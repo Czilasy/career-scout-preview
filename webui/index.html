@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BOSS 岗位匹配工作台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1110;
+      --surface: #121817;
+      --surface-2: #171f1d;
+      --line: #27312f;
+      --line-strong: #3a4845;
+      --text: #eef4f2;
+      --muted: #8e9c98;
+      --accent: #58d6b0;
+      --accent-soft: #163b32;
+      --danger: #ff8c82;
+      --warning: #f0c36b;
+      --radius: 12px;
+      --header: 62px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    * { box-sizing: border-box; min-width: 0; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); }
+    body { font-size: 14px; line-height: 1.5; overflow-x: hidden; }
+    button, input, select, textarea { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .48; }
+    .app-header {
+      min-height: var(--header); display: flex; align-items: center; justify-content: space-between;
+      gap: 20px; padding: 0 22px; border-bottom: 1px solid var(--line); background: rgba(13,17,16,.94);
+      position: sticky; top: 0; z-index: 20; backdrop-filter: blur(12px);
+    }
+    .brand { display: flex; align-items: center; gap: 11px; font-weight: 760; letter-spacing: -.02em; }
+    .brand-mark { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 20px rgba(88,214,176,.6); }
+    .header-actions { display: flex; align-items: center; gap: 8px; }
+    .status {
+      display: inline-flex; align-items: center; gap: 7px; min-height: 32px; padding: 0 11px;
+      border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 12px;
+    }
+    .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #68736f; }
+    .status.ok { color: var(--accent); border-color: #285f50; background: #10241f; }
+    .status.ok::before { background: var(--accent); }
+    .status.bad { color: var(--danger); border-color: #663c38; background: #291715; }
+    .status.bad::before { background: var(--danger); }
+    .workspace {
+      display: grid; grid-template-columns: 310px minmax(420px, 1fr) 360px;
+      min-height: calc(100vh - var(--header));
+    }
+    .rail, .results-pane, .inspector { min-width: 0; }
+    .rail { border-right: 1px solid var(--line); background: var(--surface); overflow: auto; }
+    .results-pane { background: var(--bg); overflow: hidden; }
+    .inspector { border-left: 1px solid var(--line); background: var(--surface); overflow: auto; }
+    .section { padding: 18px; border-bottom: 1px solid var(--line); }
+    .section-title { margin: 0 0 3px; font-size: 13px; font-weight: 720; }
+    .section-note { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .field { display: grid; gap: 5px; }
+    .field.wide { grid-column: 1 / -1; }
+    label { color: var(--muted); font-size: 11px; }
+    input, select, textarea {
+      width: 100%; border: 1px solid var(--line); border-radius: 8px; background: #0d1312;
+      color: var(--text); padding: 9px 10px; outline: none; transition: border-color .16s, background .16s;
+    }
+    textarea { min-height: 64px; resize: vertical; }
+    input:focus, select:focus, textarea:focus { border-color: var(--accent); background: #101816; }
+    .checks { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
+    .check { display: inline-flex; align-items: center; gap: 7px; color: var(--text); font-size: 12px; }
+    .check input { width: auto; accent-color: var(--accent); }
+    .button-row { display: flex; gap: 8px; margin-top: 12px; }
+    .button {
+      min-height: 36px; border: 1px solid var(--line); border-radius: 8px; padding: 0 12px;
+      background: transparent; color: var(--text); transition: background .16s, border-color .16s, transform .16s;
+    }
+    .button:hover { border-color: var(--line-strong); background: var(--surface-2); }
+    .button:active { transform: translateY(1px); }
+    .button.primary { flex: 1; border-color: var(--accent); background: var(--accent); color: #071310; font-weight: 760; }
+    .button.primary:hover { background: #70e1c0; }
+    .button.compact { min-height: 32px; font-size: 12px; }
+    .history { display: grid; gap: 4px; max-height: 230px; overflow: auto; }
+    .history-item {
+      width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; text-align: left;
+      border: 0; border-radius: 8px; padding: 9px 10px; background: transparent; color: var(--text);
+    }
+    .history-item:hover, .history-item.active { background: var(--surface-2); }
+    .history-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .history-meta { color: var(--muted); font-size: 10px; }
+    .task-state { font-size: 10px; color: var(--muted); }
+    .task-state.running, .task-state.queued { color: var(--warning); }
+    .task-state.succeeded { color: var(--accent); }
+    .task-state.failed, .task-state.interrupted { color: var(--danger); }
+    .results-head {
+      min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 14px;
+      padding: 14px 18px; border-bottom: 1px solid var(--line);
+    }
+    .results-head h1 { margin: 0; font-size: 17px; letter-spacing: -.02em; }
+    .result-meta { margin-top: 3px; color: var(--muted); font-size: 12px; }
+    .result-actions { display: flex; gap: 7px; align-items: center; }
+    .metrics {
+      display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line);
+      animation: rise .28s ease-out both;
+    }
+    .metric { padding: 13px 18px; border-right: 1px solid var(--line); }
+    .metric:last-child { border-right: 0; }
+    .metric-value { font-size: 20px; font-weight: 760; letter-spacing: -.03em; }
+    .metric-label { color: var(--muted); font-size: 11px; }
+    .filter-strip { display: flex; gap: 8px; align-items: center; padding: 10px 18px; border-bottom: 1px solid var(--line); }
+    .filter-strip select { width: auto; min-width: 120px; padding: 7px 9px; }
+    .job-list { height: calc(100vh - var(--header) - 184px); overflow: auto; }
+    .empty { padding: 56px 24px; text-align: center; color: var(--muted); }
+    .job-row {
+      width: 100%; display: grid; grid-template-columns: 56px minmax(0,1fr) auto; gap: 14px;
+      align-items: start; padding: 15px 18px; border: 0; border-bottom: 1px solid var(--line);
+      background: transparent; color: inherit; text-align: left; transition: background .15s, transform .15s;
+      animation: rise .24s ease-out both;
+    }
+    .job-row:hover, .job-row.active { background: var(--surface-2); }
+    .job-row:hover { transform: translateX(2px); }
+    .score {
+      width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center;
+      border: 1px solid #315f54; background: var(--accent-soft); color: var(--accent); font-weight: 800;
+    }
+    .score.rejected { border-color: #5e3835; background: #251614; color: var(--danger); }
+    .job-title { font-size: 14px; font-weight: 730; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .job-company, .job-sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .job-salary { color: var(--accent); font-weight: 750; white-space: nowrap; }
+    .tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+    .tag { border-radius: 999px; padding: 2px 7px; background: #1b2825; color: #a9beb8; font-size: 10px; }
+    .tag.risk { background: #2b1b18; color: #eaa59e; }
+    .inspector-empty { padding: 54px 22px; text-align: center; color: var(--muted); }
+    .inspector-content { animation: fade .2s ease-out both; }
+    .inspector-title { margin: 0; font-size: 19px; line-height: 1.3; letter-spacing: -.025em; }
+    .inspector-salary { margin-top: 6px; color: var(--accent); font-size: 16px; font-weight: 760; }
+    .inspector-meta { margin-top: 5px; color: var(--muted); font-size: 12px; }
+    .explain-block { padding: 15px 18px; border-bottom: 1px solid var(--line); }
+    .explain-block h3 { margin: 0 0 9px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+    .explain-list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; font-size: 12px; }
+    .explain-list li { position: relative; padding-left: 14px; }
+    .explain-list li::before { content: ""; position: absolute; left: 0; top: 7px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+    .explain-list.risks li::before { background: var(--danger); }
+    .jd { white-space: pre-wrap; color: #c5cfcc; font-size: 12px; max-height: 320px; overflow: auto; }
+    .task-console {
+      max-height: 190px; overflow: auto; white-space: pre-wrap; margin: 0; padding: 12px;
+      border-radius: 8px; background: #090d0c; color: #96cbbd; font: 11px/1.55 "Cascadia Code", Consolas, monospace;
+    }
+    details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+    dialog { width: min(720px, calc(100vw - 32px)); border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0; }
+    dialog::backdrop { background: rgba(0,0,0,.68); backdrop-filter: blur(3px); }
+    .dialog-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+    .dialog-body { max-height: 70vh; overflow: auto; padding: 18px; white-space: pre-wrap; color: #c5cfcc; }
+    @keyframes rise { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+    @media (max-width: 1100px) {
+      .workspace { grid-template-columns: 290px minmax(0, 1fr); }
+      .inspector { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); min-height: 380px; }
+      .job-list { height: 620px; }
+    }
+    @media (max-width: 720px) {
+      :root { --header: auto; }
+      .app-header { position: static; flex-wrap: wrap; padding: 12px 14px; }
+      .header-actions { width: 100%; flex-wrap: wrap; }
+      .status { margin-right: auto; }
+      .workspace { display: block; min-height: 0; }
+      .rail, .inspector { border: 0; }
+      .rail { border-bottom: 1px solid var(--line); }
+      .results-head { align-items: flex-start; flex-direction: column; }
+      .result-actions { width: 100%; flex-wrap: wrap; }
+      .metrics { grid-template-columns: repeat(3, minmax(0,1fr)); }
+      .metric { padding: 11px 12px; }
+      .filter-strip { flex-wrap: wrap; }
+      .filter-strip select { flex: 1; }
+      .job-list { height: auto; max-height: 680px; }
+      .job-row { grid-template-columns: 48px minmax(0,1fr); padding: 14px; }
+      .job-salary { grid-column: 2; }
+      .section { padding: 16px 14px; }
+    }
+    @media (max-width: 420px) {
+      .form-grid { grid-template-columns: 1fr; }
+      .field.wide { grid-column: auto; }
+      .metrics { grid-template-columns: 1fr; }
+      .metric { border-right: 0; border-bottom: 1px solid var(--line); }
+      .metric:last-child { border-bottom: 0; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand"><span class="brand-mark"></span><span>BOSS 岗位匹配工作台</span></div>
+    <div class="header-actions">
+      <span id="connectionStatus" class="status">尚未检查环境</span>
+      <button id="checkBtn" class="button compact" type="button">环境检查</button>
+      <button id="setupBtn" class="button compact" type="button">启动 Chrome 登录</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <aside class="rail">
+      <section class="section">
+        <h2 class="section-title">目标画像</h2>
+        <p class="section-note">硬条件由程序淘汰，技能只用于排序和解释。</p>
+        <form id="profileForm" class="form-grid">
+          <div class="field wide"><label for="targetTitles">目标岗位</label><input id="targetTitles" placeholder="Python 后端, AI 应用开发"></div>
+          <div class="field wide"><label for="mustSkills">必备技能</label><input id="mustSkills" placeholder="Python, FastAPI"></div>
+          <div class="field wide"><label for="niceSkills">加分技能</label><input id="niceSkills" placeholder="Redis, RAG"></div>
+          <div class="field wide"><label for="excludeKeywords">排除词</label><input id="excludeKeywords" placeholder="外包, 驻场, 销售"></div>
+          <div class="field wide"><label for="blacklistCompanies">公司黑名单</label><input id="blacklistCompanies" placeholder="公司名称，用逗号分隔"></div>
+          <div class="field"><label for="districts">目标区域</label><input id="districts" placeholder="浦东新区"></div>
+          <div class="field"><label for="minSalary">最低月薪 K</label><input id="minSalary" type="number" min="0" step="1" placeholder="20"></div>
+          <div class="field wide"><button class="button" type="submit">保存画像</button></div>
+        </form>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">搜索任务</h2>
+        <p class="section-note">筛选项由抓取核心统一提供，不在页面硬编码。</p>
+        <form id="searchForm" class="form-grid">
+          <div class="field wide"><label for="keyword">关键词</label><input id="keyword" required value="Python 后端"></div>
+          <div class="field"><label for="city">城市</label><select id="city"></select></div>
+          <div class="field"><label for="pages">页数</label><input id="pages" type="number" min="1" max="10" value="3"></div>
+          <div class="field"><label for="scale">公司规模</label><select id="scale"></select></div>
+          <div class="field"><label for="salary">薪资</label><select id="salary"></select></div>
+          <div class="field"><label for="experience">经验</label><select id="experience"></select></div>
+          <div class="field"><label for="degree">学历</label><select id="degree"></select></div>
+          <div class="field"><label for="stage">融资</label><select id="stage"></select></div>
+          <div class="field"><label for="industry">行业</label><select id="industry"></select></div>
+          <div class="field wide checks">
+            <label class="check"><input id="detail" type="checkbox" checked>抓取详情 JD</label>
+            <label class="check"><input id="analysis" type="checkbox" checked>生成分析</label>
+            <label class="check"><input id="csvFormat" type="checkbox">同时保存 CSV</label>
+          </div>
+          <div class="field wide"><button id="startBtn" class="button primary" type="submit">开始任务</button></div>
+        </form>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">任务历史</h2>
+        <div id="historyList" class="history"><div class="section-note">暂无任务</div></div>
+      </section>
+    </aside>
+
+    <section class="results-pane">
+      <header class="results-head">
+        <div><h1 id="resultTitle">岗位结果</h1><div id="resultMeta" class="result-meta">选择或创建一个搜索任务</div></div>
+        <div class="result-actions">
+          <button id="cancelBtn" class="button compact" type="button" disabled>取消任务</button>
+          <button id="retryBtn" class="button compact" type="button" disabled>重试</button>
+          <button id="summaryBtn" class="button compact" type="button" disabled>市场摘要</button>
+          <button id="downloadBtn" class="button compact" type="button" disabled>导出 CSV</button>
+        </div>
+      </header>
+      <div class="metrics">
+        <div class="metric"><div id="totalMetric" class="metric-value">0</div><div class="metric-label">抓取岗位</div></div>
+        <div class="metric"><div id="eligibleMetric" class="metric-value">0</div><div class="metric-label">符合硬条件</div></div>
+        <div class="metric"><div id="detailMetric" class="metric-value">0</div><div class="metric-label">详情 JD</div></div>
+      </div>
+      <div class="filter-strip">
+        <select id="eligibilityFilter" aria-label="按硬条件筛选">
+          <option value="all">全部岗位</option><option value="eligible">只看符合</option><option value="rejected">只看淘汰</option>
+        </select>
+        <select id="sortMode" aria-label="岗位排序">
+          <option value="score">匹配度排序</option><option value="salary">薪资上限排序</option>
+        </select>
+      </div>
+      <div id="jobList" class="job-list"><div class="empty">完成任务后，这里会按可解释匹配度排序。</div></div>
+    </section>
+
+    <aside id="jobInspector" class="inspector">
+      <div class="inspector-empty">选择一个岗位查看命中技能、缺失项、风险和完整 JD。</div>
+      <section class="explain-block">
+        <details open>
+          <summary>任务日志</summary>
+          <pre id="taskLog" class="task-console">暂无日志</pre>
+        </details>
+      </section>
+    </aside>
+  </main>
+
+  <dialog id="summaryDialog">
+    <div class="dialog-head"><strong>岗位市场摘要</strong><button id="closeSummaryBtn" class="button compact" type="button">关闭</button></div>
+    <div id="summaryBody" class="dialog-body">正在加载…</div>
+  </dialog>
+
+  <script>
+    const byId = id => document.getElementById(id);
+    const filterNames = ["scale", "salary", "experience", "degree", "stage", "industry"];
+    const state = { tasks: [], currentTask: null, result: null, selectedJobId: null, pollTimer: null, apiToken: "" };
+    const statusLabels = { queued: "等待中", running: "运行中", succeeded: "已完成", failed: "失败", interrupted: "已中断" };
+
+    async function api(url, options = {}) {
+      const method = (options.method || "GET").toUpperCase();
+      if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+        options.headers = { ...(options.headers || {}), "X-Boss-Token": state.apiToken };
+      }
+      const response = await fetch(url, options);
+      const type = response.headers.get("content-type") || "";
+      const payload = type.includes("application/json") ? await response.json() : null;
+      if (!response.ok) throw new Error(payload?.error || `请求失败 (${response.status})`);
+      return payload;
+    }
+    function jsonOptions(method, body) {
+      return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+    }
+    async function loadSession() {
+      const payload = await api("/api/session"); state.apiToken = payload.token;
+    }
+    function setConnection(connected, text) {
+      const node = byId("connectionStatus");
+      node.textContent = text;
+      node.className = `status ${connected ? "ok" : "bad"}`;
+    }
+    function values(id) { return byId(id).value.trim(); }
+    function profilePayload() {
+      return {
+        target_titles: values("targetTitles"), must_skills: values("mustSkills"), nice_skills: values("niceSkills"),
+        exclude_keywords: values("excludeKeywords"), blacklist_companies: values("blacklistCompanies"),
+        districts: values("districts"), min_salary: Number(byId("minSalary").value || 0),
+      };
+    }
+    function setProfile(profile) {
+      const join = value => Array.isArray(value) ? value.join(", ") : (value || "");
+      byId("targetTitles").value = join(profile.target_titles);
+      byId("mustSkills").value = join(profile.must_skills);
+      byId("niceSkills").value = join(profile.nice_skills);
+      byId("excludeKeywords").value = join(profile.exclude_keywords);
+      byId("blacklistCompanies").value = join(profile.blacklist_companies);
+      byId("districts").value = join(profile.districts);
+      byId("minSalary").value = profile.min_salary || "";
+    }
+    function addOptions(select, options) {
+      select.replaceChildren(...options.map(item => {
+        const option = document.createElement("option"); option.value = item.value; option.textContent = item.label; return option;
+      }));
+    }
+    async function loadOptions() {
+      const payload = await api("/api/options");
+      addOptions(byId("city"), payload.cities);
+      byId("city").value = "上海";
+      filterNames.forEach(name => addOptions(byId(name), payload.filters[name]));
+    }
+    async function loadProfile() {
+      const payload = await api("/api/profile"); setProfile(payload.profile);
+    }
+    async function saveProfile() {
+      const payload = await api("/api/profile", jsonOptions("PUT", profilePayload()));
+      setProfile(payload.profile); return payload.profile;
+    }
+    function searchPayload() {
+      const payload = {
+        keyword: values("keyword"), city: byId("city").value, pages: Number(byId("pages").value || 3),
+        detail: byId("detail").checked, analysis: byId("analysis").checked,
+        format: byId("csvFormat").checked ? "csv" : "json", profile: profilePayload(),
+      };
+      filterNames.forEach(name => payload[name] = byId(name).value);
+      return payload;
+    }
+    function clearPoll() { if (state.pollTimer) clearTimeout(state.pollTimer); state.pollTimer = null; }
+    function schedulePoll() { clearPoll(); state.pollTimer = setTimeout(pollCurrentTask, 1200); }
+    async function loadTasks(selectActive = true) {
+      const payload = await api("/api/tasks?limit=40"); state.tasks = payload.tasks; renderHistory();
+      if (!selectActive || state.currentTask || !state.tasks.length) return;
+      const active = state.tasks.find(task => ["queued", "running"].includes(task.status)) || state.tasks.find(task => task.kind === "scrape");
+      if (active) await selectTask(active.id);
+    }
+    function renderHistory() {
+      const host = byId("historyList"); host.replaceChildren();
+      if (!state.tasks.length) { const empty = document.createElement("div"); empty.className = "section-note"; empty.textContent = "暂无任务"; host.append(empty); return; }
+      state.tasks.forEach(task => {
+        const button = document.createElement("button"); button.type = "button"; button.className = `history-item ${state.currentTask?.id === task.id ? "active" : ""}`;
+        const title = document.createElement("span"); title.className = "history-title"; title.textContent = task.kind === "setup_chrome" ? "Chrome 登录" : (task.params?.search?.keyword || "岗位搜索");
+        const status = document.createElement("span"); status.className = `task-state ${task.status}`; status.textContent = statusLabels[task.status] || task.status;
+        const meta = document.createElement("span"); meta.className = "history-meta"; meta.textContent = new Date(task.created_at).toLocaleString();
+        button.append(title, status, meta); button.addEventListener("click", () => selectTask(task.id)); host.append(button);
+      });
+    }
+    async function selectTask(taskId) {
+      clearPoll();
+      const payload = await api(`/api/tasks/${taskId}`); state.currentTask = payload.task; state.result = null; state.selectedJobId = null;
+      renderTask(); renderHistory();
+      if (["queued", "running"].includes(state.currentTask.status)) schedulePoll();
+      if (state.currentTask.kind === "scrape") {
+        try { await loadResult(); }
+        catch (error) { byId("resultMeta").textContent = `${statusLabels[state.currentTask.status] || state.currentTask.status} · 结果写入中`; }
+      }
+    }
+    async function pollCurrentTask() {
+      if (!state.currentTask) return;
+      try {
+        const payload = await api(`/api/tasks/${state.currentTask.id}`); state.currentTask = payload.task; renderTask(); await loadTasks(false);
+        if (["queued", "running"].includes(state.currentTask.status)) schedulePoll();
+        else if (state.currentTask.kind === "scrape") await loadResult();
+        else if (state.currentTask.status === "succeeded") await checkEnvironment();
+      } catch (error) { byId("taskLog").textContent += `\n${error.message}`; }
+    }
+    function renderTask() {
+      const task = state.currentTask; if (!task) return;
+      const search = task.params?.search || {};
+      byId("resultTitle").textContent = task.kind === "setup_chrome" ? "Chrome 登录任务" : (search.keyword || "岗位结果");
+      byId("resultMeta").textContent = `${statusLabels[task.status] || task.status}${search.city ? ` · ${search.city}` : ""}${task.error ? ` · ${task.error}` : ""}`;
+      const logs = task.logs || []; byId("taskLog").textContent = logs.length ? logs.map(item => item.line).join("\n") : "暂无日志";
+      byId("startBtn").disabled = ["queued", "running"].includes(task.status);
+      byId("cancelBtn").disabled = !["queued", "running"].includes(task.status);
+      byId("retryBtn").disabled = !["failed", "interrupted", "succeeded"].includes(task.status);
+    }
+    async function loadResult() {
+      if (!state.currentTask || state.currentTask.kind !== "scrape") return;
+      const payload = await api(`/api/tasks/${state.currentTask.id}/result`); state.result = payload;
+      byId("totalMetric").textContent = payload.total;
+      byId("eligibleMetric").textContent = payload.jobs.filter(job => job.eligible).length;
+      byId("detailMetric").textContent = payload.details;
+      byId("summaryBtn").disabled = !payload.total; byId("downloadBtn").disabled = !payload.total;
+      renderJobs();
+    }
+    function salaryHigh(raw) { const match = String(raw || "").match(/(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*K/i); return match ? Number(match[2]) : -1; }
+    function visibleJobs() {
+      let jobs = [...(state.result?.jobs || [])]; const filter = byId("eligibilityFilter").value;
+      if (filter === "eligible") jobs = jobs.filter(job => job.eligible);
+      if (filter === "rejected") jobs = jobs.filter(job => !job.eligible);
+      if (byId("sortMode").value === "salary") jobs.sort((a,b) => salaryHigh(b.salary) - salaryHigh(a.salary));
+      else jobs.sort((a,b) => Number(b.eligible) - Number(a.eligible) || b.match_score - a.match_score);
+      return jobs;
+    }
+    function renderJobs() {
+      const host = byId("jobList"); host.replaceChildren(); const jobs = visibleJobs();
+      if (!jobs.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = "当前筛选下没有岗位。"; host.append(empty); renderInspector(null); return; }
+      jobs.forEach((job, index) => {
+        const row = document.createElement("button"); row.type = "button"; row.className = `job-row ${state.selectedJobId === job.job_id ? "active" : ""}`; row.style.animationDelay = `${Math.min(index, 8) * 24}ms`;
+        const score = document.createElement("span"); score.className = `score ${job.eligible ? "" : "rejected"}`; score.textContent = job.match_score;
+        const body = document.createElement("span");
+        const title = document.createElement("div"); title.className = "job-title"; title.textContent = job.title || "未命名岗位";
+        const company = document.createElement("div"); company.className = "job-company"; company.textContent = job.boss_name || job.company || "公司未标注";
+        const sub = document.createElement("div"); sub.className = "job-sub"; sub.textContent = job.location || "地点未标注";
+        const tags = document.createElement("div"); tags.className = "tags";
+        (job.matched_skills || []).slice(0,4).forEach(text => { const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = text; tags.append(tag); });
+        (job.risk_flags || []).slice(0,1).forEach(text => { const tag = document.createElement("span"); tag.className = "tag risk"; tag.textContent = text; tags.append(tag); });
+        body.append(title, company, sub, tags);
+        const salary = document.createElement("span"); salary.className = "job-salary"; salary.textContent = job.salary || "薪资未标注";
+        row.append(score, body, salary); row.addEventListener("click", () => { state.selectedJobId = job.job_id; renderJobs(); renderInspector(job); }); host.append(row);
+      });
+      const selected = jobs.find(job => job.job_id === state.selectedJobId) || jobs[0]; state.selectedJobId = selected.job_id; renderInspector(selected);
+    }
+    function listBlock(title, items, risk = false) {
+      const section = document.createElement("section"); section.className = "explain-block";
+      const heading = document.createElement("h3"); heading.textContent = title;
+      const list = document.createElement("ul"); list.className = `explain-list ${risk ? "risks" : ""}`;
+      (items?.length ? items : ["暂无"]).forEach(text => { const item = document.createElement("li"); item.textContent = text; list.append(item); });
+      section.append(heading, list); return section;
+    }
+    function safeJobLink(raw) {
+      try { const url = new URL(raw); return url.protocol === "https:" && (url.hostname === "www.zhipin.com" || url.hostname.endsWith(".zhipin.com")) ? url.href : ""; }
+      catch { return ""; }
+    }
+    function renderInspector(job) {
+      const host = byId("jobInspector"); const logSection = host.querySelector(".explain-block:last-child"); host.replaceChildren();
+      if (!job) { const empty = document.createElement("div"); empty.className = "inspector-empty"; empty.textContent = "选择一个岗位查看详情。"; host.append(empty); if (logSection) host.append(logSection); return; }
+      const content = document.createElement("div"); content.className = "inspector-content";
+      const head = document.createElement("section"); head.className = "explain-block";
+      const title = document.createElement("h2"); title.className = "inspector-title"; title.textContent = job.title || "未命名岗位";
+      const salary = document.createElement("div"); salary.className = "inspector-salary"; salary.textContent = `${job.match_score} 分 · ${job.salary || "薪资未标注"}`;
+      const meta = document.createElement("div"); meta.className = "inspector-meta"; meta.textContent = [job.boss_name || job.company, job.location, job.company_scale].filter(Boolean).join(" · ");
+      head.append(title, salary, meta);
+      const link = safeJobLink(job.job_link); if (link) { const anchor = document.createElement("a"); anchor.href = link; anchor.target = "_blank"; anchor.rel = "noopener noreferrer"; anchor.className = "button compact"; anchor.textContent = "在 BOSS 查看原文"; anchor.style.display = "inline-flex"; anchor.style.alignItems = "center"; anchor.style.marginTop = "12px"; head.append(anchor); }
+      content.append(head, listBlock("匹配理由", job.match_reasons), listBlock("缺失技能", job.missing_skills, true), listBlock("风险与硬条件", job.risk_flags, true));
+      const jd = document.createElement("section"); jd.className = "explain-block"; const jdTitle = document.createElement("h3"); jdTitle.textContent = "岗位 JD"; const text = document.createElement("div"); text.className = "jd"; text.textContent = job.jd || "尚未抓取详情 JD"; jd.append(jdTitle, text); content.append(jd); host.append(content);
+      const logs = document.createElement("section"); logs.className = "explain-block"; const details = document.createElement("details"); const summary = document.createElement("summary"); summary.textContent = "任务日志"; const pre = document.createElement("pre"); pre.id = "taskLog"; pre.className = "task-console"; pre.textContent = (state.currentTask?.logs || []).map(item => item.line).join("\n") || "暂无日志"; details.append(summary, pre); logs.append(details); host.append(logs);
+    }
+    async function checkEnvironment() {
+      byId("checkBtn").disabled = true;
+      try { const payload = await api("/api/check"); setConnection(payload.connected, payload.connected ? "Chrome 已连接且已登录" : "Chrome 未连接或未登录"); }
+      catch (error) { setConnection(false, error.message); }
+      finally { byId("checkBtn").disabled = false; }
+    }
+    async function startSetup() {
+      byId("setupBtn").disabled = true;
+      try { const payload = await api("/api/setup-chrome", { method: "POST" }); state.currentTask = payload.task; renderTask(); await loadTasks(false); schedulePoll(); }
+      catch (error) { setConnection(false, error.message); }
+      finally { byId("setupBtn").disabled = false; }
+    }
+    async function startSearch(event) {
+      event.preventDefault(); byId("startBtn").disabled = true;
+      try { const payload = await api("/api/tasks", jsonOptions("POST", searchPayload())); state.currentTask = payload.task; state.result = null; renderTask(); renderJobs(); await loadTasks(false); schedulePoll(); }
+      catch (error) { byId("resultMeta").textContent = error.message; byId("startBtn").disabled = false; }
+    }
+    async function cancelCurrentTask() {
+      if (!state.currentTask) return;
+      try { const payload = await api(`/api/tasks/${state.currentTask.id}/cancel`, {method: "POST"}); state.currentTask = payload.task; renderTask(); await loadTasks(false); clearPoll(); }
+      catch (error) { byId("resultMeta").textContent = error.message; }
+    }
+    async function retryCurrentTask() {
+      if (!state.currentTask) return;
+      try { const payload = await api(`/api/tasks/${state.currentTask.id}/retry`, {method: "POST"}); state.currentTask = payload.task; state.result = null; renderTask(); renderJobs(); await loadTasks(false); schedulePoll(); }
+      catch (error) { byId("resultMeta").textContent = error.message; }
+    }
+    async function showSummary() {
+      if (!state.currentTask) return; const dialog = byId("summaryDialog"); byId("summaryBody").textContent = "正在加载…"; dialog.showModal();
+      try { const payload = await api(`/api/tasks/${state.currentTask.id}/summary`); byId("summaryBody").textContent = `${payload.summary_text}\n\n—— 可复制提示词 ——\n${payload.prompt}`; }
+      catch (error) { byId("summaryBody").textContent = error.message; }
+    }
+
+    byId("profileForm").addEventListener("submit", async event => { event.preventDefault(); try { await saveProfile(); byId("resultMeta").textContent = "目标画像已保存"; } catch (error) { byId("resultMeta").textContent = error.message; } });
+    byId("searchForm").addEventListener("submit", startSearch);
+    byId("checkBtn").addEventListener("click", checkEnvironment);
+    byId("setupBtn").addEventListener("click", startSetup);
+    byId("cancelBtn").addEventListener("click", cancelCurrentTask);
+    byId("retryBtn").addEventListener("click", retryCurrentTask);
+    byId("eligibilityFilter").addEventListener("change", renderJobs);
+    byId("sortMode").addEventListener("change", renderJobs);
+    byId("summaryBtn").addEventListener("click", showSummary);
+    byId("closeSummaryBtn").addEventListener("click", () => byId("summaryDialog").close());
+    byId("downloadBtn").addEventListener("click", () => { if (state.currentTask) window.location.href = `/api/tasks/${state.currentTask.id}/export.csv`; });
+
+    loadSession()
+      .then(() => Promise.all([loadOptions(), loadProfile(), loadTasks()]))
+      .then(checkEnvironment)
+      .catch(error => setConnection(false, error.message));
+  </script>
+</body>
+</html>
