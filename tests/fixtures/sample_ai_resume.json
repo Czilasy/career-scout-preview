@@ -1,0 +1,11 @@
+{
+  "profile_name": "Python 后端",
+  "city": "上海",
+  "roles": ["Python 后端工程师", "后端开发工程师"],
+  "skills": ["Python", "FastAPI", "Redis", "PostgreSQL"],
+  "keywords": ["Python 后端", "FastAPI 后端", "微服务开发"],
+  "suggestions": [
+    {"field": "city", "value": "上海", "source": "resume", "uncertain": false},
+    {"field": "roles", "value": ["Python 后端工程师"], "source": "resume", "uncertain": false}
+  ]
+}

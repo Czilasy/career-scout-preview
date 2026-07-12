@@ -187,16 +187,28 @@ class WebUIAppTests(unittest.TestCase):
         html = response.get_data(as_text=True)
         response.close()
 
-        for element_id in (
-            "profileForm", "searchForm", "historyList", "jobList",
-            "jobInspector", "taskLog", "connectionStatus", "cancelBtn", "retryBtn",
-        ):
-            self.assertIn(f'id="{element_id}"', html)
-        self.assertIn("/api/options", html)
-        self.assertIn("/api/profile", html)
-        self.assertIn("/api/tasks", html)
+        # Dark theme workbench
+        self.assertIn("color-scheme: dark", html)
+        # Collapsible settings panel on the left
+        self.assertIn('id="settingsPanel"', html)
+        self.assertIn('id="settingsToggle"', html)
+        # Single-column job card flow
+        self.assertIn('id="jobCardList"', html)
+        # Card fields: name, company, salary, location, JD excerpt
+        self.assertIn("job-card", html)
+        # Feedback buttons (interested / not interested) — no navigation
+        self.assertIn("感兴趣", html)
+        self.assertIn("不感兴趣", html)
+        # Search and profile endpoints
+        self.assertIn("/api/profiles", html)
+        self.assertIn("/api/search-runs", html)
+        self.assertIn("/api/ai-settings", html)
+        # Responsive: narrow-screen drawer
         self.assertIn("@media (max-width: 720px)", html)
+        # No external CDN, no AI scores, no auto-apply
         self.assertNotIn("cdn.jsdelivr.net", html)
+        self.assertNotIn("match_score", html)
+        self.assertNotIn("/api/apply", html)
         self.assertNotIn("/api/export-csv", html)
 
 

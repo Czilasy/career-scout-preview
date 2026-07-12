@@ -1,0 +1,4 @@
+{
+  "ranked_job_ids": ["job-001", "job-002", "job-003", "job-004", "job-005"],
+  "labels": {"job-001": null, "job-002": null, "job-003": null, "job-004": null, "job-005": null}
+}

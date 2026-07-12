@@ -1,0 +1,6 @@
+{
+  "positive_terms": ["Python", "FastAPI"],
+  "negative_terms": ["外包"],
+  "keyword_weights": {"Python": 1.0, "FastAPI": 0.8},
+  "uncertain": []
+}

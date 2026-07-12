@@ -1,51 +1,92 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI 求职工作台</title>
+  <title>AI 求职工作台 · v2</title>
   <style>
-    :root {
+    :root, html[data-theme="dark"] {
       color-scheme: dark;
-      --bg: #0d1117;
-      --surface: #161b22;
-      --surface-2: #1c2330;
-      --line: #2d333b;
-      --line-strong: #444c56;
-      --text: #e6edf3;
-      --muted: #8b949e;
-      --accent: #58a6ff;
-      --accent-soft: #1a3a5c;
-      --success: #3fb950;
-      --danger: #f85149;
-      --warning: #d29922;
+      --bg: #0a0a0a;
+      --surface: #111111;
+      --surface-2: #171717;
+      --surface-3: #1f1f1f;
+      --line: rgba(255,255,255,.10);
+      --line-2: rgba(255,255,255,.22);
+      --line-3: rgba(255,255,255,.42);
+      --text: #fafafa;
+      --muted: #9a9a9a;
+      --faint: #5c5c5c;
+      --invert-bg: #fafafa;
+      --invert-fg: #0a0a0a;
+      --ok: #4ade80;
+      --no: #f87171;
       --radius: 10px;
+      --radius-s: 6px;
       --header-h: 56px;
-      --card-h: 300px;
-      font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      --sans: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    html[data-theme="light"] {
+      color-scheme: light;
+      --bg: #fafafa;
+      --surface: #ffffff;
+      --surface-2: #f2f2f2;
+      --surface-3: #e9e9e9;
+      --line: rgba(0,0,0,.12);
+      --line-2: rgba(0,0,0,.26);
+      --line-3: rgba(0,0,0,.5);
+      --text: #0a0a0a;
+      --muted: #6a6a6a;
+      --faint: #9a9a9a;
+      --invert-bg: #0a0a0a;
+      --invert-fg: #fafafa;
+      --ok: #16a34a;
+      --no: #dc2626;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; font-family: var(--sans); }
     button, input, select, textarea { font: inherit; color: inherit; }
     button { cursor: pointer; border: none; background: none; }
-    a { color: var(--accent); text-decoration: none; }
+    a { color: var(--text); text-decoration: none; }
+    .mono { font-family: var(--mono); }
 
+    /* == 顶栏 == */
     .app-header {
       height: var(--header-h); display: flex; align-items: center; justify-content: space-between;
-      padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--surface);
+      padding: 0 18px; border-bottom: 1px solid var(--line); background: var(--surface);
       position: sticky; top: 0; z-index: 100;
     }
-    .brand { font-weight: 700; font-size: 16px; display: flex; align-items: center; gap: 8px; }
-    .brand-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
-    .header-actions { display: flex; align-items: center; gap: 10px; }
-    .conn-status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
-    .conn-status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
-    .conn-status.ok::before { background: var(--success); }
-    .conn-status.bad::before { background: var(--danger); }
+    .brand { font-weight: 700; font-size: 15px; display: flex; align-items: center; gap: 10px; letter-spacing: .01em; }
+    .brand .logo {
+      width: 26px; height: 26px; border-radius: 5px; background: var(--invert-bg); color: var(--invert-fg);
+      display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11px; font-weight: 700;
+    }
+    .brand .vt { font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em; color: var(--faint); border: 1px solid var(--line-2); padding: 1px 5px; border-radius: 4px; }
+    .header-actions { display: flex; align-items: center; gap: 12px; }
+    .stats { display: flex; gap: 8px; }
+    .stat { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.1; }
+    .stat .n { font-family: var(--mono); font-size: 15px; font-weight: 700; letter-spacing: -.02em; }
+    .stat .l { font-family: var(--mono); font-size: 9px; letter-spacing: .12em; color: var(--faint); text-transform: uppercase; }
+    .conn-status {
+      font-family: var(--mono); font-size: 11px; letter-spacing: .04em; color: var(--muted);
+      display: flex; align-items: center; gap: 6px; border: 1px solid var(--line-2); padding: 4px 10px; border-radius: 999px;
+    }
+    .conn-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+    .conn-status.ok { color: var(--text); }
+    .conn-status.ok::before { background: var(--ok); }
+    .conn-status.bad { color: var(--text); }
+    .conn-status.bad::before { background: var(--no); }
+    .theme-toggle {
+      border: 1px solid var(--line-2); background: transparent; color: var(--text);
+      width: 32px; height: 32px; border-radius: var(--radius-s); display: flex; align-items: center; justify-content: center;
+    }
+    .theme-toggle:hover { border-color: var(--line-3); }
+    .theme-toggle svg { width: 15px; height: 15px; }
 
     .workspace { display: flex; height: calc(100vh - var(--header-h)); overflow: hidden; }
 
-    /* == 左侧可折叠设置区 == */
+    /* == 左侧设置区 == */
     .settings-panel {
       width: 320px; min-width: 320px; border-right: 1px solid var(--line);
       background: var(--surface); overflow-y: auto; transition: margin-left .25s ease, min-width .25s ease, width .25s ease;
@@ -55,37 +96,38 @@
       position: absolute; left: 320px; top: calc(var(--header-h) + 10px); z-index: 50;
       width: 24px; height: 48px; border: 1px solid var(--line); border-left: none;
       border-radius: 0 6px 6px 0; background: var(--surface); color: var(--muted);
-      display: flex; align-items: center; justify-content: center; font-size: 14px;
-      transition: left .25s ease;
+      display: flex; align-items: center; justify-content: center; font-size: 14px; transition: left .25s ease;
     }
     .settings-toggle.collapsed { left: 0; }
-    .settings-toggle:hover { color: var(--text); background: var(--surface-2); }
+    .settings-toggle:hover { color: var(--text); border-color: var(--line-3); }
 
     .section { padding: 16px; border-bottom: 1px solid var(--line); }
-    .section-title { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 10px; }
-    .field { margin-bottom: 10px; }
-    .field label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+    .section-title { font-family: var(--mono); font-size: 10.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .14em; margin-bottom: 12px; }
+    .field { margin-bottom: 11px; }
+    .field label { display: block; font-family: var(--mono); font-size: 10px; color: var(--muted); margin-bottom: 5px; letter-spacing: .06em; text-transform: uppercase; }
     .field input, .field select, .field textarea {
-      width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
-      background: var(--bg); outline: none; transition: border-color .15s;
+      width: 100%; padding: 8px 10px; border: 1px solid var(--line-2); border-radius: var(--radius-s);
+      background: var(--bg); outline: none; transition: border-color .15s; font-family: var(--mono); font-size: 12.5px;
     }
-    .field input:focus, .field select:focus { border-color: var(--accent); }
-    .field input[type="file"] { padding: 4px; }
+    .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--line-3); }
+    .field input[type="file"] { padding: 5px; font-family: var(--sans); font-size: 12px; }
     .btn {
-      padding: 8px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2);
-      color: var(--text); font-size: 13px; transition: background .15s, border-color .15s;
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      padding: 8px 14px; border: 1px solid var(--line-2); border-radius: var(--radius-s); background: transparent;
+      color: var(--text); font-size: 13px; font-weight: 600; transition: border-color .15s, opacity .15s;
     }
-    .btn:hover { border-color: var(--line-strong); background: var(--line); }
-    .btn.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
-    .btn.primary:hover { background: #4493e0; }
-    .btn.danger { color: var(--danger); border-color: var(--danger); }
+    .btn svg { width: 15px; height: 15px; }
+    .btn:hover { border-color: var(--line-3); }
+    .btn.primary { background: var(--invert-bg); color: var(--invert-fg); border-color: var(--invert-bg); }
+    .btn.primary:hover { opacity: .85; }
+    .btn.danger { color: var(--text); border-color: var(--line-2); }
+    .btn.danger:hover { border-color: var(--no); color: var(--no); }
     .btn-row { display: flex; gap: 8px; margin-top: 8px; }
     .btn-row .btn { flex: 1; }
 
-    .history-list { display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; }
-    .history-item { padding: 8px 10px; border-radius: 6px; background: var(--bg); font-size: 12px; cursor: pointer; transition: background .12s; }
-    .history-item:hover { background: var(--surface-2); }
-    .history-item.active { background: var(--accent-soft); }
+    .history-list { display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; font-family: var(--mono); font-size: 11px; }
+    .history-item { padding: 7px 10px; border-radius: var(--radius-s); background: var(--bg); cursor: pointer; transition: background .12s; color: var(--muted); }
+    .history-item:hover { background: var(--surface-2); color: var(--text); }
 
     /* == 主区 == */
     .main-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
@@ -94,83 +136,113 @@
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
     }
     .search-info { font-size: 13px; color: var(--muted); }
-    .search-info strong { color: var(--text); }
+    .search-info strong { color: var(--text); font-family: var(--mono); }
+    .search-actions { display: flex; gap: 8px; }
 
     .job-card-list {
-      flex: 1; overflow-y: auto; padding: 16px 20px;
-      display: flex; flex-direction: column; gap: 12px;
+      flex: 1; overflow-y: auto; padding: 18px 20px;
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; align-content: start;
     }
-    .empty-state { text-align: center; color: var(--muted); padding: 60px 20px; }
+    .empty-state { grid-column: 1 / -1; text-align: center; color: var(--muted); padding: 70px 20px; border: 1px dashed var(--line-2); border-radius: var(--radius); }
+    .empty-state .em-ic { width: 44px; height: 44px; margin: 0 auto 14px; border-radius: 10px; border: 1px solid var(--line-2); display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 20px; color: var(--text); }
+    .empty-state h4 { color: var(--text); font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+    .empty-state p { font-family: var(--mono); font-size: 11.5px; line-height: 1.8; }
 
     /* == 岗位卡片 == */
     .job-card {
       background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-      padding: 16px; height: var(--card-h); display: flex; flex-direction: column; gap: 8px;
-      transition: opacity .3s ease, transform .3s ease, margin .3s ease, max-height .3s ease;
+      padding: 15px; display: flex; flex-direction: column; gap: 9px; min-height: 0;
+      transition: border-color .15s ease, opacity .3s ease, transform .3s ease;
       animation: cardEnter .3s ease-out;
     }
-    .job-card.exiting { opacity: 0; transform: translateX(60px); max-height: 0; margin: 0; padding: 0; overflow: hidden; border-width: 0; }
+    .job-card:hover { border-color: var(--line-2); }
+    .job-card.exiting { opacity: 0; transform: translateY(8px); }
     @keyframes cardEnter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 
-    .card-header { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+    .card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
     .card-title-block { min-width: 0; flex: 1; }
     .card-title { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .card-company { font-size: 12px; color: var(--muted); margin-top: 2px; }
-    .card-salary { font-size: 15px; font-weight: 700; color: var(--success); white-space: nowrap; }
-    .card-meta { font-size: 12px; color: var(--muted); display: flex; gap: 12px; }
+    .card-company { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 3px; letter-spacing: .02em; }
+    .card-salary { font-family: var(--mono); font-size: 14px; font-weight: 700; white-space: nowrap; }
+    .card-meta { font-family: var(--mono); font-size: 11px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .card-jd {
-      font-size: 12px; color: var(--muted); flex: 1; overflow: hidden;
-      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
-      text-overflow: ellipsis; line-height: 1.5; max-height: 54px;
+      font-size: 12.5px; color: var(--muted); flex: 1; overflow: hidden;
+      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; line-height: 1.55;
     }
-    .card-actions { display: flex; gap: 8px; align-items: center; }
+    .card-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .card-link {
-      font-size: 12px; color: var(--accent); padding: 4px 10px;
-      border: 1px solid var(--accent); border-radius: 4px; transition: background .12s;
+      font-size: 12.5px; color: var(--text); padding: 5px 12px;
+      border: 1px solid var(--line-2); border-radius: var(--radius-s); transition: border-color .12s; display: inline-flex; align-items: center; gap: 6px;
     }
-    .card-link:hover { background: var(--accent-soft); }
+    .card-link svg { width: 13px; height: 13px; }
+    .card-link:hover { border-color: var(--line-3); }
     .card-btn {
-      padding: 5px 12px; border: 1px solid var(--line); border-radius: 4px; font-size: 12px;
-      transition: background .12s, border-color .12s; type: button;
+      padding: 5px 12px; border: 1px solid var(--line-2); border-radius: var(--radius-s); font-size: 12.5px; font-weight: 600;
+      transition: border-color .12s, color .12s; display: inline-flex; align-items: center; gap: 6px;
     }
-    .card-btn:hover { background: var(--surface-2); border-color: var(--line-strong); }
-    .card-btn.interested { color: var(--success); border-color: var(--success); }
-    .card-btn.interested:hover { background: rgba(63,185,80,.1); }
-    .card-btn.not-interested { color: var(--danger); border-color: var(--danger); }
-    .card-btn.not-interested:hover { background: rgba(248,81,73,.1); }
+    .card-btn svg { width: 13px; height: 13px; }
+    .card-btn:hover { border-color: var(--line-3); }
+    .card-btn.primary { background: var(--invert-bg); color: var(--invert-fg); border-color: var(--invert-bg); }
+    .card-btn.primary:hover { opacity: .85; }
+    .card-btn.interested { color: var(--muted); border-color: var(--line-2); background: transparent; cursor: default; }
+    .card-btn.more { font-family: var(--mono); font-size: 11.5px; }
+    .more-row { display: none; gap: 8px; align-items: center; flex-wrap: wrap; padding-top: 2px; border-top: 1px dashed var(--line); margin-top: 2px; padding-top: 9px; }
+    .more-row.open { display: flex; }
+    .more-row select { padding: 5px 8px; border: 1px solid var(--line-2); border-radius: var(--radius-s); background: var(--bg); font-family: var(--mono); font-size: 11.5px; }
+    .more-row .card-btn.not-interested:hover { border-color: var(--no); color: var(--no); }
+    .more-row .card-btn.remove:hover { border-color: var(--no); color: var(--no); }
+
+    .badge { font-family: var(--mono); font-size: 10.5px; font-weight: 700; background: var(--invert-bg); color: var(--invert-fg); padding: 2px 7px; border-radius: 4px; white-space: nowrap; letter-spacing: .03em; }
+    .pill-tag { font-family: var(--mono); font-size: 10px; letter-spacing: .04em; border: 1px solid var(--line-2); color: var(--muted); padding: 1px 7px; border-radius: 999px; }
 
     .undo-bar {
       position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-      background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: 8px;
+      background: var(--surface-2); border: 1px solid var(--line-3); border-radius: var(--radius-s);
       padding: 10px 16px; display: none; align-items: center; gap: 12px; z-index: 200;
-      box-shadow: 0 4px 12px rgba(0,0,0,.4);
     }
     .undo-bar.show { display: flex; animation: cardEnter .2s ease-out; }
     .undo-bar .btn { padding: 4px 12px; font-size: 12px; }
 
     .ai-suggestion { font-size: 12px; color: var(--muted); margin-top: 4px; }
-    .ai-suggestion .field-group { margin-bottom: 6px; }
+    .ai-suggestion .field-group { margin-bottom: 6px; font-family: var(--mono); }
     .ai-suggestion .field-group span { color: var(--text); }
-    .suggestion-box { background: var(--bg); border-radius: 6px; padding: 10px; margin-top: 6px; }
+    .suggestion-box { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 10px; margin-top: 6px; }
 
-    /* == 窄屏 == */
+    /* 骨架屏 */
+    .skeleton { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 15px; display: flex; flex-direction: column; gap: 9px; }
+    .sk { background: var(--surface-3); border-radius: 4px; }
+    .sk.ln { height: 10px; }
+    .sk.ln.s { width: 40%; } .sk.ln.m { width: 70%; }
+    .sk.box { height: 54px; margin-top: 4px; }
+    @keyframes shimmer { 0% { opacity: .5; } 50% { opacity: 1; } 100% { opacity: .5; } }
+    .sk { animation: shimmer 1.3s infinite; }
+
+    .consent-note { font-size: 11.5px; color: var(--muted); line-height: 1.6; }
+    .consent-note label { display: flex; align-items: center; gap: 6px; font-family: var(--sans); text-transform: none; letter-spacing: 0; color: var(--muted); font-size: 11.5px; margin-top: 6px; cursor: pointer; }
+
     @media (max-width: 720px) {
       .settings-panel { position: fixed; left: 0; top: var(--header-h); height: calc(100vh - var(--header-h)); z-index: 90; box-shadow: 2px 0 12px rgba(0,0,0,.3); }
       .settings-panel.collapsed { margin-left: -320px; }
       .settings-toggle { left: 320px; }
       .settings-toggle.collapsed { left: 0; }
-      .search-bar { padding: 10px 12px; }
-      .job-card-list { padding: 10px 12px; }
-      .card-jd { -webkit-line-clamp: 2; }
-      :root { --card-h: 320px; }
+      .stats { display: none; }
+      .job-card-list { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
   <div class="app-header">
-    <div class="brand"><span class="brand-dot"></span>AI 求职工作台</div>
+    <div class="brand"><span class="logo">AI</span>AI 求职工作台 <span class="vt">V2</span></div>
     <div class="header-actions">
+      <div class="stats">
+        <div class="stat"><span class="n" id="statFound">0</span><span class="l">FOUND</span></div>
+        <div class="stat"><span class="n" id="statLike">0</span><span class="l">LIKE</span></div>
+        <div class="stat"><span class="n" id="statSent">0</span><span class="l">SENT</span></div>
+      </div>
       <span class="conn-status" id="connectionStatus">未连接</span>
+      <button class="theme-toggle" onclick="toggleTheme()" aria-label="切换深/浅色">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>
+      </button>
     </div>
   </div>
 
@@ -202,7 +274,9 @@
         <div class="field"><label>行业代码（可选）</label><input type="text" id="profileIndustry" placeholder="BOSS 行业代码"></div>
         <div class="field"><label>排除关键词（逗号分隔）</label><input type="text" id="profileExcludes" placeholder="如：外包,销售"></div>
         <div class="btn-row">
-          <button class="btn primary" onclick="createProfile()">创建画像</button>
+          <button class="btn primary" onclick="createProfile()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>创建画像
+          </button>
           <button class="btn" onclick="saveProfileFields()">保存条件</button>
         </div>
       </div>
@@ -212,12 +286,14 @@
         <div class="field">
           <input type="file" id="resumeFile" accept=".txt,.pdf,.docx">
         </div>
-        <div class="field" style="font-size:12px;color:var(--muted);">
+        <div class="consent-note">
           勾选后，简历文本会发送到你配置的 AI 服务用于生成可编辑建议；不勾选则只本地保存。
           <label><input type="checkbox" id="resumeAiConsent"> 我已知悉并同意 AI 解析</label>
         </div>
         <div class="btn-row">
-          <button class="btn primary" onclick="uploadResume()">上传解析</button>
+          <button class="btn primary" onclick="uploadResume()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 19V5M5 12l7-7 7 7"/></svg>上传解析
+          </button>
         </div>
         <div id="aiSuggestion" class="ai-suggestion" style="display:none;"></div>
       </div>
@@ -245,7 +321,9 @@
           <input type="text" id="manualKeywords" placeholder="如：Python 后端,FastAPI,风控">
         </div>
         <div class="btn-row">
-          <button class="btn primary" onclick="startSearch()">开始搜索</button>
+          <button class="btn primary" onclick="startSearch()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4-4"/></svg>开始搜索
+          </button>
           <button class="btn danger" onclick="cancelSearch()" id="cancelBtn" style="display:none;">取消</button>
         </div>
       </div>
@@ -264,10 +342,14 @@
     <main class="main-area">
       <div class="search-bar">
         <div class="search-info" id="searchInfo">点击搜索开始发现岗位</div>
-        <div id="searchActions"></div>
+        <div class="search-actions" id="searchActions"></div>
       </div>
       <div class="job-card-list" id="jobCardList">
-        <div class="empty-state">上传简历或手动输入关键词，点击搜索开始</div>
+        <div class="empty-state">
+          <div class="em-ic">∅</div>
+          <h4>还没有岗位</h4>
+          <p>上传简历或输入关键词，点 [开始搜索]<br>让 AI 帮你发现匹配的职位</p>
+        </div>
       </div>
     </main>
   </div>
@@ -308,6 +390,7 @@
       await loadAiSettings();
       await checkConnection();
       await restoreSearchRun();
+      await updateStats();
     }
 
     async function checkConnection() {
@@ -326,6 +409,12 @@
       panel.classList.toggle("collapsed");
       toggle.classList.toggle("collapsed");
       toggle.textContent = panel.classList.contains("collapsed") ? "▶" : "◀";
+    }
+
+    function toggleTheme() {
+      const h = document.documentElement;
+      if (h.getAttribute("data-theme") === "light") h.removeAttribute("data-theme");
+      else h.setAttribute("data-theme", "light");
     }
 
     // == 画像 ==
@@ -348,6 +437,7 @@
     function selectProfile(pid) {
       currentProfileId = pid;
       document.getElementById("profileSelect").value = pid;
+      updateStats();
     }
 
     async function createProfile() {
@@ -355,7 +445,7 @@
       if (!name) { alert("请输入画像名称"); return; }
       const fields = collectProfileFields();
       const resp = await api(API.profiles, { method: "POST", json: { name, confirmed_fields: fields } });
-      if (resp.ok) { await loadProfiles(); }
+      if (resp.ok) { await loadProfiles(); await updateStats(); }
     }
 
     function collectProfileFields() {
@@ -449,6 +539,17 @@
     }
 
     // == 搜索 ==
+    function showSkeletons(n = 3) {
+      const list = document.getElementById("jobCardList");
+      list.innerHTML = "";
+      for (let i = 0; i < n; i++) {
+        const sk = document.createElement("div");
+        sk.className = "skeleton";
+        sk.innerHTML = '<div class="sk ln m"></div><div class="sk ln s"></div><div class="sk box"></div>';
+        list.appendChild(sk);
+      }
+    }
+
     async function startSearch() {
       if (!currentProfileId) { alert("请先选择画像"); return; }
       const kw = document.getElementById("manualKeywords").value.trim();
@@ -463,7 +564,7 @@
         localStorage.setItem("boss-workbench-run", run.id);
         document.getElementById("cancelBtn").style.display = "inline-block";
         document.getElementById("searchInfo").innerHTML = `搜索运行中… <strong>${run.total_detail_budget}</strong> 条预算`;
-        document.getElementById("jobCardList").innerHTML = "";
+        showSkeletons();
         startPolling(run.id);
         loadHistory();
       } catch(e) { /* handled */ }
@@ -487,6 +588,7 @@
           const run = await runResp.json();
           document.getElementById("searchInfo").innerHTML =
             `状态：<strong>${run.status}</strong> · 已发现 <strong>${run.discovered_count || 0}</strong> · 已完成 <strong>${run.completed_jd_count || 0}</strong>`;
+          document.getElementById("statFound").textContent = run.discovered_count || 0;
           if (["succeeded","partial","failed","interrupted"].includes(run.status)) {
             stopPolling();
             localStorage.removeItem("boss-workbench-run");
@@ -517,14 +619,23 @@
 
     function renderCards(jobs) {
       const list = document.getElementById("jobCardList");
-      const existing = new Set(Array.from(list.children).map(c => c.dataset.jobId));
-      if (jobs.length === 0) { if (list.children.length === 0) list.innerHTML = '<div class="empty-state">暂无岗位，等待 JD 抓取…</div>'; return; }
-      if (list.querySelector(".empty-state")) list.innerHTML = "";
+      const existing = new Set(Array.from(list.children).map(c => c.dataset && c.dataset.jobId).filter(Boolean));
+      if (jobs.length === 0) {
+        if (list.children.length === 0) {
+          list.innerHTML = '<div class="empty-state"><div class="em-ic">∅</div><h4>还没有岗位</h4><p>上传简历或输入关键词，点 [开始搜索]<br>让 AI 帮你发现匹配的职位</p></div>';
+        }
+        return;
+      }
+      const hadPlaceholder = list.querySelector(".empty-state") || list.querySelector(".skeleton");
+      if (hadPlaceholder) list.innerHTML = "";
+      let added = 0;
       for (const job of jobs) {
         if (existing.has(job.job_id)) continue;
         const card = createCard(job);
         list.appendChild(card);
+        added++;
       }
+      if (added) document.getElementById("statFound").textContent = list.querySelectorAll(".job-card").length;
     }
 
     function createCard(job) {
@@ -536,18 +647,27 @@
       const header = document.createElement("div"); header.className = "card-header";
       const titleBlock = document.createElement("div"); titleBlock.className = "card-title-block";
       titleBlock.append(node("card-title", job.title), node("card-company", job.company));
-      header.append(titleBlock, node("card-salary", job.salary));
+      const headRight = document.createElement("div");
+      headRight.style.display = "flex"; headRight.style.alignItems = "center"; headRight.style.gap = "8px";
+      if (job.match_score != null) { const b = document.createElement("span"); b.className = "badge"; b.textContent = "匹配 " + Math.round(job.match_score) + "%"; headRight.appendChild(b); }
+      headRight.appendChild(node("card-salary", job.salary));
+      header.append(titleBlock, headRight);
+
       const meta = node("card-meta", job.location);
+      if (Array.isArray(job.tags) && job.tags.length) {
+        job.tags.forEach(t => { const tag = document.createElement("span"); tag.className = "pill-tag"; tag.textContent = t; meta.appendChild(tag); });
+      }
       const jd = node("card-jd", job.jd_excerpt);
+
       const actions = document.createElement("div"); actions.className = "card-actions";
       const stop = event => event.stopPropagation();
       if (safeUrl) {
         const link = document.createElement("a"); link.className = "card-link"; link.href = safeUrl;
-        link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "阅读 JD";
+        link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "阅读职位描述";
         link.addEventListener("click", event => openSafe(event, safeUrl)); actions.appendChild(link);
         card.addEventListener("click", event => openSafe(event, safeUrl));
       }
-      const interested = document.createElement("button"); interested.type = "button"; interested.className = "card-btn interested";
+      const interested = document.createElement("button"); interested.type = "button"; interested.className = "card-btn" + (job.interest_state === "interested" ? " interested" : " primary");
       interested.textContent = job.interest_state === "interested" ? "已感兴趣" : "感兴趣";
       interested.addEventListener("click", event => { stop(event); if (job.interest_state !== "interested") markInterested(job.job_id); });
       if (job.interest_state === "interested") {
@@ -555,22 +675,31 @@
         applied.addEventListener("click", event => { stop(event); setJobStatus(job.job_id, "applied"); });
         actions.appendChild(applied);
       }
-      const reason = document.createElement("select"); reason.className = "card-reason";
+
+      // 更多菜单：不感兴趣原因 + 不感兴趣 + 删除
+      const moreBtn = document.createElement("button"); moreBtn.type = "button"; moreBtn.className = "card-btn more"; moreBtn.textContent = "更多 ⋯";
+      const moreRow = document.createElement("div"); moreRow.className = "more-row";
+      const reason = document.createElement("select");
       [["", "不感兴趣原因（可跳过）"], ["role", "岗位方向"], ["salary", "薪资"], ["location", "地点"], ["company", "公司"]].forEach(([value, label]) => {
         const option = document.createElement("option"); option.value = value; option.textContent = label; reason.appendChild(option);
-      }); reason.addEventListener("click", stop);
+      });
       const dislike = document.createElement("button"); dislike.type = "button"; dislike.className = "card-btn not-interested"; dislike.textContent = "不感兴趣";
       dislike.addEventListener("click", event => { stop(event); markNotInterested(job.job_id, dislike, reason.value); });
-      const remove = document.createElement("button"); remove.type = "button"; remove.className = "card-btn"; remove.textContent = "删除";
+      const remove = document.createElement("button"); remove.type = "button"; remove.className = "card-btn remove"; remove.textContent = "删除";
       remove.addEventListener("click", event => { stop(event); setJobStatus(job.job_id, "deleted"); });
-      actions.append(interested, reason, dislike, remove); card.append(header, meta, jd, actions);
+      moreRow.append(reason, dislike, remove);
+
+      moreBtn.addEventListener("click", event => { stop(event); moreRow.classList.toggle("open"); });
+      moreRow.addEventListener("click", stop);
+
+      actions.append(interested, moreBtn);
+      card.append(header, meta, jd, actions, moreRow);
       return card;
     }
 
     function openSafe(event, url) {
       event.preventDefault();
       event.stopPropagation();
-      // 只允许 HTTPS 且预期 BOSS 域名的岗位链接
       try {
         const parsed = new URL(url);
         if (parsed.protocol !== "https:") { return false; }
@@ -585,14 +714,14 @@
       const resp = await api(`/api/jobs/${jobId}/feedback`, {
         method: "POST", json: { profile_id: currentProfileId, action: "interested" },
       });
-      if (resp.ok) { await refreshCards(); }
+      if (resp.ok) { await refreshCards(); await updateStats(); }
     }
 
     async function setJobStatus(jobId, status) {
       const resp = await api(`${API.profileJobs}/${currentProfileId}/${jobId}`, {
         method: "PATCH", json: { status },
       });
-      if (resp.ok) { await refreshCards(); await loadHistory(); }
+      if (resp.ok) { await refreshCards(); await loadHistory(); await updateStats(); }
     }
 
     async function markNotInterested(jobId, btn, reason = null) {
@@ -623,6 +752,7 @@
       const card = document.querySelector(`.job-card[data-job-id="${lastFeedbackJobId}"]`);
       if (card) { card.classList.remove("exiting"); card.style.display = ""; }
       lastFeedbackId = ""; lastFeedbackJobId = "";
+      await updateStats();
     }
 
     async function refreshCards() {
@@ -631,6 +761,22 @@
       const data = await resp.json();
       document.getElementById("jobCardList").innerHTML = "";
       renderCards(data.jobs || []);
+    }
+
+    async function updateStats() {
+      if (!currentProfileId) return;
+      try {
+        const resp = await api(`${API.profileJobs}?profile_id=${currentProfileId}`);
+        const data = await resp.json();
+        const jobs = data.jobs || [];
+        let like = 0, sent = 0;
+        for (const pj of jobs) {
+          if (pj.status === "interested") like++;
+          else if (pj.status === "applied") sent++;
+        }
+        document.getElementById("statLike").textContent = like;
+        document.getElementById("statSent").textContent = sent;
+      } catch (e) { /* 非关键，静默 */ }
     }
 
     async function loadHistory(status = "new") {
@@ -648,6 +794,7 @@
         item.textContent = `${pj.status} · ${new Date(pj.shown_at).toLocaleDateString()}`;
         list.appendChild(item);
       }
+      await updateStats();
     }
 
     function escapeHtml(text) {

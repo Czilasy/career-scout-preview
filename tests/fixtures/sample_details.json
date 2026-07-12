@@ -1,0 +1,7 @@
+[
+  {"job_id": "job-001", "jd": "负责使用 Python 和 FastAPI 开发后端服务，熟悉 Redis 与 PostgreSQL，参与微服务架构设计。", "skill_tags": ["Python", "FastAPI", "Redis"]},
+  {"job_id": "job-002", "jd": "使用 FastAPI 构建 RESTful API，熟悉 Python 异步编程与 PostgreSQL。", "skill_tags": ["FastAPI", "Python"]},
+  {"job_id": "job-003", "jd": "高级 Python 工程师，负责后端架构优化，熟悉 PostgreSQL 与微服务。", "skill_tags": ["Python", "PostgreSQL"]},
+  {"job_id": "job-004", "jd": "后端开发，使用 Go 和 Redis 构建高并发服务。", "skill_tags": ["Go", "Redis"]},
+  {"job_id": "job-005", "jd": "Python 外包开发，驻场客户现场。", "skill_tags": ["Python"]}
+]

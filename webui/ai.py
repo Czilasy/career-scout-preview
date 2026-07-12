@@ -1,0 +1,391 @@
+"""AI adapter: credential management, connection testing, JSON-validated AI calls.
+
+All errors are sanitized to safe classification codes.  API keys, request
+bodies and raw responses never appear in exceptions, logs or return values.
+The application validates every AI output on its own side — the AI never
+decides task status.
+"""
+
+from __future__ import annotations
+
+import json
+from urllib.parse import urlparse
+
+import requests
+import keyring
+
+
+KEYRING_SERVICE = "boss-workbench"
+DEFAULT_TIMEOUT = 60
+CONNECTION_TIMEOUT = 15
+RANK_BATCH_SIZE = 10
+
+# Safe error classifications returned to callers.  Never include raw
+# exception text, API keys or response bodies.
+ERROR_TIMEOUT = "timeout"
+ERROR_AUTH = "auth_failed"
+ERROR_NETWORK = "network_error"
+ERROR_INVALID = "invalid_response"
+
+
+class AISecurityError(Exception):
+    """AI call failure carrying only a safe error classification.
+
+    The string form is the error_code alone, so it is safe to log or
+    surface to users — it never contains the API key, request body or
+    raw response.  The original exception is suppressed via ``from None``
+    so tracebacks do not leak sensitive details either.
+    """
+
+    def __init__(self, error_code: str):
+        self.error_code = error_code
+        super().__init__(error_code)
+
+
+# ---------------------------------------------------------------------------
+# Credential management
+# ---------------------------------------------------------------------------
+
+def _host_from_url(endpoint_url: str) -> str:
+    """Extract the hostname from *endpoint_url*, falling back to the raw string."""
+    return urlparse(endpoint_url).hostname or endpoint_url
+
+
+def store_api_key(endpoint_url: str, api_key: str) -> str:
+    """Store *api_key* in the system credential store and return a credential_ref.
+
+    The credential_ref is the hostname of *endpoint_url*, used as the
+    keyring username.  The service name is fixed to ``boss-workbench``.
+    """
+    host = _host_from_url(endpoint_url)
+    keyring.set_password(KEYRING_SERVICE, host, api_key)
+    return host
+
+
+def retrieve_api_key(credential_ref: str) -> str:
+    """Retrieve the api_key associated with *credential_ref* from the credential store."""
+    return keyring.get_password(KEYRING_SERVICE, credential_ref)
+
+
+def delete_api_key(credential_ref: str) -> None:
+    """Delete the api_key associated with *credential_ref* from the credential store."""
+    keyring.delete_password(KEYRING_SERVICE, credential_ref)
+
+
+# ---------------------------------------------------------------------------
+# Connection testing
+# ---------------------------------------------------------------------------
+
+def test_connection(endpoint_url: str, api_key: str) -> tuple[bool, str | None]:
+    """Send a minimal chat completions request to verify connectivity.
+
+    Returns ``(True, None)`` on success, or ``(False, error_code)`` where
+    *error_code* is one of: ``timeout``, ``auth_failed``, ``network_error``,
+    ``invalid_response``.  Never includes raw error details, the API key
+    or response body.
+    """
+    payload = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "ping"}],
+        "temperature": 0.3,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        response = requests.post(
+            endpoint_url, json=payload, headers=headers, timeout=CONNECTION_TIMEOUT
+        )
+    except requests.Timeout:
+        return (False, ERROR_TIMEOUT)
+    except requests.RequestException:
+        return (False, ERROR_NETWORK)
+    except Exception:
+        return (False, ERROR_INVALID)
+
+    if response.status_code in (401, 403):
+        return (False, ERROR_AUTH)
+    if response.status_code >= 400:
+        return (False, ERROR_INVALID)
+    return (True, None)
+
+
+# ---------------------------------------------------------------------------
+# AI call
+# ---------------------------------------------------------------------------
+
+def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFAULT_TIMEOUT) -> dict:
+    """Call an OpenAI-compatible chat completions endpoint and return parsed JSON.
+
+    Raises :class:`AISecurityError` with a safe error_code on any failure.
+    The exception never contains the API key, request body or raw response,
+    and the original exception is suppressed so tracebacks stay clean.
+    """
+    payload = {
+        "model": "auto",
+        "messages": messages,
+        "temperature": 0.3,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        response = requests.post(
+            endpoint_url, json=payload, headers=headers, timeout=timeout
+        )
+    except requests.Timeout:
+        raise AISecurityError(ERROR_TIMEOUT) from None
+    except requests.RequestException:
+        raise AISecurityError(ERROR_NETWORK) from None
+    except Exception:
+        raise AISecurityError(ERROR_INVALID) from None
+
+    if response.status_code in (401, 403):
+        raise AISecurityError(ERROR_AUTH)
+    if response.status_code >= 400:
+        raise AISecurityError(ERROR_INVALID)
+
+    try:
+        data = response.json()
+    except ValueError:
+        raise AISecurityError(ERROR_INVALID) from None
+
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise AISecurityError(ERROR_INVALID) from None
+
+    try:
+        return json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        raise AISecurityError(ERROR_INVALID) from None
+
+
+# ---------------------------------------------------------------------------
+# JSON validation helpers
+# ---------------------------------------------------------------------------
+
+def _require(data: dict, field: str, expected_type: type):
+    """Return *data[field]* if it exists and matches *expected_type*, else raise."""
+    if field not in data:
+        raise ValueError(f"missing_field:{field}")
+    if not isinstance(data[field], expected_type):
+        raise ValueError(f"invalid_type:{field}")
+    return data[field]
+
+
+def _require_str_list(data: dict, field: str) -> list[str]:
+    """Return *data[field]* as a list of strings, raising on non-string elements."""
+    value = _require(data, field, list)
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"invalid_element:{field}")
+    return value
+
+
+# ---------------------------------------------------------------------------
+# JSON validation — application-side contracts for AI outputs
+# ---------------------------------------------------------------------------
+
+def validate_resume_response(data) -> dict:
+    """Validate an AI resume parsing response.
+
+    Returns a dict with ``profile_name``, ``city``, ``roles``, ``skills``,
+    ``keywords`` and ``suggestions``.  Raises :class:`ValueError` on missing
+    fields or type mismatches — the AI does not decide what is valid.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("invalid_response")
+
+    profile_name = _require(data, "profile_name", str)
+    city = _require(data, "city", str)
+    roles = _require_str_list(data, "roles")
+    skills = _require_str_list(data, "skills")
+    keywords = _require_str_list(data, "keywords")
+    suggestions = _require(data, "suggestions", list)
+
+    for sug in suggestions:
+        if not isinstance(sug, dict):
+            raise ValueError("invalid_suggestion")
+        if "field" not in sug or not isinstance(sug["field"], str):
+            raise ValueError("invalid_suggestion")
+        if "source" not in sug or not isinstance(sug["source"], str):
+            raise ValueError("invalid_suggestion")
+        if "uncertain" not in sug or not isinstance(sug["uncertain"], bool):
+            raise ValueError("invalid_suggestion")
+        if "value" not in sug:
+            raise ValueError("invalid_suggestion")
+
+    return {
+        "profile_name": profile_name,
+        "city": city,
+        "roles": roles,
+        "skills": skills,
+        "keywords": keywords,
+        "suggestions": suggestions,
+    }
+
+
+def validate_rank_response(data, input_job_ids) -> list[str]:
+    """Validate an AI JD ranking response.
+
+    Returns the ranked job_ids list.  Raises :class:`ValueError` if any
+    returned job_id was not in *input_job_ids*, or on type/structure errors.
+    The AI cannot inject jobs that were not part of the input.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("invalid_response")
+
+    ranked = _require(data, "ranked_job_ids", list)
+    input_set = set(input_job_ids)
+    result: list[str] = []
+    for jid in ranked:
+        if not isinstance(jid, str):
+            raise ValueError("invalid_element:ranked_job_ids")
+        if jid not in input_set:
+            raise ValueError("unknown_job_id")
+        result.append(jid)
+    return result
+
+
+def validate_preference_response(data) -> dict:
+    """Validate an AI preference update response.
+
+    Returns a dict with ``positive_terms``, ``negative_terms``,
+    ``keyword_weights`` and ``uncertain``.  Raises :class:`ValueError` on
+    missing fields or type mismatches.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("invalid_response")
+
+    positive_terms = _require_str_list(data, "positive_terms")
+    negative_terms = _require_str_list(data, "negative_terms")
+    keyword_weights = _require(data, "keyword_weights", dict)
+    uncertain = _require(data, "uncertain", list)
+
+    for key, value in keyword_weights.items():
+        if not isinstance(key, str):
+            raise ValueError("invalid_keyword_weight_key")
+        # bool is a subclass of int — reject it explicitly so True/False
+        # are not accepted as numeric weights.
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError("invalid_keyword_weight_value")
+
+    return {
+        "positive_terms": positive_terms,
+        "negative_terms": negative_terms,
+        "keyword_weights": keyword_weights,
+        "uncertain": uncertain,
+    }
+
+
+# ---------------------------------------------------------------------------
+# High-level AI operations
+# ---------------------------------------------------------------------------
+
+def parse_resume(resume_text: str, endpoint_url: str, api_key: str) -> dict:
+    """Call AI to parse a resume and return validated fields.
+
+    Returns ``{profile_name, city, roles, skills, keywords, suggestions}``.
+    The output is validated by :func:`validate_resume_response`.
+    """
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是简历解析助手。根据简历内容提取JSON："
+                "profile_name(画像名,str), city(城市,str), "
+                "roles(岗位方向,list[str]), skills(技能,list[str]), "
+                "keywords(搜索关键词,list[str],最多3个), "
+                "suggestions(建议,list[{field,value,source,uncertain}])。"
+                "仅使用简历明确内容，无依据时返回空数组。"
+                "禁止编造经历、学历、薪资、证书或项目。"
+            ),
+        },
+        {"role": "user", "content": resume_text},
+    ]
+    data = call_ai(endpoint_url, api_key, messages)
+    return validate_resume_response(data)
+
+
+def rank_jds(confirmed_fields: dict, jobs_with_jd: list, endpoint_url: str, api_key: str) -> list[str]:
+    """Call AI to rank jobs by relevance, in batches of at most 10.
+
+    Returns a list of ranked job_ids.  Each batch is validated by
+    :func:`validate_rank_response` to reject any job_id not present in
+    the input — the AI cannot introduce jobs the caller did not supply.
+    """
+    if not jobs_with_jd:
+        return []
+
+    ranked: list[str] = []
+    for i in range(0, len(jobs_with_jd), RANK_BATCH_SIZE):
+        batch = jobs_with_jd[i:i + RANK_BATCH_SIZE]
+        batch_job_ids = [job["job_id"] for job in batch]
+        job_summaries = [
+            {
+                "job_id": job["job_id"],
+                "title": job.get("title", ""),
+                "jd": job.get("jd", ""),
+            }
+            for job in batch
+        ]
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是岗位排序助手。根据画像与人工条件对给定JD按相关性排序。"
+                    "返回JSON：{ranked_job_ids: [输入job_id的排序列表]}。"
+                    "不得生成链接、改变人工条件或返回未输入的job_id。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "confirmed_fields": confirmed_fields,
+                        "jobs": job_summaries,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+        data = call_ai(endpoint_url, api_key, messages)
+        batch_ranked = validate_rank_response(data, batch_job_ids)
+        ranked.extend(batch_ranked)
+
+    return ranked
+
+
+def update_preference(profile: dict, feedback_events: list, endpoint_url: str, api_key: str) -> dict:
+    """Call AI to update preferences based on recent feedback.
+
+    Returns ``{positive_terms, negative_terms, keyword_weights, uncertain}``.
+    The output is validated by :func:`validate_preference_response`.
+    """
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是偏好更新助手。根据画像与最近反馈更新求职偏好。"
+                "返回JSON：{positive_terms(list[str]), "
+                "negative_terms(list[str]), keyword_weights(dict[str,float]), "
+                "uncertain(list)}。一次反馈不得形成永久黑名单。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "profile": profile,
+                    "feedback_events": feedback_events,
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    data = call_ai(endpoint_url, api_key, messages)
+    return validate_preference_response(data)

@@ -1,0 +1,61 @@
+{
+  "keyword": "Python 后端",
+  "city": "上海",
+  "jobs": [
+    {
+      "job_id": "job-001",
+      "title": "Python 后端工程师",
+      "boss_name": "示例科技",
+      "salary": "25-35K",
+      "location": "上海·浦东新区·张江",
+      "skills": "Python | Redis",
+      "job_labels": ["Python", "后端"],
+      "tags": [],
+      "job_link": "https://www.zhipin.com/job_detail/job-001.html"
+    },
+    {
+      "job_id": "job-002",
+      "title": "FastAPI 后端开发",
+      "boss_name": "演示公司",
+      "salary": "20-30K",
+      "location": "上海·徐汇区",
+      "skills": "Python | FastAPI",
+      "job_labels": ["FastAPI"],
+      "tags": [],
+      "job_link": "https://www.zhipin.com/job_detail/job-002.html"
+    },
+    {
+      "job_id": "job-003",
+      "title": "Python 高级工程师",
+      "boss_name": "测试有限",
+      "salary": "30-50K",
+      "location": "上海·闵行区",
+      "skills": "Python | PostgreSQL",
+      "job_labels": ["Python"],
+      "tags": [],
+      "job_link": "https://www.zhipin.com/job_detail/job-003.html"
+    },
+    {
+      "job_id": "job-004",
+      "title": "后端开发工程师",
+      "boss_name": "样本信息",
+      "salary": "18-28K",
+      "location": "上海·浦东新区",
+      "skills": "Go | Redis",
+      "job_labels": ["后端"],
+      "tags": [],
+      "job_link": "https://www.zhipin.com/job_detail/job-004.html"
+    },
+    {
+      "job_id": "job-005",
+      "title": "Python 外包开发",
+      "boss_name": "外包公司",
+      "salary": "10-15K",
+      "location": "上海·闵行区",
+      "skills": "Python",
+      "job_labels": ["外包"],
+      "tags": [],
+      "job_link": "https://www.zhipin.com/job_detail/job-005.html"
+    }
+  ]
+}

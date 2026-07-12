@@ -37,9 +37,9 @@ python3 scripts/boss_cdp_raw.py --keyword "AI Agent" --city 上海 --pages 3 --a
 python3 scripts/job_summary.py
 ```
 
-Right after scraping you get salary ranges, experience requirements, top skill keywords, and an application-optimization prompt. The CLI prompt only uses scraped job data and never reads a local résumé. The optional Web UI can apply local hard filters and explainable ranking from a profile you enter manually; it does not read a résumé or estimate hiring probability.
+Right after scraping you get salary ranges, experience requirements, top skill keywords, and an application-optimization prompt. The CLI prompt only uses scraped job data and never reads a local résumé. The optional AI Job Workbench parses your résumé, generates keywords, streams job cards, and learns from feedback — but it never auto-applies, contacts recruiters, or predicts hiring probability.
 
-## Local Job-Matching Workspace
+## AI Job Workbench
 
 After installing dependencies, start the local workspace:
 
@@ -47,16 +47,79 @@ After installing dependencies, start the local workspace:
 python3 webui/app.py
 ```
 
-Open `http://127.0.0.1:5000`. The workspace provides:
+Open `http://127.0.0.1:5000`. The workspace is a dark-themed job-seeking workbench: a collapsible left settings panel for profiles, resumes, and AI settings, and a main area with a single-column stream of fixed-height job cards.
 
-- Persistent task state and logs that survive page refreshes, with cancel/retry controls; unfinished work is explicitly marked interrupted after a server restart.
-- Per-task list/detail paths, so one task can never silently read another task's “latest JSON”.
-- Filter options generated from the scraper's single source of truth.
-- Target titles, required/preferred skills, exclusions, districts, minimum salary, and company blacklist.
-- Deterministic hard filters for location, salary, exclusions, and blacklist, followed by explainable skill-based ranking.
-- A task-scoped market summary and CSV download.
+### Core Capabilities
 
-Workspace state is stored at `~/.career-scout/webui/webui.db`; job files remain under `~/.career-scout/job-result/`. Set `BOSS_PYTHON` before launch to select a specific Python executable.
+1. **Resume parsing**: Upload a TXT / PDF / DOCX résumé and the AI extracts job direction, city, skills, and up to 3 search keyword groups. Users can manually supplement or override — **manual conditions always take priority**.
+2. **Background search**: After clicking search, the backend runs automatically with up to 3 keyword groups, cross-query deduplication, and at most 60 full JDs per run. Each completed JD appears as a card streamed into the frontend.
+3. **Job cards**: Cards show title, company, salary, location, and a truncated JD; clicking the reading area opens only a validated BOSS link (HTTPS and expected BOSS domains only).
+4. **Feedback & learning**: The "Interested / Not interested" buttons on a card **do not trigger navigation**; "not interested" smoothly exits with undo support. After every 5 valid feedbacks the AI updates the current profile's preference, affecting only future results — already-shown cards are never re-ranked.
+5. **History & cleanup**: Normal results are retained for 30 days; interested and applied jobs are retained until manual deletion.
+
+### AI URL & Key Configuration
+
+Users only configure two items: the AI service URL and the API Key.
+
+- Enter the AI service URL (an OpenAI-compatible `/v1/chat/completions` endpoint) and API Key in the left settings panel.
+- Click "Test connection" to confirm the configuration works.
+- **The Key must enter the system credential store** (Windows Credential Manager / macOS Keychain / Linux Secret Service, via the `keyring` library) and is **never written in plaintext to SQLite, logs, API responses, or exports**.
+- The AI settings endpoint returns only the URL, status, and last error code — never the Key or credential reference.
+
+### Privacy Notice
+
+- Résumé text and AI Key are processed locally and never uploaded to any third party (other than the AI service you configure).
+- All résumé reads, AI settings reads, and write operations require a local session token (`X-Boss-Token`).
+- Résumé deletion atomically removes the original file, extracted text, content hash, filename, and unconfirmed suggestions.
+- No Key or résumé text ever appears in logs, history, exports, or error messages.
+- Only HTTPS links on the expected BOSS domain (`zhipin.com`) are opened by the frontend.
+
+### Profile Isolation
+
+- Each new résumé defaults to a new job-seeking profile and **does not inherit the old profile's AI negative preferences**.
+- Feedback is bound to the current profile; "not interested" only affects that profile's subsequent results.
+- Copying a profile copies only the manually confirmed fields — AI preferences do not migrate.
+
+### Card Interaction
+
+- Cards have a fixed height; JDs are auto-truncated (3-line clamp) to keep the reading flow stable.
+- Clicking a card's reading area opens the validated BOSS job link in a **new tab**.
+- The "Interested / Not interested" buttons **do not navigate** — they only record feedback.
+- After "not interested", the card smoothly exits and an undo bar appears for 5 seconds.
+
+### Feedback Learning
+
+- After every 5 valid feedbacks (interested / not interested; revoked ones don't count), the AI updates the current profile's preference.
+- Preference updates only affect **future** search results and card ordering — already-shown cards are never re-ranked.
+- AI output is validated by the program; **the AI cannot decide task status or bypass manual filtering**.
+
+### No-Auto-Application Boundary
+
+This project **does not** implement:
+
+- Automatic résumé submission
+- Automatically contacting recruiters or sending messages
+- Hiring probability prediction
+
+The AI is only responsible for JSON-structured résumé parsing, JD ranking, and preference updates. All task status and application actions are decided by the user.
+
+### Data Retention
+
+| Type | Retention |
+|------|-----------|
+| Normal results | Auto-cleaned after 30 days |
+| Interested jobs | Retained until manual deletion |
+| Applied jobs | Retained until manual deletion |
+
+Cleanup never touches the résumé directory or uncontrolled paths, and never deletes saved or applied jobs.
+
+### State Directories
+
+- State database: `~/.career-scout/webui/webui.db`
+- Job results: `~/.career-scout/job-result/`
+- Résumé files: `~/.career-scout/webui/resumes/`
+
+Set `BOSS_PYTHON` before launch to select a specific Python executable.
 
 ## ✨ Features
 
@@ -224,8 +287,11 @@ career-scout/
 ├── webui/
 │   ├── app.py            # Flask API + background task orchestration
 │   ├── core.py           # Validation + explainable ranking
-│   ├── store.py          # SQLite tasks, logs, and profile
-│   └── index.html        # Responsive local workspace
+│   ├── store.py          # SQLite tasks, logs, profiles, search runs, feedback
+│   ├── workbench.py      # Keyword selection, dedup, budget, card projection
+│   ├── resume.py         # Résumé storage, extraction, path validation, atomic delete
+│   ├── ai.py             # AI connection test, credential-store ref, JSON contract validation
+│   └── index.html        # Dark job-workbench frontend
 └── requirements.txt
 ```
 

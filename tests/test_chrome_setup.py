@@ -630,11 +630,12 @@ class ProjectScopeTests(unittest.TestCase):
             self._read_text(name)
             for name in ("README.md", "CHANGELOG.md", "SKILL.md", "pyproject.toml", "requirements.txt", "uv.lock")
         )
+        # pypdf and python-docx are allowed: they are used by the AI Job
+        # Workbench to parse uploaded TXT/PDF/DOCX resumes, not for the
+        # removed resume-score-matching feature.
         for forbidden in (
             "resume_score",
             "pdfplumber",
-            "pypdf",
-            "python-docx",
             "openai",
             "langchain",
             "sentence-transformers",
