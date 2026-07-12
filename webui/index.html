@@ -25,7 +25,7 @@
       font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; overflow-x: hidden; }
     button, input, select, textarea { font: inherit; color: inherit; }
     button { cursor: pointer; border: none; background: none; }
     a { color: var(--accent); text-decoration: none; }
@@ -199,27 +199,56 @@
     }
     .screening-keyword:focus { border-color: var(--accent); }
 
-    /* == 两区切换 == */
-    .zone-tabs { display: flex; gap: 4px; padding: 8px 20px; border-bottom: 1px solid var(--line); background: var(--surface); }
+    /* == 五区切换：本次运行 / 长期保存 == */
+    .zone-tabs { display: flex; align-items: center; gap: 4px; padding: 8px 20px; border-bottom: 1px solid var(--line); background: var(--surface); overflow-x: auto; }
+    .zone-group-label { margin: 0 5px 0 10px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .zone-group-label:first-child { margin-left: 0; }
     .zone-tab {
-      padding: 6px 16px; border-radius: 6px; font-size: 13px; color: var(--muted);
+      padding: 6px 10px; border-radius: 5px; font-size: 12px; color: var(--muted); white-space: nowrap;
       transition: background .15s, color .15s; cursor: pointer;
     }
     .zone-tab.active { background: var(--accent-soft); color: var(--text); }
+    .zone-tab[data-zone-tab="pending"] .zone-count { color: var(--warning); }
+    .zone-count { margin-left: 4px; font-variant-numeric: tabular-nums; }
 
-    .zone-container { flex: 1; overflow-y: auto; padding: 16px 20px; display: none; flex-direction: column; gap: 12px; }
+    .screening-summary { min-height: 34px; padding: 7px 20px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 12px; }
+    .screening-summary .summary-actions { margin-left: auto; display: flex; gap: 6px; }
+    .zone-container { flex: 1; overflow-y: auto; padding: 8px 20px; display: none; flex-direction: column; gap: 0; }
     .zone-container.active { display: flex; }
 
-    /* == 筛选岗位卡片 == */
+    /* == 紧凑岗位列表行 == */
     .screening-card {
-      background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
-      padding: 16px; height: var(--card-h); display: flex; flex-direction: column; gap: 8px;
-      animation: cardEnter .3s ease-out;
+      display: grid; grid-template-columns: minmax(170px, 1.15fr) minmax(240px, 2fr) auto;
+      gap: 14px; align-items: center; min-height: 88px; padding: 10px 4px;
+      border-bottom: 1px solid var(--line); animation: screeningRowEnter .16s ease-out;
     }
-    .screening-card-actions { display: flex; gap: 8px; align-items: center; }
+    @keyframes screeningRowEnter { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+    .screening-card-main { min-width: 0; }
+    .screening-card-main .card-title { font-size: 14px; }
+    .screening-card-detail { min-width: 0; }
+    .screening-card-detail .card-meta { margin-bottom: 3px; }
+    .screening-card-detail .card-jd { -webkit-line-clamp: 2; max-height: 36px; }
+    .screening-card-status { color: var(--warning); font-size: 11px; margin-top: 3px; }
+    .screening-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; align-items: center; max-width: 260px; }
+    .screening-card .card-btn { padding: 4px 8px; }
 
     /* == 感兴趣区与垃圾桶区入口 == */
     .zone-entries { display: flex; gap: 8px; padding: 8px 20px; border-top: 1px solid var(--line); background: var(--surface); }
+
+    @media (max-width: 720px) {
+      .screening-topbar { max-height: 45vh; overflow-y: auto; }
+      .zone-tabs { padding: 7px 10px; }
+      .screening-summary { padding: 7px 10px; align-items: flex-start; flex-wrap: wrap; }
+      .screening-summary .summary-actions { width: 100%; margin-left: 0; }
+      .zone-container { padding: 4px 10px; }
+      .screening-card { grid-template-columns: 1fr; gap: 5px; min-height: 0; padding: 10px 2px; }
+      .screening-card-actions { justify-content: flex-start; max-width: none; }
+      .screening-filters { max-height: 96px; overflow-y: auto; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+    }
 
     /* == 降级态 == */
     .ai-unavailable-prompt {
@@ -383,9 +412,19 @@
       <div class="screening-status" data-screening="status" id="screeningStatus">点击执行开始筛选</div>
     </div>
 
-    <div class="zone-tabs">
-      <div class="zone-tab active" data-zone-tab="match" onclick="switchZone('match')">符合区</div>
-      <div class="zone-tab" data-zone-tab="mismatch" onclick="switchZone('mismatch')">不符合区</div>
+    <div class="zone-tabs" aria-label="筛选结果视图">
+      <span class="zone-group-label">本次运行</span>
+      <button class="zone-tab active" data-zone-tab="match" onclick="switchZone('match')">符合<span class="zone-count" id="matchCount">0</span></button>
+      <button class="zone-tab" data-zone-tab="mismatch" onclick="switchZone('mismatch')">不符合<span class="zone-count" id="mismatchCount">0</span></button>
+      <button class="zone-tab" data-zone-tab="pending" onclick="switchZone('pending')">待核验<span class="zone-count" id="pendingCount">0</span></button>
+      <span class="zone-group-label">长期保存</span>
+      <button class="zone-tab" data-zone-tab="interested" data-screening="interested-entry" onclick="switchZone('interested')">感兴趣<span class="zone-count" id="interestedCount">0</span></button>
+      <button class="zone-tab" data-zone-tab="trash" data-screening="trash-entry" onclick="switchZone('trash')">垃圾桶<span class="zone-count" id="trashCount">0</span></button>
+    </div>
+
+    <div class="screening-summary" id="screeningSummary">
+      <span>尚未执行筛选</span>
+      <div class="summary-actions" id="screeningSummaryActions"></div>
     </div>
 
     <div class="zone-container active" data-zone="match" id="matchZone">
@@ -394,10 +433,14 @@
     <div class="zone-container" data-zone="mismatch" id="mismatchZone">
       <div class="empty-state">不符合硬规则的岗位将显示在这里</div>
     </div>
-
-    <div class="zone-entries">
-      <button class="btn" data-screening="interested-entry" onclick="loadInterestedJobs()">感兴趣区</button>
-      <button class="btn" data-screening="trash-entry" onclick="loadTrashJobs()">垃圾桶</button>
+    <div class="zone-container" data-zone="pending" id="pendingZone">
+      <div class="empty-state">所有已抓回岗位均已完成核验</div>
+    </div>
+    <div class="zone-container" data-zone="interested" id="interestedZone">
+      <div class="empty-state">可在任意结果区标记感兴趣</div>
+    </div>
+    <div class="zone-container" data-zone="trash" id="trashZone">
+      <div class="empty-state">尚无被移除岗位</div>
     </div>
   </div>
 
@@ -454,6 +497,7 @@
       await loadAiSettings();
       await checkConnection();
       await restoreSearchRun();
+      await restoreScreeningRun();
     }
 
     async function checkConnection() {
@@ -876,6 +920,7 @@
           if (!uploadResp.ok) { alert("简历上传失败"); return; }
           const uploadData = await uploadResp.json();
           screeningResumeId = uploadData.resume_id || "";
+          if (uploadData.profile_id) currentProfileId = uploadData.profile_id;
         } catch(e) { alert("简历上传失败"); return; }
       }
       try {
@@ -888,16 +933,13 @@
           return;
         }
         if (data.suggestions) {
-          applyScreeningSuggestions(data.suggestions);
+          applyScreeningSuggestions(data.suggestions, data.suggestion_meta || {});
         }
       } catch(e) { /* 建议失败时用户手动填筛 */ }
     }
 
-    function applyScreeningSuggestions(suggestions) {
-      const sugMap = {};
-      for (const s of (suggestions || [])) {
-        if (s.field && s.value !== undefined) sugMap[s.field] = s.value;
-      }
+    function applyScreeningSuggestions(suggestions, meta = {}) {
+      const sugMap = suggestions || {};
       const fieldMap = {
         city: "screeningFilterCity", salary: "screeningFilterSalary",
         experience: "screeningFilterExperience", degree: "screeningFilterDegree",
@@ -907,7 +949,13 @@
       for (const [key, elId] of Object.entries(fieldMap)) {
         if (sugMap[key] !== undefined) {
           const sel = document.getElementById(elId);
-          if (sel) sel.value = sugMap[key];
+          if (sel) {
+            sel.value = sugMap[key];
+            const state = meta[key] || {};
+            sel.title = state.status === "ai_suggested"
+              ? `AI 建议 · 置信度 ${state.confidence}`
+              : state.status === "user_confirmed" ? "用户确认" : "待确认";
+          }
         }
       }
     }
@@ -923,12 +971,15 @@
         const resp = await api(ScreeningAPI.runs, { method: "POST", json: body });
         if (resp.status === 400) { const e = await resp.json(); alert(e.error || "参数错误"); return; }
         const run = await resp.json();
-        screeningRunId = run.id;
+        screeningRunId = run.run_id;
+        localStorage.setItem("boss-screening-run", screeningRunId);
         document.getElementById("screeningStatus").innerHTML =
           `筛选运行中… 状态：<strong>${run.status}</strong>`;
-        document.getElementById("matchZone").innerHTML = '<div class="empty-state">等待结果…</div>';
-        document.getElementById("mismatchZone").innerHTML = '<div class="empty-state">等待结果…</div>';
-        startScreeningPoll(run.id);
+        for (const id of ["matchZone", "mismatchZone", "pendingZone"]) {
+          document.getElementById(id).innerHTML = '<div class="empty-state">等待结果…</div>';
+        }
+        updateScreeningRunSummary(run);
+        startScreeningPoll(screeningRunId);
       } catch(e) { /* handled */ }
     }
 
@@ -954,7 +1005,8 @@
           const runResp = await api(`/api/screening/runs/${runId}`);
           const run = await runResp.json();
           document.getElementById("screeningStatus").innerHTML =
-            `状态：<strong>${run.status}</strong> · 符合 <strong>${run.match_count || 0}</strong> · 不符合 <strong>${run.mismatch_count || 0}</strong>`;
+            `状态：<strong>${run.status}</strong> · 已处理 <strong>${run.processed_count || 0}</strong> / ${run.source_count || 0}`;
+          updateScreeningRunSummary(run);
           if (["succeeded","partial","failed","interrupted"].includes(run.status)) {
             stopScreeningPoll();
             await loadScreeningZones(runId);
@@ -967,17 +1019,54 @@
       if (screeningPollTimer) { clearInterval(screeningPollTimer); screeningPollTimer = null; }
     }
 
+    async function restoreScreeningRun() {
+      const runId = localStorage.getItem("boss-screening-run");
+      if (!runId) return;
+      try {
+        const response = await api(`/api/screening/runs/${runId}`);
+        if (!response.ok) { localStorage.removeItem("boss-screening-run"); return; }
+        const run = await response.json();
+        screeningRunId = runId;
+        updateScreeningRunSummary(run);
+        if (["queued", "running"].includes(run.status)) startScreeningPoll(runId);
+        else await loadScreeningZones(runId);
+      } catch (_error) { /* retry on next refresh */ }
+    }
+
     async function loadScreeningZones(runId) {
+      if (!runId) return;
+      const profile = currentProfileId ? `?profile_id=${encodeURIComponent(currentProfileId)}` : "";
       try {
-        const matchResp = await api(`/api/screening/runs/${runId}/matches`);
+        const matchResp = await api(`/api/screening/runs/${runId}/matches${profile}`);
         const matchData = await matchResp.json();
-        renderScreeningCards(matchData.jobs || [], "match");
+        renderScreeningCards(matchData.items || [], "match");
+        document.getElementById("matchCount").textContent = matchData.count || 0;
       } catch(e) {}
       try {
-        const mismatchResp = await api(`/api/screening/runs/${runId}/mismatches`);
+        const mismatchResp = await api(`/api/screening/runs/${runId}/mismatches${profile}`);
         const mismatchData = await mismatchResp.json();
-        renderScreeningCards(mismatchData.jobs || [], "mismatch");
+        renderScreeningCards(mismatchData.items || [], "mismatch");
+        document.getElementById("mismatchCount").textContent = mismatchData.count || 0;
       } catch(e) {}
+      try {
+        const pendingResp = await api(`/api/screening/runs/${runId}/pending`);
+        const pendingData = await pendingResp.json();
+        renderScreeningCards(pendingData.items || [], "pending");
+        document.getElementById("pendingCount").textContent = pendingData.count || 0;
+      } catch(e) {}
+      await loadInterestedJobs(false);
+      await loadTrashJobs(false);
+    }
+
+    function updateScreeningRunSummary(run) {
+      document.getElementById("matchCount").textContent = run.match_count || 0;
+      document.getElementById("mismatchCount").textContent = run.mismatch_count || 0;
+      document.getElementById("pendingCount").textContent = run.pending_count || 0;
+      const total = run.source_count || 0;
+      const failed = run.parse_failure_count || 0;
+      const ratio = total ? Math.round(failed * 100 / total) : 0;
+      document.getElementById("screeningSummary").firstElementChild.textContent =
+        `状态 ${run.status || "queued"} · 字段解析失败 ${failed}（${ratio}%） · 进度 ${run.processed_count || 0}/${total}`;
     }
 
     // 两区切换
@@ -986,37 +1075,54 @@
       document.querySelectorAll(".zone-container").forEach(c => c.classList.remove("active"));
       document.querySelector(`[data-zone-tab="${zone}"]`).classList.add("active");
       document.querySelector(`[data-zone="${zone}"]`).classList.add("active");
+      const actions = document.getElementById("screeningSummaryActions");
+      actions.replaceChildren();
+      if (zone === "pending" && screeningRunId) {
+        const retry = document.createElement("button"); retry.className = "btn"; retry.type = "button";
+        retry.textContent = "批量重试"; retry.onclick = retryScreeningPendingAll; actions.appendChild(retry);
+      }
+      if (zone === "interested") loadInterestedJobs(false);
+      if (zone === "trash") loadTrashJobs(false);
     }
 
     // 渲染筛选岗位卡片
     function renderScreeningCards(jobs, zone) {
-      const container = document.getElementById(zone === "match" ? "matchZone" : "mismatchZone");
+      const container = document.querySelector(`[data-zone="${zone}"]`);
       if (!jobs.length) {
         container.innerHTML = '<div class="empty-state">暂无岗位</div>';
         return;
       }
       container.innerHTML = "";
       for (const job of jobs) {
-        container.appendChild(createScreeningCard(job));
+        container.appendChild(createScreeningCard(job, zone));
       }
     }
 
-    function createScreeningCard(job) {
+    function createScreeningCard(job, zone = "match") {
       const card = document.createElement("div");
       card.className = "screening-card";
       card.setAttribute("data-screening", "job-card");
       card.dataset.jobId = job.job_id || "";
       const safeUrl = job.canonical_url || "";
       const node = (cls, text) => { const el = document.createElement("div"); el.className = cls; el.textContent = text || ""; return el; };
-      const header = document.createElement("div"); header.className = "card-header";
-      const titleBlock = document.createElement("div"); titleBlock.className = "card-title-block";
-      titleBlock.append(node("card-title", job.title), node("card-company", job.company));
-      header.append(titleBlock, node("card-salary", job.salary));
-      const meta = node("card-meta", job.location);
-      const jd = node("card-jd", job.jd_excerpt);
+      const main = document.createElement("div"); main.className = "screening-card-main";
+      main.append(node("card-title", job.title), node("card-company", job.company), node("card-salary", job.salary));
+      const detail = document.createElement("div"); detail.className = "screening-card-detail";
+      detail.append(node("card-meta", job.location), node("card-jd", job.jd_excerpt));
+      if (zone === "pending") {
+        detail.append(node("screening-card-status", `${job.failure_stage || "核验异常"} · 尝试 ${job.attempts || 1} 次`));
+      } else if (zone === "trash") {
+        detail.append(node("screening-card-status", `将恢复到：${job.origin_zone || "match"}`));
+      }
       const actions = document.createElement("div"); actions.className = "screening-card-actions";
       const stop = event => { event.stopPropagation(); event.preventDefault(); };
-      // 感兴趣按钮
+      if (zone === "pending") {
+        if (job.retryable) actions.append(makeScreeningButton("重试", () => retryScreeningPending(job.job_id)));
+        actions.append(makeScreeningButton("人工通过", () => routeScreeningPending(job.job_id, "match")));
+        actions.append(makeScreeningButton("人工不通过", () => routeScreeningPending(job.job_id, "mismatch")));
+      } else if (zone === "trash") {
+        actions.append(makeScreeningButton("恢复", () => restoreScreeningTrash(job.job_id)));
+      } else {
       const interestBtn = document.createElement("button");
       interestBtn.type = "button";
       interestBtn.setAttribute("data-feedback", "interest");
@@ -1029,42 +1135,84 @@
       rejectBtn.setAttribute("data-feedback", "reject");
       rejectBtn.className = "card-btn not-interested";
       rejectBtn.textContent = "不感兴趣";
-      rejectBtn.addEventListener("click", event => { stop(event); markScreeningReject(job.job_id); });
+      rejectBtn.addEventListener("click", event => { stop(event); markScreeningReject(job.job_id, zone); });
       actions.append(interestBtn, rejectBtn);
-      card.append(header, meta, jd, actions);
+      }
+      if (safeUrl && zone === "interested") card.addEventListener("click", event => openScreeningJobLink(event, safeUrl));
+      card.append(main, detail, actions);
       return card;
+    }
+
+    function makeScreeningButton(label, handler) {
+      const button = document.createElement("button"); button.type = "button"; button.className = "card-btn";
+      button.textContent = label; button.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); handler(); });
+      return button;
     }
 
     async function markScreeningInterest(jobId) {
       try {
-        await api(`/api/screening/jobs/${jobId}/interest`, { method: "POST", json: {} });
+        await api(`/api/screening/jobs/${jobId}/interest`, {
+          method: "POST", json: { profile_id: currentProfileId, run_id: screeningRunId },
+        });
         await loadScreeningZones(screeningRunId);
       } catch(e) {}
     }
 
-    async function markScreeningReject(jobId) {
+    async function markScreeningReject(jobId, originZone) {
       try {
-        await api(`/api/screening/jobs/${jobId}/reject`, { method: "POST", json: {} });
+        await api(`/api/screening/jobs/${jobId}/reject`, {
+          method: "POST", json: { profile_id: currentProfileId, run_id: screeningRunId, origin_zone: originZone },
+        });
         await loadScreeningZones(screeningRunId);
       } catch(e) {}
     }
 
     // 感兴趣区
-    async function loadInterestedJobs() {
+    async function loadInterestedJobs(switchAfter = true) {
+      if (!currentProfileId) return;
       try {
-        const resp = await api(ScreeningAPI.interested);
+        const resp = await api(`${ScreeningAPI.interested}?profile_id=${encodeURIComponent(currentProfileId)}`);
         const data = await resp.json();
-        showZoneModal("感兴趣区", data.jobs || [], true);
+        renderScreeningCards(data.items || [], "interested");
+        document.getElementById("interestedCount").textContent = data.count || 0;
+        if (switchAfter) switchZone("interested");
       } catch(e) {}
     }
 
     // 垃圾桶区
-    async function loadTrashJobs() {
+    async function loadTrashJobs(switchAfter = true) {
+      if (!currentProfileId) return;
       try {
-        const resp = await api(ScreeningAPI.trash);
+        const resp = await api(`${ScreeningAPI.trash}?profile_id=${encodeURIComponent(currentProfileId)}`);
         const data = await resp.json();
-        showZoneModal("垃圾桶", data.jobs || [], false);
+        renderScreeningCards(data.items || [], "trash");
+        document.getElementById("trashCount").textContent = data.count || 0;
+        if (switchAfter) switchZone("trash");
       } catch(e) {}
+    }
+
+    async function retryScreeningPending(jobId) {
+      await api(`/api/screening/runs/${screeningRunId}/pending/${jobId}/retry`, { method: "POST", json: {} });
+      await loadScreeningZones(screeningRunId);
+    }
+
+    async function retryScreeningPendingAll() {
+      await api(`/api/screening/runs/${screeningRunId}/pending/retry-all`, { method: "POST", json: {} });
+      await loadScreeningZones(screeningRunId);
+    }
+
+    async function routeScreeningPending(jobId, target) {
+      await api(`/api/screening/runs/${screeningRunId}/pending/${jobId}/route`, {
+        method: "POST", json: { target },
+      });
+      await loadScreeningZones(screeningRunId);
+    }
+
+    async function restoreScreeningTrash(jobId) {
+      await api(`/api/screening/trash/${jobId}/restore`, {
+        method: "POST", json: { profile_id: currentProfileId },
+      });
+      await loadScreeningZones(screeningRunId);
     }
 
     function showZoneModal(title, jobs, allowNavigation) {
