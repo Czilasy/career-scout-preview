@@ -126,7 +126,7 @@ US3 的 AI 语义相似度只留接口与占位，不依赖框架设计。US5 �
 
 - [x] T060 [P] 更新 README.md，说明简历驱动筛选、两层核验、区域生命周期、感兴趣/垃圾桶、降级与不自动投递边界
 - [x] T061 [P] 更新 README.en.md，使英文说明与 README.md 的功能边界一致
-- [ ] T062 运行完整自动化测试并将结果记录到 specs/002-resume-driven-filtering/validation.md：python -m unittest discover -s tests -v
+- [x] T062 运行完整自动化测试并将结果记录到 specs/002-resume-driven-filtering/validation.md：python -m unittest discover -s tests -v
 - [ ] T063 按 quickstart 执行本地浏览器验收并记录结果到 specs/002-resume-driven-filtering/validation.md
 - [ ] T064 在已登录专用 Chrome 上执行真实来源冒烟测试，记录成功或失败及可追踪日志到 specs/002-resume-driven-filtering/validation.md
 - [ ] T065 复查敏感数据、受控路径、展示排除边界与不自动投递边界，更新 specs/002-resume-driven-filtering/validation.md
