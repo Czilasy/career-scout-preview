@@ -14,14 +14,19 @@ class ScreeningPrototypeContractTests(unittest.TestCase):
     def test_exposes_all_simulated_screening_operations(self):
         for text in ("符合", "不符合", "待核验", "感兴趣", "垃圾桶"):
             self.assertIn(text, self.html)
-        for action in ("markInterested", "moveToTrash", "restoreJob", "retryJob", "retryAll", "manualRoute"):
+        actions = (
+            "markInterested", "moveToTrash", "restoreJob", "retryJob",
+            "retryAll", "manualRoute",
+        )
+        for action in actions:
             self.assertIn(action, self.html)
 
     def test_separates_temporary_run_state_from_long_lived_records(self):
         self.assertIn("localStorage", self.html)
-        self.assertIn("sessionStorage", self.html)
         self.assertIn("RUN_STORAGE_KEY", self.html)
         self.assertIn("LONG_TERM_STORAGE_KEY", self.html)
+        self.assertIn("createdAt", self.html)
+        self.assertNotIn("sessionStorage", self.html)
 
     def test_pending_jobs_explain_retry_state_and_last_failure(self):
         self.assertIn("retryable", self.html)
@@ -48,11 +53,27 @@ class ScreeningPrototypeContractTests(unittest.TestCase):
         self.assertIn("userActions", self.html)
         self.assertIn("移入垃圾桶", self.html)
 
-    def test_simulates_31_day_cleanup_without_deleting_long_lived_records(self):
+    def test_simulates_31_day_cleanup_without_deleting_long_lived_records(
+        self,
+    ):
         self.assertIn("simulateCleanup", self.html)
         self.assertIn("cleanupRecords", self.html)
         self.assertIn("模拟 31 天后清理", self.html)
         self.assertIn("待核验岗位", self.html)
+        self.assertIn("allPendingJobs", self.html)
+        self.assertIn("pendingRemoved", self.html)
+
+    def test_keeps_every_user_action_in_queryable_history(self):
+        self.assertIn("userActions", self.html)
+        self.assertNotIn("userActions=longTerm.userActions.slice", self.html)
+        self.assertIn("全部操作历史", self.html)
+
+    def test_python_contract_test_lines_stay_within_pep8_limit(self):
+        for line_number, line in enumerate(
+            Path(__file__).read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            message = f"line {line_number} is too long"
+            self.assertLessEqual(len(line), 79, message)
 
 
 if __name__ == "__main__":
