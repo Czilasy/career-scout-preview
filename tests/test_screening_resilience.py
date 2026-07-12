@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import unittest
 from unittest import mock
+import json
+import pathlib
+import sys
+import tempfile
 
 from tests.test_screening_fixtures import sample_screening_job
-from webui.screening import partition_job, partition_jobs, verify_hard_rules_detailed
+from webui.screening import (
+    execute_first_layer,
+    partition_job,
+    partition_jobs,
+    verify_hard_rules_detailed,
+)
 
 
 class HardRuleResilienceTests(unittest.TestCase):
@@ -90,6 +99,27 @@ class ThreeWayPartitionTests(unittest.TestCase):
         result = partition_jobs([job], {}, "resume")
         self.assertEqual(result["pending"], [job])
         self.assertEqual(result["pending_failures"], {"p1": "ai_timeout"})
+
+
+class InterruptedFetchPreservationTests(unittest.TestCase):
+    def test_nonzero_fetch_with_valid_partial_artifact_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = pathlib.Path(tmp) / "partial.json"
+            jobs = [sample_screening_job(job_id="saved-1")]
+            output.write_text(json.dumps({"jobs": jobs}, ensure_ascii=False), encoding="utf-8")
+            store = mock.MagicMock()
+            store.get_screening_run.return_value = {"status": "queued"}
+            with mock.patch("webui.screening.subprocess.run") as run:
+                run.return_value.returncode = 1
+                result = execute_first_layer(
+                    {}, "Python", output_path=output,
+                    python_executable=sys.executable, store=store, run_id="r1",
+                )
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["jobs"][0]["job_id"], "saved-1")
+        store.update_screening_run_status.assert_any_call(
+            "r1", "partial", source_count=1, source_cursor=1,
+        )
 
 
 if __name__ == "__main__":

@@ -220,6 +220,29 @@ def execute_first_layer(filters, keyword, *, output_path, python_executable,
 
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
+        output = Path(output_path)
+        partial_jobs = []
+        if output.is_file():
+            try:
+                with output.open(encoding="utf-8") as handle:
+                    partial_payload = json.load(handle)
+                if isinstance(partial_payload, dict) and isinstance(partial_payload.get("jobs"), list):
+                    partial_jobs = partial_payload["jobs"]
+            except (OSError, json.JSONDecodeError):
+                partial_jobs = []
+        if partial_jobs:
+            if store and run_id:
+                store.update_screening_run_status(
+                    run_id, "partial", source_count=len(partial_jobs),
+                    source_cursor=len(partial_jobs),
+                )
+            return {
+                "jobs": partial_jobs,
+                "source_count": len(partial_jobs),
+                "source_cursor": len(partial_jobs),
+                "status": "partial",
+                "error_code": "fetch_interrupted",
+            }
         if store and run_id:
             store.update_screening_run_status(run_id, "failed")
         raise RuntimeError(f"抓取器执行失败: returncode={result.returncode}")
