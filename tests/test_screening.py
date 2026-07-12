@@ -563,9 +563,9 @@ class HardRuleVerificationTests(unittest.TestCase):
         # frozen 203 = 本科, tags 学历段 = 本科
         self.assertTrue(self.verify(self._job(tags="3-5年 | 本科"), {"degree": "203"}))
 
-    def test_degree_mismatch_fails(self):
-        # frozen 203 = 本科, tags 学历段 = 大专
-        self.assertFalse(self.verify(self._job(tags="3-5年 | 大专"), {"degree": "203"}))
+    def test_bachelor_candidate_passes_associate_job_requirement(self):
+        # 003 FR-007: 专科、本科双向互通
+        self.assertTrue(self.verify(self._job(tags="3-5年 | 大专"), {"degree": "203"}))
 
     # -- combined: verify only selected, skip unselected --
 

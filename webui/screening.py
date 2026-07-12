@@ -287,69 +287,110 @@ def _tags_contains(tags, target_label) -> bool:
     return target_label in segments
 
 
+_DEGREE_LEVEL = {
+    "初中及以下": 0,
+    "中专/中技": 1,
+    "高中": 2,
+    "大专": 3,
+    "本科": 4,
+    "硕士": 5,
+    "博士": 6,
+}
+
+
+def _tag_value(tags, allowed_labels):
+    if not tags:
+        return None
+    segments = [segment.strip() for segment in str(tags).split("|")]
+    return next((segment for segment in segments if segment in allowed_labels), None)
+
+
+def _degree_compatible(candidate_degree, required_degree) -> bool:
+    if {candidate_degree, required_degree}.issubset({"大专", "本科"}):
+        return True
+    return _DEGREE_LEVEL[candidate_degree] >= _DEGREE_LEVEL[required_degree]
+
+
+def verify_hard_rules_detailed(job, frozen_filters) -> dict:
+    """Verify selected fields and retain safe parse-failure metadata.
+
+    Missing or unparseable job fields pass leniently but are listed in
+    ``parse_failures``. A parsed, incompatible field fails deterministically.
+    """
+    frozen = frozen_filters or {}
+    if not isinstance(job, dict):
+        return {"passed": False, "parse_failures": ["job"]}
+    failures = []
+
+    city = frozen.get("city", "")
+    if city:
+        job_city = (job.get("location") or "").split("·")[0].strip()
+        if not job_city:
+            failures.append("city")
+        elif job_city != city:
+            return {"passed": False, "parse_failures": failures}
+
+    salary_code = frozen.get("salary", "")
+    if salary_code:
+        expected = _parse_salary_range(_SALARY_REVERSE.get(salary_code, ""))
+        actual = _parse_salary_range(job.get("salary", ""))
+        if expected is None or actual is None:
+            failures.append("salary")
+        elif not _ranges_overlap(expected, actual):
+            return {"passed": False, "parse_failures": failures}
+
+    exp_code = frozen.get("experience", "")
+    if exp_code:
+        expected = _EXP_REVERSE.get(exp_code)
+        actual = _tag_value(job.get("tags"), set(_EXP_REVERSE.values()))
+        if not expected or actual is None:
+            failures.append("experience")
+        elif actual != expected:
+            return {"passed": False, "parse_failures": failures}
+
+    degree_code = frozen.get("degree", "")
+    if degree_code:
+        candidate = _DEGREE_REVERSE.get(degree_code)
+        required = _tag_value(job.get("tags"), set(_DEGREE_LEVEL))
+        if candidate not in _DEGREE_LEVEL or required is None:
+            failures.append("degree")
+        elif not _degree_compatible(candidate, required):
+            return {"passed": False, "parse_failures": failures}
+
+    for key, job_key, labels in (
+        ("scale", "company_scale", _SCALE_REVERSE),
+        ("stage", "company_stage", _STAGE_REVERSE),
+        ("industry", "company_industry", _INDUSTRY_REVERSE),
+    ):
+        code = frozen.get(key, "")
+        if not code:
+            continue
+        expected = labels.get(code)
+        actual = (job.get(job_key) or "").strip()
+        if not expected or not actual:
+            failures.append(key)
+        elif actual != expected:
+            return {"passed": False, "parse_failures": failures}
+
+    return {"passed": True, "parse_failures": failures}
+
+
 def verify_hard_rules(job, frozen_filters) -> bool:
     """对 job 按用户确认的非空字段逐项核验（硬规则）。
 
     用户选了什么核什么，没选的不核；空字段跳过；job 缺字段时该字段跳过。
     返回 True（过）或 False（不过）。不记录是被哪个字段排除。
     """
-    frozen = frozen_filters or {}
-    if not isinstance(job, dict):
-        return False
+    return verify_hard_rules_detailed(job, frozen_filters)["passed"]
 
-    # city: job location 首段（"上海·浦东·张江" -> "上海"）
-    city = frozen.get("city", "")
-    if city:
-        job_city = (job.get("location") or "").split("·")[0].strip()
-        if job_city != city:
-            return False
 
-    # salary: frozen 段范围与 job 薪资范围重叠
-    salary_code = frozen.get("salary", "")
-    if salary_code:
-        frozen_label = _SALARY_REVERSE.get(salary_code)
-        if frozen_label:
-            frozen_range = _parse_salary_range(frozen_label)
-            job_range = _parse_salary_range(job.get("salary", ""))
-            if not _ranges_overlap(frozen_range, job_range):
-                return False
+class PartitionVerdict(str):
+    """String-compatible verdict carrying only a safe pending failure code."""
 
-    # experience: job tags 包含 frozen 经验标签
-    exp_code = frozen.get("experience", "")
-    if exp_code:
-        exp_label = _EXP_REVERSE.get(exp_code)
-        if exp_label and not _tags_contains(job.get("tags"), exp_label):
-            return False
-
-    # degree: job tags 包含 frozen 学历标签
-    deg_code = frozen.get("degree", "")
-    if deg_code:
-        deg_label = _DEGREE_REVERSE.get(deg_code)
-        if deg_label and not _tags_contains(job.get("tags"), deg_label):
-            return False
-
-    # scale: job company_scale 等于 frozen 规模标签
-    scale_code = frozen.get("scale", "")
-    if scale_code:
-        scale_label = _SCALE_REVERSE.get(scale_code)
-        if scale_label and (job.get("company_scale") or "").strip() != scale_label:
-            return False
-
-    # stage: job company_stage 等于 frozen 阶段标签
-    stage_code = frozen.get("stage", "")
-    if stage_code:
-        stage_label = _STAGE_REVERSE.get(stage_code)
-        if stage_label and (job.get("company_stage") or "").strip() != stage_label:
-            return False
-
-    # industry: job company_industry 等于 frozen 行业标签
-    ind_code = frozen.get("industry", "")
-    if ind_code:
-        ind_label = _INDUSTRY_REVERSE.get(ind_code)
-        if ind_label and (job.get("company_industry") or "").strip() != ind_label:
-            return False
-
-    return True
+    def __new__(cls, value, failure_stage=None):
+        instance = super().__new__(cls, value)
+        instance.failure_stage = failure_stage
+        return instance
 
 
 def partition_job(job, frozen_filters, resume_text="", jd_text="", *, ai_enabled=True) -> str:
@@ -363,13 +404,15 @@ def partition_job(job, frozen_filters, resume_text="", jd_text="", *, ai_enabled
     跳过 AI 语义相似度，硬规则过即 match。默认 True 保持向后兼容。
     """
     if not verify_hard_rules(job, frozen_filters):
-        return "mismatch"
+        return PartitionVerdict("mismatch")
     if not ai_enabled:
-        return "match"
+        return PartitionVerdict("match")
     ai_result = assess_semantic_similarity(resume_text, jd_text)
-    if isinstance(ai_result, dict) and ai_result.get("verdict") == "match":
-        return "match"
-    return "mismatch"
+    verdict = ai_result.get("verdict") if isinstance(ai_result, dict) else "pending"
+    if verdict in {"match", "mismatch"}:
+        return PartitionVerdict(verdict)
+    stage = ai_result.get("failure_stage") if isinstance(ai_result, dict) else None
+    return PartitionVerdict("pending", stage or "ai_invalid_output")
 
 
 def partition_jobs(jobs, frozen_filters, resume_text="", jd_text="", *, ai_enabled=True) -> dict:
@@ -383,13 +426,27 @@ def partition_jobs(jobs, frozen_filters, resume_text="", jd_text="", *, ai_enabl
     """
     match_zone = []
     mismatch_zone = []
+    pending_zone = []
+    pending_failures = {}
     for job in jobs or []:
-        verdict = partition_job(job, frozen_filters, resume_text, jd_text, ai_enabled=ai_enabled)
+        try:
+            verdict = partition_job(job, frozen_filters, resume_text, jd_text, ai_enabled=ai_enabled)
+        except Exception:
+            verdict = PartitionVerdict("pending", "verification_error")
         if verdict == "match":
             match_zone.append(job)
-        else:
+        elif verdict == "mismatch":
             mismatch_zone.append(job)
-    return {"match": match_zone, "mismatch": mismatch_zone}
+        else:
+            pending_zone.append(job)
+            job_id = job.get("job_id", "") if isinstance(job, dict) else ""
+            pending_failures[job_id] = getattr(verdict, "failure_stage", None) or "verification_error"
+    return {
+        "match": match_zone,
+        "mismatch": mismatch_zone,
+        "pending": pending_zone,
+        "pending_failures": pending_failures,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,96 @@
+"""Formal integration tests for screening resilience rules (spec 003)."""
+
+from __future__ import annotations
+
+import unittest
+from unittest import mock
+
+from tests.test_screening_fixtures import sample_screening_job
+from webui.screening import partition_job, partition_jobs, verify_hard_rules_detailed
+
+
+class HardRuleResilienceTests(unittest.TestCase):
+    def test_salary_ranges_pass_when_they_overlap_at_all(self):
+        result = verify_hard_rules_detailed(
+            sample_screening_job(salary="18-25K"), {"salary": "405"},
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["parse_failures"], [])
+
+    def test_missing_salary_is_lenient_but_tracked(self):
+        result = verify_hard_rules_detailed(
+            sample_screening_job(salary=""), {"salary": "405"},
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["parse_failures"], ["salary"])
+
+    def test_missing_city_is_lenient_but_tracked(self):
+        result = verify_hard_rules_detailed(
+            sample_screening_job(location=""), {"city": "上海"},
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["parse_failures"], ["city"])
+
+    def test_master_candidate_passes_bachelor_job_requirement(self):
+        result = verify_hard_rules_detailed(
+            sample_screening_job(tags="3-5年 | 本科"), {"degree": "204"},
+        )
+        self.assertTrue(result["passed"])
+
+    def test_associate_and_bachelor_are_bidirectionally_compatible(self):
+        associate_for_bachelor = verify_hard_rules_detailed(
+            sample_screening_job(tags="3-5年 | 本科"), {"degree": "202"},
+        )
+        bachelor_for_associate = verify_hard_rules_detailed(
+            sample_screening_job(tags="3-5年 | 大专"), {"degree": "203"},
+        )
+        self.assertTrue(associate_for_bachelor["passed"])
+        self.assertTrue(bachelor_for_associate["passed"])
+
+    def test_bachelor_candidate_fails_master_job_requirement(self):
+        result = verify_hard_rules_detailed(
+            sample_screening_job(tags="3-5年 | 硕士"), {"degree": "203"},
+        )
+        self.assertFalse(result["passed"])
+
+    def test_master_candidate_fails_doctorate_job_requirement(self):
+        result = verify_hard_rules_detailed(
+            sample_screening_job(tags="3-5年 | 博士"), {"degree": "204"},
+        )
+        self.assertFalse(result["passed"])
+
+    def test_unparseable_degree_is_lenient_but_tracked(self):
+        result = verify_hard_rules_detailed(
+            sample_screening_job(tags="3-5年 | 学历不限"), {"degree": "203"},
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["parse_failures"], ["degree"])
+
+
+class ThreeWayPartitionTests(unittest.TestCase):
+    @mock.patch("webui.screening.assess_semantic_similarity")
+    def test_uncertain_semantic_result_goes_to_pending(self, assess):
+        assess.return_value = {"verdict": "pending", "failure_stage": "ai_uncertain"}
+        self.assertEqual(partition_job(sample_screening_job(), {}, "resume", "jd"), "pending")
+
+    @mock.patch("webui.screening.partition_job")
+    def test_one_job_exception_does_not_block_the_batch(self, partition):
+        partition.side_effect = ["match", RuntimeError("boom"), "mismatch"]
+        jobs = [sample_screening_job(job_id=f"j{i}") for i in range(3)]
+        result = partition_jobs(jobs, {}, "resume")
+        self.assertEqual([j["job_id"] for j in result["match"]], ["j0"])
+        self.assertEqual([j["job_id"] for j in result["pending"]], ["j1"])
+        self.assertEqual([j["job_id"] for j in result["mismatch"]], ["j2"])
+        self.assertEqual(result["pending_failures"]["j1"], "verification_error")
+
+    @mock.patch("webui.screening.assess_semantic_similarity")
+    def test_pending_failure_stage_is_exposed_only_as_safe_code(self, assess):
+        assess.return_value = {"verdict": "pending", "failure_stage": "ai_timeout"}
+        job = sample_screening_job(job_id="p1")
+        result = partition_jobs([job], {}, "resume")
+        self.assertEqual(result["pending"], [job])
+        self.assertEqual(result["pending_failures"], {"p1": "ai_timeout"})
+
+
+if __name__ == "__main__":
+    unittest.main()
