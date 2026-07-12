@@ -454,18 +454,41 @@ def update_preference(profile: dict, feedback_events: list, endpoint_url: str, a
 # AI 语义相似度占位（T031）
 # ---------------------------------------------------------------------------
 
-def assess_semantic_similarity(resume_text, jd_text) -> dict:
-    """AI 语义相似度占位实现（恒返回过）。
+def assess_semantic_similarity(
+    resume_text, jd_text, *, ai_available=False, endpoint_url="", api_key="",
+    timeout=DEFAULT_TIMEOUT,
+) -> dict:
+    """Return a program-validated semantic verdict.
 
-    接口契约：输入简历原文与职位 JD 全文，输出结构化结果，至少含
-    ``verdict``: "match"/"mismatch"。本次为占位，恒返回 verdict="match"，
-    使本次结果分流完全由硬规则决定（plan.md "AI 语义相似度" 节）。
-
-    占位不调 AI（call_ai）、不访问凭据库（keyring）、不发 HTTP 请求，
-    也不在返回值中泄露入参文本。未来 AI 框架设计落地后替换此占位即可，
-    不改动分流与区域逻辑（见 FR-030；框架设计本次不实现）。
+    The default keeps the established no-AI degradation path. Callers that
+    enable AI must provide the configured endpoint and key; raw model output
+    is validated and sanitized by :mod:`webui.semantic`.
     """
-    return {"verdict": "match"}
+    from webui.semantic import assess_semantic_similarity_formal
+
+    call_fn = None
+    if ai_available and endpoint_url and api_key:
+        def call_fn(prompt):
+            try:
+                return call_ai(
+                    endpoint_url,
+                    api_key,
+                    [{"role": "system", "content": prompt}],
+                    timeout=timeout,
+                )
+            except AISecurityError as exc:
+                if exc.error_code == ERROR_TIMEOUT:
+                    raise TimeoutError from None
+                if exc.error_code == ERROR_NETWORK:
+                    raise ConnectionError from None
+                raise
+
+    return assess_semantic_similarity_formal(
+        resume_text,
+        jd_text,
+        ai_available=bool(ai_available and call_fn),
+        call_ai_fn=call_fn,
+    )
 
 
 # ---------------------------------------------------------------------------
