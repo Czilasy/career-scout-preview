@@ -409,6 +409,7 @@
       </div>
       <input type="text" data-screening="keyword" id="screeningKeyword" class="screening-keyword" placeholder="搜索关键词">
       <button class="btn primary" data-screening="execute-btn" onclick="executeScreeningRun()">执行筛选</button>
+      <button class="btn" type="button" onclick="cleanupScreeningResults()">清理 30 天结果</button>
       <div class="screening-status" data-screening="status" id="screeningStatus">点击执行开始筛选</div>
     </div>
 
@@ -879,6 +880,12 @@
     let screeningRunId = "";
     let screeningPollTimer = null;
     let screeningResumeId = "";
+    const SCREENING_FIELD_IDS = {
+      city: "screeningFilterCity", salary: "screeningFilterSalary",
+      experience: "screeningFilterExperience", degree: "screeningFilterDegree",
+      scale: "screeningFilterScale", stage: "screeningFilterStage",
+      industry: "screeningFilterIndustry",
+    };
 
     // 加载筛选项枚举
     async function loadScreeningFilterOptions() {
@@ -886,13 +893,7 @@
         const resp = await fetch(ScreeningAPI.filterOptions);
         const data = await resp.json();
         const options = data.options || {};
-        const fieldMap = {
-          city: "screeningFilterCity", salary: "screeningFilterSalary",
-          experience: "screeningFilterExperience", degree: "screeningFilterDegree",
-          scale: "screeningFilterScale", stage: "screeningFilterStage",
-          industry: "screeningFilterIndustry",
-        };
-        for (const [key, elId] of Object.entries(fieldMap)) {
+        for (const [key, elId] of Object.entries(SCREENING_FIELD_IDS)) {
           const sel = document.getElementById(elId);
           if (!sel || !options[key]) continue;
           sel.innerHTML = "";
@@ -913,6 +914,7 @@
         if (!fileInput.files.length) { alert("请选择简历文件或勾选跳过简历"); return; }
         const formData = new FormData();
         formData.append("file", fileInput.files[0]);
+        if (currentProfileId) formData.append("profile_id", currentProfileId);
         try {
           const uploadResp = await fetch(ScreeningAPI.resume, {
             method: "POST", body: formData, headers: { "X-Boss-Token": token },
@@ -940,13 +942,7 @@
 
     function applyScreeningSuggestions(suggestions, meta = {}) {
       const sugMap = suggestions || {};
-      const fieldMap = {
-        city: "screeningFilterCity", salary: "screeningFilterSalary",
-        experience: "screeningFilterExperience", degree: "screeningFilterDegree",
-        scale: "screeningFilterScale", stage: "screeningFilterStage",
-        industry: "screeningFilterIndustry",
-      };
-      for (const [key, elId] of Object.entries(fieldMap)) {
+      for (const [key, elId] of Object.entries(SCREENING_FIELD_IDS)) {
         if (sugMap[key] !== undefined) {
           const sel = document.getElementById(elId);
           if (sel) {
@@ -966,6 +962,7 @@
       if (!keyword) { alert("请输入搜索关键词"); return; }
       const filters = collectScreeningFilters();
       const body = { keyword, filters };
+      if (currentProfileId) body.profile_id = currentProfileId;
       if (screeningResumeId) body.resume_id = screeningResumeId;
       try {
         const resp = await api(ScreeningAPI.runs, { method: "POST", json: body });
@@ -985,13 +982,7 @@
 
     function collectScreeningFilters() {
       const filters = {};
-      const fieldMap = {
-        city: "screeningFilterCity", salary: "screeningFilterSalary",
-        experience: "screeningFilterExperience", degree: "screeningFilterDegree",
-        scale: "screeningFilterScale", stage: "screeningFilterStage",
-        industry: "screeningFilterIndustry",
-      };
-      for (const [key, elId] of Object.entries(fieldMap)) {
+      for (const [key, elId] of Object.entries(SCREENING_FIELD_IDS)) {
         const sel = document.getElementById(elId);
         if (sel && sel.value) filters[key] = sel.value;
       }
@@ -1209,10 +1200,33 @@
     }
 
     async function restoreScreeningTrash(jobId) {
-      await api(`/api/screening/trash/${jobId}/restore`, {
+      const response = await api(`/api/screening/trash/${jobId}/restore`, {
         method: "POST", json: { profile_id: currentProfileId },
       });
+      const restored = await response.json();
+      if (restored.recovery_run_id) {
+        screeningRunId = restored.recovery_run_id;
+        localStorage.setItem("boss-screening-run", screeningRunId);
+      }
       await loadScreeningZones(screeningRunId);
+      if (["match", "mismatch", "pending"].includes(restored.restored_to)) switchZone(restored.restored_to);
+    }
+
+    async function cleanupScreeningResults() {
+      const previewResponse = await api("/api/screening/cleanup/preview?days=30");
+      const preview = await previewResponse.json();
+      const pendingNote = preview.pending_at_cleanup
+        ? `其中有 ${preview.pending_at_cleanup} 条待核验记录。` : "";
+      if (!window.confirm(`将清理 ${preview.runs_to_cleanup || 0} 次临时运行。${pendingNote}长期标记和垃圾桶不会删除。继续吗？`)) return;
+      await api("/api/screening/cleanup", { method: "POST", json: { days: 30 } });
+      if (screeningRunId) {
+        const check = await api(`/api/screening/runs/${screeningRunId}`);
+        if (!check.ok) {
+          screeningRunId = "";
+          localStorage.removeItem("boss-screening-run");
+        }
+      }
+      document.getElementById("screeningStatus").textContent = "临时结果清理完成；长期标记已保留";
     }
 
     function showZoneModal(title, jobs, allowNavigation) {

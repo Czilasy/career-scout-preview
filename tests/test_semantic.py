@@ -65,8 +65,14 @@ class ValidateSemanticOutputTests(unittest.TestCase):
         raw = self._valid_raw()
         raw["verdict"] = "mismatch"
         raw["confidence"] = 90
+        raw["match_score"] = 40
         out = semantic.validate_semantic_output(raw)
         self.assertEqual(out["verdict"], "mismatch")
+
+    def test_ai_verdict_cannot_override_program_score_rule(self):
+        raw = self._valid_raw()
+        raw["verdict"] = "mismatch"
+        self.assertEqual(semantic.validate_semantic_output(raw)["verdict"], "match")
 
     def test_low_confidence_returns_uncertain_pending(self):
         raw = self._valid_raw()
@@ -95,12 +101,12 @@ class ValidateSemanticOutputTests(unittest.TestCase):
         self.assertEqual(out["verdict"], "pending")
         self.assertEqual(out["failure_stage"], "ai_invalid_output")
 
-    def test_dimension_score_below_threshold_returns_uncertain(self):
+    def test_dimension_score_below_threshold_is_program_mismatch(self):
         raw = self._valid_raw()
         raw["dimensions"]["skill_coverage"]["score"] = 30  # < 50
         out = semantic.validate_semantic_output(raw)
-        self.assertEqual(out["verdict"], "pending")
-        self.assertEqual(out["failure_stage"], "ai_uncertain")
+        self.assertEqual(out["verdict"], "mismatch")
+        self.assertEqual(out["failure_stage"], None)
 
 
 class AssessSemanticSimilarityFormalTests(unittest.TestCase):

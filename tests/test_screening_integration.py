@@ -49,12 +49,14 @@ class ScreeningResilienceAPITests(unittest.TestCase):
 
     def test_create_run_persists_pending_and_marks_run_partial(self):
         jobs = [sample_screening_job(job_id="m1"), sample_screening_job(job_id="p1")]
-        partition = {
-            "match": [jobs[0]], "mismatch": [], "pending": [jobs[1]],
-            "pending_failures": {"p1": "ai_timeout"},
-        }
+        def partition(batch, *_args, **_kwargs):
+            job = batch[0]
+            if job["job_id"] == "m1":
+                return {"match": [job], "mismatch": [], "pending": [], "pending_failures": {}}
+            return {"match": [], "mismatch": [], "pending": [job],
+                    "pending_failures": {"p1": "ai_timeout"}}
         with mock.patch("webui.app.execute_first_layer", side_effect=self._fake_execute(jobs)):
-            with mock.patch("webui.app.partition_jobs", return_value=partition):
+            with mock.patch("webui.app.partition_jobs", side_effect=partition):
                 response = self.client.post("/api/screening/runs", json={
                     "keyword": "Python", "filters": {},
                 })
@@ -119,6 +121,29 @@ class ScreeningResilienceAPITests(unittest.TestCase):
             json={"profile_id": self.profile["id"]},
         )
         self.assertEqual(response.get_json()["restored_to"], "pending")
+
+    def test_restore_after_snapshot_cleanup_recreates_original_zone(self):
+        job = self.store.save_job(
+            "https://www.zhipin.com/job_detail/recover.html", "", "Recover", "ACME", "20-30K", "上海", "JD",
+        )
+        self.store.link_profile_job(self.profile["id"], job["id"], None, None)
+        run = self.store.create_screening_run({})
+        self.store.add_screening_result(run["id"], job["id"], "match")
+        self.store.move_to_trash_with_origin(
+            self.profile["id"], job["id"], "match", run_id=run["id"],
+        )
+        self.store.update_screening_run_status(run["id"], "succeeded", match_count=1)
+        self.store.cleanup_temp_run_data(days=-1)
+        response = self.client.post(
+            f"/api/screening/trash/{job['id']}/restore",
+            json={"profile_id": self.profile["id"]},
+        ).get_json()
+        self.assertEqual(response["restored_to"], "match")
+        self.assertTrue(response["recovery_run_id"])
+        matches = self.client.get(
+            f"/api/screening/runs/{response['recovery_run_id']}/matches"
+        ).get_json()
+        self.assertEqual(matches["items"][0]["title"], "Recover")
 
     def test_cleanup_preview_warns_and_execution_records_result(self):
         preview = self.client.get("/api/screening/cleanup/preview?days=30")

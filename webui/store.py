@@ -750,6 +750,7 @@ class TaskStore:
     # -- screening runs ----------------------------------------------------
 
     def create_screening_run(self, frozen_filters, resume_id=None) -> dict:
+        """Create a queued screening run with frozen filters and resume reference."""
         rid = _uuid()
         ts = _now()
         with self._connection() as conn:

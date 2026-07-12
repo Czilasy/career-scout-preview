@@ -194,7 +194,7 @@ def execute_first_layer(filters, keyword, *, output_path, python_executable,
 
     Reuses ``scripts/boss_cdp_raw.py`` as a subprocess.  When *store* and
     *run_id* are provided, advances the run status ``queued -> running``
-    then ``running -> succeeded`` (or ``failed`` on error).
+    and leaves it running for second-layer verification (or failed on error).
 
     Returns ``{"jobs": [...], "source_count": N}`` and includes
     ``"status"`` only when status management was requested.
@@ -259,11 +259,11 @@ def execute_first_layer(filters, keyword, *, output_path, python_executable,
     jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
 
     if store and run_id:
-        store.update_screening_run_status(run_id, "succeeded")
+        store.update_screening_run_status(run_id, "running", source_count=len(jobs))
 
     result = {"jobs": jobs, "source_count": len(jobs)}
     if store and run_id:
-        result["status"] = "succeeded"
+        result["status"] = "running"
     return result
 
 
@@ -464,7 +464,7 @@ def partition_jobs(jobs, frozen_filters, resume_text="", jd_text="", *, ai_enabl
                 job, frozen_filters, resume_text, jd_text,
                 ai_enabled=ai_enabled, semantic_options=semantic_options,
             )
-        except Exception:
+        except (RuntimeError, ValueError, TypeError, KeyError):
             verdict = PartitionVerdict("pending", "verification_error")
         if verdict == "match":
             match_zone.append(job)

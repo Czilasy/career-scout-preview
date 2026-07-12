@@ -420,7 +420,7 @@ class ScreeningSearchOrchestrationTests(unittest.TestCase):
             )
 
     @mock.patch("webui.screening.subprocess.run")
-    def test_status_advances_to_succeeded_on_success(self, mock_run):
+    def test_status_stays_running_until_second_layer_finishes(self, mock_run):
         from webui.screening import execute_first_layer
         mock_run.return_value = self._ok_returncode()
         self._write_jobs_file([{"title": "Python"}])
@@ -436,8 +436,8 @@ class ScreeningSearchOrchestrationTests(unittest.TestCase):
             run_id="run-1",
         )
         store.update_screening_run_status.assert_any_call("run-1", "running")
-        store.update_screening_run_status.assert_any_call("run-1", "succeeded")
-        self.assertEqual(result["status"], "succeeded")
+        store.update_screening_run_status.assert_any_call("run-1", "running", source_count=1)
+        self.assertEqual(result["status"], "running")
 
     @mock.patch("webui.screening.subprocess.run")
     def test_status_advances_to_failed_on_scraper_error(self, mock_run):

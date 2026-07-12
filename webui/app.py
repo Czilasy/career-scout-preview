@@ -909,6 +909,12 @@ def create_app(config=None):
             raise ValueError("keyword 不能为空")
 
         frozen = freeze_filters(filters)
+        profile_id = raw.get("profile_id")
+        if profile_id:
+            store.get_profile(profile_id)
+            # Executing is the explicit confirmation point. Missing keys are
+            # deliberate clears, so persist exactly the frozen selection.
+            store.update_profile(profile_id, confirmed_fields=frozen)
         resume_id = raw.get("resume_id")
         resume_text = ""
         if resume_id:
@@ -949,36 +955,49 @@ def create_app(config=None):
                 "api_key": ai_api_key,
                 "require_input": True,
             }
-        partition = partition_jobs(
-            jobs, frozen, resume_text,
-            ai_enabled=ai_available,
-            semantic_options=semantic_options,
-        )
-        for job in partition["match"]:
-            store.add_screening_result(run_id, job.get("job_id", ""), "match")
-        for job in partition["mismatch"]:
-            store.add_screening_result(run_id, job.get("job_id", ""), "mismatch")
-        for job in partition.get("pending", []):
-            job_id = job.get("job_id", "")
-            store.add_pending_result(
-                run_id, job_id,
-                partition.get("pending_failures", {}).get(job_id, "verification_error"),
-            )
-
         parse_distribution = {}
         parse_failure_count = 0
-        for job in jobs:
+        counts = {"match": 0, "mismatch": 0, "pending": 0}
+        for index, job in enumerate(jobs, start=1):
+            # Persist each completed verification before advancing to the next
+            # job so a process interruption cannot erase the finished prefix.
+            partition = partition_jobs(
+                [job], frozen, resume_text,
+                ai_enabled=ai_available,
+                semantic_options=semantic_options,
+            )
+            job_id = job.get("job_id", "")
+            if partition["match"]:
+                store.add_screening_result(run_id, job_id, "match")
+                counts["match"] += 1
+            elif partition["mismatch"]:
+                store.add_screening_result(run_id, job_id, "mismatch")
+                counts["mismatch"] += 1
+            else:
+                store.add_pending_result(
+                    run_id, job_id,
+                    partition.get("pending_failures", {}).get(job_id, "verification_error"),
+                )
+                counts["pending"] += 1
             detail = verify_hard_rules_detailed(job, frozen)
             for field in detail["parse_failures"]:
                 parse_distribution[field] = parse_distribution.get(field, 0) + 1
                 parse_failure_count += 1
-        pending_count = len(partition.get("pending", []))
+            store.update_screening_run_status(
+                run_id, "partial" if search_result.get("status") == "partial" else "running",
+                source_count=len(jobs), match_count=counts["match"],
+                mismatch_count=counts["mismatch"], pending_count=counts["pending"],
+                processed_count=index, source_cursor=index,
+                parse_failure_count=parse_failure_count,
+                parse_failures=parse_distribution,
+            )
+        pending_count = counts["pending"]
         final_status = "partial" if pending_count or search_result.get("status") == "partial" else "succeeded"
         store.update_screening_run_status(
             run_id, final_status,
             source_count=len(jobs),
-            match_count=len(partition["match"]),
-            mismatch_count=len(partition["mismatch"]),
+            match_count=counts["match"],
+            mismatch_count=counts["mismatch"],
             pending_count=pending_count,
             processed_count=len(jobs),
             source_cursor=len(jobs),
@@ -1185,6 +1204,7 @@ def create_app(config=None):
 
     @app.route("/api/screening/runs/<run_id>/pending", methods=["GET"])
     def screening_pending(run_id):
+        """Return safe pending-verification items for one screening run."""
         try:
             store.get_screening_run(run_id)
         except KeyError:
@@ -1239,6 +1259,7 @@ def create_app(config=None):
 
     @app.route("/api/screening/runs/<run_id>/pending/<job_id>/retry", methods=["POST"])
     def screening_retry_pending(run_id, job_id):
+        """Retry one retryable pending item and persist its new state."""
         pending = next((p for p in store.list_pending(run_id) if p["job_id"] == job_id), None)
         if not pending:
             return jsonify({"error_code": "not_found", "user_message": "待核验岗位不存在"}), 404
@@ -1250,6 +1271,7 @@ def create_app(config=None):
 
     @app.route("/api/screening/runs/<run_id>/pending/retry-all", methods=["POST"])
     def screening_retry_all_pending(run_id):
+        """Retry every retryable pending item without blocking on skipped rows."""
         pending = store.list_pending(run_id)
         retried = 0
         skipped = 0
@@ -1264,6 +1286,7 @@ def create_app(config=None):
 
     @app.route("/api/screening/runs/<run_id>/pending/<job_id>/route", methods=["POST"])
     def screening_route_pending(run_id, job_id):
+        """Apply an explicit human match/mismatch decision to a pending item."""
         target = (request.get_json(silent=True) or {}).get("target")
         if target not in {"match", "mismatch"}:
             raise ValueError("target 必须为 match 或 mismatch")
@@ -1273,6 +1296,7 @@ def create_app(config=None):
 
     @app.route("/api/screening/runs/<run_id>/cancel", methods=["POST"])
     def screening_cancel_run(run_id):
+        """Interrupt a running screening run without deleting saved results."""
         run = store.get_screening_run(run_id)
         if run["status"] not in {"queued", "running"}:
             raise ValueError("只能取消等待中或运行中的筛选")
@@ -1432,27 +1456,71 @@ def create_app(config=None):
 
     @app.route("/api/screening/trash/<job_id>/restore", methods=["POST"])
     def screening_restore_trash(job_id):
+        """Restore a long-lived trash record, recreating a cleaned snapshot if needed."""
         profile_id = (request.get_json(silent=True) or {}).get("profile_id")
         if not profile_id:
             raise ValueError("profile_id 不能为空")
         restored = store.restore_from_trash(profile_id, job_id)
-        # Restoring changes current visibility but deliberately preserves the
-        # historical interested/not_interested feedback event.
+        feedback = store.list_feedback(profile_id, job_id=job_id)
+        was_interested = any(
+            item.get("action") == "interested" and not item.get("revoked_at")
+            for item in feedback
+        )
+        status = "interested" if restored["origin_zone"] == "interested" or was_interested else "new"
+        store.update_profile_job(profile_id, job_id, status=status)
+
+        recovery_run_id = restored.get("run_id")
         try:
-            store.update_profile_job(profile_id, job_id, status="new")
+            if recovery_run_id:
+                store.get_screening_run(recovery_run_id)
+            else:
+                raise KeyError("missing run")
         except KeyError:
-            pass
-        return jsonify({"job_id": job_id, "restored_to": restored["origin_zone"]})
+            origin = restored["origin_zone"]
+            if origin in {"match", "mismatch", "pending"}:
+                recovery = store.create_screening_run({})
+                recovery_run_id = recovery["id"]
+                job = store.get_job(job_id)
+                artifact_job = {
+                    "job_id": job_id, "title": job.get("title", ""),
+                    "boss_name": job.get("company", ""), "salary": job.get("salary", ""),
+                    "location": job.get("location", ""), "jd": job.get("jd", ""),
+                    "job_link": job.get("canonical_url", ""),
+                }
+                output_path = Path(app.config["RESULT_DIR"]) / f"screening_{recovery_run_id}.json"
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                with output_path.open("w", encoding="utf-8") as handle:
+                    json.dump({"jobs": [artifact_job]}, handle, ensure_ascii=False)
+                if origin == "pending":
+                    store.add_pending_result(recovery_run_id, job_id, "verification_error")
+                    store.update_screening_run_status(
+                        recovery_run_id, "partial", source_count=1, pending_count=1,
+                        processed_count=1, source_cursor=1,
+                    )
+                else:
+                    store.add_screening_result(recovery_run_id, job_id, origin)
+                    store.update_screening_run_status(
+                        recovery_run_id, "succeeded", source_count=1,
+                        match_count=1 if origin == "match" else 0,
+                        mismatch_count=1 if origin == "mismatch" else 0,
+                        processed_count=1, source_cursor=1,
+                    )
+        return jsonify({
+            "job_id": job_id, "restored_to": restored["origin_zone"],
+            "recovery_run_id": recovery_run_id,
+        })
 
     # == 003: 30-day temporary screening cleanup ========================
 
     @app.route("/api/screening/cleanup/preview", methods=["GET"])
     def screening_cleanup_preview():
+        """Preview temporary screening cleanup, including pending warnings."""
         days = request.args.get("days", 30, type=int) or 30
         return jsonify(store.preview_cleanup_with_pending_prompt(days=days))
 
     @app.route("/api/screening/cleanup", methods=["POST"])
     def screening_cleanup_execute():
+        """Clean expired temporary screening data and record the outcome."""
         days = int((request.get_json(silent=True) or {}).get("days", 30))
         result = store.cleanup_temp_run_data(days=days)
         record = store.record_cleanup(
@@ -1463,6 +1531,7 @@ def create_app(config=None):
 
     @app.route("/api/screening/cleanup/history", methods=["GET"])
     def screening_cleanup_history():
+        """Return queryable screening cleanup audit records."""
         items = store.list_cleanup_records()
         return jsonify({"items": items, "count": len(items)})
 

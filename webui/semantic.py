@@ -25,6 +25,7 @@ FAILURE_STAGES = (
 )
 MIN_CONFIDENCE = 70
 MIN_DIMENSION_SCORE = 50
+MIN_MATCH_SCORE = 70
 
 
 def _pending(stage: str) -> dict:
@@ -87,11 +88,7 @@ def validate_semantic_output(data) -> dict:
     except (KeyError, TypeError, ValueError):
         return _pending("ai_invalid_output")
 
-    if (
-        verdict == "uncertain"
-        or confidence < MIN_CONFIDENCE
-        or any(item["score"] < MIN_DIMENSION_SCORE for item in dimensions.values())
-    ):
+    if verdict == "uncertain" or confidence < MIN_CONFIDENCE:
         result = _pending("ai_uncertain")
         result.update({
             "confidence": confidence,
@@ -99,8 +96,14 @@ def validate_semantic_output(data) -> dict:
             "dimensions": dimensions,
         })
         return result
+    program_verdict = (
+        "match"
+        if match_score >= MIN_MATCH_SCORE
+        and all(item["score"] >= MIN_DIMENSION_SCORE for item in dimensions.values())
+        else "mismatch"
+    )
     return {
-        "verdict": verdict,
+        "verdict": program_verdict,
         "confidence": confidence,
         "match_score": match_score,
         "dimensions": dimensions,
@@ -132,6 +135,6 @@ def assess_semantic_similarity_formal(
         return _pending("ai_timeout")
     except ConnectionError:
         return _pending("ai_network_error")
-    except Exception:
+    except (RuntimeError, ValueError, TypeError, KeyError):
         return _pending("verification_error")
     return validate_semantic_output(raw)
