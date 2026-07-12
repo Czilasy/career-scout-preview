@@ -245,14 +245,31 @@
 
 命令：`python scripts/boss_cdp_raw.py --smoke-test`
 
-结果：**待执行**
+结果：**阻塞（需用户在已登录专用 Chrome 上手动执行）**
 
-需用户在已登录专用 Chrome 上手动执行后补充结果。自动化测试中的模拟抓取不能替代真实来源验证。
+### 执行记录
+
+- 执行时间：2026-07-13
+- 执行环境：Windows，无运行中的专用 Chrome（CDP 端口 9222 无人监听）
+- 执行结果：失败 —— 无法连接到 127.0.0.1:9222（`WinError 10061`，目标计算机积极拒绝）
+- 可追踪日志：`HTTPConnectionPool(host='127.0.0.1', port=9222): Max retries exceeded with url: /json/version (Caused by NewConnectionError: Failed to establish a new connection)`
+
+### 阻塞原因
+
+真实来源冒烟测试要求专用 Chrome 已通过 `python scripts/boss_cdp_raw.py --setup-chrome` 启动并在 BOSS 直聘完成登录。当前环境无运行中的专用 Chrome，无法执行。自动化测试中的模拟抓取不能替代此项。
+
+### 解除阻塞条件
+
+用户需在本机执行以下步骤后重跑冒烟测试：
+
+1. `python scripts/boss_cdp_raw.py --setup-chrome`（启动专用 Chrome 并登录 BOSS）
+2. `python scripts/boss_cdp_raw.py --smoke-test`（确认真实 BOSS 搜索返回有效岗位与明文薪资）
+3. 将执行结果与可追踪日志补充到本节
 
 ## 未完成或受外部条件阻塞的项目
 
 | 项目 | 状态 | 说明 |
 |------|------|------|
 | 第二层 AI 语义相似度框架 | 待设计 | 本次不实现，T031 只留接口契约与占位；框架设计另做 |
-| 真实来源冒烟测试 | 待执行 | 需用户在已登录专用 Chrome 上执行 |
+| 真实来源冒烟测试 | 阻塞 | 需用户在已登录专用 Chrome 上执行；当前无运行中的专用 Chrome |
 | 交互式浏览器操作 | 待执行 | 点击卡片、两区切换、垃圾桶查看等需用户在浏览器中手动确认 |
