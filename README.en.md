@@ -121,6 +121,65 @@ Cleanup never touches the résumé directory or uncontrolled paths, and never de
 
 Set `BOSS_PYTHON` before launch to select a specific Python executable.
 
+### Resume-Driven Two-Layer Filtering (002)
+
+A filtering capability layered on top of the 001 workbench, improving match quality via two-layer verification. Overall flow:
+
+1. **Upload résumé**: The user uploads a TXT / PDF / DOCX résumé (skippable when AI is unavailable).
+2. **AI reads and suggests values**: The AI reads the résumé while the program fetches the BOSS filter option enumerations (salary range, experience, degree, company scale, funding stage, industry, city). The AI judges which options can be filled from the résumé and returns suggested values.
+3. **User confirmation**: The frontend shows the suggested values; the user may edit or leave them. **User-confirmed values take priority — the AI cannot override.** Any field the AI did not provide and the user did not fill stays empty.
+4. **Layer-1 search**: Uses the confirmed conditions to call the BOSS search API and scrape back a batch of jobs, all of which proceed to layer 2. An empty city searches nationwide.
+5. **Layer-2 verification**: Each job goes through two checks — hard-rule field verification + AI semantic-similarity judgment. For this release, AI semantic similarity is a **placeholder (always passes)** with only its interface contract defined; the constraint framework is to be designed separately. Replacing the placeholder when the framework lands does not change the partition or zone logic.
+6. **Partition into temporary match/mismatch zones**: Jobs passing both checks go to the match zone; jobs failing either go to the mismatch zone. The match zone is ordered by scrape order — no similarity sorting. The mismatch zone is shown mixed together, without annotating which field excluded a job.
+7. **Mark interested / not-interested**: Any job in the match or mismatch zone can be marked and routed to a persistent zone.
+
+No field is mandatory (including city): fields the user did not select do not participate in layer-1 search or layer-2 hard-rule verification.
+
+#### Two-Layer Verification
+
+- **Layer 1**: Calls the BOSS search API with the confirmed conditions to scrape back jobs.
+- **Layer 2**: Each scraped job is checked by hard-rule verification (deterministic program logic, no AI call) + AI semantic-similarity judgment (placeholder always passes this release; framework to be designed). Jobs passing both go to the match zone; jobs failing either go to the mismatch zone. The mismatch zone does not distinguish exclusion reasons and does not annotate.
+
+#### Zone Lifecycle
+
+| Zone | Type | Lifecycle |
+|------|------|-----------|
+| Match zone | Temporary zone for this run | Cleared when the next run starts |
+| Mismatch zone | Temporary zone for this run | Cleared when the next run starts |
+| Interested zone | Persistent zone | Unaffected by zone clearing; retained long-term |
+| Trash zone | Persistent zone | Unaffected by zone clearing; retained long-term |
+
+#### Interested Zone and Trash Zone
+
+- **Interested zone**: Clicking "Interested" routes a job to the persistent interested zone for long-term review. Cards in the interested zone are clickable and open the corresponding BOSS original job page in the browser — only HTTPS links on the expected BOSS domain (`zhipin.com`) are allowed.
+- **Trash zone**: Clicking "Not interested" routes a job to the persistent trash zone, where the list of previously not-interested jobs can be viewed.
+- **Display exclusion**: When subsequent search results are displayed, specific jobs previously marked not-interested are excluded and no longer shown. Exclusion **happens only at display time** and does not modify the scraped results; exclusion **identifies specific jobs only** and is not extended to jobs at the same company or with similar characteristics.
+
+#### AI-Unavailable Degradation
+
+When the AI service is unavailable, the system prompts the user and degrades to:
+
+- **Skip résumé**: The résumé upload step can be skipped.
+- **Manual filtering**: The filter bar degrades to manual entry; no field is mandatory — leave blank to mean "no limit".
+- **Hard-rule-only verification**: Layer 2 performs only hard-rule verification and skips AI semantic-similarity judgment.
+- Layer 1 still scrapes normally using the confirmed conditions via the BOSS search API.
+
+#### No-Auto-Application Boundary
+
+This project **does not** implement:
+
+- No automatic résumé submission
+- No automatically contacting recruiters or sending messages
+- No hiring probability prediction
+
+The AI is only responsible for reading the résumé to suggest filter values (and in the future, structured semantic-similarity output). All task status, partition verdicts, and application actions are decided by program logic and the user. The AI cannot decide task status or bypass program verdicts.
+
+#### State Directories and Testing
+
+- State directories: reuses 001's `~/.career-scout/webui/` (screening runs `screening_runs`/`screening_results` are written to the same `webui.db`; layer-1 scrape output goes to `~/.career-scout/job-result/`).
+- Dependencies: reuses 001's existing dependencies; no new third-party libraries.
+- Automated tests: `python -m unittest discover -s tests -v`
+
 ## ✨ Features
 
 - Plaintext salary (API mode, bypasses font-based obfuscation)
