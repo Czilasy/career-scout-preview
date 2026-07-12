@@ -1425,11 +1425,19 @@ class ScreeningDegradationIntegrationTests(unittest.TestCase):
 
     @mock.patch("webui.screening.assess_semantic_similarity")
     def test_run_with_ai_calls_semantic_similarity(self, mock_ai):
-        # 对照：AI 可用时第二层调用语义相似度
+        # 对照：AI 可用且提供简历/JD 时第二层调用语义相似度
         self._configure_ai()
         with mock.patch("webui.ai.keyring.get_password", return_value="secret-key"):
-            jobs = [self._job("job-1"), self._job("job-2")]
-            self._create_run({"city": "上海"}, "Python", jobs)
+            resume_id = self._upload_resume()
+            jobs = [self._job("job-1", jd="Python FastAPI"),
+                    self._job("job-2", jd="Python backend")]
+            with mock.patch("webui.app.execute_first_layer",
+                            side_effect=self._fake_execute_with_jobs(jobs)):
+                self.client.post("/api/screening/runs", json={
+                    "filters": {"city": "上海"},
+                    "keyword": "Python",
+                    "resume_id": resume_id,
+                })
         self.assertEqual(mock_ai.call_count, 2)
 
     # -- suggest 降级边界 --

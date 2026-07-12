@@ -45,7 +45,9 @@ from webui.screening import (
     execute_first_layer,
     freeze_filters,
     is_valid_filters,
+    partition_job,
     partition_jobs,
+    verify_hard_rules_detailed,
     exclude_trash_jobs,
 )
 
@@ -521,6 +523,7 @@ def create_app(config=None):
             path.startswith("/api/screening/runs")
             or path.startswith("/api/screening/interested")
             or path.startswith("/api/screening/trash")
+            or path.startswith("/api/screening/cleanup")
         )
         sensitive_get = (
             path.startswith("/api/resumes")
@@ -899,7 +902,12 @@ def create_app(config=None):
             raise ValueError("keyword 不能为空")
 
         frozen = freeze_filters(filters)
-        run = store.create_screening_run(frozen)
+        resume_id = raw.get("resume_id")
+        resume_text = ""
+        if resume_id:
+            resume = store.get_resume(resume_id)
+            resume_text = resume.get("extracted_text") or ""
+        run = store.create_screening_run(frozen, resume_id=resume_id)
         run_id = run["id"]
         output_path = Path(app.config["RESULT_DIR"]) / f"screening_{run_id}.json"
 
@@ -925,17 +933,50 @@ def create_app(config=None):
         ai_settings = store.get_ai_settings()
         ai_cred_ref = store.get_credential_ref()
         ai_api_key = ai_service.retrieve_api_key(ai_cred_ref) if ai_cred_ref else ""
-        ai_available = ai_service.is_ai_available(ai_settings, ai_cred_ref, ai_api_key)
-        partition = partition_jobs(jobs, frozen, ai_enabled=ai_available)
+        ai_available = ai_service.is_ai_available(ai_settings, ai_cred_ref, ai_api_key) and bool(resume_text)
+        semantic_options = None
+        if ai_available:
+            semantic_options = {
+                "ai_available": True,
+                "endpoint_url": ai_settings["endpoint_url"],
+                "api_key": ai_api_key,
+                "require_input": True,
+            }
+        partition = partition_jobs(
+            jobs, frozen, resume_text,
+            ai_enabled=ai_available,
+            semantic_options=semantic_options,
+        )
         for job in partition["match"]:
             store.add_screening_result(run_id, job.get("job_id", ""), "match")
         for job in partition["mismatch"]:
             store.add_screening_result(run_id, job.get("job_id", ""), "mismatch")
+        for job in partition.get("pending", []):
+            job_id = job.get("job_id", "")
+            store.add_pending_result(
+                run_id, job_id,
+                partition.get("pending_failures", {}).get(job_id, "verification_error"),
+            )
+
+        parse_distribution = {}
+        parse_failure_count = 0
+        for job in jobs:
+            detail = verify_hard_rules_detailed(job, frozen)
+            for field in detail["parse_failures"]:
+                parse_distribution[field] = parse_distribution.get(field, 0) + 1
+                parse_failure_count += 1
+        pending_count = len(partition.get("pending", []))
+        final_status = "partial" if pending_count or search_result.get("status") == "partial" else "succeeded"
         store.update_screening_run_status(
-            run_id, "succeeded",
+            run_id, final_status,
             source_count=len(jobs),
             match_count=len(partition["match"]),
             mismatch_count=len(partition["mismatch"]),
+            pending_count=pending_count,
+            processed_count=len(jobs),
+            source_cursor=len(jobs),
+            parse_failure_count=parse_failure_count,
+            parse_failures=parse_distribution,
         )
 
         final = store.get_screening_run(run_id)
@@ -945,6 +986,9 @@ def create_app(config=None):
             "source_count": final["source_count"],
             "match_count": final["match_count"],
             "mismatch_count": final["mismatch_count"],
+            "pending_count": final.get("pending_count", 0),
+            "parse_failure_count": final.get("parse_failure_count", 0),
+            "parse_failures": final.get("parse_failures", {}),
         }), 201
 
     @app.route("/api/screening/runs/<run_id>", methods=["GET"])
@@ -960,6 +1004,11 @@ def create_app(config=None):
             "source_count": run["source_count"],
             "match_count": run["match_count"],
             "mismatch_count": run["mismatch_count"],
+            "pending_count": run.get("pending_count", 0),
+            "processed_count": run.get("processed_count", 0),
+            "source_cursor": run.get("source_cursor", 0),
+            "parse_failure_count": run.get("parse_failure_count", 0),
+            "parse_failures": run.get("parse_failures", {}),
             "error_code": run.get("error_code"),
             "frozen_filters": run.get("frozen_filters", {}),
         })
@@ -1110,6 +1159,118 @@ def create_app(config=None):
         items = [_format_screening_job_item(j, states.get(j.get("job_id", ""), "none")) for j in mismatch_jobs]
         return jsonify({"items": items, "count": len(items)})
 
+    # == 003: pending verification, retry and manual routing =============
+
+    def _sync_screening_run_counts(run_id):
+        counts = store.count_screening_results(run_id)
+        pending_count = len(store.list_pending(run_id))
+        run = store.get_screening_run(run_id)
+        if run["status"] in {"queued", "running", "partial", "succeeded"}:
+            status = "partial" if pending_count else "succeeded"
+        else:
+            status = run["status"]
+        return store.update_screening_run_status(
+            run_id, status,
+            match_count=counts["match"], mismatch_count=counts["mismatch"],
+            pending_count=pending_count,
+            processed_count=counts["match"] + counts["mismatch"] + pending_count,
+        )
+
+    @app.route("/api/screening/runs/<run_id>/pending", methods=["GET"])
+    def screening_pending(run_id):
+        try:
+            store.get_screening_run(run_id)
+        except KeyError:
+            return jsonify({"error_code": "not_found", "user_message": "运行不存在"}), 404
+        jobs = {j.get("job_id", ""): j for j in _load_run_jobs(run_id) if isinstance(j, dict)}
+        items = []
+        for pending in store.list_pending(run_id):
+            job = _format_screening_job_item(jobs.get(pending["job_id"], {}))
+            job.update({
+                "failure_stage": pending["failure_stage"],
+                "retryable": pending["retryable"],
+                "attempts": pending["attempts"],
+                "last_failed_at": pending["last_failed_at"],
+            })
+            items.append(job)
+        return jsonify({"items": items, "count": len(items)})
+
+    def _retry_one_pending(run_id, pending):
+        job_id = pending["job_id"]
+        job = _find_screening_job(job_id, run_id)
+        if not job:
+            store.add_pending_result(run_id, job_id, "verification_error", retryable=False)
+            return "pending"
+        run = store.get_screening_run(run_id)
+        resume_text = ""
+        if run.get("resume_id"):
+            try:
+                resume_text = store.get_resume(run["resume_id"]).get("extracted_text") or ""
+            except KeyError:
+                resume_text = ""
+        settings = store.get_ai_settings()
+        credential_ref = store.get_credential_ref()
+        api_key = ai_service.retrieve_api_key(credential_ref) if credential_ref else ""
+        ai_enabled = ai_service.is_ai_available(settings, credential_ref, api_key) and bool(resume_text)
+        options = None
+        if ai_enabled:
+            options = {"ai_available": True, "endpoint_url": settings["endpoint_url"],
+                       "api_key": api_key, "require_input": True}
+        verdict = partition_job(
+            job, run["frozen_filters"], resume_text,
+            ai_enabled=ai_enabled, semantic_options=options,
+        )
+        if verdict in {"match", "mismatch"}:
+            store.manual_route_pending(run_id, job_id, str(verdict))
+        else:
+            store.add_pending_result(
+                run_id, job_id,
+                getattr(verdict, "failure_stage", None) or "verification_error",
+                retryable=True,
+            )
+        return str(verdict)
+
+    @app.route("/api/screening/runs/<run_id>/pending/<job_id>/retry", methods=["POST"])
+    def screening_retry_pending(run_id, job_id):
+        pending = next((p for p in store.list_pending(run_id) if p["job_id"] == job_id), None)
+        if not pending:
+            return jsonify({"error_code": "not_found", "user_message": "待核验岗位不存在"}), 404
+        if not pending["retryable"]:
+            return jsonify({"error_code": "not_retryable", "user_message": "该岗位不可自动重试"}), 409
+        verdict = _retry_one_pending(run_id, pending)
+        run = _sync_screening_run_counts(run_id)
+        return jsonify({"job_id": job_id, "verdict": verdict, "status": run["status"]})
+
+    @app.route("/api/screening/runs/<run_id>/pending/retry-all", methods=["POST"])
+    def screening_retry_all_pending(run_id):
+        pending = store.list_pending(run_id)
+        retried = 0
+        skipped = 0
+        for item in pending:
+            if not item["retryable"]:
+                skipped += 1
+                continue
+            _retry_one_pending(run_id, item)
+            retried += 1
+        run = _sync_screening_run_counts(run_id)
+        return jsonify({"retried": retried, "skipped": skipped, "status": run["status"]})
+
+    @app.route("/api/screening/runs/<run_id>/pending/<job_id>/route", methods=["POST"])
+    def screening_route_pending(run_id, job_id):
+        target = (request.get_json(silent=True) or {}).get("target")
+        if target not in {"match", "mismatch"}:
+            raise ValueError("target 必须为 match 或 mismatch")
+        result = store.manual_route_pending(run_id, job_id, target)
+        run = _sync_screening_run_counts(run_id)
+        return jsonify({"result": result, "status": run["status"]})
+
+    @app.route("/api/screening/runs/<run_id>/cancel", methods=["POST"])
+    def screening_cancel_run(run_id):
+        run = store.get_screening_run(run_id)
+        if run["status"] not in {"queued", "running"}:
+            raise ValueError("只能取消等待中或运行中的筛选")
+        return jsonify(store.update_screening_run_status(run_id, "interrupted"))
+
     # == US4: interest / reject / persistent zones =======================
 
     def _find_screening_job(job_id, run_id):
@@ -1183,7 +1344,14 @@ def create_app(config=None):
         saved = _save_screening_job_to_store(job)
         if not saved:
             return jsonify({"error_code": "invalid_link", "user_message": "岗位链接不安全"}), 400
-        store.mark_screening_reject(profile_id, saved["id"], run_id=run_id)
+        feedback = store.mark_screening_reject(profile_id, saved["id"], run_id=run_id)
+        origin_zone = raw.get("origin_zone") or "match"
+        if origin_zone not in {"match", "mismatch", "pending", "interested"}:
+            raise ValueError("origin_zone 无效")
+        store.move_to_trash_with_origin(
+            profile_id, saved["id"], origin_zone=origin_zone,
+            run_id=run_id, feedback_ref=feedback.get("id"),
+        )
         return jsonify({"reject_state": "rejected", "job_id": saved["id"]})
 
     @app.route("/api/screening/interested", methods=["GET"])
@@ -1233,6 +1401,9 @@ def create_app(config=None):
         except KeyError:
             return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
         rejected = store.list_screening_rejected(profile_id)
+        origins = {
+            row["job_id"]: row for row in store.list_trash_with_origin(profile_id)
+        }
         items = []
         for pj in rejected:
             try:
@@ -1248,7 +1419,44 @@ def create_app(config=None):
                 "location": job.get("location", ""),
                 "canonical_url": canonical_url,
                 "reject_state": "rejected",
+                "origin_zone": origins.get(job["id"], {}).get("origin_zone", "match"),
             })
+        return jsonify({"items": items, "count": len(items)})
+
+    @app.route("/api/screening/trash/<job_id>/restore", methods=["POST"])
+    def screening_restore_trash(job_id):
+        profile_id = (request.get_json(silent=True) or {}).get("profile_id")
+        if not profile_id:
+            raise ValueError("profile_id 不能为空")
+        restored = store.restore_from_trash(profile_id, job_id)
+        # Restoring changes current visibility but deliberately preserves the
+        # historical interested/not_interested feedback event.
+        try:
+            store.update_profile_job(profile_id, job_id, status="new")
+        except KeyError:
+            pass
+        return jsonify({"job_id": job_id, "restored_to": restored["origin_zone"]})
+
+    # == 003: 30-day temporary screening cleanup ========================
+
+    @app.route("/api/screening/cleanup/preview", methods=["GET"])
+    def screening_cleanup_preview():
+        days = request.args.get("days", 30, type=int) or 30
+        return jsonify(store.preview_cleanup_with_pending_prompt(days=days))
+
+    @app.route("/api/screening/cleanup", methods=["POST"])
+    def screening_cleanup_execute():
+        days = int((request.get_json(silent=True) or {}).get("days", 30))
+        result = store.cleanup_temp_run_data(days=days)
+        record = store.record_cleanup(
+            f"screening_temp_{days}d",
+            result["success_count"], result["fail_count"], result["pending_at_cleanup"],
+        )
+        return jsonify({"result": result, "record": record})
+
+    @app.route("/api/screening/cleanup/history", methods=["GET"])
+    def screening_cleanup_history():
+        items = store.list_cleanup_records()
         return jsonify({"items": items, "count": len(items)})
 
     # == US2: search runs ================================================

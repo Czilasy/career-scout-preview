@@ -393,7 +393,8 @@ class PartitionVerdict(str):
         return instance
 
 
-def partition_job(job, frozen_filters, resume_text="", jd_text="", *, ai_enabled=True) -> str:
+def partition_job(job, frozen_filters, resume_text="", jd_text="", *, ai_enabled=True,
+                  semantic_options=None) -> str:
     """对单条 job 做两条核验分流：硬规则 + AI 语义相似度占位。
 
     都过返回 "match"（符合区），任一不过返回 "mismatch"（不符合区）。
@@ -407,7 +408,12 @@ def partition_job(job, frozen_filters, resume_text="", jd_text="", *, ai_enabled
         return PartitionVerdict("mismatch")
     if not ai_enabled:
         return PartitionVerdict("match")
-    ai_result = assess_semantic_similarity(resume_text, jd_text)
+    options = dict(semantic_options or {})
+    require_input = bool(options.pop("require_input", False))
+    effective_jd = (job.get("jd") or jd_text) if isinstance(job, dict) else jd_text
+    if require_input and (not str(resume_text or "").strip() or not str(effective_jd or "").strip()):
+        return PartitionVerdict("pending", "verification_error")
+    ai_result = assess_semantic_similarity(resume_text, effective_jd, **options)
     verdict = ai_result.get("verdict") if isinstance(ai_result, dict) else "pending"
     if verdict in {"match", "mismatch"}:
         return PartitionVerdict(verdict)
@@ -415,7 +421,8 @@ def partition_job(job, frozen_filters, resume_text="", jd_text="", *, ai_enabled
     return PartitionVerdict("pending", stage or "ai_invalid_output")
 
 
-def partition_jobs(jobs, frozen_filters, resume_text="", jd_text="", *, ai_enabled=True) -> dict:
+def partition_jobs(jobs, frozen_filters, resume_text="", jd_text="", *, ai_enabled=True,
+                   semantic_options=None) -> dict:
     """对一批抓回职位做两条核验分流，返回 {"match": [...], "mismatch": [...]}。
 
     每个区按 jobs 在输入列表中的抓回顺序排列，不使用相似度排序（FR-029）。
@@ -430,7 +437,10 @@ def partition_jobs(jobs, frozen_filters, resume_text="", jd_text="", *, ai_enabl
     pending_failures = {}
     for job in jobs or []:
         try:
-            verdict = partition_job(job, frozen_filters, resume_text, jd_text, ai_enabled=ai_enabled)
+            verdict = partition_job(
+                job, frozen_filters, resume_text, jd_text,
+                ai_enabled=ai_enabled, semantic_options=semantic_options,
+            )
         except Exception:
             verdict = PartitionVerdict("pending", "verification_error")
         if verdict == "match":

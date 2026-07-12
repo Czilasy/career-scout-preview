@@ -163,6 +163,8 @@ class TaskStore:
             self._migration_005()
         if current < 6:
             self._migration_006()
+        if current < 7:
+            self._migration_007()
         # A process restart cannot resume an in-memory child process. Record
         # that fact instead of leaving a permanently "running" UI state.
         with self._connection() as conn:
@@ -439,6 +441,27 @@ class TaskStore:
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
                 "VALUES (6, ?, 'screening trash and cleanup records')",
+                (_now(),),
+            )
+
+    def _migration_007(self):
+        """Persist screening progress, pending counts and parse-failure summary."""
+        with self._connection() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(screening_runs)")}
+            additions = {
+                "resume_id": "TEXT",
+                "pending_count": "INTEGER NOT NULL DEFAULT 0",
+                "processed_count": "INTEGER NOT NULL DEFAULT 0",
+                "source_cursor": "INTEGER NOT NULL DEFAULT 0",
+                "parse_failure_count": "INTEGER NOT NULL DEFAULT 0",
+                "parse_failures_json": "TEXT NOT NULL DEFAULT '{}'",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE screening_runs ADD COLUMN {name} {definition}")
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (7, ?, 'screening progress and parse summary')",
                 (_now(),),
             )
 
@@ -726,14 +749,14 @@ class TaskStore:
 
     # -- screening runs ----------------------------------------------------
 
-    def create_screening_run(self, frozen_filters) -> dict:
+    def create_screening_run(self, frozen_filters, resume_id=None) -> dict:
         rid = _uuid()
         ts = _now()
         with self._connection() as conn:
             conn.execute(
-                "INSERT INTO screening_runs (id, frozen_filters_json, status, source_count, match_count, mismatch_count, created_at, updated_at, error_code) "
-                "VALUES (?, ?, 'queued', 0, 0, 0, ?, ?, NULL)",
-                (rid, json.dumps(frozen_filters, ensure_ascii=False), ts, ts),
+                "INSERT INTO screening_runs (id, frozen_filters_json, status, source_count, match_count, mismatch_count, resume_id, created_at, updated_at, error_code) "
+                "VALUES (?, ?, 'queued', 0, 0, 0, ?, ?, ?, NULL)",
+                (rid, json.dumps(frozen_filters, ensure_ascii=False), _opt_str(resume_id), ts, ts),
             )
         return self.get_screening_run(rid)
 
@@ -744,10 +767,14 @@ class TaskStore:
             raise KeyError(run_id)
         result = dict(row)
         result["frozen_filters"] = json.loads(result.pop("frozen_filters_json", "{}") or "{}")
+        result["parse_failures"] = json.loads(result.pop("parse_failures_json", "{}") or "{}")
         return result
 
     def update_screening_run_status(self, run_id, status, *, source_count=None,
-                                    match_count=None, mismatch_count=None, error_code=None) -> dict:
+                                    match_count=None, mismatch_count=None,
+                                    pending_count=None, processed_count=None,
+                                    source_cursor=None, parse_failure_count=None,
+                                    parse_failures=None, error_code=None) -> dict:
         ts = _now()
         fields = ["status = ?", "updated_at = ?"]
         values = [status, ts]
@@ -760,6 +787,21 @@ class TaskStore:
         if mismatch_count is not None:
             fields.append("mismatch_count = ?")
             values.append(int(mismatch_count))
+        if pending_count is not None:
+            fields.append("pending_count = ?")
+            values.append(int(pending_count))
+        if processed_count is not None:
+            fields.append("processed_count = ?")
+            values.append(int(processed_count))
+        if source_cursor is not None:
+            fields.append("source_cursor = ?")
+            values.append(int(source_cursor))
+        if parse_failure_count is not None:
+            fields.append("parse_failure_count = ?")
+            values.append(int(parse_failure_count))
+        if parse_failures is not None:
+            fields.append("parse_failures_json = ?")
+            values.append(json.dumps(parse_failures, ensure_ascii=False))
         if error_code is not None:
             fields.append("error_code = ?")
             values.append(error_code)
@@ -976,6 +1018,8 @@ class TaskStore:
         """把待核验记录人工分流到 match/mismatch 结果区，并从 pending 删除。"""
         if target not in ("match", "mismatch"):
             raise ValueError(f"invalid manual route target: {target}")
+        result_id = _uuid()
+        ts = _now()
         with self._connection() as conn:
             row = conn.execute(
                 "SELECT id FROM screening_pending_results "
@@ -984,12 +1028,21 @@ class TaskStore:
             ).fetchone()
             if not row:
                 raise KeyError(f"pending result not found: run={run_id} job={job_id}")
+            existing = conn.execute(
+                "SELECT * FROM screening_results WHERE run_id = ? AND job_id = ?",
+                (str(run_id), str(job_id)),
+            ).fetchone()
+            if existing:
+                conn.execute("DELETE FROM screening_pending_results WHERE id = ?", (row["id"],))
+                return dict(existing)
             conn.execute(
-                "DELETE FROM screening_pending_results WHERE id = ?",
-                (row["id"],),
+                "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (result_id, str(run_id), str(job_id), target, ts),
             )
-            # 复用 add_screening_result 写入结果区
-        return self.add_screening_result(run_id, job_id, target)
+            conn.execute("DELETE FROM screening_pending_results WHERE id = ?", (row["id"],))
+        return {"id": result_id, "run_id": str(run_id), "job_id": str(job_id),
+                "verdict": target, "created_at": ts}
 
     def move_to_trash_with_origin(self, profile_id, job_id, origin_zone="match",
                                   run_id=None, feedback_ref=None) -> dict:
