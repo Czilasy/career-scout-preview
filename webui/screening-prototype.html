@@ -8,149 +8,94 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%235fa7ff'/%3E%3C/svg%3E">
   <style>
     :root { color-scheme:dark; --bg:#0b1020; --panel:#111a2d; --panel-2:#17233a; --line:#293853; --text:#edf3ff; --muted:#9aabc7; --blue:#5fa7ff; --green:#51d49b; --amber:#f4bd62; --gray:#77859b; --radius:8px; font-family:Inter,"Microsoft YaHei",system-ui,sans-serif; }
-    * { box-sizing:border-box; }
-    html,body { min-height:100%; margin:0; background:var(--bg); color:var(--text); }
-    body { overflow-x:hidden; font-size:14px; }
-    button { cursor:pointer; min-height:30px; padding:4px 9px; border:1px solid var(--line); border-radius:6px; background:#1b2a44; color:var(--text); font:inherit; }
-    button:hover,button:focus-visible { border-color:var(--blue); outline:none; }
-    button.primary { color:#061221; border-color:var(--blue); background:var(--blue); font-weight:700; }
-    button.danger { color:#ffdce0; border-color:#864451; background:#35202a; }
-    button.quiet { background:transparent; color:var(--muted); }
-    .app { min-height:100vh; display:grid; grid-template-columns:238px minmax(0,1fr); }
-    .sidebar { background:#0d1527; border-right:1px solid var(--line); padding:15px; }
-    .brand { font-size:15px; font-weight:750; letter-spacing:.02em; }
-    .prototype-note { color:var(--muted); font-size:12px; line-height:1.45; margin:7px 0 20px; }
-    .side-section { border-top:1px solid var(--line); padding:13px 0; }
-    .side-title { color:var(--muted); font-size:12px; margin-bottom:8px; }
-    .filter-value { display:flex; justify-content:space-between; gap:8px; margin:7px 0; }
-    .source { color:var(--blue); font-size:11px; white-space:nowrap; }
-    .main { min-width:0; padding:15px 20px 24px; }
-    .topline { display:flex; align-items:center; gap:12px; min-height:32px; }
-    .topline h1 { flex:1; margin:0; font-size:18px; }
-    .badges { display:flex; gap:7px; flex-wrap:wrap; }
-    .badge { border-radius:99px; background:var(--panel-2); color:var(--muted); padding:3px 8px; font-size:12px; }
-    .badge.ok { color:var(--green); } .badge.warn { color:var(--amber); }
-    .summary { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:13px; padding:9px 11px; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); color:var(--muted); }
-    .summary strong { color:var(--text); } .parse-stat { color:var(--amber); }
-    .views { display:flex; gap:7px; overflow-x:auto; margin:14px 0 10px; padding-bottom:10px; border-bottom:1px solid var(--line); scrollbar-width:thin; }
-    .view-button { flex:0 0 auto; white-space:nowrap; background:transparent; color:var(--muted); }
-    .view-button.active { border-color:var(--blue); background:#152946; color:var(--text); }
-    .view-button.pending .count { color:var(--amber); } .view-button.trash .count { color:var(--gray); }
-    .count { margin-left:5px; color:var(--blue); font-variant-numeric:tabular-nums; }
-    .list-toolbar { display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:34px; margin-bottom:8px; }
-    .list-toolbar p { margin:0; color:var(--muted); font-size:12px; }
-    .job-list { display:grid; gap:7px; }
-    .job-row { display:grid; grid-template-columns:minmax(205px,.95fr) minmax(320px,1.45fr) minmax(220px,.9fr); align-items:center; gap:15px; min-height:82px; padding:9px 11px; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); }
-    .job-title { font-size:15px; font-weight:700; line-height:1.25; } .company { margin-top:3px; color:var(--muted); }
-    .job-meta { display:flex; gap:8px; flex-wrap:wrap; color:#c7d4e9; font-size:12px; } .salary { color:var(--green); font-weight:700; }
-    .excerpt { display:-webkit-box; overflow:hidden; margin-top:5px; color:var(--muted); font-size:12px; line-height:1.35; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
-    .job-actions { display:flex; align-items:center; justify-content:flex-end; justify-self:end; gap:6px; flex-wrap:wrap; }
-    .status { color:var(--muted); font-size:12px; white-space:nowrap; } .status.match { color:var(--green); } .status.pending { color:var(--amber); }
-    .failure { width:100%; color:var(--amber); text-align:right; font-size:11px; } .manual-actions { display:flex; gap:5px; }
-    .empty { padding:30px 16px; border:1px dashed var(--line); border-radius:var(--radius); color:var(--muted); text-align:center; }
-    .mobile-filter-toggle,.mobile-close,.drawer-backdrop { display:none; }
-    .live { position:fixed; inline-size:1px; block-size:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
-    @media (prefers-reduced-motion:no-preference) { .job-row,.views { transition:opacity .12s ease,transform .12s ease; } }
-    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation-duration:.01ms !important; transition-duration:.01ms !important; scroll-behavior:auto !important; } }
-    @media (max-width: 720px) {
-      .app { display:block; } .main { padding:12px 10px 20px; } .topline { align-items:flex-start; flex-wrap:wrap; } .topline h1 { flex-basis:100%; }
-      .mobile-filter-toggle { display:inline-block; } .mobile-close { display:block; float:right; } .sidebar { display:none; }
-      .filters-open .sidebar { display:block; position:fixed; z-index:3; inset:0 auto 0 0; width:min(330px,calc(100vw - 36px)); overflow-y:auto; box-shadow:12px 0 32px #0008; }
-      .filters-open .drawer-backdrop { display:block; position:fixed; z-index:2; inset:0; border:0; border-radius:0; background:#0008; }
-      .summary { gap:7px; margin-top:10px; } .job-row { grid-template-columns:minmax(0,1fr); gap:6px; min-height:auto; padding:10px; } .job-actions { justify-content:flex-start; justify-self:start; } .failure { text-align:left; }
-    }
+    * { box-sizing:border-box; } html,body { min-height:100%; margin:0; background:var(--bg); color:var(--text); } body { overflow-x:hidden; font-size:14px; }
+    button { cursor:pointer; min-height:30px; padding:4px 9px; border:1px solid var(--line); border-radius:6px; background:#1b2a44; color:var(--text); font:inherit; } button:hover,button:focus-visible { border-color:var(--blue); outline:none; } button.primary { color:#061221; border-color:var(--blue); background:var(--blue); font-weight:700; } button.danger { color:#ffdce0; border-color:#864451; background:#35202a; } button.quiet { background:transparent; color:var(--muted); }
+    .app { min-height:100vh; display:grid; grid-template-columns:238px minmax(0,1fr); } .sidebar { background:#0d1527; border-right:1px solid var(--line); padding:15px; } .brand { font-size:15px; font-weight:750; } .prototype-note { color:var(--muted); font-size:12px; line-height:1.45; margin:7px 0 15px; } .side-section { border-top:1px solid var(--line); padding:13px 0; } .side-title { color:var(--muted); font-size:12px; margin-bottom:8px; } .filter-value { display:flex; justify-content:space-between; gap:8px; margin:7px 0; } .source { color:var(--blue); font-size:11px; white-space:nowrap; }
+    .main { min-width:0; padding:15px 20px 24px; } .topline { display:flex; align-items:center; gap:12px; min-height:32px; } .topline h1 { flex:1; margin:0; font-size:18px; } .badges { display:flex; gap:7px; flex-wrap:wrap; } .badge { border-radius:99px; background:var(--panel-2); color:var(--muted); padding:3px 8px; font-size:12px; } .badge.ok { color:var(--green); } .badge.warn { color:var(--amber); }
+    .summary { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:13px; padding:9px 11px; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); color:var(--muted); } .summary strong { color:var(--text); } .parse-stat { color:var(--amber); }
+    .views { display:flex; gap:7px; overflow-x:auto; margin:14px 0 10px; padding-bottom:10px; border-bottom:1px solid var(--line); scrollbar-width:thin; } .view-button { flex:0 0 auto; white-space:nowrap; background:transparent; color:var(--muted); } .view-button.active { border-color:var(--blue); background:#152946; color:var(--text); } .view-button.pending .count { color:var(--amber); } .view-button.trash .count { color:var(--gray); } .count { margin-left:5px; color:var(--blue); font-variant-numeric:tabular-nums; }
+    .list-toolbar { display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:34px; margin-bottom:8px; } .list-toolbar p { margin:0; color:var(--muted); font-size:12px; } .job-list { display:grid; gap:7px; } .job-row { display:grid; grid-template-columns:minmax(205px,.95fr) minmax(320px,1.45fr) minmax(250px,.95fr); align-items:center; gap:15px; min-height:82px; padding:9px 11px; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); } .job-title { font-size:15px; font-weight:700; line-height:1.25; } .company { margin-top:3px; color:var(--muted); } .job-meta { display:flex; gap:8px; flex-wrap:wrap; color:#c7d4e9; font-size:12px; } .salary { color:var(--green); font-weight:700; } .excerpt { display:-webkit-box; overflow:hidden; margin-top:5px; color:var(--muted); font-size:12px; line-height:1.35; -webkit-box-orient:vertical; -webkit-line-clamp:2; } .job-actions { display:flex; align-items:center; justify-content:flex-end; justify-self:end; gap:6px; flex-wrap:wrap; } .status { color:var(--muted); font-size:12px; white-space:nowrap; } .status.match { color:var(--green); } .status.pending { color:var(--amber); } .failure { width:100%; color:var(--amber); text-align:right; font-size:11px; } .manual-actions { display:flex; gap:5px; } .empty { padding:30px 16px; border:1px dashed var(--line); border-radius:var(--radius); color:var(--muted); text-align:center; }
+    .cleanup-prompt { display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-bottom:8px; padding:8px; border:1px solid #765d2a; border-radius:var(--radius); background:#30291b; color:#ffe1a8; } .history-line { color:var(--muted); font-size:11px; line-height:1.5; }
+    .mobile-filter-toggle,.mobile-close,.drawer-backdrop { display:none; } .modal-backdrop { display:none; } .modal-backdrop.open { display:grid; position:fixed; z-index:5; inset:0; place-items:center; padding:16px; background:#0009; } .modal { width:min(680px,100%); max-height:80vh; overflow:auto; padding:16px; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); } .modal h2 { margin:0 0 10px; font-size:16px; } .modal-row { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 0; border-top:1px solid var(--line); } .modal-actions { display:flex; gap:5px; flex-wrap:wrap; justify-content:flex-end; } .live { position:fixed; inline-size:1px; block-size:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+    @media (prefers-reduced-motion:no-preference) { .job-row,.views { transition:opacity .12s ease,transform .12s ease; } } @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation-duration:.01ms !important; transition-duration:.01ms !important; scroll-behavior:auto !important; } }
+    @media (max-width: 720px) { .app { display:block; } .main { padding:12px 10px 20px; } .topline { align-items:flex-start; flex-wrap:wrap; } .topline h1 { flex-basis:100%; } .mobile-filter-toggle { display:inline-block; } .mobile-close { display:block; float:right; } .sidebar { display:none; } .filters-open .sidebar { display:block; position:fixed; z-index:3; inset:0 auto 0 0; width:min(330px,calc(100vw - 36px)); overflow-y:auto; box-shadow:12px 0 32px #0008; } .filters-open .drawer-backdrop { display:block; position:fixed; z-index:2; inset:0; border:0; border-radius:0; background:#0008; } .summary { gap:7px; margin-top:10px; } .job-row { grid-template-columns:minmax(0,1fr); gap:6px; min-height:auto; padding:10px; } .job-actions { justify-content:flex-start; justify-self:start; } .failure { text-align:left; } }
   </style>
 </head>
 <body>
-  <div id="root"></div>
-  <div id="announcer" class="live" aria-live="polite"></div>
+  <div id="root"></div><div id="modalRoot"></div><div id="announcer" class="live" aria-live="polite"></div>
   <script>
-    const STORAGE_KEY = 'boss-screening-prototype-v2';
+    const RUN_STORAGE_KEY = 'boss-screening-run-v1';
+    const LONG_TERM_STORAGE_KEY = 'boss-screening-long-term-v1';
     const views = [['matched','符合'],['rejected','不符合'],['pending','待核验'],['interested','感兴趣'],['trash','垃圾桶']];
     const parseFailures = [{field:'薪资',count:2},{field:'经验',count:1}];
     const initialJobs = [
-      {id:'m1',zone:'matched',title:'高级 Python 工程师',company:'星澜数据',salary:'30-45K·14薪',location:'上海·浦东',experience:'5-10年',degree:'本科',jd:'负责数据平台服务和 AI 工作流的稳定交付。',interested:false},
-      {id:'m2',zone:'matched',title:'后端开发工程师',company:'稻田科技',salary:'25-35K',location:'上海·徐汇',experience:'3-5年',degree:'本科',jd:'负责 API、异步任务与可观测性建设。',interested:false},
-      {id:'m3',zone:'matched',title:'AI 平台工程师',company:'北极光实验室',salary:'32-48K',location:'上海·杨浦',experience:'3-5年',degree:'本科',jd:'建设模型服务编排、评测与权限平台。',interested:true},
-      {id:'m4',zone:'matched',title:'Python 服务端工程师',company:'雾森网络',salary:'28-40K·13薪',location:'上海·静安',experience:'3-5年',degree:'本科',jd:'为业务中台开发高并发服务与内部工具。',interested:false},
-      {id:'m5',zone:'matched',title:'数据工程师',company:'进制智能',salary:'26-38K',location:'上海·闵行',experience:'3-5年',degree:'本科',jd:'维护批处理与实时数据链路，支持分析产品。',interested:false},
-      {id:'m6',zone:'matched',title:'平台后端工程师',company:'光年系统',salary:'27-42K',location:'上海·虹口',experience:'3-5年',degree:'本科',jd:'负责多租户平台的接口、权限和发布流程。',interested:false},
-      {id:'r1',zone:'rejected',title:'Java 架构师',company:'远帆供应链',salary:'45-65K',location:'上海·宝山',experience:'10年以上',degree:'本科',jd:'已完成核验，当前筛选条件下不符合。',interested:false},
-      {id:'r2',zone:'rejected',title:'算法研究员',company:'量子视野',salary:'35-55K',location:'上海·徐汇',experience:'5-10年',degree:'硕士',jd:'已完成核验，当前筛选条件下不符合。',interested:false},
-      {id:'p1',zone:'pending',title:'Python 后端工程师',company:'云脉软件',salary:'24-36K',location:'上海·浦东',experience:'3-5年',degree:'本科',jd:'岗位核验等待再次执行。',interested:false,failure:'AI 核验超时',stage:'AI 核验',attempts:1,retryable:true,lastFailedAt:'2026-07-13 09:42',retryOutcome:'matched'},
-      {id:'p2',zone:'pending',title:'数据平台开发',company:'海图科技',salary:'20-30K',location:'上海·长宁',experience:'3-5年',degree:'本科',jd:'岗位字段尚未完成安全核验。',interested:false,failure:'核验结果无效',stage:'结果校验',attempts:2,retryable:true,lastFailedAt:'2026-07-13 10:03',retryOutcome:'pending'},
-      {id:'p3',zone:'pending',title:'业务系统维护',company:'远山服务',salary:'18-26K',location:'上海·普陀',experience:'1-3年',degree:'大专',jd:'等待人工确认来源字段。',interested:false,failure:'来源字段缺失',stage:'字段核验',attempts:1,retryable:false,lastFailedAt:'2026-07-13 10:08',retryOutcome:'pending'}
+      {id:'m1',zone:'matched',title:'高级 Python 工程师',company:'星澜数据',salary:'30-45K·14薪',location:'上海·浦东',experience:'5-10年',degree:'本科',jd:'负责数据平台服务和 AI 工作流的稳定交付。'},
+      {id:'m2',zone:'matched',title:'后端开发工程师',company:'稻田科技',salary:'25-35K',location:'上海·徐汇',experience:'3-5年',degree:'本科',jd:'负责 API、异步任务与可观测性建设。'},
+      {id:'m3',zone:'matched',title:'AI 平台工程师',company:'北极光实验室',salary:'32-48K',location:'上海·杨浦',experience:'3-5年',degree:'本科',jd:'建设模型服务编排、评测与权限平台。'},
+      {id:'m4',zone:'matched',title:'Python 服务端工程师',company:'雾森网络',salary:'28-40K·13薪',location:'上海·静安',experience:'3-5年',degree:'本科',jd:'为业务中台开发高并发服务与内部工具。'},
+      {id:'m5',zone:'matched',title:'数据工程师',company:'进制智能',salary:'26-38K',location:'上海·闵行',experience:'3-5年',degree:'本科',jd:'维护批处理与实时数据链路，支持分析产品。'},
+      {id:'m6',zone:'matched',title:'平台后端工程师',company:'光年系统',salary:'27-42K',location:'上海·虹口',experience:'3-5年',degree:'本科',jd:'负责多租户平台的接口、权限和发布流程。'},
+      {id:'r1',zone:'rejected',title:'Java 架构师',company:'远帆供应链',salary:'45-65K',location:'上海·宝山',experience:'10年以上',degree:'本科',jd:'已完成核验，当前筛选条件下不符合。'},
+      {id:'r2',zone:'rejected',title:'算法研究员',company:'量子视野',salary:'35-55K',location:'上海·徐汇',experience:'5-10年',degree:'硕士',jd:'已完成核验，当前筛选条件下不符合。'},
+      {id:'p1',zone:'pending',title:'Python 后端工程师',company:'云脉软件',salary:'24-36K',location:'上海·浦东',experience:'3-5年',degree:'本科',jd:'岗位核验等待再次执行。',failure:'AI 核验超时',stage:'AI 核验',attempts:1,retryable:true,lastFailedAt:'2026-07-13 09:42',retryOutcome:'matched'},
+      {id:'p2',zone:'pending',title:'数据平台开发',company:'海图科技',salary:'20-30K',location:'上海·长宁',experience:'3-5年',degree:'本科',jd:'岗位字段尚未完成安全核验。',failure:'核验结果无效',stage:'结果校验',attempts:2,retryable:true,lastFailedAt:'2026-07-13 10:03',retryOutcome:'pending'},
+      {id:'p3',zone:'pending',title:'业务系统维护',company:'远山服务',salary:'18-26K',location:'上海·普陀',experience:'1-3年',degree:'大专',jd:'等待人工确认来源字段。',failure:'来源字段缺失',stage:'字段核验',attempts:1,retryable:false,lastFailedAt:'2026-07-13 10:08',retryOutcome:'pending'}
     ];
-    let state = loadState();
-    let currentView = 'matched';
-    let filtersOpen = false;
+    let runJobs = loadRunJobs();
+    let longTerm = loadLongTerm();
+    let currentView = 'matched'; let filtersOpen = false; let historyOpen = false; let cleanupPrompt = false;
 
-    function cloneInitialJobs() { return JSON.parse(JSON.stringify(initialJobs)); }
-    function loadState() { try { const saved = localStorage.getItem(STORAGE_KEY); const jobs = saved && JSON.parse(saved); return Array.isArray(jobs) ? jobs : cloneInitialJobs(); } catch (_) { return cloneInitialJobs(); } }
-    function saveState() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+    function copy(value) { return JSON.parse(JSON.stringify(value)); }
+    function emptyLongTerm() { return {interested:{m3:copy(initialJobs[2])},notInterested:{},trash:{},userActions:[],cleanupRecords:[]}; }
+    function loadRunJobs() { try { const value = JSON.parse(sessionStorage.getItem(RUN_STORAGE_KEY)); return Array.isArray(value) ? value : copy(initialJobs); } catch (_) { return copy(initialJobs); } }
+    function loadLongTerm() { try { const value = JSON.parse(localStorage.getItem(LONG_TERM_STORAGE_KEY)); return value && value.interested && value.notInterested && value.trash ? value : emptyLongTerm(); } catch (_) { return emptyLongTerm(); } }
+    function saveRunJobs() { sessionStorage.setItem(RUN_STORAGE_KEY,JSON.stringify(runJobs)); }
+    function saveLongTerm() { localStorage.setItem(LONG_TERM_STORAGE_KEY,JSON.stringify(longTerm)); }
     function announce(message) { document.getElementById('announcer').textContent = message; }
     function el(tag,className,text) { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; }
-    function button(label,className,handler) { const node = el('button',className,label); node.type = 'button'; node.addEventListener('click',handler); return node; }
+    function button(label,className,handler,action) { const node = el('button',className,label); node.type='button'; if (action) node.dataset.action=action; node.addEventListener('click',handler); return node; }
     function add(parent,...children) { children.flat().filter(Boolean).forEach(child => parent.append(child)); return parent; }
-    function viewLabel(zone) { return (views.find(item => item[0] === zone) || ['',zone])[1]; }
-    function getJobsForView(zone) { return zone === 'interested' ? state.filter(job => job.interested && job.zone !== 'trash') : state.filter(job => job.zone === zone); }
-    function count(zone) { return getJobsForView(zone).length; }
-    function setView(zone) { currentView = zone; render(); }
-    function toggleFilters() { filtersOpen = !filtersOpen; render(); }
-    function toggleInterest(id) { const job = state.find(item => item.id === id); if (!job) return; job.interested = !job.interested; saveState(); announce(`${job.title}${job.interested ? '已标记感兴趣' : '已取消感兴趣标记'}`); render(); }
-    function moveToTrash(id) { const job = state.find(item => item.id === id); if (!job || job.zone === 'trash') return; job.previousZone = job.zone; job.zone = 'trash'; saveState(); announce(`${job.title}已移入垃圾桶`); render(); }
-    function restoreJob(id) { const job = state.find(item => item.id === id); if (!job || job.zone !== 'trash') return; job.zone = job.previousZone || 'matched'; delete job.previousZone; saveState(); announce(`${job.title}已恢复到${viewLabel(job.zone)}`); render(); }
-    function retryJob(id) { const job = state.find(item => item.id === id); if (!job || job.zone !== 'pending' || !job.retryable) return; job.attempts += 1; if (job.retryOutcome === 'matched') { job.zone = 'matched'; delete job.failure; delete job.stage; delete job.lastFailedAt; announce(`${job.title}重试成功，已进入符合区`); } else { job.failure = 'AI 核验仍超时'; job.lastFailedAt = '刚刚'; announce(`${job.title}重试失败，仍在待核验区`); } saveState(); render(); }
-    function retryAll() { getJobsForView('pending').filter(job => job.retryable).forEach(job => retryJob(job.id)); announce('已完成可重试岗位的模拟批量重试'); }
-    function manualRoute(id,zone) { const job = state.find(item => item.id === id); if (!job || job.zone !== 'pending') return; job.zone = zone; delete job.failure; delete job.stage; delete job.lastFailedAt; saveState(); announce(`${job.title}已人工核验并分流到${viewLabel(zone)}`); render(); }
-    function resetPrototype() { state = cloneInitialJobs(); saveState(); currentView = 'matched'; announce('模拟数据已重置'); render(); }
+    function label(zone) { return (views.find(item=>item[0]===zone)||['',zone])[1]; }
+    function logAction(type,job) { longTerm.userActions.unshift({type,jobId:job.id,title:job.title,at:'模拟当前时间'}); longTerm.userActions=longTerm.userActions.slice(0,20); }
+    function isExcluded(jobId) { return Boolean(longTerm.notInterested[jobId] || longTerm.trash[jobId]); }
+    function jobsFor(zone) { if (zone==='interested') return Object.values(longTerm.interested).filter(job=>!longTerm.trash[job.id]&&!longTerm.notInterested[job.id]); if (zone==='trash') return Object.values(longTerm.trash).map(record=>({...record.snapshot,previousZone:record.previousZone})); return runJobs.filter(job=>job.zone===zone&&!isExcluded(job.id)); }
+    function count(zone) { return jobsFor(zone).length; }
+    function setView(zone) { currentView=zone; render(); }
+    function toggleFilters() { filtersOpen=!filtersOpen; render(); }
+    function findRunJob(id) { return runJobs.find(job=>job.id===id); }
+    function markInterested(job) { delete longTerm.notInterested[job.id]; longTerm.interested[job.id]=copy(job); logAction('感兴趣',job); saveLongTerm(); announce(`${job.title}已标记感兴趣`); render(); }
+    function markNotInterested(job) { delete longTerm.interested[job.id]; longTerm.notInterested[job.id]=copy(job); logAction('不感兴趣',job); saveLongTerm(); announce(`${job.title}已标记不感兴趣，并从本次结果隐藏`); render(); }
+    function moveToTrash(job) { longTerm.trash[job.id]={snapshot:copy(job),previousZone:job.zone,movedAt:'模拟当前时间'}; delete longTerm.notInterested[job.id]; logAction('移入垃圾桶',job); saveLongTerm(); announce(`${job.title}已移入垃圾桶`); render(); }
+    function restoreJob(id) { const record=longTerm.trash[id]; if (!record) return; delete longTerm.trash[id]; delete longTerm.notInterested[id]; if (!findRunJob(id)) runJobs.push({...copy(record.snapshot),zone:record.previousZone}); saveRunJobs(); logAction('从垃圾桶恢复',record.snapshot); saveLongTerm(); announce(`${record.snapshot.title}已恢复到${label(record.previousZone)}`); render(); }
+    function showNotInterested(id) { delete longTerm.notInterested[id]; saveLongTerm(); announce('已解除不感兴趣展示排除'); render(); }
+    function retryJob(id) { const job=findRunJob(id); if (!job||job.zone!=='pending'||!job.retryable) return; job.attempts+=1; if(job.retryOutcome==='matched'){job.zone='matched';delete job.failure;delete job.stage;delete job.lastFailedAt;announce(`${job.title}重试成功，已进入符合区`);}else{job.failure='AI 核验仍超时';job.lastFailedAt='模拟当前时间';announce(`${job.title}重试失败，仍在待核验区`);} saveRunJobs(); render(); }
+    function retryAll() { jobsFor('pending').filter(job=>job.retryable).forEach(job=>retryJob(job.id)); announce('已完成可重试岗位的模拟批量重试'); }
+    function manualRoute(id,zone) { const job=findRunJob(id); if(!job||job.zone!=='pending') return; job.zone=zone;delete job.failure;delete job.stage;delete job.lastFailedAt;saveRunJobs();announce(`${job.title}已人工核验并分流到${label(zone)}`);render(); }
+    function simulateCleanup() { if (jobsFor('pending').length) { cleanupPrompt=true; render(); return; } runCleanup(); }
+    function runCleanup() { const pending=jobsFor('pending').length; const total=runJobs.length; runJobs=[]; saveRunJobs(); longTerm.cleanupRecords.unshift({at:'模拟第31天',scope:'临时运行结果与待核验记录',succeeded:total,failed:0,pendingWarning:pending}); longTerm.cleanupRecords=longTerm.cleanupRecords.slice(0,10); saveLongTerm(); cleanupPrompt=false; announce(`已清理 ${total} 条临时结果；长期标记和垃圾桶记录已保留`); render(); }
+    function resetPrototype() { runJobs=copy(initialJobs); longTerm=emptyLongTerm(); saveRunJobs();saveLongTerm();currentView='matched';cleanupPrompt=false;historyOpen=false;announce('模拟数据已重置');render(); }
 
-    function createSidebar() {
-      const sidebar = el('aside','sidebar');
-      add(sidebar,button('关闭筛选面板','mobile-close',toggleFilters),el('div','brand','BOSS 筛选工作台'),el('p','prototype-note','模拟数据 · 不连接真实后端'));
-      const filters = el('section','side-section'); add(filters,el('div','side-title','当前筛选（模拟）'));
-      [['薪资','25-45K'],['学历','本科'],['方向','Python 后端']].forEach(([label,value]) => { const row = el('div','filter-value'); add(row,el('span','',label),el('strong','',value)); filters.append(row); });
-      const sources = el('section','side-section'); add(sources,el('div','side-title','字段来源'));
-      [['城市','用户确认'],['经验','AI 建议'],['行业','待确认']].forEach(([label,value]) => { const row = el('div','filter-value'); add(row,el('span','',label),el('span','source',value)); sources.append(row); });
-      const note = el('section','side-section'); add(note,el('div','side-title','原型说明'),el('p','prototype-note','状态保存在此浏览器的本地存储中；关闭浏览器后仍会保留，直到手动清除。'),button('重置模拟数据','quiet',resetPrototype));
-      return add(sidebar,filters,sources,note);
+    function sidebar() {
+      const side=el('aside','sidebar'); add(side,button('关闭筛选面板','mobile-close',toggleFilters),el('div','brand','BOSS 筛选工作台'),el('p','prototype-note','模拟数据 · 不连接真实后端'));
+      const filters=add(el('section','side-section'),el('div','side-title','当前筛选（模拟）')); [['薪资','25-45K'],['学历','本科'],['方向','Python 后端']].forEach(([a,b])=>filters.append(add(el('div','filter-value'),el('span','',a),el('strong','',b))));
+      const long=add(el('section','side-section'),el('div','side-title','长期状态（本地保存）'),el('div','history-line',`感兴趣 ${Object.keys(longTerm.interested).length} · 不感兴趣 ${Object.keys(longTerm.notInterested).length} · 垃圾桶 ${Object.keys(longTerm.trash).length}`),button('查看不感兴趣记录','quiet',()=>{historyOpen=true;render();},'not-interested-history'));
+      const last=longTerm.cleanupRecords[0]; const cleanup=add(el('section','side-section'),el('div','side-title','模拟 31 天清理'),el('p','prototype-note','只清理临时运行结果和待核验；长期标记与垃圾桶不删除。'),button('模拟 31 天后清理','quiet',simulateCleanup,'simulate-cleanup'));
+      if(last) cleanup.append(el('div','history-line',`最近：${last.at}，清理 ${last.succeeded} 条，失败 ${last.failed} 条${last.pendingWarning?'（含待核验提示）':''}`));
+      return add(side,filters,long,cleanup,add(el('section','side-section'),button('重置模拟数据','quiet',resetPrototype)));
     }
-    function createJobRow(job) {
-      const row = el('article','job-row'); row.dataset.jobId = job.id;
-      const identity = add(el('div'),el('div','job-title',job.title),el('div','company',job.company));
-      const meta = el('div','job-meta'); add(meta,el('span','salary',job.salary),el('span','',job.location),el('span','',job.experience),el('span','',job.degree));
-      const details = add(el('div'),meta,el('div','excerpt',job.jd));
-      const pending = job.zone === 'pending'; const status = el('span',`status ${pending ? 'pending' : job.zone === 'matched' ? 'match' : ''}`,pending ? '待核验' : job.zone === 'rejected' ? '已完成核验 · 未通过' : '已完成核验');
-      const actions = add(el('div','job-actions'),status);
-      if (currentView === 'trash') { add(actions,el('span','failure',`将恢复到：${viewLabel(job.previousZone || 'matched')}`),button('恢复','primary',() => restoreJob(job.id))); }
-      else if (pending) {
-        add(actions,el('span','failure',`${job.failure} · ${job.stage} · 最近失败：${job.lastFailedAt} · 已尝试 ${job.attempts} 次 · ${job.retryable ? '可重试' : '无法自动重试'}`));
-        if (job.retryable) actions.append(button('重试','primary',() => retryJob(job.id)));
-        const manual = el('span','manual-actions'); add(manual,button('人工：符合','',() => manualRoute(job.id,'matched')),button('人工：不符合','',() => manualRoute(job.id,'rejected'))); actions.append(manual);
-      } else { add(actions,button(job.interested ? '取消感兴趣' : '感兴趣','',() => toggleInterest(job.id)),button('移入垃圾桶','danger',() => moveToTrash(job.id))); }
+    function jobRow(job) {
+      const row=el('article','job-row');row.dataset.jobId=job.id;const identity=add(el('div'),el('div','job-title',job.title),el('div','company',job.company));const meta=add(el('div','job-meta'),el('span','salary',job.salary),el('span','',job.location),el('span','',job.experience),el('span','',job.degree));const details=add(el('div'),meta,el('div','excerpt',job.jd));const pending=job.zone==='pending';const actions=add(el('div','job-actions'),el('span',`status ${pending?'pending':job.zone==='matched'?'match':''}`,pending?'待核验':job.zone==='rejected'?'已完成核验 · 未通过':'已完成核验'));
+      if(currentView==='trash'){add(actions,el('span','failure',`将恢复到：${label(job.previousZone)}`),button('恢复','primary',()=>restoreJob(job.id),'restore'));}
+      else if(pending){add(actions,el('span','failure',`${job.failure} · ${job.stage} · 最近失败：${job.lastFailedAt} · 已尝试 ${job.attempts} 次 · ${job.retryable?'可重试':'无法自动重试'}`));if(job.retryable)actions.append(button('重试','primary',()=>retryJob(job.id),'retry'));const manual=add(el('span','manual-actions'),button('人工：符合','',()=>manualRoute(job.id,'matched')),button('人工：不符合','',()=>manualRoute(job.id,'rejected')));actions.append(manual);}
+      else{add(actions,button('感兴趣','',()=>markInterested(job),'interested'),button('不感兴趣','',()=>markNotInterested(job),'not-interested'),button('移入垃圾桶','danger',()=>moveToTrash(job),'trash'));}
       return add(row,identity,details,actions);
     }
-    function createWorkspace() {
-      const main = el('main','main');
-      const heading = el('div','topline'); const badges = add(el('div','badges'),el('span','badge ok','BOSS：未连接（模拟）'),el('span','badge warn','AI：模拟异常 3'));
-      add(heading,el('h1','','紧凑清单'),button('筛选条件','mobile-filter-toggle',toggleFilters),badges);
-      const parseText = parseFailures.map(item => `${item.field}${item.count}`).join('、');
-      const summary = add(el('section','summary'),el('strong','','运行 #DEMO-023'),el('span','','已抓取 11'),el('span','',`已核验 ${count('matched') + count('rejected')}`),el('span','',`待核验 ${count('pending')}`),el('span','parse-stat',`字段解析失败 3 / 18（16.7%）：${parseText}`),el('span','','最后更新：刚刚'));
-      const nav = el('nav','views'); nav.setAttribute('aria-label','筛选结果区域'); views.forEach(([zone,label]) => { const classes = `view-button ${zone === currentView ? 'active' : ''} ${zone === 'pending' ? 'pending' : ''} ${zone === 'trash' ? 'trash' : ''}`; const tab = button(label,classes,() => setView(zone)); tab.append(el('span','count',String(count(zone)))); nav.append(tab); });
-      const jobs = getJobsForView(currentView); const hints = {matched:'本次运行：已完成核验且符合条件。',rejected:'本次运行：已完成核验但未通过。',pending:'本次运行：需处理的异常岗位。',interested:'长期保存：你明确标记感兴趣的岗位。',trash:'长期保存：每条岗位都可以恢复到删除前区域。'};
-      const toolbar = add(el('div','list-toolbar'),el('p','',hints[currentView]));
-      if (currentView === 'pending' && jobs.some(job => job.retryable)) toolbar.append(button(`批量重试待核验（${jobs.filter(job => job.retryable).length}）`,'primary',retryAll));
-      const list = el('section','job-list'); list.setAttribute('aria-label',`${viewLabel(currentView)}岗位列表`);
-      if (jobs.length) jobs.forEach(job => list.append(createJobRow(job))); else list.append(el('div','empty',`${viewLabel(currentView)}暂无岗位。${currentView === 'interested' ? '可在任意结果区标记感兴趣。' : ''}`));
-      return add(main,heading,summary,nav,toolbar,list);
+    function workspace() {
+      const main=el('main','main');const heading=add(el('div','topline'),el('h1','','紧凑清单'),button('筛选条件','mobile-filter-toggle',toggleFilters),add(el('div','badges'),el('span','badge ok','BOSS：未连接（模拟）'),el('span','badge warn',`AI：模拟异常 ${count('pending')}`)));const parseText=parseFailures.map(item=>`${item.field}${item.count}`).join('、');const summary=add(el('section','summary'),el('strong','','运行 #DEMO-023'),el('span','',`临时岗位 ${runJobs.length}`),el('span','',`已核验 ${count('matched')+count('rejected')}`),el('span','',`待核验 ${count('pending')}`),el('span','parse-stat',`字段解析失败 3 / 18（16.7%）：${parseText}`));
+      const nav=el('nav','views');nav.setAttribute('aria-label','筛选结果区域');views.forEach(([zone,text])=>{const tab=button(text,`view-button ${zone===currentView?'active':''} ${zone==='pending'?'pending':''} ${zone==='trash'?'trash':''}`,()=>setView(zone));tab.append(el('span','count',String(count(zone))));nav.append(tab);});const jobs=jobsFor(currentView);const hints={matched:'本次运行：已完成核验且符合条件。',rejected:'本次运行：已完成核验但未通过。',pending:'本次运行：需处理的异常岗位。',interested:'长期保存：你明确标记感兴趣的岗位。',trash:'长期保存：每条岗位都可以恢复到删除前区域。'};const toolbar=add(el('div','list-toolbar'),el('p','',hints[currentView]));if(currentView==='pending'&&jobs.some(job=>job.retryable))toolbar.append(button(`批量重试待核验（${jobs.filter(job=>job.retryable).length}）`,'primary',retryAll,'retry-all'));const list=el('section','job-list');list.setAttribute('aria-label',`${label(currentView)}岗位列表`);if(jobs.length)jobs.forEach(job=>list.append(jobRow(job)));else list.append(el('div','empty',`${label(currentView)}暂无岗位。`));if(cleanupPrompt){const prompt=add(el('div','cleanup-prompt'),el('span','','有待核验岗位，清理后将不能再重试。'),button('仍要清理','danger',runCleanup,'confirm-cleanup'),button('取消','',()=>{cleanupPrompt=false;render();}));main.append(prompt);}return add(main,heading,summary,nav,toolbar,list);
     }
-    function render() {
-      const scrollTop = window.scrollY; document.body.classList.toggle('filters-open',filtersOpen);
-      const app = el('div','app'); app.append(createSidebar(),createWorkspace());
-      const backdrop = button('关闭筛选面板','drawer-backdrop',toggleFilters); backdrop.setAttribute('aria-label','关闭筛选面板');
-      document.getElementById('root').replaceChildren(app,backdrop);
-      window.scrollTo(0,scrollTop);
-    }
+    function modal() { const root=document.getElementById('modalRoot');root.replaceChildren();if(!historyOpen)return;const backdrop=el('div','modal-backdrop open');const box=add(el('section','modal'),el('h2','','不感兴趣记录（长期保存）'));const records=Object.values(longTerm.notInterested);if(records.length)records.forEach(job=>{const row=add(el('div','modal-row'),add(el('div'),el('strong','',job.title),el('div','history-line',`${job.company} · 原区域：${label(job.zone)}`)));row.append(add(el('div','modal-actions'),button('移入垃圾桶','danger',()=>moveToTrash(job),'history-to-trash'),button('重新显示','',()=>showNotInterested(job.id))));box.append(row);});else box.append(el('p','prototype-note','暂无当前不感兴趣记录；历史操作会保留在本地。'));box.append(button('关闭','quiet',()=>{historyOpen=false;render();}));backdrop.append(box);root.append(backdrop); }
+    function render(){const top=window.scrollY;document.body.classList.toggle('filters-open',filtersOpen);const app=add(el('div','app'),sidebar(),workspace());const backdrop=button('关闭筛选面板','drawer-backdrop',toggleFilters);document.getElementById('root').replaceChildren(app,backdrop);modal();window.scrollTo(0,top);}
     render();
   </script>
 </body>
