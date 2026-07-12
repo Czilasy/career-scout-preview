@@ -117,7 +117,8 @@ def test_connection(endpoint_url: str, api_key: str) -> tuple[bool, str | None]:
 # AI call
 # ---------------------------------------------------------------------------
 
-def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFAULT_TIMEOUT) -> dict:
+def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFAULT_TIMEOUT,
+            temperature: float = 0.3) -> dict:
     """Call an OpenAI-compatible chat completions endpoint and return parsed JSON.
 
     Raises :class:`AISecurityError` with a safe error_code on any failure.
@@ -127,7 +128,7 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
     payload = {
         "model": "auto",
         "messages": messages,
-        "temperature": 0.3,
+        "temperature": temperature,
         "response_format": {"type": "json_object"},
     }
     headers = {
@@ -368,6 +369,82 @@ def _validate_suggest_response(data) -> dict:
         val = val.strip()
         result[field] = val if val in valid_sets[field] else ""
     return result
+
+
+SCREENING_FIELDS = ("city", "salary", "experience", "degree", "scale", "stage", "industry")
+SUGGESTION_CONFIDENCE_THRESHOLD = 70
+
+
+def _screening_valid_sets():
+    valid_sets = {
+        name: {value for value in mapping.values() if value != "0"}
+        for name, mapping in (
+            ("salary", boss.SALARY_MAP),
+            ("experience", boss.EXPERIENCE_MAP),
+            ("degree", boss.DEGREE_MAP),
+            ("scale", boss.SCALE_MAP),
+            ("stage", boss.STAGE_MAP),
+            ("industry", boss.INDUSTRY_MAP),
+        )
+    }
+    valid_sets["city"] = {name for name in boss.CITY_MAP if name != "全国"}
+    return valid_sets
+
+
+def validate_cautious_screening_suggestions(data, confirmed_fields=None,
+                                             threshold=SUGGESTION_CONFIDENCE_THRESHOLD):
+    """Apply enum, confidence and user-lock gates to screening suggestions."""
+    raw = data if isinstance(data, dict) else {}
+    confirmed = confirmed_fields if isinstance(confirmed_fields, dict) else {}
+    valid_sets = _screening_valid_sets()
+    values = {}
+    meta = {}
+    for field in SCREENING_FIELDS:
+        locked = confirmed.get(field)
+        if isinstance(locked, str) and locked.strip():
+            values[field] = locked.strip()
+            meta[field] = {"status": "user_confirmed", "confidence": None}
+            continue
+        item = raw.get(field)
+        value = item.get("value", "") if isinstance(item, dict) else ""
+        confidence = item.get("confidence") if isinstance(item, dict) else None
+        valid_confidence = (
+            isinstance(confidence, (int, float))
+            and not isinstance(confidence, bool)
+            and 0 <= confidence <= 100
+        )
+        valid_value = isinstance(value, str) and value.strip() in valid_sets[field]
+        if valid_value and valid_confidence and confidence >= threshold:
+            values[field] = value.strip()
+            meta[field] = {"status": "ai_suggested", "confidence": confidence}
+        else:
+            values[field] = ""
+            meta[field] = {
+                "status": "pending_confirmation",
+                "confidence": confidence if valid_confidence else None,
+            }
+    return {"values": values, "meta": meta}
+
+
+def suggest_screening_filters_cautious(resume_text, endpoint_url, api_key,
+                                       confirmed_fields=None, timeout=DEFAULT_TIMEOUT):
+    """Generate deterministic, confidence-bearing suggestions and validate them."""
+    unlocked = [
+        field for field in SCREENING_FIELDS
+        if not str((confirmed_fields or {}).get(field) or "").strip()
+    ]
+    messages = [{
+        "role": "system",
+        "content": (
+            "根据简历为未锁定的 BOSS 筛选字段给建议。仅返回 JSON；每个字段必须是"
+            "{value:string, confidence:number 0-100}。没有明确依据时 value 为空且低置信度。"
+            f"未锁定字段：{','.join(unlocked)}。禁止输出近似枚举或改写已确认字段。"
+        ),
+    }, {"role": "user", "content": resume_text}]
+    data = call_ai(
+        endpoint_url, api_key, messages, timeout=timeout, temperature=0,
+    )
+    return validate_cautious_screening_suggestions(data, confirmed_fields=confirmed_fields)
 
 
 def rank_jds(confirmed_fields: dict, jobs_with_jd: list, endpoint_url: str, api_key: str) -> list[str]:

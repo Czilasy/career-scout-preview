@@ -872,12 +872,19 @@ def create_app(config=None):
         if not ai_service.is_ai_available(settings, cred_ref, api_key):
             return jsonify({"status": "ai_unavailable"})
         try:
-            suggestions = ai_service.suggest_screening_filters(
+            profile = store.get_profile(resume["profile_id"])
+            suggestion_result = ai_service.suggest_screening_filters_cautious(
                 extracted_text, settings["endpoint_url"], api_key,
+                confirmed_fields=profile.get("confirmed_fields") or {},
             )
         except ai_service.AISecurityError:
             return jsonify({"status": "ai_unavailable"})
-        return jsonify({"status": "ok", "suggestions": suggestions})
+        store.save_resume_suggestions(resume_id, suggestion_result)
+        return jsonify({
+            "status": "ok",
+            "suggestions": suggestion_result["values"],
+            "suggestion_meta": suggestion_result["meta"],
+        })
 
     # == US2: screening execution run ====================================
 
