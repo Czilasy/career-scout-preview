@@ -40,6 +40,14 @@ from webui.workbench import (
 )
 from webui import resume as resume_service
 from webui import ai as ai_service
+from webui.screening import (
+    build_screening_filter_options,
+    execute_first_layer,
+    freeze_filters,
+    is_valid_filters,
+    partition_jobs,
+    exclude_trash_jobs,
+)
 
 
 SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
@@ -505,11 +513,20 @@ def create_app(config=None):
             return jsonify({"error": "拒绝不受信任的 Host"}), 403
         # T010: resume reads and AI settings reads also require the session
         # token — they expose private user data even though they are GET.
+        # T009: screening GET endpoints (runs/interested/trash) expose job
+        # data and require the token; filter-options is a public enum and
+        # stays open.
         path = request.path
+        screening_sensitive_get = (
+            path.startswith("/api/screening/runs")
+            or path.startswith("/api/screening/interested")
+            or path.startswith("/api/screening/trash")
+        )
         sensitive_get = (
             path.startswith("/api/resumes")
             or path.startswith("/api/ai-settings")
             or path.startswith("/api/profiles/") and "/resumes" in path
+            or screening_sensitive_get
         )
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} or (request.method == "GET" and sensitive_get):
             origin = request.headers.get("Origin")
@@ -795,6 +812,444 @@ def create_app(config=None):
     def profile_resume_list(profile_id):
         store.get_profile(profile_id)
         return jsonify({"resumes": store.list_resumes(profile_id)})
+
+    # == US1: screening resume upload & AI suggest ========================
+
+    @app.route("/api/screening/filter-options")
+    def screening_filter_options():
+        """Return 7-class filter option enums. Public endpoint, no token."""
+        return jsonify({"options": build_screening_filter_options()})
+
+    @app.route("/api/screening/resume", methods=["POST"])
+    def screening_upload_resume():
+        """Upload a resume for screening. Reuses 001 resume storage.
+
+        Returns resume_id and a privacy notice. Never returns the resume
+        text. AI parsing is deferred to the /suggest endpoint.
+        """
+        profile_id = request.form.get("profile_id")
+        if not profile_id:
+            created = store.create_profile("筛选简历")
+            profile_id = created["id"]
+        if "file" not in request.files:
+            raise ValueError("请上传简历文件")
+        upload = request.files["file"]
+        file_bytes = upload.read()
+        filename = upload.filename or "resume.txt"
+        record = resume_service.save_resume(
+            profile_id, file_bytes, filename,
+            resume_service.validate_format(filename),
+            app.config["RESUME_DIR"], store,
+        )
+        return jsonify({
+            "resume_id": record["id"],
+            "profile_id": profile_id,
+            "privacy_notice": "简历文本仅用于 AI 读取筛选项建议，不会写入日志或接口响应。",
+        })
+
+    @app.route("/api/screening/resume/suggest", methods=["POST"])
+    def screening_resume_suggest():
+        """Read a resume and call AI for filter suggestions.
+
+        Returns {status: "ok", suggestions: {...}} on success, or
+        {status: "ai_unavailable"} when AI is not configured or fails.
+        Never returns the resume text.
+        """
+        raw = request.get_json(silent=True) or {}
+        resume_id = raw.get("resume_id")
+        if not resume_id:
+            raise ValueError("resume_id 不能为空")
+        resume = store.get_resume(resume_id)
+        extracted_text = resume.get("extracted_text") or ""
+        if not extracted_text:
+            raise ValueError("简历文本为空")
+        settings = store.get_ai_settings()
+        cred_ref = store.get_credential_ref()
+        api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
+        if not ai_service.is_ai_available(settings, cred_ref, api_key):
+            return jsonify({"status": "ai_unavailable"})
+        try:
+            suggestions = ai_service.suggest_screening_filters(
+                extracted_text, settings["endpoint_url"], api_key,
+            )
+        except ai_service.AISecurityError:
+            return jsonify({"status": "ai_unavailable"})
+        return jsonify({"status": "ok", "suggestions": suggestions})
+
+    # == US2: screening execution run ====================================
+
+    @app.route("/api/screening/runs", methods=["POST"])
+    def screening_create_run():
+        """Create a screening run with confirmed filters and trigger first-layer search.
+
+        Freezes the filter snapshot, creates a screening run, and executes
+        the first-layer search synchronously. Returns run_id with the final
+        status and source_count. On execution failure the run is persisted
+        as failed and a 500 response with run_id is returned so the client
+        can still reference the run.
+        """
+        raw = request.get_json(silent=True) or {}
+        filters = raw.get("filters") or {}
+        keyword = raw.get("keyword") or ""
+        if not isinstance(filters, dict):
+            raise ValueError("filters 必须是对象")
+        if not is_valid_filters(filters):
+            raise ValueError("filters 含有不允许的字段")
+        if not keyword:
+            raise ValueError("keyword 不能为空")
+
+        frozen = freeze_filters(filters)
+        run = store.create_screening_run(frozen)
+        run_id = run["id"]
+        output_path = Path(app.config["RESULT_DIR"]) / f"screening_{run_id}.json"
+
+        try:
+            search_result = execute_first_layer(
+                frozen, keyword,
+                output_path=str(output_path),
+                python_executable=app.config["PYTHON_EXECUTABLE"],
+                store=store,
+                run_id=run_id,
+            )
+        except Exception:
+            final = store.get_screening_run(run_id)
+            return jsonify({
+                "run_id": run_id,
+                "status": final["status"],
+                "source_count": final["source_count"],
+                "error_code": "execution_failed",
+            }), 500
+
+        # 第二层核验分流：AI 可用时硬规则 + AI 占位，不可用时仅硬规则（FR-034）
+        jobs = search_result.get("jobs", []) if isinstance(search_result, dict) else []
+        ai_settings = store.get_ai_settings()
+        ai_cred_ref = store.get_credential_ref()
+        ai_api_key = ai_service.retrieve_api_key(ai_cred_ref) if ai_cred_ref else ""
+        ai_available = ai_service.is_ai_available(ai_settings, ai_cred_ref, ai_api_key)
+        partition = partition_jobs(jobs, frozen, ai_enabled=ai_available)
+        for job in partition["match"]:
+            store.add_screening_result(run_id, job.get("job_id", ""), "match")
+        for job in partition["mismatch"]:
+            store.add_screening_result(run_id, job.get("job_id", ""), "mismatch")
+        store.update_screening_run_status(
+            run_id, "succeeded",
+            source_count=len(jobs),
+            match_count=len(partition["match"]),
+            mismatch_count=len(partition["mismatch"]),
+        )
+
+        final = store.get_screening_run(run_id)
+        return jsonify({
+            "run_id": run_id,
+            "status": final["status"],
+            "source_count": final["source_count"],
+            "match_count": final["match_count"],
+            "mismatch_count": final["mismatch_count"],
+        }), 201
+
+    @app.route("/api/screening/runs/<run_id>", methods=["GET"])
+    def screening_get_run(run_id):
+        """返回运行状态、source_count、match_count、mismatch_count、error_code。"""
+        try:
+            run = store.get_screening_run(run_id)
+        except KeyError:
+            return jsonify({"error_code": "not_found", "user_message": "运行不存在"}), 404
+        return jsonify({
+            "run_id": run["id"],
+            "status": run["status"],
+            "source_count": run["source_count"],
+            "match_count": run["match_count"],
+            "mismatch_count": run["mismatch_count"],
+            "error_code": run.get("error_code"),
+            "frozen_filters": run.get("frozen_filters", {}),
+        })
+
+    # == US3: match/mismatch zone query ==================================
+
+    def _load_run_jobs(run_id):
+        """从第一层搜索产物读取 jobs 列表（按抓回顺序）。产物不存在返回空。"""
+        output_path = Path(app.config["RESULT_DIR"]) / f"screening_{run_id}.json"
+        if not output_path.is_file():
+            return []
+        try:
+            with output_path.open(encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (json.JSONDecodeError, OSError):
+            return []
+        return payload.get("jobs", []) if isinstance(payload, dict) else []
+
+    def _format_screening_job_item(job, interest_state="none"):
+        """格式化岗位为接口契约字段：job_id/title/company/salary/location/
+        jd_excerpt/canonical_url/interest_state。不返回排除原因。
+        interest_state 由 US4 的展示排除逻辑填充（interested/rejected/none）。
+        """
+        if not isinstance(job, dict):
+            job = {}
+        return {
+            "job_id": job.get("job_id", ""),
+            "title": job.get("title", ""),
+            "company": job.get("boss_name", ""),
+            "salary": job.get("salary", ""),
+            "location": job.get("location", ""),
+            "jd_excerpt": "",  # US3 阶段无 JD 详情，留空
+            "canonical_url": job.get("job_link", ""),
+            "interest_state": interest_state,
+        }
+
+    def _build_zone_canonical_urls(profile_id):
+        """构建感兴趣区与垃圾桶区的 canonical_url 集合（FR-020, FR-022）。
+
+        遍历持久区的 profile_jobs，经 normalize_job_link 规范化 jobs.canonical_url，
+        返回 (interested_urls, rejected_urls)。链接不安全的岗位不纳入集合。
+        """
+        interested_urls = set()
+        for pj in store.list_screening_interested(profile_id):
+            try:
+                job = store.get_job(pj["job_id"])
+            except KeyError:
+                continue
+            url = normalize_job_link(job.get("canonical_url", ""))
+            if url:
+                interested_urls.add(url)
+        rejected_urls = set()
+        for pj in store.list_screening_rejected(profile_id):
+            try:
+                job = store.get_job(pj["job_id"])
+            except KeyError:
+                continue
+            url = normalize_job_link(job.get("canonical_url", ""))
+            if url:
+                rejected_urls.add(url)
+        return interested_urls, rejected_urls
+
+    def _screening_job_interest_state(job, interested_urls, rejected_urls):
+        """根据 screening job 的 job_link 规范化后判断 interest_state。"""
+        if not isinstance(job, dict):
+            return "none"
+        url = normalize_job_link(job.get("job_link", ""))
+        if url in rejected_urls:
+            return "rejected"
+        if url in interested_urls:
+            return "interested"
+        return "none"
+
+    @app.route("/api/screening/runs/<run_id>/matches", methods=["GET"])
+    def screening_matches(run_id):
+        """返回本次执行符合区岗位列表，按抓回顺序排列。
+
+        从 screening_results 查 verdict=match 的 job_id（按 created_at 升序，
+        即抓回顺序），再从第一层搜索产物读 job 详情。不返回排除原因。
+        传入 profile_id 时执行展示排除（FR-022）并填充 interest_state。
+        """
+        try:
+            store.get_screening_run(run_id)
+        except KeyError:
+            return jsonify({"error_code": "not_found", "user_message": "运行不存在"}), 404
+        results = store.get_screening_results(run_id, verdict="match")
+        jobs = _load_run_jobs(run_id)
+        jobs_by_id = {j.get("job_id", ""): j for j in jobs if isinstance(j, dict)}
+        match_jobs = [jobs_by_id.get(r["job_id"], {}) for r in results]
+
+        profile_id = request.args.get("profile_id")
+        states = {}
+        if profile_id:
+            try:
+                store.get_profile(profile_id)
+            except KeyError:
+                profile_id = None
+        if profile_id:
+            interested_urls, rejected_urls = _build_zone_canonical_urls(profile_id)
+            # 经 canonical_url 桥接 screening job_id 与持久垃圾桶记录
+            rejected_screening_ids = {
+                j.get("job_id", "") for j in match_jobs
+                if _screening_job_interest_state(j, interested_urls, rejected_urls) == "rejected"
+            }
+            match_jobs = exclude_trash_jobs(match_jobs, rejected_screening_ids)
+            states = {
+                j.get("job_id", ""): _screening_job_interest_state(j, interested_urls, rejected_urls)
+                for j in match_jobs
+            }
+
+        items = [_format_screening_job_item(j, states.get(j.get("job_id", ""), "none")) for j in match_jobs]
+        return jsonify({"items": items, "count": len(items)})
+
+    @app.route("/api/screening/runs/<run_id>/mismatches", methods=["GET"])
+    def screening_mismatches(run_id):
+        """返回本次执行不符合区岗位列表，混在一起，不返回排除原因、
+        不区分硬规则或 AI 排除。字段同符合区。
+        传入 profile_id 时执行展示排除（FR-022）并填充 interest_state。
+        """
+        try:
+            store.get_screening_run(run_id)
+        except KeyError:
+            return jsonify({"error_code": "not_found", "user_message": "运行不存在"}), 404
+        results = store.get_screening_results(run_id, verdict="mismatch")
+        jobs = _load_run_jobs(run_id)
+        jobs_by_id = {j.get("job_id", ""): j for j in jobs if isinstance(j, dict)}
+        mismatch_jobs = [jobs_by_id.get(r["job_id"], {}) for r in results]
+
+        profile_id = request.args.get("profile_id")
+        states = {}
+        if profile_id:
+            try:
+                store.get_profile(profile_id)
+            except KeyError:
+                profile_id = None
+        if profile_id:
+            interested_urls, rejected_urls = _build_zone_canonical_urls(profile_id)
+            rejected_screening_ids = {
+                j.get("job_id", "") for j in mismatch_jobs
+                if _screening_job_interest_state(j, interested_urls, rejected_urls) == "rejected"
+            }
+            mismatch_jobs = exclude_trash_jobs(mismatch_jobs, rejected_screening_ids)
+            states = {
+                j.get("job_id", ""): _screening_job_interest_state(j, interested_urls, rejected_urls)
+                for j in mismatch_jobs
+            }
+
+        items = [_format_screening_job_item(j, states.get(j.get("job_id", ""), "none")) for j in mismatch_jobs]
+        return jsonify({"items": items, "count": len(items)})
+
+    # == US4: interest / reject / persistent zones =======================
+
+    def _find_screening_job(job_id, run_id):
+        """按 job_id 在指定 run 的第一层搜索产物中查找岗位。未找到返回 None。"""
+        if not run_id:
+            return None
+        for job in _load_run_jobs(run_id):
+            if isinstance(job, dict) and job.get("job_id", "") == job_id:
+                return job
+        return None
+
+    def _save_screening_job_to_store(job):
+        """将 screening 岗位保存到 jobs 表，返回 jobs 记录或 None（链接不安全）。"""
+        canonical_url = normalize_job_link(job.get("job_link", ""))
+        if not canonical_url:
+            return None
+        return store.save_job(
+            canonical_url, canonical_url,
+            job.get("title", ""), job.get("boss_name", ""),
+            job.get("salary", ""), job.get("location", ""), "",
+        )
+
+    @app.route("/api/screening/jobs/<job_id>/interest", methods=["POST"])
+    def screening_mark_interest(job_id):
+        """标记感兴趣：保存岗位到 jobs 表，写入持久感兴趣区（FR-018, FR-019）。
+
+        请求体需含 profile_id 与 run_id；run_id 用于从第一层搜索产物定位岗位详情。
+        链接经 normalize_job_link 校验，不安全返回 400。返回 interest_state。
+        """
+        raw = request.get_json(silent=True) or {}
+        profile_id = raw.get("profile_id")
+        run_id = raw.get("run_id")
+        if not profile_id:
+            raise ValueError("profile_id 不能为空")
+        if not run_id:
+            raise ValueError("run_id 不能为空")
+        try:
+            store.get_profile(profile_id)
+        except KeyError:
+            return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
+        job = _find_screening_job(job_id, run_id)
+        if not job:
+            return jsonify({"error_code": "not_found", "user_message": "岗位不存在"}), 404
+        saved = _save_screening_job_to_store(job)
+        if not saved:
+            return jsonify({"error_code": "invalid_link", "user_message": "岗位链接不安全"}), 400
+        store.mark_screening_interest(profile_id, saved["id"], run_id=run_id)
+        return jsonify({"interest_state": "interested", "job_id": saved["id"]})
+
+    @app.route("/api/screening/jobs/<job_id>/reject", methods=["POST"])
+    def screening_mark_reject(job_id):
+        """标记不感兴趣：保存岗位到 jobs 表，写入持久垃圾桶区（FR-021）。
+
+        请求体需含 profile_id 与 run_id。链接经 normalize_job_link 校验。
+        返回 reject_state。
+        """
+        raw = request.get_json(silent=True) or {}
+        profile_id = raw.get("profile_id")
+        run_id = raw.get("run_id")
+        if not profile_id:
+            raise ValueError("profile_id 不能为空")
+        if not run_id:
+            raise ValueError("run_id 不能为空")
+        try:
+            store.get_profile(profile_id)
+        except KeyError:
+            return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
+        job = _find_screening_job(job_id, run_id)
+        if not job:
+            return jsonify({"error_code": "not_found", "user_message": "岗位不存在"}), 404
+        saved = _save_screening_job_to_store(job)
+        if not saved:
+            return jsonify({"error_code": "invalid_link", "user_message": "岗位链接不安全"}), 400
+        store.mark_screening_reject(profile_id, saved["id"], run_id=run_id)
+        return jsonify({"reject_state": "rejected", "job_id": saved["id"]})
+
+    @app.route("/api/screening/interested", methods=["GET"])
+    def screening_interested_list():
+        """返回持久感兴趣区岗位列表，可长期回看（FR-018, FR-024）。
+
+        每条含 canonical_url，经 normalize_job_link 校验（仅 HTTPS 且预期 BOSS
+        域名），不安全链接返回空字符串（FR-020）。需传入 profile_id 查询参数。
+        """
+        profile_id = request.args.get("profile_id")
+        if not profile_id:
+            raise ValueError("profile_id 不能为空")
+        try:
+            store.get_profile(profile_id)
+        except KeyError:
+            return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
+        interested = store.list_screening_interested(profile_id)
+        items = []
+        for pj in interested:
+            try:
+                job = store.get_job(pj["job_id"])
+            except KeyError:
+                continue
+            canonical_url = normalize_job_link(job.get("canonical_url", ""))
+            items.append({
+                "job_id": job["id"],
+                "title": job.get("title", ""),
+                "company": job.get("company", ""),
+                "salary": job.get("salary", ""),
+                "location": job.get("location", ""),
+                "canonical_url": canonical_url,
+                "interest_state": "interested",
+            })
+        return jsonify({"items": items, "count": len(items)})
+
+    @app.route("/api/screening/trash", methods=["GET"])
+    def screening_trash_list():
+        """返回持久垃圾桶区岗位列表，可查看（FR-024）。
+
+        需传入 profile_id 查询参数。canonical_url 经 normalize_job_link 校验。
+        """
+        profile_id = request.args.get("profile_id")
+        if not profile_id:
+            raise ValueError("profile_id 不能为空")
+        try:
+            store.get_profile(profile_id)
+        except KeyError:
+            return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
+        rejected = store.list_screening_rejected(profile_id)
+        items = []
+        for pj in rejected:
+            try:
+                job = store.get_job(pj["job_id"])
+            except KeyError:
+                continue
+            canonical_url = normalize_job_link(job.get("canonical_url", ""))
+            items.append({
+                "job_id": job["id"],
+                "title": job.get("title", ""),
+                "company": job.get("company", ""),
+                "salary": job.get("salary", ""),
+                "location": job.get("location", ""),
+                "canonical_url": canonical_url,
+                "reject_state": "rejected",
+            })
+        return jsonify({"items": items, "count": len(items)})
 
     # == US2: search runs ================================================
 

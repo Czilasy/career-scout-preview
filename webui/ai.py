@@ -14,6 +14,8 @@ from urllib.parse import urlparse
 import requests
 import keyring
 
+from scripts import boss_cdp_raw as boss
+
 
 KEYRING_SERVICE = "boss-workbench"
 DEFAULT_TIMEOUT = 60
@@ -311,6 +313,63 @@ def parse_resume(resume_text: str, endpoint_url: str, api_key: str) -> dict:
     return validate_resume_response(data)
 
 
+def suggest_screening_filters(resume_text: str, endpoint_url: str, api_key: str,
+                              timeout: int = DEFAULT_TIMEOUT) -> dict:
+    """Call AI to read a resume and suggest BOSS filter values.
+
+    Returns ``{city, salary, experience, degree, scale, stage, industry}``
+    where each value is a valid code or empty string. Invalid codes are
+    coerced to empty so downstream merging skips them. "0" (不限) is treated
+    as empty to match build_screening_filter_options.
+
+    Raises :class:`AISecurityError` on timeout/network/invalid responses.
+    The exception never contains the resume text or API key.
+    """
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是简历筛选助手。根据简历内容给出BOSS直聘筛选项建议值，返回JSON："
+                "city(城市名,str,如上海), salary(薪资段代码,str,如405代表10-20K), "
+                "experience(经验代码,str,如105代表3-5年), degree(学历代码,str,如203代表本科), "
+                "scale(公司规模代码,str,如303代表100-499人), "
+                "stage(融资阶段代码,str,如804代表B轮), "
+                "industry(行业代码,str,如1001代表互联网)。"
+                "无法从简历提取的字段返回空字符串。禁止编造。"
+            ),
+        },
+        {"role": "user", "content": resume_text},
+    ]
+    data = call_ai(endpoint_url, api_key, messages, timeout=timeout)
+    return _validate_suggest_response(data)
+
+
+def _validate_suggest_response(data) -> dict:
+    """Validate AI suggest response: keep only valid codes, coerce invalid to empty."""
+    if not isinstance(data, dict):
+        raise AISecurityError(ERROR_INVALID)
+    valid_sets = {
+        name: {v for v in mapping.values() if v != "0"}
+        for name, mapping in (
+            ("salary", boss.SALARY_MAP),
+            ("experience", boss.EXPERIENCE_MAP),
+            ("degree", boss.DEGREE_MAP),
+            ("scale", boss.SCALE_MAP),
+            ("stage", boss.STAGE_MAP),
+            ("industry", boss.INDUSTRY_MAP),
+        )
+    }
+    valid_sets["city"] = {n for n in boss.CITY_MAP if n != "全国"}
+    result = {}
+    for field in ("city", "salary", "experience", "degree", "scale", "stage", "industry"):
+        val = data.get(field, "")
+        if not isinstance(val, str):
+            val = ""
+        val = val.strip()
+        result[field] = val if val in valid_sets[field] else ""
+    return result
+
+
 def rank_jds(confirmed_fields: dict, jobs_with_jd: list, endpoint_url: str, api_key: str) -> list[str]:
     """Call AI to rank jobs by relevance, in batches of at most 10.
 
@@ -389,3 +448,47 @@ def update_preference(profile: dict, feedback_events: list, endpoint_url: str, a
     ]
     data = call_ai(endpoint_url, api_key, messages)
     return validate_preference_response(data)
+
+
+# ---------------------------------------------------------------------------
+# AI 语义相似度占位（T031）
+# ---------------------------------------------------------------------------
+
+def assess_semantic_similarity(resume_text, jd_text) -> dict:
+    """AI 语义相似度占位实现（恒返回过）。
+
+    接口契约：输入简历原文与职位 JD 全文，输出结构化结果，至少含
+    ``verdict``: "match"/"mismatch"。本次为占位，恒返回 verdict="match"，
+    使本次结果分流完全由硬规则决定（plan.md "AI 语义相似度" 节）。
+
+    占位不调 AI（call_ai）、不访问凭据库（keyring）、不发 HTTP 请求，
+    也不在返回值中泄露入参文本。未来 AI 框架设计落地后替换此占位即可，
+    不改动分流与区域逻辑（见 FR-030；框架设计本次不实现）。
+    """
+    return {"verdict": "match"}
+
+
+# ---------------------------------------------------------------------------
+# AI availability detection (T047, FR-031 / FR-032)
+# ---------------------------------------------------------------------------
+
+def is_ai_available(settings, credential_ref, api_key) -> bool:
+    """检测 AI 服务是否可用（FR-031, FR-032）。
+
+    纯函数：只检查入参是否齐全，不调 AI（call_ai）、不访凭据库（keyring）、
+    不发 HTTP 请求（requests）。调用方负责从凭据库取 api_key 后传入。
+    三条件全满足返回 True，任一不满足返回 False：
+
+    1. *settings* 是 dict 且 ``settings["is_configured"]`` 为真；
+    2. *credential_ref* 是非空字符串；
+    3. *api_key* 是非空字符串。
+
+    返回值恒为 bool，永不包含凭据本身——可安全用于日志与响应。
+    """
+    if not isinstance(settings, dict) or not settings.get("is_configured"):
+        return False
+    if not isinstance(credential_ref, str) or not credential_ref.strip():
+        return False
+    if not isinstance(api_key, str) or not api_key.strip():
+        return False
+    return True

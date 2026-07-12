@@ -147,6 +147,8 @@ class TaskStore:
             self._migration_002()
         if current < 3:
             self._migration_003()
+        if current < 4:
+            self._migration_004()
         # A process restart cannot resume an in-memory child process. Record
         # that fact instead of leaving a permanently "running" UI state.
         with self._connection() as conn:
@@ -311,6 +313,43 @@ class TaskStore:
             )
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) VALUES (3, ?, 'search run events')",
+                (_now(),),
+            )
+
+    def _migration_004(self):
+        """Add screening_runs and screening_results tables (002 resume-driven filtering)."""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS screening_runs (
+                    id TEXT PRIMARY KEY,
+                    frozen_filters_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL,
+                    source_count INTEGER NOT NULL DEFAULT 0,
+                    match_count INTEGER NOT NULL DEFAULT 0,
+                    mismatch_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    error_code TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS screening_results (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(run_id, job_id),
+                    FOREIGN KEY (run_id) REFERENCES screening_runs(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (4, ?, 'screening runs and results')",
                 (_now(),),
             )
 
@@ -595,6 +634,167 @@ class TaskStore:
                 (status, last_error_code, _now()),
             )
         return self.get_ai_settings()
+
+    # -- screening runs ----------------------------------------------------
+
+    def create_screening_run(self, frozen_filters) -> dict:
+        rid = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO screening_runs (id, frozen_filters_json, status, source_count, match_count, mismatch_count, created_at, updated_at, error_code) "
+                "VALUES (?, ?, 'queued', 0, 0, 0, ?, ?, NULL)",
+                (rid, json.dumps(frozen_filters, ensure_ascii=False), ts, ts),
+            )
+        return self.get_screening_run(rid)
+
+    def get_screening_run(self, run_id) -> dict:
+        with self._connection() as conn:
+            row = conn.execute("SELECT * FROM screening_runs WHERE id = ?", (str(run_id),)).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        result = dict(row)
+        result["frozen_filters"] = json.loads(result.pop("frozen_filters_json", "{}") or "{}")
+        return result
+
+    def update_screening_run_status(self, run_id, status, *, source_count=None,
+                                    match_count=None, mismatch_count=None, error_code=None) -> dict:
+        ts = _now()
+        fields = ["status = ?", "updated_at = ?"]
+        values = [status, ts]
+        if source_count is not None:
+            fields.append("source_count = ?")
+            values.append(int(source_count))
+        if match_count is not None:
+            fields.append("match_count = ?")
+            values.append(int(match_count))
+        if mismatch_count is not None:
+            fields.append("mismatch_count = ?")
+            values.append(int(mismatch_count))
+        if error_code is not None:
+            fields.append("error_code = ?")
+            values.append(error_code)
+        values.append(str(run_id))
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE screening_runs SET {', '.join(fields)} WHERE id = ?",
+                values,
+            )
+        return self.get_screening_run(run_id)
+
+    # -- screening results (match/mismatch zones, run-isolated) -----------
+
+    def add_screening_result(self, run_id, job_id, verdict) -> dict:
+        """添加一条核验结果到指定 run。
+
+        verdict 为 "match" 或 "mismatch"。同一 (run_id, job_id) 重复添加
+        会因 UNIQUE 约束抛 IntegrityError。不存储核验明细或排除原因
+        (data-model.md: "不存储核验明细或排除原因")。
+        """
+        rid = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (rid, str(run_id), str(job_id), verdict, ts),
+            )
+        return {
+            "id": rid,
+            "run_id": str(run_id),
+            "job_id": str(job_id),
+            "verdict": verdict,
+            "created_at": ts,
+        }
+
+    def get_screening_results(self, run_id, verdict=None) -> list:
+        """查询指定 run 的核验结果，按 created_at 升序（即插入/抓回顺序）。
+
+        可选 verdict 过滤 ("match"/"mismatch")。返回 list of dict，每条含
+        id/run_id/job_id/verdict/created_at。新 run 自然返回空列表
+        (区域清空通过 run_id 隔离实现，旧 run 结果作为历史保留)。
+        """
+        with self._connection() as conn:
+            if verdict:
+                rows = conn.execute(
+                    "SELECT * FROM screening_results WHERE run_id = ? AND verdict = ? "
+                    "ORDER BY created_at ASC, id ASC",
+                    (str(run_id), verdict),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM screening_results WHERE run_id = ? "
+                    "ORDER BY created_at ASC, id ASC",
+                    (str(run_id),),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_screening_results(self, run_id) -> dict:
+        """统计指定 run 的 match/mismatch 数量。返回 {"match": N, "mismatch": N}。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT verdict, COUNT(*) AS cnt FROM screening_results "
+                "WHERE run_id = ? GROUP BY verdict",
+                (str(run_id),),
+            ).fetchall()
+        counts = {"match": 0, "mismatch": 0}
+        for row in rows:
+            v = row["verdict"]
+            if v in counts:
+                counts[v] = int(row["cnt"])
+        return counts
+
+    # -- screening feedback persistence (interested / rejected zones) -----
+
+    def mark_screening_interest(self, profile_id, job_id, run_id=None) -> dict:
+        """标记岗位为感兴趣：profile_jobs.status='interested' + feedback_events。
+
+        复用 001 的 create_feedback（内部已更新 status='interested'）。
+        若 profile_job 记录不存在则先建立。感兴趣进持久感兴趣区，跨简历保留。
+        """
+        # 确保 profile_job 记录存在（status 默认 new）
+        try:
+            self.get_profile_job(profile_id, job_id)
+        except KeyError:
+            self.link_profile_job(profile_id, job_id, run_id, run_id, status="new")
+        # create_feedback 内部对 action='interested' 会更新 status='interested'
+        return self.create_feedback(profile_id, job_id, run_id, "interested")
+
+    def mark_screening_reject(self, profile_id, job_id, run_id=None) -> dict:
+        """标记岗位为不感兴趣：profile_jobs.status='deleted' + feedback_events。
+
+        复用 001 的 create_feedback（写 not_interested 反馈），并显式设
+        status='deleted' 使其进入持久垃圾桶区。跨简历保留。
+        """
+        # 确保 profile_job 记录存在
+        try:
+            self.get_profile_job(profile_id, job_id)
+        except KeyError:
+            self.link_profile_job(profile_id, job_id, run_id, run_id, status="new")
+        # create_feedback 对 not_interested 不自动更新 status，需显式设
+        feedback = self.create_feedback(profile_id, job_id, run_id, "not_interested")
+        self.update_profile_job(profile_id, job_id, status="deleted")
+        return feedback
+
+    def list_screening_interested(self, profile_id) -> list:
+        """返回持久感兴趣区的 profile_jobs 列表（status='interested'）。
+
+        按最近反馈时间降序（shown_at DESC），便于长期回看。
+        """
+        return self.list_profile_jobs(profile_id, status="interested")
+
+    def list_screening_rejected(self, profile_id) -> list:
+        """返回持久垃圾桶区的 profile_jobs 列表（status='deleted'）。"""
+        return self.list_profile_jobs(profile_id, status="deleted")
+
+    def list_screening_rejected_job_ids(self, profile_id) -> list:
+        """返回垃圾桶区的 job_id 列表，用于展示阶段排除。
+
+        只返回当前 status='deleted' 的 job_id；已改为 interested 的不包含。
+        排除只按具体岗位识别，不扩展。
+        """
+        rejected = self.list_screening_rejected(profile_id)
+        return [r["job_id"] for r in rejected]
 
     # -- search runs -------------------------------------------------------
 

@@ -719,5 +719,253 @@ class CredentialManagementTests(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# suggest_screening_filters (T012)
+# ---------------------------------------------------------------------------
+
+class ScreeningSuggestTests(unittest.TestCase):
+    """T012: AI suggest screening filters — JSON parse, validate, timeout, safe errors."""
+
+    def _valid_payload(self):
+        return {
+            "city": "上海", "salary": "405", "experience": "105",
+            "degree": "203", "scale": "", "stage": "", "industry": "",
+        }
+
+    def test_valid_suggest_returns_seven_fields(self):
+        from webui.ai import suggest_screening_filters
+
+        with patch("webui.ai.call_ai", return_value=self._valid_payload()):
+            result = suggest_screening_filters("resume", "http://ep", "key")
+        expected = {"city", "salary", "experience", "degree", "scale", "stage", "industry"}
+        self.assertEqual(set(result.keys()), expected)
+        self.assertEqual(result["city"], "上海")
+        self.assertEqual(result["salary"], "405")
+
+    def test_invalid_salary_code_becomes_empty(self):
+        from webui.ai import suggest_screening_filters
+
+        payload = self._valid_payload()
+        payload["salary"] = "999"  # 非法代码
+        with patch("webui.ai.call_ai", return_value=payload):
+            result = suggest_screening_filters("resume", "http://ep", "key")
+        self.assertEqual(result["salary"], "")
+
+    def test_invalid_city_becomes_empty(self):
+        from webui.ai import suggest_screening_filters
+
+        payload = self._valid_payload()
+        payload["city"] = "不存在的城市"
+        with patch("webui.ai.call_ai", return_value=payload):
+            result = suggest_screening_filters("resume", "http://ep", "key")
+        self.assertEqual(result["city"], "")
+
+    def test_empty_strings_preserved(self):
+        from webui.ai import suggest_screening_filters
+
+        with patch("webui.ai.call_ai", return_value=self._valid_payload()):
+            result = suggest_screening_filters("resume", "http://ep", "key")
+        self.assertEqual(result["scale"], "")
+        self.assertEqual(result["stage"], "")
+
+    def test_non_string_value_coerced_to_empty(self):
+        from webui.ai import suggest_screening_filters
+
+        payload = self._valid_payload()
+        payload["salary"] = 405  # int, not str
+        with patch("webui.ai.call_ai", return_value=payload):
+            result = suggest_screening_filters("resume", "http://ep", "key")
+        self.assertEqual(result["salary"], "")
+
+    def test_timeout_raises_ai_security_error(self):
+        from webui.ai import suggest_screening_filters, AISecurityError, ERROR_TIMEOUT
+
+        with patch("webui.ai.call_ai", side_effect=AISecurityError(ERROR_TIMEOUT)):
+            with self.assertRaises(AISecurityError) as ctx:
+                suggest_screening_filters("resume", "http://ep", "key")
+            self.assertEqual(ctx.exception.error_code, ERROR_TIMEOUT)
+
+    def test_network_error_raises_ai_security_error(self):
+        from webui.ai import suggest_screening_filters, AISecurityError, ERROR_NETWORK
+
+        with patch("webui.ai.call_ai", side_effect=AISecurityError(ERROR_NETWORK)):
+            with self.assertRaises(AISecurityError) as ctx:
+                suggest_screening_filters("resume", "http://ep", "key")
+            self.assertEqual(ctx.exception.error_code, ERROR_NETWORK)
+
+    def test_invalid_json_raises_ai_security_error(self):
+        from webui.ai import suggest_screening_filters, AISecurityError, ERROR_INVALID
+
+        with patch("webui.ai.call_ai", side_effect=AISecurityError(ERROR_INVALID)):
+            with self.assertRaises(AISecurityError) as ctx:
+                suggest_screening_filters("resume", "http://ep", "key")
+            self.assertEqual(ctx.exception.error_code, ERROR_INVALID)
+
+    def test_error_excludes_resume_text(self):
+        from webui.ai import suggest_screening_filters, AISecurityError, ERROR_TIMEOUT
+
+        sensitive = "我的真实姓名是张三身份证110101199001011234"
+        with patch("webui.ai.call_ai", side_effect=AISecurityError(ERROR_TIMEOUT)):
+            with self.assertRaises(AISecurityError) as ctx:
+                suggest_screening_filters(sensitive, "http://ep", "key")
+            self.assertNotIn(sensitive, str(ctx.exception))
+            self.assertNotIn("张三", str(ctx.exception))
+
+    def test_error_excludes_api_key(self):
+        from webui.ai import suggest_screening_filters, AISecurityError, ERROR_TIMEOUT
+
+        api_key = "sk-secret-key-1234567890"
+        with patch("webui.ai.call_ai", side_effect=AISecurityError(ERROR_TIMEOUT)):
+            with self.assertRaises(AISecurityError) as ctx:
+                suggest_screening_filters("resume", "http://ep", api_key)
+            self.assertNotIn(api_key, str(ctx.exception))
+
+    def test_suggest_does_not_return_resume_text(self):
+        from webui.ai import suggest_screening_filters
+
+        sensitive = "我的真实姓名是张三"
+        with patch("webui.ai.call_ai", return_value=self._valid_payload()):
+            result = suggest_screening_filters(sensitive, "http://ep", "key")
+        # 返回值只有 7 个筛选项字段，不含简历正文
+        self.assertNotIn(sensitive, str(result))
+        self.assertNotIn("张三", str(result))
+
+
+# ---------------------------------------------------------------------------
+# T026: assess_semantic_similarity — AI 语义相似度占位（恒返回过、不调 AI）
+# ---------------------------------------------------------------------------
+
+class SemanticSimilarityPlaceholderTests(unittest.TestCase):
+    """T026: AI semantic similarity placeholder.
+
+    Contract: input resume_text + jd_text, output dict with verdict
+    (match/mismatch). Placeholder always returns verdict="match", does not
+    call AI, does not access keyring or make HTTP requests. Framework design
+    is deferred; replacing the placeholder must not change the contract.
+    """
+
+    def setUp(self):
+        from webui.ai import assess_semantic_similarity
+        self.assess = assess_semantic_similarity
+
+    def test_placeholder_returns_match_verdict(self):
+        result = self.assess("resume text", "jd text")
+        self.assertEqual(result.get("verdict"), "match")
+
+    def test_placeholder_always_returns_match_for_any_input(self):
+        for resume, jd in [
+            ("Python 后端", "Java 前端"),
+            ("", ""),
+            ("经验丰富", "要求初级"),
+        ]:
+            result = self.assess(resume, jd)
+            self.assertEqual(result["verdict"], "match", f"{resume!r}/{jd!r}")
+
+    def test_placeholder_does_not_call_ai(self):
+        with patch("webui.ai.call_ai") as mock_call:
+            result = self.assess("resume", "jd")
+            mock_call.assert_not_called()
+            self.assertEqual(result["verdict"], "match")
+
+    def test_placeholder_does_not_access_keyring(self):
+        with patch("webui.ai.keyring") as mock_keyring:
+            result = self.assess("resume", "jd")
+            mock_keyring.get_password.assert_not_called()
+            self.assertEqual(result["verdict"], "match")
+
+    def test_placeholder_does_not_make_http_requests(self):
+        with patch("webui.ai.requests") as mock_requests:
+            result = self.assess("resume", "jd")
+            mock_requests.post.assert_not_called()
+            self.assertEqual(result["verdict"], "match")
+
+    def test_placeholder_returns_dict_with_verdict_key(self):
+        result = self.assess("resume", "jd")
+        self.assertIsInstance(result, dict)
+        self.assertIn("verdict", result)
+
+    def test_placeholder_does_not_leak_resume_text(self):
+        sensitive = "SECRET_RESUME_42"
+        result = self.assess(sensitive, "jd")
+        self.assertNotIn(sensitive, str(result))
+
+    def test_placeholder_does_not_leak_jd_text(self):
+        sensitive = "SECRET_JD_99"
+        result = self.assess("resume", sensitive)
+        self.assertNotIn(sensitive, str(result))
+
+
+class AIAvailabilityTests(unittest.TestCase):
+    """T045: AI 不可用检测与提示（FR-031, FR-032）。
+
+    is_ai_available 是纯函数：接收 settings（含 is_configured）、credential_ref、
+    api_key，返回 bool。不调 AI、不访 keyring、不发 HTTP。调用方负责从凭据库
+    取 api_key。不可用时返回 False，可用时返回 True，永不泄露凭据。
+    """
+
+    def setUp(self):
+        from webui.ai import is_ai_available
+        self.check = is_ai_available
+
+    def _settings(self, configured=True):
+        return {
+            "endpoint_url": "https://api.example.com/v1" if configured else "",
+            "status": "ready" if configured else "unconfigured",
+            "is_configured": configured,
+        }
+
+    # -- 可用 --
+
+    def test_available_when_configured_and_key_present(self):
+        self.assertTrue(self.check(self._settings(True), "host-ref", "sk-real-key"))
+
+    # -- 不可用 --
+
+    def test_unavailable_when_not_configured(self):
+        self.assertFalse(self.check(self._settings(False), "host-ref", "sk-real-key"))
+
+    def test_unavailable_when_credential_ref_empty(self):
+        self.assertFalse(self.check(self._settings(True), "", "sk-real-key"))
+
+    def test_unavailable_when_api_key_empty(self):
+        self.assertFalse(self.check(self._settings(True), "host-ref", ""))
+
+    def test_unavailable_when_all_missing(self):
+        self.assertFalse(self.check(self._settings(False), "", ""))
+
+    # -- 安全：不泄露凭据 --
+
+    def test_return_value_is_bool_not_string_with_key(self):
+        result = self.check(self._settings(True), "host-ref", "SECRET_KEY_42")
+        self.assertIsInstance(result, bool)
+        self.assertNotIn("SECRET_KEY_42", str(result))
+
+    def test_does_not_call_ai(self):
+        with patch("webui.ai.call_ai") as mock_call:
+            self.check(self._settings(True), "ref", "key")
+            mock_call.assert_not_called()
+
+    def test_does_not_access_keyring(self):
+        with patch("webui.ai.keyring") as mock_keyring:
+            self.check(self._settings(True), "ref", "key")
+            mock_keyring.get_password.assert_not_called()
+
+    def test_does_not_make_http_requests(self):
+        with patch("webui.ai.requests") as mock_requests:
+            self.check(self._settings(True), "ref", "key")
+            mock_requests.post.assert_not_called()
+
+    # -- 边界 --
+
+    def test_none_settings_returns_false(self):
+        self.assertFalse(self.check(None, "ref", "key"))
+
+    def test_none_credential_ref_returns_false(self):
+        self.assertFalse(self.check(self._settings(True), None, "key"))
+
+    def test_none_api_key_returns_false(self):
+        self.assertFalse(self.check(self._settings(True), "ref", None))
+
+
 if __name__ == "__main__":
     unittest.main()

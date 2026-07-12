@@ -1,0 +1,16 @@
+{
+  "full": {
+    "city": "上海",
+    "salary": "405",
+    "experience": "105",
+    "degree": "203",
+    "scale": "303",
+    "stage": "804",
+    "industry": "1001"
+  },
+  "partial": {
+    "city": "上海",
+    "salary": "405"
+  },
+  "empty": {}
+}

@@ -163,12 +163,95 @@
       .job-card-list { padding: 10px 12px; }
       .card-jd { -webkit-line-clamp: 2; }
       :root { --card-h: 320px; }
+      .screening-topbar { padding: 10px 12px; }
+      .zone-container { padding: 10px 12px; }
     }
+
+    /* == 视图切换 == */
+    .view-tabs { display: flex; gap: 2px; }
+    .view-tab {
+      padding: 4px 12px; border-radius: 6px; font-size: 13px; color: var(--muted);
+      transition: background .15s, color .15s; cursor: pointer;
+    }
+    .view-tab.active { background: var(--surface-2); color: var(--text); }
+
+    /* == 筛选工作区 == */
+    .screening-workspace { display: none; height: calc(100vh - var(--header-h)); flex-direction: column; overflow: hidden; }
+    .screening-workspace.active { display: flex; }
+    .workspace.hidden { display: none; }
+
+    .screening-topbar {
+      padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--surface);
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    }
+    .screening-topbar .field { margin: 0; }
+    .screening-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+    .screening-filters select {
+      padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px;
+      background: var(--bg); font-size: 12px; min-width: 90px; outline: none;
+    }
+    .screening-filters select:focus { border-color: var(--accent); }
+    .screening-status { font-size: 13px; color: var(--muted); }
+    .screening-status strong { color: var(--text); }
+    .screening-keyword {
+      flex: 1; min-width: 150px; padding: 6px 10px; border: 1px solid var(--line);
+      border-radius: 6px; background: var(--bg); outline: none;
+    }
+    .screening-keyword:focus { border-color: var(--accent); }
+
+    /* == 两区切换 == */
+    .zone-tabs { display: flex; gap: 4px; padding: 8px 20px; border-bottom: 1px solid var(--line); background: var(--surface); }
+    .zone-tab {
+      padding: 6px 16px; border-radius: 6px; font-size: 13px; color: var(--muted);
+      transition: background .15s, color .15s; cursor: pointer;
+    }
+    .zone-tab.active { background: var(--accent-soft); color: var(--text); }
+
+    .zone-container { flex: 1; overflow-y: auto; padding: 16px 20px; display: none; flex-direction: column; gap: 12px; }
+    .zone-container.active { display: flex; }
+
+    /* == 筛选岗位卡片 == */
+    .screening-card {
+      background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+      padding: 16px; height: var(--card-h); display: flex; flex-direction: column; gap: 8px;
+      animation: cardEnter .3s ease-out;
+    }
+    .screening-card-actions { display: flex; gap: 8px; align-items: center; }
+
+    /* == 感兴趣区与垃圾桶区入口 == */
+    .zone-entries { display: flex; gap: 8px; padding: 8px 20px; border-top: 1px solid var(--line); background: var(--surface); }
+
+    /* == 降级态 == */
+    .ai-unavailable-prompt {
+      padding: 8px 12px; background: rgba(210,153,34,.1); border: 1px solid var(--warning);
+      border-radius: 6px; font-size: 12px; color: var(--warning); display: none;
+      width: 100%;
+    }
+    .ai-unavailable-prompt.show { display: block; }
+    .skip-resume-option { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; cursor: pointer; }
+    .manual-filter-hint { font-size: 11px; color: var(--muted); }
+
+    /* == 模态层（感兴趣区/垃圾桶区） == */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 150;
+      display: none; align-items: center; justify-content: center;
+    }
+    .modal-overlay.show { display: flex; }
+    .modal-content {
+      background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius);
+      width: 90%; max-width: 800px; max-height: 80vh; overflow-y: auto; padding: 20px;
+    }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+    .modal-close { font-size: 18px; color: var(--muted); cursor: pointer; }
   </style>
 </head>
 <body>
   <div class="app-header">
     <div class="brand"><span class="brand-dot"></span>AI 求职工作台</div>
+    <div class="view-tabs">
+      <div class="view-tab active" onclick="switchView('workbench')">工作台</div>
+      <div class="view-tab" onclick="switchView('screening')">筛选</div>
+    </div>
     <div class="header-actions">
       <span class="conn-status" id="connectionStatus">未连接</span>
     </div>
@@ -270,6 +353,69 @@
         <div class="empty-state">上传简历或手动输入关键词，点击搜索开始</div>
       </div>
     </main>
+  </div>
+
+  <!-- 筛选工作区（T054-T057） -->
+  <div class="screening-workspace" id="screeningWorkspace">
+    <div class="screening-topbar">
+      <div class="ai-unavailable-prompt" data-screening="ai-unavailable" id="aiUnavailablePrompt">
+        AI 不可用：可跳过简历，人工填写筛选条件，第二层仅硬规则核验
+      </div>
+      <div class="field" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        <input type="file" data-screening="resume-upload" id="screeningResumeFile" accept=".txt,.pdf,.docx">
+        <button class="btn" data-screening="suggest-btn" onclick="suggestScreeningFilters()">AI 建议填筛</button>
+        <label class="skip-resume-option" data-screening="skip-resume">
+          <input type="checkbox" id="skipResumeCheck"> 跳过简历
+        </label>
+        <span class="manual-filter-hint">人工填筛：字段无必填，留空即不限</span>
+      </div>
+      <div class="screening-filters" data-screening="filters">
+        <select data-filter="city" id="screeningFilterCity"><option value="">城市（不限）</option></select>
+        <select data-filter="salary" id="screeningFilterSalary"><option value="">薪资（不限）</option></select>
+        <select data-filter="experience" id="screeningFilterExperience"><option value="">经验（不限）</option></select>
+        <select data-filter="degree" id="screeningFilterDegree"><option value="">学历（不限）</option></select>
+        <select data-filter="scale" id="screeningFilterScale"><option value="">规模（不限）</option></select>
+        <select data-filter="stage" id="screeningFilterStage"><option value="">阶段（不限）</option></select>
+        <select data-filter="industry" id="screeningFilterIndustry"><option value="">行业（不限）</option></select>
+      </div>
+      <input type="text" data-screening="keyword" id="screeningKeyword" class="screening-keyword" placeholder="搜索关键词">
+      <button class="btn primary" data-screening="execute-btn" onclick="executeScreeningRun()">执行筛选</button>
+      <div class="screening-status" data-screening="status" id="screeningStatus">点击执行开始筛选</div>
+    </div>
+
+    <div class="zone-tabs">
+      <div class="zone-tab active" data-zone-tab="match" onclick="switchZone('match')">符合区</div>
+      <div class="zone-tab" data-zone-tab="mismatch" onclick="switchZone('mismatch')">不符合区</div>
+    </div>
+
+    <div class="zone-container active" data-zone="match" id="matchZone">
+      <div class="empty-state">执行筛选后，符合硬规则的岗位将显示在这里</div>
+    </div>
+    <div class="zone-container" data-zone="mismatch" id="mismatchZone">
+      <div class="empty-state">不符合硬规则的岗位将显示在这里</div>
+    </div>
+
+    <div class="zone-entries">
+      <button class="btn" data-screening="interested-entry" onclick="loadInterestedJobs()">感兴趣区</button>
+      <button class="btn" data-screening="trash-entry" onclick="loadTrashJobs()">垃圾桶</button>
+    </div>
+  </div>
+
+  <!-- 筛选岗位卡片模板（隐藏，供 JS 克隆） -->
+  <div data-screening="job-card" id="screeningCardTemplate" style="display:none;" aria-hidden="true">
+    <button type="button" data-feedback="interest">感兴趣</button>
+    <button type="button" data-feedback="reject">不感兴趣</button>
+  </div>
+
+  <!-- 感兴趣区/垃圾桶区模态层 -->
+  <div class="modal-overlay" id="zoneModal" onclick="closeZoneModal(event)">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div class="section-title" id="zoneModalTitle">列表</div>
+        <span class="modal-close" onclick="closeZoneModalDirect()">&times;</span>
+      </div>
+      <div id="zoneModalList"></div>
+    </div>
   </div>
 
   <div class="undo-bar" id="undoBar">
@@ -654,6 +800,321 @@
       const div = document.createElement("div");
       div.textContent = String(text || "");
       return div.innerHTML;
+    }
+
+    // == 筛选视图（T054-T057）==
+
+    // 视图切换
+    function switchView(view) {
+      const workbench = document.querySelector(".workspace");
+      const screening = document.getElementById("screeningWorkspace");
+      const tabs = document.querySelectorAll(".view-tab");
+      tabs.forEach(t => t.classList.remove("active"));
+      if (view === "screening") {
+        workbench.classList.add("hidden");
+        screening.classList.add("active");
+        tabs[1].classList.add("active");
+        if (!screening._initialized) { loadScreeningFilterOptions(); screening._initialized = true; }
+      } else {
+        workbench.classList.remove("hidden");
+        screening.classList.remove("active");
+        tabs[0].classList.add("active");
+      }
+    }
+
+    // 筛选 API 端点
+    const ScreeningAPI = {
+      filterOptions: "/api/screening/filter-options",
+      resume: "/api/screening/resume",
+      suggest: "/api/screening/resume/suggest",
+      runs: "/api/screening/runs",
+      interested: "/api/screening/interested",
+      trash: "/api/screening/trash",
+    };
+
+    let screeningRunId = "";
+    let screeningPollTimer = null;
+    let screeningResumeId = "";
+
+    // 加载筛选项枚举
+    async function loadScreeningFilterOptions() {
+      try {
+        const resp = await fetch(ScreeningAPI.filterOptions);
+        const data = await resp.json();
+        const options = data.options || {};
+        const fieldMap = {
+          city: "screeningFilterCity", salary: "screeningFilterSalary",
+          experience: "screeningFilterExperience", degree: "screeningFilterDegree",
+          scale: "screeningFilterScale", stage: "screeningFilterStage",
+          industry: "screeningFilterIndustry",
+        };
+        for (const [key, elId] of Object.entries(fieldMap)) {
+          const sel = document.getElementById(elId);
+          if (!sel || !options[key]) continue;
+          sel.innerHTML = "";
+          for (const opt of options[key]) {
+            const o = document.createElement("option");
+            o.value = opt.value; o.textContent = opt.label;
+            sel.appendChild(o);
+          }
+        }
+      } catch(e) { /* 筛选项加载失败时保留不限选项 */ }
+    }
+
+    // 上传简历 + AI 建议填筛
+    async function suggestScreeningFilters() {
+      const skipResume = document.getElementById("skipResumeCheck").checked;
+      if (!skipResume) {
+        const fileInput = document.getElementById("screeningResumeFile");
+        if (!fileInput.files.length) { alert("请选择简历文件或勾选跳过简历"); return; }
+        const formData = new FormData();
+        formData.append("file", fileInput.files[0]);
+        try {
+          const uploadResp = await fetch(ScreeningAPI.resume, {
+            method: "POST", body: formData, headers: { "X-Boss-Token": token },
+          });
+          if (!uploadResp.ok) { alert("简历上传失败"); return; }
+          const uploadData = await uploadResp.json();
+          screeningResumeId = uploadData.resume_id || "";
+        } catch(e) { alert("简历上传失败"); return; }
+      }
+      try {
+        const resp = await api(ScreeningAPI.suggest, {
+          method: "POST", json: { resume_id: screeningResumeId },
+        });
+        const data = await resp.json();
+        if (data.status === "ai_unavailable") {
+          showScreeningDegradation();
+          return;
+        }
+        if (data.suggestions) {
+          applyScreeningSuggestions(data.suggestions);
+        }
+      } catch(e) { /* 建议失败时用户手动填筛 */ }
+    }
+
+    function applyScreeningSuggestions(suggestions) {
+      const sugMap = {};
+      for (const s of (suggestions || [])) {
+        if (s.field && s.value !== undefined) sugMap[s.field] = s.value;
+      }
+      const fieldMap = {
+        city: "screeningFilterCity", salary: "screeningFilterSalary",
+        experience: "screeningFilterExperience", degree: "screeningFilterDegree",
+        scale: "screeningFilterScale", stage: "screeningFilterStage",
+        industry: "screeningFilterIndustry",
+      };
+      for (const [key, elId] of Object.entries(fieldMap)) {
+        if (sugMap[key] !== undefined) {
+          const sel = document.getElementById(elId);
+          if (sel) sel.value = sugMap[key];
+        }
+      }
+    }
+
+    // 执行筛选运行
+    async function executeScreeningRun() {
+      const keyword = document.getElementById("screeningKeyword").value.trim();
+      if (!keyword) { alert("请输入搜索关键词"); return; }
+      const filters = collectScreeningFilters();
+      const body = { keyword, filters };
+      if (screeningResumeId) body.resume_id = screeningResumeId;
+      try {
+        const resp = await api(ScreeningAPI.runs, { method: "POST", json: body });
+        if (resp.status === 400) { const e = await resp.json(); alert(e.error || "参数错误"); return; }
+        const run = await resp.json();
+        screeningRunId = run.id;
+        document.getElementById("screeningStatus").innerHTML =
+          `筛选运行中… 状态：<strong>${run.status}</strong>`;
+        document.getElementById("matchZone").innerHTML = '<div class="empty-state">等待结果…</div>';
+        document.getElementById("mismatchZone").innerHTML = '<div class="empty-state">等待结果…</div>';
+        startScreeningPoll(run.id);
+      } catch(e) { /* handled */ }
+    }
+
+    function collectScreeningFilters() {
+      const filters = {};
+      const fieldMap = {
+        city: "screeningFilterCity", salary: "screeningFilterSalary",
+        experience: "screeningFilterExperience", degree: "screeningFilterDegree",
+        scale: "screeningFilterScale", stage: "screeningFilterStage",
+        industry: "screeningFilterIndustry",
+      };
+      for (const [key, elId] of Object.entries(fieldMap)) {
+        const sel = document.getElementById(elId);
+        if (sel && sel.value) filters[key] = sel.value;
+      }
+      return filters;
+    }
+
+    function startScreeningPoll(runId) {
+      stopScreeningPoll();
+      screeningPollTimer = setInterval(async () => {
+        try {
+          const runResp = await api(`/api/screening/runs/${runId}`);
+          const run = await runResp.json();
+          document.getElementById("screeningStatus").innerHTML =
+            `状态：<strong>${run.status}</strong> · 符合 <strong>${run.match_count || 0}</strong> · 不符合 <strong>${run.mismatch_count || 0}</strong>`;
+          if (["succeeded","partial","failed","interrupted"].includes(run.status)) {
+            stopScreeningPoll();
+            await loadScreeningZones(runId);
+          }
+        } catch(e) {}
+      }, 2000);
+    }
+
+    function stopScreeningPoll() {
+      if (screeningPollTimer) { clearInterval(screeningPollTimer); screeningPollTimer = null; }
+    }
+
+    async function loadScreeningZones(runId) {
+      try {
+        const matchResp = await api(`/api/screening/runs/${runId}/matches`);
+        const matchData = await matchResp.json();
+        renderScreeningCards(matchData.jobs || [], "match");
+      } catch(e) {}
+      try {
+        const mismatchResp = await api(`/api/screening/runs/${runId}/mismatches`);
+        const mismatchData = await mismatchResp.json();
+        renderScreeningCards(mismatchData.jobs || [], "mismatch");
+      } catch(e) {}
+    }
+
+    // 两区切换
+    function switchZone(zone) {
+      document.querySelectorAll(".zone-tab").forEach(t => t.classList.remove("active"));
+      document.querySelectorAll(".zone-container").forEach(c => c.classList.remove("active"));
+      document.querySelector(`[data-zone-tab="${zone}"]`).classList.add("active");
+      document.querySelector(`[data-zone="${zone}"]`).classList.add("active");
+    }
+
+    // 渲染筛选岗位卡片
+    function renderScreeningCards(jobs, zone) {
+      const container = document.getElementById(zone === "match" ? "matchZone" : "mismatchZone");
+      if (!jobs.length) {
+        container.innerHTML = '<div class="empty-state">暂无岗位</div>';
+        return;
+      }
+      container.innerHTML = "";
+      for (const job of jobs) {
+        container.appendChild(createScreeningCard(job));
+      }
+    }
+
+    function createScreeningCard(job) {
+      const card = document.createElement("div");
+      card.className = "screening-card";
+      card.setAttribute("data-screening", "job-card");
+      card.dataset.jobId = job.job_id || "";
+      const safeUrl = job.canonical_url || "";
+      const node = (cls, text) => { const el = document.createElement("div"); el.className = cls; el.textContent = text || ""; return el; };
+      const header = document.createElement("div"); header.className = "card-header";
+      const titleBlock = document.createElement("div"); titleBlock.className = "card-title-block";
+      titleBlock.append(node("card-title", job.title), node("card-company", job.company));
+      header.append(titleBlock, node("card-salary", job.salary));
+      const meta = node("card-meta", job.location);
+      const jd = node("card-jd", job.jd_excerpt);
+      const actions = document.createElement("div"); actions.className = "screening-card-actions";
+      const stop = event => { event.stopPropagation(); event.preventDefault(); };
+      // 感兴趣按钮
+      const interestBtn = document.createElement("button");
+      interestBtn.type = "button";
+      interestBtn.setAttribute("data-feedback", "interest");
+      interestBtn.className = "card-btn interested";
+      interestBtn.textContent = "感兴趣";
+      interestBtn.addEventListener("click", event => { stop(event); markScreeningInterest(job.job_id); });
+      // 不感兴趣按钮
+      const rejectBtn = document.createElement("button");
+      rejectBtn.type = "button";
+      rejectBtn.setAttribute("data-feedback", "reject");
+      rejectBtn.className = "card-btn not-interested";
+      rejectBtn.textContent = "不感兴趣";
+      rejectBtn.addEventListener("click", event => { stop(event); markScreeningReject(job.job_id); });
+      actions.append(interestBtn, rejectBtn);
+      card.append(header, meta, jd, actions);
+      return card;
+    }
+
+    async function markScreeningInterest(jobId) {
+      try {
+        await api(`/api/screening/jobs/${jobId}/interest`, { method: "POST", json: {} });
+        await loadScreeningZones(screeningRunId);
+      } catch(e) {}
+    }
+
+    async function markScreeningReject(jobId) {
+      try {
+        await api(`/api/screening/jobs/${jobId}/reject`, { method: "POST", json: {} });
+        await loadScreeningZones(screeningRunId);
+      } catch(e) {}
+    }
+
+    // 感兴趣区
+    async function loadInterestedJobs() {
+      try {
+        const resp = await api(ScreeningAPI.interested);
+        const data = await resp.json();
+        showZoneModal("感兴趣区", data.jobs || [], true);
+      } catch(e) {}
+    }
+
+    // 垃圾桶区
+    async function loadTrashJobs() {
+      try {
+        const resp = await api(ScreeningAPI.trash);
+        const data = await resp.json();
+        showZoneModal("垃圾桶", data.jobs || [], false);
+      } catch(e) {}
+    }
+
+    function showZoneModal(title, jobs, allowNavigation) {
+      const modal = document.getElementById("zoneModal");
+      document.getElementById("zoneModalTitle").textContent = title;
+      const list = document.getElementById("zoneModalList");
+      list.innerHTML = "";
+      if (!jobs.length) {
+        list.innerHTML = '<div class="empty-state">暂无岗位</div>';
+      } else {
+        for (const job of jobs) {
+          const card = createScreeningCard(job);
+          if (allowNavigation && job.canonical_url) {
+            card.addEventListener("click", event => openScreeningJobLink(event, job.canonical_url));
+            card.style.cursor = "pointer";
+          }
+          list.appendChild(card);
+        }
+      }
+      modal.classList.add("show");
+    }
+
+    function closeZoneModal(event) {
+      if (event.target === event.currentTarget) {
+        document.getElementById("zoneModal").classList.remove("show");
+      }
+    }
+
+    function closeZoneModalDirect() {
+      document.getElementById("zoneModal").classList.remove("show");
+    }
+
+    // 安全跳转（复用 001 的 openSafe 逻辑）
+    function openScreeningJobLink(event, url) {
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== "https:") { return false; }
+        const host = parsed.hostname.toLowerCase();
+        if (host !== "www.zhipin.com" && host !== "zhipin.com" && !host.endsWith(".zhipin.com")) { return false; }
+      } catch(e) { return false; }
+      window.open(url, "_blank", "noopener,noreferrer");
+      return false;
+    }
+
+    // AI 不可用降级态
+    function showScreeningDegradation() {
+      document.getElementById("aiUnavailablePrompt").classList.add("show");
+      document.getElementById("skipResumeCheck").checked = true;
     }
 
     init();
