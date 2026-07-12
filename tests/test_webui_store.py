@@ -1,4 +1,4 @@
-import json
+﻿import json
 import pathlib
 import sqlite3
 import tempfile
@@ -766,6 +766,156 @@ class ScreeningCrossResumePersistenceTests(unittest.TestCase):
         # profile_jobs 记录不受影响
         pj = self.store.get_profile_job(self.pid, self.job_id)
         self.assertEqual(pj["status"], "interested")
+
+# == 阶段1：003 待核验/垃圾桶原区域/清理记录 存储 ==
+
+class ScreeningPendingAndTrashOriginTests(unittest.TestCase):
+    """003 FR-011~016 待核验、FR-020~023 垃圾桶带原区域恢复、FR-024~027 清理记录。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = TaskStore(pathlib.Path(self.temp.name) / "db")
+        self.profile = self.store.create_profile("测试画像")
+        self.pid = self.profile["id"]
+        self.run = self.store.create_screening_run({})
+        self.run_id = self.run["id"]
+        self.job = self.store.save_job(
+            "https://www.zhipin.com/job_detail/P-1.html",
+            "https://www.zhipin.com/job_detail/P-1.html",
+            "Python", "公司A", "20K", "上海", "JD",
+        )
+        self.job_id = self.job["id"]
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    # -- 迁移版本 --
+
+    def test_schema_version_reaches_six(self):
+        self.assertGreaterEqual(self.store.schema_version(), 6)
+
+    # -- 待核验记录 --
+
+    def test_add_pending_result_stages_job_for_retry(self):
+        rec = self.store.add_pending_result(
+            self.run_id, self.job_id,
+            failure_stage="ai_timeout", retryable=True,
+            origin_zone="match", ai_payload={"raw": "x"},
+        )
+        self.assertEqual(rec["run_id"], self.run_id)
+        self.assertEqual(rec["failure_stage"], "ai_timeout")
+        self.assertTrue(rec["retryable"])
+        self.assertEqual(rec["attempts"], 1)
+
+    def test_list_pending_returns_only_pending(self):
+        self.store.add_pending_result(
+            self.run_id, self.job_id, "ai_timeout", True, "match",
+        )
+        pending = self.store.list_pending(self.run_id)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["job_id"], self.job_id)
+
+    def test_retry_pending_increments_attempts(self):
+        self.store.add_pending_result(
+            self.run_id, self.job_id, "ai_timeout", True, "match",
+        )
+        self.store.retry_pending(self.run_id, self.job_id)
+        pending = self.store.list_pending(self.run_id)
+        self.assertEqual(pending[0]["attempts"], 2)
+        self.assertIsNotNone(pending[0]["last_failed_at"])
+
+    def test_manual_route_pending_moves_job_out_of_pending(self):
+        self.store.add_pending_result(
+            self.run_id, self.job_id, "ai_invalid_output", True, "match",
+        )
+        self.store.manual_route_pending(self.run_id, self.job_id, "mismatch")
+        # 已离开 pending
+        self.assertEqual(self.store.list_pending(self.run_id), [])
+        # 进 mismatch 结果区
+        results = self.store.get_screening_results(self.run_id, "mismatch")
+        self.assertTrue(any(r["job_id"] == self.job_id for r in results))
+
+    # -- 垃圾桶带原区域 --
+
+    def test_move_to_trash_records_origin_zone(self):
+        self.store.move_to_trash_with_origin(
+            self.pid, self.job_id, origin_zone="match", run_id=self.run_id,
+        )
+        items = self.store.list_trash_with_origin(self.pid)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["origin_zone"], "match")
+
+    def test_restore_from_trash_returns_to_origin_zone(self):
+        self.store.move_to_trash_with_origin(
+            self.pid, self.job_id, origin_zone="pending", run_id=self.run_id,
+        )
+        rec = self.store.restore_from_trash(self.pid, self.job_id)
+        self.assertEqual(rec["origin_zone"], "pending")
+        # 垃圾桶中已无
+        self.assertEqual(self.store.list_trash_with_origin(self.pid), [])
+
+    def test_restore_preserves_existing_interest_or_reject_mark(self):
+        # 先标记感兴趣
+        self.store.mark_screening_interest(self.pid, self.job_id)
+        # 移入垃圾桶
+        self.store.move_to_trash_with_origin(
+            self.pid, self.job_id, origin_zone="match", run_id=self.run_id,
+        )
+        self.store.restore_from_trash(self.pid, self.job_id)
+        # 感兴趣标记仍在
+        pj = self.store.get_profile_job(self.pid, self.job_id)
+        self.assertEqual(pj["status"], "interested")
+
+    def test_trash_record_survives_temp_run_cleanup(self):
+        self.store.move_to_trash_with_origin(
+            self.pid, self.job_id, origin_zone="match", run_id=self.run_id,
+        )
+        # 模拟 30 天清理临时执行数据
+        self.store.cleanup_temp_run_data(days=0)
+        # 垃圾桶记录仍存在
+        items = self.store.list_trash_with_origin(self.pid)
+        self.assertEqual(len(items), 1)
+
+    # -- 30 天清理 + 待核验提示 --
+
+    def test_cleanup_temp_run_data_removes_old_runs(self):
+        self.store.add_pending_result(
+            self.run_id, self.job_id, "ai_timeout", True, "match",
+        )
+        self.store.cleanup_temp_run_data(days=0)
+        # 临时执行数据已清理
+        self.assertEqual(self.store.list_pending(self.run_id), [])
+        self.assertEqual(self.store.get_screening_results(self.run_id), [])
+
+    def test_cleanup_preserves_long_term_interest_and_trash(self):
+        self.store.mark_screening_interest(self.pid, self.job_id)
+        self.store.move_to_trash_with_origin(
+            self.pid, self.job_id, origin_zone="match", run_id=self.run_id,
+        )
+        self.store.cleanup_temp_run_data(days=0)
+        # 感兴趣仍在
+        self.assertEqual(len(self.store.list_screening_interested(self.pid)), 1)
+        # 垃圾桶仍在
+        self.assertEqual(len(self.store.list_trash_with_origin(self.pid)), 1)
+
+    def test_preview_cleanup_with_pending_prompt_reports_pending(self):
+        self.store.add_pending_result(
+            self.run_id, self.job_id, "ai_timeout", True, "match",
+        )
+        preview = self.store.preview_cleanup_with_pending_prompt(days=0)
+        self.assertGreaterEqual(preview["pending_at_cleanup"], 1)
+
+    def test_record_cleanup_writes_queryable_history(self):
+        rec = self.store.record_cleanup(
+            scope="temp_run_data", success_count=5, fail_count=1,
+            pending_at_cleanup=2,
+        )
+        self.assertEqual(rec["success_count"], 5)
+        self.assertEqual(rec["fail_count"], 1)
+        # 可查询
+        records = self.store.list_cleanup_records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["scope"], "temp_run_data")
 
 
 if __name__ == "__main__":

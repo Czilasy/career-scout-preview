@@ -13,7 +13,7 @@ import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +56,16 @@ def _now():
 
 def _uuid():
     return uuid.uuid4().hex[:16]
+
+
+def _opt_str(value):
+    """把 None 转为 SQL NULL（None），其他值转 str。"""
+    return None if value is None else str(value)
+
+
+def _now_minus_days(days):
+    """返回 N 天前的 ISO 时间字符串（用于清理阈值）。"""
+    return (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +159,10 @@ class TaskStore:
             self._migration_003()
         if current < 4:
             self._migration_004()
+        if current < 5:
+            self._migration_005()
+        if current < 6:
+            self._migration_006()
         # A process restart cannot resume an in-memory child process. Record
         # that fact instead of leaving a permanently "running" UI state.
         with self._connection() as conn:
@@ -350,6 +364,81 @@ class TaskStore:
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
                 "VALUES (4, ?, 'screening runs and results')",
+                (_now(),),
+            )
+
+    def _migration_005(self):
+        """Add screening_pending_results for 003 FR-011~016.
+
+        待核验区：未完成核验的岗位（AI 超时、AI 无效输出、核验异常）。
+        记录失败阶段、是否可重试、尝试次数、最近失败时间、原所在区域。
+        同一 (run_id, job_id) 只有一条 pending 记录，重试时更新 attempts 与 last_failed_at。
+        """
+        with self._connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS screening_pending_results (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    failure_stage TEXT NOT NULL,
+                    retryable INTEGER NOT NULL DEFAULT 1,
+                    attempts INTEGER NOT NULL DEFAULT 1,
+                    last_failed_at TEXT NOT NULL,
+                    origin_zone TEXT NOT NULL DEFAULT 'match',
+                    ai_payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(run_id, job_id),
+                    FOREIGN KEY (run_id) REFERENCES screening_runs(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (5, ?, 'screening pending results')",
+                (_now(),),
+            )
+
+    def _migration_006(self):
+        """Add screening_trash_records and screening_cleanup_records for 003 FR-020~027.
+
+        trash_records：垃圾桶带原区域记录，支持永久恢复（FR-020~023）。
+        cleanup_records：30 天清理产生的可查询历史（FR-024~027）。
+        """
+        with self._connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS screening_trash_records (
+                    id TEXT PRIMARY KEY,
+                    profile_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    origin_zone TEXT NOT NULL,
+                    run_id TEXT,
+                    feedback_ref TEXT,
+                    deleted_at TEXT NOT NULL,
+                    restored_at TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(profile_id, job_id),
+                    FOREIGN KEY (profile_id) REFERENCES candidate_profiles(id) ON DELETE CASCADE,
+                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS screening_cleanup_records (
+                    id TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL,
+                    success_count INTEGER NOT NULL DEFAULT 0,
+                    fail_count INTEGER NOT NULL DEFAULT 0,
+                    pending_at_cleanup INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (6, ?, 'screening trash and cleanup records')",
                 (_now(),),
             )
 
@@ -795,6 +884,283 @@ class TaskStore:
         """
         rejected = self.list_screening_rejected(profile_id)
         return [r["job_id"] for r in rejected]
+
+    # -- screening pending / trash-with-origin / cleanup (003 FR-011~027) --
+
+    def add_pending_result(self, run_id, job_id, failure_stage, retryable=True,
+                           origin_zone="match", ai_payload=None, *, attempts=None) -> dict:
+        """添加或更新一条待核验记录。同一 (run_id, job_id) 只有一条；
+        重试时 attempts+1 并刷新 last_failed_at。"""
+        import json as _json
+        rid = _uuid()
+        ts = _now()
+        payload_json = _json.dumps(ai_payload or {}, ensure_ascii=False)
+        att = 1 if attempts is None else int(attempts)
+        with self._connection() as conn:
+            existing = conn.execute(
+                "SELECT id, attempts FROM screening_pending_results "
+                "WHERE run_id = ? AND job_id = ?",
+                (str(run_id), str(job_id)),
+            ).fetchone()
+            if existing:
+                new_attempts = int(existing["attempts"]) + 1
+                conn.execute(
+                    "UPDATE screening_pending_results "
+                    "SET failure_stage = ?, retryable = ?, origin_zone = ?, "
+                    "ai_payload_json = ?, attempts = ?, last_failed_at = ? "
+                    "WHERE id = ?",
+                    (failure_stage, 1 if retryable else 0, origin_zone,
+                     payload_json, new_attempts, ts, existing["id"]),
+                )
+                rid = existing["id"]
+                att = new_attempts
+            else:
+                conn.execute(
+                    "INSERT INTO screening_pending_results "
+                    "(id, run_id, job_id, failure_stage, retryable, attempts, "
+                    " last_failed_at, origin_zone, ai_payload_json, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (rid, str(run_id), str(job_id), failure_stage,
+                     1 if retryable else 0, att, ts, origin_zone, payload_json, ts),
+                )
+        return {
+            "id": rid, "run_id": str(run_id), "job_id": str(job_id),
+            "failure_stage": failure_stage, "retryable": bool(retryable),
+            "attempts": att, "last_failed_at": ts,
+            "origin_zone": origin_zone, "ai_payload": ai_payload or {},
+            "created_at": ts,
+        }
+
+    def list_pending(self, run_id) -> list:
+        """返回指定 run 的待核验记录，按 created_at 升序。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM screening_pending_results WHERE run_id = ? "
+                "ORDER BY created_at ASC, id ASC",
+                (str(run_id),),
+            ).fetchall()
+        import json as _json
+        out = []
+        for row in rows:
+            d = dict(row)
+            try:
+                d["ai_payload"] = _json.loads(d.get("ai_payload_json") or "{}")
+            except Exception:
+                d["ai_payload"] = {}
+            d["retryable"] = bool(d.get("retryable"))
+            out.append(d)
+        return out
+
+    def retry_pending(self, run_id, job_id) -> dict:
+        """对待核验记录做一次重试登记：attempts+1、刷新 last_failed_at。
+        不删除记录（重试若成功会由 manual_route 或 add_screening_result 流出）。
+        """
+        ts = _now()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT id, attempts FROM screening_pending_results "
+                "WHERE run_id = ? AND job_id = ?",
+                (str(run_id), str(job_id)),
+            ).fetchone()
+            if not row:
+                raise KeyError(f"pending result not found: run={run_id} job={job_id}")
+            new_attempts = int(row["attempts"]) + 1
+            conn.execute(
+                "UPDATE screening_pending_results "
+                "SET attempts = ?, last_failed_at = ? WHERE id = ?",
+                (new_attempts, ts, row["id"]),
+            )
+        return {"id": row["id"], "attempts": new_attempts, "last_failed_at": ts}
+
+    def manual_route_pending(self, run_id, job_id, target) -> dict:
+        """把待核验记录人工分流到 match/mismatch 结果区，并从 pending 删除。"""
+        if target not in ("match", "mismatch"):
+            raise ValueError(f"invalid manual route target: {target}")
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM screening_pending_results "
+                "WHERE run_id = ? AND job_id = ?",
+                (str(run_id), str(job_id)),
+            ).fetchone()
+            if not row:
+                raise KeyError(f"pending result not found: run={run_id} job={job_id}")
+            conn.execute(
+                "DELETE FROM screening_pending_results WHERE id = ?",
+                (row["id"],),
+            )
+            # 复用 add_screening_result 写入结果区
+        return self.add_screening_result(run_id, job_id, target)
+
+    def move_to_trash_with_origin(self, profile_id, job_id, origin_zone="match",
+                                  run_id=None, feedback_ref=None) -> dict:
+        """把岗位移入垃圾桶并记录原区域（match/mismatch/pending/interested）。
+        若已有 trash 记录则更新 origin_zone（保留 created_at）。"""
+        rid = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            existing = conn.execute(
+                "SELECT id, created_at FROM screening_trash_records "
+                "WHERE profile_id = ? AND job_id = ?",
+                (str(profile_id), str(job_id)),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE screening_trash_records "
+                    "SET origin_zone = ?, run_id = ?, feedback_ref = ?, "
+                    "deleted_at = ?, restored_at = NULL WHERE id = ?",
+                    (origin_zone, _opt_str(run_id), _opt_str(feedback_ref),
+                     ts, existing["id"]),
+                )
+                rid = existing["id"]
+                created = existing["created_at"]
+            else:
+                conn.execute(
+                    "INSERT INTO screening_trash_records "
+                    "(id, profile_id, job_id, origin_zone, run_id, feedback_ref, "
+                    " deleted_at, restored_at, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+                    (rid, str(profile_id), str(job_id), origin_zone,
+                     _opt_str(run_id), _opt_str(feedback_ref), ts, ts),
+                )
+                created = ts
+        return {
+            "id": rid, "profile_id": str(profile_id), "job_id": str(job_id),
+            "origin_zone": origin_zone, "run_id": run_id,
+            "feedback_ref": feedback_ref, "deleted_at": ts,
+            "created_at": created,
+        }
+
+    def list_trash_with_origin(self, profile_id) -> list:
+        """返回垃圾桶中未恢复的记录（restored_at IS NULL）。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM screening_trash_records "
+                "WHERE profile_id = ? AND restored_at IS NULL "
+                "ORDER BY deleted_at DESC, id ASC",
+                (str(profile_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def restore_from_trash(self, profile_id, job_id) -> dict:
+        """从垃圾桶恢复岗位：标记 restored_at，返回原区域信息。
+        不修改 profile_jobs.status（保留既有感兴趣/不感兴趣标记）。
+        """
+        ts = _now()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM screening_trash_records "
+                "WHERE profile_id = ? AND job_id = ? AND restored_at IS NULL",
+                (str(profile_id), str(job_id)),
+            ).fetchone()
+            if not row:
+                raise KeyError(f"trash record not found: profile={profile_id} job={job_id}")
+            conn.execute(
+                "UPDATE screening_trash_records SET restored_at = ? WHERE id = ?",
+                (ts, row["id"]),
+            )
+        out = dict(row)
+        out["restored_at"] = ts
+        return out
+
+    def cleanup_temp_run_data(self, days=30) -> dict:
+        """清理超期临时执行数据：screening_runs/results/pending 超 N 天。
+        保留长期感兴趣、垃圾桶记录、清理记录本身。返回 success/fail/pending 计数。"""
+        cutoff = _now_minus_days(days)
+        success = 0
+        fail = 0
+        pending = 0
+        with self._connection() as conn:
+            # 先统计将清理的 pending 数（用于提示）
+            pending = conn.execute(
+                "SELECT COUNT(*) AS c FROM screening_pending_results "
+                "WHERE created_at < ?",
+                (cutoff,),
+            ).fetchone()["c"]
+            # 找到超期 run_id
+            old_runs = [r["id"] for r in conn.execute(
+                "SELECT id FROM screening_runs WHERE created_at < ?",
+                (cutoff,),
+            ).fetchall()]
+            if old_runs:
+                placeholders = ",".join("?" * len(old_runs))
+                try:
+                    conn.execute(
+                        f"DELETE FROM screening_pending_results "
+                        f"WHERE run_id IN ({placeholders})",
+                        old_runs,
+                    )
+                    conn.execute(
+                        f"DELETE FROM screening_results "
+                        f"WHERE run_id IN ({placeholders})",
+                        old_runs,
+                    )
+                    conn.execute(
+                        f"DELETE FROM screening_runs "
+                        f"WHERE id IN ({placeholders})",
+                        old_runs,
+                    )
+                    success = len(old_runs)
+                except Exception:
+                    fail = len(old_runs)
+        return {"success_count": success, "fail_count": fail,
+                "pending_at_cleanup": pending}
+
+    def preview_cleanup_with_pending_prompt(self, days=30) -> dict:
+        """预览 30 天清理：返回将清理的 pending 数等。
+        用于在执行清理前给用户提示有待核验记录将被清理。"""
+        cutoff = _now_minus_days(days)
+        with self._connection() as conn:
+            pending = conn.execute(
+                "SELECT COUNT(*) AS c FROM screening_pending_results "
+                "WHERE created_at < ?",
+                (cutoff,),
+            ).fetchone()["c"]
+            runs = conn.execute(
+                "SELECT COUNT(*) AS c FROM screening_runs WHERE created_at < ?",
+                (cutoff,),
+            ).fetchone()["c"]
+            results = conn.execute(
+                "SELECT COUNT(*) AS c FROM screening_results "
+                "WHERE created_at < ?",
+                (cutoff,),
+            ).fetchone()["c"]
+        return {
+            "days": days,
+            "pending_at_cleanup": pending,
+            "runs_to_cleanup": runs,
+            "results_to_cleanup": results,
+        }
+
+    def record_cleanup(self, scope, success_count, fail_count,
+                       pending_at_cleanup) -> dict:
+        """记录一次清理历史，可查询。"""
+        rid = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO screening_cleanup_records "
+                "(id, scope, success_count, fail_count, pending_at_cleanup, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (rid, scope, int(success_count), int(fail_count),
+                 int(pending_at_cleanup), ts),
+            )
+        return {
+            "id": rid, "scope": scope,
+            "success_count": int(success_count),
+            "fail_count": int(fail_count),
+            "pending_at_cleanup": int(pending_at_cleanup),
+            "created_at": ts,
+        }
+
+    def list_cleanup_records(self, limit=50) -> list:
+        """返回清理历史，按 created_at 降序。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM screening_cleanup_records "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # -- search runs -------------------------------------------------------
 
