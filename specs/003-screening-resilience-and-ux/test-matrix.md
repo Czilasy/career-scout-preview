@@ -5,7 +5,7 @@
 ## 自动化与浏览器命令
 
 ```powershell
-python -m pytest tests/test_screening_prototype.py -q
+python -m unittest tests.test_screening_prototype -v
 python -m http.server 8765 --directory webui
 npx --yes @playwright/cli@latest -s=phase23 open http://127.0.0.1:8765/screening-prototype.html
 ```
@@ -37,12 +37,12 @@ npx --yes @playwright/cli@latest -s=phase23 open http://127.0.0.1:8765/screening
 | U-01 | 切换符合、不符合、待核验、感兴趣、垃圾桶 | 每个入口显示实时数量且当前视图切换正确 | 通过（浏览器实际切换五区） |
 | U-02 | 在符合区标记感兴趣 | 感兴趣区计数和内容立即更新 | 通过（感兴趣区为 `2|2`） |
 | U-03 | 从符合、不符合、待核验分别移入垃圾桶并恢复 | 垃圾桶显示恢复前区域，恢复到原区 | 通过（m1→符合、r1→不符合、p1→待核验） |
-| U-04 | 对待核验岗位单条重试 | 一条模拟成功进入符合区；另一条保留待核验并增加尝试次数 | 通过（p1 成功，p2 再次失败） |
-| U-05 | 批量重试待核验 | 对所有当前待核验岗位分别执行模拟重试 | 通过（对仍待核验的 p2 执行） |
+| U-04 | 对待核验岗位单条重试 | 一条模拟成功进入符合区；另一条保留待核验并增加尝试次数 | 通过（p1 成功；p2 再次失败；p3 明确不可自动重试） |
+| U-05 | 批量重试待核验 | 对所有当前待核验岗位分别执行模拟重试 | 通过（只处理可重试岗位，不可重试项保留给人工分流） |
 | U-06 | 人工核验分流 | 可直接选择分流到符合或不符合 | 通过（p2 人工分流到不符合） |
-| U-07 | 刷新页面 | 当前会话内的兴趣标记和垃圾桶记录仍在 | 通过（刷新后感兴趣状态保留；垃圾桶计数为 `1` 且可恢复 m2） |
+| U-07 | 刷新页面 | 当前会话内的兴趣标记和垃圾桶记录仍在 | 通过（使用本地浏览器存储；关闭并重新打开持久浏览器资料目录后，m2 感兴趣标记仍为 `true`） |
 | U-08 | 1366×768 默认视口 | 一屏辨识至少 5 条岗位的标题、公司、薪资、地点和主要操作 | 通过（6/6 行完整位于视口） |
-| U-09 | 720 像素宽 | `document.documentElement.scrollWidth <= window.innerWidth`，五区与主要操作均可触达 | 通过（`true|720|720`，并实际标记和切区） |
+| U-09 | 720 像素宽 | `document.documentElement.scrollWidth <= window.innerWidth`，五区与主要操作均可触达 | 通过（`true|720|720`，筛选条件抽屉可打开） |
 | U-10 | 减少动态效果 | 在 `prefers-reduced-motion: reduce` 下不依赖动画表达状态 | 通过（行过渡为 `1e-05s`） |
 
 ## 第一档集成门
@@ -53,10 +53,12 @@ npx --yes @playwright/cli@latest -s=phase23 open http://127.0.0.1:8765/screening
 
 2026-07-13，模拟冒烟与浏览器交互验收：
 
-- `python -m pytest tests/test_screening_prototype.py -q`：2 passed。
+- `python -m unittest tests.test_screening_prototype -v`：6 passed。
 - 本地静态服务器：`python -m http.server 8765 --directory webui`，只提供 `webui/` 中的原型文件。
 - 浏览器：以 `npx --yes @playwright/cli@latest -s=phase23` 实际打开本地页面并完成 U-01 至 U-10。
 - 控制台：补充内联 favicon 后最终检查为 `0 errors, 0 warnings`。
+- 修复回归：从不符合区把 r1 移入垃圾桶并恢复；p1 单条重试后，五区计数为 `符合7|不符合2|待核验2|感兴趣1|垃圾桶0`。
+- 存储回归：在带固定资料目录的浏览器中标记 m2 感兴趣，关闭并重新打开后读取结果为 `true`。
 
 失败节点（均已定位且不影响最终验收）：
 
