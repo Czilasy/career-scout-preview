@@ -7,22 +7,24 @@
   <style>
     :root {
       color-scheme: dark;
-      --bg: #0d1117;
-      --surface: #161b22;
-      --surface-2: #1c2330;
-      --line: #2d333b;
-      --line-strong: #444c56;
-      --text: #e6edf3;
-      --muted: #8b949e;
-      --accent: #58a6ff;
-      --accent-soft: #1a3a5c;
-      --success: #3fb950;
-      --danger: #f85149;
-      --warning: #d29922;
-      --radius: 10px;
-      --header-h: 56px;
+      --bg: #101216;
+      --surface: #16191f;
+      --surface-2: #1c2027;
+      --surface-raised: #1c2027;
+      --line: #2b3039;
+      --line-strong: #444b57;
+      --text: #f3f0e9;
+      --muted: #a7a7a2;
+      --accent: #d9b663;
+      --accent-soft: rgba(217, 182, 99, .14);
+      --gold: #d9b663;
+      --success: #79c497;
+      --danger: #e4857f;
+      --warning: #e5ad59;
+      --radius: 8px;
+      --header-h: 58px;
       --card-h: 300px;
-      font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      font-family: "Microsoft YaHei UI", "PingFang SC", sans-serif;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; overflow-x: hidden; }
@@ -273,6 +275,124 @@
     }
     .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
     .modal-close { font-size: 18px; color: var(--muted); cursor: pointer; }
+
+    /* == 决策工作台视觉层：不改变现有业务绑定，仅统一操作层级 == */
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+      outline: 2px solid var(--gold); outline-offset: 2px;
+    }
+    .app-header {
+      height: 58px; padding: 0 24px; background: #15181e; border-color: var(--line);
+    }
+    .brand { font-size: 15px; letter-spacing: .025em; }
+    .brand-dot { width: 7px; height: 7px; box-shadow: 0 0 0 3px rgba(121,196,151,.11); }
+    .view-tabs { gap: 4px; }
+    .view-tab { padding: 6px 11px; border-radius: 4px; }
+    .view-tab.active { background: var(--accent-soft); color: var(--text); }
+    .conn-status { padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; font-size: 11px; }
+
+    .settings-panel { width: 304px; min-width: 304px; background: #15181e; border-color: var(--line); }
+    .settings-panel.collapsed { margin-left: -304px; }
+    .settings-toggle {
+      left: 304px; width: 28px; height: 44px; border-color: var(--line); border-radius: 0 5px 5px 0;
+      background: #15181e; color: var(--muted);
+    }
+    .settings-toggle:hover { background: var(--surface-raised); color: var(--gold); }
+    .section { padding: 18px 16px; border-color: var(--line); }
+    .section-title { color: var(--faint); font-size: 11px; letter-spacing: .1em; }
+    .field label { color: var(--muted); }
+    .field input, .field select, .field textarea,
+    .screening-filters select, .screening-keyword, .screening-limit {
+      border-color: var(--line); border-radius: 5px; background: var(--bg);
+    }
+    .field input:focus, .field select:focus, .screening-filters select:focus,
+    .screening-keyword:focus { border-color: var(--gold); }
+    .btn { border-radius: 5px; background: transparent; }
+    .btn:hover { border-color: var(--gold); background: var(--surface-raised); }
+    .btn.primary { background: var(--gold); border-color: var(--gold); color: #1b170e; }
+    .btn.primary:hover { background: #edcd79; }
+    .history-item { border-left: 2px solid transparent; border-radius: 0; background: transparent; }
+    .history-item:hover, .history-item.active { border-left-color: var(--gold); background: var(--surface-raised); }
+
+    .search-bar { min-height: 52px; padding: 12px 28px; background: var(--surface); }
+    .search-info { font-size: 12px; }
+    .job-card-list { padding: 8px 28px 24px; gap: 0; }
+    .job-card {
+      min-height: 106px; height: auto; padding: 13px 8px; border: 0; border-bottom: 1px solid var(--line);
+      border-radius: 0; background: transparent; gap: 7px; animation-duration: .22s;
+    }
+    .job-card:hover { background: linear-gradient(90deg, var(--surface-raised), transparent 82%); }
+    .card-title { font-size: 15px; }
+    .card-salary { color: var(--success); }
+    .card-meta { gap: 10px; }
+    .card-jd { max-width: 820px; -webkit-line-clamp: 2; max-height: 36px; }
+    .card-actions { margin-top: 2px; }
+    .card-link { border-color: var(--gold); border-radius: 4px; color: var(--gold); }
+    .card-link:hover { background: var(--accent-soft); }
+    .card-btn { border-radius: 4px; }
+    .empty-state { padding: 72px 20px; color: var(--muted); }
+
+    .screening-workspace { background: var(--bg); }
+    .screening-topbar { padding: 0; gap: 0; background: var(--surface); }
+    .screening-toolbar {
+      min-height: 74px; padding: 13px 28px; display: flex; align-items: center;
+      justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--line);
+    }
+    .screening-toolbar-copy { min-width: 0; display: grid; gap: 2px; }
+    .screening-eyebrow { color: var(--faint); font-size: 10px; font-weight: 600; letter-spacing: .12em; }
+    .screening-title { font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
+    .screening-toolbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+    .screening-filter-summary { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .screening-filter-toggle { white-space: nowrap; }
+    .screening-filter-details {
+      display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 14px 28px 16px;
+      border-bottom: 1px solid var(--line); background: #14171c;
+    }
+    .screening-filter-details.collapsed { display: none; }
+    .screening-filter-section { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .screening-filter-section + .screening-filter-section { padding-top: 12px; border-top: 1px solid var(--line); }
+    .screening-filter-section-title { width: 100%; color: var(--faint); font-size: 10px; font-weight: 600; letter-spacing: .1em; }
+    .screening-topbar .field { min-width: 0; }
+    .screening-filters { display: grid; grid-template-columns: repeat(7, minmax(110px, 1fr)); gap: 8px; width: 100%; }
+    .screening-filter-field { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+    .screening-filters select { min-width: 0; padding: 7px 9px; color: var(--text); }
+    .screening-keyword { min-width: 220px; padding: 7px 10px; }
+    .screening-limit { padding: 7px 8px; }
+    .screening-status { color: var(--muted); font-size: 12px; }
+    .zone-tabs { padding: 9px 28px; background: var(--surface); }
+    .zone-group-label { color: var(--faint); font-size: 10px; letter-spacing: .08em; }
+    .zone-tab { border-radius: 4px; }
+    .zone-tab.active { background: var(--accent-soft); color: var(--text); }
+    .zone-count { color: var(--gold); }
+    .screening-summary { min-height: 42px; padding: 8px 28px; background: var(--bg); }
+    .zone-container { padding: 0 28px 22px; }
+    .screening-card { min-height: 92px; padding: 12px 8px; gap: 20px; }
+    .screening-card:hover { background: linear-gradient(90deg, var(--surface-raised), transparent 82%); }
+    .screening-card-main .card-title { font-size: 15px; }
+    .screening-card-actions { gap: 7px; }
+    .screening-card-status { color: var(--warning); }
+    .modal-content { border-radius: 8px; background: var(--surface); }
+
+    @media (max-width: 1100px) {
+      .screening-filters { grid-template-columns: repeat(4, minmax(120px, 1fr)); }
+    }
+    @media (max-width: 720px) {
+      .app-header { padding: 0 12px; }
+      .brand { font-size: 14px; }
+      .header-actions { display: none; }
+      .settings-panel { width: min(304px, calc(100vw - 36px)); min-width: 0; }
+      .settings-panel.collapsed { margin-left: min(-304px, calc(36px - 100vw)); }
+      .settings-toggle { left: min(304px, calc(100vw - 36px)); }
+      .search-bar { padding-left: 12px; padding-right: 12px; }
+      .screening-toolbar { min-height: 68px; padding: 10px 12px; gap: 10px; }
+      .screening-toolbar-copy { min-width: 100px; }
+      .screening-title { font-size: 14px; }
+      .screening-filter-summary { display: none; }
+      .screening-filter-details { padding: 12px; }
+      .job-card-list, .zone-container { padding-left: 12px; padding-right: 12px; }
+      .screening-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .screening-keyword { width: 100%; min-width: 0; flex-basis: 100%; }
+      .zone-tabs, .screening-summary { padding-left: 12px; padding-right: 12px; }
+    }
   </style>
 </head>
 <body>
@@ -288,9 +408,9 @@
   </div>
 
   <div class="workspace">
-    <button class="settings-toggle" id="settingsToggle" onclick="toggleSettings()" aria-label="折叠设置区">◀</button>
+    <button class="settings-toggle collapsed" id="settingsToggle" onclick="toggleSettings()" aria-label="展开设置区" aria-expanded="false">▶</button>
 
-    <aside class="settings-panel" id="settingsPanel">
+    <aside class="settings-panel collapsed" id="settingsPanel">
       <div class="section">
         <div class="section-title">画像管理</div>
         <div class="field">
@@ -396,32 +516,51 @@
   <!-- 筛选工作区（T054-T057） -->
   <div class="screening-workspace" id="screeningWorkspace">
     <div class="screening-topbar">
-      <div class="ai-unavailable-prompt" data-screening="ai-unavailable" id="aiUnavailablePrompt">
-        AI 不可用：可跳过简历，人工填写筛选条件，第二层仅硬规则核验
+      <div class="screening-toolbar">
+        <div class="screening-toolbar-copy">
+          <span class="screening-eyebrow">岗位决策台</span>
+          <strong class="screening-title">发现岗位 · 精准筛选 · 已收藏</strong>
+        </div>
+        <div class="screening-toolbar-actions">
+          <span class="screening-filter-summary" id="screeningFilterSummary" aria-live="polite">全部条件 · 1 页 · 核验 3 条详情</span>
+          <button class="btn screening-filter-toggle" id="screeningFilterToggle" type="button" onclick="toggleScreeningFilters()" aria-controls="screeningFilterDetails" aria-expanded="false">修改筛选</button>
+        </div>
       </div>
-      <div class="field" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-        <input type="file" data-screening="resume-upload" id="screeningResumeFile" accept=".txt,.pdf,.docx">
-        <button class="btn" data-screening="suggest-btn" onclick="suggestScreeningFilters()">AI 建议填筛</button>
-        <label class="skip-resume-option" data-screening="skip-resume">
-          <input type="checkbox" id="skipResumeCheck"> 跳过简历
-        </label>
-        <span class="manual-filter-hint">人工填筛：字段无必填，留空即不限</span>
+      <div class="screening-filter-details collapsed" id="screeningFilterDetails">
+        <div class="ai-unavailable-prompt" data-screening="ai-unavailable" id="aiUnavailablePrompt">
+          AI 不可用：可跳过简历，人工填写筛选条件，第二层仅硬规则核验
+        </div>
+        <div class="screening-filter-section">
+          <span class="screening-filter-section-title">简历与 AI 建议</span>
+          <input type="file" data-screening="resume-upload" id="screeningResumeFile" accept=".txt,.pdf,.docx">
+          <button class="btn" data-screening="suggest-btn" onclick="suggestScreeningFilters()">AI 建议填筛</button>
+          <label class="skip-resume-option" data-screening="skip-resume">
+            <input type="checkbox" id="skipResumeCheck"> 跳过简历
+          </label>
+          <span class="manual-filter-hint">人工填筛：字段无必填，留空即不限</span>
+        </div>
+        <div class="screening-filter-section">
+          <span class="screening-filter-section-title">岗位条件</span>
+          <div class="screening-filters" data-screening="filters">
+            <label class="screening-filter-field">城市<select data-filter="city" id="screeningFilterCity"><option value="">不限</option></select></label>
+            <label class="screening-filter-field">薪资<select data-filter="salary" id="screeningFilterSalary"><option value="">不限</option></select></label>
+            <label class="screening-filter-field">经验<select data-filter="experience" id="screeningFilterExperience"><option value="">不限</option></select></label>
+            <label class="screening-filter-field">学历<select data-filter="degree" id="screeningFilterDegree"><option value="">不限</option></select></label>
+            <label class="screening-filter-field">规模<select data-filter="scale" id="screeningFilterScale"><option value="">不限</option></select></label>
+            <label class="screening-filter-field">融资阶段<select data-filter="stage" id="screeningFilterStage"><option value="">不限</option></select></label>
+            <label class="screening-filter-field">行业<select data-filter="industry" id="screeningFilterIndustry"><option value="">不限</option></select></label>
+          </div>
+        </div>
+        <div class="screening-filter-section">
+          <span class="screening-filter-section-title">执行范围</span>
+          <input type="text" data-screening="keyword" id="screeningKeyword" class="screening-keyword" placeholder="搜索关键词">
+          <label class="manual-filter-hint">页数 <input class="screening-limit" id="screeningPages" type="number" min="1" max="10" value="1"></label>
+          <label class="manual-filter-hint">详情 <input class="screening-limit" id="screeningMaxDetails" type="number" min="1" value="3"></label>
+          <button class="btn primary" data-screening="execute-btn" onclick="executeScreeningRun()">执行筛选</button>
+          <button class="btn" type="button" onclick="cleanupScreeningResults()">清理 30 天结果</button>
+          <span class="screening-status" data-screening="status" id="screeningStatus">点击执行开始筛选</span>
+        </div>
       </div>
-      <div class="screening-filters" data-screening="filters">
-        <select data-filter="city" id="screeningFilterCity"><option value="">城市（不限）</option></select>
-        <select data-filter="salary" id="screeningFilterSalary"><option value="">薪资（不限）</option></select>
-        <select data-filter="experience" id="screeningFilterExperience"><option value="">经验（不限）</option></select>
-        <select data-filter="degree" id="screeningFilterDegree"><option value="">学历（不限）</option></select>
-        <select data-filter="scale" id="screeningFilterScale"><option value="">规模（不限）</option></select>
-        <select data-filter="stage" id="screeningFilterStage"><option value="">阶段（不限）</option></select>
-        <select data-filter="industry" id="screeningFilterIndustry"><option value="">行业（不限）</option></select>
-      </div>
-      <input type="text" data-screening="keyword" id="screeningKeyword" class="screening-keyword" placeholder="搜索关键词">
-      <label class="manual-filter-hint">页数 <input class="screening-limit" id="screeningPages" type="number" min="1" max="10" value="1"></label>
-      <label class="manual-filter-hint">详情 <input class="screening-limit" id="screeningMaxDetails" type="number" min="1" value="3"></label>
-      <button class="btn primary" data-screening="execute-btn" onclick="executeScreeningRun()">执行筛选</button>
-      <button class="btn" type="button" onclick="cleanupScreeningResults()">清理 30 天结果</button>
-      <div class="screening-status" data-screening="status" id="screeningStatus">点击执行开始筛选</div>
     </div>
 
     <div class="zone-tabs" aria-label="筛选结果视图">
@@ -527,7 +666,10 @@
       const toggle = document.getElementById("settingsToggle");
       panel.classList.toggle("collapsed");
       toggle.classList.toggle("collapsed");
-      toggle.textContent = panel.classList.contains("collapsed") ? "▶" : "◀";
+      const isCollapsed = panel.classList.contains("collapsed");
+      toggle.textContent = isCollapsed ? "▶" : "◀";
+      toggle.setAttribute("aria-expanded", String(!isCollapsed));
+      toggle.setAttribute("aria-label", isCollapsed ? "展开设置区" : "折叠设置区");
     }
 
     // == 画像 ==
@@ -921,7 +1063,11 @@
         workbench.classList.add("hidden");
         screening.classList.add("active");
         tabs[1].classList.add("active");
-        if (!screening._initialized) { loadScreeningFilterOptions(); screening._initialized = true; }
+        if (!screening._initialized) {
+          loadScreeningFilterOptions();
+          initializeScreeningFilterSummary();
+          screening._initialized = true;
+        }
       } else {
         workbench.classList.remove("hidden");
         screening.classList.remove("active");
@@ -949,6 +1095,44 @@
       industry: "screeningFilterIndustry",
     };
 
+    function toggleScreeningFilters() {
+      const details = document.getElementById("screeningFilterDetails");
+      const toggle = document.getElementById("screeningFilterToggle");
+      const isCollapsed = details.classList.toggle("collapsed");
+      toggle.textContent = isCollapsed ? "修改筛选" : "收起筛选";
+      toggle.setAttribute("aria-expanded", String(!isCollapsed));
+    }
+
+    function updateScreeningFilterSummary() {
+      const summary = document.getElementById("screeningFilterSummary");
+      if (!summary) return;
+      const selected = [];
+      for (const elId of Object.values(SCREENING_FIELD_IDS)) {
+        const select = document.getElementById(elId);
+        const option = select && select.selectedOptions[0];
+        if (select && select.value && option) selected.push(option.textContent);
+      }
+      const keyword = document.getElementById("screeningKeyword")?.value.trim();
+      if (keyword) selected.unshift(`关键词：${keyword}`);
+      const pages = document.getElementById("screeningPages")?.value || "1";
+      const details = document.getElementById("screeningMaxDetails")?.value || "3";
+      const visible = selected.slice(0, 2);
+      if (selected.length > visible.length) visible.push(`等 ${selected.length - visible.length} 项`);
+      const conditions = visible.length ? visible.join(" · ") : "全部条件";
+      summary.textContent = `${conditions} · ${pages} 页 · 核验 ${details} 条详情`;
+    }
+
+    function initializeScreeningFilterSummary() {
+      document.querySelectorAll("[data-screening='filters'] select").forEach((select) => {
+        select.addEventListener("change", updateScreeningFilterSummary);
+      });
+      ["screeningKeyword", "screeningPages", "screeningMaxDetails"].forEach((id) => {
+        const input = document.getElementById(id);
+        if (input) input.addEventListener("input", updateScreeningFilterSummary);
+      });
+      updateScreeningFilterSummary();
+    }
+
     // 加载筛选项枚举
     async function loadScreeningFilterOptions() {
       try {
@@ -965,6 +1149,7 @@
             sel.appendChild(o);
           }
         }
+        updateScreeningFilterSummary();
       } catch(e) { /* 筛选项加载失败时保留不限选项 */ }
     }
 
@@ -1016,6 +1201,7 @@
           }
         }
       }
+      updateScreeningFilterSummary();
     }
 
     // 执行筛选运行

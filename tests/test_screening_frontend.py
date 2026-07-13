@@ -47,6 +47,14 @@ class ScreeningFiveViewContractTests(unittest.TestCase):
     def test_reduced_motion_is_supported(self):
         self.assertIn("prefers-reduced-motion: reduce", self.html)
 
+    def test_uses_the_shared_decision_workbench_visual_system(self):
+        self.assertIn("--gold: #d9b663", self.html)
+        self.assertIn("--surface-raised: #1c2027", self.html)
+        self.assertIn(".settings-panel.collapsed", self.html)
+        self.assertIn(".screening-card:hover", self.html)
+        self.assertIn('id="screeningFilterDetails"', self.html)
+        self.assertIn("function toggleScreeningFilters()", self.html)
+
 
 if __name__ == "__main__":
     unittest.main()
