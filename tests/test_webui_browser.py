@@ -112,6 +112,17 @@ class WorkbenchBrowserContractTests(unittest.TestCase):
         self.assertIn("整理你的求职条件", self.html)
         self.assertIn("关闭设置区", self.html)
 
+    def test_model_refresh_action_stays_compact_without_losing_its_meaning(self):
+        """The model refresh control keeps a short label and the existing action."""
+        self.assertIn('class="btn model-fetch-button"', self.html)
+        self.assertIn('aria-label="拉取可用模型"', self.html)
+        self.assertIn('title="拉取可用模型"', self.html)
+        self.assertIn('onclick="fetchAiModels()"', self.html)
+
+    def test_narrow_workbench_reserves_space_for_the_settings_toggle(self):
+        """The collapsed settings toggle must not cover the workbench title on phones."""
+        self.assertIn('.search-bar { min-height: 68px; padding: 10px 12px 10px 42px; }', self.html)
+
     def test_no_ai_scores_in_card_template(self):
         """Card template must not expose AI scores, ranks or match reasons."""
         self.assertNotIn("match_score", self.html)

@@ -316,6 +316,11 @@
     .field input, .field select, .field textarea { min-height: 36px; }
     .field input::placeholder, .field textarea::placeholder { color: #696e72; }
     .settings-panel .btn-row { margin-top: 12px; }
+    .settings-panel .model-picker-row { align-items: stretch; }
+    .settings-panel .model-picker-row select { flex: 1 1 auto; min-width: 0; }
+    .settings-panel .model-picker-row .model-fetch-button {
+      flex: 0 0 auto; white-space: nowrap; padding-inline: 12px;
+    }
     .settings-panel .history-list { margin-top: 12px; }
     .field input, .field select, .field textarea,
     .screening-filters select, .screening-keyword, .screening-limit {
@@ -436,7 +441,7 @@
       .screening-filter-summary { display: none; }
       .screening-filter-details { padding: 12px; }
       .job-card-list, .zone-container { padding-left: 12px; padding-right: 12px; }
-      .search-bar { min-height: 68px; padding: 10px 12px; }
+      .search-bar { min-height: 68px; padding: 10px 12px 10px 42px; }
       .search-info { font-size: 14px; }
       .workbench-empty { padding-top: 28px; }
       .workbench-steps { grid-template-columns: 1fr; margin-top: 30px; }
@@ -531,9 +536,9 @@
         </div>
         <div class="field">
           <label>模型</label>
-          <div class="btn-row">
+          <div class="btn-row model-picker-row">
             <select id="aiModel"><option value="">请先拉取</option></select>
-            <button class="btn" onclick="fetchAiModels()">拉取可用模型</button>
+            <button class="btn model-fetch-button" type="button" onclick="fetchAiModels()" aria-label="拉取可用模型" title="拉取可用模型">拉取</button>
           </div>
         </div>
         <div class="btn-row">
