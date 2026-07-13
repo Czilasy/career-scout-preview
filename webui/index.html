@@ -48,11 +48,16 @@
 
     .workspace { display: flex; height: calc(100vh - var(--header-h)); overflow: hidden; }
 
-    /* == 左侧可折叠设置区 == */
+    /* == 左侧设置区（始终展开） == */
     .settings-panel {
       width: 320px; min-width: 320px; border-right: 1px solid var(--line);
-      background: var(--surface); overflow-y: auto; transition: margin-left .25s ease, min-width .25s ease, width .25s ease;
+      background: var(--surface); overflow-y: auto;
     }
+    .settings-panel::-webkit-scrollbar { width: 6px; }
+    .settings-panel::-webkit-scrollbar-track { background: transparent; }
+    .settings-panel::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 3px; }
+    .settings-panel::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+    .settings-panel { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
     .settings-panel.collapsed { margin-left: -320px; min-width: 0; width: 0; }
     .settings-toggle {
       position: absolute; left: 320px; top: calc(var(--header-h) + 10px); z-index: 50;
@@ -76,13 +81,24 @@
     .field label input[type="checkbox"] { vertical-align: middle; margin-right: 6px; }
     .field input:focus, .field select:focus { border-color: var(--accent); }
     .field input[type="file"] { padding: 4px; }
-    .btn {
+    .btn { 
       padding: 8px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2);
       color: var(--text); font-size: 13px; transition: background .15s, border-color .15s;
     }
     .btn:hover { border-color: var(--line-strong); background: var(--line); }
     .btn.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
     .btn.primary:hover { background: #4493e0; }
+    .btn:disabled { cursor: wait; opacity: .72; }
+    .btn:disabled:hover { border-color: var(--line); background: var(--surface-2); }
+    .btn.primary:disabled { background: var(--surface-2); color: var(--muted); border-color: var(--line-strong); }
+    .btn-with-loading { display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+    .btn-spinner {
+      display: none; width: 13px; height: 13px; flex: 0 0 13px;
+      border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+      animation: btnSpin .75s linear infinite;
+    }
+    .btn.loading .btn-spinner { display: inline-block; }
+    @keyframes btnSpin { to { transform: rotate(360deg); } }
     .btn.danger { color: var(--danger); border-color: var(--danger); }
     .btn-row { display: flex; gap: 8px; margin-top: 8px; }
     .btn-row .btn { flex: 1; }
@@ -430,12 +446,119 @@
     .settings-accordion-toggle .section-title { margin-bottom: 0; }
     .settings-accordion-action { color: var(--gold); font-size: 11px; white-space: nowrap; }
     .settings-accordion-content { padding-top: 16px; }
+
+    /* == 左侧 Tab 分组 == */
+    .panel-tabs { display: flex; border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; z-index: 10; }
+    .panel-tab {
+      flex: 1; padding: 11px 8px; background: transparent; border: none; color: var(--muted);
+      font-size: 12px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+    }
+    .panel-tab:hover { color: var(--text); }
+    .panel-tab.active { color: var(--success); border-bottom-color: var(--success); font-weight: 600; }
+    .panel-tab-pane { display: none; }
+    .panel-tab-pane.active { display: block; }
+
+    /* == 配置区手风琴 == */
+    .accordion-section { padding: 0; }
+    .accordion-section .accordion-toggle {
+      width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 14px 16px; background: transparent; border: none; color: var(--text); text-align: left;
+      cursor: pointer; border-bottom: 1px solid var(--line);
+    }
+    .accordion-section .accordion-toggle .section-title { margin-bottom: 0; font-size: 12px; }
+    .accordion-section .accordion-toggle .accordion-status {
+      margin-left: auto; font-size: 11px; color: var(--muted); font-weight: 400; white-space: nowrap;
+    }
+    .accordion-section.open .accordion-toggle .accordion-status { color: var(--success); }
+    .accordion-section .accordion-toggle .accordion-action {
+      color: var(--gold); font-size: 11px; white-space: nowrap; margin-left: 8px;
+    }
+    .accordion-section .accordion-content { padding: 16px; border-bottom: 1px solid var(--line); }
+    .accordion-section:not(.open) .accordion-content { display: none !important; }
+    .accordion-section.open .accordion-content { display: block !important; }
+    .accordion-section.open .accordion-toggle .accordion-action::before { content: "收起"; }
+    .accordion-section:not(.open) .accordion-toggle .accordion-action::before { content: "展开"; }
+    .accordion-section .accordion-toggle .accordion-action { font-size: 0; }
+    .accordion-section .accordion-toggle .accordion-action::before { font-size: 11px; }
+
+    /* 高级字段折叠 + 链接式按钮 */
+    .field-advanced[hidden] { display: none; }
+    .btn.link-btn {
+      background: transparent; border: none; color: var(--muted); font-size: 11px;
+      padding: 4px 0; cursor: pointer; text-align: left;
+    }
+    .btn.link-btn:hover { color: var(--text); }
+
+    /* 简历拖拽区 */
+    .resume-drop-zone {
+      border: 1.5px dashed var(--line-strong); border-radius: 6px; padding: 22px 12px;
+      text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
+      background: var(--bg); outline: none;
+    }
+    .resume-drop-zone:hover, .resume-drop-zone:focus { border-color: var(--accent); background: var(--surface-2); }
+    .resume-drop-zone.dragover { border-color: var(--success); background: var(--accent-soft); }
+    .resume-drop-hint { font-size: 12px; color: var(--muted); }
+    .resume-drop-filename { font-size: 12px; color: var(--success); margin-top: 6px; word-break: break-all; }
+    .resume-drop-filename:empty { display: none; }
+
+    /* AI 解析同意提示框（hover 显示） */
+    .consent-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 0;
+    }
+    .consent-wrap input[type="checkbox"] {
+      flex: 0 0 auto;
+      width: 13px;
+      height: 13px;
+      margin: 0;
+      padding: 0;
+      accent-color: var(--gold);
+      cursor: pointer;
+    }
+    .consent-wrap span.consent-text {
+      flex: 0 1 auto;
+      color: var(--text);
+    }
+    .consent-tooltip {
+      position: absolute; bottom: calc(100% + 8px); left: 0;
+      width: 260px; padding: 8px 10px;
+      background: var(--surface-2, #2a2a2a); color: var(--text, #e0e0e0);
+      border: 1px solid var(--line-strong, #444); border-radius: 6px;
+      font-size: 12px; line-height: 1.5;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+      opacity: 0; visibility: hidden; transition: opacity .15s, visibility .15s;
+      z-index: 10; pointer-events: none;
+    }
+    .consent-tooltip::after {
+      content: ""; position: absolute; top: 100%; left: 18px;
+      border: 6px solid transparent; border-top-color: var(--line-strong, #444);
+    }
+    .consent-wrap:hover .consent-tooltip,
+    .consent-wrap:focus-within .consent-tooltip { opacity: 1; visibility: visible; }
+
+    /* 搜索 tab 画像摘要卡片 */
+    .profile-summary {
+      background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 12px;
+    }
+    .profile-summary-label { font-size: 10px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .05em; }
+    .profile-summary-text { font-size: 13px; color: var(--text); line-height: 1.5; margin-bottom: 8px; }
+
+    /* 历史 tab 分类按钮 */
+    .history-filter-row .history-filter-btn { flex: 1; font-size: 11px; padding: 7px 4px; }
+    .history-filter-row .history-filter-btn.active { background: var(--success); color: #000; border-color: var(--success); font-weight: 600; }
     .app-notice, .screening-notice {
       display: none; align-items: center; gap: 10px; border: 1px solid var(--line);
       border-radius: 6px; background: var(--surface-raised); color: var(--muted); font-size: 12px;
     }
     .app-notice {
-      position: fixed; top: calc(var(--header-h) + 12px); right: 20px; z-index: 220;
+      position: fixed; top: calc(var(--header-h) + 12px); left: 50%; transform: translateX(-50%); z-index: 220;
       max-width: min(420px, calc(100vw - 40px)); padding: 9px 12px; box-shadow: 0 8px 24px rgba(0,0,0,.24);
     }
     .app-notice.show, .screening-notice.show { display: flex; }
@@ -479,7 +602,7 @@
       .zone-tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); overflow-x: visible; gap: 4px; }
       .zone-group-label { display: none; }
       .zone-tab { min-width: 0; padding: 7px 4px; text-align: center; }
-      .app-notice { top: calc(var(--header-h) + 10px); right: 12px; left: 12px; max-width: none; }
+      .app-notice { top: calc(var(--header-h) + 10px); left: 12px; right: 12px; max-width: none; transform: none; }
       .screening-notice { padding: 8px 12px; }
     }
   </style>
@@ -502,109 +625,138 @@
   </div>
 
   <div class="workspace">
-    <button class="settings-toggle collapsed" id="settingsToggle" onclick="toggleSettings()" aria-label="展开设置区" aria-expanded="false">▶</button>
-
-    <aside class="settings-panel collapsed" id="settingsPanel">
-      <div class="settings-panel-header">
-        <div>
-          <span class="settings-panel-kicker">搜索设置</span>
-          <strong class="settings-panel-title">整理你的求职条件</strong>
-        </div>
-        <button class="settings-panel-close" type="button" onclick="toggleSettings()" aria-label="关闭设置区">×</button>
-      </div>
-      <div class="section">
-        <div class="section-title">画像管理</div>
-        <div class="field">
-          <select id="profileSelect" onchange="selectProfile(this.value)"></select>
-        </div>
-        <div class="field">
-          <label>画像名称</label>
-          <input type="text" id="profileName" placeholder="如：Python 后端求职">
-        </div>
-        <div class="field">
-          <label>城市</label>
-          <input type="text" id="profileCity" placeholder="如：上海">
-        </div>
-        <div class="field">
-          <label>岗位方向（逗号分隔）</label>
-          <input type="text" id="profileRoles" placeholder="如：Python 后端,FastAPI">
-        </div>
-        <div class="field">
-          <label>最低薪资（K）</label>
-          <input type="number" id="profileMinSalary" placeholder="如：20">
-        </div>
-        <div class="field"><label>行业代码（可选）</label><input type="text" id="profileIndustry" placeholder="BOSS 行业代码"></div>
-        <div class="field"><label>排除关键词（逗号分隔）</label><input type="text" id="profileExcludes" placeholder="如：外包,销售"></div>
-        <div class="btn-row">
-          <button class="btn primary" onclick="createProfile()">创建画像</button>
-          <button class="btn" onclick="saveProfileFields()">保存条件</button>
-        </div>
+    <aside class="settings-panel" id="settingsPanel">
+      <div class="panel-tabs" role="tablist">
+        <button class="panel-tab active" data-tab="config" role="tab" aria-selected="true" onclick="switchPanelTab('config')">配置</button>
+        <button class="panel-tab" data-tab="search" role="tab" aria-selected="false" onclick="switchPanelTab('search')">搜索</button>
+        <button class="panel-tab" data-tab="history" role="tab" aria-selected="false" onclick="switchPanelTab('history')">历史</button>
       </div>
 
-      <div class="section">
-        <div class="section-title">简历上传</div>
-        <div class="field">
-          <input type="file" id="resumeFile" accept=".txt,.pdf,.docx">
-        </div>
-        <div class="field" style="font-size:12px;color:var(--muted);">
-          勾选后，简历文本会发送到你配置的 AI 服务用于生成可编辑建议；不勾选则只本地保存。
-          <label><input type="checkbox" id="resumeAiConsent"> 我已知悉并同意 AI 解析</label>
-        </div>
-        <div class="btn-row">
-          <button class="btn primary" onclick="uploadResume()">上传解析</button>
-        </div>
-        <div id="aiSuggestion" class="ai-suggestion" style="display:none;"></div>
-      </div>
-
-      <div class="section settings-accordion" id="aiSettingsSection">
-        <button class="settings-accordion-toggle" id="aiSettingsToggle" type="button" onclick="toggleAiSettings()" aria-controls="aiSettingsContent" aria-expanded="false">
-          <span class="section-title">AI 服务设置</span>
-          <span class="settings-accordion-action">展开</span>
-        </button>
-        <div class="settings-accordion-content" id="aiSettingsContent" hidden>
-          <div class="field">
-          <label>AI 服务 URL（填到 /v1 这一级，/chat/completions 会自动补全）</label>
-          <input type="url" id="aiEndpointUrl" placeholder="https://api.example.com/v1">
+      <!-- 配置 Tab -->
+      <div class="panel-tab-pane active" data-pane="config">
+        <!-- 简历上传（默认展开，含拖拽区） -->
+        <div class="section" id="resumeSection">
+          <div class="section-title">简历上传</div>
+          <div class="resume-drop-zone" id="resumeDropZone" tabindex="0">
+            <div class="resume-drop-hint" id="resumeDropHint">将简历文件拖到此处，或点击选择</div>
+            <input type="file" id="resumeFile" accept=".txt,.pdf,.docx" hidden>
+            <div class="resume-drop-filename" id="resumeDropFilename"></div>
           </div>
-          <div class="field">
-          <label>API Key</label>
-          <input type="text" id="aiApiKey" placeholder="sk-..." autocomplete="off">
-          <span id="aiApiKeyHint" style="margin-left:8px;color:#6b7280;font-size:13px;"></span>
-          </div>
-          <div class="field">
-          <label>模型</label>
-          <div class="btn-row model-picker-row">
-            <select id="aiModel"><option value="">请先拉取</option></select>
-            <button class="btn model-fetch-button" type="button" onclick="fetchAiModels()" aria-label="拉取可用模型" title="拉取可用模型">拉取</button>
-          </div>
+          <div class="field" style="margin-top:10px;">
+            <label class="consent-wrap" id="resumeConsentWrap">
+              <input type="checkbox" id="resumeAiConsent">
+              <span class="consent-text">我已知悉并同意 AI 解析</span>
+              <div class="consent-tooltip" id="resumeConsentTip">勾选后，简历文本会发送到你配置的 AI 服务用于生成可编辑建议；不勾选则只本地保存。</div>
+            </label>
           </div>
           <div class="btn-row">
-          <button class="btn primary" onclick="saveAiSettings()">保存</button>
-          <button class="btn" onclick="testAiConnection()">测试</button>
+            <button class="btn primary btn-with-loading" id="resumeUploadButton" type="button" aria-busy="false" onclick="uploadResume()">
+              <span class="btn-label">上传解析</span>
+              <span class="btn-spinner" aria-hidden="true"></span>
+            </button>
+          </div>
+          <div id="aiSuggestion" class="ai-suggestion" style="display:none;"></div>
+        </div>
+
+        <!-- 画像管理（默认全展开） -->
+        <div class="section" id="profileSection">
+          <div class="section-title">画像管理</div>
+          <div class="field">
+            <select id="profileSelect" onchange="selectProfile(this.value)"></select>
+          </div>
+          <div class="field">
+            <label>画像名称</label>
+            <input type="text" id="profileName" placeholder="如：Python 后端求职">
+          </div>
+          <div class="field">
+            <label>城市</label>
+            <input type="text" id="profileCity" placeholder="如：上海">
+          </div>
+          <div class="field">
+            <label>岗位方向（逗号分隔）</label>
+            <input type="text" id="profileRoles" placeholder="如：Python 后端,FastAPI">
+          </div>
+          <div class="field">
+            <label>最低薪资（K）</label>
+            <input type="number" id="profileMinSalary" placeholder="如：20">
+          </div>
+          <div class="field-advanced" id="profileAdvanced" hidden>
+            <div class="field"><label>行业代码（可选）</label><input type="text" id="profileIndustry" placeholder="BOSS 行业代码"></div>
+            <div class="field"><label>排除关键词（逗号分隔）</label><input type="text" id="profileExcludes" placeholder="如：外包,销售"></div>
+          </div>
+          <button class="btn link-btn" type="button" id="advancedToggle" onclick="toggleAdvanced()">高级（行业/排除词）</button>
+          <div class="btn-row">
+            <button class="btn primary" onclick="createProfile()">新建</button>
+            <button class="btn" onclick="saveProfileFields()">更新</button>
+            <button class="btn danger" onclick="deleteProfile()">删除</button>
+          </div>
+        </div>
+
+        <!-- AI 服务设置（折叠带状态） -->
+        <div class="section accordion-section" id="aiSettingsSection">
+          <button class="accordion-toggle" type="button" onclick="togglePanelAccordion('aiSettingsSection')">
+            <span class="section-title">AI 服务设置</span>
+            <span class="accordion-status" id="aiStatus">未连接</span>
+            <span class="accordion-action">展开</span>
+          </button>
+          <div class="accordion-content" id="aiSettingsContent" hidden>
+            <div class="field">
+              <label>AI 服务 URL（填到 /v1 这一级，/chat/completions 会自动补全）</label>
+              <input type="url" id="aiEndpointUrl" placeholder="https://api.example.com/v1">
+            </div>
+            <div class="field">
+              <label>API Key</label>
+              <input type="text" id="aiApiKey" placeholder="sk-..." autocomplete="off">
+              <span id="aiApiKeyHint" style="margin-left:8px;color:#6b7280;font-size:13px;"></span>
+            </div>
+            <div class="field">
+              <label>模型</label>
+              <div class="btn-row model-picker-row">
+                <select id="aiModel"><option value="">请先拉取</option></select>
+                <button class="btn model-fetch-button" type="button" onclick="fetchAiModels()" aria-label="拉取可用模型" title="拉取可用模型">拉取</button>
+              </div>
+            </div>
+            <div class="btn-row">
+              <button class="btn primary" onclick="saveAiSettings()">保存</button>
+              <button class="btn" onclick="testAiConnection()">测试</button>
+            </div>
           </div>
         </div>
       </div>
 
-      <div class="section">
-        <div class="section-title">搜索</div>
-        <div class="field">
-          <label>手动关键词（逗号分隔，最多3个）</label>
-          <input type="text" id="manualKeywords" placeholder="如：Python 后端,FastAPI,风控">
+      <!-- 搜索 Tab -->
+      <div class="panel-tab-pane" data-pane="search" hidden>
+        <div class="section">
+          <div class="profile-summary" id="profileSummary">
+            <div class="profile-summary-label">当前画像</div>
+            <div class="profile-summary-text" id="profileSummaryText">未选择画像</div>
+            <button class="btn link-btn" type="button" onclick="switchPanelTab('config')">更换画像</button>
+          </div>
         </div>
-        <div class="btn-row">
-          <button class="btn primary" onclick="startSearch()">开始搜索</button>
-          <button class="btn danger" onclick="cancelSearch()" id="cancelBtn" style="display:none;">取消</button>
+        <div class="section">
+          <div class="section-title">搜索</div>
+          <div class="field">
+            <label id="manualKeywordsLabel">手动关键词（逗号分隔，最多3个）</label>
+            <input type="text" id="manualKeywords" placeholder="如：Python 后端,FastAPI,风控">
+          </div>
+          <div class="btn-row">
+            <button class="btn primary" onclick="startSearch()">开始搜索</button>
+            <button class="btn danger" onclick="cancelSearch()" id="cancelBtn" style="display:none;">取消</button>
+          </div>
         </div>
       </div>
 
-      <div class="section">
-        <div class="section-title">搜索历史</div>
-        <div class="btn-row">
-          <button class="btn" onclick="loadHistory('interested')">感兴趣</button>
-          <button class="btn" onclick="loadHistory('applied')">已投递</button>
-          <button class="btn" onclick="loadHistory('new')">历史</button>
+      <!-- 历史 Tab -->
+      <div class="panel-tab-pane" data-pane="history" hidden>
+        <div class="section">
+          <div class="section-title">搜索历史</div>
+          <div class="btn-row history-filter-row">
+            <button class="btn history-filter-btn active" data-status="interested" onclick="switchHistoryFilter('interested')">感兴趣</button>
+            <button class="btn history-filter-btn" data-status="applied" onclick="switchHistoryFilter('applied')">已投递</button>
+            <button class="btn history-filter-btn" data-status="new" onclick="switchHistoryFilter('new')">历史</button>
+          </div>
+          <div class="history-list" id="historyList"></div>
         </div>
-        <div class="history-list" id="historyList"></div>
       </div>
     </aside>
 
@@ -757,11 +909,13 @@
       profileJobs: "/api/profile-jobs",
     };
 
+    let appNoticeTimer = null;
     function setAppNotice(message, tone = "info", retryHandler = null) {
       const notice = document.getElementById("appNotice");
       const text = document.getElementById("appNoticeText");
       const retry = document.getElementById("appNoticeRetry");
       if (!notice || !text || !retry) return;
+      if (appNoticeTimer) { clearTimeout(appNoticeTimer); appNoticeTimer = null; }
       const hasMessage = Boolean(message);
       notice.hidden = !hasMessage;
       notice.classList.toggle("show", hasMessage);
@@ -780,17 +934,129 @@
           retry.disabled = false;
         }
       } : null;
+      // 错误和带重试按钮的提示不自动消失，其余 3 秒后自动消失
+      if (hasMessage && tone !== "error" && typeof retryHandler !== "function") {
+        appNoticeTimer = setTimeout(() => {
+          notice.hidden = true;
+          notice.classList.remove("show");
+          text.textContent = "";
+          appNoticeTimer = null;
+        }, 3000);
+      }
     }
 
-    function toggleAiSettings() {
-      const toggle = document.getElementById("aiSettingsToggle");
-      const content = document.getElementById("aiSettingsContent");
-      if (!toggle || !content) return;
-      const expanded = toggle.getAttribute("aria-expanded") === "true";
-      toggle.setAttribute("aria-expanded", String(!expanded));
-      content.hidden = expanded;
-      const action = toggle.querySelector(".settings-accordion-action");
-      if (action) action.textContent = expanded ? "展开" : "收起";
+    // == 左侧 Tab 切换 ==
+    function switchPanelTab(name) {
+      document.querySelectorAll(".panel-tab").forEach(t => {
+        const active = t.dataset.tab === name;
+        t.classList.toggle("active", active);
+        t.setAttribute("aria-selected", String(active));
+      });
+      document.querySelectorAll(".panel-tab-pane").forEach(p => {
+        p.classList.toggle("active", p.dataset.pane === name);
+        p.hidden = p.dataset.pane !== name;
+      });
+      if (name === "search") updateProfileSummary();
+    }
+
+    // == 配置区手风琴 ==
+    function togglePanelAccordion(sectionId) {
+      const sec = document.getElementById(sectionId);
+      if (!sec) return;
+      sec.classList.toggle("open");
+    }
+
+    // == 高级字段折叠 ==
+    function toggleAdvanced() {
+      const adv = document.getElementById("profileAdvanced");
+      const btn = document.getElementById("advancedToggle");
+      if (!adv || !btn) return;
+      adv.hidden = !adv.hidden;
+      btn.textContent = adv.hidden ? "高级（行业/排除词）" : "收起高级";
+    }
+
+    // == 画像摘要更新（搜索 tab） ==
+    function updateProfileSummary() {
+      const el = document.getElementById("profileSummaryText");
+      if (!el) return;
+      const sel = document.getElementById("profileSelect");
+      const name = sel && sel.value ? sel.options[sel.selectedIndex].textContent : "";
+      const city = (document.getElementById("profileCity").value || "").trim();
+      const salary = (document.getElementById("profileMinSalary").value || "").trim();
+      if (!name && !city && !salary) { el.textContent = "未选择画像"; return; }
+      const parts = [];
+      if (name) parts.push(name);
+      if (city) parts.push(city);
+      if (salary) parts.push(salary + "K+");
+      el.textContent = parts.join(" · ");
+    }
+
+    // == 历史分类切换 ==
+    let currentHistoryFilter = "interested";
+    function switchHistoryFilter(status) {
+      currentHistoryFilter = status;
+      document.querySelectorAll(".history-filter-btn").forEach(b => {
+        b.classList.toggle("active", b.dataset.status === status);
+      });
+      loadHistory(status);
+    }
+
+    // == 状态摘要更新 ==
+    function updateResumeStatus(filename) {
+      const el = document.getElementById("resumeDropFilename");
+      if (!el) return;
+      el.textContent = filename ? ("已选择：" + filename) : "";
+    }
+    function updateAiStatus(connected) {
+      const el = document.getElementById("aiStatus");
+      if (!el) return;
+      el.textContent = connected ? "已连接" : "未连接";
+    }
+
+    // 鼠标点击后释放复选框焦点，避免 hover 移开后仍被 focus-within 保持显示；键盘聚焦仍保留提示。
+    function initResumeConsentTooltip() {
+      const consentWrap = document.getElementById("resumeConsentWrap");
+      const consentInput = document.getElementById("resumeAiConsent");
+      if (!consentWrap || !consentInput) return;
+      let pointerActivated = false;
+      consentWrap.addEventListener("pointerdown", event => {
+        pointerActivated = event.pointerType !== "keyboard";
+      }, true);
+      consentWrap.addEventListener("pointercancel", () => {
+        pointerActivated = false;
+      }, true);
+      consentWrap.addEventListener("click", () => {
+        if (!pointerActivated) return;
+        pointerActivated = false;
+        consentInput.blur();
+        setTimeout(() => consentInput.blur(), 0);
+      });
+    }
+
+    // == 简历拖拽区初始化 ==
+    function initResumeDropZone() {
+      const zone = document.getElementById("resumeDropZone");
+      const input = document.getElementById("resumeFile");
+      if (!zone || !input) return;
+      zone.addEventListener("click", () => input.click());
+      zone.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
+      input.addEventListener("change", () => {
+        updateResumeStatus(input.files && input.files[0] ? input.files[0].name : "");
+      });
+      ["dragenter", "dragover"].forEach(ev => zone.addEventListener(ev, e => {
+        e.preventDefault(); e.stopPropagation(); zone.classList.add("dragover");
+      }));
+      ["dragleave", "drop"].forEach(ev => zone.addEventListener(ev, e => {
+        e.preventDefault(); e.stopPropagation(); zone.classList.remove("dragover");
+      }));
+      zone.addEventListener("drop", e => {
+        const files = e.dataTransfer && e.dataTransfer.files;
+        if (!files || !files.length) return;
+        const dt = new DataTransfer();
+        dt.items.add(files[0]);
+        input.files = dt.files;
+        updateResumeStatus(files[0].name);
+      });
     }
 
     async function api(path, opts = {}) {
@@ -805,6 +1071,8 @@
       const resp = await fetch(API.session);
       const data = await resp.json();
       token = data.token;
+      initResumeDropZone();
+      initResumeConsentTooltip();
       await loadProfiles();
       await loadAiSettings();
       await checkConnection();
@@ -824,13 +1092,9 @@
 
     function toggleSettings() {
       const panel = document.getElementById("settingsPanel");
-      const toggle = document.getElementById("settingsToggle");
-      panel.classList.toggle("collapsed");
-      toggle.classList.toggle("collapsed");
-      const isCollapsed = panel.classList.contains("collapsed");
-      toggle.textContent = isCollapsed ? "▶" : "◀";
-      toggle.setAttribute("aria-expanded", String(!isCollapsed));
-      toggle.setAttribute("aria-label", isCollapsed ? "展开设置区" : "折叠设置区");
+      if (!panel) return;
+      panel.scrollIntoView({ behavior: "smooth", block: "start" });
+      panel.scrollTop = 0;
     }
 
     // == 画像 ==
@@ -853,6 +1117,7 @@
     function selectProfile(pid) {
       currentProfileId = pid;
       document.getElementById("profileSelect").value = pid;
+      updateProfileSummary();
     }
 
     async function createProfile() {
@@ -870,6 +1135,26 @@
         }
       } catch (_error) {
         setAppNotice("画像创建失败，请检查连接后重试", "error");
+      }
+    }
+
+    async function deleteProfile() {
+      if (!currentProfileId) { setAppNotice("请先选择画像", "warning"); return; }
+      const sel = document.getElementById("profileSelect");
+      const profileName = sel && sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : "该画像";
+      if (!confirm(`确定删除画像「${profileName}」吗？\n\n该画像的简历文件、搜索历史、岗位关联、筛选结果将一并删除，且不可恢复。`)) return;
+      try {
+        const resp = await api(`${API.profiles}/${currentProfileId}`, { method: "DELETE" });
+        if (resp.ok) {
+          currentProfileId = null;
+          await loadProfiles();
+          setAppNotice("画像已删除", "success");
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          setAppNotice(err.error || "画像删除失败", "error");
+        }
+      } catch (_error) {
+        setAppNotice("画像删除失败，请检查连接后重试", "error");
       }
     }
 
@@ -900,14 +1185,27 @@
       }
     }
 
+    function setResumeUploadLoading(isLoading) {
+      const button = document.getElementById("resumeUploadButton");
+      if (!button) return;
+      button.disabled = isLoading;
+      button.classList.toggle("loading", isLoading);
+      button.setAttribute("aria-busy", String(isLoading));
+      const label = button.querySelector(".btn-label");
+      if (label) label.textContent = isLoading ? "解析中…" : "上传解析";
+    }
+
     // == 简历 ==
     async function uploadResume() {
       if (!currentProfileId) { setAppNotice("请先选择画像", "warning"); return; }
+      const uploadButton = document.getElementById("resumeUploadButton");
+      if (uploadButton && uploadButton.disabled) return;
       const fileInput = document.getElementById("resumeFile");
       if (!fileInput.files.length) { setAppNotice("请选择简历文件", "warning"); return; }
       const formData = new FormData();
       formData.append("file", fileInput.files[0]);
       formData.append("ai_consent", String(document.getElementById("resumeAiConsent").checked));
+      setResumeUploadLoading(true);
       try {
         const resp = await fetch(`/api/profiles/${currentProfileId}/resume`, {
           method: "POST", body: formData, headers: { "X-Boss-Token": token },
@@ -920,12 +1218,15 @@
           }
           showAiSuggestion(data);
           setAppNotice("简历已上传", "success");
+          updateResumeStatus(fileInput.files[0] ? fileInput.files[0].name : "");
         } else {
           const err = await resp.json().catch(() => ({}));
           setAppNotice("上传失败：" + (err.error || resp.status), "error");
         }
       } catch (_error) {
         setAppNotice("上传失败，请检查连接后重试", "error");
+      } finally {
+        setResumeUploadLoading(false);
       }
     }
 
@@ -949,8 +1250,29 @@
       notice.style.cssText = "margin-top:6px;font-size:11px;color:var(--muted);";
       notice.textContent = data.privacy_notice || ""; box.appendChild(notice);
       el.replaceChildren(box);
+
+      // AI 联动：解析结果自动填入画像与搜索字段
+      // 1. 城市 → 画像管理「城市」
       if (sug.city) document.getElementById("profileCity").value = sug.city;
-      if (sug.roles) document.getElementById("profileRoles").value = sug.roles.join(",");
+      // 2. 岗位方向 → 画像管理「岗位方向」
+      if (sug.roles && sug.roles.length) document.getElementById("profileRoles").value = sug.roles.join(",");
+      // 3. 最低薪资 → 画像管理「最低薪资」（从 suggestions 提取）
+      const minSalary = sug.suggestions && sug.suggestions.min_salary;
+      if (minSalary && !isNaN(Number(minSalary))) {
+        document.getElementById("profileMinSalary").value = minSalary;
+      }
+      // 4. 搜索关键词 → 搜索 tab「手动关键词」（逗号分隔，最多 3 个）
+      const kwLabel = document.getElementById("manualKeywordsLabel");
+      const kwInput = document.getElementById("manualKeywords");
+      if (sug.keywords && sug.keywords.length) {
+        const topKw = sug.keywords.slice(0, 3).join(",");
+        kwInput.value = topKw;
+        kwLabel.textContent = "搜索关键词（AI 已提取，可修改）";
+        kwLabel.style.color = "var(--success)";
+      } else {
+        kwLabel.textContent = "手动关键词（逗号分隔，最多3个）";
+        kwLabel.style.color = "";
+      }
     }
 
     // == AI 设置 ==
@@ -992,6 +1314,7 @@
       }
       const savedModel = data.model || "";
       renderAiModelOptions(savedModel ? [savedModel] : [], savedModel, "请先拉取");
+      updateAiStatus(Boolean(data.is_configured));
     }
 
     async function fetchAiModels() {
@@ -1035,8 +1358,8 @@
       try {
         const resp = await api("/api/ai-settings/test", { method: "POST" });
         const data = await resp.json();
-        if (data.ok) setAppNotice("AI 连接成功", "success");
-        else setAppNotice("连接失败：" + (data.error_code || "未知"), "error", testAiConnection);
+        if (data.ok) { setAppNotice("AI 连接成功", "success"); updateAiStatus(true); }
+        else { setAppNotice("连接失败：" + (data.error_code || "未知"), "error", testAiConnection); updateAiStatus(false); }
       } catch (_error) {
         setAppNotice("连接测试失败，请稍后重试", "error", testAiConnection);
       }

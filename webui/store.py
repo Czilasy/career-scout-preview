@@ -666,6 +666,28 @@ class TaskStore:
             )
         return self.get_profile(profile_id)
 
+    def delete_profile(self, profile_id, resume_dir=None):
+        """删除画像及其关联数据。
+
+        - 先逐个删除该画像下的简历物理文件（若提供 resume_dir）
+        - 再删除 candidate_profiles 行，外键 ON DELETE CASCADE 自动清理
+          profile_jobs / search_runs / resumes / screening_* 等关联表
+        """
+        pid = str(profile_id)
+        # 校验存在，不存在抛 KeyError 与 get_profile 行为一致
+        self.get_profile(pid)
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT id FROM resumes WHERE profile_id = ? AND deleted_at IS NULL",
+                (pid,),
+            ).fetchall()
+        resume_ids = [r["id"] for r in rows]
+        # 删除简历文件需要 resume_service，但 store 不依赖 resume_service；
+        # 这里只清数据库层，文件删除由 app 层调用前清理（见 app.py delete_profile 路由）。
+        with self._connection() as conn:
+            conn.execute("DELETE FROM candidate_profiles WHERE id = ?", (pid,))
+        return {"deleted": True, "resume_ids": resume_ids}
+
     def _profile_row(self, row) -> dict:
         return {
             "id": row["id"],

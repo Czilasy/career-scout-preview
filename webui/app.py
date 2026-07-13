@@ -798,10 +798,20 @@ def create_app(config=None):
         )
         return jsonify(profile)
 
-    @app.route("/api/profiles/<profile_id>", methods=["GET", "PATCH"])
+    @app.route("/api/profiles/<profile_id>", methods=["GET", "PATCH", "DELETE"])
     def profile_detail(profile_id):
         if request.method == "GET":
             return jsonify(store.get_profile(profile_id))
+        if request.method == "DELETE":
+            # 先删该画像下的简历物理文件，再删画像行（CASCADE 清关联表）
+            resumes = store.list_resumes(profile_id)
+            for r in resumes:
+                if r.get("deleted_at"):
+                    continue
+                resume_service.delete_resume(
+                    r["id"], store, resume_dir=app.config["RESUME_DIR"],
+                )
+            return jsonify(store.delete_profile(profile_id))
         raw = request.get_json(silent=True) or {}
         name = raw.get("name")
         confirmed_fields = raw.get("confirmed_fields")

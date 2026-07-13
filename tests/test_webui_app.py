@@ -191,9 +191,9 @@ class WebUIAppTests(unittest.TestCase):
 
         # Dark theme workbench
         self.assertIn("color-scheme: dark", html)
-        # Collapsible settings panel on the left
+        # Settings panel on the left (default expanded, no collapse toggle)
         self.assertIn('id="settingsPanel"', html)
-        self.assertIn('id="settingsToggle"', html)
+        self.assertIn('data-pane="config"', html)
         # Single-column job card flow
         self.assertIn('id="jobCardList"', html)
         # Card fields: name, company, salary, location, JD excerpt
@@ -1610,8 +1610,42 @@ class ScreeningDOMContractTests(unittest.TestCase):
     def test_resume_upload_input_present(self):
         self.assertIn('data-screening="resume-upload"', self.html)
 
+    def test_resume_upload_button_has_loading_feedback(self):
+        self.assertIn('id="resumeUploadButton"', self.html)
+        self.assertIn('aria-busy="false"', self.html)
+        self.assertIn('class="btn-label">上传解析</span>', self.html)
+        self.assertIn('class="btn-spinner" aria-hidden="true"', self.html)
+        self.assertIn("@keyframes btnSpin", self.html)
+        self.assertIn("function setResumeUploadLoading(isLoading)", self.html)
+        self.assertIn("button.disabled = isLoading", self.html)
+        self.assertIn('button.setAttribute("aria-busy", String(isLoading))', self.html)
+
+        upload_source = self.html.split("async function uploadResume()", 1)[1].split(
+            "function showAiSuggestion", 1
+        )[0]
+        self.assertIn("if (uploadButton && uploadButton.disabled) return;", upload_source)
+        self.assertIn("setResumeUploadLoading(true);", upload_source)
+        self.assertIn("finally", upload_source)
+        self.assertIn("setResumeUploadLoading(false);", upload_source)
+
     def test_suggest_button_present(self):
         self.assertIn('data-screening="suggest-btn"', self.html)
+
+    def test_resume_consent_tooltip_releases_mouse_focus(self):
+        self.assertIn(
+            ".consent-wrap:hover .consent-tooltip,\n"
+            "    .consent-wrap:focus-within .consent-tooltip { opacity: 1; visibility: visible; }",
+            self.html,
+        )
+        self.assertNotIn(
+            ".consent-wrap:has(input:checked) .consent-tooltip",
+            self.html,
+        )
+        self.assertIn("function initResumeConsentTooltip()", self.html)
+        self.assertIn("consentWrap.addEventListener(\"pointerdown\"", self.html)
+        self.assertIn("consentInput.blur()", self.html)
+        self.assertIn("setTimeout(() => consentInput.blur(), 0)", self.html)
+        self.assertIn("initResumeConsentTooltip();", self.html)
 
     # -- 执行按钮与关键词 --
 

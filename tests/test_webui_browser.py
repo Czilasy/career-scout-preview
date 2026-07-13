@@ -107,10 +107,15 @@ class WorkbenchBrowserContractTests(unittest.TestCase):
         self.assertIn("onclick=\"toggleSettings()\"", self.html)
 
     def test_settings_panel_has_a_clear_context_and_close_control(self):
-        """The settings drawer must identify itself and remain easy to dismiss."""
-        self.assertIn("settings-panel-header", self.html)
-        self.assertIn("整理你的求职条件", self.html)
-        self.assertIn("关闭设置区", self.html)
+        """The settings panel is always expanded and organized into tabs."""
+        # Tab navigation replaces the old collapse/close controls
+        self.assertIn("panel-tab", self.html)
+        self.assertIn("data-pane=\"config\"", self.html)
+        self.assertIn("data-pane=\"search\"", self.html)
+        self.assertIn("data-pane=\"history\"", self.html)
+        # No collapse toggle or close button (user requested default-expanded)
+        self.assertNotIn("settingsToggle", self.html)
+        self.assertNotIn("关闭设置区", self.html)
 
     def test_model_refresh_action_stays_compact_without_losing_its_meaning(self):
         """The model refresh control keeps a short label and the existing action."""
@@ -124,12 +129,11 @@ class WorkbenchBrowserContractTests(unittest.TestCase):
         self.assertIn('.search-bar { min-height: 68px; padding: 10px 12px 10px 42px; }', self.html)
 
     def test_ai_settings_can_be_collapsed_without_removing_controls(self):
-        """AI configuration stays available behind an explicit accessible disclosure."""
-        self.assertIn('id="aiSettingsToggle"', self.html)
-        self.assertIn('aria-controls="aiSettingsContent"', self.html)
-        self.assertIn('aria-expanded="false"', self.html)
+        """AI configuration stays available behind an accordion disclosure."""
+        self.assertIn('id="aiSettingsSection"', self.html)
         self.assertIn('id="aiSettingsContent"', self.html)
-        self.assertIn("function toggleAiSettings()", self.html)
+        self.assertIn("function togglePanelAccordion", self.html)
+        self.assertIn("accordion-section", self.html)
 
     def test_mobile_screening_tabs_fit_without_horizontal_scrolling(self):
         """The five screening views remain directly reachable on narrow screens."""
