@@ -291,16 +291,32 @@
     .view-tab.active { background: var(--accent-soft); color: var(--text); }
     .conn-status { padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; font-size: 11px; }
 
-    .settings-panel { width: 304px; min-width: 304px; background: #15181e; border-color: var(--line); }
+    .settings-panel {
+      width: 304px; min-width: 304px; background: #15181e; border-color: var(--line);
+      box-shadow: 14px 0 32px rgba(0, 0, 0, .12);
+    }
     .settings-panel.collapsed { margin-left: -304px; }
     .settings-toggle {
       left: 304px; width: 28px; height: 44px; border-color: var(--line); border-radius: 0 5px 5px 0;
       background: #15181e; color: var(--muted);
     }
     .settings-toggle:hover { background: var(--surface-raised); color: var(--gold); }
-    .section { padding: 18px 16px; border-color: var(--line); }
-    .section-title { color: var(--faint); font-size: 11px; letter-spacing: .1em; }
+    .settings-panel-header {
+      position: sticky; top: 0; z-index: 2; min-height: 72px; padding: 14px 16px;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      border-bottom: 1px solid var(--line); background: #171a20;
+    }
+    .settings-panel-kicker { display: block; color: var(--faint); font-size: 10px; font-weight: 600; letter-spacing: .12em; }
+    .settings-panel-title { display: block; margin-top: 2px; color: var(--text); font-size: 15px; letter-spacing: -.01em; }
+    .settings-panel-close { width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 50%; color: var(--muted); font-size: 18px; line-height: 1; }
+    .settings-panel-close:hover { border-color: var(--gold); color: var(--gold); }
+    .section { padding: 20px 16px; border-color: var(--line); }
+    .section-title { color: var(--faint); font-size: 10px; font-weight: 600; letter-spacing: .12em; }
     .field label { color: var(--muted); }
+    .field input, .field select, .field textarea { min-height: 36px; }
+    .field input::placeholder, .field textarea::placeholder { color: #696e72; }
+    .settings-panel .btn-row { margin-top: 12px; }
+    .settings-panel .history-list { margin-top: 12px; }
     .field input, .field select, .field textarea,
     .screening-filters select, .screening-keyword, .screening-limit {
       border-color: var(--line); border-radius: 5px; background: var(--bg);
@@ -451,6 +467,13 @@
     <button class="settings-toggle collapsed" id="settingsToggle" onclick="toggleSettings()" aria-label="展开设置区" aria-expanded="false">▶</button>
 
     <aside class="settings-panel collapsed" id="settingsPanel">
+      <div class="settings-panel-header">
+        <div>
+          <span class="settings-panel-kicker">搜索设置</span>
+          <strong class="settings-panel-title">整理你的求职条件</strong>
+        </div>
+        <button class="settings-panel-close" type="button" onclick="toggleSettings()" aria-label="关闭设置区">×</button>
+      </div>
       <div class="section">
         <div class="section-title">画像管理</div>
         <div class="field">

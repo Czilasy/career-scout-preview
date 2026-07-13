@@ -106,6 +106,12 @@ class WorkbenchBrowserContractTests(unittest.TestCase):
         self.assertIn("打开设置并开始", self.html)
         self.assertIn("onclick=\"toggleSettings()\"", self.html)
 
+    def test_settings_panel_has_a_clear_context_and_close_control(self):
+        """The settings drawer must identify itself and remain easy to dismiss."""
+        self.assertIn("settings-panel-header", self.html)
+        self.assertIn("整理你的求职条件", self.html)
+        self.assertIn("关闭设置区", self.html)
+
     def test_no_ai_scores_in_card_template(self):
         """Card template must not expose AI scores, ranks or match reasons."""
         self.assertNotIn("match_score", self.html)
