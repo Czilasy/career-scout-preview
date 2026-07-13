@@ -833,8 +833,9 @@ def create_app(config=None):
                 )
                 deleted = True
             return jsonify({"deleted": deleted})
-        # POST: upload. A second resume starts a fresh profile; only the
-        # user-confirmed fields are carried forward, never learned preference.
+        # POST: upload. A second resume overwrites the current one in-place:
+        # the old resume is soft-deleted (deleted_at set, file removed) and
+        # the new resume binds to the same profile. No new profile is created.
         current_profile = store.get_profile(profile_id)
         if "file" not in request.files:
             raise ValueError("请上传简历文件")
@@ -842,11 +843,10 @@ def create_app(config=None):
         file_bytes = upload.read()
         filename = upload.filename or "resume.txt"
         if current_profile.get("resume_id"):
-            created = store.create_profile(
-                f"{Path(filename).stem[:70] or '新简历'} 求职画像",
-                confirmed_fields=current_profile.get("confirmed_fields") or {},
+            resume_service.delete_resume(
+                current_profile["resume_id"], store,
+                resume_dir=app.config["RESUME_DIR"],
             )
-            profile_id = created["id"]
         record = resume_service.save_resume(
             profile_id, file_bytes, filename,
             resume_service.validate_format(filename),

@@ -295,6 +295,14 @@
     .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
     .modal-close { font-size: 18px; color: var(--muted); cursor: pointer; }
 
+    /* == 通用确认对话框 == */
+    .confirm-modal-content {
+      width: 90%; max-width: 420px; padding: 24px; text-align: left;
+    }
+    .confirm-modal-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; color: var(--text); }
+    .confirm-modal-body { font-size: 14px; color: var(--muted); line-height: 1.6; margin-bottom: 24px; white-space: pre-line; }
+    .confirm-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
     /* == 决策工作台视觉层：不改变现有业务绑定，仅统一操作层级 == */
     button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
       outline: 2px solid var(--gold); outline-offset: 2px;
@@ -775,7 +783,6 @@
           <p class="workbench-empty-kicker">尚未开始</p>
           <h1 id="workbenchEmptyTitle">先设定你的求职范围</h1>
           <p class="workbench-empty-copy">完善画像或输入关键词后，系统会把发现到的岗位集中到这里，供你快速判断与处理。</p>
-          <button class="btn primary" type="button" onclick="toggleSettings()">打开设置并开始</button>
           <div class="workbench-steps" aria-label="开始步骤">
             <div class="workbench-step"><span class="workbench-step-index">01</span><strong>完善画像</strong><span>城市、岗位与最低薪资</span></div>
             <div class="workbench-step"><span class="workbench-step-index">02</span><strong>上传简历</strong><span>可选，用于生成建议</span></div>
@@ -886,6 +893,18 @@
         <span class="modal-close" onclick="closeZoneModalDirect()">&times;</span>
       </div>
       <div id="zoneModalList"></div>
+    </div>
+  </div>
+
+  <!-- 通用确认对话框 -->
+  <div class="modal-overlay" id="confirmModal" onclick="closeConfirmModal(event)">
+    <div class="modal-content confirm-modal-content" onclick="event.stopPropagation()">
+      <div class="confirm-modal-title" id="confirmModalTitle"></div>
+      <div class="confirm-modal-body" id="confirmModalBody"></div>
+      <div class="confirm-modal-actions">
+        <button class="btn" id="confirmModalCancel" onclick="resolveConfirm(false)">取消</button>
+        <button class="btn danger" id="confirmModalOk" onclick="resolveConfirm(true)">确认</button>
+      </div>
     </div>
   </div>
 
@@ -1097,6 +1116,27 @@
       panel.scrollTop = 0;
     }
 
+    // == 通用确认对话框（替代浏览器原生 confirm，避免阻塞主线程与跨环境差异） ==
+    let _confirmResolve = null;
+    function showConfirmDialog(opts) {
+      return new Promise((resolve) => {
+        _confirmResolve = resolve;
+        document.getElementById("confirmModalTitle").textContent = opts.title || "确认操作";
+        document.getElementById("confirmModalBody").textContent = opts.message || "";
+        const okBtn = document.getElementById("confirmModalOk");
+        okBtn.textContent = opts.okText || "确认";
+        okBtn.className = "btn " + (opts.okClass || "primary");
+        document.getElementById("confirmModal").classList.add("show");
+      });
+    }
+    function resolveConfirm(result) {
+      document.getElementById("confirmModal").classList.remove("show");
+      if (_confirmResolve) { _confirmResolve(result); _confirmResolve = null; }
+    }
+    function closeConfirmModal(event) {
+      if (event.target === event.currentTarget) resolveConfirm(false);
+    }
+
     // == 画像 ==
     async function loadProfiles() {
       const resp = await api(API.profiles);
@@ -1142,7 +1182,13 @@
       if (!currentProfileId) { setAppNotice("请先选择画像", "warning"); return; }
       const sel = document.getElementById("profileSelect");
       const profileName = sel && sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : "该画像";
-      if (!confirm(`确定删除画像「${profileName}」吗？\n\n该画像的简历文件、搜索历史、岗位关联、筛选结果将一并删除，且不可恢复。`)) return;
+      const ok = await showConfirmDialog({
+        title: `删除画像「${profileName}」？`,
+        message: "该画像的简历文件、搜索历史、岗位关联、筛选结果将一并删除，且不可恢复。",
+        okText: "确认删除",
+        okClass: "danger"
+      });
+      if (!ok) return;
       try {
         const resp = await api(`${API.profiles}/${currentProfileId}`, { method: "DELETE" });
         if (resp.ok) {
@@ -1197,11 +1243,27 @@
 
     // == 简历 ==
     async function uploadResume() {
-      if (!currentProfileId) { setAppNotice("请先选择画像", "warning"); return; }
       const uploadButton = document.getElementById("resumeUploadButton");
       if (uploadButton && uploadButton.disabled) return;
       const fileInput = document.getElementById("resumeFile");
       if (!fileInput.files.length) { setAppNotice("请选择简历文件", "warning"); return; }
+      // 无画像时自动创建一个以简历文件名命名的画像（简历是入口，画像是产物）
+      if (!currentProfileId) {
+        const fileName = fileInput.files[0].name || "新简历";
+        const profileName = fileName.replace(/\.[^.]+$/, "").slice(0, 70) + " 求职画像";
+        try {
+          const createResp = await api(API.profiles, {
+            method: "POST", json: { name: profileName, confirmed_fields: {} },
+          });
+          if (!createResp.ok) { setAppNotice("创建画像失败", "error"); return; }
+          const created = await createResp.json();
+          currentProfileId = created.id;
+          await loadProfiles();
+        } catch (_e) {
+          setAppNotice("创建画像失败，请检查连接后重试", "error");
+          return;
+        }
+      }
       const formData = new FormData();
       formData.append("file", fileInput.files[0]);
       formData.append("ai_consent", String(document.getElementById("resumeAiConsent").checked));
@@ -1212,10 +1274,6 @@
         });
         if (resp.ok) {
           const data = await resp.json();
-          if (data.profile_id && data.profile_id !== currentProfileId) {
-            currentProfileId = data.profile_id;
-            await loadProfiles();
-          }
           showAiSuggestion(data);
           setAppNotice("简历已上传", "success");
           updateResumeStatus(fileInput.files[0] ? fileInput.files[0].name : "");
@@ -2064,7 +2122,13 @@
         const preview = await previewResponse.json();
         const pendingNote = preview.pending_at_cleanup
           ? `其中有 ${preview.pending_at_cleanup} 条待核验记录。` : "";
-        if (!window.confirm(`将清理 ${preview.runs_to_cleanup || 0} 次临时运行。${pendingNote}长期标记和垃圾桶不会删除。继续吗？`)) return;
+        const ok = await showConfirmDialog({
+          title: "确认清理临时运行？",
+          message: `将清理 ${preview.runs_to_cleanup || 0} 次临时运行。${pendingNote}长期标记和垃圾桶不会删除。`,
+          okText: "确认清理",
+          okClass: "primary"
+        });
+        if (!ok) return;
         await api("/api/screening/cleanup", { method: "POST", json: { days: 30 } });
         if (screeningRunId) {
           const check = await api(`/api/screening/runs/${screeningRunId}`);
