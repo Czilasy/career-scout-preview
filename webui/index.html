@@ -198,6 +198,7 @@
       border-radius: 6px; background: var(--bg); outline: none;
     }
     .screening-keyword:focus { border-color: var(--accent); }
+    .screening-limit { width: 72px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 
     /* == 五区切换：本次运行 / 长期保存 == */
     .zone-tabs { display: flex; align-items: center; gap: 4px; padding: 8px 20px; border-bottom: 1px solid var(--line); background: var(--surface); overflow-x: auto; }
@@ -337,12 +338,20 @@
       <div class="section">
         <div class="section-title">AI 服务设置</div>
         <div class="field">
-          <label>AI 服务 URL</label>
+          <label>AI 服务 URL（填到 /v1 这一级，/chat/completions 会自动补全）</label>
           <input type="url" id="aiEndpointUrl" placeholder="https://api.example.com/v1">
         </div>
         <div class="field">
           <label>API Key</label>
-          <input type="password" id="aiApiKey" placeholder="sk-...">
+          <input type="text" id="aiApiKey" placeholder="sk-..." autocomplete="off">
+          <span id="aiApiKeyHint" style="margin-left:8px;color:#6b7280;font-size:13px;"></span>
+        </div>
+        <div class="field">
+          <label>模型</label>
+          <div class="btn-row">
+            <select id="aiModel"><option value="">请先拉取</option></select>
+            <button class="btn" onclick="fetchAiModels()">拉取可用模型</button>
+          </div>
         </div>
         <div class="btn-row">
           <button class="btn primary" onclick="saveAiSettings()">保存</button>
@@ -408,6 +417,8 @@
         <select data-filter="industry" id="screeningFilterIndustry"><option value="">行业（不限）</option></select>
       </div>
       <input type="text" data-screening="keyword" id="screeningKeyword" class="screening-keyword" placeholder="搜索关键词">
+      <label class="manual-filter-hint">页数 <input class="screening-limit" id="screeningPages" type="number" min="1" max="10" value="1"></label>
+      <label class="manual-filter-hint">详情 <input class="screening-limit" id="screeningMaxDetails" type="number" min="1" value="3"></label>
       <button class="btn primary" data-screening="execute-btn" onclick="executeScreeningRun()">执行筛选</button>
       <button class="btn" type="button" onclick="cleanupScreeningResults()">清理 30 天结果</button>
       <div class="screening-status" data-screening="status" id="screeningStatus">点击执行开始筛选</div>
@@ -619,18 +630,69 @@
     }
 
     // == AI 设置 ==
+    function renderAiModelOptions(models, selectedModel, emptyLabel) {
+      const sel = document.getElementById("aiModel");
+      const safeModels = Array.isArray(models)
+        ? models.filter(model => typeof model === "string" && model)
+        : [];
+      sel.replaceChildren();
+      if (!safeModels.length) {
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = emptyLabel;
+        sel.appendChild(option);
+        return;
+      }
+      for (const model of safeModels) {
+        const option = document.createElement("option");
+        option.value = model;
+        option.textContent = model;
+        option.selected = model === selectedModel;
+        sel.appendChild(option);
+      }
+    }
+
     async function loadAiSettings() {
       const resp = await api(API.aiSettings);
       const data = await resp.json();
       document.getElementById("aiEndpointUrl").value = data.endpoint_url || "";
+      // key 已保存时用星号占位展示打码预览，留空保存则沿用原 key
+      const keyInput = document.getElementById("aiApiKey");
+      const keyHint = document.getElementById("aiApiKeyHint");
+      if (data.is_configured && data.masked_key) {
+        keyInput.value = data.masked_key;
+        keyHint.textContent = "已保存（留空保存则沿用，重新输入则覆盖）";
+      } else {
+        keyInput.value = "";
+        keyHint.textContent = "首次需填写";
+      }
+      const savedModel = data.model || "";
+      renderAiModelOptions(savedModel ? [savedModel] : [], savedModel, "请先拉取");
+    }
+
+    async function fetchAiModels() {
+      const resp = await api("/api/ai-settings/models");
+      const data = await resp.json();
+      if (!data.ok) {
+        alert("拉取模型失败: " + (data.error_code || "未知"));
+        return;
+      }
+      const savedModel = (await (await api(API.aiSettings)).json()).model || "";
+      renderAiModelOptions(data.models, savedModel, "无可用模型");
     }
 
     async function saveAiSettings() {
       const endpoint_url = document.getElementById("aiEndpointUrl").value.trim();
-      const api_key = document.getElementById("aiApiKey").value.trim();
-      if (!endpoint_url || !api_key) { alert("请填写 URL 和 Key"); return; }
-      const resp = await api(API.aiSettings, { method: "PUT", json: { endpoint_url, api_key } });
-      if (resp.ok) { document.getElementById("aiApiKey").value = ""; alert("已保存，Key 已进入系统凭据库"); }
+      let api_key = document.getElementById("aiApiKey").value.trim();
+      const model = document.getElementById("aiModel").value.trim();
+      if (!endpoint_url) { alert("请填写 URL"); return; }
+      // 输入框是打码预览或空时，不提交 key，后端沿用已存 key
+      if (api_key.includes("*") || !api_key) { api_key = ""; }
+      const resp = await api(API.aiSettings, { method: "PUT", json: { endpoint_url, api_key, model } });
+      if (resp.ok) {
+        alert("已保存");
+        await loadAiSettings();  // 刷新打码预览
+      } else { const e = await resp.json(); alert(e.error || "保存失败"); }
     }
 
     async function testAiConnection() {
@@ -962,6 +1024,8 @@
       if (!keyword) { alert("请输入搜索关键词"); return; }
       const filters = collectScreeningFilters();
       const body = { keyword, filters };
+      body.pages = Number(document.getElementById("screeningPages").value);
+      body.max_details = Number(document.getElementById("screeningMaxDetails").value);
       if (currentProfileId) body.profile_id = currentProfileId;
       if (screeningResumeId) body.resume_id = screeningResumeId;
       try {

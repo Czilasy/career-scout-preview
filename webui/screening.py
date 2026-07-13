@@ -188,8 +188,54 @@ def filters_to_search_params(filters) -> dict:
     return {"city": city_code, "filters": search_filters}
 
 
+def _merge_detail_jds(jobs, detail_output_path):
+    """Merge run-scoped detail JD records into list jobs by job_id."""
+    if not detail_output_path:
+        return list(jobs or [])
+    detail_path = Path(detail_output_path)
+    if not detail_path.is_file():
+        return list(jobs or [])
+    try:
+        with detail_path.open(encoding="utf-8") as handle:
+            details = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return list(jobs or [])
+    if not isinstance(details, list):
+        return list(jobs or [])
+    detail_by_id = {
+        str(item.get("job_id") or ""): str(item.get("jd") or "")
+        for item in details
+        if isinstance(item, dict) and str(item.get("job_id") or "") and str(item.get("jd") or "").strip()
+    }
+    merged = []
+    for job in jobs or []:
+        if not isinstance(job, dict):
+            merged.append(job)
+            continue
+        jd = detail_by_id.get(str(job.get("job_id") or ""))
+        if jd:
+            item = dict(job)
+            item["jd"] = jd
+            merged.append(item)
+        else:
+            merged.append(job)
+    return merged
+
+
+def _write_jobs_artifact(output_path, payload, jobs):
+    """Atomically update the list artifact after JD merge."""
+    output = Path(output_path)
+    next_payload = dict(payload) if isinstance(payload, dict) else {}
+    next_payload["jobs"] = jobs
+    tmp = output.with_name(output.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(next_payload, handle, ensure_ascii=False)
+    tmp.replace(output)
+
+
 def execute_first_layer(filters, keyword, *, output_path, python_executable,
-                        scraper_path=None, store=None, run_id=None) -> dict:
+                        pages=None, max_details=None, detail_output_path=None, scraper_path=None,
+                        store=None, run_id=None) -> dict:
     """Execute first-layer search: map params -> call scraper -> read artifact.
 
     Reuses ``scripts/boss_cdp_raw.py`` as a subprocess.  When *store* and
@@ -215,6 +261,12 @@ def execute_first_layer(filters, keyword, *, output_path, python_executable,
         "--city", str(params["city"]),
         "--output", str(output_path),
     ]
+    if pages is not None:
+        command.extend(["--pages", str(pages)])
+    if max_details is not None:
+        command.extend(["--max-details", str(max_details)])
+    if detail_output_path is not None:
+        command.extend(["--detail-output", str(detail_output_path)])
     for name, value in params["filters"].items():
         command.extend([f"--{name}", str(value)])
 
@@ -257,6 +309,10 @@ def execute_first_layer(filters, keyword, *, output_path, python_executable,
         payload = json.load(handle)
 
     jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
+    merged_jobs = _merge_detail_jds(jobs, detail_output_path)
+    if merged_jobs != jobs:
+        _write_jobs_artifact(output, payload, merged_jobs)
+        jobs = merged_jobs
 
     if store and run_id:
         store.update_screening_run_status(run_id, "running", source_count=len(jobs))

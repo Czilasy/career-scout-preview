@@ -102,6 +102,49 @@ class ThreeWayPartitionTests(unittest.TestCase):
 
 
 class InterruptedFetchPreservationTests(unittest.TestCase):
+    def test_successful_fetch_merges_run_scoped_detail_jd_into_jobs_and_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            output = root / "screening_r1.json"
+            detail_output = root / "screening_r1_details.json"
+            jobs = [
+                sample_screening_job(job_id="with-jd"),
+                sample_screening_job(job_id="without-jd"),
+            ]
+
+            def run_scraper(command, **_kwargs):
+                output.write_text(
+                    json.dumps({"jobs": jobs}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                detail_output.write_text(
+                    json.dumps([
+                        {"job_id": "with-jd", "jd": "完整职位描述 Python FastAPI"},
+                    ], ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                self.assertIn("--detail-output", command)
+                self.assertEqual(
+                    pathlib.Path(command[command.index("--detail-output") + 1]),
+                    detail_output,
+                )
+                return mock.Mock(returncode=0)
+
+            with mock.patch("webui.screening.subprocess.run", side_effect=run_scraper):
+                result = execute_first_layer(
+                    {}, "Python", output_path=output,
+                    detail_output_path=detail_output,
+                    python_executable=sys.executable,
+                )
+
+            self.assertEqual(result["jobs"][0]["jd"], "完整职位描述 Python FastAPI")
+            self.assertNotIn("jd", result["jobs"][1])
+            persisted = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                persisted["jobs"][0]["jd"],
+                "完整职位描述 Python FastAPI",
+            )
+
     def test_nonzero_fetch_with_valid_partial_artifact_is_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = pathlib.Path(tmp) / "partial.json"

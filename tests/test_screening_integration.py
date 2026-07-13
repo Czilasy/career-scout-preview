@@ -42,7 +42,8 @@ class ScreeningResilienceAPITests(unittest.TestCase):
         )
 
     def _fake_execute(self, jobs):
-        def execute(filters, keyword, *, output_path, python_executable, store, run_id):
+        def execute(filters, keyword, *, output_path, python_executable, store, run_id,
+                    **_execution_outputs):
             self._write_artifact(run_id, jobs)
             store.update_screening_run_status(run_id, "running", source_count=len(jobs))
             return {"jobs": jobs, "source_count": len(jobs), "status": "running"}
@@ -101,6 +102,29 @@ class ScreeningResilienceAPITests(unittest.TestCase):
         self.assertEqual(body["retried"], 1)
         self.assertEqual(body["skipped"], 1)
         self.assertEqual([item["job_id"] for item in self.store.list_pending(run["id"])], ["p2"])
+
+    def test_pending_retry_forwards_configured_model(self):
+        """Retry uses the same configured model as the initial semantic check."""
+        resume = self.store.save_resume(
+            self.profile["id"], "resume.txt", "txt", "Python FastAPI", "resume-hash",
+        )
+        run = self.store.create_screening_run({}, resume_id=resume["id"])
+        self._write_artifact(run["id"], [sample_screening_job(job_id="p1")])
+        self.store.add_pending_result(run["id"], "p1", "ai_timeout", retryable=True)
+        self.store.save_ai_settings(
+            "https://api.example.com/v1/chat/completions", "api.example.com",
+            model="deepseek-v4-flash-free",
+        )
+        with mock.patch("webui.ai.keyring.get_password", return_value="test-key"):
+            with mock.patch("webui.app.partition_job", return_value="match") as partition:
+                response = self.client.post(
+                    f"/api/screening/runs/{run['id']}/pending/p1/retry", json={},
+                )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            partition.call_args.kwargs["semantic_options"]["model"],
+            "deepseek-v4-flash-free",
+        )
 
     def test_cancel_preserves_already_saved_results(self):
         run = self.store.create_screening_run({})
@@ -221,7 +245,12 @@ class ScreeningResilienceAPITests(unittest.TestCase):
     def test_cleanup_removes_controlled_screening_artifact(self):
         run = self.store.create_screening_run({})
         artifact = self.result_dir / f"screening_{run['id']}.json"
+        detail_artifact = self.result_dir / f"screening_{run['id']}_details.json"
         self._write_artifact(run["id"], [sample_screening_job(job_id="old")])
+        detail_artifact.write_text(
+            json.dumps([{"job_id": "old", "jd": "旧 JD"}], ensure_ascii=False),
+            encoding="utf-8",
+        )
         old = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
         with self.store._connection() as connection:
             connection.execute(
@@ -231,6 +260,7 @@ class ScreeningResilienceAPITests(unittest.TestCase):
         response = self.client.post("/api/screening/cleanup", json={"days": 30})
         self.assertEqual(response.status_code, 200)
         self.assertFalse(artifact.exists())
+        self.assertFalse(detail_artifact.exists())
 
 
 if __name__ == "__main__":

@@ -450,7 +450,8 @@ class ScreeningExecutionAPITests(unittest.TestCase):
             jobs = [{"job_id": "job-1", "title": "Python"}]
         source_count = source_count if source_count is not None else len(jobs)
 
-        def _impl(filters, keyword, *, output_path, python_executable, store=None, run_id=None):
+        def _impl(filters, keyword, *, output_path, python_executable, store=None, run_id=None,
+                  **_execution_limits):
             if store and run_id:
                 store.update_screening_run_status(run_id, "running")
                 store.update_screening_run_status(run_id, "succeeded", source_count=source_count)
@@ -461,7 +462,8 @@ class ScreeningExecutionAPITests(unittest.TestCase):
     def _fake_execute_fail(self):
         """Return a side_effect that advances run to failed then raises."""
 
-        def _impl(filters, keyword, *, output_path, python_executable, store=None, run_id=None):
+        def _impl(filters, keyword, *, output_path, python_executable, store=None, run_id=None,
+                  **_execution_outputs):
             if store and run_id:
                 store.update_screening_run_status(run_id, "running")
                 store.update_screening_run_status(run_id, "failed")
@@ -533,7 +535,8 @@ class ScreeningExecutionAPITests(unittest.TestCase):
     def test_create_run_empty_city_passes_empty_in_frozen_snapshot(self):
         captured = {}
 
-        def capture(filters, keyword, *, output_path, python_executable, store=None, run_id=None):
+        def capture(filters, keyword, *, output_path, python_executable, store=None, run_id=None,
+                    **_execution_outputs):
             captured["filters"] = filters
             if store and run_id:
                 store.update_screening_run_status(run_id, "running")
@@ -642,7 +645,8 @@ class ScreeningZoneQueryAPITests(unittest.TestCase):
 
     def _fake_execute_with_jobs(self, jobs):
         """Return side_effect that returns the given jobs and advances status."""
-        def _impl(filters, keyword, *, output_path, python_executable, store=None, run_id=None):
+        def _impl(filters, keyword, *, output_path, python_executable, store=None, run_id=None,
+                  **_execution_outputs):
             # 把 jobs 写入产物文件，让 GET /matches 能读到 job 详情
             output_path = pathlib.Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -773,6 +777,13 @@ class ScreeningZoneQueryAPITests(unittest.TestCase):
                     "jd_excerpt", "canonical_url", "interest_state"}
         self.assertEqual(set(item.keys()), expected)
 
+    def test_zone_items_include_jd_excerpt_from_artifact(self):
+        jobs = [self._job("job-A", jd="负责 Python FastAPI 后端开发和 AI 应用落地")]
+        resp = self._create_run({}, "Python", jobs)
+        run_id = resp.get_json()["run_id"]
+        matches = self.client.get(f"/api/screening/runs/{run_id}/matches").get_json()
+        self.assertIn("Python FastAPI", matches["items"][0]["jd_excerpt"])
+
     # -- 排序：matches 按抓回顺序 --
 
     def test_matches_in_scrape_order(self):
@@ -900,7 +911,8 @@ class ScreeningFeedbackAPITests(unittest.TestCase):
         self.temp.cleanup()
 
     def _fake_execute_with_jobs(self, jobs):
-        def _impl(filters, keyword, *, output_path, python_executable, store=None, run_id=None):
+        def _impl(filters, keyword, *, output_path, python_executable, store=None, run_id=None,
+                  **_execution_outputs):
             output_path = pathlib.Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(json.dumps({"jobs": jobs}, ensure_ascii=False), encoding="utf-8")
@@ -1357,7 +1369,8 @@ class ScreeningDegradationIntegrationTests(unittest.TestCase):
 
     def _fake_execute_with_jobs(self, jobs):
         """Return side_effect that writes jobs to artifact and advances status."""
-        def _impl(filters, keyword, *, output_path, python_executable, store=None, run_id=None):
+        def _impl(filters, keyword, *, output_path, python_executable, store=None, run_id=None,
+                  **_execution_limits):
             output_path = pathlib.Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(json.dumps({"jobs": jobs}, ensure_ascii=False), encoding="utf-8")
@@ -1382,9 +1395,9 @@ class ScreeningDegradationIntegrationTests(unittest.TestCase):
                 "keyword": keyword,
             })
 
-    def _configure_ai(self, credential_ref="api.example.com"):
+    def _configure_ai(self, credential_ref="api.example.com", model=""):
         self.store.save_ai_settings(
-            "https://api.example.com/v1/chat/completions", credential_ref,
+            "https://api.example.com/v1/chat/completions", credential_ref, model=model,
         )
 
     def _upload_resume(self, content=None):
@@ -1423,10 +1436,56 @@ class ScreeningDegradationIntegrationTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.get_json()["status"], "succeeded")
 
+    def test_run_forwards_explicit_execution_limits_to_scraper(self):
+        """用户选择的小范围抓取参数必须原样传给第一层编排。"""
+        jobs = [self._job("job-1")]
+        with mock.patch(
+            "webui.app.execute_first_layer",
+            side_effect=self._fake_execute_with_jobs(jobs),
+        ) as execute:
+            response = self.client.post("/api/screening/runs", json={
+                "filters": {}, "keyword": "Python",
+                "pages": 1, "max_details": 3,
+            })
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(execute.call_args.kwargs.get("pages"), 1)
+        self.assertEqual(execute.call_args.kwargs.get("max_details"), 3)
+
+    def test_run_forwards_run_scoped_detail_output_to_scraper(self):
+        """正式筛选必须声明本次 run 的详情产物，不能读取默认时间戳文件。"""
+        captured = {}
+
+        def capture(_filters, _keyword, **kwargs):
+            captured.update(kwargs)
+            kwargs["store"].update_screening_run_status(kwargs["run_id"], "running")
+            return {"jobs": [], "source_count": 0, "status": "running"}
+
+        with mock.patch("webui.app.execute_first_layer", side_effect=capture):
+            response = self.client.post("/api/screening/runs", json={
+                "filters": {}, "keyword": "Python",
+                "pages": 1, "max_details": 3,
+            })
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            pathlib.Path(captured["detail_output_path"]).name,
+            f"screening_{body['run_id']}_details.json",
+        )
+
+    def test_run_rejects_invalid_execution_limits_before_scraping(self):
+        """范围控制只能是正整数，非法值不得触发抓取。"""
+        with mock.patch("webui.app.execute_first_layer") as execute:
+            response = self.client.post("/api/screening/runs", json={
+                "filters": {}, "keyword": "Python", "pages": 0,
+            })
+        self.assertEqual(response.status_code, 400)
+        execute.assert_not_called()
+
     @mock.patch("webui.screening.assess_semantic_similarity")
     def test_run_with_ai_calls_semantic_similarity(self, mock_ai):
         # 对照：AI 可用且提供简历/JD 时第二层调用语义相似度
-        self._configure_ai()
+        self._configure_ai(model="deepseek-v4-flash-free")
         with mock.patch("webui.ai.keyring.get_password", return_value="secret-key"):
             resume_id = self._upload_resume()
             jobs = [self._job("job-1", jd="Python FastAPI"),
@@ -1439,6 +1498,9 @@ class ScreeningDegradationIntegrationTests(unittest.TestCase):
                     "resume_id": resume_id,
                 })
         self.assertEqual(mock_ai.call_count, 2)
+        self.assertEqual(
+            mock_ai.call_args.kwargs["model"], "deepseek-v4-flash-free",
+        )
 
     # -- suggest 降级边界 --
 

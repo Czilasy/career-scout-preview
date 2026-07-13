@@ -167,6 +167,8 @@ class TaskStore:
             self._migration_007()
         if current < 8:
             self._migration_008()
+        if current < 9:
+            self._migration_009()
         # A process restart cannot resume an in-memory child process. Record
         # that fact instead of leaving a permanently "running" UI state.
         with self._connection() as conn:
@@ -490,6 +492,18 @@ class TaskStore:
                 (_now(),),
             )
 
+    def _migration_009(self):
+        """Add model column to ai_settings for user-selectable model."""
+        with self._connection() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(ai_settings)")}
+            if "model" not in columns:
+                conn.execute("ALTER TABLE ai_settings ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (9, ?, 'ai_settings model column')",
+                (_now(),),
+            )
+
     def _copy_legacy_default_profile(self):
         """Copy old default profile to candidate_profiles if not already present."""
         with self._connection() as conn:
@@ -733,16 +747,17 @@ class TaskStore:
 
     # -- AI settings -------------------------------------------------------
 
-    def save_ai_settings(self, endpoint_url, credential_ref, status="unconfigured", last_error_code=None):
+    def save_ai_settings(self, endpoint_url, credential_ref, status="unconfigured", last_error_code=None, model=""):
         ts = _now()
         with self._connection() as conn:
             conn.execute(
-                """INSERT INTO ai_settings (id, endpoint_url, credential_ref, status, last_error_code, updated_at)
-                   VALUES (1, ?, ?, ?, ?, ?)
+                """INSERT INTO ai_settings (id, endpoint_url, credential_ref, status, last_error_code, model, updated_at)
+                   VALUES (1, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET endpoint_url = excluded.endpoint_url,
                    credential_ref = excluded.credential_ref, status = excluded.status,
-                   last_error_code = excluded.last_error_code, updated_at = excluded.updated_at""",
-                (endpoint_url, credential_ref, status, last_error_code, ts),
+                   last_error_code = excluded.last_error_code, model = excluded.model,
+                   updated_at = excluded.updated_at""",
+                (endpoint_url, credential_ref, status, last_error_code, str(model or ""), ts),
             )
         return self.get_ai_settings()
 
@@ -750,11 +765,13 @@ class TaskStore:
         with self._connection() as conn:
             row = conn.execute("SELECT * FROM ai_settings WHERE id = 1").fetchone()
         if row is None:
-            return {"endpoint_url": "", "status": "unconfigured", "last_error_code": None, "updated_at": None, "is_configured": False}
+            return {"endpoint_url": "", "model": "", "status": "unconfigured", "last_error_code": None, "updated_at": None, "is_configured": False}
         result = dict(row)
         result["is_configured"] = bool(result["endpoint_url"] and result["credential_ref"])
         # Never expose credential_ref outside the store — callers only see is_configured
         result.pop("credential_ref", None)
+        if "model" not in result:
+            result["model"] = ""
         return result
 
     def get_credential_ref(self) -> str:

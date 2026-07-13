@@ -137,4 +137,6 @@ def assess_semantic_similarity_formal(
         return _pending("ai_network_error")
     except (RuntimeError, ValueError, TypeError, KeyError):
         return _pending("verification_error")
+    except Exception:
+        return _pending("verification_error")
     return validate_semantic_output(raw)

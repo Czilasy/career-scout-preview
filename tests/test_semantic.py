@@ -149,6 +149,14 @@ class AssessSemanticSimilarityFormalTests(unittest.TestCase):
         self.assertEqual(out["verdict"], "pending")
         self.assertEqual(out["failure_stage"], "ai_network_error")
 
+    def test_ai_call_unexpected_error_returns_pending(self):
+        call_fn = MagicMock(side_effect=Exception("provider rejected request"))
+        out = semantic.assess_semantic_similarity_formal(
+            "resume", "jd", ai_available=True, call_ai_fn=call_fn,
+        )
+        self.assertEqual(out["verdict"], "pending")
+        self.assertEqual(out["failure_stage"], "verification_error")
+
     def test_ai_invalid_json_output_returns_pending(self):
         call_fn = MagicMock(return_value="not a dict")
         out = semantic.assess_semantic_similarity_formal(
@@ -208,6 +216,22 @@ class AssessSemanticSimilarityCompatTests(unittest.TestCase):
         result = assess_semantic_similarity("resume", "jd")
         self.assertIsInstance(result, dict)
         self.assertIn("verdict", result)
+
+    def test_ai_security_error_returns_pending_not_exception(self):
+        from webui import ai as ai_module
+
+        with patch(
+            "webui.ai.call_ai",
+            side_effect=ai_module.AISecurityError(ai_module.ERROR_INVALID),
+        ):
+            result = assess_semantic_similarity(
+                "resume", "jd",
+                ai_available=True,
+                endpoint_url="https://api.example.com/v1/chat/completions",
+                api_key="test-key",
+            )
+        self.assertEqual(result["verdict"], "pending")
+        self.assertEqual(result["failure_stage"], "verification_error")
 
     def test_default_does_not_leak_resume_text(self):
         secret = "SECRET_RESUME_42"

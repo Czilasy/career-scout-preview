@@ -53,6 +53,68 @@ def _host_from_url(endpoint_url: str) -> str:
     return urlparse(endpoint_url).hostname or endpoint_url
 
 
+def _chat_completions_url(endpoint_url: str) -> str:
+    """补全 chat completions 路径。
+
+    用户填到 /v1 这一级（如 https://api.openai.com/v1 或
+    https://opencode.ai/zen/v1），代码自动补 /chat/completions。
+    如果用户已经填了 /chat/completions 则不再补。
+    """
+    url = (endpoint_url or "").rstrip("/")
+    if not url:
+        return url
+    if url.endswith("/chat/completions"):
+        return url
+    return url + "/chat/completions"
+
+
+def list_models(endpoint_url: str, api_key: str) -> list[str]:
+    """GET /models 拉取可用模型列表。
+
+    endpoint_url 填到 /v1 这一级。返回 model id 字符串列表，按字母序排序。
+    失败时抛 AISecurityError（携带安全错误码，不含原始响应）。
+    """
+    base = (endpoint_url or "").rstrip("/")
+    if not base:
+        raise AISecurityError(ERROR_NETWORK)
+    if not base.endswith("/models"):
+        if base.endswith("/chat/completions"):
+            base = base[: -len("/chat/completions")] + "/models"
+        else:
+            base = base + "/models"
+    try:
+        response = requests.get(
+            base,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=CONNECTION_TIMEOUT,
+        )
+    except requests.Timeout:
+        raise AISecurityError(ERROR_TIMEOUT) from None
+    except requests.RequestException:
+        raise AISecurityError(ERROR_NETWORK) from None
+    except Exception:
+        raise AISecurityError(ERROR_INVALID) from None
+
+    if response.status_code in (401, 403):
+        raise AISecurityError(ERROR_AUTH)
+    if response.status_code >= 400:
+        raise AISecurityError(ERROR_INVALID)
+
+    try:
+        data = response.json()
+    except ValueError:
+        raise AISecurityError(ERROR_INVALID) from None
+
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        raise AISecurityError(ERROR_INVALID)
+
+    models = []
+    for item in data["data"]:
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+            models.append(item["id"])
+    return sorted(set(models))
+
+
 def store_api_key(endpoint_url: str, api_key: str) -> str:
     """Store *api_key* in the system credential store and return a credential_ref.
 
@@ -78,7 +140,7 @@ def delete_api_key(credential_ref: str) -> None:
 # Connection testing
 # ---------------------------------------------------------------------------
 
-def test_connection(endpoint_url: str, api_key: str) -> tuple[bool, str | None]:
+def test_connection(endpoint_url: str, api_key: str, model: str = "") -> tuple[bool, str | None]:
     """Send a minimal chat completions request to verify connectivity.
 
     Returns ``(True, None)`` on success, or ``(False, error_code)`` where
@@ -87,7 +149,7 @@ def test_connection(endpoint_url: str, api_key: str) -> tuple[bool, str | None]:
     or response body.
     """
     payload = {
-        "model": "auto",
+        "model": model or "auto",
         "messages": [{"role": "user", "content": "ping"}],
         "temperature": 0.3,
     }
@@ -97,7 +159,7 @@ def test_connection(endpoint_url: str, api_key: str) -> tuple[bool, str | None]:
     }
     try:
         response = requests.post(
-            endpoint_url, json=payload, headers=headers, timeout=CONNECTION_TIMEOUT
+            _chat_completions_url(endpoint_url), json=payload, headers=headers, timeout=CONNECTION_TIMEOUT
         )
     except requests.Timeout:
         return (False, ERROR_TIMEOUT)
@@ -118,7 +180,7 @@ def test_connection(endpoint_url: str, api_key: str) -> tuple[bool, str | None]:
 # ---------------------------------------------------------------------------
 
 def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFAULT_TIMEOUT,
-            temperature: float = 0.3) -> dict:
+            temperature: float = 0.3, model: str = "") -> dict:
     """Call an OpenAI-compatible chat completions endpoint and return parsed JSON.
 
     Raises :class:`AISecurityError` with a safe error_code on any failure.
@@ -126,7 +188,7 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
     and the original exception is suppressed so tracebacks stay clean.
     """
     payload = {
-        "model": "auto",
+        "model": model or "auto",
         "messages": messages,
         "temperature": temperature,
         "response_format": {"type": "json_object"},
@@ -137,7 +199,7 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
     }
     try:
         response = requests.post(
-            endpoint_url, json=payload, headers=headers, timeout=timeout
+            _chat_completions_url(endpoint_url), json=payload, headers=headers, timeout=timeout
         )
     except requests.Timeout:
         raise AISecurityError(ERROR_TIMEOUT) from None
@@ -289,7 +351,7 @@ def validate_preference_response(data) -> dict:
 # High-level AI operations
 # ---------------------------------------------------------------------------
 
-def parse_resume(resume_text: str, endpoint_url: str, api_key: str) -> dict:
+def parse_resume(resume_text: str, endpoint_url: str, api_key: str, model: str = "") -> dict:
     """Call AI to parse a resume and return validated fields.
 
     Returns ``{profile_name, city, roles, skills, keywords, suggestions}``.
@@ -310,12 +372,12 @@ def parse_resume(resume_text: str, endpoint_url: str, api_key: str) -> dict:
         },
         {"role": "user", "content": resume_text},
     ]
-    data = call_ai(endpoint_url, api_key, messages)
+    data = call_ai(endpoint_url, api_key, messages, model=model)
     return validate_resume_response(data)
 
 
 def suggest_screening_filters(resume_text: str, endpoint_url: str, api_key: str,
-                              timeout: int = DEFAULT_TIMEOUT) -> dict:
+                              timeout: int = DEFAULT_TIMEOUT, model: str = "") -> dict:
     """Call AI to read a resume and suggest BOSS filter values.
 
     Returns ``{city, salary, experience, degree, scale, stage, industry}``
@@ -341,7 +403,7 @@ def suggest_screening_filters(resume_text: str, endpoint_url: str, api_key: str,
         },
         {"role": "user", "content": resume_text},
     ]
-    data = call_ai(endpoint_url, api_key, messages, timeout=timeout)
+    data = call_ai(endpoint_url, api_key, messages, timeout=timeout, model=model)
     return _validate_suggest_response(data)
 
 
@@ -427,7 +489,7 @@ def validate_cautious_screening_suggestions(data, confirmed_fields=None,
 
 
 def suggest_screening_filters_cautious(resume_text, endpoint_url, api_key,
-                                       confirmed_fields=None, timeout=DEFAULT_TIMEOUT):
+                                       confirmed_fields=None, timeout=DEFAULT_TIMEOUT, model=""):
     """Generate deterministic, confidence-bearing suggestions and validate them."""
     unlocked = [
         field for field in SCREENING_FIELDS
@@ -442,12 +504,12 @@ def suggest_screening_filters_cautious(resume_text, endpoint_url, api_key,
         ),
     }, {"role": "user", "content": resume_text}]
     data = call_ai(
-        endpoint_url, api_key, messages, timeout=timeout, temperature=0,
+        endpoint_url, api_key, messages, timeout=timeout, temperature=0, model=model,
     )
     return validate_cautious_screening_suggestions(data, confirmed_fields=confirmed_fields)
 
 
-def rank_jds(confirmed_fields: dict, jobs_with_jd: list, endpoint_url: str, api_key: str) -> list[str]:
+def rank_jds(confirmed_fields: dict, jobs_with_jd: list, endpoint_url: str, api_key: str, model: str = "") -> list[str]:
     """Call AI to rank jobs by relevance, in batches of at most 10.
 
     Returns a list of ranked job_ids.  Each batch is validated by
@@ -489,14 +551,14 @@ def rank_jds(confirmed_fields: dict, jobs_with_jd: list, endpoint_url: str, api_
                 ),
             },
         ]
-        data = call_ai(endpoint_url, api_key, messages)
+        data = call_ai(endpoint_url, api_key, messages, model=model)
         batch_ranked = validate_rank_response(data, batch_job_ids)
         ranked.extend(batch_ranked)
 
     return ranked
 
 
-def update_preference(profile: dict, feedback_events: list, endpoint_url: str, api_key: str) -> dict:
+def update_preference(profile: dict, feedback_events: list, endpoint_url: str, api_key: str, model: str = "") -> dict:
     """Call AI to update preferences based on recent feedback.
 
     Returns ``{positive_terms, negative_terms, keyword_weights, uncertain}``.
@@ -523,7 +585,7 @@ def update_preference(profile: dict, feedback_events: list, endpoint_url: str, a
             ),
         },
     ]
-    data = call_ai(endpoint_url, api_key, messages)
+    data = call_ai(endpoint_url, api_key, messages, model=model)
     return validate_preference_response(data)
 
 
@@ -533,7 +595,7 @@ def update_preference(profile: dict, feedback_events: list, endpoint_url: str, a
 
 def assess_semantic_similarity(
     resume_text, jd_text, *, ai_available=False, endpoint_url="", api_key="",
-    timeout=DEFAULT_TIMEOUT,
+    timeout=DEFAULT_TIMEOUT, model="",
 ) -> dict:
     """Return a program-validated semantic verdict.
 
@@ -552,13 +614,14 @@ def assess_semantic_similarity(
                     api_key,
                     [{"role": "system", "content": prompt}],
                     timeout=timeout,
+                    model=model,
                 )
             except AISecurityError as exc:
                 if exc.error_code == ERROR_TIMEOUT:
                     raise TimeoutError from None
                 if exc.error_code == ERROR_NETWORK:
                     raise ConnectionError from None
-                raise
+                raise RuntimeError from None
 
     return assess_semantic_similarity_formal(
         resume_text,

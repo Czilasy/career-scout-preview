@@ -131,6 +131,20 @@ class WorkbenchBrowserContractTests(unittest.TestCase):
         self.assertNotIn('href="${safeUrl}"', self.html)
         self.assertIn("textContent", self.html)
 
+    def test_ai_model_options_use_dom_text_nodes(self):
+        """Configured and remotely listed model names must not be parsed as HTML."""
+        self.assertIn("function renderAiModelOptions", self.html)
+        self.assertIn("option.textContent = model", self.html)
+        self.assertNotIn('sel.innerHTML = `<option value="${savedModel}"', self.html)
+        self.assertNotIn('data.models.map(m => `<option value="${m}"', self.html)
+
+    def test_screening_execution_range_controls_are_sent_to_the_api(self):
+        """正式筛选页必须让用户限制页数和详情数，并发送给运行接口。"""
+        self.assertIn('id="screeningPages"', self.html)
+        self.assertIn('id="screeningMaxDetails"', self.html)
+        self.assertIn("body.pages", self.html)
+        self.assertIn("body.max_details", self.html)
+
 
 class ScreeningBrowserContractTests(unittest.TestCase):
     """T053: 筛选页浏览器交互契约（卡片跳转、按钮阻止跳转、两区切换、垃圾桶查看、降级态展示）。

@@ -57,6 +57,23 @@ SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
 DEFAULT_STATE_DIR = Path(os.path.expanduser("~/.career-scout/webui"))
 
 
+def _optional_positive_int(value, field, *, maximum=None):
+    """Parse a user-controlled optional execution limit without coercion surprises."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{field} 必须是正整数")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} 必须是正整数") from None
+    if str(value).strip() != str(parsed) or parsed < 1:
+        raise ValueError(f"{field} 必须是正整数")
+    if maximum is not None and parsed > maximum:
+        raise ValueError(f"{field} 不能超过 {maximum}")
+    return parsed
+
+
 def _env():
     environment = os.environ.copy()
     environment["PYTHONUTF8"] = "1"
@@ -92,6 +109,15 @@ def _task_payload(store, task_id):
     if not isinstance(details, list):
         details = []
     return task, list_payload, jobs, details
+
+
+def _mask_key(key: str) -> str:
+    """打码 API key：保留前4后4字符，中间星号。短 key 全星号。"""
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "*" * len(key)
+    return key[:4] + "*" * (len(key) - 8) + key[-4:]
 
 
 class TaskRunner:
@@ -370,7 +396,7 @@ class WorkbenchRunner(TaskRunner):
                     ranked_ids = ai_service.rank_jds(
                         run["profile_snapshot"],
                         [{"job_id": job["id"], "title": job["title"], "jd": job["jd"]} for job in persisted_jobs],
-                        settings["endpoint_url"], api_key,
+                        settings["endpoint_url"], api_key, settings.get("model", ""),
                     )
                     for rank, job_id in enumerate(ranked_ids):
                         self.store.link_profile_job(run["profile_id"], job_id, run["id"], run["id"], ai_rank=rank)
@@ -552,7 +578,9 @@ def create_app(config=None):
 
     @app.route("/")
     def index():
-        return send_from_directory(HERE, "index.html")
+        resp = send_from_directory(HERE, "index.html")
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return resp
 
     @app.route("/v2")
     def index_v2():
@@ -696,15 +724,27 @@ def create_app(config=None):
     @app.route("/api/ai-settings", methods=["GET", "PUT"])
     def ai_settings():
         if request.method == "GET":
-            return jsonify(store.get_ai_settings())
+            settings = store.get_ai_settings()
+            # 返回打码后的 key 预览（保留首尾，中间星号），供前端展示
+            cred_ref = store.get_credential_ref() if settings.get("is_configured") else ""
+            real_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
+            settings["masked_key"] = _mask_key(real_key) if real_key else ""
+            return jsonify(settings)
         raw = request.get_json(silent=True) or {}
         endpoint_url = str(raw.get("endpoint_url") or "").strip()
         api_key = str(raw.get("api_key") or "").strip()
-        if not endpoint_url or not api_key:
-            raise ValueError("endpoint_url 和 api_key 不能为空")
+        model = str(raw.get("model") or "").strip()
+        if not endpoint_url:
+            raise ValueError("endpoint_url 不能为空")
+        # key 为空时尝试复用已存的 key（允许只改 model 不重填 key）
+        if not api_key:
+            existing_ref = store.get_credential_ref()
+            api_key = ai_service.retrieve_api_key(existing_ref) if existing_ref else ""
+            if not api_key:
+                raise ValueError("api_key 不能为空（尚未保存过 key）")
         credential_ref = ai_service.store_api_key(endpoint_url, api_key)
         settings = store.save_ai_settings(
-            endpoint_url, credential_ref, status="unconfigured",
+            endpoint_url, credential_ref, status="unconfigured", model=model,
         )
         return jsonify(settings)
 
@@ -716,10 +756,27 @@ def create_app(config=None):
             raise ValueError("请先保存 AI 服务 URL")
         cred_ref = store.get_credential_ref()
         api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
-        ok, error_code = ai_service.test_connection(endpoint_url, api_key)
+        ok, error_code = ai_service.test_connection(endpoint_url, api_key, model=settings.get("model", ""))
         new_status = "ready" if ok else "failed"
         store.update_ai_status(new_status, last_error_code=error_code)
         return jsonify({"ok": ok, "error_code": error_code})
+
+    @app.route("/api/ai-settings/models", methods=["GET"])
+    def ai_settings_models():
+        """拉取可用模型列表。前端持 key 不安全，由后端代理 GET /models。"""
+        settings = store.get_ai_settings()
+        endpoint_url = settings.get("endpoint_url") or ""
+        if not endpoint_url:
+            raise ValueError("请先保存 AI 服务 URL")
+        cred_ref = store.get_credential_ref()
+        api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
+        if not api_key:
+            raise ValueError("API Key 未配置")
+        try:
+            models = ai_service.list_models(endpoint_url, api_key)
+        except ai_service.AISecurityError as exc:
+            return jsonify({"ok": False, "error_code": exc.error_code, "models": []}), 200
+        return jsonify({"ok": True, "models": models})
 
     @app.route("/api/profiles", methods=["GET", "POST"])
     def profiles():
@@ -792,7 +849,7 @@ def create_app(config=None):
                 try:
                     ai_suggestion = ai_service.parse_resume(
                         record["extracted_text"],
-                        settings["endpoint_url"], api_key,
+                        settings["endpoint_url"], api_key, settings.get("model", ""),
                     )
                     store.save_resume_suggestions(record["id"], ai_suggestion)
                     store.update_ai_status("ready")
@@ -877,6 +934,7 @@ def create_app(config=None):
             suggestion_result = ai_service.suggest_screening_filters_cautious(
                 extracted_text, settings["endpoint_url"], api_key,
                 confirmed_fields=profile.get("confirmed_fields") or {},
+                model=settings.get("model", ""),
             )
         except ai_service.AISecurityError:
             return jsonify({"status": "ai_unavailable"})
@@ -908,6 +966,15 @@ def create_app(config=None):
             raise ValueError("filters 含有不允许的字段")
         if not keyword:
             raise ValueError("keyword 不能为空")
+        pages = _optional_positive_int(raw.get("pages"), "pages", maximum=boss.MAX_PAGES)
+        max_details = _optional_positive_int(raw.get("max_details"), "max_details")
+        if pages is not None and max_details is not None and max_details > pages * 30:
+            raise ValueError(f"max_details 不能超过 {pages * 30}")
+        execution_limits = {}
+        if pages is not None:
+            execution_limits["pages"] = pages
+        if max_details is not None:
+            execution_limits["max_details"] = max_details
 
         frozen = freeze_filters(filters)
         profile_id = raw.get("profile_id")
@@ -924,12 +991,15 @@ def create_app(config=None):
         run = store.create_screening_run(frozen, resume_id=resume_id)
         run_id = run["id"]
         output_path = Path(app.config["RESULT_DIR"]) / f"screening_{run_id}.json"
+        detail_output_path = Path(app.config["RESULT_DIR"]) / f"screening_{run_id}_details.json"
 
         try:
             search_result = execute_first_layer(
                 frozen, keyword,
                 output_path=str(output_path),
+                detail_output_path=str(detail_output_path),
                 python_executable=app.config["PYTHON_EXECUTABLE"],
+                **execution_limits,
                 store=store,
                 run_id=run_id,
             )
@@ -954,6 +1024,7 @@ def create_app(config=None):
                 "ai_available": True,
                 "endpoint_url": ai_settings["endpoint_url"],
                 "api_key": ai_api_key,
+                "model": ai_settings.get("model", ""),
                 "require_input": True,
             }
         parse_distribution = {}
@@ -1067,7 +1138,7 @@ def create_app(config=None):
             "company": job.get("boss_name", ""),
             "salary": job.get("salary", ""),
             "location": job.get("location", ""),
-            "jd_excerpt": "",  # US3 阶段无 JD 详情，留空
+            "jd_excerpt": str(job.get("jd", ""))[:320],
             "canonical_url": job.get("job_link", ""),
             "interest_state": interest_state,
         }
@@ -1243,7 +1314,8 @@ def create_app(config=None):
         options = None
         if ai_enabled:
             options = {"ai_available": True, "endpoint_url": settings["endpoint_url"],
-                       "api_key": api_key, "require_input": True}
+                       "api_key": api_key, "model": settings.get("model", ""),
+                       "require_input": True}
         verdict = partition_job(
             job, run["frozen_filters"], resume_text,
             ai_enabled=ai_enabled, semantic_options=options,
@@ -1538,14 +1610,15 @@ def create_app(config=None):
         artifact_failures = 0
         result_root = Path(app.config["RESULT_DIR"]).resolve()
         for run_id in run_ids:
-            artifact = (result_root / f"screening_{run_id}.json").resolve()
-            if artifact.parent != result_root:
-                artifact_failures += 1
-                continue
-            try:
-                artifact.unlink(missing_ok=True)
-            except OSError:
-                artifact_failures += 1
+            for name in (f"screening_{run_id}.json", f"screening_{run_id}_details.json"):
+                artifact = (result_root / name).resolve()
+                if artifact.parent != result_root:
+                    artifact_failures += 1
+                    continue
+                try:
+                    artifact.unlink(missing_ok=True)
+                except OSError:
+                    artifact_failures += 1
         result["artifact_fail_count"] = artifact_failures
         result["fail_count"] += artifact_failures
         record = store.record_cleanup(
@@ -1659,7 +1732,7 @@ def create_app(config=None):
                 try:
                     preference = ai_service.update_preference(
                         store.get_profile(profile_id), store.list_feedback(profile_id),
-                        settings["endpoint_url"], api_key,
+                        settings["endpoint_url"], api_key, settings.get("model", ""),
                     )
                     store.save_preference_version(profile_id, feedback_count, preference)
                 except (ai_service.AISecurityError, ValueError):
