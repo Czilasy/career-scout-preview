@@ -165,6 +165,8 @@ class TaskStore:
             self._migration_006()
         if current < 7:
             self._migration_007()
+        if current < 8:
+            self._migration_008()
         # A process restart cannot resume an in-memory child process. Record
         # that fact instead of leaving a permanently "running" UI state.
         with self._connection() as conn:
@@ -462,6 +464,29 @@ class TaskStore:
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
                 "VALUES (7, ?, 'screening progress and parse summary')",
+                (_now(),),
+            )
+
+    def _migration_008(self):
+        """Persist suspended pending metadata needed for atomic trash recovery."""
+        with self._connection() as conn:
+            columns = {row["name"] for row in conn.execute(
+                "PRAGMA table_info(screening_trash_records)"
+            )}
+            additions = {
+                "source_job_id": "TEXT",
+                "pending_failure_stage": "TEXT",
+                "pending_retryable": "INTEGER",
+                "pending_attempts": "INTEGER",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    conn.execute(
+                        f"ALTER TABLE screening_trash_records ADD COLUMN {name} {definition}"
+                    )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (8, ?, 'screening trash suspended pending metadata')",
                 (_now(),),
             )
 
@@ -928,6 +953,96 @@ class TaskStore:
         rejected = self.list_screening_rejected(profile_id)
         return [r["job_id"] for r in rejected]
 
+    def reject_screening_with_origin(self, profile_id, job_id, source_job_id,
+                                     run_id, origin_zone) -> dict:
+        """Atomically reject a job, record its origin, and suspend pending state."""
+        if origin_zone not in {"match", "mismatch", "pending", "interested"}:
+            raise ValueError(f"invalid origin zone: {origin_zone}")
+        feedback_id = _uuid()
+        trash_id = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            profile_job = conn.execute(
+                "SELECT 1 FROM profile_jobs WHERE profile_id = ? AND job_id = ?",
+                (str(profile_id), str(job_id)),
+            ).fetchone()
+            if profile_job:
+                conn.execute(
+                    "UPDATE profile_jobs SET status = 'deleted', last_run_id = ? "
+                    "WHERE profile_id = ? AND job_id = ?",
+                    (_opt_str(run_id), str(profile_id), str(job_id)),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO profile_jobs "
+                    "(profile_id, job_id, first_run_id, last_run_id, ai_rank, shown_at, status) "
+                    "VALUES (?, ?, ?, ?, NULL, ?, 'deleted')",
+                    (str(profile_id), str(job_id), _opt_str(run_id),
+                     _opt_str(run_id), ts),
+                )
+            conn.execute(
+                "INSERT INTO feedback_events "
+                "(id, profile_id, job_id, run_id, action, reason, revoked_at, created_at) "
+                "VALUES (?, ?, ?, ?, 'not_interested', NULL, NULL, ?)",
+                (feedback_id, str(profile_id), str(job_id), _opt_str(run_id), ts),
+            )
+
+            pending = None
+            if origin_zone == "pending":
+                pending = conn.execute(
+                    "SELECT * FROM screening_pending_results "
+                    "WHERE run_id = ? AND job_id = ?",
+                    (str(run_id), str(source_job_id)),
+                ).fetchone()
+                if pending:
+                    conn.execute(
+                        "DELETE FROM screening_pending_results WHERE id = ?",
+                        (pending["id"],),
+                    )
+                    conn.execute(
+                        "UPDATE screening_runs SET pending_count = ("
+                        "SELECT COUNT(*) FROM screening_pending_results WHERE run_id = ?"
+                        "), updated_at = ? WHERE id = ?",
+                        (str(run_id), ts, str(run_id)),
+                    )
+
+            existing = conn.execute(
+                "SELECT id FROM screening_trash_records "
+                "WHERE profile_id = ? AND job_id = ?",
+                (str(profile_id), str(job_id)),
+            ).fetchone()
+            values = (
+                origin_zone, _opt_str(run_id), feedback_id, ts,
+                str(source_job_id),
+                pending["failure_stage"] if pending else None,
+                int(pending["retryable"]) if pending else None,
+                int(pending["attempts"]) if pending else None,
+            )
+            if existing:
+                trash_id = existing["id"]
+                conn.execute(
+                    "UPDATE screening_trash_records SET origin_zone = ?, run_id = ?, "
+                    "feedback_ref = ?, deleted_at = ?, restored_at = NULL, "
+                    "source_job_id = ?, pending_failure_stage = ?, "
+                    "pending_retryable = ?, pending_attempts = ? WHERE id = ?",
+                    (*values, trash_id),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO screening_trash_records "
+                    "(id, profile_id, job_id, origin_zone, run_id, feedback_ref, "
+                    "deleted_at, restored_at, created_at, source_job_id, "
+                    "pending_failure_stage, pending_retryable, pending_attempts) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+                    (trash_id, str(profile_id), str(job_id), origin_zone,
+                     _opt_str(run_id), feedback_id, ts, ts, str(source_job_id),
+                     pending["failure_stage"] if pending else None,
+                     int(pending["retryable"]) if pending else None,
+                     int(pending["attempts"]) if pending else None),
+                )
+        return {"id": trash_id, "feedback_id": feedback_id,
+                "origin_zone": origin_zone, "job_id": str(job_id)}
+
     # -- screening pending / trash-with-origin / cleanup (003 FR-011~027) --
 
     def add_pending_result(self, run_id, job_id, failure_stage, retryable=True,
@@ -1095,6 +1210,94 @@ class TaskStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_active_trash_record(self, profile_id, job_id) -> dict:
+        """Return one active trash record without changing its recoverability."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM screening_trash_records "
+                "WHERE profile_id = ? AND job_id = ? AND restored_at IS NULL",
+                (str(profile_id), str(job_id)),
+            ).fetchone()
+        if not row:
+            raise KeyError(f"trash record not found: profile={profile_id} job={job_id}")
+        return dict(row)
+
+    def complete_trash_restore(self, profile_id, job_id, profile_status,
+                               recovery_run_id=None, create_recovery=False) -> dict:
+        """Atomically reactivate a trash item after external artifacts are ready."""
+        ts = _now()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM screening_trash_records "
+                "WHERE profile_id = ? AND job_id = ? AND restored_at IS NULL",
+                (str(profile_id), str(job_id)),
+            ).fetchone()
+            if not row:
+                raise KeyError(f"trash record not found: profile={profile_id} job={job_id}")
+            origin = row["origin_zone"]
+            target_run_id = recovery_run_id or row["run_id"]
+            source_job_id = row["source_job_id"] or str(job_id)
+
+            if create_recovery:
+                if not recovery_run_id or origin not in {"match", "mismatch", "pending"}:
+                    raise ValueError("invalid recovery run")
+                pending_count = 1 if origin == "pending" else 0
+                match_count = 1 if origin == "match" else 0
+                mismatch_count = 1 if origin == "mismatch" else 0
+                status = "partial" if origin == "pending" else "succeeded"
+                conn.execute(
+                    "INSERT INTO screening_runs "
+                    "(id, frozen_filters_json, status, source_count, match_count, "
+                    "mismatch_count, created_at, updated_at, error_code, pending_count, "
+                    "processed_count, source_cursor, parse_failure_count, parse_failures_json) "
+                    "VALUES (?, '{}', ?, 1, ?, ?, ?, ?, NULL, ?, 1, 1, 0, '{}')",
+                    (recovery_run_id, status, match_count, mismatch_count,
+                     ts, ts, pending_count),
+                )
+
+            if origin == "pending":
+                if not target_run_id:
+                    raise ValueError("pending restore requires run")
+                conn.execute(
+                    "INSERT INTO screening_pending_results "
+                    "(id, run_id, job_id, failure_stage, retryable, attempts, "
+                    "last_failed_at, origin_zone, ai_payload_json, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', '{}', ?) "
+                    "ON CONFLICT(run_id, job_id) DO UPDATE SET "
+                    "failure_stage = excluded.failure_stage, retryable = excluded.retryable, "
+                    "attempts = excluded.attempts, last_failed_at = excluded.last_failed_at",
+                    (_uuid(), str(target_run_id), str(source_job_id),
+                     row["pending_failure_stage"] or "verification_error",
+                     int(row["pending_retryable"] if row["pending_retryable"] is not None else 1),
+                    int(row["pending_attempts"] or 1), ts, ts),
+                )
+                if not create_recovery:
+                    conn.execute(
+                        "UPDATE screening_runs SET pending_count = ("
+                        "SELECT COUNT(*) FROM screening_pending_results WHERE run_id = ?"
+                        "), updated_at = ? WHERE id = ?",
+                        (str(target_run_id), ts, str(target_run_id)),
+                    )
+            elif create_recovery and origin in {"match", "mismatch"}:
+                conn.execute(
+                    "INSERT INTO screening_results "
+                    "(id, run_id, job_id, verdict, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (_uuid(), str(recovery_run_id), str(source_job_id), origin, ts),
+                )
+
+            conn.execute(
+                "UPDATE profile_jobs SET status = ? WHERE profile_id = ? AND job_id = ?",
+                (profile_status, str(profile_id), str(job_id)),
+            )
+            conn.execute(
+                "UPDATE screening_trash_records SET restored_at = ? WHERE id = ?",
+                (ts, row["id"]),
+            )
+        result = dict(row)
+        result["restored_at"] = ts
+        result["recovery_run_id"] = target_run_id
+        return result
+
     def restore_from_trash(self, profile_id, job_id) -> dict:
         """从垃圾桶恢复岗位：标记 restored_at，返回原区域信息。
         不修改 profile_jobs.status（保留既有感兴趣/不感兴趣标记）。
@@ -1123,21 +1326,20 @@ class TaskStore:
         success = 0
         fail = 0
         pending = 0
-        with self._connection() as conn:
-            # 先统计将清理的 pending 数（用于提示）
-            pending = conn.execute(
-                "SELECT COUNT(*) AS c FROM screening_pending_results "
-                "WHERE created_at < ?",
-                (cutoff,),
-            ).fetchone()["c"]
-            # 找到超期 run_id
-            old_runs = [r["id"] for r in conn.execute(
-                "SELECT id FROM screening_runs WHERE created_at < ?",
-                (cutoff,),
-            ).fetchall()]
-            if old_runs:
-                placeholders = ",".join("?" * len(old_runs))
-                try:
+        old_runs = []
+        try:
+            with self._connection() as conn:
+                pending = conn.execute(
+                    "SELECT COUNT(*) AS c FROM screening_pending_results "
+                    "WHERE created_at < ?",
+                    (cutoff,),
+                ).fetchone()["c"]
+                old_runs = [r["id"] for r in conn.execute(
+                    "SELECT id FROM screening_runs WHERE created_at < ?",
+                    (cutoff,),
+                ).fetchall()]
+                if old_runs:
+                    placeholders = ",".join("?" * len(old_runs))
                     conn.execute(
                         f"DELETE FROM screening_pending_results "
                         f"WHERE run_id IN ({placeholders})",
@@ -1154,10 +1356,11 @@ class TaskStore:
                         old_runs,
                     )
                     success = len(old_runs)
-                except Exception:
-                    fail = len(old_runs)
+        except sqlite3.Error:
+            success = 0
+            fail = len(old_runs)
         return {"success_count": success, "fail_count": fail,
-                "pending_at_cleanup": pending}
+                "pending_at_cleanup": pending, "run_ids": old_runs}
 
     def preview_cleanup_with_pending_prompt(self, days=30) -> dict:
         """预览 30 天清理：返回将清理的 pending 数等。

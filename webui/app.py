@@ -8,6 +8,7 @@ import io
 import json
 import os
 import secrets
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -1365,6 +1366,9 @@ def create_app(config=None):
             raise ValueError("profile_id 不能为空")
         if not run_id:
             raise ValueError("run_id 不能为空")
+        origin_zone = raw.get("origin_zone") or "match"
+        if origin_zone not in {"match", "mismatch", "pending", "interested"}:
+            raise ValueError("origin_zone 无效")
         try:
             store.get_profile(profile_id)
         except KeyError:
@@ -1375,13 +1379,9 @@ def create_app(config=None):
         saved = _save_screening_job_to_store(job)
         if not saved:
             return jsonify({"error_code": "invalid_link", "user_message": "岗位链接不安全"}), 400
-        feedback = store.mark_screening_reject(profile_id, saved["id"], run_id=run_id)
-        origin_zone = raw.get("origin_zone") or "match"
-        if origin_zone not in {"match", "mismatch", "pending", "interested"}:
-            raise ValueError("origin_zone 无效")
-        store.move_to_trash_with_origin(
-            profile_id, saved["id"], origin_zone=origin_zone,
-            run_id=run_id, feedback_ref=feedback.get("id"),
+        store.reject_screening_with_origin(
+            profile_id, saved["id"], source_job_id=job_id,
+            run_id=run_id, origin_zone=origin_zone,
         )
         return jsonify({"reject_state": "rejected", "job_id": saved["id"]})
 
@@ -1460,51 +1460,58 @@ def create_app(config=None):
         profile_id = (request.get_json(silent=True) or {}).get("profile_id")
         if not profile_id:
             raise ValueError("profile_id 不能为空")
-        restored = store.restore_from_trash(profile_id, job_id)
+        restored = store.get_active_trash_record(profile_id, job_id)
         feedback = store.list_feedback(profile_id, job_id=job_id)
         was_interested = any(
             item.get("action") == "interested" and not item.get("revoked_at")
             for item in feedback
         )
         status = "interested" if restored["origin_zone"] == "interested" or was_interested else "new"
-        store.update_profile_job(profile_id, job_id, status=status)
-
         recovery_run_id = restored.get("run_id")
+        run_exists = False
         try:
             if recovery_run_id:
                 store.get_screening_run(recovery_run_id)
-            else:
-                raise KeyError("missing run")
+                run_exists = True
         except KeyError:
-            origin = restored["origin_zone"]
-            if origin in {"match", "mismatch", "pending"}:
-                recovery = store.create_screening_run({})
-                recovery_run_id = recovery["id"]
-                job = store.get_job(job_id)
-                artifact_job = {
-                    "job_id": job_id, "title": job.get("title", ""),
-                    "boss_name": job.get("company", ""), "salary": job.get("salary", ""),
-                    "location": job.get("location", ""), "jd": job.get("jd", ""),
-                    "job_link": job.get("canonical_url", ""),
-                }
-                output_path = Path(app.config["RESULT_DIR"]) / f"screening_{recovery_run_id}.json"
+            run_exists = False
+
+        origin = restored["origin_zone"]
+        create_recovery = origin in {"match", "mismatch", "pending"} and not run_exists
+        output_path = None
+        if create_recovery:
+            recovery_run_id = uuid.uuid4().hex[:16]
+            job = store.get_job(job_id)
+            source_job_id = restored.get("source_job_id") or job_id
+            artifact_job = {
+                "job_id": source_job_id, "title": job.get("title", ""),
+                "boss_name": job.get("company", ""), "salary": job.get("salary", ""),
+                "location": job.get("location", ""), "jd": job.get("jd", ""),
+                "job_link": job.get("canonical_url", ""),
+            }
+            output_path = Path(app.config["RESULT_DIR"]) / f"screening_{recovery_run_id}.json"
+            try:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 with output_path.open("w", encoding="utf-8") as handle:
                     json.dump({"jobs": [artifact_job]}, handle, ensure_ascii=False)
-                if origin == "pending":
-                    store.add_pending_result(recovery_run_id, job_id, "verification_error")
-                    store.update_screening_run_status(
-                        recovery_run_id, "partial", source_count=1, pending_count=1,
-                        processed_count=1, source_cursor=1,
-                    )
-                else:
-                    store.add_screening_result(recovery_run_id, job_id, origin)
-                    store.update_screening_run_status(
-                        recovery_run_id, "succeeded", source_count=1,
-                        match_count=1 if origin == "match" else 0,
-                        mismatch_count=1 if origin == "mismatch" else 0,
-                        processed_count=1, source_cursor=1,
-                    )
+            except OSError:
+                return jsonify({
+                    "error_code": "restore_artifact_failed",
+                    "user_message": "恢复产物写入失败，岗位仍保留在垃圾桶",
+                }), 500
+        try:
+            restored = store.complete_trash_restore(
+                profile_id, job_id, status,
+                recovery_run_id=recovery_run_id,
+                create_recovery=create_recovery,
+            )
+        except (sqlite3.Error, ValueError, KeyError):
+            if output_path:
+                try:
+                    output_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
         return jsonify({
             "job_id": job_id, "restored_to": restored["origin_zone"],
             "recovery_run_id": recovery_run_id,
@@ -1516,13 +1523,31 @@ def create_app(config=None):
     def screening_cleanup_preview():
         """Preview temporary screening cleanup, including pending warnings."""
         days = request.args.get("days", 30, type=int) or 30
+        if days != 30:
+            raise ValueError("screening cleanup days 必须为 30")
         return jsonify(store.preview_cleanup_with_pending_prompt(days=days))
 
     @app.route("/api/screening/cleanup", methods=["POST"])
     def screening_cleanup_execute():
         """Clean expired temporary screening data and record the outcome."""
         days = int((request.get_json(silent=True) or {}).get("days", 30))
+        if days != 30:
+            raise ValueError("screening cleanup days 必须为 30")
         result = store.cleanup_temp_run_data(days=days)
+        run_ids = result.pop("run_ids", [])
+        artifact_failures = 0
+        result_root = Path(app.config["RESULT_DIR"]).resolve()
+        for run_id in run_ids:
+            artifact = (result_root / f"screening_{run_id}.json").resolve()
+            if artifact.parent != result_root:
+                artifact_failures += 1
+                continue
+            try:
+                artifact.unlink(missing_ok=True)
+            except OSError:
+                artifact_failures += 1
+        result["artifact_fail_count"] = artifact_failures
+        result["fail_count"] += artifact_failures
         record = store.record_cleanup(
             f"screening_temp_{days}d",
             result["success_count"], result["fail_count"], result["pending_at_cleanup"],

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from datetime import datetime, timedelta, timezone
 
 from tests.test_screening_fixtures import sample_screening_job
 from webui.app import create_app
@@ -153,6 +154,83 @@ class ScreeningResilienceAPITests(unittest.TestCase):
         history = self.client.get("/api/screening/cleanup/history").get_json()
         self.assertEqual(len(history["items"]), 1)
         self.assertEqual(history["items"][0]["scope"], "screening_temp_30d")
+
+    def test_cleanup_api_rejects_non_30_day_policy(self):
+        response = self.client.post("/api/screening/cleanup", json={"days": 0})
+        self.assertEqual(response.status_code, 400)
+
+    def test_invalid_origin_does_not_mutate_reject_state(self):
+        run = self.store.create_screening_run({})
+        raw_job = sample_screening_job(job_id="invalid-origin")
+        self._write_artifact(run["id"], [raw_job])
+        response = self.client.post(
+            "/api/screening/jobs/invalid-origin/reject",
+            json={
+                "profile_id": self.profile["id"], "run_id": run["id"],
+                "origin_zone": "bad",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.store.list_screening_rejected(self.profile["id"]), [])
+        self.assertEqual(self.store.list_feedback(self.profile["id"]), [])
+
+    def test_pending_moves_exclusively_to_trash_and_restore_reactivates_it(self):
+        run = self.store.create_screening_run({})
+        raw_job = sample_screening_job(job_id="pending-source")
+        self._write_artifact(run["id"], [raw_job])
+        self.store.add_pending_result(
+            run["id"], "pending-source", "ai_timeout", retryable=True,
+        )
+        rejected = self.client.post(
+            "/api/screening/jobs/pending-source/reject",
+            json={
+                "profile_id": self.profile["id"], "run_id": run["id"],
+                "origin_zone": "pending",
+            },
+        ).get_json()
+        self.assertEqual(self.store.list_pending(run["id"]), [])
+        self.assertEqual(self.store.get_screening_run(run["id"])["pending_count"], 0)
+        restored = self.client.post(
+            f"/api/screening/trash/{rejected['job_id']}/restore",
+            json={"profile_id": self.profile["id"]},
+        )
+        self.assertEqual(restored.status_code, 200)
+        pending = self.store.list_pending(run["id"])
+        self.assertEqual(pending[0]["job_id"], "pending-source")
+        self.assertEqual(pending[0]["failure_stage"], "ai_timeout")
+        self.assertEqual(self.store.get_screening_run(run["id"])["pending_count"], 1)
+
+    def test_restore_file_failure_keeps_item_in_trash(self):
+        job = self.store.save_job(
+            "https://www.zhipin.com/job_detail/fail-restore.html", "", "Fail", "ACME",
+            "20-30K", "上海", "JD",
+        )
+        self.store.link_profile_job(self.profile["id"], job["id"], None, None)
+        self.store.move_to_trash_with_origin(
+            self.profile["id"], job["id"], "match", run_id="cleaned-run",
+        )
+        with mock.patch("webui.app.Path.open", side_effect=OSError("disk full")):
+            response = self.client.post(
+                f"/api/screening/trash/{job['id']}/restore",
+                json={"profile_id": self.profile["id"]},
+            )
+        self.assertEqual(response.status_code, 500)
+        remaining = self.store.list_trash_with_origin(self.profile["id"])
+        self.assertEqual([item["job_id"] for item in remaining], [job["id"]])
+
+    def test_cleanup_removes_controlled_screening_artifact(self):
+        run = self.store.create_screening_run({})
+        artifact = self.result_dir / f"screening_{run['id']}.json"
+        self._write_artifact(run["id"], [sample_screening_job(job_id="old")])
+        old = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+        with self.store._connection() as connection:
+            connection.execute(
+                "UPDATE screening_runs SET created_at = ?, updated_at = ? WHERE id = ?",
+                (old, old, run["id"]),
+            )
+        response = self.client.post("/api/screening/cleanup", json={"days": 30})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(artifact.exists())
 
 
 if __name__ == "__main__":
