@@ -213,6 +213,14 @@ class WebUIAppTests(unittest.TestCase):
         self.assertNotIn("/api/apply", html)
         self.assertNotIn("/api/export-csv", html)
 
+    def test_screening_design_prototype_has_a_browser_route(self):
+        response = self.client.get("/screening-prototype")
+        html = response.get_data(as_text=True)
+        response.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("筛选工作台原型（模拟）", html)
+
 
 class ScreeningTokenProtectionTests(unittest.TestCase):
     """T009: screening GET endpoints require X-Boss-Token (except filter-options)."""
