@@ -15,6 +15,7 @@
       --line-strong: #444b57;
       --text: #f3f0e9;
       --muted: #a7a7a2;
+      --faint: #767a75;
       --accent: #d9b663;
       --accent-soft: rgba(217, 182, 99, .14);
       --gold: #d9b663;
@@ -313,23 +314,51 @@
     .history-item { border-left: 2px solid transparent; border-radius: 0; background: transparent; }
     .history-item:hover, .history-item.active { border-left-color: var(--gold); background: var(--surface-raised); }
 
-    .search-bar { min-height: 52px; padding: 12px 28px; background: var(--surface); }
-    .search-info { font-size: 12px; }
+    .search-bar {
+      min-height: 74px; padding: 13px 28px; background: var(--surface); display: flex;
+      align-items: center; justify-content: space-between; gap: 20px;
+    }
+    .workbench-heading { min-width: 0; display: grid; gap: 2px; }
+    .workbench-eyebrow { color: var(--faint); font-size: 10px; font-weight: 600; letter-spacing: .12em; }
+    .search-info { color: var(--text); font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
+    .workbench-settings-trigger { white-space: nowrap; }
     .job-card-list { padding: 8px 28px 24px; gap: 0; }
     .job-card {
       min-height: 106px; height: auto; padding: 13px 8px; border: 0; border-bottom: 1px solid var(--line);
-      border-radius: 0; background: transparent; gap: 7px; animation-duration: .22s;
+      border-radius: 0; background: transparent; display: grid;
+      grid-template-columns: minmax(210px, 1.1fr) minmax(125px, .65fr) minmax(220px, 1.8fr) auto;
+      align-items: center; gap: 20px; animation-duration: .22s;
     }
     .job-card:hover { background: linear-gradient(90deg, var(--surface-raised), transparent 82%); }
+    .job-card .card-header { min-width: 0; }
     .card-title { font-size: 15px; }
     .card-salary { color: var(--success); }
     .card-meta { gap: 10px; }
     .card-jd { max-width: 820px; -webkit-line-clamp: 2; max-height: 36px; }
-    .card-actions { margin-top: 2px; }
+    .card-actions { margin-top: 2px; justify-content: flex-end; }
     .card-link { border-color: var(--gold); border-radius: 4px; color: var(--gold); }
     .card-link:hover { background: var(--accent-soft); }
     .card-btn { border-radius: 4px; }
+    .card-reason {
+      max-width: 160px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 4px;
+      background: var(--bg); color: var(--muted); font-size: 11px;
+    }
+    .card-reason:focus { border-color: var(--gold); outline: none; }
     .empty-state { padding: 72px 20px; color: var(--muted); }
+    .workbench-empty {
+      align-self: center; width: min(100%, 620px); margin: auto; padding: 40px 20px;
+      text-align: center; color: var(--muted);
+    }
+    .workbench-empty-kicker { color: var(--gold); font-size: 11px; font-weight: 600; letter-spacing: .1em; }
+    .workbench-empty h1 { margin: 10px 0 8px; color: var(--text); font-size: clamp(24px, 3vw, 34px); letter-spacing: -.04em; line-height: 1.15; }
+    .workbench-empty-copy { max-width: 420px; margin: 0 auto; }
+    .workbench-empty .btn { margin-top: 22px; }
+    .workbench-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin: 42px auto 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); text-align: left; }
+    .workbench-step { min-height: 84px; padding: 14px 12px; display: grid; align-content: center; gap: 3px; }
+    .workbench-step + .workbench-step { border-left: 1px solid var(--line); }
+    .workbench-step-index { color: var(--gold); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
+    .workbench-step strong { color: var(--text); font-size: 13px; }
+    .workbench-step span:last-child { font-size: 11px; }
 
     .screening-workspace { background: var(--bg); }
     .screening-topbar { padding: 0; gap: 0; background: var(--surface); }
@@ -374,6 +403,8 @@
 
     @media (max-width: 1100px) {
       .screening-filters { grid-template-columns: repeat(4, minmax(120px, 1fr)); }
+      .job-card { grid-template-columns: minmax(190px, 1fr) minmax(200px, 1.25fr) auto; }
+      .job-card .card-meta { display: none; }
     }
     @media (max-width: 720px) {
       .app-header { padding: 0 12px; }
@@ -389,6 +420,15 @@
       .screening-filter-summary { display: none; }
       .screening-filter-details { padding: 12px; }
       .job-card-list, .zone-container { padding-left: 12px; padding-right: 12px; }
+      .search-bar { min-height: 68px; padding: 10px 12px; }
+      .search-info { font-size: 14px; }
+      .workbench-empty { padding-top: 28px; }
+      .workbench-steps { grid-template-columns: 1fr; margin-top: 30px; }
+      .workbench-step + .workbench-step { border-top: 1px solid var(--line); border-left: 0; }
+      .job-card { grid-template-columns: 1fr; gap: 6px; padding: 12px 4px; }
+      .job-card .card-meta { display: flex; }
+      .card-actions { justify-content: flex-start; }
+      .card-reason { max-width: 100%; }
       .screening-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .screening-keyword { width: 100%; min-width: 0; flex-basis: 100%; }
       .zone-tabs, .screening-summary { padding-left: 12px; padding-right: 12px; }
@@ -504,11 +544,26 @@
 
     <main class="main-area">
       <div class="search-bar">
-        <div class="search-info" id="searchInfo">点击搜索开始发现岗位</div>
-        <div id="searchActions"></div>
+        <div class="workbench-heading">
+          <span class="workbench-eyebrow">岗位工作台</span>
+          <div class="search-info" id="searchInfo">点击搜索开始发现岗位</div>
+        </div>
+        <div id="searchActions">
+          <button class="btn workbench-settings-trigger" type="button" onclick="toggleSettings()">设置搜索条件</button>
+        </div>
       </div>
       <div class="job-card-list" id="jobCardList">
-        <div class="empty-state">上传简历或手动输入关键词，点击搜索开始</div>
+        <section class="workbench-empty empty-state" aria-labelledby="workbenchEmptyTitle">
+          <p class="workbench-empty-kicker">尚未开始</p>
+          <h1 id="workbenchEmptyTitle">先设定你的求职范围</h1>
+          <p class="workbench-empty-copy">完善画像或输入关键词后，系统会把发现到的岗位集中到这里，供你快速判断与处理。</p>
+          <button class="btn primary" type="button" onclick="toggleSettings()">打开设置并开始</button>
+          <div class="workbench-steps" aria-label="开始步骤">
+            <div class="workbench-step"><span class="workbench-step-index">01</span><strong>完善画像</strong><span>城市、岗位与最低薪资</span></div>
+            <div class="workbench-step"><span class="workbench-step-index">02</span><strong>上传简历</strong><span>可选，用于生成建议</span></div>
+            <div class="workbench-step"><span class="workbench-step-index">03</span><strong>开始搜索</strong><span>在岗位列表中做决策</span></div>
+          </div>
+        </section>
       </div>
     </main>
   </div>
