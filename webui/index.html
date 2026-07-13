@@ -72,6 +72,8 @@
       width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
       background: var(--bg); outline: none; transition: border-color .15s;
     }
+    .field input[type="checkbox"] { width: auto; min-height: 0; padding: 0; accent-color: var(--gold); }
+    .field label input[type="checkbox"] { vertical-align: middle; margin-right: 6px; }
     .field input:focus, .field select:focus { border-color: var(--accent); }
     .field input[type="file"] { padding: 4px; }
     .btn {
@@ -421,6 +423,27 @@
     .screening-card-actions { gap: 7px; }
     .screening-card-status { color: var(--warning); }
     .modal-content { border-radius: 8px; background: var(--surface); }
+    .settings-accordion-toggle {
+      width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 0; color: var(--text); text-align: left;
+    }
+    .settings-accordion-toggle .section-title { margin-bottom: 0; }
+    .settings-accordion-action { color: var(--gold); font-size: 11px; white-space: nowrap; }
+    .settings-accordion-content { padding-top: 16px; }
+    .app-notice, .screening-notice {
+      display: none; align-items: center; gap: 10px; border: 1px solid var(--line);
+      border-radius: 6px; background: var(--surface-raised); color: var(--muted); font-size: 12px;
+    }
+    .app-notice {
+      position: fixed; top: calc(var(--header-h) + 12px); right: 20px; z-index: 220;
+      max-width: min(420px, calc(100vw - 40px)); padding: 9px 12px; box-shadow: 0 8px 24px rgba(0,0,0,.24);
+    }
+    .app-notice.show, .screening-notice.show { display: flex; }
+    .app-notice[data-tone="error"], .screening-notice[data-tone="error"] { color: var(--danger); border-color: rgba(228,133,127,.65); }
+    .app-notice[data-tone="warning"], .screening-notice[data-tone="warning"] { color: var(--warning); border-color: rgba(229,173,89,.65); }
+    .app-notice[data-tone="success"], .screening-notice[data-tone="success"] { color: var(--success); border-color: rgba(121,196,151,.65); }
+    .app-notice button, .screening-notice button { margin-left: auto; flex: 0 0 auto; }
+    .screening-notice { padding: 8px 28px; border-width: 0 0 1px; border-radius: 0; background: #14171c; }
 
     @media (max-width: 1100px) {
       .screening-filters { grid-template-columns: repeat(4, minmax(120px, 1fr)); }
@@ -453,6 +476,11 @@
       .screening-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .screening-keyword { width: 100%; min-width: 0; flex-basis: 100%; }
       .zone-tabs, .screening-summary { padding-left: 12px; padding-right: 12px; }
+      .zone-tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); overflow-x: visible; gap: 4px; }
+      .zone-group-label { display: none; }
+      .zone-tab { min-width: 0; padding: 7px 4px; text-align: center; }
+      .app-notice { top: calc(var(--header-h) + 10px); right: 12px; left: 12px; max-width: none; }
+      .screening-notice { padding: 8px 12px; }
     }
   </style>
 </head>
@@ -466,6 +494,11 @@
     <div class="header-actions">
       <span class="conn-status" id="connectionStatus">未连接</span>
     </div>
+  </div>
+
+  <div class="app-notice" id="appNotice" role="status" aria-live="polite" hidden>
+    <span id="appNoticeText"></span>
+    <button class="btn" id="appNoticeRetry" type="button" hidden>重试</button>
   </div>
 
   <div class="workspace">
@@ -523,27 +556,32 @@
         <div id="aiSuggestion" class="ai-suggestion" style="display:none;"></div>
       </div>
 
-      <div class="section">
-        <div class="section-title">AI 服务设置</div>
-        <div class="field">
+      <div class="section settings-accordion" id="aiSettingsSection">
+        <button class="settings-accordion-toggle" id="aiSettingsToggle" type="button" onclick="toggleAiSettings()" aria-controls="aiSettingsContent" aria-expanded="false">
+          <span class="section-title">AI 服务设置</span>
+          <span class="settings-accordion-action">展开</span>
+        </button>
+        <div class="settings-accordion-content" id="aiSettingsContent" hidden>
+          <div class="field">
           <label>AI 服务 URL（填到 /v1 这一级，/chat/completions 会自动补全）</label>
           <input type="url" id="aiEndpointUrl" placeholder="https://api.example.com/v1">
-        </div>
-        <div class="field">
+          </div>
+          <div class="field">
           <label>API Key</label>
           <input type="text" id="aiApiKey" placeholder="sk-..." autocomplete="off">
           <span id="aiApiKeyHint" style="margin-left:8px;color:#6b7280;font-size:13px;"></span>
-        </div>
-        <div class="field">
+          </div>
+          <div class="field">
           <label>模型</label>
           <div class="btn-row model-picker-row">
             <select id="aiModel"><option value="">请先拉取</option></select>
             <button class="btn model-fetch-button" type="button" onclick="fetchAiModels()" aria-label="拉取可用模型" title="拉取可用模型">拉取</button>
           </div>
-        </div>
-        <div class="btn-row">
+          </div>
+          <div class="btn-row">
           <button class="btn primary" onclick="saveAiSettings()">保存</button>
           <button class="btn" onclick="testAiConnection()">测试</button>
+          </div>
         </div>
       </div>
 
@@ -608,6 +646,10 @@
           <span class="screening-filter-summary" id="screeningFilterSummary" aria-live="polite">全部条件 · 1 页 · 核验 3 条详情</span>
           <button class="btn screening-filter-toggle" id="screeningFilterToggle" type="button" onclick="toggleScreeningFilters()" aria-controls="screeningFilterDetails" aria-expanded="false">修改筛选</button>
         </div>
+      </div>
+      <div class="screening-notice" id="screeningNotice" role="status" aria-live="polite" hidden>
+        <span id="screeningNoticeText"></span>
+        <button class="btn" id="screeningNoticeRetry" type="button" hidden>重试</button>
       </div>
       <div class="screening-filter-details collapsed" id="screeningFilterDetails">
         <div class="ai-unavailable-prompt" data-screening="ai-unavailable" id="aiUnavailablePrompt">
@@ -715,11 +757,47 @@
       profileJobs: "/api/profile-jobs",
     };
 
+    function setAppNotice(message, tone = "info", retryHandler = null) {
+      const notice = document.getElementById("appNotice");
+      const text = document.getElementById("appNoticeText");
+      const retry = document.getElementById("appNoticeRetry");
+      if (!notice || !text || !retry) return;
+      const hasMessage = Boolean(message);
+      notice.hidden = !hasMessage;
+      notice.classList.toggle("show", hasMessage);
+      notice.dataset.tone = tone;
+      text.textContent = message || "";
+      retry.hidden = typeof retryHandler !== "function";
+      retry.disabled = false;
+      retry.onclick = typeof retryHandler === "function" ? async () => {
+        retry.disabled = true;
+        try {
+          setAppNotice("");
+          await retryHandler();
+        } catch (_error) {
+          setAppNotice("重试仍未成功，请稍后再试", "error", retryHandler);
+        } finally {
+          retry.disabled = false;
+        }
+      } : null;
+    }
+
+    function toggleAiSettings() {
+      const toggle = document.getElementById("aiSettingsToggle");
+      const content = document.getElementById("aiSettingsContent");
+      if (!toggle || !content) return;
+      const expanded = toggle.getAttribute("aria-expanded") === "true";
+      toggle.setAttribute("aria-expanded", String(!expanded));
+      content.hidden = expanded;
+      const action = toggle.querySelector(".settings-accordion-action");
+      if (action) action.textContent = expanded ? "展开" : "收起";
+    }
+
     async function api(path, opts = {}) {
       const headers = { "X-Boss-Token": token, ...opts.headers };
       if (opts.json) { headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.json); }
       const resp = await fetch(path, { ...opts, headers });
-      if (resp.status === 403) { alert("会话已过期，请刷新页面"); throw new Error("forbidden"); }
+      if (resp.status === 403) { setAppNotice("会话已过期，请刷新页面", "error"); throw new Error("forbidden"); }
       return resp;
     }
 
@@ -779,10 +857,20 @@
 
     async function createProfile() {
       const name = document.getElementById("profileName").value.trim();
-      if (!name) { alert("请输入画像名称"); return; }
+      if (!name) { setAppNotice("请输入画像名称", "warning"); return; }
       const fields = collectProfileFields();
-      const resp = await api(API.profiles, { method: "POST", json: { name, confirmed_fields: fields } });
-      if (resp.ok) { await loadProfiles(); }
+      try {
+        const resp = await api(API.profiles, { method: "POST", json: { name, confirmed_fields: fields } });
+        if (resp.ok) {
+          await loadProfiles();
+          setAppNotice("画像已创建", "success");
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          setAppNotice(err.error || "画像创建失败", "error");
+        }
+      } catch (_error) {
+        setAppNotice("画像创建失败，请检查连接后重试", "error");
+      }
     }
 
     function collectProfileFields() {
@@ -801,32 +889,43 @@
     }
 
     async function saveProfileFields() {
-      if (!currentProfileId) { alert("请先选择画像"); return; }
+      if (!currentProfileId) { setAppNotice("请先选择画像", "warning"); return; }
       const fields = collectProfileFields();
-      await api(`${API.profiles}/${currentProfileId}`, { method: "PATCH", json: { confirmed_fields: fields } });
+      try {
+        const resp = await api(`${API.profiles}/${currentProfileId}`, { method: "PATCH", json: { confirmed_fields: fields } });
+        if (resp.ok) setAppNotice("画像设置已保存", "success");
+        else setAppNotice("画像设置保存失败", "error");
+      } catch (_error) {
+        setAppNotice("画像设置保存失败，请检查连接后重试", "error");
+      }
     }
 
     // == 简历 ==
     async function uploadResume() {
-      if (!currentProfileId) { alert("请先选择画像"); return; }
+      if (!currentProfileId) { setAppNotice("请先选择画像", "warning"); return; }
       const fileInput = document.getElementById("resumeFile");
-      if (!fileInput.files.length) { alert("请选择简历文件"); return; }
+      if (!fileInput.files.length) { setAppNotice("请选择简历文件", "warning"); return; }
       const formData = new FormData();
       formData.append("file", fileInput.files[0]);
       formData.append("ai_consent", String(document.getElementById("resumeAiConsent").checked));
-      const resp = await fetch(`/api/profiles/${currentProfileId}/resume`, {
-        method: "POST", body: formData, headers: { "X-Boss-Token": token },
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.profile_id && data.profile_id !== currentProfileId) {
-          currentProfileId = data.profile_id;
-          await loadProfiles();
+      try {
+        const resp = await fetch(`/api/profiles/${currentProfileId}/resume`, {
+          method: "POST", body: formData, headers: { "X-Boss-Token": token },
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.profile_id && data.profile_id !== currentProfileId) {
+            currentProfileId = data.profile_id;
+            await loadProfiles();
+          }
+          showAiSuggestion(data);
+          setAppNotice("简历已上传", "success");
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          setAppNotice("上传失败：" + (err.error || resp.status), "error");
         }
-        showAiSuggestion(data);
-      } else {
-        const err = await resp.json().catch(() => ({}));
-        alert("上传失败: " + (err.error || resp.status));
+      } catch (_error) {
+        setAppNotice("上传失败，请检查连接后重试", "error");
       }
     }
 
@@ -896,46 +995,63 @@
     }
 
     async function fetchAiModels() {
-      const resp = await api("/api/ai-settings/models");
-      const data = await resp.json();
-      if (!data.ok) {
-        alert("拉取模型失败: " + (data.error_code || "未知"));
-        return;
+      try {
+        const resp = await api("/api/ai-settings/models");
+        const data = await resp.json();
+        if (!data.ok) {
+          setAppNotice("拉取模型失败：" + (data.error_code || "未知"), "error", fetchAiModels);
+          return;
+        }
+        const savedModel = (await (await api(API.aiSettings)).json()).model || "";
+        renderAiModelOptions(data.models, savedModel, "无可用模型");
+        setAppNotice("模型列表已更新", "success");
+      } catch (_error) {
+        setAppNotice("拉取模型失败，请检查连接后重试", "error", fetchAiModels);
       }
-      const savedModel = (await (await api(API.aiSettings)).json()).model || "";
-      renderAiModelOptions(data.models, savedModel, "无可用模型");
     }
 
     async function saveAiSettings() {
       const endpoint_url = document.getElementById("aiEndpointUrl").value.trim();
       let api_key = document.getElementById("aiApiKey").value.trim();
       const model = document.getElementById("aiModel").value.trim();
-      if (!endpoint_url) { alert("请填写 URL"); return; }
+      if (!endpoint_url) { setAppNotice("请填写 AI 服务 URL", "warning"); return; }
       // 输入框是打码预览或空时，不提交 key，后端沿用已存 key
       if (api_key.includes("*") || !api_key) { api_key = ""; }
-      const resp = await api(API.aiSettings, { method: "PUT", json: { endpoint_url, api_key, model } });
-      if (resp.ok) {
-        alert("已保存");
-        await loadAiSettings();  // 刷新打码预览
-      } else { const e = await resp.json(); alert(e.error || "保存失败"); }
+      try {
+        const resp = await api(API.aiSettings, { method: "PUT", json: { endpoint_url, api_key, model } });
+        if (resp.ok) {
+          setAppNotice("AI 设置已保存", "success");
+          await loadAiSettings();  // 刷新打码预览
+        } else {
+          const e = await resp.json();
+          setAppNotice(e.error || "AI 设置保存失败", "error", saveAiSettings);
+        }
+      } catch (_error) {
+        setAppNotice("AI 设置保存失败，请稍后重试", "error", saveAiSettings);
+      }
     }
 
     async function testAiConnection() {
-      const resp = await api("/api/ai-settings/test", { method: "POST" });
-      const data = await resp.json();
-      alert(data.ok ? "连接成功" : "连接失败: " + (data.error_code || "未知"));
+      try {
+        const resp = await api("/api/ai-settings/test", { method: "POST" });
+        const data = await resp.json();
+        if (data.ok) setAppNotice("AI 连接成功", "success");
+        else setAppNotice("连接失败：" + (data.error_code || "未知"), "error", testAiConnection);
+      } catch (_error) {
+        setAppNotice("连接测试失败，请稍后重试", "error", testAiConnection);
+      }
     }
 
     // == 搜索 ==
     async function startSearch() {
-      if (!currentProfileId) { alert("请先选择画像"); return; }
+      if (!currentProfileId) { setAppNotice("请先选择画像", "warning"); return; }
       const kw = document.getElementById("manualKeywords").value.trim();
       const keywords = kw ? kw.split(",").map(s => s.trim()).filter(Boolean) : [];
       const body = { profile_id: currentProfileId };
       if (keywords.length) body.manual_keywords = keywords;
       try {
         const resp = await api(API.searchRuns, { method: "POST", json: body });
-        if (resp.status === 400) { const e = await resp.json(); alert(e.error); return; }
+        if (resp.status === 400) { const e = await resp.json(); setAppNotice(e.error || "搜索参数有误", "warning"); return; }
         const run = await resp.json();
         currentRunId = run.id;
         localStorage.setItem("boss-workbench-run", run.id);
@@ -944,7 +1060,7 @@
         document.getElementById("jobCardList").innerHTML = "";
         startPolling(run.id);
         loadHistory();
-      } catch(e) { /* handled */ }
+      } catch(e) { setAppNotice("搜索启动失败，请检查连接后重试", "error", startSearch); }
     }
 
     async function cancelSearch() {
@@ -990,7 +1106,9 @@
         } else {
           localStorage.removeItem("boss-workbench-run");
         }
-      } catch (_error) { /* retry on next refresh */ }
+      } catch (_error) {
+        setScreeningNotice("上次筛选结果暂时无法恢复", "error", restoreScreeningRun);
+      }
     }
 
     function renderCards(jobs) {
@@ -1178,6 +1296,31 @@
       industry: "screeningFilterIndustry",
     };
 
+    function setScreeningNotice(message, tone = "info", retryHandler = null) {
+      const notice = document.getElementById("screeningNotice");
+      const text = document.getElementById("screeningNoticeText");
+      const retry = document.getElementById("screeningNoticeRetry");
+      if (!notice || !text || !retry) return;
+      const hasMessage = Boolean(message);
+      notice.hidden = !hasMessage;
+      notice.classList.toggle("show", hasMessage);
+      notice.dataset.tone = tone;
+      text.textContent = message || "";
+      retry.hidden = typeof retryHandler !== "function";
+      retry.disabled = false;
+      retry.onclick = typeof retryHandler === "function" ? async () => {
+        retry.disabled = true;
+        try {
+          setScreeningNotice("");
+          await retryHandler();
+        } catch (_error) {
+          setScreeningNotice("重试仍未成功，请稍后再试", "error", retryHandler);
+        } finally {
+          retry.disabled = false;
+        }
+      } : null;
+    }
+
     function toggleScreeningFilters() {
       const details = document.getElementById("screeningFilterDetails");
       const toggle = document.getElementById("screeningFilterToggle");
@@ -1233,7 +1376,9 @@
           }
         }
         updateScreeningFilterSummary();
-      } catch(e) { /* 筛选项加载失败时保留不限选项 */ }
+      } catch(e) {
+        setScreeningNotice("筛选项加载失败，可继续手动填写", "error", loadScreeningFilterOptions);
+      }
     }
 
     // 上传简历 + AI 建议填筛
@@ -1241,7 +1386,7 @@
       const skipResume = document.getElementById("skipResumeCheck").checked;
       if (!skipResume) {
         const fileInput = document.getElementById("screeningResumeFile");
-        if (!fileInput.files.length) { alert("请选择简历文件或勾选跳过简历"); return; }
+        if (!fileInput.files.length) { setScreeningNotice("请选择简历文件，或勾选跳过简历", "warning"); return; }
         const formData = new FormData();
         formData.append("file", fileInput.files[0]);
         if (currentProfileId) formData.append("profile_id", currentProfileId);
@@ -1249,11 +1394,14 @@
           const uploadResp = await fetch(ScreeningAPI.resume, {
             method: "POST", body: formData, headers: { "X-Boss-Token": token },
           });
-          if (!uploadResp.ok) { alert("简历上传失败"); return; }
+          if (!uploadResp.ok) { setScreeningNotice("简历上传失败，请重试", "error", suggestScreeningFilters); return; }
           const uploadData = await uploadResp.json();
           screeningResumeId = uploadData.resume_id || "";
           if (uploadData.profile_id) currentProfileId = uploadData.profile_id;
-        } catch(e) { alert("简历上传失败"); return; }
+        } catch(e) {
+          setScreeningNotice("简历上传失败，请检查连接后重试", "error", suggestScreeningFilters);
+          return;
+        }
       }
       try {
         const resp = await api(ScreeningAPI.suggest, {
@@ -1266,8 +1414,13 @@
         }
         if (data.suggestions) {
           applyScreeningSuggestions(data.suggestions, data.suggestion_meta || {});
+          setScreeningNotice("AI 建议已生成，请确认后再执行筛选", "success");
+        } else {
+          setScreeningNotice("AI 未返回建议，可手动填写筛选条件", "warning");
         }
-      } catch(e) { /* 建议失败时用户手动填筛 */ }
+      } catch(e) {
+        setScreeningNotice("AI 建议失败，可重试或手动填写筛选条件", "error", suggestScreeningFilters);
+      }
     }
 
     function applyScreeningSuggestions(suggestions, meta = {}) {
@@ -1290,7 +1443,7 @@
     // 执行筛选运行
     async function executeScreeningRun() {
       const keyword = document.getElementById("screeningKeyword").value.trim();
-      if (!keyword) { alert("请输入搜索关键词"); return; }
+      if (!keyword) { setScreeningNotice("请输入搜索关键词", "warning"); return; }
       const filters = collectScreeningFilters();
       const body = { keyword, filters };
       body.pages = Number(document.getElementById("screeningPages").value);
@@ -1299,7 +1452,7 @@
       if (screeningResumeId) body.resume_id = screeningResumeId;
       try {
         const resp = await api(ScreeningAPI.runs, { method: "POST", json: body });
-        if (resp.status === 400) { const e = await resp.json(); alert(e.error || "参数错误"); return; }
+        if (resp.status === 400) { const e = await resp.json(); setScreeningNotice(e.error || "筛选参数有误", "warning"); return; }
         const run = await resp.json();
         screeningRunId = run.run_id;
         localStorage.setItem("boss-screening-run", screeningRunId);
@@ -1310,7 +1463,10 @@
         }
         updateScreeningRunSummary(run);
         startScreeningPoll(screeningRunId);
-      } catch(e) { /* handled */ }
+        setScreeningNotice("筛选已启动", "success");
+      } catch(e) {
+        setScreeningNotice("筛选启动失败，请检查连接后重试", "error", executeScreeningRun);
+      }
     }
 
     function collectScreeningFilters() {
@@ -1335,7 +1491,9 @@
             stopScreeningPoll();
             await loadScreeningZones(runId);
           }
-        } catch(e) {}
+        } catch(e) {
+          setScreeningNotice("筛选状态暂时无法刷新", "error", () => startScreeningPoll(runId));
+        }
       }, 2000);
     }
 
@@ -1354,7 +1512,9 @@
         updateScreeningRunSummary(run);
         if (["queued", "running"].includes(run.status)) startScreeningPoll(runId);
         else await loadScreeningZones(runId);
-      } catch (_error) { /* retry on next refresh */ }
+      } catch (_error) {
+        setScreeningNotice("上次筛选结果暂时无法恢复", "error", restoreScreeningRun);
+      }
     }
 
     async function loadScreeningZones(runId) {
@@ -1365,19 +1525,25 @@
         const matchData = await matchResp.json();
         renderScreeningCards(matchData.items || [], "match");
         document.getElementById("matchCount").textContent = matchData.count || 0;
-      } catch(e) {}
+      } catch(e) {
+        setScreeningNotice("符合结果加载失败", "error", () => loadScreeningZones(runId));
+      }
       try {
         const mismatchResp = await api(`/api/screening/runs/${runId}/mismatches${profile}`);
         const mismatchData = await mismatchResp.json();
         renderScreeningCards(mismatchData.items || [], "mismatch");
         document.getElementById("mismatchCount").textContent = mismatchData.count || 0;
-      } catch(e) {}
+      } catch(e) {
+        setScreeningNotice("不符合结果加载失败", "error", () => loadScreeningZones(runId));
+      }
       try {
         const pendingResp = await api(`/api/screening/runs/${runId}/pending`);
         const pendingData = await pendingResp.json();
         renderScreeningCards(pendingData.items || [], "pending");
         document.getElementById("pendingCount").textContent = pendingData.count || 0;
-      } catch(e) {}
+      } catch(e) {
+        setScreeningNotice("待核验结果加载失败", "error", () => loadScreeningZones(runId));
+      }
       await loadInterestedJobs(false);
       await loadTrashJobs(false);
     }
@@ -1479,7 +1645,9 @@
           method: "POST", json: { profile_id: currentProfileId, run_id: screeningRunId },
         });
         await loadScreeningZones(screeningRunId);
-      } catch(e) {}
+      } catch(e) {
+        setScreeningNotice("感兴趣标记失败，请重试", "error", () => markScreeningInterest(jobId));
+      }
     }
 
     async function markScreeningReject(jobId, originZone) {
@@ -1488,7 +1656,9 @@
           method: "POST", json: { profile_id: currentProfileId, run_id: screeningRunId, origin_zone: originZone },
         });
         await loadScreeningZones(screeningRunId);
-      } catch(e) {}
+      } catch(e) {
+        setScreeningNotice("不感兴趣标记失败，请重试", "error", () => markScreeningReject(jobId, originZone));
+      }
     }
 
     // 感兴趣区
@@ -1500,7 +1670,9 @@
         renderScreeningCards(data.items || [], "interested");
         document.getElementById("interestedCount").textContent = data.count || 0;
         if (switchAfter) switchZone("interested");
-      } catch(e) {}
+      } catch(e) {
+        setScreeningNotice("感兴趣列表加载失败", "error", () => loadInterestedJobs(false));
+      }
     }
 
     // 垃圾桶区
@@ -1512,54 +1684,77 @@
         renderScreeningCards(data.items || [], "trash");
         document.getElementById("trashCount").textContent = data.count || 0;
         if (switchAfter) switchZone("trash");
-      } catch(e) {}
+      } catch(e) {
+        setScreeningNotice("垃圾桶列表加载失败", "error", () => loadTrashJobs(false));
+      }
     }
 
     async function retryScreeningPending(jobId) {
-      await api(`/api/screening/runs/${screeningRunId}/pending/${jobId}/retry`, { method: "POST", json: {} });
-      await loadScreeningZones(screeningRunId);
+      try {
+        await api(`/api/screening/runs/${screeningRunId}/pending/${jobId}/retry`, { method: "POST", json: {} });
+        await loadScreeningZones(screeningRunId);
+      } catch (_error) {
+        setScreeningNotice("重试失败，请稍后再试", "error", () => retryScreeningPending(jobId));
+      }
     }
 
     async function retryScreeningPendingAll() {
-      await api(`/api/screening/runs/${screeningRunId}/pending/retry-all`, { method: "POST", json: {} });
-      await loadScreeningZones(screeningRunId);
+      try {
+        await api(`/api/screening/runs/${screeningRunId}/pending/retry-all`, { method: "POST", json: {} });
+        await loadScreeningZones(screeningRunId);
+      } catch (_error) {
+        setScreeningNotice("批量重试失败，请稍后再试", "error", retryScreeningPendingAll);
+      }
     }
 
     async function routeScreeningPending(jobId, target) {
-      await api(`/api/screening/runs/${screeningRunId}/pending/${jobId}/route`, {
-        method: "POST", json: { target },
-      });
-      await loadScreeningZones(screeningRunId);
+      try {
+        await api(`/api/screening/runs/${screeningRunId}/pending/${jobId}/route`, {
+          method: "POST", json: { target },
+        });
+        await loadScreeningZones(screeningRunId);
+      } catch (_error) {
+        setScreeningNotice("人工路由失败，请稍后再试", "error", () => routeScreeningPending(jobId, target));
+      }
     }
 
     async function restoreScreeningTrash(jobId) {
-      const response = await api(`/api/screening/trash/${jobId}/restore`, {
-        method: "POST", json: { profile_id: currentProfileId },
-      });
-      const restored = await response.json();
-      if (restored.recovery_run_id) {
-        screeningRunId = restored.recovery_run_id;
-        localStorage.setItem("boss-screening-run", screeningRunId);
+      try {
+        const response = await api(`/api/screening/trash/${jobId}/restore`, {
+          method: "POST", json: { profile_id: currentProfileId },
+        });
+        const restored = await response.json();
+        if (restored.recovery_run_id) {
+          screeningRunId = restored.recovery_run_id;
+          localStorage.setItem("boss-screening-run", screeningRunId);
+        }
+        await loadScreeningZones(screeningRunId);
+        if (["match", "mismatch", "pending"].includes(restored.restored_to)) switchZone(restored.restored_to);
+      } catch (_error) {
+        setScreeningNotice("恢复岗位失败，请稍后再试", "error", () => restoreScreeningTrash(jobId));
       }
-      await loadScreeningZones(screeningRunId);
-      if (["match", "mismatch", "pending"].includes(restored.restored_to)) switchZone(restored.restored_to);
     }
 
     async function cleanupScreeningResults() {
-      const previewResponse = await api("/api/screening/cleanup/preview?days=30");
-      const preview = await previewResponse.json();
-      const pendingNote = preview.pending_at_cleanup
-        ? `其中有 ${preview.pending_at_cleanup} 条待核验记录。` : "";
-      if (!window.confirm(`将清理 ${preview.runs_to_cleanup || 0} 次临时运行。${pendingNote}长期标记和垃圾桶不会删除。继续吗？`)) return;
-      await api("/api/screening/cleanup", { method: "POST", json: { days: 30 } });
-      if (screeningRunId) {
-        const check = await api(`/api/screening/runs/${screeningRunId}`);
-        if (!check.ok) {
-          screeningRunId = "";
-          localStorage.removeItem("boss-screening-run");
+      try {
+        const previewResponse = await api("/api/screening/cleanup/preview?days=30");
+        const preview = await previewResponse.json();
+        const pendingNote = preview.pending_at_cleanup
+          ? `其中有 ${preview.pending_at_cleanup} 条待核验记录。` : "";
+        if (!window.confirm(`将清理 ${preview.runs_to_cleanup || 0} 次临时运行。${pendingNote}长期标记和垃圾桶不会删除。继续吗？`)) return;
+        await api("/api/screening/cleanup", { method: "POST", json: { days: 30 } });
+        if (screeningRunId) {
+          const check = await api(`/api/screening/runs/${screeningRunId}`);
+          if (!check.ok) {
+            screeningRunId = "";
+            localStorage.removeItem("boss-screening-run");
+          }
         }
+        document.getElementById("screeningStatus").textContent = "临时结果清理完成；长期标记已保留";
+        setScreeningNotice("临时结果清理完成，长期标记已保留", "success");
+      } catch (_error) {
+        setScreeningNotice("清理结果失败，请稍后重试", "error", cleanupScreeningResults);
       }
-      document.getElementById("screeningStatus").textContent = "临时结果清理完成；长期标记已保留";
     }
 
     function showZoneModal(title, jobs, allowNavigation) {
@@ -1610,6 +1805,7 @@
     function showScreeningDegradation() {
       document.getElementById("aiUnavailablePrompt").classList.add("show");
       document.getElementById("skipResumeCheck").checked = true;
+      setScreeningNotice("AI 暂不可用，已切换为人工填筛", "warning");
     }
 
     init();

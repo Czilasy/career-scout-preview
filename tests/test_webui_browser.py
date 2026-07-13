@@ -123,6 +123,39 @@ class WorkbenchBrowserContractTests(unittest.TestCase):
         """The collapsed settings toggle must not cover the workbench title on phones."""
         self.assertIn('.search-bar { min-height: 68px; padding: 10px 12px 10px 42px; }', self.html)
 
+    def test_ai_settings_can_be_collapsed_without_removing_controls(self):
+        """AI configuration stays available behind an explicit accessible disclosure."""
+        self.assertIn('id="aiSettingsToggle"', self.html)
+        self.assertIn('aria-controls="aiSettingsContent"', self.html)
+        self.assertIn('aria-expanded="false"', self.html)
+        self.assertIn('id="aiSettingsContent"', self.html)
+        self.assertIn("function toggleAiSettings()", self.html)
+
+    def test_mobile_screening_tabs_fit_without_horizontal_scrolling(self):
+        """The five screening views remain directly reachable on narrow screens."""
+        self.assertIn('.zone-tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); overflow-x: visible; gap: 4px; }', self.html)
+
+    def test_screening_errors_have_an_inline_notice_and_retry_action(self):
+        """Screening failures must be visible in-page and offer a retry affordance."""
+        self.assertIn('id="screeningNotice"', self.html)
+        self.assertIn('id="screeningNoticeRetry"', self.html)
+        self.assertIn("function setScreeningNotice", self.html)
+        self.assertIn("screeningNoticeRetry", self.html)
+
+    def test_global_actions_have_an_inline_notice_and_retry_action(self):
+        """Workbench and AI settings failures share a visible inline feedback surface."""
+        self.assertIn('id="appNotice"', self.html)
+        self.assertIn('id="appNoticeRetry"', self.html)
+        self.assertIn("function setAppNotice", self.html)
+
+    def test_resume_consent_checkbox_keeps_native_compact_dimensions(self):
+        """The consent checkbox must not inherit full-width text-input sizing."""
+        self.assertIn('.field input[type="checkbox"] { width: auto; min-height: 0;', self.html)
+
+    def test_workbench_primary_actions_do_not_use_blocking_alerts(self):
+        """Profile and resume actions use the shared inline feedback surface."""
+        self.assertNotIn("alert(", self.html)
+
     def test_no_ai_scores_in_card_template(self):
         """Card template must not expose AI scores, ranks or match reasons."""
         self.assertNotIn("match_score", self.html)
