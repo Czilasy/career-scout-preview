@@ -141,6 +141,25 @@ class CheckPrerequisitesTriStateTests(unittest.TestCase):
         e2e._enable_line_buffering(stream)
         stream.reconfigure.assert_called_once_with(line_buffering=True)
 
+    def test_quality_summary_keeps_scores_and_excludes_raw_text(self):
+        summary = e2e._summarize_quality_results({
+            "items": [{
+                "job_id": "j1", "title": "后端", "company": "公司",
+                "salary": "20K", "location": "北京", "source_url": "https://www.zhipin.com/job_detail/j1.html",
+                "source_status": "active", "completeness": "complete",
+                "primary_assessment": {
+                    "category": "needs_review", "hard_outcome": "pass",
+                    "match_score": 62, "confidence": 78,
+                    "failure_code": "ai_uncertain", "gaps": [{"text": "gap"}],
+                    "evidence": [{"client_ref": "e1"}],
+                },
+            }],
+        })
+        self.assertEqual(summary["items"][0]["match_score"], 62)
+        self.assertEqual(summary["items"][0]["confidence"], 78)
+        self.assertEqual(summary["items"][0]["evidence_count"], 1)
+        self.assertNotIn("raw", summary["items"][0])
+
 
 class OfflineCookiesDiagnosisTests(unittest.TestCase):
     """When CDP is down, an offline Cookies diagnosis must be appended."""

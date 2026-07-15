@@ -269,7 +269,7 @@ components:
       properties:
         error_code:
           type: string
-          enum: [ai_timeout, ai_auth_failed, ai_network_error, ai_invalid_output, ai_uncertain, evidence_reference_invalid, input_incomplete, verification_error, dispatch_failed, state_conflict, not_found]
+          enum: [ai_timeout, ai_auth_failed, ai_network_error, ai_invalid_output, ai_uncertain, evidence_reference_invalid, snapshot_unavailable, snapshot_expired, experience_level_conflict, hard_rule_unknown, input_incomplete, verification_error, dispatch_failed, state_conflict, not_found]
         user_message: {type: string}
         stage: {type: [string, 'null']}
         retryable: {type: boolean}

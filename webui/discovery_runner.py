@@ -33,6 +33,7 @@ from webui.discovery import (
     compile_search_plan,
     EVALUATION_POLICY_VERSION,
 )
+from webui.ai import AISecurityError as AIProviderSecurityError
 from webui.source import BossCdpSource, SourceOutcome, _input_hash as _source_input_hash
 from webui.workbench import normalize_job_link
 
@@ -624,6 +625,13 @@ class DiscoveryRunner:
             except ConnectionError:
                 ai_proposal = None
                 failure_code = "ai_network_error"
+            except AIProviderSecurityError as exc:
+                ai_proposal = None
+                provider_code = getattr(exc, "error_code", None)
+                failure_code = (
+                    provider_code if provider_code in ERROR_CODE_MAP
+                    else "ai_invalid_output"
+                )
             except Exception:  # noqa: BLE001 - provider adapter boundary
                 ai_proposal = None
                 failure_code = "ai_invalid_output"
@@ -631,21 +639,41 @@ class DiscoveryRunner:
         result = assess_job_direction(
             snapshot_view, direction_view, ai_proposal,
             hard_constraints=hard_constraints,
+            candidate_profile=candidate_summary,
         )
         # T117: 持久化每岗位安全失败码，失败岗位 needs_review
+        if not failure_code:
+            assessment_failure = (result.get("ai_assessment") or {}).get("failure_stage")
+            reason = result.get("reason")
+            if assessment_failure in ERROR_CODE_MAP:
+                failure_code = assessment_failure
+            elif reason in ERROR_CODE_MAP:
+                failure_code = reason
         if failure_code and not result.get("ai_assessment"):
             result["reason"] = failure_code
         # Persist assessment.
+        assessment = result.get("ai_assessment") or {}
+        dimensions = assessment.get("dimensions") or {}
+        candidate_evidence_ids = sorted({
+            ref
+            for dimension in dimensions.values()
+            for ref in (dimension.get("candidate_evidence_refs") or [])
+        })
+        job_evidence = {
+            name: list(dimension.get("job_evidence_refs") or [])
+            for name, dimension in dimensions.items()
+            if dimension.get("job_evidence_refs")
+        }
         self.store.create_assessment(
             run_id=run_id, snapshot_id=snapshot["id"], direction_id=direction["id"],
             hard_outcome=result.get("hard_rule_outcome", "unknown"),
             hard_checks=result.get("hard_rule_checks", {}),
-            dimensions=(result.get("ai_assessment") or {}).get("dimensions", {}),
-            match_score=(result.get("ai_assessment") or {}).get("match_score"),
-            confidence=(result.get("ai_assessment") or {}).get("confidence"),
+            dimensions=dimensions,
+            match_score=assessment.get("match_score"),
+            confidence=assessment.get("confidence"),
             category=result.get("category", "needs_review"),
-            candidate_evidence_ids=(result.get("ai_assessment") or {}).get("candidate_evidence_refs", []),
-            job_evidence=(result.get("ai_assessment") or {}).get("job_evidence", {}),
+            candidate_evidence_ids=candidate_evidence_ids,
+            job_evidence=job_evidence,
             gaps=result.get("gaps", []),
             policy_version=EVALUATION_POLICY_VERSION,
             failure_code=failure_code,

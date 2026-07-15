@@ -79,6 +79,15 @@ class JobAssessmentContractTests(unittest.TestCase):
         )
         self.assertEqual(result["category"], "needs_review")
 
+    def test_fractional_score_rejected(self):
+        data = _valid_job_assessment()
+        data["match_score"] = 78.5
+        result = semantic.validate_job_assessment(
+            data, self.analysis_evidence, self.direction_evidence, self.snapshot_fields,
+        )
+        self.assertEqual(result["category"], "needs_review")
+        self.assertEqual(result["failure_stage"], "ai_invalid_output")
+
     def test_out_of_range_score_rejected(self):
         data = _valid_job_assessment()
         data["match_score"] = 150
@@ -103,6 +112,15 @@ class JobAssessmentContractTests(unittest.TestCase):
             data, self.analysis_evidence, self.direction_evidence, self.snapshot_fields,
         )
         self.assertEqual(result["category"], "needs_review")
+
+    def test_invalid_candidate_evidence_reports_reference_failure(self):
+        data = _valid_job_assessment()
+        data["dimensions"]["direction_alignment"]["candidate_evidence_refs"] = ["e3"]
+        result = semantic.validate_job_assessment(
+            data, self.analysis_evidence, self.direction_evidence, self.snapshot_fields,
+        )
+        self.assertEqual(result["category"], "needs_review")
+        self.assertEqual(result["failure_stage"], "evidence_reference_invalid")
 
     def test_unknown_job_evidence_rejected(self):
         data = _valid_job_assessment()
@@ -311,6 +329,28 @@ class AssessmentPolicyTests(unittest.TestCase):
         self.assertEqual(unavailable["category"], "needs_review")
         self.assertEqual(no_ai["category"], "needs_review")
         self.assertEqual(low_confidence["category"], "needs_review")
+
+    def test_entry_level_job_cannot_be_high_match_for_experienced_candidate(self):
+        from webui.discovery import assess_job_direction
+
+        result = assess_job_direction(
+            {
+                "completeness": "complete",
+                "fields": {
+                    "title": "大数据开发实习生",
+                    "company": "ACME",
+                    "jd": "面向在校生，参与数据开发项目",
+                    "tags": "数据开发",
+                },
+            },
+            {"evidence_refs": ["e1", "e2"], "analysis_evidence_ids": ["e1", "e2"]},
+            _valid_job_assessment(),
+            candidate_profile={"experience_level": "5年全职工作经验"},
+        )
+
+        self.assertEqual(result["category"], "needs_review")
+        self.assertEqual(result["reason"], "experience_level_conflict")
+        self.assertEqual(result["ai_assessment"]["match_score"], 78)
 
 
 class PortfolioAssemblyTests(unittest.TestCase):

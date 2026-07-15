@@ -874,7 +874,11 @@ class DiscoveryAIProvider:
                     "experience_match,industry_relevance}"
                     "{score,candidate_evidence_refs,job_evidence_refs}，"
                     "match_score,confidence,gaps[{text,job_evidence_refs}],"
-                    "proposed_band。score 必须 0-100。"
+                    "proposed_band。score、match_score、confidence 必须是 0-100 的整数。"
+                    "proposed_band 只能是 high/adjacent/growth/unsuitable/uncertain。"
+                    "证据引用必须使用输入中已有的 ID；没有证据时返回空数组[]，禁止创造 ID。"
+                    "岗位级别必须与候选人经验匹配；实习/校招/应届岗位与多年全职经历明显冲突时，"
+                    "不得给出 high 或 adjacent，应降低 experience_match 和 match_score。"
                 ),
             },
             {

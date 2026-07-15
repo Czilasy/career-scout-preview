@@ -136,7 +136,7 @@ A filtering capability layered on top of the 001 workbench, improving match qual
 2. **AI reads and suggests values**: The AI reads the résumé while the program fetches the BOSS filter option enumerations (salary range, experience, degree, company scale, funding stage, industry, city). The AI judges which options can be filled from the résumé and returns suggested values.
 3. **User confirmation**: The frontend shows the suggested values; the user may edit or leave them. **User-confirmed values take priority — the AI cannot override.** Any field the AI did not provide and the user did not fill stays empty.
 4. **Layer-1 search**: Uses the confirmed conditions to call the BOSS search API and scrape back a batch of jobs, all of which proceed to layer 2. An empty city searches nationwide.
-5. **Layer-2 verification**: Each job goes through two checks — hard-rule field verification + AI semantic-similarity judgment. For this release, AI semantic similarity is a **placeholder (always passes)** with only its interface contract defined; the constraint framework is to be designed separately. Replacing the placeholder when the framework lands does not change the partition or zone logic.
+5. **Layer-2 verification**: Each job goes through two checks — hard-rule field verification + AI semantic-similarity judgment. Job discovery uses a fixed four-dimension structured assessment; invalid contracts, invalid evidence references, low confidence, or provider failures route the job to review without inventing default scores.
 6. **Partition into temporary match/mismatch zones**: Jobs passing both checks go to the match zone; jobs failing either go to the mismatch zone. The match zone is ordered by scrape order — no similarity sorting. The mismatch zone is shown mixed together, without annotating which field excluded a job.
 7. **Mark interested / not-interested**: Any job in the match or mismatch zone can be marked and routed to a persistent zone.
 
@@ -145,7 +145,9 @@ No field is mandatory (including city): fields the user did not select do not pa
 #### Two-Layer Verification
 
 - **Layer 1**: Calls the BOSS search API with the confirmed conditions to scrape back jobs.
-- **Layer 2**: Each scraped job is checked by hard-rule verification (deterministic program logic, no AI call) + AI semantic-similarity judgment (placeholder always passes this release; framework to be designed). Jobs passing both go to the match zone; jobs failing either go to the mismatch zone. The mismatch zone does not distinguish exclusion reasons and does not annotate.
+- **Layer 2**: Each scraped job is checked by hard-rule verification (deterministic program logic) + AI semantic-similarity judgment (a fixed four-dimension structured contract). A job can enter high-match only when hard rules pass, the detail is complete, the AI contract is valid, confidence and dimension gates pass, and evidence is traceable. Contract/reference/provider failures route to review with a safe failure code and never use default scores.
+
+Job discovery preserves `match_score`, `confidence`, evidence counts, and safe failure codes (for example `ai_invalid_output`, `evidence_reference_invalid`, `ai_uncertain`, `ai_network_error`, `snapshot_unavailable`, `hard_rule_unknown`, and `experience_level_conflict`) so a genuinely weak match can be distinguished from an assessment failure. A clear conflict between an entry-level job and substantial candidate experience is programmatically blocked from high or adjacent match.
 
 #### Zone Lifecycle
 

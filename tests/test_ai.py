@@ -1017,6 +1017,32 @@ class DiscoveryAIProviderTests(unittest.TestCase):
         provider = self.ProviderClass("e", "m", "k")
         self.assertTrue(callable(getattr(provider, "assess_job", None)))
 
+    def test_assessment_prompt_declares_allowed_band_and_reference_rules(self):
+        messages = self.ProviderClass._build_assess_messages(
+            {"headline": "数据工程师"},
+            {"id": "d1", "evidence_refs": ["e1"]},
+            [{"id": "e1"}],
+            {"fields": {"title": "数据工程师", "jd": "负责数据开发"}},
+        )
+        system_prompt = messages[0]["content"]
+        self.assertIn(
+            "proposed_band 只能是 high/adjacent/growth/unsuitable/uncertain",
+            system_prompt,
+        )
+        self.assertIn("证据引用必须使用输入中已有的 ID", system_prompt)
+
+    def test_assessment_prompt_handles_experience_level_conflict(self):
+        messages = self.ProviderClass._build_assess_messages(
+            {"headline": "数据工程师", "experience_level": "5年全职经验"},
+            {"id": "d1", "evidence_refs": ["e1"]},
+            [{"id": "e1"}],
+            {"fields": {"title": "数据开发实习生", "jd": "面向在校生"}},
+        )
+        system_prompt = messages[0]["content"]
+        self.assertIn("实习/校招/应届", system_prompt)
+        self.assertIn("多年全职经历", system_prompt)
+        self.assertIn("不得给出 high 或 adjacent", system_prompt)
+
     # -- 错误码映射（feature-safe：ai_* 前缀） --
 
     def test_auth_failure_maps_to_ai_auth_failed(self):

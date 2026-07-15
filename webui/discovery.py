@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, Iterable
 
 from webui.candidate import (
@@ -40,6 +41,10 @@ ERROR_CODE_MAP: dict[str, dict] = {
     "input_incomplete": {"retryable": False, "stage": None},
     "verification_error": {"retryable": True, "stage": "evaluating"},
     "ai_unavailable": {"retryable": True, "stage": "analyzing"},
+    "snapshot_unavailable": {"retryable": True, "stage": "evaluating"},
+    "snapshot_expired": {"retryable": False, "stage": "evaluating"},
+    "experience_level_conflict": {"retryable": False, "stage": "evaluating"},
+    "hard_rule_unknown": {"retryable": False, "stage": "evaluating"},
     "state_conflict": {"retryable": False, "stage": None},
     "not_found": {"retryable": False, "stage": None},
     "cancelled": {"retryable": False, "stage": None},
@@ -55,6 +60,10 @@ DEFAULT_USER_MESSAGES: dict[str, str] = {
     "input_incomplete": "输入信息不完整，请补充必要字段。",
     "verification_error": "校验过程发生错误，请重试。",
     "ai_unavailable": "AI 服务当前不可用，已降级处理。",
+    "snapshot_unavailable": "岗位详情不可用，已转入待确认。",
+    "snapshot_expired": "岗位详情已失效，已转入待确认。",
+    "experience_level_conflict": "岗位级别与候选人经历存在明显冲突，已转入待确认。",
+    "hard_rule_unknown": "岗位硬条件缺少可验证字段，已转入待确认。",
     "state_conflict": "当前状态不支持该操作。",
     "not_found": "请求的资源不存在。",
     "cancelled": "操作已取消。",
@@ -282,6 +291,39 @@ def build_snapshot(job: dict, detail: dict | None) -> dict:
 EVALUATION_POLICY_VERSION = "v1"
 JOB_CATEGORIES = ("high_match", "adjacent_match", "growth_match", "needs_review", "not_suitable")
 
+_ENTRY_LEVEL_TITLE_TERMS = ("实习", "校招", "应届", "在校生", "毕业生")
+_ENTRY_LEVEL_JD_TERMS = ("面向在校生", "应届生", "校招", "实习岗位", "实习生")
+
+
+def _has_substantial_experience(candidate_profile: dict | None) -> bool:
+    """Return whether the candidate profile signals at least two years' work."""
+    if not isinstance(candidate_profile, dict):
+        return False
+    years = candidate_profile.get("years_experience")
+    if isinstance(years, (int, float)) and not isinstance(years, bool) and years >= 2:
+        return True
+    text = " ".join(
+        str(candidate_profile.get(key, "") or "")
+        for key in ("experience_level", "headline", "summary")
+    )
+    if any(term in text for term in ("多年", "高级", "资深")):
+        return True
+    matches = re.findall(r"(?<!\d)(\d+(?:\.\d+)?)\s*(?:年|years?)", text, re.IGNORECASE)
+    return any(float(value) >= 2 for value in matches)
+
+
+def _has_entry_level_job(snapshot: dict) -> bool:
+    """Return whether title/JD explicitly signals an entry-level role."""
+    fields = snapshot.get("fields") if isinstance(snapshot, dict) else {}
+    if not isinstance(fields, dict):
+        fields = snapshot if isinstance(snapshot, dict) else {}
+    title = str(fields.get("title", "") or "")
+    jd = str(fields.get("jd", "") or "")
+    return (
+        any(term in title for term in _ENTRY_LEVEL_TITLE_TERMS)
+        or any(term in jd for term in _ENTRY_LEVEL_JD_TERMS)
+    )
+
 
 def assess_job_direction(
     snapshot: dict,
@@ -289,6 +331,7 @@ def assess_job_direction(
     ai_proposal: dict | None,
     *,
     hard_constraints: dict | None = None,
+    candidate_profile: dict | None = None,
 ) -> dict:
     """Assess a job against a direction: tri-state hard rules + AI contract.
 
@@ -304,6 +347,8 @@ def assess_job_direction(
       - proposed_band ``adjacent`` -> ``adjacent_match``
       - proposed_band ``growth`` -> ``growth_match``
       - proposed_band ``unsuitable`` -> ``not_suitable``
+      - an entry-level job conflicting with substantial experience prevents
+        ``high_match`` and ``adjacent_match``
     """
     from webui.screening import verify_hard_rules_tri_state
     from webui.semantic import (
@@ -386,7 +431,8 @@ def assess_job_direction(
             "reason": validated["failure_stage"],
         }
 
-    # Apply program policy (proposed_band is advisory).
+    # Apply program policy (proposed_band is advisory).  The level-conflict
+    # guard is deliberately program-owned so a model cannot override it.
     proposed_band = validated.get("proposed_band", "uncertain")
     match_score = validated.get("match_score", 0)
     dimensions = validated.get("dimensions", {})
@@ -394,7 +440,15 @@ def assess_job_direction(
         dim.get("score", 0) >= MIN_DIMENSION_SCORE for dim in dimensions.values()
     ) if dimensions else False
 
-    if proposed_band == "high" and match_score >= MIN_MATCH_SCORE and all_dims_pass:
+    level_conflict = False
+    if (
+        _has_substantial_experience(candidate_profile)
+        and _has_entry_level_job(snapshot)
+        and proposed_band in {"high", "adjacent"}
+    ):
+        category = "needs_review"
+        level_conflict = True
+    elif proposed_band == "high" and match_score >= MIN_MATCH_SCORE and all_dims_pass:
         category = "high_match"
     elif proposed_band == "adjacent" and match_score >= MIN_MATCH_SCORE and all_dims_pass:
         # M2: adjacent also requires dimension verification, not just AI advisory.
@@ -414,6 +468,7 @@ def assess_job_direction(
         "hard_rule_checks": hard["checks"],
         "ai_assessment": validated,
         "gaps": validated.get("gaps", []),
+        **({"reason": "experience_level_conflict"} if level_conflict else {}),
     }
 
 

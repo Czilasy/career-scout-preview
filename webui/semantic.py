@@ -58,12 +58,11 @@ def build_semantic_prompt(resume_text: str, jd_text: str) -> str:
 
 
 def _score(value):
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("invalid_score")
-    number = float(value)
-    if number < 0 or number > 100:
+    if value < 0 or value > 100:
         raise ValueError("invalid_score")
-    return int(number) if number.is_integer() else number
+    return value
 
 
 def validate_semantic_output(data) -> dict:
@@ -249,7 +248,13 @@ def validate_job_assessment(
         proposed_band = data.get("proposed_band", "uncertain")
         if proposed_band not in JOB_PROPOSED_BANDS:
             raise ValueError("invalid_proposed_band")
-    except (KeyError, TypeError, ValueError):
+    except ValueError as exc:
+        # Evidence linkage has a distinct safe failure code so operators can
+        # separate a bad model reference from an otherwise malformed output.
+        if str(exc).startswith(("invalid_refs:", "unknown_ref:")):
+            return _needs_review("evidence_reference_invalid")
+        return _needs_review(JOB_ASSESSMENT_FAILURE_STAGE)
+    except (KeyError, TypeError):
         return _needs_review(JOB_ASSESSMENT_FAILURE_STAGE)
 
     if confidence < MIN_CONFIDENCE:

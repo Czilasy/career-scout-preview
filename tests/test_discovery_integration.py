@@ -13,6 +13,7 @@ from webui.discovery import (
     analyze_resume,
     confirm_directions,
 )
+from webui.ai import AISecurityError as AIProviderSecurityError
 from webui.store import TaskStore
 
 
@@ -621,6 +622,209 @@ class AiDegradeTests(_IntegrationTestCase):
         assessments = self.store.list_assessments(run["id"])
         for a in assessments:
             self.assertEqual(a["category"], "needs_review")
+
+    def test_invalid_ai_contract_persists_failure_reason(self):
+        source = self._fake_source_cls(list_jobs={
+            ("Python 后端", "北京"): [{
+                "job_id": "invalid-assessment-job",
+                "title": "Python 后端",
+                "company": "测试公司",
+                "location": "北京",
+                "source_url": "https://www.zhipin.com/job_detail/invalid-assessment-job.html",
+            }],
+        }, detail_jobs={"invalid-assessment-job": {"jd": "负责 Python 后端开发"}})
+        class ContractInvalidProvider:
+            def assess_job(self, **_kwargs):
+                return _default_job_assessment()
+
+        runner = self._runner_cls(
+            self.store, source=source,
+            ai_provider=ContractInvalidProvider(),
+            result_dir=tempfile.mkdtemp(prefix="boss-invalid-assessment-"),
+        )
+        run = _make_discovery_run(
+            self.store, self.confirmation, self.analysis,
+            self.resume["id"], self.profile["id"],
+        )
+
+        runner.run(run["id"])
+
+        assessments = self.store.list_assessments(run["id"])
+        self.assertEqual(len(assessments), 1)
+        self.assertEqual(assessments[0]["category"], "needs_review")
+        self.assertEqual(assessments[0]["failure_code"], "ai_invalid_output")
+
+    def test_provider_safe_error_code_is_persisted(self):
+        source = self._fake_source_cls(list_jobs={
+            ("Python 后端", "北京"): [{
+                "job_id": "provider-error-job",
+                "title": "Python 后端",
+                "company": "测试公司",
+                "location": "北京",
+                "source_url": (
+                    "https://www.zhipin.com/job_detail/provider-error-job.html"
+                ),
+            }],
+        }, detail_jobs={"provider-error-job": {"jd": "负责 Python 后端开发"}})
+        class ProviderError:
+            def assess_job(self, **_kwargs):
+                raise AIProviderSecurityError("ai_network_error")
+
+        runner = self._runner_cls(
+            self.store, source=source, ai_provider=ProviderError(),
+            result_dir=tempfile.mkdtemp(prefix="boss-provider-error-"),
+        )
+        run = _make_discovery_run(
+            self.store, self.confirmation, self.analysis,
+            self.resume["id"], self.profile["id"],
+        )
+
+        runner.run(run["id"])
+
+        assessments = self.store.list_assessments(run["id"])
+        self.assertEqual(len(assessments), 1)
+        self.assertEqual(assessments[0]["category"], "needs_review")
+        self.assertEqual(assessments[0]["failure_code"], "ai_network_error")
+
+    def test_valid_evidence_references_are_persisted_from_dimensions(self):
+        source = self._fake_source_cls(list_jobs={
+            ("Python 后端", "北京"): [{
+                "job_id": "evidence-job",
+                "title": "Python 后端",
+                "company": "测试公司",
+                "location": "北京",
+                "source_url": (
+                    "https://www.zhipin.com/job_detail/evidence-job.html"
+                ),
+            }],
+        }, detail_jobs={"evidence-job": {"jd": "负责 Python 后端开发"}})
+
+        class EvidenceProvider:
+            def assess_job(self, **kwargs):
+                candidate_ref = kwargs["direction"]["evidence_refs"][0]
+                dimensions = {
+                    name: {
+                        "score": score,
+                        "candidate_evidence_refs": [candidate_ref],
+                        "job_evidence_refs": ["title"],
+                    }
+                    for name, score in (
+                        ("direction_alignment", 90),
+                        ("skill_coverage", 85),
+                        ("experience_match", 80),
+                        ("industry_relevance", 75),
+                    )
+                }
+                return {
+                    "dimensions": dimensions,
+                    "match_score": 85,
+                    "confidence": 88,
+                    "gaps": [],
+                    "proposed_band": "high",
+                }
+
+        runner = self._runner_cls(
+            self.store,
+            source=source,
+            ai_provider=EvidenceProvider(),
+            result_dir=tempfile.mkdtemp(prefix="boss-evidence-"),
+        )
+        run = _make_discovery_run(
+            self.store, self.confirmation, self.analysis,
+            self.resume["id"], self.profile["id"],
+        )
+
+        runner.run(run["id"])
+
+        assessments = self.store.list_assessments(run["id"])
+        self.assertTrue(any(a["candidate_evidence_ids"] for a in assessments))
+        self.assertTrue(any(
+            "direction_alignment" in a["job_evidence"]
+            for a in assessments
+        ))
+
+    def test_unavailable_snapshot_persists_failure_reason(self):
+        source = self._fake_source_cls(list_jobs={
+            ("Python 后端", "北京"): [{
+                "job_id": "unavailable-job",
+                "title": "Python 后端",
+                "location": "北京",
+                "source_url": "https://www.zhipin.com/job_detail/unavailable-job.html",
+            }],
+        }, detail_jobs={"unavailable-job": {}})
+        runner = self._runner_cls(
+            self.store,
+            source=source,
+            ai_provider=None,
+            result_dir=tempfile.mkdtemp(prefix="boss-unavailable-"),
+        )
+        run = _make_discovery_run(
+            self.store, self.confirmation, self.analysis,
+            self.resume["id"], self.profile["id"],
+        )
+
+        runner.run(run["id"])
+
+        assessments = self.store.list_assessments(run["id"])
+        self.assertTrue(assessments)
+        self.assertTrue(all(
+            a["failure_code"] == "snapshot_unavailable"
+            for a in assessments
+        ))
+
+    def test_experience_level_conflict_persists_review(self):
+        source = self._fake_source_cls(list_jobs={
+            ("Python 后端", "北京"): [{
+                "job_id": "internship-job",
+                "title": "Python 后端实习生",
+                "company": "测试公司",
+                "location": "北京",
+                "source_url": "https://www.zhipin.com/job_detail/internship-job.html",
+            }],
+        }, detail_jobs={"internship-job": {"jd": "面向在校生的 Python 实习岗位"}})
+
+        class HighProvider:
+            def assess_job(self, **_kwargs):
+                return {
+                    "dimensions": {
+                        name: {
+                            "score": 90,
+                            "candidate_evidence_refs": [],
+                            "job_evidence_refs": [],
+                        }
+                        for name in (
+                            "direction_alignment",
+                            "skill_coverage",
+                            "experience_match",
+                            "industry_relevance",
+                        )
+                    },
+                    "match_score": 95,
+                    "confidence": 95,
+                    "gaps": [],
+                    "proposed_band": "high",
+                }
+
+        runner = self._runner_cls(
+            self.store,
+            source=source,
+            ai_provider=HighProvider(),
+            result_dir=tempfile.mkdtemp(prefix="boss-level-conflict-"),
+        )
+        run = _make_discovery_run(
+            self.store, self.confirmation, self.analysis,
+            self.resume["id"], self.profile["id"],
+        )
+
+        runner.run(run["id"])
+
+        assessments = self.store.list_assessments(run["id"])
+        self.assertTrue(assessments)
+        self.assertTrue(all(a["category"] == "needs_review" for a in assessments))
+        self.assertTrue(all(
+            a["failure_code"] == "experience_level_conflict"
+            for a in assessments
+        ))
 
 
 class SensitivePiiRedactionTests(_IntegrationTestCase):

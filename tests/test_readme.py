@@ -2,7 +2,7 @@
 
 验证 README.md 覆盖 002 简历驱动筛选功能的六类必备主题：
 1. 简历驱动筛选（上传简历→AI 读取→建议值→用户确认→搜索）
-2. 两层核验（第一层 BOSS 搜索 + 第二层硬规则与 AI 语义相似度占位）
+2. 两层核验（第一层 BOSS 搜索 + 第二层硬规则与 AI 四维度语义评估）
 3. 区域生命周期（符合/不符合临时区 + 感兴趣/垃圾桶持久区）
 4. 感兴趣/垃圾桶（持久保留、展示阶段排除具体岗位）
 5. 降级路径（AI 不可用→人工填筛+跳过简历+仅硬规则）
@@ -46,10 +46,14 @@ class ReadmeScreeningDocumentationTests(unittest.TestCase):
     def test_hard_rule_verification_exists(self):
         self.assertIn("硬规则", README, "README 必须说明硬规则核验")
 
-    def test_ai_semantic_placeholder_exists(self):
-        has_ai_placeholder = "语义相似度" in README and "占位" in README
+    def test_ai_semantic_assessment_exists(self):
+        has_ai_assessment = (
+            "语义相似度" in README
+            and ("四维度" in README or "结构化评估" in README)
+            and "待确认" in README
+        )
         self.assertTrue(
-            has_ai_placeholder, "README 必须说明 AI 语义相似度为占位"
+            has_ai_assessment, "README 必须说明 AI 语义相似度使用结构化评估并可进入待确认"
         )
 
     # -- 主题 3：区域生命周期 --
@@ -179,14 +183,16 @@ class ReadmeEnScreeningDocumentationTests(unittest.TestCase):
             has_hard, "README.en.md must document hard-rule verification"
         )
 
-    def test_ai_semantic_placeholder_exists(self):
-        has_ai_placeholder = (
-            "semantic similarity" in README_EN.lower()
-            and ("placeholder" in README_EN.lower() or "stub" in README_EN.lower())
+    def test_ai_semantic_assessment_exists(self):
+        has_ai_assessment = (
+            ("semantic similarity" in README_EN.lower()
+             or "semantic-similarity" in README_EN.lower())
+            and "four-dimension" in README_EN.lower()
+            and "review" in README_EN.lower()
         )
         self.assertTrue(
-            has_ai_placeholder,
-            "README.en.md must document AI semantic similarity as placeholder",
+            has_ai_assessment,
+            "README.en.md must document structured AI semantic assessment and review routing",
         )
 
     # -- Theme 3: zone lifecycle --

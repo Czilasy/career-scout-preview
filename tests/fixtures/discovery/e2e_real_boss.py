@@ -273,6 +273,35 @@ def _check_prerequisites(stage_timeout_seconds: float = 15) -> dict:
     return results
 
 
+def _summarize_quality_results(results: dict) -> dict:
+    """Keep auditable match signals without persisting JD or model text."""
+    summaries = []
+    for item in (results or {}).get("items", []) if isinstance(results, dict) else []:
+        assessment = item.get("primary_assessment") or {}
+        summaries.append({
+            "job_id": item.get("job_id", ""),
+            "title": item.get("title", ""),
+            "company": item.get("company", ""),
+            "salary": item.get("salary", ""),
+            "location": item.get("location", ""),
+            "source_url": item.get("source_url", ""),
+            "source_status": item.get("source_status", "unknown"),
+            "completeness": item.get("completeness", "unavailable"),
+            "category": assessment.get("category", "needs_review"),
+            "hard_outcome": assessment.get("hard_outcome", "unknown"),
+            "match_score": assessment.get("match_score"),
+            "confidence": assessment.get("confidence"),
+            "failure_code": assessment.get("failure_code"),
+            "gap_count": len(assessment.get("gaps") or []),
+            "evidence_count": len(assessment.get("evidence") or []),
+        })
+    return {
+        "item_count": len(summaries),
+        "categories": (results or {}).get("counts", {}) if isinstance(results, dict) else {},
+        "items": summaries,
+    }
+
+
 def _load_ai_settings() -> tuple[dict, str]:
     """Load AI settings + credential_ref from the default store.
 
@@ -631,6 +660,7 @@ def _run_e2e(resume_name: str = "resume_cross_family.txt") -> dict:
                 "item_count": len(results.get("items", [])),
                 "result_counts": results.get("counts", {}),
             })
+            report["quality"] = _summarize_quality_results(results)
         else:
             report["steps"].append({
                 "step": "results", "status": "error",
