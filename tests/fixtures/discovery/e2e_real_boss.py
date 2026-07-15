@@ -29,7 +29,9 @@ from __future__ import annotations
 import json
 import io
 import os
+import queue
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -159,7 +161,31 @@ def _probe_login_via_cdp(cdp_port: int = 9222) -> bool:
         return False
 
 
-def _check_prerequisites() -> dict:
+def _run_prerequisite_stage(name: str, operation, timeout_seconds: float):
+    """Run one potentially blocking prerequisite in a daemon thread."""
+    print(f"  [prereq] {name}: start", flush=True)
+    outcome = queue.Queue(maxsize=1)
+
+    def invoke():
+        try:
+            outcome.put(("ok", operation()))
+        except Exception as exc:
+            outcome.put(("error", type(exc).__name__))
+
+    worker = threading.Thread(
+        target=invoke, name=f"e2e-prereq-{name}", daemon=True,
+    )
+    worker.start()
+    try:
+        status, value = outcome.get(timeout=max(0.01, float(timeout_seconds)))
+    except queue.Empty:
+        print(f"  [prereq] {name}: timeout", flush=True)
+        return "timeout", None
+    print(f"  [prereq] {name}: {status}", flush=True)
+    return status, value
+
+
+def _check_prerequisites(stage_timeout_seconds: float = 15) -> dict:
     """Check all prerequisites for a real BOSS E2E run.
 
     boss_login is tri-state:
@@ -167,7 +193,10 @@ def _check_prerequisites() -> dict:
       - False: CDP up and probe confirms NOT logged-in
       - "unknown": CDP down — cannot verify (with offline diagnosis note)
     """
-    results = {"cdp": False, "boss_login": "unknown", "ai_credentials": False, "errors": []}
+    results = {
+        "cdp": False, "boss_login": "unknown", "ai_credentials": False,
+        "errors": [], "stages": {},
+    }
 
     # 1. Chrome CDP connectivity
     try:
@@ -175,9 +204,12 @@ def _check_prerequisites() -> dict:
         resp = requests.get("http://127.0.0.1:9222/json/version", timeout=3)
         if resp.status_code == 200:
             results["cdp"] = True
+            results["stages"]["cdp"] = {"status": "ok"}
         else:
+            results["stages"]["cdp"] = {"status": "failed"}
             results["errors"].append(f"CDP returned status {resp.status_code}")
     except Exception as exc:
+        results["stages"]["cdp"] = {"status": "failed"}
         results["errors"].append(f"CDP not reachable: {exc}")
 
     # 2. BOSS login state
@@ -186,9 +218,16 @@ def _check_prerequisites() -> dict:
         # and checking for plaintext salary. The tab list alone is not a
         # reliable signal — the user may have logged in earlier and then
         # closed or navigated away from the zhipin tab.
-        logged_in = _probe_login_via_cdp(9222)
-        results["boss_login"] = logged_in
-        if not logged_in:
+        status, logged_in = _run_prerequisite_stage(
+            "boss_login", lambda: _probe_login_via_cdp(9222), stage_timeout_seconds,
+        )
+        results["stages"]["boss_login"] = {"status": status}
+        results["boss_login"] = bool(logged_in) if status == "ok" else False
+        if status == "timeout":
+            results["errors"].append("boss_login_probe_timeout")
+        elif status == "error":
+            results["errors"].append(f"boss_login_probe_error:{logged_in}")
+        elif not logged_in:
             results["errors"].append(
                 "BOSS login probe returned not-logged-in "
                 "(run scripts/boss_cdp_raw.py --setup-chrome and login in the dedicated Chrome)")
@@ -198,6 +237,7 @@ def _check_prerequisites() -> dict:
         # login state is likely still good.
         note = _diagnose_login_offline(_default_cdp_data_dir())
         results["boss_login"] = "unknown"
+        results["stages"]["boss_login"] = {"status": "skipped"}
         results["boss_login_note"] = note
         results["errors"].append("Cannot check BOSS login without CDP")
 
@@ -208,18 +248,27 @@ def _check_prerequisites() -> dict:
     #   store.get_ai_settings() -> {is_configured, ...}  (credential_ref is popped)
     #   store.get_credential_ref() -> hostname
     #   ai.retrieve_api_key(cred_ref) -> real key from keyring
-    try:
+    def check_ai_credentials():
         settings, cred_ref = _load_ai_settings()
         api_key = _retrieve_api_key(cred_ref) if cred_ref else ""
-        if settings.get("is_configured") and api_key:
-            results["ai_credentials"] = True
-        else:
+        return bool(settings.get("is_configured") and api_key), settings, bool(api_key)
+
+    status, ai_result = _run_prerequisite_stage(
+        "ai_credentials", check_ai_credentials, stage_timeout_seconds,
+    )
+    results["stages"]["ai_credentials"] = {"status": status}
+    if status == "ok":
+        configured, settings, has_key = ai_result
+        results["ai_credentials"] = configured
+        if not configured:
             results["errors"].append(
                 "No AI API key configured "
                 f"(is_configured={settings.get('is_configured')}, "
-                f"keyring_has_key={bool(api_key)})")
-    except Exception as exc:
-        results["errors"].append(f"Cannot check AI credentials: {exc}")
+                f"keyring_has_key={has_key})")
+    elif status == "timeout":
+        results["errors"].append("ai_credentials_timeout")
+    else:
+        results["errors"].append(f"Cannot check AI credentials: {ai_result}")
 
     return results
 
@@ -1234,7 +1283,16 @@ def _run_live_provider_smoke() -> dict:
     return report
 
 
+def _enable_line_buffering(stream) -> None:
+    """Make stage output visible immediately when stdout is piped."""
+    try:
+        stream.reconfigure(line_buffering=True)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
 def main(browser_backend=None) -> int:
+    _enable_line_buffering(sys.stdout)
     print("=" * 72)
     print("Feature 004 Controlled Real-BOSS E2E")
     print("=" * 72)

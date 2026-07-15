@@ -11,6 +11,8 @@ import importlib.util
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -109,6 +111,35 @@ class CheckPrerequisitesTriStateTests(unittest.TestCase):
         self.assertTrue(result["cdp"])
         self.assertTrue(result["boss_login"],
                         "Active CDP probe confirming login must yield True even without a zhipin tab")
+
+    def test_hung_login_probe_times_out_and_ai_check_still_runs(self):
+        """A stuck CDP navigation must not hang the whole prerequisite check."""
+        fake_version_resp = mock.Mock(status_code=200)
+        never_returns = threading.Event()
+        fake_settings = {"is_configured": True}
+
+        with mock.patch("requests.get", return_value=fake_version_resp):
+            with mock.patch.object(
+                e2e, "_probe_login_via_cdp", side_effect=lambda *_: never_returns.wait(30),
+            ):
+                with mock.patch.object(
+                    e2e, "_load_ai_settings", return_value=(fake_settings, "provider"),
+                ):
+                    with mock.patch.object(e2e, "_retrieve_api_key", return_value="secret"):
+                        started = time.monotonic()
+                        result = e2e._check_prerequisites(stage_timeout_seconds=0.05)
+                        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.5)
+        self.assertFalse(result["boss_login"])
+        self.assertTrue(result["ai_credentials"])
+        self.assertIn("boss_login_probe_timeout", result["errors"])
+        self.assertEqual(result["stages"]["boss_login"]["status"], "timeout")
+
+    def test_enable_line_buffering_flushes_stage_output(self):
+        stream = mock.Mock()
+        e2e._enable_line_buffering(stream)
+        stream.reconfigure.assert_called_once_with(line_buffering=True)
 
 
 class OfflineCookiesDiagnosisTests(unittest.TestCase):
