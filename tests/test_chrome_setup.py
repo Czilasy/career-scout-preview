@@ -47,56 +47,135 @@ class ChromeSetupTests(unittest.TestCase):
         self.assertEqual(module.DEFAULT_CITY_INPUT, "上海")
         self.assertEqual(module.resolve_city(module.DEFAULT_CITY_INPUT), ("上海", "101020100"))
 
-    def test_city_map_matches_current_boss_city_snapshot(self):
-        module = load_module()
+    # ----- 本地静态城市码表（data/city_codes.json）-----
 
-        expected = {
+    def test_local_city_map_loads_and_valid(self):
+        """本地码表能加载、是字典、非空、value 全是数字字符串。"""
+        module = load_module()
+        name_to_code, code_to_name = module.load_local_city_map()
+
+        self.assertIsInstance(name_to_code, dict)
+        self.assertGreater(len(name_to_code), 100, "码表应包含上百个城市")
+        for name, code in name_to_code.items():
+            self.assertIsInstance(name, str)
+            self.assertIsInstance(code, str)
+            self.assertTrue(code.isdigit(), f"城市码应为数字字符串: {name}={code!r}")
+        # 反向映射一致
+        self.assertEqual(code_to_name.get("101020100"), "上海")
+
+    def test_local_city_map_contains_known_cities(self):
+        """码表覆盖一线城市 + 三/四线城市（验证是全量，非旧 24 城）。"""
+        module = load_module()
+        name_to_code, _ = module.load_local_city_map()
+
+        for city in ("全国", "北京", "上海", "深圳"):
+            self.assertIn(city, name_to_code, f"缺少常见城市: {city}")
+        # 三/四线城市（旧内置码表没有的），证明已扩展到全量
+        for tier34 in ("赣州", "洛阳", "临沂", "襄阳"):
+            self.assertIn(tier34, name_to_code, f"缺少三四线城市: {tier34}")
+
+    def test_local_city_map_is_superset_of_old_builtin(self):
+        """防回归：新静态码表必须 ⊇ 原内置 24 城且码值一致。"""
+        module = load_module()
+        name_to_code, _ = module.load_local_city_map()
+
+        old_builtin = {
             "全国": "100010000",
-            "北京": "101010100",
-            "上海": "101020100",
-            "广州": "101280100",
-            "深圳": "101280600",
-            "杭州": "101210100",
-            "成都": "101270100",
-            "西安": "101110100",
-            "重庆": "101040100",
-            "南京": "101190100",
-            "长沙": "101250100",
-            "福州": "101230100",
-            "武汉": "101200100",
-            "合肥": "101220100",
-            "济南": "101120100",
-            "大连": "101070200",
-            "青岛": "101120200",
-            "宁波": "101210400",
-            "厦门": "101230200",
-            "天津": "101030100",
-            "苏州": "101190400",
-            "郑州": "101180100",
-            "东莞": "101281600",
-            "佛山": "101280800",
-            "沈阳": "101070100",
+            "北京": "101010100", "上海": "101020100", "广州": "101280100",
+            "深圳": "101280600", "杭州": "101210100", "成都": "101270100",
+            "西安": "101110100", "重庆": "101040100", "南京": "101190100",
+            "长沙": "101250100", "福州": "101230100", "武汉": "101200100",
+            "合肥": "101220100", "济南": "101120100", "大连": "101070200",
+            "青岛": "101120200", "宁波": "101210400", "厦门": "101230200",
+            "天津": "101030100", "苏州": "101190400", "郑州": "101180100",
+            "东莞": "101281600", "佛山": "101280800", "沈阳": "101070100",
         }
+        for name, code in old_builtin.items():
+            self.assertEqual(name_to_code.get(name), code,
+                             f"原内置城市 {name}={code} 在新码表中缺失或码值不一致")
 
-        self.assertEqual(module.CITY_MAP, expected)
-        for name, code in expected.items():
-            self.assertEqual(module.resolve_city(name), (name, code))
-            self.assertEqual(module.resolve_city(code), (name, code))
+    # ----- resolve_city 三级查询链 -----
 
-    def test_resolve_city_uses_live_city_map_for_non_static_city(self):
+    def test_resolve_city_hit_local_map(self):
+        """本地静态码表命中（含三四线城市）。"""
         module = load_module()
 
-        with mock.patch.object(
-            module,
-            "load_live_city_maps",
-            return_value=(
-                {"长春": "101060100"},
-                {"101060100": "长春"},
-            ),
-            create=True,
-        ):
+        for name, code in [("上海", "101020100"), ("赣州", "101240700")]:
+            self.assertEqual(module.resolve_city(name), (name, code))
+
+    def test_resolve_city_reverse_lookup(self):
+        """用城市码反查中文名。"""
+        module = load_module()
+
+        self.assertEqual(module.resolve_city("101020100"), ("上海", "101020100"))
+        self.assertEqual(module.resolve_city("101240700"), ("赣州", "101240700"))
+
+    def test_resolve_city_fallback_to_live(self):
+        """本地码表没有时降级到运行时拉取（mock）。"""
+        module = load_module()
+
+        with mock.patch.object(module, "load_local_city_map",
+                               return_value=({}, {})), \
+             mock.patch.object(module, "load_live_city_maps",
+                               return_value=({"长春": "101060100"},
+                                             {"101060100": "长春"})):
             self.assertEqual(module.resolve_city("长春"), ("长春", "101060100"))
             self.assertEqual(module.resolve_city("101060100"), ("长春", "101060100"))
+
+    def test_resolve_city_fallback_to_raw(self):
+        """本地和实时都查不到时，原样返回（兼容用户传裸 code）。"""
+        module = load_module()
+
+        with mock.patch.object(module, "load_local_city_map",
+                               return_value=({}, {})), \
+             mock.patch.object(module, "load_live_city_maps",
+                               return_value=({}, {})):
+            self.assertEqual(module.resolve_city("999999999"), ("999999999", "999999999"))
+
+    def test_resolve_city_empty_input(self):
+        module = load_module()
+
+        self.assertEqual(module.resolve_city(""), ("", ""))
+
+    # ----- --list-cities -----
+
+    def test_list_cities_prints_all(self):
+        """--list-cities 打印全部城市（用本地码表，mock 掉联网）。"""
+        module = load_module()
+
+        with mock.patch.object(module, "load_live_city_maps",
+                               return_value=({}, {})):
+            with mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
+                module.list_cities(keyword=None)
+            text = out.getvalue()
+        self.assertIn("个城市", text)
+        self.assertIn("上海", text)
+        self.assertIn("赣州", text)
+
+    def test_list_cities_with_filter(self):
+        """关键词过滤只打印匹配的城市。"""
+        module = load_module()
+
+        with mock.patch.object(module, "load_live_city_maps",
+                               return_value=({}, {})):
+            with mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
+                module.list_cities(keyword="江")
+            text = out.getvalue()
+        self.assertIn("江", text)
+        self.assertNotIn("上海", text)
+        self.assertNotIn("赣州", text)
+
+    def test_list_cities_offline_uses_local(self):
+        """联网失败时回退本地静态码表，不报错。"""
+        module = load_module()
+
+        with mock.patch.object(module, "load_live_city_maps",
+                               return_value=({}, {})):
+            with mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
+                module.list_cities(keyword=None)
+            text = out.getvalue()
+        # 本地码表非空时应有输出
+        self.assertIn("个城市", text)
 
     def test_filter_maps_match_current_boss_condition_snapshot(self):
         module = load_module()
@@ -172,6 +251,101 @@ class ChromeSetupTests(unittest.TestCase):
         self.assertEqual(detail["link"], job["job_link"])
         self.assertEqual(detail["salary"], "30-60K")
         self.assertEqual(detail["salary_source"], "api")
+
+    def test_detail_extractor_never_uses_body_text_as_jd_fallback(self):
+        module = load_module()
+
+        self.assertNotIn("jd = body.substring", module.EXTRACT_DETAIL_JS)
+        self.assertIn("page_text", module.EXTRACT_DETAIL_JS)
+        self.assertIn("text.indexOf('职位描述')", module.EXTRACT_DETAIL_JS)
+
+    def test_extract_job_description_removes_header_and_recruiter_footer(self):
+        module = load_module()
+        description = (
+            "公司介绍\n这段属于招聘方发布的岗位正文，应当保留。\n"
+            + "负责 AI 产品规划、需求分析、研发协作和上线复盘。\n" * 8
+        ).strip()
+        page_text = (
+            "微信扫码分享 举报\n职位描述\n"
+            f"{description}\n"
+            "张女士\n今日活跃\n示例公司\n·\n招聘者\n竞争力分析\n"
+            "查看完整个人竞争力\nBOSS 安全提示\n公司工商信息\n更多职位"
+        )
+
+        jd = module.extract_job_description({"jd": page_text, "page_text": page_text})
+
+        self.assertEqual(jd, description)
+        self.assertIn("公司介绍", jd)
+        self.assertNotIn("张女士", jd)
+        self.assertNotIn("竞争力分析", jd)
+
+    def test_extract_job_description_rejects_login_truncation(self):
+        module = load_module()
+        page_text = (
+            "职位描述\n负责产品规划和需求分析。\n"
+            "登录查看完整内容\n招聘者\nBOSS 安全提示"
+        )
+
+        with self.assertRaises(module.DetailLoginRequiredError):
+            module.extract_job_description({"jd": "", "page_text": page_text})
+
+    def test_extract_job_description_preserves_competitiveness_heading_in_jd(self):
+        module = load_module()
+        description = (
+            "岗位职责\n负责产品规划、需求分析和跨团队项目推进。\n"
+            "竞争力分析\n负责持续研究竞品并制定差异化产品策略。\n" * 5
+        )
+
+        jd = module.extract_job_description({"jd": f"职位描述\n{description}"})
+
+        self.assertIn("竞争力分析", jd)
+        self.assertIn("制定差异化产品策略", jd)
+
+    def test_extract_job_description_removes_trailing_recruiter_card(self):
+        module = load_module()
+        description = "负责 AI 产品规划、需求分析和跨团队项目推进。\n" * 8
+        page_text = (
+            f"职位描述\n{description}"
+            "李女士\n在线\n示例公司\n·\n招聘专员"
+        )
+
+        jd = module.extract_job_description({"jd": page_text, "page_text": page_text})
+
+        self.assertEqual(jd, description.strip())
+        self.assertNotIn("李女士", jd)
+        self.assertNotIn("招聘专员", jd)
+
+    def test_extract_job_description_removes_recruiter_card_before_safety_footer(self):
+        module = load_module()
+        description = "负责视觉算法研发、模型部署和业务场景落地。\n" * 8
+        page_text = (
+            f"职位描述\n{description}"
+            "认证资质\n人力资源服务许可证\n"
+            "曾先生\n示例猎头\n·\n猎头顾问\n\n"
+            "BOSS 安全提示\n公司介绍\n更多职位"
+        )
+
+        jd = module.extract_job_description({"jd": page_text, "page_text": page_text})
+
+        self.assertEqual(
+            jd,
+            f"{description}认证资质\n人力资源服务许可证".strip(),
+        )
+        self.assertNotIn("曾先生", jd)
+        self.assertNotIn("猎头顾问", jd)
+
+    def test_extract_job_description_rejects_navigation_page(self):
+        module = load_module()
+        page_text = "首页\n职位\n公司\n校园\n无障碍专区\n热门职位\n产品经理"
+
+        with self.assertRaisesRegex(module.DetailExtractionError, "navigation chrome"):
+            module.extract_job_description({"jd": "", "page_text": page_text})
+
+    def test_extract_job_description_rejects_short_text(self):
+        module = load_module()
+
+        with self.assertRaisesRegex(module.DetailExtractionError, "too short"):
+            module.extract_job_description({"jd": "职位描述\n只有一句话"})
 
     def test_detail_url_adds_security_context_without_changing_job_link(self):
         module = load_module()
@@ -360,6 +534,48 @@ class ChromeSetupTests(unittest.TestCase):
                 self.assertTrue((workdir / "boss_details.json").exists())
             finally:
                 os.chdir(cwd)
+
+    def test_scrape_details_stops_before_writing_login_truncation(self):
+        module = load_module()
+        session = mock.Mock()
+
+        def send(method, params=None, sid=None):
+            if method == "Target.createTarget":
+                return {"result": {"targetId": "target-1"}}
+            if method == "Target.attachToTarget":
+                return {"result": {"sessionId": "session-1"}}
+            return {}
+
+        session.send.side_effect = send
+        session.eval_js.side_effect = lambda script, sid: (
+            json.dumps(
+                {
+                    "jd": "",
+                    "page_text": "职位描述\n负责产品规划\n登录查看完整内容",
+                    "tags": [],
+                }
+            )
+            if script == module.EXTRACT_DETAIL_JS
+            else None
+        )
+        job = {
+            "job_id": "blocked",
+            "title": "AI Product Manager",
+            "job_link": "https://www.zhipin.com/job_detail/blocked.html",
+        }
+
+        with tempfile_profile() as paths:
+            output = paths["cdp_profile"] / "details.json"
+            with mock.patch.object(module, "CDPSession", return_value=session), \
+                    mock.patch.object(module.time, "sleep"):
+                with self.assertRaisesRegex(RuntimeError, "login expired"):
+                    module.scrape_details({"jobs": [job]}, output_path=str(output))
+
+        self.assertFalse(output.exists())
+        session.send.assert_any_call(
+            "Target.closeTarget", {"targetId": "target-1"}
+        )
+        session.close.assert_called_once()
 
     def test_setup_defaults_do_not_copy_cookies_or_kill_all_chrome(self):
         module = load_module()

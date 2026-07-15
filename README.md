@@ -35,6 +35,11 @@ python3 scripts/boss_cdp_raw.py --setup-chrome
 # 3. 抓取 + 分析
 python3 scripts/boss_cdp_raw.py --keyword "AI Agent" --city 上海 --pages 3 --analysis
 
+# 支持全国城市（含三四五线），例如：
+python3 scripts/boss_cdp_raw.py --keyword "前端" --city 赣州 --pages 3
+# 查看支持的城市：--list-cities [关键词]
+python3 scripts/boss_cdp_raw.py --list-cities 江
+
 # 4. 抓取后生成聚合摘要 + 提示词（默认读取最新结果）
 python3 scripts/job_summary.py
 ```
@@ -294,7 +299,8 @@ python3 scripts/job_summary.py --top 15
 | 参数 | 说明 |
 |------|------|
 | `--keyword` | 搜索关键词（默认 "AI Agent"） |
-| `--city` | 城市（中文或代码，默认上海） |
+| `--city` | 城市（中文或代码，默认上海）。**支持全国城市**（一二三四五线全覆盖，共 300+ 个），运行时自动从 BOSS 同步最新城市码；码表见 [`data/city_codes.json`](data/city_codes.json)，或用 `--list-cities` 查看 |
+| `--list-cities [关键词]` | 打印支持的城市列表，可选关键词过滤，如 `--list-cities 江` |
 | `--pages` | 页数（上限 10） |
 | `--format` | json / csv；csv 会同时导出列表和详情 CSV |
 | `--detail` | 抓取详情页 JD（默认开启） |
@@ -375,6 +381,8 @@ career-scout/
 
 默认不会使用 DOM 提取列表，因为 DOM 薪资可能受字体反爬影响。只有明确传 `--allow-dom-fallback` 时，API 无数据才会降级 DOM。
 
+详情页只从包含“职位描述”的详情区提取 JD，整页 `body` 仅用于识别登录墙和导航页，不会直接写入结果。若页面出现“登录查看完整内容”，抓取会明确报错并停止，避免把截断正文、招聘者信息、公司介绍和推荐职位当成完整 JD 保存。
+
 `--input ... --analysis --no-detail` 会优先加载 `--detail-output`，其次加载与输入列表同目录、同时间戳的 `boss_details_*.json`，最后查找 `~/.career-scout/job-result` 下最新详情文件。
 
 ## Chrome profile 安全策略
@@ -400,6 +408,10 @@ python3 scripts/boss_cdp_raw.py --setup-chrome --copy-login-state
 ```bash
 python3 scripts/boss_cdp_raw.py --setup-chrome --reset-chrome-profile
 ```
+
+## 📌 TODO
+
+- [ ] 详情页抓取补强 Referer 与请求指纹，进一步降低风控触发概率
 
 ## License
 

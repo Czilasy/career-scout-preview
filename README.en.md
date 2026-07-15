@@ -33,6 +33,11 @@ python3 scripts/boss_cdp_raw.py --setup-chrome
 # 3. Scrape + analyze
 python3 scripts/boss_cdp_raw.py --keyword "AI Agent" --city 上海 --pages 3 --analysis
 
+# Cities nationwide are supported (incl. tier-3/4/5), e.g.:
+python3 scripts/boss_cdp_raw.py --keyword "前端" --city 赣州 --pages 3
+# List supported cities: --list-cities [keyword]
+python3 scripts/boss_cdp_raw.py --list-cities 江
+
 # 4. Generate an aggregated summary + prompt after scraping (reads the latest result)
 python3 scripts/job_summary.py
 ```
@@ -284,7 +289,8 @@ python3 scripts/job_summary.py --top 15
 | Parameter | Description |
 |-----------|-------------|
 | `--keyword` | Search keyword (default "AI Agent") |
-| `--city` | City (Chinese name or code, default Shanghai) |
+| `--city` | City (Chinese name or code, default Shanghai). **Supports cities nationwide** (300+, incl. tier-3/4/5); city codes auto-sync from BOSS at runtime. See [`data/city_codes.json`](data/city_codes.json), or run `--list-cities` |
+| `--list-cities [keyword]` | Print the supported city list, optional keyword filter, e.g. `--list-cities 江` |
 | `--pages` | Number of pages (max 10) |
 | `--format` | json / csv; csv also exports list and detail CSVs |
 | `--detail` | Scrape detail-page JD (on by default) |
@@ -366,6 +372,8 @@ This is a Chrome-CDP-based BOSS Zhipin crawler. Core flow:
 
 DOM extraction is not used for the list by default, since DOM salaries may be hit by font-based obfuscation. Only when `--allow-dom-fallback` is explicitly passed will it fall back to DOM when the API returns no data.
 
+For detail pages, the scraper only extracts a section containing the job-description heading. Full-page `body` text is diagnostic input for detecting login walls and navigation shells and is never written directly as a JD. If the page contains the login-to-view-full-content marker, the crawl fails explicitly and stops before truncated text, recruiter metadata, company sections, or recommended jobs can be saved as a complete JD.
+
 `--input ... --analysis --no-detail` first loads `--detail-output`, then the `boss_details_*.json` with the same timestamp in the same dir as the input list, and finally the newest detail file under `~/.career-scout/job-result`.
 
 ## Chrome Profile Security Policy
@@ -391,6 +399,10 @@ python3 scripts/boss_cdp_raw.py --setup-chrome --copy-login-state
 ```bash
 python3 scripts/boss_cdp_raw.py --setup-chrome --reset-chrome-profile
 ```
+
+## 📌 TODO
+
+- [ ] Strengthen the detail-page `Referer` and request fingerprinting to further reduce risk-control triggers
 
 ## License
 
