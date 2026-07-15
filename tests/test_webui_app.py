@@ -87,10 +87,11 @@ class WebUIAppTests(unittest.TestCase):
     def test_check_uses_returncode_not_log_keywords(self):
         completed = type("Completed", (), {
             "returncode": 1,
-            "stdout": "CDP 9222 检查失败，未登录",
-            "stderr": "",
+            "output_tail": "CDP 9222 检查失败，未登录",
+            "failure_code": "process_failed",
+            "ok": False,
         })()
-        with mock.patch("webui.app.subprocess.run", return_value=completed):
+        with mock.patch("webui.app.ScraperExecutor.execute", return_value=completed):
             response = self.client.get("/api/check")
 
         payload = response.get_json()

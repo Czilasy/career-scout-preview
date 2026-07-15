@@ -365,7 +365,7 @@ class RunOrchestrationTests(_IntegrationTestCase):
         source = self._fake_source_cls(list_jobs={
             ("Python 后端", "北京"): [
                 {"job_id": "j1", "title": "Python 后端", "company": "A", "salary": "20k",
-                 "location": "北京", "source_url": "https://x/1", "tags": "Python", "jd": "负责..."},
+                 "location": "北京", "source_url": "https://www.zhipin.com/job_detail/j1.html", "tags": "Python", "jd": "负责..."},
             ],
         }, detail_jobs={"j1": {"title": "Python 后端", "jd": "完整JD"}})
         runner = self._make_runner(source=source)
@@ -436,8 +436,8 @@ class RunOrchestrationTests(_IntegrationTestCase):
     def test_count_counters_update(self):
         source = self._fake_source_cls(list_jobs={
             ("Python 后端", "北京"): [
-                {"job_id": "j1", "title": "Python", "source_url": "https://x/1", "jd": "jd"},
-                {"job_id": "j2", "title": "后端", "source_url": "https://x/2", "jd": "jd"},
+                {"job_id": "j1", "title": "Python", "source_url": "https://www.zhipin.com/job_detail/j1.html", "jd": "jd"},
+                {"job_id": "j2", "title": "后端", "source_url": "https://www.zhipin.com/job_detail/j2.html", "jd": "jd"},
             ],
         }, detail_jobs={"j1": {"jd": "jd"}, "j2": {"jd": "jd"}})
         runner = self._make_runner(source=source)
@@ -850,6 +850,23 @@ class ResumeDeletionCascadeTests(_IntegrationTestCase):
         self.assertEqual(assessment["candidate_evidence_ids"], [])
         self.assertEqual(assessment["job_evidence"], {})
         self.assertEqual(assessment["gaps"], [])
+
+
+class DiscoverySourceAdmissionTests(_IntegrationTestCase):
+    def test_persist_jobs_accepts_only_valid_boss_https_sources(self):
+        from webui.discovery_runner import DiscoveryRunner
+
+        runner = DiscoveryRunner(self.store, result_dir=tempfile.mkdtemp())
+        runner._persist_jobs([
+            {"job_id": "missing", "source_url": ""},
+            {"job_id": "evil", "source_url": "https://evil.example/job/1"},
+            {"job_id": "valid", "source_url": "https://www.zhipin.com/job_detail/valid.html?x=1"},
+        ], "run", {})
+
+        with self.store._connection() as conn:
+            rows = conn.execute("SELECT id, canonical_url FROM jobs ORDER BY id").fetchall()
+        self.assertEqual([row["id"] for row in rows], ["valid"])
+        self.assertEqual(rows[0]["canonical_url"], "https://www.zhipin.com/job_detail/valid.html")
 
 
 class SummaryPiiRedactionTests(_IntegrationTestCase):

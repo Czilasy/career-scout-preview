@@ -829,6 +829,16 @@ class FeedbackHttpContractTests(unittest.TestCase):
         self.store = TaskStore(self._tmp.name)
         self.profile = self.store.create_profile("feedback 测试画像")
 
+    def _insert_source_job(self, job_id):
+        now = "2026-07-15T00:00:00+00:00"
+        source_url = f"https://www.zhipin.com/job_detail/{job_id}.html"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                "VALUES (?, ?, ?, '', '', '', '', '', ?, ?)",
+                (job_id, source_url, source_url, now, now),
+            )
+
     def tearDown(self):
         import os
         runtime = self.app.config.get("DISCOVERY_RUNTIME")
@@ -857,6 +867,7 @@ class FeedbackHttpContractTests(unittest.TestCase):
         self.assertIn("feedback_id", data)
 
     def test_job_feedback_defaults_to_exact_job_and_lists_visible_change(self):
+        self._insert_source_job("job-exact")
         created = self.client.post("/api/discovery/feedback", json={
             "profile_id": self.profile["id"],
             "target_type": "job",
@@ -878,6 +889,7 @@ class FeedbackHttpContractTests(unittest.TestCase):
         self.assertEqual(self.store.get_profile_job(self.profile["id"], "job-exact")["status"], "deleted")
 
     def test_revoke_not_interested_restores_job_and_removes_active_trash(self):
+        self._insert_source_job("job-restore")
         created = self.client.post("/api/discovery/feedback", json={
             "profile_id": self.profile["id"],
             "target_type": "job",

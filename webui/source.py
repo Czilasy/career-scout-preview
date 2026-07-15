@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from webui.discovery import DiscoveryError, build_snapshot
+from webui.process_executor import ScraperExecutor
+from webui.workbench import normalize_job_link
 
 
 HERE = Path(__file__).resolve().parent
@@ -119,12 +121,20 @@ class BossCdpSource:
         env: dict | None = None,
         timeout_seconds: int = 600,
         runner: Callable[..., subprocess.Popen] | None = None,
+        executor: ScraperExecutor | None = None,
+        cancel_event=None,
+        artifact_root: Path | str | None = None,
+        max_artifact_bytes: int = 20_000_000,
     ):
         self.python_executable = python_executable or sys.executable or "python"
         self.cwd = Path(cwd) if cwd else PROJECT_ROOT
         self.scraper_path = Path(scraper_path) if scraper_path else SCRAPER
         self.env = env or {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", **os.environ}
         self.timeout_seconds = int(timeout_seconds)
+        self._executor = executor or ScraperExecutor()
+        self.cancel_event = cancel_event
+        self.artifact_root = Path(artifact_root).resolve() if artifact_root else None
+        self.max_artifact_bytes = max(1, int(max_artifact_bytes))
         self._runner = runner or self._default_run
 
     # ------------------------------------------------------------------
@@ -157,6 +167,10 @@ class BossCdpSource:
             return SourceOutcome.failure(
                 failed_code="source_invalid_output",
                 safe_log="plan_item_missing_list_output_path",
+            )
+        if not self._artifact_path_allowed(output_path):
+            return SourceOutcome.failure(
+                failed_code="source_invalid_output", safe_log="list_output_path_invalid",
             )
         command = self._build_list_command(keyword, city, target_pages, source_filters, str(output_path))
         safe_log = f"list keyword_present=1 city_present={bool(city)} pages={target_pages}"
@@ -217,7 +231,7 @@ class BossCdpSource:
         """
         if not isinstance(job, dict):
             return SourceOutcome.failure(failed_code="source_invalid_output", safe_log="job_not_dict")
-        source_url = str(job.get("source_url") or job.get("url") or "").strip()
+        source_url = normalize_job_link(job.get("source_url") or job.get("url") or "")
         job_id = str(job.get("job_id") or job.get("id") or "").strip()
         if not source_url or not job_id:
             return SourceOutcome.failure(
@@ -227,6 +241,10 @@ class BossCdpSource:
         detail_path = detail_output_path or job.get("_detail_output_path")
         if not detail_path:
             return SourceOutcome.failure(failed_code="source_invalid_output", safe_log="detail_path_missing")
+        if not self._artifact_path_allowed(detail_path):
+            return SourceOutcome.failure(
+                failed_code="source_invalid_output", safe_log="detail_output_path_invalid",
+            )
         detail_input_path = f"{detail_path}.input.json"
         detail_job = dict(job)
         detail_job.setdefault("job_link", source_url)
@@ -316,28 +334,28 @@ class BossCdpSource:
         Returns ``(returncode, captured_output)``. Captured output is for
         diagnostic only; never persisted to the database in raw form.
         """
-        proc = subprocess.Popen(
-            command,
-            cwd=str(self.cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            env=self.env,
+        result = self._executor.execute(
+            command, timeout_seconds=timeout, cwd=self.cwd, env=self.env,
+            cancel_event=self.cancel_event,
         )
+        if result.failure_code == "process_timeout":
+            raise subprocess.TimeoutExpired(command, timeout)
+        if result.failure_code == "process_unreachable":
+            raise FileNotFoundError(command[0])
+        return result.returncode if result.returncode is not None else -1, result.output_tail
+
+    def _artifact_path_allowed(self, raw_path: str) -> bool:
+        if self.artifact_root is None:
+            return True
         try:
-            stdout, _ = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=30)
-            raise
-        return proc.returncode, stdout or ""
+            Path(raw_path).resolve().relative_to(self.artifact_root)
+        except (OSError, ValueError):
+            return False
+        return True
 
     def _read_jobs(self, output_path: str) -> list[dict] | None:
         path = Path(output_path)
-        if not path.is_file():
+        if not path.is_file() or path.stat().st_size > self.max_artifact_bytes:
             return None
         try:
             with path.open(encoding="utf-8") as handle:
@@ -352,7 +370,7 @@ class BossCdpSource:
 
     def _read_detail(self, detail_path: str) -> dict | None:
         path = Path(detail_path)
-        if not path.is_file():
+        if not path.is_file() or path.stat().st_size > self.max_artifact_bytes:
             return None
         try:
             with path.open(encoding="utf-8") as handle:

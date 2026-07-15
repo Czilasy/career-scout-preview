@@ -6,7 +6,9 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 from webui.source import (
@@ -18,6 +20,57 @@ from webui.source import (
     _safe_tail,
     _safe_host,
 )
+
+
+class _RecordingExecutor:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def execute(self, command, **kwargs):
+        self.calls.append((command, kwargs))
+        return self.result
+
+
+class BossSourceExecutorTests(unittest.TestCase):
+    def test_default_runner_delegates_to_bounded_executor(self):
+        executor = _RecordingExecutor(SimpleNamespace(
+            returncode=0, output_tail="safe", failure_code=None,
+        ))
+        cancel_event = threading.Event()
+        source = BossCdpSource(
+            executor=executor, timeout_seconds=7, cancel_event=cancel_event,
+        )
+
+        result = source._default_run(["python", "scraper.py"], 7)
+
+        self.assertEqual(result, (0, "safe"))
+        self.assertEqual(executor.calls[0][1]["timeout_seconds"], 7)
+        self.assertIs(executor.calls[0][1]["cancel_event"], cancel_event)
+
+    def test_fetch_detail_rejects_non_boss_url_before_process_start(self):
+        calls = []
+
+        def runner(*args):
+            calls.append(args)
+            return 0, ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = BossCdpSource(runner=runner)
+            outcome = source.fetch_detail(
+                {"job_id": "evil", "source_url": "https://evil.example/job/1"},
+                detail_output_path=str(Path(tmp) / "detail.json"),
+            )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+        self.assertEqual(calls, [])
+
+    def test_artifact_reader_rejects_file_over_size_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "jobs.json"
+            path.write_text(json.dumps({"jobs": [{"jd": "x" * 1000}]}), encoding="utf-8")
+            source = BossCdpSource(max_artifact_bytes=100)
+            self.assertIsNone(source._read_jobs(str(path)))
 
 
 def _make_plan_item(*, keyword="Python", city="北京", input_hash=None, list_output_path=None,

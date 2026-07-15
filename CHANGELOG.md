@@ -6,6 +6,8 @@
 - 城市码表外置为 `data/city_codes.json`（全量 300+ 城市，覆盖一二三四五线），新增 `--list-cities [关键词]` 命令查看支持的城市；`resolve_city` 查询链改为「本地静态码表 → 运行时拉 BOSS 接口 → 原样兜底」。城市码表打进 wheel，`pip install` 用户也可用。（#24）
 
 ### 修复
+- Web UI 抓取子进程统一增加总超时、取消后的进程树终止、输出上限和受控产物路径检查；SQLite 启用 WAL 与 busy timeout，降低后台任务锁库风险
+- 岗位发现仅允许具有有效 BOSS HTTPS 详情链接的岗位进入长期岗位库、详情抓取和 AI 评估；未知岗位反馈不再创建 `boss://` / `discovery://` 伪来源
 - 详情页 JD 改为只提取“职位描述”区，并在登录墙、导航页或过短正文出现时拒绝写入，不再把整页 `body`、招聘者信息、公司介绍和推荐职位当作 JD
 - 同步 BOSS 当前 `city.json` / `condition.json` 映射，修正城市码以及薪资、经验、学历筛选枚举漂移，并在内置城市表未命中时自动加载 BOSS `cityGroup.json` 支持更多城市中文名
 - `scrape_details` 最终保存改用 `os.path.dirname(path) or "."`，`--detail-output` 传不带目录的裸文件名时不再抛 `FileNotFoundError`（与循环内及其它写文件处保持一致）

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -48,6 +49,7 @@ PROFILE_JOB_STATUSES = {"new", "interested", "applied", "deleted"}
 AI_STATUS_VALUES = {"unconfigured", "testing", "ready", "failed"}
 RESUME_FORMATS = {"txt", "pdf", "docx"}
 MAX_DETAIL_BUDGET = 60
+_INITIALIZE_LOCK = threading.RLock()
 
 
 def _now():
@@ -76,17 +78,30 @@ class TaskStore:
     def __init__(self, db_path):
         self.db_path = os.path.abspath(os.fspath(db_path))
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
-        self._initialize()
-        self._migrate()
-        self._mark_stale_runs_interrupted()
+        with _INITIALIZE_LOCK:
+            self._configure_database()
+            self._initialize()
+            self._migrate()
+            self._mark_stale_runs_interrupted()
 
     # -- connection --------------------------------------------------------
 
     def _connect(self):
         connection = sqlite3.connect(self.db_path, timeout=10)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 10000")
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    def _configure_database(self):
+        """Configure persistent concurrency settings before schema work."""
+        connection = sqlite3.connect(self.db_path, timeout=10)
+        try:
+            connection.execute("PRAGMA busy_timeout = 10000")
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA synchronous = NORMAL")
+        finally:
+            connection.close()
 
     @contextmanager
     def _connection(self):
@@ -2852,14 +2867,9 @@ class TaskStore:
                 "SELECT id FROM jobs WHERE id = ?", (str(job_id),),
             ).fetchone()
         if not existing_job:
-            import time
-            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            with self._connection() as conn:
-                conn.execute(
-                    "INSERT OR IGNORE INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
-                    "VALUES (?, ?, ?, '', '', '', '', '', ?, ?)",
-                    (str(job_id), f"discovery://{job_id}", f"discovery://{job_id}", ts, ts),
-                )
+            # Keep the explicit feedback event, but do not invent a source URL
+            # merely to satisfy the legacy profile_jobs foreign key.
+            return
         # Ensure profile_job record exists.
         try:
             previous_status = self.get_profile_job(profile_id, job_id).get("status", "new")

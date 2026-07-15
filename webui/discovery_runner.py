@@ -34,6 +34,7 @@ from webui.discovery import (
     EVALUATION_POLICY_VERSION,
 )
 from webui.source import BossCdpSource, SourceOutcome, _input_hash as _source_input_hash
+from webui.workbench import normalize_job_link
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +141,8 @@ class DiscoveryRunner:
             self.store.update_discovery_run(run_id, status=STATUS_CREATED)
 
         cancel_event = self._register_run(run_id)
+        if self.source is not None and hasattr(self.source, "cancel_event"):
+            self.source.cancel_event = cancel_event
         try:
             self._execute_stages(run_id, cancel_event)
         except DiscoveryError:
@@ -316,12 +319,17 @@ class DiscoveryRunner:
             jobs = self._read_list_jobs(item)
             for job in jobs:
                 job_id = str(job.get("job_id") or job.get("id") or "")
+                source_url = normalize_job_link(job.get("source_url") or job.get("url") or "")
+                if not source_url:
+                    continue
                 if not job_id or job_id in seen_job_ids:
                     continue
                 seen_job_ids.add(job_id)
                 if len(jobs_to_fetch) >= detail_budget:
                     break
-                jobs_to_fetch.append({**job, "_plan_item_id": item["id"]})
+                jobs_to_fetch.append({
+                    **job, "source_url": source_url, "_plan_item_id": item["id"],
+                })
             if len(jobs_to_fetch) >= detail_budget:
                 break
 
@@ -488,8 +496,10 @@ class DiscoveryRunner:
         if self.source is None:
             return False
         job_id = str(job.get("job_id") or job.get("id") or "")
-        if not job_id:
+        source_url = normalize_job_link(job.get("source_url") or job.get("url") or "")
+        if not job_id or not source_url:
             return False
+        job = {**job, "source_url": source_url}
         detail_output_path = str(self.result_dir / f"detail_{run_id}_{job_id}.json")
         self.store.append_discovery_event(
             run_id, "detail_fetch_started", {"job_id": job_id},
@@ -772,13 +782,10 @@ class DiscoveryRunner:
         with self.store._connection() as conn:
             for job in jobs:
                 job_id = str(job.get("job_id") or job.get("id") or uuid.uuid4().hex[:12])
-                source_url = str(job.get("source_url") or job.get("url") or "")
-                # T133: jobs.canonical_url 是 NOT NULL UNIQUE。BOSS 列表可能
-                # 返回没有 source_url 的 job（如推荐流卡片）。旧实现直接 continue，
-                # 导致这些 job 不在 jobs 表中，后续 fetching_details 阶段
-                # save_job_snapshot 因 FOREIGN KEY (job_id) REFERENCES jobs(id)
-                # 失败。为空时用 job_id 构造唯一 canonical_url，保证外键可满足。
-                canonical_url = source_url if source_url else f"boss://job/{job_id}"
+                source_url = normalize_job_link(job.get("source_url") or job.get("url") or "")
+                if not source_url:
+                    continue
+                canonical_url = source_url
                 conn.execute(
                     "INSERT OR IGNORE INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -797,9 +804,10 @@ class DiscoveryRunner:
         job_id = str(job.get("job_id") or job.get("id") or "")
         if not job_id:
             return
-        source_url = str(job.get("source_url") or job.get("url") or "")
-        # T133: 同 _persist_jobs，source_url 为空时用 job_id 构造 canonical_url。
-        canonical_url = source_url if source_url else f"boss://job/{job_id}"
+        source_url = normalize_job_link(job.get("source_url") or job.get("url") or "")
+        if not source_url:
+            return
+        canonical_url = source_url
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         with self.store._connection() as conn:
             existing = conn.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
@@ -902,6 +910,7 @@ class DiscoveryTaskRuntime:
             thread_name_prefix="discovery-runtime",
         )
         self._futures: dict[str, Any] = {}
+        self._runners: dict[str, DiscoveryRunner] = {}
         self._lock = threading.Lock()
         # 构造时收敛 active runs 为 interrupted（进程重启恢复）
         try:
@@ -962,6 +971,7 @@ class DiscoveryTaskRuntime:
         future = self._executor.submit(self._safe_execute, runner, run_id)
         with self._lock:
             self._futures[run_id] = future
+            self._runners[run_id] = runner
 
     def _safe_execute(self, runner: DiscoveryRunner, run_id: str) -> None:
         """Execute run in background, persisting dispatch failures safely."""
@@ -991,6 +1001,9 @@ class DiscoveryTaskRuntime:
                 )
             except Exception:
                 pass
+        finally:
+            with self._lock:
+                self._runners.pop(run_id, None)
 
     def cancel_run(self, run_id: str) -> dict:
         """Request cancellation of a running run.
@@ -998,7 +1011,10 @@ class DiscoveryTaskRuntime:
         Persists cancel_requested_at first; the worker checks before
         each unit of work. Saved completed work remains.
         """
-        runner = self._make_runner()
+        with self._lock:
+            runner = self._runners.get(run_id)
+        if runner is None:
+            runner = self._make_runner()
         return runner.request_cancel(run_id)
 
     def resume_run(self, run_id: str) -> None:

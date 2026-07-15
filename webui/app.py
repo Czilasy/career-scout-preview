@@ -49,6 +49,7 @@ from webui.discovery import (
 )
 from webui.discovery_runner import DiscoveryTaskRuntime as _DiscoveryTaskRuntime
 from webui.source import BossCdpSource as _BossCdpSource
+from webui.process_executor import ArtifactSpec, ScraperExecutor
 from webui import resume as resume_service
 from webui import ai as ai_service
 from webui.screening import (
@@ -139,7 +140,9 @@ class TaskRunner:
         self.python_executable = str(python_executable)
         self.start_tasks = bool(start_tasks)
         self._processes = {}
+        self._cancel_events = {}
         self._process_lock = threading.Lock()
+        self.process_executor = ScraperExecutor()
         self.result_dir.mkdir(parents=True, exist_ok=True)
         self.executor = (
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="boss-task")
@@ -176,6 +179,9 @@ class TaskRunner:
             raise ValueError(f"只能取消等待中或运行中的任务，当前状态: {task['status']}")
         with self._process_lock:
             process = self._processes.get(task_id)
+            cancel_event = self._cancel_events.get(task_id)
+        if cancel_event is not None:
+            cancel_event.set()
         if process is not None:
             process.terminate()
         self.store.append_log(task_id, "用户取消任务")
@@ -240,7 +246,6 @@ class TaskRunner:
                 raise ValueError("详情产物必须是 JSON list")
 
     def _execute(self, task_id):
-        process = None
         try:
             if self.store.get_task(task_id)["status"] != "queued":
                 return
@@ -248,34 +253,36 @@ class TaskRunner:
             task = self.store.get_task(task_id)
             command = self.build_command(task)
             self.store.append_log(task_id, "任务开始")
-            process = subprocess.Popen(
-                command,
-                cwd=PROJECT_ROOT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                env=_env(),
-            )
+            cancel_event = threading.Event()
             with self._process_lock:
-                self._processes[task_id] = process
-            if self.store.get_task(task_id)["status"] == "interrupted":
-                process.terminate()
-            for line in process.stdout or []:
-                self.store.append_log(task_id, line.rstrip())
-            returncode = process.wait()
+                self._cancel_events[task_id] = cancel_event
+            artifacts = []
+            if task["kind"] == "scrape":
+                artifacts = [
+                    ArtifactSpec(task["output_path"], root=self.result_dir),
+                    ArtifactSpec(task["detail_output_path"], root=self.result_dir, required=False),
+                ]
+            result = self.process_executor.execute(
+                command, timeout_seconds=600, cwd=PROJECT_ROOT, env=_env(),
+                cancel_event=cancel_event, artifacts=artifacts,
+                on_output=lambda chunk: [
+                    self.store.append_log(task_id, line)
+                    for line in chunk.splitlines() if line.strip()
+                ],
+            )
             if self.store.get_task(task_id)["status"] == "interrupted":
                 return
-            if returncode == 0:
+            if result.ok:
                 self.validate_artifacts(task)
                 self.store.append_log(task_id, "任务完成")
                 self.store.update_task(task_id, "succeeded", returncode=0)
             else:
-                message = f"子进程返回码 {returncode}"
+                message = f"抓取执行失败: {result.failure_code or 'process_failed'}"
                 self.store.append_log(task_id, message)
-                self.store.update_task(task_id, "failed", returncode=returncode, error=message)
+                self.store.update_task(
+                    task_id, "failed", returncode=result.returncode if result.returncode is not None else -1,
+                    error=message,
+                )
         except Exception as exc:
             try:
                 self.store.append_log(task_id, f"任务失败：{exc}")
@@ -285,6 +292,7 @@ class TaskRunner:
         finally:
             with self._process_lock:
                 self._processes.pop(task_id, None)
+                self._cancel_events.pop(task_id, None)
 
 
 class WorkbenchRunner(TaskRunner):
@@ -441,24 +449,29 @@ class WorkbenchRunner(TaskRunner):
                 return
             self.store.update_run_query(query["id"], status="running")
             try:
-                process = subprocess.Popen(
-                    self._query_command(query), cwd=PROJECT_ROOT,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                    encoding="utf-8", errors="replace", env=_env(),
-                )
+                cancel_event = threading.Event()
                 with self._process_lock:
-                    self._processes[run_id] = process
+                    self._cancel_events[run_id] = cancel_event
                 seen_detail_ids = set()
-                while getattr(process, "poll", lambda: 0)() is None:
+
+                def stream_progress():
                     persisted = self._stream_new_details(run_id, query, seen_detail_ids)
                     if persisted:
                         current = self.store.get_search_run(run_id)
                         self.store.update_search_run(
                             run_id, completed_jd_count=current["completed_jd_count"] + persisted,
                         )
-                    time.sleep(0.5)
-                if process.wait() != 0:
-                    raise ValueError("抓取器执行失败")
+                result = self.process_executor.execute(
+                    self._query_command(query), timeout_seconds=600,
+                    cwd=PROJECT_ROOT, env=_env(), cancel_event=cancel_event,
+                    on_poll=stream_progress,
+                    artifacts=[
+                        ArtifactSpec(query["list_output_path"], root=self.result_dir),
+                        ArtifactSpec(query["detail_output_path"], root=self.result_dir, required=False),
+                    ],
+                )
+                if not result.ok:
+                    raise ValueError(result.failure_code or "抓取器执行失败")
                 jobs, details = self._read_query_artifacts(run_id, query)
                 persisted = self._stream_new_details(run_id, query, seen_detail_ids)
                 self.store.update_run_query(query["id"], status="succeeded", counts={"completed_jd": persisted})
@@ -473,6 +486,7 @@ class WorkbenchRunner(TaskRunner):
             finally:
                 with self._process_lock:
                     self._processes.pop(run_id, None)
+                    self._cancel_events.pop(run_id, None)
         if self.store.get_search_run(run_id)["status"] != "interrupted":
             self._finalize_run(run_id)
         self.store.cleanup_expired_jobs(days=30)
@@ -505,6 +519,9 @@ class WorkbenchRunner(TaskRunner):
             raise ValueError(f"只能取消等待中或运行中的运行，当前状态: {run['status']}")
         with self._process_lock:
             process = self._processes.get(run_id)
+            cancel_event = self._cancel_events.get(run_id)
+        if cancel_event is not None:
+            cancel_event.set()
         if process is not None:
             process.terminate()
         return self.store.update_search_run(run_id, status="interrupted")
@@ -631,6 +648,7 @@ def create_app(config=None):
         try:
             return _BossCdpSource(
                 python_executable=app.config["PYTHON_EXECUTABLE"],
+                artifact_root=app.config["RESULT_DIR"],
             )
         except Exception:
             return None
@@ -739,25 +757,16 @@ def create_app(config=None):
 
     @app.route("/api/check")
     def check():
-        try:
-            completed = subprocess.run(
-                [app.config["PYTHON_EXECUTABLE"], str(SCRAPER), "--check"],
-                cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-                env=_env(),
-            )
-            output = (completed.stdout or "") + (completed.stderr or "")
-            return jsonify({
-                "connected": completed.returncode == 0,
-                "returncode": completed.returncode,
-                "output": output,
-            })
-        except subprocess.TimeoutExpired:
-            return jsonify({"connected": False, "returncode": -1, "output": "环境检查超时"})
+        result = ScraperExecutor(max_output_bytes=64_000).execute(
+            [app.config["PYTHON_EXECUTABLE"], str(SCRAPER), "--check"],
+            cwd=PROJECT_ROOT, timeout_seconds=30, env=_env(),
+        )
+        output = "环境检查超时" if result.failure_code == "process_timeout" else result.output_tail
+        return jsonify({
+            "connected": result.ok,
+            "returncode": result.returncode if result.returncode is not None else -1,
+            "output": output,
+        })
 
     @app.route("/api/profile", methods=["GET", "PUT"])
     def profile():

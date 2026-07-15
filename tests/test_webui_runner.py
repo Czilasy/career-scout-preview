@@ -24,6 +24,26 @@ class FakeProcess:
         self.terminated = True
 
 
+class FakeExecutionExecutor:
+    def __init__(self, *, callback=None, returncode=0, failure_code=None):
+        self.callback = callback
+        self.returncode = returncode
+        self.failure_code = failure_code
+        self.calls = []
+
+    def execute(self, command, **kwargs):
+        from types import SimpleNamespace
+        self.calls.append((command, kwargs))
+        if self.callback:
+            self.callback(command)
+        return SimpleNamespace(
+            ok=self.returncode == 0 and self.failure_code is None,
+            returncode=self.returncode,
+            failure_code=self.failure_code,
+            output_tail="",
+        )
+
+
 class TaskRunnerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -67,8 +87,8 @@ class TaskRunnerTests(unittest.TestCase):
 
     def test_execute_marks_returncode_zero_without_artifact_failed(self):
         task = self.runner.create_scrape(self.search, self.profile)
-        with mock.patch("webui.app.subprocess.Popen", return_value=FakeProcess(0)):
-            self.runner._execute(task["id"])
+        self.runner.process_executor = FakeExecutionExecutor()
+        self.runner._execute(task["id"])
 
         stored = self.store.get_task(task["id"])
         self.assertEqual(stored["status"], "failed")
@@ -256,10 +276,11 @@ class WorkbenchRunnerTests(unittest.TestCase):
             detail.write_text(json.dumps([{"job_id": "safe", "jd": "完整 JD"}]), encoding="utf-8")
             return FakeProcess(0)
 
-        with mock.patch("webui.app.subprocess.Popen", side_effect=write_artifacts) as popen:
-            self.runner._execute_search_run(run["id"])
+        executor = FakeExecutionExecutor(callback=write_artifacts)
+        self.runner.process_executor = executor
+        self.runner._execute_search_run(run["id"])
 
-        command = popen.call_args.args[0]
+        command = executor.calls[0][0]
         self.assertEqual(command[command.index("--max-details") + 1], "60")
         self.assertEqual(self.store.get_search_run(run["id"])["status"], "succeeded")
         jobs = self.store.list_profile_jobs(self.profile["id"], run_id=run["id"])

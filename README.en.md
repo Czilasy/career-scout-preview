@@ -46,6 +46,8 @@ Right after scraping you get salary ranges, experience requirements, top skill k
 
 ## AI Job Workbench
 
+Workbench scraper tasks run through one controlled executor: every task has a total timeout and traceable failure code, cancellation terminates the child process tree, logs and artifacts are size-bounded, and artifacts must stay inside the task result directory. Job discovery only sends jobs with a valid BOSS HTTPS detail URL into detail fetching, AI assessment, and formal results.
+
 After installing dependencies, start the local workspace:
 
 ```bash

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 
 from webui.store import TaskStore
@@ -123,6 +124,32 @@ class Migration011Tests(_StoreTestCase):
         TaskStore(self._tmp.name)
         TaskStore(self._tmp.name)
         self.assertEqual(self._schema_version(), 13)
+
+    def test_connections_use_wal_and_busy_timeout(self):
+        with self.store._connection() as conn:
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        self.assertEqual(journal_mode.lower(), "wal")
+        self.assertGreaterEqual(busy_timeout, 10_000)
+
+    def test_concurrent_initialization_is_serialized(self):
+        barrier = threading.Barrier(2)
+        errors = []
+
+        def initialize():
+            try:
+                barrier.wait(timeout=2)
+                TaskStore(self._tmp.name)
+            except Exception as exc:  # captured for assertion in the test thread
+                errors.append(exc)
+
+        threads = [threading.Thread(target=initialize) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertEqual(errors, [])
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
 
     def test_unique_resume_version_constraint(self):
         pid, rid = _make_profile_and_resume(self.store)
@@ -658,6 +685,17 @@ class LegacyInterestTrashCompatTests(_StoreTestCase):
         )
         pj = self.store.get_profile_job(pid, "job-int-1")
         self.assertEqual(pj["status"], "interested")
+
+    def test_feedback_for_unknown_job_does_not_create_fake_source(self):
+        pid, _ = _make_profile_and_resume(self.store)
+        self.store.create_discovery_feedback(
+            profile_id=pid, target_type="job", action="interested",
+            job_id="unknown-job", run_id="run-x",
+        )
+        with self.store._connection() as conn:
+            job = conn.execute("SELECT * FROM jobs WHERE id='unknown-job'").fetchone()
+        self.assertIsNone(job)
+        self.assertEqual(len(self.store.list_discovery_feedback(pid)), 1)
 
     def test_discovery_feedback_cross_run_visible(self):
         """T061: discovery feedback state is visible across runs."""
