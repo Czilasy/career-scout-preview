@@ -8,6 +8,7 @@ decides task status.
 
 from __future__ import annotations
 
+import copy
 import json
 from urllib.parse import urlparse
 
@@ -15,6 +16,11 @@ import requests
 import keyring
 
 from scripts import boss_cdp_raw as boss
+from webui.candidate import (
+    canonicalize_resume_text_v2,
+    redact_pii,
+    resolve_evidence_quote,
+)
 
 
 KEYRING_SERVICE = "boss-workbench"
@@ -655,3 +661,241 @@ def is_ai_available(settings, credential_ref, api_key) -> bool:
     if not isinstance(api_key, str) or not api_key.strip():
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# T099: DiscoveryAIProvider — feature 004 real AI provider
+# ---------------------------------------------------------------------------
+
+# Feature-safe error code mapping (ai_* prefix per openapi.yaml Error schema).
+# Low-level call_ai raises AISecurityError with codes like "timeout";
+# DiscoveryAIProvider re-raises with feature-safe codes like "ai_timeout".
+_PROVIDER_ERROR_MAP = {
+    ERROR_TIMEOUT: "ai_timeout",
+    ERROR_AUTH: "ai_auth_failed",
+    ERROR_NETWORK: "ai_network_error",
+    ERROR_INVALID: "ai_invalid_output",
+}
+
+
+def _map_provider_error(exc: AISecurityError) -> AISecurityError:
+    """Map a low-level AISecurityError to a feature-safe error code."""
+    mapped = _PROVIDER_ERROR_MAP.get(exc.error_code, exc.error_code)
+    return AISecurityError(mapped)
+
+
+class DiscoveryAIProvider:
+    """Feature 004 AI provider for candidate analysis and job assessment.
+
+    Holds only endpoint/model/api_key. Does not read or write TaskStore.
+    Maps low-level AI errors to feature-safe error codes (ai_* prefix).
+    Allows up to two corrective retries for a structurally invalid response.
+    Never persists or returns raw model responses, prompts or API keys.
+    """
+
+    def __init__(self, endpoint: str, model: str, api_key: str):
+        self.endpoint = endpoint
+        self.model = model
+        self.api_key = api_key
+
+    # -- Candidate analysis v2 (T106: locator enrichment) --
+
+    def analyze(self, *, resume_text: str) -> dict:
+        """Call AI to analyze a resume and return a v2 candidate response.
+
+        Constructs the v2 prompt, calls call_ai, maps errors to feature-safe
+        codes, and allows up to two corrective retries for structural failures.
+
+        T106 v2 locator enrichment:
+        - Canonicalizes resume text (Unicode code-point offsets).
+        - For each evidence, resolves ``source_quote`` to a program-generated
+          ``source_locator`` via ``resolve_evidence_quote``.
+        - Ignores any model-provided ``source_locator``.
+        - Derives ``safe_excerpt`` locally from the quote (redacted).
+        - If any quote cannot be resolved (not_found / ambiguous / sensitive),
+          the entire response is treated as structurally invalid — no partial
+          ready is returned.
+        - Does not persist the raw response.
+        """
+        messages = self._build_analyze_messages(resume_text)
+        canonical = canonicalize_resume_text_v2(resume_text)
+        for attempt in range(3):
+            try:
+                response = call_ai(
+                    self.endpoint, self.api_key, messages, model=self.model,
+                    timeout=120,
+                )
+            except AISecurityError as exc:
+                raise _map_provider_error(exc) from None
+            if not self._is_structurally_valid_v2(response):
+                if attempt < 2:
+                    continue
+                raise AISecurityError("ai_invalid_output") from None
+            # v2 locator enrichment
+            enriched = self._enrich_v2_locators(response, canonical)
+            if enriched is None:
+                # locator 失败 → 结构性失败 → 触发重试
+                if attempt < 2:
+                    continue
+                raise AISecurityError("ai_invalid_output") from None
+            return enriched
+        # Defensive: loop exited without return or raise
+        raise AISecurityError("ai_invalid_output") from None
+
+    @staticmethod
+    def _enrich_v2_locators(response: dict, canonical_text: str) -> dict | None:
+        """Enrich a v2 response with program-generated locators.
+
+        Returns a deep-copied enriched dict, or ``None`` if any quote cannot
+        be resolved. Never mutates the original response.
+        """
+        try:
+            result = copy.deepcopy(response)
+        except Exception:
+            return None
+        evidence_list = result.get("evidence")
+        if not isinstance(evidence_list, list):
+            return None
+        for ev in evidence_list:
+            if not isinstance(ev, dict):
+                return None
+            quote = ev.get("source_quote")
+            if not isinstance(quote, str) or not quote:
+                return None
+            try:
+                locator = resolve_evidence_quote(quote, canonical_text)
+            except ValueError:
+                return None
+            # Overwrite any model-provided locator with program locator
+            ev["source_locator"] = locator
+            # Derive safe_excerpt locally (redacted)
+            ev["safe_excerpt"] = redact_pii(quote)
+        return result
+
+    # -- Job-direction assessment v1 (T114) --
+
+    def assess_job(self, *, candidate_summary: dict, direction: dict,
+                   evidence: list, job_snapshot: dict) -> dict:
+        """Call AI to assess one job against one direction.
+
+        Constructs the v1 assessment prompt with sanitized input, calls
+        call_ai, and maps errors to feature-safe codes.
+
+        T114: 允许一次纠正性重试（结构性失败时）。第二次仍失败抛
+        AISecurityError("ai_invalid_output")。
+        """
+        messages = self._build_assess_messages(
+            candidate_summary, direction, evidence, job_snapshot,
+        )
+        for attempt in range(2):
+            try:
+                response = call_ai(
+                    self.endpoint, self.api_key, messages, model=self.model,
+                )
+            except AISecurityError as exc:
+                raise _map_provider_error(exc) from None
+            if self._is_structurally_valid_assessment(response):
+                return response
+            if attempt == 0:
+                continue
+            raise AISecurityError("ai_invalid_output") from None
+        raise AISecurityError("ai_invalid_output") from None
+
+    @staticmethod
+    def _is_structurally_valid_assessment(response) -> bool:
+        """Return True iff response has the minimal v1 assessment structure."""
+        if not isinstance(response, dict):
+            return False
+        dims = response.get("dimensions")
+        if not isinstance(dims, dict):
+            return False
+        required = {"direction_alignment", "skill_coverage", "experience_match", "industry_relevance"}
+        if not required.issubset(dims.keys()):
+            return False
+        for name in required:
+            item = dims[name]
+            if not isinstance(item, dict):
+                return False
+            if "score" not in item:
+                return False
+        if "match_score" not in response:
+            return False
+        if "confidence" not in response:
+            return False
+        if "proposed_band" not in response:
+            return False
+        return True
+
+    # -- Prompt construction (T106/T114 will refine) --
+
+    @staticmethod
+    def _build_analyze_messages(resume_text: str) -> list:
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "你是候选人分析助手。根据简历返回JSON："
+                    "summary{headline(str),experience_level(str),domains[list[str]],strengths[list[str]]}，"
+                    "evidence[list[{client_ref(str),type(str),normalized_value(str),"
+                    "source_quote(str),assertion_type(str),confidence(int 0-100)}]]，"
+                    "unknowns[list[{field(str),message(str)}]]，"
+                    "directions[list[{client_ref(str),name(str),type(str),"
+                    "rationale(str),evidence_refs[list[str]],gaps[list[str]],"
+                    "confidence(int 0-100),default_enabled(bool),"
+                    "search_terms[list[str] 1-3个]}]]。"
+                    "evidence.type 仅允许：skill/responsibility/project/industry/"
+                    "seniority/education/achievement/other。"
+                    "evidence.assertion_type 仅允许：explicit/inferred。"
+                    "unknowns.field 仅允许：current_city/min_salary/career_intent/other。"
+                    "directions.type 仅允许：core/adjacent/growth。"
+                    "directions 最多 5 个。"
+                    "source_quote 必须是简历中的精确子串，且在简历中唯一出现。"
+                    "不要用单个词作为 quote（如 'Python'），必须包含足够上下文使其唯一。"
+                    "禁止编造经历、学历、薪资、证书。"
+                ),
+            },
+            {"role": "user", "content": resume_text},
+        ]
+
+    @staticmethod
+    def _build_assess_messages(candidate_summary, direction, evidence, job_snapshot):
+        payload = {
+            "candidate_summary": candidate_summary,
+            "direction": direction,
+            "evidence": evidence,
+            "job": job_snapshot,
+        }
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "你是岗位评估助手。根据候选人证据与岗位详情返回JSON："
+                    "dimensions{direction_alignment,skill_coverage,"
+                    "experience_match,industry_relevance}"
+                    "{score,candidate_evidence_refs,job_evidence_refs}，"
+                    "match_score,confidence,gaps[{text,job_evidence_refs}],"
+                    "proposed_band。score 必须 0-100。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(payload, ensure_ascii=False),
+            },
+        ]
+
+    # -- Minimal structural check (T105/T107 will strengthen) --
+
+    @staticmethod
+    def _is_structurally_valid_v2(response) -> bool:
+        """Return True iff response has the minimal v2 top-level structure."""
+        if not isinstance(response, dict):
+            return False
+        if not isinstance(response.get("summary"), dict):
+            return False
+        if not isinstance(response.get("evidence"), list):
+            return False
+        if not isinstance(response.get("unknowns"), list):
+            return False
+        if not isinstance(response.get("directions"), list):
+            return False
+        return True

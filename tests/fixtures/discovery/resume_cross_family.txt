@@ -1,0 +1,25 @@
+姓名：李四（虚构样本，仅用于测试）
+联系方式：[REDACTED-PII-PHONE]
+证件号：[REDACTED-PII-ID]
+
+求职意向：数据相关岗位 / 后端岗位均可
+
+工作经历：
+2021.03 - 至今 MNO数据科技 数据工程师
+- 搭建公司数据仓库，使用 Spark、Hive、Airflow
+- 设计实时数仓，Flink 消费 Kafka 数据落地 ClickHouse
+- 编写 dbt 模型规范，覆盖核心业务域 12 个
+
+2018.07 - 2021.02 PQR互联网 后端开发
+- 维护支付服务，使用 Python、Django
+- 实现支付对账自动化，对账差异率从 0.3% 降至 0.01%
+
+技能：
+- 数据：Spark、Flink、Hive、ClickHouse、dbt
+- 后端：Python、Django、MySQL、Redis
+- 工具：Airflow、Docker、Kubernetes
+
+教育背景：
+2014.09 - 2018.06 某大学 软件工程 本科
+
+项目：实时风控数据管道（2022）- Flink + Kafka 处理风控事件 5000 QPS

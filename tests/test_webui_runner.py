@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from webui.app import TaskRunner, WorkbenchRunner
+from webui.app import ScreeningRunner, TaskRunner, WorkbenchRunner
 from webui.core import normalize_profile, validate_search_params
 from webui.store import TaskStore
 
@@ -92,6 +92,24 @@ class TaskRunnerTests(unittest.TestCase):
 
         self.assertTrue(process.terminated)
         self.assertEqual(cancelled["status"], "interrupted")
+
+
+class ScreeningRunnerTests(unittest.TestCase):
+    def test_unexpected_worker_error_marks_active_run_failed_safely(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(pathlib.Path(tmp) / "webui.db")
+            run = store.create_screening_run({})
+            runner = ScreeningRunner(store, start_tasks=False)
+
+            def explode(*_args, **_kwargs):
+                raise RuntimeError("SECRET provider payload")
+
+            runner.submit(run["id"], explode)
+            final = store.get_screening_run(run["id"])
+
+        self.assertEqual(final["status"], "failed")
+        self.assertEqual(final["error_code"], "execution_failed")
+        self.assertNotIn("SECRET", json.dumps(final))
 
 
 class WorkbenchRunnerTests(unittest.TestCase):

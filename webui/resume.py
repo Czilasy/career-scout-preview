@@ -172,4 +172,8 @@ def delete_resume(resume_id, store, resume_dir=None) -> bool:
         else:
             if file_path.is_file():
                 file_path.unlink()
-    return store.delete_resume(resume_id)
+    store.delete_resume(resume_id)
+    # CR-1: cascade-delete derived evidence/analyses/directions (FR-098).
+    if hasattr(store, "delete_resume_derived_evidence"):
+        store.delete_resume_derived_evidence(resume_id)
+    return True

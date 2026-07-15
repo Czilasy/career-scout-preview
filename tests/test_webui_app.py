@@ -57,6 +57,33 @@ class WebUIAppTests(unittest.TestCase):
         self.assertEqual(stages["不需要融资"], "808")
         self.assertIn({"label": "上海", "value": "上海"}, payload["cities"])
 
+    def test_production_session_uses_httponly_cookie_without_json_token(self):
+        root = pathlib.Path(self.temp.name) / "production-session"
+        app = create_app({
+            "TESTING": False,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "RESUME_DIR": str(root / "resumes"),
+        })
+        client = app.test_client()
+
+        session = client.get("/api/session")
+
+        self.assertEqual(session.get_json(), {"status": "ok"})
+        cookie = session.headers.get("Set-Cookie", "")
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("SameSite=Strict", cookie)
+        authenticated = client.post(
+            "/api/profiles", json={"name": "cookie-session", "confirmed_fields": {}},
+        )
+        self.assertNotEqual(authenticated.status_code, 403)
+
+        without_session = app.test_client().post(
+            "/api/profiles", json={"name": "blocked", "confirmed_fields": {}},
+        )
+        self.assertEqual(without_session.status_code, 403)
+
     def test_check_uses_returncode_not_log_keywords(self):
         completed = type("Completed", (), {
             "returncode": 1,
@@ -157,7 +184,19 @@ class WebUIAppTests(unittest.TestCase):
         response = self.client.post("/api/tasks", json={"keyword": "Python", "salary": "999"})
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("salary", response.get_json()["error"])
+        body = response.get_json()
+        self.assertEqual(body["error_code"], "invalid_request")
+        self.assertIn("salary", body["user_message"])
+        self.assertNotIn("error", body)
+
+    def test_missing_task_uses_safe_error_contract(self):
+        response = self.client.get("/api/tasks/missing-task")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            response.get_json(),
+            {"error_code": "not_found", "user_message": "任务不存在"},
+        )
 
     def test_mutations_require_token_and_reject_untrusted_hosts_and_origins(self):
         anonymous = self.app.test_client()
@@ -207,9 +246,13 @@ class WebUIAppTests(unittest.TestCase):
         self.assertIn("/api/ai-settings", html)
         # Responsive: narrow-screen drawer
         self.assertIn("@media (max-width: 720px)", html)
-        # No external CDN, no AI scores, no auto-apply
+        # No external CDN, no raw AI scores/reasons, no auto-apply.
+        # Note: match_score is approved by spec 004 for program-validated
+        # discovery result cards (FR-064); raw AI fields stay excluded.
         self.assertNotIn("cdn.jsdelivr.net", html)
-        self.assertNotIn("match_score", html)
+        self.assertNotIn("ai_rank", html)
+        self.assertNotIn("match_reason", html)
+        self.assertNotIn("ai_score", html)
         self.assertNotIn("/api/apply", html)
         self.assertNotIn("/api/export-csv", html)
 

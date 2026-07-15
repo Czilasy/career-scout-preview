@@ -1,0 +1,24 @@
+姓名：周八（虚构样本，仅用于测试）
+联系方式：[REDACTED-PII-PHONE]
+证件号：[REDACTED-PII-ID]
+
+工作经历：
+2022.06 - 至今 HIJ金融科技 风控算法工程师
+- 使用 Python、XGBoost 构建信用评分模型
+- 设计反欺诈规则引擎，覆盖 200+ 风险特征
+
+2019.07 - 2022.05 KLM电商 推荐算法工程师
+- 使用 TensorFlow 构建商品推荐模型，CTR 提升 15%
+- 维护 Spark 离线特征管道
+
+2016.07 - 2019.06 NOP广告 数据分析师
+- SQL 提取广告投放数据
+- Tableau 制作日报
+
+技能：
+- 算法：XGBoost、TensorFlow、scikit-learn
+- 工程：Python、Spark、SQL
+- 工具：Airflow、Docker
+
+教育背景：
+2012.09 - 2016.06 某大学 统计学 本科

@@ -30,6 +30,9 @@ htmlcov/
 
 # Project-generated local files
 docs/
+debug.log
+tests/regression_*.txt
+tests/fixtures/discovery/*_result.json
 
 # Local skill tooling config (baoyu-image-gen etc.)
 .baoyu-skills/

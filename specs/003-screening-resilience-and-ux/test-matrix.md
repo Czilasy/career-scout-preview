@@ -76,3 +76,19 @@ npx --yes @playwright/cli@0.1.17 -s=phase23 open http://127.0.0.1:8765/screening
 3. 两次验证用复杂属性选择器读取文本时发生 CLI 参数转义错误；随后的直接恢复点击成功。测试矩阵只记录经实际交互确认的结果。
 
 所有结果都是**模拟冒烟通过**，不构成真实 BOSS 来源、真实登录态或正式接口验证。
+
+## 2026-07-14 运行时与生产页面复验
+
+- 自动化回归：来源分页断点实现后的最终执行 `python -m pytest -q` 为 763 passed（81.08 秒），覆盖后台 worker 最终异常保护、取消竞态、保存产物与来源分页续处理、重启收敛、Cookie 会话和前端契约。
+- 模拟验收：`python tests/browser_acceptance.py` 全部通过；`python -m unittest tests.test_screening_prototype -v` 为 10 passed。以上仍只属于模拟/API 合同验收。
+- 生产页面真实浏览器：Playwright CLI 实际打开隔离 Flask 服务的 `/` 页面。1366×768 下 `scrollWidth = 1366`，符合区 6 条中有 5 条完整位于视口；720×768 下 `scrollWidth = 720`，五个区域入口均实际点击成功，待核验的重试和人工分流按钮可见。
+- 浏览器控制台：首次发现缺少 `/favicon.ico` 导致 1 条 404；改为内联 favicon 后重新开启浏览器，结果为 0 errors、0 warnings。
+- 真实来源：`python scripts/boss_cdp_raw.py --check --cdp-port 9222` 未通过，阻断点为 `127.0.0.1:9222` 拒绝连接，当前没有可用的专用 CDP 登录态。因此没有发起真实职位抓取，结果标记为**真实来源阻断**，未复制主浏览器资料、未尝试规避登录或反自动化限制。
+
+### 2026-07-14 后续真实来源复验
+
+- 使用 `--setup-chrome --no-wait-login` 启动项目自己的隔离 Chrome profile；未使用 `--copy-login-state`，未读取或复制主 Chrome 资料。
+- `--check --cdp-port 9222` 随后通过，识别到 Chrome 150 且 BOSS 登录状态有效。
+- `--smoke-test --cdp-port 9222` 真实 API smoke 通过；该命令不写结果文件。
+- 真实分页断点：Java / 上海，第 1 页抓回 30 条并写入 `last_completed_page = 1`；随后对同一临时产物执行 `--pages 2 --start-page 2 --no-detail`，第 2 页返回 30 条、新增 29 条。
+- 最终产物为 `last_completed_page = 2`、`jobs = 59`、唯一 `job_id = 59`。结果标记为**真实来源冒烟通过 + 来源断点续抓通过**。

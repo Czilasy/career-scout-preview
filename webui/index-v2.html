@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%2379c497'/%3E%3C/svg%3E">
   <title>AI 求职工作台 · v2</title>
   <style>
     :root, html[data-theme="dark"] {
@@ -360,7 +361,6 @@
   </div>
 
   <script>
-    let token = "";
     let currentProfileId = "";
     let currentRunId = "";
     let lastFeedbackJobId = "";
@@ -375,17 +375,15 @@
     };
 
     async function api(path, opts = {}) {
-      const headers = { "X-Boss-Token": token, ...opts.headers };
+      const headers = { ...opts.headers };
       if (opts.json) { headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.json); }
-      const resp = await fetch(path, { ...opts, headers });
+      const resp = await fetch(path, { ...opts, headers, credentials: "same-origin" });
       if (resp.status === 403) { alert("会话已过期，请刷新页面"); throw new Error("forbidden"); }
       return resp;
     }
 
     async function init() {
-      const resp = await fetch(API.session);
-      const data = await resp.json();
-      token = data.token;
+      await fetch(API.session, { credentials: "same-origin" });
       await loadProfiles();
       await loadAiSettings();
       await checkConnection();
@@ -477,8 +475,8 @@
       const formData = new FormData();
       formData.append("file", fileInput.files[0]);
       formData.append("ai_consent", String(document.getElementById("resumeAiConsent").checked));
-      const resp = await fetch(`/api/profiles/${currentProfileId}/resume`, {
-        method: "POST", body: formData, headers: { "X-Boss-Token": token },
+      const resp = await api(`/api/profiles/${currentProfileId}/resume`, {
+        method: "POST", body: formData,
       });
       if (resp.ok) {
         const data = await resp.json();
@@ -563,7 +561,11 @@
         currentRunId = run.id;
         localStorage.setItem("boss-workbench-run", run.id);
         document.getElementById("cancelBtn").style.display = "inline-block";
-        document.getElementById("searchInfo").innerHTML = `搜索运行中… <strong>${run.total_detail_budget}</strong> 条预算`;
+        const _si = document.getElementById("searchInfo");
+        _si.textContent = "";
+        _si.appendChild(document.createTextNode("搜索运行中… "));
+        const _b1 = document.createElement("strong"); _b1.textContent = run.total_detail_budget; _si.appendChild(_b1);
+        _si.appendChild(document.createTextNode(" 条预算"));
         showSkeletons();
         startPolling(run.id);
         loadHistory();
@@ -586,8 +588,14 @@
           renderCards(data.jobs || []);
           const runResp = await api(`${API.searchRuns}/${runId}`);
           const run = await runResp.json();
-          document.getElementById("searchInfo").innerHTML =
-            `状态：<strong>${run.status}</strong> · 已发现 <strong>${run.discovered_count || 0}</strong> · 已完成 <strong>${run.completed_jd_count || 0}</strong>`;
+          const _si2 = document.getElementById("searchInfo");
+          _si2.textContent = "";
+          _si2.appendChild(document.createTextNode("状态："));
+          const _b2 = document.createElement("strong"); _b2.textContent = run.status; _si2.appendChild(_b2);
+          _si2.appendChild(document.createTextNode(" · 已发现 "));
+          const _b3 = document.createElement("strong"); _b3.textContent = run.discovered_count || 0; _si2.appendChild(_b3);
+          _si2.appendChild(document.createTextNode(" · 已完成 "));
+          const _b4 = document.createElement("strong"); _b4.textContent = run.completed_jd_count || 0; _si2.appendChild(_b4);
           document.getElementById("statFound").textContent = run.discovered_count || 0;
           if (["succeeded","partial","failed","interrupted"].includes(run.status)) {
             stopPolling();

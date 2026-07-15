@@ -6,6 +6,8 @@ import json
 import pathlib
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 from datetime import datetime, timedelta, timezone
@@ -134,6 +136,90 @@ class ScreeningResilienceAPITests(unittest.TestCase):
         self.assertEqual(response.get_json()["status"], "interrupted")
         self.assertEqual(len(self.store.get_screening_results(run["id"])), 1)
 
+    def test_resume_uses_saved_artifact_and_skips_already_processed_jobs(self):
+        jobs = [
+            sample_screening_job(job_id="saved"),
+            sample_screening_job(job_id="remaining"),
+        ]
+        run = self.store.create_screening_run(
+            {}, execution={"keyword": "Python", "pages": 1},
+        )
+        self._write_artifact(run["id"], jobs)
+        self.store.update_screening_run_status(run["id"], "running")
+        self.store.add_screening_result(run["id"], "saved", "match")
+        self.store.update_screening_run_status(
+            run["id"], "interrupted", source_count=2,
+            match_count=1, processed_count=1, source_cursor=2,
+            error_code="cancelled",
+        )
+
+        partition = {
+            "match": [], "mismatch": [jobs[1]], "pending": [],
+            "pending_failures": {},
+        }
+        with mock.patch("webui.app.execute_first_layer") as execute:
+            with mock.patch("webui.app.partition_jobs", return_value=partition):
+                response = self.client.post(
+                    f"/api/screening/runs/{run['id']}/resume", json={},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        execute.assert_not_called()
+        final = self.store.get_screening_run(run["id"])
+        self.assertEqual(final["status"], "partial")
+        self.assertEqual(final["processed_count"], 2)
+        results = self.store.get_screening_results(run["id"])
+        self.assertEqual(
+            [(item["job_id"], item["verdict"]) for item in results],
+            [("saved", "match"), ("remaining", "mismatch")],
+        )
+
+    def test_resume_continues_from_next_source_page_when_checkpoint_available(self):
+        saved = sample_screening_job(job_id="saved")
+        new_job = sample_screening_job(job_id="new-from-page-2")
+        run = self.store.create_screening_run(
+            {}, execution={"keyword": "Python", "pages": 3},
+        )
+        self.result_dir.mkdir(parents=True, exist_ok=True)
+        artifact = self.result_dir / f"screening_{run['id']}.json"
+        artifact.write_text(json.dumps({
+            "keyword": "Python", "last_completed_page": 1, "jobs": [saved],
+        }, ensure_ascii=False), encoding="utf-8")
+        self.store.update_screening_run_status(run["id"], "running")
+        self.store.add_screening_result(run["id"], "saved", "match")
+        self.store.update_screening_run_status(
+            run["id"], "interrupted", source_count=1,
+            match_count=1, processed_count=1, source_cursor=1,
+            error_code="cancelled",
+        )
+
+        def continue_fetch(*_args, **kwargs):
+            self.assertEqual(kwargs["start_page"], 2)
+            artifact.write_text(json.dumps({
+                "keyword": "Python", "last_completed_page": 3,
+                "jobs": [saved, new_job],
+            }, ensure_ascii=False), encoding="utf-8")
+            return {
+                "jobs": [saved, new_job], "source_count": 2,
+                "status": "running",
+            }
+
+        partition = {
+            "match": [], "mismatch": [new_job], "pending": [],
+            "pending_failures": {},
+        }
+        with mock.patch("webui.app.execute_first_layer", side_effect=continue_fetch) as execute:
+            with mock.patch("webui.app.partition_jobs", return_value=partition):
+                response = self.client.post(
+                    f"/api/screening/runs/{run['id']}/resume", json={},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(execute.call_count, 1)
+        final = self.store.get_screening_run(run["id"])
+        self.assertEqual(final["status"], "succeeded")
+        self.assertEqual(final["processed_count"], 2)
+
     def test_trash_restore_returns_recorded_origin_zone(self):
         job = self.store.save_job(
             "https://www.zhipin.com/job_detail/abc.html", "", "Python", "ACME", "20-30K", "上海", "JD",
@@ -261,6 +347,62 @@ class ScreeningResilienceAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(artifact.exists())
         self.assertFalse(detail_artifact.exists())
+
+
+class ScreeningBackgroundRuntimeTests(unittest.TestCase):
+    def test_runtime_post_returns_202_and_cancel_prevents_late_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            started = threading.Event()
+            release = threading.Event()
+
+            def blocked_fetch(*_args, **_kwargs):
+                started.set()
+                release.wait(timeout=5)
+                return {
+                    "jobs": [sample_screening_job(job_id="late-job")],
+                    "source_count": 1,
+                    "status": "running",
+                }
+
+            app = create_app({
+                "TESTING": True,
+                "START_TASKS": True,
+                "RESULT_DIR": str(root / "results"),
+                "DB_PATH": str(root / "state" / "webui.db"),
+                "PYTHON_EXECUTABLE": sys.executable,
+                "SCREENING_TIMEOUT_SECONDS": 30,
+            })
+            client = app.test_client()
+            token = client.get("/api/session").get_json()["token"]
+            client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+            store = app.config["TASK_STORE"]
+
+            with mock.patch("webui.app.execute_first_layer", side_effect=blocked_fetch):
+                response = client.post(
+                    "/api/screening/runs",
+                    json={"keyword": "Python", "filters": {}},
+                )
+                self.assertEqual(response.status_code, 202)
+                run_id = response.get_json()["run_id"]
+                self.assertTrue(started.wait(timeout=2), "background worker did not start")
+
+                cancelled = client.post(f"/api/screening/runs/{run_id}/cancel")
+                self.assertEqual(cancelled.status_code, 200)
+                self.assertEqual(cancelled.get_json()["status"], "interrupted")
+                release.set()
+
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if run_id not in app.config["SCREENING_RUNNER"]._cancel_events:
+                        break
+                    time.sleep(0.01)
+
+            final = store.get_screening_run(run_id)
+            self.assertEqual(final["status"], "interrupted")
+            self.assertEqual(final["error_code"], "cancelled")
+            self.assertEqual(store.get_screening_results(run_id), [])
+            self.assertEqual(store.list_pending(run_id), [])
 
 
 if __name__ == "__main__":

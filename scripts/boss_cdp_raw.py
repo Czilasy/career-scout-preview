@@ -226,6 +226,11 @@ def load_local_city_map():
     _local_city_map_cache = name_to_code, code_to_name
     return _local_city_map_cache
 
+
+# Backward-compatible aliases for the existing Web UI integration. The
+# source of truth remains the external city_codes.json introduced upstream.
+CITY_MAP, CITY_R = load_local_city_map()
+
 SCALE_MAP = {
     "0-20人": "301", "20-99人": "302", "100-499人": "303",
     "500-999人": "304", "1000-9999人": "305", "10000人以上": "306",
@@ -1074,13 +1079,32 @@ def load_existing_details(input_path=None, detail_output=None, result_dir=DEFAUL
 # 抓取列表
 # ============================================================
 def scrape_list(keyword, city_input, max_pages, filters, output_path,
-                cdp_port=DEFAULT_CDP_PORT, fmt="json", allow_dom_fallback=False):
+                cdp_port=DEFAULT_CDP_PORT, fmt="json", allow_dom_fallback=False,
+                start_page=1):
     city_name, city_code = resolve_city(city_input)
     cdp = CDPSession(cdp_port)
     all_jobs = []
     seen = set()
     if not output_path:
         output_path = default_output_path("jobs")
+    start_page = max(1, int(start_page))
+    last_completed_page = start_page - 1
+    if start_page > 1 and os.path.exists(output_path):
+        try:
+            with open(output_path, encoding="utf-8") as handle:
+                checkpoint = json.load(handle)
+            if checkpoint.get("keyword") == keyword and isinstance(checkpoint.get("jobs"), list):
+                all_jobs = list(checkpoint["jobs"])
+                seen = {
+                    job.get("job_link") or job.get("title", "")
+                    for job in all_jobs if isinstance(job, dict)
+                }
+                last_completed_page = int(
+                    checkpoint.get("last_completed_page", last_completed_page)
+                )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            all_jobs = []
+            seen = set()
 
     # 显示筛选条件
     filter_desc = []
@@ -1146,12 +1170,12 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             }, sid)
 
     try:
-        for pg in range(1, max_pages + 1):
+        for pg in range(start_page, max_pages + 1):
             print(f"--- [{pg}/{max_pages} 页, {len(all_jobs)} 条已抓] ---")
             incr_request()
 
-            # 第一页：导航到搜索页建立 cookie/session
-            if pg == 1:
+            # 本次执行的起始页：先导航到 BOSS 搜索域建立页面 origin/session。
+            if pg == start_page:
                 url = build_search_url(keyword, city_code, pg, filters)
                 cdp.send("Page.navigate", {"url": url}, sid)
                 time.sleep(random.uniform(6, 10))
@@ -1195,6 +1219,16 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
 
             if not jobs:
                 print("  ⚠️ 无数据")
+                last_completed_page = pg
+                if output_path:
+                    flush_jobs(output_path, {
+                        "keyword": keyword,
+                        "city": city_name,
+                        "filters": filters,
+                        "filter_desc": filter_desc,
+                        "scraped_at": datetime.now().isoformat(),
+                        "last_completed_page": last_completed_page,
+                    }, all_jobs)
                 continue
 
             new = 0
@@ -1212,6 +1246,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 print(f"  ✓ {j['title']} | {salary} | {j.get('location','')} | {j.get('boss_name','')}{extra}")
 
             print(f"  本页 {len(jobs)} 条, 新增 {new}, 累计 {len(all_jobs)}")
+            last_completed_page = pg
 
             # 每页抓完就写入文件，异常退出也能保留
             if output_path:
@@ -1221,6 +1256,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                     "filters": filters,
                     "filter_desc": filter_desc,
                     "scraped_at": datetime.now().isoformat(),
+                    "last_completed_page": last_completed_page,
                 }, all_jobs)
 
             if pg < max_pages:
@@ -1249,6 +1285,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             "filters": filters,
             "filter_desc": filter_desc,
             "scraped_at": datetime.now().isoformat(),
+            "last_completed_page": last_completed_page,
         }, all_jobs)
         print(f"已保存: {output_path}")
 
@@ -1264,6 +1301,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             "filters": filters,
             "filter_desc": filter_desc,
             "scraped_at": datetime.now().isoformat(),
+            "last_completed_page": last_completed_page,
         }, [])
 
     return {"keyword": keyword, "city": city_name, "total": len(all_jobs), "jobs": all_jobs}
@@ -1744,8 +1782,181 @@ def run_check(cdp_port=DEFAULT_CDP_PORT):
 # ============================================================
 # --setup-chrome 自动启动
 # ============================================================
+def is_boss_cookie_domain(domain):
+    """Return True only for zhipin.com and its real subdomains."""
+    normalized = str(domain or "").strip().lower().lstrip(".")
+    return normalized == "zhipin.com" or normalized.endswith(".zhipin.com")
+
+
+def normalize_boss_cookie(cookie):
+    """Project a CDP cookie onto the minimal safe import contract."""
+    if not isinstance(cookie, dict) or not is_boss_cookie_domain(cookie.get("domain")):
+        return None
+    name = cookie.get("name")
+    value = cookie.get("value")
+    if not isinstance(name, str) or not name or not isinstance(value, str):
+        return None
+
+    normalized = {
+        "name": name,
+        "value": value,
+        "domain": str(cookie["domain"]),
+        "path": str(cookie.get("path") or "/"),
+    }
+    for field in ("secure", "httpOnly"):
+        if isinstance(cookie.get(field), bool):
+            normalized[field] = cookie[field]
+    if cookie.get("sameSite") in ("Strict", "Lax", "None"):
+        normalized["sameSite"] = cookie["sameSite"]
+    expires = cookie.get("expires")
+    if isinstance(expires, (int, float)) and expires > 0:
+        normalized["expires"] = expires
+    return normalized
+
+
+def _cdp_cookies(session):
+    response = session.send("Storage.getCookies")
+    if response.get("error"):
+        raise RuntimeError("cdp_cookie_read_failed")
+    cookies = response.get("result", {}).get("cookies", [])
+    if not isinstance(cookies, list):
+        raise RuntimeError("cdp_cookie_read_failed")
+    return cookies
+
+
+def _rollback_boss_cookies(target, imported, original):
+    """Restore only the target's BOSS-cookie subset after a failed import."""
+    identities = {}
+    for cookie in imported + original:
+        identities[(cookie["name"], cookie["domain"], cookie["path"])] = cookie
+    try:
+        for name, domain, path in identities:
+            response = target.send("Network.deleteCookies", {
+                "name": name,
+                "domain": domain,
+                "path": path,
+            })
+            if response.get("error"):
+                return False
+        if original:
+            response = target.send("Storage.setCookies", {"cookies": original})
+            if response.get("error"):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def import_boss_session(source_cdp_port, target_cdp_port, authorized=False,
+                        session_factory=CDPSession, login_checker=None,
+                        target_profile_checker=None):
+    """Import only an explicitly authorized BOSS session between CDP browsers.
+
+    Cookie values remain in memory and are never included in the returned result.
+    """
+    if not authorized:
+        return {
+            "status": "blocked",
+            "code": "authorization_required",
+            "imported_count": 0,
+        }
+    if source_cdp_port == target_cdp_port:
+        return {
+            "status": "blocked",
+            "code": "source_target_port_conflict",
+            "imported_count": 0,
+        }
+    profile_checker = target_profile_checker or (
+        lambda port: cdp_port_uses_profile(port, DEFAULT_CDP_DATA_DIR)
+    )
+    try:
+        target_is_dedicated = bool(profile_checker(target_cdp_port))
+    except Exception:
+        target_is_dedicated = False
+    if not target_is_dedicated:
+        return {
+            "status": "blocked",
+            "code": "target_not_dedicated_profile",
+            "imported_count": 0,
+        }
+
+    source = None
+    target = None
+    try:
+        source = session_factory(source_cdp_port)
+        target = session_factory(target_cdp_port)
+        source_cookies = [
+            normalized
+            for cookie in _cdp_cookies(source)
+            if (normalized := normalize_boss_cookie(cookie)) is not None
+        ]
+        target_cookies = [
+            normalized
+            for cookie in _cdp_cookies(target)
+            if (normalized := normalize_boss_cookie(cookie)) is not None
+        ]
+        if not source_cookies:
+            return {"status": "failed", "code": "no_boss_session", "imported_count": 0}
+        try:
+            response = target.send("Storage.setCookies", {"cookies": source_cookies})
+        except Exception:
+            if not _rollback_boss_cookies(target, source_cookies, target_cookies):
+                return {"status": "failed", "code": "session_import_rollback_failed", "imported_count": 0}
+            return {"status": "failed", "code": "session_write_failed", "imported_count": 0}
+        if not isinstance(response, dict) or response.get("error"):
+            if not _rollback_boss_cookies(target, source_cookies, target_cookies):
+                return {"status": "failed", "code": "session_import_rollback_failed", "imported_count": 0}
+            return {"status": "failed", "code": "session_write_failed", "imported_count": 0}
+        checker = login_checker or check_login_state
+        try:
+            verified = bool(checker(target_cdp_port))
+        except Exception:
+            verified = False
+        if not verified:
+            if not _rollback_boss_cookies(target, source_cookies, target_cookies):
+                return {"status": "failed", "code": "session_import_rollback_failed", "imported_count": 0}
+            return {"status": "failed", "code": "session_import_unverified", "imported_count": 0}
+        return {"status": "completed", "code": "ok", "imported_count": len(source_cookies)}
+    except Exception:
+        return {"status": "failed", "code": "session_import_failed", "imported_count": 0}
+    finally:
+        for session in (source, target):
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+
+def run_import_boss_session(source_cdp_port, target_cdp_port, authorized=False):
+    """CLI boundary for a safe, auditable BOSS-only session import."""
+    print("=" * 50)
+    print("  BOSS 专用会话导入")
+    print("=" * 50)
+    if not authorized:
+        result = {"status": "blocked", "code": "authorization_required", "imported_count": 0}
+    elif source_cdp_port is None:
+        result = {"status": "blocked", "code": "source_cdp_port_required", "imported_count": 0}
+    elif source_cdp_port == target_cdp_port:
+        result = {"status": "blocked", "code": "source_target_port_conflict", "imported_count": 0}
+    elif not cdp_port_uses_profile(target_cdp_port, DEFAULT_CDP_DATA_DIR):
+        result = {"status": "blocked", "code": "target_not_dedicated_profile", "imported_count": 0}
+    else:
+        result = import_boss_session(
+            source_cdp_port=source_cdp_port,
+            target_cdp_port=target_cdp_port,
+            authorized=authorized,
+        )
+    print(f"status={result['status']}")
+    print(f"code={result['code']}")
+    print(f"imported_count={result['imported_count']}")
+    return 0 if result["status"] == "completed" else 1
+
+
 def prepare_cdp_profile(copy_login_state=False, reset=False):
     """Prepare an isolated persistent Chrome profile for CDP."""
+    if copy_login_state:
+        raise ValueError("copy_login_state_deprecated")
     cdp_data_dir = DEFAULT_CDP_DATA_DIR
     cdp_default = os.path.join(cdp_data_dir, "Default")
 
@@ -1754,32 +1965,11 @@ def prepare_cdp_profile(copy_login_state=False, reset=False):
 
     os.makedirs(cdp_default, exist_ok=True)
 
-    copied = 0
-    if copy_login_state:
-        default_profile = DEFAULT_PROFILE_DIR
-        default_default = os.path.join(default_profile, "Default")
-        cookie_files = []
-        for rel_dir in ("", "Network"):
-            for name in ("Cookies", "Cookies-journal", "Cookies-wal", "Cookies-shm"):
-                rel_path = os.path.join(rel_dir, name) if rel_dir else name
-                cookie_files.append((os.path.join(default_default, rel_path), os.path.join(cdp_default, rel_path)))
-
-        copy_files = [(os.path.join(default_profile, "Local State"), os.path.join(cdp_data_dir, "Local State"))]
-        copy_files.extend(cookie_files)
-        for src, dst in copy_files:
-            if os.path.exists(src):
-                try:
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
-                    shutil.copy2(src, dst)
-                    copied += 1
-                except Exception as e:
-                    print(f"  ⚠️  复制 {os.path.basename(src)} 失败: {e}")
-
     return {
         "path": cdp_data_dir,
-        "copied": copied,
+        "copied": 0,
         "reset": reset,
-        "copy_login_state": copy_login_state,
+        "copy_login_state": False,
     }
 
 
@@ -1934,6 +2124,42 @@ def stop_cdp_chrome(cdp_data_dir):
     return len(pids)
 
 
+def close_cdp_chrome(cdp_port=DEFAULT_CDP_PORT, cdp_data_dir=DEFAULT_CDP_DATA_DIR,
+                     profile_checker=None, session_factory=CDPSession,
+                     process_stopper=None, ready_checker=None, sleeper=None):
+    """Close only a Chrome CDP instance using the expected dedicated profile."""
+    checker = profile_checker or cdp_port_uses_profile
+    if not checker(cdp_port, cdp_data_dir):
+        return False
+
+    is_ready = ready_checker or is_cdp_ready
+    stop_processes = process_stopper or stop_cdp_chrome
+    pause = sleeper or time.sleep
+    session = None
+    try:
+        session = session_factory(cdp_port)
+        try:
+            session.send("Browser.close", timeout=5)
+        except Exception:
+            # Chrome may close the WebSocket before acknowledging Browser.close.
+            pass
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    for _ in range(10):
+        if not is_ready(cdp_port):
+            return True
+        pause(0.2)
+
+    # Fallback remains restricted to the same dedicated user-data-dir.
+    stop_processes(cdp_data_dir)
+    return not is_ready(cdp_port)
+
+
 def wait_for_cdp(cdp_port, timeout=30):
     print("等待 CDP 可用", end="")
     for _ in range(timeout):
@@ -1967,6 +2193,10 @@ def run_setup_chrome(cdp_port=DEFAULT_CDP_PORT, copy_login_state=False,
                      reset_profile=False, wait_login=True,
                      login_timeout=DEFAULT_LOGIN_TIMEOUT):
     """自动配置并启动 Chrome CDP 模式"""
+    if copy_login_state:
+        print("❌ --copy-login-state 已停用：不会复制 Chrome 数据库。")
+        print("   请改用 --import-boss-session + --confirm-session-import。")
+        return 1
     if not require_runtime_dependencies("requests"):
         return 1
 
@@ -1980,10 +2210,7 @@ def run_setup_chrome(cdp_port=DEFAULT_CDP_PORT, copy_login_state=False,
     print(f"✅ 使用独立 Chrome profile: {cdp_data_dir}")
     if reset_profile:
         print("   已按 --reset-chrome-profile 重建 profile")
-    if copy_login_state:
-        print(f"   已复制 {profile['copied']} 个登录态文件（Local State + Cookie 相关文件）")
-    else:
-        print("   默认、首次启动、重复启动都不复制主 Chrome Cookie；首次使用请在此专用 Chrome 中登录 zhipin.com")
+    print("   默认、首次启动、重复启动都不复制主 Chrome Cookie；首次使用请在此专用 Chrome 中登录 zhipin.com")
 
     if is_cdp_ready(cdp_port):
         if cdp_port_uses_profile(cdp_port, cdp_data_dir):
@@ -2077,6 +2304,8 @@ def main():
     p.add_argument("--keyword", default="AI Agent", help="搜索关键词")
     p.add_argument("--city", default=DEFAULT_CITY_INPUT, help=f"城市 (中文名或代码，默认 {DEFAULT_CITY_INPUT})")
     p.add_argument("--pages", type=int, default=3, help=f"抓取页数 (最大 {MAX_PAGES})")
+    p.add_argument("--start-page", type=int, default=1,
+                   help="从指定页继续抓取（与已有 --output 断点配合）")
     p.add_argument("--output", default=None, help="列表数据输出路径")
     p.add_argument("--detail-output", default=None, help="详情数据输出路径")
     p.add_argument("--cdp-port", type=int, default=DEFAULT_CDP_PORT,
@@ -2114,7 +2343,13 @@ def main():
     p.add_argument("--setup-chrome", action="store_true",
                    help="自动启动 Chrome CDP 调试模式")
     p.add_argument("--copy-login-state", action="store_true",
-                   help="手动从主 Chrome 导入 Local State + Cookie 相关文件到独立 profile（默认、首次启动、重复启动都不复制）")
+                   help="已停用；不会复制 Chrome 数据库，请使用受控会话导入")
+    p.add_argument("--import-boss-session", action="store_true",
+                   help="从另一个已授权 CDP 浏览器导入仅限 zhipin.com 的会话")
+    p.add_argument("--source-cdp-port", type=int,
+                   help="会话导入的源 Chrome CDP 端口（必须与目标端口不同）")
+    p.add_argument("--confirm-session-import", action="store_true",
+                   help="确认本次显式授权读取并导入源浏览器的 BOSS 会话")
     p.add_argument("--reset-chrome-profile", action="store_true",
                    help="重建 BOSS 专用 Chrome profile，会清除此专用浏览器内的登录态")
     p.add_argument("--no-wait-login", action="store_true",
@@ -2123,6 +2358,11 @@ def main():
                    help=f"--setup-chrome 等待登录完成的秒数 (默认 {DEFAULT_LOGIN_TIMEOUT})")
 
     args = p.parse_args()
+
+    if args.copy_login_state:
+        print("❌ --copy-login-state 已停用：不会复制 Chrome 数据库。")
+        print("   请改用 --import-boss-session + --confirm-session-import。")
+        sys.exit(1)
 
     # --check 模式
     if args.check:
@@ -2135,6 +2375,13 @@ def main():
     if args.list_cities is not None:
         list_cities(keyword=args.list_cities or None)
         sys.exit(0)
+
+    if args.import_boss_session:
+        sys.exit(run_import_boss_session(
+            source_cdp_port=args.source_cdp_port,
+            target_cdp_port=args.cdp_port,
+            authorized=args.confirm_session_import,
+        ))
 
     # --setup-chrome 模式
     if args.setup_chrome:
@@ -2153,6 +2400,9 @@ def main():
     if args.pages > MAX_PAGES:
         print(f"⚠️ 页数 {args.pages} 超过上限 {MAX_PAGES}，已自动调整为 {MAX_PAGES}")
         args.pages = MAX_PAGES
+    if args.start_page < 1 or args.start_page > args.pages:
+        print(f"❌ start-page 必须在 1 到 {args.pages} 之间")
+        sys.exit(2)
 
     # 收集筛选条件
     filters = {}
@@ -2179,6 +2429,7 @@ def main():
             args.keyword, args.city, args.pages, filters, args.output,
             cdp_port=args.cdp_port, fmt=args.format,
             allow_dom_fallback=args.allow_dom_fallback,
+            start_page=args.start_page,
         )
 
     # 合并外部文件

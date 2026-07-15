@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%2379c497'/%3E%3C/svg%3E">
   <title>AI 求职工作台</title>
   <style>
     :root {
@@ -613,14 +614,351 @@
       .app-notice { top: calc(var(--header-h) + 10px); left: 12px; right: 12px; max-width: none; transform: none; }
       .screening-notice { padding: 8px 12px; }
     }
+
+    /* == 发现工作区（feature 004 默认入口，4 步主流程） == */
+    .discovery-workspace {
+      display: none;
+      height: calc(100vh - var(--header-h));
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg);
+    }
+    .discovery-workspace.active { display: flex; }
+
+    .discovery-topbar {
+      padding: 13px 28px; background: var(--surface);
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 20px; border-bottom: 1px solid var(--line);
+    }
+    .discovery-topbar-copy { min-width: 0; display: grid; gap: 2px; }
+    .discovery-eyebrow { color: var(--faint); font-size: 10px; font-weight: 600; letter-spacing: .12em; }
+    .discovery-title { font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
+    .discovery-topbar-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+    .discovery-topbar-actions .btn { font-size: 12px; padding: 6px 12px; }
+
+    .discovery-stepper {
+      display: flex; align-items: stretch; gap: 0;
+      padding: 0 28px; background: var(--surface); border-bottom: 1px solid var(--line);
+    }
+    .discovery-step-indicator {
+      flex: 1; min-width: 0; padding: 12px 12px;
+      display: flex; align-items: center; gap: 8px;
+      color: var(--muted); font-size: 12px;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+    }
+    .discovery-step-indicator + .discovery-step-indicator { border-left: 1px solid var(--line); }
+    .discovery-step-indicator .step-num {
+      width: 20px; height: 20px; border-radius: 50%;
+      background: var(--surface-2); color: var(--muted);
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 600; flex: 0 0 auto;
+    }
+    .discovery-step-indicator.active {
+      color: var(--text); border-bottom-color: var(--gold);
+    }
+    .discovery-step-indicator.active .step-num {
+      background: var(--gold); color: #1b170e;
+    }
+    .discovery-step-indicator.done .step-num {
+      background: var(--success); color: #000;
+    }
+    .discovery-step-indicator .step-label {
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    .discovery-step {
+      display: none; flex: 1; overflow-y: auto;
+      padding: 24px 28px;
+    }
+    .discovery-step.active { display: block; }
+    .discovery-upload-card, .discovery-review-card, .discovery-progress-card {
+      width: min(100%, 760px); margin: 0 auto;
+    }
+    .discovery-upload-card h2, .discovery-review-card h2, .discovery-progress-card h2 {
+      font-size: 20px; font-weight: 650; margin-bottom: 8px; color: var(--text);
+    }
+    .discovery-step-hint { font-size: 13px; color: var(--muted); margin-bottom: 16px; line-height: 1.6; }
+    .discovery-review-card h3, .discovery-progress-card h3 {
+      font-size: 12px; font-weight: 600; color: var(--faint);
+      letter-spacing: .08em; text-transform: uppercase; margin: 16px 0 8px;
+    }
+
+    .discovery-summary {
+      background: var(--surface); border: 1px solid var(--line);
+      border-radius: 8px; padding: 16px; margin-bottom: 16px;
+    }
+    .discovery-summary-headline { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+    .discovery-summary-meta {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      font-size: 12px; color: var(--muted); margin-bottom: 8px;
+    }
+    .discovery-summary-meta strong { color: var(--text); }
+    .discovery-summary-domains { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .discovery-tag {
+      display: inline-block; padding: 2px 8px; border-radius: 4px;
+      background: var(--surface-2); color: var(--text); font-size: 11px;
+    }
+
+    .discovery-evidence-group { margin-bottom: 16px; }
+    .discovery-evidence-group-title {
+      font-size: 11px; font-weight: 600; letter-spacing: .08em;
+      color: var(--faint); text-transform: uppercase;
+      margin-bottom: 8px; display: flex; align-items: center; gap: 8px;
+    }
+    .discovery-evidence-group-title .badge {
+      font-size: 10px; padding: 2px 6px; border-radius: 3px;
+      background: var(--surface-2); color: var(--text);
+    }
+    .discovery-evidence-list {
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .discovery-evidence-item {
+      background: var(--surface); border: 1px solid var(--line);
+      border-radius: 6px; padding: 8px 12px;
+      font-size: 12px; display: grid;
+      grid-template-columns: 90px 1fr auto; gap: 10px; align-items: center;
+    }
+    .discovery-evidence-type { color: var(--muted); font-size: 11px; }
+    .discovery-evidence-value { color: var(--text); font-weight: 500; word-break: break-word; }
+    .discovery-evidence-confidence {
+      color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums;
+    }
+
+    .discovery-direction-card {
+      background: var(--surface); border: 1px solid var(--line);
+      border-radius: 8px; padding: 14px 16px; margin-bottom: 10px;
+    }
+    .discovery-direction-card.disabled { opacity: .65; }
+    .discovery-direction-header {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+    }
+    .discovery-direction-name { font-size: 15px; font-weight: 600; color: var(--text); flex: 1; min-width: 0; }
+    .discovery-direction-type {
+      font-size: 11px; padding: 2px 8px; border-radius: 3px;
+      background: var(--accent-soft); color: var(--gold); white-space: nowrap;
+    }
+    .discovery-direction-type.core { background: rgba(121,196,151,.16); color: var(--success); }
+    .discovery-direction-type.adjacent { background: rgba(229,173,89,.16); color: var(--warning); }
+    .discovery-direction-type.growth { background: rgba(228,133,127,.16); color: var(--danger); }
+    .discovery-direction-toggle {
+      display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+      font-size: 12px; color: var(--muted);
+    }
+    .discovery-direction-toggle input[type="checkbox"] {
+      accent-color: var(--gold); width: 13px; height: 13px; margin: 0;
+    }
+    .discovery-direction-rationale {
+      font-size: 12px; color: var(--muted); margin: 6px 0;
+      line-height: 1.6;
+    }
+    .discovery-direction-meta {
+      display: flex; flex-wrap: wrap; gap: 12px;
+      font-size: 11px; color: var(--faint); margin-bottom: 6px;
+    }
+    .discovery-direction-meta strong { color: var(--text); }
+    .discovery-direction-gaps {
+      font-size: 12px; color: var(--warning); margin-top: 4px; line-height: 1.5;
+    }
+    .discovery-direction-search-terms {
+      display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px;
+    }
+
+    .discovery-unknowns {
+      background: var(--surface); border: 1px solid var(--line);
+      border-radius: 8px; padding: 14px 16px; margin-bottom: 16px;
+    }
+    .discovery-unknown-item {
+      font-size: 12px; color: var(--warning); margin: 4px 0;
+      display: flex; align-items: flex-start; gap: 8px; line-height: 1.5;
+    }
+    .discovery-unknown-item::before { content: "?"; flex: 0 0 14px; font-weight: 700; }
+
+    .discovery-hard-constraints {
+      background: var(--surface); border: 1px solid var(--line);
+      border-radius: 8px; padding: 14px 16px; margin-bottom: 16px;
+    }
+    .discovery-hard-constraints-title {
+      font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 10px;
+      letter-spacing: .04em;
+    }
+    .discovery-hard-constraints .field {
+      display: inline-block; margin-right: 16px; margin-bottom: 6px; vertical-align: top;
+    }
+    .discovery-hard-constraints-hint {
+      font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.5;
+    }
+
+    .discovery-progress-stage {
+      display: flex; gap: 0; margin-bottom: 12px; border-radius: 6px; overflow: hidden;
+    }
+    .discovery-progress-stage-item {
+      flex: 1; padding: 10px 6px; text-align: center;
+      background: var(--surface); border: 1px solid var(--line);
+      font-size: 11px; color: var(--muted);
+    }
+    .discovery-progress-stage-item + .discovery-progress-stage-item { border-left: none; }
+    .discovery-progress-stage-item.active {
+      background: var(--accent-soft); color: var(--text); border-color: var(--gold);
+      font-weight: 600;
+    }
+    .discovery-progress-stage-item.done {
+      background: rgba(121,196,151,.08); color: var(--success);
+    }
+    .discovery-progress-status {
+      margin-top: 10px; font-size: 13px; color: var(--muted);
+    }
+    .discovery-progress-status strong { color: var(--text); }
+    .discovery-progress-counts {
+      display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 12px;
+      font-size: 12px; color: var(--muted);
+    }
+    .discovery-progress-counts strong {
+      color: var(--text); font-variant-numeric: tabular-nums; margin-left: 4px;
+    }
+    .discovery-progress-updated {
+      font-size: 11px; color: var(--faint); margin-bottom: 12px;
+    }
+
+    .discovery-results-header {
+      display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+      padding: 12px 0; border-bottom: 1px solid var(--line); margin-bottom: 16px;
+      justify-content: space-between;
+    }
+    .discovery-direction-selector {
+      display: flex; flex-wrap: wrap; gap: 4px;
+    }
+    .discovery-direction-tab {
+      padding: 6px 12px; border-radius: 4px;
+      background: var(--surface); border: 1px solid var(--line);
+      font-size: 12px; color: var(--muted); cursor: pointer;
+      transition: background .12s, color .12s, border-color .12s;
+    }
+    .discovery-direction-tab:hover { border-color: var(--line-strong); }
+    .discovery-direction-tab.active {
+      background: var(--accent-soft); color: var(--text); border-color: var(--gold);
+    }
+    .discovery-category-filter {
+      display: flex; flex-wrap: wrap; gap: 4px;
+    }
+    .discovery-category-tab {
+      padding: 4px 10px; border-radius: 3px;
+      background: transparent; border: 1px solid var(--line);
+      font-size: 11px; color: var(--muted); cursor: pointer;
+    }
+    .discovery-category-tab:hover { border-color: var(--line-strong); }
+    .discovery-category-tab.active {
+      background: var(--surface-2); color: var(--text); border-color: var(--line-strong);
+    }
+    .discovery-category-tab .count {
+      margin-left: 4px; color: var(--gold); font-variant-numeric: tabular-nums;
+    }
+    .discovery-feedback-tools, .discovery-preference-changes {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--line);
+      border-radius: 6px; background: var(--surface);
+    }
+    .discovery-feedback-tools select, .discovery-feedback-reason {
+      min-width: 150px; padding: 5px 8px; border: 1px solid var(--line);
+      border-radius: 4px; background: var(--bg); color: var(--text);
+    }
+    .discovery-preference-changes { align-items: flex-start; }
+    .discovery-preference-changes[hidden] { display: none; }
+    .discovery-preference-change { display: flex; gap: 6px; align-items: center; }
+
+    .discovery-job-card {
+      background: var(--surface); border: 1px solid var(--line);
+      border-radius: 8px; padding: 14px 16px; margin-bottom: 10px;
+      display: flex; flex-direction: column; gap: 8px;
+      animation: cardEnter .2s ease-out;
+    }
+    .discovery-job-card-header {
+      display: flex; justify-content: space-between; gap: 12px; align-items: start;
+    }
+    .discovery-job-card-title-block { min-width: 0; flex: 1; }
+    .discovery-job-card-title {
+      font-size: 15px; font-weight: 600; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .discovery-job-card-company { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .discovery-job-card-salary { font-size: 15px; font-weight: 700; color: var(--success); white-space: nowrap; }
+    .discovery-job-card-meta {
+      font-size: 12px; color: var(--muted);
+      display: flex; flex-wrap: wrap; gap: 10px;
+    }
+    .discovery-job-card-badges {
+      display: flex; flex-wrap: wrap; gap: 4px;
+    }
+    .discovery-job-card-badge {
+      font-size: 10px; padding: 2px 6px; border-radius: 3px;
+      background: var(--surface-2); color: var(--text);
+    }
+    .discovery-job-card-badge.cat-high_match { background: rgba(121,196,151,.16); color: var(--success); }
+    .discovery-job-card-badge.cat-adjacent_match { background: rgba(229,173,89,.16); color: var(--warning); }
+    .discovery-job-card-badge.cat-growth_match { background: rgba(217,182,99,.12); color: var(--gold); }
+    .discovery-job-card-badge.cat-needs_review { background: rgba(248,81,73,.08); color: var(--danger); }
+    .discovery-job-card-badge.cat-not_suitable { background: rgba(228,133,127,.12); color: var(--danger); }
+    .discovery-job-card-completeness {
+      font-size: 11px; color: var(--faint);
+    }
+    .discovery-job-card-explanation {
+      font-size: 12px; color: var(--muted); line-height: 1.5;
+      background: var(--bg); border-radius: 6px; padding: 8px 10px;
+      word-break: break-word;
+    }
+    .discovery-job-card-explanation strong { color: var(--text); }
+    .discovery-job-card-gaps {
+      font-size: 11px; color: var(--warning); line-height: 1.5;
+    }
+    .discovery-job-card-actions {
+      display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+      padding-top: 8px; border-top: 1px solid var(--line);
+    }
+    .discovery-job-card-actions .card-link {
+      font-size: 12px; padding: 4px 10px; border: 1px solid var(--gold);
+      border-radius: 4px; color: var(--gold); text-decoration: none;
+    }
+    .discovery-job-card-actions .card-link:hover { background: var(--accent-soft); }
+    .discovery-job-card-actions .card-btn {
+      padding: 4px 10px; font-size: 12px;
+      border: 1px solid var(--line); border-radius: 4px;
+      background: transparent; color: var(--text); cursor: pointer;
+      transition: background .12s, border-color .12s;
+    }
+    .discovery-job-card-actions .card-btn:hover { background: var(--surface-2); border-color: var(--line-strong); }
+    .discovery-job-card-actions .card-btn.interested { color: var(--success); border-color: var(--success); }
+    .discovery-job-card-actions .card-btn.interested:hover { background: rgba(121,196,151,.08); }
+    .discovery-job-card-actions .card-btn.not_interested { color: var(--danger); border-color: var(--danger); }
+    .discovery-job-card-actions .card-btn.not_interested:hover { background: rgba(228,133,127,.08); }
+    .discovery-job-card-actions .card-btn.trash { color: var(--faint); border-color: var(--line-strong); }
+    .discovery-job-card-actions .card-btn:disabled { opacity: .6; cursor: default; }
+    .discovery-job-card-actions .card-btn.undo { color: var(--gold); border-color: var(--gold); }
+
+    @media (max-width: 720px) {
+      .discovery-topbar { padding: 10px 12px; gap: 8px; flex-wrap: wrap; }
+      .discovery-topbar-actions { width: 100%; }
+      .discovery-topbar-actions .btn { flex: 1; }
+      .discovery-stepper { padding: 0 12px; }
+      .discovery-step-indicator { padding: 8px 4px; gap: 4px; font-size: 11px; }
+      .discovery-step-indicator .step-num { width: 18px; height: 18px; font-size: 10px; }
+      .discovery-step-indicator .step-label { display: none; }
+      .discovery-step { padding: 16px 12px; }
+      .discovery-evidence-item { grid-template-columns: 1fr; gap: 4px; }
+      .discovery-progress-stage-item { font-size: 10px; padding: 6px 2px; }
+      .discovery-results-header { gap: 8px; padding: 8px 0; flex-direction: column; align-items: stretch; }
+      .discovery-direction-tab { padding: 5px 8px; font-size: 11px; }
+      .discovery-category-tab { padding: 3px 8px; }
+      .discovery-job-card { padding: 12px; }
+    }
   </style>
 </head>
 <body>
   <div class="app-header">
     <div class="brand"><span class="brand-dot"></span>AI 求职工作台</div>
     <div class="view-tabs">
-      <div class="view-tab active" onclick="switchView('workbench')">工作台</div>
-      <div class="view-tab" onclick="switchView('screening')">筛选</div>
+      <div class="view-tab active" onclick="switchView('discovery')">发现</div>
+      <div class="view-tab" onclick="switchView('workbench')">历史搜索</div>
+      <div class="view-tab" onclick="switchView('screening')">历史筛选</div>
     </div>
     <div class="header-actions">
       <span class="conn-status" id="connectionStatus">未连接</span>
@@ -632,7 +970,109 @@
     <button class="btn" id="appNoticeRetry" type="button" hidden>重试</button>
   </div>
 
-  <div class="workspace">
+  <!-- 发现工作区（feature 004 默认入口，4 步主流程） -->
+  <div class="discovery-workspace active" id="discoveryWorkspace">
+    <div class="discovery-topbar">
+      <div class="discovery-topbar-copy">
+        <span class="discovery-eyebrow">简历驱动发现</span>
+        <strong class="discovery-title">上传简历 · 确认方向 · 发现岗位</strong>
+      </div>
+      <div class="discovery-topbar-actions">
+        <button class="btn" type="button" onclick="switchToDiscovery('upload')">重新上传</button>
+      </div>
+    </div>
+    <div class="discovery-stepper">
+      <div class="discovery-step-indicator active" data-step="upload" onclick="switchToDiscovery('upload')">
+        <span class="step-num">1</span><span class="step-label">上传简历</span>
+      </div>
+      <div class="discovery-step-indicator" data-step="review" onclick="switchToDiscovery('review')">
+        <span class="step-num">2</span><span class="step-label">确认理解</span>
+      </div>
+      <div class="discovery-step-indicator" data-step="progress" onclick="switchToDiscovery('progress')">
+        <span class="step-num">3</span><span class="step-label">运行进度</span>
+      </div>
+      <div class="discovery-step-indicator" data-step="results" onclick="switchToDiscovery('results')">
+        <span class="step-num">4</span><span class="step-label">结果</span>
+      </div>
+    </div>
+
+    <!-- 步骤 1：上传简历 -->
+    <div class="discovery-step active" data-step="upload" id="discoveryStepUpload">
+      <div class="discovery-upload-card">
+        <h2>上传你的简历</h2>
+        <p class="discovery-step-hint">拖拽或点击选择简历文件（.txt / .pdf / .docx）。勾选 AI 同意后，系统会提取证据、生成方向并标记未知项。</p>
+        <div class="resume-drop-zone" id="discoveryDropZone" tabindex="0">
+          <div class="resume-drop-hint" id="discoveryDropHint">将简历文件拖到此处，或点击选择</div>
+          <input type="file" id="discoveryResumeFile" accept=".txt,.pdf,.docx" hidden>
+          <div class="resume-drop-filename" id="discoveryDropFilename"></div>
+        </div>
+        <div class="field" style="margin-top:10px;">
+          <label class="consent-wrap" id="discoveryConsentWrap">
+            <input type="checkbox" id="discoveryAiConsent">
+            <span class="consent-text">我已知悉并同意 AI 解析</span>
+            <div class="consent-tooltip" id="discoveryConsentTip">勾选后，简历文本会发送到你配置的 AI 服务用于生成可编辑建议；不勾选则只本地保存。</div>
+          </label>
+        </div>
+        <div class="btn-row">
+          <button class="btn primary btn-with-loading" id="discoveryUploadButton" type="button" aria-busy="false" onclick="uploadResumeDiscovery()">
+            <span class="btn-label">上传并分析</span>
+            <span class="btn-spinner" aria-hidden="true"></span>
+          </button>
+        </div>
+        <div id="discoveryUploadStatus" class="discovery-step-hint" style="margin-top:8px;"></div>
+      </div>
+    </div>
+
+    <!-- 步骤 2：确认系统理解 -->
+    <div class="discovery-step" data-step="review" id="discoveryStepReview">
+      <div class="discovery-review-card discovery-analysis-card">
+        <h2>确认系统理解</h2>
+        <p class="discovery-step-hint">下方为系统从简历中提取的证据、推断方向和未知项。可关闭/开启方向、调整硬约束，确认后将冻结为不可变输入。</p>
+        <div id="discoveryAnalysisContent"></div>
+        <div class="btn-row" style="margin-top:16px;">
+          <button class="btn primary btn-with-loading" id="discoveryConfirmButton" type="button" aria-busy="false" onclick="confirmDirections()">
+            <span class="btn-label">确认方向并开始发现</span>
+            <span class="btn-spinner" aria-hidden="true"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 步骤 3：运行进度 -->
+    <div class="discovery-step" data-step="progress" id="discoveryStepProgress">
+      <div class="discovery-progress-card">
+        <h2>发现运行进度</h2>
+        <p class="discovery-step-hint">系统正在按确认方向搜索、抓取详情并评估岗位。</p>
+        <div id="discoveryProgressContent"></div>
+        <div class="btn-row" style="margin-top:12px;">
+          <button class="btn danger" id="discoveryCancelBtn" type="button" onclick="cancelDiscoveryRun()" hidden>取消运行</button>
+          <button class="btn primary" id="discoveryResumeBtn" type="button" onclick="resumeDiscoveryRun()" hidden>继续运行</button>
+          <button class="btn" id="discoveryViewResultsBtn" type="button" onclick="switchToDiscovery('results')" hidden>查看结果</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 步骤 4：结果 -->
+    <div class="discovery-step" data-step="results" id="discoveryStepResults">
+      <div class="discovery-results-header" id="discoveryResultsHeader">
+        <div class="discovery-direction-selector" id="discoveryDirectionSelector"></div>
+        <div class="discovery-category-filter" id="discoveryCategoryFilter"></div>
+      </div>
+      <div class="discovery-feedback-tools" aria-label="方向反馈">
+        <label for="discoveryFeedbackDirection">方向反馈</label>
+        <select id="discoveryFeedbackDirection" aria-label="选择反馈方向"></select>
+        <select id="discoveryDirectionReason" aria-label="选择方向反馈原因">
+          <option value="direction_not_wanted">不想找这个方向</option>
+          <option value="skill_assessment_inaccurate">技能判断不准确</option>
+        </select>
+        <button class="btn" type="button" onclick="recordDirectionFeedback()">提交方向反馈</button>
+      </div>
+      <div class="discovery-preference-changes" id="discoveryPreferenceChanges" role="status" hidden></div>
+      <div id="discoveryResultsList"></div>
+    </div>
+  </div>
+
+  <div class="workspace hidden">
     <aside class="settings-panel" id="settingsPanel">
       <div class="panel-tabs" role="tablist">
         <button class="panel-tab active" data-tab="config" role="tab" aria-selected="true" onclick="switchPanelTab('config')">配置</button>
@@ -783,6 +1223,7 @@
           <p class="workbench-empty-kicker">尚未开始</p>
           <h1 id="workbenchEmptyTitle">先设定你的求职范围</h1>
           <p class="workbench-empty-copy">完善画像或输入关键词后，系统会把发现到的岗位集中到这里，供你快速判断与处理。</p>
+          <button class="btn primary" type="button" onclick="toggleSettings()">打开设置并开始</button>
           <div class="workbench-steps" aria-label="开始步骤">
             <div class="workbench-step"><span class="workbench-step-index">01</span><strong>完善画像</strong><span>城市、岗位与最低薪资</span></div>
             <div class="workbench-step"><span class="workbench-step-index">02</span><strong>上传简历</strong><span>可选，用于生成建议</span></div>
@@ -841,6 +1282,7 @@
           <label class="manual-filter-hint">页数 <input class="screening-limit" id="screeningPages" type="number" min="1" max="10" value="1"></label>
           <label class="manual-filter-hint">详情 <input class="screening-limit" id="screeningMaxDetails" type="number" min="1" value="3"></label>
           <button class="btn primary" data-screening="execute-btn" onclick="executeScreeningRun()">执行筛选</button>
+          <button class="btn danger" id="screeningCancelBtn" onclick="cancelScreeningRun()" hidden>取消运行</button>
           <button class="btn" type="button" onclick="cleanupScreeningResults()">清理 30 天结果</button>
           <span class="screening-status" data-screening="status" id="screeningStatus">点击执行开始筛选</span>
         </div>
@@ -914,7 +1356,6 @@
   </div>
 
   <script>
-    let token = "";
     let currentProfileId = "";
     let currentRunId = "";
     let lastFeedbackJobId = "";
@@ -1079,24 +1520,24 @@
     }
 
     async function api(path, opts = {}) {
-      const headers = { "X-Boss-Token": token, ...opts.headers };
+      const headers = { ...opts.headers };
       if (opts.json) { headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.json); }
-      const resp = await fetch(path, { ...opts, headers });
+      const resp = await fetch(path, { ...opts, headers, credentials: "same-origin" });
       if (resp.status === 403) { setAppNotice("会话已过期，请刷新页面", "error"); throw new Error("forbidden"); }
       return resp;
     }
 
     async function init() {
-      const resp = await fetch(API.session);
-      const data = await resp.json();
-      token = data.token;
+      await fetch(API.session, { credentials: "same-origin" });
       initResumeDropZone();
       initResumeConsentTooltip();
+      initDiscoveryDropZone();
       await loadProfiles();
       await loadAiSettings();
       await checkConnection();
       await restoreSearchRun();
       await restoreScreeningRun();
+      await restoreDiscoveryRun();
     }
 
     async function checkConnection() {
@@ -1171,7 +1612,7 @@
           setAppNotice("画像已创建", "success");
         } else {
           const err = await resp.json().catch(() => ({}));
-          setAppNotice(err.error || "画像创建失败", "error");
+          setAppNotice(err.user_message || "画像创建失败", "error");
         }
       } catch (_error) {
         setAppNotice("画像创建失败，请检查连接后重试", "error");
@@ -1197,7 +1638,7 @@
           setAppNotice("画像已删除", "success");
         } else {
           const err = await resp.json().catch(() => ({}));
-          setAppNotice(err.error || "画像删除失败", "error");
+          setAppNotice(err.user_message || "画像删除失败", "error");
         }
       } catch (_error) {
         setAppNotice("画像删除失败，请检查连接后重试", "error");
@@ -1269,17 +1710,21 @@
       formData.append("ai_consent", String(document.getElementById("resumeAiConsent").checked));
       setResumeUploadLoading(true);
       try {
-        const resp = await fetch(`/api/profiles/${currentProfileId}/resume`, {
-          method: "POST", body: formData, headers: { "X-Boss-Token": token },
+        const resp = await api(`/api/profiles/${currentProfileId}/resume`, {
+          method: "POST", body: formData,
         });
         if (resp.ok) {
           const data = await resp.json();
+          if (data.profile_id && data.profile_id !== currentProfileId) {
+            currentProfileId = data.profile_id;
+            await loadProfiles();
+          }
           showAiSuggestion(data);
           setAppNotice("简历已上传", "success");
           updateResumeStatus(fileInput.files[0] ? fileInput.files[0].name : "");
         } else {
           const err = await resp.json().catch(() => ({}));
-          setAppNotice("上传失败：" + (err.error || resp.status), "error");
+          setAppNotice("上传失败：" + (err.user_message || resp.status), "error");
         }
       } catch (_error) {
         setAppNotice("上传失败，请检查连接后重试", "error");
@@ -1405,7 +1850,7 @@
           await loadAiSettings();  // 刷新打码预览
         } else {
           const e = await resp.json();
-          setAppNotice(e.error || "AI 设置保存失败", "error", saveAiSettings);
+          setAppNotice(e.user_message || "AI 设置保存失败", "error", saveAiSettings);
         }
       } catch (_error) {
         setAppNotice("AI 设置保存失败，请稍后重试", "error", saveAiSettings);
@@ -1432,7 +1877,7 @@
       if (keywords.length) body.manual_keywords = keywords;
       try {
         const resp = await api(API.searchRuns, { method: "POST", json: body });
-        if (resp.status === 400) { const e = await resp.json(); setAppNotice(e.error || "搜索参数有误", "warning"); return; }
+        if (resp.status === 400) { const e = await resp.json(); setAppNotice(e.user_message || "搜索参数有误", "warning"); return; }
         const run = await resp.json();
         currentRunId = run.id;
         localStorage.setItem("boss-workbench-run", run.id);
@@ -1594,6 +2039,15 @@
     }
 
     async function undoLastFeedback() {
+      // 优先撤销 discovery 反馈
+      if (lastDiscoveryFeedbackId) {
+        const revoked = await revokeFeedback(lastDiscoveryFeedbackId);
+        if (!revoked) return;
+        document.getElementById("undoBar").classList.remove("show");
+        lastDiscoveryFeedbackId = ""; lastDiscoveryFeedbackJobId = "";
+        return;
+      }
+      // 回退到 legacy 反馈撤销
       if (!lastFeedbackId) return;
       await api(`/api/feedback/${lastFeedbackId}/revoke`, { method: "POST" });
       document.getElementById("undoBar").classList.remove("show");
@@ -1639,21 +2093,28 @@
     function switchView(view) {
       const workbench = document.querySelector(".workspace");
       const screening = document.getElementById("screeningWorkspace");
+      const discovery = document.getElementById("discoveryWorkspace");
       const tabs = document.querySelectorAll(".view-tab");
       tabs.forEach(t => t.classList.remove("active"));
-      if (view === "screening") {
-        workbench.classList.add("hidden");
+      // 先隐藏全部视图
+      workbench.classList.add("hidden");
+      screening.classList.remove("active");
+      if (discovery) discovery.classList.remove("active");
+      if (view === "discovery") {
+        if (discovery) discovery.classList.add("active");
+        tabs[0].classList.add("active");
+      } else if (view === "screening") {
         screening.classList.add("active");
-        tabs[1].classList.add("active");
+        tabs[2].classList.add("active");
         if (!screening._initialized) {
           loadScreeningFilterOptions();
           initializeScreeningFilterSummary();
           screening._initialized = true;
         }
       } else {
+        // workbench（历史搜索）
         workbench.classList.remove("hidden");
-        screening.classList.remove("active");
-        tabs[0].classList.add("active");
+        tabs[1].classList.add("active");
       }
     }
 
@@ -1670,6 +2131,30 @@
     let screeningRunId = "";
     let screeningPollTimer = null;
     let screeningResumeId = "";
+    const SCREENING_RUN_STORAGE_KEY = "boss-screening-run";
+
+    function saveScreeningRun(runId) {
+      localStorage.setItem(SCREENING_RUN_STORAGE_KEY, JSON.stringify({
+        run_id: runId,
+        profile_id: currentProfileId,
+      }));
+    }
+
+    function readScreeningRun() {
+      const raw = localStorage.getItem(SCREENING_RUN_STORAGE_KEY);
+      if (!raw) return null;
+      try {
+        const saved = JSON.parse(raw);
+        return saved && saved.run_id ? saved : null;
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function clearScreeningRun() {
+      localStorage.removeItem(SCREENING_RUN_STORAGE_KEY);
+    }
+
     const SCREENING_FIELD_IDS = {
       city: "screeningFilterCity", salary: "screeningFilterSalary",
       experience: "screeningFilterExperience", degree: "screeningFilterDegree",
@@ -1772,8 +2257,8 @@
         formData.append("file", fileInput.files[0]);
         if (currentProfileId) formData.append("profile_id", currentProfileId);
         try {
-          const uploadResp = await fetch(ScreeningAPI.resume, {
-            method: "POST", body: formData, headers: { "X-Boss-Token": token },
+          const uploadResp = await api(ScreeningAPI.resume, {
+            method: "POST", body: formData,
           });
           if (!uploadResp.ok) { setScreeningNotice("简历上传失败，请重试", "error", suggestScreeningFilters); return; }
           const uploadData = await uploadResp.json();
@@ -1833,10 +2318,11 @@
       if (screeningResumeId) body.resume_id = screeningResumeId;
       try {
         const resp = await api(ScreeningAPI.runs, { method: "POST", json: body });
-        if (resp.status === 400) { const e = await resp.json(); setScreeningNotice(e.error || "筛选参数有误", "warning"); return; }
+        if (resp.status === 400) { const e = await resp.json(); setScreeningNotice(e.user_message || "筛选参数有误", "warning"); return; }
         const run = await resp.json();
         screeningRunId = run.run_id;
-        localStorage.setItem("boss-screening-run", screeningRunId);
+        saveScreeningRun(screeningRunId);
+        document.getElementById("screeningCancelBtn").hidden = false;
         document.getElementById("screeningStatus").innerHTML =
           `筛选运行中… 状态：<strong>${run.status}</strong>`;
         for (const id of ["matchZone", "mismatchZone", "pendingZone"]) {
@@ -1870,6 +2356,7 @@
           updateScreeningRunSummary(run);
           if (["succeeded","partial","failed","interrupted"].includes(run.status)) {
             stopScreeningPoll();
+            document.getElementById("screeningCancelBtn").hidden = true;
             await loadScreeningZones(runId);
           }
         } catch(e) {
@@ -1882,17 +2369,75 @@
       if (screeningPollTimer) { clearInterval(screeningPollTimer); screeningPollTimer = null; }
     }
 
+    async function cancelScreeningRun() {
+      if (!screeningRunId) return;
+      const button = document.getElementById("screeningCancelBtn");
+      button.disabled = true;
+      try {
+        const response = await api(`/api/screening/runs/${screeningRunId}/cancel`, {
+          method: "POST", json: {},
+        });
+        if (!response.ok) throw new Error("cancel failed");
+        const run = await response.json();
+        stopScreeningPoll();
+        button.hidden = true;
+        document.getElementById("screeningStatus").innerHTML =
+          `状态：<strong>${run.status}</strong> · 已保留已完成结果`;
+        await loadScreeningZones(screeningRunId);
+        setScreeningNotice(
+          "筛选已取消，已完成结果已保留；可点击重试继续处理保存的岗位",
+          "warning", resumeScreeningRun,
+        );
+      } catch (_error) {
+        setScreeningNotice("取消筛选失败，请重试", "error", cancelScreeningRun);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function resumeScreeningRun() {
+      if (!screeningRunId) return;
+      try {
+        const response = await api(`/api/screening/runs/${screeningRunId}/resume`, {
+          method: "POST", json: {},
+        });
+        if (!response.ok) throw new Error("resume failed");
+        const run = await response.json();
+        document.getElementById("screeningCancelBtn").hidden = false;
+        updateScreeningRunSummary(run);
+        startScreeningPoll(screeningRunId);
+        setScreeningNotice("已从保存进度继续处理", "success");
+      } catch (_error) {
+        setScreeningNotice("继续处理失败，请重试", "error", resumeScreeningRun);
+      }
+    }
+
     async function restoreScreeningRun() {
-      const runId = localStorage.getItem("boss-screening-run");
-      if (!runId) return;
+      const saved = readScreeningRun();
+      if (!saved || saved.profile_id !== currentProfileId) {
+        if (saved) clearScreeningRun();
+        return;
+      }
+      const runId = saved.run_id;
       try {
         const response = await api(`/api/screening/runs/${runId}`);
-        if (!response.ok) { localStorage.removeItem("boss-screening-run"); return; }
+        if (!response.ok) { clearScreeningRun(); return; }
         const run = await response.json();
         screeningRunId = runId;
         updateScreeningRunSummary(run);
-        if (["queued", "running"].includes(run.status)) startScreeningPoll(runId);
-        else await loadScreeningZones(runId);
+        if (["queued", "running"].includes(run.status)) {
+          document.getElementById("screeningCancelBtn").hidden = false;
+          startScreeningPoll(runId);
+        } else {
+          document.getElementById("screeningCancelBtn").hidden = true;
+          await loadScreeningZones(runId);
+          if (["interrupted", "failed"].includes(run.status)) {
+            setScreeningNotice(
+              "上次筛选已中断，可继续处理已保存的岗位",
+              "warning", resumeScreeningRun,
+            );
+          }
+        }
       } catch (_error) {
         setScreeningNotice("上次筛选结果暂时无法恢复", "error", restoreScreeningRun);
       }
@@ -2107,7 +2652,7 @@
         const restored = await response.json();
         if (restored.recovery_run_id) {
           screeningRunId = restored.recovery_run_id;
-          localStorage.setItem("boss-screening-run", screeningRunId);
+          saveScreeningRun(screeningRunId);
         }
         await loadScreeningZones(screeningRunId);
         if (["match", "mismatch", "pending"].includes(restored.restored_to)) switchZone(restored.restored_to);
@@ -2134,7 +2679,7 @@
           const check = await api(`/api/screening/runs/${screeningRunId}`);
           if (!check.ok) {
             screeningRunId = "";
-            localStorage.removeItem("boss-screening-run");
+            clearScreeningRun();
           }
         }
         document.getElementById("screeningStatus").textContent = "临时结果清理完成；长期标记已保留";
@@ -2193,6 +2738,1115 @@
       document.getElementById("aiUnavailablePrompt").classList.add("show");
       document.getElementById("skipResumeCheck").checked = true;
       setScreeningNotice("AI 暂不可用，已切换为人工填筛", "warning");
+    }
+
+    // == 发现工作区（feature 004：简历驱动岗位发现）==
+    let discoveryAnalysisId = "";
+    let discoveryConfirmationId = "";
+    let discoveryRunId = "";
+    let discoveryDirections = [];
+    let discoveryPollTimer = null;
+    let discoveryCurrentDirectionId = "";
+    let discoveryCurrentCategory = "";
+    let discoveryResultsCache = [];
+    let discoveryFeedbackItems = [];
+    let discoveryPreferenceChanges = [];
+    let lastDiscoveryFeedbackId = "";
+    let lastDiscoveryFeedbackJobId = "";
+    const DISCOVERY_RUN_STORAGE_KEY = "boss-discovery-run";
+    const DiscoveryAPI = {
+      analyses: "/api/discovery/analyses",
+      confirmations: "/api/discovery/confirmations",
+      runs: "/api/discovery/runs",
+      feedback: "/api/discovery/feedback",
+    };
+
+    function saveDiscoveryRun(runId) {
+      localStorage.setItem(DISCOVERY_RUN_STORAGE_KEY, JSON.stringify({
+        run_id: runId, profile_id: currentProfileId,
+      }));
+    }
+    function readDiscoveryRun() {
+      const raw = localStorage.getItem(DISCOVERY_RUN_STORAGE_KEY);
+      if (!raw) return null;
+      try { const s = JSON.parse(raw); return s && s.run_id ? s : null; } catch (_e) { return null; }
+    }
+    function clearDiscoveryRun() { localStorage.removeItem(DISCOVERY_RUN_STORAGE_KEY); }
+
+    function initDiscoveryDropZone() {
+      const zone = document.getElementById("discoveryDropZone");
+      const input = document.getElementById("discoveryResumeFile");
+      if (!zone || !input) return;
+      const filename = document.getElementById("discoveryDropFilename");
+      const trigger = () => input.click();
+      zone.addEventListener("click", trigger);
+      zone.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); trigger(); }
+      });
+      zone.addEventListener("dragover", event => { event.preventDefault(); zone.classList.add("dragover"); });
+      zone.addEventListener("dragleave", () => zone.classList.remove("dragover"));
+      zone.addEventListener("drop", event => {
+        event.preventDefault();
+        zone.classList.remove("dragover");
+        if (event.dataTransfer.files.length) {
+          input.files = event.dataTransfer.files;
+          if (filename) filename.textContent = "已选择：" + input.files[0].name;
+        }
+      });
+      input.addEventListener("change", () => {
+        if (input.files.length && filename) filename.textContent = "已选择：" + input.files[0].name;
+      });
+      // consent tooltip（复用 consent-wrap 模式）
+      const consentWrap = document.getElementById("discoveryConsentWrap");
+      const consentInput = document.getElementById("discoveryAiConsent");
+      if (consentWrap && consentInput) {
+        let pointerActivated = false;
+        consentWrap.addEventListener("pointerdown", event => { pointerActivated = event.pointerType !== "keyboard"; }, true);
+        consentWrap.addEventListener("pointercancel", () => { pointerActivated = false; }, true);
+        consentWrap.addEventListener("click", () => {
+          if (!pointerActivated) return;
+          pointerActivated = false;
+          consentInput.blur();
+          setTimeout(() => consentInput.blur(), 0);
+        });
+      }
+    }
+
+    function switchToDiscovery(step) {
+      document.querySelectorAll(".discovery-step-indicator").forEach(ind => {
+        ind.classList.toggle("active", ind.dataset.step === step);
+      });
+      document.querySelectorAll(".discovery-step").forEach(s => {
+        s.classList.toggle("active", s.dataset.step === step);
+      });
+    }
+
+    function setDiscoveryUploadLoading(isLoading) {
+      const btn = document.getElementById("discoveryUploadButton");
+      if (!btn) return;
+      btn.disabled = isLoading;
+      btn.setAttribute("aria-busy", String(isLoading));
+      const label = btn.querySelector(".btn-label");
+      if (label) label.textContent = isLoading ? "分析中…" : "上传并分析";
+    }
+
+    async function uploadResumeDiscovery() {
+      const uploadButton = document.getElementById("discoveryUploadButton");
+      if (uploadButton && uploadButton.disabled) return;
+      const fileInput = document.getElementById("discoveryResumeFile");
+      if (!fileInput.files.length) { setAppNotice("请选择简历文件", "warning"); return; }
+      // 无画像时自动创建（简历是入口，画像是产物）
+      if (!currentProfileId) {
+        const fileName = fileInput.files[0].name || "新简历";
+        const profileName = fileName.replace(/\.[^.]+$/, "").slice(0, 70) + " 求职画像";
+        try {
+          const createResp = await api(API.profiles, {
+            method: "POST", json: { name: profileName, confirmed_fields: {} },
+          });
+          if (!createResp.ok) { setAppNotice("创建画像失败", "error"); return; }
+          const created = await createResp.json();
+          currentProfileId = created.id;
+          await loadProfiles();
+        } catch (_e) {
+          setAppNotice("创建画像失败，请检查连接后重试", "error");
+          return;
+        }
+      }
+      const aiConsent = document.getElementById("discoveryAiConsent").checked;
+      setDiscoveryUploadLoading(true);
+      try {
+        // 1. 上传简历文件
+        const formData = new FormData();
+        formData.append("file", fileInput.files[0]);
+        formData.append("ai_consent", String(aiConsent));
+        const uploadResp = await api(`/api/profiles/${currentProfileId}/resume`, {
+          method: "POST", body: formData,
+        });
+        if (!uploadResp.ok) {
+          const err = await uploadResp.json().catch(() => ({}));
+          setAppNotice("简历上传失败：" + (err.user_message || uploadResp.status), "error");
+          return;
+        }
+        // 2. 启动分析（T110: JSON body {resume_id, ai_consent} 匹配 T109 异步提交路径）
+        const uploadData = await uploadResp.json();
+        const resumeId = uploadData.resume_id;
+        if (!resumeId) {
+          setAppNotice("简历上传未返回 resume_id", "error");
+          return;
+        }
+        const analysisResp = await api(DiscoveryAPI.analyses, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ resume_id: resumeId, ai_consent: aiConsent }),
+        });
+        if (!analysisResp.ok) {
+          const err = await analysisResp.json().catch(() => ({}));
+          setAppNotice("分析启动失败：" + (err.user_message || analysisResp.status), "error");
+          return;
+        }
+        const summary = await analysisResp.json();
+        discoveryAnalysisId = summary.analysis_id;
+        await pollDiscoveryAnalysis(discoveryAnalysisId);
+      } catch (_e) {
+        setAppNotice("上传或分析失败，请检查连接后重试", "error");
+      } finally {
+        setDiscoveryUploadLoading(false);
+      }
+    }
+
+    async function pollDiscoveryAnalysis(analysisId) {
+      const maxAttempts = 60;
+      let lastNotice = "";
+      for (let i = 0; i < maxAttempts; i++) {
+        const resp = await api(`${DiscoveryAPI.analyses}/${analysisId}`);
+        if (!resp.ok) { setAppNotice("分析结果获取失败", "error"); return; }
+        const analysis = await resp.json();
+        // T110: 显式处理 queued/analyzing 状态，告知用户当前进度，避免静默等待
+        if (analysis.status === "queued") {
+          if (lastNotice !== "queued") {
+            setAppNotice("分析已排队，等待执行…", "info");
+            lastNotice = "queued";
+          }
+        } else if (analysis.status === "analyzing") {
+          if (lastNotice !== "analyzing") {
+            setAppNotice("正在分析简历…", "info");
+            lastNotice = "analyzing";
+          }
+        } else if (analysis.status === "ready") {
+          renderAnalysis(analysis);
+          switchToDiscovery("review");
+          setAppNotice("分析完成，请确认方向", "success");
+          return;
+        } else if (analysis.status === "failed") {
+          // T110: 安全失败信封，仅展示 error_code + user_message，不泄漏原始异常
+          const failure = analysis.failure || {};
+          const code = failure.error_code || "未知错误";
+          const msg = failure.user_message || code;
+          setAppNotice("分析失败：" + msg + "（" + code + "）", "error");
+          return;
+        }
+        await new Promise(r => setTimeout(r, 2000));
+      }
+      setAppNotice("分析超时，请稍后重试", "warning");
+    }
+
+    function renderAnalysis(analysis) {
+      discoveryDirections = analysis.directions || [];
+      const container = document.getElementById("discoveryAnalysisContent");
+      if (!container) return;
+      container.innerHTML = "";
+      // 摘要
+      const summary = analysis.summary || {};
+      if (summary.headline || (summary.domains && summary.domains.length) || (summary.strengths && summary.strengths.length)) {
+        const sumDiv = document.createElement("div");
+        sumDiv.className = "discovery-summary";
+        if (summary.headline) {
+          const h = document.createElement("div");
+          h.className = "discovery-summary-headline";
+          h.textContent = summary.headline;
+          sumDiv.appendChild(h);
+        }
+        if (summary.experience_level || (summary.domains && summary.domains.length)) {
+          const meta = document.createElement("div");
+          meta.className = "discovery-summary-meta";
+          if (summary.experience_level) {
+            const s = document.createElement("span");
+            s.innerHTML = "经验：<strong>" + escapeHtml(summary.experience_level) + "</strong>";
+            meta.appendChild(s);
+          }
+          if (summary.domains && summary.domains.length) {
+            const s = document.createElement("span");
+            s.innerHTML = "领域：<strong>" + escapeHtml(summary.domains.join("、")) + "</strong>";
+            meta.appendChild(s);
+          }
+          sumDiv.appendChild(meta);
+        }
+        if (summary.strengths && summary.strengths.length) {
+          const div = document.createElement("div");
+          div.className = "discovery-summary-domains";
+          for (const st of summary.strengths) {
+            const tag = document.createElement("span");
+            tag.className = "discovery-tag";
+            tag.textContent = st;
+            div.appendChild(tag);
+          }
+          sumDiv.appendChild(div);
+        }
+        container.appendChild(sumDiv);
+      }
+      // 证据分组
+      const evidence = analysis.evidence || [];
+      if (evidence.length) {
+        const groups = { explicit: [], inferred: [] };
+        for (const e of evidence) {
+          const key = e.assertion_type === "inferred" ? "inferred" : "explicit";
+          groups[key].push(e);
+        }
+        const labels = { explicit: "事实证据", inferred: "推断证据" };
+        for (const key of ["explicit", "inferred"]) {
+          if (!groups[key].length) continue;
+          const grp = document.createElement("div");
+          grp.className = "discovery-evidence-group";
+          const title = document.createElement("div");
+          title.className = "discovery-evidence-group-title";
+          title.textContent = labels[key];
+          const badge = document.createElement("span");
+          badge.className = "badge";
+          badge.textContent = String(groups[key].length);
+          title.appendChild(badge);
+          grp.appendChild(title);
+          const list = document.createElement("div");
+          list.className = "discovery-evidence-list";
+          for (const e of groups[key]) {
+            const item = document.createElement("div");
+            item.className = "discovery-evidence-item";
+            const type = document.createElement("span");
+            type.className = "discovery-evidence-type";
+            type.textContent = e.type || "other";
+            const val = document.createElement("span");
+            val.className = "discovery-evidence-value";
+            val.textContent = e.normalized_value || e.safe_excerpt || "—";
+            const conf = document.createElement("span");
+            conf.className = "discovery-evidence-confidence";
+            conf.textContent = (e.confidence != null ? e.confidence : "—") + "%";
+            item.append(type, val, conf);
+            list.appendChild(item);
+          }
+          grp.appendChild(list);
+          container.appendChild(grp);
+        }
+      }
+      // 方向卡片
+      if (discoveryDirections.length) {
+        const grp = document.createElement("div");
+        grp.className = "discovery-evidence-group";
+        const title = document.createElement("div");
+        title.className = "discovery-evidence-group-title";
+        title.textContent = "候选方向";
+        grp.appendChild(title);
+        for (const d of discoveryDirections) {
+          const card = document.createElement("div");
+          card.className = "discovery-direction-card" + (d.default_enabled === false ? " disabled" : "");
+          card.dataset.directionId = d.id;
+          const header = document.createElement("div");
+          header.className = "discovery-direction-header";
+          const name = document.createElement("span");
+          name.className = "discovery-direction-name";
+          name.textContent = d.name || "未命名方向";
+          const typeBadge = document.createElement("span");
+          typeBadge.className = "discovery-direction-type " + (d.type || "core");
+          typeBadge.textContent = d.type || "core";
+          const toggle = document.createElement("label");
+          toggle.className = "discovery-direction-toggle";
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.checked = d.default_enabled !== false;
+          cb.dataset.directionId = d.id;
+          toggle.appendChild(cb);
+          const toggleLabel = document.createElement("span");
+          toggleLabel.textContent = "启用";
+          toggle.appendChild(toggleLabel);
+          header.append(name, typeBadge, toggle);
+          card.appendChild(header);
+          if (d.rationale) {
+            const r = document.createElement("div");
+            r.className = "discovery-direction-rationale";
+            r.textContent = d.rationale;
+            card.appendChild(r);
+          }
+          const meta = document.createElement("div");
+          meta.className = "discovery-direction-meta";
+          const confSpan = document.createElement("span");
+          confSpan.innerHTML = "置信度：<strong>" + (d.confidence != null ? d.confidence : "—") + "</strong>";
+          meta.appendChild(confSpan);
+          if (d.evidence_ids && d.evidence_ids.length) {
+            const evSpan = document.createElement("span");
+            evSpan.innerHTML = "证据：<strong>" + d.evidence_ids.length + "</strong>";
+            meta.appendChild(evSpan);
+          }
+          card.appendChild(meta);
+          if (d.gaps && d.gaps.length) {
+            const gaps = document.createElement("div");
+            gaps.className = "discovery-direction-gaps";
+            gaps.textContent = "缺口：" + d.gaps.join("；");
+            card.appendChild(gaps);
+          }
+          if (d.search_terms && d.search_terms.length) {
+            const terms = document.createElement("div");
+            terms.className = "discovery-direction-search-terms";
+            for (const t of d.search_terms) {
+              const tag = document.createElement("span");
+              tag.className = "discovery-tag";
+              tag.textContent = t;
+              terms.appendChild(tag);
+            }
+            card.appendChild(terms);
+          }
+          grp.appendChild(card);
+        }
+        container.appendChild(grp);
+      }
+      // 未知项
+      const unknowns = analysis.unknowns || [];
+      if (unknowns.length) {
+        const unkDiv = document.createElement("div");
+        unkDiv.className = "discovery-unknowns";
+        const title = document.createElement("div");
+        title.className = "discovery-evidence-group-title";
+        title.textContent = "未知项";
+        unkDiv.appendChild(title);
+        for (const u of unknowns) {
+          const item = document.createElement("div");
+          item.className = "discovery-unknown-item";
+          item.textContent = u.message || u.field || "—";
+          unkDiv.appendChild(item);
+        }
+        container.appendChild(unkDiv);
+      }
+      // 硬约束输入
+      const hcDiv = document.createElement("div");
+      hcDiv.className = "discovery-hard-constraints";
+      const hcTitle = document.createElement("div");
+      hcTitle.className = "discovery-hard-constraints-title";
+      hcTitle.textContent = "硬约束（可选）";
+      hcDiv.appendChild(hcTitle);
+      const cityField = document.createElement("div");
+      cityField.className = "field";
+      cityField.innerHTML = '<label>城市</label><input type="text" id="discoveryHardCity" placeholder="如：上海">';
+      hcDiv.appendChild(cityField);
+      const salaryField = document.createElement("div");
+      salaryField.className = "field";
+      salaryField.innerHTML = '<label>最低薪资（K）</label><input type="number" id="discoveryHardSalary" placeholder="如：20">';
+      hcDiv.appendChild(salaryField);
+      const hint = document.createElement("div");
+      hint.className = "discovery-hard-constraints-hint";
+      hint.textContent = "留空则不作为硬约束；确认后不可修改。";
+      hcDiv.appendChild(hint);
+      container.appendChild(hcDiv);
+    }
+
+    async function confirmDirections() {
+      if (!discoveryAnalysisId) { setAppNotice("请先上传简历", "warning"); return; }
+      const btn = document.getElementById("discoveryConfirmButton");
+      if (btn && btn.disabled) return;
+      const enabledDirectionIds = [];
+      document.querySelectorAll(".discovery-direction-card input[type=checkbox]").forEach(cb => {
+        if (cb.checked) enabledDirectionIds.push(cb.dataset.directionId);
+      });
+      if (!enabledDirectionIds.length) {
+        setAppNotice("请至少启用一个方向", "warning");
+        return;
+      }
+      const hardConstraints = {};
+      const cityEl = document.getElementById("discoveryHardCity");
+      const salaryEl = document.getElementById("discoveryHardSalary");
+      if (cityEl && cityEl.value.trim()) hardConstraints.city = cityEl.value.trim();
+      if (salaryEl && salaryEl.value.trim()) hardConstraints.min_salary = salaryEl.value.trim();
+      if (btn) { btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
+      const label = btn ? btn.querySelector(".btn-label") : null;
+      if (label) label.textContent = "确认中…";
+      try {
+        const resp = await api(DiscoveryAPI.confirmations, {
+          method: "POST", json: {
+            analysis_id: discoveryAnalysisId,
+            enabled_direction_ids: enabledDirectionIds,
+            hard_constraints: hardConstraints,
+            soft_preferences: {},
+            safe_limits: {},
+            user_directions: [],
+          },
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          setAppNotice("确认失败：" + (err.user_message || resp.status), "error");
+          return;
+        }
+        const data = await resp.json();
+        discoveryConfirmationId = data.confirmation_id;
+        setAppNotice("方向已确认，开始发现", "success");
+        document.querySelector('.discovery-step-indicator[data-step="review"]').classList.add("done");
+        await startDiscoveryRun(discoveryConfirmationId);
+      } catch (_e) {
+        setAppNotice("确认失败，请检查连接后重试", "error");
+      } finally {
+        if (btn) { btn.disabled = false; btn.setAttribute("aria-busy", "false"); }
+        if (label) label.textContent = "确认方向并开始发现";
+      }
+    }
+
+    async function startDiscoveryRun(confirmationId) {
+      try {
+        const resp = await api(DiscoveryAPI.runs, {
+          method: "POST", json: { confirmation_id: confirmationId },
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          setAppNotice("启动失败：" + (err.user_message || resp.status), "error");
+          return;
+        }
+        const run = await resp.json();
+        discoveryRunId = run.run_id;
+        saveDiscoveryRun(discoveryRunId);
+        switchToDiscovery("progress");
+        renderRunProgress(run);
+        startDiscoveryPoll(discoveryRunId);
+      } catch (_e) {
+        setAppNotice("启动失败，请检查连接后重试", "error");
+      }
+    }
+
+    function startDiscoveryPoll(runId) {
+      if (discoveryPollTimer) clearTimeout(discoveryPollTimer);
+      const poll = async () => {
+        try {
+          const resp = await api(`${DiscoveryAPI.runs}/${runId}`);
+          if (!resp.ok) return;
+          const run = await resp.json();
+          renderRunProgress(run);
+          const terminal = ["succeeded", "failed", "cancelled"];
+          if (terminal.includes(run.status)) {
+            discoveryPollTimer = null;
+            if (run.status === "succeeded" || run.status === "partial") {
+              document.querySelector('.discovery-step-indicator[data-step="progress"]').classList.add("done");
+              document.getElementById("discoveryViewResultsBtn").hidden = false;
+              setAppNotice("发现完成，可查看结果", "success");
+              await loadDiscoveryResults(runId);
+            } else if (run.status === "failed") {
+              setAppNotice("发现失败：" + (run.failure_code || "未知错误"), "error");
+            } else if (run.status === "cancelled") {
+              setAppNotice("运行已取消", "warning");
+            }
+            return;
+          }
+          if (run.status === "interrupted") {
+            document.getElementById("discoveryResumeBtn").hidden = false;
+            document.getElementById("discoveryCancelBtn").hidden = true;
+            setAppNotice("运行已中断，可继续", "warning");
+            return;
+          }
+          discoveryPollTimer = setTimeout(poll, 3000);
+        } catch (_e) {
+          discoveryPollTimer = setTimeout(poll, 5000);
+        }
+      };
+      discoveryPollTimer = setTimeout(poll, 3000);
+    }
+
+    function renderRunProgress(run) {
+      const container = document.getElementById("discoveryProgressContent");
+      if (!container) return;
+      container.innerHTML = "";
+      // 阶段进度条
+      const stages = ["planning", "fetching_lists", "fetching_details", "evaluating", "assembling"];
+      const stageLabels = {
+        planning: "规划", fetching_lists: "抓取列表", fetching_details: "抓取详情",
+        evaluating: "评估", assembling: "组装",
+      };
+      const currentStage = run.stage || run.status || "planning";
+      const stageBar = document.createElement("div");
+      stageBar.className = "discovery-progress-stage";
+      const currentIdx = stages.indexOf(currentStage);
+      for (const s of stages) {
+        const item = document.createElement("div");
+        item.className = "discovery-progress-stage-item";
+        const idx = stages.indexOf(s);
+        if (idx < currentIdx) item.classList.add("done");
+        if (s === currentStage || (currentIdx === -1 && s === "planning")) item.classList.add("active");
+        item.textContent = stageLabels[s] || s;
+        stageBar.appendChild(item);
+      }
+      container.appendChild(stageBar);
+      // 状态文本
+      const statusDiv = document.createElement("div");
+      statusDiv.className = "discovery-progress-status";
+      const statusLabels = {
+        created: "已创建", planning: "规划中", fetching_lists: "抓取列表中",
+        fetching_details: "抓取详情中", evaluating: "评估中", assembling: "组装中",
+        succeeded: "成功", partial: "部分成功", failed: "失败",
+        interrupted: "已中断", cancelled: "已取消",
+      };
+      statusDiv.innerHTML = "状态：<strong>" + (statusLabels[run.status] || run.status) + "</strong>";
+      container.appendChild(statusDiv);
+      // T126: created 超时阻断和 dispatch_failed 展示
+      if (run.status === "created" && run.created_at) {
+        const createdMs = new Date(run.created_at).getTime();
+        if (Date.now() - createdMs > 30000) {
+          const warn = document.createElement("div");
+          warn.className = "discovery-progress-warn";
+          warn.textContent = "运行已创建超过 30 秒仍未开始，可能调度失败。";
+          container.appendChild(warn);
+        }
+      }
+      if (run.failure_code === "dispatch_failed" || run.failure_stage === "dispatch_failed") {
+        const warn = document.createElement("div");
+        warn.className = "discovery-progress-warn";
+        warn.textContent = "调度失败，请重试或检查配置。";
+        container.appendChild(warn);
+      }
+      // 进度计数
+      const progress = run.progress || {};
+      const counts = run.counts || {};
+      const countsDiv = document.createElement("div");
+      countsDiv.className = "discovery-progress-counts";
+      if (progress.fetched != null) {
+        const s = document.createElement("span");
+        s.innerHTML = "已抓取：<strong>" + progress.fetched + "</strong>";
+        countsDiv.appendChild(s);
+      }
+      if (progress.assessed != null) {
+        const s = document.createElement("span");
+        s.innerHTML = "已评估：<strong>" + progress.assessed + "</strong>";
+        countsDiv.appendChild(s);
+      }
+      const catLabels = {
+        high_match: "高度匹配", adjacent_match: "邻近匹配", growth_match: "发展匹配",
+        needs_review: "待确认", not_suitable: "不适合",
+      };
+      for (const [cat, count] of Object.entries(counts)) {
+        const s = document.createElement("span");
+        s.innerHTML = (catLabels[cat] || cat) + "：<strong>" + count + "</strong>";
+        countsDiv.appendChild(s);
+      }
+      container.appendChild(countsDiv);
+      // 更新时间
+      if (run.updated_at) {
+        const upd = document.createElement("div");
+        upd.className = "discovery-progress-updated";
+        upd.textContent = "最后更新：" + run.updated_at;
+        container.appendChild(upd);
+      }
+      // 按钮状态
+      const cancelBtn = document.getElementById("discoveryCancelBtn");
+      const resumeBtn = document.getElementById("discoveryResumeBtn");
+      const viewResultsBtn = document.getElementById("discoveryViewResultsBtn");
+      const terminal = ["succeeded", "failed", "cancelled"];
+      const resumable = ["interrupted", "partial"];
+      if (cancelBtn) cancelBtn.hidden = terminal.includes(run.status) || resumable.includes(run.status);
+      if (resumeBtn) resumeBtn.hidden = !resumable.includes(run.status);
+      if (viewResultsBtn) viewResultsBtn.hidden = !(run.status === "succeeded" || run.status === "partial");
+    }
+
+    async function cancelDiscoveryRun() {
+      if (!discoveryRunId) return;
+      try {
+        const resp = await api(`${DiscoveryAPI.runs}/${discoveryRunId}/cancel`, { method: "POST" });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          setAppNotice("取消失败：" + (err.user_message || resp.status), "error");
+          return;
+        }
+        const run = await resp.json();
+        renderRunProgress(run);
+        setAppNotice("运行已取消", "warning");
+      } catch (_e) {
+        setAppNotice("取消失败，请稍后重试", "error");
+      }
+    }
+
+    async function resumeDiscoveryRun() {
+      if (!discoveryRunId) return;
+      try {
+        const resp = await api(`${DiscoveryAPI.runs}/${discoveryRunId}/resume`, { method: "POST" });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          setAppNotice("继续失败：" + (err.user_message || resp.status), "error");
+          return;
+        }
+        const run = await resp.json();
+        renderRunProgress(run);
+        document.getElementById("discoveryResumeBtn").hidden = true;
+        document.getElementById("discoveryCancelBtn").hidden = false;
+        setAppNotice("运行已继续", "success");
+        startDiscoveryPoll(discoveryRunId);
+      } catch (_e) {
+        setAppNotice("继续失败，请稍后重试", "error");
+      }
+    }
+
+    async function loadDiscoveryResults(runId) {
+      if (!runId) return;
+      try {
+        const resp = await api(`${DiscoveryAPI.runs}/${runId}/results?limit=100`);
+        if (!resp.ok) { setAppNotice("结果加载失败", "error"); return; }
+        const data = await resp.json();
+        await loadDiscoveryFeedbackState();
+        renderResults(data.items || [], data.counts || {});
+      } catch (_e) {
+        setAppNotice("结果加载失败，请稍后重试", "error");
+      }
+    }
+
+    function renderResults(items, counts) {
+      const dirSelector = document.getElementById("discoveryDirectionSelector");
+      const catFilter = document.getElementById("discoveryCategoryFilter");
+      const list = document.getElementById("discoveryResultsList");
+      if (!dirSelector || !catFilter || !list) return;
+      // 方向选择器
+      dirSelector.innerHTML = "";
+      const allBtn = document.createElement("button");
+      allBtn.className = "discovery-direction-tab active";
+      allBtn.textContent = "全部方向";
+      allBtn.dataset.directionId = "";
+      allBtn.onclick = () => {
+        discoveryCurrentDirectionId = "";
+        filterDiscoveryResults();
+      };
+      dirSelector.appendChild(allBtn);
+      for (const d of discoveryDirections) {
+        const btn = document.createElement("button");
+        btn.className = "discovery-direction-tab";
+        btn.textContent = d.name;
+        btn.dataset.directionId = d.id;
+        btn.onclick = () => {
+          discoveryCurrentDirectionId = d.id;
+          filterDiscoveryResults();
+        };
+        dirSelector.appendChild(btn);
+      }
+      const directionFeedbackSelect = document.getElementById("discoveryFeedbackDirection");
+      if (directionFeedbackSelect) {
+        directionFeedbackSelect.innerHTML = "";
+        for (const d of discoveryDirections) {
+          const option = document.createElement("option");
+          option.value = d.id;
+          option.textContent = d.name;
+          directionFeedbackSelect.appendChild(option);
+        }
+      }
+      // 分类筛选器
+      catFilter.innerHTML = "";
+      const categories = [
+        { key: "", label: "全部" },
+        { key: "high_match", label: "高度匹配" },
+        { key: "adjacent_match", label: "邻近匹配" },
+        { key: "growth_match", label: "发展匹配" },
+        { key: "needs_review", label: "待确认" },
+        { key: "not_suitable", label: "不适合" },
+        { key: "interested", label: "感兴趣" },
+        { key: "trash", label: "垃圾桶" },
+      ];
+      for (const cat of categories) {
+        const btn = document.createElement("button");
+        btn.className = "discovery-category-tab" + (cat.key === discoveryCurrentCategory ? " active" : "");
+        btn.textContent = cat.label;
+        btn.dataset.category = cat.key;
+        if (cat.key) {
+          const c = document.createElement("span");
+          c.className = "count";
+          c.textContent = String(counts[cat.key] || 0);
+          btn.appendChild(c);
+        }
+        btn.onclick = () => {
+          discoveryCurrentCategory = cat.key;
+          filterDiscoveryResults();
+        };
+        catFilter.appendChild(btn);
+      }
+      // 渲染岗位卡片
+      list.innerHTML = "";
+      discoveryResultsCache = items.map(item => {
+        const primary = item.primary_assessment || {};
+        return {
+          ...item,
+          category: item.category || primary.category || "needs_review",
+          direction_id: item.direction_id || primary.direction_id || "",
+          match_score: item.match_score != null ? item.match_score : primary.match_score,
+          gaps: item.gaps || primary.gaps || [],
+        };
+      });
+      filterDiscoveryResults();
+    }
+
+    function discoveryFeedbackForJob(jobId) {
+      for (let i = discoveryFeedbackItems.length - 1; i >= 0; i -= 1) {
+        const item = discoveryFeedbackItems[i];
+        if (item.target_type === "job" && item.job_id === jobId) return item;
+      }
+      return null;
+    }
+
+    function filterDiscoveryResults() {
+      const list = document.getElementById("discoveryResultsList");
+      if (!list) return;
+      const stateCounts = { interested: 0, trash: 0 };
+      for (const item of discoveryResultsCache) {
+        const action = (discoveryFeedbackForJob(item.job_id) || {}).action;
+        if (action === "interested") stateCounts.interested += 1;
+        if (action === "not_interested") stateCounts.trash += 1;
+      }
+      for (const key of ["interested", "trash"]) {
+        const count = document.querySelector(`.discovery-category-tab[data-category="${key}"] .count`);
+        if (count) count.textContent = String(stateCounts[key]);
+      }
+      // 更新方向 tab active
+      document.querySelectorAll(".discovery-direction-tab").forEach(t => {
+        const isActive = (t.dataset.directionId || "") === discoveryCurrentDirectionId;
+        t.classList.toggle("active", isActive);
+      });
+      // 更新分类 tab active
+      document.querySelectorAll(".discovery-category-tab").forEach(t => {
+        const isActive = (t.dataset.category || "") === discoveryCurrentCategory;
+        t.classList.toggle("active", isActive);
+      });
+      // 筛选
+      let filtered = discoveryResultsCache;
+      if (discoveryCurrentDirectionId) {
+        filtered = filtered.filter(i => i.direction_id === discoveryCurrentDirectionId);
+      }
+      if (discoveryCurrentCategory === "interested") {
+        filtered = filtered.filter(i => (discoveryFeedbackForJob(i.job_id) || {}).action === "interested");
+      } else if (discoveryCurrentCategory === "trash") {
+        filtered = filtered.filter(i => (discoveryFeedbackForJob(i.job_id) || {}).action === "not_interested");
+      } else if (discoveryCurrentCategory) {
+        filtered = filtered.filter(i => i.category === discoveryCurrentCategory);
+        filtered = filtered.filter(i => (discoveryFeedbackForJob(i.job_id) || {}).action !== "not_interested");
+      } else {
+        filtered = filtered.filter(i => (discoveryFeedbackForJob(i.job_id) || {}).action !== "not_interested");
+      }
+      list.innerHTML = "";
+      if (!filtered.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        empty.textContent = "暂无岗位";
+        list.appendChild(empty);
+        return;
+      }
+      for (const item of filtered) {
+        list.appendChild(createDiscoveryCard(item));
+      }
+    }
+
+    function createDiscoveryCard(job) {
+      const card = document.createElement("div");
+      card.className = "discovery-job-card";
+      const jobId = job.job_id || job.id || "";
+      card.dataset.jobId = jobId;
+      // 头部
+      const header = document.createElement("div");
+      header.className = "discovery-job-card-header";
+      const titleBlock = document.createElement("div");
+      titleBlock.className = "discovery-job-card-title-block";
+      const title = document.createElement("div");
+      title.className = "discovery-job-card-title";
+      title.textContent = job.title || job.job_title || "未知岗位";
+      titleBlock.appendChild(title);
+      const company = document.createElement("div");
+      company.className = "discovery-job-card-company";
+      company.textContent = job.company || job.company_name || "—";
+      titleBlock.appendChild(company);
+      const salary = document.createElement("div");
+      salary.className = "discovery-job-card-salary";
+      salary.textContent = job.salary || "—";
+      header.append(titleBlock, salary);
+      card.appendChild(header);
+      // 元信息
+      const meta = document.createElement("div");
+      meta.className = "discovery-job-card-meta";
+      if (job.location) {
+        const s = document.createElement("span");
+        s.textContent = "📍 " + job.location;
+        meta.appendChild(s);
+      }
+      if (job.experience) {
+        const s = document.createElement("span");
+        s.textContent = "经验 " + job.experience;
+        meta.appendChild(s);
+      }
+      if (job.degree) {
+        const s = document.createElement("span");
+        s.textContent = "学历 " + job.degree;
+        meta.appendChild(s);
+      }
+      if (meta.children.length) card.appendChild(meta);
+      // 徽章
+      const badges = document.createElement("div");
+      badges.className = "discovery-job-card-badges";
+      if (job.category) {
+        const b = document.createElement("span");
+        b.className = "discovery-job-card-badge cat-" + job.category;
+        const catLabels = {
+          high_match: "高度匹配", adjacent_match: "邻近匹配", growth_match: "发展匹配",
+          needs_review: "待确认", not_suitable: "不适合",
+        };
+        b.textContent = catLabels[job.category] || job.category;
+        badges.appendChild(b);
+      }
+      if (job.match_score != null) {
+        const b = document.createElement("span");
+        b.className = "discovery-job-card-badge";
+        b.textContent = "匹配 " + job.match_score;
+        badges.appendChild(b);
+      }
+      if (badges.children.length) card.appendChild(badges);
+      if (job.completeness) {
+        const comp = document.createElement("div");
+        comp.className = "discovery-job-card-completeness";
+        comp.textContent = "完整度：" + job.completeness;
+        card.appendChild(comp);
+      }
+      // 解释
+      const gaps = job.gaps_json || job.gaps || [];
+      if (job.explanation || (gaps && gaps.length)) {
+        const expl = document.createElement("div");
+        expl.className = "discovery-job-card-explanation";
+        if (job.explanation) {
+          const strong = document.createElement("strong");
+          strong.textContent = "依据：";
+          expl.appendChild(strong);
+          expl.appendChild(document.createTextNode(job.explanation));
+        }
+        if (gaps && gaps.length) {
+          const gapDiv = document.createElement("div");
+          gapDiv.className = "discovery-job-card-gaps";
+          const gapTexts = gaps.map(g => typeof g === "string" ? g : (g.text || ""));
+          gapDiv.textContent = "缺口：" + gapTexts.filter(Boolean).join("；");
+          expl.appendChild(gapDiv);
+        }
+        card.appendChild(expl);
+      }
+      // 操作
+      const actions = document.createElement("div");
+      actions.className = "discovery-job-card-actions";
+      const safeUrl = job.source_url || job.canonical_url || "";
+      if (safeUrl) {
+        const link = document.createElement("a");
+        link.className = "card-link";
+        link.href = "#";
+        link.textContent = "查看详情";
+        link.onclick = (event) => openDiscoveryJobLink(event, safeUrl);
+        actions.appendChild(link);
+      }
+      const activeFeedback = discoveryFeedbackForJob(jobId);
+      if (activeFeedback && activeFeedback.action === "not_interested") {
+        const restoreBtn = document.createElement("button");
+        restoreBtn.type = "button";
+        restoreBtn.className = "card-btn interested";
+        restoreBtn.textContent = "恢复";
+        restoreBtn.onclick = (event) => { event.preventDefault(); event.stopPropagation(); restoreDiscoveryJob(jobId); };
+        actions.appendChild(restoreBtn);
+      } else {
+        const interestBtn = document.createElement("button");
+        interestBtn.type = "button";
+        interestBtn.className = "card-btn interested";
+        interestBtn.textContent = activeFeedback && activeFeedback.action === "interested" ? "取消感兴趣" : "感兴趣";
+        interestBtn.onclick = (event) => {
+          event.preventDefault(); event.stopPropagation();
+          if (activeFeedback && activeFeedback.action === "interested") revokeFeedback(activeFeedback.id);
+          else markDiscoveryInterest(jobId);
+        };
+        actions.appendChild(interestBtn);
+        const reasonSelect = document.createElement("select");
+        reasonSelect.className = "discovery-feedback-reason";
+        reasonSelect.setAttribute("aria-label", "不感兴趣原因");
+        reasonSelect.innerHTML = '<option value="job_not_interested">岗位不合适</option>' +
+          '<option value="company_unsuitable">公司不合适</option>' +
+          '<option value="location_unsuitable">地点不合适</option>' +
+          '<option value="salary_unsuitable">薪资不合适</option>' +
+          '<option value="skill_assessment_inaccurate">技能判断不准确</option>';
+        actions.appendChild(reasonSelect);
+        const rejectBtn = document.createElement("button");
+        rejectBtn.type = "button";
+        rejectBtn.className = "card-btn not_interested";
+        rejectBtn.textContent = "不感兴趣 / 移入垃圾桶";
+        rejectBtn.onclick = (event) => {
+          event.preventDefault(); event.stopPropagation();
+          markDiscoveryReject(jobId, reasonSelect.value);
+        };
+        actions.appendChild(rejectBtn);
+      }
+      card.appendChild(actions);
+      return card;
+    }
+
+    async function markDiscoveryInterest(jobId) {
+      if (!jobId || !currentProfileId) return;
+      try {
+        const resp = await api(DiscoveryAPI.feedback, {
+          method: "POST", json: {
+            profile_id: currentProfileId,
+            target_type: "job",
+            target_id: jobId,
+            action: "interested",
+            scope: "exact_job",
+            run_id: discoveryRunId,
+            direction_id: discoveryCurrentDirectionId || null,
+          },
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          setAppNotice("标记失败：" + (err.user_message || resp.status), "error");
+          return;
+        }
+        const data = await resp.json();
+        lastDiscoveryFeedbackId = data.feedback_id;
+        lastDiscoveryFeedbackJobId = jobId;
+        await loadDiscoveryFeedbackState();
+        filterDiscoveryResults();
+        setAppNotice("已标记感兴趣", "success");
+      } catch (_e) {
+        setAppNotice("标记失败，请稍后重试", "error");
+      }
+    }
+
+    async function markDiscoveryReject(jobId, reasonCode = "job_not_interested") {
+      if (!jobId || !currentProfileId) return;
+      try {
+        const resp = await api(DiscoveryAPI.feedback, {
+          method: "POST", json: {
+            profile_id: currentProfileId,
+            target_type: "job",
+            target_id: jobId,
+            action: "not_interested",
+            scope: "exact_job",
+            reason_code: reasonCode,
+            run_id: discoveryRunId,
+            direction_id: discoveryCurrentDirectionId || null,
+          },
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          setAppNotice("标记失败：" + (err.user_message || resp.status), "error");
+          return;
+        }
+        const data = await resp.json();
+        lastDiscoveryFeedbackId = data.feedback_id;
+        lastDiscoveryFeedbackJobId = jobId;
+        await loadDiscoveryFeedbackState();
+        filterDiscoveryResults();
+        setAppNotice("已标记不感兴趣并移入垃圾桶", "info");
+      } catch (_e) {
+        setAppNotice("标记失败，请稍后重试", "error");
+      }
+    }
+
+    async function revokeFeedback(feedbackId) {
+      if (!feedbackId) return;
+      try {
+        const resp = await api(`${DiscoveryAPI.feedback}/${feedbackId}/revoke`, { method: "POST" });
+        if (!resp.ok) { setAppNotice("撤销失败", "error"); return; }
+        await loadDiscoveryFeedbackState();
+        filterDiscoveryResults();
+        setAppNotice("已撤销反馈", "info");
+        return true;
+      } catch (_e) {
+        setAppNotice("撤销失败，请稍后重试", "error");
+      }
+      return false;
+    }
+
+    async function restoreDiscoveryJob(jobId) {
+      const feedback = discoveryFeedbackForJob(jobId);
+      if (!feedback || feedback.action !== "not_interested") return;
+      if (await revokeFeedback(feedback.id)) setAppNotice("岗位已从垃圾桶恢复", "success");
+    }
+
+    async function recordDirectionFeedback() {
+      if (!currentProfileId) return;
+      const directionSelect = document.getElementById("discoveryFeedbackDirection");
+      const reasonSelect = document.getElementById("discoveryDirectionReason");
+      const directionId = directionSelect ? directionSelect.value : "";
+      const reasonCode = reasonSelect ? reasonSelect.value : "direction_not_wanted";
+      if (!directionId) { setAppNotice("请先选择方向", "warning"); return; }
+      const action = reasonCode === "direction_not_wanted" ? "direction_disable" : "direction_feedback";
+      try {
+        const resp = await api(DiscoveryAPI.feedback, { method: "POST", json: {
+          profile_id: currentProfileId,
+          target_type: "direction",
+          direction_id: directionId,
+          action,
+          reason_code: reasonCode,
+          scope: "direction",
+          run_id: discoveryRunId,
+        }});
+        if (!resp.ok) { setAppNotice("方向反馈提交失败", "error"); return; }
+        await loadDiscoveryFeedbackState();
+        setAppNotice("方向反馈已记录，将用于下一次发现", "success");
+      } catch (_e) {
+        setAppNotice("方向反馈提交失败，请稍后重试", "error");
+      }
+    }
+
+    async function loadDiscoveryFeedbackState() {
+      if (!currentProfileId) return;
+      try {
+        const resp = await api(`${DiscoveryAPI.feedback}?profile_id=${encodeURIComponent(currentProfileId)}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        discoveryFeedbackItems = data.items || [];
+        discoveryPreferenceChanges = data.preference_changes || [];
+        renderPreferenceChanges(discoveryPreferenceChanges);
+      } catch (_e) {
+        setAppNotice("反馈状态加载失败", "error");
+      }
+    }
+
+    function renderPreferenceChanges(changes) {
+      const container = document.getElementById("discoveryPreferenceChanges");
+      if (!container) return;
+      container.innerHTML = "";
+      container.hidden = !changes.length;
+      if (!changes.length) return;
+      const heading = document.createElement("strong");
+      heading.textContent = "当前偏好变化：";
+      container.appendChild(heading);
+      const labels = {
+        direction_disabled: "下次不再搜索该方向",
+        job_excluded: "仅排除这个岗位",
+        job_interested: "已长期标记感兴趣",
+      };
+      for (const change of changes) {
+        const row = document.createElement("span");
+        row.className = "discovery-preference-change";
+        row.appendChild(document.createTextNode(labels[change.kind] || "已记录反馈"));
+        const undo = document.createElement("button");
+        undo.type = "button";
+        undo.className = "card-btn";
+        undo.textContent = "撤销";
+        undo.onclick = () => revokeFeedback(change.feedback_id);
+        row.appendChild(undo);
+        container.appendChild(row);
+      }
+    }
+
+    async function restoreDiscoveryRun() {
+      const saved = readDiscoveryRun();
+      if (!saved || saved.profile_id !== currentProfileId) {
+        if (saved) clearDiscoveryRun();
+        return;
+      }
+      const runId = saved.run_id;
+      try {
+        const resp = await api(`${DiscoveryAPI.runs}/${runId}`);
+        if (!resp.ok) { clearDiscoveryRun(); return; }
+        const run = await resp.json();
+        discoveryRunId = runId;
+        const terminal = ["succeeded", "failed", "cancelled"];
+        if (!terminal.includes(run.status)) {
+          switchToDiscovery("progress");
+          renderRunProgress(run);
+          startDiscoveryPoll(runId);
+        } else if (run.status === "succeeded" || run.status === "partial") {
+          switchToDiscovery("progress");
+          renderRunProgress(run);
+          await loadDiscoveryResults(runId);
+          document.querySelector('.discovery-step-indicator[data-step="progress"]').classList.add("done");
+        }
+      } catch (_e) {
+        clearDiscoveryRun();
+      }
+    }
+
+    function openDiscoveryJobLink(event, url) {
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== "https:") return false;
+        const host = parsed.hostname.toLowerCase();
+        if (host !== "www.zhipin.com" && host !== "zhipin.com" && !host.endsWith(".zhipin.com")) return false;
+      } catch(e) { return false; }
+      window.open(url, "_blank", "noopener,noreferrer");
+      return false;
     }
 
     init();

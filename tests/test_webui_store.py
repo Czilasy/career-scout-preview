@@ -144,6 +144,55 @@ class ScreeningSchemaMigrationTests(unittest.TestCase):
         }
         self.assertTrue(expected.issubset(cols), f"missing: {expected - cols}")
 
+    def test_screening_run_persists_execution_inputs(self):
+        store = TaskStore(self.db_path)
+        run = store.create_screening_run(
+            {"city": "上海"}, resume_id="resume-1", profile_id="profile-1",
+            execution={"keyword": "Python", "pages": 2, "max_details": 20},
+        )
+        self.assertEqual(run["profile_id"], "profile-1")
+        self.assertEqual(
+            run["execution"],
+            {"keyword": "Python", "pages": 2, "max_details": 20},
+        )
+
+    def test_restart_interrupts_stale_screening_run_without_deleting_progress(self):
+        store = TaskStore(self.db_path)
+        run = store.create_screening_run(
+            {}, execution={"keyword": "Python", "pages": 1},
+        )
+        store.update_screening_run_status(
+            run["id"], "running", source_count=1, source_cursor=1,
+        )
+        store.add_screening_result(run["id"], "saved-job", "match")
+
+        reopened = TaskStore(self.db_path)
+        restored = reopened.get_screening_run(run["id"])
+
+        self.assertEqual(restored["status"], "interrupted")
+        self.assertEqual(restored["error_code"], "restart")
+        self.assertEqual(restored["source_cursor"], 1)
+        self.assertEqual(
+            reopened.get_screening_results(run["id"])[0]["job_id"],
+            "saved-job",
+        )
+
+    def test_conditional_status_update_cannot_overwrite_cancelled_run(self):
+        store = TaskStore(self.db_path)
+        run = store.create_screening_run({})
+        store.update_screening_run_status(run["id"], "running")
+        store.update_screening_run_status(
+            run["id"], "interrupted", error_code="cancelled",
+        )
+
+        current = store.update_screening_run_status(
+            run["id"], "succeeded", match_count=1,
+            expected_statuses={"queued", "running"},
+        )
+
+        self.assertEqual(current["status"], "interrupted")
+        self.assertEqual(current["match_count"], 0)
+
     def test_screening_results_table_exists_with_columns(self):
         store = TaskStore(self.db_path)
         cols = self._columns(store, "screening_results")

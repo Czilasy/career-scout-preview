@@ -24,6 +24,278 @@ def load_module():
 
 
 class ChromeSetupTests(unittest.TestCase):
+    def test_session_import_requires_explicit_authorization(self):
+        module = load_module()
+        factory = mock.Mock()
+
+        result = module.import_boss_session(
+            source_cdp_port=9223,
+            target_cdp_port=9222,
+            authorized=False,
+            session_factory=factory,
+        )
+
+        self.assertEqual(result, {
+            "status": "blocked",
+            "code": "authorization_required",
+            "imported_count": 0,
+        })
+        factory.assert_not_called()
+
+    def test_session_import_only_transfers_boss_cookies_without_exposing_values(self):
+        module = load_module()
+        secret_one = "boss-secret-one"
+        secret_two = "boss-secret-two"
+
+        class FakeSession:
+            def __init__(self, port):
+                self.port = port
+                self.calls = []
+                self.closed = False
+
+            def send(self, method, params=None):
+                self.calls.append((method, params or {}))
+                if method == "Storage.getCookies":
+                    cookies = {
+                        9223: [
+                            {"name": "wt2", "value": secret_one, "domain": ".zhipin.com", "path": "/", "secure": True, "httpOnly": True},
+                            {"name": "lastCity", "value": secret_two, "domain": "www.zhipin.com", "path": "/", "sameSite": "Lax"},
+                            {"name": "trap", "value": "must-not-move", "domain": "evilzhipin.com", "path": "/"},
+                            {"name": "google", "value": "must-not-move", "domain": ".google.com", "path": "/"},
+                        ],
+                        9222: [],
+                    }[self.port]
+                    return {"result": {"cookies": cookies}}
+                if method == "Storage.setCookies":
+                    return {"result": {}}
+                raise AssertionError(method)
+
+            def close(self):
+                self.closed = True
+
+        sessions = {}
+
+        def factory(port):
+            sessions[port] = FakeSession(port)
+            return sessions[port]
+
+        result = module.import_boss_session(
+            source_cdp_port=9223,
+            target_cdp_port=9222,
+            authorized=True,
+            session_factory=factory,
+            login_checker=lambda port: port == 9222,
+            target_profile_checker=lambda _port: True,
+        )
+
+        self.assertEqual(result, {"status": "completed", "code": "ok", "imported_count": 2})
+        set_call = next(call for call in sessions[9222].calls if call[0] == "Storage.setCookies")
+        imported = set_call[1]["cookies"]
+        self.assertEqual([cookie["domain"] for cookie in imported], [".zhipin.com", "www.zhipin.com"])
+        self.assertNotIn("trap", repr(imported))
+        self.assertNotIn("google", repr(imported))
+        self.assertNotIn(secret_one, repr(result))
+        self.assertNotIn(secret_two, repr(result))
+        self.assertTrue(sessions[9223].closed)
+        self.assertTrue(sessions[9222].closed)
+
+    def test_session_import_rolls_back_target_boss_cookies_when_probe_fails(self):
+        module = load_module()
+
+        class FakeSession:
+            def __init__(self, port):
+                self.port = port
+                self.calls = []
+
+            def send(self, method, params=None):
+                params = params or {}
+                self.calls.append((method, params))
+                if method == "Storage.getCookies":
+                    return {"result": {"cookies": {
+                        9223: [{"name": "wt2", "value": "new-secret", "domain": ".zhipin.com", "path": "/"}],
+                        9222: [
+                            {"name": "old", "value": "old-secret", "domain": ".zhipin.com", "path": "/"},
+                            {"name": "unrelated", "value": "keep", "domain": ".example.com", "path": "/"},
+                        ],
+                    }[self.port]}}
+                if method in ("Storage.setCookies", "Network.deleteCookies"):
+                    return {"result": {}}
+                raise AssertionError(method)
+
+            def close(self):
+                pass
+
+        sessions = {}
+
+        def factory(port):
+            sessions[port] = FakeSession(port)
+            return sessions[port]
+
+        result = module.import_boss_session(
+            source_cdp_port=9223,
+            target_cdp_port=9222,
+            authorized=True,
+            session_factory=factory,
+            login_checker=lambda _port: False,
+            target_profile_checker=lambda _port: True,
+        )
+
+        self.assertEqual(result, {
+            "status": "failed",
+            "code": "session_import_unverified",
+            "imported_count": 0,
+        })
+        target_calls = sessions[9222].calls
+        deleted = [params for method, params in target_calls if method == "Network.deleteCookies"]
+        self.assertEqual(
+            {(item["name"], item["domain"], item["path"]) for item in deleted},
+            {("wt2", ".zhipin.com", "/"), ("old", ".zhipin.com", "/")},
+        )
+        set_calls = [params["cookies"] for method, params in target_calls if method == "Storage.setCookies"]
+        self.assertEqual(len(set_calls), 2)
+        self.assertEqual([cookie["name"] for cookie in set_calls[1]], ["old"])
+        self.assertNotIn("unrelated", repr(target_calls))
+
+    def test_session_import_rejects_same_source_and_target_port_before_connecting(self):
+        module = load_module()
+        factory = mock.Mock()
+
+        result = module.import_boss_session(
+            source_cdp_port=9222,
+            target_cdp_port=9222,
+            authorized=True,
+            session_factory=factory,
+        )
+
+        self.assertEqual(result, {
+            "status": "blocked",
+            "code": "source_target_port_conflict",
+            "imported_count": 0,
+        })
+        factory.assert_not_called()
+
+    def test_session_import_rejects_non_dedicated_target_before_connecting(self):
+        module = load_module()
+        factory = mock.Mock()
+
+        result = module.import_boss_session(
+            source_cdp_port=9223,
+            target_cdp_port=9222,
+            authorized=True,
+            session_factory=factory,
+            target_profile_checker=lambda _port: False,
+        )
+
+        self.assertEqual(result, {
+            "status": "blocked",
+            "code": "target_not_dedicated_profile",
+            "imported_count": 0,
+        })
+        factory.assert_not_called()
+
+    def test_session_import_rolls_back_and_redacts_probe_exceptions(self):
+        module = load_module()
+        secret = "probe-secret-must-not-leak"
+
+        class FakeSession:
+            def __init__(self, port):
+                self.port = port
+                self.calls = []
+
+            def send(self, method, params=None):
+                params = params or {}
+                self.calls.append((method, params))
+                if method == "Storage.getCookies":
+                    cookies = [{
+                        "name": "wt2",
+                        "value": secret,
+                        "domain": ".zhipin.com",
+                        "path": "/",
+                    }] if self.port == 9223 else []
+                    return {"result": {"cookies": cookies}}
+                if method in ("Storage.setCookies", "Network.deleteCookies"):
+                    return {"result": {}}
+                raise AssertionError(method)
+
+            def close(self):
+                pass
+
+        sessions = {}
+
+        def factory(port):
+            sessions[port] = FakeSession(port)
+            return sessions[port]
+
+        def failing_probe(_port):
+            raise RuntimeError(secret)
+
+        result = module.import_boss_session(
+            source_cdp_port=9223,
+            target_cdp_port=9222,
+            authorized=True,
+            session_factory=factory,
+            login_checker=failing_probe,
+            target_profile_checker=lambda _port: True,
+        )
+
+        self.assertEqual(result, {
+            "status": "failed",
+            "code": "session_import_unverified",
+            "imported_count": 0,
+        })
+        self.assertNotIn(secret, repr(result))
+        self.assertTrue(any(method == "Network.deleteCookies" for method, _ in sessions[9222].calls))
+
+    def test_session_import_rolls_back_when_cookie_write_raises(self):
+        module = load_module()
+        secret = "write-secret-must-not-leak"
+
+        class FakeSession:
+            def __init__(self, port):
+                self.port = port
+                self.calls = []
+
+            def send(self, method, params=None):
+                params = params or {}
+                self.calls.append((method, params))
+                if method == "Storage.getCookies":
+                    cookies = [{
+                        "name": "wt2", "value": secret,
+                        "domain": ".zhipin.com", "path": "/",
+                    }] if self.port == 9223 else []
+                    return {"result": {"cookies": cookies}}
+                if method == "Storage.setCookies":
+                    raise RuntimeError(secret)
+                if method == "Network.deleteCookies":
+                    return {"result": {}}
+                raise AssertionError(method)
+
+            def close(self):
+                pass
+
+        sessions = {}
+
+        def factory(port):
+            sessions[port] = FakeSession(port)
+            return sessions[port]
+
+        result = module.import_boss_session(
+            source_cdp_port=9223,
+            target_cdp_port=9222,
+            authorized=True,
+            session_factory=factory,
+            login_checker=lambda _port: True,
+            target_profile_checker=lambda _port: True,
+        )
+
+        self.assertEqual(result, {
+            "status": "failed",
+            "code": "session_write_failed",
+            "imported_count": 0,
+        })
+        self.assertNotIn(secret, repr(result))
+        self.assertTrue(any(method == "Network.deleteCookies" for method, _ in sessions[9222].calls))
+
     def test_default_cdp_profile_is_persistent_and_not_default_or_tmp(self):
         module = load_module()
 
@@ -612,24 +884,37 @@ class ChromeSetupTests(unittest.TestCase):
         self.assertIn(expected_profile_arg, launched)
         wait_login.assert_called_once_with(9333, timeout=module.DEFAULT_LOGIN_TIMEOUT)
 
-    def test_copy_login_state_is_explicit_and_does_not_copy_password_databases(self):
+    def test_copy_login_state_is_rejected_without_copying_browser_databases(self):
         module = load_module()
-        copied = []
-        with tempfile_profile() as paths:
-            with mock.patch.object(module, "DEFAULT_PROFILE_DIR", str(paths["source_profile"])), \
-                    mock.patch.object(module, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
-                    mock.patch.object(module.shutil, "copy2", side_effect=lambda src, dst: copied.append((pathlib.Path(src), pathlib.Path(dst)))):
-                result = module.prepare_cdp_profile(copy_login_state=True, reset=False)
+        with mock.patch.object(module, "require_runtime_dependencies", return_value=True), \
+                mock.patch.object(module.shutil, "copy2") as copy2, \
+                mock.patch.object(module, "is_cdp_ready", return_value=False), \
+                mock.patch.object(module, "stop_cdp_chrome", return_value=0), \
+                mock.patch.object(module, "wait_for_cdp", return_value=False), \
+                mock.patch.object(module.subprocess, "Popen") as popen:
+            result = module.run_setup_chrome(copy_login_state=True)
 
-        copied_names = [src.name for src, _ in copied]
-        copied_rel_paths = [src.relative_to(paths["source_profile"]) for src, _ in copied]
-        self.assertEqual(result["copied"], 4)
-        self.assertIn("Local State", copied_names)
-        self.assertIn("Cookies", copied_names)
-        self.assertIn(pathlib.Path("Default/Cookies-journal"), copied_rel_paths)
-        self.assertIn(pathlib.Path("Default/Network/Cookies"), copied_rel_paths)
-        self.assertNotIn("Login Data", copied_names)
-        self.assertNotIn("Web Data", copied_names)
+        self.assertEqual(result, 1)
+        copy2.assert_not_called()
+        popen.assert_not_called()
+
+    def test_copy_login_state_is_rejected_before_other_cli_modes(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "--copy-login-state",
+                "--check",
+                "--cdp-port", "1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--copy-login-state", result.stdout)
+        self.assertNotIn("[1/3]", result.stdout)
 
     def test_setup_rejects_ready_cdp_port_owned_by_other_profile(self):
         module = load_module()
@@ -719,6 +1004,27 @@ class ChromeSetupTests(unittest.TestCase):
         self.assertIn("--reset-chrome-profile", result.stdout)
         self.assertIn("--no-wait-login", result.stdout)
         self.assertIn("--login-timeout", result.stdout)
+        self.assertIn("--import-boss-session", result.stdout)
+        self.assertIn("--source-cdp-port", result.stdout)
+        self.assertIn("--confirm-session-import", result.stdout)
+
+    def test_session_import_cli_requires_confirmation_before_browser_probe(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "--import-boss-session",
+                "--source-cdp-port", "2",
+                "--cdp-port", "1",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("code=authorization_required", result.stdout)
+        self.assertNotIn("target_not_dedicated_profile", result.stdout)
 
     def test_check_does_not_crash_when_console_encoding_cannot_encode_emoji(self):
         env = os.environ.copy()
@@ -780,6 +1086,67 @@ def _normalize_version(raw):
     major = parts[0] if len(parts) > 0 else "0"
     minor = parts[1] if len(parts) > 1 else "0"
     return f"{major}.{minor}"
+
+
+class DedicatedChromeShutdownTests(unittest.TestCase):
+    def test_graceful_close_refuses_non_dedicated_cdp_profile(self):
+        module = load_module()
+        session_factory = mock.Mock()
+        process_stopper = mock.Mock()
+
+        closed = module.close_cdp_chrome(
+            cdp_port=9333,
+            cdp_data_dir="C:/isolated/boss-profile",
+            profile_checker=lambda _port, _path: False,
+            session_factory=session_factory,
+            process_stopper=process_stopper,
+            ready_checker=lambda _port: True,
+            sleeper=lambda _seconds: None,
+        )
+
+        self.assertFalse(closed)
+        session_factory.assert_not_called()
+        process_stopper.assert_not_called()
+
+    def test_dedicated_browser_receives_graceful_close_without_process_kill(self):
+        module = load_module()
+        session = mock.Mock()
+        process_stopper = mock.Mock()
+
+        closed = module.close_cdp_chrome(
+            cdp_port=9333,
+            cdp_data_dir="C:/isolated/boss-profile",
+            profile_checker=lambda _port, _path: True,
+            session_factory=lambda _port: session,
+            process_stopper=process_stopper,
+            ready_checker=lambda _port: False,
+            sleeper=lambda _seconds: None,
+        )
+
+        self.assertTrue(closed)
+        session.send.assert_called_once_with("Browser.close", timeout=5)
+        session.close.assert_called_once_with()
+        process_stopper.assert_not_called()
+
+    def test_graceful_close_falls_back_to_dedicated_process_stop(self):
+        module = load_module()
+        session = mock.Mock()
+        session.send.side_effect = ConnectionError("browser closed socket")
+        process_stopper = mock.Mock(return_value=1)
+        readiness = iter([True] * 10 + [False])
+
+        closed = module.close_cdp_chrome(
+            cdp_port=9333,
+            cdp_data_dir="C:/isolated/boss-profile",
+            profile_checker=lambda _port, _path: True,
+            session_factory=lambda _port: session,
+            process_stopper=process_stopper,
+            ready_checker=lambda _port: next(readiness),
+            sleeper=lambda _seconds: None,
+        )
+
+        self.assertTrue(closed)
+        process_stopper.assert_called_once_with("C:/isolated/boss-profile")
 
 
 class VersionConsistencyTests(unittest.TestCase):

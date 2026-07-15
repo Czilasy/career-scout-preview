@@ -39,6 +39,16 @@ from webui.workbench import (
     aggregate_feedback_state,
     merge_profile_fields,
 )
+from webui.discovery import (
+    DiscoveryError as _DiscoveryError,
+    ERROR_CODE_MAP as _ERROR_CODE_MAP,
+    analyze_resume as _discovery_analyze_resume,
+    confirm_directions as _discovery_confirm_directions,
+    compile_search_plan as _discovery_compile_plan,
+    normalize_portfolio_assessment as _normalize_discovery_assessment,
+)
+from webui.discovery_runner import DiscoveryTaskRuntime as _DiscoveryTaskRuntime
+from webui.source import BossCdpSource as _BossCdpSource
 from webui import resume as resume_service
 from webui import ai as ai_service
 from webui.screening import (
@@ -500,6 +510,82 @@ class WorkbenchRunner(TaskRunner):
         return self.store.update_search_run(run_id, status="interrupted")
 
 
+class ScreeningRunner:
+    """Own background screening workers, cancellation events and scraper handles."""
+
+    def __init__(self, store, *, start_tasks=True, timeout_seconds=300):
+        self.store = store
+        self.start_tasks = bool(start_tasks)
+        self.timeout_seconds = max(1, int(timeout_seconds))
+        self._lock = threading.Lock()
+        self._cancel_events = {}
+        self._processes = {}
+        self.executor = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="boss-screening")
+            if self.start_tasks else None
+        )
+
+    def submit(self, run_id, execute):
+        event = threading.Event()
+        with self._lock:
+            self._cancel_events[run_id] = event
+        if self.executor:
+            self.executor.submit(self._run, run_id, execute)
+        else:
+            self._run(run_id, execute)
+
+    def _run(self, run_id, execute):
+        try:
+            execute(
+                run_id,
+                should_cancel=lambda: self.is_cancelled(run_id),
+                on_process=lambda process: self.track_process(run_id, process),
+                timeout_seconds=self.timeout_seconds,
+            )
+        except Exception:
+            self.store.update_screening_run_status(
+                run_id, "failed", error_code="execution_failed",
+                expected_statuses={"queued", "running"},
+            )
+        finally:
+            with self._lock:
+                self._processes.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
+
+    def is_cancelled(self, run_id):
+        with self._lock:
+            event = self._cancel_events.get(run_id)
+        if event and event.is_set():
+            return True
+        try:
+            return self.store.get_screening_run(run_id)["status"] == "interrupted"
+        except KeyError:
+            return True
+
+    def track_process(self, run_id, process):
+        with self._lock:
+            if process is None:
+                self._processes.pop(run_id, None)
+            else:
+                self._processes[run_id] = process
+
+    def cancel(self, run_id):
+        run = self.store.get_screening_run(run_id)
+        if run["status"] not in {"queued", "running"}:
+            raise ValueError("只能取消等待中或运行中的筛选")
+        with self._lock:
+            event = self._cancel_events.get(run_id)
+            process = self._processes.get(run_id)
+            if event:
+                event.set()
+        if process is not None and process.poll() is None:
+            process.terminate()
+        return self.store.update_screening_run_status(
+            run_id, "interrupted", error_code="cancelled",
+            expected_statuses={"queued", "running"},
+        )
+
+
 def create_app(config=None):
     app = Flask(__name__)
     app.config.update(
@@ -508,8 +594,10 @@ def create_app(config=None):
         PYTHON_EXECUTABLE=os.environ.get("BOSS_PYTHON", sys.executable),
         START_TASKS=True,
         API_TOKEN=secrets.token_urlsafe(24),
+        SESSION_COOKIE_NAME="boss_local_session",
         TRUSTED_HOSTS=["127.0.0.1", "localhost", "::1"],
         RESUME_DIR=str(DEFAULT_STATE_DIR / "resumes"),
+        SCREENING_TIMEOUT_SECONDS=300,
     )
     if config:
         app.config.update(config)
@@ -530,10 +618,36 @@ def create_app(config=None):
         app.config["PYTHON_EXECUTABLE"],
         start_tasks=app.config["START_TASKS"],
     )
+    screening_runner = ScreeningRunner(
+        store,
+        start_tasks=app.config["START_TASKS"],
+        timeout_seconds=app.config["SCREENING_TIMEOUT_SECONDS"],
+    )
+
+    # T101: 应用持有的唯一 DiscoveryTaskRuntime。
+    # provider/source factory 让 runtime 在每次 submit_run 时获取最新 AI 设置
+    # 和 CDP source 状态，而不是被钉死在 create_app 构造时刻的实例上。
+    def _make_discovery_source():
+        try:
+            return _BossCdpSource(
+                python_executable=app.config["PYTHON_EXECUTABLE"],
+            )
+        except Exception:
+            return None
+
+    discovery_runtime = _DiscoveryTaskRuntime(
+        store,
+        source_factory=_make_discovery_source,
+        ai_provider_factory=lambda: _build_ai_provider(store),
+        result_dir=app.config["RESULT_DIR"],
+        max_workers=1,
+    )
     Path(app.config["RESUME_DIR"]).mkdir(parents=True, exist_ok=True)
     app.config["TASK_STORE"] = store
     app.config["TASK_RUNNER"] = runner
     app.config["WORKBENCH_RUNNER"] = workbench_runner
+    app.config["SCREENING_RUNNER"] = screening_runner
+    app.config["DISCOVERY_RUNTIME"] = discovery_runtime
 
     @app.before_request
     def protect_local_api():
@@ -564,21 +678,34 @@ def create_app(config=None):
                 return jsonify({"error": "拒绝跨站请求"}), 403
             if request.headers.get("Sec-Fetch-Site", "").lower() == "cross-site":
                 return jsonify({"error": "拒绝跨站请求"}), 403
-            supplied = request.headers.get("X-Boss-Token", "")
+            supplied = (
+                request.headers.get("X-Boss-Token", "")
+                or request.cookies.get(app.config["SESSION_COOKIE_NAME"], "")
+            )
             if not secrets.compare_digest(supplied, app.config["API_TOKEN"]):
                 return jsonify({"error": "缺少有效的本地会话令牌"}), 403
 
     @app.errorhandler(ValueError)
     def handle_value_error(error):
-        return jsonify({"error": str(error)}), 400
+        return jsonify({
+            "error_code": "invalid_request",
+            "user_message": str(error),
+        }), 400
 
     @app.errorhandler(KeyError)
     def handle_key_error(error):
-        return jsonify({"error": f"任务不存在: {error.args[0]}"}), 404
+        return jsonify({
+            "error_code": "not_found",
+            "user_message": "任务不存在",
+        }), 404
 
     @app.route("/")
     def index():
-        resp = send_from_directory(HERE, "index.html")
+        # Read as text so the generated HTML uses stable LF line endings on
+        # every platform; DOM contract checks and embedded script snippets
+        # should not depend on the host filesystem newline convention.
+        html = (HERE / "index.html").read_text(encoding="utf-8")
+        resp = app.response_class(html, mimetype="text/html")
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         return resp
 
@@ -599,7 +726,16 @@ def create_app(config=None):
 
     @app.route("/api/session")
     def session():
-        return jsonify({"token": app.config["API_TOKEN"]})
+        payload = (
+            {"token": app.config["API_TOKEN"]}
+            if app.config.get("TESTING") else {"status": "ok"}
+        )
+        response = jsonify(payload)
+        response.set_cookie(
+            app.config["SESSION_COOKIE_NAME"], app.config["API_TOKEN"],
+            httponly=True, samesite="Strict", secure=False, path="/",
+        )
+        return response
 
     @app.route("/api/check")
     def check():
@@ -833,9 +969,8 @@ def create_app(config=None):
                 )
                 deleted = True
             return jsonify({"deleted": deleted})
-        # POST: upload. A second resume overwrites the current one in-place:
-        # the old resume is soft-deleted (deleted_at set, file removed) and
-        # the new resume binds to the same profile. No new profile is created.
+        # POST: upload. A second resume starts a fresh profile; only the
+        # user-confirmed fields are carried forward, never learned preference.
         current_profile = store.get_profile(profile_id)
         if "file" not in request.files:
             raise ValueError("请上传简历文件")
@@ -843,10 +978,11 @@ def create_app(config=None):
         file_bytes = upload.read()
         filename = upload.filename or "resume.txt"
         if current_profile.get("resume_id"):
-            resume_service.delete_resume(
-                current_profile["resume_id"], store,
-                resume_dir=app.config["RESUME_DIR"],
+            created = store.create_profile(
+                f"{Path(filename).stem[:70] or '新简历'} 求职画像",
+                confirmed_fields=current_profile.get("confirmed_fields") or {},
             )
+            profile_id = created["id"]
         record = resume_service.save_resume(
             profile_id, file_bytes, filename,
             resume_service.validate_format(filename),
@@ -962,16 +1098,202 @@ def create_app(config=None):
 
     # == US2: screening execution run ====================================
 
+    def _screening_run_payload(run):
+        return {
+            "run_id": run["id"],
+            "status": run["status"],
+            "source_count": run["source_count"],
+            "match_count": run["match_count"],
+            "mismatch_count": run["mismatch_count"],
+            "pending_count": run.get("pending_count", 0),
+            "parse_failure_count": run.get("parse_failure_count", 0),
+            "parse_failures": run.get("parse_failures", {}),
+        }
+
+    def _execute_screening_pipeline(run_id, *, should_cancel, on_process,
+                                    timeout_seconds, resume_saved=False):
+        """Run fetch + per-job verification with cancellation-safe writes."""
+        run = store.get_screening_run(run_id)
+        if should_cancel():
+            return run
+        frozen = run["frozen_filters"]
+        execution = run.get("execution", {})
+        keyword = execution.get("keyword", "")
+        execution_limits = {
+            key: execution[key] for key in ("pages", "max_details")
+            if execution.get(key) is not None
+        }
+        resume_text = ""
+        if run.get("resume_id"):
+            resume_text = store.get_resume(run["resume_id"]).get("extracted_text") or ""
+        output_path = Path(app.config["RESULT_DIR"]) / f"screening_{run_id}.json"
+        detail_output_path = Path(app.config["RESULT_DIR"]) / f"screening_{run_id}_details.json"
+        guarded = bool(app.config["START_TASKS"])
+        if guarded or resume_saved:
+            store.update_screening_run_status(
+                run_id, "running", expected_statuses={"queued"},
+            )
+            if should_cancel():
+                return store.get_screening_run(run_id)
+
+        search_result = None
+        if resume_saved:
+            payload = _read_json(output_path, {})
+            saved_jobs = payload.get("jobs") if isinstance(payload, dict) else None
+            try:
+                last_completed_page = int(payload.get("last_completed_page", 0))
+            except (TypeError, ValueError):
+                last_completed_page = 0
+            target_pages = int(execution.get("pages") or 0)
+            can_continue_source = (
+                last_completed_page >= 1
+                and target_pages > last_completed_page
+                and payload.get("keyword") == keyword
+            )
+            if can_continue_source:
+                execution_limits["start_page"] = last_completed_page + 1
+            elif isinstance(saved_jobs, list) and saved_jobs:
+                search_result = {
+                    "jobs": saved_jobs,
+                    "source_count": len(saved_jobs),
+                    "status": (
+                        "running" if target_pages and last_completed_page >= target_pages
+                        else "partial"
+                    ),
+                    "error_code": "resumed_from_saved_artifact",
+                }
+        if search_result is None:
+            try:
+                search_result = execute_first_layer(
+                    frozen, keyword,
+                    output_path=str(output_path),
+                    detail_output_path=str(detail_output_path),
+                    python_executable=app.config["PYTHON_EXECUTABLE"],
+                    **execution_limits,
+                    store=store,
+                    run_id=run_id,
+                    should_cancel=should_cancel if guarded else None,
+                    timeout_seconds=timeout_seconds if guarded else None,
+                    on_process=on_process if guarded else None,
+                    manage_status=not (guarded or resume_saved),
+                )
+            except Exception:
+                if not should_cancel():
+                    store.update_screening_run_status(
+                        run_id, "failed", error_code="execution_failed",
+                        **({"expected_statuses": {"queued", "running"}} if guarded else {}),
+                    )
+                return store.get_screening_run(run_id)
+
+        if should_cancel() or search_result.get("status") == "interrupted":
+            return store.get_screening_run(run_id)
+
+        jobs = search_result.get("jobs", []) if isinstance(search_result, dict) else []
+        ai_settings = store.get_ai_settings()
+        ai_cred_ref = store.get_credential_ref()
+        ai_api_key = ai_service.retrieve_api_key(ai_cred_ref) if ai_cred_ref else ""
+        ai_available = ai_service.is_ai_available(
+            ai_settings, ai_cred_ref, ai_api_key,
+        ) and bool(resume_text)
+        semantic_options = None
+        if ai_available:
+            semantic_options = {
+                "ai_available": True,
+                "endpoint_url": ai_settings["endpoint_url"],
+                "api_key": ai_api_key,
+                "model": ai_settings.get("model", ""),
+                "require_input": True,
+            }
+
+        existing_results = store.get_screening_results(run_id)
+        existing_pending = store.list_pending(run_id)
+        completed_job_ids = {
+            item["job_id"] for item in [*existing_results, *existing_pending]
+        }
+        current = store.get_screening_run(run_id)
+        parse_distribution = dict(current.get("parse_failures", {}))
+        parse_failure_count = int(current.get("parse_failure_count", 0))
+        persisted_counts = store.count_screening_results(run_id)
+        counts = {
+            "match": persisted_counts["match"],
+            "mismatch": persisted_counts["mismatch"],
+            "pending": len(existing_pending),
+        }
+        active_statuses = {"running"}
+        for index, job in enumerate(jobs, start=1):
+            if job.get("job_id", "") in completed_job_ids:
+                continue
+            if should_cancel():
+                break
+            partition = partition_jobs(
+                [job], frozen, resume_text,
+                ai_enabled=ai_available,
+                semantic_options=semantic_options,
+            )
+            if should_cancel():
+                break
+            job_id = job.get("job_id", "")
+            write_guard = active_statuses if guarded else None
+            written = None
+            if partition["match"]:
+                written = store.add_screening_result(
+                    run_id, job_id, "match", expected_run_statuses=write_guard,
+                )
+                if written:
+                    counts["match"] += 1
+                    completed_job_ids.add(job_id)
+            elif partition["mismatch"]:
+                written = store.add_screening_result(
+                    run_id, job_id, "mismatch", expected_run_statuses=write_guard,
+                )
+                if written:
+                    counts["mismatch"] += 1
+                    completed_job_ids.add(job_id)
+            else:
+                written = store.add_pending_result(
+                    run_id, job_id,
+                    partition.get("pending_failures", {}).get(job_id, "verification_error"),
+                    expected_run_statuses=write_guard,
+                )
+                if written:
+                    counts["pending"] += 1
+                    completed_job_ids.add(job_id)
+            if guarded and not written:
+                break
+            detail = verify_hard_rules_detailed(job, frozen)
+            for field in detail["parse_failures"]:
+                parse_distribution[field] = parse_distribution.get(field, 0) + 1
+                parse_failure_count += 1
+            store.update_screening_run_status(
+                run_id, "running",
+                source_count=len(jobs), match_count=counts["match"],
+                mismatch_count=counts["mismatch"], pending_count=counts["pending"],
+                processed_count=index, source_cursor=index,
+                parse_failure_count=parse_failure_count,
+                parse_failures=parse_distribution,
+                **({"expected_statuses": active_statuses} if guarded else {}),
+            )
+
+        if should_cancel():
+            return store.get_screening_run(run_id)
+        pending_count = counts["pending"]
+        final_status = (
+            "partial" if pending_count or search_result.get("status") == "partial"
+            else "succeeded"
+        )
+        return store.update_screening_run_status(
+            run_id, final_status,
+            source_count=len(jobs), match_count=counts["match"],
+            mismatch_count=counts["mismatch"], pending_count=pending_count,
+            processed_count=len(completed_job_ids), source_cursor=len(jobs),
+            parse_failure_count=parse_failure_count,
+            parse_failures=parse_distribution,
+            **({"expected_statuses": active_statuses} if guarded else {}),
+        )
+
     @app.route("/api/screening/runs", methods=["POST"])
     def screening_create_run():
-        """Create a screening run with confirmed filters and trigger first-layer search.
-
-        Freezes the filter snapshot, creates a screening run, and executes
-        the first-layer search synchronously. Returns run_id with the final
-        status and source_count. On execution failure the run is persisted
-        as failed and a 500 response with run_id is returned so the client
-        can still reference the run.
-        """
+        """Freeze inputs, persist the run, then queue it in normal runtime."""
         raw = request.get_json(silent=True) or {}
         filters = raw.get("filters") or {}
         keyword = raw.get("keyword") or ""
@@ -985,11 +1307,11 @@ def create_app(config=None):
         max_details = _optional_positive_int(raw.get("max_details"), "max_details")
         if pages is not None and max_details is not None and max_details > pages * 30:
             raise ValueError(f"max_details 不能超过 {pages * 30}")
-        execution_limits = {}
+        execution = {"keyword": keyword}
         if pages is not None:
-            execution_limits["pages"] = pages
+            execution["pages"] = pages
         if max_details is not None:
-            execution_limits["max_details"] = max_details
+            execution["max_details"] = max_details
 
         frozen = freeze_filters(filters)
         profile_id = raw.get("profile_id")
@@ -999,110 +1321,23 @@ def create_app(config=None):
             # deliberate clears, so persist exactly the frozen selection.
             store.update_profile(profile_id, confirmed_fields=frozen)
         resume_id = raw.get("resume_id")
-        resume_text = ""
         if resume_id:
-            resume = store.get_resume(resume_id)
-            resume_text = resume.get("extracted_text") or ""
-        run = store.create_screening_run(frozen, resume_id=resume_id)
-        run_id = run["id"]
-        output_path = Path(app.config["RESULT_DIR"]) / f"screening_{run_id}.json"
-        detail_output_path = Path(app.config["RESULT_DIR"]) / f"screening_{run_id}_details.json"
-
-        try:
-            search_result = execute_first_layer(
-                frozen, keyword,
-                output_path=str(output_path),
-                detail_output_path=str(detail_output_path),
-                python_executable=app.config["PYTHON_EXECUTABLE"],
-                **execution_limits,
-                store=store,
-                run_id=run_id,
-            )
-        except Exception:
-            final = store.get_screening_run(run_id)
-            return jsonify({
-                "run_id": run_id,
-                "status": final["status"],
-                "source_count": final["source_count"],
-                "error_code": "execution_failed",
-            }), 500
-
-        # 第二层核验分流：AI 可用时硬规则 + AI 占位，不可用时仅硬规则（FR-034）
-        jobs = search_result.get("jobs", []) if isinstance(search_result, dict) else []
-        ai_settings = store.get_ai_settings()
-        ai_cred_ref = store.get_credential_ref()
-        ai_api_key = ai_service.retrieve_api_key(ai_cred_ref) if ai_cred_ref else ""
-        ai_available = ai_service.is_ai_available(ai_settings, ai_cred_ref, ai_api_key) and bool(resume_text)
-        semantic_options = None
-        if ai_available:
-            semantic_options = {
-                "ai_available": True,
-                "endpoint_url": ai_settings["endpoint_url"],
-                "api_key": ai_api_key,
-                "model": ai_settings.get("model", ""),
-                "require_input": True,
-            }
-        parse_distribution = {}
-        parse_failure_count = 0
-        counts = {"match": 0, "mismatch": 0, "pending": 0}
-        for index, job in enumerate(jobs, start=1):
-            # Persist each completed verification before advancing to the next
-            # job so a process interruption cannot erase the finished prefix.
-            partition = partition_jobs(
-                [job], frozen, resume_text,
-                ai_enabled=ai_available,
-                semantic_options=semantic_options,
-            )
-            job_id = job.get("job_id", "")
-            if partition["match"]:
-                store.add_screening_result(run_id, job_id, "match")
-                counts["match"] += 1
-            elif partition["mismatch"]:
-                store.add_screening_result(run_id, job_id, "mismatch")
-                counts["mismatch"] += 1
-            else:
-                store.add_pending_result(
-                    run_id, job_id,
-                    partition.get("pending_failures", {}).get(job_id, "verification_error"),
-                )
-                counts["pending"] += 1
-            detail = verify_hard_rules_detailed(job, frozen)
-            for field in detail["parse_failures"]:
-                parse_distribution[field] = parse_distribution.get(field, 0) + 1
-                parse_failure_count += 1
-            store.update_screening_run_status(
-                run_id, "partial" if search_result.get("status") == "partial" else "running",
-                source_count=len(jobs), match_count=counts["match"],
-                mismatch_count=counts["mismatch"], pending_count=counts["pending"],
-                processed_count=index, source_cursor=index,
-                parse_failure_count=parse_failure_count,
-                parse_failures=parse_distribution,
-            )
-        pending_count = counts["pending"]
-        final_status = "partial" if pending_count or search_result.get("status") == "partial" else "succeeded"
-        store.update_screening_run_status(
-            run_id, final_status,
-            source_count=len(jobs),
-            match_count=counts["match"],
-            mismatch_count=counts["mismatch"],
-            pending_count=pending_count,
-            processed_count=len(jobs),
-            source_cursor=len(jobs),
-            parse_failure_count=parse_failure_count,
-            parse_failures=parse_distribution,
+            store.get_resume(resume_id)
+        run = store.create_screening_run(
+            frozen, resume_id=resume_id, profile_id=profile_id,
+            execution=execution,
         )
+        run_id = run["id"]
+        screening_runner.submit(run_id, _execute_screening_pipeline)
+        if app.config["START_TASKS"]:
+            return jsonify(_screening_run_payload(store.get_screening_run(run_id))), 202
 
         final = store.get_screening_run(run_id)
-        return jsonify({
-            "run_id": run_id,
-            "status": final["status"],
-            "source_count": final["source_count"],
-            "match_count": final["match_count"],
-            "mismatch_count": final["mismatch_count"],
-            "pending_count": final.get("pending_count", 0),
-            "parse_failure_count": final.get("parse_failure_count", 0),
-            "parse_failures": final.get("parse_failures", {}),
-        }), 201
+        payload = _screening_run_payload(final)
+        if final["status"] == "failed":
+            payload["error_code"] = "execution_failed"
+            return jsonify(payload), 500
+        return jsonify(payload), 201
 
     @app.route("/api/screening/runs/<run_id>", methods=["GET"])
     def screening_get_run(run_id):
@@ -1125,6 +1360,26 @@ def create_app(config=None):
             "error_code": run.get("error_code"),
             "frozen_filters": run.get("frozen_filters", {}),
         })
+
+    @app.route("/api/screening/runs/<run_id>/resume", methods=["POST"])
+    def screening_resume_run(run_id):
+        """Continue an interrupted run from its saved artifact when available."""
+        store.requeue_screening_run(run_id)
+
+        def execute_saved(resume_run_id, **kwargs):
+            return _execute_screening_pipeline(
+                resume_run_id, resume_saved=True, **kwargs,
+            )
+
+        screening_runner.submit(run_id, execute_saved)
+        if app.config["START_TASKS"]:
+            return jsonify(_screening_run_payload(store.get_screening_run(run_id))), 202
+        final = store.get_screening_run(run_id)
+        payload = _screening_run_payload(final)
+        if final["status"] == "failed":
+            payload["error_code"] = final.get("error_code") or "execution_failed"
+            return jsonify(payload), 500
+        return jsonify(payload), 200
 
     # == US3: match/mismatch zone query ==================================
 
@@ -1385,10 +1640,7 @@ def create_app(config=None):
     @app.route("/api/screening/runs/<run_id>/cancel", methods=["POST"])
     def screening_cancel_run(run_id):
         """Interrupt a running screening run without deleting saved results."""
-        run = store.get_screening_run(run_id)
-        if run["status"] not in {"queued", "running"}:
-            raise ValueError("只能取消等待中或运行中的筛选")
-        return jsonify(store.update_screening_run_status(run_id, "interrupted"))
+        return jsonify(screening_runner.cancel(run_id))
 
     # == US4: interest / reject / persistent zones =======================
 
@@ -1786,6 +2038,504 @@ def create_app(config=None):
     def cleanup_preview():
         would_remove = store.preview_cleanup_expired_jobs(days=30)
         return jsonify({"would_remove": len(would_remove), "items": would_remove})
+
+    # ===================================================================
+    # 004 discovery: analyses, confirmations, runs, results, feedback
+    # ===================================================================
+
+    @app.errorhandler(_DiscoveryError)
+    def handle_discovery_error(error):
+        return jsonify(error.to_envelope()), _discovery_status_code(error)
+
+    def _discovery_status_code(error):
+        code = error.error_code
+        if code == "not_found":
+            return 404
+        if code == "state_conflict":
+            return 409
+        return 400
+
+    @app.route("/api/discovery/analyses", methods=["POST"])
+    def discovery_create_analysis():
+        """Create a queued candidate analysis attempt and submit it (US1).
+
+        T109: 接受 application/json {resume_id, ai_consent}，创建 queued
+        analysis 后提交 DiscoveryTaskRuntime 异步执行。不再同步调用 AI
+        直接返回 ready/failed。
+        """
+        raw = request.get_json(silent=True) or {}
+        resume_id = raw.get("resume_id")
+        if not resume_id:
+            raise ValueError("resume_id 不能为空")
+        if "ai_consent" not in raw:
+            raise ValueError("ai_consent 不能为空")
+        ai_consent = bool(raw.get("ai_consent"))
+        try:
+            resume = store.get_resume(resume_id)
+        except KeyError:
+            raise _DiscoveryError("not_found", user_message="简历不存在。")
+        profile_id = resume.get("profile_id")
+        if not profile_id:
+            raise _DiscoveryError(
+                "input_incomplete", user_message="简历未关联候选人档案。",
+            )
+        # T109: 创建 queued attempt，提交 runtime 异步执行
+        # P1/P2: 落库 contract_version="v2" 和 model_name（来自 ai_settings）
+        ai_settings = store.get_ai_settings()
+        analysis = store.create_analysis(
+            resume_id, profile_id,
+            model_name=ai_settings.get("model", ""),
+            contract_version="v2",
+        )
+        discovery_runtime = app.config["DISCOVERY_RUNTIME"]
+        discovery_runtime.submit_analysis(analysis["id"], ai_consent=ai_consent)
+        return jsonify(_analysis_summary(analysis, store)), 202
+
+    @app.route("/api/discovery/analyses/<analysis_id>")
+    def discovery_get_analysis(analysis_id):
+        analysis = store.get_analysis(analysis_id)
+        evidence = store.list_evidence(analysis_id)
+        directions = store.list_directions(analysis_id)
+        return jsonify({
+            "analysis_id": analysis["id"],
+            "resume_id": analysis["resume_id"],
+            "profile_id": analysis["profile_id"],
+            "status": analysis["status"],
+            "version": analysis.get("version"),
+            "summary": analysis.get("summary", {}),
+            "evidence": [
+                {
+                    "id": e["id"],
+                    "type": e["evidence_type"],
+                    "normalized_value": e["normalized_value"],
+                    "safe_excerpt": e.get("safe_excerpt", ""),
+                    "assertion_type": e.get("assertion_type", "explicit"),
+                    "confidence": e.get("confidence", 0),
+                }
+                for e in evidence
+            ],
+            "unknowns": analysis.get("unknowns", []),
+            "directions": [
+                {
+                    "id": d["id"],
+                    "name": d["name"],
+                    "type": d["direction_type"],
+                    "rationale": d.get("rationale", ""),
+                    "evidence_ids": [r["evidence_id"] for r in store.list_direction_evidence(d["id"])],
+                    "gaps": d.get("gaps", []),
+                    "confidence": d.get("confidence", 0),
+                    "default_enabled": d.get("default_enabled", False),
+                    "search_terms": d.get("search_terms", []),
+                }
+                for d in directions
+            ],
+            "failure": _analysis_failure(analysis),
+        }), 200
+
+    @app.route("/api/discovery/analyses/<analysis_id>/retry", methods=["POST"])
+    def discovery_retry_analysis(analysis_id):
+        """Create a new analysis attempt for the same resume (T109).
+
+        读取请求体 ai_consent（默认 True 向后兼容），创建新版本 queued
+        analysis 后提交 DiscoveryTaskRuntime 异步执行。
+        """
+        try:
+            analysis = store.get_analysis(analysis_id)
+        except KeyError:
+            raise _DiscoveryError("not_found", user_message="分析不存在。")
+        raw = request.get_json(silent=True) or {}
+        ai_consent = bool(raw.get("ai_consent", True))
+        resume_id = analysis["resume_id"]
+        profile_id = analysis["profile_id"]
+        # T109: 创建新版本 queued attempt，提交 runtime 异步执行
+        new_analysis = store.create_analysis(resume_id, profile_id)
+        discovery_runtime = app.config["DISCOVERY_RUNTIME"]
+        discovery_runtime.submit_analysis(new_analysis["id"], ai_consent=ai_consent)
+        return jsonify(_analysis_summary(new_analysis, store)), 202
+
+    @app.route("/api/discovery/confirmations", methods=["POST"])
+    def discovery_create_confirmation():
+        raw = request.get_json(silent=True) or {}
+        analysis_id = raw.get("analysis_id")
+        enabled_direction_ids = raw.get("enabled_direction_ids", [])
+        hard_constraints = raw.get("hard_constraints", {})
+        soft_preferences = raw.get("soft_preferences", {})
+        safe_limits = raw.get("safe_limits", {})
+        user_directions = raw.get("user_directions", [])
+        confirmation = _discovery_confirm_directions(
+            store, analysis_id, enabled_direction_ids,
+            hard_constraints=hard_constraints,
+            soft_preferences=soft_preferences,
+            safe_limits=safe_limits,
+            user_directions=user_directions,
+        )
+        return jsonify({
+            "confirmation_id": confirmation["id"],
+            "analysis_id": confirmation["analysis_id"],
+            "version": confirmation["version"],
+            "enabled_direction_ids": [d["direction_id"] for d in store.get_confirmation(confirmation["id"])["directions"]],
+            "confirmed_at": confirmation["confirmed_at"],
+        }), 201
+
+    @app.route("/api/discovery/runs", methods=["POST"])
+    def discovery_create_run():
+        raw = request.get_json(silent=True) or {}
+        confirmation_id = raw.get("confirmation_id")
+        if not confirmation_id:
+            raise ValueError("confirmation_id 不能为空")
+        try:
+            confirmation = store.get_confirmation(confirmation_id)
+        except KeyError:
+            raise _DiscoveryError("not_found", user_message="确认信息不存在。")
+        # Build confirmation view for plan compilation
+        directions = store.list_directions(confirmation["analysis_id"])
+        enabled_dirs = []
+        for d in directions:
+            for cd in confirmation["directions"]:
+                if cd["direction_id"] == d["id"] and cd["enabled"]:
+                    enabled_dirs.append({
+                        "id": d["id"],
+                        "name": d["name"],
+                        "search_terms": d.get("search_terms", []),
+                    })
+        confirmation_view = {
+            "enabled_directions": enabled_dirs,
+            "hard_constraints": confirmation.get("hard_constraints", {}),
+            "safe_limits": confirmation.get("safe_limits", {}),
+        }
+        plan = _discovery_compile_plan(confirmation_view)
+        run = store.create_discovery_run(
+            profile_id=confirmation["profile_id"],
+            resume_id=confirmation["resume_id"],
+            analysis_id=confirmation["analysis_id"],
+            confirmation_id=confirmation_id,
+            input_hash=plan["input_hash"],
+        )
+        # T101/T133: 不在路由预创建 search_plan_items。
+        # 1. 旧实现给所有 items 设置同一个 plan 级 input_hash，违反
+        #    search_plan_items 的 UNIQUE (plan_id, input_hash) 约束；
+        # 2. 旧 input_hash 与 _source_input_hash 计算结果不一致，导致
+        #    runtime resume 校验时全部触发 input_hash_mismatch。
+        # 改由 DiscoveryRuntime._stage_planning 用 _materialize_plan_items
+        # 生成 per-item 唯一且与 source adapter 一致的 input_hash。
+        discovery_runtime = app.config["DISCOVERY_RUNTIME"]
+        discovery_runtime.submit_run(run["id"])
+        return jsonify(_run_summary(run, store)), 202
+
+    @app.route("/api/discovery/runs/<run_id>")
+    def discovery_get_run(run_id):
+        try:
+            run = store.get_discovery_run(run_id)
+        except KeyError:
+            raise _DiscoveryError("not_found", user_message="运行不存在。")
+        return jsonify(_run_summary(run, store)), 200
+
+    @app.route("/api/discovery/runs/<run_id>/cancel", methods=["POST"])
+    def discovery_cancel_run(run_id):
+        try:
+            run = store.get_discovery_run(run_id)
+        except KeyError:
+            raise _DiscoveryError("not_found", user_message="运行不存在。")
+        terminal = {"succeeded", "failed", "cancelled"}
+        if run["status"] in terminal:
+            raise _DiscoveryError("state_conflict", user_message=f"运行已终态 ({run['status']})。")
+        # T101: 委托给应用持有的 runtime，先持久化取消请求再阻止后续工作。
+        discovery_runtime = app.config["DISCOVERY_RUNTIME"]
+        try:
+            updated = discovery_runtime.cancel_run(run_id)
+        except _DiscoveryError:
+            raise
+        return jsonify(_run_summary(updated, store)), 202
+
+    @app.route("/api/discovery/runs/<run_id>/resume", methods=["POST"])
+    def discovery_resume_run(run_id):
+        try:
+            run = store.get_discovery_run(run_id)
+        except KeyError:
+            raise _DiscoveryError("not_found", user_message="运行不存在。")
+        resumable = {"interrupted", "partial"}
+        if run["status"] not in resumable:
+            raise _DiscoveryError("state_conflict", user_message=f"运行状态 {run['status']} 不可恢复。")
+        # T101: 真实重新提交未完成工作，不得仅修改显示状态。
+        discovery_runtime = app.config["DISCOVERY_RUNTIME"]
+        discovery_runtime.resume_run(run_id)
+        return jsonify(_run_summary(store.get_discovery_run(run_id), store)), 202
+
+    @app.route("/api/discovery/runs/<run_id>/results")
+    def discovery_run_results(run_id):
+        try:
+            run = store.get_discovery_run(run_id)
+        except KeyError:
+            raise _DiscoveryError("not_found", user_message="运行不存在。")
+        category = request.args.get("category")
+        direction_id = request.args.get("direction_id")
+        limit = min(100, max(1, request.args.get("limit", 20, type=int) or 20))
+        # T047: Build JobResult objects per openapi.yaml contract.
+        # Each job (snapshot) becomes one JobResult with primary_assessment + assessments.
+        snapshots = store.list_snapshots(run_id) if hasattr(store, "list_snapshots") else []
+        assessments = store.list_assessments(run_id) if hasattr(store, "list_assessments") else []
+        # Look up direction names for AssessmentSummary
+        directions_by_id = {}
+        try:
+            dirs = store.list_directions(run.get("analysis_id", ""))
+            directions_by_id = {d["id"]: d for d in dirs}
+        except Exception:
+            pass
+        # Group assessments by snapshot_id
+        assessments_by_snapshot: dict[str, list[dict]] = {}
+        for a in assessments:
+            sid = a.get("snapshot_id", "")
+            assessments_by_snapshot.setdefault(sid, []).append(a)
+        # Build JobResult per snapshot
+        category_priority = {"high_match": 0, "adjacent_match": 1, "growth_match": 2,
+                             "needs_review": 3, "not_suitable": 4}
+        items = []
+        for snap in snapshots:
+            source_url = normalize_job_link(snap.get("source_url", ""))
+            if not source_url:
+                # FR-042: diagnostics may retain an incomplete snapshot, but
+                # only a validated, user-accessible BOSS HTTPS detail link is
+                # eligible for the formal result collection.
+                continue
+            snap_id = snap["id"]
+            snap_assessments = [
+                _normalize_discovery_assessment({
+                    **assessment,
+                    "snapshot_completeness": snap.get("completeness", "unavailable"),
+                })
+                for assessment in assessments_by_snapshot.get(snap_id, [])
+            ]
+            if not snap_assessments:
+                continue
+            # Filter by direction_id if specified
+            if direction_id:
+                snap_assessments = [a for a in snap_assessments if a.get("direction_id") == direction_id]
+                if not snap_assessments:
+                    continue
+            # Select primary_assessment by best category (lowest priority number)
+            primary_idx = min(range(len(snap_assessments)),
+                              key=lambda i: category_priority.get(
+                                  snap_assessments[i].get("category", "needs_review"), 99))
+            primary = snap_assessments[primary_idx]
+            primary_category = primary.get("category", "needs_review")
+            # Filter by category if specified (on primary_assessment category)
+            if category and primary_category != category:
+                continue
+            # Build AssessmentSummary list
+            def _to_summary(a):
+                did = a.get("direction_id", "")
+                return {
+                    "direction_id": did,
+                    "direction_name": (directions_by_id.get(did) or {}).get("name", ""),
+                    "category": a.get("category", "needs_review"),
+                    "hard_outcome": a.get("hard_outcome", "unknown"),
+                    "match_score": a.get("match_score"),
+                    "confidence": a.get("confidence"),
+                    "evidence": [{"client_ref": eid} for eid in (a.get("candidate_evidence_ids") or [])],
+                    "gaps": a.get("gaps") or [],
+                    "failure_code": a.get("failure_code"),
+                }
+            assessment_summaries = [_to_summary(a) for a in snap_assessments]
+            items.append({
+                "job_id": snap.get("job_id", ""),
+                "title": snap.get("title", ""),
+                "company": snap.get("company", ""),
+                "salary": snap.get("salary", ""),
+                "location": snap.get("location", ""),
+                "source_url": source_url,
+                "source_status": snap.get("source_status", "unknown"),
+                "completeness": snap.get("completeness", "unavailable"),
+                "missing_fields": snap.get("missing_fields") or [],
+                "primary_assessment": assessment_summaries[primary_idx],
+                "assessments": assessment_summaries,
+            })
+        # Counts by primary_assessment category
+        counts: dict[str, int] = {}
+        for item in items:
+            cat = item["primary_assessment"]["category"]
+            counts[cat] = counts.get(cat, 0) + 1
+        items = items[:limit]
+        return jsonify({"items": items, "counts": counts, "next": None}), 200
+
+    @app.route("/api/discovery/runs/<run_id>/jobs/<job_id>/retry", methods=["POST"])
+    def discovery_retry_job(run_id, job_id):
+        try:
+            run = store.get_discovery_run(run_id)
+        except KeyError:
+            raise _DiscoveryError("not_found", user_message="运行不存在。")
+        if run["status"] in {"succeeded", "failed", "cancelled"}:
+            raise _DiscoveryError("state_conflict", user_message="运行已终态。")
+        # T119: 真实提交到 runtime，重置 snapshot 并重新提交 run
+        discovery_runtime = app.config["DISCOVERY_RUNTIME"]
+        try:
+            updated = discovery_runtime.retry_job(run_id, job_id)
+        except _DiscoveryError:
+            raise
+        return jsonify({"accepted": True, "run_id": run_id, "job_id": job_id}), 202
+
+    def _discovery_preference_changes(feedback_items):
+        changes = []
+        for item in feedback_items:
+            base = {
+                "feedback_id": item["id"],
+                "reason_code": item.get("reason_code"),
+                "created_at": item.get("created_at"),
+            }
+            if item.get("target_type") == "direction" and item.get("action") == "direction_disable":
+                changes.append({**base, "kind": "direction_disabled", "direction_id": item.get("direction_id")})
+            elif item.get("target_type") == "job" and item.get("action") == "not_interested":
+                changes.append({**base, "kind": "job_excluded", "job_id": item.get("job_id"), "scope": item.get("scope")})
+            elif item.get("target_type") == "job" and item.get("action") == "interested":
+                changes.append({**base, "kind": "job_interested", "job_id": item.get("job_id"), "scope": item.get("scope")})
+        return changes
+
+    def _discovery_feedback_payload(items):
+        safe_items = [{
+            "id": item["id"],
+            "run_id": item.get("run_id"),
+            "job_id": item.get("job_id"),
+            "direction_id": item.get("direction_id"),
+            "target_type": item.get("target_type"),
+            "action": item.get("action"),
+            "reason_code": item.get("reason_code"),
+            "scope": item.get("scope"),
+            "created_at": item.get("created_at"),
+        } for item in items]
+        return {
+            "items": safe_items,
+            "preference_changes": _discovery_preference_changes(safe_items),
+        }
+
+    @app.route("/api/discovery/feedback", methods=["GET", "POST"])
+    def discovery_create_feedback():
+        if request.method == "GET":
+            profile_id = request.args.get("profile_id")
+            if not profile_id:
+                raise ValueError("profile_id 不能为空")
+            try:
+                store.get_profile(profile_id)
+            except KeyError:
+                raise _DiscoveryError("not_found", user_message="画像不存在。")
+            feedback_items = store.list_discovery_feedback(profile_id, effective_only=True)
+            run_id = request.args.get("run_id")
+            if run_id:
+                feedback_items = [item for item in feedback_items if item.get("run_id") == run_id]
+            return jsonify(_discovery_feedback_payload(feedback_items)), 200
+
+        raw = request.get_json(silent=True) or {}
+        required = ("profile_id", "target_type", "action")
+        for field in required:
+            if not raw.get(field):
+                raise ValueError(f"{field} 不能为空")
+        if raw["target_type"] == "job" and not (raw.get("target_id") or raw.get("job_id")):
+            raise ValueError("job_id 不能为空")
+        if raw["target_type"] == "direction" and not raw.get("direction_id"):
+            raise ValueError("direction_id 不能为空")
+        feedback = store.create_discovery_feedback(
+            profile_id=raw["profile_id"],
+            target_type=raw["target_type"],
+            action=raw["action"],
+            scope=raw.get("scope", "exact_job"),
+            safe_note=raw.get("note", ""),
+            run_id=raw.get("run_id"),
+            job_id=raw.get("target_id") or raw.get("job_id"),
+            direction_id=raw.get("direction_id"),
+            assessment_id=raw.get("assessment_id"),
+            reason_code=raw.get("reason_code"),
+        )
+        visible = _discovery_feedback_payload(store.list_discovery_feedback(raw["profile_id"], effective_only=True))
+        return jsonify({
+            "feedback_id": feedback["id"],
+            "effective_scope": feedback.get("scope", "exact_job"),
+            "preference_changes": visible["preference_changes"],
+        }), 201
+
+    @app.route("/api/discovery/feedback/<feedback_id>/revoke", methods=["POST"])
+    def discovery_revoke_feedback(feedback_id):
+        try:
+            feedback = store.revoke_discovery_feedback(feedback_id)
+        except KeyError:
+            raise _DiscoveryError("not_found", user_message="反馈不存在。")
+        remaining = store.list_discovery_feedback(feedback["profile_id"], effective_only=True)
+        return jsonify({
+            "revoked": True,
+            "preference_changes": _discovery_preference_changes(remaining),
+        }), 200
+
+    # Helper functions for discovery routes
+    def _analysis_summary(analysis, store):
+        return {
+            "analysis_id": analysis["id"],
+            "resume_id": analysis["resume_id"],
+            "profile_id": analysis["profile_id"],
+            "status": analysis["status"],
+            "version": analysis.get("version"),
+        }
+
+    def _analysis_failure(analysis):
+        if analysis.get("status") != "failed":
+            return None
+        code = analysis.get("failure_code") or "verification_error"
+        return {
+            "error_code": code,
+            "user_message": _DiscoveryError(code).user_message if code in _ERROR_CODE_MAP else "分析失败。",
+            "stage": "analyzing",
+            "retryable": _ERROR_CODE_MAP.get(code, {}).get("retryable", False),
+        }
+
+    def _run_summary(run, store):
+        # T133: openapi.yaml Run schema 要求 progress + counts 两个对象，
+        # 都是 additionalProperties: integer。旧实现返回空数据，导致
+        # E2E 和 HTTP 客户端无法读取真实进度。
+        # get_discovery_run 返回的 run 字典包含直接列名（source_count 等）
+        # 和 progress/counts 包装字段；这里统一从直接列名构建，避免双重包装。
+        failure = None
+        if run.get("failure_code"):
+            failure = {
+                "code": run["failure_code"],
+                "stage": run.get("failure_stage", ""),
+            }
+        return {
+            "run_id": run["id"],
+            "confirmation_id": run.get("confirmation_id", ""),
+            "status": run["status"],
+            "stage": run.get("stage", run["status"]),
+            "progress": {
+                "source_count": int(run.get("source_count", 0)),
+                "detail_count": int(run.get("detail_count", 0)),
+                "evaluated_count": int(run.get("evaluated_count", 0)),
+            },
+            "counts": {
+                "high": int(run.get("high_count", 0)),
+                "adjacent": int(run.get("adjacent_count", 0)),
+                "growth": int(run.get("growth_count", 0)),
+                "review": int(run.get("review_count", 0)),
+                "unsuitable": int(run.get("unsuitable_count", 0)),
+            },
+            "failure": failure,
+            "updated_at": run.get("updated_at", run.get("created_at", "")),
+        }
+
+    def _build_ai_provider(store):
+        """Construct a DiscoveryAIProvider from current AI settings.
+
+        T101/T099: 返回真实 DiscoveryAIProvider（仅持 endpoint/model/api_key），
+        不再返回未定义的 _AIProviderAdapter。不读写 TaskStore，不泄漏凭据。
+        """
+        settings = store.get_ai_settings()
+        if not settings.get("is_configured"):
+            return None
+        cred_ref = store.get_credential_ref()
+        if not cred_ref:
+            return None
+        api_key = ai_service.retrieve_api_key(cred_ref)
+        if not api_key:
+            return None
+        return ai_service.DiscoveryAIProvider(
+            endpoint=settings.get("endpoint_url", ""),
+            model=settings.get("model", ""),
+            api_key=api_key,
+        )
 
     return app
 

@@ -78,6 +78,7 @@ class TaskStore:
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         self._initialize()
         self._migrate()
+        self._mark_stale_runs_interrupted()
 
     # -- connection --------------------------------------------------------
 
@@ -169,16 +170,44 @@ class TaskStore:
             self._migration_008()
         if current < 9:
             self._migration_009()
-        # A process restart cannot resume an in-memory child process. Record
-        # that fact instead of leaving a permanently "running" UI state.
+        if current < 10:
+            self._migration_010()
+        if current < 11:
+            self._migration_011()
+        if current < 12:
+            self._migration_012()
+        if current < 13:
+            self._migration_013()
+        # Always reconcile: copy old default profile if not yet in candidate_profiles
+        self._copy_legacy_default_profile()
+
+    def _mark_stale_runs_interrupted(self):
+        """Reconcile run state on process restart.
+
+        A process restart cannot resume an in-memory child process. Mark runs
+        left in an active state as interrupted so the UI does not show a
+        permanently "running" state. This is runtime reconciliation, not
+        schema migration; ``mark_interrupted_on_restart`` in
+        ``discovery_runner.py`` performs the equivalent operation with an
+        appended audit event.
+        """
         with self._connection() as conn:
             conn.execute(
                 "UPDATE search_runs SET status = 'interrupted', error_code = 'restart', updated_at = ? "
                 "WHERE status IN ('queued', 'running')",
                 (_now(),),
             )
-        # Always reconcile: copy old default profile if not yet in candidate_profiles
-        self._copy_legacy_default_profile()
+            conn.execute(
+                "UPDATE screening_runs SET status = 'interrupted', error_code = 'restart', updated_at = ? "
+                "WHERE status IN ('queued', 'running')",
+                (_now(),),
+            )
+            conn.execute(
+                "UPDATE discovery_runs SET status = 'interrupted', failure_code = 'restart', updated_at = ? "
+                "WHERE status IN ('created', 'planning', 'fetching_lists', 'fetching_details', "
+                "'evaluating', 'assembling')",
+                (_now(),),
+            )
 
     def _migration_001(self):
         """First workbench migration: add all new tables."""
@@ -504,6 +533,290 @@ class TaskStore:
                 (_now(),),
             )
 
+    def _migration_010(self):
+        """Persist the inputs needed to identify and diagnose screening work."""
+        with self._connection() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(screening_runs)")}
+            additions = {
+                "profile_id": "TEXT",
+                "execution_params_json": "TEXT NOT NULL DEFAULT '{}'",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE screening_runs ADD COLUMN {name} {definition}")
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (10, ?, 'screening execution inputs')",
+                (_now(),),
+            )
+
+    def _migration_011(self):
+        """004 migration: candidate analyses, evidence, directions and links."""
+        with self._connection() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS candidate_analyses (
+                    id TEXT PRIMARY KEY,
+                    resume_id TEXT NOT NULL,
+                    profile_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    unknowns_json TEXT NOT NULL DEFAULT '[]',
+                    model_name TEXT NOT NULL DEFAULT '',
+                    contract_version TEXT NOT NULL DEFAULT 'v1',
+                    failure_code TEXT,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (resume_id) REFERENCES resumes(id) ON DELETE CASCADE,
+                    FOREIGN KEY (profile_id) REFERENCES candidate_profiles(id) ON DELETE CASCADE,
+                    UNIQUE (resume_id, version)
+                );
+
+                CREATE TABLE IF NOT EXISTS resume_evidence (
+                    id TEXT PRIMARY KEY,
+                    analysis_id TEXT NOT NULL,
+                    evidence_type TEXT NOT NULL,
+                    normalized_value TEXT NOT NULL,
+                    safe_excerpt TEXT NOT NULL DEFAULT '',
+                    source_locator_json TEXT NOT NULL DEFAULT '{}',
+                    assertion_type TEXT NOT NULL DEFAULT 'explicit',
+                    confidence INTEGER NOT NULL DEFAULT 0,
+                    sensitive INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (analysis_id) REFERENCES candidate_analyses(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS career_directions (
+                    id TEXT PRIMARY KEY,
+                    analysis_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    direction_type TEXT NOT NULL,
+                    rationale TEXT NOT NULL DEFAULT '',
+                    gaps_json TEXT NOT NULL DEFAULT '[]',
+                    confidence INTEGER NOT NULL DEFAULT 0,
+                    default_enabled INTEGER NOT NULL DEFAULT 0,
+                    search_terms_json TEXT NOT NULL DEFAULT '[]',
+                    contract_version TEXT NOT NULL DEFAULT 'v1',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (analysis_id) REFERENCES candidate_analyses(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS direction_evidence (
+                    direction_id TEXT NOT NULL,
+                    evidence_id TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'primary',
+                    PRIMARY KEY (direction_id, evidence_id),
+                    FOREIGN KEY (direction_id) REFERENCES career_directions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (evidence_id) REFERENCES resume_evidence(id) ON DELETE CASCADE
+                );
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (11, ?, '004 candidate analysis/evidence/directions')",
+                (_now(),),
+            )
+
+    def _migration_012(self):
+        """004 migration: confirmations, discovery runs, search plans."""
+        with self._connection() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS direction_confirmations (
+                    id TEXT PRIMARY KEY,
+                    profile_id TEXT NOT NULL,
+                    resume_id TEXT NOT NULL,
+                    analysis_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    hard_constraints_json TEXT NOT NULL DEFAULT '{}',
+                    soft_preferences_json TEXT NOT NULL DEFAULT '{}',
+                    safe_limits_json TEXT NOT NULL DEFAULT '{}',
+                    confirmed_at TEXT NOT NULL,
+                    FOREIGN KEY (profile_id) REFERENCES candidate_profiles(id) ON DELETE CASCADE,
+                    FOREIGN KEY (resume_id) REFERENCES resumes(id) ON DELETE CASCADE,
+                    FOREIGN KEY (analysis_id) REFERENCES candidate_analyses(id) ON DELETE CASCADE,
+                    UNIQUE (profile_id, version)
+                );
+
+                CREATE TABLE IF NOT EXISTS confirmation_directions (
+                    confirmation_id TEXT NOT NULL,
+                    direction_id TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    user_added INTEGER NOT NULL DEFAULT 0,
+                    user_label TEXT,
+                    PRIMARY KEY (confirmation_id, direction_id),
+                    FOREIGN KEY (confirmation_id) REFERENCES direction_confirmations(id) ON DELETE CASCADE,
+                    FOREIGN KEY (direction_id) REFERENCES career_directions(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS discovery_runs (
+                    id TEXT PRIMARY KEY,
+                    profile_id TEXT NOT NULL,
+                    resume_id TEXT NOT NULL,
+                    analysis_id TEXT NOT NULL,
+                    confirmation_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'created',
+                    stage TEXT NOT NULL DEFAULT 'created',
+                    policy_version TEXT NOT NULL DEFAULT 'v1',
+                    input_hash TEXT NOT NULL,
+                    source_count INTEGER NOT NULL DEFAULT 0,
+                    detail_count INTEGER NOT NULL DEFAULT 0,
+                    evaluated_count INTEGER NOT NULL DEFAULT 0,
+                    high_count INTEGER NOT NULL DEFAULT 0,
+                    adjacent_count INTEGER NOT NULL DEFAULT 0,
+                    growth_count INTEGER NOT NULL DEFAULT 0,
+                    review_count INTEGER NOT NULL DEFAULT 0,
+                    unsuitable_count INTEGER NOT NULL DEFAULT 0,
+                    cancel_requested_at TEXT,
+                    failure_code TEXT,
+                    failure_stage TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (profile_id) REFERENCES candidate_profiles(id) ON DELETE CASCADE,
+                    FOREIGN KEY (resume_id) REFERENCES resumes(id) ON DELETE CASCADE,
+                    FOREIGN KEY (analysis_id) REFERENCES candidate_analyses(id) ON DELETE CASCADE,
+                    FOREIGN KEY (confirmation_id) REFERENCES direction_confirmations(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS discovery_run_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    safe_payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    UNIQUE (run_id, sequence)
+                );
+
+                CREATE TABLE IF NOT EXISTS search_plans (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    plan_version TEXT NOT NULL DEFAULT 'v1',
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    item_count INTEGER NOT NULL DEFAULT 0,
+                    detail_budget INTEGER NOT NULL DEFAULT 60,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    UNIQUE (run_id),
+                    FOREIGN KEY (run_id) REFERENCES discovery_runs(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS search_plan_items (
+                    id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    keyword TEXT NOT NULL,
+                    city TEXT NOT NULL DEFAULT '',
+                    source_filters_json TEXT NOT NULL DEFAULT '{}',
+                    direction_ids_json TEXT NOT NULL DEFAULT '[]',
+                    input_hash TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    page_cursor INTEGER NOT NULL DEFAULT 0,
+                    target_pages INTEGER NOT NULL DEFAULT 1,
+                    detail_budget INTEGER NOT NULL DEFAULT 0,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    failure_code TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (plan_id) REFERENCES search_plans(id) ON DELETE CASCADE,
+                    UNIQUE (plan_id, input_hash)
+                );
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (12, ?, '004 confirmations/runs/plans')",
+                (_now(),),
+            )
+
+    def _migration_013(self):
+        """004 migration: job snapshots, per-direction assessments, feedback."""
+        with self._connection() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS discovery_job_snapshots (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    source_url TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL DEFAULT '',
+                    company TEXT NOT NULL DEFAULT '',
+                    salary TEXT NOT NULL DEFAULT '',
+                    location TEXT NOT NULL DEFAULT '',
+                    tags TEXT NOT NULL DEFAULT '',
+                    jd TEXT NOT NULL DEFAULT '',
+                    company_json TEXT NOT NULL DEFAULT '{}',
+                    completeness TEXT NOT NULL DEFAULT 'unavailable',
+                    missing_fields_json TEXT NOT NULL DEFAULT '[]',
+                    source_status TEXT NOT NULL DEFAULT 'unknown',
+                    content_hash TEXT NOT NULL DEFAULT '',
+                    fetch_status TEXT NOT NULL DEFAULT 'queued',
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    failure_code TEXT,
+                    fetched_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+                    UNIQUE (run_id, job_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS job_direction_assessments (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    snapshot_id TEXT NOT NULL,
+                    direction_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    hard_outcome TEXT NOT NULL DEFAULT 'unknown',
+                    hard_checks_json TEXT NOT NULL DEFAULT '{}',
+                    dimensions_json TEXT NOT NULL DEFAULT '{}',
+                    match_score INTEGER,
+                    confidence INTEGER,
+                    category TEXT NOT NULL DEFAULT 'needs_review',
+                    candidate_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+                    job_evidence_json TEXT NOT NULL DEFAULT '{}',
+                    gaps_json TEXT NOT NULL DEFAULT '[]',
+                    policy_version TEXT NOT NULL DEFAULT 'v1',
+                    contract_version TEXT NOT NULL DEFAULT 'v1',
+                    failure_code TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (run_id) REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    FOREIGN KEY (snapshot_id) REFERENCES discovery_job_snapshots(id) ON DELETE CASCADE,
+                    FOREIGN KEY (direction_id) REFERENCES career_directions(id) ON DELETE CASCADE,
+                    UNIQUE (run_id, snapshot_id, direction_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS discovery_feedback (
+                    id TEXT PRIMARY KEY,
+                    profile_id TEXT NOT NULL,
+                    run_id TEXT,
+                    job_id TEXT,
+                    direction_id TEXT,
+                    assessment_id TEXT,
+                    target_type TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    reason_code TEXT,
+                    scope TEXT NOT NULL DEFAULT 'exact_job',
+                    safe_note TEXT,
+                    created_at TEXT NOT NULL,
+                    revoked_at TEXT,
+                    FOREIGN KEY (profile_id) REFERENCES candidate_profiles(id) ON DELETE CASCADE,
+                    FOREIGN KEY (direction_id) REFERENCES career_directions(id) ON DELETE CASCADE
+                );
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (13, ?, '004 snapshots/assessments/feedback')",
+                (_now(),),
+            )
+
     def _copy_legacy_default_profile(self):
         """Copy old default profile to candidate_profiles if not already present."""
         with self._connection() as conn:
@@ -813,15 +1126,19 @@ class TaskStore:
 
     # -- screening runs ----------------------------------------------------
 
-    def create_screening_run(self, frozen_filters, resume_id=None) -> dict:
+    def create_screening_run(self, frozen_filters, resume_id=None, *,
+                             profile_id=None, execution=None) -> dict:
         """Create a queued screening run with frozen filters and resume reference."""
         rid = _uuid()
         ts = _now()
         with self._connection() as conn:
             conn.execute(
-                "INSERT INTO screening_runs (id, frozen_filters_json, status, source_count, match_count, mismatch_count, resume_id, created_at, updated_at, error_code) "
-                "VALUES (?, ?, 'queued', 0, 0, 0, ?, ?, ?, NULL)",
-                (rid, json.dumps(frozen_filters, ensure_ascii=False), _opt_str(resume_id), ts, ts),
+                "INSERT INTO screening_runs (id, frozen_filters_json, status, source_count, "
+                "match_count, mismatch_count, resume_id, profile_id, execution_params_json, "
+                "created_at, updated_at, error_code) "
+                "VALUES (?, ?, 'queued', 0, 0, 0, ?, ?, ?, ?, ?, NULL)",
+                (rid, json.dumps(frozen_filters, ensure_ascii=False), _opt_str(resume_id),
+                 _opt_str(profile_id), json.dumps(execution or {}, ensure_ascii=False), ts, ts),
             )
         return self.get_screening_run(rid)
 
@@ -833,13 +1150,29 @@ class TaskStore:
         result = dict(row)
         result["frozen_filters"] = json.loads(result.pop("frozen_filters_json", "{}") or "{}")
         result["parse_failures"] = json.loads(result.pop("parse_failures_json", "{}") or "{}")
+        result["execution"] = json.loads(result.pop("execution_params_json", "{}") or "{}")
         return result
+
+    def requeue_screening_run(self, run_id) -> dict:
+        """Requeue an interrupted/failed run while retaining saved progress."""
+        ts = _now()
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "UPDATE screening_runs SET status = 'queued', error_code = NULL, updated_at = ? "
+                "WHERE id = ? AND status IN ('interrupted', 'failed')",
+                (ts, str(run_id)),
+            )
+        if cursor.rowcount == 0:
+            run = self.get_screening_run(run_id)
+            raise ValueError(f"当前筛选状态不能续处理: {run['status']}")
+        return self.get_screening_run(run_id)
 
     def update_screening_run_status(self, run_id, status, *, source_count=None,
                                     match_count=None, mismatch_count=None,
                                     pending_count=None, processed_count=None,
                                     source_cursor=None, parse_failure_count=None,
-                                    parse_failures=None, error_code=None) -> dict:
+                                    parse_failures=None, error_code=None,
+                                    expected_statuses=None) -> dict:
         ts = _now()
         fields = ["status = ?", "updated_at = ?"]
         values = [status, ts]
@@ -871,16 +1204,24 @@ class TaskStore:
             fields.append("error_code = ?")
             values.append(error_code)
         values.append(str(run_id))
+        where = "id = ?"
+        if expected_statuses is not None:
+            expected = sorted({str(item) for item in expected_statuses})
+            if not expected:
+                return self.get_screening_run(run_id)
+            where += f" AND status IN ({','.join('?' for _ in expected)})"
+            values.extend(expected)
         with self._connection() as conn:
             conn.execute(
-                f"UPDATE screening_runs SET {', '.join(fields)} WHERE id = ?",
+                f"UPDATE screening_runs SET {', '.join(fields)} WHERE {where}",
                 values,
             )
         return self.get_screening_run(run_id)
 
     # -- screening results (match/mismatch zones, run-isolated) -----------
 
-    def add_screening_result(self, run_id, job_id, verdict) -> dict:
+    def add_screening_result(self, run_id, job_id, verdict, *,
+                             expected_run_statuses=None) -> dict | None:
         """添加一条核验结果到指定 run。
 
         verdict 为 "match" 或 "mismatch"。同一 (run_id, job_id) 重复添加
@@ -890,11 +1231,25 @@ class TaskStore:
         rid = _uuid()
         ts = _now()
         with self._connection() as conn:
-            conn.execute(
-                "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (rid, str(run_id), str(job_id), verdict, ts),
-            )
+            if expected_run_statuses is None:
+                cursor = conn.execute(
+                    "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (rid, str(run_id), str(job_id), verdict, ts),
+                )
+            else:
+                expected = sorted({str(item) for item in expected_run_statuses})
+                if not expected:
+                    return None
+                cursor = conn.execute(
+                    "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
+                    "SELECT ?, ?, ?, ?, ? WHERE EXISTS ("
+                    f"SELECT 1 FROM screening_runs WHERE id = ? AND status IN ({','.join('?' for _ in expected)})"
+                    ")",
+                    (rid, str(run_id), str(job_id), verdict, ts, str(run_id), *expected),
+                )
+                if cursor.rowcount == 0:
+                    return None
         return {
             "id": rid,
             "run_id": str(run_id),
@@ -1085,7 +1440,8 @@ class TaskStore:
     # -- screening pending / trash-with-origin / cleanup (003 FR-011~027) --
 
     def add_pending_result(self, run_id, job_id, failure_stage, retryable=True,
-                           origin_zone="match", ai_payload=None, *, attempts=None) -> dict:
+                           origin_zone="match", ai_payload=None, *, attempts=None,
+                           expected_run_statuses=None) -> dict | None:
         """添加或更新一条待核验记录。同一 (run_id, job_id) 只有一条；
         重试时 attempts+1 并刷新 last_failed_at。"""
         import json as _json
@@ -1094,6 +1450,17 @@ class TaskStore:
         payload_json = _json.dumps(ai_payload or {}, ensure_ascii=False)
         att = 1 if attempts is None else int(attempts)
         with self._connection() as conn:
+            if expected_run_statuses is not None:
+                expected = sorted({str(item) for item in expected_run_statuses})
+                if not expected:
+                    return None
+                placeholders = ",".join("?" for _ in expected)
+                active = conn.execute(
+                    f"SELECT 1 FROM screening_runs WHERE id = ? AND status IN ({placeholders})",
+                    (str(run_id), *expected),
+                ).fetchone()
+                if not active:
+                    return None
             existing = conn.execute(
                 "SELECT id, attempts FROM screening_pending_results "
                 "WHERE run_id = ? AND job_id = ?",
@@ -1849,3 +2216,794 @@ class TaskStore:
                 (cutoff,),
             ).fetchall()
         return [{"profile_id": row["profile_id"], "job_id": row["job_id"]} for row in rows]
+
+    # ===================================================================
+    # 004 discovery: analyses, evidence, directions, confirmations
+    # ===================================================================
+
+    def create_analysis(self, resume_id, profile_id, *, model_name="", contract_version="v1") -> dict:
+        resume_id, profile_id = str(resume_id), str(profile_id)
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 AS next_v FROM candidate_analyses WHERE resume_id = ?",
+                (resume_id,),
+            ).fetchone()
+            version = int(row["next_v"])
+            aid = _uuid()
+            ts = _now()
+            conn.execute(
+                "INSERT INTO candidate_analyses (id, resume_id, profile_id, version, status, model_name, "
+                "contract_version, created_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)",
+                (aid, resume_id, profile_id, version, model_name, contract_version, ts),
+            )
+        return {"id": aid, "resume_id": resume_id, "profile_id": profile_id, "version": version,
+                "status": "queued", "created_at": ts}
+
+    def update_analysis_status(self, analysis_id, status, *, failure_code=None, summary=None, unknowns=None):
+        aid = str(analysis_id)
+        sets = ["status = ?"]
+        params = [status]
+        if failure_code is not None:
+            sets.append("failure_code = ?")
+            params.append(failure_code)
+        if summary is not None:
+            sets.append("summary_json = ?")
+            params.append(json.dumps(summary, ensure_ascii=False))
+        if unknowns is not None:
+            sets.append("unknowns_json = ?")
+            params.append(json.dumps(unknowns, ensure_ascii=False))
+        if status in ("ready", "failed"):
+            sets.append("completed_at = ?")
+            params.append(_now())
+        params.append(aid)
+        with self._connection() as conn:
+            conn.execute(f"UPDATE candidate_analyses SET {', '.join(sets)} WHERE id = ?", params)
+
+    def get_analysis(self, analysis_id) -> dict:
+        with self._connection() as conn:
+            row = conn.execute("SELECT * FROM candidate_analyses WHERE id = ?", (str(analysis_id),)).fetchone()
+            if row is None:
+                raise KeyError(analysis_id)
+            d = dict(row)
+            d["summary"] = json.loads(d.pop("summary_json") or "{}")
+            d["unknowns"] = json.loads(d.pop("unknowns_json") or "[]")
+            return d
+
+    def list_analyses(self, resume_id) -> list:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM candidate_analyses "
+                "WHERE resume_id = ? AND status <> 'deleted' ORDER BY version ASC",
+                (str(resume_id),),
+            ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["summary"] = json.loads(d.pop("summary_json") or "{}")
+            d["unknowns"] = json.loads(d.pop("unknowns_json") or "[]")
+            out.append(d)
+        return out
+
+    def add_evidence(self, analysis_id, evidence_type, normalized_value, *, safe_excerpt="",
+                     source_locator=None, assertion_type="explicit", confidence=0, sensitive=False) -> dict:
+        eid = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO resume_evidence (id, analysis_id, evidence_type, normalized_value, safe_excerpt, "
+                "source_locator_json, assertion_type, confidence, sensitive, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (eid, str(analysis_id), evidence_type, normalized_value, safe_excerpt,
+                 json.dumps(source_locator or {}, ensure_ascii=False), assertion_type,
+                 int(confidence), int(bool(sensitive)), ts),
+            )
+        return {"id": eid, "analysis_id": str(analysis_id), "evidence_type": evidence_type,
+                "normalized_value": normalized_value, "safe_excerpt": safe_excerpt,
+                "source_locator": source_locator or {}, "assertion_type": assertion_type,
+                "confidence": int(confidence), "sensitive": bool(sensitive), "created_at": ts}
+
+    def add_evidence_batch(self, analysis_id, items) -> list:
+        out = []
+        for it in items:
+            out.append(self.add_evidence(analysis_id, it["evidence_type"], it["normalized_value"],
+                                         safe_excerpt=it.get("safe_excerpt", ""),
+                                         source_locator=it.get("source_locator"),
+                                         assertion_type=it.get("assertion_type", "explicit"),
+                                         confidence=it.get("confidence", 0),
+                                         sensitive=it.get("sensitive", False)))
+        return out
+
+    def list_evidence(self, analysis_id) -> list:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM resume_evidence WHERE analysis_id = ? ORDER BY created_at ASC",
+                (str(analysis_id),),
+            ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["source_locator"] = json.loads(d.pop("source_locator_json") or "{}")
+            d["sensitive"] = bool(d.pop("sensitive"))
+            out.append(d)
+        return out
+
+    def add_direction(self, analysis_id, name, direction_type, *, rationale="", gaps=None,
+                      confidence=0, default_enabled=False, search_terms=None, contract_version="v1") -> dict:
+        did = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO career_directions (id, analysis_id, name, direction_type, rationale, gaps_json, "
+                "confidence, default_enabled, search_terms_json, contract_version, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (did, str(analysis_id), name, direction_type, rationale,
+                 json.dumps(gaps or [], ensure_ascii=False), int(confidence),
+                 int(bool(default_enabled)),
+                 json.dumps(search_terms or [], ensure_ascii=False), contract_version, ts),
+            )
+        return {"id": did, "analysis_id": str(analysis_id), "name": name, "direction_type": direction_type,
+                "rationale": rationale, "gaps": gaps or [], "confidence": int(confidence),
+                "default_enabled": bool(default_enabled), "search_terms": search_terms or [],
+                "contract_version": contract_version, "created_at": ts}
+
+    def add_direction_batch(self, analysis_id, directions) -> list:
+        return [self.add_direction(analysis_id, d["name"], d["direction_type"],
+                                   rationale=d.get("rationale", ""), gaps=d.get("gaps"),
+                                   confidence=d.get("confidence", 0),
+                                   default_enabled=d.get("default_enabled", False),
+                                   search_terms=d.get("search_terms"),
+                                   contract_version=d.get("contract_version", "v1")) for d in directions]
+
+    def link_direction_evidence(self, direction_id, evidence_id, role="primary"):
+        # data-model.md:108 — direction and evidence must belong to the same analysis.
+        with self._connection() as conn:
+            d_row = conn.execute(
+                "SELECT analysis_id FROM career_directions WHERE id = ?",
+                (str(direction_id),),
+            ).fetchone()
+            e_row = conn.execute(
+                "SELECT analysis_id FROM resume_evidence WHERE id = ?",
+                (str(evidence_id),),
+            ).fetchone()
+            if (d_row is None or e_row is None
+                    or d_row["analysis_id"] != e_row["analysis_id"]):
+                raise ValueError("cross_analysis_link")
+            conn.execute(
+                "INSERT OR IGNORE INTO direction_evidence (direction_id, evidence_id, role) VALUES (?, ?, ?)",
+                (str(direction_id), str(evidence_id), role),
+            )
+
+    def list_directions(self, analysis_id) -> list:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT d.* FROM career_directions d "
+                "JOIN candidate_analyses a ON a.id = d.analysis_id "
+                "WHERE d.analysis_id = ? AND a.status <> 'deleted' ORDER BY d.created_at ASC",
+                (str(analysis_id),),
+            ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["gaps"] = json.loads(d.pop("gaps_json") or "[]")
+            d["default_enabled"] = bool(d.pop("default_enabled"))
+            d["search_terms"] = json.loads(d.pop("search_terms_json") or "[]")
+            out.append(d)
+        return out
+
+    def list_direction_evidence(self, direction_id) -> list:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT evidence_id, role FROM direction_evidence WHERE direction_id = ?",
+                (str(direction_id),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def create_confirmation(self, profile_id, resume_id, analysis_id, *, hard_constraints,
+                            soft_preferences, safe_limits, directions, version=None) -> dict:
+        cid = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            if version is None:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(version), 0) + 1 AS next_v FROM direction_confirmations WHERE profile_id = ?",
+                    (str(profile_id),),
+                ).fetchone()
+                version = int(row["next_v"])
+            conn.execute(
+                "INSERT INTO direction_confirmations (id, profile_id, resume_id, analysis_id, version, "
+                "hard_constraints_json, soft_preferences_json, safe_limits_json, confirmed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (cid, str(profile_id), str(resume_id), str(analysis_id), version,
+                 json.dumps(hard_constraints, ensure_ascii=False),
+                 json.dumps(soft_preferences, ensure_ascii=False),
+                 json.dumps(safe_limits, ensure_ascii=False), ts),
+            )
+            for d in directions:
+                conn.execute(
+                    "INSERT OR IGNORE INTO confirmation_directions "
+                    "(confirmation_id, direction_id, enabled, user_added, user_label) VALUES (?, ?, ?, ?, ?)",
+                    (cid, str(d["direction_id"]), int(bool(d.get("enabled", True))),
+                     int(bool(d.get("user_added", False))), d.get("user_label")),
+                )
+        return {"id": cid, "profile_id": str(profile_id), "resume_id": str(resume_id),
+                "analysis_id": str(analysis_id), "version": version, "confirmed_at": ts}
+
+    def get_confirmation(self, confirmation_id) -> dict:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM direction_confirmations WHERE id = ?", (str(confirmation_id),),
+            ).fetchone()
+            if row is None:
+                raise KeyError(confirmation_id)
+            d = dict(row)
+            d["hard_constraints"] = json.loads(d.pop("hard_constraints_json") or "{}")
+            d["soft_preferences"] = json.loads(d.pop("soft_preferences_json") or "{}")
+            d["safe_limits"] = json.loads(d.pop("safe_limits_json") or "{}")
+            drows = conn.execute(
+                "SELECT * FROM confirmation_directions WHERE confirmation_id = ?", (str(confirmation_id),),
+            ).fetchall()
+            d["directions"] = [
+                {"direction_id": r["direction_id"], "enabled": bool(r["enabled"]),
+                 "user_added": bool(r["user_added"]), "user_label": r["user_label"]}
+                for r in drows
+            ]
+            return d
+
+    # ===================================================================
+    # 004 discovery: runs, plans, snapshots, assessments, feedback
+    # ===================================================================
+
+    def create_discovery_run(self, profile_id, resume_id, analysis_id, confirmation_id, *,
+                             input_hash, policy_version="v1") -> dict:
+        rid = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO discovery_runs (id, profile_id, resume_id, analysis_id, confirmation_id, "
+                "status, stage, policy_version, input_hash, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 'created', 'created', ?, ?, ?, ?)",
+                (rid, str(profile_id), str(resume_id), str(analysis_id), str(confirmation_id),
+                 policy_version, input_hash, ts, ts),
+            )
+        return {"id": rid, "profile_id": str(profile_id), "resume_id": str(resume_id),
+                "analysis_id": str(analysis_id), "confirmation_id": str(confirmation_id),
+                "status": "created", "stage": "created", "policy_version": policy_version,
+                "input_hash": input_hash, "created_at": ts, "updated_at": ts}
+
+    def update_discovery_run(self, run_id, *, status=None, stage=None, failure_code=None,
+                             failure_stage=None, counters=None, cancel_requested=False,
+                             started=False, completed=False):
+        # Terminal-state immutability: succeeded/failed/cancelled may not move
+        # back into an active stage. `interrupted` and `partial` remain
+        # resumable per the state machine contract.
+        TERMINAL = {"succeeded", "failed", "cancelled"}
+        if status is not None and status not in TERMINAL:
+            current = self.get_discovery_run(run_id)
+            if current["status"] in TERMINAL:
+                raise ValueError(
+                    f"run {run_id} is terminal ({current['status']}); "
+                    f"cannot transition to {status}"
+                )
+        sets = ["updated_at = ?"]
+        params = [_now()]
+        if status is not None:
+            sets.append("status = ?")
+            params.append(status)
+        if stage is not None:
+            sets.append("stage = ?")
+            params.append(stage)
+        if failure_code is not None:
+            sets.append("failure_code = ?")
+            params.append(failure_code)
+        if failure_stage is not None:
+            sets.append("failure_stage = ?")
+            params.append(failure_stage)
+        if cancel_requested:
+            sets.append("cancel_requested_at = ?")
+            params.append(_now())
+        if started:
+            sets.append("started_at = ?")
+            params.append(_now())
+        if completed:
+            sets.append("completed_at = ?")
+            params.append(_now())
+        if counters and isinstance(counters, dict):
+            for key in ("source_count", "detail_count", "evaluated_count", "high_count",
+                        "adjacent_count", "growth_count", "review_count", "unsuitable_count"):
+                if key in counters:
+                    sets.append(f"{key} = ?")
+                    params.append(int(counters[key]))
+        params.append(str(run_id))
+        with self._connection() as conn:
+            conn.execute(f"UPDATE discovery_runs SET {', '.join(sets)} WHERE id = ?", params)
+
+    def get_discovery_run(self, run_id) -> dict:
+        with self._connection() as conn:
+            row = conn.execute("SELECT * FROM discovery_runs WHERE id = ?", (str(run_id),)).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            d = dict(row)
+        d["progress"] = {
+            "source_count": d["source_count"], "detail_count": d["detail_count"],
+            "evaluated_count": d["evaluated_count"],
+        }
+        d["counts"] = {
+            "high": d["high_count"], "adjacent": d["adjacent_count"], "growth": d["growth_count"],
+            "review": d["review_count"], "unsuitable": d["unsuitable_count"],
+        }
+        return d
+
+    def list_discovery_runs(self, profile_id=None, limit=30) -> list:
+        with self._connection() as conn:
+            if profile_id:
+                rows = conn.execute(
+                    "SELECT * FROM discovery_runs WHERE profile_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (str(profile_id), int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM discovery_runs ORDER BY created_at DESC LIMIT ?", (int(limit),),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def append_discovery_event(self, run_id, event_type, payload=None):
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_s FROM discovery_run_events WHERE run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+            seq = int(row["next_s"])
+            conn.execute(
+                "INSERT INTO discovery_run_events (run_id, sequence, event_type, safe_payload_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (str(run_id), seq, event_type, json.dumps(payload or {}, ensure_ascii=False), _now()),
+            )
+        return seq
+
+    def list_discovery_events(self, run_id, after=0) -> list:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM discovery_run_events WHERE run_id = ? AND sequence > ? ORDER BY sequence ASC",
+                (str(run_id), int(after)),
+            ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["payload"] = json.loads(d.pop("safe_payload_json") or "{}")
+            out.append(d)
+        return out
+
+    def create_search_plan(self, run_id, *, plan_version="v1", detail_budget=60,
+                           items=None) -> dict:
+        pid = _uuid()
+        ts = _now()
+        item_list = items or []
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO search_plans (id, run_id, plan_version, status, item_count, detail_budget, "
+                "created_at) VALUES (?, ?, ?, 'ready', ?, ?, ?)",
+                (pid, str(run_id), plan_version, len(item_list), int(detail_budget), ts),
+            )
+            for it in item_list:
+                iid = _uuid()
+                conn.execute(
+                    "INSERT INTO search_plan_items (id, plan_id, keyword, city, source_filters_json, "
+                    "direction_ids_json, input_hash, status, target_pages, detail_budget, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)",
+                    (iid, pid, it["keyword"], it.get("city", ""),
+                     json.dumps(it.get("source_filters", {}), ensure_ascii=False),
+                     json.dumps(it.get("direction_ids", []), ensure_ascii=False),
+                     it["input_hash"], int(it.get("target_pages", 1)),
+                     int(it.get("detail_budget", 0)), ts, ts),
+                )
+        return {"id": pid, "run_id": str(run_id), "plan_version": plan_version,
+                "status": "ready", "item_count": len(item_list), "detail_budget": detail_budget,
+                "items": item_list}
+
+    def get_search_plan(self, run_id) -> dict:
+        with self._connection() as conn:
+            row = conn.execute("SELECT * FROM search_plans WHERE run_id = ?", (str(run_id),)).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            d = dict(row)
+            irows = conn.execute(
+                "SELECT * FROM search_plan_items WHERE plan_id = ? ORDER BY created_at ASC",
+                (d["id"],),
+            ).fetchall()
+            items = []
+            for ir in irows:
+                idd = dict(ir)
+                idd["source_filters"] = json.loads(idd.pop("source_filters_json") or "{}")
+                idd["direction_ids"] = json.loads(idd.pop("direction_ids_json") or "[]")
+                items.append(idd)
+            d["items"] = items
+            return d
+
+    def get_search_plan_item(self, item_id) -> dict:
+        """Return a single search_plan_items row by its id, or raise KeyError."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM search_plan_items WHERE id = ?",
+                (str(item_id),),
+            ).fetchone()
+            if row is None:
+                raise KeyError(item_id)
+            idd = dict(row)
+            idd["source_filters"] = json.loads(idd.pop("source_filters_json") or "{}")
+            idd["direction_ids"] = json.loads(idd.pop("direction_ids_json") or "[]")
+            return idd
+
+    def update_plan_item(self, item_id, *, status=None, page_cursor=None, failure_code=None,
+                         attempt=False, completed=False):
+        sets = ["updated_at = ?"]
+        params = [_now()]
+        if status is not None:
+            sets.append("status = ?")
+            params.append(status)
+        if page_cursor is not None:
+            sets.append("page_cursor = ?")
+            params.append(int(page_cursor))
+        if failure_code is not None:
+            sets.append("failure_code = ?")
+            params.append(failure_code)
+        if attempt:
+            sets.append("attempt_count = attempt_count + 1")
+        if completed:
+            sets.append("completed_at = ?")
+            params.append(_now())
+        params.append(str(item_id))
+        with self._connection() as conn:
+            conn.execute(f"UPDATE search_plan_items SET {', '.join(sets)} WHERE id = ?", params)
+
+    def save_job_snapshot(self, run_id, job_id, *, source_url="", title="", company="",
+                          salary="", location="", tags="", jd="", company_json=None,
+                          completeness="unavailable", missing_fields=None, source_status="unknown",
+                          content_hash="", fetch_status="queued") -> dict:
+        sid = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            existing = conn.execute(
+                "SELECT id FROM discovery_job_snapshots WHERE run_id = ? AND job_id = ?",
+                (str(run_id), str(job_id)),
+            ).fetchone()
+            if existing:
+                sid = existing["id"]
+                conn.execute(
+                    "UPDATE discovery_job_snapshots SET source_url=?, title=?, company=?, salary=?, "
+                    "location=?, tags=?, jd=?, company_json=?, completeness=?, missing_fields_json=?, "
+                    "source_status=?, content_hash=?, fetch_status=?, updated_at=? WHERE id=?",
+                    (source_url, title, company, salary, location, tags, jd,
+                     json.dumps(company_json or {}, ensure_ascii=False), completeness,
+                     json.dumps(missing_fields or [], ensure_ascii=False), source_status,
+                     content_hash, fetch_status, ts, sid),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO discovery_job_snapshots (id, run_id, job_id, source_url, title, company, "
+                    "salary, location, tags, jd, company_json, completeness, missing_fields_json, "
+                    "source_status, content_hash, fetch_status, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (sid, str(run_id), str(job_id), source_url, title, company, salary, location,
+                     tags, jd, json.dumps(company_json or {}, ensure_ascii=False), completeness,
+                     json.dumps(missing_fields or [], ensure_ascii=False), source_status,
+                     content_hash, fetch_status, ts),
+                )
+        return {"id": sid, "run_id": str(run_id), "job_id": str(job_id), "completeness": completeness,
+                "source_status": source_status, "fetch_status": fetch_status}
+
+    def get_snapshot(self, run_id, job_id) -> dict:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM discovery_job_snapshots WHERE run_id = ? AND job_id = ?",
+                (str(run_id), str(job_id)),
+            ).fetchone()
+            if row is None:
+                raise KeyError((run_id, job_id))
+            d = dict(row)
+            d["company_json"] = json.loads(d.pop("company_json") or "{}")
+            d["missing_fields"] = json.loads(d.pop("missing_fields_json") or "[]")
+            return d
+
+    def reset_job_snapshot(self, run_id, job_id) -> None:
+        """Reset a snapshot's fetch_status to 'queued' so the runner re-fetches it."""
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE discovery_job_snapshots SET fetch_status='queued', updated_at=? "
+                "WHERE run_id=? AND job_id=?",
+                (_now(), str(run_id), str(job_id)),
+            )
+
+    def list_snapshots(self, run_id) -> list:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM discovery_job_snapshots WHERE run_id = ? ORDER BY updated_at ASC",
+                (str(run_id),),
+            ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["company_json"] = json.loads(d.pop("company_json") or "{}")
+            d["missing_fields"] = json.loads(d.pop("missing_fields_json") or "[]")
+            out.append(d)
+        return out
+
+    def create_assessment(self, run_id, snapshot_id, direction_id, *, hard_outcome="unknown",
+                          hard_checks=None, dimensions=None, match_score=None, confidence=None,
+                          category="needs_review", candidate_evidence_ids=None, job_evidence=None,
+                          gaps=None, policy_version="v1", contract_version="v1",
+                          failure_code=None, status="queued") -> dict:
+        asid = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            existing = conn.execute(
+                "SELECT id FROM job_direction_assessments WHERE run_id=? AND snapshot_id=? AND direction_id=?",
+                (str(run_id), str(snapshot_id), str(direction_id)),
+            ).fetchone()
+            if existing:
+                asid = existing["id"]
+                conn.execute(
+                    "UPDATE job_direction_assessments SET hard_outcome=?, hard_checks_json=?, dimensions_json=?, "
+                    "match_score=?, confidence=?, category=?, candidate_evidence_ids_json=?, job_evidence_json=?, "
+                    "gaps_json=?, failure_code=?, status=?, updated_at=? WHERE id=?",
+                    (hard_outcome, json.dumps(hard_checks or {}, ensure_ascii=False),
+                     json.dumps(dimensions or {}, ensure_ascii=False), match_score, confidence, category,
+                     json.dumps(candidate_evidence_ids or [], ensure_ascii=False),
+                     json.dumps(job_evidence or {}, ensure_ascii=False),
+                     json.dumps(gaps or [], ensure_ascii=False), failure_code, status, ts, asid),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO job_direction_assessments (id, run_id, snapshot_id, direction_id, status, "
+                    "hard_outcome, hard_checks_json, dimensions_json, match_score, confidence, category, "
+                    "candidate_evidence_ids_json, job_evidence_json, gaps_json, policy_version, "
+                    "contract_version, failure_code, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (asid, str(run_id), str(snapshot_id), str(direction_id), status, hard_outcome,
+                     json.dumps(hard_checks or {}, ensure_ascii=False),
+                     json.dumps(dimensions or {}, ensure_ascii=False), match_score, confidence, category,
+                     json.dumps(candidate_evidence_ids or [], ensure_ascii=False),
+                     json.dumps(job_evidence or {}, ensure_ascii=False),
+                     json.dumps(gaps or [], ensure_ascii=False), policy_version, contract_version,
+                     failure_code, ts, ts),
+                )
+            if status == "completed":
+                conn.execute("UPDATE job_direction_assessments SET completed_at=? WHERE id=?", (ts, asid))
+        return {"id": asid, "run_id": str(run_id), "snapshot_id": str(snapshot_id),
+                "direction_id": str(direction_id), "category": category, "hard_outcome": hard_outcome,
+                "status": status}
+
+    def get_assessment(self, run_id, snapshot_id, direction_id) -> dict:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM job_direction_assessments WHERE run_id=? AND snapshot_id=? AND direction_id=?",
+                (str(run_id), str(snapshot_id), str(direction_id)),
+            ).fetchone()
+            if row is None:
+                raise KeyError((run_id, snapshot_id, direction_id))
+            d = dict(row)
+            d["hard_checks"] = json.loads(d.pop("hard_checks_json") or "{}")
+            d["dimensions"] = json.loads(d.pop("dimensions_json") or "{}")
+            d["candidate_evidence_ids"] = json.loads(d.pop("candidate_evidence_ids_json") or "[]")
+            d["job_evidence"] = json.loads(d.pop("job_evidence_json") or "{}")
+            d["gaps"] = json.loads(d.pop("gaps_json") or "[]")
+            return d
+
+    def list_assessments(self, run_id, *, category=None, direction_id=None) -> list:
+        clauses = ["run_id = ?"]
+        params = [str(run_id)]
+        if category:
+            clauses.append("category = ?")
+            params.append(category)
+        if direction_id:
+            clauses.append("direction_id = ?")
+            params.append(str(direction_id))
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM job_direction_assessments WHERE {' AND '.join(clauses)} ORDER BY updated_at ASC",
+                params,
+            ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["hard_checks"] = json.loads(d.pop("hard_checks_json") or "{}")
+            d["dimensions"] = json.loads(d.pop("dimensions_json") or "{}")
+            d["candidate_evidence_ids"] = json.loads(d.pop("candidate_evidence_ids_json") or "[]")
+            d["job_evidence"] = json.loads(d.pop("job_evidence_json") or "{}")
+            d["gaps"] = json.loads(d.pop("gaps_json") or "[]")
+            out.append(d)
+        return out
+
+    def create_discovery_feedback(self, profile_id, target_type, action, *, run_id=None, job_id=None,
+                                  direction_id=None, assessment_id=None, reason_code=None,
+                                  scope="exact_job", safe_note=None) -> dict:
+        fid = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO discovery_feedback (id, profile_id, run_id, job_id, direction_id, assessment_id, "
+                "target_type, action, reason_code, scope, safe_note, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (fid, str(profile_id),
+                 _opt_str(run_id), _opt_str(job_id), _opt_str(direction_id), _opt_str(assessment_id),
+                 target_type, action, _opt_str(reason_code), scope,
+                 safe_note[:500] if safe_note else None, ts),
+            )
+        # T061: Bridge to legacy profile_jobs + screening_trash_records so that
+        # discovery feedback is visible in the existing interested/trash zones
+        # and persists across runs. Only applies to job-level feedback.
+        if target_type == "job" and job_id:
+            self._bridge_discovery_feedback_to_legacy(
+                profile_id, job_id, action, run_id=run_id, reason_code=reason_code,
+            )
+        return {"id": fid, "profile_id": str(profile_id), "target_type": target_type, "action": action,
+                "scope": scope, "created_at": ts}
+
+    def _bridge_discovery_feedback_to_legacy(self, profile_id, job_id, action, *,
+                                             run_id=None, reason_code=None):
+        """Mirror job-level discovery feedback into profile_jobs + screening_trash_records.
+
+        - ``not_interested`` -> profile_jobs.status='deleted' + screening_trash_records row.
+        - ``interested`` -> profile_jobs.status='interested'.
+        - Other actions -> no-op (only bridge explicit interest/trash).
+        """
+        # Ensure canonical job row exists (profile_jobs FK -> jobs.id).
+        with self._connection() as conn:
+            existing_job = conn.execute(
+                "SELECT id FROM jobs WHERE id = ?", (str(job_id),),
+            ).fetchone()
+        if not existing_job:
+            import time
+            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            with self._connection() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                    "VALUES (?, ?, ?, '', '', '', '', '', ?, ?)",
+                    (str(job_id), f"discovery://{job_id}", f"discovery://{job_id}", ts, ts),
+                )
+        # Ensure profile_job record exists.
+        try:
+            previous_status = self.get_profile_job(profile_id, job_id).get("status", "new")
+        except KeyError:
+            self.link_profile_job(profile_id, job_id, run_id, run_id, status="new")
+            previous_status = "new"
+        if action == "not_interested":
+            self.update_profile_job(profile_id, job_id, status="deleted")
+            # Also write/refresh the durable trash record.
+            origin_zone = "interested" if previous_status == "interested" else "discovery"
+            existing = None
+            with self._connection() as conn:
+                row = conn.execute(
+                    "SELECT id FROM screening_trash_records "
+                    "WHERE profile_id = ? AND job_id = ? AND restored_at IS NULL",
+                    (str(profile_id), str(job_id)),
+                ).fetchone()
+                existing = dict(row) if row else None
+            ts = _now()
+            if existing:
+                with self._connection() as conn:
+                    conn.execute(
+                        "UPDATE screening_trash_records SET origin_zone = ?, run_id = ?, "
+                        "feedback_ref = ?, deleted_at = ? WHERE id = ?",
+                        (origin_zone, _opt_str(run_id), _opt_str(reason_code), ts, existing["id"]),
+                    )
+            else:
+                with self._connection() as conn:
+                    conn.execute(
+                        "INSERT INTO screening_trash_records "
+                        "(id, profile_id, job_id, origin_zone, run_id, feedback_ref, deleted_at, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (_uuid(), str(profile_id), str(job_id), origin_zone,
+                         _opt_str(run_id), _opt_str(reason_code), ts, ts),
+                    )
+        elif action == "interested":
+            self.update_profile_job(profile_id, job_id, status="interested")
+
+    def revoke_discovery_feedback(self, feedback_id):
+        ts = _now()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM discovery_feedback WHERE id = ?",
+                (str(feedback_id),),
+            ).fetchone()
+            if row is None:
+                raise KeyError(feedback_id)
+            cur = conn.execute(
+                "UPDATE discovery_feedback SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+                (ts, str(feedback_id)),
+            )
+            if cur.rowcount == 0:
+                return dict(row)
+
+            feedback = dict(row)
+            job_id = feedback.get("job_id")
+            profile_id = feedback.get("profile_id")
+            if feedback.get("target_type") == "job" and job_id:
+                latest = conn.execute(
+                    "SELECT action FROM discovery_feedback "
+                    "WHERE profile_id=? AND job_id=? AND target_type='job' AND revoked_at IS NULL "
+                    "ORDER BY created_at DESC, id DESC LIMIT 1",
+                    (str(profile_id), str(job_id)),
+                ).fetchone()
+                trash = conn.execute(
+                    "SELECT origin_zone FROM screening_trash_records "
+                    "WHERE profile_id=? AND job_id=? AND restored_at IS NULL "
+                    "ORDER BY deleted_at DESC, id DESC LIMIT 1",
+                    (str(profile_id), str(job_id)),
+                ).fetchone()
+                status = "new"
+                if latest and latest["action"] == "interested":
+                    status = "interested"
+                elif latest and latest["action"] == "not_interested":
+                    status = "deleted"
+                elif trash and trash["origin_zone"] == "interested":
+                    status = "interested"
+                conn.execute(
+                    "UPDATE profile_jobs SET status=? WHERE profile_id=? AND job_id=?",
+                    (status, str(profile_id), str(job_id)),
+                )
+                if status != "deleted":
+                    conn.execute(
+                        "UPDATE screening_trash_records SET restored_at=? "
+                        "WHERE profile_id=? AND job_id=? AND restored_at IS NULL",
+                        (ts, str(profile_id), str(job_id)),
+                    )
+            feedback["revoked_at"] = ts
+            return feedback
+
+    def list_discovery_feedback(self, profile_id, *, effective_only=False) -> list:
+        clauses = ["profile_id = ?"]
+        params = [str(profile_id)]
+        if effective_only:
+            clauses.append("revoked_at IS NULL")
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM discovery_feedback WHERE {' AND '.join(clauses)} ORDER BY created_at ASC",
+                params,
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_resume_derived_evidence(self, resume_id):
+        """Forget resume-derived content while preserving historical job runs.
+
+        Analyses and directions are logical tombstones because discovery runs
+        reference them through cascading foreign keys. Physical deletion would
+        erase the user's run history, snapshots and assessments. Their derived
+        contents are scrubbed and hidden from normal list APIs instead.
+        """
+        with self._connection() as conn:
+            aids = [r["id"] for r in conn.execute(
+                "SELECT id FROM candidate_analyses WHERE resume_id = ?", (str(resume_id),),
+            ).fetchall()]
+            if not aids:
+                return
+
+            # Historical jobs remain visible, but no score or explanation may
+            # survive after its resume evidence has been forgotten.
+            conn.execute(
+                "UPDATE job_direction_assessments SET hard_outcome='unknown', "
+                "hard_checks_json='{}', dimensions_json='{}', match_score=NULL, confidence=NULL, "
+                "category='needs_review', candidate_evidence_ids_json='[]', "
+                "job_evidence_json='{}', gaps_json='[]', failure_code='resume_deleted', "
+                "updated_at=? WHERE run_id IN ("
+                "  SELECT id FROM discovery_runs WHERE resume_id = ?)",
+                (_now(), str(resume_id)),
+            )
+            for aid in aids:
+                conn.execute(
+                    "DELETE FROM direction_evidence WHERE direction_id IN ("
+                    "SELECT id FROM career_directions WHERE analysis_id = ?)",
+                    (aid,),
+                )
+                conn.execute("DELETE FROM resume_evidence WHERE analysis_id = ?", (aid,))
+                conn.execute(
+                    "UPDATE career_directions SET name='', rationale='', gaps_json='[]', "
+                    "confidence=0, default_enabled=0, search_terms_json='[]' "
+                    "WHERE analysis_id = ?",
+                    (aid,),
+                )
+                conn.execute(
+                    "UPDATE candidate_analyses SET status='deleted', summary_json='{}', "
+                    "unknowns_json='[]', model_name='', failure_code='resume_deleted', "
+                    "completed_at=? WHERE id = ?",
+                    (_now(), aid),
+                )

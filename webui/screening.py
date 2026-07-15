@@ -11,6 +11,7 @@ import copy
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from scripts import boss_cdp_raw as boss
@@ -234,8 +235,11 @@ def _write_jobs_artifact(output_path, payload, jobs):
 
 
 def execute_first_layer(filters, keyword, *, output_path, python_executable,
-                        pages=None, max_details=None, detail_output_path=None, scraper_path=None,
-                        store=None, run_id=None) -> dict:
+                        pages=None, max_details=None, start_page=None,
+                        detail_output_path=None, scraper_path=None,
+                        store=None, run_id=None, should_cancel=None,
+                        timeout_seconds=None, on_process=None,
+                        manage_status=True) -> dict:
     """Execute first-layer search: map params -> call scraper -> read artifact.
 
     Reuses ``scripts/boss_cdp_raw.py`` as a subprocess.  When *store* and
@@ -250,7 +254,7 @@ def execute_first_layer(filters, keyword, *, output_path, python_executable,
 
     params = filters_to_search_params(filters)
 
-    if store and run_id:
+    if store and run_id and manage_status:
         run = store.get_screening_run(run_id)
         validate_transition(run["status"], "running")
         store.update_screening_run_status(run_id, "running")
@@ -263,6 +267,8 @@ def execute_first_layer(filters, keyword, *, output_path, python_executable,
     ]
     if pages is not None:
         command.extend(["--pages", str(pages)])
+    if start_page is not None:
+        command.extend(["--start-page", str(start_page)])
     if max_details is not None:
         command.extend(["--max-details", str(max_details)])
     if detail_output_path is not None:
@@ -270,8 +276,41 @@ def execute_first_layer(filters, keyword, *, output_path, python_executable,
     for name, value in params["filters"].items():
         command.extend([f"--{name}", str(value)])
 
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
+    interrupted_reason = None
+    if timeout_seconds is None and should_cancel is None and on_process is None:
+        result = subprocess.run(command, capture_output=True, text=True)
+        returncode = result.returncode
+    else:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if on_process:
+            on_process(process)
+        started = time.monotonic()
+        try:
+            while process.poll() is None:
+                if should_cancel and should_cancel():
+                    interrupted_reason = "cancelled"
+                    break
+                if timeout_seconds is not None and time.monotonic() - started >= timeout_seconds:
+                    interrupted_reason = "timeout"
+                    break
+                time.sleep(0.1)
+            if interrupted_reason:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            returncode = process.wait()
+        finally:
+            if on_process:
+                on_process(None)
+
+    if returncode != 0 or interrupted_reason:
         output = Path(output_path)
         partial_jobs = []
         if output.is_file():
@@ -282,43 +321,73 @@ def execute_first_layer(filters, keyword, *, output_path, python_executable,
                     partial_jobs = partial_payload["jobs"]
             except (OSError, json.JSONDecodeError):
                 partial_jobs = []
+        if interrupted_reason == "cancelled":
+            if store and run_id and manage_status:
+                store.update_screening_run_status(
+                    run_id, "interrupted", source_count=len(partial_jobs),
+                    source_cursor=len(partial_jobs), error_code="cancelled",
+                )
+            return {
+                "jobs": partial_jobs,
+                "source_count": len(partial_jobs),
+                "source_cursor": len(partial_jobs),
+                "status": "interrupted",
+                "error_code": "cancelled",
+            }
         if partial_jobs:
-            if store and run_id:
+            error_code = "timeout" if interrupted_reason == "timeout" else "fetch_interrupted"
+            if store and run_id and manage_status:
                 store.update_screening_run_status(
                     run_id, "partial", source_count=len(partial_jobs),
                     source_cursor=len(partial_jobs),
+                    **({"error_code": "timeout"} if interrupted_reason == "timeout" else {}),
                 )
             return {
                 "jobs": partial_jobs,
                 "source_count": len(partial_jobs),
                 "source_cursor": len(partial_jobs),
                 "status": "partial",
-                "error_code": "fetch_interrupted",
+                "error_code": error_code,
             }
-        if store and run_id:
-            store.update_screening_run_status(run_id, "failed")
-        raise RuntimeError(f"抓取器执行失败: returncode={result.returncode}")
+        if store and run_id and manage_status:
+            store.update_screening_run_status(
+                run_id, "failed",
+                **({"error_code": "timeout"} if interrupted_reason == "timeout" else {}),
+            )
+        if interrupted_reason == "timeout":
+            raise RuntimeError("抓取器执行超时")
+        raise RuntimeError(f"抓取器执行失败: returncode={returncode}")
 
     output = Path(output_path)
     if not output.is_file():
-        if store and run_id:
+        if store and run_id and manage_status:
             store.update_screening_run_status(run_id, "failed")
         raise RuntimeError("搜索产物不存在")
 
-    with output.open(encoding="utf-8") as handle:
-        payload = json.load(handle)
+    try:
+        with output.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        if store and run_id and manage_status:
+            store.update_screening_run_status(run_id, "failed")
+        raise RuntimeError("搜索产物无法解析") from exc
 
-    jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
+    if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list):
+        if store and run_id and manage_status:
+            store.update_screening_run_status(run_id, "failed")
+        raise RuntimeError("搜索产物格式无效")
+
+    jobs = payload["jobs"]
     merged_jobs = _merge_detail_jds(jobs, detail_output_path)
     if merged_jobs != jobs:
         _write_jobs_artifact(output, payload, merged_jobs)
         jobs = merged_jobs
 
-    if store and run_id:
+    if store and run_id and manage_status:
         store.update_screening_run_status(run_id, "running", source_count=len(jobs))
 
     result = {"jobs": jobs, "source_count": len(jobs)}
-    if store and run_id:
+    if store and run_id and manage_status:
         result["status"] = "running"
     return result
 
@@ -463,6 +532,119 @@ def verify_hard_rules(job, frozen_filters) -> bool:
     return verify_hard_rules_detailed(job, frozen_filters)["passed"]
 
 
+# ---------------------------------------------------------------------------
+# T015: Tri-state hard rules (pass / violation / unknown) for feature 004
+# ---------------------------------------------------------------------------
+
+TRI_STATE_OUTCOMES = ("pass", "violation", "unknown")
+
+
+def verify_hard_rules_tri_state(job, hard_constraints) -> dict:
+    """Verify hard constraints returning a tri-state outcome.
+
+    Returns ``{"outcome": "pass"|"violation"|"unknown", "checks": [...]}``
+    where each check carries ``{"field", "outcome", "reason"}``.
+
+    Semantics:
+      - ``pass``: every required field the user set was present on the job
+        and matched.
+      - ``violation``: at least one required field was present on the job
+        but explicitly mismatched (deterministic fail).
+      - ``unknown``: no explicit mismatch occurred but at least one required
+        field was missing or unparseable on the job. ``unknown`` never
+        promotes to ``high_match``; the caller routes it to ``needs_review``.
+
+    Missing job fields are NOT treated as violations — per spec, a missing
+    field cannot prove a mismatch. Empty constraints yield ``pass`` (nothing
+    to verify).
+    """
+    frozen = hard_constraints or {}
+    if not isinstance(job, dict):
+        return {"outcome": "unknown", "checks": [{"field": "job", "outcome": "unknown", "reason": "job_not_dict"}]}
+
+    checks: list[dict] = []
+    has_violation = False
+    has_unknown = False
+
+    city = frozen.get("city", "")
+    if city:
+        job_city = (job.get("location") or "").split("·")[0].strip()
+        if not job_city:
+            checks.append({"field": "city", "outcome": "unknown", "reason": "missing"})
+            has_unknown = True
+        elif job_city != city:
+            checks.append({"field": "city", "outcome": "violation", "reason": "mismatch"})
+            has_violation = True
+        else:
+            checks.append({"field": "city", "outcome": "pass", "reason": "match"})
+
+    salary_code = frozen.get("salary", "")
+    if salary_code:
+        expected = _parse_salary_range(_SALARY_REVERSE.get(salary_code, ""))
+        actual = _parse_salary_range(job.get("salary", ""))
+        if expected is None or actual is None:
+            checks.append({"field": "salary", "outcome": "unknown", "reason": "unparseable"})
+            has_unknown = True
+        elif not _ranges_overlap(expected, actual):
+            checks.append({"field": "salary", "outcome": "violation", "reason": "mismatch"})
+            has_violation = True
+        else:
+            checks.append({"field": "salary", "outcome": "pass", "reason": "overlap"})
+
+    exp_code = frozen.get("experience", "")
+    if exp_code:
+        expected = _EXP_REVERSE.get(exp_code)
+        actual = _tag_value(job.get("tags"), set(_EXP_REVERSE.values()))
+        if not expected or actual is None:
+            checks.append({"field": "experience", "outcome": "unknown", "reason": "missing"})
+            has_unknown = True
+        elif actual != expected:
+            checks.append({"field": "experience", "outcome": "violation", "reason": "mismatch"})
+            has_violation = True
+        else:
+            checks.append({"field": "experience", "outcome": "pass", "reason": "match"})
+
+    degree_code = frozen.get("degree", "")
+    if degree_code:
+        candidate = _DEGREE_REVERSE.get(degree_code)
+        required = _tag_value(job.get("tags"), set(_DEGREE_LEVEL))
+        if candidate not in _DEGREE_LEVEL or required is None:
+            checks.append({"field": "degree", "outcome": "unknown", "reason": "missing"})
+            has_unknown = True
+        elif not _degree_compatible(candidate, required):
+            checks.append({"field": "degree", "outcome": "violation", "reason": "mismatch"})
+            has_violation = True
+        else:
+            checks.append({"field": "degree", "outcome": "pass", "reason": "compatible"})
+
+    for key, job_key, labels in (
+        ("scale", "company_scale", _SCALE_REVERSE),
+        ("stage", "company_stage", _STAGE_REVERSE),
+        ("industry", "company_industry", _INDUSTRY_REVERSE),
+    ):
+        code = frozen.get(key, "")
+        if not code:
+            continue
+        expected = labels.get(code)
+        actual = (job.get(job_key) or "").strip()
+        if not expected or not actual:
+            checks.append({"field": key, "outcome": "unknown", "reason": "missing"})
+            has_unknown = True
+        elif actual != expected:
+            checks.append({"field": key, "outcome": "violation", "reason": "mismatch"})
+            has_violation = True
+        else:
+            checks.append({"field": key, "outcome": "pass", "reason": "match"})
+
+    if has_violation:
+        outcome = "violation"
+    elif has_unknown:
+        outcome = "unknown"
+    else:
+        outcome = "pass"
+    return {"outcome": outcome, "checks": checks}
+
+
 class PartitionVerdict(str):
     """String-compatible verdict carrying only a safe pending failure code."""
 
@@ -520,7 +702,7 @@ def partition_jobs(jobs, frozen_filters, resume_text="", jd_text="", *, ai_enabl
                 job, frozen_filters, resume_text, jd_text,
                 ai_enabled=ai_enabled, semantic_options=semantic_options,
             )
-        except (RuntimeError, ValueError, TypeError, KeyError):
+        except Exception:
             verdict = PartitionVerdict("pending", "verification_error")
         if verdict == "match":
             match_zone.append(job)

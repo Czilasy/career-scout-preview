@@ -45,6 +45,13 @@ class WorkbenchBrowserContractTests(unittest.TestCase):
             "前端必须包含 zhipin.com 域名校验逻辑",
         )
 
+    def test_homepage_declares_inline_favicon(self):
+        self.assertRegex(
+            self.html,
+            r'<link[^>]+rel="icon"[^>]+href="data:',
+            "首页应使用内联 favicon，避免浏览器产生无意义的 404 错误",
+        )
+
     def test_feedback_buttons_prevent_navigation(self):
         """Interested / not-interested buttons must not trigger card link navigation."""
         # Buttons should be type="button" (not submit) and should call
@@ -161,8 +168,11 @@ class WorkbenchBrowserContractTests(unittest.TestCase):
         self.assertNotIn("alert(", self.html)
 
     def test_no_ai_scores_in_card_template(self):
-        """Card template must not expose AI scores, ranks or match reasons."""
-        self.assertNotIn("match_score", self.html)
+        """Card template must not expose raw AI scores, ranks or match reasons.
+
+        match_score is approved by spec 004 for program-validated discovery
+        result cards (FR-064); raw AI fields stay excluded.
+        """
         self.assertNotIn("ai_rank", self.html)
         self.assertNotIn("match_reason", self.html)
         self.assertNotIn("ai_score", self.html)
@@ -204,6 +214,12 @@ class WorkbenchBrowserContractTests(unittest.TestCase):
         self.assertIn('id="screeningMaxDetails"', self.html)
         self.assertIn("body.pages", self.html)
         self.assertIn("body.max_details", self.html)
+
+    def test_screening_run_restore_is_profile_scoped(self):
+        """A run saved for one profile must not be restored for another."""
+        self.assertIn("function saveScreeningRun", self.html)
+        self.assertIn("profile_id: currentProfileId", self.html)
+        self.assertIn("saved.profile_id !== currentProfileId", self.html)
 
 
 class ScreeningBrowserContractTests(unittest.TestCase):

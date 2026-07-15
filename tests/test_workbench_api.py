@@ -252,7 +252,10 @@ class SearchRunTests(WorkbenchAPITestBase):
             "manual_keywords": ["Python"],
         })
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("城市", resp.get_json()["error"])
+        body = resp.get_json()
+        self.assertEqual(body["error_code"], "invalid_request")
+        self.assertIn("城市", body["user_message"])
+        self.assertNotIn("error", body)
 
     def test_search_uses_validated_resume_ai_keywords_when_manual_is_empty(self):
         pid = self._make_profile()

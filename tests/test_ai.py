@@ -967,5 +967,295 @@ class AIAvailabilityTests(unittest.TestCase):
         self.assertFalse(self.check(self._settings(True), "ref", None))
 
 
+# ---------------------------------------------------------------------------
+# T097: DiscoveryAIProvider — 真实 provider 公共边界与错误映射
+# ---------------------------------------------------------------------------
+
+
+class DiscoveryAIProviderTests(unittest.TestCase):
+    """T097: 真实 DiscoveryAIProvider 公共边界。
+
+    Provider 只持 endpoint/model/api_key，不读写 TaskStore。
+    认证/超时/网络/无效输出映射到 feature-safe 错误码（ai_* 前缀）。
+    结构性失败触发单次纠正重试；第二次仍失败抛 ai_invalid_output。
+    """
+
+    def setUp(self):
+        from webui.ai import DiscoveryAIProvider, AISecurityError
+        self.ProviderClass = DiscoveryAIProvider
+        self.AISecurityError = AISecurityError
+
+    # -- 构造与隔离 --
+
+    def test_provider_can_be_constructed_with_endpoint_model_api_key(self):
+        provider = self.ProviderClass(
+            endpoint="https://api.example.com/v1",
+            model="deepseek-v4-flash-free",
+            api_key="sk-test-key",
+        )
+        self.assertIsNotNone(provider)
+
+    def test_provider_does_not_require_store_parameter(self):
+        import inspect
+        sig = inspect.signature(self.ProviderClass.__init__)
+        param_names = set(sig.parameters.keys()) - {"self"}
+        self.assertNotIn("store", param_names)
+        self.assertNotIn("task_store", param_names)
+
+    def test_provider_instance_does_not_hold_store_attribute(self):
+        provider = self.ProviderClass("e", "m", "k")
+        self.assertFalse(hasattr(provider, "store"))
+        self.assertFalse(hasattr(provider, "_store"))
+
+    # -- 公共方法 --
+
+    def test_provider_exposes_analyze_callable(self):
+        provider = self.ProviderClass("e", "m", "k")
+        self.assertTrue(callable(getattr(provider, "analyze", None)))
+
+    def test_provider_exposes_assess_job_callable(self):
+        provider = self.ProviderClass("e", "m", "k")
+        self.assertTrue(callable(getattr(provider, "assess_job", None)))
+
+    # -- 错误码映射（feature-safe：ai_* 前缀） --
+
+    def test_auth_failure_maps_to_ai_auth_failed(self):
+        provider = self.ProviderClass("e", "m", "k")
+        with patch("webui.ai.call_ai", side_effect=self.AISecurityError("auth_failed")):
+            with self.assertRaises(self.AISecurityError) as ctx:
+                provider.analyze(resume_text="resume text here")
+            self.assertEqual(ctx.exception.error_code, "ai_auth_failed")
+
+    def test_timeout_maps_to_ai_timeout(self):
+        provider = self.ProviderClass("e", "m", "k")
+        with patch("webui.ai.call_ai", side_effect=self.AISecurityError("timeout")):
+            with self.assertRaises(self.AISecurityError) as ctx:
+                provider.analyze(resume_text="resume text here")
+            self.assertEqual(ctx.exception.error_code, "ai_timeout")
+
+    def test_network_error_maps_to_ai_network_error(self):
+        provider = self.ProviderClass("e", "m", "k")
+        with patch("webui.ai.call_ai", side_effect=self.AISecurityError("network_error")):
+            with self.assertRaises(self.AISecurityError) as ctx:
+                provider.analyze(resume_text="resume text here")
+            self.assertEqual(ctx.exception.error_code, "ai_network_error")
+
+    def test_invalid_response_maps_to_ai_invalid_output(self):
+        provider = self.ProviderClass("e", "m", "k")
+        with patch("webui.ai.call_ai", side_effect=self.AISecurityError("invalid_response")):
+            with self.assertRaises(self.AISecurityError) as ctx:
+                provider.analyze(resume_text="resume text here")
+            self.assertEqual(ctx.exception.error_code, "ai_invalid_output")
+
+    # -- 单次纠正重试（call_ai 成功返回但结构无效） --
+
+    def test_structurally_invalid_response_triggers_one_corrective_retry(self):
+        provider = self.ProviderClass("e", "m", "k")
+        invalid_response = {}  # 缺顶层字段
+        valid_response = self._valid_v2_response()
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            return invalid_response if call_count[0] == 1 else valid_response
+
+        with patch("webui.ai.call_ai", side_effect=side_effect):
+            provider.analyze(resume_text=self._resume_text())
+        self.assertEqual(call_count[0], 2)
+
+    def test_second_invalid_response_raises_ai_invalid_output(self):
+        provider = self.ProviderClass("e", "m", "k")
+        invalid_response = {}
+        with patch("webui.ai.call_ai", return_value=invalid_response):
+            with self.assertRaises(self.AISecurityError) as ctx:
+                provider.analyze(resume_text=self._resume_text())
+            self.assertEqual(ctx.exception.error_code, "ai_invalid_output")
+
+    def test_valid_response_no_retry(self):
+        provider = self.ProviderClass("e", "m", "k")
+        valid_response = self._valid_v2_response()
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            return valid_response
+
+        with patch("webui.ai.call_ai", side_effect=side_effect):
+            provider.analyze(resume_text=self._resume_text())
+        self.assertEqual(call_count[0], 1)
+
+    # -- 最小不泄漏 --
+
+    def test_analyze_does_not_leak_api_key_in_exception(self):
+        provider = self.ProviderClass("e", "m", "sk-SECRET-KEY-42")
+        with patch("webui.ai.call_ai", side_effect=self.AISecurityError("timeout")):
+            with self.assertRaises(self.AISecurityError) as ctx:
+                provider.analyze(resume_text="resume")
+        self.assertNotIn("sk-SECRET-KEY-42", str(ctx.exception))
+        self.assertNotIn("sk-SECRET-KEY-42", repr(ctx.exception))
+
+    # -- T105: v2 exact-quote locator enrichment --
+
+    def test_analyze_generates_program_locator_for_valid_quote(self):
+        """analyze 返回的 evidence 必须包含程序生成的 source_locator。"""
+        provider = self.ProviderClass("e", "m", "k")
+        with patch("webui.ai.call_ai", return_value=self._valid_v2_response()):
+            result = provider.analyze(resume_text=self._resume_text())
+        evidence = result["evidence"][0]
+        self.assertIn("source_locator", evidence)
+        self.assertIsInstance(evidence["source_locator"], dict)
+        self.assertIn("start", evidence["source_locator"])
+        self.assertIn("end", evidence["source_locator"])
+
+    def test_analyze_ignores_model_provided_locator(self):
+        """模型如果返回 source_locator，analyze 必须忽略它并生成自己的。"""
+        provider = self.ProviderClass("e", "m", "k")
+        response = self._valid_v2_response()
+        # 模型故意返回错误的 locator
+        response["evidence"][0]["source_locator"] = {"start": 999, "end": 9999}
+        with patch("webui.ai.call_ai", return_value=response):
+            result = provider.analyze(resume_text=self._resume_text())
+        locator = result["evidence"][0]["source_locator"]
+        # 程序生成的 locator 必须与简历文本一致，不是模型的 999/9999
+        self.assertNotEqual(locator["start"], 999)
+        self.assertNotEqual(locator["end"], 9999)
+
+    def test_analyze_locator_slice_matches_quote(self):
+        """程序生成的 locator 切片必须 == source_quote。"""
+        provider = self.ProviderClass("e", "m", "k")
+        resume = self._resume_text()
+        with patch("webui.ai.call_ai", return_value=self._valid_v2_response()):
+            result = provider.analyze(resume_text=resume)
+        from webui.candidate import canonicalize_resume_text_v2
+        canonical = canonicalize_resume_text_v2(resume)
+        for ev in result["evidence"]:
+            quote = ev["source_quote"]
+            loc = ev["source_locator"]
+            self.assertEqual(canonical[loc["start"]:loc["end"]], quote)
+
+    def test_analyze_generates_safe_excerpt(self):
+        """analyze 必须为每条 evidence 生成程序 safe_excerpt。"""
+        provider = self.ProviderClass("e", "m", "k")
+        with patch("webui.ai.call_ai", return_value=self._valid_v2_response()):
+            result = provider.analyze(resume_text=self._resume_text())
+        for ev in result["evidence"]:
+            self.assertIn("safe_excerpt", ev)
+            self.assertIsInstance(ev["safe_excerpt"], str)
+            self.assertTrue(ev["safe_excerpt"])  # 非空
+
+    def test_analyze_rejects_quote_not_found(self):
+        """source_quote 不在简历中 → ai_invalid_output。"""
+        provider = self.ProviderClass("e", "m", "k")
+        response = self._valid_v2_response()
+        response["evidence"][0]["source_quote"] = "不存在的经历描述xyz"
+        with patch("webui.ai.call_ai", return_value=response):
+            with self.assertRaises(self.AISecurityError) as ctx:
+                provider.analyze(resume_text=self._resume_text())
+            self.assertEqual(ctx.exception.error_code, "ai_invalid_output")
+
+    def test_analyze_rejects_ambiguous_quote(self):
+        """source_quote 重复出现 → ai_invalid_output。"""
+        provider = self.ProviderClass("e", "m", "k")
+        response = self._valid_v2_response()
+        # "Python" 在简历中出现多次
+        response["evidence"][0]["source_quote"] = "Python"
+        resume = "Python 后端经验，5年开发，Python 熟悉 Django/Flask"
+        with patch("webui.ai.call_ai", return_value=response):
+            with self.assertRaises(self.AISecurityError) as ctx:
+                provider.analyze(resume_text=resume)
+            self.assertEqual(ctx.exception.error_code, "ai_invalid_output")
+
+    def test_analyze_rejects_sensitive_quote(self):
+        """source_quote 含敏感信息 → ai_invalid_output。"""
+        provider = self.ProviderClass("e", "m", "k")
+        response = self._valid_v2_response()
+        response["evidence"][0]["source_quote"] = "13912345678"
+        # 简历中包含该号码以便 find 能匹配，但应被敏感检测拒绝
+        resume = "Python 后端经验，电话 13912345678，5年开发"
+        with patch("webui.ai.call_ai", return_value=response):
+            with self.assertRaises(self.AISecurityError) as ctx:
+                provider.analyze(resume_text=resume)
+            self.assertEqual(ctx.exception.error_code, "ai_invalid_output")
+
+    def test_analyze_does_not_return_partial_ready(self):
+        """一个 evidence quote 无法解析 → 整个响应失败，不返回部分 ready。"""
+        provider = self.ProviderClass("e", "m", "k")
+        response = self._valid_v2_response()
+        response["evidence"].append({
+            "client_ref": "e2",
+            "type": "skill",
+            "normalized_value": "Go",
+            "source_quote": "不存在的Go经历",
+            "assertion_type": "explicit",
+            "confidence": 80,
+        })
+        response["directions"][0]["evidence_refs"] = ["e1", "e2"]
+        call_count = [0]
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            return response
+        with patch("webui.ai.call_ai", side_effect=side_effect):
+            with self.assertRaises(self.AISecurityError) as ctx:
+                provider.analyze(resume_text=self._resume_text())
+            self.assertEqual(ctx.exception.error_code, "ai_invalid_output")
+
+    def test_analyze_v2_retry_on_locator_failure_then_success(self):
+        """locator 失败触发一次重试，重试返回可解析 quote → 成功。"""
+        provider = self.ProviderClass("e", "m", "k")
+        bad_response = self._valid_v2_response()
+        bad_response["evidence"][0]["source_quote"] = "不存在的经历"
+        good_response = self._valid_v2_response()
+        call_count = [0]
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            return bad_response if call_count[0] == 1 else good_response
+        with patch("webui.ai.call_ai", side_effect=side_effect):
+            result = provider.analyze(resume_text=self._resume_text())
+        self.assertEqual(call_count[0], 2)
+        self.assertIn("source_locator", result["evidence"][0])
+
+    # -- 辅助夹具 --
+
+    @staticmethod
+    def _resume_text() -> str:
+        return "Python 后端经验，5年开发，熟悉 Django/Flask"
+
+    @staticmethod
+    def _valid_v2_response() -> dict:
+        """最小结构合法的 v2 候选人分析响应（用于驱动 T099 最小结构检查）。"""
+        return {
+            "summary": {
+                "headline": "后端开发工程师",
+                "experience_level": "中级",
+                "domains": ["后端"],
+                "strengths": ["Python"],
+            },
+            "evidence": [
+                {
+                    "client_ref": "e1",
+                    "type": "skill",
+                    "normalized_value": "Python",
+                    "source_quote": "Python 后端经验",
+                    "assertion_type": "explicit",
+                    "confidence": 90,
+                },
+            ],
+            "unknowns": [],
+            "directions": [
+                {
+                    "client_ref": "d1",
+                    "name": "后端开发工程师",
+                    "type": "core",
+                    "rationale": "5年后端经验",
+                    "evidence_refs": ["e1"],
+                    "gaps": [],
+                    "confidence": 90,
+                    "default_enabled": True,
+                    "search_terms": ["Python 后端"],
+                },
+            ],
+        }
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,13 @@ class ScreeningFiveViewContractTests(unittest.TestCase):
         self.assertIn("routeScreeningPending", self.html)
         self.assertIn("/pending/retry-all", self.html)
 
+    def test_active_screening_run_has_cancel_control(self):
+        self.assertIn('id="screeningCancelBtn"', self.html)
+        self.assertIn("cancelScreeningRun", self.html)
+        self.assertIn("/cancel", self.html)
+        self.assertIn("resumeScreeningRun", self.html)
+        self.assertIn("/resume", self.html)
+
     def test_trash_has_permanent_restore_action(self):
         self.assertIn("restoreScreeningTrash", self.html)
         self.assertIn("/restore", self.html)
