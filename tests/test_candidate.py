@@ -922,3 +922,29 @@ class CandidateV3NormalizerTests(unittest.TestCase):
     def test_direction_with_no_search_terms_is_manual_required(self):
         d=self._payload(); d["directions"][0]["search_terms"]=[]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
         self.assertFalse(o["directions"][0]["default_enabled"]); self.assertEqual(o["quality"]["status"],"manual_required")
+
+    def test_provider_extra_key_names_never_leak_into_warning_paths(self):
+        raw_key="PII_张三_13912345678"; cases=(
+            ("root","root.extra",lambda d:d.__setitem__(raw_key,"raw")),
+            ("summary","summary.extra",lambda d:d["summary"].__setitem__(raw_key,"raw")),
+            ("evidence","evidence[0].extra",lambda d:d["evidence"][0].__setitem__(raw_key,"raw")),
+            ("unknown","unknowns[0].extra",lambda d:(d.__setitem__("unknowns",[{"field":"other","message":"safe"}]),d["unknowns"][0].__setitem__(raw_key,"raw"))),
+            ("direction","directions[0].extra",lambda d:d["directions"][0].__setitem__(raw_key,"raw")),
+            ("quality","quality.extra",lambda d:d["quality"].__setitem__(raw_key,"raw")),
+        )
+        for label,path,mutate in cases:
+            with self.subTest(label=label):
+                d=self._payload(); mutate(d); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); rendered=str(o)
+                self.assertNotIn(raw_key,rendered); self.assertNotIn("张三",rendered); self.assertNotIn("13912345678",rendered); self.assertIn({"code":"unverified_field","path":path},o["quality"]["warnings"])
+
+    def test_missing_or_empty_direction_client_ref_is_visible_disabled_partial(self):
+        for label,value in (("missing",None),("empty","")):
+            with self.subTest(label=label):
+                d=self._payload()
+                if value is None: d["directions"][0].pop("client_ref")
+                else: d["directions"][0]["client_ref"]=value
+                o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(len(o["directions"]),1); self.assertEqual(o["directions"][0]["client_ref"],""); self.assertFalse(o["directions"][0]["default_enabled"]); self.assertIn({"code":"missing_required","path":"directions[0].client_ref"},o["quality"]["warnings"]); self.assertEqual(o["quality"]["status"],"partial")
+
+    def test_provider_warning_empty_path_is_rejected_safely(self):
+        d=self._payload(); d["quality"]["warnings"]=[{"code":"invalid_type","path":""}]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertTrue(any(w["path"]=="quality.warnings[0].path" and w["code"] in {"invalid_type","missing_required"} for w in o["quality"]["warnings"])); self.assertNotIn({"code":"invalid_type","path":""},o["quality"]["warnings"]); self.assertEqual(o["quality"]["status"],"partial")
