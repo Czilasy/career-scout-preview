@@ -159,7 +159,8 @@ def normalize_candidate_analysis(data, resume_text):
                 _warn(warnings, "invalid_type", p+".normalized_value")
                 raise ValueError("invalid_type")
             if len(normalized) > CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["normalized_value"]["max_length"]:
-                _warn(warnings, "invalid_type", p+".normalized_value"); raise ValueError("invalid_type")
+                _warn(warnings, "invalid_type", p+".normalized_value")
+                normalized = CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["normalized_value"]["empty"]
             if isinstance(item.get("confidence"), bool) or not isinstance(item.get("confidence"), int):
                 _warn(warnings,"invalid_type",p+".confidence"); continue
             try: conf = _confidence(item.get("confidence"))
@@ -180,7 +181,7 @@ def normalize_candidate_analysis(data, resume_text):
             refs.add(ref); out["evidence"].append({"client_ref": ref, "type": typ, "normalized_value": normalized, "source_quote": quote, "source_locator": loc, "safe_excerpt": redact_pii(quote), "assertion_type": assertion, "confidence": conf})
         except ValueError as e: _warn(warnings, str(e), p)
     raw_dirs = data.get("directions", []) if isinstance(data.get("directions", []), list) else []
-    clean_direction_exists = False
+    confirmable_direction_exists = False
     max_directions = CANDIDATE_ANALYSIS_V3_CONTRACT["top"]["directions"]["max"]
     if isinstance(data.get("directions"), list) and len(data["directions"]) > max_directions:
         _warn(warnings, "invalid_type", "directions")
@@ -233,7 +234,7 @@ def normalize_candidate_analysis(data, resume_text):
             elif r not in refs: _warn(warnings,"reference_invalid",p+".evidence_refs"); lost_ref=True
         max_terms = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["search_terms"]["max"]
         executable = 1 <= len(terms) <= max_terms and not lost_ref and gaps_valid and scalar_valid
-        clean_direction_exists = clean_direction_exists or executable
+        confirmable_direction_exists = confirmable_direction_exists or 1 <= len(terms) <= max_terms
         out["directions"].append({"client_ref": scalar_values["client_ref"], "name": scalar_values["name"], "type": typ, "rationale": scalar_values["rationale"], "evidence_refs": valid_refs, "gaps": gaps, "confidence": _confidence(item.get("confidence",0)) if isinstance(item.get("confidence",0),int) and not isinstance(item.get("confidence",0),bool) and 0 <= item.get("confidence",0) <= 100 else 0, "default_enabled": (item.get("default_enabled",False) and executable) if isinstance(item.get("default_enabled",False),bool) else False, "search_terms": terms})
     # Provider quality is informational only; validate its shape for diagnostics,
     # but retain the backend-derived quality object as the sole authority.
@@ -259,7 +260,7 @@ def normalize_candidate_analysis(data, resume_text):
         _warn(warnings, "invalid_type", "quality")
     out["quality"]["warnings"] = warnings
     max_terms = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["search_terms"]["max"]
-    executable = clean_direction_exists
+    executable = confirmable_direction_exists
     out["quality"]["status"] = "manual_required" if not executable else ("partial" if warnings else "complete")
     return out
 
