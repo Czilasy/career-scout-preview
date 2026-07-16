@@ -706,8 +706,8 @@ class CandidateV3NormalizerTests(unittest.TestCase):
         self.assertIn({"code":"invalid_type","path":"summary.headline"},o["quality"]["warnings"]); self.assertEqual(o["summary"]["domains"],[])
 
     def test_unknown_enum_type_and_extra_warn(self):
-        d=self._payload(); d["unknowns"]=[{"field":"phone","message":3,"x":1}]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
-        self.assertIn({"code":"invalid_enum","path":"unknowns[0].field"},o["quality"]["warnings"]); self.assertIn({"code":"unverified_field","path":"unknowns[0].x"},o["quality"]["warnings"])
+        d=self._payload(); d["unknowns"]=[{"field":"phone","message":3,"x":"raw"}]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertIn({"code":"invalid_enum","path":"unknowns[0].field"},o["quality"]["warnings"]); self.assertIn({"code":"unverified_field","path":"unknowns[0].extra"},o["quality"]["warnings"]); self.assertNotIn("'x'",str(o)); self.assertNotIn("raw",str(o))
 
     def test_invalid_evidence_assertion_confidence_dropped(self):
         d=self._payload(); d["evidence"][0].update({"assertion_type":"guess","confidence":"90"}); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
@@ -873,7 +873,8 @@ class CandidateV3NormalizerTests(unittest.TestCase):
         d=self._payload(); d["directions"][0]["default_enabled"]=False; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["quality"]["status"],"complete")
 
     def test_nested_extras_emit_warnings(self):
-        d=self._payload(); d["evidence"][0]["source_context"]="raw"; d["directions"][0]["extra"]="raw"; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertTrue(any(w["code"]=="unverified_field" and "source_context" in w["path"] for w in o["quality"]["warnings"]))
+        d=self._payload(); d["evidence"][0]["source_context"]="raw-evidence"; d["directions"][0]["private_extra"]="raw-direction"; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); warnings=o["quality"]["warnings"]
+        self.assertIn({"code":"unverified_field","path":"evidence[0].extra"},warnings); self.assertIn({"code":"unverified_field","path":"directions[0].extra"},warnings); self.assertNotIn("source_context",str(o)); self.assertNotIn("private_extra",str(o)); self.assertNotIn("raw-evidence",str(o)); self.assertNotIn("raw-direction",str(o))
 
     def test_contract_metadata_owns_all_approved_size_limits(self):
         c=candidate.CANDIDATE_ANALYSIS_V3_CONTRACT
