@@ -65,6 +65,18 @@ class CandidateAnalysisV3ContractTests(unittest.TestCase):
         self.assertIn("confidence", self.ai_contract)
         self.assertIn("integer from 0 through 100", self.ai_contract)
 
+    def test_item_object_schemas_and_limits_are_explicit(self):
+        for field in ("client_ref", "normalized_value", "source_quote", "assertion_type", "confidence",
+                      "evidence_refs", "search_terms", "default_enabled"):
+            self.assertIn(f"`{field}`", self.ai_contract)
+        for enum in ("skill|responsibility|project|industry|seniority|education|achievement|other",
+                     "explicit|inferred", "current_city|min_salary|career_intent|other", "core|adjacent|growth"):
+            self.assertIn(enum, self.ai_contract)
+        self.assertIn("maximum 3", self.ai_contract)
+        self.assertIn("maximum of 5 items", self.ai_contract)
+        self.assertIn("generic string-list rule does not apply", self.ai_contract)
+        self.assertIn("object arrays are never coerced", self.ai_contract)
+
 
 # Resume text used by HTTP contract tests. Kept脱敏: no phone/ID/address.
 _CONTRACT_RESUME_TEXT = (

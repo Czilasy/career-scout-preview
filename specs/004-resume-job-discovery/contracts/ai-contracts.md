@@ -32,6 +32,14 @@ Program validation:
 - A warning object is exactly `{`code`, `path`}` with both non-empty strings; no other keys or raw provider/resume text are allowed. Allowed codes are `invalid_type`, `invalid_enum`, `invalid_evidence`, `sensitive_value`, `unverified_field`, `missing_required`, and `reference_invalid`.
 - `warnings` is an array of warning objects. warnings is an array.
 
+Object-array schemas (the generic string-list rule does not apply to these objects):
+
+object arrays are never coerced from scalars or generic string lists.
+
+- `evidence` items require `client_ref` (non-empty string), `type` (required enum `skill|responsibility|project|industry|seniority|education|achievement|other`), `normalized_value` (string, typed empty `""` when quarantined), `source_quote` (string, typed empty `""` when unavailable), `assertion_type` (required enum `explicit|inferred`), and `confidence` (required integer 0–100). Backend may add `safe_excerpt` (string) and `source_locator` (`{start:int,end:int}`) only after validation; these are never provider-authoritative.
+- `unknowns` items require `field` (required enum `current_city|min_salary|career_intent|other`) and `message` (string, typed empty `""` when unavailable). No additional keys are permitted.
+- `directions` items require `client_ref` (non-empty string), `name` (string, typed empty `""` when quarantined), `type` (required enum `core|adjacent|growth`), `rationale` (string, typed empty `""` when unavailable), `evidence_refs` (array of strings, default `[]`), `gaps` (array of strings, default `[]`), `confidence` (integer 0–100, default `0`), `default_enabled` (boolean, default `false`), and `search_terms` (array of strings, default `[]`, maximum 3). The directions array has a maximum of 5 items.
+
 - Canonical resume text is derived with the contract's versioned Unicode normalization rule; offsets are Unicode code-point indexes into this exact text.
 - Every `source_quote` must be a minimal exact substring of canonical resume text and must resolve uniquely. A repeated quote requires additional surrounding text; fuzzy or arbitrary first-match selection is forbidden.
 - Program code generates `source_locator.start/end` from the unique match and verifies that the resolved slice equals `source_quote` before redaction.
