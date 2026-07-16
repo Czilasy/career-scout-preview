@@ -765,6 +765,10 @@ class CandidateV3NormalizerTests(unittest.TestCase):
         d=self._payload(); d["evidence"][0]["normalized_value"]=99; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
         self.assertEqual(o["evidence"],[])
 
+    def test_sensitive_normalized_value_quarantines_evidence_item(self):
+        d=self._payload(); d["evidence"][0]["normalized_value"]="13912345678"; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertEqual(o["evidence"],[]); self.assertIn({"code":"sensitive_value","path":"evidence[0]"},o["quality"]["warnings"]); self.assertNotIn("13912345678",str(o))
+
     def test_evidence_limit_twenty_one_warns_and_caps(self):
         d=self._payload(); base=d["evidence"][0]; d["evidence"]=[dict(base,client_ref=f"e{i}",source_quote=f"Python后端经验{i}") for i in range(21)]
         resume=" ".join(f"Python后端经验{i}" for i in range(21)); o=candidate.normalize_candidate_analysis(d,resume)

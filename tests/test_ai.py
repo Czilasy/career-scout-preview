@@ -1401,7 +1401,7 @@ class CandidateV3ProviderAdapterTests(unittest.TestCase):
 
     def test_cleanup_rejects_unknown_nested_multiple_and_trailing(self):
         value = self._empty()
-        for raw in (json.dumps({"foo": value}), json.dumps({"data":{"result":value}}), json.dumps({"data":value,"result":value}), json.dumps(value)+" trailing", "```{" ):
+        for raw in (json.dumps({"foo": value}), json.dumps({"data":{"result":value}}), json.dumps({"data":value,"result":value}), json.dumps(value)+" trailing", "```{", f"```python\n{json.dumps(value)}\n```", f"```json\n{json.dumps(value)}\n```trailing"):
             with self.assertRaises(ValueError): self._cleanup(raw)
 
     def test_cleanup_does_not_fill_semantic_values(self):
@@ -1434,7 +1434,7 @@ class CandidateV3ProviderAdapterTests(unittest.TestCase):
         self.assertEqual(call.call_count, 2)
 
     def test_corrected_higher_quality_result_is_used(self):
-        first = self._partial(); second = self._complete()
+        first = self._partial(); second = self._complete(); second["summary"]["headline"] = "平台后端工程师"
         with patch("webui.ai.call_ai", side_effect=[first, second]):
             result = self.provider.analyze(resume_text=self._resume())
         self.assertEqual(result["summary"]["headline"], second["summary"]["headline"])
@@ -1443,12 +1443,24 @@ class CandidateV3ProviderAdapterTests(unittest.TestCase):
         first = self._partial(); second = self._manual()
         with patch("webui.ai.call_ai", side_effect=[first, second]):
             result = self.provider.analyze(resume_text=self._resume())
-        self.assertIsInstance(result, dict)
+        expected = self.candidate.normalize_candidate_analysis(first, self._resume())
+        self.assertEqual(result, expected)
 
     def test_second_partial_returns_best_result_after_two_calls(self):
-        with patch("webui.ai.call_ai", side_effect=[self._partial(), self._manual()]) as call:
+        first = self._partial(); second = self._manual()
+        with patch("webui.ai.call_ai", side_effect=[first, second]) as call:
             result = self.provider.analyze(resume_text=self._resume())
-        self.assertEqual(call.call_count, 2); self.assertIsInstance(result, dict)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(result, self.candidate.normalize_candidate_analysis(first, self._resume()))
+
+    def test_sensitive_value_never_enters_correction_diagnostics(self):
+        partial = self._complete(); partial["evidence"][0]["normalized_value"] = "13912345678"
+        with patch("webui.ai.call_ai", side_effect=[partial, self._complete()]) as call:
+            self.provider.analyze(resume_text=self._resume())
+        correction = call.call_args_list[1].args[2][-1]["content"]
+        self.assertNotIn("13912345678", correction)
+        diagnostics = json.loads(correction.split("：", 1)[1])
+        self.assertTrue(all(set(item) == {"code", "path"} for item in diagnostics))
 
     def test_invalid_json_is_terminal_without_retry(self):
         with patch("webui.ai.call_ai", return_value="not-json") as call:

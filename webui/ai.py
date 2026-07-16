@@ -761,7 +761,8 @@ class DiscoveryAIProvider:
             text = response.strip()
             if text.startswith("```"):
                 lines = text.splitlines()
-                if len(lines) < 3 or not lines[-1].strip().startswith("```"):
+                if (len(lines) < 3 or lines[0].strip() not in ("```", "```json")
+                        or lines[-1].strip() != "```"):
                     raise ValueError("fence")
                 if any(line.strip().startswith("```") for line in lines[1:-1]):
                     raise ValueError("fence")

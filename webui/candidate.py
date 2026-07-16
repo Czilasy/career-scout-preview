@@ -163,6 +163,8 @@ def normalize_candidate_analysis(data, resume_text):
             if len(normalized) > CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["normalized_value"]["max_length"]:
                 _warn(warnings, "invalid_type", p+".normalized_value")
                 normalized = CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["normalized_value"]["empty"]
+            if _is_sensitive(normalized):
+                raise ValueError("sensitive_value")
             if isinstance(item.get("confidence"), bool) or not isinstance(item.get("confidence"), int):
                 _warn(warnings,"invalid_type",p+".confidence"); continue
             try: conf = _confidence(item.get("confidence"))
