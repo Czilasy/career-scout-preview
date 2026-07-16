@@ -47,10 +47,11 @@ CANDIDATE_ANALYSIS_V3_CONTRACT = {
  "version":"v3", "warning_codes":("invalid_type","invalid_enum","invalid_evidence","sensitive_value","unverified_field","missing_required","reference_invalid"),
  "top":{"contract_version":{"type":"string","empty":"v3"},"summary":{"type":"object","empty":{"headline":"","experience_level":"","domains":[],"strengths":[]}},"evidence":{"type":"list","max":20,"empty":[]},"unknowns":{"type":"list","max":20,"empty":[]},"directions":{"type":"list","max":5,"empty":[]},"quality":{"type":"object","empty":{"status":"complete","warnings":[]}}},
  "summary":{"headline":{"type":"string","empty":""},"experience_level":{"type":"string","empty":""},"domains":{"type":"list","items":"string","empty":[]},"strengths":{"type":"list","items":"string","empty":[]}},
- "evidence":{"client_ref":{"type":"string"},"type":{"type":"string","enum":EVIDENCE_TYPES},"normalized_value":{"type":"string","empty":""},"source_quote":{"type":"string"},"assertion_type":{"type":"string","enum":ASSERTION_TYPES},"confidence":{"type":"integer","min":0,"max":100}},
- "unknown":{"field":{"type":"string","enum":UNKNOWN_FIELDS},"message":{"type":"string","empty":""}},
- "direction":{"client_ref":{"type":"string","empty":""},"name":{"type":"string","empty":""},"type":{"type":"string","enum":DIRECTION_TYPES},"rationale":{"type":"string","empty":""},"evidence_refs":{"type":"list","items":"string","empty":[]},"gaps":{"type":"list","items":"string","empty":[]},"confidence":{"type":"integer","min":0,"max":100},"default_enabled":{"type":"boolean","empty":False},"search_terms":{"type":"list","items":"string","max":3,"empty":[]}},
- "quality":{"status":{"type":"string","enum":("complete","partial","manual_required")},"warnings":{"type":"list","items":"warning","empty":[]}}
+ "evidence":{"client_ref":{"type":"string"},"type":{"type":"string","enum":("skill","responsibility","project","industry","seniority","education","achievement","other")},"normalized_value":{"type":"string","empty":""},"source_quote":{"type":"string"},"source_locator":{"type":"object","empty":{}},"safe_excerpt":{"type":"string","empty":""},"assertion_type":{"type":"string","enum":("explicit","inferred")},"confidence":{"type":"integer","min":0,"max":100}},
+ "unknown":{"field":{"type":"string","enum":("current_city","min_salary","career_intent","other")},"message":{"type":"string","empty":""}},
+ "direction":{"client_ref":{"type":"string","empty":""},"name":{"type":"string","empty":""},"type":{"type":"string","enum":("core","adjacent","growth")},"rationale":{"type":"string","empty":""},"evidence_refs":{"type":"list","items":"string","empty":[]},"gaps":{"type":"list","items":"string","empty":[]},"confidence":{"type":"integer","min":0,"max":100},"default_enabled":{"type":"boolean","empty":False},"search_terms":{"type":"list","items":"string","max":3,"empty":[]}},
+ "quality":{"status":{"type":"string","enum":("complete","partial","manual_required")},"warnings":{"type":"list","items":"warning","empty":[]}},
+ "warning":{"code":{"type":"string"},"path":{"type":"string"}}
 }
 
 def build_empty_candidate_analysis():
@@ -130,9 +131,10 @@ def normalize_candidate_analysis(data, resume_text):
             ref, typ, quote, assertion = item.get("client_ref"), item.get("type"), item.get("source_quote"), item.get("assertion_type")
             if not isinstance(ref, str) or not ref: raise ValueError("missing_required")
             if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["type"]["enum"] or assertion not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["assertion_type"]["enum"]: raise ValueError("invalid_enum")
-            if not isinstance(quote, str) or not quote: raise ValueError("missing_required")
+            if not isinstance(quote, str) or not quote:
+                raise ValueError("invalid_evidence" if "source_quote" in item else "missing_required")
             normalized = item.get("normalized_value", "")
-            if "normalized_value" not in item or not isinstance(normalized, str):
+            if not isinstance(normalized, str):
                 raise ValueError("invalid_type")
             if isinstance(item.get("confidence"), bool) or not isinstance(item.get("confidence"), int):
                 _warn(warnings,"invalid_type",p+".confidence"); continue
@@ -177,6 +179,8 @@ def normalize_candidate_analysis(data, resume_text):
         if not isinstance(terms, list) or not all(isinstance(x, str) for x in terms):
             _warn(warnings,"invalid_type", p + ".search_terms"); terms = []
         valid_refs=[]; lost_ref=False
+        if "evidence_refs" not in item:
+            _warn(warnings, "missing_required", p+".evidence_refs"); lost_ref = True; erefs = []
         if not isinstance(erefs, list) or not all(isinstance(x, str) for x in erefs):
             _warn(warnings,"invalid_type", p + ".evidence_refs"); erefs = []; lost_ref = True
         for r in erefs:
@@ -200,7 +204,7 @@ def normalize_candidate_analysis(data, resume_text):
         _warn(warnings, "invalid_type", "quality")
     out["quality"]["warnings"] = warnings
     max_terms = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["search_terms"]["max"]
-    executable = any(d["default_enabled"] and 1 <= len(d["search_terms"]) <= max_terms for d in out["directions"])
+    executable = any(1 <= len(d["search_terms"]) <= max_terms and d["evidence_refs"] for d in out["directions"])
     if not out["directions"]:
         executable = False
     out["quality"]["status"] = "manual_required" if not executable else ("partial" if warnings else "complete")
