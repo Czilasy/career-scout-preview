@@ -783,10 +783,11 @@ class CandidateV3NormalizerTests(unittest.TestCase):
     def test_unknown_message_type_warns_and_unknowns_cap(self):
         d=self._payload(); d["unknowns"]=[{"field":"other","message":1} for _ in range(21)]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertLessEqual(len(o["unknowns"]),20); self.assertTrue(any(w["path"].endswith(".message") for w in o["quality"]["warnings"]))
 
-    def test_evidence_confidence_bool_float_and_missing_value_drop(self):
+    def test_evidence_confidence_bool_float_out_of_range_drop(self):
         for val in (True,1.5,101):
             d=self._payload(); d["evidence"][0]["confidence"]=val; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["evidence"],[])
-        d=self._payload(); d["evidence"][0].pop("normalized_value"); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["evidence"],[])
+    def test_missing_normalized_value_is_accepted_as_empty(self):
+        d=self._payload(); d["evidence"][0].pop("normalized_value"); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["evidence"][0]["normalized_value"],"")
 
     def test_duplicate_refs_warn_and_nonstring_refs_disable(self):
         d=self._payload(); d["directions"][0]["evidence_refs"]=["e1","e1"]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertTrue(any(w["code"]=="reference_invalid" for w in o["quality"]["warnings"]))
