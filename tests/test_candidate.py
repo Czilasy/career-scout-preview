@@ -675,3 +675,89 @@ class CandidateV3NormalizerTests(unittest.TestCase):
         self.assertNotIn("identity", out)
         self.assertFalse(out["directions"][0]["default_enabled"])
         self.assertTrue(out["quality"]["warnings"])
+
+    def _payload(self):
+        return {"contract_version":"v3","summary":{"headline":"后端","experience_level":"高级","domains":["服务"],"strengths":["Python"]},"evidence":[{"client_ref":"e1","type":"skill","normalized_value":"Python","source_quote":"Python后端经验","assertion_type":"explicit","confidence":90}],"unknowns":[],"directions":[{"client_ref":"d1","name":"后端","type":"core","rationale":"经验","evidence_refs":["e1"],"gaps":[],"confidence":90,"default_enabled":True,"search_terms":["Python"]}]}
+
+    def test_v3_skeleton_has_exact_top_keys(self):
+        self.assertEqual(set(candidate.build_empty_candidate_analysis()), {"contract_version","summary","evidence","unknowns","directions","quality"})
+
+    def test_contract_constant_is_sole_complete_schema(self):
+        c = candidate.CANDIDATE_ANALYSIS_V3_CONTRACT
+        self.assertEqual(c["version"], "v3"); self.assertEqual(set(c["top"]), {"contract_version","summary","evidence","unknowns","directions","quality"})
+        self.assertEqual(c["top"]["evidence"]["max"], 20); self.assertEqual(c["top"]["directions"]["max"], 5); self.assertEqual(c["direction"]["search_terms"]["max"], 3)
+        self.assertEqual(set(c["warning_codes"]), {"invalid_type","invalid_enum","invalid_evidence","sensitive_value","unverified_field","missing_required","reference_invalid"})
+
+    def test_wrong_contract_version_warns_and_keeps_v3(self):
+        d=self._payload(); d["contract_version"]="v2"; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertEqual(o["contract_version"],"v3"); self.assertIn({"code":"invalid_enum","path":"contract_version"},o["quality"]["warnings"])
+
+    def test_missing_each_top_key_warns_typed_empty(self):
+        for key in ("contract_version","summary","evidence","unknowns","directions","quality"):
+            d=self._payload(); d.pop(key,None); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+            self.assertIn({"code":"missing_required","path":key},o["quality"]["warnings"]); self.assertIn(key,o)
+
+    def test_wrong_summary_types_warn(self):
+        d=self._payload(); d["summary"]={"headline":1,"domains":["ok",2],"strengths":"x"}; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertIn({"code":"invalid_type","path":"summary.headline"},o["quality"]["warnings"]); self.assertEqual(o["summary"]["domains"],[])
+
+    def test_unknown_enum_type_and_extra_warn(self):
+        d=self._payload(); d["unknowns"]=[{"field":"phone","message":3,"x":1}]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertIn({"code":"invalid_enum","path":"unknowns[0].field"},o["quality"]["warnings"]); self.assertIn({"code":"unverified_field","path":"unknowns[0].x"},o["quality"]["warnings"])
+
+    def test_invalid_evidence_assertion_confidence_dropped(self):
+        d=self._payload(); d["evidence"][0].update({"assertion_type":"guess","confidence":"90"}); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertEqual(o["evidence"],[]); self.assertTrue(any(w["path"]=="evidence[0]" for w in o["quality"]["warnings"]))
+
+    def test_sensitive_notfound_repeated_short_quotes_drop(self):
+        d=self._payload(); d["evidence"][0]["source_quote"]="13912345678"; o=candidate.normalize_candidate_analysis(d,"电话13912345678")
+        self.assertEqual(o["evidence"],[]); self.assertTrue(any(w["code"]=="sensitive_value" for w in o["quality"]["warnings"]))
+
+    def test_unicode_nfc_quote_persists_canonical_locator(self):
+        resume="技能：Cafe\u0301 后端"; d=self._payload(); d["evidence"][0]["source_quote"]="Cafe\u0301"; o=candidate.normalize_candidate_analysis(d,resume)
+        self.assertEqual(o["evidence"][0]["source_quote"],"Café"); self.assertEqual(o["evidence"][0]["source_locator"],{"start":3,"end":7})
+
+    def test_long_unique_context_quote_accepted(self):
+        d=self._payload(); d["evidence"][0]["source_quote"]="Python后端经验"; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertEqual(len(o["evidence"]),1)
+
+    def test_provider_locator_excerpt_ignored_generated(self):
+        d=self._payload(); d["evidence"][0].update({"source_locator":{"start":99,"end":100},"safe_excerpt":"fake"}); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertEqual(o["evidence"][0]["safe_excerpt"],"Python后端经验"); self.assertNotEqual(o["evidence"][0]["source_locator"],{"start":99,"end":100})
+
+    def test_duplicate_and_missing_refs_pruned_disable_direction(self):
+        d=self._payload(); d["directions"][0]["evidence_refs"]=["e1","e1","missing"]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertEqual(o["directions"][0]["evidence_refs"],["e1"]); self.assertFalse(o["directions"][0]["default_enabled"])
+
+    def test_search_terms_limits_and_empty_manual_required(self):
+        d=self._payload(); d["directions"][0]["search_terms"]=["a","b","c","d"]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertEqual(o["directions"][0]["search_terms"],[]); self.assertEqual(o["quality"]["status"],"manual_required")
+
+    def test_direction_invalid_fields_warn(self):
+        d=self._payload(); d["directions"][0].update({"type":"bad","gaps":[1],"confidence":"x","default_enabled":"yes"}); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertTrue(any(w["path"].endswith(".type") and w["code"]=="invalid_enum" for w in o["quality"]["warnings"]))
+
+    def test_mixed_payload_partial_preserves_valid_summary(self):
+        d=self._payload(); d["evidence"].append({"client_ref":"bad","type":"x"}); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertEqual(o["summary"]["headline"],"后端"); self.assertEqual(o["quality"]["status"],"partial")
+
+    def test_empty_and_summary_only_manual_required(self):
+        self.assertEqual(candidate.normalize_candidate_analysis({},"" )["quality"]["status"],"manual_required")
+        d={"contract_version":"v3","summary":{"headline":"x"}}; self.assertEqual(candidate.normalize_candidate_analysis(d,"" )["quality"]["status"],"manual_required")
+
+    def test_warnings_closed_deduped_and_safe(self):
+        d=self._payload(); d["x"]={"resume":"secret"}; d["summary"]["x"]=1; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        ws=o["quality"]["warnings"]; self.assertEqual(len(ws),len({(w["code"],w["path"]) for w in ws})); self.assertTrue(all(set(w)=={"code","path"} for w in ws)); self.assertNotIn("secret",str(o))
+
+    def test_quality_wrong_types_warn_and_typed_empty(self):
+        d=self._payload(); d["quality"]={"status":7,"warnings":"oops"}; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertIn({"code":"invalid_type","path":"quality.status"},o["quality"]["warnings"])
+
+    def test_invalid_normalized_value_drops_evidence_item(self):
+        d=self._payload(); d["evidence"][0]["normalized_value"]=99; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertEqual(o["evidence"],[])
+
+    def test_evidence_limit_twenty_one_warns_and_caps(self):
+        d=self._payload(); base=d["evidence"][0]; d["evidence"]=[dict(base,client_ref=f"e{i}",source_quote=f"Python后端经验{i}") for i in range(21)]
+        resume=" ".join(f"Python后端经验{i}" for i in range(21)); o=candidate.normalize_candidate_analysis(d,resume)
+        self.assertLessEqual(len(o["evidence"]),20); self.assertTrue(any(w["path"]=="evidence" for w in o["quality"]["warnings"]))
