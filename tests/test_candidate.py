@@ -807,6 +807,16 @@ class CandidateV3NormalizerTests(unittest.TestCase):
     def test_wrong_normalized_value_has_field_warning(self):
         d=self._payload(); d["evidence"][0]["normalized_value"]=3; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["evidence"],[]); self.assertIn({"code":"invalid_type","path":"evidence[0].normalized_value"},o["quality"]["warnings"])
 
+    def test_direction_float_confidence_is_typed_zero_and_warns(self):
+        d=self._payload(); d["directions"][0]["confidence"]=1.5; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["directions"][0]["confidence"],0); self.assertIn({"code":"invalid_type","path":"directions[0].confidence"},o["quality"]["warnings"]); self.assertNotEqual(o["quality"]["status"],"complete")
+
+    def test_provider_warning_unknown_code_is_invalid_enum(self):
+        d=self._payload(); d["quality"]={"status":"complete","warnings":[{"code":"raw","path":"quality"}]}; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertIn({"code":"invalid_enum","path":"quality.warnings[0].code"},o["quality"]["warnings"]); self.assertNotIn('"raw"',str(o)); self.assertEqual(o["quality"]["status"],"partial")
+
+    def test_mixed_payload_keeps_clean_direction_and_disables_bad(self):
+        d=self._payload(); d["evidence"].append({"client_ref":"bad","type":"bad","source_quote":"不存在","assertion_type":"explicit","confidence":90}); d["directions"].append({"client_ref":"d2","name":"干净","type":"adjacent","rationale":"r","evidence_refs":[],"gaps":[],"confidence":80,"default_enabled":False,"search_terms":["Go"]}); d["directions"][0]["evidence_refs"]=["e1","missing"]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验 Go")
+        self.assertEqual([e["client_ref"] for e in o["evidence"]],["e1"]); self.assertFalse(o["directions"][0]["default_enabled"]); self.assertEqual(o["directions"][1]["name"],"干净"); self.assertEqual(o["quality"]["status"],"partial")
+
     def test_duplicate_refs_warn_and_nonstring_refs_disable(self):
         d=self._payload(); d["directions"][0]["evidence_refs"]=["e1","e1"]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertTrue(any(w["code"]=="reference_invalid" for w in o["quality"]["warnings"]))
         d=self._payload(); d["directions"][0]["evidence_refs"]=[1]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertFalse(o["directions"][0]["default_enabled"])
