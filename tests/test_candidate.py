@@ -903,3 +903,22 @@ class CandidateV3NormalizerTests(unittest.TestCase):
 
     def test_oversized_search_term_is_removed_and_requires_manual_review(self):
         marker="RAW-TERM-"+"t"*201; d=self._payload(); d["directions"][0]["search_terms"]=[marker]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["directions"][0]["search_terms"],[]); self.assertFalse(o["directions"][0]["default_enabled"]); self.assertEqual(o["quality"]["status"],"manual_required"); self.assertNotIn(marker,str(o))
+
+    def test_bounded_direction_degradations_are_partial_not_manual(self):
+        cases=(
+            ("oversized_scalars",{"name":"n"*201,"rationale":"r"*1001}),
+            ("oversized_gaps",{"gaps":[f"gap-{i}" for i in range(21)]}),
+            ("lost_ref",{"evidence_refs":["e1","missing"]}),
+        )
+        for label,changes in cases:
+            with self.subTest(label=label):
+                d=self._payload(); d["directions"][0].update(changes); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+                self.assertEqual([e["client_ref"] for e in o["evidence"]],["e1"]); self.assertEqual(o["directions"][0]["search_terms"],["Python"]); self.assertFalse(o["directions"][0]["default_enabled"]); self.assertEqual(o["quality"]["status"],"partial")
+
+    def test_oversized_optional_normalized_value_is_empty_and_evidence_retained(self):
+        marker="RAW-NORMALIZED-"+"v"*501; d=self._payload(); d["evidence"][0]["normalized_value"]=marker; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertEqual(len(o["evidence"]),1); self.assertEqual(o["evidence"][0]["normalized_value"],""); self.assertIn({"code":"invalid_type","path":"evidence[0].normalized_value"},o["quality"]["warnings"]); self.assertNotIn(marker,str(o))
+
+    def test_direction_with_no_search_terms_is_manual_required(self):
+        d=self._payload(); d["directions"][0]["search_terms"]=[]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertFalse(o["directions"][0]["default_enabled"]); self.assertEqual(o["quality"]["status"],"manual_required")
