@@ -533,7 +533,7 @@
     async function testAiConnection() {
       const resp = await api("/api/ai-settings/test", { method: "POST" });
       const data = await resp.json();
-      alert(data.ok ? "连接成功" : "连接失败: " + (data.error_code || "未知"));
+      alert(data.ok ? "候选人提取能力可用" : "能力测试失败: " + ((data.warning_codes || [])[0] || "未知"));
     }
 
     // == 搜索 ==

@@ -42,7 +42,7 @@ One immutable analysis attempt for one resume.
 | `summary_json` | Sanitized candidate summary; no contact identifiers or full resume. |
 | `unknowns_json` | Items the resume cannot establish, such as current city intention. |
 | `model_name` | Provider model label used for audit, if available. |
-| `contract_version` | Candidate-analysis contract version. |
+| `contract_version` | Candidate-analysis contract version; authoritative candidate results use `v3`. |
 | `failure_code` | Safe code only; null unless failed. |
 | `created_at`, `completed_at` | Lifecycle timestamps. |
 
@@ -51,8 +51,9 @@ Validation:
 - Only `ready` analyses may be confirmed.
 - `(resume_id, version)` is unique.
 - A failed analysis has no default-enabled directions.
-- Candidate-analysis v2 derives one canonical analysis text from the immutable resume extraction using a versioned normalization rule. Evidence locators are relative to that canonical text, and the resume content hash plus contract version identify the input interpretation without persisting a duplicate full-text copy.
-- A queued/analyzing attempt that cannot construct or call the configured provider becomes `failed` with a feature-safe failure code; it is never promoted to `ready` from partial output.
+- Candidate-analysis v3 derives one canonical analysis text from the immutable resume extraction using a versioned normalization rule. Evidence locators are relative to that canonical text, and the resume content hash plus contract version identify the input interpretation without persisting a duplicate full-text copy.
+- V3 quarantines invalid fields independently and permits `ready` with `quality.status=partial` or `manual_required`; quarantined fields cannot influence confirmation, SearchPlan compilation, matching, or scraper inputs.
+- A queued/analyzing attempt that cannot construct or call the configured provider becomes `failed` with a feature-safe failure code.
 
 ### `resume_evidence`
 

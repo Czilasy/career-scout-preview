@@ -226,6 +226,33 @@ class DiscoveryBrowserRenderTests(unittest.TestCase):
             el = self.page.query_selector(f"#{step_id}")
             self.assertIsNotNone(el, f"missing #{step_id} at 720px")
 
+    def test_partial_and_manual_analysis_states_render_without_overflow(self):
+        for width, quality in ((1366, "partial"), (720, "manual_required")):
+            with self.subTest(width=width, quality=quality):
+                self.page.set_viewport_size({"width": width, "height": 900})
+                self.page.evaluate("""quality => renderAnalysis({
+                    contract_version: 'v3', summary: {headline:'', experience_level:'', domains:[], strengths:[]},
+                    evidence: [], unknowns: [], directions: [],
+                    quality: {status: quality, warnings: [{code:'missing_required', path:'directions'}]}
+                })""", quality)
+                self.page.evaluate("() => switchToDiscovery('review')")
+                text = self.page.locator("#discoveryAnalysisContent").inner_text()
+                self.assertIn("需要", text)
+                self.assertIn("简历未提供", text)
+                self.assertTrue(self.page.locator("#discoveryManualDirection").is_visible())
+                overflow = self.page.evaluate("() => document.documentElement.scrollWidth > document.documentElement.clientWidth")
+                self.assertFalse(overflow)
+
+    def test_direction_default_and_dynamic_text_are_safe(self):
+        self.page.evaluate("""() => renderAnalysis({
+            summary:{headline:'<img src=x onerror=window.__xss=1>', experience_level:'', domains:[], strengths:[]},
+            evidence:[], unknowns:[], quality:{status:'complete', warnings:[]},
+            directions:[{id:'d1', name:'方向', type:'core', default_enabled:false, search_terms:['Python']}]
+        })""")
+        self.assertEqual(self.page.locator(".discovery-summary-headline").inner_text(), "<img src=x onerror=window.__xss=1>")
+        self.assertFalse(self.page.locator('.discovery-direction-card input[type="checkbox"]').is_checked())
+        self.assertIsNone(self.page.evaluate("() => window.__xss"))
+
     # ------------------------------------------------------------------
     # Run state injection (JS-level simulation)
     # ------------------------------------------------------------------

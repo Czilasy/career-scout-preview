@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from webui.app import create_app
@@ -18,6 +20,68 @@ from webui.discovery import (
     build_portfolio,
 )
 from webui.store import TaskStore
+
+
+class CandidateAnalysisV3ContractTests(unittest.TestCase):
+    """Specification-level guards for the backend-owned candidate v3 contract."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Path(__file__).resolve().parents[1]
+        cls.ai_contract = (cls.root / "specs/004-resume-job-discovery/contracts/ai-contracts.md").read_text(encoding="utf-8")
+        cls.data_model = (cls.root / "specs/004-resume-job-discovery/data-model.md").read_text(encoding="utf-8")
+        cls.state_machine = (cls.root / "specs/004-resume-job-discovery/contracts/state-machine.md").read_text(encoding="utf-8")
+        block = re.search(r"## Candidate analysis provider output v3.*?```json\n(.*?)\n```", cls.ai_contract, re.S)
+        cls.shape = json.loads(block.group(1)) if block else None
+
+    def test_candidate_v3_has_backend_owned_typed_empty_shape(self):
+        self.assertEqual(self.shape, {
+            "contract_version": "v3",
+            "summary": {"headline": "", "experience_level": "", "domains": [], "strengths": []},
+            "evidence": [], "unknowns": [], "directions": [],
+            "quality": {"status": "complete", "warnings": []},
+        })
+
+    def test_one_invalid_evidence_item_does_not_discard_valid_summary(self):
+        self.assertIn("invalid evidence item is quarantined without discarding the valid summary", self.ai_contract)
+        self.assertIn("quality.status=partial", self.data_model)
+        self.assertNotIn("partial unvalidated output is not persisted as ready", self.ai_contract)
+
+    def test_unverified_search_fields_never_become_confirmed_constraints(self):
+        self.assertRegex(self.ai_contract, r"quarantined fields cannot influence confirmation, SearchPlan compilation, matching, or scraper inputs")
+        self.assertIn("unverified search fields never become confirmed constraints", self.ai_contract)
+        self.assertIn("analysis stages are", self.state_machine.lower())
+        self.assertRegex(self.data_model, r"`status`\s*\|\s*`queued`, `analyzing`, `ready`, `failed`, `deleted`")
+        self.assertIn("ready` with `quality.status=partial` or `manual_required`", self.data_model)
+
+    def test_identity_fields_are_not_candidate_or_search_fields(self):
+        self.assertRegex(self.ai_contract, r"Identity fields .* excluded from candidate and search fields")
+
+    def test_warning_schema_codes_and_field_types_are_closed(self):
+        self.assertRegex(self.ai_contract, r"warning object.*\{`?code`?, `?path`?\}")
+        for code in ("invalid_type", "invalid_enum", "invalid_evidence", "sensitive_value", "unverified_field", "missing_required", "reference_invalid"):
+            self.assertIn(f"`{code}`", self.ai_contract)
+        self.assertIn("`warnings` is an array", self.ai_contract)
+        self.assertIn("confidence", self.ai_contract)
+        self.assertIn("integer from 0 through 100", self.ai_contract)
+
+    def test_item_object_schemas_and_limits_are_explicit(self):
+        for field in ("client_ref", "normalized_value", "source_quote", "assertion_type", "confidence",
+                      "evidence_refs", "search_terms", "default_enabled"):
+            self.assertIn(f"`{field}`", self.ai_contract)
+        for enum in ("skill|responsibility|project|industry|seniority|education|achievement|other",
+                     "explicit|inferred", "current_city|min_salary|career_intent|other", "core|adjacent|growth"):
+            self.assertIn(enum, self.ai_contract)
+        self.assertIn("maximum 3", self.ai_contract)
+        self.assertIn("maximum of 5 items", self.ai_contract)
+        self.assertIn("generic string-list rule does not apply", self.ai_contract)
+        self.assertIn("object arrays are never coerced", self.ai_contract)
+
+    def test_invalid_evidence_is_dropped_and_refs_cannot_enable_direction(self):
+        self.assertIn("dropped entirely from normalized `evidence`", self.ai_contract)
+        self.assertIn("`source_quote` cannot be empty for an accepted evidence item", self.ai_contract)
+        self.assertIn("Directions referencing dropped evidence lose those refs", self.ai_contract)
+        self.assertIn("Every accepted/persisted evidence item", self.ai_contract)
 
 
 # Resume text used by HTTP contract tests. Kept脱敏: no phone/ID/address.
@@ -273,7 +337,7 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         """契约: POST 接受 application/json {resume_id, ai_consent}，返回 202 + AnalysisSummary。"""
         resp = self.client.post(
             "/api/discovery/analyses",
-            json={"resume_id": self.resume["id"], "ai_consent": False},
+            json={"resume_id": self.resume["id"], "ai_consent": True},
         )
         self.assertEqual(resp.status_code, 202)
         data = resp.get_json()
@@ -293,19 +357,18 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         data = resp.get_json()
         self.assertIn("error_code", data)
 
-    def test_post_analyses_consent_false_stays_queued_and_no_provider_call(self):
-        """契约: consent=false 时分析保持 queued，不调用 AI provider。"""
+    def test_post_analyses_consent_false_rejects_without_row(self):
+        """契约: consent=false 时创建前拒绝，不调用 AI provider。"""
         self._configure_ai_settings()
         fake_provider = self._patch_ai_provider()
+        before = len(self.store.list_analyses(self.resume["id"]))
         resp = self.client.post(
             "/api/discovery/analyses",
             json={"resume_id": self.resume["id"], "ai_consent": False},
         )
-        self.assertEqual(resp.status_code, 202)
+        self.assertEqual(resp.status_code, 400)
         fake_provider.analyze.assert_not_called()
-        analysis_id = resp.get_json()["analysis_id"]
-        get_resp = self.client.get(f"/api/discovery/analyses/{analysis_id}")
-        self.assertEqual(get_resp.get_json()["status"], "queued")
+        self.assertEqual(len(self.store.list_analyses(self.resume["id"])), before)
 
     def test_post_analyses_consent_true_with_provider_no_500(self):
         """契约: 已配置 + consent=true 不得 NameError/500，最终 ready 或安全 failed。"""
@@ -382,6 +445,20 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()["error_code"], "state_conflict")
 
+    def test_manual_direction_with_one_to_three_terms_keeps_manual_analysis_usable(self):
+        analysis = self._create_ready_analysis_over_http()
+        response = self.client.post("/api/discovery/confirmations", json={
+            "analysis_id": analysis["analysis_id"],
+            "enabled_direction_ids": [],
+            "user_directions": [{"name": "手动平台工程师", "search_terms": ["平台工程", "Python"]}],
+            "hard_constraints": {"city": "上海"},
+        })
+        self.assertEqual(response.status_code, 201)
+        confirmation = self.store.get_confirmation(response.get_json()["confirmation_id"])
+        self.assertEqual(len(confirmation["directions"]), 1)
+        stored = self.store.list_directions(analysis["analysis_id"])[-1]
+        self.assertEqual(stored["search_terms"], ["平台工程", "Python"])
+
     def test_post_analyses_response_does_not_leak_resume_text(self):
         """契约: 202 响应体不得包含简历正文片段。"""
         self._configure_ai_settings()
@@ -414,6 +491,9 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         for field in ("analysis_id", "resume_id", "profile_id", "status",
                        "evidence", "directions", "unknowns", "failure"):
             self.assertIn(field, data, f"missing field: {field}")
+        self.assertEqual(data["contract_version"], "v3")
+        self.assertEqual(set(data["quality"]), {"status", "warnings"})
+        self.assertNotIn("source_quote", str(data))
 
     def test_get_analysis_404_for_unknown_id(self):
         """契约: GET 未知 id 返回 404 安全错误信封。"""
@@ -452,7 +532,10 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         first_version = first_data.get("version")
         self._poll_until_terminal(first_id, timeout=5.0)
 
-        retry_resp = self.client.post(f"/api/discovery/analyses/{first_id}/retry")
+        retry_resp = self.client.post(
+            f"/api/discovery/analyses/{first_id}/retry",
+            json={"ai_consent": True},
+        )
         self.assertEqual(retry_resp.status_code, 202)
         retry_data = retry_resp.get_json()
         self.assertEqual(retry_data["version"], first_version + 1)
@@ -460,8 +543,8 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         self.assertEqual(retry_data["resume_id"], self.resume["id"])
         self._poll_until_terminal(retry_data["analysis_id"], timeout=5.0)
 
-    def test_retry_respects_consent_false(self):
-        """契约: retry 请求体 ai_consent=false 时新建分析保持 queued，不调用 provider。"""
+    def test_retry_rejects_consent_false_without_new_attempt(self):
+        """契约: retry consent=false 时拒绝且不新建分析。"""
         self._configure_ai_settings()
         fake_provider = self._patch_ai_provider(response=_contract_valid_ai_response())
         first_resp = self.client.post(
@@ -471,17 +554,16 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         first_id = first_resp.get_json()["analysis_id"]
         self._poll_until_terminal(first_id, timeout=5.0)
         calls_before_retry = fake_provider.analyze.call_count
+        versions_before = len(self.store.list_analyses(self.resume["id"]))
 
         retry_resp = self.client.post(
             f"/api/discovery/analyses/{first_id}/retry",
             json={"ai_consent": False},
         )
-        self.assertEqual(retry_resp.status_code, 202)
-        retry_id = retry_resp.get_json()["analysis_id"]
+        self.assertEqual(retry_resp.status_code, 400)
         # consent=false -> provider 不应被再次调用
         self.assertEqual(fake_provider.analyze.call_count, calls_before_retry)
-        get_resp = self.client.get(f"/api/discovery/analyses/{retry_id}")
-        self.assertEqual(get_resp.get_json()["status"], "queued")
+        self.assertEqual(len(self.store.list_analyses(self.resume["id"])), versions_before)
 
     def test_retry_unknown_analysis_returns_404(self):
         """契约: retry 未知 id 返回 404。"""

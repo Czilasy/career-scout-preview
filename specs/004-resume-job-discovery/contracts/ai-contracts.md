@@ -2,50 +2,65 @@
 
 AI contracts are versioned, deterministic where provider support allows, and validated before use. Unknown fields are omitted or explicit; no default score is inserted.
 
-## Candidate analysis provider output v2
+## Candidate analysis provider output v3
 
-Version 2 removes authoritative character offsets from the model contract. The model returns a minimal exact quote; program code resolves and verifies the locator against canonical resume text before the domain validator sees the response.
+Version 3 is the backend-owned canonical result. The backend supplies typed empty values and quarantines invalid fields independently; one invalid evidence item never discards a valid summary. `contract_version` is always `v3`. The canonical quality shape is `quality {status: "complete|partial|manual_required", warnings: []}`.
 
-Required top-level fields:
+The canonical empty result is exact JSON: `{"contract_version":"v3","summary":{"headline":"","experience_level":"","domains":[],"strengths":[]},"evidence":[],"unknowns":[],"directions":[],"quality":{"status":"complete","warnings":[]}}`. Backend normalization owns this shape; provider omissions are filled with these typed empties.
+
+Required top-level fields (backend-owned typed empty shape; backend-owned typed empty values):
 
 ```json
 {
+  "contract_version": "v3",
   "summary": {
-    "headline": "string",
-    "experience_level": "string or empty",
-    "domains": ["string"],
-    "strengths": ["string"]
+    "headline": "",
+    "experience_level": "",
+    "domains": [],
+    "strengths": []
   },
-  "evidence": [
-    {
-      "client_ref": "e1",
-      "type": "skill|responsibility|project|industry|seniority|education|achievement|other",
-      "normalized_value": "string",
-      "source_quote": "minimal exact substring copied from the supplied resume",
-      "assertion_type": "explicit|inferred",
-      "confidence": 0
-    }
-  ],
-  "unknowns": [
-    {"field": "current_city|min_salary|career_intent|other", "message": "string"}
-  ],
-  "directions": [
-    {
-      "client_ref": "d1",
-      "name": "string",
-      "type": "core|adjacent|growth",
-      "rationale": "string",
-      "evidence_refs": ["e1"],
-      "gaps": ["string"],
-      "confidence": 0,
-      "default_enabled": true,
-      "search_terms": ["string"]
-    }
-  ]
+  "evidence": [],
+  "unknowns": [],
+  "directions": [],
+  "quality": {"status": "complete", "warnings": []}
 }
 ```
 
 Program validation:
+
+- JSON types are strict: strings are JSON strings; lists contain only strings; `confidence` is an integer from 0 through 100; `default_enabled` is boolean. Allowed enums are evidence `type` = `skill|responsibility|project|industry|seniority|education|achievement|other`, assertion `explicit|inferred`, unknown field `current_city|min_salary|career_intent|other`, direction `type` = `core|adjacent|growth`, and quality status `complete|partial|manual_required`. At most 5 directions and 3 search terms per direction are allowed.
+- A warning object is exactly `{`code`, `path`}` with both non-empty strings; no other keys or raw provider/resume text are allowed. Allowed codes are `invalid_type`, `invalid_enum`, `invalid_evidence`, `sensitive_value`, `unverified_field`, `missing_required`, and `reference_invalid`.
+- `warnings` is an array of warning objects.
+
+Size limits are authoritative and are enforced before persistence or expensive evidence resolution:
+
+| Field | Maximum |
+|---|---:|
+| `summary.headline` | 200 characters |
+| `summary.experience_level` | 100 characters |
+| `summary.domains`, `summary.strengths` | 20 items; 200 characters per item |
+| `evidence` | 20 items |
+| `evidence.client_ref` | 128 characters |
+| `evidence.normalized_value` | 500 characters |
+| `evidence.source_quote` | 2,000 characters |
+| `unknowns` | 20 items |
+| `unknowns[].message` | 500 characters |
+| `directions` | 5 items |
+| `directions[].client_ref` | 128 characters |
+| `directions[].name` | 200 characters |
+| `directions[].rationale` | 1,000 characters |
+| `directions[].gaps` | 20 items; 300 characters per item |
+| `directions[].search_terms` | 3 items; 200 characters per item |
+
+An oversized scalar becomes its typed empty value with a safe field warning. An oversized list member is dropped, and lists are capped with a safe warning. Oversized required evidence strings quarantine the entire evidence item. Evidence input is capped at 20 before quote lookup or canonical substring work. Raw oversized values are never copied into normalized output or warnings.
+
+Object-array schemas (the generic string-list rule does not apply to these objects):
+
+object arrays are never coerced from scalars or generic string lists.
+
+- `evidence` items require `client_ref` (non-empty string), `type` (required enum `skill|responsibility|project|industry|seniority|education|achievement|other`), `normalized_value` (string), `source_quote` (non-empty string), `assertion_type` (required enum `explicit|inferred`), and `confidence` (required integer 0–100). Invalid required fields or quotes quarantine and drop the entire item from normalized `evidence`; persist only `{code,path}`. Every accepted/persisted evidence item has a unique source quote; `source_quote` cannot be empty for an accepted evidence item.
+- `unknowns` items require `field` (required enum `current_city|min_salary|career_intent|other`) and `message` (string, typed empty `""` when unavailable). No additional keys are permitted.
+- `directions` items require `client_ref` (non-empty string), `name` (string, typed empty `""` when quarantined), `type` (required enum `core|adjacent|growth`), `rationale` (string, typed empty `""` when unavailable), `evidence_refs` (array of strings, default `[]`), `gaps` (array of strings, default `[]`), `confidence` (integer 0–100, default `0`), `default_enabled` (boolean, default `false`), and `search_terms` (array of strings, default `[]`, maximum 3). The directions array has a maximum of 5 items. Directions referencing dropped evidence lose those refs and cannot be default-enabled.
 
 - Canonical resume text is derived with the contract's versioned Unicode normalization rule; offsets are Unicode code-point indexes into this exact text.
 - Every `source_quote` must be a minimal exact substring of canonical resume text and must resolve uniquely. A repeated quote requires additional surrounding text; fuzzy or arbitrary first-match selection is forbidden.
@@ -55,7 +70,11 @@ Program validation:
 - Default-enabled directions require evidence and the configured confidence gate.
 - Normalize and merge synonymous directions; retain at most five default-visible directions and at most three terms each.
 - Contact details, identity numbers and exact addresses are rejected as evidence.
-- Any structural/reference failure invalidates the response; partial unvalidated output is not persisted as ready.
+- An invalid evidence item is quarantined with a field-level warning code and dropped entirely from normalized `evidence`; unrelated valid summary, unknowns and directions remain usable (invalid evidence item is quarantined without discarding the valid summary).
+- `quality.status` is one of `complete|partial|manual_required`; `warnings` is always a typed list of field-level warning objects. A `ready` analysis may be `partial` or `manual_required` after quarantine.
+- `quality`, `source_locator`, and `safe_excerpt` are backend-owned normalized output fields. The provider does not return them; omitting them from provider output is not a missing-field warning. The program derives them after parsing.
+- Identity fields (name, gender, age, phone, ID number, exact address and similar contact identifiers) are excluded from candidate and search fields.
+- quarantined fields cannot influence confirmation, SearchPlan compilation, matching, or scraper inputs; unverified search fields never become confirmed constraints.
 - At most one corrective retry is allowed for a successfully returned but structurally invalid response. Missing evidence, values, scores or references are never guessed locally.
 
 ## Job-direction assessment input v1

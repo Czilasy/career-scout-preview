@@ -248,6 +248,22 @@ class AnalysisSubmissionFrontendTests(_FlaskTestCase):
         self.assertIn("error_code", html)
         self.assertIn("user_message", html)
 
+    def test_normalized_quality_and_manual_direction_controls_exist(self):
+        html = self.client.get("/").data.decode("utf-8")
+        for marker in ("quality_status", "discovery-quality-state", "需要确认", "简历未提供", "discoveryManualDirection", "discoveryManualTerms"):
+            self.assertIn(marker, html)
+
+    def test_default_selection_requires_explicit_true(self):
+        html = self.client.get("/").data.decode("utf-8")
+        self.assertIn("cb.checked = d.default_enabled === true", html)
+        self.assertNotIn("cb.checked = d.default_enabled !== false", html)
+
+    def test_dynamic_candidate_values_use_text_content(self):
+        html = self.client.get("/").data.decode("utf-8")
+        render = html.split("function renderAnalysis(analysis)", 1)[1].split("async function confirmDirections", 1)[0]
+        self.assertIn("textContent = summary.headline", render)
+        self.assertIn("item.textContent = \"需要确认：\"", render)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

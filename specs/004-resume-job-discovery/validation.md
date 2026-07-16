@@ -875,3 +875,25 @@ python webui/app.py
 - E2E 结果新增 `browser_lifecycle.mode/close_status`；关闭失败写入 `operational_blockers=browser_close_failed` 并使命令非零退出，不静默遗留浏览器。
 - `python -m unittest tests.test_e2e_prerequisites tests.test_chrome_setup -v`: `Ran 73 tests in 6.963s`，`OK`；`python -m py_compile scripts/boss_cdp_raw.py tests/fixtures/discovery/e2e_real_boss.py tests/test_e2e_prerequisites.py tests/test_chrome_setup.py` exit 0。
 - 本项只改变测试基础设施生命周期，没有重新执行真实 BOSS E2E；T133/T134 的业务发布门仍沿用 §12.9–§12.10 已完成的新鲜真实验证证据。
+
+### 12.14 Candidate Contract Adapter 最终验证（2026-07-16）
+
+#### 自动化回归
+
+- 后端专项：`python -u -m unittest tests.test_candidate tests.test_ai tests.test_discovery_contracts tests.test_discovery_store tests.test_discovery tests.test_discovery_integration tests.test_webui_app -q`，`Ran 610 tests in 92.304s`，`OK`。
+- 前端与真实浏览器：`python -m unittest tests.test_discovery_frontend tests.test_discovery_browser tests.test_webui_browser -q`，`Ran 94 tests in 163.185s`，`OK`；覆盖 1366×768 与 720px。
+- 全量最终复验：`python -u -m unittest discover -s tests -q`，在正常本机权限下 `Ran 1341 tests in 289.860s`，`OK`。同一命令先在受限沙箱内运行时，有 10 项仅因不能向本机简历目录写测试文件而报 `PermissionError`；解除该文件系统限制后原样重跑为 0 失败。
+- 全量输出仍含既有 sqlite 连接、子进程文件句柄和模块导入 `ResourceWarning` / `ImportWarning`；退出码为 0，但本节不把结果表述为“无警告”。
+
+#### 本机迁移与真实提供方探测
+
+- 默认本机配置库存在，随当前代码打开后 `schema_version=14`；AI 配置状态为 `ready`，端点、模型名、凭据引用和密钥均未写入验证日志。
+- 直接调用当前适配器并仅发送内置虚构简历：传输与生成成功，候选合同为 `partial`，安全告警码为 `invalid_evidence`、`reference_invalid`。这证明无效证据会被降级，不会伪装成完整结果。
+- 受影响 Flask 服务最终由功能工作树绝对路径启动，PID 15392 实际持有 `127.0.0.1:5000`，主页返回 HTTP 200。重启后的 `/api/ai-settings/test` 通过正常本地会话提交虚构简历，提供方在连接测试时限内超时，安全返回 `transport=failed`、`generation=failed`、`candidate_contract=manual_required`、`warning_codes=[timeout]`；未写入兜底候选人事实。
+- 首次相对路径启动验证发现 5000 端口仍由旧工作区服务持有；已停止旧服务和冲突进程，再以功能工作树绝对路径重启并核对端口所有者。该运行时问题已在本轮纠正。
+
+#### 明确未执行与阻断边界
+
+- 未向任何 AI 提供方发送用户真实简历：本轮没有针对具体真实简历的单独明确同意，因此只执行虚构简历探测。
+- 未执行真实 BOSS 抓取交接：验收时 `127.0.0.1:9222` 没有专用 CDP 监听者，也没有可验证的已登录浏览器；不能把自动化测试或历史 E2E 结果冒充本轮真实抓取。
+- 候选人 v3 适配器、持久化、人工补充交互、抓取字段白名单和执行上限均已通过本轮专项与全量回归；外部真实来源仍依赖后续明确提供的专用登录态。

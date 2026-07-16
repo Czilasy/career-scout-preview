@@ -21,6 +21,7 @@ from webui.candidate import (
     normalize_evidence,
     redact_pii,
     validate_candidate_analysis,
+    normalize_candidate_analysis,
 )
 from webui.ai import AISecurityError as AIProviderError
 
@@ -48,6 +49,8 @@ ERROR_CODE_MAP: dict[str, dict] = {
     "state_conflict": {"retryable": False, "stage": None},
     "not_found": {"retryable": False, "stage": None},
     "cancelled": {"retryable": False, "stage": None},
+    "consent_required": {"retryable": False, "stage": None},
+    "analysis_interrupted": {"retryable": True, "stage": "analyzing"},
 }
 
 DEFAULT_USER_MESSAGES: dict[str, str] = {
@@ -67,6 +70,8 @@ DEFAULT_USER_MESSAGES: dict[str, str] = {
     "state_conflict": "当前状态不支持该操作。",
     "not_found": "请求的资源不存在。",
     "cancelled": "操作已取消。",
+    "consent_required": "需要明确同意后才能调用 AI。",
+    "analysis_interrupted": "分析因服务重启而中断，请重试。",
 }
 
 
@@ -133,6 +138,29 @@ def _input_hash(payload: Any) -> str:
 
 
 MAX_GLOBAL_SEARCH_ITEMS = 12
+CONFIRMED_SCRAPER_FIELDS = ("city", "salary", "experience", "degree", "industry", "scale", "stage")
+SCRAPER_FILTER_FIELDS = CONFIRMED_SCRAPER_FIELDS[1:]
+SAFE_SOURCE_LIMIT_BOUNDS = {"max_details": (1, 200), "max_pages": (1, 10)}
+
+
+def map_confirmation_to_scraper_inputs(confirmation: dict) -> dict:
+    """Return the sole allowlisted, bounded source input view."""
+    raw_hard = confirmation.get("hard_constraints") if isinstance(confirmation, dict) else {}
+    raw_limits = confirmation.get("safe_limits") if isinstance(confirmation, dict) else {}
+    hard = {}
+    for key in CONFIRMED_SCRAPER_FIELDS:
+        value = (raw_hard or {}).get(key)
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            continue
+        if str(value).strip():
+            hard[key] = value
+    limits = {}
+    for key, (minimum, maximum) in SAFE_SOURCE_LIMIT_BOUNDS.items():
+        value = (raw_limits or {}).get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        limits[key] = min(max(value, minimum), maximum)
+    return {"hard_constraints": hard, "safe_limits": limits}
 
 
 def compile_search_plan(confirmation: dict) -> dict:
@@ -153,9 +181,10 @@ def compile_search_plan(confirmation: dict) -> dict:
     enabled_directions = confirmation.get("enabled_directions", []) or []
     if not enabled_directions:
         raise DiscoveryError("input_incomplete", user_message="未启用任何方向。")
-    hard_constraints = confirmation.get("hard_constraints", {}) or {}
-    safe_limits = confirmation.get("safe_limits", {}) or {}
-    detail_budget = int(safe_limits.get("max_details", 60))
+    source_inputs = map_confirmation_to_scraper_inputs(confirmation)
+    hard_constraints = source_inputs["hard_constraints"]
+    safe_limits = source_inputs["safe_limits"]
+    detail_budget = safe_limits.get("max_details", 60)
 
     seen_terms: dict[str, list[str]] = {}
     items: list[dict] = []
@@ -172,6 +201,11 @@ def compile_search_plan(confirmation: dict) -> dict:
         if not terms:
             continue
         for term in terms:
+            if not isinstance(term, str) or not term.strip():
+                continue
+            term = term.strip()
+            if redact_pii(term) != term:
+                continue
             if term not in seen_terms:
                 if len(items) >= MAX_GLOBAL_SEARCH_ITEMS:
                     break
@@ -210,10 +244,12 @@ def compile_search_plan(confirmation: dict) -> dict:
         "items": items,
         "detail_budget": detail_budget,
         "hard_constraints": dict(hard_constraints),
+        "safe_limits": dict(safe_limits),
         "input_hash": _input_hash({
             "items": [{k: v for k, v in item.items() if k != "status"} for item in items],
             "detail_budget": detail_budget,
             "hard_constraints": dict(hard_constraints),
+            "safe_limits": dict(safe_limits),
         }),
     }
     return plan
@@ -712,9 +748,6 @@ def confirm_directions(
             user_message=f"分析状态为 {analysis.get('status')}，无法确认。",
             stage="analyzing",
         )
-    if not enabled_direction_ids:
-        raise DiscoveryError("input_incomplete", user_message="至少需要启用一个方向。")
-
     analysis_directions = store.list_directions(analysis_id)
     analysis_direction_ids = {d["id"] for d in analysis_directions}
     for direction_id in enabled_direction_ids:
@@ -730,7 +763,25 @@ def confirm_directions(
         if value not in (None, "", []):
             clean_hard[key] = value
 
-    user_added_ids = {d.get("id") for d in (user_directions or [])}
+    user_added_ids = set()
+    for item in user_directions or []:
+        if not isinstance(item, dict):
+            raise DiscoveryError("input_incomplete", user_message="人工方向格式无效。")
+        name = str(item.get("name") or "").strip()
+        raw_terms = item.get("search_terms")
+        if not name or not isinstance(raw_terms, list):
+            raise DiscoveryError("input_incomplete", user_message="人工方向和搜索词不能为空。")
+        terms = [str(term).strip() for term in raw_terms if str(term).strip()]
+        if not 1 <= len(terms) <= 3:
+            raise DiscoveryError("input_incomplete", user_message="人工方向需要 1–3 个搜索词。")
+        stored = store.add_direction(
+            analysis_id, name[:200], "core", rationale="用户手动添加",
+            confidence=100, default_enabled=True, search_terms=terms[:3],
+        )
+        user_added_ids.add(stored["id"])
+        enabled_direction_ids = [*enabled_direction_ids, stored["id"]]
+    if not enabled_direction_ids:
+        raise DiscoveryError("input_incomplete", user_message="至少需要启用一个方向。")
     directions_payload = [
         {
             "direction_id": did,
@@ -768,9 +819,7 @@ def analyze_resume(
 ) -> dict:
     """Orchestrate candidate analysis: consent -> read resume -> AI -> validate -> persist.
 
-    - ``ai_consent`` False: only local validation, no remote AI call. The
-      analysis is created in ``queued`` status and never transitions to
-      ``ready`` without consent.
+    - ``ai_consent`` must be explicitly true before an attempt is created.
     - Empty resume text blocks the analysis (``input_incomplete``).
     - AI contract failures raise :class:`AISecurityError` and persist the
       analysis as ``failed`` with a failure_code.
@@ -790,6 +839,24 @@ def analyze_resume(
     profile_id = resume.get("profile_id")
     if not profile_id:
         raise DiscoveryError("input_incomplete", user_message="简历未关联候选人档案。")
+    if not ai_consent:
+        raise DiscoveryError("consent_required", user_message="需要明确同意后才能调用 AI。")
+
+    def set_stage(stage, *, status=None, quality_status=None, quality_warnings=None, **kwargs):
+        """Persist lifecycle metadata through the store's v3-compatible API."""
+        target_status = status or store.get_analysis(analysis["id"]).get("status", "queued")
+        conditional = {}
+        if target_status in {"ready", "failed"}:
+            conditional["expected_statuses"] = {
+                "queued", "analyzing", "normalizing", "validating", "repairing", "persisting",
+            }
+        elif target_status == "analyzing":
+            conditional["expected_statuses"] = {"analyzing"}
+        store.update_analysis_status(
+            analysis["id"], target_status, analysis_stage=stage,
+            quality_status=quality_status, quality_warnings=quality_warnings,
+            **conditional, **kwargs,
+        )
 
     if analysis_id:
         # T109: Use existing analysis created by the HTTP route.
@@ -797,34 +864,27 @@ def analyze_resume(
     else:
         analysis = store.create_analysis(
             resume_id, profile_id,
-            model_name=model_name, contract_version="v2",
+            model_name=model_name, contract_version="v3",
         )
+
+    if not store.claim_analysis(analysis["id"]):
+        raise DiscoveryError("state_conflict", user_message="分析已被处理或不再可执行。")
 
     if not resume_text:
-        store.update_analysis_status(
-            analysis["id"], "failed", failure_code="input_incomplete",
-        )
+        set_stage("validating", status="failed", quality_status="manual_required", quality_warnings=[] , failure_code="input_incomplete")
         raise DiscoveryError("input_incomplete", user_message="简历正文为空，无法分析。")
 
-    if not ai_consent:
-        # Without consent we never call the remote AI. Leave analysis queued.
-        return store.get_analysis(analysis["id"])
-
     if ai_provider is None:
-        store.update_analysis_status(
-            analysis["id"], "failed", failure_code="ai_unavailable",
-        )
+        set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_unavailable")
         raise DiscoveryError("ai_unavailable", user_message="AI 服务未配置。")
-
-    store.update_analysis_status(analysis["id"], "analyzing")
 
     try:
         raw = ai_provider.analyze(resume_text=resume_text)
     except TimeoutError:
-        store.update_analysis_status(analysis["id"], "failed", failure_code="ai_timeout")
+        set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_timeout")
         raise DiscoveryError("ai_timeout")
     except ConnectionError:
-        store.update_analysis_status(analysis["id"], "failed", failure_code="ai_network_error")
+        set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_network_error")
         raise DiscoveryError("ai_network_error")
     except AIProviderError as exc:
         # T111: webui.ai.AISecurityError — provider 抛出，已携带 feature-safe 码
@@ -832,26 +892,29 @@ def analyze_resume(
         # 重新包装为 webui.discovery.AISecurityError 以保持调用方契约
         # （_safe_execute_analysis 捕获 DiscoveryError/AISecurityError）。
         code = exc.error_code if exc.error_code in ERROR_CODE_MAP else "ai_invalid_output"
-        store.update_analysis_status(analysis["id"], "failed", failure_code=code)
+        set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code=code)
         raise AISecurityError(code) from None
     except AISecurityError as exc:
         # webui.discovery.AISecurityError — 本地抛出（如 validate_candidate_analysis
         # 失败）。保留 provider/本地映射后的 feature-safe error_code。
         code = exc.error_code if exc.error_code in ERROR_CODE_MAP else "ai_invalid_output"
-        store.update_analysis_status(analysis["id"], "failed", failure_code=code)
+        set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code=code)
         raise
     except Exception as exc:  # noqa: BLE001 - provider adapter boundary
-        store.update_analysis_status(analysis["id"], "failed", failure_code="ai_invalid_output")
+        set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_invalid_output")
         raise AISecurityError("ai_invalid_output", log_detail=str(exc))
 
-    try:
-        validated = validate_candidate_analysis(raw, resume_text)
-    except ValueError as exc:
-        store.update_analysis_status(
-            analysis["id"], "failed", failure_code="ai_invalid_output",
-        )
-        raise AISecurityError("ai_invalid_output", log_detail=str(exc))
-
+    set_stage("normalizing", status="analyzing")
+    if isinstance(raw, dict) and raw.get("contract_version") == "v3":
+        validated = normalize_candidate_analysis(raw, resume_text)
+    else:
+        try:
+            validated = validate_candidate_analysis(raw, resume_text)
+        except ValueError as exc:
+            set_stage("validating", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_invalid_output")
+            raise AISecurityError("ai_invalid_output", log_detail=str(exc))
+    quality = validated.get("quality", {})
+    set_stage("validating", status="analyzing", quality_status=quality.get("status"), quality_warnings=quality.get("warnings", []))
     # Normalize and merge evidence/directions.
     normalized_evidence = normalize_evidence(validated["evidence"], resume_text)
     merged_directions = merge_directions(validated["directions"])
@@ -897,8 +960,7 @@ def analyze_resume(
         if isinstance(v, list) else v
         for k, v in raw_summary.items()
     }
-    store.update_analysis_status(
-        analysis["id"], "ready",
+    set_stage("persisting", status="ready", quality_status=quality.get("status", "complete"), quality_warnings=quality.get("warnings", []),
         summary=redacted_summary,
         unknowns=validated["unknowns"],
     )

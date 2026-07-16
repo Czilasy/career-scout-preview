@@ -78,12 +78,13 @@ class AISettingsTests(WorkbenchAPITestBase):
                 "api_key": "sk-secret",
             })
         with mock.patch("webui.ai.retrieve_api_key", return_value="sk-secret"), \
-             mock.patch("webui.ai.test_connection", return_value=(False, "auth_failed")):
+             mock.patch("webui.ai.test_connection", return_value={"ok": False, "transport": "failed", "generation": "failed", "candidate_contract": "manual_required", "warning_codes": ["auth_failed"]}):
             resp = self.client.post("/api/ai-settings/test")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertFalse(data["ok"])
-        self.assertEqual(data["error_code"], "auth_failed")
+        self.assertEqual(data["warning_codes"], ["auth_failed"])
+        self.assertEqual(data["transport"], "failed")
 
 
 class ProfileTests(WorkbenchAPITestBase):
