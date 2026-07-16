@@ -20,6 +20,9 @@ from webui.candidate import (
     canonicalize_resume_text_v2,
     redact_pii,
     resolve_evidence_quote,
+    CANDIDATE_ANALYSIS_V3_CONTRACT,
+    build_empty_candidate_analysis,
+    normalize_candidate_analysis,
 )
 
 
@@ -718,8 +721,8 @@ class DiscoveryAIProvider:
         - Does not persist the raw response.
         """
         messages = self._build_analyze_messages(resume_text)
-        canonical = canonicalize_resume_text_v2(resume_text)
-        for attempt in range(3):
+        original = None
+        for attempt in range(2):
             try:
                 response = call_ai(
                     self.endpoint, self.api_key, messages, model=self.model,
@@ -727,20 +730,49 @@ class DiscoveryAIProvider:
                 )
             except AISecurityError as exc:
                 raise _map_provider_error(exc) from None
-            if not self._is_structurally_valid_v2(response):
-                if attempt < 2:
-                    continue
+            try:
+                parsed = self._clean_candidate_response(response)
+            except (ValueError, TypeError, json.JSONDecodeError):
                 raise AISecurityError("ai_invalid_output") from None
-            # v2 locator enrichment
-            enriched = self._enrich_v2_locators(response, canonical)
-            if enriched is None:
-                # locator 失败 → 结构性失败 → 触发重试
-                if attempt < 2:
-                    continue
-                raise AISecurityError("ai_invalid_output") from None
-            return enriched
-        # Defensive: loop exited without return or raise
-        raise AISecurityError("ai_invalid_output") from None
+            normalized = normalize_candidate_analysis(parsed, resume_text)
+            if original is None:
+                original = normalized
+            if normalized["quality"]["status"] == "complete":
+                return normalized
+            if attempt == 0:
+                warnings = normalized["quality"]["warnings"]
+                corrective = messages + [{"role":"assistant", "content": json.dumps(parsed, ensure_ascii=False)}, {"role":"user", "content": "仅修正以下契约问题并返回JSON：" + json.dumps([{"code": w["code"], "path": w["path"]} for w in warnings], ensure_ascii=False)}]
+                messages = corrective
+                continue
+            return normalized if self._quality_score(normalized) > self._quality_score(original) else original
+        return original or build_empty_candidate_analysis()
+
+    @staticmethod
+    def _quality_score(result):
+        q = result.get("quality", {})
+        return (len(result.get("evidence", [])) + len(result.get("directions", [])) + len(result.get("summary", {}).get("strengths", [])), q.get("status") == "complete")
+
+    @staticmethod
+    def _clean_candidate_response(response):
+        if isinstance(response, dict):
+            obj = response
+        elif isinstance(response, str):
+            text = response.strip()
+            if text.startswith("```"):
+                lines = text.splitlines()
+                if len(lines) < 3 or not lines[-1].strip().startswith("```"):
+                    raise ValueError("fence")
+                text = "\n".join(lines[1:-1]).strip()
+            obj = json.loads(text)
+        else:
+            raise ValueError("json")
+        if not isinstance(obj, dict): raise ValueError("object")
+        for key in ("data", "result"):
+            if key in obj:
+                if len(obj) != 1 or not isinstance(obj[key], dict): raise ValueError("envelope")
+                obj = obj[key]
+                break
+        return obj
 
     @staticmethod
     def _enrich_v2_locators(response: dict, canonical_text: str) -> dict | None:
@@ -830,28 +862,13 @@ class DiscoveryAIProvider:
 
     @staticmethod
     def _build_analyze_messages(resume_text: str) -> list:
+        schema = json.dumps(CANDIDATE_ANALYSIS_V3_CONTRACT, ensure_ascii=False, default=list)
+        example = json.dumps({k: v for k, v in build_empty_candidate_analysis().items() if k != "quality"}, ensure_ascii=False)
         return [
             {
                 "role": "system",
                 "content": (
-                    "你是候选人分析助手。根据简历返回JSON："
-                    "summary{headline(str),experience_level(str),domains[list[str]],strengths[list[str]]}，"
-                    "evidence[list[{client_ref(str),type(str),normalized_value(str),"
-                    "source_quote(str),assertion_type(str),confidence(int 0-100)}]]，"
-                    "unknowns[list[{field(str),message(str)}]]，"
-                    "directions[list[{client_ref(str),name(str),type(str),"
-                    "rationale(str),evidence_refs[list[str]],gaps[list[str]],"
-                    "confidence(int 0-100),default_enabled(bool),"
-                    "search_terms[list[str] 1-3个]}]]。"
-                    "evidence.type 仅允许：skill/responsibility/project/industry/"
-                    "seniority/education/achievement/other。"
-                    "evidence.assertion_type 仅允许：explicit/inferred。"
-                    "unknowns.field 仅允许：current_city/min_salary/career_intent/other。"
-                    "directions.type 仅允许：core/adjacent/growth。"
-                    "directions 最多 5 个。"
-                    "source_quote 必须是简历中的精确子串，且在简历中唯一出现。"
-                    "不要用单个词作为 quote（如 'Python'），必须包含足够上下文使其唯一。"
-                    "禁止编造经历、学历、薪资、证书。"
+                    "你是候选人分析助手。严格按以下v3契约返回JSON。仅输出provider拥有字段；quality由程序生成，禁止输出source_locator和safe_excerpt。字段缺失使用契约typed-empty。契约schema:" + schema + "；示例:" + example + "。"
                 ),
             },
             {"role": "user", "content": resume_text},
