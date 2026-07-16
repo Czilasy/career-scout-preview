@@ -59,7 +59,7 @@ class CandidateAnalysisV3ContractTests(unittest.TestCase):
 
     def test_warning_schema_codes_and_field_types_are_closed(self):
         self.assertRegex(self.ai_contract, r"warning object.*\{`?code`?, `?path`?\}")
-        for code in ("invalid_type", "invalid_enum", "invalid_evidence", "sensitive_value", "unverified_field"):
+        for code in ("invalid_type", "invalid_enum", "invalid_evidence", "sensitive_value", "unverified_field", "missing_required", "reference_invalid"):
             self.assertIn(f"`{code}`", self.ai_contract)
         self.assertIn("warnings is an array", self.ai_contract)
         self.assertIn("confidence", self.ai_contract)
