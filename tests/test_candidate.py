@@ -653,3 +653,25 @@ class CandidateContractV2ValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+class CandidateV3NormalizerTests(unittest.TestCase):
+    def test_empty_v3_shape_and_fresh(self):
+        a = candidate.build_empty_candidate_analysis()
+        b = candidate.build_empty_candidate_analysis()
+        self.assertEqual(a["contract_version"], "v3")
+        self.assertEqual(a, b)
+        a["summary"]["domains"].append("x")
+        self.assertEqual(b["summary"]["domains"], [])
+
+    def test_normalizer_quarantines_invalid_and_generates_locator(self):
+        resume = "经历：Python后端经验\n"
+        data = {"summary":{"headline":"后端","experience_level":"高级","domains":["服务"],"strengths":[]},
+                "evidence":[{"client_ref":"e1","type":"skill","normalized_value":"Python","source_quote":"Python后端经验","assertion_type":"explicit","confidence":90,"source_locator":{"start":99,"end":100},"safe_excerpt":"bad"}],
+                "directions":[{"client_ref":"d1","name":"后端","type":"core","evidence_refs":["e1","missing","missing"],"search_terms":["Python"],"default_enabled":True}],
+                "identity":{"name":"张三"},"extra":1}
+        out = candidate.normalize_candidate_analysis(data, resume)
+        self.assertEqual(out["evidence"][0]["source_locator"], {"start":3,"end":13})
+        self.assertEqual(out["evidence"][0]["safe_excerpt"], "Python后端经验")
+        self.assertNotIn("identity", out)
+        self.assertFalse(out["directions"][0]["default_enabled"])
+        self.assertTrue(out["quality"]["warnings"])
