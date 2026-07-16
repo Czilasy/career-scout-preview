@@ -6,6 +6,7 @@ import unittest
 import ast
 import inspect
 import copy
+from unittest import mock
 
 from webui import candidate
 
@@ -873,3 +874,32 @@ class CandidateV3NormalizerTests(unittest.TestCase):
 
     def test_nested_extras_emit_warnings(self):
         d=self._payload(); d["evidence"][0]["source_context"]="raw"; d["directions"][0]["extra"]="raw"; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertTrue(any(w["code"]=="unverified_field" and "source_context" in w["path"] for w in o["quality"]["warnings"]))
+
+    def test_contract_metadata_owns_all_approved_size_limits(self):
+        c=candidate.CANDIDATE_ANALYSIS_V3_CONTRACT
+        self.assertEqual(c["summary"]["headline"]["max_length"],200); self.assertEqual(c["summary"]["experience_level"]["max_length"],100)
+        for field in ("domains","strengths"): self.assertEqual((c["summary"][field]["max"],c["summary"][field]["item_max_length"]),(20,200))
+        self.assertEqual(c["top"]["evidence"]["max"],20); self.assertEqual(c["evidence"]["client_ref"]["max_length"],128); self.assertEqual(c["evidence"]["normalized_value"]["max_length"],500); self.assertEqual(c["evidence"]["source_quote"]["max_length"],2000)
+        self.assertEqual(c["top"]["unknowns"]["max"],20); self.assertEqual(c["unknown"]["message"]["max_length"],500)
+        self.assertEqual(c["top"]["directions"]["max"],5); self.assertEqual(c["direction"]["client_ref"]["max_length"],128); self.assertEqual(c["direction"]["name"]["max_length"],200); self.assertEqual(c["direction"]["rationale"]["max_length"],1000)
+        self.assertEqual((c["direction"]["gaps"]["max"],c["direction"]["gaps"]["item_max_length"]),(20,300)); self.assertEqual((c["direction"]["search_terms"]["max"],c["direction"]["search_terms"]["item_max_length"]),(3,200))
+
+    def test_oversized_summary_values_are_bounded_and_warned(self):
+        marker="RAW-SUMMARY-"+"x"*220; d=self._payload(); d["summary"].update({"headline":marker,"experience_level":"y"*101,"domains":["ok"]*21,"strengths":["z"*201]}); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertEqual(o["summary"]["headline"],""); self.assertEqual(o["summary"]["experience_level"],""); self.assertLessEqual(len(o["summary"]["domains"]),20); self.assertEqual(o["summary"]["strengths"],[]); self.assertNotIn(marker,str(o)); self.assertTrue(any(w["path"].startswith("summary.") for w in o["quality"]["warnings"]))
+
+    def test_oversized_evidence_strings_drop_and_list_caps_before_resolve(self):
+        d=self._payload(); d["evidence"][0]["client_ref"]="R"*129; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["evidence"],[]); self.assertNotIn("R"*129,str(o))
+        d=self._payload(); base=d["evidence"][0]; d["evidence"]=[dict(base,client_ref=f"e{i}") for i in range(25)]
+        with mock.patch.object(candidate,"resolve_evidence_quote",return_value={"start":0,"end":10}) as resolver: o=candidate.normalize_candidate_analysis(d,"Python后端经验")
+        self.assertLessEqual(resolver.call_count,20); self.assertLessEqual(len(o["evidence"]),20); self.assertTrue(any(w["path"]=="evidence" for w in o["quality"]["warnings"]))
+
+    def test_oversized_unknown_message_is_typed_empty_and_safe(self):
+        marker="RAW-UNKNOWN-"+"u"*510; d=self._payload(); d["unknowns"]=[{"field":"other","message":marker}]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["unknowns"][0]["message"],""); self.assertNotIn(marker,str(o)); self.assertIn({"code":"invalid_type","path":"unknowns[0].message"},o["quality"]["warnings"])
+
+    def test_oversized_direction_scalars_and_gaps_are_safe_draft(self):
+        marker="RAW-DIRECTION-"+"n"*210; d=self._payload(); d["directions"][0].update({"client_ref":"c"*129,"name":marker,"rationale":"r"*1001,"gaps":["ok"]*21+["g"*301]}); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        direction=o["directions"][0]; self.assertEqual(direction["client_ref"],""); self.assertEqual(direction["name"],""); self.assertEqual(direction["rationale"],""); self.assertLessEqual(len(direction["gaps"]),20); self.assertFalse(direction["default_enabled"]); self.assertNotIn(marker,str(o))
+
+    def test_oversized_search_term_is_removed_and_requires_manual_review(self):
+        marker="RAW-TERM-"+"t"*201; d=self._payload(); d["directions"][0]["search_terms"]=[marker]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["directions"][0]["search_terms"],[]); self.assertFalse(o["directions"][0]["default_enabled"]); self.assertEqual(o["quality"]["status"],"manual_required"); self.assertNotIn(marker,str(o))
