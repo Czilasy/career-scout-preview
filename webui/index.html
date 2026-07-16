@@ -3459,7 +3459,7 @@
               setAppNotice("发现完成，可查看结果", "success");
               await loadDiscoveryResults(runId);
             } else if (run.status === "failed") {
-              setAppNotice("发现失败：" + (run.failure_code || "未知错误"), "error");
+              setAppNotice(getDiscoveryFailureMessage(run), "error");
             } else if (run.status === "cancelled") {
               setAppNotice("运行已取消", "warning");
             }
@@ -3477,6 +3477,19 @@
         }
       };
       discoveryPollTimer = setTimeout(poll, 3000);
+    }
+
+    function getDiscoveryFailureMessage(run) {
+      const code = (run && run.failure_code) || "";
+      const messages = {
+        source_cdp_unavailable: "BOSS 专用浏览器未连接。请先启动专用浏览器并打开 BOSS直聘，然后重新运行。",
+        source_login_required: "尚未登录 BOSS直聘。请在 BOSS 专用浏览器中完成登录，然后重新运行。",
+        source_blocked: "BOSS 数据源当前不可用，请检查专用浏览器的连接和登录状态后重试。",
+        source_unreachable: "BOSS 数据源无法访问，请检查本地运行环境后重试。",
+        source_timeout: "连接 BOSS 数据源超时，请检查专用浏览器后重试。",
+        dispatch_failed: "发现任务调度失败，请重试或检查本地服务。",
+      };
+      return messages[code] || "发现失败，请检查 BOSS 专用浏览器的连接和登录状态后重试。";
     }
 
     function renderRunProgress(run) {
@@ -3528,6 +3541,12 @@
         const warn = document.createElement("div");
         warn.className = "discovery-progress-warn";
         warn.textContent = "调度失败，请重试或检查配置。";
+        container.appendChild(warn);
+      }
+      if (run.status === "failed" && run.failure_code !== "dispatch_failed") {
+        const warn = document.createElement("div");
+        warn.className = "discovery-progress-warn";
+        warn.textContent = getDiscoveryFailureMessage(run);
         container.appendChild(warn);
       }
       // 进度计数

@@ -471,6 +471,49 @@ class RunOrchestrationTests(_IntegrationTestCase):
         for it in plan["items"]:
             self.assertEqual(it["status"], "failed")
 
+    def test_source_preflight_failure_stops_before_repeating_plan_items(self):
+        from webui.source import FakeJobSource, SourceOutcome
+
+        class CdpUnavailableSource(FakeJobSource):
+            def __init__(self):
+                super().__init__()
+                self.preflight_calls = 0
+
+            def preflight(self):
+                self.preflight_calls += 1
+                return SourceOutcome.failure(
+                    failed_code="source_cdp_unavailable",
+                    safe_log="cdp_port_unavailable",
+                )
+
+        source = CdpUnavailableSource()
+        runner = self._make_runner(source=source)
+        run = _make_discovery_run(
+            self.store, self.confirmation, self.analysis,
+            self.resume["id"], self.profile["id"],
+        )
+
+        final = runner.run(run["id"])
+
+        self.assertEqual(source.preflight_calls, 1)
+        self.assertEqual(source.list_calls, [])
+        self.assertEqual(final["status"], "failed")
+        self.assertEqual(final["stage"], "fetching_lists")
+        self.assertEqual(final["failure_code"], "source_cdp_unavailable")
+        plan = self.store.get_search_plan(run["id"])
+        self.assertTrue(plan["items"])
+        self.assertTrue(all(
+            item["status"] == "failed" and
+            item["failure_code"] == "source_cdp_unavailable"
+            for item in plan["items"]
+        ))
+        event_types = [
+            event["event_type"]
+            for event in self.store.list_discovery_events(run["id"])
+        ]
+        self.assertIn("source_preflight_failed", event_types)
+        self.assertNotIn("plan_item_started", event_types)
+
     def test_count_counters_update(self):
         source = self._fake_source_cls(list_jobs={
             ("Python 后端", "北京"): [

@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -195,6 +196,7 @@ class JobSourceAdapterTests(unittest.TestCase):
 
     def test_safe_failure_codes_set_is_complete(self):
         expected = {
+            "source_cdp_unavailable", "source_login_required",
             "source_unreachable", "source_blocked", "source_not_found",
             "source_invalid_output", "source_input_drift", "source_timeout",
             "source_unknown_error",
@@ -273,6 +275,36 @@ class BossCdpSourceMockedTests(unittest.TestCase):
     def _make_source(self, **runner_kwargs):
         runner = _MockRunner(jobs_path=self.list_path, **runner_kwargs)
         return BossCdpSource(runner=runner), runner
+
+    @patch("webui.source.boss.check_login_state", return_value=True)
+    @patch("webui.source.boss.requests.get")
+    def test_preflight_reports_ready_once_cdp_and_login_are_available(self, get, login):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"Browser": "Chrome/150"}
+        get.return_value = response
+        outcome = BossCdpSource().preflight()
+        self.assertTrue(outcome.ok)
+        login.assert_called_once_with(9222)
+
+    @patch("webui.source.boss.requests.get")
+    def test_preflight_distinguishes_cdp_unavailable(self, get):
+        from scripts import boss_cdp_raw as boss
+        get.side_effect = boss.requests.ConnectionError("refused")
+        outcome = BossCdpSource().preflight()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_cdp_unavailable")
+
+    @patch("webui.source.boss.check_login_state", return_value=False)
+    @patch("webui.source.boss.requests.get")
+    def test_preflight_distinguishes_login_required(self, get, login):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"Browser": "Chrome/150"}
+        get.return_value = response
+        outcome = BossCdpSource().preflight()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_login_required")
 
     def test_list_success_with_mock_runner(self):
         runner = _MockRunner(

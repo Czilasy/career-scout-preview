@@ -36,7 +36,12 @@ from webui.discovery import (
     EVALUATION_POLICY_VERSION,
 )
 from webui.ai import AISecurityError as AIProviderSecurityError
-from webui.source import BossCdpSource, SourceOutcome, _input_hash as _source_input_hash
+from webui.source import (
+    SAFE_FAILURE_CODES,
+    BossCdpSource,
+    SourceOutcome,
+    _input_hash as _source_input_hash,
+)
 from webui.workbench import normalize_job_link
 
 
@@ -221,7 +226,8 @@ class DiscoveryRunner:
             return self._handle_cancel(run_id)
 
         # Stage 2: fetching lists
-        self._stage_fetching_lists(run_id, cancel_event)
+        if self._stage_fetching_lists(run_id, cancel_event) is False:
+            return
         if cancel_event.is_set() or self.is_cancelled(run_id):
             return self._handle_cancel(run_id)
 
@@ -265,14 +271,40 @@ class DiscoveryRunner:
             )
         self.store.update_discovery_run(run_id, status=STATUS_FETCHING_LISTS, stage=STAGE_FETCHING_LISTS)
 
-    def _stage_fetching_lists(self, run_id: str, cancel_event: threading.Event) -> None:
+    def _stage_fetching_lists(self, run_id: str, cancel_event: threading.Event) -> bool:
         run = self.store.get_discovery_run(run_id)
         if run["stage"] in (STAGE_FETCHING_DETAILS, STAGE_EVALUATING, STAGE_ASSEMBLING):
-            return
+            return True
         self.store.update_discovery_run(run_id, status=STATUS_FETCHING_LISTS, stage=STAGE_FETCHING_LISTS)
         self.store.append_discovery_event(run_id, "stage_entered", {"stage": STAGE_FETCHING_LISTS})
 
         plan = self.store.get_search_plan(run_id)
+        preflight = getattr(self.source, "preflight", None)
+        if callable(preflight):
+            outcome = preflight()
+            if not outcome.ok:
+                failure_code = outcome.failed_code
+                if failure_code not in SAFE_FAILURE_CODES:
+                    failure_code = "source_unknown_error"
+                for item in plan["items"]:
+                    if item["status"] not in ("completed", "failed", "cancelled", "skipped"):
+                        self.store.update_plan_item(
+                            item["id"], status="failed",
+                            failure_code=failure_code, completed=True,
+                        )
+                self.store.append_discovery_event(run_id, "source_preflight_failed", {
+                    "failure_code": failure_code,
+                    "safe_log": outcome.safe_log,
+                })
+                self.store.update_discovery_run(
+                    run_id,
+                    status=STATUS_FAILED,
+                    stage=STAGE_FETCHING_LISTS,
+                    failure_code=failure_code,
+                    failure_stage=STAGE_FETCHING_LISTS,
+                    completed=True,
+                )
+                return False
         source_count = 0
         for item in plan["items"]:
             if cancel_event.is_set() or self.is_cancelled(run_id):
@@ -300,6 +332,7 @@ class DiscoveryRunner:
             if updated_item["status"] == "completed":
                 source_count += 1
         self.store.update_discovery_run(run_id, counters={"source_count": source_count})
+        return True
 
     def _stage_fetching_details(self, run_id: str, cancel_event: threading.Event) -> None:
         run = self.store.get_discovery_run(run_id)

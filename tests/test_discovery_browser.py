@@ -358,6 +358,25 @@ class DiscoveryBrowserRenderTests(unittest.TestCase):
         content = self.page.query_selector("#discoveryProgressContent")
         self.assertTrue(content.inner_html() != "")
 
+    def test_source_failures_render_actionable_messages_instead_of_unknown_error(self):
+        cases = (
+            ("source_cdp_unavailable", "BOSS 专用浏览器未连接"),
+            ("source_login_required", "尚未登录 BOSS直聘"),
+        )
+        for failure_code, expected in cases:
+            with self.subTest(failure_code=failure_code):
+                message = self.page.evaluate(
+                    "code => getDiscoveryFailureMessage({status:'failed', failure_code:code})",
+                    failure_code,
+                )
+                self.assertIn(expected, message)
+                self.assertNotIn("未知错误", message)
+                self.page.evaluate(
+                    "code => renderRunProgress({status:'failed', stage:'fetching_lists', failure_code:code, counts:{}})",
+                    failure_code,
+                )
+                self.assertIn(expected, self.page.locator("#discoveryProgressContent").inner_text())
+
     def test_state_interrupted_renders(self):
         self._inject_run_state("interrupted")
         content = self.page.query_selector("#discoveryProgressContent")

@@ -48,6 +48,8 @@ Right after scraping you get salary ranges, experience requirements, top skill k
 
 Workbench scraper tasks run through one controlled executor: every task has a total timeout and traceable failure code, cancellation terminates the child process tree, logs and artifacts are size-bounded, and artifacts must stay inside the task result directory. Job discovery only sends jobs with a valid BOSS HTTPS detail URL into detail fetching, AI assessment, and formal results.
 
+Before fetching begins, job discovery checks the dedicated BOSS browser once. It reports that the dedicated browser is disconnected when Chrome/CDP is unavailable, and reports that BOSS login is required when the browser is connected without an active session. A failed preflight stops the run immediately instead of retrying every search term and ending with an unknown error.
+
 After installing dependencies, start the local workspace:
 
 ```bash

@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+from scripts import boss_cdp_raw as boss
 from webui.discovery import DiscoveryError, SCRAPER_FILTER_FIELDS, build_snapshot
 from webui.process_executor import ScraperExecutor
 from webui.workbench import normalize_job_link
@@ -24,6 +25,10 @@ from webui.workbench import normalize_job_link
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
+
+# The scraper loads optional dependencies lazily for its CLI.  The web adapter
+# needs requests available before tests and preflight can patch/use it.
+boss.require_runtime_dependencies("requests")
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +87,8 @@ class SourceOutcome:
 
 
 SAFE_FAILURE_CODES = frozenset({
+    "source_cdp_unavailable",
+    "source_login_required",
     "source_unreachable",
     "source_blocked",
     "source_not_found",
@@ -125,6 +132,7 @@ class BossCdpSource:
         cancel_event=None,
         artifact_root: Path | str | None = None,
         max_artifact_bytes: int = 20_000_000,
+        cdp_port: int = boss.DEFAULT_CDP_PORT,
     ):
         self.python_executable = python_executable or sys.executable or "python"
         self.cwd = Path(cwd) if cwd else PROJECT_ROOT
@@ -135,11 +143,54 @@ class BossCdpSource:
         self.cancel_event = cancel_event
         self.artifact_root = Path(artifact_root).resolve() if artifact_root else None
         self.max_artifact_bytes = max(1, int(max_artifact_bytes))
+        self.cdp_port = int(cdp_port)
         self._runner = runner or self._default_run
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def preflight(self) -> SourceOutcome:
+        """Check the dedicated Chrome connection and BOSS login once per run."""
+        if boss.requests is None:
+            return SourceOutcome.failure(
+                failed_code="source_unreachable",
+                safe_log="runtime_dependency_missing",
+            )
+
+        try:
+            response = boss.requests.get(
+                f"http://127.0.0.1:{self.cdp_port}/json/version",
+                timeout=5,
+            )
+            if response.status_code != 200:
+                return SourceOutcome.failure(
+                    failed_code="source_cdp_unavailable",
+                    safe_log=f"cdp_http_status={response.status_code}",
+                )
+            payload = response.json()
+            if not isinstance(payload, dict) or not payload.get("Browser"):
+                return SourceOutcome.failure(
+                    failed_code="source_cdp_unavailable",
+                    safe_log="cdp_response_invalid",
+                )
+        except (boss.requests.ConnectionError, boss.requests.Timeout):
+            return SourceOutcome.failure(
+                failed_code="source_cdp_unavailable",
+                safe_log="cdp_port_unavailable",
+            )
+        except (TypeError, ValueError):
+            return SourceOutcome.failure(
+                failed_code="source_cdp_unavailable",
+                safe_log="cdp_response_invalid",
+            )
+
+        if not boss.check_login_state(self.cdp_port):
+            return SourceOutcome.failure(
+                failed_code="source_login_required",
+                safe_log="boss_login_required",
+            )
+        return SourceOutcome.success(safe_log="source_ready")
 
     def fetch_list(self, plan_item: dict) -> SourceOutcome:
         """Fetch a job list for one search plan item.
