@@ -253,6 +253,71 @@ class DiscoveryBrowserRenderTests(unittest.TestCase):
         self.assertFalse(self.page.locator('.discovery-direction-card input[type="checkbox"]').is_checked())
         self.assertIsNone(self.page.evaluate("() => window.__xss"))
 
+    def test_manual_direction_accepts_comma_shorthand_and_clears_stale_warning(self):
+        self.page.evaluate("""() => renderAnalysis({
+            summary:{headline:'', experience_level:'', domains:[], strengths:[]},
+            evidence:[], directions:[],
+            unknowns:[{field:'city', message:'简历未提及当前城市'}],
+            quality:{status:'manual_required', warnings:[]}
+        })""")
+        self.page.evaluate("() => switchToDiscovery('review')")
+        self.page.locator("#discoveryManualDirection").fill("AI初级应用开发，AI Agent")
+        self.page.evaluate("() => setAppNotice('手动方向需要名称和 1–3 个搜索词', 'warning', null, 10000)")
+        self.page.locator("#discoveryManualDirection").press("Tab")
+
+        parsed = self.page.evaluate("() => readManualDirectionInputs({normalize: true})")
+        self.assertEqual(parsed, {
+            "name": "AI初级应用开发",
+            "search_terms": ["AI Agent"],
+            "valid": True,
+            "present": True,
+        })
+        self.assertEqual(self.page.locator("#discoveryManualDirection").input_value(), "AI初级应用开发")
+        self.assertEqual(self.page.locator("#discoveryManualTerms").input_value(), "AI Agent")
+        self.assertIn("1 / 3", self.page.locator("#discoveryManualTermCount").inner_text())
+        self.assertTrue(self.page.locator("#appNotice").is_hidden())
+
+        self.page.evaluate("""() => {
+            discoveryAnalysisId = 'analysis-test';
+            window.__confirmationPayload = null;
+            api = async (path, options) => {
+                if (path === DiscoveryAPI.confirmations) {
+                    window.__confirmationPayload = options.json;
+                    return {ok:true, status:201, json:async () => ({confirmation_id:'confirmation-test'})};
+                }
+                return {ok:false, status:400, json:async () => ({user_message:'stop after confirmation'})};
+            };
+        }""")
+        self.page.locator("#discoveryConfirmButton").click()
+        self.page.wait_for_function("() => window.__confirmationPayload !== null")
+        payload = self.page.evaluate("() => window.__confirmationPayload")
+        self.assertEqual(payload["user_directions"], [{
+            "name": "AI初级应用开发",
+            "search_terms": ["AI Agent"],
+        }])
+
+    def test_manual_completion_panel_groups_inputs_and_unknowns_without_touching(self):
+        self.page.evaluate("""() => renderAnalysis({
+            summary:{headline:'', experience_level:'', domains:[], strengths:[]},
+            evidence:[], directions:[],
+            unknowns:[{field:'city', message:'简历未提及当前城市'}],
+            quality:{status:'manual_required', warnings:[]}
+        })""")
+        self.page.evaluate("() => switchToDiscovery('review')")
+        panel = self.page.locator(".discovery-manual-direction")
+        self.assertEqual(panel.locator(".discovery-manual-field").count(), 2)
+        self.assertEqual(panel.locator(".discovery-unknowns").count(), 1)
+        first_box = panel.locator(".discovery-manual-field").nth(0).bounding_box()
+        second_box = panel.locator(".discovery-manual-field").nth(1).bounding_box()
+        self.assertGreater(second_box["x"] - (first_box["x"] + first_box["width"]), 10)
+
+        self.page.set_viewport_size({"width": 720, "height": 900})
+        self.page.wait_for_timeout(100)
+        overflow = self.page.evaluate(
+            "() => document.documentElement.scrollWidth > document.documentElement.clientWidth"
+        )
+        self.assertFalse(overflow)
+
     # ------------------------------------------------------------------
     # Run state injection (JS-level simulation)
     # ------------------------------------------------------------------

@@ -784,6 +784,32 @@
       background: var(--surface-2); overflow-wrap: anywhere;
     }
     .discovery-quality-state.partial, .discovery-quality-state.manual_required { border-color: var(--warning); }
+    .discovery-manual-direction { padding: 16px; margin-bottom: 16px; }
+    .discovery-manual-header {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+    }
+    .discovery-manual-title { display: block; margin-bottom: 3px; color: var(--text); }
+    .discovery-manual-grid {
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+      gap: 18px; margin-top: 14px;
+    }
+    .discovery-manual-field { min-width: 0; }
+    .discovery-manual-field label {
+      display: block; margin-bottom: 6px; color: var(--muted); font-size: 11px;
+    }
+    .discovery-manual-field input { width: 100%; min-width: 0; }
+    .discovery-manual-meta {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      min-height: 20px; margin-top: 6px; font-size: 11px; color: var(--muted);
+    }
+    .discovery-manual-status.valid { color: var(--success); }
+    .discovery-manual-status.invalid { color: var(--warning); }
+    .discovery-manual-term-count { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .discovery-manual-direction .discovery-unknowns {
+      margin: 14px 0 0; padding: 13px 0 0; border: 0; border-top: 1px solid var(--line);
+      border-radius: 0; background: transparent;
+    }
+    .discovery-manual-direction .discovery-evidence-group-title { color: var(--muted); }
     .discovery-warning-item { color: var(--warning); font-size: 12px; margin-top: 4px; }
     .discovery-empty-value { color: var(--muted); font-style: italic; }
     .discovery-unknown-item {
@@ -967,6 +993,8 @@
       .discovery-direction-tab { padding: 5px 8px; font-size: 11px; }
       .discovery-category-tab { padding: 3px 8px; }
       .discovery-job-card { padding: 12px; }
+      .discovery-manual-header { display: block; }
+      .discovery-manual-grid { grid-template-columns: 1fr; gap: 12px; }
     }
   </style>
 </head>
@@ -3204,17 +3232,46 @@
       // 人工方向：manual_required 或 AI 方向不合适时仍可继续。
       const manual = document.createElement("div");
       manual.className = "discovery-manual-direction";
+      const manualHeader = document.createElement("div");
+      manualHeader.className = "discovery-manual-header";
+      const manualCopy = document.createElement("div");
       const manualTitle = document.createElement("strong");
+      manualTitle.className = "discovery-manual-title";
       manualTitle.textContent = "手动添加方向";
       const manualHint = document.createElement("div");
       manualHint.className = "discovery-step-hint";
-      manualHint.textContent = "填写一个方向和 1–3 个搜索词；手动输入优先于 AI 建议。";
+      manualHint.textContent = "补充一个方向和 1–3 个搜索词；手动输入优先于 AI 建议。";
+      manualCopy.append(manualTitle, manualHint);
+      manualHeader.appendChild(manualCopy);
+      const manualGrid = document.createElement("div");
+      manualGrid.className = "discovery-manual-grid";
+      const nameField = document.createElement("div");
+      nameField.className = "discovery-manual-field";
+      const nameLabel = document.createElement("label");
+      nameLabel.htmlFor = "discoveryManualDirection";
+      nameLabel.textContent = "方向名称";
       const manualName = document.createElement("input");
-      manualName.id = "discoveryManualDirection"; manualName.type = "text"; manualName.placeholder = "如：Python 后端工程师"; manualName.setAttribute("aria-label", "手动方向");
+      manualName.id = "discoveryManualDirection"; manualName.type = "text"; manualName.placeholder = "例如：AI 应用开发工程师"; manualName.setAttribute("aria-label", "手动方向");
+      nameField.append(nameLabel, manualName);
+      const termsField = document.createElement("div");
+      termsField.className = "discovery-manual-field";
+      const termsLabel = document.createElement("label");
+      termsLabel.htmlFor = "discoveryManualTerms";
+      termsLabel.textContent = "搜索词（1–3 个）";
       const manualTerms = document.createElement("input");
-      manualTerms.id = "discoveryManualTerms"; manualTerms.type = "text"; manualTerms.placeholder = "搜索词，用逗号分隔，最多 3 个"; manualTerms.setAttribute("aria-label", "手动搜索词");
-      manual.append(manualTitle, manualHint, manualName, manualTerms);
-      container.appendChild(manual);
+      manualTerms.id = "discoveryManualTerms"; manualTerms.type = "text"; manualTerms.placeholder = "例如：AI Agent，RAG，LangGraph"; manualTerms.setAttribute("aria-label", "手动搜索词");
+      const manualMeta = document.createElement("div");
+      manualMeta.className = "discovery-manual-meta";
+      const manualStatus = document.createElement("span");
+      manualStatus.id = "discoveryManualStatus";
+      manualStatus.className = "discovery-manual-status";
+      const manualCount = document.createElement("span");
+      manualCount.id = "discoveryManualTermCount";
+      manualCount.className = "discovery-manual-term-count";
+      manualMeta.append(manualStatus, manualCount);
+      termsField.append(termsLabel, manualTerms, manualMeta);
+      manualGrid.append(nameField, termsField);
+      manual.append(manualHeader, manualGrid);
       // 未知项
       const unknowns = analysis.unknowns || [];
       if (unknowns.length) {
@@ -3222,7 +3279,7 @@
         unkDiv.className = "discovery-unknowns";
         const title = document.createElement("div");
         title.className = "discovery-evidence-group-title";
-        title.textContent = "未知项";
+        title.textContent = "简历中待确认（" + unknowns.length + "）";
         unkDiv.appendChild(title);
         for (const u of unknowns) {
           const item = document.createElement("div");
@@ -3230,13 +3287,18 @@
           item.textContent = u.message || u.field || "—";
           unkDiv.appendChild(item);
         }
-        container.appendChild(unkDiv);
+        manual.appendChild(unkDiv);
       } else {
         const emptyUnknowns = document.createElement("div");
-        emptyUnknowns.className = "discovery-empty-value";
+        emptyUnknowns.className = "discovery-empty-value discovery-unknowns";
         emptyUnknowns.textContent = "未知项：简历未提供";
-        container.appendChild(emptyUnknowns);
+        manual.appendChild(emptyUnknowns);
       }
+      container.appendChild(manual);
+      manualName.addEventListener("input", () => updateManualDirectionState());
+      manualTerms.addEventListener("input", () => updateManualDirectionState());
+      manualName.addEventListener("blur", () => updateManualDirectionState({ normalize: true }));
+      updateManualDirectionState();
       // 硬约束输入
       const hcDiv = document.createElement("div");
       hcDiv.className = "discovery-hard-constraints";
@@ -3259,6 +3321,51 @@
       container.appendChild(hcDiv);
     }
 
+    function readManualDirectionInputs({ normalize = false } = {}) {
+      const nameInput = document.getElementById("discoveryManualDirection");
+      const termsInput = document.getElementById("discoveryManualTerms");
+      let name = (nameInput?.value || "").trim();
+      let searchTerms = (termsInput?.value || "").split(/[，,]/).map(v => v.trim()).filter(Boolean);
+      if (!searchTerms.length && /[，,]/.test(name)) {
+        const shorthand = name.split(/[，,]/).map(v => v.trim()).filter(Boolean);
+        if (shorthand.length > 1) {
+          name = shorthand.shift();
+          searchTerms = shorthand;
+          if (normalize) {
+            nameInput.value = name;
+            termsInput.value = searchTerms.join("，");
+          }
+        }
+      }
+      const present = Boolean(name || searchTerms.length);
+      return { name, search_terms: searchTerms, valid: Boolean(name && searchTerms.length >= 1 && searchTerms.length <= 3), present };
+    }
+
+    function updateManualDirectionState(options = {}) {
+      const value = readManualDirectionInputs(options);
+      const status = document.getElementById("discoveryManualStatus");
+      const count = document.getElementById("discoveryManualTermCount");
+      if (count) count.textContent = value.search_terms.length + " / 3";
+      if (status) {
+        status.className = "discovery-manual-status";
+        if (!value.present) {
+          status.textContent = "可选：也可只启用上方 AI 方向";
+        } else if (value.valid) {
+          status.textContent = "已识别，可提交";
+          status.classList.add("valid");
+        } else {
+          status.textContent = value.name ? "请补充 1–3 个搜索词" : "请填写方向名称";
+          status.classList.add("invalid");
+        }
+      }
+      const notice = document.getElementById("appNotice");
+      const noticeText = document.getElementById("appNoticeText");
+      if (value.valid && notice?.dataset.tone === "warning" && noticeText?.textContent === "手动方向需要名称和 1–3 个搜索词") {
+        setAppNotice("");
+      }
+      return value;
+    }
+
     async function confirmDirections() {
       if (!discoveryAnalysisId) { setAppNotice("请先上传简历", "warning"); return; }
       const btn = document.getElementById("discoveryConfirmButton");
@@ -3267,10 +3374,9 @@
       document.querySelectorAll(".discovery-direction-card input[type=checkbox]").forEach(cb => {
         if (cb.checked) enabledDirectionIds.push(cb.dataset.directionId);
       });
-      const manualName = (document.getElementById("discoveryManualDirection")?.value || "").trim();
-      const manualTerms = (document.getElementById("discoveryManualTerms")?.value || "").split(/[，,]/).map(v => v.trim()).filter(Boolean);
-      const userDirections = manualName || manualTerms.length ? [{ name: manualName, search_terms: manualTerms.slice(0, 3) }] : [];
-      if (userDirections.length && (!manualName || manualTerms.length < 1 || manualTerms.length > 3)) {
+      const manualDirection = updateManualDirectionState({ normalize: true });
+      const userDirections = manualDirection.present ? [{ name: manualDirection.name, search_terms: manualDirection.search_terms }] : [];
+      if (userDirections.length && !manualDirection.valid) {
         setAppNotice("手动方向需要名称和 1–3 个搜索词", "warning");
         return;
       }
