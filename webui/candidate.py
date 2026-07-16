@@ -55,7 +55,12 @@ CANDIDATE_ANALYSIS_V3_CONTRACT = {
 }
 
 def build_empty_candidate_analysis():
-    return {"contract_version":"v3","summary":copy.deepcopy(CANDIDATE_ANALYSIS_V3_CONTRACT["top"]["summary"]["empty"]),"evidence":[],"unknowns":[],"directions":[],"quality":copy.deepcopy(CANDIDATE_ANALYSIS_V3_CONTRACT["top"]["quality"]["empty"])}
+    def empty(spec):
+        if "empty" in spec: return copy.deepcopy(spec["empty"])
+        if spec.get("type") == "object": return {k: empty(v) for k,v in spec.items() if isinstance(v, dict) and "type" in v}
+        if spec.get("type") == "list": return []
+        return None
+    return {k: empty(spec) for k, spec in CANDIDATE_ANALYSIS_V3_CONTRACT["top"].items()}
 
 def _v3_warning(code, path):
     if code not in CANDIDATE_ANALYSIS_V3_CONTRACT["warning_codes"]:
@@ -154,11 +159,7 @@ def normalize_candidate_analysis(data, resume_text):
                 _warn(warnings, "reference_invalid", p+".client_ref")
                 raise ValueError("invalid_evidence")
             refs.add(ref); out["evidence"].append({"client_ref": ref, "type": typ, "normalized_value": normalized, "source_quote": quote, "source_locator": loc, "safe_excerpt": redact_pii(quote), "assertion_type": assertion, "confidence": conf})
-        except ValueError as e:
-            code = str(e)
-            if code == "invalid_type" and "source_quote" in item:
-                code = "invalid_evidence"
-            _warn(warnings, code, p)
+        except ValueError as e: _warn(warnings, str(e), p)
     max_evidence = CANDIDATE_ANALYSIS_V3_CONTRACT["top"]["evidence"]["max"]
     if isinstance(data.get("evidence"), list) and len(data["evidence"]) > max_evidence:
         _warn(warnings, "invalid_type", "evidence")
@@ -205,10 +206,19 @@ def normalize_candidate_analysis(data, resume_text):
     # but retain the backend-derived quality object as the sole authority.
     provider_quality = data.get("quality")
     if isinstance(provider_quality, dict):
-        if "status" in provider_quality and not isinstance(provider_quality["status"], str):
-            _warn(warnings, "invalid_type", "quality.status")
-        if "warnings" in provider_quality and not isinstance(provider_quality["warnings"], list):
-            _warn(warnings, "invalid_type", "quality.warnings")
+        for key in provider_quality:
+            if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["quality"]: _warn(warnings, "unverified_field", "quality."+str(key))
+        if "status" in provider_quality and provider_quality["status"] not in CANDIDATE_ANALYSIS_V3_CONTRACT["quality"]["status"]["enum"]: _warn(warnings, "invalid_enum", "quality.status")
+        if "warnings" in provider_quality:
+            if not isinstance(provider_quality["warnings"], list): _warn(warnings, "invalid_type", "quality.warnings")
+            else:
+                for i, item in enumerate(provider_quality["warnings"]):
+                    if not isinstance(item, dict): _warn(warnings, "invalid_type", f"quality.warnings[{i}]")
+                    else:
+                        for field in item:
+                            if field not in ("code", "path"): _warn(warnings, "unverified_field", f"quality.warnings[{i}].{field}")
+                        if not isinstance(item.get("code"), str): _warn(warnings, "invalid_type", f"quality.warnings[{i}].code")
+                        if not isinstance(item.get("path"), str): _warn(warnings, "invalid_type", f"quality.warnings[{i}].path")
     elif "quality" in data:
         _warn(warnings, "invalid_type", "quality")
     out["quality"]["warnings"] = warnings
