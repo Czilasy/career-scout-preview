@@ -778,7 +778,7 @@ class CandidateV3NormalizerTests(unittest.TestCase):
             d=self._payload(); d[key]=None; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertTrue(any(w["path"]==key for w in o["quality"]["warnings"]))
 
     def test_quality_nested_invalid_status_warning_is_safe(self):
-        d=self._payload(); d["quality"]={"status":"bogus","warnings":["raw",{"code":1,"path":2}],"secret":"resume"}; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertNotIn("secret",str(o)); self.assertTrue(all(set(w)=={"code","path"} for w in o["quality"]["warnings"]))
+        d=self._payload(); d["quality"]={"status":"bogus","warnings":["raw",{"code":1,"path":2}],"secret":"resume"}; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertNotIn("secret",str(o)); self.assertTrue(all(set(w)=={"code","path"} for w in o["quality"]["warnings"])); self.assertTrue(any(w["path"]=="quality.extra" for w in o["quality"]["warnings"]))
 
     def test_unknown_message_type_warns_and_unknowns_cap(self):
         d=self._payload(); d["unknowns"]=[{"field":"other","message":1} for _ in range(21)]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertLessEqual(len(o["unknowns"]),20); self.assertTrue(any(w["path"].endswith(".message") for w in o["quality"]["warnings"]))
@@ -845,7 +845,7 @@ class CandidateV3NormalizerTests(unittest.TestCase):
         finally: c["top"]["summary"]["empty"]=old
 
     def test_provider_quality_is_ignored_and_warned(self):
-        d=self._payload(); d["quality"]={"status":"bogus","warnings":[{"code":"raw","path":123},"x"],"extra":1}; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["quality"]["status"],"complete"); self.assertNotIn("raw",str(o))
+        d=self._payload(); d["quality"]={"status":"bogus","warnings":[{"code":"raw","path":123},"x"],"extra":1}; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["quality"]["status"],"partial"); self.assertNotIn("raw",str(o))
 
     def test_not_found_and_repeated_short_quotes_drop_with_invalid_evidence(self):
         for quote,resume in (("不存在","经历：Python后端经验"),("Py","Py Py") ):
