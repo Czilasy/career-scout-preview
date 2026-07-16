@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import unittest
+import ast
+import inspect
+import copy
 
 from webui import candidate
 
@@ -810,3 +813,34 @@ class CandidateV3NormalizerTests(unittest.TestCase):
 
     def test_nested_extras_warn_and_not_persisted(self):
         d=self._payload(); d["evidence"][0]["source_context"]="raw"; d["directions"][0]["x"]="raw"; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertNotIn("source_context",o["evidence"][0]); self.assertNotIn("x",o["directions"][0])
+
+    def test_contract_source_has_literal_v3_enums_not_legacy_names(self):
+        src=inspect.getsource(candidate); node=ast.parse(src); assign=next(n for n in ast.walk(node) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=="CANDIDATE_ANALYSIS_V3_CONTRACT" for t in n.targets)); text=ast.get_source_segment(src,assign)
+        for legacy in ("EVIDENCE_TYPES","ASSERTION_TYPES","DIRECTION_TYPES","UNKNOWN_FIELDS","MAX_DIRECTIONS","MAX_SEARCH_TERMS"): self.assertNotIn(legacy,text)
+        self.assertEqual(candidate.CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["source_locator"]["type"],"object")
+        self.assertEqual(candidate.CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["safe_excerpt"]["type"],"string")
+
+    def test_empty_shape_derives_contract_metadata(self):
+        c=candidate.CANDIDATE_ANALYSIS_V3_CONTRACT; old=copy.deepcopy(c["top"]["summary"]["empty"]); c["top"]["summary"]["empty"]["headline"]="sentinel"
+        try: self.assertEqual(candidate.build_empty_candidate_analysis()["summary"]["headline"],"sentinel")
+        finally: c["top"]["summary"]["empty"]=old
+
+    def test_provider_quality_is_ignored_and_warned(self):
+        d=self._payload(); d["quality"]={"status":"bogus","warnings":[{"code":"raw","path":123},"x"],"extra":1}; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["quality"]["status"],"complete"); self.assertNotIn("raw",str(o))
+
+    def test_not_found_and_repeated_short_quotes_drop_with_invalid_evidence(self):
+        for quote,resume in (("不存在","经历：Python后端经验"),("Py","Py Py") ):
+            d=self._payload(); d["evidence"][0]["source_quote"]=quote; o=candidate.normalize_candidate_analysis(d,resume); self.assertEqual(o["evidence"],[]); self.assertIn({"code":"invalid_evidence","path":"evidence[0]"},o["quality"]["warnings"])
+
+    def test_missing_normalized_value_is_typed_empty_but_wrong_type_drops(self):
+        d=self._payload(); d["evidence"][0].pop("normalized_value"); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["evidence"][0]["normalized_value"],"")
+        d=self._payload(); d["evidence"][0]["normalized_value"]=3; self.assertEqual(candidate.normalize_candidate_analysis(d,"经历：Python后端经验")["evidence"],[])
+
+    def test_missing_evidence_refs_disables_visible_direction(self):
+        d=self._payload(); d["directions"][0].pop("evidence_refs"); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(len(o["directions"]),1); self.assertFalse(o["directions"][0]["default_enabled"]); self.assertTrue(any("evidence_refs" in w["path"] for w in o["quality"]["warnings"]))
+
+    def test_clean_disabled_direction_still_complete(self):
+        d=self._payload(); d["directions"][0]["default_enabled"]=False; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["quality"]["status"],"complete")
+
+    def test_nested_extras_emit_warnings(self):
+        d=self._payload(); d["evidence"][0]["source_context"]="raw"; d["directions"][0]["extra"]="raw"; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertTrue(any(w["code"]=="unverified_field" and "source_context" in w["path"] for w in o["quality"]["warnings"]))
