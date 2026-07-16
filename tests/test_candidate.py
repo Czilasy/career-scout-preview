@@ -677,7 +677,7 @@ class CandidateV3NormalizerTests(unittest.TestCase):
         self.assertTrue(out["quality"]["warnings"])
 
     def _payload(self):
-        return {"contract_version":"v3","summary":{"headline":"后端","experience_level":"高级","domains":["服务"],"strengths":["Python"]},"evidence":[{"client_ref":"e1","type":"skill","normalized_value":"Python","source_quote":"Python后端经验","assertion_type":"explicit","confidence":90}],"unknowns":[],"directions":[{"client_ref":"d1","name":"后端","type":"core","rationale":"经验","evidence_refs":["e1"],"gaps":[],"confidence":90,"default_enabled":True,"search_terms":["Python"]}]}
+        return {"contract_version":"v3","summary":{"headline":"后端","experience_level":"高级","domains":["服务"],"strengths":["Python"]},"evidence":[{"client_ref":"e1","type":"skill","normalized_value":"Python","source_quote":"Python后端经验","assertion_type":"explicit","confidence":90}],"unknowns":[],"directions":[{"client_ref":"d1","name":"后端","type":"core","rationale":"经验","evidence_refs":["e1"],"gaps":[],"confidence":90,"default_enabled":True,"search_terms":["Python"]}],"quality":{"status":"complete","warnings":[]}}
 
     def test_v3_skeleton_has_exact_top_keys(self):
         self.assertEqual(set(candidate.build_empty_candidate_analysis()), {"contract_version","summary","evidence","unknowns","directions","quality"})
@@ -761,3 +761,52 @@ class CandidateV3NormalizerTests(unittest.TestCase):
         d=self._payload(); base=d["evidence"][0]; d["evidence"]=[dict(base,client_ref=f"e{i}",source_quote=f"Python后端经验{i}") for i in range(21)]
         resume=" ".join(f"Python后端经验{i}" for i in range(21)); o=candidate.normalize_candidate_analysis(d,resume)
         self.assertLessEqual(len(o["evidence"]),20); self.assertTrue(any(w["path"]=="evidence" for w in o["quality"]["warnings"]))
+
+    def test_empty_shape_literal_and_nested_freshness(self):
+        expected={"contract_version":"v3","summary":{"headline":"","experience_level":"","domains":[],"strengths":[]},"evidence":[],"unknowns":[],"directions":[],"quality":{"status":"complete","warnings":[]}}
+        a=candidate.build_empty_candidate_analysis(); b=candidate.build_empty_candidate_analysis(); self.assertEqual(a,expected)
+        a["summary"]["domains"].append("x"); a["quality"]["warnings"].append({"code":"x","path":"y"}); self.assertEqual(b,expected)
+
+    def test_schema_program_owned_output_fields_and_literal_enums(self):
+        c=candidate.CANDIDATE_ANALYSIS_V3_CONTRACT; self.assertIn("source_quote",c["evidence"]); self.assertEqual(set(c["warning_codes"]),{"invalid_type","invalid_enum","invalid_evidence","sensitive_value","unverified_field","missing_required","reference_invalid"}); self.assertEqual(c["direction"]["search_terms"]["max"],3)
+
+    def test_wrong_top_level_types_each_warn(self):
+        for key in ("evidence","unknowns","directions","quality"):
+            d=self._payload(); d[key]=None; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertTrue(any(w["path"]==key for w in o["quality"]["warnings"]))
+
+    def test_quality_nested_invalid_status_warning_is_safe(self):
+        d=self._payload(); d["quality"]={"status":"bogus","warnings":["raw",{"code":1,"path":2}],"secret":"resume"}; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertNotIn("secret",str(o)); self.assertTrue(all(set(w)=={"code","path"} for w in o["quality"]["warnings"]))
+
+    def test_unknown_message_type_warns_and_unknowns_cap(self):
+        d=self._payload(); d["unknowns"]=[{"field":"other","message":1} for _ in range(21)]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertLessEqual(len(o["unknowns"]),20); self.assertTrue(any(w["path"].endswith(".message") for w in o["quality"]["warnings"]))
+
+    def test_evidence_confidence_bool_float_and_missing_value_drop(self):
+        for val in (True,1.5,101):
+            d=self._payload(); d["evidence"][0]["confidence"]=val; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["evidence"],[])
+        d=self._payload(); d["evidence"][0].pop("normalized_value"); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["evidence"],[])
+
+    def test_duplicate_refs_warn_and_nonstring_refs_disable(self):
+        d=self._payload(); d["directions"][0]["evidence_refs"]=["e1","e1"]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertTrue(any(w["code"]=="reference_invalid" for w in o["quality"]["warnings"]))
+        d=self._payload(); d["directions"][0]["evidence_refs"]=[1]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertFalse(o["directions"][0]["default_enabled"])
+
+    def test_search_terms_missing_empty_and_nonstring_disable(self):
+        for terms in (None,[],[1]):
+            d=self._payload(); d["directions"][0].pop("search_terms",None) if terms is None else d["directions"][0].__setitem__("search_terms",terms); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertFalse(o["directions"][0]["default_enabled"]); self.assertEqual(o["quality"]["status"],"manual_required")
+
+    def test_invalid_gaps_default_and_float_confidence_not_persisted(self):
+        d=self._payload(); d["directions"][0]["gaps"]=[1]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["directions"][0]["gaps"],[])
+        d=self._payload(); d["directions"][0]["default_enabled"]="yes"; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertFalse(o["directions"][0]["default_enabled"])
+        d=self._payload(); d["directions"][0]["confidence"]=1.5; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertNotEqual(o["directions"][0]["confidence"],1.5)
+
+    def test_directions_over_five_warn_and_cap(self):
+        d=self._payload(); d["directions"]*=6; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertLessEqual(len(o["directions"]),5); self.assertTrue(any(w["path"]=="directions" for w in o["quality"]["warnings"]))
+
+    def test_fully_shaped_empty_and_summary_only_manual_required(self):
+        e={"contract_version":"v3","summary":{"headline":"","experience_level":"","domains":[],"strengths":[]},"evidence":[],"unknowns":[],"directions":[],"quality":{"status":"complete","warnings":[]}}; self.assertEqual(candidate.normalize_candidate_analysis(e,"")["quality"]["status"],"manual_required")
+        s=dict(e); s["summary"]["headline"]="x"; self.assertEqual(candidate.normalize_candidate_analysis(s,"")["quality"]["status"],"manual_required")
+
+    def test_clean_payload_is_complete(self):
+        o=candidate.normalize_candidate_analysis(self._payload(),"经历：Python后端经验"); self.assertEqual(o["quality"],{"status":"complete","warnings":[]})
+
+    def test_nested_extras_warn_and_not_persisted(self):
+        d=self._payload(); d["evidence"][0]["source_context"]="raw"; d["directions"][0]["x"]="raw"; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertNotIn("source_context",o["evidence"][0]); self.assertNotIn("x",o["directions"][0])
