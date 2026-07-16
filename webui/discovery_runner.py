@@ -26,6 +26,7 @@ from webui.discovery import (
     AISecurityError,
     DiscoveryError,
     ERROR_CODE_MAP,
+    SCRAPER_FILTER_FIELDS,
     analyze_resume,
     assess_job_direction,
     build_portfolio,
@@ -751,7 +752,7 @@ class DiscoveryRunner:
             city = (compiled.get("hard_constraints") or {}).get("city", "")
             source_filters = {
                 k: v for k, v in (compiled.get("hard_constraints") or {}).items()
-                if k in ("scale", "stage", "salary", "experience", "degree", "industry")
+                if k in SCRAPER_FILTER_FIELDS
             }
             target_pages = 1
             # input_hash must match what the source adapter computes (same fields).

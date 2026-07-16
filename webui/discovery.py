@@ -138,6 +138,29 @@ def _input_hash(payload: Any) -> str:
 
 
 MAX_GLOBAL_SEARCH_ITEMS = 12
+CONFIRMED_SCRAPER_FIELDS = ("city", "salary", "experience", "degree", "industry", "scale", "stage")
+SCRAPER_FILTER_FIELDS = CONFIRMED_SCRAPER_FIELDS[1:]
+SAFE_SOURCE_LIMIT_BOUNDS = {"max_details": (1, 200), "max_pages": (1, 10)}
+
+
+def map_confirmation_to_scraper_inputs(confirmation: dict) -> dict:
+    """Return the sole allowlisted, bounded source input view."""
+    raw_hard = confirmation.get("hard_constraints") if isinstance(confirmation, dict) else {}
+    raw_limits = confirmation.get("safe_limits") if isinstance(confirmation, dict) else {}
+    hard = {}
+    for key in CONFIRMED_SCRAPER_FIELDS:
+        value = (raw_hard or {}).get(key)
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            continue
+        if str(value).strip():
+            hard[key] = value
+    limits = {}
+    for key, (minimum, maximum) in SAFE_SOURCE_LIMIT_BOUNDS.items():
+        value = (raw_limits or {}).get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        limits[key] = min(max(value, minimum), maximum)
+    return {"hard_constraints": hard, "safe_limits": limits}
 
 
 def compile_search_plan(confirmation: dict) -> dict:
@@ -158,9 +181,10 @@ def compile_search_plan(confirmation: dict) -> dict:
     enabled_directions = confirmation.get("enabled_directions", []) or []
     if not enabled_directions:
         raise DiscoveryError("input_incomplete", user_message="未启用任何方向。")
-    hard_constraints = confirmation.get("hard_constraints", {}) or {}
-    safe_limits = confirmation.get("safe_limits", {}) or {}
-    detail_budget = int(safe_limits.get("max_details", 60))
+    source_inputs = map_confirmation_to_scraper_inputs(confirmation)
+    hard_constraints = source_inputs["hard_constraints"]
+    safe_limits = source_inputs["safe_limits"]
+    detail_budget = safe_limits.get("max_details", 60)
 
     seen_terms: dict[str, list[str]] = {}
     items: list[dict] = []
@@ -177,6 +201,11 @@ def compile_search_plan(confirmation: dict) -> dict:
         if not terms:
             continue
         for term in terms:
+            if not isinstance(term, str) or not term.strip():
+                continue
+            term = term.strip()
+            if redact_pii(term) != term:
+                continue
             if term not in seen_terms:
                 if len(items) >= MAX_GLOBAL_SEARCH_ITEMS:
                     break

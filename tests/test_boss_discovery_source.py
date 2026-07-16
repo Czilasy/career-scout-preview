@@ -291,6 +291,30 @@ class BossCdpSourceMockedTests(unittest.TestCase):
         self.assertIn("Python", cmd)
         self.assertIn("--city", cmd)
 
+    def test_list_command_drops_unknown_and_sensitive_plan_fields(self):
+        runner = _MockRunner(returncode=0, jobs_payload=[], jobs_path=self.list_path)
+        source = BossCdpSource(runner=runner)
+        plan = _make_plan_item(keyword="Python", city="上海", list_output_path=self.list_path)
+        plan["source_filters"] = {
+            "salary": "20-30K", "experience": "5", "degree": "本科", "industry": "互联网",
+            "scale": "100-499", "stage": "已上市", "phone": "13812345678",
+            "resume_text": "SECRET_RESUME", "quality_warnings": "SECRET_WARNING",
+        }
+        import webui.source as source_module
+        plan["input_hash"] = source_module._input_hash({
+            "keyword": "Python", "city": "上海",
+            "source_filters": {k: plan["source_filters"][k] for k in source_module.SCRAPER_FILTER_FIELDS},
+            "target_pages": 1,
+        })
+        outcome = source.fetch_list(plan)
+        self.assertTrue(outcome.ok)
+        command = runner.calls[0]["command"]
+        joined = " ".join(command)
+        for value in ("13812345678", "SECRET_RESUME", "SECRET_WARNING", "--phone", "--resume_text"):
+            self.assertNotIn(value, joined)
+        for flag in ("--salary", "--experience", "--degree", "--industry", "--scale", "--stage"):
+            self.assertIn(flag, command)
+
     def test_list_failure_nonzero_returncode(self):
         runner = _MockRunner(returncode=2, captured="some error output", jobs_path=self.list_path)
         source = BossCdpSource(runner=runner)

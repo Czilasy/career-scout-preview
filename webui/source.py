@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from webui.discovery import DiscoveryError, build_snapshot
+from webui.discovery import DiscoveryError, SCRAPER_FILTER_FIELDS, build_snapshot
 from webui.process_executor import ScraperExecutor
 from webui.workbench import normalize_job_link
 
@@ -161,7 +161,13 @@ class BossCdpSource:
                 safe_log=f"plan_item_missing_fields keyword={bool(keyword)} hash={bool(expected_hash)}",
             )
         target_pages = max(1, int(plan_item.get("target_pages") or 1))
-        source_filters = plan_item.get("source_filters") or {}
+        raw_filters = plan_item.get("source_filters") or {}
+        if not isinstance(raw_filters, dict):
+            raw_filters = {}
+        source_filters = {
+            key: raw_filters[key] for key in SCRAPER_FILTER_FIELDS
+            if raw_filters.get(key) not in (None, "", [])
+        }
         output_path = plan_item.get("list_output_path") or plan_item.get("_list_output_path")
         if not output_path:
             return SourceOutcome.failure(
@@ -308,7 +314,7 @@ class BossCdpSource:
             "--output", output_path,
             "--no-detail",  # list fetch never pulls detail; orchestrator does that
         ]
-        for name in ("scale", "stage", "salary", "experience", "degree", "industry"):
+        for name in SCRAPER_FILTER_FIELDS:
             value = (source_filters or {}).get(name)
             if value:
                 command.extend([f"--{name}", str(value)])

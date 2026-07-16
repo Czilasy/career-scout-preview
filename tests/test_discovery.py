@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from webui import semantic
@@ -228,6 +229,36 @@ class SearchPlanCompilationTests(unittest.TestCase):
         second = compile_search_plan({**base, "hard_constraints": {"city": "北京"}})
 
         self.assertNotEqual(first["input_hash"], second["input_hash"])
+
+    def test_scraper_inputs_are_allowlisted_from_confirmation_only(self):
+        from webui.discovery import compile_search_plan
+        confirmation = {
+            "enabled_directions": [{"id": "d1", "search_terms": ["Python", "13812345678", ""]}],
+            "hard_constraints": {
+                "city": "上海", "salary": "20-30K", "experience": "5", "degree": "本科",
+                "industry": "互联网", "scale": "100-499", "stage": "已上市",
+                "phone": "13812345678", "full_name": "张三", "resume_text": "SECRET_RESUME",
+                "quality_warnings": [{"code": "x", "path": "resume"}], "unconfirmed_role": "Java",
+            },
+            "safe_limits": {"max_details": 9999, "max_pages": 99, "raw_limit": 999},
+            "evidence": [{"safe_excerpt": "SECRET_EXCERPT"}],
+            "unconfirmed_suggestions": {"city": "北京"},
+        }
+        plan = compile_search_plan(confirmation)
+        self.assertEqual(plan["items"][0]["term"], "Python")
+        self.assertEqual(set(plan["hard_constraints"]), {"city", "salary", "experience", "degree", "industry", "scale", "stage"})
+        self.assertEqual(plan["detail_budget"], 200)
+        serialized = json.dumps(plan, ensure_ascii=False)
+        for secret in ("13812345678", "张三", "SECRET_RESUME", "SECRET_EXCERPT", "Java", "quality_warnings"):
+            self.assertNotIn(secret, serialized)
+
+    def test_empty_confirmed_filters_are_omitted(self):
+        from webui.discovery import compile_search_plan
+        plan = compile_search_plan({
+            "enabled_directions": [{"id": "d1", "search_terms": ["Python"]}],
+            "hard_constraints": {"city": "", "salary": None, "industry": []},
+        })
+        self.assertEqual(plan["hard_constraints"], {})
 
 
 class JobSnapshotTests(unittest.TestCase):
