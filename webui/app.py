@@ -2113,9 +2113,14 @@ def create_app(config=None):
             "profile_id": analysis["profile_id"],
             "status": analysis["status"],
             "version": analysis.get("version"),
+            "contract_version": analysis.get("contract_version", "v3"),
             "stage": analysis.get("stage", analysis.get("analysis_stage", "queued")),
             "quality_status": analysis.get("quality_status", "manual_required"),
             "quality_warnings": analysis.get("quality_warnings", []),
+            "quality": {
+                "status": analysis.get("quality_status", "complete"),
+                "warnings": analysis.get("quality_warnings", []),
+            },
             "summary": analysis.get("summary", {}),
             "evidence": [
                 {

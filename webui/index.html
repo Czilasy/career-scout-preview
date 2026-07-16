@@ -779,6 +779,13 @@
       background: var(--surface); border: 1px solid var(--line);
       border-radius: 8px; padding: 14px 16px; margin-bottom: 16px;
     }
+    .discovery-quality-state, .discovery-manual-direction {
+      margin: 12px 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px;
+      background: var(--surface-2); overflow-wrap: anywhere;
+    }
+    .discovery-quality-state.partial, .discovery-quality-state.manual_required { border-color: var(--warning); }
+    .discovery-warning-item { color: var(--warning); font-size: 12px; margin-top: 4px; }
+    .discovery-empty-value { color: var(--muted); font-style: italic; }
     .discovery-unknown-item {
       font-size: 12px; color: var(--warning); margin: 4px 0;
       display: flex; align-items: flex-start; gap: 8px; line-height: 1.5;
@@ -3000,7 +3007,8 @@
         } else if (analysis.status === "ready") {
           renderAnalysis(analysis);
           switchToDiscovery("review");
-          setAppNotice("分析完成，请确认方向", "success");
+          const qualityStatus = (analysis.quality || {}).status || analysis.quality_status || "complete";
+          setAppNotice(qualityStatus === "complete" ? "分析完成，请确认方向" : qualityStatus === "partial" ? "分析部分完成，请确认标记字段" : "分析需要人工补充方向和搜索词", qualityStatus === "complete" ? "success" : "warning");
           return true;
         } else if (analysis.status === "failed") {
           // T110: 安全失败信封，仅展示 error_code + user_message，不泄漏原始异常
@@ -3021,30 +3029,41 @@
       const container = document.getElementById("discoveryAnalysisContent");
       if (!container) return;
       container.innerHTML = "";
+      const quality = analysis.quality || { status: analysis.quality_status || "complete", warnings: analysis.quality_warnings || [] };
+      const qualityBox = document.createElement("div");
+      qualityBox.className = "discovery-quality-state " + quality.status;
+      const qualityTitle = document.createElement("strong");
+      qualityTitle.textContent = quality.status === "complete" ? "提取完整" : quality.status === "partial" ? "部分字段需要确认" : "需要人工补充";
+      qualityBox.appendChild(qualityTitle);
+      const safeFieldLabels = { summary: "候选人摘要", evidence: "简历证据", directions: "求职方向", unknowns: "未知项", contract_version: "契约版本", quality: "质量状态", root: "分析结果" };
+      for (const warning of quality.warnings || []) {
+        const item = document.createElement("div");
+        item.className = "discovery-warning-item";
+        const root = String(warning.path || "root").split(/[.\[]/, 1)[0];
+        item.textContent = "需要确认：" + (safeFieldLabels[root] || "分析字段") + "（" + String(warning.code || "unverified_field") + "）";
+        qualityBox.appendChild(item);
+      }
+      container.appendChild(qualityBox);
       // 摘要
       const summary = analysis.summary || {};
-      if (summary.headline || (summary.domains && summary.domains.length) || (summary.strengths && summary.strengths.length)) {
+      {
         const sumDiv = document.createElement("div");
         sumDiv.className = "discovery-summary";
-        if (summary.headline) {
-          const h = document.createElement("div");
-          h.className = "discovery-summary-headline";
-          h.textContent = summary.headline;
-          sumDiv.appendChild(h);
-        }
-        if (summary.experience_level || (summary.domains && summary.domains.length)) {
+        const h = document.createElement("div");
+        h.className = "discovery-summary-headline" + (summary.headline ? "" : " discovery-empty-value");
+        h.textContent = summary.headline || "简历未提供";
+        sumDiv.appendChild(h);
+        {
           const meta = document.createElement("div");
           meta.className = "discovery-summary-meta";
-          if (summary.experience_level) {
-            const s = document.createElement("span");
-            s.innerHTML = "经验：<strong>" + escapeHtml(summary.experience_level) + "</strong>";
-            meta.appendChild(s);
-          }
-          if (summary.domains && summary.domains.length) {
-            const s = document.createElement("span");
-            s.innerHTML = "领域：<strong>" + escapeHtml(summary.domains.join("、")) + "</strong>";
-            meta.appendChild(s);
-          }
+          const experience = document.createElement("span");
+          experience.textContent = "经验：" + (summary.experience_level || "简历未提供");
+          if (!summary.experience_level) experience.classList.add("discovery-empty-value");
+          meta.appendChild(experience);
+          const domains = document.createElement("span");
+          domains.textContent = "领域：" + ((summary.domains || []).join("、") || "简历未提供");
+          if (!(summary.domains || []).length) domains.classList.add("discovery-empty-value");
+          meta.appendChild(domains);
           sumDiv.appendChild(meta);
         }
         if (summary.strengths && summary.strengths.length) {
@@ -3057,6 +3076,11 @@
             div.appendChild(tag);
           }
           sumDiv.appendChild(div);
+        } else {
+          const empty = document.createElement("div");
+          empty.className = "discovery-empty-value";
+          empty.textContent = "优势：简历未提供";
+          sumDiv.appendChild(empty);
         }
         container.appendChild(sumDiv);
       }
@@ -3101,6 +3125,11 @@
           grp.appendChild(list);
           container.appendChild(grp);
         }
+      } else {
+        const emptyEvidence = document.createElement("div");
+        emptyEvidence.className = "discovery-empty-value";
+        emptyEvidence.textContent = "简历证据：简历未提供";
+        container.appendChild(emptyEvidence);
       }
       // 方向卡片
       if (discoveryDirections.length) {
@@ -3126,7 +3155,7 @@
           toggle.className = "discovery-direction-toggle";
           const cb = document.createElement("input");
           cb.type = "checkbox";
-          cb.checked = d.default_enabled !== false;
+          cb.checked = d.default_enabled === true;
           cb.dataset.directionId = d.id;
           toggle.appendChild(cb);
           const toggleLabel = document.createElement("span");
@@ -3143,11 +3172,11 @@
           const meta = document.createElement("div");
           meta.className = "discovery-direction-meta";
           const confSpan = document.createElement("span");
-          confSpan.innerHTML = "置信度：<strong>" + (d.confidence != null ? d.confidence : "—") + "</strong>";
+          confSpan.textContent = "置信度：" + (d.confidence != null ? d.confidence : "—");
           meta.appendChild(confSpan);
           if (d.evidence_ids && d.evidence_ids.length) {
             const evSpan = document.createElement("span");
-            evSpan.innerHTML = "证据：<strong>" + d.evidence_ids.length + "</strong>";
+            evSpan.textContent = "证据：" + d.evidence_ids.length;
             meta.appendChild(evSpan);
           }
           card.appendChild(meta);
@@ -3172,6 +3201,20 @@
         }
         container.appendChild(grp);
       }
+      // 人工方向：manual_required 或 AI 方向不合适时仍可继续。
+      const manual = document.createElement("div");
+      manual.className = "discovery-manual-direction";
+      const manualTitle = document.createElement("strong");
+      manualTitle.textContent = "手动添加方向";
+      const manualHint = document.createElement("div");
+      manualHint.className = "discovery-step-hint";
+      manualHint.textContent = "填写一个方向和 1–3 个搜索词；手动输入优先于 AI 建议。";
+      const manualName = document.createElement("input");
+      manualName.id = "discoveryManualDirection"; manualName.type = "text"; manualName.placeholder = "如：Python 后端工程师"; manualName.setAttribute("aria-label", "手动方向");
+      const manualTerms = document.createElement("input");
+      manualTerms.id = "discoveryManualTerms"; manualTerms.type = "text"; manualTerms.placeholder = "搜索词，用逗号分隔，最多 3 个"; manualTerms.setAttribute("aria-label", "手动搜索词");
+      manual.append(manualTitle, manualHint, manualName, manualTerms);
+      container.appendChild(manual);
       // 未知项
       const unknowns = analysis.unknowns || [];
       if (unknowns.length) {
@@ -3188,6 +3231,11 @@
           unkDiv.appendChild(item);
         }
         container.appendChild(unkDiv);
+      } else {
+        const emptyUnknowns = document.createElement("div");
+        emptyUnknowns.className = "discovery-empty-value";
+        emptyUnknowns.textContent = "未知项：简历未提供";
+        container.appendChild(emptyUnknowns);
       }
       // 硬约束输入
       const hcDiv = document.createElement("div");
@@ -3219,7 +3267,14 @@
       document.querySelectorAll(".discovery-direction-card input[type=checkbox]").forEach(cb => {
         if (cb.checked) enabledDirectionIds.push(cb.dataset.directionId);
       });
-      if (!enabledDirectionIds.length) {
+      const manualName = (document.getElementById("discoveryManualDirection")?.value || "").trim();
+      const manualTerms = (document.getElementById("discoveryManualTerms")?.value || "").split(/[，,]/).map(v => v.trim()).filter(Boolean);
+      const userDirections = manualName || manualTerms.length ? [{ name: manualName, search_terms: manualTerms.slice(0, 3) }] : [];
+      if (userDirections.length && (!manualName || manualTerms.length < 1 || manualTerms.length > 3)) {
+        setAppNotice("手动方向需要名称和 1–3 个搜索词", "warning");
+        return;
+      }
+      if (!enabledDirectionIds.length && !userDirections.length) {
         setAppNotice("请至少启用一个方向", "warning");
         return;
       }
@@ -3239,7 +3294,7 @@
             hard_constraints: hardConstraints,
             soft_preferences: {},
             safe_limits: {},
-            user_directions: [],
+            user_directions: userDirections,
           },
         });
         if (!resp.ok) {

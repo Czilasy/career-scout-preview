@@ -717,9 +717,6 @@ def confirm_directions(
             user_message=f"分析状态为 {analysis.get('status')}，无法确认。",
             stage="analyzing",
         )
-    if not enabled_direction_ids:
-        raise DiscoveryError("input_incomplete", user_message="至少需要启用一个方向。")
-
     analysis_directions = store.list_directions(analysis_id)
     analysis_direction_ids = {d["id"] for d in analysis_directions}
     for direction_id in enabled_direction_ids:
@@ -735,7 +732,25 @@ def confirm_directions(
         if value not in (None, "", []):
             clean_hard[key] = value
 
-    user_added_ids = {d.get("id") for d in (user_directions or [])}
+    user_added_ids = set()
+    for item in user_directions or []:
+        if not isinstance(item, dict):
+            raise DiscoveryError("input_incomplete", user_message="人工方向格式无效。")
+        name = str(item.get("name") or "").strip()
+        raw_terms = item.get("search_terms")
+        if not name or not isinstance(raw_terms, list):
+            raise DiscoveryError("input_incomplete", user_message="人工方向和搜索词不能为空。")
+        terms = [str(term).strip() for term in raw_terms if str(term).strip()]
+        if not 1 <= len(terms) <= 3:
+            raise DiscoveryError("input_incomplete", user_message="人工方向需要 1–3 个搜索词。")
+        stored = store.add_direction(
+            analysis_id, name[:200], "core", rationale="用户手动添加",
+            confidence=100, default_enabled=True, search_terms=terms[:3],
+        )
+        user_added_ids.add(stored["id"])
+        enabled_direction_ids = [*enabled_direction_ids, stored["id"]]
+    if not enabled_direction_ids:
+        raise DiscoveryError("input_incomplete", user_message="至少需要启用一个方向。")
     directions_payload = [
         {
             "direction_id": did,

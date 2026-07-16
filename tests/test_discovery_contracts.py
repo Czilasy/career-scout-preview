@@ -445,6 +445,20 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()["error_code"], "state_conflict")
 
+    def test_manual_direction_with_one_to_three_terms_keeps_manual_analysis_usable(self):
+        analysis = self._create_ready_analysis_over_http()
+        response = self.client.post("/api/discovery/confirmations", json={
+            "analysis_id": analysis["analysis_id"],
+            "enabled_direction_ids": [],
+            "user_directions": [{"name": "手动平台工程师", "search_terms": ["平台工程", "Python"]}],
+            "hard_constraints": {"city": "上海"},
+        })
+        self.assertEqual(response.status_code, 201)
+        confirmation = self.store.get_confirmation(response.get_json()["confirmation_id"])
+        self.assertEqual(len(confirmation["directions"]), 1)
+        stored = self.store.list_directions(analysis["analysis_id"])[-1]
+        self.assertEqual(stored["search_terms"], ["平台工程", "Python"])
+
     def test_post_analyses_response_does_not_leak_resume_text(self):
         """契约: 202 响应体不得包含简历正文片段。"""
         self._configure_ai_settings()
@@ -477,6 +491,9 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         for field in ("analysis_id", "resume_id", "profile_id", "status",
                        "evidence", "directions", "unknowns", "failure"):
             self.assertIn(field, data, f"missing field: {field}")
+        self.assertEqual(data["contract_version"], "v3")
+        self.assertEqual(set(data["quality"]), {"status", "warnings"})
+        self.assertNotIn("source_quote", str(data))
 
     def test_get_analysis_404_for_unknown_id(self):
         """契约: GET 未知 id 返回 404 安全错误信封。"""
