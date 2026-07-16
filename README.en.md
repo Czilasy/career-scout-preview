@@ -58,7 +58,7 @@ Open `http://127.0.0.1:5000`. The workspace is a dark-themed job-seeking workben
 
 ### Core Capabilities
 
-1. **Resume parsing**: Upload a TXT / PDF / DOCX résumé and the AI extracts job direction, city, skills, and up to 3 search keyword groups. Users can manually supplement or override — **manual conditions always take priority**.
+1. **Resume parsing**: Upload a TXT / PDF / DOCX résumé and the AI extracts job direction, city, skills, and up to 3 search keyword groups. The upload button reports analyzing, success, or retryable failure in place; without AI consent the file is saved locally and clearly marked as not analyzed instead of creating a permanently queued task. Users can manually supplement or override — **manual conditions always take priority**.
 2. **Background search**: After clicking search, the backend runs automatically with up to 3 keyword groups, cross-query deduplication, and at most 60 full JDs per run. Each completed JD appears as a card streamed into the frontend.
 3. **Job cards**: Cards show title, company, salary, location, and a truncated JD; clicking the reading area opens only a validated BOSS link (HTTPS and expected BOSS domains only).
 4. **Feedback & learning**: The "Interested / Not interested" buttons on a card **do not trigger navigation**; "not interested" smoothly exits with undo support. After every 5 valid feedbacks the AI updates the current profile's preference, affecting only future results — already-shown cards are never re-ranked.
@@ -70,6 +70,7 @@ Users only configure two items: the AI service URL and the API Key.
 
 - Enter the AI service URL (an OpenAI-compatible `/v1/chat/completions` endpoint) and API Key in the left settings panel.
 - Click "Test connection" to confirm the configuration works.
+- The "Fetch" and "Test" buttons report in-progress, success, or retryable failure in place; supplemental top notices dismiss automatically according to severity.
 - **The Key must enter the system credential store** (Windows Credential Manager / macOS Keychain / Linux Secret Service, via the `keyring` library) and is **never written in plaintext to SQLite, logs, API responses, or exports**.
 - The AI settings endpoint returns only the URL, status, and last error code — never the Key or credential reference.
 

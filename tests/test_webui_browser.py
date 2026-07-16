@@ -127,6 +127,7 @@ class WorkbenchBrowserContractTests(unittest.TestCase):
     def test_model_refresh_action_stays_compact_without_losing_its_meaning(self):
         """The model refresh control keeps a short label and the existing action."""
         self.assertIn('class="btn model-fetch-button"', self.html)
+        self.assertIn('id="aiModelFetchButton"', self.html)
         self.assertIn('aria-label="拉取可用模型"', self.html)
         self.assertIn('title="拉取可用模型"', self.html)
         self.assertIn('onclick="fetchAiModels()"', self.html)

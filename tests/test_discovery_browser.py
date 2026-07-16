@@ -110,6 +110,94 @@ class DiscoveryBrowserRenderTests(unittest.TestCase):
         btn = self.page.query_selector("#discoveryConfirmButton")
         self.assertIsNotNone(btn)
 
+    def test_upload_button_exposes_success_and_retry_states(self):
+        """Upload outcome stays on the action that initiated it."""
+        button = self.page.locator("#discoveryUploadButton")
+
+        self.page.evaluate("() => setDiscoveryUploadState('success')")
+        self.assertEqual(button.locator(".btn-label").inner_text(), "上传分析成功")
+        self.assertTrue(button.evaluate("element => element.classList.contains('upload-success')"))
+        self.assertTrue(button.is_disabled())
+
+        self.page.evaluate("() => setDiscoveryUploadState('error')")
+        self.assertEqual(button.locator(".btn-label").inner_text(), "失败，点击重试")
+        self.assertTrue(button.evaluate("element => element.classList.contains('upload-error')"))
+        self.assertFalse(button.is_disabled())
+
+        self.page.evaluate("() => setDiscoveryUploadState('idle')")
+        self.assertEqual(button.locator(".btn-label").inner_text(), "上传并分析")
+        self.assertFalse(button.evaluate("element => element.classList.contains('upload-success')"))
+        self.assertFalse(button.evaluate("element => element.classList.contains('upload-error')"))
+
+    def test_ai_setting_buttons_expose_loading_success_and_failure(self):
+        """Model fetch and connection test report progress on their own buttons."""
+        fetch_button = self.page.locator("#aiModelFetchButton")
+        test_button = self.page.locator("#aiConnectionTestButton")
+
+        self.page.evaluate("() => setAiActionButtonState('fetch', 'loading')")
+        self.assertEqual(fetch_button.locator(".btn-label").inner_text(), "拉取中…")
+        self.assertTrue(fetch_button.is_disabled())
+
+        self.page.evaluate("() => setAiActionButtonState('fetch', 'success')")
+        self.assertEqual(fetch_button.locator(".btn-label").inner_text(), "拉取成功")
+        self.assertTrue(fetch_button.evaluate("el => el.classList.contains('upload-success')"))
+
+        self.page.evaluate("() => setAiActionButtonState('test', 'loading')")
+        self.assertEqual(test_button.locator(".btn-label").inner_text(), "测试中…")
+        self.assertTrue(test_button.is_disabled())
+
+        self.page.evaluate("() => setAiActionButtonState('test', 'error')")
+        self.assertEqual(test_button.locator(".btn-label").inner_text(), "测试失败，重试")
+        self.assertTrue(test_button.evaluate("el => el.classList.contains('upload-error')"))
+        self.assertFalse(test_button.is_disabled())
+
+    def test_error_notice_auto_dismisses(self):
+        """Even retryable errors leave the global notice after a bounded delay."""
+        self.page.evaluate("() => setAppNotice('连接失败', 'error', () => {}, 50)")
+        notice = self.page.locator("#appNotice")
+        self.assertTrue(notice.is_visible())
+        self.page.wait_for_timeout(100)
+        self.assertTrue(notice.is_hidden())
+
+    def test_upload_without_ai_consent_stops_after_local_save(self):
+        """Local-only upload must not create an analysis that stays queued forever."""
+        self.page.set_input_files(
+            "#discoveryResumeFile",
+            {"name": "resume.txt", "mimeType": "text/plain", "buffer": b"Python developer"},
+        )
+        self.page.evaluate("""() => {
+            currentProfileId = 'profile-test';
+            document.getElementById('discoveryAiConsent').checked = false;
+            window.__analysisSubmitted = false;
+            api = async path => {
+                if (path === DiscoveryAPI.analyses) {
+                    window.__analysisSubmitted = true;
+                    return {ok: true, status: 202, json: async () => ({analysis_id: 'analysis-test'})};
+                }
+                if (path.includes('/resume')) {
+                    return {ok: true, status: 201, json: async () => ({resume_id: 'resume-test'})};
+                }
+                return {
+                    ok: true, status: 200,
+                    json: async () => ({status: 'failed', failure: {error_code: 'unexpected'}}),
+                };
+            };
+        }""")
+
+        self.page.locator("#discoveryUploadButton").click()
+        self.page.wait_for_function(
+            "() => document.querySelector('#discoveryUploadButton .btn-label').textContent.includes('上传成功')"
+        )
+        self.assertFalse(self.page.evaluate("() => window.__analysisSubmitted"))
+        self.assertEqual(
+            self.page.locator("#discoveryUploadButton .btn-label").inner_text(),
+            "上传成功（未分析）",
+        )
+
+    def test_top_navigation_names_the_workspaces(self):
+        labels = self.page.locator(".app-header .view-tab").all_inner_texts()
+        self.assertEqual(labels, ["岗位发现", "搜索工作台", "筛选工作台"])
+
     def test_desktop_focus_visible(self):
         """Tabbing to a button shows a focus indicator."""
         self.page.keyboard.press("Tab")

@@ -59,12 +59,12 @@ class HomeFourStepTests(_FlaskTestCase):
     def test_legacy_workbench_link_visible(self):
         resp = self.client.get("/")
         html = resp.data.decode("utf-8")
-        self.assertIn("历史搜索", html)
+        self.assertIn("搜索工作台", html)
 
     def test_legacy_screening_link_visible(self):
         resp = self.client.get("/")
         html = resp.data.decode("utf-8")
-        self.assertIn("历史筛选", html)
+        self.assertIn("筛选工作台", html)
 
 
 class DirectionConfirmationPageTests(_FlaskTestCase):

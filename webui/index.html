@@ -359,6 +359,17 @@
     .btn:hover { border-color: var(--gold); background: var(--surface-raised); }
     .btn.primary { background: var(--gold); border-color: var(--gold); color: #1b170e; }
     .btn.primary:hover { background: #edcd79; }
+    .btn.upload-success,
+    .btn.upload-success:disabled,
+    .btn.upload-success:hover {
+      background: var(--success); border-color: var(--success); color: #071a0c;
+      opacity: 1;
+    }
+    .btn.upload-success:disabled { cursor: default; }
+    .btn.upload-error,
+    .btn.upload-error:hover {
+      background: var(--danger); border-color: var(--danger); color: #fff;
+    }
     .history-item { border-left: 2px solid transparent; border-radius: 0; background: transparent; }
     .history-item:hover, .history-item.active { border-left-color: var(--gold); background: var(--surface-raised); }
 
@@ -956,9 +967,9 @@
   <div class="app-header">
     <div class="brand"><span class="brand-dot"></span>AI 求职工作台</div>
     <div class="view-tabs">
-      <div class="view-tab active" onclick="switchView('discovery')">发现</div>
-      <div class="view-tab" onclick="switchView('workbench')">历史搜索</div>
-      <div class="view-tab" onclick="switchView('screening')">历史筛选</div>
+      <div class="view-tab active" onclick="switchView('discovery')">岗位发现</div>
+      <div class="view-tab" onclick="switchView('workbench')">搜索工作台</div>
+      <div class="view-tab" onclick="switchView('screening')">筛选工作台</div>
     </div>
     <div class="header-actions">
       <span class="conn-status" id="connectionStatus">未连接</span>
@@ -1161,12 +1172,16 @@
               <label>模型</label>
               <div class="btn-row model-picker-row">
                 <select id="aiModel"><option value="">请先拉取</option></select>
-                <button class="btn model-fetch-button" type="button" onclick="fetchAiModels()" aria-label="拉取可用模型" title="拉取可用模型">拉取</button>
+                <button class="btn model-fetch-button" id="aiModelFetchButton" type="button" onclick="fetchAiModels()" aria-busy="false" aria-label="拉取可用模型" title="拉取可用模型">
+                  <span class="btn-label">拉取</span><span class="btn-spinner" aria-hidden="true"></span>
+                </button>
               </div>
             </div>
             <div class="btn-row">
               <button class="btn primary" onclick="saveAiSettings()">保存</button>
-              <button class="btn" onclick="testAiConnection()">测试</button>
+              <button class="btn" id="aiConnectionTestButton" type="button" onclick="testAiConnection()" aria-busy="false">
+                <span class="btn-label">测试</span><span class="btn-spinner" aria-hidden="true"></span>
+              </button>
             </div>
           </div>
         </div>
@@ -1370,7 +1385,7 @@
     };
 
     let appNoticeTimer = null;
-    function setAppNotice(message, tone = "info", retryHandler = null) {
+    function setAppNotice(message, tone = "info", retryHandler = null, autoDismissMs = null) {
       const notice = document.getElementById("appNotice");
       const text = document.getElementById("appNoticeText");
       const retry = document.getElementById("appNoticeRetry");
@@ -1394,14 +1409,18 @@
           retry.disabled = false;
         }
       } : null;
-      // 错误和带重试按钮的提示不自动消失，其余 3 秒后自动消失
-      if (hasMessage && tone !== "error" && typeof retryHandler !== "function") {
+      // 所有提示都有上限；错误停留更久，但具体失败态同时保留在操作按钮上。
+      if (hasMessage) {
+        const defaultDelay = tone === "error" ? 8000 : tone === "warning" ? 5000 : 3000;
+        const dismissDelay = Number.isFinite(autoDismissMs) ? Math.max(0, autoDismissMs) : defaultDelay;
         appNoticeTimer = setTimeout(() => {
           notice.hidden = true;
           notice.classList.remove("show");
           text.textContent = "";
+          retry.hidden = true;
+          retry.onclick = null;
           appNoticeTimer = null;
-        }, 3000);
+        }, dismissDelay);
       }
     }
 
@@ -1820,7 +1839,33 @@
       updateAiStatus(Boolean(data.is_configured));
     }
 
+    function setAiActionButtonState(action, state) {
+      const configs = {
+        fetch: {
+          id: "aiModelFetchButton",
+          labels: { idle: "拉取", loading: "拉取中…", success: "拉取成功", error: "拉取失败，重试" },
+        },
+        test: {
+          id: "aiConnectionTestButton",
+          labels: { idle: "测试", loading: "测试中…", success: "测试成功", error: "测试失败，重试" },
+        },
+      };
+      const config = configs[action];
+      const button = config ? document.getElementById(config.id) : null;
+      if (!button) return;
+      const nextState = config.labels[state] ? state : "idle";
+      button.disabled = nextState === "loading";
+      button.classList.toggle("loading", nextState === "loading");
+      button.classList.toggle("upload-success", nextState === "success");
+      button.classList.toggle("upload-error", nextState === "error");
+      button.setAttribute("aria-busy", String(nextState === "loading"));
+      const label = button.querySelector(".btn-label");
+      if (label) label.textContent = config.labels[nextState];
+    }
+
     async function fetchAiModels() {
+      setAiActionButtonState("fetch", "loading");
+      let outcome = "error";
       try {
         const resp = await api("/api/ai-settings/models");
         const data = await resp.json();
@@ -1830,9 +1875,12 @@
         }
         const savedModel = (await (await api(API.aiSettings)).json()).model || "";
         renderAiModelOptions(data.models, savedModel, "无可用模型");
+        outcome = "success";
         setAppNotice("模型列表已更新", "success");
       } catch (_error) {
         setAppNotice("拉取模型失败，请检查连接后重试", "error", fetchAiModels);
+      } finally {
+        setAiActionButtonState("fetch", outcome);
       }
     }
 
@@ -1858,13 +1906,21 @@
     }
 
     async function testAiConnection() {
+      setAiActionButtonState("test", "loading");
+      let outcome = "error";
       try {
         const resp = await api("/api/ai-settings/test", { method: "POST" });
         const data = await resp.json();
-        if (data.ok) { setAppNotice("AI 连接成功", "success"); updateAiStatus(true); }
+        if (data.ok) {
+          outcome = "success";
+          setAppNotice("AI 连接成功", "success");
+          updateAiStatus(true);
+        }
         else { setAppNotice("连接失败：" + (data.error_code || "未知"), "error", testAiConnection); updateAiStatus(false); }
       } catch (_error) {
         setAppNotice("连接测试失败，请稍后重试", "error", testAiConnection);
+      } finally {
+        setAiActionButtonState("test", outcome);
       }
     }
 
@@ -2791,10 +2847,12 @@
         if (event.dataTransfer.files.length) {
           input.files = event.dataTransfer.files;
           if (filename) filename.textContent = "已选择：" + input.files[0].name;
+          setDiscoveryUploadState("idle");
         }
       });
       input.addEventListener("change", () => {
         if (input.files.length && filename) filename.textContent = "已选择：" + input.files[0].name;
+        setDiscoveryUploadState("idle");
       });
       // consent tooltip（复用 consent-wrap 模式）
       const consentWrap = document.getElementById("discoveryConsentWrap");
@@ -2821,13 +2879,28 @@
       });
     }
 
-    function setDiscoveryUploadLoading(isLoading) {
+    function setDiscoveryUploadState(state) {
       const btn = document.getElementById("discoveryUploadButton");
       if (!btn) return;
-      btn.disabled = isLoading;
-      btn.setAttribute("aria-busy", String(isLoading));
+      const states = {
+        idle: { label: "上传并分析", disabled: false },
+        loading: { label: "分析中…", disabled: true },
+        success: { label: "上传分析成功", disabled: true },
+        saved: { label: "上传成功（未分析）", disabled: false },
+        error: { label: "失败，点击重试", disabled: false },
+      };
+      const next = states[state] || states.idle;
+      btn.disabled = next.disabled;
+      btn.classList.toggle("loading", state === "loading");
+      btn.classList.toggle("upload-success", state === "success" || state === "saved");
+      btn.classList.toggle("upload-error", state === "error");
+      btn.setAttribute("aria-busy", String(state === "loading"));
       const label = btn.querySelector(".btn-label");
-      if (label) label.textContent = isLoading ? "分析中…" : "上传并分析";
+      if (label) label.textContent = next.label;
+    }
+
+    function setDiscoveryUploadLoading(isLoading) {
+      setDiscoveryUploadState(isLoading ? "loading" : "idle");
     }
 
     async function uploadResumeDiscovery() {
@@ -2843,17 +2916,23 @@
           const createResp = await api(API.profiles, {
             method: "POST", json: { name: profileName, confirmed_fields: {} },
           });
-          if (!createResp.ok) { setAppNotice("创建画像失败", "error"); return; }
+          if (!createResp.ok) {
+            setDiscoveryUploadState("error");
+            setAppNotice("创建画像失败", "error");
+            return;
+          }
           const created = await createResp.json();
           currentProfileId = created.id;
           await loadProfiles();
         } catch (_e) {
+          setDiscoveryUploadState("error");
           setAppNotice("创建画像失败，请检查连接后重试", "error");
           return;
         }
       }
       const aiConsent = document.getElementById("discoveryAiConsent").checked;
       setDiscoveryUploadLoading(true);
+      let uploadState = "error";
       try {
         // 1. 上传简历文件
         const formData = new FormData();
@@ -2874,6 +2953,11 @@
           setAppNotice("简历上传未返回 resume_id", "error");
           return;
         }
+        if (!aiConsent) {
+          uploadState = "saved";
+          setAppNotice("简历已在本地保存；未勾选 AI 同意，因此未启动分析", "success");
+          return;
+        }
         const analysisResp = await api(DiscoveryAPI.analyses, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2886,11 +2970,12 @@
         }
         const summary = await analysisResp.json();
         discoveryAnalysisId = summary.analysis_id;
-        await pollDiscoveryAnalysis(discoveryAnalysisId);
+        const analysisSucceeded = await pollDiscoveryAnalysis(discoveryAnalysisId);
+        uploadState = analysisSucceeded ? "success" : "error";
       } catch (_e) {
         setAppNotice("上传或分析失败，请检查连接后重试", "error");
       } finally {
-        setDiscoveryUploadLoading(false);
+        setDiscoveryUploadState(uploadState);
       }
     }
 
@@ -2899,7 +2984,7 @@
       let lastNotice = "";
       for (let i = 0; i < maxAttempts; i++) {
         const resp = await api(`${DiscoveryAPI.analyses}/${analysisId}`);
-        if (!resp.ok) { setAppNotice("分析结果获取失败", "error"); return; }
+        if (!resp.ok) { setAppNotice("分析结果获取失败", "error"); return false; }
         const analysis = await resp.json();
         // T110: 显式处理 queued/analyzing 状态，告知用户当前进度，避免静默等待
         if (analysis.status === "queued") {
@@ -2916,18 +3001,19 @@
           renderAnalysis(analysis);
           switchToDiscovery("review");
           setAppNotice("分析完成，请确认方向", "success");
-          return;
+          return true;
         } else if (analysis.status === "failed") {
           // T110: 安全失败信封，仅展示 error_code + user_message，不泄漏原始异常
           const failure = analysis.failure || {};
           const code = failure.error_code || "未知错误";
           const msg = failure.user_message || code;
           setAppNotice("分析失败：" + msg + "（" + code + "）", "error");
-          return;
+          return false;
         }
         await new Promise(r => setTimeout(r, 2000));
       }
       setAppNotice("分析超时，请稍后重试", "warning");
+      return false;
     }
 
     function renderAnalysis(analysis) {
