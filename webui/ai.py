@@ -681,6 +681,11 @@ _PROVIDER_ERROR_MAP = {
 }
 
 
+def cleanup_candidate_analysis_response(response):
+    """Public, testable deterministic cleanup for candidate-v3 responses."""
+    return DiscoveryAIProvider._clean_candidate_response(response)
+
+
 def _map_provider_error(exc: AISecurityError) -> AISecurityError:
     """Map a low-level AISecurityError to a feature-safe error code."""
     mapped = _PROVIDER_ERROR_MAP.get(exc.error_code, exc.error_code)
@@ -750,7 +755,11 @@ class DiscoveryAIProvider:
     @staticmethod
     def _quality_score(result):
         q = result.get("quality", {})
-        return (len(result.get("evidence", [])) + len(result.get("directions", [])) + len(result.get("summary", {}).get("strengths", [])), q.get("status") == "complete")
+        rank = {"manual_required": 0, "partial": 1, "complete": 2}
+        useful = (len(result.get("evidence", [])) + len(result.get("directions", [])) +
+                  len(result.get("summary", {}).get("strengths", [])) +
+                  bool(result.get("summary", {}).get("headline")))
+        return (rank.get(q.get("status"), 0), useful)
 
     @staticmethod
     def _clean_candidate_response(response):
@@ -762,16 +771,25 @@ class DiscoveryAIProvider:
                 lines = text.splitlines()
                 if len(lines) < 3 or not lines[-1].strip().startswith("```"):
                     raise ValueError("fence")
+                if any(line.strip().startswith("```") for line in lines[1:-1]):
+                    raise ValueError("fence")
                 text = "\n".join(lines[1:-1]).strip()
             obj = json.loads(text)
         else:
             raise ValueError("json")
         if not isinstance(obj, dict): raise ValueError("object")
-        for key in ("data", "result"):
-            if key in obj:
-                if len(obj) != 1 or not isinstance(obj[key], dict): raise ValueError("envelope")
-                obj = obj[key]
-                break
+        envelopes = [key for key in ("data", "result") if key in obj]
+        if len(envelopes) > 1:
+            raise ValueError("envelope")
+        if envelopes:
+            key = envelopes[0]
+            if len(obj) != 1 or not isinstance(obj[key], dict): raise ValueError("envelope")
+            obj = obj[key]
+            if any(key in obj for key in ("data", "result")):
+                raise ValueError("envelope")
+        known = set(CANDIDATE_ANALYSIS_V3_CONTRACT.get("top", {}))
+        if not any(key in obj for key in known):
+            raise ValueError("unknown")
         return obj
 
     @staticmethod
@@ -862,13 +880,19 @@ class DiscoveryAIProvider:
 
     @staticmethod
     def _build_analyze_messages(resume_text: str) -> list:
-        schema = json.dumps(CANDIDATE_ANALYSIS_V3_CONTRACT, ensure_ascii=False, default=list)
+        # Provider-owned canonical schema; quality and generated locator fields
+        # are intentionally omitted from this section.
+        contract = copy.deepcopy(CANDIDATE_ANALYSIS_V3_CONTRACT)
+        contract["top"].pop("quality", None)
+        contract["evidence"].pop("source_locator", None)
+        contract["evidence"].pop("safe_excerpt", None)
+        schema = json.dumps(contract, ensure_ascii=False, default=list)
         example = json.dumps({k: v for k, v in build_empty_candidate_analysis().items() if k != "quality"}, ensure_ascii=False)
         return [
             {
                 "role": "system",
                 "content": (
-                    "你是候选人分析助手。严格按以下v3契约返回JSON。仅输出provider拥有字段；quality由程序生成，禁止输出source_locator和safe_excerpt。字段缺失使用契约typed-empty。契约schema:" + schema + "；示例:" + example + "。"
+                    "你是候选人分析助手。严格按以下v3契约返回JSON。仅输出provider拥有字段；quality由程序生成，禁止输出source_locator和safe_excerpt。字段缺失使用契约typed-empty。CANONICAL_CANDIDATE_V3_SCHEMA_BEGIN\n" + schema + "\nCANONICAL_CANDIDATE_V3_SCHEMA_END\n示例:" + example + "。"
                 ),
             },
             {"role": "user", "content": resume_text},
