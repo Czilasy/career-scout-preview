@@ -221,6 +221,7 @@ def normalize_candidate_analysis(data, resume_text):
                         for field in item:
                             if field not in ("code", "path"): _warn(warnings, "unverified_field", f"quality.warnings[{i}].{field}")
                         if not isinstance(item.get("code"), str): _warn(warnings, "invalid_type", f"quality.warnings[{i}].code")
+                        elif item.get("code") not in CANDIDATE_ANALYSIS_V3_CONTRACT["warning_codes"]: _warn(warnings, "invalid_enum", f"quality.warnings[{i}].code")
                         if not isinstance(item.get("path"), str): _warn(warnings, "invalid_type", f"quality.warnings[{i}].path")
     elif "quality" in data:
         _warn(warnings, "invalid_type", "quality")
