@@ -95,6 +95,9 @@ def normalize_candidate_analysis(data, resume_text):
             path = f"unknowns[{i}]"
             if not isinstance(item, dict):
                 warnings.append(_v3_warning("invalid_type", path)); continue
+            for key in item:
+                if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["unknown"]:
+                    warnings.append(_v3_warning("unverified_field", f"{path}.{key}"))
             field = item.get("field")
             if field not in UNKNOWN_FIELDS:
                 warnings.append(_v3_warning("invalid_enum", path + ".field")); continue
@@ -108,6 +111,9 @@ def normalize_candidate_analysis(data, resume_text):
         p = f"evidence[{i}]"
         try:
             if not isinstance(item, dict): raise ValueError("invalid_type")
+            for key in item:
+                if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"] and key not in ("source_locator","safe_excerpt"):
+                    raise ValueError("unverified_field")
             ref, typ, quote, assertion = item.get("client_ref"), item.get("type"), item.get("source_quote"), item.get("assertion_type")
             if not isinstance(ref, str) or not ref: raise ValueError("missing_required")
             if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["type"]["enum"] or assertion not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["assertion_type"]["enum"]: raise ValueError("invalid_enum")
@@ -125,6 +131,9 @@ def normalize_candidate_analysis(data, resume_text):
     for i, item in enumerate(raw_dirs[:MAX_DIRECTIONS]):
         p=f"directions[{i}]"
         if not isinstance(item, dict): warnings.append(_v3_warning("invalid_type",p)); continue
+        for key in item:
+            if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]:
+                warnings.append(_v3_warning("unverified_field", f"{p}.{key}"))
         typ=item.get("type"); terms=item.get("search_terms", []); erefs=item.get("evidence_refs", [])
         if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["type"]["enum"]: warnings.append(_v3_warning("invalid_enum",p+".type")); continue
         if not isinstance(terms, list) or not all(isinstance(x, str) for x in terms):
@@ -139,7 +148,7 @@ def normalize_candidate_analysis(data, resume_text):
         executable = 1 <= len(terms) <= 3 and not lost_ref
         out["directions"].append({"client_ref": item.get("client_ref", "") if isinstance(item.get("client_ref", ""),str) else "", "name": item.get("name", "") if isinstance(item.get("name", ""),str) else "", "type": typ, "rationale": item.get("rationale", "") if isinstance(item.get("rationale", ""),str) else "", "evidence_refs": valid_refs, "gaps": item.get("gaps", []) if isinstance(item.get("gaps", []),list) else [], "confidence": _confidence(item.get("confidence",0)) if isinstance(item.get("confidence",0),(int,float)) and not isinstance(item.get("confidence",0),bool) else 0, "default_enabled": bool(item.get("default_enabled",False)) and executable, "search_terms": terms[:MAX_SEARCH_TERMS]})
     out["quality"]["warnings"] = warnings
-    executable = any(d["search_terms"] and d["default_enabled"] for d in out["directions"])
+    executable = any(1 <= len(d["search_terms"]) <= 3 and d["evidence_refs"] == [r for r in d["evidence_refs"]] for d in out["directions"])
     out["quality"]["status"] = "complete" if not warnings else ("partial" if executable else "manual_required")
     return out
 
