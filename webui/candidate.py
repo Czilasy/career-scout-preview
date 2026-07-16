@@ -9,8 +9,6 @@ persisted or returned to the browser.
 from __future__ import annotations
 
 import re
-import copy
-import unicodedata
 from typing import Iterable
 
 # ---------------------------------------------------------------------------
@@ -18,70 +16,6 @@ from typing import Iterable
 # ---------------------------------------------------------------------------
 
 CANDIDATE_CONTRACT_VERSION = "v1"
-CANDIDATE_ANALYSIS_V3_CONTRACT = {
-    "contract_version": "v3",
-    "required_top_level": ("summary", "evidence", "unknowns", "directions", "quality"),
-    "warning_codes": ("invalid_type", "invalid_enum", "invalid_evidence", "sensitive_value", "unverified_field", "missing_required", "reference_invalid"),
-    "quality_status": ("complete", "partial", "manual_required"),
-    "max_directions": 5, "max_search_terms": 3,
-}
-
-def build_empty_candidate_analysis() -> dict:
-    return {"contract_version":"v3", "summary":{"headline":"", "experience_level":"", "domains":[], "strengths":[]}, "evidence":[], "unknowns":[], "directions":[], "quality":{"status":"complete", "warnings":[]}}
-
-def canonicalize_resume_text_v3(resume_text: str) -> str:
-    return unicodedata.normalize("NFC", canonicalize_resume_text_v2(resume_text or ""))
-
-def normalize_candidate_analysis(data, resume_text: str) -> dict:
-    """Field-level quarantine normalizer for provider candidate v3 output."""
-    out = build_empty_candidate_analysis(); warnings=[]
-    def warn(code,path): warnings.append({"code":code,"path":path})
-    if not isinstance(data, dict):
-        warn("invalid_type", "response"); out["quality"]={"status":"manual_required","warnings":warnings}; return out
-    raw = data.get("summary", {})
-    if not isinstance(raw, dict): raw={}; warn("invalid_type","summary")
-    for f in ("headline","experience_level"):
-        if isinstance(raw.get(f,""), str): out["summary"][f]=raw.get(f,"")
-        elif f in raw: warn("invalid_type",f"summary.{f}")
-    for f in ("domains","strengths"):
-        val=raw.get(f,[])
-        if isinstance(val,list): out["summary"][f]=[x for x in val if isinstance(x,str)]
-        elif f in raw: warn("invalid_type",f"summary.{f}")
-    canonical=canonicalize_resume_text_v3(resume_text)
-    refs=set()
-    for i,item in enumerate(data.get("evidence",[]) if isinstance(data.get("evidence",[]),list) else []):
-        path=f"evidence[{i}]"
-        if not isinstance(item,dict): warn("invalid_evidence",path); continue
-        ref=item.get("client_ref"); typ=item.get("type"); quote=item.get("source_quote")
-        if not isinstance(ref,str) or not ref or ref in refs or typ not in EVIDENCE_TYPES or not isinstance(quote,str) or not quote:
-            warn("invalid_evidence",path); continue
-        if _is_sensitive(quote): warn("sensitive_value",path+".source_quote"); continue
-        try:
-            loc=resolve_evidence_quote(quote,canonical)
-        except ValueError as exc:
-            if "ambiguous" in str(exc) and isinstance(item.get("source_context"),str):
-                ctx=item["source_context"]; poss=[p for p in range(len(canonical)) if canonical.startswith(ctx,p) and quote in ctx]
-                if len(poss)==1: loc={"start":poss[0]+ctx.index(quote),"end":poss[0]+ctx.index(quote)+len(quote)}
-                else: warn("invalid_evidence",path); continue
-            else: warn("invalid_evidence",path); continue
-        if canonical[loc["start"]:loc["end"]] != quote: warn("invalid_evidence",path); continue
-        refs.add(ref); out["evidence"].append({"id":ref,"type":typ,"normalized_value":item.get("normalized_value","") if isinstance(item.get("normalized_value",""),str) else "","source_quote":quote,"source_locator":loc,"safe_excerpt":redact_pii(quote),"assertion_type":item.get("assertion_type") if item.get("assertion_type") in ASSERTION_TYPES else "explicit","confidence":item.get("confidence") if isinstance(item.get("confidence"),int) and not isinstance(item.get("confidence"),bool) and 0<=item.get("confidence")<=100 else 0,"sensitive":False})
-    raw_u=data.get("unknowns",[])
-    if isinstance(raw_u,list):
-        for i,x in enumerate(raw_u):
-            if isinstance(x,dict) and x.get("field") in UNKNOWN_FIELDS: out["unknowns"].append({"field":x["field"],"message":x.get("message","") if isinstance(x.get("message",""),str) else ""})
-            else: warn("invalid_type",f"unknowns[{i}]")
-    raw_d=data.get("directions",[])
-    if isinstance(raw_d,list):
-        for i,x in enumerate(raw_d[:MAX_DIRECTIONS]):
-            if not isinstance(x,dict) or not isinstance(x.get("client_ref"),str) or x.get("type") not in DIRECTION_TYPES: warn("invalid_type",f"directions[{i}]"); continue
-            terms=x.get("search_terms",[]); terms=[t for t in terms if isinstance(t,str)][:MAX_SEARCH_TERMS] if isinstance(terms,list) else []
-            er=[r for r in x.get("evidence_refs",[]) if r in refs] if isinstance(x.get("evidence_refs",[]),list) else []
-            out["directions"].append({"id":x["client_ref"],"name":x.get("name","") if isinstance(x.get("name",""),str) else "","type":x["type"],"rationale":x.get("rationale","") if isinstance(x.get("rationale",""),str) else "","evidence_refs":er,"gaps":x.get("gaps",[]) if isinstance(x.get("gaps",[]),list) else [],"confidence":x.get("confidence",0) if isinstance(x.get("confidence",0),int) else 0,"default_enabled":bool(x.get("default_enabled",False)) and bool(er),"search_terms":terms})
-    executable=any(d["search_terms"] for d in out["directions"])
-    useful=bool(out["summary"]["headline"] or out["summary"]["domains"] or out["evidence"] or out["directions"])
-    status="complete" if not warnings else ("partial" if useful and executable else "manual_required")
-    out["quality"]={"status":status,"warnings":warnings}; return out
 DIRECTION_CONTRACT_VERSION = "v1"
 
 EVIDENCE_TYPES = (
