@@ -32,6 +32,28 @@ Program validation:
 - A warning object is exactly `{`code`, `path`}` with both non-empty strings; no other keys or raw provider/resume text are allowed. Allowed codes are `invalid_type`, `invalid_enum`, `invalid_evidence`, `sensitive_value`, `unverified_field`, `missing_required`, and `reference_invalid`.
 - `warnings` is an array of warning objects.
 
+Size limits are authoritative and are enforced before persistence or expensive evidence resolution:
+
+| Field | Maximum |
+|---|---:|
+| `summary.headline` | 200 characters |
+| `summary.experience_level` | 100 characters |
+| `summary.domains`, `summary.strengths` | 20 items; 200 characters per item |
+| `evidence` | 20 items |
+| `evidence.client_ref` | 128 characters |
+| `evidence.normalized_value` | 500 characters |
+| `evidence.source_quote` | 2,000 characters |
+| `unknowns` | 20 items |
+| `unknowns[].message` | 500 characters |
+| `directions` | 5 items |
+| `directions[].client_ref` | 128 characters |
+| `directions[].name` | 200 characters |
+| `directions[].rationale` | 1,000 characters |
+| `directions[].gaps` | 20 items; 300 characters per item |
+| `directions[].search_terms` | 3 items; 200 characters per item |
+
+An oversized scalar becomes its typed empty value with a safe field warning. An oversized list member is dropped, and lists are capped with a safe warning. Oversized required evidence strings quarantine the entire evidence item. Evidence input is capped at 20 before quote lookup or canonical substring work. Raw oversized values are never copied into normalized output or warnings.
+
 Object-array schemas (the generic string-list rule does not apply to these objects):
 
 object arrays are never coerced from scalars or generic string lists.

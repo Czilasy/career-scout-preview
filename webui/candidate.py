@@ -46,10 +46,10 @@ SENSITIVE_PATTERNS = [
 CANDIDATE_ANALYSIS_V3_CONTRACT = {
  "version":"v3", "warning_codes":("invalid_type","invalid_enum","invalid_evidence","sensitive_value","unverified_field","missing_required","reference_invalid"),
  "top":{"contract_version":{"type":"string","empty":"v3"},"summary":{"type":"object","empty":{"headline":"","experience_level":"","domains":[],"strengths":[]}},"evidence":{"type":"list","max":20,"empty":[]},"unknowns":{"type":"list","max":20,"empty":[]},"directions":{"type":"list","max":5,"empty":[]},"quality":{"type":"object","empty":{"status":"complete","warnings":[]}}},
- "summary":{"headline":{"type":"string","empty":""},"experience_level":{"type":"string","empty":""},"domains":{"type":"list","items":"string","empty":[]},"strengths":{"type":"list","items":"string","empty":[]}},
- "evidence":{"client_ref":{"type":"string"},"type":{"type":"string","enum":("skill","responsibility","project","industry","seniority","education","achievement","other")},"normalized_value":{"type":"string","empty":""},"source_quote":{"type":"string"},"source_locator":{"type":"object","empty":{}},"safe_excerpt":{"type":"string","empty":""},"assertion_type":{"type":"string","enum":("explicit","inferred")},"confidence":{"type":"integer","min":0,"max":100}},
- "unknown":{"field":{"type":"string","enum":("current_city","min_salary","career_intent","other")},"message":{"type":"string","empty":""}},
- "direction":{"client_ref":{"type":"string","empty":""},"name":{"type":"string","empty":""},"type":{"type":"string","enum":("core","adjacent","growth")},"rationale":{"type":"string","empty":""},"evidence_refs":{"type":"list","items":"string","empty":[]},"gaps":{"type":"list","items":"string","empty":[]},"confidence":{"type":"integer","min":0,"max":100},"default_enabled":{"type":"boolean","empty":False},"search_terms":{"type":"list","items":"string","max":3,"empty":[]}},
+ "summary":{"headline":{"type":"string","max_length":200,"empty":""},"experience_level":{"type":"string","max_length":100,"empty":""},"domains":{"type":"list","items":"string","max":20,"item_max_length":200,"empty":[]},"strengths":{"type":"list","items":"string","max":20,"item_max_length":200,"empty":[]}},
+ "evidence":{"client_ref":{"type":"string","max_length":128},"type":{"type":"string","enum":("skill","responsibility","project","industry","seniority","education","achievement","other")},"normalized_value":{"type":"string","max_length":500,"empty":""},"source_quote":{"type":"string","max_length":2000},"source_locator":{"type":"object","empty":{}},"safe_excerpt":{"type":"string","empty":""},"assertion_type":{"type":"string","enum":("explicit","inferred")},"confidence":{"type":"integer","min":0,"max":100}},
+ "unknown":{"field":{"type":"string","enum":("current_city","min_salary","career_intent","other")},"message":{"type":"string","max_length":500,"empty":""}},
+ "direction":{"client_ref":{"type":"string","max_length":128,"empty":""},"name":{"type":"string","max_length":200,"empty":""},"type":{"type":"string","enum":("core","adjacent","growth")},"rationale":{"type":"string","max_length":1000,"empty":""},"evidence_refs":{"type":"list","items":"string","empty":[]},"gaps":{"type":"list","items":"string","max":20,"item_max_length":300,"empty":[]},"confidence":{"type":"integer","min":0,"max":100},"default_enabled":{"type":"boolean","empty":False},"search_terms":{"type":"list","items":"string","max":3,"item_max_length":200,"empty":[]}},
  "quality":{"status":{"type":"string","enum":("complete","partial","manual_required")},"warnings":{"type":"list","items":"warning","empty":[]}},
  "warning":{"code":{"type":"string"},"path":{"type":"string"}}
 }
@@ -98,10 +98,18 @@ def normalize_candidate_analysis(data, resume_text):
             if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["summary"]:
                 _warn(warnings,"unverified_field", f"summary.{key}")
         for key in ("headline", "experience_level"):
-            if isinstance(raw.get(key, ""), str): out["summary"][key] = raw.get(key, "")
+            spec = CANDIDATE_ANALYSIS_V3_CONTRACT["summary"][key]
+            if isinstance(raw.get(key, ""), str) and len(raw.get(key, "")) <= spec["max_length"]: out["summary"][key] = raw.get(key, "")
             elif key in raw: _warn(warnings,"invalid_type", f"summary.{key}")
         for key in ("domains", "strengths"):
-            if isinstance(raw.get(key, []), list) and all(isinstance(x, str) for x in raw.get(key, [])): out["summary"][key] = raw.get(key, [])
+            spec = CANDIDATE_ANALYSIS_V3_CONTRACT["summary"][key]; values = raw.get(key, [])
+            if isinstance(values, list):
+                if any(not isinstance(value, str) for value in values):
+                    _warn(warnings,"invalid_type", f"summary.{key}"); continue
+                if len(values) > spec["max"]: _warn(warnings,"invalid_type", f"summary.{key}")
+                for i, value in enumerate(values[:spec["max"]]):
+                    if isinstance(value, str) and len(value) <= spec["item_max_length"]: out["summary"][key].append(value)
+                    else: _warn(warnings,"invalid_type", f"summary.{key}[{i}]")
             elif key in raw: _warn(warnings,"invalid_type", f"summary.{key}")
     elif "summary" in data: _warn(warnings,"invalid_type", "summary")
     canonical = canonicalize_resume_text_v3(resume_text); refs = set()
@@ -120,13 +128,17 @@ def normalize_candidate_analysis(data, resume_text):
             if field not in CANDIDATE_ANALYSIS_V3_CONTRACT["unknown"]["field"]["enum"]:
                 _warn(warnings,"invalid_enum", path + ".field"); continue
             message = item.get("message", "")
-            if not isinstance(message, str):
+            message_spec = CANDIDATE_ANALYSIS_V3_CONTRACT["unknown"]["message"]
+            if not isinstance(message, str) or len(message) > message_spec["max_length"]:
                 _warn(warnings,"invalid_type", path + ".message"); message = ""
             out["unknowns"].append({"field": field, "message": message})
     elif "unknowns" in data:
         _warn(warnings,"invalid_type", "unknowns")
     if "evidence" in data and not isinstance(data.get("evidence"), list): _warn(warnings,"invalid_type","evidence")
-    for i, item in enumerate(data.get("evidence", []) if isinstance(data.get("evidence", []), list) else []):
+    raw_evidence = data.get("evidence", []) if isinstance(data.get("evidence", []), list) else []
+    max_evidence = CANDIDATE_ANALYSIS_V3_CONTRACT["top"]["evidence"]["max"]
+    if len(raw_evidence) > max_evidence: _warn(warnings, "invalid_type", "evidence")
+    for i, item in enumerate(raw_evidence[:max_evidence]):
         p = f"evidence[{i}]"
         try:
             if not isinstance(item, dict): raise ValueError("invalid_type")
@@ -134,14 +146,20 @@ def normalize_candidate_analysis(data, resume_text):
                 if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"] and key not in ("source_locator","safe_excerpt"):
                     _warn(warnings,"unverified_field", f"{p}.{key}")
             ref, typ, quote, assertion = item.get("client_ref"), item.get("type"), item.get("source_quote"), item.get("assertion_type")
+            ref_spec = CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["client_ref"]
             if not isinstance(ref, str) or not ref: raise ValueError("missing_required")
+            if len(ref) > ref_spec["max_length"]: _warn(warnings,"invalid_type",p+".client_ref"); raise ValueError("invalid_type")
             if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["type"]["enum"] or assertion not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["assertion_type"]["enum"]: raise ValueError("invalid_enum")
             if not isinstance(quote, str) or not quote:
                 raise ValueError("invalid_evidence" if "source_quote" in item else "missing_required")
+            if len(quote) > CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["source_quote"]["max_length"]:
+                _warn(warnings,"invalid_type",p+".source_quote"); raise ValueError("invalid_type")
             normalized = item.get("normalized_value", "")
             if not isinstance(normalized, str):
                 _warn(warnings, "invalid_type", p+".normalized_value")
                 raise ValueError("invalid_type")
+            if len(normalized) > CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["normalized_value"]["max_length"]:
+                _warn(warnings, "invalid_type", p+".normalized_value"); raise ValueError("invalid_type")
             if isinstance(item.get("confidence"), bool) or not isinstance(item.get("confidence"), int):
                 _warn(warnings,"invalid_type",p+".confidence"); continue
             try: conf = _confidence(item.get("confidence"))
@@ -161,12 +179,8 @@ def normalize_candidate_analysis(data, resume_text):
                 raise ValueError("invalid_evidence")
             refs.add(ref); out["evidence"].append({"client_ref": ref, "type": typ, "normalized_value": normalized, "source_quote": quote, "source_locator": loc, "safe_excerpt": redact_pii(quote), "assertion_type": assertion, "confidence": conf})
         except ValueError as e: _warn(warnings, str(e), p)
-    max_evidence = CANDIDATE_ANALYSIS_V3_CONTRACT["top"]["evidence"]["max"]
-    if isinstance(data.get("evidence"), list) and len(data["evidence"]) > max_evidence:
-        _warn(warnings, "invalid_type", "evidence")
-    if len(out["evidence"]) > max_evidence:
-        out["evidence"] = out["evidence"][:max_evidence]
     raw_dirs = data.get("directions", []) if isinstance(data.get("directions", []), list) else []
+    clean_direction_exists = False
     max_directions = CANDIDATE_ANALYSIS_V3_CONTRACT["top"]["directions"]["max"]
     if isinstance(data.get("directions"), list) and len(data["directions"]) > max_directions:
         _warn(warnings, "invalid_type", "directions")
@@ -176,19 +190,37 @@ def normalize_candidate_analysis(data, resume_text):
         for key in item:
             if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]:
                 _warn(warnings,"unverified_field", f"{p}.{key}")
+        scalar_values = {}
+        scalar_valid = True
         for fld in ("client_ref","name","rationale"):
-            if fld in item and not isinstance(item[fld], str): _warn(warnings,"invalid_type",p+"."+fld)
-        gaps_valid = isinstance(item.get("gaps", []), list) and all(isinstance(x,str) for x in item.get("gaps", []))
-        for fld in ("gaps",):
-            if fld in item and (not isinstance(item[fld], list) or not all(isinstance(x,str) for x in item[fld])): _warn(warnings,"invalid_type",p+"."+fld)
+            spec = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"][fld]; value = item.get(fld, spec["empty"])
+            if not isinstance(value, str) or len(value) > spec["max_length"]:
+                if fld in item: _warn(warnings,"invalid_type",p+"."+fld)
+                value = spec["empty"]; scalar_valid = False
+            scalar_values[fld] = value
+        gaps_spec = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["gaps"]; raw_gaps = item.get("gaps", [])
+        gaps=[]; gaps_valid=isinstance(raw_gaps,list)
+        if not gaps_valid: _warn(warnings,"invalid_type",p+".gaps")
+        else:
+            if len(raw_gaps)>gaps_spec["max"]: _warn(warnings,"invalid_type",p+".gaps"); gaps_valid=False
+            for j,value in enumerate(raw_gaps[:gaps_spec["max"]]):
+                if isinstance(value,str) and len(value)<=gaps_spec["item_max_length"]: gaps.append(value)
+                else: _warn(warnings,"invalid_type",f"{p}.gaps[{j}]"); gaps_valid=False
         if "confidence" in item:
             if isinstance(item["confidence"], bool) or not isinstance(item["confidence"], int) or not 0 <= item["confidence"] <= 100:
                 _warn(warnings,"invalid_type",p+".confidence")
         if "default_enabled" in item and not isinstance(item["default_enabled"], bool): _warn(warnings,"invalid_type",p+".default_enabled")
         typ=item.get("type"); terms=item.get("search_terms", []); erefs=item.get("evidence_refs", [])
         if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["type"]["enum"]: _warn(warnings,"invalid_enum",p+".type"); continue
-        if not isinstance(terms, list) or not all(isinstance(x, str) for x in terms):
-            _warn(warnings,"invalid_type", p + ".search_terms"); terms = []
+        terms_spec=CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["search_terms"]
+        if not isinstance(terms, list): _warn(warnings,"invalid_type", p + ".search_terms"); terms = []
+        else:
+            raw_terms=terms; terms=[]
+            if len(raw_terms)>terms_spec["max"]: _warn(warnings,"invalid_type",p+".search_terms")
+            else:
+                for j,value in enumerate(raw_terms):
+                    if isinstance(value,str) and len(value)<=terms_spec["item_max_length"]: terms.append(value)
+                    else: _warn(warnings,"invalid_type",f"{p}.search_terms[{j}]")
         valid_refs=[]; lost_ref=False
         if "evidence_refs" not in item:
             _warn(warnings, "missing_required", p+".evidence_refs"); lost_ref = True; erefs = []
@@ -200,9 +232,9 @@ def normalize_candidate_analysis(data, resume_text):
             elif r in refs: valid_refs.append(r)
             elif r not in refs: _warn(warnings,"reference_invalid",p+".evidence_refs"); lost_ref=True
         max_terms = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["search_terms"]["max"]
-        if len(terms)>max_terms: _warn(warnings,"invalid_type",p+".search_terms"); terms=[]
-        executable = 1 <= len(terms) <= max_terms and not lost_ref and gaps_valid
-        out["directions"].append({"client_ref": item.get("client_ref", "") if isinstance(item.get("client_ref", ""),str) else "", "name": item.get("name", "") if isinstance(item.get("name", ""),str) else "", "type": typ, "rationale": item.get("rationale", "") if isinstance(item.get("rationale", ""),str) else "", "evidence_refs": valid_refs, "gaps": item.get("gaps", []) if gaps_valid else [], "confidence": _confidence(item.get("confidence",0)) if isinstance(item.get("confidence",0),int) and not isinstance(item.get("confidence",0),bool) and 0 <= item.get("confidence",0) <= 100 else 0, "default_enabled": (item.get("default_enabled",False) and executable) if isinstance(item.get("default_enabled",False),bool) else False, "search_terms": terms[:max_terms]})
+        executable = 1 <= len(terms) <= max_terms and not lost_ref and gaps_valid and scalar_valid
+        clean_direction_exists = clean_direction_exists or executable
+        out["directions"].append({"client_ref": scalar_values["client_ref"], "name": scalar_values["name"], "type": typ, "rationale": scalar_values["rationale"], "evidence_refs": valid_refs, "gaps": gaps, "confidence": _confidence(item.get("confidence",0)) if isinstance(item.get("confidence",0),int) and not isinstance(item.get("confidence",0),bool) and 0 <= item.get("confidence",0) <= 100 else 0, "default_enabled": (item.get("default_enabled",False) and executable) if isinstance(item.get("default_enabled",False),bool) else False, "search_terms": terms})
     # Provider quality is informational only; validate its shape for diagnostics,
     # but retain the backend-derived quality object as the sole authority.
     provider_quality = data.get("quality")
@@ -227,9 +259,7 @@ def normalize_candidate_analysis(data, resume_text):
         _warn(warnings, "invalid_type", "quality")
     out["quality"]["warnings"] = warnings
     max_terms = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["search_terms"]["max"]
-    executable = any(1 <= len(d["search_terms"]) <= max_terms and d["evidence_refs"] for d in out["directions"])
-    if not out["directions"]:
-        executable = False
+    executable = clean_direction_exists
     out["quality"]["status"] = "manual_required" if not executable else ("partial" if warnings else "complete")
     return out
 
