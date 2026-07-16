@@ -82,6 +82,10 @@ def normalize_candidate_analysis(data, resume_text):
     for key, spec in CANDIDATE_ANALYSIS_V3_CONTRACT["top"].items():
         if key not in data:
             _warn(warnings,"missing_required", key)
+        elif spec.get("type") == "list" and not isinstance(data[key], list):
+            _warn(warnings, "invalid_type", key)
+        elif spec.get("type") == "object" and not isinstance(data[key], dict):
+            _warn(warnings, "invalid_type", key)
     raw = data.get("summary", {})
     if isinstance(raw, dict):
         for key in raw:
@@ -97,7 +101,9 @@ def normalize_candidate_analysis(data, resume_text):
     canonical = canonicalize_resume_text_v3(resume_text); refs = set()
     raw_unknowns = data.get("unknowns", [])
     if isinstance(raw_unknowns, list):
-        for i, item in enumerate(raw_unknowns):
+        max_unknowns = CANDIDATE_ANALYSIS_V3_CONTRACT["top"]["unknowns"]["max"]
+        if len(raw_unknowns) > max_unknowns: _warn(warnings, "invalid_type", "unknowns")
+        for i, item in enumerate(raw_unknowns[:max_unknowns]):
             path = f"unknowns[{i}]"
             if not isinstance(item, dict):
                 _warn(warnings,"invalid_type", path); continue
@@ -128,6 +134,8 @@ def normalize_candidate_analysis(data, resume_text):
             normalized = item.get("normalized_value", "")
             if not isinstance(normalized, str):
                 raise ValueError("invalid_type")
+            if isinstance(item.get("confidence"), bool) or not isinstance(item.get("confidence"), int):
+                _warn(warnings,"invalid_type",p+".confidence"); continue
             try: conf = _confidence(item.get("confidence"))
             except ValueError: _warn(warnings,"invalid_type",p+".confidence"); continue
             if _is_sensitive(quote): raise ValueError("sensitive_value")
@@ -135,7 +143,9 @@ def normalize_candidate_analysis(data, resume_text):
             loc = resolve_evidence_quote(quote, canonical)
             if not loc: raise ValueError("invalid_evidence")
             if len(quote) < 4 and canonical.count(quote) > 1: raise ValueError("invalid_evidence")
-            if ref in refs: raise ValueError("invalid_evidence")
+            if ref in refs:
+                _warn(warnings, "reference_invalid", p+".client_ref")
+                raise ValueError("invalid_evidence")
             refs.add(ref); out["evidence"].append({"client_ref": ref, "type": typ, "normalized_value": normalized, "source_quote": quote, "source_locator": loc, "safe_excerpt": redact_pii(quote), "assertion_type": assertion, "confidence": conf})
         except ValueError as e: _warn(warnings, str(e), p)
     max_evidence = CANDIDATE_ANALYSIS_V3_CONTRACT["top"]["evidence"]["max"]
@@ -145,6 +155,8 @@ def normalize_candidate_analysis(data, resume_text):
         out["evidence"] = out["evidence"][:max_evidence]
     raw_dirs = data.get("directions", []) if isinstance(data.get("directions", []), list) else []
     max_directions = CANDIDATE_ANALYSIS_V3_CONTRACT["top"]["directions"]["max"]
+    if isinstance(data.get("directions"), list) and len(data["directions"]) > max_directions:
+        _warn(warnings, "invalid_type", "directions")
     for i, item in enumerate(raw_dirs[:max_directions]):
         p=f"directions[{i}]"
         if not isinstance(item, dict): _warn(warnings,"invalid_type",p); continue
@@ -153,6 +165,7 @@ def normalize_candidate_analysis(data, resume_text):
                 _warn(warnings,"unverified_field", f"{p}.{key}")
         for fld in ("client_ref","name","rationale"):
             if fld in item and not isinstance(item[fld], str): _warn(warnings,"invalid_type",p+"."+fld)
+        gaps_valid = isinstance(item.get("gaps", []), list) and all(isinstance(x,str) for x in item.get("gaps", []))
         for fld in ("gaps",):
             if fld in item and (not isinstance(item[fld], list) or not all(isinstance(x,str) for x in item[fld])): _warn(warnings,"invalid_type",p+"."+fld)
         if "confidence" in item:
@@ -167,12 +180,14 @@ def normalize_candidate_analysis(data, resume_text):
             _warn(warnings,"invalid_type", p + ".evidence_refs"); erefs = []
         valid_refs=[]; lost_ref=False
         for r in erefs:
-            if r in refs and r not in valid_refs: valid_refs.append(r)
+            if r in valid_refs:
+                _warn(warnings, "reference_invalid", p+".evidence_refs"); lost_ref=True
+            elif r in refs: valid_refs.append(r)
             elif r not in refs: _warn(warnings,"reference_invalid",p+".evidence_refs"); lost_ref=True
         max_terms = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["search_terms"]["max"]
         if len(terms)>max_terms: _warn(warnings,"invalid_type",p+".search_terms"); terms=[]
-        executable = 1 <= len(terms) <= max_terms and not lost_ref
-        out["directions"].append({"client_ref": item.get("client_ref", "") if isinstance(item.get("client_ref", ""),str) else "", "name": item.get("name", "") if isinstance(item.get("name", ""),str) else "", "type": typ, "rationale": item.get("rationale", "") if isinstance(item.get("rationale", ""),str) else "", "evidence_refs": valid_refs, "gaps": item.get("gaps", []) if isinstance(item.get("gaps", []),list) else [], "confidence": _confidence(item.get("confidence",0)) if isinstance(item.get("confidence",0),(int,float)) and not isinstance(item.get("confidence",0),bool) else 0, "default_enabled": bool(item.get("default_enabled",False)) and executable, "search_terms": terms[:max_terms]})
+        executable = 1 <= len(terms) <= max_terms and not lost_ref and gaps_valid
+        out["directions"].append({"client_ref": item.get("client_ref", "") if isinstance(item.get("client_ref", ""),str) else "", "name": item.get("name", "") if isinstance(item.get("name", ""),str) else "", "type": typ, "rationale": item.get("rationale", "") if isinstance(item.get("rationale", ""),str) else "", "evidence_refs": valid_refs, "gaps": item.get("gaps", []) if gaps_valid else [], "confidence": _confidence(item.get("confidence",0)) if isinstance(item.get("confidence",0),int) and not isinstance(item.get("confidence",0),bool) and 0 <= item.get("confidence",0) <= 100 else 0, "default_enabled": item.get("default_enabled",False) if isinstance(item.get("default_enabled",False),bool) else False, "search_terms": terms[:max_terms]})
     # Provider quality is informational only; validate its shape for diagnostics,
     # but retain the backend-derived quality object as the sole authority.
     provider_quality = data.get("quality")
@@ -185,8 +200,10 @@ def normalize_candidate_analysis(data, resume_text):
         _warn(warnings, "invalid_type", "quality")
     out["quality"]["warnings"] = warnings
     max_terms = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["search_terms"]["max"]
-    executable = any(1 <= len(d["search_terms"]) <= max_terms and d["evidence_refs"] == [r for r in d["evidence_refs"]] for d in out["directions"])
-    out["quality"]["status"] = "complete" if not warnings else ("partial" if executable else "manual_required")
+    executable = any(d["default_enabled"] and 1 <= len(d["search_terms"]) <= max_terms for d in out["directions"])
+    if not out["directions"]:
+        executable = False
+    out["quality"]["status"] = "manual_required" if not executable else ("partial" if warnings else "complete")
     return out
 
 
