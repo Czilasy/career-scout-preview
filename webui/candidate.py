@@ -84,7 +84,7 @@ def normalize_candidate_analysis(data, resume_text):
     elif data.get("contract_version") != CANDIDATE_ANALYSIS_V3_CONTRACT["version"]: _warn(warnings,"invalid_enum", "contract_version")
     for key in data:
         if key not in allowed:
-            _warn(warnings,"unverified_field", key)
+            _warn(warnings,"unverified_field", "root.extra")
     for key, spec in CANDIDATE_ANALYSIS_V3_CONTRACT["top"].items():
         if key not in data:
             _warn(warnings,"missing_required", key)
@@ -96,7 +96,7 @@ def normalize_candidate_analysis(data, resume_text):
     if isinstance(raw, dict):
         for key in raw:
             if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["summary"]:
-                _warn(warnings,"unverified_field", f"summary.{key}")
+                _warn(warnings,"unverified_field", "summary.extra")
         for key in ("headline", "experience_level"):
             spec = CANDIDATE_ANALYSIS_V3_CONTRACT["summary"][key]
             if isinstance(raw.get(key, ""), str) and len(raw.get(key, "")) <= spec["max_length"]: out["summary"][key] = raw.get(key, "")
@@ -123,7 +123,7 @@ def normalize_candidate_analysis(data, resume_text):
                 _warn(warnings,"invalid_type", path); continue
             for key in item:
                 if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["unknown"]:
-                    _warn(warnings,"unverified_field", f"{path}.{key}")
+                    _warn(warnings,"unverified_field", f"{path}.extra")
             field = item.get("field")
             if field not in CANDIDATE_ANALYSIS_V3_CONTRACT["unknown"]["field"]["enum"]:
                 _warn(warnings,"invalid_enum", path + ".field"); continue
@@ -144,7 +144,7 @@ def normalize_candidate_analysis(data, resume_text):
             if not isinstance(item, dict): raise ValueError("invalid_type")
             for key in item:
                 if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"] and key not in ("source_locator","safe_excerpt"):
-                    _warn(warnings,"unverified_field", f"{p}.{key}")
+                    _warn(warnings,"unverified_field", f"{p}.extra")
             ref, typ, quote, assertion = item.get("client_ref"), item.get("type"), item.get("source_quote"), item.get("assertion_type")
             ref_spec = CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["client_ref"]
             if not isinstance(ref, str) or not ref: raise ValueError("missing_required")
@@ -190,12 +190,15 @@ def normalize_candidate_analysis(data, resume_text):
         if not isinstance(item, dict): _warn(warnings,"invalid_type",p); continue
         for key in item:
             if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]:
-                _warn(warnings,"unverified_field", f"{p}.{key}")
+                _warn(warnings,"unverified_field", f"{p}.extra")
         scalar_values = {}
         scalar_valid = True
         for fld in ("client_ref","name","rationale"):
             spec = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"][fld]; value = item.get(fld, spec["empty"])
-            if not isinstance(value, str) or len(value) > spec["max_length"]:
+            if fld == "client_ref" and (not isinstance(value, str) or not value):
+                _warn(warnings,"missing_required",p+".client_ref")
+                value = spec["empty"]; scalar_valid = False
+            elif not isinstance(value, str) or len(value) > spec["max_length"]:
                 if fld in item: _warn(warnings,"invalid_type",p+"."+fld)
                 value = spec["empty"]; scalar_valid = False
             scalar_values[fld] = value
@@ -252,10 +255,11 @@ def normalize_candidate_analysis(data, resume_text):
                     if not isinstance(item, dict): _warn(warnings, "invalid_type", f"quality.warnings[{i}]")
                     else:
                         for field in item:
-                            if field not in ("code", "path"): _warn(warnings, "unverified_field", f"quality.warnings[{i}].{field}")
+                            if field not in ("code", "path"): _warn(warnings, "unverified_field", "quality.extra")
                         if not isinstance(item.get("code"), str): _warn(warnings, "invalid_type", f"quality.warnings[{i}].code")
                         elif item.get("code") not in CANDIDATE_ANALYSIS_V3_CONTRACT["warning_codes"]: _warn(warnings, "invalid_enum", f"quality.warnings[{i}].code")
                         if not isinstance(item.get("path"), str): _warn(warnings, "invalid_type", f"quality.warnings[{i}].path")
+                        elif not item.get("path"): _warn(warnings, "missing_required", f"quality.warnings[{i}].path")
     elif "quality" in data:
         _warn(warnings, "invalid_type", "quality")
     out["quality"]["warnings"] = warnings
