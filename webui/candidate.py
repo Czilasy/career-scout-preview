@@ -61,64 +61,72 @@ def _v3_warning(code, path):
         code = "invalid_type"
     return {"code": code, "path": str(path)}
 
+def _warn(warnings, code, path):
+    w = _v3_warning(code, path)
+    if w not in warnings:
+        warnings.append(w)
+
 def canonicalize_resume_text_v3(text):
     return unicodedata.normalize("NFC", str(text or "").replace("\r\n", "\n").replace("\r", "\n"))
 
 def normalize_candidate_analysis(data, resume_text):
     out = build_empty_candidate_analysis(); warnings = []
     if not isinstance(data, dict):
-        warnings.append(_v3_warning("invalid_type", "root")); out["quality"]["warnings"] = warnings; out["quality"]["status"] = "manual_required"; return out
+        _warn(warnings,"invalid_type", "root"); out["quality"]["warnings"] = warnings; out["quality"]["status"] = "manual_required"; return out
     allowed = set(CANDIDATE_ANALYSIS_V3_CONTRACT["top"])
-    if data.get("contract_version") != "v3": warnings.append(_v3_warning("invalid_enum", "contract_version"))
+    if not isinstance(data.get("contract_version"), str): _warn(warnings,"invalid_type", "contract_version")
+    elif data.get("contract_version") != CANDIDATE_ANALYSIS_V3_CONTRACT["version"]: _warn(warnings,"invalid_enum", "contract_version")
     for key in data:
         if key not in allowed:
-            warnings.append(_v3_warning("unverified_field", key))
+            _warn(warnings,"unverified_field", key)
     for key, spec in CANDIDATE_ANALYSIS_V3_CONTRACT["top"].items():
         if key not in data:
-            warnings.append(_v3_warning("missing_required", key))
+            _warn(warnings,"missing_required", key)
     raw = data.get("summary", {})
     if isinstance(raw, dict):
         for key in raw:
             if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["summary"]:
-                warnings.append(_v3_warning("unverified_field", f"summary.{key}"))
+                _warn(warnings,"unverified_field", f"summary.{key}")
         for key in ("headline", "experience_level"):
             if isinstance(raw.get(key, ""), str): out["summary"][key] = raw.get(key, "")
-            elif key in raw: warnings.append(_v3_warning("invalid_type", f"summary.{key}"))
+            elif key in raw: _warn(warnings,"invalid_type", f"summary.{key}")
         for key in ("domains", "strengths"):
             if isinstance(raw.get(key, []), list) and all(isinstance(x, str) for x in raw.get(key, [])): out["summary"][key] = raw.get(key, [])
-            elif key in raw: warnings.append(_v3_warning("invalid_type", f"summary.{key}"))
-    elif "summary" in data: warnings.append(_v3_warning("invalid_type", "summary"))
+            elif key in raw: _warn(warnings,"invalid_type", f"summary.{key}")
+    elif "summary" in data: _warn(warnings,"invalid_type", "summary")
     canonical = canonicalize_resume_text_v3(resume_text); refs = set()
     raw_unknowns = data.get("unknowns", [])
     if isinstance(raw_unknowns, list):
         for i, item in enumerate(raw_unknowns):
             path = f"unknowns[{i}]"
             if not isinstance(item, dict):
-                warnings.append(_v3_warning("invalid_type", path)); continue
+                _warn(warnings,"invalid_type", path); continue
             for key in item:
                 if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["unknown"]:
-                    warnings.append(_v3_warning("unverified_field", f"{path}.{key}"))
+                    _warn(warnings,"unverified_field", f"{path}.{key}")
             field = item.get("field")
             if field not in UNKNOWN_FIELDS:
-                warnings.append(_v3_warning("invalid_enum", path + ".field")); continue
+                _warn(warnings,"invalid_enum", path + ".field"); continue
             message = item.get("message", "")
             if not isinstance(message, str):
-                warnings.append(_v3_warning("invalid_type", path + ".message")); message = ""
+                _warn(warnings,"invalid_type", path + ".message"); message = ""
             out["unknowns"].append({"field": field, "message": message})
     elif "unknowns" in data:
-        warnings.append(_v3_warning("invalid_type", "unknowns"))
+        _warn(warnings,"invalid_type", "unknowns")
+    if "evidence" in data and not isinstance(data.get("evidence"), list): _warn(warnings,"invalid_type","evidence")
     for i, item in enumerate(data.get("evidence", []) if isinstance(data.get("evidence", []), list) else []):
         p = f"evidence[{i}]"
         try:
             if not isinstance(item, dict): raise ValueError("invalid_type")
             for key in item:
                 if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"] and key not in ("source_locator","safe_excerpt"):
-                    raise ValueError("unverified_field")
+                    _warn(warnings,"unverified_field", f"{p}.{key}")
             ref, typ, quote, assertion = item.get("client_ref"), item.get("type"), item.get("source_quote"), item.get("assertion_type")
             if not isinstance(ref, str) or not ref: raise ValueError("missing_required")
             if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["type"]["enum"] or assertion not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["assertion_type"]["enum"]: raise ValueError("invalid_enum")
             if not isinstance(quote, str) or not quote: raise ValueError("missing_required")
-            conf = item.get("confidence"); conf = _confidence(conf)
+            try: conf = _confidence(item.get("confidence"))
+            except ValueError: _warn(warnings,"invalid_type",p+".confidence"); continue
             if _is_sensitive(quote): raise ValueError("sensitive_value")
             quote = canonicalize_resume_text_v3(quote)
             loc = resolve_evidence_quote(quote, canonical)
@@ -126,25 +134,33 @@ def normalize_candidate_analysis(data, resume_text):
             if len(quote) < 4 and canonical.count(quote) > 1: raise ValueError("invalid_evidence")
             if ref in refs: raise ValueError("invalid_evidence")
             refs.add(ref); out["evidence"].append({"client_ref": ref, "type": typ, "normalized_value": item.get("normalized_value", "") if isinstance(item.get("normalized_value", ""), str) else "", "source_quote": quote, "source_locator": loc, "safe_excerpt": redact_pii(quote), "assertion_type": assertion, "confidence": conf})
-        except ValueError as e: warnings.append(_v3_warning(str(e), p))
+        except ValueError as e: _warn(warnings, str(e), p)
     raw_dirs = data.get("directions", []) if isinstance(data.get("directions", []), list) else []
     for i, item in enumerate(raw_dirs[:MAX_DIRECTIONS]):
         p=f"directions[{i}]"
-        if not isinstance(item, dict): warnings.append(_v3_warning("invalid_type",p)); continue
+        if not isinstance(item, dict): _warn(warnings,"invalid_type",p); continue
         for key in item:
             if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]:
-                warnings.append(_v3_warning("unverified_field", f"{p}.{key}"))
+                _warn(warnings,"unverified_field", f"{p}.{key}")
+        for fld in ("client_ref","name","rationale"):
+            if fld in item and not isinstance(item[fld], str): _warn(warnings,"invalid_type",p+"."+fld)
+        for fld in ("gaps",):
+            if fld in item and (not isinstance(item[fld], list) or not all(isinstance(x,str) for x in item[fld])): _warn(warnings,"invalid_type",p+"."+fld)
+        if "confidence" in item:
+            try: _confidence(item["confidence"])
+            except ValueError: _warn(warnings,"invalid_type",p+".confidence")
+        if "default_enabled" in item and not isinstance(item["default_enabled"], bool): _warn(warnings,"invalid_type",p+".default_enabled")
         typ=item.get("type"); terms=item.get("search_terms", []); erefs=item.get("evidence_refs", [])
-        if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["type"]["enum"]: warnings.append(_v3_warning("invalid_enum",p+".type")); continue
+        if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["type"]["enum"]: _warn(warnings,"invalid_enum",p+".type"); continue
         if not isinstance(terms, list) or not all(isinstance(x, str) for x in terms):
-            warnings.append(_v3_warning("invalid_type", p + ".search_terms")); terms = []
+            _warn(warnings,"invalid_type", p + ".search_terms"); terms = []
         if not isinstance(erefs, list) or not all(isinstance(x, str) for x in erefs):
-            warnings.append(_v3_warning("invalid_type", p + ".evidence_refs")); erefs = []
+            _warn(warnings,"invalid_type", p + ".evidence_refs"); erefs = []
         valid_refs=[]; lost_ref=False
         for r in erefs:
             if r in refs and r not in valid_refs: valid_refs.append(r)
-            elif r not in refs: warnings.append(_v3_warning("reference_invalid",p+".evidence_refs")); lost_ref=True
-        if len(terms)>3: warnings.append(_v3_warning("invalid_type",p+".search_terms")); terms=[]
+            elif r not in refs: _warn(warnings,"reference_invalid",p+".evidence_refs"); lost_ref=True
+        if len(terms)>3: _warn(warnings,"invalid_type",p+".search_terms"); terms=[]
         executable = 1 <= len(terms) <= 3 and not lost_ref
         out["directions"].append({"client_ref": item.get("client_ref", "") if isinstance(item.get("client_ref", ""),str) else "", "name": item.get("name", "") if isinstance(item.get("name", ""),str) else "", "type": typ, "rationale": item.get("rationale", "") if isinstance(item.get("rationale", ""),str) else "", "evidence_refs": valid_refs, "gaps": item.get("gaps", []) if isinstance(item.get("gaps", []),list) else [], "confidence": _confidence(item.get("confidence",0)) if isinstance(item.get("confidence",0),(int,float)) and not isinstance(item.get("confidence",0),bool) else 0, "default_enabled": bool(item.get("default_enabled",False)) and executable, "search_terms": terms[:MAX_SEARCH_TERMS]})
     out["quality"]["warnings"] = warnings
