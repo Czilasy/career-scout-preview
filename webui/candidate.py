@@ -103,11 +103,11 @@ def normalize_candidate_analysis(data, resume_text):
         if typ not in DIRECTION_TYPES: warnings.append(_v3_warning("invalid_enum",p+".type")); continue
         terms = terms if isinstance(terms,list) and all(isinstance(x,str) for x in terms) else []
         erefs = erefs if isinstance(erefs,list) and all(isinstance(x,str) for x in erefs) else []
-        valid_refs=[]
+        valid_refs=[]; lost_ref=False
         for r in erefs:
             if r in refs and r not in valid_refs: valid_refs.append(r)
-            elif r not in refs: warnings.append(_v3_warning("reference_invalid",p+".evidence_refs"))
-        executable = 1 <= len(terms) <= MAX_SEARCH_TERMS and bool(valid_refs)
+            elif r not in refs: warnings.append(_v3_warning("reference_invalid",p+".evidence_refs")); lost_ref=True
+        executable = 1 <= len(terms) <= MAX_SEARCH_TERMS and bool(valid_refs) and not lost_ref
         out["directions"].append({"client_ref": item.get("client_ref", "") if isinstance(item.get("client_ref", ""),str) else "", "name": item.get("name", "") if isinstance(item.get("name", ""),str) else "", "type": typ, "rationale": item.get("rationale", "") if isinstance(item.get("rationale", ""),str) else "", "evidence_refs": valid_refs, "gaps": item.get("gaps", []) if isinstance(item.get("gaps", []),list) else [], "confidence": _confidence(item.get("confidence",0)) if isinstance(item.get("confidence",0),(int,float)) and not isinstance(item.get("confidence",0),bool) else 0, "default_enabled": bool(item.get("default_enabled",False)) and executable, "search_terms": terms[:MAX_SEARCH_TERMS]})
     out["quality"]["warnings"] = warnings
     executable = any(d["default_enabled"] and d["search_terms"] for d in out["directions"])
