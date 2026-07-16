@@ -6,48 +6,31 @@ AI contracts are versioned, deterministic where provider support allows, and val
 
 Version 3 is the backend-owned canonical result. The backend supplies typed empty values and quarantines invalid fields independently; one invalid evidence item never discards a valid summary. `contract_version` is always `v3`. The canonical quality shape is `quality {status: "complete|partial|manual_required", warnings: []}`.
 
+The canonical empty result is exact JSON: `{"contract_version":"v3","summary":{"headline":"","experience_level":"","domains":[],"strengths":[]},"evidence":[],"unknowns":[],"directions":[],"quality":{"status":"complete","warnings":[]}}`. Backend normalization owns this shape; provider omissions are filled with these typed empties.
+
 Required top-level fields (backend-owned typed empty shape; backend-owned typed empty values):
 
 ```json
 {
   "contract_version": "v3",
   "summary": {
-    "headline": "string",
-    "experience_level": "string or empty",
-    "domains": ["string"],
-    "strengths": ["string"]
+    "headline": "",
+    "experience_level": "",
+    "domains": [],
+    "strengths": []
   },
-  "evidence": [
-    {
-      "client_ref": "e1",
-      "type": "skill|responsibility|project|industry|seniority|education|achievement|other",
-      "normalized_value": "string",
-      "source_quote": "minimal exact substring copied from the supplied resume",
-      "assertion_type": "explicit|inferred",
-      "confidence": 0
-    }
-  ],
-  "unknowns": [
-    {"field": "current_city|min_salary|career_intent|other", "message": "string"}
-  ],
-  "directions": [
-    {
-      "client_ref": "d1",
-      "name": "string",
-      "type": "core|adjacent|growth",
-      "rationale": "string",
-      "evidence_refs": ["e1"],
-      "gaps": ["string"],
-      "confidence": 0,
-      "default_enabled": true,
-      "search_terms": ["string"]
-    }
-  ],
+  "evidence": [],
+  "unknowns": [],
+  "directions": [],
   "quality": {"status": "complete", "warnings": []}
 }
 ```
 
 Program validation:
+
+- JSON types are strict: strings are JSON strings; lists contain only strings; `confidence` is an integer from 0 through 100; `default_enabled` is boolean. Allowed enums are evidence `type` = `skill|responsibility|project|industry|seniority|education|achievement|other`, assertion `explicit|inferred`, unknown field `current_city|min_salary|career_intent|other`, direction `type` = `core|adjacent|growth`, and quality status `complete|partial|manual_required`. At most 5 directions and 3 search terms per direction are allowed.
+- A warning object is exactly `{`code`, `path`}` with both non-empty strings; no other keys or raw provider/resume text are allowed. Allowed codes are `invalid_type`, `invalid_enum`, `invalid_evidence`, `sensitive_value`, `unverified_field`, `missing_required`, and `reference_invalid`.
+- `warnings` is an array of warning objects. warnings is an array.
 
 - Canonical resume text is derived with the contract's versioned Unicode normalization rule; offsets are Unicode code-point indexes into this exact text.
 - Every `source_quote` must be a minimal exact substring of canonical resume text and must resolve uniquely. A repeated quote requires additional surrounding text; fuzzy or arbitrary first-match selection is forbidden.

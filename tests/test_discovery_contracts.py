@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import tempfile
 import time
@@ -30,27 +31,39 @@ class CandidateAnalysisV3ContractTests(unittest.TestCase):
         cls.ai_contract = (cls.root / "specs/004-resume-job-discovery/contracts/ai-contracts.md").read_text(encoding="utf-8")
         cls.data_model = (cls.root / "specs/004-resume-job-discovery/data-model.md").read_text(encoding="utf-8")
         cls.state_machine = (cls.root / "specs/004-resume-job-discovery/contracts/state-machine.md").read_text(encoding="utf-8")
+        block = re.search(r"## Candidate analysis provider output v3.*?```json\n(.*?)\n```", cls.ai_contract, re.S)
+        cls.shape = json.loads(block.group(1)) if block else None
 
     def test_candidate_v3_has_backend_owned_typed_empty_shape(self):
-        self.assertIn("Candidate analysis provider output v3", self.ai_contract)
-        self.assertIn('"contract_version": "v3"', self.ai_contract)
-        self.assertIn('quality {status: "complete|partial|manual_required", warnings: []}', self.ai_contract)
-        self.assertIn("backend-owned typed empty values", self.ai_contract)
+        self.assertEqual(self.shape, {
+            "contract_version": "v3",
+            "summary": {"headline": "", "experience_level": "", "domains": [], "strengths": []},
+            "evidence": [], "unknowns": [], "directions": [],
+            "quality": {"status": "complete", "warnings": []},
+        })
 
     def test_one_invalid_evidence_item_does_not_discard_valid_summary(self):
-        self.assertIn("invalid evidence item is quarantined", self.ai_contract)
-        self.assertIn("valid summary", self.ai_contract)
+        self.assertIn("invalid evidence item is quarantined without discarding the valid summary", self.ai_contract)
+        self.assertIn("quality.status=partial", self.data_model)
         self.assertNotIn("partial unvalidated output is not persisted as ready", self.ai_contract)
 
     def test_unverified_search_fields_never_become_confirmed_constraints(self):
-        for phrase in ("quarantined fields cannot influence confirmation", "SearchPlan", "scraper inputs"):
-            self.assertIn(phrase, self.ai_contract)
+        self.assertRegex(self.ai_contract, r"quarantined fields cannot influence confirmation, SearchPlan compilation, matching, or scraper inputs")
+        self.assertIn("unverified search fields never become confirmed constraints", self.ai_contract)
+        self.assertIn("analysis stages are", self.state_machine.lower())
+        self.assertRegex(self.data_model, r"`status`\s*\|\s*`queued`, `analyzing`, `ready`, `failed`, `deleted`")
+        self.assertIn("ready` with `quality.status=partial` or `manual_required`", self.data_model)
 
     def test_identity_fields_are_not_candidate_or_search_fields(self):
-        self.assertIn("Identity fields", self.ai_contract)
-        self.assertIn("name", self.ai_contract)
-        self.assertIn("exact address", self.ai_contract)
-        self.assertIn("excluded from candidate and search fields", self.ai_contract)
+        self.assertRegex(self.ai_contract, r"Identity fields .* excluded from candidate and search fields")
+
+    def test_warning_schema_codes_and_field_types_are_closed(self):
+        self.assertRegex(self.ai_contract, r"warning object.*\{`?code`?, `?path`?\}")
+        for code in ("invalid_type", "invalid_enum", "invalid_evidence", "sensitive_value", "unverified_field"):
+            self.assertIn(f"`{code}`", self.ai_contract)
+        self.assertIn("warnings is an array", self.ai_contract)
+        self.assertIn("confidence", self.ai_contract)
+        self.assertIn("integer from 0 through 100", self.ai_contract)
 
 
 # Resume text used by HTTP contract tests. Kept脱敏: no phone/ID/address.
