@@ -789,6 +789,24 @@ class CandidateV3NormalizerTests(unittest.TestCase):
     def test_missing_normalized_value_is_accepted_as_empty(self):
         d=self._payload(); d["evidence"][0].pop("normalized_value"); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["evidence"][0]["normalized_value"],"")
 
+    def test_empty_builder_follows_all_contract_empties(self):
+        c=candidate.CANDIDATE_ANALYSIS_V3_CONTRACT; top=c["top"]; saved={k:copy.deepcopy(top[k]["empty"]) for k in top if "empty" in top[k]}
+        try:
+            top["contract_version"]["empty"]="sentinel"; top["evidence"]["empty"]=["x"]; top["unknowns"]["empty"]=["x"]; top["directions"]["empty"]=["x"]; top["quality"]["empty"]={"status":"partial","warnings":[]}
+            o=candidate.build_empty_candidate_analysis(); self.assertEqual(o["contract_version"],"sentinel"); self.assertEqual(o["evidence"],["x"]); self.assertEqual(o["quality"]["status"],"partial")
+        finally:
+            for k,v in saved.items(): top[k]["empty"]=v
+
+    def test_provider_quality_malformed_fields_warn_and_partial(self):
+        d=self._payload(); d["quality"]={"status":"bogus","warnings":"raw","extra":1}; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); ws=o["quality"]["warnings"]
+        self.assertIn({"code":"invalid_enum","path":"quality.status"},ws); self.assertNotIn("raw",str(o)); self.assertTrue(any(w["path"]=="quality.extra" for w in ws)); self.assertEqual(o["quality"]["status"],"partial")
+
+    def test_non_dict_evidence_members_quarantined_sibling_retained(self):
+        d=self._payload(); d["evidence"]=[3,None,d["evidence"][0]]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(len(o["evidence"]),1); self.assertIn({"code":"invalid_type","path":"evidence[0]"},o["quality"]["warnings"])
+
+    def test_wrong_normalized_value_has_field_warning(self):
+        d=self._payload(); d["evidence"][0]["normalized_value"]=3; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertEqual(o["evidence"],[]); self.assertIn({"code":"invalid_type","path":"evidence[0].normalized_value"},o["quality"]["warnings"])
+
     def test_duplicate_refs_warn_and_nonstring_refs_disable(self):
         d=self._payload(); d["directions"][0]["evidence_refs"]=["e1","e1"]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertTrue(any(w["code"]=="reference_invalid" for w in o["quality"]["warnings"]))
         d=self._payload(); d["directions"][0]["evidence_refs"]=[1]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验"); self.assertFalse(o["directions"][0]["default_enabled"])
