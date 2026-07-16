@@ -61,7 +61,7 @@ class CandidateAnalysisV3ContractTests(unittest.TestCase):
         self.assertRegex(self.ai_contract, r"warning object.*\{`?code`?, `?path`?\}")
         for code in ("invalid_type", "invalid_enum", "invalid_evidence", "sensitive_value", "unverified_field", "missing_required", "reference_invalid"):
             self.assertIn(f"`{code}`", self.ai_contract)
-        self.assertIn("warnings is an array", self.ai_contract)
+        self.assertIn("`warnings` is an array", self.ai_contract)
         self.assertIn("confidence", self.ai_contract)
         self.assertIn("integer from 0 through 100", self.ai_contract)
 
@@ -76,6 +76,12 @@ class CandidateAnalysisV3ContractTests(unittest.TestCase):
         self.assertIn("maximum of 5 items", self.ai_contract)
         self.assertIn("generic string-list rule does not apply", self.ai_contract)
         self.assertIn("object arrays are never coerced", self.ai_contract)
+
+    def test_invalid_evidence_is_dropped_and_refs_cannot_enable_direction(self):
+        self.assertIn("dropped entirely from normalized `evidence`", self.ai_contract)
+        self.assertIn("`source_quote` cannot be empty for an accepted evidence item", self.ai_contract)
+        self.assertIn("Directions referencing dropped evidence lose those refs", self.ai_contract)
+        self.assertIn("Every accepted/persisted evidence item", self.ai_contract)
 
 
 # Resume text used by HTTP contract tests. Kept脱敏: no phone/ID/address.
