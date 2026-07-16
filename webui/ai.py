@@ -697,7 +697,7 @@ class DiscoveryAIProvider:
 
     Holds only endpoint/model/api_key. Does not read or write TaskStore.
     Maps low-level AI errors to feature-safe error codes (ai_* prefix).
-    Allows up to two corrective retries for a structurally invalid response.
+    Allows one corrective request for a normalized partial/manual response.
     Never persists or returns raw model responses, prompts or API keys.
     """
 
@@ -706,24 +706,16 @@ class DiscoveryAIProvider:
         self.model = model
         self.api_key = api_key
 
-    # -- Candidate analysis v2 (T106: locator enrichment) --
+    # -- Candidate analysis v3 --
 
     def analyze(self, *, resume_text: str) -> dict:
-        """Call AI to analyze a resume and return a v2 candidate response.
+        """Return a normalized v3 candidate analysis.
 
-        Constructs the v2 prompt, calls call_ai, maps errors to feature-safe
-        codes, and allows up to two corrective retries for structural failures.
-
-        T106 v2 locator enrichment:
-        - Canonicalizes resume text (Unicode code-point offsets).
-        - For each evidence, resolves ``source_quote`` to a program-generated
-          ``source_locator`` via ``resolve_evidence_quote``.
-        - Ignores any model-provided ``source_locator``.
-        - Derives ``safe_excerpt`` locally from the quote (redacted).
-        - If any quote cannot be resolved (not_found / ambiguous / sensitive),
-          the entire response is treated as structurally invalid — no partial
-          ready is returned.
-        - Does not persist the raw response.
+        Unparseable output and transport failures are terminal. A parseable
+        partial/manual result gets one corrective request containing only safe
+        warning codes and structural paths. Backend-owned locator, excerpt and
+        quality fields are derived by the normalizer; raw provider output is
+        never returned or persisted.
         """
         messages = self._build_analyze_messages(resume_text)
         original = None
@@ -882,11 +874,24 @@ class DiscoveryAIProvider:
     def _build_analyze_messages(resume_text: str) -> list:
         # Provider-owned canonical schema; quality and generated locator fields
         # are intentionally omitted from this section.
-        contract = copy.deepcopy(CANDIDATE_ANALYSIS_V3_CONTRACT)
-        contract["top"].pop("quality", None)
-        contract["evidence"].pop("source_locator", None)
-        contract["evidence"].pop("safe_excerpt", None)
-        schema = json.dumps(contract, ensure_ascii=False, default=list)
+        contract = CANDIDATE_ANALYSIS_V3_CONTRACT
+        provider_contract = {
+            "version": contract["version"],
+            "top": {
+                key: copy.deepcopy(spec)
+                for key, spec in contract["top"].items()
+                if spec.get("provider_owned", True)
+            },
+            "summary": copy.deepcopy(contract["summary"]),
+            "evidence": {
+                key: copy.deepcopy(spec)
+                for key, spec in contract["evidence"].items()
+                if spec.get("provider_owned", True)
+            },
+            "unknown": copy.deepcopy(contract["unknown"]),
+            "direction": copy.deepcopy(contract["direction"]),
+        }
+        schema = json.dumps(provider_contract, ensure_ascii=False, default=list)
         example = json.dumps({k: v for k, v in build_empty_candidate_analysis().items() if k != "quality"}, ensure_ascii=False)
         return [
             {

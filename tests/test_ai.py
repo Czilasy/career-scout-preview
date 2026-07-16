@@ -1075,19 +1075,13 @@ class DiscoveryAIProviderTests(unittest.TestCase):
 
     # -- 单次纠正重试（call_ai 成功返回但结构无效） --
 
-    def test_structurally_invalid_response_triggers_one_corrective_retry(self):
+    def test_unrecognizable_response_is_terminal_without_retry(self):
         provider = self.ProviderClass("e", "m", "k")
-        invalid_response = {}  # 缺顶层字段
-        valid_response = self._valid_v2_response()
-        call_count = [0]
-
-        def side_effect(*args, **kwargs):
-            call_count[0] += 1
-            return invalid_response if call_count[0] == 1 else valid_response
-
-        with patch("webui.ai.call_ai", side_effect=side_effect):
-            provider.analyze(resume_text=self._resume_text())
-        self.assertEqual(call_count[0], 2)
+        with patch("webui.ai.call_ai", return_value={}) as call:
+            with self.assertRaises(self.AISecurityError) as ctx:
+                provider.analyze(resume_text=self._resume_text())
+        self.assertEqual(ctx.exception.error_code, "ai_invalid_output")
+        self.assertEqual(call.call_count, 1)
 
     def test_second_invalid_response_raises_ai_invalid_output(self):
         provider = self.ProviderClass("e", "m", "k")
@@ -1169,42 +1163,45 @@ class DiscoveryAIProviderTests(unittest.TestCase):
             self.assertIsInstance(ev["safe_excerpt"], str)
             self.assertTrue(ev["safe_excerpt"])  # 非空
 
-    def test_analyze_rejects_quote_not_found(self):
-        """source_quote 不在简历中 → ai_invalid_output。"""
+    def test_analyze_quarantines_quote_not_found(self):
+        """source_quote 不在简历中时丢弃该证据并返回降级结果。"""
         provider = self.ProviderClass("e", "m", "k")
         response = self._valid_v2_response()
         response["evidence"][0]["source_quote"] = "不存在的经历描述xyz"
-        with patch("webui.ai.call_ai", return_value=response):
-            with self.assertRaises(self.AISecurityError) as ctx:
-                provider.analyze(resume_text=self._resume_text())
-            self.assertEqual(ctx.exception.error_code, "ai_invalid_output")
+        with patch("webui.ai.call_ai", return_value=response) as call:
+            result = provider.analyze(resume_text=self._resume_text())
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(result["evidence"], [])
+        self.assertIn({"code": "invalid_evidence", "path": "evidence[0]"}, result["quality"]["warnings"])
 
-    def test_analyze_rejects_ambiguous_quote(self):
-        """source_quote 重复出现 → ai_invalid_output。"""
+    def test_analyze_quarantines_ambiguous_quote(self):
+        """source_quote 重复出现时丢弃该证据并返回降级结果。"""
         provider = self.ProviderClass("e", "m", "k")
         response = self._valid_v2_response()
         # "Python" 在简历中出现多次
         response["evidence"][0]["source_quote"] = "Python"
         resume = "Python 后端经验，5年开发，Python 熟悉 Django/Flask"
-        with patch("webui.ai.call_ai", return_value=response):
-            with self.assertRaises(self.AISecurityError) as ctx:
-                provider.analyze(resume_text=resume)
-            self.assertEqual(ctx.exception.error_code, "ai_invalid_output")
+        with patch("webui.ai.call_ai", return_value=response) as call:
+            result = provider.analyze(resume_text=resume)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(result["evidence"], [])
+        self.assertIn({"code": "invalid_evidence", "path": "evidence[0]"}, result["quality"]["warnings"])
 
-    def test_analyze_rejects_sensitive_quote(self):
-        """source_quote 含敏感信息 → ai_invalid_output。"""
+    def test_analyze_quarantines_sensitive_quote(self):
+        """source_quote 含敏感信息时丢弃该证据并返回降级结果。"""
         provider = self.ProviderClass("e", "m", "k")
         response = self._valid_v2_response()
         response["evidence"][0]["source_quote"] = "13912345678"
         # 简历中包含该号码以便 find 能匹配，但应被敏感检测拒绝
         resume = "Python 后端经验，电话 13912345678，5年开发"
-        with patch("webui.ai.call_ai", return_value=response):
-            with self.assertRaises(self.AISecurityError) as ctx:
-                provider.analyze(resume_text=resume)
-            self.assertEqual(ctx.exception.error_code, "ai_invalid_output")
+        with patch("webui.ai.call_ai", return_value=response) as call:
+            result = provider.analyze(resume_text=resume)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(result["evidence"], [])
+        self.assertIn({"code": "sensitive_value", "path": "evidence[0]"}, result["quality"]["warnings"])
 
-    def test_analyze_does_not_return_partial_ready(self):
-        """一个 evidence quote 无法解析 → 整个响应失败，不返回部分 ready。"""
+    def test_analyze_preserves_valid_evidence_when_one_quote_is_invalid(self):
+        """一个 quote 无法解析时保留其他有效证据并返回 partial。"""
         provider = self.ProviderClass("e", "m", "k")
         response = self._valid_v2_response()
         response["evidence"].append({
@@ -1221,9 +1218,10 @@ class DiscoveryAIProviderTests(unittest.TestCase):
             call_count[0] += 1
             return response
         with patch("webui.ai.call_ai", side_effect=side_effect):
-            with self.assertRaises(self.AISecurityError) as ctx:
-                provider.analyze(resume_text=self._resume_text())
-            self.assertEqual(ctx.exception.error_code, "ai_invalid_output")
+            result = provider.analyze(resume_text=self._resume_text())
+        self.assertEqual(call_count[0], 2)
+        self.assertEqual([item["client_ref"] for item in result["evidence"]], ["e1"])
+        self.assertEqual(result["quality"]["status"], "partial")
 
     def test_analyze_v2_retry_on_locator_failure_then_success(self):
         """locator 失败触发一次重试，重试返回可解析 quote → 成功。"""
@@ -1248,8 +1246,9 @@ class DiscoveryAIProviderTests(unittest.TestCase):
 
     @staticmethod
     def _valid_v2_response() -> dict:
-        """最小结构合法的 v2 候选人分析响应（用于驱动 T099 最小结构检查）。"""
+        """最小结构合法的候选人分析响应。"""
         return {
+            "contract_version": "v3",
             "summary": {
                 "headline": "后端开发工程师",
                 "experience_level": "中级",
@@ -1299,37 +1298,93 @@ class CandidateV3ProviderAdapterTests(unittest.TestCase):
         return getattr(self.candidate, "CANDIDATE_ANALYSIS_V3_CONTRACT")
 
     def _empty(self):
-        c = self._contract()
-        return c.build_empty() if hasattr(c, "build_empty") else self.candidate.build_empty()
+        return self.candidate.build_empty_candidate_analysis()
 
     def _cleanup(self, value):
         fn = getattr(self.ai, "cleanup_candidate_analysis_response", None) or getattr(self.ai, "_cleanup_candidate_response")
         return fn(value)
 
-    def test_v3_schema_covers_provider_fields_once(self):
+    def _schema(self):
         text = self.provider._build_analyze_messages("resume")[0]["content"]
-        self.assertIn("CANDIDATE_ANALYSIS_V3_CONTRACT", text)
-        self.assertEqual(text.count("source_locator"), 1)
+        begin = "CANONICAL_CANDIDATE_V3_SCHEMA_BEGIN"
+        end = "CANONICAL_CANDIDATE_V3_SCHEMA_END"
+        self.assertIn(begin, text)
+        self.assertIn(end, text)
+        encoded = text.split(begin, 1)[1].split(end, 1)[0].strip()
+        return json.loads(encoded)
+
+    def _provider_projection(self):
+        contract = self._contract()
+        top = {key: value for key, value in contract["top"].items() if key != "quality"}
+        evidence = {
+            key: value for key, value in contract["evidence"].items()
+            if key not in {"source_locator", "safe_excerpt"}
+        }
+        return {
+            "version": contract["version"],
+            "top": top,
+            "summary": contract["summary"],
+            "evidence": evidence,
+            "unknown": contract["unknown"],
+            "direction": contract["direction"],
+        }
+
+    def _keys(self, value):
+        out = set()
+        if isinstance(value, dict):
+            for k, v in value.items():
+                out.add(k); out |= self._keys(v)
+        elif isinstance(value, list):
+            for v in value: out |= self._keys(v)
+        return out
+
+    @staticmethod
+    def _resume():
+        return "候选人具备 Python 后端经验，负责订单系统。"
+
+    def _complete(self):
+        return {
+            "contract_version": "v3",
+            "summary": {"headline": "后端工程师", "experience_level": "senior", "domains": ["互联网"], "strengths": ["Python"]},
+            "evidence": [{"client_ref": "e1", "type": "skill", "normalized_value": "Python", "source_quote": "Python 后端经验", "assertion_type": "explicit", "confidence": 90}],
+            "unknowns": [],
+            "directions": [{"client_ref": "d1", "name": "后端开发工程师", "type": "core", "rationale": "5年后端经验", "evidence_refs": ["e1"], "gaps": [], "confidence": 90, "default_enabled": True, "search_terms": ["Python 后端"]}],
+        }
+
+    def _partial(self):
+        value = self._complete(); value["summary"]["strengths"] = ["Python", 1]; return value
+
+    def _manual(self):
+        value = self._complete(); value["directions"][0]["search_terms"] = []; return value
+
+    def test_v3_schema_covers_provider_fields_once(self):
+        self.assertEqual(self._schema(), json.loads(json.dumps(self._provider_projection())))
 
     def test_v3_typed_empty_is_exact(self):
         empty = self._empty()
         self.assertIsInstance(empty, dict)
-        self.assertEqual(empty, self._contract().build_empty())
+        self.assertEqual(empty, self.candidate.build_empty_candidate_analysis())
 
     def test_identity_fields_are_not_provider_output_fields(self):
-        schema = self.provider._build_analyze_messages("resume")[0]["content"]
-        for field in ("name", "phone", "email", "identity"):
-            self.assertNotIn(field, schema)
+        keys = self._keys(self._schema())
+        for field in ("full_name", "phone", "email", "gender", "age", "id_number", "exact_address"):
+            self.assertNotIn(field, keys)
+        self.assertIn("name", self._keys(self._schema().get("direction", {})))
 
     def test_locator_excerpt_quality_are_program_owned(self):
-        schema = self.provider._build_analyze_messages("resume")[0]["content"]
-        self.assertNotIn('"source_locator"', schema)
-        self.assertNotIn('"safe_excerpt"', schema)
-        self.assertNotIn('"quality"', schema)
-        self.assertNotIn("offset", schema.lower())
+        keys = self._keys(self._schema())
+        for field in ("source_locator", "safe_excerpt", "quality", "offset"):
+            self.assertNotIn(field, keys)
 
     def test_response_format_is_json_object(self):
-        self.assertEqual(self.provider._build_analyze_messages("resume")[-1].get("response_format", {"type":"json_object"}), {"type":"json_object"})
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "choices": [{"message": {"content": json.dumps(self._complete())}}]
+        }
+        with patch("webui.ai.requests.post", return_value=response) as post:
+            self.ai.call_ai("https://example.test", "key", [{"role": "user", "content": "x"}])
+        self.assertEqual(post.call_args.kwargs["json"]["response_format"], {"type": "json_object"})
 
     def test_cleanup_accepts_plain_json(self):
         value = self._empty(); self.assertEqual(self._cleanup(json.dumps(value)), value)
@@ -1353,53 +1408,62 @@ class CandidateV3ProviderAdapterTests(unittest.TestCase):
         value = self._empty(); out = self._cleanup(json.dumps(value)); self.assertEqual(out, value)
 
     def test_complete_v3_result_does_not_retry(self):
-        with patch("webui.ai.call_ai", return_value=self._empty()) as call:
-            self.provider.analyze(resume_text="resume")
+        with patch("webui.ai.call_ai", return_value=self._complete()) as call:
+            self.provider.analyze(resume_text=self._resume())
         self.assertEqual(call.call_count, 1)
 
     def test_partial_result_triggers_one_correction_with_safe_diagnostics(self):
-        partial = {"status":"partial"}; good = self._empty()
+        partial = self._partial(); good = self._complete()
         with patch("webui.ai.call_ai", side_effect=[partial, good]) as call:
-            self.provider.analyze(resume_text="resume")
+            self.provider.analyze(resume_text=self._resume())
         self.assertEqual(call.call_count, 2)
-        correction = call.call_args_list[1].args[2][0]["content"]
-        self.assertNotIn("resume", correction)
+        correction_messages = call.call_args_list[1].args[2]
+        self.assertEqual(correction_messages[-2]["role"], "assistant")
+        self.assertEqual(correction_messages[-1]["role"], "user")
+        correction = correction_messages[-1]["content"]
+        self.assertNotIn(self._resume(), correction)
+        self.assertNotIn("Python 后端经验", correction)
+        self.assertNotIn("互联网", correction)
+        diagnostics = json.loads(correction.split("：", 1)[1])
+        self.assertTrue(diagnostics)
+        self.assertTrue(all(set(item) == {"code", "path"} for item in diagnostics))
 
     def test_manual_required_triggers_one_correction(self):
-        with patch("webui.ai.call_ai", side_effect=[{"status":"manual_required"}, self._empty()]) as call:
-            self.provider.analyze(resume_text="resume")
+        with patch("webui.ai.call_ai", side_effect=[self._manual(), self._complete()]) as call:
+            self.provider.analyze(resume_text=self._resume())
         self.assertEqual(call.call_count, 2)
 
     def test_corrected_higher_quality_result_is_used(self):
-        first = self._empty(); second = dict(first); second["status"] = "ready"
+        first = self._partial(); second = self._complete()
         with patch("webui.ai.call_ai", side_effect=[first, second]):
-            self.assertEqual(self.provider.analyze(resume_text="resume")["status"], "ready")
+            result = self.provider.analyze(resume_text=self._resume())
+        self.assertEqual(result["summary"]["headline"], second["summary"]["headline"])
 
     def test_worse_correction_cannot_discard_useful_original(self):
-        first = self._empty(); second = {"status":"partial"}
+        first = self._partial(); second = self._manual()
         with patch("webui.ai.call_ai", side_effect=[first, second]):
-            result = self.provider.analyze(resume_text="resume")
+            result = self.provider.analyze(resume_text=self._resume())
         self.assertIsInstance(result, dict)
 
     def test_second_partial_returns_best_result_after_two_calls(self):
-        with patch("webui.ai.call_ai", side_effect=[{"status":"partial"}, {"status":"manual_required"}]) as call:
-            result = self.provider.analyze(resume_text="resume")
+        with patch("webui.ai.call_ai", side_effect=[self._partial(), self._manual()]) as call:
+            result = self.provider.analyze(resume_text=self._resume())
         self.assertEqual(call.call_count, 2); self.assertIsInstance(result, dict)
 
     def test_invalid_json_is_terminal_without_retry(self):
         with patch("webui.ai.call_ai", return_value="not-json") as call:
-            with self.assertRaises(self.ai.AISecurityError): self.provider.analyze(resume_text="resume")
+            with self.assertRaises(self.ai.AISecurityError): self.provider.analyze(resume_text=self._resume())
         self.assertEqual(call.call_count, 1)
 
     def test_typed_transport_failures_do_not_retry(self):
         for code in ("timeout", "auth_failed", "network_error"):
             with self.subTest(code=code), patch("webui.ai.call_ai", side_effect=self.ai.AISecurityError(code)) as call:
-                with self.assertRaises(self.ai.AISecurityError): self.provider.analyze(resume_text="resume")
+                with self.assertRaises(self.ai.AISecurityError): self.provider.analyze(resume_text=self._resume())
                 self.assertEqual(call.call_count, 1)
 
     def test_correction_is_normalized_through_cleanup_path(self):
-        with patch("webui.ai.call_ai", side_effect=[{"status":"partial"}, f"```json\n{json.dumps(self._empty())}\n```"]) as call:
-            self.provider.analyze(resume_text="resume")
+        with patch("webui.ai.call_ai", side_effect=[self._partial(), f"```json\n{json.dumps(self._complete())}\n```"]) as call:
+            self.provider.analyze(resume_text=self._resume())
         self.assertEqual(call.call_count, 2)
 
 

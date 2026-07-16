@@ -697,9 +697,13 @@ class CandidateV3NormalizerTests(unittest.TestCase):
         self.assertEqual(o["contract_version"],"v3"); self.assertIn({"code":"invalid_enum","path":"contract_version"},o["quality"]["warnings"])
 
     def test_missing_each_top_key_warns_typed_empty(self):
-        for key in ("contract_version","summary","evidence","unknowns","directions","quality"):
+        for key in ("contract_version","summary","evidence","unknowns","directions"):
             d=self._payload(); d.pop(key,None); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
             self.assertIn({"code":"missing_required","path":key},o["quality"]["warnings"]); self.assertIn(key,o)
+
+    def test_missing_backend_owned_quality_is_not_a_provider_warning(self):
+        d=self._payload(); d.pop("quality"); o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertNotIn({"code":"missing_required","path":"quality"},o["quality"]["warnings"])
 
     def test_wrong_summary_types_warn(self):
         d=self._payload(); d["summary"]={"headline":1,"domains":["ok",2],"strengths":"x"}; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")

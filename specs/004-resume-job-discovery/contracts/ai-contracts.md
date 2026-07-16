@@ -72,6 +72,7 @@ object arrays are never coerced from scalars or generic string lists.
 - Contact details, identity numbers and exact addresses are rejected as evidence.
 - An invalid evidence item is quarantined with a field-level warning code and dropped entirely from normalized `evidence`; unrelated valid summary, unknowns and directions remain usable (invalid evidence item is quarantined without discarding the valid summary).
 - `quality.status` is one of `complete|partial|manual_required`; `warnings` is always a typed list of field-level warning objects. A `ready` analysis may be `partial` or `manual_required` after quarantine.
+- `quality`, `source_locator`, and `safe_excerpt` are backend-owned normalized output fields. The provider does not return them; omitting them from provider output is not a missing-field warning. The program derives them after parsing.
 - Identity fields (name, gender, age, phone, ID number, exact address and similar contact identifiers) are excluded from candidate and search fields.
 - quarantined fields cannot influence confirmation, SearchPlan compilation, matching, or scraper inputs; unverified search fields never become confirmed constraints.
 - At most one corrective retry is allowed for a successfully returned but structurally invalid response. Missing evidence, values, scores or references are never guessed locally.

@@ -45,9 +45,9 @@ SENSITIVE_PATTERNS = [
 
 CANDIDATE_ANALYSIS_V3_CONTRACT = {
  "version":"v3", "warning_codes":("invalid_type","invalid_enum","invalid_evidence","sensitive_value","unverified_field","missing_required","reference_invalid"),
- "top":{"contract_version":{"type":"string","empty":"v3"},"summary":{"type":"object","empty":{"headline":"","experience_level":"","domains":[],"strengths":[]}},"evidence":{"type":"list","max":20,"empty":[]},"unknowns":{"type":"list","max":20,"empty":[]},"directions":{"type":"list","max":5,"empty":[]},"quality":{"type":"object","empty":{"status":"complete","warnings":[]}}},
+ "top":{"contract_version":{"type":"string","empty":"v3"},"summary":{"type":"object","empty":{"headline":"","experience_level":"","domains":[],"strengths":[]}},"evidence":{"type":"list","max":20,"empty":[]},"unknowns":{"type":"list","max":20,"empty":[]},"directions":{"type":"list","max":5,"empty":[]},"quality":{"type":"object","provider_owned":False,"empty":{"status":"complete","warnings":[]}}},
  "summary":{"headline":{"type":"string","max_length":200,"empty":""},"experience_level":{"type":"string","max_length":100,"empty":""},"domains":{"type":"list","items":"string","max":20,"item_max_length":200,"empty":[]},"strengths":{"type":"list","items":"string","max":20,"item_max_length":200,"empty":[]}},
- "evidence":{"client_ref":{"type":"string","max_length":128},"type":{"type":"string","enum":("skill","responsibility","project","industry","seniority","education","achievement","other")},"normalized_value":{"type":"string","max_length":500,"empty":""},"source_quote":{"type":"string","max_length":2000},"source_locator":{"type":"object","empty":{}},"safe_excerpt":{"type":"string","empty":""},"assertion_type":{"type":"string","enum":("explicit","inferred")},"confidence":{"type":"integer","min":0,"max":100}},
+ "evidence":{"client_ref":{"type":"string","max_length":128},"type":{"type":"string","enum":("skill","responsibility","project","industry","seniority","education","achievement","other")},"normalized_value":{"type":"string","max_length":500,"empty":""},"source_quote":{"type":"string","max_length":2000},"source_locator":{"type":"object","provider_owned":False,"empty":{}},"safe_excerpt":{"type":"string","provider_owned":False,"empty":""},"assertion_type":{"type":"string","enum":("explicit","inferred")},"confidence":{"type":"integer","min":0,"max":100}},
  "unknown":{"field":{"type":"string","enum":("current_city","min_salary","career_intent","other")},"message":{"type":"string","max_length":500,"empty":""}},
  "direction":{"client_ref":{"type":"string","max_length":128,"empty":""},"name":{"type":"string","max_length":200,"empty":""},"type":{"type":"string","enum":("core","adjacent","growth")},"rationale":{"type":"string","max_length":1000,"empty":""},"evidence_refs":{"type":"list","items":"string","empty":[]},"gaps":{"type":"list","items":"string","max":20,"item_max_length":300,"empty":[]},"confidence":{"type":"integer","min":0,"max":100},"default_enabled":{"type":"boolean","empty":False},"search_terms":{"type":"list","items":"string","max":3,"item_max_length":200,"empty":[]}},
  "quality":{"status":{"type":"string","enum":("complete","partial","manual_required")},"warnings":{"type":"list","items":"warning","empty":[]}},
@@ -86,6 +86,8 @@ def normalize_candidate_analysis(data, resume_text):
         if key not in allowed:
             _warn(warnings,"unverified_field", "root.extra")
     for key, spec in CANDIDATE_ANALYSIS_V3_CONTRACT["top"].items():
+        if spec.get("provider_owned") is False:
+            continue
         if key not in data:
             _warn(warnings,"missing_required", key)
         elif spec.get("type") == "list" and not isinstance(data[key], list):
