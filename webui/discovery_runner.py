@@ -754,7 +754,7 @@ class DiscoveryRunner:
                 k: v for k, v in (compiled.get("hard_constraints") or {}).items()
                 if k in SCRAPER_FILTER_FIELDS
             }
-            target_pages = 1
+            target_pages = int((compiled.get("safe_limits") or {}).get("max_pages", 1))
             # input_hash must match what the source adapter computes (same fields).
             input_hash = _source_input_hash({
                 "keyword": raw_item["term"],

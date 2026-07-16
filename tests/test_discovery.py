@@ -248,6 +248,7 @@ class SearchPlanCompilationTests(unittest.TestCase):
         self.assertEqual(plan["items"][0]["term"], "Python")
         self.assertEqual(set(plan["hard_constraints"]), {"city", "salary", "experience", "degree", "industry", "scale", "stage"})
         self.assertEqual(plan["detail_budget"], 200)
+        self.assertEqual(plan["safe_limits"], {"max_details": 200, "max_pages": 10})
         serialized = json.dumps(plan, ensure_ascii=False)
         for secret in ("13812345678", "张三", "SECRET_RESUME", "SECRET_EXCERPT", "Java", "quality_warnings"):
             self.assertNotIn(secret, serialized)
@@ -259,6 +260,16 @@ class SearchPlanCompilationTests(unittest.TestCase):
             "hard_constraints": {"city": "", "salary": None, "industry": []},
         })
         self.assertEqual(plan["hard_constraints"], {})
+
+    def test_bounded_max_pages_reaches_materialized_source_item(self):
+        from webui.discovery import compile_search_plan
+        from webui.discovery_runner import DiscoveryRunner
+        compiled = compile_search_plan({
+            "enabled_directions": [{"id": "d1", "search_terms": ["Python"]}],
+            "safe_limits": {"max_pages": 99},
+        })
+        items = DiscoveryRunner.__new__(DiscoveryRunner)._materialize_plan_items(compiled, "run")
+        self.assertEqual(items[0]["target_pages"], 10)
 
 
 class JobSnapshotTests(unittest.TestCase):

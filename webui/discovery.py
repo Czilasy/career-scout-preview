@@ -244,10 +244,12 @@ def compile_search_plan(confirmation: dict) -> dict:
         "items": items,
         "detail_budget": detail_budget,
         "hard_constraints": dict(hard_constraints),
+        "safe_limits": dict(safe_limits),
         "input_hash": _input_hash({
             "items": [{k: v for k, v in item.items() if k != "status"} for item in items],
             "detail_budget": detail_budget,
             "hard_constraints": dict(hard_constraints),
+            "safe_limits": dict(safe_limits),
         }),
     }
     return plan
