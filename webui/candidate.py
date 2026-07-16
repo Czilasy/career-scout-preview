@@ -140,6 +140,7 @@ def normalize_candidate_analysis(data, resume_text):
                 raise ValueError("invalid_evidence" if "source_quote" in item else "missing_required")
             normalized = item.get("normalized_value", "")
             if not isinstance(normalized, str):
+                _warn(warnings, "invalid_type", p+".normalized_value")
                 raise ValueError("invalid_type")
             if isinstance(item.get("confidence"), bool) or not isinstance(item.get("confidence"), int):
                 _warn(warnings,"invalid_type",p+".confidence"); continue
@@ -208,7 +209,9 @@ def normalize_candidate_analysis(data, resume_text):
     if isinstance(provider_quality, dict):
         for key in provider_quality:
             if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["quality"]: _warn(warnings, "unverified_field", "quality."+str(key))
-        if "status" in provider_quality and provider_quality["status"] not in CANDIDATE_ANALYSIS_V3_CONTRACT["quality"]["status"]["enum"]: _warn(warnings, "invalid_enum", "quality.status")
+        if "status" in provider_quality:
+            if not isinstance(provider_quality["status"], str): _warn(warnings, "invalid_type", "quality.status")
+            elif provider_quality["status"] not in CANDIDATE_ANALYSIS_V3_CONTRACT["quality"]["status"]["enum"]: _warn(warnings, "invalid_enum", "quality.status")
         if "warnings" in provider_quality:
             if not isinstance(provider_quality["warnings"], list): _warn(warnings, "invalid_type", "quality.warnings")
             else:
