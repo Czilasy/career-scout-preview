@@ -906,10 +906,11 @@ def create_app(config=None):
             raise ValueError("请先保存 AI 服务 URL")
         cred_ref = store.get_credential_ref()
         api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
-        ok, error_code = ai_service.test_connection(endpoint_url, api_key, model=settings.get("model", ""))
-        new_status = "ready" if ok else "failed"
+        capability = ai_service.test_connection(endpoint_url, api_key, model=settings.get("model", ""))
+        new_status = "ready" if capability["ok"] else "failed"
+        error_code = capability["warning_codes"][0] if not capability["ok"] and capability["warning_codes"] else None
         store.update_ai_status(new_status, last_error_code=error_code)
-        return jsonify({"ok": ok, "error_code": error_code})
+        return jsonify(capability)
 
     @app.route("/api/ai-settings/models", methods=["GET"])
     def ai_settings_models():

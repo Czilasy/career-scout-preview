@@ -149,39 +149,29 @@ def delete_api_key(credential_ref: str) -> None:
 # Connection testing
 # ---------------------------------------------------------------------------
 
-def test_connection(endpoint_url: str, api_key: str, model: str = "") -> tuple[bool, str | None]:
-    """Send a minimal chat completions request to verify connectivity.
-
-    Returns ``(True, None)`` on success, or ``(False, error_code)`` where
-    *error_code* is one of: ``timeout``, ``auth_failed``, ``network_error``,
-    ``invalid_response``.  Never includes raw error details, the API key
-    or response body.
-    """
-    payload = {
-        "model": model or "auto",
-        "messages": [{"role": "user", "content": "ping"}],
-        "temperature": 0.3,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+def test_connection(endpoint_url: str, api_key: str, model: str = "") -> dict:
+    """Probe the real candidate-v3 extraction capability with fictional data."""
+    fictional_resume = "虚构候选人：具备 Python 后端经验，负责演示订单系统。"
+    messages = DiscoveryAIProvider._build_analyze_messages(fictional_resume)
     try:
-        response = requests.post(
-            _chat_completions_url(endpoint_url), json=payload, headers=headers, timeout=CONNECTION_TIMEOUT
+        response = call_ai(
+            endpoint_url, api_key, messages, model=model or "auto",
+            timeout=CONNECTION_TIMEOUT,
         )
-    except requests.Timeout:
-        return (False, ERROR_TIMEOUT)
-    except requests.RequestException:
-        return (False, ERROR_NETWORK)
-    except Exception:
-        return (False, ERROR_INVALID)
-
-    if response.status_code in (401, 403):
-        return (False, ERROR_AUTH)
-    if response.status_code >= 400:
-        return (False, ERROR_INVALID)
-    return (True, None)
+    except AISecurityError as exc:
+        transport = "failed" if exc.error_code in {ERROR_TIMEOUT, ERROR_AUTH, ERROR_NETWORK} else "ready"
+        return {"ok": False, "transport": transport, "generation": "failed",
+                "candidate_contract": "manual_required", "warning_codes": [exc.error_code]}
+    try:
+        parsed = cleanup_candidate_analysis_response(response)
+        normalized = normalize_candidate_analysis(parsed, fictional_resume)
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return {"ok": False, "transport": "ready", "generation": "failed",
+                "candidate_contract": "manual_required", "warning_codes": [ERROR_INVALID]}
+    quality = normalized["quality"]
+    warning_codes = list(dict.fromkeys(item["code"] for item in quality["warnings"]))
+    return {"ok": True, "transport": "ready", "generation": "ready",
+            "candidate_contract": quality["status"], "warning_codes": warning_codes}
 
 
 # ---------------------------------------------------------------------------

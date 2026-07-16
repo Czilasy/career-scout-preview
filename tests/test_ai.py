@@ -414,16 +414,14 @@ class TestConnectionTests(unittest.TestCase):
     def test_successful_connection(self, mock_post):
         from webui.ai import test_connection
 
-        response = MagicMock()
-        response.status_code = 200
+        response = MagicMock(); response.status_code = 200
+        response.json.return_value = {"choices": [{"message": {"content": json.dumps(CandidateV3ProviderAdapterTests()._complete())}}]}
         mock_post.return_value = response
 
-        success, error_code = test_connection(
+        result = test_connection(
             "https://api.example.com/v1/chat/completions", "secret-key"
         )
-
-        self.assertTrue(success)
-        self.assertIsNone(error_code)
+        self.assertEqual(result, {"ok": True, "transport": "ready", "generation": "ready", "candidate_contract": "complete", "warning_codes": []})
 
     @patch("webui.ai.requests.post")
     def test_timeout_returns_safe_code(self, mock_post):
@@ -431,12 +429,11 @@ class TestConnectionTests(unittest.TestCase):
 
         mock_post.side_effect = requests.Timeout("timed out")
 
-        success, error_code = test_connection(
+        result = test_connection(
             "https://api.example.com/v1/chat/completions", "secret-key"
         )
 
-        self.assertFalse(success)
-        self.assertEqual(error_code, "timeout")
+        self.assertFalse(result["ok"]); self.assertEqual(result["transport"], "failed"); self.assertEqual(result["warning_codes"], ["timeout"])
 
     @patch("webui.ai.requests.post")
     def test_auth_failure_returns_safe_code(self, mock_post):
@@ -446,12 +443,11 @@ class TestConnectionTests(unittest.TestCase):
         response.status_code = 403
         mock_post.return_value = response
 
-        success, error_code = test_connection(
+        result = test_connection(
             "https://api.example.com/v1/chat/completions", "secret-key"
         )
 
-        self.assertFalse(success)
-        self.assertEqual(error_code, "auth_failed")
+        self.assertFalse(result["ok"]); self.assertEqual(result["warning_codes"], ["auth_failed"])
 
     @patch("webui.ai.requests.post")
     def test_network_error_returns_safe_code(self, mock_post):
@@ -459,12 +455,11 @@ class TestConnectionTests(unittest.TestCase):
 
         mock_post.side_effect = requests.ConnectionError("DNS failed")
 
-        success, error_code = test_connection(
+        result = test_connection(
             "https://api.example.com/v1/chat/completions", "secret-key"
         )
 
-        self.assertFalse(success)
-        self.assertEqual(error_code, "network_error")
+        self.assertFalse(result["ok"]); self.assertEqual(result["warning_codes"], ["network_error"])
 
     @patch("webui.ai.requests.post")
     def test_server_error_returns_safe_code(self, mock_post):
@@ -474,12 +469,11 @@ class TestConnectionTests(unittest.TestCase):
         response.status_code = 500
         mock_post.return_value = response
 
-        success, error_code = test_connection(
+        result = test_connection(
             "https://api.example.com/v1/chat/completions", "secret-key"
         )
 
-        self.assertFalse(success)
-        self.assertEqual(error_code, "invalid_response")
+        self.assertFalse(result["ok"]); self.assertEqual(result["generation"], "failed"); self.assertEqual(result["warning_codes"], ["invalid_response"])
 
     @patch("webui.ai.requests.post")
     def test_connection_error_does_not_leak_api_key(self, mock_post):
@@ -488,12 +482,27 @@ class TestConnectionTests(unittest.TestCase):
         api_key = "sk-super-secret-key-12345"
         mock_post.side_effect = requests.ConnectionError(f"failed with {api_key}")
 
-        success, error_code = test_connection(
+        result = test_connection(
             "https://api.example.com/v1/chat/completions", api_key
         )
 
-        self.assertFalse(success)
-        self.assertNotIn(api_key, error_code or "")
+        self.assertFalse(result["ok"])
+        self.assertNotIn(api_key, str(result))
+
+    @patch("webui.ai.call_ai")
+    def test_partial_candidate_capability_is_supported(self, call):
+        from webui.ai import test_connection
+        value = CandidateV3ProviderAdapterTests()._complete(); value["summary"]["strengths"] = ["Python", 1]
+        call.return_value = value
+        result = test_connection("https://api.example.com/v1", "secret", "model")
+        self.assertTrue(result["ok"]); self.assertEqual(result["candidate_contract"], "partial")
+        self.assertIn("invalid_type", result["warning_codes"])
+
+    @patch("webui.ai.call_ai", return_value="not-json")
+    def test_invalid_json_reports_generation_failure(self, call):
+        from webui.ai import test_connection
+        result = test_connection("https://api.example.com/v1", "secret", "model")
+        self.assertFalse(result["ok"]); self.assertEqual(result["transport"], "ready"); self.assertEqual(result["generation"], "failed")
 
 
 # ---------------------------------------------------------------------------

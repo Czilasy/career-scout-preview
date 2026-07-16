@@ -69,7 +69,7 @@ Open `http://127.0.0.1:5000`. The workspace is a dark-themed job-seeking workben
 Users only configure two items: the AI service URL and the API Key.
 
 - Enter the AI service URL (an OpenAI-compatible `/v1/chat/completions` endpoint) and API Key in the left settings panel.
-- Click "Test connection" to confirm the configuration works.
+- "Test connection" uses an embedded fictional résumé to verify transport, JSON generation, and the candidate-v3 extraction contract; it never reads or sends a saved real résumé.
 - The "Fetch" and "Test" buttons report in-progress, success, or retryable failure in place; supplemental top notices dismiss automatically according to severity.
 - **The Key must enter the system credential store** (Windows Credential Manager / macOS Keychain / Linux Secret Service, via the `keyring` library) and is **never written in plaintext to SQLite, logs, API responses, or exports**.
 - The AI settings endpoint returns only the URL, status, and last error code — never the Key or credential reference.

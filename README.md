@@ -71,7 +71,7 @@ python3 webui/app.py
 用户只需配置两项：AI 服务 URL 和 API Key。
 
 - 在左侧设置区填写 AI 服务 URL（OpenAI 兼容的 `/v1/chat/completions` 端点）和 API Key。
-- 点击“测试连接”确认配置可用。
+- 点击“测试连接”会使用内置虚构简历验证传输、JSON 生成和候选人 v3 提取契约；不会读取或发送已保存的真实简历。
 - “拉取”和“测试”按钮会原位显示进行中、成功或失败重试状态；顶部补充提示会按严重程度自动消失。
 - **Key 必须进入系统凭据库**（Windows Credential Manager / macOS Keychain / Linux Secret Service，通过 `keyring` 库），**绝不会明文写入 SQLite、日志、接口响应或导出文件**。
 - 接口返回的 AI 设置只包含 URL、状态和最后错误码，不含 Key 或凭据引用。

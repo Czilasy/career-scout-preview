@@ -1913,10 +1913,10 @@
         const data = await resp.json();
         if (data.ok) {
           outcome = "success";
-          setAppNotice("AI 连接成功", "success");
+          setAppNotice("AI 候选人提取能力可用", "success");
           updateAiStatus(true);
         }
-        else { setAppNotice("连接失败：" + (data.error_code || "未知"), "error", testAiConnection); updateAiStatus(false); }
+        else { setAppNotice("能力测试失败：" + ((data.warning_codes || [])[0] || "未知"), "error", testAiConnection); updateAiStatus(false); }
       } catch (_error) {
         setAppNotice("连接测试失败，请稍后重试", "error", testAiConnection);
       } finally {
