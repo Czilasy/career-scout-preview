@@ -208,7 +208,7 @@ def normalize_candidate_analysis(data, resume_text):
     provider_quality = data.get("quality")
     if isinstance(provider_quality, dict):
         for key in provider_quality:
-            if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["quality"]: _warn(warnings, "unverified_field", "quality."+str(key))
+            if key not in CANDIDATE_ANALYSIS_V3_CONTRACT["quality"]: _warn(warnings, "unverified_field", "quality.extra")
         if "status" in provider_quality:
             if not isinstance(provider_quality["status"], str): _warn(warnings, "invalid_type", "quality.status")
             elif provider_quality["status"] not in CANDIDATE_ANALYSIS_V3_CONTRACT["quality"]["status"]["enum"]: _warn(warnings, "invalid_enum", "quality.status")
