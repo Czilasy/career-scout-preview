@@ -142,14 +142,23 @@ def normalize_candidate_analysis(data, resume_text):
             except ValueError: _warn(warnings,"invalid_type",p+".confidence"); continue
             if _is_sensitive(quote): raise ValueError("sensitive_value")
             quote = canonicalize_resume_text_v3(quote)
-            loc = resolve_evidence_quote(quote, canonical)
+            try:
+                loc = resolve_evidence_quote(quote, canonical)
+            except ValueError:
+                # Sensitivity is checked above; resolver failures are safe
+                # evidence-verification failures and must not leak internals.
+                raise ValueError("invalid_evidence")
             if not loc: raise ValueError("invalid_evidence")
             if len(quote) < 4 and canonical.count(quote) > 1: raise ValueError("invalid_evidence")
             if ref in refs:
                 _warn(warnings, "reference_invalid", p+".client_ref")
                 raise ValueError("invalid_evidence")
             refs.add(ref); out["evidence"].append({"client_ref": ref, "type": typ, "normalized_value": normalized, "source_quote": quote, "source_locator": loc, "safe_excerpt": redact_pii(quote), "assertion_type": assertion, "confidence": conf})
-        except ValueError as e: _warn(warnings, str(e), p)
+        except ValueError as e:
+            code = str(e)
+            if code == "invalid_type" and "source_quote" in item:
+                code = "invalid_evidence"
+            _warn(warnings, code, p)
     max_evidence = CANDIDATE_ANALYSIS_V3_CONTRACT["top"]["evidence"]["max"]
     if isinstance(data.get("evidence"), list) and len(data["evidence"]) > max_evidence:
         _warn(warnings, "invalid_type", "evidence")
