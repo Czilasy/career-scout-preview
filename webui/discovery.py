@@ -21,6 +21,7 @@ from webui.candidate import (
     normalize_evidence,
     redact_pii,
     validate_candidate_analysis,
+    normalize_candidate_analysis,
 )
 from webui.ai import AISecurityError as AIProviderError
 
@@ -48,6 +49,8 @@ ERROR_CODE_MAP: dict[str, dict] = {
     "state_conflict": {"retryable": False, "stage": None},
     "not_found": {"retryable": False, "stage": None},
     "cancelled": {"retryable": False, "stage": None},
+    "consent_required": {"retryable": False, "stage": None},
+    "analysis_interrupted": {"retryable": True, "stage": "analyzing"},
 }
 
 DEFAULT_USER_MESSAGES: dict[str, str] = {
@@ -67,6 +70,8 @@ DEFAULT_USER_MESSAGES: dict[str, str] = {
     "state_conflict": "当前状态不支持该操作。",
     "not_found": "请求的资源不存在。",
     "cancelled": "操作已取消。",
+    "consent_required": "需要明确同意后才能调用 AI。",
+    "analysis_interrupted": "分析因服务重启而中断，请重试。",
 }
 
 
@@ -768,9 +773,7 @@ def analyze_resume(
 ) -> dict:
     """Orchestrate candidate analysis: consent -> read resume -> AI -> validate -> persist.
 
-    - ``ai_consent`` False: only local validation, no remote AI call. The
-      analysis is created in ``queued`` status and never transitions to
-      ``ready`` without consent.
+    - ``ai_consent`` must be explicitly true before an attempt is created.
     - Empty resume text blocks the analysis (``input_incomplete``).
     - AI contract failures raise :class:`AISecurityError` and persist the
       analysis as ``failed`` with a failure_code.
@@ -790,6 +793,22 @@ def analyze_resume(
     profile_id = resume.get("profile_id")
     if not profile_id:
         raise DiscoveryError("input_incomplete", user_message="简历未关联候选人档案。")
+    if not ai_consent:
+        raise DiscoveryError("consent_required", user_message="需要明确同意后才能调用 AI。")
+
+    def set_stage(stage, *, status=None, quality_status=None, quality_warnings=None, **kwargs):
+        """Persist lifecycle metadata through the store's v3-compatible API."""
+        target_status = status or store.get_analysis(analysis["id"]).get("status", "queued")
+        conditional = {}
+        if target_status in {"ready", "failed"}:
+            conditional["expected_statuses"] = {
+                "queued", "analyzing", "normalizing", "validating", "repairing", "persisting",
+            }
+        store.update_analysis_status(
+            analysis["id"], target_status, analysis_stage=stage,
+            quality_status=quality_status, quality_warnings=quality_warnings,
+            **conditional, **kwargs,
+        )
 
     if analysis_id:
         # T109: Use existing analysis created by the HTTP route.
@@ -797,34 +816,26 @@ def analyze_resume(
     else:
         analysis = store.create_analysis(
             resume_id, profile_id,
-            model_name=model_name, contract_version="v2",
+            model_name=model_name, contract_version="v3",
         )
 
     if not resume_text:
-        store.update_analysis_status(
-            analysis["id"], "failed", failure_code="input_incomplete",
-        )
+        set_stage("validating", status="failed", quality_status="manual_required", quality_warnings=[] , failure_code="input_incomplete")
         raise DiscoveryError("input_incomplete", user_message="简历正文为空，无法分析。")
 
-    if not ai_consent:
-        # Without consent we never call the remote AI. Leave analysis queued.
-        return store.get_analysis(analysis["id"])
-
     if ai_provider is None:
-        store.update_analysis_status(
-            analysis["id"], "failed", failure_code="ai_unavailable",
-        )
+        set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_unavailable")
         raise DiscoveryError("ai_unavailable", user_message="AI 服务未配置。")
 
-    store.update_analysis_status(analysis["id"], "analyzing")
+    set_stage("requesting", status="analyzing")
 
     try:
         raw = ai_provider.analyze(resume_text=resume_text)
     except TimeoutError:
-        store.update_analysis_status(analysis["id"], "failed", failure_code="ai_timeout")
+        set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_timeout")
         raise DiscoveryError("ai_timeout")
     except ConnectionError:
-        store.update_analysis_status(analysis["id"], "failed", failure_code="ai_network_error")
+        set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_network_error")
         raise DiscoveryError("ai_network_error")
     except AIProviderError as exc:
         # T111: webui.ai.AISecurityError — provider 抛出，已携带 feature-safe 码
@@ -832,26 +843,29 @@ def analyze_resume(
         # 重新包装为 webui.discovery.AISecurityError 以保持调用方契约
         # （_safe_execute_analysis 捕获 DiscoveryError/AISecurityError）。
         code = exc.error_code if exc.error_code in ERROR_CODE_MAP else "ai_invalid_output"
-        store.update_analysis_status(analysis["id"], "failed", failure_code=code)
+        set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code=code)
         raise AISecurityError(code) from None
     except AISecurityError as exc:
         # webui.discovery.AISecurityError — 本地抛出（如 validate_candidate_analysis
         # 失败）。保留 provider/本地映射后的 feature-safe error_code。
         code = exc.error_code if exc.error_code in ERROR_CODE_MAP else "ai_invalid_output"
-        store.update_analysis_status(analysis["id"], "failed", failure_code=code)
+        set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code=code)
         raise
     except Exception as exc:  # noqa: BLE001 - provider adapter boundary
-        store.update_analysis_status(analysis["id"], "failed", failure_code="ai_invalid_output")
+        set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_invalid_output")
         raise AISecurityError("ai_invalid_output", log_detail=str(exc))
 
-    try:
-        validated = validate_candidate_analysis(raw, resume_text)
-    except ValueError as exc:
-        store.update_analysis_status(
-            analysis["id"], "failed", failure_code="ai_invalid_output",
-        )
-        raise AISecurityError("ai_invalid_output", log_detail=str(exc))
-
+    set_stage("normalizing", status="analyzing")
+    if isinstance(raw, dict) and raw.get("contract_version") == "v3":
+        validated = normalize_candidate_analysis(raw, resume_text)
+    else:
+        try:
+            validated = validate_candidate_analysis(raw, resume_text)
+        except ValueError as exc:
+            set_stage("validating", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_invalid_output")
+            raise AISecurityError("ai_invalid_output", log_detail=str(exc))
+    quality = validated.get("quality", {})
+    set_stage("validating", status="analyzing", quality_status=quality.get("status"), quality_warnings=quality.get("warnings", []))
     # Normalize and merge evidence/directions.
     normalized_evidence = normalize_evidence(validated["evidence"], resume_text)
     merged_directions = merge_directions(validated["directions"])
@@ -897,8 +911,7 @@ def analyze_resume(
         if isinstance(v, list) else v
         for k, v in raw_summary.items()
     }
-    store.update_analysis_status(
-        analysis["id"], "ready",
+    set_stage("persisting", status="ready", quality_status=quality.get("status", "complete"), quality_warnings=quality.get("warnings", []),
         summary=redacted_summary,
         unknowns=validated["unknowns"],
     )

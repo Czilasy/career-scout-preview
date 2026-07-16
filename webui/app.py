@@ -2078,7 +2078,8 @@ def create_app(config=None):
             raise ValueError("resume_id 不能为空")
         if "ai_consent" not in raw:
             raise ValueError("ai_consent 不能为空")
-        ai_consent = bool(raw.get("ai_consent"))
+        if raw.get("ai_consent") is not True:
+            raise ValueError("ai_consent 必须明确为 true")
         try:
             resume = store.get_resume(resume_id)
         except KeyError:
@@ -2089,15 +2090,15 @@ def create_app(config=None):
                 "input_incomplete", user_message="简历未关联候选人档案。",
             )
         # T109: 创建 queued attempt，提交 runtime 异步执行
-        # P1/P2: 落库 contract_version="v2" 和 model_name（来自 ai_settings）
+        # Persist the canonical candidate v3 contract marker.
         ai_settings = store.get_ai_settings()
         analysis = store.create_analysis(
             resume_id, profile_id,
             model_name=ai_settings.get("model", ""),
-            contract_version="v2",
+            contract_version="v3",
         )
         discovery_runtime = app.config["DISCOVERY_RUNTIME"]
-        discovery_runtime.submit_analysis(analysis["id"], ai_consent=ai_consent)
+        discovery_runtime.submit_analysis(analysis["id"], ai_consent=True)
         return jsonify(_analysis_summary(analysis, store)), 202
 
     @app.route("/api/discovery/analyses/<analysis_id>")
@@ -2111,6 +2112,9 @@ def create_app(config=None):
             "profile_id": analysis["profile_id"],
             "status": analysis["status"],
             "version": analysis.get("version"),
+            "stage": analysis.get("stage", analysis.get("analysis_stage", "queued")),
+            "quality_status": analysis.get("quality_status", "manual_required"),
+            "quality_warnings": analysis.get("quality_warnings", []),
             "summary": analysis.get("summary", {}),
             "evidence": [
                 {
@@ -2145,21 +2149,21 @@ def create_app(config=None):
     def discovery_retry_analysis(analysis_id):
         """Create a new analysis attempt for the same resume (T109).
 
-        读取请求体 ai_consent（默认 True 向后兼容），创建新版本 queued
-        analysis 后提交 DiscoveryTaskRuntime 异步执行。
+        仅在请求体显式给出 ai_consent=true 时创建新版本并提交。
         """
         try:
             analysis = store.get_analysis(analysis_id)
         except KeyError:
             raise _DiscoveryError("not_found", user_message="分析不存在。")
         raw = request.get_json(silent=True) or {}
-        ai_consent = bool(raw.get("ai_consent", True))
+        if raw.get("ai_consent") is not True:
+            raise ValueError("ai_consent 必须明确为 true")
         resume_id = analysis["resume_id"]
         profile_id = analysis["profile_id"]
         # T109: 创建新版本 queued attempt，提交 runtime 异步执行
         new_analysis = store.create_analysis(resume_id, profile_id)
         discovery_runtime = app.config["DISCOVERY_RUNTIME"]
-        discovery_runtime.submit_analysis(new_analysis["id"], ai_consent=ai_consent)
+        discovery_runtime.submit_analysis(new_analysis["id"], ai_consent=True)
         return jsonify(_analysis_summary(new_analysis, store)), 202
 
     @app.route("/api/discovery/confirmations", methods=["POST"])
@@ -2479,6 +2483,9 @@ def create_app(config=None):
             "profile_id": analysis["profile_id"],
             "status": analysis["status"],
             "version": analysis.get("version"),
+            "stage": analysis.get("stage", "queued"),
+            "quality_status": analysis.get("quality_status", "complete"),
+            "quality_warnings": analysis.get("quality_warnings", []),
         }
 
     def _analysis_failure(analysis):

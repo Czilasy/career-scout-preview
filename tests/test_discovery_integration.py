@@ -112,9 +112,11 @@ class AnalyzeResumeOrchestrationTests(_IntegrationTestCase):
 
     def test_consent_false_does_not_call_ai(self):
         provider = FakeAIProvider(_valid_ai_response())
-        result = analyze_resume(self.store, self.resume["id"], ai_consent=False, ai_provider=provider)
+        with self.assertRaises(DiscoveryError) as ctx:
+            analyze_resume(self.store, self.resume["id"], ai_consent=False, ai_provider=provider)
         self.assertEqual(provider.call_count, 0)
-        self.assertEqual(result["status"], "queued")
+        self.assertEqual(ctx.exception.error_code, "consent_required")
+        self.assertEqual(self.store.list_analyses(self.resume["id"]), [])
 
     def test_consent_true_calls_ai_and_persists(self):
         provider = FakeAIProvider(_valid_ai_response())
@@ -125,6 +127,29 @@ class AnalyzeResumeOrchestrationTests(_IntegrationTestCase):
         self.assertEqual(len(directions), 1)
         evidence = self.store.list_evidence(result["id"])
         self.assertEqual(len(evidence), 2)
+
+    def test_mixed_v3_output_persists_ready_partial(self):
+        response = {
+            "contract_version": "v3",
+            "summary": {"headline": "后端工程师", "experience_level": "高级", "domains": ["后端"], "strengths": ["Python"]},
+            "evidence": [
+                {"client_ref": "e1", "type": "skill", "normalized_value": "Python", "source_quote": "Python 后端经验", "assertion_type": "explicit", "confidence": 90},
+                {"client_ref": "bad", "type": "skill", "normalized_value": "Go", "source_quote": "不存在的 Go 经历", "assertion_type": "explicit", "confidence": 80},
+            ],
+            "unknowns": [],
+            "directions": [{"client_ref": "d1", "name": "后端工程师", "type": "core", "rationale": "经验匹配", "evidence_refs": ["e1"], "gaps": [], "confidence": 90, "default_enabled": True, "search_terms": ["Python 后端"]}],
+        }
+        result = analyze_resume(self.store, self.resume["id"], ai_consent=True, ai_provider=FakeAIProvider(response))
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["quality_status"], "partial")
+        self.assertEqual(len(self.store.list_evidence(result["id"])), 1)
+        self.assertTrue(all(set(w) == {"code", "path"} for w in result["quality_warnings"]))
+
+    def test_empty_v3_output_persists_ready_manual_required(self):
+        response = {"contract_version": "v3", "summary": {}, "evidence": [], "unknowns": [], "directions": []}
+        result = analyze_resume(self.store, self.resume["id"], ai_consent=True, ai_provider=FakeAIProvider(response))
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["quality_status"], "manual_required")
 
     def test_empty_resume_blocks(self):
         self.store.save_resume(
@@ -253,7 +278,8 @@ class PrivacyConsentGatingTests(_IntegrationTestCase):
 
     def test_consent_false_never_calls_ai(self):
         provider = FakeAIProvider(_valid_ai_response())
-        analyze_resume(self.store, self.resume["id"], ai_consent=False, ai_provider=provider)
+        with self.assertRaises(DiscoveryError):
+            analyze_resume(self.store, self.resume["id"], ai_consent=False, ai_provider=provider)
         self.assertEqual(provider.call_count, 0)
 
     def test_consent_true_calls_ai(self):
@@ -546,6 +572,16 @@ class RestartInterruptedTests(_IntegrationTestCase):
         self.assertEqual(count, 0)
         final = self.store.get_discovery_run(run["id"])
         self.assertEqual(final["status"], "succeeded")
+
+    def test_all_inflight_analysis_stages_reconcile_to_failed(self):
+        from webui.discovery_runner import reconcile_analysis_on_restart
+        for stage in ("requesting", "normalizing", "validating", "repairing", "persisting"):
+            with self.subTest(stage=stage):
+                analysis = self.store.create_analysis(self.resume["id"], self.profile["id"], contract_version="v3")
+                self.store.update_analysis_status(analysis["id"], "analyzing", analysis_stage=stage)
+        self.assertEqual(reconcile_analysis_on_restart(self.store), 5)
+        for analysis in self.store.list_analyses(self.resume["id"])[-5:]:
+            self.assertEqual((analysis["status"], analysis["stage"], analysis["failure_code"]), ("failed", "interrupted", "analysis_interrupted"))
 
     def test_resume_continues_from_saved_stage(self):
         source = self._fake_source_cls(list_jobs={
@@ -1643,20 +1679,15 @@ class US1CompositionIntegrationTests(unittest.TestCase):
             f"(last_status={last_status})"
         )
 
-    def test_consent_false_does_not_call_ai_through_http(self):
-        """consent=false：分析保持 queued，call_ai transport 不被调用。"""
+    def test_consent_false_rejected_without_analysis_row(self):
+        """consent=false：创建前拒绝，且不调用 transport。"""
+        before = len(self.store.list_analyses(self.resume["id"]))
         resp = self.client.post(
             "/api/discovery/analyses",
             json={"resume_id": self.resume["id"], "ai_consent": False},
         )
-        self.assertEqual(resp.status_code, 202)
-        analysis_id = resp.get_json()["analysis_id"]
-        # 等待短暂时间确认 queued 状态稳定
-        import time
-        time.sleep(0.3)
-        status_resp = self.client.get(f"/api/discovery/analyses/{analysis_id}")
-        self.assertEqual(status_resp.status_code, 200)
-        self.assertEqual(status_resp.get_json()["status"], "queued")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(len(self.store.list_analyses(self.resume["id"])), before)
         # call_ai transport 不应被调用
         self.assertFalse(
             self._call_ai_mock.called,
@@ -1771,8 +1802,8 @@ class US1CompositionIntegrationTests(unittest.TestCase):
 
     # ---- P1/P2/P6/P7 全量审查修复测试 ----
 
-    def test_analysis_persists_contract_version_v2(self):
-        """P1: 走 v2 流程的分析必须落库 contract_version='v2'。"""
+    def test_analysis_persists_contract_version_v3(self):
+        """候选人适配流程必须落库 contract_version='v3'。"""
         resp = self.client.post(
             "/api/discovery/analyses",
             json={"resume_id": self.resume["id"], "ai_consent": True},
@@ -1783,8 +1814,8 @@ class US1CompositionIntegrationTests(unittest.TestCase):
         # 直接查库验证 contract_version
         stored = self.store.get_analysis(analysis_id)
         self.assertEqual(
-            stored.get("contract_version"), "v2",
-            f"contract_version 应为 'v2'，实际为 {stored.get('contract_version')!r}",
+            stored.get("contract_version"), "v3",
+            f"contract_version 应为 'v3'，实际为 {stored.get('contract_version')!r}",
         )
 
     def test_analysis_persists_model_name(self):

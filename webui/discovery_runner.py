@@ -15,6 +15,7 @@ an interrupt at any point leaves a resumable state in the database.
 from __future__ import annotations
 
 import os
+import sqlite3
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -907,6 +908,31 @@ def mark_interrupted_on_restart(store) -> int:
     return count
 
 
+def reconcile_analysis_on_restart(store) -> int:
+    """Safely close analyses interrupted in an in-flight v3 lifecycle stage."""
+    stages = ("requesting", "normalizing", "validating", "repairing", "persisting")
+    try:
+        with store._connection() as conn:
+            rows = conn.execute(
+                "SELECT id FROM candidate_analyses WHERE status NOT IN ('ready','failed','deleted') AND analysis_stage IN (?,?,?,?,?)",
+                stages,
+            ).fetchall()
+    except (AttributeError, sqlite3.Error):
+        return 0
+    count = 0
+    for row in rows:
+        try:
+            store.update_analysis_status(
+                row["id"], "failed", analysis_stage="interrupted",
+                failure_code="analysis_interrupted", quality_status="manual_required",
+                quality_warnings=[], expected_stages=stages,
+            )
+            count += 1
+        except (KeyError, ValueError, TypeError):
+            continue
+    return count
+
+
 # ---------------------------------------------------------------------------
 # T100: DiscoveryTaskRuntime — 应用持有的运行时基础设施
 # ---------------------------------------------------------------------------
@@ -943,6 +969,7 @@ class DiscoveryTaskRuntime:
         # 构造时收敛 active runs 为 interrupted（进程重启恢复）
         try:
             mark_interrupted_on_restart(self.store)
+            reconcile_analysis_on_restart(self.store)
         except Exception:
             pass
 
@@ -1087,8 +1114,7 @@ class DiscoveryTaskRuntime:
     def submit_analysis(self, analysis_id: str, *, ai_consent: bool) -> None:
         """Submit an analysis for background execution.
 
-        - ``ai_consent`` False: the analysis stays ``queued`` (no AI call).
-          The route has already persisted the analysis; we do nothing.
+        - ``ai_consent`` must already be explicitly true at the route boundary.
         - ``ai_consent`` True: resolve the current AI provider via factory
           and submit ``_safe_execute_analysis`` to the executor. The
           worker calls :func:`analyze_resume` with the existing
@@ -1101,7 +1127,7 @@ class DiscoveryTaskRuntime:
         it never leaks to the executor's error log.
         """
         if not ai_consent:
-            return  # Stay queued; no AI call
+            raise ValueError("ai_consent must be true")
         with self._lock:
             key = f"analysis:{analysis_id}"
             existing = self._futures.get(key)
@@ -1152,6 +1178,7 @@ __all__ = [
     "DiscoveryRunner",
     "DiscoveryTaskRuntime",
     "mark_interrupted_on_restart",
+    "reconcile_analysis_on_restart",
     "ACTIVE_STATUSES",
     "TERMINAL_STATUSES",
     "RESUMABLE_STATUSES",

@@ -70,6 +70,23 @@ def _now_minus_days(days):
     return (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
 
 
+def _safe_quality_warnings(value):
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        if isinstance(item, dict) and isinstance(item.get("code"), str) and isinstance(item.get("path"), str):
+            result.append({"code": item["code"], "path": item["path"]})
+    return result
+
+
+def _decode_json(value, fallback):
+    try:
+        return json.loads(value or "")
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
@@ -193,6 +210,8 @@ class TaskStore:
             self._migration_012()
         if current < 13:
             self._migration_013()
+        if current < 14:
+            self._migration_014()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -830,6 +849,23 @@ class TaskStore:
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
                 "VALUES (13, ?, '004 snapshots/assessments/feedback')",
                 (_now(),),
+            )
+
+    def _migration_014(self):
+        """Candidate v3 analysis lifecycle and safe quality warnings."""
+        with self._connection() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(candidate_analyses)")}
+            additions = {
+                "analysis_stage": "TEXT NOT NULL DEFAULT 'queued'",
+                "quality_status": "TEXT NOT NULL DEFAULT 'complete'",
+                "quality_warnings_json": "TEXT NOT NULL DEFAULT '[]'",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE candidate_analyses ADD COLUMN {name} {definition}")
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (14, ?, 'candidate v3 lifecycle and quality warnings')", (_now(),)
             )
 
     def _copy_legacy_default_profile(self):
@@ -2247,17 +2283,29 @@ class TaskStore:
             aid = _uuid()
             ts = _now()
             conn.execute(
-                "INSERT INTO candidate_analyses (id, resume_id, profile_id, version, status, model_name, "
-                "contract_version, created_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)",
+                "INSERT INTO candidate_analyses (id, resume_id, profile_id, version, status, analysis_stage, quality_status, "
+                "quality_warnings_json, model_name, contract_version, created_at) VALUES (?, ?, ?, ?, 'queued', 'queued', "
+                "'complete', '[]', ?, ?, ?)",
                 (aid, resume_id, profile_id, version, model_name, contract_version, ts),
             )
         return {"id": aid, "resume_id": resume_id, "profile_id": profile_id, "version": version,
-                "status": "queued", "created_at": ts}
+                "status": "queued", "stage": "queued", "quality_status": "complete",
+                "quality_warnings": [], "created_at": ts}
 
-    def update_analysis_status(self, analysis_id, status, *, failure_code=None, summary=None, unknowns=None):
+    def update_analysis_status(self, analysis_id, status, *, failure_code=None, summary=None, unknowns=None,
+                               analysis_stage=None, stage=None, quality_status=None, quality_warnings=None,
+                               expected_statuses=None, expected_stages=None):
         aid = str(analysis_id)
         sets = ["status = ?"]
         params = [status]
+        next_stage = analysis_stage if analysis_stage is not None else stage
+        if next_stage is not None:
+            sets.append("analysis_stage = ?"); params.append(next_stage)
+        if quality_status is not None:
+            sets.append("quality_status = ?"); params.append(quality_status)
+        if quality_warnings is not None:
+            sets.append("quality_warnings_json = ?")
+            params.append(json.dumps(_safe_quality_warnings(quality_warnings), ensure_ascii=False))
         if failure_code is not None:
             sets.append("failure_code = ?")
             params.append(failure_code)
@@ -2270,9 +2318,15 @@ class TaskStore:
         if status in ("ready", "failed"):
             sets.append("completed_at = ?")
             params.append(_now())
-        params.append(aid)
+        where = ["id = ?"]; where_params = [aid]
+        if expected_statuses is not None:
+            vals = [str(v) for v in expected_statuses]; where.append("status IN (" + ",".join("?" for _ in vals) + ")"); where_params.extend(vals)
+        if expected_stages is not None:
+            vals = [str(v) for v in expected_stages]; where.append("analysis_stage IN (" + ",".join("?" for _ in vals) + ")"); where_params.extend(vals)
+        params.extend(where_params)
         with self._connection() as conn:
-            conn.execute(f"UPDATE candidate_analyses SET {', '.join(sets)} WHERE id = ?", params)
+            conn.execute(f"UPDATE candidate_analyses SET {', '.join(sets)} WHERE {' AND '.join(where)}", params)
+        return self.get_analysis(aid)
 
     def get_analysis(self, analysis_id) -> dict:
         with self._connection() as conn:
@@ -2280,8 +2334,10 @@ class TaskStore:
             if row is None:
                 raise KeyError(analysis_id)
             d = dict(row)
-            d["summary"] = json.loads(d.pop("summary_json") or "{}")
-            d["unknowns"] = json.loads(d.pop("unknowns_json") or "[]")
+            d["summary"] = _decode_json(d.pop("summary_json"), {})
+            d["unknowns"] = _decode_json(d.pop("unknowns_json"), [])
+            d["quality_warnings"] = _safe_quality_warnings(_decode_json(d.pop("quality_warnings_json", "[]"), []))
+            d["stage"] = d.pop("analysis_stage", "queued")
             return d
 
     def list_analyses(self, resume_id) -> list:
@@ -2294,8 +2350,10 @@ class TaskStore:
         out = []
         for row in rows:
             d = dict(row)
-            d["summary"] = json.loads(d.pop("summary_json") or "{}")
-            d["unknowns"] = json.loads(d.pop("unknowns_json") or "[]")
+            d["summary"] = _decode_json(d.pop("summary_json"), {})
+            d["unknowns"] = _decode_json(d.pop("unknowns_json"), [])
+            d["quality_warnings"] = _safe_quality_warnings(_decode_json(d.pop("quality_warnings_json", "[]"), []))
+            d["stage"] = d.pop("analysis_stage", "queued")
             out.append(d)
         return out
 

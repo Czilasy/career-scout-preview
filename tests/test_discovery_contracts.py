@@ -337,7 +337,7 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         """契约: POST 接受 application/json {resume_id, ai_consent}，返回 202 + AnalysisSummary。"""
         resp = self.client.post(
             "/api/discovery/analyses",
-            json={"resume_id": self.resume["id"], "ai_consent": False},
+            json={"resume_id": self.resume["id"], "ai_consent": True},
         )
         self.assertEqual(resp.status_code, 202)
         data = resp.get_json()
@@ -357,19 +357,18 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         data = resp.get_json()
         self.assertIn("error_code", data)
 
-    def test_post_analyses_consent_false_stays_queued_and_no_provider_call(self):
-        """契约: consent=false 时分析保持 queued，不调用 AI provider。"""
+    def test_post_analyses_consent_false_rejects_without_row(self):
+        """契约: consent=false 时创建前拒绝，不调用 AI provider。"""
         self._configure_ai_settings()
         fake_provider = self._patch_ai_provider()
+        before = len(self.store.list_analyses(self.resume["id"]))
         resp = self.client.post(
             "/api/discovery/analyses",
             json={"resume_id": self.resume["id"], "ai_consent": False},
         )
-        self.assertEqual(resp.status_code, 202)
+        self.assertEqual(resp.status_code, 400)
         fake_provider.analyze.assert_not_called()
-        analysis_id = resp.get_json()["analysis_id"]
-        get_resp = self.client.get(f"/api/discovery/analyses/{analysis_id}")
-        self.assertEqual(get_resp.get_json()["status"], "queued")
+        self.assertEqual(len(self.store.list_analyses(self.resume["id"])), before)
 
     def test_post_analyses_consent_true_with_provider_no_500(self):
         """契约: 已配置 + consent=true 不得 NameError/500，最终 ready 或安全 failed。"""
@@ -516,7 +515,10 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         first_version = first_data.get("version")
         self._poll_until_terminal(first_id, timeout=5.0)
 
-        retry_resp = self.client.post(f"/api/discovery/analyses/{first_id}/retry")
+        retry_resp = self.client.post(
+            f"/api/discovery/analyses/{first_id}/retry",
+            json={"ai_consent": True},
+        )
         self.assertEqual(retry_resp.status_code, 202)
         retry_data = retry_resp.get_json()
         self.assertEqual(retry_data["version"], first_version + 1)
@@ -524,8 +526,8 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         self.assertEqual(retry_data["resume_id"], self.resume["id"])
         self._poll_until_terminal(retry_data["analysis_id"], timeout=5.0)
 
-    def test_retry_respects_consent_false(self):
-        """契约: retry 请求体 ai_consent=false 时新建分析保持 queued，不调用 provider。"""
+    def test_retry_rejects_consent_false_without_new_attempt(self):
+        """契约: retry consent=false 时拒绝且不新建分析。"""
         self._configure_ai_settings()
         fake_provider = self._patch_ai_provider(response=_contract_valid_ai_response())
         first_resp = self.client.post(
@@ -535,17 +537,16 @@ class AnalysisConfirmationHttpContractTests(unittest.TestCase):
         first_id = first_resp.get_json()["analysis_id"]
         self._poll_until_terminal(first_id, timeout=5.0)
         calls_before_retry = fake_provider.analyze.call_count
+        versions_before = len(self.store.list_analyses(self.resume["id"]))
 
         retry_resp = self.client.post(
             f"/api/discovery/analyses/{first_id}/retry",
             json={"ai_consent": False},
         )
-        self.assertEqual(retry_resp.status_code, 202)
-        retry_id = retry_resp.get_json()["analysis_id"]
+        self.assertEqual(retry_resp.status_code, 400)
         # consent=false -> provider 不应被再次调用
         self.assertEqual(fake_provider.analyze.call_count, calls_before_retry)
-        get_resp = self.client.get(f"/api/discovery/analyses/{retry_id}")
-        self.assertEqual(get_resp.get_json()["status"], "queued")
+        self.assertEqual(len(self.store.list_analyses(self.resume["id"])), versions_before)
 
     def test_retry_unknown_analysis_returns_404(self):
         """契约: retry 未知 id 返回 404。"""

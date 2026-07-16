@@ -622,7 +622,7 @@ def normalize_evidence(raw_evidence: Iterable[dict], resume_text: str) -> list[d
             existing["confidence"] = max(existing["confidence"], confidence)
         else:
             merged[key] = {
-                "id": item.get("id") or f"{etype}:{normalized_value.lower()}",
+                "id": item.get("id") or item.get("client_ref") or f"{etype}:{normalized_value.lower()}",
                 "evidence_type": etype,
                 "normalized_value": normalized_value,
                 "safe_excerpt": safe_excerpt,

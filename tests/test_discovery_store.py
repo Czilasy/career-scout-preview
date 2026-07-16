@@ -80,8 +80,8 @@ class _StoreTestCase(unittest.TestCase):
 
 
 class Migration011Tests(_StoreTestCase):
-    def test_schema_version_upgraded_to_13(self):
-        self.assertEqual(self._schema_version(), 13)
+    def test_schema_version_upgraded_to_14(self):
+        self.assertEqual(self._schema_version(), 14)
 
     def test_candidate_analyses_table_structure(self):
         self.assertTrue(self._table_exists("candidate_analyses"))
@@ -90,6 +90,7 @@ class Migration011Tests(_StoreTestCase):
             "id", "resume_id", "profile_id", "version", "status",
             "summary_json", "unknowns_json", "model_name", "contract_version",
             "failure_code", "created_at", "completed_at",
+            "analysis_stage", "quality_status", "quality_warnings_json",
         }
         self.assertTrue(required.issubset(cols), f"missing: {required - cols}")
 
@@ -123,7 +124,7 @@ class Migration011Tests(_StoreTestCase):
     def test_idempotent_reopen(self):
         TaskStore(self._tmp.name)
         TaskStore(self._tmp.name)
-        self.assertEqual(self._schema_version(), 13)
+        self.assertEqual(self._schema_version(), 14)
 
     def test_connections_use_wal_and_busy_timeout(self):
         with self.store._connection() as conn:
@@ -342,6 +343,33 @@ class Migration013Tests(_StoreTestCase):
 
 
 class AnalysisEvidenceDirectionCrudTests(_StoreTestCase):
+    def test_v3_analysis_defaults_and_quality_warning_sanitization(self):
+        pid, rid = _make_profile_and_resume(self.store)
+        a = self.store.create_analysis(rid, pid, contract_version="v3")
+        self.assertEqual(a["stage"], "queued")
+        self.assertEqual(a["quality_status"], "complete")
+        self.store.update_analysis_status(a["id"], "partial", stage="normalized",
+            quality_status="partial", quality_warnings=[{"code": "x", "path": "summary"}, {"code": 1}, "bad"])
+        got = self.store.get_analysis(a["id"])
+        self.assertEqual(got["quality_warnings"], [{"code": "x", "path": "summary"}])
+
+    def test_malformed_quality_warning_json_falls_back_to_empty(self):
+        pid, rid = _make_profile_and_resume(self.store)
+        a = self.store.create_analysis(rid, pid)
+        with self.store._connection() as conn:
+            conn.execute("UPDATE candidate_analyses SET quality_warnings_json = ? WHERE id = ?", ("{bad", a["id"]))
+        self.assertEqual(self.store.get_analysis(a["id"])["quality_warnings"], [])
+
+    def test_conditional_update_rejects_late_worker(self):
+        pid, rid = _make_profile_and_resume(self.store)
+        a = self.store.create_analysis(rid, pid)
+        self.store.update_analysis_status(a["id"], "failed", stage="failed")
+        self.store.update_analysis_status(a["id"], "ready", stage="persisting",
+            expected_statuses={"queued", "running"}, expected_stages={"queued", "running"})
+        got = self.store.get_analysis(a["id"])
+        self.assertEqual(got["status"], "failed")
+        self.assertEqual(got["stage"], "failed")
+
     def test_create_analysis_increments_version(self):
         pid, rid = _make_profile_and_resume(self.store)
         a1 = self.store.create_analysis(rid, pid)
