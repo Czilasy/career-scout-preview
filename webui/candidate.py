@@ -182,8 +182,8 @@ def normalize_candidate_analysis(data, resume_text):
         for fld in ("gaps",):
             if fld in item and (not isinstance(item[fld], list) or not all(isinstance(x,str) for x in item[fld])): _warn(warnings,"invalid_type",p+"."+fld)
         if "confidence" in item:
-            try: _confidence(item["confidence"])
-            except ValueError: _warn(warnings,"invalid_type",p+".confidence")
+            if isinstance(item["confidence"], bool) or not isinstance(item["confidence"], int) or not 0 <= item["confidence"] <= 100:
+                _warn(warnings,"invalid_type",p+".confidence")
         if "default_enabled" in item and not isinstance(item["default_enabled"], bool): _warn(warnings,"invalid_type",p+".default_enabled")
         typ=item.get("type"); terms=item.get("search_terms", []); erefs=item.get("evidence_refs", [])
         if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["type"]["enum"]: _warn(warnings,"invalid_enum",p+".type"); continue
