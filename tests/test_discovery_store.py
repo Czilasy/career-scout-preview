@@ -370,6 +370,14 @@ class AnalysisEvidenceDirectionCrudTests(_StoreTestCase):
         self.assertEqual(got["status"], "failed")
         self.assertEqual(got["stage"], "failed")
 
+    def test_analysis_claim_is_atomic_and_single_use(self):
+        pid, rid = _make_profile_and_resume(self.store)
+        analysis = self.store.create_analysis(rid, pid, contract_version="v3")
+        self.assertTrue(self.store.claim_analysis(analysis["id"]))
+        self.assertFalse(self.store.claim_analysis(analysis["id"]))
+        claimed = self.store.get_analysis(analysis["id"])
+        self.assertEqual((claimed["status"], claimed["stage"]), ("analyzing", "requesting"))
+
     def test_create_analysis_increments_version(self):
         pid, rid = _make_profile_and_resume(self.store)
         a1 = self.store.create_analysis(rid, pid)

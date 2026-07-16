@@ -2328,6 +2328,16 @@ class TaskStore:
             conn.execute(f"UPDATE candidate_analyses SET {', '.join(sets)} WHERE {' AND '.join(where)}", params)
         return self.get_analysis(aid)
 
+    def claim_analysis(self, analysis_id) -> bool:
+        """Atomically claim one queued analysis for a single worker."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "UPDATE candidate_analyses SET status = 'analyzing', analysis_stage = 'requesting' "
+                "WHERE id = ? AND status = 'queued' AND analysis_stage = 'queued'",
+                (str(analysis_id),),
+            )
+            return cursor.rowcount == 1
+
     def get_analysis(self, analysis_id) -> dict:
         with self._connection() as conn:
             row = conn.execute("SELECT * FROM candidate_analyses WHERE id = ?", (str(analysis_id),)).fetchone()

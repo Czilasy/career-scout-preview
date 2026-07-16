@@ -2161,7 +2161,9 @@ def create_app(config=None):
         resume_id = analysis["resume_id"]
         profile_id = analysis["profile_id"]
         # T109: 创建新版本 queued attempt，提交 runtime 异步执行
-        new_analysis = store.create_analysis(resume_id, profile_id)
+        new_analysis = store.create_analysis(
+            resume_id, profile_id, contract_version="v3",
+        )
         discovery_runtime = app.config["DISCOVERY_RUNTIME"]
         discovery_runtime.submit_analysis(new_analysis["id"], ai_consent=True)
         return jsonify(_analysis_summary(new_analysis, store)), 202

@@ -213,6 +213,17 @@ class AnalyzeResumeOrchestrationTests(_IntegrationTestCase):
         for e in evidence:
             self.assertNotIn("5年 Python 后端经验，熟悉 Django/Flask", e.get("safe_excerpt", ""))
 
+    def test_terminal_analysis_cannot_be_reprocessed_or_duplicate_rows(self):
+        provider = FakeAIProvider(_valid_ai_response())
+        result = analyze_resume(self.store, self.resume["id"], ai_consent=True, ai_provider=provider)
+        evidence_count = len(self.store.list_evidence(result["id"]))
+        direction_count = len(self.store.list_directions(result["id"]))
+        with self.assertRaises(DiscoveryError) as ctx:
+            analyze_resume(self.store, self.resume["id"], ai_consent=True, ai_provider=provider, analysis_id=result["id"])
+        self.assertEqual(ctx.exception.error_code, "state_conflict")
+        self.assertEqual(len(self.store.list_evidence(result["id"])), evidence_count)
+        self.assertEqual(len(self.store.list_directions(result["id"])), direction_count)
+
 
 class ConfirmDirectionsTests(_IntegrationTestCase):
     """T026: confirm_directions freezes immutable version."""

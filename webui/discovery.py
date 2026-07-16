@@ -804,6 +804,8 @@ def analyze_resume(
             conditional["expected_statuses"] = {
                 "queued", "analyzing", "normalizing", "validating", "repairing", "persisting",
             }
+        elif target_status == "analyzing":
+            conditional["expected_statuses"] = {"analyzing"}
         store.update_analysis_status(
             analysis["id"], target_status, analysis_stage=stage,
             quality_status=quality_status, quality_warnings=quality_warnings,
@@ -819,6 +821,9 @@ def analyze_resume(
             model_name=model_name, contract_version="v3",
         )
 
+    if not store.claim_analysis(analysis["id"]):
+        raise DiscoveryError("state_conflict", user_message="分析已被处理或不再可执行。")
+
     if not resume_text:
         set_stage("validating", status="failed", quality_status="manual_required", quality_warnings=[] , failure_code="input_incomplete")
         raise DiscoveryError("input_incomplete", user_message="简历正文为空，无法分析。")
@@ -826,8 +831,6 @@ def analyze_resume(
     if ai_provider is None:
         set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_unavailable")
         raise DiscoveryError("ai_unavailable", user_message="AI 服务未配置。")
-
-    set_stage("requesting", status="analyzing")
 
     try:
         raw = ai_provider.analyze(resume_text=resume_text)
