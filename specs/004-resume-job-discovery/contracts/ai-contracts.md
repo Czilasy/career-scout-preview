@@ -2,14 +2,15 @@
 
 AI contracts are versioned, deterministic where provider support allows, and validated before use. Unknown fields are omitted or explicit; no default score is inserted.
 
-## Candidate analysis provider output v2
+## Candidate analysis provider output v3
 
-Version 2 removes authoritative character offsets from the model contract. The model returns a minimal exact quote; program code resolves and verifies the locator against canonical resume text before the domain validator sees the response.
+Version 3 is the backend-owned canonical result. The backend supplies typed empty values and quarantines invalid fields independently; one invalid evidence item never discards a valid summary. `contract_version` is always `v3`. The canonical quality shape is `quality {status: "complete|partial|manual_required", warnings: []}`.
 
-Required top-level fields:
+Required top-level fields (backend-owned typed empty shape; backend-owned typed empty values):
 
 ```json
 {
+  "contract_version": "v3",
   "summary": {
     "headline": "string",
     "experience_level": "string or empty",
@@ -41,7 +42,8 @@ Required top-level fields:
       "default_enabled": true,
       "search_terms": ["string"]
     }
-  ]
+  ],
+  "quality": {"status": "complete", "warnings": []}
 }
 ```
 
@@ -55,7 +57,10 @@ Program validation:
 - Default-enabled directions require evidence and the configured confidence gate.
 - Normalize and merge synonymous directions; retain at most five default-visible directions and at most three terms each.
 - Contact details, identity numbers and exact addresses are rejected as evidence.
-- Any structural/reference failure invalidates the response; partial unvalidated output is not persisted as ready.
+- An invalid evidence item is quarantined with a field-level warning code; unrelated valid summary, unknowns and directions remain usable (invalid evidence item is quarantined without discarding the valid summary).
+- `quality.status` is one of `complete|partial|manual_required`; `warnings` is always a typed list of field-level warning objects. A `ready` analysis may be `partial` or `manual_required` after quarantine.
+- Identity fields (name, gender, age, phone, ID number, exact address and similar contact identifiers) are excluded from candidate and search fields.
+- quarantined fields cannot influence confirmation, SearchPlan compilation, matching, or scraper inputs; unverified search fields never become confirmed constraints.
 - At most one corrective retry is allowed for a successfully returned but structurally invalid response. Missing evidence, values, scores or references are never guessed locally.
 
 ## Job-direction assessment input v1

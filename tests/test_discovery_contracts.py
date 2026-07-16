@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from webui.app import create_app
@@ -18,6 +19,38 @@ from webui.discovery import (
     build_portfolio,
 )
 from webui.store import TaskStore
+
+
+class CandidateAnalysisV3ContractTests(unittest.TestCase):
+    """Specification-level guards for the backend-owned candidate v3 contract."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Path(__file__).resolve().parents[1]
+        cls.ai_contract = (cls.root / "specs/004-resume-job-discovery/contracts/ai-contracts.md").read_text(encoding="utf-8")
+        cls.data_model = (cls.root / "specs/004-resume-job-discovery/data-model.md").read_text(encoding="utf-8")
+        cls.state_machine = (cls.root / "specs/004-resume-job-discovery/contracts/state-machine.md").read_text(encoding="utf-8")
+
+    def test_candidate_v3_has_backend_owned_typed_empty_shape(self):
+        self.assertIn("Candidate analysis provider output v3", self.ai_contract)
+        self.assertIn('"contract_version": "v3"', self.ai_contract)
+        self.assertIn('quality {status: "complete|partial|manual_required", warnings: []}', self.ai_contract)
+        self.assertIn("backend-owned typed empty values", self.ai_contract)
+
+    def test_one_invalid_evidence_item_does_not_discard_valid_summary(self):
+        self.assertIn("invalid evidence item is quarantined", self.ai_contract)
+        self.assertIn("valid summary", self.ai_contract)
+        self.assertNotIn("partial unvalidated output is not persisted as ready", self.ai_contract)
+
+    def test_unverified_search_fields_never_become_confirmed_constraints(self):
+        for phrase in ("quarantined fields cannot influence confirmation", "SearchPlan", "scraper inputs"):
+            self.assertIn(phrase, self.ai_contract)
+
+    def test_identity_fields_are_not_candidate_or_search_fields(self):
+        self.assertIn("Identity fields", self.ai_contract)
+        self.assertIn("name", self.ai_contract)
+        self.assertIn("exact address", self.ai_contract)
+        self.assertIn("excluded from candidate and search fields", self.ai_contract)
 
 
 # Resume text used by HTTP contract tests. Kept脱敏: no phone/ID/address.

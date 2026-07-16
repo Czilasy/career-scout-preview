@@ -8,6 +8,8 @@ queued → analyzing → ready
 ready/failed → deleted   # resume deletion
 ```
 
+Analysis stages are `requesting → normalizing → validating → repairing → persisting`; each stage emits durable progress and failure events. Quality is `complete|partial|manual_required` and is independent of workflow status, so `ready` may contain a partial or manual-required quarantined result.
+
 - Only `ready` can create a confirmation.
 - Retry creates a new analysis version; it does not mutate a failed result into a different historical result.
 - `queued` means the immutable attempt exists and has been accepted for dispatch. Dispatch/provider-construction failure transitions to `failed` with a safe code; it may not remain queued indefinitely without an event.
