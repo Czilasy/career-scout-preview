@@ -70,6 +70,10 @@ def normalize_candidate_analysis(data, resume_text):
     out = build_empty_candidate_analysis(); warnings = []
     if not isinstance(data, dict):
         warnings.append(_v3_warning("invalid_type", "root")); out["quality"]["warnings"] = warnings; out["quality"]["status"] = "manual_required"; return out
+    allowed = {"contract_version", "summary", "evidence", "unknowns", "directions", "quality"}
+    for key in data:
+        if key not in allowed:
+            warnings.append(_v3_warning("unverified_field", key))
     raw = data.get("summary", {})
     if isinstance(raw, dict):
         for key in ("headline", "experience_level"):
@@ -80,6 +84,21 @@ def normalize_candidate_analysis(data, resume_text):
             elif key in raw: warnings.append(_v3_warning("invalid_type", f"summary.{key}"))
     elif "summary" in data: warnings.append(_v3_warning("invalid_type", "summary"))
     canonical = canonicalize_resume_text_v3(resume_text); refs = set()
+    raw_unknowns = data.get("unknowns", [])
+    if isinstance(raw_unknowns, list):
+        for i, item in enumerate(raw_unknowns):
+            path = f"unknowns[{i}]"
+            if not isinstance(item, dict):
+                warnings.append(_v3_warning("invalid_type", path)); continue
+            field = item.get("field")
+            if field not in UNKNOWN_FIELDS:
+                warnings.append(_v3_warning("invalid_enum", path + ".field")); continue
+            message = item.get("message", "")
+            if not isinstance(message, str):
+                warnings.append(_v3_warning("invalid_type", path + ".message")); message = ""
+            out["unknowns"].append({"field": field, "message": message})
+    elif "unknowns" in data:
+        warnings.append(_v3_warning("invalid_type", "unknowns"))
     for i, item in enumerate(data.get("evidence", []) if isinstance(data.get("evidence", []), list) else []):
         p = f"evidence[{i}]"
         try:
@@ -101,16 +120,18 @@ def normalize_candidate_analysis(data, resume_text):
         if not isinstance(item, dict): warnings.append(_v3_warning("invalid_type",p)); continue
         typ=item.get("type"); terms=item.get("search_terms", []); erefs=item.get("evidence_refs", [])
         if typ not in DIRECTION_TYPES: warnings.append(_v3_warning("invalid_enum",p+".type")); continue
-        terms = terms if isinstance(terms,list) and all(isinstance(x,str) for x in terms) else []
-        erefs = erefs if isinstance(erefs,list) and all(isinstance(x,str) for x in erefs) else []
+        if not isinstance(terms, list) or not all(isinstance(x, str) for x in terms):
+            warnings.append(_v3_warning("invalid_type", p + ".search_terms")); terms = []
+        if not isinstance(erefs, list) or not all(isinstance(x, str) for x in erefs):
+            warnings.append(_v3_warning("invalid_type", p + ".evidence_refs")); erefs = []
         valid_refs=[]; lost_ref=False
         for r in erefs:
             if r in refs and r not in valid_refs: valid_refs.append(r)
             elif r not in refs: warnings.append(_v3_warning("reference_invalid",p+".evidence_refs")); lost_ref=True
-        executable = 1 <= len(terms) <= MAX_SEARCH_TERMS and bool(valid_refs) and not lost_ref
+        executable = 1 <= len(terms) <= MAX_SEARCH_TERMS and not lost_ref
         out["directions"].append({"client_ref": item.get("client_ref", "") if isinstance(item.get("client_ref", ""),str) else "", "name": item.get("name", "") if isinstance(item.get("name", ""),str) else "", "type": typ, "rationale": item.get("rationale", "") if isinstance(item.get("rationale", ""),str) else "", "evidence_refs": valid_refs, "gaps": item.get("gaps", []) if isinstance(item.get("gaps", []),list) else [], "confidence": _confidence(item.get("confidence",0)) if isinstance(item.get("confidence",0),(int,float)) and not isinstance(item.get("confidence",0),bool) else 0, "default_enabled": bool(item.get("default_enabled",False)) and executable, "search_terms": terms[:MAX_SEARCH_TERMS]})
     out["quality"]["warnings"] = warnings
-    executable = any(d["default_enabled"] and d["search_terms"] for d in out["directions"])
+    executable = any(d["search_terms"] for d in out["directions"])
     out["quality"]["status"] = "complete" if not warnings else ("partial" if executable else "manual_required")
     return out
 
