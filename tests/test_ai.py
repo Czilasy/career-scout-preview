@@ -1283,5 +1283,125 @@ class DiscoveryAIProviderTests(unittest.TestCase):
         }
 
 
+# ---------------------------------------------------------------------------
+# Task 3: candidate-analysis v3 provider adapter contract
+# ---------------------------------------------------------------------------
+class CandidateV3ProviderAdapterTests(unittest.TestCase):
+    """Focused contract/cleanup/retry assertions for the approved v3 flow."""
+
+    def setUp(self):
+        import webui.ai as ai
+        import webui.candidate as candidate
+        self.ai, self.candidate = ai, candidate
+        self.provider = ai.DiscoveryAIProvider("e", "m", "k")
+
+    def _contract(self):
+        return getattr(self.candidate, "CANDIDATE_ANALYSIS_V3_CONTRACT")
+
+    def _empty(self):
+        c = self._contract()
+        return c.build_empty() if hasattr(c, "build_empty") else self.candidate.build_empty()
+
+    def _cleanup(self, value):
+        fn = getattr(self.ai, "cleanup_candidate_analysis_response", None) or getattr(self.ai, "_cleanup_candidate_response")
+        return fn(value)
+
+    def test_v3_schema_covers_provider_fields_once(self):
+        text = self.provider._build_analyze_messages("resume")[0]["content"]
+        self.assertIn("CANDIDATE_ANALYSIS_V3_CONTRACT", text)
+        self.assertEqual(text.count("source_locator"), 1)
+
+    def test_v3_typed_empty_is_exact(self):
+        empty = self._empty()
+        self.assertIsInstance(empty, dict)
+        self.assertEqual(empty, self._contract().build_empty())
+
+    def test_identity_fields_are_not_provider_output_fields(self):
+        schema = self.provider._build_analyze_messages("resume")[0]["content"]
+        for field in ("name", "phone", "email", "identity"):
+            self.assertNotIn(field, schema)
+
+    def test_locator_excerpt_quality_are_program_owned(self):
+        schema = self.provider._build_analyze_messages("resume")[0]["content"]
+        self.assertNotIn('"source_locator"', schema)
+        self.assertNotIn('"safe_excerpt"', schema)
+        self.assertNotIn('"quality"', schema)
+        self.assertNotIn("offset", schema.lower())
+
+    def test_response_format_is_json_object(self):
+        self.assertEqual(self.provider._build_analyze_messages("resume")[-1].get("response_format", {"type":"json_object"}), {"type":"json_object"})
+
+    def test_cleanup_accepts_plain_json(self):
+        value = self._empty(); self.assertEqual(self._cleanup(json.dumps(value)), value)
+
+    def test_cleanup_accepts_json_and_unlabelled_fences(self):
+        value = self._empty()
+        for wrapped in (f"```json\n{json.dumps(value)}\n```", f"```\n{json.dumps(value)}\n```"):
+            self.assertEqual(self._cleanup(wrapped), value)
+
+    def test_cleanup_accepts_single_data_or_result_envelope(self):
+        value = self._empty()
+        self.assertEqual(self._cleanup(json.dumps({"data": value})), value)
+        self.assertEqual(self._cleanup(json.dumps({"result": value})), value)
+
+    def test_cleanup_rejects_unknown_nested_multiple_and_trailing(self):
+        value = self._empty()
+        for raw in (json.dumps({"foo": value}), json.dumps({"data":{"result":value}}), json.dumps({"data":value,"result":value}), json.dumps(value)+" trailing", "```{" ):
+            with self.assertRaises(ValueError): self._cleanup(raw)
+
+    def test_cleanup_does_not_fill_semantic_values(self):
+        value = self._empty(); out = self._cleanup(json.dumps(value)); self.assertEqual(out, value)
+
+    def test_complete_v3_result_does_not_retry(self):
+        with patch("webui.ai.call_ai", return_value=self._empty()) as call:
+            self.provider.analyze(resume_text="resume")
+        self.assertEqual(call.call_count, 1)
+
+    def test_partial_result_triggers_one_correction_with_safe_diagnostics(self):
+        partial = {"status":"partial"}; good = self._empty()
+        with patch("webui.ai.call_ai", side_effect=[partial, good]) as call:
+            self.provider.analyze(resume_text="resume")
+        self.assertEqual(call.call_count, 2)
+        correction = call.call_args_list[1].args[2][0]["content"]
+        self.assertNotIn("resume", correction)
+
+    def test_manual_required_triggers_one_correction(self):
+        with patch("webui.ai.call_ai", side_effect=[{"status":"manual_required"}, self._empty()]) as call:
+            self.provider.analyze(resume_text="resume")
+        self.assertEqual(call.call_count, 2)
+
+    def test_corrected_higher_quality_result_is_used(self):
+        first = self._empty(); second = dict(first); second["status"] = "ready"
+        with patch("webui.ai.call_ai", side_effect=[first, second]):
+            self.assertEqual(self.provider.analyze(resume_text="resume")["status"], "ready")
+
+    def test_worse_correction_cannot_discard_useful_original(self):
+        first = self._empty(); second = {"status":"partial"}
+        with patch("webui.ai.call_ai", side_effect=[first, second]):
+            result = self.provider.analyze(resume_text="resume")
+        self.assertIsInstance(result, dict)
+
+    def test_second_partial_returns_best_result_after_two_calls(self):
+        with patch("webui.ai.call_ai", side_effect=[{"status":"partial"}, {"status":"manual_required"}]) as call:
+            result = self.provider.analyze(resume_text="resume")
+        self.assertEqual(call.call_count, 2); self.assertIsInstance(result, dict)
+
+    def test_invalid_json_is_terminal_without_retry(self):
+        with patch("webui.ai.call_ai", return_value="not-json") as call:
+            with self.assertRaises(self.ai.AISecurityError): self.provider.analyze(resume_text="resume")
+        self.assertEqual(call.call_count, 1)
+
+    def test_typed_transport_failures_do_not_retry(self):
+        for code in ("timeout", "auth_failed", "network_error"):
+            with self.subTest(code=code), patch("webui.ai.call_ai", side_effect=self.ai.AISecurityError(code)) as call:
+                with self.assertRaises(self.ai.AISecurityError): self.provider.analyze(resume_text="resume")
+                self.assertEqual(call.call_count, 1)
+
+    def test_correction_is_normalized_through_cleanup_path(self):
+        with patch("webui.ai.call_ai", side_effect=[{"status":"partial"}, f"```json\n{json.dumps(self._empty())}\n```"]) as call:
+            self.provider.analyze(resume_text="resume")
+        self.assertEqual(call.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
