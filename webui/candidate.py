@@ -132,7 +132,7 @@ def normalize_candidate_analysis(data, resume_text):
             if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["type"]["enum"] or assertion not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["assertion_type"]["enum"]: raise ValueError("invalid_enum")
             if not isinstance(quote, str) or not quote: raise ValueError("missing_required")
             normalized = item.get("normalized_value", "")
-            if not isinstance(normalized, str):
+            if "normalized_value" not in item or not isinstance(normalized, str):
                 raise ValueError("invalid_type")
             if isinstance(item.get("confidence"), bool) or not isinstance(item.get("confidence"), int):
                 _warn(warnings,"invalid_type",p+".confidence"); continue
@@ -176,9 +176,9 @@ def normalize_candidate_analysis(data, resume_text):
         if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["type"]["enum"]: _warn(warnings,"invalid_enum",p+".type"); continue
         if not isinstance(terms, list) or not all(isinstance(x, str) for x in terms):
             _warn(warnings,"invalid_type", p + ".search_terms"); terms = []
-        if not isinstance(erefs, list) or not all(isinstance(x, str) for x in erefs):
-            _warn(warnings,"invalid_type", p + ".evidence_refs"); erefs = []
         valid_refs=[]; lost_ref=False
+        if not isinstance(erefs, list) or not all(isinstance(x, str) for x in erefs):
+            _warn(warnings,"invalid_type", p + ".evidence_refs"); erefs = []; lost_ref = True
         for r in erefs:
             if r in valid_refs:
                 _warn(warnings, "reference_invalid", p+".evidence_refs"); lost_ref=True
@@ -187,7 +187,7 @@ def normalize_candidate_analysis(data, resume_text):
         max_terms = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["search_terms"]["max"]
         if len(terms)>max_terms: _warn(warnings,"invalid_type",p+".search_terms"); terms=[]
         executable = 1 <= len(terms) <= max_terms and not lost_ref and gaps_valid
-        out["directions"].append({"client_ref": item.get("client_ref", "") if isinstance(item.get("client_ref", ""),str) else "", "name": item.get("name", "") if isinstance(item.get("name", ""),str) else "", "type": typ, "rationale": item.get("rationale", "") if isinstance(item.get("rationale", ""),str) else "", "evidence_refs": valid_refs, "gaps": item.get("gaps", []) if gaps_valid else [], "confidence": _confidence(item.get("confidence",0)) if isinstance(item.get("confidence",0),int) and not isinstance(item.get("confidence",0),bool) and 0 <= item.get("confidence",0) <= 100 else 0, "default_enabled": item.get("default_enabled",False) if isinstance(item.get("default_enabled",False),bool) else False, "search_terms": terms[:max_terms]})
+        out["directions"].append({"client_ref": item.get("client_ref", "") if isinstance(item.get("client_ref", ""),str) else "", "name": item.get("name", "") if isinstance(item.get("name", ""),str) else "", "type": typ, "rationale": item.get("rationale", "") if isinstance(item.get("rationale", ""),str) else "", "evidence_refs": valid_refs, "gaps": item.get("gaps", []) if gaps_valid else [], "confidence": _confidence(item.get("confidence",0)) if isinstance(item.get("confidence",0),int) and not isinstance(item.get("confidence",0),bool) and 0 <= item.get("confidence",0) <= 100 else 0, "default_enabled": (item.get("default_enabled",False) and executable) if isinstance(item.get("default_enabled",False),bool) else False, "search_terms": terms[:max_terms]})
     # Provider quality is informational only; validate its shape for diagnostics,
     # but retain the backend-derived quality object as the sole authority.
     provider_quality = data.get("quality")
