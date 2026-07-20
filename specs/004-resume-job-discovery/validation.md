@@ -345,7 +345,7 @@ webui/candidate.py、webui/discovery.py、webui/discovery_runner.py、webui/sour
 | M4 | Medium | search_plans 缺少 UNIQUE(run_id)，理论上可重复创建 | 在 _migration_012 增加 UNIQUE 约束 | webui/store.py:695-706 + test_discovery_store.py::test_search_plan_unique_per_run |
 | M5 | Medium | _migrate 中混用 schema 升级与运行时 UPDATE（标记中断 run），破坏迁移单一职责 | 抽出为独立 `_mark_stale_runs_interrupted` 方法 | webui/store.py:76-81,180-181,183-209 |
 | M6 | Medium | resume 恢复时未校验 input_hash，可能用过期 plan_item 续跑 | 恢复前比对 input_hash，mismatch 标记 failed | webui/discovery_runner.py:274-289 |
-| M8 | Medium | index-v2.html 用 innerHTML 渲染搜索建议，存在 XSS 风险 | 改用 textContent + createElement + appendChild | webui/index-v2.html:564-568,591-598 |
+| M8 | Medium | （历史）备用页曾用 innerHTML 渲染搜索建议，存在 XSS 风险 | 当时改用 textContent + createElement + appendChild；该备用页后续已废弃并删除 | webui/index-v2.html（已删除） |
 | M9 | Medium | data-model.md 未说明 excluded_job_ids 字段用途 | 补充文档说明 | specs/004-resume-job-discovery/data-model.md:127-131 |
 | TM-1 | 测试方法学 | evaluate.py 指标同义反复（hard_rule_violation_rate / recall）未标注 | 添加 NOTE 标注"注解一致性检查，非系统验收测试" | tests/fixtures/discovery/evaluate.py:364-367 |
 | TM-2 | 测试方法学 | partial 断言过宽 `assertIn(..., ("failed","partial","succeeded"))` / `assertTrue(html != "" or True)` 同义反复 | 收紧为 `assertEqual(..., "failed")` / `assertTrue(html is not None)` | test_discovery_integration.py:415-418 + test_discovery_browser.py:202 |
@@ -372,7 +372,7 @@ webui/candidate.py、webui/discovery.py、webui/discovery_runner.py、webui/sour
 | webui/discovery.py | CD-1/CD-2/CD-3/HI-1/HI-2/M1/M2 全部修复 |
 | webui/discovery_runner.py | CD-2（5 处 succeeded→completed）+ M6 input_hash 校验 |
 | webui/store.py | M3 跨分析校验 + M4 UNIQUE(run_id) + M5 _mark_stale_runs_interrupted 抽出 |
-| webui/index-v2.html | M8 innerHTML → DOM API |
+| webui/index-v2.html（历史文件，已删除） | M8 innerHTML → DOM API |
 | specs/004-resume-job-discovery/data-model.md | M9 文档补充 excluded_job_ids |
 | specs/004-resume-job-discovery/validation.md | 本节（§9） |
 | tests/test_discovery.py | 替换 2 个占位测试为真实测试 |
@@ -897,3 +897,81 @@ python webui/app.py
 - 未向任何 AI 提供方发送用户真实简历：本轮没有针对具体真实简历的单独明确同意，因此只执行虚构简历探测。
 - 未执行真实 BOSS 抓取交接：验收时 `127.0.0.1:9222` 没有专用 CDP 监听者，也没有可验证的已登录浏览器；不能把自动化测试或历史 E2E 结果冒充本轮真实抓取。
 - 候选人 v3 适配器、持久化、人工补充交互、抓取字段白名单和执行上限均已通过本轮专项与全量回归；外部真实来源仍依赖后续明确提供的专用登录态。
+
+### 12.15 evidence_reference_invalid 根因修复（2026-07-20）
+
+#### 起因
+
+T133 真实 BOSS E2E 在 §12.14 完成后重跑时发现：所有 Portfolio 结果被降级为 `needs_review`，`failure_code=evidence_reference_invalid`，`evidence_count=0`。诊断发现生产 DB 中分析 `fce808949ae7478d` 的 `resume_evidence` 表 0 条记录，但 `quality_status='complete'`、`status='ready'`。
+
+#### 根因
+
+v3 候选分析契约允许 `evidence` 为空 list，但下游岗位评估契约 v1（`validate_job_assessment`）要求 `candidate_evidence_refs` 引用已存在的 evidence ID。当 AI 返回空 evidence 或所有 evidence 被 `resolve_evidence_quote` 静默丢弃时：
+
+- v3 normalize 不产生 warning，`quality_status` 仍为 `complete`
+- 下游评估 `allowed_candidate_refs = analysis_evidence_ids & direction_evidence_ids = ∅`
+- AI 任何非空 evidence 引用都被 `_validate_evidence_refs` 拒绝为 `unknown_ref`
+- 所有评估被 `evidence_reference_invalid` 降级为 `needs_review`
+
+T132 smoke 用 `evidence=[]` 调用 `assess_job` 是测试盲区，未覆盖此场景。
+
+#### 修复方案（方案 C：契约边界对齐）
+
+修改 3 个文件，区分两种空 evidence 场景：
+
+1. **完全空输出**（无 evidence 无可确认 direction）→ 保持 `ready + manual_required`，让用户手动补充（符合现有契约 `test_empty_v3_output_persists_ready_manual_required`）
+2. **有可确认 direction 但 evidence 空**→ 主动抛 `AISecurityError("ai_invalid_output")`，避免产出不可用的 ready 分析导致下游全降级
+
+#### 改动文件
+
+| 文件 | 位置 | 改动 |
+|------|------|------|
+| [webui/candidate.py](file:///d:/项目/boss/webui/candidate.py) | 第 272-280 行 | `normalize_candidate_analysis` 在 `executable and not out["evidence"]` 时加 `missing_required:evidence` warning 并降级 `manual_required` |
+| [webui/discovery.py](file:///d:/项目/boss/webui/discovery.py) | 第 919-935 行 | `analyze_resume` 检测 `normalized_evidence` 为空 + 有可确认 direction 时抛 `AISecurityError("ai_invalid_output")` |
+| [tests/fixtures/discovery/e2e_real_boss.py](file:///d:/项目/boss/tests/fixtures/discovery/e2e_real_boss.py) | 第 1232-1243 行 | `_run_live_provider_smoke` 的 `v2_ok` 判定加 `len(evidence) > 0` 检查 |
+
+#### 测试验证
+
+**TDD RED（4 个失败测试）**：
+
+| 测试 | 文件 | 状态 | 失败原因 |
+|------|------|------|----------|
+| T1.1 `test_v3_empty_evidence_with_confirmable_direction_marks_manual_required` | tests/test_candidate.py:965 | RED ✓ | `'complete' != 'manual_required'` |
+| T1.2 `test_v3_non_empty_evidence_keeps_complete_status` | tests/test_candidate.py:974 | GREEN ✓ | 防回归，预期通过 |
+| T1.3 `test_v3_empty_evidence_raises_ai_invalid_output` | tests/test_discovery_integration.py:230 | RED ✓ | `AISecurityError not raised` |
+| T1.4 `test_smoke_evidence_count_zero_is_not_pass` | tests/test_discovery_contracts.py:1221 | RED ✓ | `'pass' == 'pass'` |
+
+**GREEN 验证**：4 个测试全部通过。
+
+**全量回归**：`python -m unittest discover -s tests`，`Ran 1353 tests in 386.970s`，`OK`。修正了首次回归发现的 `test_empty_v3_output_persists_ready_manual_required` 场景（区分两种空 evidence）。
+
+#### 真实 E2E 验证（2026-07-20）
+
+**T132 Live-provider contract smoke**：PASS
+- `candidate_analysis_v2`: status=pass, evidence_count=10, direction_count=1, all_evidence_has_source_quote=True
+- `job_assessment_v1`: status=pass
+
+**T133 Real BOSS E2E**：PASS (exit_code=0)
+- `status`: completed
+- `blockers`: []
+- `counts`: source_count=6, detail_count=1, evaluated_count=2
+- `feedback`: ok
+- `cancel_test`: ok（fetching_lists 阶段取消）
+- `resume_test`: ok（5 个未完成项重新提交，0 个重复）
+
+#### 修复效果对比（portfolio quality.items）
+
+| 字段 | 修复前 | 修复后 |
+|------|--------|--------|
+| `failure_code` | `evidence_reference_invalid` | `null` |
+| `evidence_count` | `0` | `6` |
+| `match_score` | N/A | `70` |
+| `confidence` | N/A | `70` |
+| `gap_count` | N/A | `2` |
+
+AI 评估能正常引用 evidence（6 条），不再被 `evidence_reference_invalid` 全量降级。`category=needs_review` 是 AI 评估本身的判断（match_score=70 未达 high_match 阈值），非 evidence 引用问题。
+
+#### 未验证边界
+
+- AI 模型偶发不稳定：第一次 T133 因 `deepseek-v4-flash-free` 返回 0 directions 阻塞，第二次跑正常。这是 AI 模型本身的不稳定，与本次修复无关。
+- E2E counts 中 `high_count=0, adjacent_count=1, growth_count=0` 是真实市场数据局限（仅 1 个 detail 评估），非修复盲区。

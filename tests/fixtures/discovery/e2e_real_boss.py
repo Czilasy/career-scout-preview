@@ -1229,13 +1229,18 @@ def _run_live_provider_smoke() -> dict:
         has_summary = isinstance(result.get("summary"), dict)
         has_evidence = isinstance(result.get("evidence"), list)
         has_directions = isinstance(result.get("directions"), list)
-        # 验证 evidence 含 source_quote（v2 契约要求）
+        # 验证 evidence 含 source_quote（v2 契约要求）且至少 1 条
+        # （下游评估 v1 要求 evidence 引用，空 evidence 会导致所有评估被
+        # evidence_reference_invalid 降级为 needs_review）
         v2_ok = has_summary and has_evidence and has_directions
         if v2_ok:
-            for ev in result.get("evidence", []):
-                if not ev.get("source_quote"):
-                    v2_ok = False
-                    break
+            if len(result.get("evidence", [])) == 0:
+                v2_ok = False
+            else:
+                for ev in result.get("evidence", []):
+                    if not ev.get("source_quote"):
+                        v2_ok = False
+                        break
         report["candidate_analysis_v2"] = {
             "status": "pass" if v2_ok else "contract_violation",
             "has_summary": has_summary,

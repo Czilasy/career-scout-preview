@@ -957,3 +957,22 @@ class CandidateV3NormalizerTests(unittest.TestCase):
     def test_provider_warning_empty_path_is_rejected_safely(self):
         d=self._payload(); d["quality"]["warnings"]=[{"code":"invalid_type","path":""}]; o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
         self.assertTrue(any(w["path"]=="quality.warnings[0].path" and w["code"] in {"invalid_type","missing_required"} for w in o["quality"]["warnings"])); self.assertNotIn({"code":"invalid_type","path":""},o["quality"]["warnings"]); self.assertEqual(o["quality"]["status"],"partial")
+
+    # T1.1 (RED): v3 契约允许 evidence 为空，但下游评估 v1 要求 evidence 引用。
+    # 当 evidence 全空但有 confirmable direction 时，quality_status 必须降级为
+    # manual_required 并加 missing_required:evidence warning，避免下游
+    # allowed_candidate_refs=∅ 导致所有评估被 evidence_reference_invalid。
+    def test_v3_empty_evidence_with_confirmable_direction_marks_manual_required(self):
+        d=self._payload(); d["evidence"]=[]; d["directions"][0]["evidence_refs"]=[]
+        o=candidate.normalize_candidate_analysis(d,"经历：Python后端经验")
+        self.assertEqual(o["evidence"],[])
+        self.assertEqual(o["quality"]["status"],"manual_required")
+        self.assertIn({"code":"missing_required","path":"evidence"},o["quality"]["warnings"])
+
+    # T1.2 (防回归): 有 evidence + 有 confirmable direction + 无 warning 时
+    # quality_status 仍为 complete，确保 T1.1 修复不会误伤正常场景。
+    def test_v3_non_empty_evidence_keeps_complete_status(self):
+        o=candidate.normalize_candidate_analysis(self._payload(),"经历：Python后端经验")
+        self.assertEqual(len(o["evidence"]),1)
+        self.assertEqual(o["quality"]["status"],"complete")
+        self.assertEqual(o["quality"]["warnings"],[])

@@ -6,6 +6,9 @@
 - 城市码表外置为 `data/city_codes.json`（全量 300+ 城市，覆盖一二三四五线），新增 `--list-cities [关键词]` 命令查看支持的城市；`resolve_city` 查询链改为「本地静态码表 → 运行时拉 BOSS 接口 → 原样兜底」。城市码表打进 wheel，`pip install` 用户也可用。（#24）
 
 ### 修复
+- 候选人分析 v3 契约与岗位评估 v1 契约的 evidence 引用边界对齐：当 AI 返回空 evidence 或所有 evidence 被静默丢弃但有可确认 direction 时，`normalize_candidate_analysis` 主动降级 `manual_required` 并加 `missing_required:evidence` warning，`analyze_resume` 抛 `AISecurityError("ai_invalid_output")`，避免下游 `allowed_candidate_refs=∅` 导致所有评估被 `evidence_reference_invalid` 全量降级为 `needs_review`；T132 smoke 的 `v2_ok` 判定增加 `len(evidence) > 0` 检查关闭测试盲区。真实 BOSS E2E 验证：`failure_code` 从 `evidence_reference_invalid` 变为 `null`，`evidence_count` 从 0 变为 6。
+
+- 移除已落后于正式工作台的 `index-v2.html` 备用页及 `/v2` 路由，并明确根路径 `/` 是唯一正式前端入口，避免版本命名误导
 - 岗位发现开始抓取前增加一次 BOSS 专用浏览器连接与登录预检；分别保存并展示“专用浏览器未连接”和“尚未登录 BOSS直聘”，预检失败立即终止，避免逐搜索词重复失败后只显示“未知错误”
 - 岗位发现的手动方向区域增加明确字段标签、搜索词实时计数和有效状态反馈；兼容“方向，搜索词”逗号简写并自动拆分，有效输入会清除旧警告，同时将未知项并入同一补全区域并优化桌面/窄屏间距
 - 候选人分析升级为 `candidate_analysis_v3` 适配链：统一规范化完整、部分和需人工补充三种质量状态，隔离无效敏感证据，原子领取后台任务，并只把用户确认的搜索字段及受限页数/详情数交给抓取器

@@ -1208,5 +1208,51 @@ class ResultTraceabilityTests(unittest.TestCase):
         self.assertEqual(portfolio["confirmation_id"], "")
 
 
+class LiveProviderSmokeValidationTests(unittest.TestCase):
+    """T1.4 (RED): T132 smoke 验证函数对 evidence_count=0 必须判定为不通过。
+
+    当前 _run_live_provider_smoke 的 v2_ok 判定只检查 has_evidence=isinstance([],list)=True,
+    不检查 len(evidence)>0, 导致 evidence=[] 被 status='pass' 放行, 下游评估全部
+    被 evidence_reference_invalid 降级为 needs_review。
+    """
+
+    @mock.patch("webui.ai.DiscoveryAIProvider")
+    @mock.patch("webui.store.TaskStore")
+    def test_smoke_evidence_count_zero_is_not_pass(self, mock_store_cls, mock_provider_cls):
+        from tests.fixtures.discovery.e2e_real_boss import _run_live_provider_smoke
+
+        mock_store = mock_store_cls.return_value
+        mock_store.get_ai_settings.return_value = {
+            "is_configured": True,
+            "endpoint_url": "https://test.example/v1",
+            "model": "test-model",
+        }
+        mock_store.get_credential_ref.return_value = "cred-ref"
+
+        mock_provider = mock_provider_cls.return_value
+        # 候选分析返回 evidence=[]（T1.4 的核心测试点）
+        mock_provider.analyze.return_value = {
+            "summary": {"headline": "后端"},
+            "evidence": [],
+            "directions": [{"id": "d1", "name": "后端"}],
+        }
+        # 评估返回完整字段，避免 job_assessment_v1 smoke 干扰本测试断言
+        mock_provider.assess_job.return_value = {
+            "dimensions": {"direction_alignment": {}},
+            "match_score": 80,
+            "confidence": 90,
+            "proposed_band": "P5",
+        }
+
+        with mock.patch(
+            "tests.fixtures.discovery.e2e_real_boss._retrieve_api_key",
+            return_value="fake-key",
+        ):
+            report = _run_live_provider_smoke()
+
+        self.assertEqual(report["candidate_analysis_v2"]["evidence_count"], 0)
+        self.assertNotEqual(report["candidate_analysis_v2"]["status"], "pass")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

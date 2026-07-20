@@ -224,6 +224,32 @@ class AnalyzeResumeOrchestrationTests(_IntegrationTestCase):
         self.assertEqual(len(self.store.list_evidence(result["id"])), evidence_count)
         self.assertEqual(len(self.store.list_directions(result["id"])), direction_count)
 
+    # T1.3 (RED): 候选分析成功但 evidence 为空时，analyze_resume 必须抛
+    # AISecurityError("ai_invalid_output")，避免下游评估全部被
+    # evidence_reference_invalid 降级为 needs_review。
+    def test_v3_empty_evidence_raises_ai_invalid_output(self):
+        response = {
+            "contract_version": "v3",
+            "summary": {"headline": "后端", "experience_level": "高级",
+                        "domains": ["后端"], "strengths": ["Python"]},
+            "evidence": [],
+            "unknowns": [],
+            "directions": [{
+                "client_ref": "d1", "name": "后端", "type": "core",
+                "rationale": "经验", "evidence_refs": [],
+                "gaps": [], "confidence": 90, "default_enabled": True,
+                "search_terms": ["Python"],
+            }],
+            "quality": {"status": "complete", "warnings": []},
+        }
+        with self.assertRaises(AISecurityError) as ctx:
+            analyze_resume(self.store, self.resume["id"],
+                           ai_consent=True, ai_provider=FakeAIProvider(response))
+        self.assertEqual(ctx.exception.error_code, "ai_invalid_output")
+        analyses = self.store.list_analyses(self.resume["id"])
+        self.assertEqual(analyses[-1]["status"], "failed")
+        self.assertEqual(analyses[-1].get("failure_code"), "ai_invalid_output")
+
 
 class ConfirmDirectionsTests(_IntegrationTestCase):
     """T026: confirm_directions freezes immutable version."""

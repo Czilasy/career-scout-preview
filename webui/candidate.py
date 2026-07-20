@@ -269,7 +269,15 @@ def normalize_candidate_analysis(data, resume_text):
     out["quality"]["warnings"] = warnings
     max_terms = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["search_terms"]["max"]
     executable = confirmable_direction_exists
-    out["quality"]["status"] = "manual_required" if not executable else ("partial" if warnings else "complete")
+    # v3 契约允许 evidence 为空，但下游评估 v1 要求 evidence 引用。
+    # 当有可确认 direction 但 evidence 全空（输入为空或全部被静默丢弃）时，
+    # 必须降级 manual_required 并加 missing_required:evidence warning，
+    # 避免下游 allowed_candidate_refs=∅ 导致所有评估被 evidence_reference_invalid。
+    if executable and not out["evidence"]:
+        _warn(warnings, "missing_required", "evidence")
+        out["quality"]["status"] = "manual_required"
+    else:
+        out["quality"]["status"] = "manual_required" if not executable else ("partial" if warnings else "complete")
     return out
 
 

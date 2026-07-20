@@ -917,6 +917,22 @@ def analyze_resume(
     set_stage("validating", status="analyzing", quality_status=quality.get("status"), quality_warnings=quality.get("warnings", []))
     # Normalize and merge evidence/directions.
     normalized_evidence = normalize_evidence(validated["evidence"], resume_text)
+    # 候选分析成功但 evidence 全空时，需要区分两种场景：
+    # 1. 完全空输出（无 evidence 无可确认 direction）→ 保持 ready + manual_required，
+    #    让用户手动补充（现有契约 test_empty_v3_output_persists_ready_manual_required）
+    # 2. 有可确认 direction 但 evidence 空 → 抛 AISecurityError("ai_invalid_output")，
+    #    避免下游评估 v1 因 allowed_candidate_refs=∅ 导致所有评估被
+    #    evidence_reference_invalid 降级为 needs_review
+    if not normalized_evidence:
+        has_confirmable_direction = any(
+            isinstance(d.get("search_terms"), list) and d.get("search_terms")
+            for d in validated.get("directions", [])
+        )
+        if has_confirmable_direction:
+            set_stage("validating", status="failed", quality_status="manual_required",
+                      quality_warnings=quality.get("warnings", []),
+                      failure_code="ai_invalid_output")
+            raise AISecurityError("ai_invalid_output")
     merged_directions = merge_directions(validated["directions"])
     evidence_by_id = {e["id"]: e for e in normalized_evidence}
     final_directions = enforce_direction_policy(merged_directions, evidence_by_id)
