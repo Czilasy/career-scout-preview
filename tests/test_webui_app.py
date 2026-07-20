@@ -257,6 +257,14 @@ class WebUIAppTests(unittest.TestCase):
         self.assertNotIn("/api/apply", html)
         self.assertNotIn("/api/export-csv", html)
 
+    def test_obsolete_v2_frontend_is_retired(self):
+        response = self.client.get("/v2")
+        response.close()
+
+        self.assertEqual(response.status_code, 404)
+        obsolete_page = pathlib.Path(__file__).parents[1] / "webui" / "index-v2.html"
+        self.assertFalse(obsolete_page.exists())
+
     def test_screening_design_prototype_has_a_browser_route(self):
         response = self.client.get("/screening-prototype")
         html = response.get_data(as_text=True)

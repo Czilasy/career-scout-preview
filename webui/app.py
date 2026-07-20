@@ -727,11 +727,6 @@ def create_app(config=None):
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         return resp
 
-    @app.route("/v2")
-    def index_v2():
-        # 备用页面：极简高对比版前端，不替换原 index.html
-        return send_from_directory(HERE, "index-v2.html")
-
     @app.route("/screening-prototype")
     def screening_prototype():
         """Serve the isolated visual review prototype without production APIs."""

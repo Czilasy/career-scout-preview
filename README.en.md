@@ -56,7 +56,7 @@ After installing dependencies, start the local workspace:
 python3 webui/app.py
 ```
 
-Open `http://127.0.0.1:5000`. The workspace is a dark-themed job-seeking workbench: a collapsible left settings panel for profiles, resumes, and AI settings, and a main area with a single-column stream of fixed-height job cards.
+Open `http://127.0.0.1:5000`. The root path `/` is the only supported frontend entry point; the repository no longer keeps parallel version pages. The workspace is a dark-themed job-seeking workbench: a collapsible left settings panel for profiles, resumes, and AI settings, and a main area with a single-column stream of fixed-height job cards.
 
 ### Core Capabilities
 
