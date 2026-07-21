@@ -37,6 +37,12 @@ tests/fixtures/discovery/*_result.json
 # Local skill tooling config (baoyu-image-gen etc.)
 .baoyu-skills/
 
+# Workbuddy tool memory (per-machine state, not project code)
+.workbuddy/
+
+# Temporary diagnostic/scratch scripts
+_tmp_*.py
+
 # Editor and OS files
 .idea/
 .vscode/
