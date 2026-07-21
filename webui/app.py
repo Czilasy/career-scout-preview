@@ -70,6 +70,8 @@ SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
 DEFAULT_STATE_DIR = Path(os.path.expanduser("~/.career-scout/webui"))
 # 最新一轮流水线结果的持久化文件（刷新页面后据此恢复展示，新一轮运行覆盖它）
 LATEST_PIPELINE_RESULT_PATH = DEFAULT_STATE_DIR / "latest_pipeline_result.json"
+# 最新一轮"只抓不筛"的原始抓取结果，供 AI 筛选步骤读取（与最终筛选结果分开）
+LATEST_SCRAPE_RESULT_PATH = DEFAULT_STATE_DIR / "latest_scrape_result.json"
 
 
 def _optional_positive_int(value, field, *, maximum=None):
@@ -2850,6 +2852,33 @@ def create_app(config=None):
             return None
         return payload
 
+    def _save_latest_scrape_result(result, script_params):
+        """持久化"只抓不筛"的原始抓取结果，供 AI 筛选步骤读取（原子写入）。"""
+        payload = {
+            "saved_at": time.time(),
+            "script_params": script_params,
+            "result": result,
+        }
+        try:
+            LATEST_SCRAPE_RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = LATEST_SCRAPE_RESULT_PATH.with_suffix(".json.tmp")
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            os.replace(tmp, LATEST_SCRAPE_RESULT_PATH)
+        except OSError:
+            pass
+
+    def _load_latest_scrape_result():
+        """读取最近一次原始抓取结果；不存在/不可读返回 None。"""
+        try:
+            with open(LATEST_SCRAPE_RESULT_PATH, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("result"), dict):
+            return None
+        return payload
+
     def _run_pipeline_task(task_id, script_params):
         from webui.pipeline_exec import run_search
         with _pipeline_lock:
@@ -2883,15 +2912,148 @@ def create_app(config=None):
                     task["result"] = result
                     task["error"] = result.get("error", "")
                     task["status"] = "done" if result.get("ok") else "failed"
-            # 成功的运行持久化为"最新结果"，刷新页面可恢复；失败不覆盖旧数据
+            # 抓取成功：持久化原始结果供 AI 筛选步骤读取（最终筛选结果另存）
             if result.get("ok"):
-                _save_latest_pipeline_result(result, script_params)
+                _save_latest_scrape_result(result, script_params)
         except Exception as exc:
             with _pipeline_lock:
                 task = _pipeline_tasks.get(task_id)
                 if task is not None:
                     task["status"] = "failed"
                     task["error"] = f"执行异常：{type(exc).__name__}"
+
+    def _run_ai_screen_task(task_id, screening_fields, profile_summary):
+        """AI 筛选任务：StageA 字段粗筛 → 批量抓 JD → StageB JD 精筛。
+
+        读取最近一次原始抓取结果，两段式 AI 筛选后把带 verdict 的最终结果
+        持久化到 latest_pipeline_result.json（供结果页恢复）。
+        """
+        from webui.pipeline_exec import ensure_chrome_ready, close_debug_chrome, fetch_job_details
+        from webui.ai import screen_jobs, match_jds
+
+        with _pipeline_lock:
+            _pipeline_tasks[task_id] = {
+                "status": "running", "progress": {}, "logs": [],
+                "result": None, "error": "",
+            }
+
+        def emit(**kw):
+            with _pipeline_lock:
+                task = _pipeline_tasks.get(task_id)
+                if task is None:
+                    return
+                task["progress"] = kw
+                msg = kw.get("message")
+                if msg:
+                    task["logs"].append(msg)
+
+        try:
+            # 1) 读取原始抓取结果（只抓不筛的全量岗位）
+            scrape_payload = _load_latest_scrape_result()
+            if scrape_payload is None:
+                raise RuntimeError("no_scrape_result")
+            raw_jobs = scrape_payload["result"].get("jobs", [])
+            if not raw_jobs:
+                raise RuntimeError("empty_scrape_result")
+
+            # 2) AI 凭据
+            settings = store.get_ai_settings()
+            cred_ref = store.get_credential_ref()
+            api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
+            endpoint = settings.get("endpoint_url", "")
+            model = settings.get("model", "")
+            if not api_key or not endpoint:
+                raise RuntimeError("ai_not_configured")
+
+            criteria = dict(screening_fields or {})
+            criteria["profile_summary"] = profile_summary or ""
+
+            # 3) Stage A：字段粗筛（移除明显不符，学历向下兼容）
+            emit(stage="screen_a", current=0, total=len(raw_jobs),
+                 message="AI 粗筛中（对照筛选字段）…")
+
+            def _a_progress(cur, tot):
+                emit(stage="screen_a", current=cur, total=tot,
+                     message=f"AI 粗筛 {cur}/{tot}")
+
+            screen_result = screen_jobs(raw_jobs, criteria, endpoint, api_key,
+                                        model=model, progress=_a_progress)
+            kept_ids = set(screen_result["kept"])
+            survivors = [j for j in raw_jobs if str(j.get("job_id", "")) in kept_ids]
+            dropped = screen_result["dropped"]
+            emit(stage="screen_a_done", kept=len(survivors), dropped=len(dropped),
+                 message=f"粗筛完成：保留 {len(survivors)} 条，移除 {len(dropped)} 条")
+
+            # 4) 对保留的岗位批量抓 JD（重开调试浏览器，抓完关闭）
+            enriched = survivors
+            if survivors:
+                emit(stage="ensure_chrome", message="启动调试浏览器，准备抓取 JD…")
+                if not ensure_chrome_ready():
+                    raise RuntimeError("chrome_not_ready")
+                source = _make_discovery_source()
+                if source is None:
+                    raise RuntimeError("source_unavailable")
+
+                def _jd_progress(cur, tot):
+                    emit(stage="fetch_jd", current=cur, total=tot,
+                         message=f"抓取 JD {cur}/{tot}")
+
+                emit(stage="fetch_jd", current=0, total=len(survivors),
+                     message=f"抓取 JD（0/{len(survivors)}）…")
+                enriched = fetch_job_details(survivors, source,
+                                             artifact_dir=app.config["RESULT_DIR"],
+                                             progress=_jd_progress)
+                close_debug_chrome()
+
+            # 5) Stage B：JD 精筛（对比候选人画像）
+            jobs_with_jd = [j for j in enriched if str(j.get("jd", "")).strip()]
+            emit(stage="screen_b", current=0, total=len(jobs_with_jd),
+                 message="AI 精筛中（JD 对比简历画像）…")
+
+            def _b_progress(cur, tot):
+                emit(stage="screen_b", current=cur, total=tot,
+                     message=f"AI 精筛 {cur}/{tot}")
+
+            match_result = match_jds(jobs_with_jd, profile_summary, endpoint, api_key,
+                                     model=model, progress=_b_progress)
+            verdicts = match_result["verdicts"]
+            for job in enriched:
+                jid = str(job.get("job_id", ""))
+                v = verdicts.get(jid)
+                if v:
+                    job["verdict"] = v["verdict"]
+                    job["verdict_reason"] = v["reason"]
+                else:
+                    # 未抓到 JD 的岗位无法精筛，标记待定（不红不绿）
+                    job["verdict"] = "uncertain"
+                    job["verdict_reason"] = "未抓到 JD，无法精筛"
+
+            match_count = sum(1 for j in enriched if j.get("verdict") == "match")
+            result = {
+                "ok": True,
+                "jobs": enriched,
+                "dropped": dropped,
+                "total_scraped": len(raw_jobs),
+                "total_kept": len(enriched),
+                "total_matched": match_count,
+                "total_dropped": len(dropped),
+                "profile_summary": profile_summary,
+                "error": "",
+            }
+            with _pipeline_lock:
+                task = _pipeline_tasks.get(task_id)
+                if task is not None:
+                    task["result"] = result
+                    task["status"] = "done"
+            emit(stage="done", total_matched=match_count,
+                 message=f"筛选完成：匹配 {match_count} 条")
+            _save_latest_pipeline_result(result, {"screening": screening_fields})
+        except Exception as exc:
+            with _pipeline_lock:
+                task = _pipeline_tasks.get(task_id)
+                if task is not None:
+                    task["status"] = "failed"
+                    task["error"] = f"AI 筛选异常：{type(exc).__name__}"
 
     @app.route("/api/analyze-resume", methods=["POST"])
     def analyze_resume():
@@ -3006,6 +3168,22 @@ def create_app(config=None):
         _pipeline_executor.submit(_run_pipeline_task, task_id, script_params)
         return jsonify({"ok": True, "task_id": task_id})
 
+    @app.route("/api/ai-screen", methods=["POST"])
+    def ai_screen():
+        """Stage 3b：对已抓取的原始岗位做两段式 AI 筛选。
+
+        接收 ``{"screening_fields": {...}, "profile_summary": "..."}``，
+        启动后台任务（StageA 粗筛→抓JD→StageB 精筛）并返回 ``task_id`` 供轮询。
+        """
+        body = request.get_json(silent=True) or {}
+        screening_fields = body.get("screening_fields") or {}
+        profile_summary = str(body.get("profile_summary") or "")
+        if not isinstance(screening_fields, dict):
+            return jsonify({"ok": False, "error": "无效的筛选字段"}), 400
+        task_id = uuid.uuid4().hex
+        _pipeline_executor.submit(_run_ai_screen_task, task_id, screening_fields, profile_summary)
+        return jsonify({"ok": True, "task_id": task_id})
+
     @app.route("/api/search-progress/<task_id>")
     def search_progress(task_id):
         """Poll the progress of a pipeline run.
@@ -3026,13 +3204,9 @@ def create_app(config=None):
                 "error": task["error"],
             }
             if task["status"] in ("done", "failed") and task["result"] is not None:
-                result = task["result"]
-                snapshot["result"] = {
-                    "total_scraped": result.get("total_scraped", 0),
-                    "total_matched": result.get("total_matched", 0),
-                    "combinations": result.get("combinations", 0),
-                    "jobs": result.get("jobs", []),
-                }
+                # 原样返回整个 result：抓取任务含 jobs/计数；
+                # AI 筛选任务还含 dropped/verdict/profile_summary 等
+                snapshot["result"] = task["result"]
         return jsonify(snapshot)
 
     @app.route("/api/latest-pipeline-result")
@@ -3055,8 +3229,12 @@ def create_app(config=None):
             "result": {
                 "total_scraped": result.get("total_scraped", 0),
                 "total_matched": result.get("total_matched", 0),
+                "total_kept": result.get("total_kept", 0),
+                "total_dropped": result.get("total_dropped", 0),
                 "combinations": result.get("combinations", 0),
                 "jobs": result.get("jobs", []),
+                "dropped": result.get("dropped", []),
+                "profile_summary": result.get("profile_summary", ""),
             },
         })
 

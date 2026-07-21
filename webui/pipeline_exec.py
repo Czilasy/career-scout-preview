@@ -250,7 +250,6 @@ def run_search(params: dict, source, *, pages: int = 3,
         sleeper = time.sleep
 
     combos = expand_combinations(params)
-    filters = params.get("filters") or {}
 
     def emit(**kw):
         if progress is not None:
@@ -333,19 +332,48 @@ def run_search(params: dict, source, *, pages: int = 3,
                  message=f"防限流等待 {delay:.0f}s 后搜索下一个组合…")
             sleeper(delay)
 
-    # Post-filter by multi-select criteria.
-    matched = [job for job in merged.values() if job_matches(job, filters)]
-    emit(stage="done", total_scraped=total_scraped, total_matched=len(matched),
-         message=f"完成：抓取 {total_scraped} 条，去重 {len(merged)} 条，符合筛选 {len(matched)} 条")
+    # 广搜策略：不做本地硬筛选，全量返回，筛选交给后续 AI 步骤。
+    all_jobs = list(merged.values())
+    emit(stage="done", total_scraped=total_scraped, total_matched=len(all_jobs),
+         message=f"完成：抓取 {total_scraped} 条，去重 {len(all_jobs)} 条")
 
     # 运行成功后主动关闭调试浏览器，不让它留在任务栏。
     # 失败路径（尤其未登录）不关，保留窗口给用户登录/重试。
     emit(stage="closing_chrome", message="正在关闭调试浏览器…")
     close_debug_chrome()
 
-    return {"ok": True, "jobs": matched, "total_scraped": total_scraped,
-            "total_matched": len(matched), "combinations": len(combos),
+    return {"ok": True, "jobs": all_jobs, "total_scraped": total_scraped,
+            "total_matched": len(all_jobs), "combinations": len(combos),
             "error": ""}
+
+
+def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None):
+    """对一批岗位逐个抓 JD（调用方需先确保 Chrome 就绪）。返回带 jd 的岗位列表。
+
+    逐条抓取，单条失败不中断（该岗位 jd 留空，前端可保留按需加载兜底）。
+    ``progress(current, total)`` 用于回报进度。
+    """
+    import os
+    if artifact_dir is None:
+        artifact_dir = os.path.join(os.path.expanduser("~"), ".career-scout", "job-result")
+    results = []
+    total = len(jobs)
+    for idx, job in enumerate(jobs):
+        jid = str(job.get("job_id", "")) or f"idx{idx}"
+        detail_path = os.path.join(artifact_dir, f"pipeline_detail_{jid}.json")
+        outcome = source.fetch_detail(job, detail_output_path=detail_path)
+        jd = ""
+        if outcome.ok and isinstance(outcome.detail, dict):
+            jd = str(outcome.detail.get("jd", "")).strip()
+        enriched = dict(job)
+        enriched["jd"] = jd
+        results.append(enriched)
+        if progress is not None:
+            try:
+                progress(idx + 1, total)
+            except Exception:
+                pass
+    return results
 
 
 def _combo_hash(keyword: str, city: str, pages: int) -> str:

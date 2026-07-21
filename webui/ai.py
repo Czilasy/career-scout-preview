@@ -308,7 +308,10 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
         "- industry: 从行业经历/求职意向推断\n"
         "- scale/stage: 从简历中对公司规模的偏好推断，无法确定则留空字符串\n"
         "- 无法从简历确定的字段一律返回空字符串，禁止编造\n"
-        "- 代码值必须精确匹配可选值中的代码(如'405'而非'10-20K')"
+        "- 代码值必须精确匹配可选值中的代码(如'405'而非'10-20K')\n"
+        "- profile_summary: 用2-3句话概括候选人画像，须包含：工作年限/应届与否、"
+        "求职类型(全职/实习)、目标岗位方向、核心技能。供后续判断岗位是否匹配时使用，"
+        "要具体、贴合简历，不要空话套话"
     )
 
     messages = [
@@ -317,7 +320,11 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
     ]
 
     data = call_ai(endpoint_url, api_key, messages, timeout=timeout, model=model)
-    return _validate_unified_fields(data)
+    result = _validate_unified_fields(data)
+    # profile_summary 是自由文本，不参与枚举校验，验证后附加返回
+    summary = data.get("profile_summary", "") if isinstance(data, dict) else ""
+    result["profile_summary"] = str(summary).strip()
+    return result
 
 
 def _validate_unified_fields(data) -> dict:
@@ -366,6 +373,187 @@ def _validate_unified_fields(data) -> dict:
         result[field] = [v for v in parts if v in valid_codes]
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# 两段式 AI 筛选（pipeline 结果精炼）
+# ---------------------------------------------------------------------------
+# Stage A：字段粗筛。脚本列表结果不含 JD，AI 先按列表字段（薪资/城市/学历等）
+#           筛掉"明显"不符合的；学历按常理向下兼容（候选人本科则大专岗也符合）。
+# Stage B：JD 精筛。对粗筛留下的岗位批量抓 JD 后，AI 对比候选人画像判 match/not_match。
+
+SCREEN_BATCH_SIZE = 12   # Stage A 每批送 AI 的岗位数
+MATCH_BATCH_SIZE = 4     # Stage B 每批送 AI 的岗位数（JD 较长，批次小）
+
+
+def _degree_code_label(code):
+    """学历码反查中文标签（用于拼 AI 提示词）。"""
+    for label, c in boss.DEGREE_MAP.items():
+        if c == code:
+            return label
+    return code
+
+
+def _build_criteria_description(criteria):
+    """把候选人标准（画像摘要 + 确认的筛选字段）转成自然语言给 AI 读。"""
+    lines = []
+    summary = (criteria.get("profile_summary") or "").strip()
+    if summary:
+        lines.append(f"候选人画像：{summary}")
+    if criteria.get("city"):
+        lines.append("期望城市：" + "、".join(criteria["city"]))
+    if criteria.get("degree"):
+        lines.append("候选人学历：" + "、".join(_degree_code_label(c) for c in criteria["degree"]))
+    _label_fields = (
+        ("salary", boss.SALARY_MAP, "期望薪资"),
+        ("experience", boss.EXPERIENCE_MAP, "经验要求"),
+        ("industry", boss.INDUSTRY_MAP, "期望行业"),
+        ("scale", boss.SCALE_MAP, "期望公司规模"),
+        ("stage", boss.STAGE_MAP, "期望融资阶段"),
+    )
+    for key, mapping, label in _label_fields:
+        codes = criteria.get(key) or []
+        if codes:
+            names = [l for l, c in mapping.items() if c in codes]
+            if names:
+                lines.append(f"{label}：" + "、".join(names))
+    return "\n".join(lines) if lines else "（无明确标准，宽松判断）"
+
+
+def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
+                batch_size=SCREEN_BATCH_SIZE, progress=None):
+    """Stage A 粗筛：AI 逐条核对岗位列表字段，移除"明显"不符合的。
+
+    ``jobs``: 脚本抓回的岗位列表（仅列表字段，无 JD）。
+    ``criteria``: {"profile_summary": str, "city": [...], "degree": [...], ...}。
+
+    学历向下兼容、实习/全职不符、城市不符、薪资严重偏低视为明显不符；
+    拿不准的一律保留（宁可多留不可错杀）。AI 调用失败的批次全部保留。
+
+    返回 {"kept": [job_id...], "dropped": [{"job_id","title","reason"}...],
+    "verdicts": {job_id: {"verdict","reason"}}}。
+    """
+    kept, dropped, verdicts = [], [], {}
+    if not jobs:
+        return {"kept": kept, "dropped": dropped, "verdicts": verdicts}
+
+    criteria_desc = _build_criteria_description(criteria)
+    system_prompt = (
+        "你是求职初筛助手。根据候选人标准，判断每个岗位是否【明显不符合】候选人条件。\n"
+        f"{criteria_desc}\n\n"
+        "判断规则（务必按常理，不要死板）：\n"
+        "- 学历向下兼容：候选人学历不低于岗位要求即符合（如候选人本科、岗位要求大专，应保留）；"
+        "仅当岗位要求学历高于候选人时排除\n"
+        "- 岗位标题含'实习'而候选人找全职（或反之），视为明显不符合\n"
+        "- 工作城市与期望城市不一致，视为明显不符合\n"
+        "- 薪资明显低于期望视为明显不符合；'元/天'的实习计价综合判断\n"
+        "- 只排除【明显】不符合的；拿不准一律保留（宁可多留，不可错杀）\n\n"
+        "对输入的每个岗位输出一个判定。严格输出JSON：\n"
+        '{"results":[{"i":0,"keep":true,"reason":"一句话理由"},...]}\n'
+        "i 为岗位序号；keep=true 保留，false 移除；reason 简短（15字内）。"
+    )
+
+    for start in range(0, len(jobs), batch_size):
+        batch = jobs[start:start + batch_size]
+        batch_desc = [
+            {
+                "i": idx,
+                "title": job.get("title", ""),
+                "salary": job.get("salary", ""),
+                "location": job.get("location", ""),
+                "company": job.get("company", "") or job.get("boss_name", ""),
+                "tags": job.get("tags", ""),
+                "job_labels": job.get("job_labels", ""),
+                "company_scale": job.get("company_scale", ""),
+                "company_stage": job.get("company_stage", ""),
+                "company_industry": job.get("company_industry", ""),
+            }
+            for idx, job in enumerate(batch)
+        ]
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(batch_desc, ensure_ascii=False)},
+        ]
+        try:
+            data = call_ai(endpoint_url, api_key, messages, model=model)
+            results = data.get("results", []) if isinstance(data, dict) else []
+            by_i = {r.get("i"): r for r in results if isinstance(r, dict)}
+        except AISecurityError:
+            by_i = {}  # 调用失败：该批全部保留，防错杀
+
+        for idx, job in enumerate(batch):
+            jid = str(job.get("job_id", ""))
+            r = by_i.get(idx) or {}
+            keep = bool(r.get("keep", True))
+            reason = str(r.get("reason", "")).strip()
+            if keep:
+                kept.append(jid)
+                verdicts[jid] = {"verdict": "kept", "reason": reason}
+            else:
+                dropped.append({"job_id": jid, "title": job.get("title", ""), "reason": reason})
+                verdicts[jid] = {"verdict": "dropped", "reason": reason}
+        if progress is not None:
+            try:
+                progress(min(start + batch_size, len(jobs)), len(jobs))
+            except Exception:
+                pass
+    return {"kept": kept, "dropped": dropped, "verdicts": verdicts}
+
+
+def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
+              batch_size=MATCH_BATCH_SIZE, progress=None):
+    """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
+
+    ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
+    返回 {"verdicts": {job_id: {"verdict": "match"/"not_match", "reason"}}}。
+    AI 调用失败的批次默认 match（宁可多留不可错杀）。
+    """
+    verdicts = {}
+    if not jobs_with_jd:
+        return {"verdicts": verdicts}
+    summary = (profile_summary or "").strip() or "（无候选人画像）"
+    system_prompt = (
+        "你是求职匹配度评估助手。根据候选人画像，判断每个岗位的JD工作内容是否适合候选人。\n"
+        f"候选人画像：{summary}\n\n"
+        "判断要点：岗位职责与候选人技能/方向的契合度；岗位性质(全职/实习)与候选人诉求是否一致。\n"
+        "对每个岗位输出判定。严格输出JSON：\n"
+        '{"results":[{"i":0,"match":true,"reason":"一句话理由"},...]}\n'
+        "i 为岗位序号；match=true 适合，false 不适合；reason 简短（20字内）。"
+    )
+    for start in range(0, len(jobs_with_jd), batch_size):
+        batch = jobs_with_jd[start:start + batch_size]
+        batch_desc = [
+            {
+                "i": idx,
+                "title": job.get("title", ""),
+                "salary": job.get("salary", ""),
+                "location": job.get("location", ""),
+                "jd": str(job.get("jd", ""))[:1500],
+            }
+            for idx, job in enumerate(batch)
+        ]
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(batch_desc, ensure_ascii=False)},
+        ]
+        try:
+            data = call_ai(endpoint_url, api_key, messages, model=model)
+            results = data.get("results", []) if isinstance(data, dict) else []
+            by_i = {r.get("i"): r for r in results if isinstance(r, dict)}
+        except AISecurityError:
+            by_i = {}
+        for idx, job in enumerate(batch):
+            jid = str(job.get("job_id", ""))
+            r = by_i.get(idx) or {}
+            match = bool(r.get("match", True))
+            reason = str(r.get("reason", "")).strip()
+            verdicts[jid] = {"verdict": "match" if match else "not_match", "reason": reason}
+        if progress is not None:
+            try:
+                progress(min(start + batch_size, len(jobs_with_jd)), len(jobs_with_jd))
+            except Exception:
+                pass
+    return {"verdicts": verdicts}
 
 
 # ---------------------------------------------------------------------------

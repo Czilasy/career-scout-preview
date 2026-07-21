@@ -138,7 +138,7 @@ class SaveResumeTests(unittest.TestCase):
                 profile["id"], file_bytes, "resume.txt", "txt", resume_dir, store
             )
             self.assertEqual(result["format"], "txt")
-            self.assertEqual(result["extracted_text"], "")
+            self.assertEqual(result["extracted_text"], sample_resume_text())
             self.assertEqual(
                 result["content_hash"], hashlib.sha256(file_bytes).hexdigest()
             )
@@ -169,15 +169,15 @@ class SaveResumeTests(unittest.TestCase):
                 profile["id"], file_bytes, "resume.docx", "docx", resume_dir, store
             )
             self.assertEqual(result["format"], "docx")
-            self.assertEqual(result["extracted_text"], "")
+            self.assertEqual(result["extracted_text"], sample_resume_text())
             self.assertEqual(
                 result["content_hash"], hashlib.sha256(file_bytes).hexdigest()
             )
             file_path = pathlib.Path(resume_dir) / result["storage_path"]
             self.assertTrue(file_path.is_file())
 
-    def test_save_long_file_no_local_extraction(self):
-        """Long files are stored as-is; no local text extraction or truncation."""
+    def test_save_long_file_full_extraction(self):
+        """Long files are stored as-is; text is fully extracted without truncation."""
         with temp_state_layout() as (_root, state_dir, _result, resume_dir):
             store, profile = self._setup(state_dir, resume_dir)
             long_text = "B" * 60_000
@@ -185,7 +185,7 @@ class SaveResumeTests(unittest.TestCase):
             result = save_resume(
                 profile["id"], file_bytes, "long.txt", "txt", resume_dir, store
             )
-            self.assertEqual(result["extracted_text"], "")
+            self.assertEqual(result["extracted_text"], long_text)
 
     def test_save_rejects_oversize_file(self):
         with temp_state_layout() as (_root, state_dir, _result, resume_dir):

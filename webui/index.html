@@ -937,6 +937,61 @@
       border-bottom: 1px solid var(--line); margin-bottom: 12px; font-size: 13px;
     }
     .discovery-results-stats strong { color: var(--text); }
+
+    /* 通用进度条 */
+    .discovery-progress-bar {
+      height: 6px; border-radius: 3px; background: var(--surface-2);
+      overflow: hidden; margin: 8px 0 12px;
+    }
+    .discovery-progress-bar-fill {
+      height: 100%; background: var(--gold); border-radius: 3px;
+      transition: width .3s ease;
+    }
+
+    /* 步骤④：单卡片审阅 */
+    .review-viewer {
+      grid-column: 1 / -1; display: flex; flex-direction: column; gap: 12px;
+      max-width: 720px; margin: 0 auto; width: 100%;
+    }
+    .review-nav-top {
+      display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    }
+    .review-counter {
+      font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums;
+    }
+    .review-verdict-badge {
+      font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 12px;
+      border: 1px solid var(--line); color: var(--muted);
+    }
+    .review-verdict-badge.verdict-match { color: var(--success); border-color: var(--success); background: rgba(121,196,151,.1); }
+    .review-verdict-badge.verdict-not-match { color: var(--danger); border-color: var(--danger); background: rgba(248,81,73,.08); }
+    .review-verdict-badge.verdict-uncertain { color: var(--warning); border-color: var(--warning); background: rgba(229,173,89,.1); }
+    .review-verdict-reason {
+      font-size: 12px; line-height: 1.6; color: var(--muted);
+      background: var(--bg); border-radius: 6px; padding: 8px 10px; word-break: break-word;
+    }
+    .review-verdict-reason.verdict-match { color: var(--success); }
+    .review-verdict-reason.verdict-not-match { color: var(--danger); }
+    .discovery-job-card.verdict-match { border-color: var(--success); box-shadow: 0 0 0 1px var(--success); }
+    .discovery-job-card.verdict-not-match { border-color: var(--danger); box-shadow: 0 0 0 1px var(--danger); }
+    .discovery-job-card.verdict-uncertain { border-color: var(--warning); }
+    .review-nav { display: flex; justify-content: space-between; gap: 12px; }
+
+    /* AI 粗筛移除（折叠，可找回） */
+    .review-dropped { grid-column: 1 / -1; margin-top: 8px; }
+    .review-dropped-toggle {
+      background: transparent; border: 1px solid var(--line); border-radius: 6px;
+      color: var(--muted); font-size: 12px; padding: 6px 12px; cursor: pointer;
+    }
+    .review-dropped-toggle:hover { background: var(--surface-2); color: var(--text); }
+    .review-dropped-list {
+      margin-top: 8px; display: flex; flex-direction: column; gap: 6px;
+      background: var(--surface-2); border-radius: 8px; padding: 10px 12px;
+    }
+    .review-dropped-item { font-size: 12px; line-height: 1.5; }
+    .review-dropped-title { color: var(--text); font-weight: 600; }
+    .review-dropped-reason { color: var(--faint); }
+
     @media (max-width: 640px) {
       .unified-text-fields, .unified-chip-fields { grid-template-columns: 1fr; }
     }
@@ -1142,11 +1197,11 @@
       <div class="discovery-step-indicator active" data-step="upload" onclick="switchToDiscovery('upload')">
         <span class="step-num">1</span><span class="step-label">上传简历</span>
       </div>
-      <div class="discovery-step-indicator" data-step="review" onclick="switchToDiscovery('review')">
-        <span class="step-num">2</span><span class="step-label">确认理解</span>
-      </div>
       <div class="discovery-step-indicator" data-step="progress" onclick="switchToDiscovery('progress')">
-        <span class="step-num">3</span><span class="step-label">运行进度</span>
+        <span class="step-num">2</span><span class="step-label">运行进度</span>
+      </div>
+      <div class="discovery-step-indicator" data-step="aiscreen" onclick="switchToDiscovery('aiscreen')">
+        <span class="step-num">3</span><span class="step-label">AI 筛选</span>
       </div>
       <div class="discovery-step-indicator" data-step="results" onclick="switchToDiscovery('results')">
         <span class="step-num">4</span><span class="step-label">结果</span>
@@ -1180,31 +1235,41 @@
       </div>
     </div>
 
-    <!-- 步骤 2：确认系统理解 -->
-    <div class="discovery-step" data-step="review" id="discoveryStepReview">
-      <div class="discovery-review-card discovery-analysis-card">
-        <h2>确认系统理解</h2>
-        <p class="discovery-step-hint">下方为 AI 从简历中提取的搜索参数。请确认或修改后执行。</p>
-        <div id="discoveryAnalysisContent"></div>
-        <div class="btn-row" style="margin-top:16px;">
-          <button class="btn primary btn-with-loading" id="discoveryConfirmButton" type="button" aria-busy="false" onclick="confirmDirections()">
-            <span class="btn-label">确认参数</span>
+    <!-- 步骤 2：运行进度（关键词+城市 + 抓取进度） -->
+    <div class="discovery-step" data-step="progress" id="discoveryStepProgress">
+      <div class="discovery-progress-card">
+        <h2>运行进度</h2>
+        <p class="discovery-step-hint">确认搜索的关键词和城市（脚本只按这两项去 BOSS 广撒网抓取），点击开始后抓取。</p>
+        <div id="discoverySearchFieldsContent"></div>
+        <div class="btn-row" style="margin-top:12px;">
+          <button class="btn primary btn-with-loading" id="discoveryStartScrapeBtn" type="button" aria-busy="false" onclick="startScrapeRun()">
+            <span class="btn-label">开始抓取</span>
             <span class="btn-spinner" aria-hidden="true"></span>
           </button>
+        </div>
+        <div id="discoveryProgressContent" style="margin-top:12px;"></div>
+        <div class="btn-row" style="margin-top:12px;">
+          <button class="btn danger" id="discoveryCancelBtn" type="button" hidden>取消运行</button>
+          <button class="btn primary" id="discoveryGoAiScreenBtn" type="button" onclick="switchToDiscovery('aiscreen')" hidden>去 AI 筛选</button>
         </div>
       </div>
     </div>
 
-    <!-- 步骤 3：运行进度 -->
-    <div class="discovery-step" data-step="progress" id="discoveryStepProgress">
-      <div class="discovery-progress-card">
-        <h2>发现运行进度</h2>
-        <p class="discovery-step-hint">系统正在按确认方向搜索、抓取详情并评估岗位。</p>
-        <div id="discoveryProgressContent"></div>
+    <!-- 步骤 3：AI 筛选（6个筛选字段 + 两段式筛选进度） -->
+    <div class="discovery-step" data-step="aiscreen" id="discoveryStepAiScreen">
+      <div class="discovery-review-card discovery-analysis-card">
+        <h2>AI 筛选</h2>
+        <p class="discovery-step-hint">下方为 AI 从简历提取的筛选标准（可调整）。开始后 AI 先按字段粗筛，再对保留的岗位抓 JD 精筛。</p>
+        <div id="discoveryScreeningFieldsContent"></div>
+        <div class="btn-row" style="margin-top:16px;">
+          <button class="btn primary btn-with-loading" id="discoveryStartAiScreenBtn" type="button" aria-busy="false" onclick="startAiScreenRun()">
+            <span class="btn-label">开始 AI 筛选</span>
+            <span class="btn-spinner" aria-hidden="true"></span>
+          </button>
+        </div>
+        <div id="discoveryAiScreenProgressContent" style="margin-top:12px;"></div>
         <div class="btn-row" style="margin-top:12px;">
-          <button class="btn danger" id="discoveryCancelBtn" type="button" hidden>取消运行</button>
-          <button class="btn primary" id="discoveryResumeBtn" type="button" hidden>继续运行</button>
-          <button class="btn" id="discoveryViewResultsBtn" type="button" onclick="switchToDiscovery('results')" hidden>查看结果</button>
+          <button class="btn primary" id="discoveryGoResultsBtn" type="button" onclick="switchToDiscovery('results')" hidden>查看结果</button>
         </div>
       </div>
     </div>
@@ -2961,6 +3026,11 @@
     let discoveryUnifiedFields = {};
     let discoveryFieldLabels = {};
     let discoveryPipelineTaskId = "";
+    let discoveryProfileSummary = "";
+    // 步骤④单卡片审阅状态
+    let discoveryScreenedJobs = [];
+    let discoveryDroppedJobs = [];
+    let discoveryReviewIndex = 0;
     // T064: canonical projector filter state
     let directionFilter = "";
     let categoryFilter = "";
@@ -3059,28 +3129,14 @@
       setDiscoveryUploadState(isLoading ? "loading" : "idle");
     }
 
-    // 新流程 Stage 2：渲染 8 个统一字段的可编辑表单。
-    // fields: {keyword, city, salary[], experience[], degree[], industry[], scale[], stage[]}
-    // labels: {field: [显示名, 当前值, type]}  type 为 "text"/"city" 或 BOSS 码表 dict
-    function renderUnifiedFields(fields, labels) {
-      const container = document.getElementById("discoveryAnalysisContent");
+    // 步骤②：渲染搜索条件（keyword + city 文本输入）到运行进度页顶部
+    function renderSearchFields(fields, labels) {
+      const container = document.getElementById("discoverySearchFieldsContent");
       if (!container) return;
       container.innerHTML = "";
-      const form = document.createElement("div");
-      form.className = "discovery-unified-form";
-      // 字段顺序：keyword → city → salary → experience → degree → industry → scale → stage
-      const order = ["keyword", "city", "salary", "experience", "degree", "industry", "scale", "stage"];
-
-      // —— 搜索条件区：keyword + city，文本输入，支持中英文逗号分隔 ——
-      const searchSection = document.createElement("div");
-      searchSection.className = "unified-section";
-      const searchTitle = document.createElement("h3");
-      searchTitle.className = "unified-section-title";
-      searchTitle.textContent = "搜索条件";
-      searchSection.appendChild(searchTitle);
-      const textGrid = document.createElement("div");
-      textGrid.className = "unified-text-fields";
-      for (const key of order.slice(0, 2)) {
+      const grid = document.createElement("div");
+      grid.className = "unified-text-fields";
+      for (const key of ["keyword", "city"]) {
         const meta = labels[key];
         if (!meta) continue;
         const [displayName, currentVal] = meta;
@@ -3093,32 +3149,25 @@
         input.type = "text";
         input.className = "discovery-unified-input";
         input.dataset.field = key;
-        // city 是列表，展示为逗号分隔；keyword 是字符串
         input.value = Array.isArray(currentVal) ? currentVal.join(",") : (currentVal || "");
         input.placeholder = key === "city"
           ? "如：上海，杭州（支持中英文逗号）"
           : "如：Python 后端，FastAPI（支持中英文逗号）";
         block.appendChild(lbl);
         block.appendChild(input);
-        textGrid.appendChild(block);
+        grid.appendChild(block);
       }
-      searchSection.appendChild(textGrid);
-      form.appendChild(searchSection);
+      container.appendChild(grid);
+    }
 
-      // —— 筛选条件区：6 个码表字段，chip 点选多选 ——
-      const filterSection = document.createElement("div");
-      filterSection.className = "unified-section";
-      const filterTitle = document.createElement("h3");
-      filterTitle.className = "unified-section-title";
-      filterTitle.textContent = "筛选条件";
-      const filterHint = document.createElement("span");
-      filterHint.className = "unified-section-hint";
-      filterHint.textContent = "点击选择，可多选；不选则不过滤";
-      filterTitle.appendChild(filterHint);
-      filterSection.appendChild(filterTitle);
+    // 步骤③：渲染 6 个筛选字段（chip 点选多选）到 AI 筛选页
+    function renderScreeningFields(fields, labels) {
+      const container = document.getElementById("discoveryScreeningFieldsContent");
+      if (!container) return;
+      container.innerHTML = "";
       const chipGrid = document.createElement("div");
       chipGrid.className = "unified-chip-fields";
-      for (const key of order.slice(2)) {
+      for (const key of ["salary", "experience", "degree", "industry", "scale", "stage"]) {
         const meta = labels[key];
         if (!meta) continue;
         const [displayName, currentVal, type] = meta;
@@ -3134,7 +3183,6 @@
         wrap.dataset.field = key;
         const selected = new Set(Array.isArray(currentVal) ? currentVal : (currentVal ? [currentVal] : []));
         selected.delete("0"); // 码表中的"不限"(code 0) 由专属 chip-any 表达
-        // "不限" chip 固定第一位：选中 = 不过滤（提交空数组），与其余选项互斥
         const anyChip = document.createElement("span");
         anyChip.className = "multi-chip chip-any" + (selected.size === 0 ? " selected" : "");
         anyChip.textContent = "不限";
@@ -3144,14 +3192,13 @@
         });
         wrap.appendChild(anyChip);
         for (const [label, code] of Object.entries(type)) {
-          if (code === "0") continue; // 跳过码表"不限"，已由 chip-any 表达
+          if (code === "0") continue;
           const chip = document.createElement("span");
           chip.className = "multi-chip" + (selected.has(code) ? " selected" : "");
           chip.textContent = label;
           chip.dataset.code = code;
           chip.addEventListener("click", () => {
             chip.classList.toggle("selected");
-            // "不限" 状态自动同步：无其他选中时恢复选中
             const hasOther = wrap.querySelectorAll(".multi-chip.selected:not(.chip-any)").length > 0;
             anyChip.classList.toggle("selected", !hasOther);
           });
@@ -3160,28 +3207,32 @@
         block.appendChild(wrap);
         chipGrid.appendChild(block);
       }
-      filterSection.appendChild(chipGrid);
-      form.appendChild(filterSection);
-
-      container.appendChild(form);
+      container.appendChild(chipGrid);
     }
 
-    // 收集表单中用户编辑后的字段值，返回给 /api/confirm-fields
-    function collectUnifiedFields() {
-      const result = {};
-      const form = document.querySelector(".discovery-unified-form");
-      if (!form) return result;
-      form.querySelectorAll("input.discovery-unified-input").forEach(inp => {
+    // 步骤②：收集用户编辑后的搜索条件（keyword + city）
+    function collectSearchFields() {
+      const result = { keyword: "", city: [] };
+      const container = document.getElementById("discoverySearchFieldsContent");
+      if (!container) return result;
+      container.querySelectorAll("input.discovery-unified-input").forEach(inp => {
         const key = inp.dataset.field;
-        if (!key) return;
         const val = (inp.value || "").trim();
-        if (key === "city") {
-          result[key] = val ? val.replace(/，/g, ",").split(",").map(s => s.trim()).filter(Boolean) : [];
-        } else {
-          result[key] = val;
+        if (key === "keyword") {
+          result.keyword = val;
+        } else if (key === "city") {
+          result.city = val ? val.replace(/，/g, ",").split(",").map(s => s.trim()).filter(Boolean) : [];
         }
       });
-      form.querySelectorAll(".multi-select-wrap[data-field]").forEach(wrap => {
+      return result;
+    }
+
+    // 步骤③：收集用户编辑后的 6 个筛选字段（chip 多选，空数组 = 不过滤）
+    function collectScreeningFields() {
+      const result = {};
+      const container = document.getElementById("discoveryScreeningFieldsContent");
+      if (!container) return result;
+      container.querySelectorAll(".multi-select-wrap[data-field]").forEach(wrap => {
         const key = wrap.dataset.field;
         if (!key) return;
         // chip-any（"不限"）不提交 code；空数组 = 该维度不过滤
@@ -3216,9 +3267,11 @@
         const data = await resp.json();
         discoveryUnifiedFields = data.fields || {};
         discoveryFieldLabels = data.labels || {};
-        renderUnifiedFields(discoveryUnifiedFields, discoveryFieldLabels);
-        switchToDiscovery("review");
-        setAppNotice("AI 已提取搜索参数，请确认后执行", "success");
+        discoveryProfileSummary = data.fields.profile_summary || "";
+        renderSearchFields(discoveryUnifiedFields, discoveryFieldLabels);
+        renderScreeningFields(discoveryUnifiedFields, discoveryFieldLabels);
+        switchToDiscovery("progress");
+        setAppNotice("AI 已提取搜索参数，请确认后开始抓取", "success");
         uploadState = "success";
       } catch (_e) {
         setAppNotice("上传或分析失败，请检查连接后重试", "error");
@@ -3227,11 +3280,11 @@
       }
     }
 
-    async function confirmDirections() {
-      const btn = document.getElementById("discoveryConfirmButton");
+    // 步骤②触发：确认 keyword+city → 启动抓取
+    async function startScrapeRun() {
+      const btn = document.getElementById("discoveryStartScrapeBtn");
       if (btn && btn.disabled) return;
-      // 收集用户编辑后的 8 个统一字段
-      const fields = collectUnifiedFields();
+      const fields = collectSearchFields();
       if (!fields.keyword || !fields.keyword.trim()) {
         setAppNotice("搜索关键词不能为空", "warning");
         return;
@@ -3242,62 +3295,102 @@
       }
       if (btn) { btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
       const label = btn ? btn.querySelector(".btn-label") : null;
-      if (label) label.textContent = "确认中…";
+      if (label) label.textContent = "抓取中…";
+      const goBtn = document.getElementById("discoveryGoAiScreenBtn");
+      if (goBtn) goBtn.hidden = true;
       try {
-        // Stage 2: 确认字段 → 拿 script_params
-        const confirmResp = await api("/api/confirm-fields", {
-          method: "POST", json: fields,
-        });
-        if (!confirmResp.ok) {
-          const err = await confirmResp.json().catch(() => ({}));
-          setAppNotice("确认失败：" + (err.error || confirmResp.status), "error");
-          return;
-        }
-        const confirmData = await confirmResp.json();
-        const scriptParams = confirmData.script_params;
-        // Stage 3: 启动抓取 → 拿 task_id
+        // 脚本只消费 keyword+city（广撒网），筛选交给后续 AI
+        const scriptParams = { keyword: fields.keyword, city: fields.city, filters: {} };
         const execResp = await api("/api/execute-search", {
           method: "POST", json: { script_params: scriptParams },
         });
         if (!execResp.ok) {
           const err = await execResp.json().catch(() => ({}));
           setAppNotice("启动失败：" + (err.error || execResp.status), "error");
+          if (btn) { btn.disabled = false; btn.setAttribute("aria-busy", "false"); }
+          if (label) label.textContent = "开始抓取";
           return;
         }
         const execData = await execResp.json();
         discoveryPipelineTaskId = execData.task_id;
-        setAppNotice("参数已确认，开始执行抓取", "success");
-        document.querySelector('.discovery-step-indicator[data-step="review"]').classList.add("done");
-        switchToDiscovery("progress");
-        startPipelinePoll(discoveryPipelineTaskId);
+        setAppNotice("开始抓取，请稍候", "success");
+        startTaskPoll(discoveryPipelineTaskId, "discoveryProgressContent", () => {
+          document.querySelector('.discovery-step-indicator[data-step="progress"]').classList.add("done");
+          if (goBtn) goBtn.hidden = false;
+          if (btn) { btn.disabled = false; btn.setAttribute("aria-busy", "false"); }
+          if (label) label.textContent = "开始抓取";
+          setAppNotice("抓取完成，可进入 AI 筛选", "success");
+        }, () => {
+          if (btn) { btn.disabled = false; btn.setAttribute("aria-busy", "false"); }
+          if (label) label.textContent = "开始抓取";
+        });
       } catch (_e) {
-        setAppNotice("确认失败，请检查连接后重试", "error");
-      } finally {
+        setAppNotice("启动失败，请检查连接后重试", "error");
         if (btn) { btn.disabled = false; btn.setAttribute("aria-busy", "false"); }
-        if (label) label.textContent = "确认参数";
+        if (label) label.textContent = "开始抓取";
       }
     }
 
-    // 新流程进度轮询：轮询 /api/search-progress/<task_id>
-    function startPipelinePoll(taskId) {
+    // 步骤③触发：确认 6 个筛选字段 → 启动两段式 AI 筛选
+    async function startAiScreenRun() {
+      const btn = document.getElementById("discoveryStartAiScreenBtn");
+      if (btn && btn.disabled) return;
+      const screeningFields = collectScreeningFields();
+      if (btn) { btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
+      const label = btn ? btn.querySelector(".btn-label") : null;
+      if (label) label.textContent = "筛选中…";
+      const goBtn = document.getElementById("discoveryGoResultsBtn");
+      if (goBtn) goBtn.hidden = true;
+      try {
+        const resp = await api("/api/ai-screen", {
+          method: "POST",
+          json: { screening_fields: screeningFields, profile_summary: discoveryProfileSummary },
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          setAppNotice("启动失败：" + (err.error || resp.status), "error");
+          if (btn) { btn.disabled = false; btn.setAttribute("aria-busy", "false"); }
+          if (label) label.textContent = "开始 AI 筛选";
+          return;
+        }
+        const data = await resp.json();
+        setAppNotice("开始 AI 筛选，请稍候", "success");
+        startTaskPoll(data.task_id, "discoveryAiScreenProgressContent", (result) => {
+          document.querySelector('.discovery-step-indicator[data-step="aiscreen"]').classList.add("done");
+          if (goBtn) goBtn.hidden = false;
+          if (btn) { btn.disabled = false; btn.setAttribute("aria-busy", "false"); }
+          if (label) label.textContent = "开始 AI 筛选";
+          setAppNotice("AI 筛选完成，可查看结果", "success");
+          renderReviewResults(result);
+        }, () => {
+          if (btn) { btn.disabled = false; btn.setAttribute("aria-busy", "false"); }
+          if (label) label.textContent = "开始 AI 筛选";
+        });
+      } catch (_e) {
+        setAppNotice("启动失败，请检查连接后重试", "error");
+        if (btn) { btn.disabled = false; btn.setAttribute("aria-busy", "false"); }
+        if (label) label.textContent = "开始 AI 筛选";
+      }
+    }
+
+    // 通用任务轮询：抓取与 AI 筛选共用，轮询 /api/search-progress/<task_id>
+    function startTaskPoll(taskId, containerId, onDone, onFail) {
       if (discoveryPollTimer) clearTimeout(discoveryPollTimer);
       const poll = async () => {
         try {
           const resp = await api(`/api/search-progress/${taskId}`);
-          if (!resp.ok) return;
+          if (!resp.ok) { discoveryPollTimer = setTimeout(poll, 3000); return; }
           const data = await resp.json();
-          renderPipelineProgress(data);
+          renderTaskProgress(data, containerId);
           if (data.status === "done") {
             discoveryPollTimer = null;
-            document.querySelector('.discovery-step-indicator[data-step="progress"]').classList.add("done");
-            document.getElementById("discoveryViewResultsBtn").hidden = false;
-            setAppNotice("发现完成，可查看结果", "success");
-            renderPipelineResults(data.result || {});
+            if (onDone) onDone(data.result || {});
             return;
           }
           if (data.status === "failed") {
             discoveryPollTimer = null;
             setAppNotice("运行失败：" + (data.error || "未知错误"), "error");
+            if (onFail) onFail(data.error || "");
             return;
           }
           discoveryPollTimer = setTimeout(poll, 2000);
@@ -3308,9 +3401,9 @@
       discoveryPollTimer = setTimeout(poll, 1500);
     }
 
-    // 渲染新流程进度（logs 列表 + 计数）
-    function renderPipelineProgress(data) {
-      const container = document.getElementById("discoveryProgressContent");
+    // 通用进度渲染：抓取与 AI 筛选共用（按出现的计数字段自适应展示）
+    function renderTaskProgress(data, containerId) {
+      const container = document.getElementById(containerId);
       if (!container) return;
       container.innerHTML = "";
       const statusDiv = document.createElement("div");
@@ -3318,26 +3411,41 @@
       const statusLabels = { running: "运行中", done: "成功", failed: "失败" };
       statusDiv.innerHTML = "状态：<strong>" + (statusLabels[data.status] || data.status) + "</strong>";
       container.appendChild(statusDiv);
-      // 进度计数
       const p = data.progress || {};
+      // 进度条（current/total）
+      if (p.current != null && p.total != null && p.total > 0) {
+        const bar = document.createElement("div");
+        bar.className = "discovery-progress-bar";
+        const fill = document.createElement("div");
+        fill.className = "discovery-progress-bar-fill";
+        fill.style.width = Math.min(100, Math.round((p.current / p.total) * 100)) + "%";
+        bar.appendChild(fill);
+        container.appendChild(bar);
+      }
+      // 计数（按出现的字段展示）
+      const countDefs = [
+        ["current", "total", "进度"],
+        ["scraped", null, "本页抓取"],
+        ["merged", null, "累计去重"],
+        ["kept", null, "保留"],
+        ["dropped", null, "移除"],
+        ["matched", null, "匹配"],
+      ];
       const countsDiv = document.createElement("div");
       countsDiv.className = "discovery-progress-counts";
-      if (p.current != null && p.total != null) {
+      let hasCount = false;
+      for (const [key, totalKey, label] of countDefs) {
+        if (p[key] == null) continue;
         const s = document.createElement("span");
-        s.innerHTML = "组合进度：<strong>" + p.current + "/" + p.total + "</strong>";
+        if (totalKey && p[totalKey] != null) {
+          s.innerHTML = label + "：<strong>" + p[key] + "/" + p[totalKey] + "</strong>";
+        } else {
+          s.innerHTML = label + "：<strong>" + p[key] + "</strong>";
+        }
         countsDiv.appendChild(s);
+        hasCount = true;
       }
-      if (p.scraped != null) {
-        const s = document.createElement("span");
-        s.innerHTML = "本页抓取：<strong>" + p.scraped + "</strong>";
-        countsDiv.appendChild(s);
-      }
-      if (p.merged != null) {
-        const s = document.createElement("span");
-        s.innerHTML = "累计去重：<strong>" + p.merged + "</strong>";
-        countsDiv.appendChild(s);
-      }
-      container.appendChild(countsDiv);
+      if (hasCount) container.appendChild(countsDiv);
       // 日志
       const logs = data.logs || [];
       if (logs.length) {
@@ -3353,16 +3461,145 @@
       }
     }
 
-    // 渲染新流程结果
-    function renderPipelineResults(result) {
-      discoveryResultsCache = result.jobs || [];
-      const counts = {
-        total_scraped: result.total_scraped || 0,
-        total_matched: result.total_matched || 0,
-        combinations: result.combinations || 0,
-      };
-      renderResults(discoveryResultsCache, counts);
+    // 步骤④：单卡片逐条审阅（绿=匹配在前，红=不符沉底，全量保留）
+    function renderReviewResults(result) {
+      const jobs = result.jobs || [];
+      // 排序：match 在前，uncertain 居中，not_match 沉底
+      const order = { match: 0, uncertain: 1, not_match: 2 };
+      discoveryScreenedJobs = jobs.slice().sort((a, b) => {
+        const oa = order[a.verdict] != null ? order[a.verdict] : 1;
+        const ob = order[b.verdict] != null ? order[b.verdict] : 1;
+        return oa - ob;
+      });
+      discoveryDroppedJobs = result.dropped || [];
+      discoveryReviewIndex = 0;
+      discoveryResultsCache = discoveryScreenedJobs;
+
+      const list = document.getElementById("discoveryResultsList");
+      if (!list) return;
+      list.innerHTML = "";
+
+      // 顶部统计
+      const stats = document.createElement("div");
+      stats.className = "discovery-results-stats";
+      stats.textContent = `共抓取 ${result.total_scraped || 0} 条，AI 保留 ${result.total_kept || 0} 条（匹配 ${result.total_matched || 0} 条），粗筛移除 ${result.total_dropped || 0} 条`;
+      list.appendChild(stats);
+
+      // 审阅区容器
+      const viewer = document.createElement("div");
+      viewer.className = "review-viewer";
+      viewer.id = "reviewViewer";
+      list.appendChild(viewer);
+
+      // 折叠的"AI 粗筛移除"区
+      const dropped = document.createElement("div");
+      dropped.className = "review-dropped";
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "review-dropped-toggle";
+      toggle.textContent = `AI 粗筛移除（${discoveryDroppedJobs.length} 条）▾`;
+      toggle.onclick = () => toggleReviewDropped(toggle);
+      const droppedList = document.createElement("div");
+      droppedList.className = "review-dropped-list";
+      droppedList.id = "reviewDroppedList";
+      droppedList.hidden = true;
+      for (const d of discoveryDroppedJobs) {
+        const item = document.createElement("div");
+        item.className = "review-dropped-item";
+        const t = document.createElement("span");
+        t.className = "review-dropped-title";
+        t.textContent = d.title || d.job_id || "未知岗位";
+        item.appendChild(t);
+        if (d.reason) {
+          const r = document.createElement("span");
+          r.className = "review-dropped-reason";
+          r.textContent = " — " + d.reason;
+          item.appendChild(r);
+        }
+        droppedList.appendChild(item);
+      }
+      dropped.append(toggle, droppedList);
+      list.appendChild(dropped);
+
+      renderReviewCard();
       switchToDiscovery("results");
+    }
+
+    // 渲染当前审阅索引对应的单张卡片
+    function renderReviewCard() {
+      const viewer = document.getElementById("reviewViewer");
+      if (!viewer) return;
+      viewer.innerHTML = "";
+      const jobs = discoveryScreenedJobs;
+      if (!jobs.length) {
+        const empty = document.createElement("div");
+        empty.className = "discovery-step-hint";
+        empty.textContent = "没有可供审阅的岗位";
+        viewer.appendChild(empty);
+        return;
+      }
+      if (discoveryReviewIndex < 0) discoveryReviewIndex = 0;
+      if (discoveryReviewIndex >= jobs.length) discoveryReviewIndex = jobs.length - 1;
+      const job = jobs[discoveryReviewIndex];
+
+      // 顶部：进度 + AI 判定徽章
+      const top = document.createElement("div");
+      top.className = "review-nav-top";
+      const counter = document.createElement("span");
+      counter.className = "review-counter";
+      counter.textContent = `${discoveryReviewIndex + 1} / ${jobs.length}`;
+      top.appendChild(counter);
+      const badge = document.createElement("span");
+      const verdictMeta = {
+        match: { cls: "verdict-match", text: "AI 认为匹配" },
+        not_match: { cls: "verdict-not-match", text: "AI 认为不符" },
+        uncertain: { cls: "verdict-uncertain", text: "待定（未抓到 JD）" },
+      };
+      const vm = verdictMeta[job.verdict] || verdictMeta.uncertain;
+      badge.className = "review-verdict-badge " + vm.cls;
+      badge.textContent = vm.text;
+      top.appendChild(badge);
+      viewer.appendChild(top);
+
+      // AI 判定理由
+      if (job.verdict_reason) {
+        const reason = document.createElement("div");
+        reason.className = "review-verdict-reason " + vm.cls;
+        reason.textContent = "AI 理由：" + job.verdict_reason;
+        viewer.appendChild(reason);
+      }
+
+      // 岗位卡片（复用既有卡片，叠加判定边框）
+      const card = createDiscoveryCard(job);
+      card.classList.add(vm.cls);
+      viewer.appendChild(card);
+
+      // 底部导航：上一个 / 下一个
+      const nav = document.createElement("div");
+      nav.className = "review-nav";
+      const prevBtn = document.createElement("button");
+      prevBtn.type = "button";
+      prevBtn.className = "btn";
+      prevBtn.textContent = "上一个";
+      prevBtn.disabled = discoveryReviewIndex === 0;
+      prevBtn.onclick = () => { discoveryReviewIndex -= 1; renderReviewCard(); };
+      const nextBtn = document.createElement("button");
+      nextBtn.type = "button";
+      nextBtn.className = "btn primary";
+      nextBtn.textContent = "下一个";
+      nextBtn.disabled = discoveryReviewIndex >= jobs.length - 1;
+      nextBtn.onclick = () => { discoveryReviewIndex += 1; renderReviewCard(); };
+      nav.append(prevBtn, nextBtn);
+      viewer.appendChild(nav);
+    }
+
+    // 展开/折叠"AI 粗筛移除"区
+    function toggleReviewDropped(toggleBtn) {
+      const listEl = document.getElementById("reviewDroppedList");
+      if (!listEl) return;
+      const willShow = listEl.hidden;
+      listEl.hidden = !willShow;
+      toggleBtn.textContent = toggleBtn.textContent.replace(/[▾▸]$/, willShow ? "▸" : "▾");
     }
 
     // ------------------------------------------------------------------
@@ -3802,10 +4039,12 @@
         const resp = await api("/api/latest-pipeline-result");
         if (!resp.ok) return;
         const data = await resp.json();
-        if (!data || !data.result) return;
-        renderPipelineResults(data.result);
+        if (!data || !data.has_result || !data.result) return;
+        // 持久化的是 AI 筛选后的最终结果，直接进单卡片审阅
+        if (data.result.profile_summary) discoveryProfileSummary = data.result.profile_summary;
+        renderReviewResults(data.result);
         document.querySelector('.discovery-step-indicator[data-step="progress"]').classList.add("done");
-        document.querySelector('.discovery-step-indicator[data-step="review"]').classList.add("done");
+        document.querySelector('.discovery-step-indicator[data-step="aiscreen"]').classList.add("done");
       } catch (_e) {
         // 恢复失败静默处理，用户可重新上传
       }

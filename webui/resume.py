@@ -1,10 +1,11 @@
 """Resume storage and deletion for the AI job workbench.
 
 Handles file validation, safe path construction, content hashing and
-deletion.  The resume file is stored as-is and sent directly to the AI
-API for reading — no local text extraction is performed.  All storage
-paths are relative to the resume directory to avoid leaking absolute
-filesystem locations.
+deletion.  The resume file is stored as-is; a plain-text copy is also
+extracted (via pypdf / python-docx) so the discovery runtime can pass
+it to the AI API, which only accepts text.  All storage paths are
+relative to the resume directory to avoid leaking absolute filesystem
+locations.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ import hashlib
 import os
 import pathlib
 import uuid
+
+from webui.ai import _resume_bytes_to_text
 
 
 # ---------------------------------------------------------------------------
@@ -80,10 +83,11 @@ def build_safe_path(resume_dir, resume_id, fmt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Text extraction — ABOLISHED
-# Local text extraction (pypdf / python-docx) has been removed.  The resume
-# file is stored as-is and sent directly to the AI API, which reads the
-# document natively.  No local "understanding" of the resume content happens.
+# Text extraction
+# PDF/DOCX resumes are converted to plain text (via pypdf / python-docx) so
+# the discovery runtime can pass the text to the AI API, which only accepts
+# text.  This is pure transport preparation — no content understanding happens
+# here; the AI does all the reading.
 # ---------------------------------------------------------------------------
 
 
@@ -98,11 +102,11 @@ def save_resume(profile_id, file_bytes, filename, fmt, resume_dir, store) -> dic
       1. Validate the filename extension and file size.
       2. Build a safe storage path inside *resume_dir*.
       3. Write the raw bytes to disk.
-      4. Compute a sha256 content hash.
-      5. Persist via ``store.save_resume``.
+      4. Extract plain text (for the AI API, which only accepts text).
+      5. Compute a sha256 content hash.
+      6. Persist via ``store.save_resume``.
 
-    No local text extraction is performed — the AI API reads the file
-    directly.  Returns the resume record produced by the store.
+    Returns the resume record produced by the store.
     """
     validated_fmt = validate_format(filename)
     validate_size(file_bytes)
@@ -112,8 +116,8 @@ def save_resume(profile_id, file_bytes, filename, fmt, resume_dir, store) -> dic
     absolute_path = base / relative_path
     absolute_path.parent.mkdir(parents=True, exist_ok=True)
     absolute_path.write_bytes(file_bytes)
-    # No local text extraction — the AI API reads the document directly.
-    extracted_text = ""
+    # 提取纯文本供 discovery runtime 使用（AI API 只接受文本）
+    extracted_text = _resume_bytes_to_text(file_bytes, validated_fmt)
     content_hash = hashlib.sha256(file_bytes).hexdigest()
     # Store only the basename to avoid retaining directory components from
     # user-supplied filenames (path-traversal hardening).
