@@ -6,6 +6,8 @@ import unittest
 import ast
 import inspect
 import copy
+import json
+from pathlib import Path
 from unittest import mock
 
 from webui import candidate
@@ -976,3 +978,88 @@ class CandidateV3NormalizerTests(unittest.TestCase):
         self.assertEqual(len(o["evidence"]),1)
         self.assertEqual(o["quality"]["status"],"complete")
         self.assertEqual(o["quality"]["warnings"],[])
+
+
+class CandidateAnalysisV4Tests(unittest.TestCase):
+    """T020–T023: typed facts, evidence lineage, intent and direction gates."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = Path(__file__).parent / "fixtures" / "discovery" / "ai_candidate_v4.json"
+        cls.fixture = json.loads(path.read_text(encoding="utf-8"))
+
+    def test_v4_fixture_covers_frozen_failure_families(self):
+        self.assertEqual(self.fixture["valid"]["contract_version"], "v4")
+        self.assertTrue(self.fixture["valid"]["facts"])
+        self.assertEqual(self.fixture["partial"]["contract_version"], "v4")
+        self.assertGreater(len(self.fixture["partial"]["facts"]), 1)
+        self.assertEqual(
+            set(self.fixture["mutations"]),
+            {"duplicate_quote", "sensitive_quote", "cross_response_reference", "oversized"},
+        )
+
+    def test_v4_normalizes_facts_evidence_unknowns_and_direction_refs(self):
+        result = candidate.normalize_candidate_analysis_v4(
+            self.fixture["valid"], self.fixture["resume_text"],
+        )
+        self.assertEqual(result["contract_version"], "v4")
+        self.assertEqual(result["quality"]["status"], "complete")
+        self.assertEqual({fact["fact_type"] for fact in result["facts"]}, {"skill", "achievement"})
+        self.assertTrue(all(fact["evidence_refs"] for fact in result["facts"]))
+        self.assertTrue(all(fact["source_kind"] == "resume_explicit" for fact in result["facts"]))
+        self.assertEqual(result["directions"][0]["fact_refs"], ["f1", "f2"])
+        self.assertTrue(result["directions"][0]["default_enabled"])
+
+    def test_v4_accepts_all_seven_fact_types_with_bounded_typed_values(self):
+        payload = copy.deepcopy(self.fixture["valid"])
+        shapes = {
+            "work": {"employer": "A", "title": "工程师", "start_date": "2020", "end_date": "2024", "current": False, "responsibilities": [], "achievements": [], "industry": "互联网"},
+            "project": {"name": "订单", "role": "负责人", "start_date": "2022", "end_date": "2023", "responsibilities": [], "technologies": ["Python"], "outcomes": []},
+            "skill": {"name": "Python", "usage_years": 5, "last_used": None, "level": None, "contexts": []},
+            "industry": {"name": "互联网", "duration_years": 5, "contexts": []},
+            "education": {"school": "示例大学", "degree": "本科", "major": "计算机", "start_date": "2015", "end_date": "2019"},
+            "achievement": {"statement": "接口延迟降低 35%", "metric": "35%", "context": "订单"},
+            "seniority": {"level": "高级", "management_scope": None, "years": 5},
+        }
+        payload["facts"] = [
+            {"client_ref": f"f-{name}", "fact_type": name, "value": value,
+             "normalized_value": name, "evidence_refs": ["e1"],
+             "assertion_type": "explicit", "confidence": 90}
+            for name, value in shapes.items()
+        ]
+        payload["directions"][0]["fact_refs"] = [item["client_ref"] for item in payload["facts"]]
+        result = candidate.normalize_candidate_analysis_v4(payload, self.fixture["resume_text"])
+        self.assertEqual({fact["fact_type"] for fact in result["facts"]}, set(shapes))
+
+    def test_cross_response_and_sensitive_facts_are_quarantined_per_field(self):
+        payload = copy.deepcopy(self.fixture["valid"])
+        payload["facts"].extend([
+            {"client_ref": "f-cross", "fact_type": "skill", "value": {"name": "Go"},
+             "normalized_value": "Go", "evidence_refs": ["old-response-evidence"],
+             "assertion_type": "explicit", "confidence": 90},
+            {"client_ref": "f-pii", "fact_type": "skill", "value": {"name": "13800138000"},
+             "normalized_value": "13800138000", "evidence_refs": ["e1"],
+             "assertion_type": "explicit", "confidence": 90},
+        ])
+        result = candidate.normalize_candidate_analysis_v4(payload, self.fixture["resume_text"])
+        self.assertEqual([fact["client_ref"] for fact in result["facts"]], ["f1", "f2"])
+        rendered = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn("13800138000", rendered)
+        self.assertTrue(result["quality"]["warnings"])
+
+    def test_user_intent_is_not_accepted_as_resume_fact_and_unlinked_direction_is_disabled(self):
+        payload = copy.deepcopy(self.fixture["valid"])
+        payload["facts"] = [{
+            "client_ref": "intent-1", "fact_type": "current_city",
+            "value": {"city": "上海"}, "normalized_value": "上海",
+            "evidence_refs": ["e1"], "assertion_type": "explicit", "confidence": 99,
+        }]
+        payload["directions"][0]["fact_refs"] = ["intent-1"]
+        payload["quality"] = {"status": "complete", "warnings": []}
+        payload["confirmed_city"] = "上海"
+        result = candidate.normalize_candidate_analysis_v4(payload, self.fixture["resume_text"])
+        self.assertEqual(result["facts"], [])
+        self.assertFalse(result["directions"][0]["default_enabled"])
+        self.assertEqual(result["unknowns"][0]["field"], "current_city")
+        self.assertNotIn("confirmed_city", result)
+        self.assertNotEqual(result["quality"], payload["quality"])

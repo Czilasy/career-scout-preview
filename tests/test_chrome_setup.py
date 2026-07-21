@@ -1228,5 +1228,398 @@ class ProjectScopeTests(unittest.TestCase):
             self.assertNotIn(forbidden, combined)
 
 
+# ============================================================
+# Phase 6 / US4 — scrape_details controlled batching & readiness
+# (T066 / T067 RED contract tests)
+#
+# These tests target the policy-v2 scrape_details contract:
+#   * at most 5 selected candidates per batch
+#   * one CDP session reused per batch, one target per job
+#   * one terminal safe event per job (no JD body / credentials)
+#   * readiness probe ≤ 12s with at most one controlled scroll retry
+#   * inter-job gap within [3, 7] seconds
+#   * no trailing wait after the last job
+#
+# They are expected to fail (RED) until scripts/boss_cdp_raw.py
+# implements the new keyword-only parameters in T068 / T069.
+# ============================================================
+
+
+def _make_scrape_details_list_data(n=10):
+    """Build a deterministic list_data payload with *n* jobs.
+
+    The fields mirror what scrape_jobs emits and what scrape_details
+    consumes today (job_link, encrypt_*_id, security_id, skills, etc.).
+    The fake JD/credential values are intentionally distinctive so that
+    any leak into a safe event is easy to detect.
+    """
+    jobs = []
+    for i in range(n):
+        jobs.append({
+            "title": f"Job-{i}",
+            "boss_name": f"Company-{i}",
+            "job_link": f"https://www.zhipin.com/job_detail/encrypt{i}.html",
+            "encrypt_job_id": f"SECRET-ENC-JOB-{i}",
+            "encrypt_boss_id": f"SECRET-ENC-BOSS-{i}",
+            "encrypt_brand_id": f"SECRET-ENC-BRAND-{i}",
+            "security_id": f"SECRET-SEC-{i}",
+            "skills": "Python | SQL",
+            "salary": "20-30K",
+            "city": "上海",
+        })
+    return {"jobs": jobs}
+
+
+def _fake_detail_payload_default():
+    """Return a default fake JD long enough to pass extract_job_description.
+
+    The payload deliberately avoids ``DETAIL_DESCRIPTION_MARKER`` and
+    ``DETAIL_LOGIN_MARKER`` so the extractor accepts it. The distinctive
+    ``SECRET-JD-BODY`` marker lets leak-detection tests assert that the
+    JD never reaches a safe event payload.
+    """
+    return {
+        "jd": "SECRET-JD-BODY " + ("后端服务开发参与系统架构设计。 " * 12),
+        "tags": ["SECRET-TAG"],
+    }
+
+
+class _FakeScrapeDetailsCDPSession:
+    """In-memory CDPSession double for scrape_details contract tests.
+
+    Records every CDP call into ``call_log`` and scripts readiness +
+    detail-extraction responses. The fake never opens a WebSocket and
+    never touches the network, so tests are deterministic.
+
+    ``readiness_responses`` is a FIFO list consumed by readiness probes
+    (recognised by the ``__boss_readiness_probe__`` marker). When the
+    list is empty, the probe is treated as "ready".
+    """
+
+    def __init__(self, *, readiness_responses=None, detail_payload=None):
+        self.call_log = []
+        self._mid = 0
+        self._readiness_responses = list(readiness_responses or [])
+        self._detail_payload = detail_payload if detail_payload is not None else _fake_detail_payload_default()
+        self.closed = False
+        self.cdp_port = None
+
+    def send(self, method, params=None, sid=None, timeout=30):
+        params = params or {}
+        self._mid += 1
+        self.call_log.append({"method": method, "params": params, "sid": sid})
+        if method == "Target.createTarget":
+            return {"result": {"targetId": f"target-{self._mid}"}}
+        if method == "Target.attachToTarget":
+            return {"result": {"sessionId": f"session-{self._mid}"}}
+        if method in (
+            "Page.addScriptToEvaluateOnNewDocument",
+            "Page.navigate",
+            "Target.closeTarget",
+            "Input.dispatchMouseEvent",
+        ):
+            return {"result": {}}
+        raise AssertionError(f"unexpected CDP method: {method}")
+
+    def eval_js(self, js, sid):
+        self.call_log.append({
+            "method": "Runtime.evaluate",
+            "params": {"expression": js},
+            "sid": sid,
+        })
+        if "__boss_readiness_probe__" in js or "document.readyState" in js:
+            if self._readiness_responses:
+                return self._readiness_responses.pop(0)
+            return "ready"
+        return json.dumps(self._detail_payload)
+
+    def close(self):
+        self.closed = True
+
+
+def _make_recording_sleeper():
+    """Return ``(sleeper, calls)`` where ``calls`` records ``(seconds, label)``."""
+    calls = []
+
+    def sleeper(seconds, label=None):
+        calls.append((float(seconds), label))
+
+    return sleeper, calls
+
+
+class ScrapeDetailsBatchingContractTests(unittest.TestCase):
+    """T066 RED: scrape_details controlled batching & safe terminal events."""
+
+    def test_scrape_details_accepts_batch_size_keyword(self):
+        module = load_module()
+        list_data = _make_scrape_details_list_data(n=3)
+
+        # Must not raise TypeError — scrape_details needs to accept the
+        # batch_size keyword (and the dependency-injection hooks used
+        # by the rest of the US4 contract tests).
+        result = module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
+            sleeper=lambda seconds, label=None: None,
+            event_callback=lambda _event: None,
+            trailing_wait=False,
+            output_path=None,
+        )
+        self.assertEqual(len(result), 3)
+
+    def test_scrape_details_rejects_batch_size_above_five(self):
+        module = load_module()
+        list_data = _make_scrape_details_list_data(n=3)
+
+        with self.assertRaises(ValueError):
+            module.scrape_details(
+                list_data,
+                batch_size=6,
+                session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
+                sleeper=lambda seconds, label=None: None,
+                output_path=None,
+            )
+
+    def test_scrape_details_creates_one_session_per_batch(self):
+        module = load_module()
+        list_data = _make_scrape_details_list_data(n=10)
+
+        sessions = []
+
+        def factory(cdp_port=None):
+            session = _FakeScrapeDetailsCDPSession()
+            sessions.append(session)
+            return session
+
+        module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=factory,
+            sleeper=lambda seconds, label=None: None,
+            trailing_wait=False,
+            output_path=None,
+        )
+        # 10 jobs / batch_size 5 = 2 batches → 2 CDP sessions.
+        self.assertEqual(len(sessions), 2)
+
+    def test_scrape_details_creates_one_target_per_job(self):
+        module = load_module()
+        list_data = _make_scrape_details_list_data(n=5)
+        session = _FakeScrapeDetailsCDPSession()
+
+        module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: session,
+            sleeper=lambda seconds, label=None: None,
+            trailing_wait=False,
+            output_path=None,
+        )
+
+        create_target_calls = [
+            entry for entry in session.call_log
+            if entry["method"] == "Target.createTarget"
+        ]
+        self.assertEqual(len(create_target_calls), 5)
+
+    def test_scrape_details_emits_one_terminal_safe_event_per_job(self):
+        module = load_module()
+        list_data = _make_scrape_details_list_data(n=4)
+        events = []
+
+        module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
+            sleeper=lambda seconds, label=None: None,
+            event_callback=events.append,
+            trailing_wait=False,
+            output_path=None,
+        )
+
+        self.assertEqual(len(events), 4)
+        terminal_statuses = {"completed", "unavailable", "failed", "cancelled"}
+        for event in events:
+            self.assertIn(event["status"], terminal_statuses)
+            self.assertIn("job_id", event)
+            self.assertIn("duration_ms", event)
+
+    def test_scrape_details_event_payload_excludes_jd_and_credentials(self):
+        module = load_module()
+        list_data = _make_scrape_details_list_data(n=1)
+        events = []
+
+        module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(
+                detail_payload={
+                    "jd": "SECRET-JD-BODY-MUST-NOT-LEAK",
+                    "tags": ["SECRET-TAG-MUST-NOT-LEAK"],
+                },
+            ),
+            sleeper=lambda seconds, label=None: None,
+            event_callback=events.append,
+            trailing_wait=False,
+            output_path=None,
+        )
+
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        event_repr = repr(event)
+        self.assertNotIn("SECRET-JD-BODY-MUST-NOT-LEAK", event_repr)
+        self.assertNotIn("SECRET-TAG-MUST-NOT-LEAK", event_repr)
+        # Safe events must never carry JD body or credential-shaped fields.
+        for forbidden_key in (
+            "jd", "tags", "encrypt_job_id", "encrypt_boss_id",
+            "encrypt_brand_id", "security_id",
+        ):
+            self.assertNotIn(forbidden_key, event)
+        # Also assert that raw input secrets do not leak via any string value.
+        for secret in ("SECRET-ENC-JOB-0", "SECRET-ENC-BOSS-0", "SECRET-SEC-0"):
+            self.assertNotIn(secret, event_repr)
+
+    def test_scrape_details_no_trailing_gap_wait_after_last_job(self):
+        module = load_module()
+        list_data = _make_scrape_details_list_data(n=3)
+        sleeper, calls = _make_recording_sleeper()
+
+        module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
+            sleeper=sleeper,
+            trailing_wait=False,
+            output_path=None,
+        )
+
+        gap_calls = [entry for entry in calls if entry[1] == "inter_job_gap"]
+        # 3 jobs → 2 inter-job gaps (between 1-2 and 2-3), no trailing gap.
+        self.assertEqual(len(gap_calls), 2)
+
+
+class ScrapeDetailsReadinessContractTests(unittest.TestCase):
+    """T067 RED: readiness-driven detail extraction, conditional scroll,
+    bounded gap, and zero trailing wait.
+    """
+
+    def test_scrape_details_readiness_wait_does_not_exceed_twelve_seconds(self):
+        module = load_module()
+        list_data = _make_scrape_details_list_data(n=1)
+        sleeper, calls = _make_recording_sleeper()
+        session = _FakeScrapeDetailsCDPSession(
+            readiness_responses=["not_ready", "ready"],
+        )
+
+        module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: session,
+            sleeper=sleeper,
+            readiness_timeout_seconds=12,
+            max_readiness_retries=1,
+            trailing_wait=False,
+            output_path=None,
+        )
+
+        readiness_waits = [
+            entry[0] for entry in calls if entry[1] == "readiness_wait"
+        ]
+        self.assertLessEqual(sum(readiness_waits), 12)
+
+    def test_scrape_details_first_not_ready_triggers_single_scroll_retry(self):
+        module = load_module()
+        list_data = _make_scrape_details_list_data(n=1)
+        session = _FakeScrapeDetailsCDPSession(
+            readiness_responses=["not_ready", "ready"],
+        )
+
+        module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: session,
+            sleeper=lambda seconds, label=None: None,
+            readiness_timeout_seconds=12,
+            max_readiness_retries=1,
+            trailing_wait=False,
+            output_path=None,
+        )
+
+        scroll_calls = [
+            entry for entry in session.call_log
+            if entry["method"] == "Runtime.evaluate"
+            and "scrollBy" in entry["params"].get("expression", "")
+        ]
+        # Exactly one controlled scroll during the readiness retry phase.
+        self.assertEqual(len(scroll_calls), 1)
+
+    def test_scrape_details_first_ready_triggers_no_scroll(self):
+        module = load_module()
+        list_data = _make_scrape_details_list_data(n=1)
+        session = _FakeScrapeDetailsCDPSession(
+            readiness_responses=["ready"],
+        )
+
+        module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: session,
+            sleeper=lambda seconds, label=None: None,
+            readiness_timeout_seconds=12,
+            max_readiness_retries=1,
+            trailing_wait=False,
+            output_path=None,
+        )
+
+        scroll_calls = [
+            entry for entry in session.call_log
+            if entry["method"] == "Runtime.evaluate"
+            and "scrollBy" in entry["params"].get("expression", "")
+        ]
+        self.assertEqual(len(scroll_calls), 0)
+
+    def test_scrape_details_inter_job_gap_within_three_to_seven_seconds(self):
+        module = load_module()
+        list_data = _make_scrape_details_list_data(n=3)
+        sleeper, calls = _make_recording_sleeper()
+
+        module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
+            sleeper=sleeper,
+            inter_job_gap_range=(3, 7),
+            trailing_wait=False,
+            output_path=None,
+        )
+
+        gap_calls = [entry for entry in calls if entry[1] == "inter_job_gap"]
+        self.assertEqual(len(gap_calls), 2)
+        for seconds, _ in gap_calls:
+            self.assertGreaterEqual(seconds, 3)
+            self.assertLessEqual(seconds, 7)
+
+    def test_scrape_details_default_inter_job_gap_range_is_three_to_seven(self):
+        module = load_module()
+        list_data = _make_scrape_details_list_data(n=2)
+        sleeper, calls = _make_recording_sleeper()
+
+        module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
+            sleeper=sleeper,
+            trailing_wait=False,
+            output_path=None,
+        )
+
+        gap_calls = [entry for entry in calls if entry[1] == "inter_job_gap"]
+        self.assertEqual(len(gap_calls), 1)
+        seconds = gap_calls[0][0]
+        self.assertGreaterEqual(seconds, 3)
+        self.assertLessEqual(seconds, 7)
+
+
 if __name__ == "__main__":
     unittest.main()

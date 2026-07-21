@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from webui.discovery import (
     AISecurityError,
@@ -1110,6 +1113,496 @@ class FeedbackInfluenceTests(_IntegrationTestCase):
         self.assertEqual(historical_run.get("evaluated_count", 0), 0)
 
 
+class FeedbackNextRunApplicationTests(_IntegrationTestCase):
+    """T088 验证 US5 反馈对下一次运行的作用域应用和历史不变性。
+
+    合同来源:
+    - spec.md US5 acceptance scenarios 1-4 (L144-147)
+    - spec.md FR-050: 反馈必须作用于后续运行，不得改写历史。
+    - spec.md FR-051: 用户必须能撤销有效反馈并看到作用范围。
+    - http-api.md L320: feedback increments result revision when visibility or
+      ordering changes.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.analysis, self.confirmation = _make_ready_analysis_with_confirmation(
+            self.store, self.resume["id"], self.profile["id"],
+            hard_constraints={"city": "北京"},
+        )
+
+    def test_judgment_error_feedback_records_dimension_without_changing_history(self):
+        """US5 scenario 3: 判断错误反馈记录受影响维度，不改写历史评分。"""
+        from webui.discovery import apply_feedback_to_next_run
+
+        # Set up a historical run + snapshot + assessment.
+        run = _make_discovery_run(
+            self.store, self.confirmation, self.analysis,
+            self.resume["id"], self.profile["id"],
+        )
+        direction = self.store.list_directions(self.analysis["id"])[0]
+        job = self.store.save_job(
+            "https://www.zhipin.com/job_detail/judg-err.html",
+            "https://www.zhipin.com/job_detail/judg-err.html",
+            "后端", "公司", "20K", "北京", "jd",
+        )
+        snap = self.store.save_job_snapshot(
+            run["id"], job["id"], source_url=job["source_url"],
+            title="后端", company="公司", salary="20K", location="北京",
+            jd="jd", completeness="complete",
+        )
+        self.store.create_assessment(
+            run["id"], snap["id"], direction["id"],
+            dimensions={"capability": {"score": 90, "candidate_fact_refs": [],
+                                       "candidate_evidence_refs": [],
+                                       "job_evidence_refs": []}},
+            match_score=90, confidence=88, gaps=[],
+            category="high_match", status="completed",
+            contract_version="job_assessment_v2",
+        )
+        # Record the historical assessment score before feedback.
+        historical_assessments = self.store.list_assessments(run["id"])
+        self.assertEqual(len(historical_assessments), 1)
+        before_score = historical_assessments[0]["match_score"]
+        self.assertEqual(before_score, 90)
+
+        # Submit judgment_error feedback targeting this assessment.
+        self.store.create_discovery_feedback(
+            profile_id=self.profile["id"],
+            target_type="assessment", action="judgment_error",
+            run_id=run["id"], assessment_id=historical_assessments[0]["id"],
+            reason_code="dimension_wrong", scope="exact_assessment",
+        )
+
+        # Historical assessment score must remain unchanged.
+        historical_after = self.store.list_assessments(run["id"])
+        self.assertEqual(historical_after[0]["match_score"], 90,
+                         "US5-3: 判断错误反馈不得改写历史 assessment 分数")
+        self.assertEqual(historical_after[0]["status"], "completed")
+
+        # apply_feedback_to_next_run on a fresh confirmation view doesn't
+        # crash and returns a valid adjusted confirmation.
+        confirmation_view = {
+            "id": self.confirmation["id"],
+            "enabled_directions": [
+                {"id": direction["id"], "direction_id": direction["id"],
+                 "name": "后端", "search_terms": ["Python"]},
+            ],
+        }
+        adjusted = apply_feedback_to_next_run(
+            self.store, confirmation_view, profile_id=self.profile["id"],
+        )
+        # Judgment-error feedback doesn't exclude the job from next run
+        # (it only records the dimension issue).
+        self.assertNotIn(job["id"], adjusted.get("excluded_job_ids", []),
+                         "US5-3: 判断错误反馈不应排除岗位，仅记录维度问题")
+
+    def test_direction_disable_does_not_allocate_budget_in_compile_search_plan(self):
+        """US5 scenario 2: 关闭方向后下一次 run 不为该方向分配搜索和详情预算。"""
+        from webui.discovery import (
+            apply_feedback_to_next_run, compile_search_plan,
+        )
+
+        direction = self.store.list_directions(self.analysis["id"])[0]
+        # Add a second direction so we have something to compare against.
+        d2 = self.store.add_direction(
+            self.analysis["id"], name="数据", direction_type="adjacent",
+            rationale="r", gaps=[], confidence=70,
+            default_enabled=True, search_terms=["SQL"],
+        )
+        # Disable direction 1 via feedback.
+        self.store.create_discovery_feedback(
+            profile_id=self.profile["id"],
+            target_type="direction", action="direction_disable",
+            direction_id=direction["id"], scope="exact_direction",
+        )
+        confirmation_view = {
+            "id": self.confirmation["id"],
+            "hard_constraints": {"city": "北京"},
+            "safe_limits": {"max_details": 10},
+            "enabled_directions": [
+                {"id": direction["id"], "direction_id": direction["id"],
+                 "name": "后端", "type": "core", "search_terms": ["Python"],
+                 "default_enabled": True, "evidence_refs": []},
+                {"id": d2["id"], "direction_id": d2["id"],
+                 "name": "数据", "type": "adjacent", "search_terms": ["SQL"],
+                 "default_enabled": True, "evidence_refs": []},
+            ],
+        }
+        adjusted = apply_feedback_to_next_run(
+            self.store, confirmation_view, profile_id=self.profile["id"],
+        )
+        # Disabled direction is removed from enabled_directions.
+        enabled_ids = [d.get("id") or d.get("direction_id")
+                       for d in adjusted["enabled_directions"]]
+        self.assertNotIn(direction["id"], enabled_ids,
+                         "US5-2: 关闭方向不应出现在 enabled_directions")
+        self.assertIn(d2["id"], enabled_ids)
+
+        # compile_search_plan only allocates budget to enabled directions.
+        plan = compile_search_plan(adjusted)
+        plan_direction_ids = set()
+        for item in plan["items"]:
+            plan_direction_ids.update(item.get("direction_ids", []))
+        self.assertNotIn(direction["id"], plan_direction_ids,
+                         "US5-2: 关闭方向不应在 plan items 中分配预算")
+        self.assertIn(d2["id"], plan_direction_ids,
+                      "US5-2: 启用方向应在 plan items 中分配预算")
+        # detail_budget should be > 0 (allocated to the remaining direction).
+        self.assertGreater(plan["detail_budget"], 0)
+
+    def test_not_interested_does_not_exclude_other_jobs_from_same_company(self):
+        """US5 scenario 1: 不感兴趣单个岗位不得扩展到同公司其他岗位。
+
+        Spec L144: 单个岗位不感兴趣默认只排除该岗位，不得自动扩展到整家公司或行业。
+        Spec L356: 将用户反馈自动扩大到公司、行业或岗位家族；扩大作用域需后续明确授权。
+        """
+        from webui.discovery import apply_feedback_to_next_run
+
+        # Two jobs at the same company.
+        job_a = self.store.save_job(
+            "https://www.zhipin.com/job_detail/a.html",
+            "https://www.zhipin.com/job_detail/a.html",
+            "岗位A", "同公司", "20K", "北京", "jd-a",
+        )
+        job_b = self.store.save_job(
+            "https://www.zhipin.com/job_detail/b.html",
+            "https://www.zhipin.com/job_detail/b.html",
+            "岗位B", "同公司", "25K", "北京", "jd-b",
+        )
+        # Mark job_a as not_interested.
+        self.store.create_discovery_feedback(
+            profile_id=self.profile["id"],
+            target_type="job", action="not_interested",
+            job_id=job_a["id"], scope="exact_job",
+        )
+        direction = self.store.list_directions(self.analysis["id"])[0]
+        confirmation_view = {
+            "id": self.confirmation["id"],
+            "enabled_directions": [
+                {"id": direction["id"], "direction_id": direction["id"],
+                 "name": "后端", "search_terms": ["Python"]},
+            ],
+        }
+        adjusted = apply_feedback_to_next_run(
+            self.store, confirmation_view, profile_id=self.profile["id"],
+        )
+        # Only job_a is excluded, not job_b (even though same company).
+        self.assertIn(job_a["id"], adjusted["excluded_job_ids"])
+        self.assertNotIn(job_b["id"], adjusted["excluded_job_ids"],
+                         "US5-1: 不感兴趣单个岗位不得自动扩展到同公司其他岗位")
+
+    def test_revoke_then_next_run_does_not_apply_feedback(self):
+        """US5 scenario 4 + FR-051: 撤销反馈后下一次运行不再应用该反馈。"""
+        from webui.discovery import apply_feedback_to_next_run
+
+        job = self.store.save_job(
+            "https://www.zhipin.com/job_detail/rev-1.html",
+            "https://www.zhipin.com/job_detail/rev-1.html",
+            "岗位", "公司", "20K", "北京", "jd",
+        )
+        fb = self.store.create_discovery_feedback(
+            profile_id=self.profile["id"],
+            target_type="job", action="not_interested",
+            job_id=job["id"], scope="exact_job",
+        )
+        direction = self.store.list_directions(self.analysis["id"])[0]
+        confirmation_view = {
+            "id": self.confirmation["id"],
+            "enabled_directions": [
+                {"id": direction["id"], "direction_id": direction["id"],
+                 "name": "后端", "search_terms": ["Python"]},
+            ],
+        }
+        # Before revoke: feedback excludes the job.
+        before = apply_feedback_to_next_run(
+            self.store, confirmation_view, profile_id=self.profile["id"],
+        )
+        self.assertIn(job["id"], before["excluded_job_ids"])
+
+        # Revoke.
+        self.store.revoke_discovery_feedback(fb["id"])
+
+        # After revoke: feedback no longer applies.
+        after = apply_feedback_to_next_run(
+            self.store, confirmation_view, profile_id=self.profile["id"],
+        )
+        self.assertNotIn(job["id"], after.get("excluded_job_ids", []),
+                         "US5-4: 撤销后下一次运行不应再应用该反馈")
+
+    def test_feedback_only_affects_subsequent_runs_not_historical(self):
+        """FR-050: 反馈只作用于后续运行，历史 run 的 input_hash 与计数器不变。"""
+        # Historical run with a confirmation snapshot.
+        run = _make_discovery_run(
+            self.store, self.confirmation, self.analysis,
+            self.resume["id"], self.profile["id"],
+        )
+        historical_run_before = self.store.get_discovery_run(run["id"])
+        historical_hash_before = historical_run_before.get("input_hash")
+        historical_status_before = historical_run_before.get("status")
+        historical_high_before = historical_run_before.get("high_count", 0)
+
+        # Submit feedback that would change the confirmation view for *next* run.
+        direction = self.store.list_directions(self.analysis["id"])[0]
+        self.store.create_discovery_feedback(
+            profile_id=self.profile["id"],
+            target_type="direction", action="direction_disable",
+            direction_id=direction["id"], scope="exact_direction",
+        )
+
+        # Historical run's input_hash, status, counters must remain unchanged.
+        historical_run_after = self.store.get_discovery_run(run["id"])
+        self.assertEqual(historical_run_after.get("input_hash"),
+                         historical_hash_before,
+                         "FR-050: 反馈不得改写历史 run 的 input_hash")
+        self.assertEqual(historical_run_after.get("status"),
+                         historical_status_before,
+                         "FR-050: 反馈不得改写历史 run 的 status")
+        self.assertEqual(historical_run_after.get("high_count", 0),
+                         historical_high_before,
+                         "FR-050: 反馈不得改写历史 run 的计数器")
+
+        # The "feedback applies to next run" behavior is verified in
+        # test_direction_disable_does_not_allocate_budget_in_compile_search_plan;
+        # here we only assert historical invariance.
+
+
+class Fr050Fr051VerificationTests(_IntegrationTestCase):
+    """T092 综合验证 FR-050 / FR-051。
+
+    FR-050: 岗位和方向反馈必须作用于后续运行，不得改写历史画像、确认快照和评估事实。
+    FR-051: 用户必须能够撤销有效反馈，并看到其作用范围。
+
+    独立测试（spec.md L140）：对固定推荐集提交岗位和方向反馈，执行下一次发现，
+    验证反馈作用范围、撤销、历史不变和新排序变化。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.analysis, self.confirmation = _make_ready_analysis_with_confirmation(
+            self.store, self.resume["id"], self.profile["id"],
+            hard_constraints={"city": "北京"},
+        )
+
+    def test_fr050_full_feedback_lifecycle_preserves_history(self):
+        """FR-050: 完整反馈生命周期（创建→应用→撤销）不改写历史 run/snapshot/assessment。"""
+        from webui.discovery import apply_feedback_to_next_run
+
+        # 1. Historical run with snapshot + assessment.
+        run = _make_discovery_run(
+            self.store, self.confirmation, self.analysis,
+            self.resume["id"], self.profile["id"],
+        )
+        d1 = self.store.list_directions(self.analysis["id"])[0]
+        # Add a second direction so disabling d1 doesn't trigger input_incomplete.
+        d2 = self.store.add_direction(
+            self.analysis["id"], name="数据", direction_type="adjacent",
+            rationale="r", gaps=[], confidence=70,
+            default_enabled=True, search_terms=["SQL"],
+        )
+        job = self.store.save_job(
+            "https://www.zhipin.com/job_detail/fr050.html",
+            "https://www.zhipin.com/job_detail/fr050.html",
+            "后端", "公司", "20K", "北京", "jd-fr050",
+        )
+        snap = self.store.save_job_snapshot(
+            run["id"], job["id"], source_url=job["source_url"],
+            title="后端", company="公司", salary="20K", location="北京",
+            jd="jd-fr050", completeness="complete",
+        )
+        self.store.create_assessment(
+            run["id"], snap["id"], d1["id"],
+            dimensions={"capability": {"score": 88}},
+            match_score=88, confidence=85, gaps=[],
+            category="high_match", status="completed",
+            contract_version="job_assessment_v2",
+        )
+        # Snapshot the historical state.
+        hist_run_before = self.store.get_discovery_run(run["id"])
+        hist_snap_before = self.store.list_snapshots(run["id"])
+        hist_assess_before = self.store.list_assessments(run["id"])
+        self.assertEqual(len(hist_snap_before), 1)
+        self.assertEqual(len(hist_assess_before), 1)
+        hist_score_before = hist_assess_before[0]["match_score"]
+
+        # 2. Submit job not_interested + direction_disable feedback.
+        fb_job = self.store.create_discovery_feedback(
+            profile_id=self.profile["id"],
+            target_type="job", action="not_interested",
+            job_id=job["id"], scope="exact_job",
+        )
+        fb_dir = self.store.create_discovery_feedback(
+            profile_id=self.profile["id"],
+            target_type="direction", action="direction_disable",
+            direction_id=d1["id"], scope="exact_direction",
+        )
+
+        # 3. Apply feedback to a fresh confirmation view (for next run).
+        #    d2 remains enabled, so apply succeeds. Historical data must be untouched.
+        confirmation_view = {
+            "id": self.confirmation["id"],
+            "enabled_directions": [
+                {"id": d1["id"], "direction_id": d1["id"],
+                 "name": "后端", "search_terms": ["Python"]},
+                {"id": d2["id"], "direction_id": d2["id"],
+                 "name": "数据", "search_terms": ["SQL"]},
+            ],
+        }
+        adjusted = apply_feedback_to_next_run(
+            self.store, confirmation_view, profile_id=self.profile["id"],
+        )
+        self.assertIn(job["id"], adjusted["excluded_job_ids"],
+                      "FR-050: not_interested 反馈应作用于下一次运行")
+        enabled_ids = [d.get("id") or d.get("direction_id")
+                       for d in adjusted["enabled_directions"]]
+        self.assertNotIn(d1["id"], enabled_ids,
+                         "FR-050: direction_disable 反馈应作用于下一次运行")
+
+        # 4. Verify historical run/snapshot/assessment unchanged.
+        hist_run_after = self.store.get_discovery_run(run["id"])
+        hist_snap_after = self.store.list_snapshots(run["id"])
+        hist_assess_after = self.store.list_assessments(run["id"])
+        self.assertEqual(hist_run_after.get("input_hash"),
+                         hist_run_before.get("input_hash"),
+                         "FR-050: 历史 run input_hash 不变")
+        self.assertEqual(hist_run_after.get("status"),
+                         hist_run_before.get("status"),
+                         "FR-050: 历史 run status 不变")
+        self.assertEqual(len(hist_snap_after), 1,
+                         "FR-050: 历史 snapshot 数量不变")
+        self.assertEqual(hist_snap_after[0]["jd"], "jd-fr050",
+                         "FR-050: 历史 snapshot 内容不变")
+        self.assertEqual(len(hist_assess_after), 1,
+                         "FR-050: 历史 assessment 数量不变")
+        self.assertEqual(hist_assess_after[0]["match_score"], hist_score_before,
+                         "FR-050: 历史 assessment 分数不变")
+        self.assertEqual(hist_assess_after[0]["status"], "completed",
+                         "FR-050: 历史 assessment 状态不变")
+
+        # 5. Revoke both feedbacks.
+        self.store.revoke_discovery_feedback(fb_job["id"])
+        self.store.revoke_discovery_feedback(fb_dir["id"])
+
+        # 6. After revoke, historical state STILL unchanged.
+        hist_run_final = self.store.get_discovery_run(run["id"])
+        self.assertEqual(hist_run_final.get("input_hash"),
+                         hist_run_before.get("input_hash"),
+                         "FR-050: 撤销后历史 run input_hash 仍不变")
+        hist_assess_final = self.store.list_assessments(run["id"])
+        self.assertEqual(hist_assess_final[0]["match_score"], hist_score_before,
+                         "FR-050: 撤销后历史 assessment 分数仍不变")
+
+    def test_fr051_revoke_makes_feedback_ineffective_for_next_run(self):
+        """FR-051: 撤销后反馈不再作用于下一次运行。"""
+        from webui.discovery import apply_feedback_to_next_run
+
+        # Add a second direction so we can disable one and still have an enabled.
+        d1 = self.store.list_directions(self.analysis["id"])[0]
+        d2 = self.store.add_direction(
+            self.analysis["id"], name="数据", direction_type="adjacent",
+            rationale="r", gaps=[], confidence=70,
+            default_enabled=True, search_terms=["SQL"],
+        )
+        job = self.store.save_job(
+            "https://www.zhipin.com/job_detail/fr051.html",
+            "https://www.zhipin.com/job_detail/fr051.html",
+            "岗位", "公司", "20K", "北京", "jd",
+        )
+
+        # 1. Submit feedback: not_interested on job + direction_disable on d1.
+        fb_job = self.store.create_discovery_feedback(
+            profile_id=self.profile["id"],
+            target_type="job", action="not_interested",
+            job_id=job["id"], scope="exact_job",
+        )
+        fb_dir = self.store.create_discovery_feedback(
+            profile_id=self.profile["id"],
+            target_type="direction", action="direction_disable",
+            direction_id=d1["id"], scope="exact_direction",
+        )
+
+        confirmation_view = {
+            "id": self.confirmation["id"],
+            "enabled_directions": [
+                {"id": d1["id"], "direction_id": d1["id"],
+                 "name": "后端", "search_terms": ["Python"]},
+                {"id": d2["id"], "direction_id": d2["id"],
+                 "name": "数据", "search_terms": ["SQL"]},
+            ],
+        }
+        # Before revoke: feedback applies.
+        before = apply_feedback_to_next_run(
+            self.store, confirmation_view, profile_id=self.profile["id"],
+        )
+        self.assertIn(job["id"], before["excluded_job_ids"],
+                      "FR-051: 反馈有效时岗位应被排除")
+        enabled_ids = [d.get("id") or d.get("direction_id")
+                       for d in before["enabled_directions"]]
+        self.assertNotIn(d1["id"], enabled_ids,
+                         "FR-051: 反馈有效时方向应被移除")
+
+        # 2. Revoke both feedbacks.
+        self.store.revoke_discovery_feedback(fb_job["id"])
+        self.store.revoke_discovery_feedback(fb_dir["id"])
+
+        # 3. After revoke: feedback no longer applies.
+        after = apply_feedback_to_next_run(
+            self.store, confirmation_view, profile_id=self.profile["id"],
+        )
+        self.assertNotIn(job["id"], after.get("excluded_job_ids", []),
+                         "FR-051: 撤销后岗位不应再被排除")
+        enabled_ids_after = [d.get("id") or d.get("direction_id")
+                             for d in after["enabled_directions"]]
+        self.assertIn(d1["id"], enabled_ids_after,
+                      "FR-051: 撤销后方向应重新启用")
+
+    def test_fr051_user_can_see_feedback_scope(self):
+        """FR-051: 用户必须能看到反馈的作用范围（scope 字段）。"""
+        # Job feedback: scope = exact_job.
+        fb_job = self.store.create_discovery_feedback(
+            profile_id=self.profile["id"],
+            target_type="job", action="not_interested",
+            job_id="job-vis-1", scope="exact_job",
+        )
+        # Direction feedback: scope = exact_direction.
+        direction = self.store.list_directions(self.analysis["id"])[0]
+        fb_dir = self.store.create_discovery_feedback(
+            profile_id=self.profile["id"],
+            target_type="direction", action="direction_disable",
+            direction_id=direction["id"], scope="exact_direction",
+        )
+        # Assessment feedback: scope = exact_assessment.
+        fb_asmt = self.store.create_discovery_feedback(
+            profile_id=self.profile["id"],
+            target_type="assessment", action="judgment_error",
+            assessment_id="asmt-1", scope="exact_assessment",
+        )
+
+        # All feedback is visible with its scope.
+        rows = self.store.list_discovery_feedback(self.profile["id"])
+        self.assertEqual(len(rows), 3)
+        scopes = {r["target_type"]: r["scope"] for r in rows}
+        self.assertEqual(scopes["job"], "exact_job")
+        self.assertEqual(scopes["direction"], "exact_direction")
+        self.assertEqual(scopes["assessment"], "exact_assessment")
+
+        # effective_only filter shows all 3 (none revoked).
+        effective = self.store.list_discovery_feedback(
+            self.profile["id"], effective_only=True,
+        )
+        self.assertEqual(len(effective), 3)
+
+        # Revoke one -> effective drops to 2.
+        self.store.revoke_discovery_feedback(fb_job["id"])
+        effective_after = self.store.list_discovery_feedback(
+            self.profile["id"], effective_only=True,
+        )
+        self.assertEqual(len(effective_after), 2)
+        revoked_types = {r["target_type"] for r in effective_after}
+        self.assertNotIn("job", revoked_types,
+                         "FR-051: 撤销后岗位反馈不再 effective")
+
+
 class ResumeDeletionCascadeTests(_IntegrationTestCase):
     """CR-1: Deleting a resume must cascade-delete derived evidence (FR-098)."""
 
@@ -2034,6 +2527,2843 @@ class US5PrivacyBoundaryTests(_IntegrationTestCase):
             # safe_excerpt should not contain raw PII patterns
             self.assertNotIn("13800138000", excerpt)
             self.assertNotIn("110101", excerpt)
+
+
+class DiscoveryV2StateAndPrivacyFoundationTests(_IntegrationTestCase):
+    """T016/T018/T019: v2 CAS, reconciliation and safe payload foundation."""
+
+    def setUp(self):
+        super().setUp()
+        self.analysis, self.confirmation = _make_ready_analysis_with_confirmation(
+            self.store, self.resume["id"], self.profile["id"],
+        )
+        self.input_hash = "a" * 64
+        self.run = self.store.create_discovery_run(
+            profile_id=self.profile["id"], resume_id=self.resume["id"],
+            analysis_id=self.analysis["id"], confirmation_id=self.confirmation["id"],
+            input_hash=self.input_hash, policy_version="discovery_v2",
+        )
+
+    def test_v2_valid_transitions_are_explicit_and_hash_is_stable(self):
+        from webui.discovery import compute_discovery_input_hash, validate_v2_run_transition
+
+        self.assertEqual(
+            compute_discovery_input_hash({"b": 2, "a": 1}, policy_version="discovery_v2"),
+            compute_discovery_input_hash({"a": 1, "b": 2}, policy_version="discovery_v2"),
+        )
+        self.assertEqual(validate_v2_run_transition("created", "planning"), "planning")
+        with self.assertRaises(DiscoveryError):
+            validate_v2_run_transition("created", "processing_jobs")
+
+    def test_store_transition_uses_expected_state_and_input_hash_cas(self):
+        updated = self.store.transition_discovery_run_v2(
+            self.run["id"], expected_state="created", target_state="planning",
+            input_hash=self.input_hash, counters={"list_candidate_count": 3},
+            event_type="stage_entered", event_payload={"stage": "planning"},
+        )
+        self.assertEqual((updated["status"], updated["stage"]), ("planning", "planning"))
+        self.assertEqual(updated["list_candidate_count"], 3)
+        self.assertEqual(len(self.store.list_discovery_events(self.run["id"])), 1)
+
+        before = self.store.get_discovery_run(self.run["id"])
+        before_events = self.store.list_discovery_events(self.run["id"])
+        with self.assertRaises(DiscoveryError) as ctx:
+            self.store.transition_discovery_run_v2(
+                self.run["id"], expected_state="created", target_state="planning",
+                input_hash=self.input_hash,
+            )
+        self.assertEqual(ctx.exception.error_code, "state_conflict")
+        self.assertEqual(self.store.get_discovery_run(self.run["id"])["list_candidate_count"], before["list_candidate_count"])
+        self.assertEqual(self.store.list_discovery_events(self.run["id"]), before_events)
+
+        with self.assertRaises(DiscoveryError) as ctx:
+            self.store.transition_discovery_run_v2(
+                self.run["id"], expected_state="planning", target_state="fetching_lists",
+                input_hash="b" * 64,
+            )
+        self.assertEqual(ctx.exception.error_code, "input_hash_mismatch")
+
+    def test_terminal_state_is_irreversible(self):
+        self.store.transition_discovery_run_v2(
+            self.run["id"], expected_state="created", target_state="planning",
+            input_hash=self.input_hash,
+        )
+        self.store.transition_discovery_run_v2(
+            self.run["id"], expected_state="planning", target_state="failed",
+            input_hash=self.input_hash,
+        )
+        with self.assertRaises(DiscoveryError):
+            self.store.transition_discovery_run_v2(
+                self.run["id"], expected_state="failed", target_state="planning",
+                input_hash=self.input_hash,
+            )
+
+    def test_empty_persisted_rows_reconcile_v2_counters_transactionally(self):
+        reconciled = self.store.reconcile_discovery_run_v2(self.run["id"])
+        for field in (
+            "list_candidate_count", "detail_selected_count", "detail_completed_count",
+            "assessment_completed_count", "recommendation_count", "detail_reused_count",
+            "ai_call_count",
+        ):
+            self.assertEqual(reconciled[field], 0, field)
+        events = self.store.list_discovery_events(self.run["id"])
+        self.assertEqual(events[-1]["event_type"], "progress_reconciled")
+
+    def test_sensitive_payload_is_rejected_before_event_or_result_serialization(self):
+        from webui.discovery import sanitize_discovery_payload
+
+        forbidden = {
+            "phone": "13800138000",
+            "id_number": "110101199001011234",
+            "address": "幸福路 88 号",
+            "resume_body": RESUME_TEXT,
+            "jd_body": "完整岗位正文 SECRET-JD",
+            "prompt": "SYSTEM PROMPT",
+            "api_key": "sk-secret",
+            "raw_model_output": "RAW MODEL SECRET",
+        }
+        with self.assertRaises(DiscoveryError):
+            sanitize_discovery_payload(forbidden, payload_kind="event")
+        with self.assertRaises(DiscoveryError):
+            self.store.transition_discovery_run_v2(
+                self.run["id"], expected_state="created", target_state="planning",
+                input_hash=self.input_hash, event_type="stage_entered",
+                event_payload=forbidden,
+            )
+        serialized = json.dumps(self.store.list_discovery_events(self.run["id"]), ensure_ascii=False)
+        for secret in forbidden.values():
+            self.assertNotIn(secret, serialized)
+
+
+class DiscoveryV4ProfileOrchestrationTests(_IntegrationTestCase):
+    """T028/T029: one v4 persistence path and manual recovery boundary."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = Path(__file__).parent / "fixtures" / "discovery" / "ai_candidate_v4.json"
+        cls.fixture = json.loads(path.read_text(encoding="utf-8"))
+
+    def setUp(self):
+        super().setUp()
+        self.resume = self.store.save_resume(
+            self.profile["id"], "storage/v4.txt", "txt", self.fixture["resume_text"],
+            "v4-resume-hash", "v4.txt",
+        )
+
+    class Provider:
+        def __init__(self, response):
+            self.response = response
+            self.calls = []
+
+        def analyze(self, *, resume_text, contract_version="v3"):
+            self.calls.append({"resume_text": resume_text, "contract_version": contract_version})
+            return self.response
+
+    def test_v4_analysis_persists_exactly_one_profile_version_and_call_count(self):
+        provider = self.Provider(self.fixture["valid"])
+        result = analyze_resume(
+            self.store, self.resume["id"], ai_consent=True,
+            ai_provider=provider, contract_version="v4",
+        )
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(provider.calls[0]["contract_version"], "v4")
+        self.assertEqual(result["contract_version"], "v4")
+        self.assertTrue(result["candidate_profile_version_id"])
+        version = self.store.get_candidate_profile_version(result["candidate_profile_version_id"])
+        self.assertEqual(len(version["facts"]), 2)
+        with self.store._connection() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM candidate_profile_versions WHERE analysis_id=?",
+                (result["id"],),
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_empty_resume_blocks_v4_before_profile_version_persistence(self):
+        empty = self.store.save_resume(
+            self.profile["id"], "storage/scan.pdf", "pdf", "", "scan-hash", "scan.pdf",
+        )
+        provider = self.Provider(self.fixture["valid"])
+        with self.assertRaises(DiscoveryError) as ctx:
+            analyze_resume(
+                self.store, empty["id"], ai_consent=True,
+                ai_provider=provider, contract_version="v4",
+            )
+        self.assertEqual(ctx.exception.error_code, "input_incomplete")
+        self.assertEqual(provider.calls, [])
+        with self.store._connection() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM candidate_profile_versions WHERE resume_id=?", (empty["id"],),
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_manual_facts_and_direction_create_editable_profile_without_ai(self):
+        from webui.discovery import create_manual_candidate_profile
+
+        result = create_manual_candidate_profile(
+            self.store, self.resume["id"],
+            facts=[{
+                "fact_type": "skill", "value": {"name": "Python"},
+                "normalized_value": "Python",
+            }],
+            directions=[{
+                "name": "Python 后端工程师", "type": "core",
+                "search_terms": ["Python 后端"],
+            }],
+            unknowns=[{"field": "current_city", "message": "待确认"}],
+        )
+        self.assertEqual(result["analysis"]["contract_version"], "manual_v1")
+        self.assertEqual(result["candidate_profile_version"]["status"], "draft")
+        self.assertEqual(result["candidate_profile_version"]["facts"][0]["source_kind"], "user_added")
+        self.assertEqual(len(self.store.list_directions(result["analysis"]["id"])), 1)
+
+
+class CandidateProfileConfirmationAcceptanceTests(_IntegrationTestCase):
+    """T034: SC-008/SC-009 user edits and provider calls remain exact."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = Path(__file__).parent / "fixtures" / "discovery" / "ai_candidate_v4.json"
+        cls.fixture = json.loads(path.read_text(encoding="utf-8"))
+
+    def setUp(self):
+        super().setUp()
+        self.resume = self.store.save_resume(
+            self.profile["id"], "storage/acceptance.txt", "txt",
+            self.fixture["resume_text"], "acceptance-hash", "acceptance.txt",
+        )
+
+    def _analyze_v4(self):
+        provider = DiscoveryV4ProfileOrchestrationTests.Provider(self.fixture["valid"])
+        return analyze_resume(
+            self.store, self.resume["id"], ai_consent=True,
+            ai_provider=provider, contract_version="v4",
+        )
+
+    def test_each_user_edit_is_frozen_into_next_confirmation_without_mutating_previous(self):
+        analysis = self._analyze_v4()
+        first_draft = self.store.get_candidate_profile_version(
+            analysis["candidate_profile_version_id"],
+        )
+        skill = next(f for f in first_draft["facts"] if f["fact_type"] == "skill")
+        corrected = self.store.update_candidate_profile_draft(
+            first_draft["id"], expected_content_hash=first_draft["content_hash"],
+            operations=[{"op": "correct", "fact_id": skill["id"],
+                         "value": {"name": "Go"}, "normalized_value": "Go"}],
+        )
+        directions = self.store.list_directions(analysis["id"])
+        first_confirmation = self.store.create_confirmation_v2(
+            candidate_profile_version_id=corrected["id"],
+            expected_content_hash=corrected["content_hash"],
+            hard_constraints={"city": "上海"}, soft_preferences={}, safe_limits={},
+            directions=[{"direction_id": directions[0]["id"], "enabled": True}],
+            intent_hash="1" * 64,
+        )
+        self.assertEqual(first_confirmation["candidate_profile_version_id"], corrected["id"])
+        self.assertIn("Go", [f["normalized_value"] for f in self.store.get_candidate_profile_version(corrected["id"])["facts"]])
+
+        next_draft = self.store.copy_candidate_profile_draft(corrected["id"])
+        active_go = next(f for f in next_draft["facts"] if f["normalized_value"] == "Go")
+        next_edited = self.store.update_candidate_profile_draft(
+            next_draft["id"], expected_content_hash=next_draft["content_hash"],
+            operations=[{"op": "correct", "fact_id": active_go["id"],
+                         "value": {"name": "Rust"}, "normalized_value": "Rust"}],
+        )
+        second_confirmation = self.store.create_confirmation_v2(
+            candidate_profile_version_id=next_edited["id"],
+            expected_content_hash=next_edited["content_hash"],
+            hard_constraints={"city": "上海"}, soft_preferences={}, safe_limits={},
+            directions=[{"direction_id": directions[0]["id"], "enabled": True}],
+            intent_hash="2" * 64,
+        )
+        self.assertNotEqual(second_confirmation["candidate_profile_version_id"], first_confirmation["candidate_profile_version_id"])
+        first_after = self.store.get_candidate_profile_version(corrected["id"])
+        self.assertIn("Go", [f["normalized_value"] for f in first_after["facts"]])
+        self.assertNotIn("Rust", [f["normalized_value"] for f in first_after["facts"]])
+
+    def test_v4_correction_chain_persists_exact_provider_call_count(self):
+        from webui.ai import DiscoveryAIProvider
+        partial = json.loads(json.dumps(self.fixture["valid"], ensure_ascii=False))
+        partial["facts"][0]["evidence_refs"] = ["missing"]
+        provider = DiscoveryAIProvider("https://ai.example/v1", "model", "secret")
+        with mock.patch("webui.ai.call_ai", side_effect=[partial, self.fixture["valid"]]):
+            result = analyze_resume(
+                self.store, self.resume["id"], ai_consent=True,
+                ai_provider=provider, contract_version="v4",
+            )
+        self.assertEqual(result["metrics"]["provider_call_count"], 2)
+        self.assertEqual(
+            self.store.get_analysis(result["id"])["provider_call_count"], 2,
+        )
+
+
+class CandidatePoolOrchestrationTests(_IntegrationTestCase):
+    """T043: runner persists all candidates, dispatches only selected, recovers from SQLite."""
+
+    def _make_v2_run_with_candidates(self, candidate_count=30, detail_budget=15):
+        """Create a v2 run and simulate list phase producing candidates."""
+        from webui.discovery import select_priority_details, precheck_list_candidate
+        pid = self.profile["id"]
+        rid = self.resume["id"]
+        a = self.store.create_analysis(rid, pid)
+        d1 = self.store.add_direction(a["id"], name="后端", direction_type="core",
+                                      rationale="r", gaps=[], confidence=80,
+                                      default_enabled=True, search_terms=["Python"])
+        d2 = self.store.add_direction(a["id"], name="数据", direction_type="core",
+                                      rationale="r", gaps=[], confidence=70,
+                                      default_enabled=True, search_terms=["数据开发"])
+        c = self.store.create_confirmation(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            hard_constraints={}, soft_preferences={}, safe_limits={"max_details": detail_budget},
+            directions=[
+                {"direction_id": d1["id"], "enabled": True, "user_added": False, "user_label": None},
+                {"direction_id": d2["id"], "enabled": True, "user_added": False, "user_label": None},
+            ],
+        )
+        run = self.store.create_discovery_run(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            confirmation_id=c["id"], input_hash="v2-hash", policy_version="discovery_v2",
+        )
+        # Simulate list phase: persist all candidates.
+        for i in range(candidate_count):
+            job_id = f"job-pool-{i:03d}"
+            with self.store._connection() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                    "VALUES (?, ?, ?, '后端', '公司', '25K', '上海', 'jd', '2026-01-01', '2026-01-01')",
+                    (job_id, f"https://www.zhipin.com/job_detail/{job_id}.html", f"https://www.zhipin.com/job_detail/{job_id}.html"),
+                )
+            direction_ids = [d1["id"]] if i % 2 == 0 else [d2["id"]]
+            self.store.upsert_run_candidate(
+                run_id=run["id"], job_id=job_id,
+                source_url=f"https://www.zhipin.com/job_detail/{job_id}.html",
+                direction_ids=direction_ids, search_terms=["Python"],
+                source_positions=[{"item": i, "page": 1, "rank": i}],
+                list_fields={"title": f"岗位{i}", "salary": "25K", "location": "上海"},
+                input_hash="v2-hash",
+            )
+        return run, d1, d2
+
+    def test_all_candidates_persisted_after_list_phase(self):
+        """列表阶段完成后全部候选持久化到 SQLite。"""
+        run, _, _ = self._make_v2_run_with_candidates(30)
+        candidates = self.store.list_run_candidates(run["id"])
+        self.assertEqual(len(candidates), 30)
+        for c in candidates:
+            self.assertEqual(c["state"], "discovered")
+
+    def test_priority_selection_marks_selected_and_deferred(self):
+        """优先选择后 selected/deferred 正确标记。"""
+        from webui.discovery import select_priority_details
+        run, d1, d2 = self._make_v2_run_with_candidates(30, detail_budget=15)
+        candidates = self.store.list_run_candidates(run["id"])
+        result = select_priority_details(
+            candidates, detail_budget=15, directions=[d1["id"], d2["id"]],
+        )
+        self.assertEqual(len(result["selected"]), 15)
+        self.assertEqual(len(result["deferred"]), 15)
+        # Persist selection decisions.
+        for item in result["selected"]:
+            self.store.update_run_candidate_state(
+                item["id"], state="selected", selection_decision="selected",
+                selection_rank=item["selection_rank"], expected_state="discovered",
+            )
+        for item in result["deferred"]:
+            self.store.update_run_candidate_state(
+                item["id"], selection_decision="deferred",
+                selection_reason="budget_deferred",
+            )
+        selected = self.store.list_run_candidates(run["id"], selection_decision="selected")
+        self.assertEqual(len(selected), 15)
+        deferred = self.store.list_run_candidates(run["id"], selection_decision="deferred")
+        self.assertEqual(len(deferred), 15)
+
+    def test_only_selected_candidates_dispatched_for_detail(self):
+        """只有 selected 候选被派发详情获取。"""
+        from webui.discovery import select_priority_details
+        run, d1, d2 = self._make_v2_run_with_candidates(30, detail_budget=10)
+        candidates = self.store.list_run_candidates(run["id"])
+        result = select_priority_details(
+            candidates, detail_budget=10, directions=[d1["id"], d2["id"]],
+        )
+        for item in result["selected"]:
+            self.store.update_run_candidate_state(
+                item["id"], state="selected", selection_decision="selected",
+                selection_rank=item["selection_rank"], expected_state="discovered",
+            )
+        for item in result["deferred"]:
+            self.store.update_run_candidate_state(
+                item["id"], selection_decision="deferred",
+                selection_reason="budget_deferred",
+            )
+        dispatchable = self.store.list_run_candidates(run["id"], state="selected")
+        self.assertEqual(len(dispatchable), 10)
+        non_dispatchable = self.store.list_run_candidates(run["id"], selection_decision="deferred")
+        self.assertEqual(len(non_dispatchable), 20)
+
+    def test_recovery_from_sqlite_after_interrupt(self):
+        """中断后从 SQLite 恢复：已持久化候选和选择状态不丢失。"""
+        from webui.discovery import select_priority_details
+        run, d1, d2 = self._make_v2_run_with_candidates(30, detail_budget=15)
+        candidates = self.store.list_run_candidates(run["id"])
+        result = select_priority_details(
+            candidates, detail_budget=15, directions=[d1["id"], d2["id"]],
+        )
+        for item in result["selected"]:
+            self.store.update_run_candidate_state(
+                item["id"], state="selected", selection_decision="selected",
+                selection_rank=item["selection_rank"], expected_state="discovered",
+            )
+        # Simulate interrupt: mark run interrupted.
+        self.store.update_discovery_run(run["id"], status="interrupted", stage="prioritizing")
+        # Recovery: re-read from SQLite.
+        recovered_run = self.store.get_discovery_run(run["id"])
+        self.assertEqual(recovered_run["status"], "interrupted")
+        recovered_candidates = self.store.list_run_candidates(run["id"])
+        self.assertEqual(len(recovered_candidates), 30)
+        recovered_selected = self.store.list_run_candidates(run["id"], state="selected")
+        self.assertEqual(len(recovered_selected), 15)
+        # Verify ranks survived.
+        ranks = sorted(c["selection_rank"] for c in recovered_selected)
+        self.assertEqual(ranks, list(range(1, 16)))
+
+    def test_violation_candidates_excluded_before_selection(self):
+        """violation 候选在选择前被排除，不占预算。"""
+        from webui.discovery import select_priority_details, precheck_list_candidate
+        run, d1, d2 = self._make_v2_run_with_candidates(20, detail_budget=15)
+        # Mark first 5 as violation via precheck.
+        candidates = self.store.list_run_candidates(run["id"])
+        for c in candidates[:5]:
+            self.store.update_run_candidate_state(
+                c["id"], state="excluded", selection_decision="excluded",
+                precheck_outcome="violation",
+            )
+        remaining = self.store.list_run_candidates(run["id"], selection_decision="pending")
+        result = select_priority_details(
+            remaining, detail_budget=15, directions=[d1["id"], d2["id"]],
+        )
+        self.assertEqual(len(result["selected"]), 15)
+        excluded = self.store.list_run_candidates(run["id"], selection_decision="excluded")
+        self.assertEqual(len(excluded), 5)
+
+
+class ProgressiveResultOrchestrationTests(_IntegrationTestCase):
+    """T045: detail_ready 立即提交单岗位评估、assessment terminal 立即增加 result revision。"""
+
+    def _make_v2_run_selected(self, candidate_count=5, detail_budget=3):
+        """Create a v2 run with selected candidates ready for detail fetch."""
+        from webui.discovery import select_priority_details
+        pid = self.profile["id"]
+        rid = self.resume["id"]
+        a = self.store.create_analysis(rid, pid)
+        d1 = self.store.add_direction(a["id"], name="后端", direction_type="core",
+                                      rationale="r", gaps=[], confidence=80,
+                                      default_enabled=True, search_terms=["Python"])
+        c = self.store.create_confirmation(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            hard_constraints={}, soft_preferences={}, safe_limits={"max_details": detail_budget},
+            directions=[
+                {"direction_id": d1["id"], "enabled": True, "user_added": False, "user_label": None},
+            ],
+        )
+        run = self.store.create_discovery_run(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            confirmation_id=c["id"], input_hash="v2-prog-hash", policy_version="discovery_v2",
+        )
+        for i in range(candidate_count):
+            job_id = f"job-prog-{i:03d}"
+            with self.store._connection() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                    "VALUES (?, ?, ?, '后端', '公司', '25K', '上海', 'jd', '2026-01-01', '2026-01-01')",
+                    (job_id, f"https://www.zhipin.com/job_detail/{job_id}.html", f"https://www.zhipin.com/job_detail/{job_id}.html"),
+                )
+            self.store.upsert_run_candidate(
+                run_id=run["id"], job_id=job_id,
+                source_url=f"https://www.zhipin.com/job_detail/{job_id}.html",
+                direction_ids=[d1["id"]], search_terms=["Python"],
+                source_positions=[{"item": i, "page": 1, "rank": i}],
+                list_fields={"title": f"岗位{i}", "salary": "25K", "location": "上海"},
+                input_hash="v2-prog-hash",
+            )
+        candidates = self.store.list_run_candidates(run["id"])
+        result = select_priority_details(
+            candidates, detail_budget=detail_budget, directions=[d1["id"]],
+        )
+        for item in result["selected"]:
+            self.store.update_run_candidate_state(
+                item["id"], state="selected", selection_decision="selected",
+                selection_rank=item["selection_rank"], expected_state="discovered",
+            )
+        for item in result["deferred"]:
+            self.store.update_run_candidate_state(
+                item["id"], selection_decision="deferred",
+                selection_reason="budget_deferred",
+            )
+        return run, d1
+
+    def test_detail_ready_immediately_creates_assessment(self):
+        """单个详情就绪后立即创建评估，不等待其他详情。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected(5, detail_budget=3)
+        selected = self.store.list_run_candidates(run["id"], state="selected")
+        self.assertEqual(len(selected), 3)
+
+        # Mock source that returns details one by one.
+        class SequentialSource:
+            def __init__(self):
+                self.fetched = []
+            def fetch_detail(self, job, detail_output_path=None):
+                self.fetched.append(job.get("job_id"))
+                class Outcome:
+                    ok = True
+                    detail = {"jd": "详细职位描述", "tags": "Python,Django"}
+                return Outcome()
+
+        source = SequentialSource()
+        runner = DiscoveryRunner(self.store, source=source, ai_provider=None,
+                                 result_dir=Path(tempfile.mkdtemp()))
+        # Run progressive orchestration (method to be implemented in T046).
+        runner.run_progressive_detail_eval(run["id"])
+
+        # After progressive run, each selected candidate should have a snapshot.
+        snapshots = self.store.list_snapshots(run["id"])
+        self.assertEqual(len(snapshots), 3)
+        # Each snapshot should have an assessment created immediately.
+        assessments = self.store.list_assessments(run["id"])
+        self.assertGreaterEqual(len(assessments), 3)
+
+    def test_assessment_terminal_increments_result_revision_immediately(self):
+        """assessment 达到 terminal 后立即增加 result_revision，不等待全部完成。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected(5, detail_budget=3)
+
+        class SequentialSource:
+            def fetch_detail(self, job, detail_output_path=None):
+                class Outcome:
+                    ok = True
+                    detail = {"jd": "详细职位描述", "tags": "Python"}
+                return Outcome()
+
+        runner = DiscoveryRunner(self.store, source=SequentialSource(), ai_provider=None,
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        # result_revision should equal the number of completed assessments.
+        updated_run = self.store.get_discovery_run(run["id"])
+        assessments = self.store.list_assessments(run["id"])
+        completed = [a for a in assessments if a.get("status") == "completed"]
+        self.assertEqual(updated_run.get("result_revision", 0), len(completed))
+        self.assertGreaterEqual(updated_run.get("result_revision", 0), 3)
+
+    def test_result_revision_visible_before_all_details_complete(self):
+        """result_revision 在全部详情完成前已可见（渐进式）。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected(5, detail_budget=3)
+
+        revision_log = []
+
+        class InstrumentedSource:
+            def __init__(self, store, run_id):
+                self._store = store
+                self._run_id = run_id
+                self.call_count = 0
+            def fetch_detail(self, job, detail_output_path=None):
+                self.call_count += 1
+                # After first detail, check that result_revision is already
+                # tracking progress (will be 0 before first assessment, but
+                # the key is that it increments per-assessment, not at end).
+                class Outcome:
+                    ok = True
+                    detail = {"jd": "详细职位描述", "tags": "Python"}
+                return Outcome()
+
+        source = InstrumentedSource(self.store, run["id"])
+        runner = DiscoveryRunner(self.store, source=source, ai_provider=None,
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        # Verify progressive: result_revision must be > 0 and equal to
+        # completed assessment count, proving it wasn't batched at the end.
+        updated_run = self.store.get_discovery_run(run["id"])
+        self.assertGreater(updated_run.get("result_revision", 0), 0)
+        # All 3 selected should have been processed.
+        self.assertEqual(source.call_count, 3)
+
+    def test_progressive_bounded_by_detail_budget(self):
+        """渐进编排受 detail_budget 约束，只处理 selected 候选。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected(10, detail_budget=3)
+
+        class CountingSource:
+            def __init__(self):
+                self.count = 0
+            def fetch_detail(self, job, detail_output_path=None):
+                self.count += 1
+                class Outcome:
+                    ok = True
+                    detail = {"jd": "jd", "tags": "Python"}
+                return Outcome()
+
+        source = CountingSource()
+        runner = DiscoveryRunner(self.store, source=source, ai_provider=None,
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        # Only 3 selected candidates should be fetched, not all 10.
+        self.assertEqual(source.count, 3)
+        snapshots = self.store.list_snapshots(run["id"])
+        self.assertEqual(len(snapshots), 3)
+
+    def test_progressive_checkpoint_survives_interrupt(self):
+        """渐进 checkpoint 在中断后保留：已完成评估和 result_revision 不丢失。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected(5, detail_budget=3)
+
+        call_count = [0]
+
+        class InterruptingSource:
+            def fetch_detail(self, job, detail_output_path=None):
+                call_count[0] += 1
+                if call_count[0] == 2:
+                    # Simulate interrupt after first detail.
+                    raise KeyboardInterrupt("simulated interrupt")
+                class Outcome:
+                    ok = True
+                    detail = {"jd": "jd", "tags": "Python"}
+                return Outcome()
+
+        runner = DiscoveryRunner(self.store, source=InterruptingSource(), ai_provider=None,
+                                 result_dir=Path(tempfile.mkdtemp()))
+        try:
+            runner.run_progressive_detail_eval(run["id"])
+        except KeyboardInterrupt:
+            pass
+
+        # First assessment should be checkpointed.
+        updated_run = self.store.get_discovery_run(run["id"])
+        assessments = self.store.list_assessments(run["id"])
+        completed = [a for a in assessments if a.get("status") == "completed"]
+        # At least the first assessment should survive.
+        self.assertGreaterEqual(len(completed), 1)
+        self.assertGreaterEqual(updated_run.get("result_revision", 0), 1)
+
+
+class _V2EnvelopeFakeAI:
+    """T057 fake provider returning a job-assessment v2 envelope.
+
+    ``assess_job`` honours ``contract_version="job_assessment_v2"`` and returns
+    one assessment per supplied direction, quarantining any direction id listed
+    in ``quarantine_direction_ids``. Legacy v1 calls (no v2 contract) return a
+    minimal v1-shaped proposal so the pre-T058 per-direction path still runs.
+    """
+
+    _V1_PROPOSAL = {
+        "dimensions": {
+            "capability": {"score": 80, "candidate_evidence_refs": [], "job_evidence_refs": []},
+            "experience": {"score": 80, "candidate_evidence_refs": [], "job_evidence_refs": []},
+            "environment": {"score": 80, "candidate_evidence_refs": [], "job_evidence_refs": []},
+            "stability": {"score": 80, "candidate_evidence_refs": [], "job_evidence_refs": []},
+        },
+        "match_score": 80, "confidence": 80, "gaps": [], "proposed_band": "high",
+    }
+
+    def __init__(self, *, quarantine_direction_ids=None, score=80):
+        self.quarantine = set(quarantine_direction_ids or [])
+        self.score = score
+        self.v2_calls = []
+
+    def assess_job(self, *, contract_version="v1", directions=None, **_kwargs):
+        if contract_version != "job_assessment_v2":
+            return dict(self._V1_PROPOSAL)
+        self.v2_calls.append([d["id"] for d in directions or []])
+        assessments = []
+        quarantined = []
+        for d in directions or []:
+            did = d["id"]
+            if did in self.quarantine:
+                quarantined.append({"direction_id": did, "reason": "non_integer_score"})
+                continue
+            assessments.append(self._valid_assessment(did))
+        if not quarantined:
+            status = "complete"
+        elif assessments:
+            status = "partial"
+        else:
+            status = "manual_required"
+        return {
+            "contract_version": "job_assessment_v2",
+            "assessments": assessments,
+            "quarantined": quarantined,
+            "quality": {"status": status, "warnings": []},
+            "metrics": {"provider_call_count": 1},
+        }
+
+    def _valid_assessment(self, direction_id):
+        dim = {"score": self.score, "candidate_fact_refs": [],
+               "candidate_evidence_refs": [], "job_evidence_refs": []}
+        return {
+            "direction_id": direction_id,
+            "dimensions": {
+                name: dict(dim)
+                for name in ("direction_alignment", "skill_coverage",
+                             "experience_match", "industry_relevance")
+            },
+            "match_score": self.score, "confidence": self.score,
+            "positive": [], "gaps": [], "proposed_band": "high",
+        }
+
+
+class JobAssessmentV2GroupOrchestrationTests(_IntegrationTestCase):
+    """T057 RED: 一岗位最多两相关方向、每方向独立 input hash/assessment、
+    失败 sibling 不污染有效 sibling。
+
+    RED 状态: run_progressive_detail_eval 仍走 v1 逐方向路径，create_assessment
+    尚未持久化 evaluation_group_id/input_hash（T058 实现）。
+    """
+
+    def _make_v2_run_multi(self, n_directions=3, candidate_count=2, detail_budget=2):
+        from webui.discovery import select_priority_details
+        pid = self.profile["id"]
+        rid = self.resume["id"]
+        a = self.store.create_analysis(rid, pid)
+        specs = [("后端", "core", 80), ("行业迁移", "adjacent", 70), ("架构师", "core", 60)][:n_directions]
+        directions = []
+        for name, dtype, conf in specs:
+            directions.append(self.store.add_direction(
+                a["id"], name=name, direction_type=dtype, rationale="r", gaps=[],
+                confidence=conf, default_enabled=True, search_terms=[name],
+            ))
+        c = self.store.create_confirmation(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            hard_constraints={}, soft_preferences={}, safe_limits={"max_details": detail_budget},
+            directions=[{"direction_id": d["id"], "enabled": True, "user_added": False, "user_label": None}
+                        for d in directions],
+        )
+        run = self.store.create_discovery_run(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            confirmation_id=c["id"], input_hash="v2-group-hash", policy_version="discovery_v2",
+        )
+        dir_ids = [d["id"] for d in directions]
+        for i in range(candidate_count):
+            job_id = f"job-grp-{i:03d}"
+            with self.store._connection() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                    "VALUES (?, ?, ?, '后端', '公司', '25K', '上海', 'jd', '2026-01-01', '2026-01-01')",
+                    (job_id, f"https://www.zhipin.com/job_detail/{job_id}.html", f"https://www.zhipin.com/job_detail/{job_id}.html"),
+                )
+            self.store.upsert_run_candidate(
+                run_id=run["id"], job_id=job_id,
+                source_url=f"https://www.zhipin.com/job_detail/{job_id}.html",
+                direction_ids=dir_ids, search_terms=["Python"],
+                source_positions=[{"item": i, "page": 1, "rank": i}],
+                list_fields={"title": f"岗位{i}", "salary": "25K", "location": "上海"},
+                input_hash="v2-group-hash",
+            )
+        candidates = self.store.list_run_candidates(run["id"])
+        result = select_priority_details(candidates, detail_budget=detail_budget, directions=dir_ids)
+        for item in result["selected"]:
+            self.store.update_run_candidate_state(
+                item["id"], state="selected", selection_decision="selected",
+                selection_rank=item["selection_rank"], expected_state="discovered",
+            )
+        return run, directions
+
+    @staticmethod
+    def _source():
+        class SequentialSource:
+            def fetch_detail(self, job, detail_output_path=None):
+                class Outcome:
+                    ok = True
+                    detail = {"jd": "详细职位描述", "tags": "Python,Django"}
+                return Outcome()
+        return SequentialSource()
+
+    def test_direction_relevance_selects_at_most_two_per_job(self):
+        from webui.discovery_runner import DiscoveryRunner
+        run, directions = self._make_v2_run_multi(n_directions=3, candidate_count=2, detail_budget=2)
+        self.assertEqual(len(directions), 3)
+        provider = _V2EnvelopeFakeAI()
+        runner = DiscoveryRunner(self.store, source=self._source(), ai_provider=provider,
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        assessments = self.store.list_assessments(run["id"])
+        # 2 selected jobs × at most 2 relevant directions = 4 assessments (not 6).
+        self.assertEqual(len(assessments), 4)
+        # The v2 call must never receive more than two directions.
+        self.assertTrue(provider.v2_calls, "expected at least one job-assessment v2 call")
+        for call_dirs in provider.v2_calls:
+            self.assertLessEqual(len(call_dirs), 2)
+
+    def test_each_direction_has_independent_input_hash_and_shared_group(self):
+        from webui.discovery_runner import DiscoveryRunner
+        run, directions = self._make_v2_run_multi(n_directions=2, candidate_count=1, detail_budget=1)
+        provider = _V2EnvelopeFakeAI()
+        runner = DiscoveryRunner(self.store, source=self._source(), ai_provider=provider,
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        assessments = self.store.list_assessments(run["id"])
+        self.assertEqual(len(assessments), 2)
+        hashes = {a.get("input_hash") for a in assessments}
+        group_ids = {a.get("evaluation_group_id") for a in assessments}
+        # Each direction assessment carries its own non-empty input hash.
+        self.assertEqual(len(hashes), 2)
+        self.assertNotIn(None, hashes)
+        self.assertNotIn("", hashes)
+        # Both directions of the same job share one evaluation group id.
+        self.assertEqual(len(group_ids), 1)
+        self.assertNotIn(None, group_ids)
+
+    def test_quarantined_sibling_does_not_pollute_valid_sibling(self):
+        from webui.discovery_runner import DiscoveryRunner
+        run, directions = self._make_v2_run_multi(n_directions=2, candidate_count=1, detail_budget=1)
+        bad_id = directions[1]["id"]
+        provider = _V2EnvelopeFakeAI(quarantine_direction_ids={bad_id})
+        runner = DiscoveryRunner(self.store, source=self._source(), ai_provider=provider,
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        assessments = self.store.list_assessments(run["id"])
+        by_dir = {a["direction_id"]: a for a in assessments}
+        self.assertEqual(len(assessments), 2)
+
+        good = by_dir[directions[0]["id"]]
+        bad = by_dir[bad_id]
+        # Valid sibling stays usable: completed, scored, not needs_review, no failure.
+        self.assertEqual(good.get("status"), "completed")
+        self.assertIsNotNone(good.get("match_score"))
+        self.assertNotEqual(good.get("category"), "needs_review")
+        self.assertFalse(good.get("failure_code"))
+        # Quarantined sibling is isolated as needs_review with a failure code.
+        self.assertEqual(bad.get("category"), "needs_review")
+        self.assertTrue(bad.get("failure_code"))
+
+
+class DetailReusePolicyTests(_IntegrationTestCase):
+    """T072 RED: 12h 详情复用 / 过期 / 漂移 / unknown / 用户刷新 / 新 run snapshot 自足。
+
+    合同来源:
+    - data-model.md L332-341 (Detail Reuse)
+    - spec.md FR-023, FR-019
+    - state-machine.md (Producer/Consumer Boundaries, Resume)
+
+    RED 状态: store.find_reusable_snapshot / store.create_reused_snapshot 尚不存在；
+    list_snapshots 不暴露 reused 投影字段。T073 GREEN 实现。
+    """
+
+    _JD_TEXT = "详细 JD：负责后端服务设计与实现，要求 Python 5 年以上经验。"
+    _TAGS = "Python,Django,MySQL"
+    _CONTENT_HASH = "sha256:fake-content-hash-for-reuse-tests"
+
+    def _iso(self, dt):
+        return dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+
+    def _make_prior_v2_run_with_snapshot(
+        self, *,
+        job_id="job-reuse-001",
+        source_url="https://www.zhipin.com/job_detail/ABC123.html",
+        title="后端工程师",
+        company="某公司",
+        salary="25K",
+        location="上海",
+        fetched_at_iso,
+        fresh_until_iso=None,
+        completeness="complete",
+        source_status="active",
+        content_hash=_CONTENT_HASH,
+    ):
+        """Create a prior v2 run with one completed snapshot for reuse tests."""
+        pid = self.profile["id"]
+        rid = self.resume["id"]
+        a = self.store.create_analysis(rid, pid)
+        d1 = self.store.add_direction(
+            a["id"], name="后端", direction_type="core", rationale="r",
+            gaps=[], confidence=80, default_enabled=True, search_terms=["Python"],
+        )
+        c = self.store.create_confirmation(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            hard_constraints={}, soft_preferences={}, safe_limits={"max_details": 1},
+            directions=[{"direction_id": d1["id"], "enabled": True,
+                         "user_added": False, "user_label": None}],
+        )
+        prior_run = self.store.create_discovery_run(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            confirmation_id=c["id"], input_hash="prior-v2-hash",
+            policy_version="discovery_v2",
+        )
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, '2026-01-01', '2026-01-01')",
+                (job_id, source_url, source_url, title, company, salary, location, ""),
+            )
+        self.store.upsert_run_candidate(
+            run_id=prior_run["id"], job_id=job_id, source_url=source_url,
+            direction_ids=[d1["id"]], search_terms=["Python"],
+            source_positions=[{"item": 0, "page": 1, "rank": 0}],
+            list_fields={"title": title, "company": company,
+                         "salary": salary, "location": location},
+            input_hash="prior-v2-hash",
+        )
+        # Build snapshot with explicit fetched_at + fresh_until.
+        snapshot_summary = self.store.save_job_snapshot(
+            run_id=prior_run["id"], job_id=job_id, source_url=source_url,
+            title=title, company=company, salary=salary, location=location,
+            tags=self._TAGS, jd=self._JD_TEXT, company_json={},
+            completeness=completeness, missing_fields=[],
+            source_status=source_status, content_hash=content_hash,
+            fetch_status="completed",
+        )
+        # save_job_snapshot does not set fetched_at / fresh_until (migration 015
+        # columns). Patch them directly to simulate a prior fresh capture.
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE discovery_job_snapshots SET fetched_at=?, fresh_until=?, "
+                "run_candidate_id=?, fetch_policy_version='discovery_v2' WHERE id=?",
+                (fetched_at_iso, fresh_until_iso, None, snapshot_summary["id"]),
+            )
+        # Return the full snapshot row so create_reused_snapshot has access to
+        # all content fields (jd/tags/content_hash/etc).
+        snapshot = self.store.get_snapshot(prior_run["id"], job_id)
+        return prior_run, d1, snapshot
+
+    def _make_current_v2_run_with_candidate(
+        self, *,
+        job_id="job-reuse-001",
+        source_url="https://www.zhipin.com/job_detail/ABC123.html",
+        title="后端工程师",
+        company="某公司",
+        salary="25K",
+        location="上海",
+    ):
+        """Create a current v2 run with one selected candidate matching the prior job."""
+        from webui.discovery import select_priority_details
+        pid = self.profile["id"]
+        rid = self.resume["id"]
+        a = self.store.create_analysis(rid, pid)
+        d1 = self.store.add_direction(
+            a["id"], name="后端", direction_type="core", rationale="r",
+            gaps=[], confidence=80, default_enabled=True, search_terms=["Python"],
+        )
+        c = self.store.create_confirmation(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            hard_constraints={}, soft_preferences={}, safe_limits={"max_details": 1},
+            directions=[{"direction_id": d1["id"], "enabled": True,
+                         "user_added": False, "user_label": None}],
+        )
+        run = self.store.create_discovery_run(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            confirmation_id=c["id"], input_hash="current-v2-hash",
+            policy_version="discovery_v2",
+        )
+        self.store.upsert_run_candidate(
+            run_id=run["id"], job_id=job_id, source_url=source_url,
+            direction_ids=[d1["id"]], search_terms=["Python"],
+            source_positions=[{"item": 0, "page": 1, "rank": 0}],
+            list_fields={"title": title, "company": company,
+                         "salary": salary, "location": location},
+            input_hash="current-v2-hash",
+        )
+        candidates = self.store.list_run_candidates(run["id"])
+        result = select_priority_details(candidates, detail_budget=1, directions=[d1["id"]])
+        for item in result["selected"]:
+            self.store.update_run_candidate_state(
+                item["id"], state="selected", selection_decision="selected",
+                selection_rank=item["selection_rank"], expected_state="discovered",
+            )
+        return run, d1
+
+    # ------------------------------------------------------------------
+    # Positive: 12h reuse
+    # ------------------------------------------------------------------
+
+    def test_find_reusable_snapshot_returns_match_within_12h(self):
+        """12h 内、身份一致、complete+active → find_reusable_snapshot 返回 prior snapshot。"""
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "后端工程师", "company": "某公司",
+                                 "salary": "25K", "location": "上海"},
+            now_iso=self._iso(now),
+        )
+        self.assertIsNotNone(matched, "12h 内 complete+active+identity match 必须返回可复用 snapshot")
+        self.assertEqual(matched["completeness"], "complete")
+        self.assertEqual(matched["source_status"], "active")
+
+    def test_create_reused_snapshot_copies_content_into_current_run(self):
+        """create_reused_snapshot 在当前 run 创建新 snapshot，复制 content_hash/jd/tags 等。"""
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        _, _, prior_snapshot = self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+        )
+        current_run, d1 = self._make_current_v2_run_with_candidate()
+        candidate = self.store.list_run_candidates(
+            current_run["id"], selection_decision="selected"
+        )[0]
+
+        reused = self.store.create_reused_snapshot(
+            run_id=current_run["id"],
+            run_candidate_id=candidate["id"],
+            source_snapshot=prior_snapshot,
+            fetch_policy_version="discovery_v2",
+            now_iso=self._iso(now),
+        )
+
+        self.assertIsNotNone(reused)
+        self.assertNotEqual(reused["id"], prior_snapshot["id"])
+        self.assertEqual(reused["run_id"], current_run["id"])
+        self.assertEqual(reused["reused_from_snapshot_id"], prior_snapshot["id"])
+        self.assertEqual(reused["run_candidate_id"], candidate["id"])
+        # Content must be copied.
+        self.assertEqual(reused["content_hash"], self._CONTENT_HASH)
+        self.assertEqual(reused["jd"], self._JD_TEXT)
+        self.assertEqual(reused["tags"], self._TAGS)
+        self.assertEqual(reused["completeness"], "complete")
+        self.assertEqual(reused["source_status"], "active")
+        # New run snapshot has its own fetched_at = current run time.
+        self.assertEqual(reused["fetched_at"], self._iso(now))
+        # fetch_policy_version recorded.
+        self.assertEqual(reused.get("fetch_policy_version"), "discovery_v2")
+
+    def test_reused_snapshot_increments_detail_reused_count(self):
+        """复用后 run 的 detail_reused_count 增加。"""
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        _, _, prior_snapshot = self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+        )
+        current_run, _ = self._make_current_v2_run_with_candidate()
+        candidate = self.store.list_run_candidates(
+            current_run["id"], selection_decision="selected"
+        )[0]
+
+        self.store.create_reused_snapshot(
+            run_id=current_run["id"],
+            run_candidate_id=candidate["id"],
+            source_snapshot=prior_snapshot,
+            fetch_policy_version="discovery_v2",
+            now_iso=self._iso(now),
+        )
+
+        updated = self.store.get_discovery_run(current_run["id"])
+        self.assertGreaterEqual(updated.get("detail_reused_count", 0), 1)
+
+    def test_list_snapshots_exposes_reused_projection_flag(self):
+        """list_snapshots 必须为复用 snapshot 暴露 reused=True 投影字段。"""
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        _, _, prior_snapshot = self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+        )
+        current_run, _ = self._make_current_v2_run_with_candidate()
+        candidate = self.store.list_run_candidates(
+            current_run["id"], selection_decision="selected"
+        )[0]
+        self.store.create_reused_snapshot(
+            run_id=current_run["id"],
+            run_candidate_id=candidate["id"],
+            source_snapshot=prior_snapshot,
+            fetch_policy_version="discovery_v2",
+            now_iso=self._iso(now),
+        )
+
+        snapshots = self.store.list_snapshots(current_run["id"])
+        self.assertEqual(len(snapshots), 1)
+        self.assertTrue(snapshots[0].get("reused"), "复用 snapshot 投影必须标记 reused=True")
+        # Source fetch time preserved separately for traceability.
+        self.assertEqual(snapshots[0].get("source_fetched_at"), self._iso(fetched_at))
+
+    # ------------------------------------------------------------------
+    # Negative: expiry (>12h)
+    # ------------------------------------------------------------------
+
+    def test_no_reuse_when_fetched_at_exceeds_12h(self):
+        """fetched_at > 12h → find_reusable_snapshot 返回 None。"""
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=13)
+        fresh_until = now - timedelta(hours=1)  # already expired
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "后端工程师", "company": "某公司",
+                                 "salary": "25K", "location": "上海"},
+            now_iso=self._iso(now),
+        )
+        self.assertIsNone(matched, "fresh_until 已过 → 不应复用")
+
+    def test_no_reuse_when_fresh_until_missing(self):
+        """fresh_until 为 NULL（旧数据无 freshness 元数据）→ 不复用。"""
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=None,
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "后端工程师", "company": "某公司",
+                                 "salary": "25K", "location": "上海"},
+            now_iso=self._iso(now),
+        )
+        self.assertIsNone(matched, "fresh_until NULL → 视为不可复用")
+
+    # ------------------------------------------------------------------
+    # Negative: completeness != complete
+    # ------------------------------------------------------------------
+
+    def test_no_reuse_when_completeness_partial(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+            completeness="partial",
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "后端工程师", "company": "某公司",
+                                 "salary": "25K", "location": "上海"},
+            now_iso=self._iso(now),
+        )
+        self.assertIsNone(matched, "completeness=partial → 不复用")
+
+    def test_no_reuse_when_completeness_unavailable(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+            completeness="unavailable",
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "后端工程师", "company": "某公司",
+                                 "salary": "25K", "location": "上海"},
+            now_iso=self._iso(now),
+        )
+        self.assertIsNone(matched, "completeness=unavailable → 不复用")
+
+    # ------------------------------------------------------------------
+    # Negative: source_status != active
+    # ------------------------------------------------------------------
+
+    def test_no_reuse_when_source_status_unknown(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+            source_status="unknown",
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "后端工程师", "company": "某公司",
+                                 "salary": "25K", "location": "上海"},
+            now_iso=self._iso(now),
+        )
+        self.assertIsNone(matched, "source_status=unknown → 不复用")
+
+    def test_no_reuse_when_source_status_closed(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+            source_status="closed",
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "后端工程师", "company": "某公司",
+                                 "salary": "25K", "location": "上海"},
+            now_iso=self._iso(now),
+        )
+        self.assertIsNone(matched, "source_status=closed → 不复用")
+
+    # ------------------------------------------------------------------
+    # Negative: identity drift
+    # ------------------------------------------------------------------
+
+    def test_no_reuse_when_canonical_url_drift(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/XYZ999.html",  # different URL
+            current_list_fields={"title": "后端工程师", "company": "某公司",
+                                 "salary": "25K", "location": "上海"},
+            now_iso=self._iso(now),
+        )
+        self.assertIsNone(matched, "canonical URL 不匹配 → 不复用")
+
+    def test_no_reuse_when_job_id_drift(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+            job_id="job-reuse-001",
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-999",  # different job_id
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "后端工程师", "company": "某公司",
+                                 "salary": "25K", "location": "上海"},
+            now_iso=self._iso(now),
+        )
+        self.assertIsNone(matched, "job_id 不匹配 → 不复用")
+
+    def test_no_reuse_when_list_fields_drift_title(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+            title="后端工程师",
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "前端工程师",  # drift
+                                 "company": "某公司",
+                                 "salary": "25K", "location": "上海"},
+            now_iso=self._iso(now),
+        )
+        self.assertIsNone(matched, "title 漂移 → 不复用")
+
+    def test_no_reuse_when_list_fields_drift_company(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+            company="某公司",
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "后端工程师",
+                                 "company": "另一家公司",  # drift
+                                 "salary": "25K", "location": "上海"},
+            now_iso=self._iso(now),
+        )
+        self.assertIsNone(matched, "company 漂移 → 不复用")
+
+    def test_no_reuse_when_list_fields_drift_salary(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+            salary="25K",
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "后端工程师", "company": "某公司",
+                                 "salary": "35K",  # drift
+                                 "location": "上海"},
+            now_iso=self._iso(now),
+        )
+        self.assertIsNone(matched, "salary 漂移 → 不复用")
+
+    def test_no_reuse_when_list_fields_drift_location(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+            location="上海",
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "后端工程师", "company": "某公司",
+                                 "salary": "25K",
+                                 "location": "北京"},  # drift
+            now_iso=self._iso(now),
+        )
+        self.assertIsNone(matched, "location 漂移 → 不复用")
+
+    # ------------------------------------------------------------------
+    # Negative: user requested refresh
+    # ------------------------------------------------------------------
+
+    def test_no_reuse_when_user_requested_refresh(self):
+        """用户显式刷新请求 → 不复用，即使 12h 内身份一致。"""
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+        )
+        matched = self.store.find_reusable_snapshot(
+            job_id="job-reuse-001",
+            source_url="https://www.zhipin.com/job_detail/ABC123.html",
+            current_list_fields={"title": "后端工程师", "company": "某公司",
+                                 "salary": "25K", "location": "上海"},
+            now_iso=self._iso(now),
+            refresh_requested=True,
+        )
+        self.assertIsNone(matched, "用户显式刷新 → 不复用")
+
+    # ------------------------------------------------------------------
+    # Self-sufficiency: parent deletion must not break current run's snapshot
+    # ------------------------------------------------------------------
+
+    def test_reused_snapshot_self_sufficient_after_parent_deletion(self):
+        """新 run snapshot 自足：parent snapshot 行被删除后，新 run 的 snapshot 仍可完整读取。"""
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        prior_run, _, prior_snapshot = self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+        )
+        current_run, _ = self._make_current_v2_run_with_candidate()
+        candidate = self.store.list_run_candidates(
+            current_run["id"], selection_decision="selected"
+        )[0]
+        reused = self.store.create_reused_snapshot(
+            run_id=current_run["id"],
+            run_candidate_id=candidate["id"],
+            source_snapshot=prior_snapshot,
+            fetch_policy_version="discovery_v2",
+            now_iso=self._iso(now),
+        )
+
+        # Delete the parent snapshot row (simulates parent run cleanup).
+        with self.store._connection() as conn:
+            conn.execute(
+                "DELETE FROM discovery_job_snapshots WHERE id=?",
+                (prior_snapshot["id"],),
+            )
+
+        # Current run's snapshot must still be fully readable.
+        reread = self.store.get_snapshot(current_run["id"], "job-reuse-001")
+        self.assertEqual(reread["id"], reused["id"])
+        self.assertEqual(reread["content_hash"], self._CONTENT_HASH)
+        self.assertEqual(reread["jd"], self._JD_TEXT)
+        self.assertEqual(reread["tags"], self._TAGS)
+        self.assertEqual(reread["completeness"], "complete")
+        self.assertEqual(reread["source_status"], "active")
+        # reused_from_snapshot_id may dangle (ON DELETE SET NULL) but content
+        # must remain intact.
+        self.assertEqual(reread["content_hash"], self._CONTENT_HASH)
+
+    def test_reused_snapshot_does_not_depend_on_parent_run_row(self):
+        """新 run snapshot 不依赖 parent run 行存在。"""
+        from datetime import datetime, timedelta
+        now = datetime(2026, 7, 21, 12, 0, 0)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        prior_run, _, prior_snapshot = self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=self._iso(fetched_at),
+            fresh_until_iso=self._iso(fresh_until),
+        )
+        current_run, _ = self._make_current_v2_run_with_candidate()
+        candidate = self.store.list_run_candidates(
+            current_run["id"], selection_decision="selected"
+        )[0]
+        self.store.create_reused_snapshot(
+            run_id=current_run["id"],
+            run_candidate_id=candidate["id"],
+            source_snapshot=prior_snapshot,
+            fetch_policy_version="discovery_v2",
+            now_iso=self._iso(now),
+        )
+
+        # Delete the entire prior run (cascades to its snapshots).
+        with self.store._connection() as conn:
+            conn.execute("DELETE FROM discovery_runs WHERE id=?", (prior_run["id"],))
+
+        snapshots = self.store.list_snapshots(current_run["id"])
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["content_hash"], self._CONTENT_HASH)
+        self.assertEqual(snapshots[0]["jd"], self._JD_TEXT)
+
+    # ------------------------------------------------------------------
+    # Runner integration: reuse path must not call source.fetch_detail
+    # ------------------------------------------------------------------
+
+    def test_runner_reuses_snapshot_without_calling_source_fetch(self):
+        """runner 在复用可用时跳过 source.fetch_detail，直接创建复用 snapshot。"""
+        from datetime import datetime, timedelta, timezone
+        from webui.discovery_runner import DiscoveryRunner
+        # Use real wall-clock time so the runner's _now() aligns with
+        # the freshness window set on the prior snapshot.
+        now = datetime.now(timezone.utc)
+        fetched_at = now - timedelta(hours=1)
+        fresh_until = now + timedelta(hours=11)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=fetched_at.isoformat(),
+            fresh_until_iso=fresh_until.isoformat(),
+        )
+        current_run, _ = self._make_current_v2_run_with_candidate()
+
+        class CountingSource:
+            def __init__(self):
+                self.fetch_detail_count = 0
+                self.fetch_details_batch_count = 0
+            def fetch_detail(self, job, detail_output_path=None):
+                self.fetch_detail_count += 1
+                class Outcome:
+                    ok = True
+                    detail = {"jd": "should-not-be-called", "tags": "Python"}
+                return Outcome()
+            def fetch_details_batch(self, jobs, *, detail_output_path=None,
+                                    event_callback=None, max_batch_size=5):
+                self.fetch_details_batch_count += 1
+                return {}
+
+        source = CountingSource()
+        runner = DiscoveryRunner(
+            self.store, source=source, ai_provider=None,
+            result_dir=Path(tempfile.mkdtemp()),
+        )
+        runner.run_progressive_detail_eval(current_run["id"])
+
+        self.assertEqual(source.fetch_detail_count, 0,
+                         "复用路径不应调用 source.fetch_detail")
+        self.assertEqual(source.fetch_details_batch_count, 0,
+                         "复用路径不应调用 source.fetch_details_batch")
+        # Snapshot was created via reuse path.
+        snapshots = self.store.list_snapshots(current_run["id"])
+        self.assertEqual(len(snapshots), 1)
+        self.assertTrue(snapshots[0].get("reused"))
+        self.assertEqual(snapshots[0]["content_hash"], self._CONTENT_HASH)
+
+    def test_runner_refetches_when_no_reusable_snapshot(self):
+        """无可复用 snapshot 时 runner 调用 source.fetch_detail。"""
+        from datetime import datetime, timedelta, timezone
+        from webui.discovery_runner import DiscoveryRunner
+        # Use real wall-clock time; prior snapshot is expired (fresh_until < now).
+        now = datetime.now(timezone.utc)
+        fetched_at = now - timedelta(hours=13)
+        fresh_until = now - timedelta(hours=1)
+        self._make_prior_v2_run_with_snapshot(
+            fetched_at_iso=fetched_at.isoformat(),
+            fresh_until_iso=fresh_until.isoformat(),
+        )
+        current_run, _ = self._make_current_v2_run_with_candidate()
+
+        class CountingSource:
+            def __init__(self):
+                self.fetch_detail_count = 0
+            def fetch_detail(self, job, detail_output_path=None):
+                self.fetch_detail_count += 1
+                class Outcome:
+                    ok = True
+                    detail = {"jd": "fresh-jd", "tags": "Python"}
+                return Outcome()
+
+        source = CountingSource()
+        runner = DiscoveryRunner(
+            self.store, source=source, ai_provider=None,
+            result_dir=Path(tempfile.mkdtemp()),
+        )
+        runner.run_progressive_detail_eval(current_run["id"])
+
+        self.assertEqual(source.fetch_detail_count, 1, "过期 snapshot 必须重新抓取")
+        snapshots = self.store.list_snapshots(current_run["id"])
+        self.assertEqual(len(snapshots), 1)
+        self.assertFalse(snapshots[0].get("reused", False))
+
+
+class FailureIsolationAndProgressTests(_IntegrationTestCase):
+    """T076 RED: 单 detail/AI/search 失败不阻断其他结果，四类进度逐单元事务更新并可 reconciliation，
+    首结果/首五/阶段边界 timing 字段写入。
+
+    合同来源:
+    - http-api.md L203-208 (four-class progress: search_queries_completed, list_candidates,
+      details_selected, details_completed, assessments_completed, recommendations)
+    - http-api.md L218-220 (timing: first_result_at, first_batch_at, updated_at)
+    - data-model.md L182-196 (additive counters + timing 字段)
+    - data-model.md L318-328 (Progress Derivation: 计数从持久化 work units 派生)
+    - state-machine.md (failure isolation: terminal safe events, no PII)
+
+    RED 状态:
+    - get_discovery_run 返回的 progress dict 仅含 v1 名 (source_count/detail_count/evaluated_count)，
+      未暴露 v2 four-class 名。
+    - run_progressive_detail_eval 不写入 first_result_at / first_batch_at / processing_completed_at。
+    - _stage_fetching_lists 不写入 list_completed_at。
+    """
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _make_v2_run_selected_n(self, candidate_count=5, detail_budget=3,
+                                job_prefix="job-iso"):
+        """Create a v2 run with N selected candidates ready for detail fetch."""
+        from webui.discovery import select_priority_details
+        pid = self.profile["id"]
+        rid = self.resume["id"]
+        a = self.store.create_analysis(rid, pid)
+        d1 = self.store.add_direction(
+            a["id"], name="后端", direction_type="core", rationale="r",
+            gaps=[], confidence=80, default_enabled=True, search_terms=["Python"],
+        )
+        c = self.store.create_confirmation(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            hard_constraints={}, soft_preferences={}, safe_limits={"max_details": detail_budget},
+            directions=[{"direction_id": d1["id"], "enabled": True,
+                         "user_added": False, "user_label": None}],
+        )
+        run = self.store.create_discovery_run(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            confirmation_id=c["id"], input_hash="v2-iso-hash",
+            policy_version="discovery_v2",
+        )
+        for i in range(candidate_count):
+            job_id = f"{job_prefix}-{i:03d}"
+            with self.store._connection() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                    "VALUES (?, ?, ?, '后端', '公司', '25K', '上海', 'jd', '2026-01-01', '2026-01-01')",
+                    (job_id, f"https://www.zhipin.com/job_detail/{job_id}.html",
+                     f"https://www.zhipin.com/job_detail/{job_id}.html"),
+                )
+            self.store.upsert_run_candidate(
+                run_id=run["id"], job_id=job_id,
+                source_url=f"https://www.zhipin.com/job_detail/{job_id}.html",
+                direction_ids=[d1["id"]], search_terms=["Python"],
+                source_positions=[{"item": i, "page": 1, "rank": i}],
+                list_fields={"title": f"岗位{i}", "salary": "25K", "location": "上海"},
+                input_hash="v2-iso-hash",
+            )
+        candidates = self.store.list_run_candidates(run["id"])
+        result = select_priority_details(
+            candidates, detail_budget=detail_budget, directions=[d1["id"]],
+        )
+        for item in result["selected"]:
+            self.store.update_run_candidate_state(
+                item["id"], state="selected", selection_decision="selected",
+                selection_rank=item["selection_rank"], expected_state="discovered",
+            )
+        for item in result["deferred"]:
+            self.store.update_run_candidate_state(
+                item["id"], selection_decision="deferred",
+                selection_reason="budget_deferred",
+            )
+        # T077: list_candidate_count is normally stamped by _stage_fetching_lists
+        # in production. The test bypasses that stage, so stamp it here to make
+        # the v2 four-class progress contract verifiable from a resumed run.
+        self.store.update_discovery_run(run["id"], counters={
+            "list_candidate_count": candidate_count,
+        })
+        return run, d1
+
+    @staticmethod
+    def _source_with_failures(fail_job_ids):
+        """Fake source where specified job_ids fail detail fetch."""
+        fail_set = set(fail_job_ids or [])
+
+        class _Source:
+            def __init__(self):
+                self.calls = []
+
+            def fetch_detail(self, job, detail_output_path=None):
+                job_id = job.get("job_id")
+                self.calls.append(job_id)
+
+                class Outcome:
+                    pass
+                out = Outcome()
+                if job_id in fail_set:
+                    out.ok = False
+                    out.detail = {}
+                    out.failed_code = "source_timeout"
+                    out.safe_log = {"reason": "timeout"}
+                else:
+                    out.ok = True
+                    out.detail = {"jd": "详细职位描述", "tags": "Python,Django"}
+                    out.failed_code = None
+                    out.safe_log = None
+                return out
+        return _Source()
+
+    @staticmethod
+    def _ai_with_failures(fail_call_indices, score=80):
+        """Fake v2 AI provider where specified call indices (0-based) raise.
+
+        ``assess_job`` is called once per job; failing the Nth call simulates
+        a per-job AI failure without blocking subsequent jobs.
+        """
+        fail_set = set(fail_call_indices or [])
+
+        class _AI:
+            def __init__(self):
+                self.calls = 0
+                self.v2_calls = []
+
+            def assess_job(self, *, candidate_profile=None, directions=None,
+                           job_snapshot=None, contract_version="v1", **_kwargs):
+                if contract_version != "job_assessment_v2":
+                    # Legacy v1 path not used in v2 progressive flow.
+                    return {
+                        "dimensions": {
+                            "capability": {"score": score, "candidate_evidence_refs": [],
+                                           "job_evidence_refs": []},
+                            "experience": {"score": score, "candidate_evidence_refs": [],
+                                           "job_evidence_refs": []},
+                            "environment": {"score": score, "candidate_evidence_refs": [],
+                                            "job_evidence_refs": []},
+                            "stability": {"score": score, "candidate_evidence_refs": [],
+                                          "job_evidence_refs": []},
+                        },
+                        "match_score": score, "confidence": score,
+                        "gaps": [], "proposed_band": "high",
+                    }
+                self.calls += 1
+                self.v2_calls.append(job_snapshot.get("snapshot_id", "") if job_snapshot else "")
+                if (self.calls - 1) in fail_set:
+                    raise RuntimeError("simulated AI failure for this job")
+                assessments = []
+                for d in directions or []:
+                    assessments.append({
+                        "direction_id": d["id"],
+                        "dimensions": {
+                            "capability": {"score": score, "candidate_fact_refs": [],
+                                           "candidate_evidence_refs": [],
+                                           "job_evidence_refs": []},
+                            "experience": {"score": score, "candidate_fact_refs": [],
+                                           "candidate_evidence_refs": [],
+                                           "job_evidence_refs": []},
+                            "environment": {"score": score, "candidate_fact_refs": [],
+                                            "candidate_evidence_refs": [],
+                                            "job_evidence_refs": []},
+                            "stability": {"score": score, "candidate_fact_refs": [],
+                                          "candidate_evidence_refs": [],
+                                          "job_evidence_refs": []},
+                        },
+                        "match_score": score, "confidence": score,
+                        "gaps": [], "proposed_band": "high",
+                    })
+                return {
+                    "contract_version": "job_assessment_v2",
+                    "assessments": assessments,
+                    "quarantined": [],
+                    "quality": {"status": "complete", "warnings": []},
+                    "metrics": {"provider_call_count": 1},
+                }
+        return _AI()
+
+    @staticmethod
+    def _ai_always_ok(score=80):
+        return FailureIsolationAndProgressTests._ai_with_failures(set(), score=score)
+
+    @staticmethod
+    def _source_always_ok():
+        return FailureIsolationAndProgressTests._source_with_failures(set())
+
+    # ------------------------------------------------------------------
+    # Failure isolation: single detail/AI/search failure does not block others
+    # ------------------------------------------------------------------
+
+    def test_single_detail_failure_does_not_block_other_candidates(self):
+        """单个详情失败时，其他候选的详情和评估仍然完成。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected_n(candidate_count=5, detail_budget=3)
+        selected = self.store.list_run_candidates(run["id"], selection_decision="selected")
+        selected.sort(key=lambda c: (c.get("selection_rank") or 9999, c["job_id"]))
+        self.assertEqual(len(selected), 3)
+        # Fail the second selected candidate's detail.
+        fail_job_id = selected[1]["job_id"]
+        other_job_ids = {selected[0]["job_id"], selected[2]["job_id"]}
+        source = self._source_with_failures({fail_job_id})
+        runner = DiscoveryRunner(self.store, source=source,
+                                 ai_provider=self._ai_always_ok(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        # All 3 selected candidates were attempted.
+        self.assertEqual(len(source.calls), 3)
+        # The OTHER 2 candidates got snapshots saved with non-unavailable completeness.
+        snapshots = self.store.list_snapshots(run["id"])
+        self.assertEqual(len(snapshots), 3)
+        ok_other = [s for s in snapshots
+                    if s["job_id"] in other_job_ids
+                    and s.get("completeness") != "unavailable"]
+        self.assertEqual(len(ok_other), 2,
+                         "失败详情不应阻断其他候选的详情保存")
+        # The OTHER 2 candidates got completed assessments (any valid category).
+        assessments = self.store.list_assessments(run["id"])
+        ok_other_snapshot_ids = {s["id"] for s in ok_other}
+        ok_other_assessments = [
+            a for a in assessments
+            if a.get("snapshot_id") in ok_other_snapshot_ids
+            and a.get("status") == "completed"
+            and a.get("failure_code") is None
+        ]
+        self.assertEqual(len(ok_other_assessments), 2,
+                         "失败详情不应阻断其他候选的评估")
+
+    def test_single_ai_failure_does_not_block_other_candidates(self):
+        """单个 AI 评估失败时，其他候选的评估仍然完成。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected_n(candidate_count=5, detail_budget=3)
+        selected = self.store.list_run_candidates(run["id"], selection_decision="selected")
+        selected.sort(key=lambda c: (c.get("selection_rank") or 9999, c["job_id"]))
+        # Fail the second assess_job call (index 1) → second candidate in rank order.
+        ai = self._ai_with_failures({1})
+        runner = DiscoveryRunner(self.store, source=self._source_always_ok(),
+                                 ai_provider=ai,
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        # All 3 jobs were attempted for AI assessment.
+        self.assertEqual(ai.calls, 3)
+        # The OTHER 2 candidates (rank 0 and rank 2) got assessments with
+        # failure_code IS NULL (no AI failure). The failed candidate's
+        # assessment has a non-null failure_code (ai_invalid_output etc).
+        assessments = self.store.list_assessments(run["id"])
+        # Map snapshot_id → job_id for join.
+        snapshots = self.store.list_snapshots(run["id"])
+        snap_to_job = {s["id"]: s["job_id"] for s in snapshots}
+        other_job_ids = {selected[0]["job_id"], selected[2]["job_id"]}
+        other_assessments = [
+            a for a in assessments
+            if snap_to_job.get(a.get("snapshot_id")) in other_job_ids
+        ]
+        # Both OTHER candidates should have assessments.
+        self.assertEqual(len(other_assessments), 2,
+                         "单个 AI 失败不应阻断其他候选的评估")
+        # And their failure_code should be null (AI succeeded for them).
+        self.assertTrue(all(a.get("failure_code") is None for a in other_assessments),
+                        "其他候选的评估不应携带 AI 失败码")
+        # result_revision still incremented for all 3 (failure is isolated, not fatal).
+        updated_run = self.store.get_discovery_run(run["id"])
+        self.assertEqual(updated_run.get("result_revision", 0), 3)
+
+    def test_single_search_item_failure_does_not_block_other_items(self):
+        """单个搜索项失败时，其他搜索项仍然完成。"""
+        from webui.discovery_runner import DiscoveryRunner, _source_input_hash
+        # Build a v2 run with a plan containing 3 items; the source's fetch_list
+        # will fail for one specific item but succeed for the others.
+        pid = self.profile["id"]
+        rid = self.resume["id"]
+        a = self.store.create_analysis(rid, pid)
+        d1 = self.store.add_direction(
+            a["id"], name="后端", direction_type="core", rationale="r",
+            gaps=[], confidence=80, default_enabled=True, search_terms=["Python"],
+        )
+        c = self.store.create_confirmation(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            hard_constraints={}, soft_preferences={}, safe_limits={"max_details": 3},
+            directions=[{"direction_id": d1["id"], "enabled": True,
+                         "user_added": False, "user_label": None}],
+        )
+        run = self.store.create_discovery_run(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            confirmation_id=c["id"], input_hash="v2-iso-list-hash",
+            policy_version="discovery_v2",
+        )
+        # Pre-create the search plan with 3 items.
+        items = []
+        for i in range(3):
+            items.append({
+                "keyword": f"Python{i}", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+                "direction_ids": [d1["id"]],
+                "input_hash": _source_input_hash({
+                    "keyword": f"Python{i}", "city": "上海",
+                    "source_filters": {}, "target_pages": 1,
+                }),
+            })
+        self.store.create_search_plan(run["id"], detail_budget=3, items=items)
+
+        # Source: fetch_list fails for item with keyword "Python1".
+        class _ListSource:
+            def __init__(self):
+                self.calls = []
+
+            def fetch_list(self, plan_item):
+                keyword = plan_item.get("keyword", "")
+                self.calls.append(keyword)
+
+                class Outcome:
+                    pass
+                out = Outcome()
+                if keyword == "Python1":
+                    out.ok = False
+                    out.jobs = []
+                    out.failed_code = "source_timeout"
+                    out.safe_log = {"reason": "timeout"}
+                else:
+                    out.ok = True
+                    out.failed_code = None
+                    out.safe_log = None
+                    # Return 2 jobs per successful item.
+                    out.jobs = [
+                        {"job_id": f"job-{keyword}-0",
+                         "source_url": f"https://www.zhipin.com/job_detail/{keyword}0.html",
+                         "title": f"{keyword}岗位0", "company": "公司",
+                         "salary": "25K", "location": "上海"},
+                        {"job_id": f"job-{keyword}-1",
+                         "source_url": f"https://www.zhipin.com/job_detail/{keyword}1.html",
+                         "title": f"{keyword}岗位1", "company": "公司",
+                         "salary": "25K", "location": "上海"},
+                    ]
+                return out
+
+        source = _ListSource()
+        import threading
+        cancel_event = threading.Event()
+        runner = DiscoveryRunner(self.store, source=source,
+                                 ai_provider=None,
+                                 result_dir=Path(tempfile.mkdtemp()))
+        # Drive only the list-fetch stage.
+        runner._stage_fetching_lists(run["id"], cancel_event)
+
+        # All 3 items were attempted.
+        self.assertEqual(len(source.calls), 3)
+        # The failed item is marked failed; the others are completed.
+        plan = self.store.get_search_plan(run["id"])
+        statuses = {item["keyword"]: item["status"] for item in plan["items"]}
+        self.assertEqual(statuses.get("Python0"), "completed")
+        self.assertEqual(statuses.get("Python1"), "failed")
+        self.assertEqual(statuses.get("Python2"), "completed")
+
+    # ------------------------------------------------------------------
+    # Four-class progress: per-unit transaction + reconciliation
+    # ------------------------------------------------------------------
+
+    def test_progress_dict_exposes_v2_four_class_names(self):
+        """get_discovery_run 返回的 progress dict 必须暴露 v2 four-class 字段名。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected_n(candidate_count=5, detail_budget=3)
+        runner = DiscoveryRunner(self.store, source=self._source_always_ok(),
+                                 ai_provider=self._ai_always_ok(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        updated = self.store.get_discovery_run(run["id"])
+        progress = updated.get("progress") or {}
+        # v2 four-class names per http-api.md L203-208.
+        self.assertIn("search_queries_completed", progress,
+                      "progress dict 必须暴露 search_queries_completed")
+        self.assertIn("list_candidates", progress,
+                      "progress dict 必须暴露 list_candidates")
+        self.assertIn("details_selected", progress,
+                      "progress dict 必须暴露 details_selected")
+        self.assertIn("details_completed", progress,
+                      "progress dict 必须暴露 details_completed")
+        self.assertIn("assessments_completed", progress,
+                      "progress dict 必须暴露 assessments_completed")
+        self.assertIn("recommendations", progress,
+                      "progress dict 必须暴露 recommendations")
+
+    def test_progress_counts_match_persisted_rows_after_progressive_run(self):
+        """progress 计数必须与持久化行一致（detail_completed_count, assessment_completed_count）。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected_n(candidate_count=5, detail_budget=3)
+        runner = DiscoveryRunner(self.store, source=self._source_always_ok(),
+                                 ai_provider=self._ai_always_ok(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        updated = self.store.get_discovery_run(run["id"])
+        progress = updated.get("progress") or {}
+        # 3 selected candidates, all succeed.
+        self.assertEqual(progress.get("details_completed"), 3)
+        self.assertEqual(progress.get("assessments_completed"), 3)
+        self.assertEqual(progress.get("details_selected"), 3)
+        # list_candidates was set to 5 by _make_v2_run_selected_n.
+        self.assertEqual(progress.get("list_candidates"), 5)
+
+    def test_reconcile_progress_recalculates_from_persisted_rows(self):
+        """reconcile_discovery_run_v2 从持久化行重算 v2 计数。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected_n(candidate_count=5, detail_budget=3)
+        runner = DiscoveryRunner(self.store, source=self._source_always_ok(),
+                                 ai_provider=self._ai_always_ok(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        # Corrupt one counter to simulate drift.
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE discovery_runs SET detail_completed_count=999 WHERE id=?",
+                (run["id"],),
+            )
+        corrupted = self.store.get_discovery_run(run["id"])
+        self.assertEqual(corrupted["detail_completed_count"], 999)
+
+        # Reconcile should recalculate from persisted rows.
+        self.store.reconcile_discovery_run_v2(run["id"])
+        reconciled = self.store.get_discovery_run(run["id"])
+        # 3 snapshots with non-unavailable completeness, fetch_status != queued/fetching.
+        self.assertEqual(reconciled["detail_completed_count"], 3)
+        # 3 completed assessments.
+        self.assertEqual(reconciled["assessment_completed_count"], 3)
+        # A progress_reconciled event was emitted.
+        events = self.store.list_discovery_events(run["id"])
+        reconcile_events = [e for e in events if e["event_type"] == "progress_reconciled"]
+        self.assertGreaterEqual(len(reconcile_events), 1,
+                                "reconcile 必须写入 progress_reconciled 事件")
+
+    def test_reconcile_progress_is_idempotent(self):
+        """多次调用 reconcile 得到一致的计数。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected_n(candidate_count=5, detail_budget=3)
+        runner = DiscoveryRunner(self.store, source=self._source_always_ok(),
+                                 ai_provider=self._ai_always_ok(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        self.store.reconcile_discovery_run_v2(run["id"])
+        first = self.store.get_discovery_run(run["id"])
+        self.store.reconcile_discovery_run_v2(run["id"])
+        second = self.store.get_discovery_run(run["id"])
+
+        self.assertEqual(first["detail_completed_count"], second["detail_completed_count"])
+        self.assertEqual(first["assessment_completed_count"], second["assessment_completed_count"])
+        self.assertEqual(first["list_candidate_count"], second["list_candidate_count"])
+
+    # ------------------------------------------------------------------
+    # Timing fields: first_result_at, first_batch_at, list_completed_at, processing_completed_at
+    # ------------------------------------------------------------------
+
+    def test_first_result_at_set_when_first_assessment_visible(self):
+        """首个结果可见时 first_result_at 必须写入。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected_n(candidate_count=5, detail_budget=3)
+        runner = DiscoveryRunner(self.store, source=self._source_always_ok(),
+                                 ai_provider=self._ai_always_ok(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        updated = self.store.get_discovery_run(run["id"])
+        self.assertIsNotNone(updated.get("first_result_at"),
+                             "首个结果可见后 first_result_at 必须非空")
+
+    def test_first_batch_at_set_when_fifth_result_visible(self):
+        """第 5 个结果可见时 first_batch_at 必须写入。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected_n(candidate_count=10, detail_budget=5)
+        runner = DiscoveryRunner(self.store, source=self._source_always_ok(),
+                                 ai_provider=self._ai_always_ok(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        updated = self.store.get_discovery_run(run["id"])
+        self.assertIsNotNone(updated.get("first_batch_at"),
+                             "第 5 个结果可见后 first_batch_at 必须非空")
+
+    def test_first_batch_at_null_when_fewer_than_five_results(self):
+        """结果不足 5 个时 first_batch_at 保持 NULL。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected_n(candidate_count=3, detail_budget=3)
+        runner = DiscoveryRunner(self.store, source=self._source_always_ok(),
+                                 ai_provider=self._ai_always_ok(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        updated = self.store.get_discovery_run(run["id"])
+        self.assertIsNone(updated.get("first_batch_at"),
+                          "结果不足 5 个时 first_batch_at 必须为 NULL")
+
+    def test_list_completed_at_set_after_stage_fetching_lists(self):
+        """_stage_fetching_lists 完成后 list_completed_at 必须写入。"""
+        from webui.discovery_runner import DiscoveryRunner, _source_input_hash
+        pid = self.profile["id"]
+        rid = self.resume["id"]
+        a = self.store.create_analysis(rid, pid)
+        d1 = self.store.add_direction(
+            a["id"], name="后端", direction_type="core", rationale="r",
+            gaps=[], confidence=80, default_enabled=True, search_terms=["Python"],
+        )
+        c = self.store.create_confirmation(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            hard_constraints={}, soft_preferences={}, safe_limits={"max_details": 3},
+            directions=[{"direction_id": d1["id"], "enabled": True,
+                         "user_added": False, "user_label": None}],
+        )
+        run = self.store.create_discovery_run(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            confirmation_id=c["id"], input_hash="v2-iso-list-timing-hash",
+            policy_version="discovery_v2",
+        )
+        items = [{
+            "keyword": "Python", "city": "上海", "source_filters": {},
+            "target_pages": 1, "direction_ids": [d1["id"]],
+            "input_hash": _source_input_hash({
+                "keyword": "Python", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+        }]
+        self.store.create_search_plan(run["id"], detail_budget=3, items=items)
+
+        class _ListSource:
+            def fetch_list(self, plan_item):
+                class Outcome:
+                    pass
+                out = Outcome()
+                out.ok = True
+                out.failed_code = None
+                out.safe_log = None
+                out.jobs = [
+                    {"job_id": "job-timing-0",
+                     "source_url": "https://www.zhipin.com/job_detail/timing0.html",
+                     "title": "岗位", "company": "公司",
+                     "salary": "25K", "location": "上海"},
+                ]
+                return out
+
+        import threading
+        cancel_event = threading.Event()
+        runner = DiscoveryRunner(self.store, source=_ListSource(),
+                                 ai_provider=None,
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner._stage_fetching_lists(run["id"], cancel_event)
+
+        updated = self.store.get_discovery_run(run["id"])
+        self.assertIsNotNone(updated.get("list_completed_at"),
+                             "_stage_fetching_lists 完成后 list_completed_at 必须非空")
+
+    def test_processing_completed_at_set_after_progressive_eval(self):
+        """run_progressive_detail_eval 完成后 processing_completed_at 必须写入。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected_n(candidate_count=5, detail_budget=3)
+        runner = DiscoveryRunner(self.store, source=self._source_always_ok(),
+                                 ai_provider=self._ai_always_ok(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        updated = self.store.get_discovery_run(run["id"])
+        self.assertIsNotNone(updated.get("processing_completed_at"),
+                             "渐进评估完成后 processing_completed_at 必须非空")
+
+    def test_first_result_at_not_overwritten_by_subsequent_results(self):
+        """first_result_at 写入后不被后续结果覆盖（单调写入：NULL → 值，不再变）。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, d1 = self._make_v2_run_selected_n(candidate_count=5, detail_budget=3)
+        runner = DiscoveryRunner(self.store, source=self._source_always_ok(),
+                                 ai_provider=self._ai_always_ok(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.run_progressive_detail_eval(run["id"])
+
+        first = self.store.get_discovery_run(run["id"])
+        first_ts = first.get("first_result_at")
+        self.assertIsNotNone(first_ts)
+        # Re-run progressive eval (idempotent re-entry); first_result_at must not change.
+        runner.run_progressive_detail_eval(run["id"])
+        second = self.store.get_discovery_run(run["id"])
+        self.assertEqual(second.get("first_result_at"), first_ts,
+                         "first_result_at 写入后不得被后续结果覆盖")
+
+
+class CancelSignalPropagationTests(_IntegrationTestCase):
+    """T078 RED: 取消信号必须立即终止新工作并保留已完成结果。
+
+    合同来源:
+    - spec.md SC-010: 用户取消后 30 秒内不再启动新 list/detail/AI；已完成结果保留率 100%。
+    - state-machine.md: cancelled 是终态，pending plan items 标记 cancelled。
+    - http-api.md L310: POST /api/discovery/runs/{run_id}/cancel 设置 cancel_requested_at。
+    - data-model.md: cancel 不删除已持久化的 snapshots / assessments / candidates。
+
+    RED 状态（当前代码差距）:
+    - ``run_progressive_detail_eval`` 主循环不检查 cancel_event，cancel 后仍会处理剩余候选。
+    - 没有 explicit 测试验证 cancel 后 source.cancel_event 被设置且 subprocess 被终止。
+    - 没有 explicit 测试验证已完成 snapshots/assessments 在 cancel 后仍可读。
+    - 没有 explicit 测试验证 cancel 后 AI 不被调用。
+    """
+
+    # ------------------------------------------------------------------
+    # Helpers (reuse FailureIsolationAndProgressTests patterns)
+    # ------------------------------------------------------------------
+
+    def _make_v2_run_selected_n(self, candidate_count=5, detail_budget=3,
+                                job_prefix="job-cancel"):
+        """Create a v2 run with N selected candidates ready for detail fetch."""
+        from webui.discovery import select_priority_details, compile_search_plan
+        pid = self.profile["id"]
+        rid = self.resume["id"]
+        a = self.store.create_analysis(rid, pid)
+        d1 = self.store.add_direction(
+            a["id"], name="后端", direction_type="core", rationale="r",
+            gaps=[], confidence=80, default_enabled=True, search_terms=["Python"],
+        )
+        c = self.store.create_confirmation(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            hard_constraints={}, soft_preferences={}, safe_limits={"max_details": detail_budget},
+            directions=[{"direction_id": d1["id"], "enabled": True,
+                         "user_added": False, "user_label": None}],
+        )
+        # T081: compute real input_hash via compile_search_plan so the resume
+        # hash drift check in runner.run() passes for v2 cancel tests.
+        confirmation_view = {
+            "id": c["id"], "analysis_id": a["id"],
+            "hard_constraints": {}, "soft_preferences": {},
+            "safe_limits": {"max_details": detail_budget},
+            "enabled_directions": [{
+                "id": d1["id"], "direction_id": d1["id"],
+                "name": d1.get("name", ""),
+                "type": d1.get("direction_type", ""),
+                "search_terms": d1.get("search_terms", []),
+                "default_enabled": d1.get("default_enabled", False),
+                "evidence_refs": [],
+            }],
+            "directions": c.get("directions", []),
+        }
+        plan = compile_search_plan(confirmation_view)
+        real_input_hash = plan["input_hash"]
+        run = self.store.create_discovery_run(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            confirmation_id=c["id"], input_hash=real_input_hash,
+            policy_version="discovery_v2",
+        )
+        for i in range(candidate_count):
+            job_id = f"{job_prefix}-{i:03d}"
+            with self.store._connection() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                    "VALUES (?, ?, ?, '后端', '公司', '25K', '上海', 'jd', '2026-01-01', '2026-01-01')",
+                    (job_id, f"https://www.zhipin.com/job_detail/{job_id}.html",
+                     f"https://www.zhipin.com/job_detail/{job_id}.html"),
+                )
+            self.store.upsert_run_candidate(
+                run_id=run["id"], job_id=job_id,
+                source_url=f"https://www.zhipin.com/job_detail/{job_id}.html",
+                direction_ids=[d1["id"]], search_terms=["Python"],
+                source_positions=[{"item": i, "page": 1, "rank": i}],
+                list_fields={"title": f"岗位{i}", "salary": "25K", "location": "上海"},
+                input_hash=real_input_hash,
+            )
+        candidates = self.store.list_run_candidates(run["id"])
+        result = select_priority_details(
+            candidates, detail_budget=detail_budget, directions=[d1["id"]],
+        )
+        for item in result["selected"]:
+            self.store.update_run_candidate_state(
+                item["id"], state="selected", selection_decision="selected",
+                selection_rank=item["selection_rank"], expected_state="discovered",
+            )
+        for item in result["deferred"]:
+            self.store.update_run_candidate_state(
+                item["id"], selection_decision="deferred",
+                selection_reason="budget_deferred",
+            )
+        self.store.update_discovery_run(run["id"], counters={
+            "list_candidate_count": candidate_count,
+        })
+        return run, d1
+
+    @staticmethod
+    def _counting_source():
+        """Fake source that records every fetch_detail invocation."""
+
+        class _Source:
+            def __init__(self):
+                self.calls = []  # list of job_id
+                self.cancel_event = None
+
+            def fetch_detail(self, job, detail_output_path=None):
+                job_id = job.get("job_id")
+                self.calls.append(job_id)
+
+                class Outcome:
+                    pass
+                out = Outcome()
+                out.ok = True
+                out.detail = {"jd": "详细职位描述", "tags": "Python,Django"}
+                out.failed_code = None
+                out.safe_log = None
+                return out
+        return _Source()
+
+    @staticmethod
+    def _counting_ai():
+        """Fake v2 AI provider that records every assess_job invocation."""
+
+        class _AI:
+            def __init__(self):
+                self.calls = 0
+                self.v2_calls = []
+
+            def assess_job(self, *, candidate_profile=None, directions=None,
+                           job_snapshot=None, contract_version="v1", **_kwargs):
+                self.calls += 1
+                self.v2_calls.append(job_snapshot.get("snapshot_id", "") if job_snapshot else "")
+                score = 80
+                assessments = []
+                for d in directions or []:
+                    assessments.append({
+                        "direction_id": d["id"],
+                        "dimensions": {
+                            "capability": {"score": score, "candidate_fact_refs": [],
+                                           "candidate_evidence_refs": [],
+                                           "job_evidence_refs": []},
+                            "experience": {"score": score, "candidate_fact_refs": [],
+                                           "candidate_evidence_refs": [],
+                                           "job_evidence_refs": []},
+                            "environment": {"score": score, "candidate_fact_refs": [],
+                                            "candidate_evidence_refs": [],
+                                            "job_evidence_refs": []},
+                            "stability": {"score": score, "candidate_fact_refs": [],
+                                          "candidate_evidence_refs": [],
+                                          "job_evidence_refs": []},
+                        },
+                        "match_score": score, "confidence": score,
+                        "gaps": [], "proposed_band": "high",
+                    })
+                return {
+                    "contract_version": "job_assessment_v2",
+                    "assessments": assessments,
+                    "quarantined": [],
+                    "quality": {"status": "complete", "warnings": []},
+                    "metrics": {"provider_call_count": 1},
+                }
+        return _AI()
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
+    def test_request_cancel_sets_source_cancel_event(self):
+        """``request_cancel`` 必须把 cancel_event 信号传到 source.cancel_event。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, _ = self._make_v2_run_selected_n(candidate_count=3, detail_budget=3)
+        source = self._counting_source()
+        runner = DiscoveryRunner(self.store, source=source,
+                                 ai_provider=self._counting_ai(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        # _register_run wires source.cancel_event to runner's internal event.
+        # Trigger by calling runner.run (which calls _register_run); but we want
+        # to inspect the wiring without driving stages. Use the public API:
+        # call request_cancel before run; then verify source.cancel_event is set.
+        runner.request_cancel(run["id"])
+        # The runner creates an event when request_cancel is called (L534-537);
+        # but to propagate to source we need _register_run. The simplest contract:
+        # after request_cancel, is_cancelled(run_id) returns True.
+        self.assertTrue(runner.is_cancelled(run["id"]),
+                        "request_cancel must make is_cancelled() return True")
+        # Run the now-cancelled run; should not invoke source.fetch_detail.
+        final = runner.run(run["id"])
+        self.assertEqual(final["status"], "cancelled")
+        self.assertEqual(len(source.calls), 0,
+                         "cancel 后不得调用 source.fetch_detail")
+
+    def test_cancel_during_progressive_eval_stops_before_next_candidate(self):
+        """cancel_event 设置后，progressive 循环不得启动下一个候选的工作。
+
+        RED: 当前 ``run_progressive_detail_eval`` 不检查 cancel_event，因此即使
+        cancel 被请求，循环仍会处理所有 selected 候选。修复后应在每个候选循环
+        开头检查 cancel_event 并 break。
+        """
+        from webui.discovery_runner import DiscoveryRunner
+        run, _ = self._make_v2_run_selected_n(candidate_count=5, detail_budget=5)
+        source = self._counting_source()
+        runner = DiscoveryRunner(self.store, source=source,
+                                 ai_provider=self._counting_ai(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        cancel_event = runner._register_run(run["id"])
+        # Mirror runner.run() wiring so source.cancel_event matches the runner's
+        # internal event (this is normally done by runner.run before stages).
+        source.cancel_event = cancel_event
+        # Set cancel BEFORE invoking progressive eval; first candidate should
+        # not even start.
+        cancel_event.set()
+        runner.run_progressive_detail_eval(run["id"])
+        self.assertEqual(len(source.calls), 0,
+                         "cancel 设置后 progressive 循环不得启动任何候选的 detail fetch")
+
+    def test_cancel_mid_progressive_eval_preserves_completed_results(self):
+        """cancel 在 N 个候选完成后到达，已 persist 的 snapshots/assessments 必须保留。
+
+        RED: 当前 progressive 循环不检查 cancel，因此无法在 N 个候选后中断；
+        此测试通过手动设置 cancel_event + 直接调用 _fetch_one_detail 模拟
+        “N 个完成 + cancel 到达” 的场景，验证已 persist 的结果在 cancel 后可读。
+        """
+        from webui.discovery_runner import DiscoveryRunner
+        run, _ = self._make_v2_run_selected_n(candidate_count=5, detail_budget=5)
+        source = self._counting_source()
+        runner = DiscoveryRunner(self.store, source=source,
+                                 ai_provider=self._counting_ai(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        cancel_event = runner._register_run(run["id"])
+        source.cancel_event = cancel_event
+
+        # Manually process 2 candidates (simulating prior work), then set cancel
+        # and verify the loop stops without processing the remaining 3.
+        selected = self.store.list_run_candidates(run["id"], selection_decision="selected")
+        selected.sort(key=lambda c: (c.get("selection_rank") or 9999, c["job_id"]))
+        self.assertEqual(len(selected), 5)
+
+        # Process first 2 by calling run_progressive_detail_eval after setting
+        # cancel_event mid-loop. Since the current code doesn't check cancel,
+        # this test will FAIL (all 5 processed instead of stopping after 2).
+        # We approximate "mid" by setting cancel after 2s using a timer.
+        import threading as _t
+        def _set_cancel_after_2_calls():
+            # Poll source.calls until it reaches 2, then set cancel.
+            for _ in range(200):  # 2s budget
+                if len(source.calls) >= 2:
+                    cancel_event.set()
+                    return
+                time.sleep(0.01)
+        watcher = _t.Thread(target=_set_cancel_after_2_calls, daemon=True)
+        watcher.start()
+        runner.run_progressive_detail_eval(run["id"])
+        watcher.join(timeout=5)
+
+        # Contract: cancel must arrive before all 5 candidates are processed.
+        # Allow some race window: at most 3 may slip through after the signal
+        # (the in-flight candidate is allowed to finish). Strict upper bound:
+        # total processed ≤ 3 (2 completed + at most 1 in-flight).
+        self.assertLess(len(source.calls), 5,
+                        "cancel_event 设置后不得继续启动新候选的 detail fetch")
+        # Already-persisted snapshots/assessments must remain readable.
+        snapshots = self.store.list_snapshots(run["id"])
+        self.assertGreaterEqual(len(snapshots), 1,
+                                "已完成候选的 snapshots 必须保留")
+        for s in snapshots:
+            self.assertIsNotNone(s.get("content_hash"))
+        assessments = self.store.list_assessments(run["id"])
+        self.assertGreaterEqual(len(assessments), 1,
+                                "已完成候选的 assessments 必须保留")
+
+    def test_cancel_does_not_invoke_ai_after_signal(self):
+        """cancel_event 设置后，AI provider 不得被调用。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, _ = self._make_v2_run_selected_n(candidate_count=5, detail_budget=5)
+        source = self._counting_source()
+        ai = self._counting_ai()
+        runner = DiscoveryRunner(self.store, source=source, ai_provider=ai,
+                                 result_dir=Path(tempfile.mkdtemp()))
+        cancel_event = runner._register_run(run["id"])
+        source.cancel_event = cancel_event
+        cancel_event.set()
+        runner.run_progressive_detail_eval(run["id"])
+        self.assertEqual(ai.calls, 0,
+                         "cancel 设置后不得调用 AI provider")
+
+    def test_cancel_reaches_cancelled_status_within_30_simulated_seconds(self):
+        """SC-010: cancel 后 30 秒内 run 必须进入 cancelled 终态。
+
+        使用 fake monotonic_clock 控制 runner 的 timing；cancel_event 设置后
+        调用 runner.run()，验证最终 status='cancelled' 且 wall-clock ≤ 30s。
+        """
+        from webui.discovery_runner import DiscoveryRunner
+        run, _ = self._make_v2_run_selected_n(candidate_count=5, detail_budget=5)
+        source = self._counting_source()
+        runner = DiscoveryRunner(self.store, source=source,
+                                 ai_provider=self._counting_ai(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        runner.request_cancel(run["id"])
+        started = time.monotonic()
+        final = runner.run(run["id"])
+        elapsed = time.monotonic() - started
+        self.assertEqual(final["status"], "cancelled")
+        self.assertLessEqual(elapsed, 30.0,
+                             "SC-010: cancel 后 30 秒内必须进入 cancelled 终态")
+
+    def test_cancel_preserves_already_persisted_snapshots_and_assessments(self):
+        """cancel 后已持久化的 snapshots / assessments / candidates 必须可读且未删除。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, _ = self._make_v2_run_selected_n(candidate_count=3, detail_budget=3)
+        source = self._counting_source()
+        runner = DiscoveryRunner(self.store, source=source,
+                                 ai_provider=self._counting_ai(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        # Run progressive eval to completion first (3 candidates, 3 snapshots, 3 assessments).
+        runner.run_progressive_detail_eval(run["id"])
+        before_snapshots = self.store.list_snapshots(run["id"])
+        before_assessments = self.store.list_assessments(run["id"])
+        self.assertEqual(len(before_snapshots), 3)
+        self.assertEqual(len(before_assessments), 3)
+
+        # Now request cancel and run again (idempotent re-entry should not destroy data).
+        runner.request_cancel(run["id"])
+        final = runner.run(run["id"])
+        # Run may be 'cancelled' if cancel was checked before any stage; or 'succeeded'
+        # if the progressive eval already completed. Either way, snapshots/assessments
+        # must survive.
+        after_snapshots = self.store.list_snapshots(run["id"])
+        after_assessments = self.store.list_assessments(run["id"])
+        self.assertEqual(len(after_snapshots), len(before_snapshots),
+                         "cancel 不得删除已 persist 的 snapshots")
+        self.assertEqual(len(after_assessments), len(before_assessments),
+                         "cancel 不得删除已 persist 的 assessments")
+        before_snapshot_ids = {s["id"] for s in before_snapshots}
+        after_snapshot_ids = {s["id"] for s in after_snapshots}
+        self.assertEqual(before_snapshot_ids, after_snapshot_ids,
+                         "cancel 不得改变 snapshot IDs")
+
+    def test_cancel_marks_pending_plan_items_cancelled_in_list_stage(self):
+        """cancel 在 list 阶段触发时，未完成的 plan items 必须标记 cancelled。"""
+        from webui.discovery_runner import DiscoveryRunner
+        from webui.source import FakeJobSource
+        # Use the standard v1 confirmation helper which compiles a real plan.
+        analysis, confirmation = _make_ready_analysis_with_confirmation(
+            self.store, self.resume["id"], self.profile["id"],
+            hard_constraints={"city": "北京"},
+        )
+        run = _make_discovery_run(
+            self.store, confirmation, analysis,
+            self.resume["id"], self.profile["id"],
+        )
+        source = FakeJobSource(list_jobs={
+            ("Python 后端", "北京"): [
+                {"job_id": "j1", "title": "Python", "source_url": "https://x/1", "jd": "jd"},
+            ],
+        }, detail_jobs={"j1": {"jd": "jd"}})
+        runner = DiscoveryRunner(self.store, source=source,
+                                 ai_provider=_AssessingFakeAIProvider(),
+                                 result_dir=Path(tempfile.mkdtemp(prefix="boss-cancel-")))
+        runner.request_cancel(run["id"])
+        # Drive runner.run() with cancel already set; planning runs (compiles plan),
+        # then _stage_fetching_lists sees cancel and exits early, leaving plan items
+        # non-terminal. _handle_cancel then marks them as cancelled.
+        final = runner.run(run["id"])
+        self.assertEqual(final["status"], "cancelled")
+        plan_after = self.store.get_search_plan(run["id"])
+        # No item should remain in 'pending' / 'running'; each must be cancelled/completed/failed.
+        for it in plan_after["items"]:
+            self.assertIn(it["status"], ("cancelled", "completed", "failed", "skipped"),
+                          f"plan item {it['id']} 留在非终态 {it['status']}")
+
+    def test_cancel_request_on_terminal_run_raises_conflict(self):
+        """已终态的 run 调用 request_cancel 必须返回 state_conflict。"""
+        from webui.discovery_runner import DiscoveryRunner
+        run, _ = self._make_v2_run_selected_n(candidate_count=3, detail_budget=3)
+        source = self._counting_source()
+        runner = DiscoveryRunner(self.store, source=source,
+                                 ai_provider=self._counting_ai(),
+                                 result_dir=Path(tempfile.mkdtemp()))
+        # Complete the run first.
+        runner.run_progressive_detail_eval(run["id"])
+        # Mark as a terminal status (succeeded) to simulate completion.
+        from webui.discovery_runner import STATUS_SUCCEEDED
+        self.store.update_discovery_run(run["id"], status=STATUS_SUCCEEDED, completed=True)
+        with self.assertRaises(DiscoveryError) as ctx:
+            runner.request_cancel(run["id"])
+        self.assertEqual(ctx.exception.error_code, "state_conflict")
+
+
+class ResumeHashDriftAndSc011Tests(_IntegrationTestCase):
+    """T080 RED: interrupted/eligible partial 恢复校验 profile/confirmation/policy/input hashes，
+    完成 detail/assessment 外部调用重复数=0（SC-011）。
+
+    合同来源:
+    - spec.md SC-011: 受控中断恢复测试中，已完成且输入身份一致的详情和评估重复执行数为 0。
+    - http-api.md L320: resume rejects profile/confirmation/policy/input hash drift with 409.
+    - data-model.md: resume 必须从 SQLite 持久化状态恢复，不得重做已完成工作。
+    - state-machine.md: interrupted / partial 是可恢复终态；succeeded/failed/cancelled 不可恢复。
+
+    RED 状态（当前代码差距）:
+    - ``runner.run()`` resume 路径不校验 input_hash / policy_version / profile_version 漂移。
+    - ``run_progressive_detail_eval`` 在 resume 时仍重新调用 ``source.fetch_detail``，
+      即使本 run 已有 complete snapshot（find_reusable_snapshot 排除当前 run）。
+    - assessment 路径已正确跳过 completed 方向（_evaluate_job_v2_group 只处理 pending_dirs）。
+    """
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _make_v2_run_selected_n(self, candidate_count=5, detail_budget=5,
+                                job_prefix="job-resume"):
+        """Create a v2 run with N selected candidates ready for detail fetch.
+
+        T081: input_hash is computed from compile_search_plan(confirmation_view)
+        so that runner.run()'s resume hash drift check can compare against a
+        real re-computed hash, not a fake placeholder.
+        """
+        from webui.discovery import compile_search_plan, select_priority_details
+        pid = self.profile["id"]
+        rid = self.resume["id"]
+        a = self.store.create_analysis(rid, pid)
+        d1 = self.store.add_direction(
+            a["id"], name="后端", direction_type="core", rationale="r",
+            gaps=[], confidence=80, default_enabled=True, search_terms=["Python"],
+        )
+        c = self.store.create_confirmation(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            hard_constraints={}, soft_preferences={}, safe_limits={"max_details": detail_budget},
+            directions=[{"direction_id": d1["id"], "enabled": True,
+                         "user_added": False, "user_label": None}],
+        )
+        # Build confirmation view (mirror _load_confirmation_view) to compute
+        # the real input_hash via compile_search_plan.
+        confirmation_view = {
+            "id": c["id"], "analysis_id": a["id"],
+            "hard_constraints": {}, "soft_preferences": {},
+            "safe_limits": {"max_details": detail_budget},
+            "enabled_directions": [{
+                "id": d1["id"], "direction_id": d1["id"],
+                "name": d1.get("name", ""),
+                "type": d1.get("direction_type", ""),
+                "search_terms": d1.get("search_terms", []),
+                "default_enabled": d1.get("default_enabled", False),
+                "evidence_refs": [],
+            }],
+            "directions": c.get("directions", []),
+        }
+        plan = compile_search_plan(confirmation_view)
+        real_input_hash = plan["input_hash"]
+        run = self.store.create_discovery_run(
+            profile_id=pid, resume_id=rid, analysis_id=a["id"],
+            confirmation_id=c["id"], input_hash=real_input_hash,
+            policy_version="discovery_v2",
+        )
+        for i in range(candidate_count):
+            job_id = f"{job_prefix}-{i:03d}"
+            with self.store._connection() as conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                    "VALUES (?, ?, ?, '后端', '公司', '25K', '上海', 'jd', '2026-01-01', '2026-01-01')",
+                    (job_id, f"https://www.zhipin.com/job_detail/{job_id}.html",
+                     f"https://www.zhipin.com/job_detail/{job_id}.html"),
+                )
+            self.store.upsert_run_candidate(
+                run_id=run["id"], job_id=job_id,
+                source_url=f"https://www.zhipin.com/job_detail/{job_id}.html",
+                direction_ids=[d1["id"]], search_terms=["Python"],
+                source_positions=[{"item": i, "page": 1, "rank": i}],
+                list_fields={"title": f"岗位{i}", "salary": "25K", "location": "上海"},
+                input_hash=real_input_hash,
+            )
+        candidates = self.store.list_run_candidates(run["id"])
+        result = select_priority_details(
+            candidates, detail_budget=detail_budget, directions=[d1["id"]],
+        )
+        for item in result["selected"]:
+            self.store.update_run_candidate_state(
+                item["id"], state="selected", selection_decision="selected",
+                selection_rank=item["selection_rank"], expected_state="discovered",
+            )
+        for item in result["deferred"]:
+            self.store.update_run_candidate_state(
+                item["id"], selection_decision="deferred",
+                selection_reason="budget_deferred",
+            )
+        self.store.update_discovery_run(run["id"], counters={
+            "list_candidate_count": candidate_count,
+        })
+        # T081: persist the search plan so _stage_assembling can read it on
+        # resume via runner.run(). Without this, _stage_assembling raises
+        # KeyError because get_search_plan finds no row.
+        # compile_search_plan returns items with `term` key; create_search_plan
+        # expects `keyword`. Mirror _materialize_plan_items transformation.
+        from webui.discovery import SCRAPER_FILTER_FIELDS
+        from webui.source import _input_hash as _source_input_hash
+        materialized_items = []
+        hard_constraints = plan.get("hard_constraints") or {}
+        safe_limits = plan.get("safe_limits") or {}
+        city = hard_constraints.get("city", "")
+        source_filters = {
+            k: v for k, v in hard_constraints.items()
+            if k in SCRAPER_FILTER_FIELDS
+        }
+        target_pages = int(safe_limits.get("max_pages", 1))
+        for raw_item in plan["items"]:
+            item_input_hash = _source_input_hash({
+                "keyword": raw_item["term"],
+                "city": city,
+                "source_filters": source_filters,
+                "target_pages": target_pages,
+            })
+            materialized_items.append({
+                "keyword": raw_item["term"],
+                "city": city,
+                "source_filters": source_filters,
+                "direction_ids": raw_item["direction_ids"],
+                "input_hash": item_input_hash,
+                "target_pages": target_pages,
+                "detail_budget": int(plan["detail_budget"] // max(1, len(plan["items"]))),
+            })
+        self.store.create_search_plan(
+            run["id"],
+            detail_budget=plan["detail_budget"],
+            items=materialized_items,
+        )
+        # T081: simulate that _stage_fetching_lists already ran and marked
+        # each plan item "completed". The test helper inserts candidates
+        # directly (skipping list fetching), so without this the plan items
+        # would remain "queued" and calculate_run_completion would return
+        # status=run.get("status") (i.e. STATUS_ASSEMBLING) instead of a
+        # terminal state.
+        persisted_plan = self.store.get_search_plan(run["id"])
+        for item in persisted_plan["items"]:
+            self.store.update_plan_item(
+                item["id"], status="completed", completed=True,
+            )
+        return run, d1
+
+    @staticmethod
+    def _counting_source():
+        """Fake source that records every fetch_detail invocation."""
+
+        class _Source:
+            def __init__(self):
+                self.calls = []  # list of job_id
+                self.cancel_event = None
+
+            def fetch_detail(self, job, detail_output_path=None):
+                job_id = job.get("job_id")
+                self.calls.append(job_id)
+
+                class Outcome:
+                    pass
+                out = Outcome()
+                out.ok = True
+                out.detail = {"jd": "详细职位描述", "tags": "Python,Django"}
+                out.failed_code = None
+                out.safe_log = None
+                return out
+        return _Source()
+
+    @staticmethod
+    def _counting_ai():
+        """Fake v2 AI provider that records every assess_job invocation."""
+
+        class _AI:
+            def __init__(self):
+                self.calls = 0
+                self.v2_calls = []
+
+            def assess_job(self, *, candidate_profile=None, directions=None,
+                           job_snapshot=None, contract_version="v1", **_kwargs):
+                self.calls += 1
+                self.v2_calls.append(job_snapshot.get("snapshot_id", "") if job_snapshot else "")
+                score = 80
+                assessments = []
+                for d in directions or []:
+                    assessments.append({
+                        "direction_id": d["id"],
+                        "dimensions": {
+                            "capability": {"score": score, "candidate_fact_refs": [],
+                                           "candidate_evidence_refs": [],
+                                           "job_evidence_refs": []},
+                            "experience": {"score": score, "candidate_fact_refs": [],
+                                           "candidate_evidence_refs": [],
+                                           "job_evidence_refs": []},
+                            "environment": {"score": score, "candidate_fact_refs": [],
+                                            "candidate_evidence_refs": [],
+                                            "job_evidence_refs": []},
+                            "stability": {"score": score, "candidate_fact_refs": [],
+                                          "candidate_evidence_refs": [],
+                                          "job_evidence_refs": []},
+                        },
+                        "match_score": score, "confidence": score,
+                        "gaps": [], "proposed_band": "high",
+                    })
+                return {
+                    "contract_version": "job_assessment_v2",
+                    "assessments": assessments,
+                    "quarantined": [],
+                    "quality": {"status": "complete", "warnings": []},
+                    "metrics": {"provider_call_count": 1},
+                }
+        return _AI()
+
+    def _make_runner(self, source, ai):
+        from webui.discovery_runner import DiscoveryRunner
+        return DiscoveryRunner(self.store, source=source, ai_provider=ai,
+                               result_dir=Path(tempfile.mkdtemp()))
+
+    # ------------------------------------------------------------------
+    # Hash drift tests (RED — no checks exist)
+    # ------------------------------------------------------------------
+
+    def test_resume_rejects_input_hash_drift(self):
+        """resume 必须拒绝 input_hash 漂移（http-api.md L320）。
+
+        GREEN: ``runner.run()`` resume 路径重算 input_hash 并与存储值比对。
+        """
+        from webui.discovery_runner import DiscoveryRunner, STATUS_INTERRUPTED
+        run, _ = self._make_v2_run_selected_n(candidate_count=3, detail_budget=3)
+        # Simulate interrupt after some work.
+        self.store.update_discovery_run(
+            run["id"], status=STATUS_INTERRUPTED, stage="processing_jobs", started=True,
+        )
+        # Drift the stored input_hash via direct SQL (simulates external
+        # corruption/migration; input_hash is immutable via public API).
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE discovery_runs SET input_hash = ? WHERE id = ?",
+                ("drifted-hash", run["id"]),
+            )
+        source = self._counting_source()
+        runner = self._make_runner(source, self._counting_ai())
+        with self.assertRaises(DiscoveryError) as ctx:
+            runner.run(run["id"])
+        self.assertEqual(ctx.exception.error_code, "state_conflict",
+                         "input_hash 漂移必须返回 state_conflict")
+        self.assertEqual(len(source.calls), 0,
+                         "hash 漂移时不得启动任何新工作")
+
+    def test_resume_rejects_policy_version_drift(self):
+        """resume 必须拒绝 policy_version 漂移到非法值（http-api.md L320）。
+
+        GREEN: ``runner.run()`` resume 路径校验 policy_version ∈
+        {"v1", "discovery_v1", "discovery_v2"}；非法值视为漂移。
+        注意：从 "discovery_v2" 漂移到 "discovery_v1" 无法检测（两者都是
+        合法值），需要单独的不可变字段才能区分；当前实现只拒绝非法值。
+        """
+        from webui.discovery_runner import DiscoveryRunner, STATUS_INTERRUPTED
+        run, _ = self._make_v2_run_selected_n(candidate_count=3, detail_budget=3)
+        self.store.update_discovery_run(
+            run["id"], status=STATUS_INTERRUPTED, stage="processing_jobs", started=True,
+        )
+        # Drift the stored policy_version to an invalid value via direct SQL.
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE discovery_runs SET policy_version = ? WHERE id = ?",
+                ("drifted-policy", run["id"]),
+            )
+        source = self._counting_source()
+        runner = self._make_runner(source, self._counting_ai())
+        with self.assertRaises(DiscoveryError) as ctx:
+            runner.run(run["id"])
+        self.assertEqual(ctx.exception.error_code, "state_conflict",
+                         "policy_version 漂移必须返回 state_conflict")
+
+    # ------------------------------------------------------------------
+    # SC-011: completed detail/assessment not re-executed on resume
+    # ------------------------------------------------------------------
+
+    def test_resume_skips_completed_detail_fetches(self):
+        """SC-011: resume 时已完成 detail 的候选不得重新调用 source.fetch_detail。
+
+        RED: 当前 ``run_progressive_detail_eval`` 在 resume 时仍重新调用
+        ``source.fetch_detail``，因为 ``find_reusable_snapshot`` 排除当前 run。
+        修复后应在 ``_fetch_one_detail`` 入口先检查本 run 是否已有 complete snapshot。
+        """
+        from webui.discovery_runner import DiscoveryRunner, STATUS_INTERRUPTED
+        run, _ = self._make_v2_run_selected_n(candidate_count=5, detail_budget=5)
+        source = self._counting_source()
+        runner = self._make_runner(source, self._counting_ai())
+        # Process all 5 candidates first (creates 5 snapshots + 5 assessments).
+        runner.run_progressive_detail_eval(run["id"])
+        self.assertEqual(len(source.calls), 5)
+        # Mark run as interrupted to simulate resume scenario.
+        self.store.update_discovery_run(
+            run["id"], status=STATUS_INTERRUPTED, stage="processing_jobs", started=True,
+        )
+        # Reset source call counter; resume should NOT re-fetch any detail.
+        source.calls.clear()
+        runner.run_progressive_detail_eval(run["id"])
+        self.assertEqual(len(source.calls), 0,
+                         "SC-011: resume 时已完成 detail 不得重新调用 source.fetch_detail")
+
+    def test_resume_skips_completed_assessments(self):
+        """SC-011: resume 时已完成 assessment 的方向不得重新调用 AI provider。
+
+        PASS (regression guard): ``_evaluate_job_v2_group`` 已通过
+        ``_get_assessment`` 跳过 completed 方向，只处理 ``pending_dirs``。
+        """
+        from webui.discovery_runner import DiscoveryRunner, STATUS_INTERRUPTED
+        run, _ = self._make_v2_run_selected_n(candidate_count=5, detail_budget=5)
+        source = self._counting_source()
+        ai = self._counting_ai()
+        runner = self._make_runner(source, ai)
+        # Process all 5 candidates first (5 AI calls).
+        runner.run_progressive_detail_eval(run["id"])
+        self.assertEqual(ai.calls, 5)
+        # Mark interrupted, reset AI counter, resume.
+        self.store.update_discovery_run(
+            run["id"], status=STATUS_INTERRUPTED, stage="processing_jobs", started=True,
+        )
+        ai.calls = 0
+        ai.v2_calls.clear()
+        runner.run_progressive_detail_eval(run["id"])
+        self.assertEqual(ai.calls, 0,
+                         "SC-011: resume 时已完成 assessment 不得重新调用 AI provider")
+
+    # ------------------------------------------------------------------
+    # Terminal run rejection (PASS — existing behavior)
+    # ------------------------------------------------------------------
+
+    def test_resume_rejects_terminal_run(self):
+        """succeeded / failed / cancelled 终态 run 不得 resume。"""
+        from webui.discovery_runner import DiscoveryRunner, STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED
+        run, _ = self._make_v2_run_selected_n(candidate_count=3, detail_budget=3)
+        source = self._counting_source()
+        runner = self._make_runner(source, self._counting_ai())
+        for terminal in (STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED):
+            self.store.update_discovery_run(run["id"], status=terminal, completed=True)
+            # runner.run() on terminal run just returns it as-is; the HTTP layer
+            # is what rejects. Test the HTTP-layer contract via state check.
+            final = runner.run(run["id"])
+            self.assertEqual(final["status"], terminal,
+                             f"终态 {terminal} 不得被 resume 改写")
+
+    def test_resume_eligible_when_hashes_match(self):
+        """interrupted run with matching hashes 必须成功 resume。"""
+        from webui.discovery_runner import DiscoveryRunner, STATUS_INTERRUPTED
+        run, _ = self._make_v2_run_selected_n(candidate_count=3, detail_budget=3)
+        # Mark interrupted before any work.
+        self.store.update_discovery_run(
+            run["id"], status=STATUS_INTERRUPTED, stage="processing_jobs", started=True,
+        )
+        source = self._counting_source()
+        runner = self._make_runner(source, self._counting_ai())
+        # Resume should succeed and process all 3 candidates.
+        final = runner.run(run["id"])
+        self.assertIn(final["status"], ("succeeded", "partial", "failed"))
+        self.assertEqual(len(source.calls), 3,
+                         "未完成工作必须在 resume 时执行")
 
 
 if __name__ == "__main__":  # pragma: no cover

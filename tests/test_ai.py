@@ -8,6 +8,7 @@ Uses shared fixtures from tests/test_workbench_fixtures.py.
 from __future__ import annotations
 
 import json
+import copy
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -1486,6 +1487,316 @@ class CandidateV3ProviderAdapterTests(unittest.TestCase):
         with patch("webui.ai.call_ai", side_effect=[self._partial(), f"```json\n{json.dumps(self._complete())}\n```"]) as call:
             self.provider.analyze(resume_text=self._resume())
         self.assertEqual(call.call_count, 2)
+
+
+class DiscoveryAIVersionRoutingV2Tests(unittest.TestCase):
+    """T015 RED contracts for candidate-analysis v4 and job-assessment v2."""
+
+    def setUp(self):
+        from webui.ai import DiscoveryAIProvider
+        self.provider = DiscoveryAIProvider("https://ai.example/v1", "model", "secret-key")
+
+    def test_candidate_v4_routes_by_explicit_version_and_discards_raw_fields(self):
+        response = {
+                "contract_version": "v4",
+            "summary": {"headline": "后端", "experience_level": "高级", "domains": [], "strengths": []},
+            "evidence": [{
+                "client_ref": "e1", "type": "skill", "normalized_value": "Python",
+                "source_quote": "Python 后端", "assertion_type": "explicit", "confidence": 90,
+            }],
+            "facts": [{
+                "client_ref": "f1", "fact_type": "skill", "value": {"name": "Python"},
+                "normalized_value": "Python", "evidence_refs": ["e1"],
+                "assertion_type": "explicit", "confidence": 90,
+            }],
+            "unknowns": [],
+            "directions": [],
+            "raw_response": "RAW-MODEL-SECRET",
+        }
+        with patch("webui.ai.call_ai", return_value=response):
+            result = self.provider.analyze(
+                resume_text="5年 Python 后端经验",
+                contract_version="v4",
+            )
+        self.assertEqual(result["contract_version"], "v4")
+        self.assertNotIn("raw_response", result)
+        self.assertNotIn("RAW-MODEL-SECRET", json.dumps(result, ensure_ascii=False))
+        self.assertLessEqual(len(result.get("facts", [])), 100)
+        self.assertTrue(all(len(item.get("normalized_value", "")) <= 500 for item in result.get("facts", [])))
+
+    def test_candidate_v4_rejects_cross_response_reference_domain(self):
+        response = {
+            "contract_version": "v4", "summary": {},
+            "evidence": [],
+            "facts": [{
+                "client_ref": "f1", "fact_type": "skill", "value": {"name": "Python"},
+                "normalized_value": "Python", "evidence_refs": ["evidence-from-old-response"],
+                "assertion_type": "explicit", "confidence": 90,
+            }],
+            "unknowns": [], "directions": [],
+        }
+        with patch("webui.ai.call_ai", return_value=response):
+            result = self.provider.analyze(
+                resume_text="Python 后端",
+                contract_version="v4",
+            )
+        self.assertEqual(result.get("facts"), [])
+        self.assertTrue(result.get("quality", {}).get("warnings"))
+
+    def test_job_assessment_v2_accepts_one_job_and_at_most_two_direction_refs(self):
+        response = {
+            "contract_version": "job_assessment_v2",
+            "assessments": [],
+            "raw_model_output": "DO-NOT-RETURN",
+        }
+        directions = [
+            {"id": "d1", "fact_refs": ["f1"], "evidence_refs": ["e1"]},
+            {"id": "d2", "fact_refs": ["f2"], "evidence_refs": ["e2"]},
+            {"id": "d3", "fact_refs": ["f3"], "evidence_refs": ["e3"]},
+        ]
+        with patch("webui.ai.call_ai", return_value=response):
+            with self.assertRaises(ValueError):
+                self.provider.assess_job(
+                    candidate_profile={"facts": [], "evidence": []},
+                    directions=directions,
+                    job_snapshot={"id": "snap-1", "fields": {"title": "后端"}},
+                    contract_version="job_assessment_v2",
+                )
+
+    def test_unknown_discovery_ai_contract_version_is_not_silently_downgraded(self):
+        with self.assertRaises(ValueError):
+            self.provider.analyze(
+                resume_text="Python 后端",
+                contract_version="v999",
+            )
+
+
+class CandidateAnalysisV4ProviderTests(unittest.TestCase):
+    """T024/T025: one bounded request chain and validated-result-only return."""
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        fixture_path = Path(__file__).parent / "fixtures" / "discovery" / "ai_candidate_v4.json"
+        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    def setUp(self):
+        from webui.ai import DiscoveryAIProvider
+        self.provider = DiscoveryAIProvider("https://ai.example/v1", "model", "secret-key")
+
+    def test_complete_v4_uses_one_provider_call_and_records_safe_count(self):
+        with patch("webui.ai.call_ai", return_value=self.fixture["valid"]) as call:
+            result = self.provider.analyze(
+                resume_text=self.fixture["resume_text"], contract_version="v4",
+            )
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(result["metrics"], {"provider_call_count": 1})
+        self.assertEqual(result["quality"]["status"], "complete")
+
+    def test_parseable_partial_gets_at_most_one_safe_correction(self):
+        partial = copy.deepcopy(self.fixture["valid"])
+        partial["facts"][0]["evidence_refs"] = ["missing-evidence"]
+        with patch("webui.ai.call_ai", side_effect=[partial, self.fixture["valid"]]) as call:
+            result = self.provider.analyze(
+                resume_text=self.fixture["resume_text"], contract_version="v4",
+            )
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(result["metrics"], {"provider_call_count": 2})
+        correction = call.call_args_list[1].args[2][-1]["content"]
+        self.assertNotIn("secret-key", correction)
+        self.assertNotIn(self.fixture["resume_text"], correction)
+
+    def test_unparseable_v4_is_terminal_without_correction(self):
+        from webui.ai import AISecurityError
+        with patch("webui.ai.call_ai", return_value="not-json") as call:
+            with self.assertRaises(AISecurityError):
+                self.provider.analyze(
+                    resume_text=self.fixture["resume_text"], contract_version="v4",
+                )
+        self.assertEqual(call.call_count, 1)
+
+    def test_raw_provider_fields_never_survive_v4_return(self):
+        response = copy.deepcopy(self.fixture["valid"])
+        response["raw_model_output"] = "RAW-V4-SECRET"
+        with patch("webui.ai.call_ai", return_value=response):
+            result = self.provider.analyze(
+                resume_text=self.fixture["resume_text"], contract_version="v4",
+            )
+        rendered = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn("raw_model_output", rendered)
+        self.assertNotIn("RAW-V4-SECRET", rendered)
+
+
+class JobAssessmentV2ProviderTests(unittest.TestCase):
+    """T055 RED: job-assessment v2 一岗位/最多两方向、四维度、整数分数、
+    双侧证据、partial quarantine 与一次定向纠正。
+
+    契约来源: contracts/ai-contracts.md#job-assessment-v2 与 research.md R7。
+    RED 状态: DiscoveryAIProvider.assess_job 对 job_assessment_v2 抛
+    NotImplementedError（T056 实现）。
+
+    返回合同（T056 实现）::
+
+        {
+          "contract_version": "job_assessment_v2",
+          "assessments": [ {direction_id, dimensions{4}, match_score,
+                            confidence, positive[], gaps[], proposed_band} ],
+          "quarantined": [ {"direction_id", "reason"} ],
+          "quality": {"status": "complete"|"partial"|"manual_required",
+                      "warnings": [...]},
+          "metrics": {"provider_call_count": int},
+        }
+    """
+
+    REQUIRED_DIMS = (
+        "direction_alignment", "skill_coverage",
+        "experience_match", "industry_relevance",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        path = Path(__file__).parent / "fixtures" / "discovery" / "ai_job_assessment_v2.json"
+        cls.fixture = json.loads(path.read_text(encoding="utf-8"))
+
+    def setUp(self):
+        from webui.ai import DiscoveryAIProvider
+        self.provider = DiscoveryAIProvider("https://ai.example/v1", "model", "secret-key")
+        inp = self.fixture["input"]
+        self.candidate_profile = inp["candidate"]
+        self.directions = inp["directions"]
+        self.job_snapshot = inp["job"]
+
+    def _assess(self, **overrides):
+        kwargs = dict(
+            candidate_profile=self.candidate_profile,
+            directions=self.directions,
+            job_snapshot=self.job_snapshot,
+            contract_version="job_assessment_v2",
+        )
+        kwargs.update(overrides)
+        return self.provider.assess_job(**kwargs)
+
+    def _output(self, name):
+        return copy.deepcopy(self.fixture["outputs"][name])
+
+    # --- 最多两方向 ----------------------------------------------------
+
+    def test_more_than_two_directions_raises(self):
+        three = self.directions + [{"id": "dir-3", "fact_refs": [], "evidence_refs": []}]
+        with self.assertRaises(ValueError):
+            self._assess(directions=three)
+
+    def test_zero_directions_raises(self):
+        with self.assertRaises(ValueError):
+            self._assess(directions=[])
+
+    # --- 一岗位两方向：单次调用、四维度、整数分数 ----------------------
+
+    def test_valid_two_directions_single_call_complete(self):
+        with patch("webui.ai.call_ai", return_value=self._output("valid_two_directions")) as call:
+            result = self._assess()
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(result["contract_version"], "job_assessment_v2")
+        ids = {a["direction_id"] for a in result["assessments"]}
+        self.assertEqual(ids, {"dir-1", "dir-2"})
+        self.assertEqual(result["quarantined"], [])
+        self.assertEqual(result["quality"]["status"], "complete")
+        self.assertEqual(result["metrics"]["provider_call_count"], 1)
+
+    def test_all_four_dimensions_present_with_integer_scores(self):
+        with patch("webui.ai.call_ai", return_value=self._output("valid_two_directions")):
+            result = self._assess()
+        for assessment in result["assessments"]:
+            dims = assessment["dimensions"]
+            for name in self.REQUIRED_DIMS:
+                self.assertIn(name, dims)
+                score = dims[name]["score"]
+                self.assertIsInstance(score, int)
+                self.assertNotIsInstance(score, bool)
+                self.assertGreaterEqual(score, 0)
+                self.assertLessEqual(score, 100)
+            self.assertIsInstance(assessment["match_score"], int)
+            self.assertIsInstance(assessment["confidence"], int)
+
+    # --- 双侧证据 ------------------------------------------------------
+
+    def test_positive_requires_bilateral_evidence(self):
+        broken = self._output("valid_two_directions")
+        # dir-1 的 positive 去掉岗位侧证据 -> 该 positive 不应保留
+        broken["assessments"][0]["positive"][0]["job_evidence_refs"] = []
+        with patch("webui.ai.call_ai", return_value=broken):
+            result = self._assess()
+        for assessment in result["assessments"]:
+            for item in assessment.get("positive", []):
+                self.assertTrue(item.get("candidate_evidence_refs"),
+                                "positive 缺少候选侧证据")
+                self.assertTrue(item.get("job_evidence_refs"),
+                                "positive 缺少岗位侧证据")
+
+    # --- partial quarantine -------------------------------------------
+
+    def test_non_integer_score_quarantines_direction_only(self):
+        with patch("webui.ai.call_ai", return_value=self._output("partial_invalid")):
+            result = self._assess()
+        valid_ids = {a["direction_id"] for a in result["assessments"]}
+        quarantined_ids = {q["direction_id"] for q in result["quarantined"]}
+        self.assertEqual(valid_ids, {"dir-1"})
+        self.assertEqual(quarantined_ids, {"dir-2"})
+        self.assertEqual(result["quality"]["status"], "partial")
+
+    def test_cross_direction_reference_quarantined(self):
+        with patch("webui.ai.call_ai", return_value=self._output("cross_direction_reference")):
+            result = self._assess()
+        valid_ids = {a["direction_id"] for a in result["assessments"]}
+        quarantined_ids = {q["direction_id"] for q in result["quarantined"]}
+        self.assertIn("dir-1", valid_ids)
+        self.assertIn("dir-2", quarantined_ids)
+        self.assertEqual(result["quality"]["status"], "partial")
+
+    # --- 一次定向纠正 --------------------------------------------------
+
+    def test_single_targeted_correction_recovers_invalid_direction(self):
+        responses = [self._output("partial_invalid"), self._output("correction_response")]
+        with patch("webui.ai.call_ai", side_effect=responses) as call:
+            result = self._assess()
+        self.assertEqual(call.call_count, 2)
+        valid_ids = {a["direction_id"] for a in result["assessments"]}
+        self.assertEqual(valid_ids, {"dir-1", "dir-2"})
+        self.assertEqual(result["quarantined"], [])
+        self.assertEqual(result["quality"]["status"], "complete")
+        self.assertEqual(result["metrics"]["provider_call_count"], 2)
+
+    def test_correction_request_targets_only_invalid_direction_and_no_secret(self):
+        responses = [self._output("partial_invalid"), self._output("correction_response")]
+        with patch("webui.ai.call_ai", side_effect=responses) as call:
+            self._assess()
+        correction_messages = call.call_args_list[1].args[2]
+        correction_text = json.dumps(correction_messages, ensure_ascii=False)
+        self.assertIn("dir-2", correction_text)
+        self.assertNotIn("secret-key", correction_text)
+
+    def test_uncorrected_invalid_direction_stays_quarantined_after_one_retry(self):
+        responses = [self._output("partial_invalid"), self._output("partial_invalid")]
+        with patch("webui.ai.call_ai", side_effect=responses) as call:
+            result = self._assess()
+        self.assertEqual(call.call_count, 2)
+        valid_ids = {a["direction_id"] for a in result["assessments"]}
+        quarantined_ids = {q["direction_id"] for q in result["quarantined"]}
+        self.assertEqual(valid_ids, {"dir-1"})
+        self.assertEqual(quarantined_ids, {"dir-2"})
+        self.assertEqual(result["quality"]["status"], "partial")
+
+    # --- 原始字段不存活 ------------------------------------------------
+
+    def test_raw_provider_fields_never_survive_v2_return(self):
+        response = self._output("valid_two_directions")
+        response["raw_model_output"] = "RAW-V2-SECRET"
+        with patch("webui.ai.call_ai", return_value=response):
+            result = self._assess()
+        rendered = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn("raw_model_output", rendered)
+        self.assertNotIn("RAW-V2-SECRET", rendered)
 
 
 if __name__ == "__main__":

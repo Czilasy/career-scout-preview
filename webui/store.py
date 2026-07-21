@@ -9,12 +9,17 @@ preserved unchanged.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+
+
+class DiscoveryStoreConflictError(Exception):
+    """Raised when a CAS-guarded store update detects a state conflict."""
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +90,28 @@ def _decode_json(value, fallback):
         return json.loads(value or "")
     except (TypeError, json.JSONDecodeError):
         return fallback
+
+
+def _candidate_profile_content_hash(summary, unknowns, facts) -> str:
+    normalized_facts = []
+    for fact in facts or []:
+        normalized_facts.append({
+            "stable_key": fact.get("stable_key", ""),
+            "fact_type": fact.get("fact_type", ""),
+            "value": fact.get("value", {}),
+            "normalized_value": fact.get("normalized_value", ""),
+            "source_kind": fact.get("source_kind", ""),
+            "assertion_type": fact.get("assertion_type", ""),
+            "confidence": fact.get("confidence", 0),
+            "verification_status": fact.get("verification_status", ""),
+            "evidence_ids": sorted(fact.get("evidence_ids", []) or []),
+        })
+    normalized_facts.sort(key=lambda item: (item["stable_key"], item["fact_type"], item["normalized_value"]))
+    blob = json.dumps(
+        {"summary": summary or {}, "unknowns": unknowns or [], "facts": normalized_facts},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +239,8 @@ class TaskStore:
             self._migration_013()
         if current < 14:
             self._migration_014()
+        if current < 15:
+            self._migration_015()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -866,6 +895,363 @@ class TaskStore:
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
                 "VALUES (14, ?, 'candidate v3 lifecycle and quality warnings')", (_now(),)
+            )
+
+    def _migration_015(self):
+        """005 additive candidate-profile and durable discovery work units."""
+        with self._connection() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS candidate_profile_versions (
+                    id TEXT PRIMARY KEY,
+                    profile_id TEXT NOT NULL,
+                    resume_id TEXT NOT NULL,
+                    analysis_id TEXT,
+                    version INTEGER NOT NULL CHECK (version > 0),
+                    status TEXT NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft', 'confirmed', 'superseded', 'deleted')),
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    unknowns_json TEXT NOT NULL DEFAULT '[]',
+                    contract_version TEXT NOT NULL DEFAULT 'candidate_profile_v1',
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    confirmed_at TEXT,
+                    supersedes_version_id TEXT,
+                    FOREIGN KEY (profile_id) REFERENCES candidate_profiles(id) ON DELETE CASCADE,
+                    FOREIGN KEY (resume_id) REFERENCES resumes(id) ON DELETE CASCADE,
+                    FOREIGN KEY (analysis_id) REFERENCES candidate_analyses(id) ON DELETE SET NULL,
+                    FOREIGN KEY (supersedes_version_id) REFERENCES candidate_profile_versions(id) ON DELETE SET NULL,
+                    UNIQUE (profile_id, version)
+                );
+
+                CREATE TABLE IF NOT EXISTS candidate_fact_items (
+                    id TEXT PRIMARY KEY,
+                    profile_version_id TEXT NOT NULL,
+                    fact_type TEXT NOT NULL CHECK (
+                        fact_type IN ('work', 'project', 'skill', 'industry', 'education',
+                                      'achievement', 'seniority')
+                    ),
+                    stable_key TEXT NOT NULL,
+                    value_json TEXT NOT NULL DEFAULT '{}',
+                    normalized_value TEXT NOT NULL DEFAULT '',
+                    source_kind TEXT NOT NULL CHECK (
+                        source_kind IN ('resume_explicit', 'resume_inferred',
+                                        'user_added', 'user_corrected')
+                    ),
+                    assertion_type TEXT NOT NULL CHECK (assertion_type IN ('explicit', 'inferred')),
+                    confidence INTEGER NOT NULL CHECK (
+                        typeof(confidence) = 'integer' AND confidence BETWEEN 0 AND 100
+                    ),
+                    verification_status TEXT NOT NULL CHECK (
+                        verification_status IN ('extracted', 'confirmed', 'corrected',
+                                                'rejected', 'unknown')
+                    ),
+                    supersedes_fact_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (profile_version_id) REFERENCES candidate_profile_versions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (supersedes_fact_id) REFERENCES candidate_fact_items(id) ON DELETE SET NULL,
+                    UNIQUE (profile_version_id, stable_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS candidate_fact_evidence (
+                    fact_id TEXT NOT NULL,
+                    evidence_id TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'primary' CHECK (role IN ('primary', 'supporting')),
+                    PRIMARY KEY (fact_id, evidence_id),
+                    FOREIGN KEY (fact_id) REFERENCES candidate_fact_items(id) ON DELETE CASCADE,
+                    FOREIGN KEY (evidence_id) REFERENCES resume_evidence(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS discovery_run_candidates (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    direction_ids_json TEXT NOT NULL DEFAULT '[]',
+                    search_terms_json TEXT NOT NULL DEFAULT '[]',
+                    source_positions_json TEXT NOT NULL DEFAULT '[]',
+                    list_fields_json TEXT NOT NULL DEFAULT '{}',
+                    dedupe_key TEXT NOT NULL,
+                    precheck_outcome TEXT NOT NULL DEFAULT 'unknown'
+                        CHECK (precheck_outcome IN ('pass', 'violation', 'unknown')),
+                    precheck_json TEXT NOT NULL DEFAULT '{}',
+                    priority_components_json TEXT NOT NULL DEFAULT '{}',
+                    selection_decision TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (selection_decision IN ('pending', 'selected', 'deferred',
+                                                     'excluded', 'blocked')),
+                    selection_reason TEXT,
+                    selection_rank INTEGER CHECK (selection_rank IS NULL OR selection_rank > 0),
+                    state TEXT NOT NULL DEFAULT 'discovered' CHECK (
+                        state IN ('discovered', 'prechecked_pass', 'prechecked_unknown',
+                                  'excluded', 'selected', 'deferred', 'detail_fetching',
+                                  'detail_reused', 'detail_ready', 'detail_failed', 'cancelled',
+                                  'evaluating', 'recommended', 'needs_review', 'unsuitable',
+                                  'evaluation_failed', 'reordered', 'withdrawn')
+                    ),
+                    snapshot_id TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                    failure_code TEXT,
+                    input_hash TEXT NOT NULL,
+                    discovered_at TEXT NOT NULL,
+                    selected_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (run_id) REFERENCES discovery_runs(id) ON DELETE CASCADE,
+                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+                    FOREIGN KEY (snapshot_id) REFERENCES discovery_job_snapshots(id) ON DELETE SET NULL,
+                    UNIQUE (run_id, job_id)
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_discovery_run_candidates_selected_rank
+                    ON discovery_run_candidates(run_id, selection_rank)
+                    WHERE selection_rank IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_candidate_profile_versions_owner
+                    ON candidate_profile_versions(profile_id, status, version);
+                CREATE INDEX IF NOT EXISTS idx_candidate_fact_items_version
+                    ON candidate_fact_items(profile_version_id, verification_status);
+                CREATE INDEX IF NOT EXISTS idx_discovery_run_candidates_state
+                    ON discovery_run_candidates(run_id, selection_decision, state);
+
+                CREATE TRIGGER IF NOT EXISTS candidate_profile_versions_lineage_insert
+                BEFORE INSERT ON candidate_profile_versions
+                WHEN NOT EXISTS (
+                        SELECT 1 FROM resumes
+                        WHERE id = NEW.resume_id AND profile_id = NEW.profile_id
+                    )
+                    OR (
+                        NEW.analysis_id IS NOT NULL AND NOT EXISTS (
+                            SELECT 1 FROM candidate_analyses
+                            WHERE id = NEW.analysis_id
+                              AND resume_id = NEW.resume_id
+                              AND profile_id = NEW.profile_id
+                        )
+                    )
+                BEGIN
+                    SELECT RAISE(ABORT, 'candidate profile lineage mismatch');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS candidate_profile_versions_lineage_update
+                BEFORE UPDATE OF profile_id, resume_id, analysis_id ON candidate_profile_versions
+                WHEN NOT EXISTS (
+                        SELECT 1 FROM resumes
+                        WHERE id = NEW.resume_id AND profile_id = NEW.profile_id
+                    )
+                    OR (
+                        NEW.analysis_id IS NOT NULL AND NOT EXISTS (
+                            SELECT 1 FROM candidate_analyses
+                            WHERE id = NEW.analysis_id
+                              AND resume_id = NEW.resume_id
+                              AND profile_id = NEW.profile_id
+                        )
+                    )
+                BEGIN
+                    SELECT RAISE(ABORT, 'candidate profile lineage mismatch');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS candidate_profile_versions_immutable
+                BEFORE UPDATE ON candidate_profile_versions
+                WHEN OLD.status IN ('confirmed', 'superseded')
+                     AND NEW.status <> 'deleted'
+                     AND (
+                        NEW.profile_id IS NOT OLD.profile_id
+                        OR NEW.resume_id IS NOT OLD.resume_id
+                        OR NEW.analysis_id IS NOT OLD.analysis_id
+                        OR NEW.version IS NOT OLD.version
+                        OR NEW.summary_json IS NOT OLD.summary_json
+                        OR NEW.unknowns_json IS NOT OLD.unknowns_json
+                        OR NEW.contract_version IS NOT OLD.contract_version
+                        OR NEW.content_hash IS NOT OLD.content_hash
+                        OR NEW.supersedes_version_id IS NOT OLD.supersedes_version_id
+                     )
+                BEGIN
+                    SELECT RAISE(ABORT, 'confirmed candidate profile is immutable');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS candidate_profile_versions_status_transition
+                BEFORE UPDATE OF status ON candidate_profile_versions
+                WHEN NEW.status <> OLD.status
+                     AND NOT (
+                        (OLD.status = 'draft' AND NEW.status IN ('confirmed', 'deleted'))
+                        OR (OLD.status = 'confirmed' AND NEW.status IN ('superseded', 'deleted'))
+                        OR (OLD.status = 'superseded' AND NEW.status = 'deleted')
+                     )
+                BEGIN
+                    SELECT RAISE(ABORT, 'invalid candidate profile status transition');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS candidate_fact_items_insert_draft_only
+                BEFORE INSERT ON candidate_fact_items
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM candidate_profile_versions
+                    WHERE id = NEW.profile_version_id AND status = 'draft'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'candidate facts require a draft profile');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS candidate_fact_items_update_draft_only
+                BEFORE UPDATE ON candidate_fact_items
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM candidate_profile_versions
+                    WHERE id = OLD.profile_version_id AND status = 'draft'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'confirmed candidate facts are immutable');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS candidate_fact_items_delete_draft_only
+                BEFORE DELETE ON candidate_fact_items
+                WHEN EXISTS (
+                    SELECT 1 FROM candidate_profile_versions
+                    WHERE id = OLD.profile_version_id AND status <> 'draft'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'confirmed candidate facts are immutable');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS candidate_fact_evidence_insert_draft_only
+                BEFORE INSERT ON candidate_fact_evidence
+                WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM candidate_fact_items AS fact
+                    JOIN candidate_profile_versions AS version
+                      ON version.id = fact.profile_version_id
+                    WHERE fact.id = NEW.fact_id AND version.status = 'draft'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'candidate fact evidence requires a draft profile');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS candidate_fact_evidence_update_draft_only
+                BEFORE UPDATE ON candidate_fact_evidence
+                WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM candidate_fact_items AS fact
+                    JOIN candidate_profile_versions AS version
+                      ON version.id = fact.profile_version_id
+                    WHERE fact.id = OLD.fact_id AND version.status = 'draft'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'confirmed candidate fact evidence is immutable');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS candidate_fact_evidence_delete_draft_only
+                BEFORE DELETE ON candidate_fact_evidence
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM candidate_fact_items AS fact
+                    JOIN candidate_profile_versions AS version
+                      ON version.id = fact.profile_version_id
+                    WHERE fact.id = OLD.fact_id AND version.status <> 'draft'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'confirmed candidate fact evidence is immutable');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS candidate_fact_evidence_lineage_insert
+                BEFORE INSERT ON candidate_fact_evidence
+                WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM candidate_fact_items AS fact
+                    JOIN candidate_profile_versions AS version
+                      ON version.id = fact.profile_version_id
+                    JOIN resume_evidence AS evidence
+                      ON evidence.id = NEW.evidence_id
+                    WHERE fact.id = NEW.fact_id
+                      AND version.analysis_id = evidence.analysis_id
+                      AND evidence.sensitive = 0
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'candidate fact evidence lineage mismatch');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS candidate_fact_evidence_lineage_update
+                BEFORE UPDATE OF fact_id, evidence_id ON candidate_fact_evidence
+                WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM candidate_fact_items AS fact
+                    JOIN candidate_profile_versions AS version
+                      ON version.id = fact.profile_version_id
+                    JOIN resume_evidence AS evidence
+                      ON evidence.id = NEW.evidence_id
+                    WHERE fact.id = NEW.fact_id
+                      AND version.analysis_id = evidence.analysis_id
+                      AND evidence.sensitive = 0
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'candidate fact evidence lineage mismatch');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS discovery_run_candidates_input_hash_immutable
+                BEFORE UPDATE OF input_hash ON discovery_run_candidates
+                WHEN NEW.input_hash IS NOT OLD.input_hash
+                BEGIN
+                    SELECT RAISE(ABORT, 'run candidate input hash is immutable');
+                END;
+                """
+            )
+
+            additions = {
+                "candidate_analyses": {
+                    "provider_call_count": "INTEGER CHECK (provider_call_count IS NULL OR provider_call_count >= 0)",
+                },
+                "direction_confirmations": {
+                    "candidate_profile_version_id": (
+                        "TEXT REFERENCES candidate_profile_versions(id) ON DELETE RESTRICT"
+                    ),
+                    "intent_contract_version": "TEXT",
+                    "intent_hash": "TEXT",
+                },
+                "discovery_runs": {
+                    "candidate_profile_version_id": (
+                        "TEXT REFERENCES candidate_profile_versions(id) ON DELETE RESTRICT"
+                    ),
+                    "list_candidate_count": "INTEGER CHECK (list_candidate_count IS NULL OR list_candidate_count >= 0)",
+                    "detail_selected_count": "INTEGER CHECK (detail_selected_count IS NULL OR detail_selected_count >= 0)",
+                    "detail_completed_count": "INTEGER CHECK (detail_completed_count IS NULL OR detail_completed_count >= 0)",
+                    "assessment_completed_count": "INTEGER CHECK (assessment_completed_count IS NULL OR assessment_completed_count >= 0)",
+                    "recommendation_count": "INTEGER CHECK (recommendation_count IS NULL OR recommendation_count >= 0)",
+                    "detail_reused_count": "INTEGER CHECK (detail_reused_count IS NULL OR detail_reused_count >= 0)",
+                    "ai_call_count": "INTEGER CHECK (ai_call_count IS NULL OR ai_call_count >= 0)",
+                    "result_revision": "INTEGER CHECK (result_revision IS NULL OR result_revision >= 0)",
+                    "first_result_at": "TEXT",
+                    "first_batch_at": "TEXT",
+                    "list_completed_at": "TEXT",
+                    "processing_completed_at": "TEXT",
+                },
+                "discovery_job_snapshots": {
+                    "run_candidate_id": (
+                        "TEXT REFERENCES discovery_run_candidates(id) ON DELETE SET NULL"
+                    ),
+                    "reused_from_snapshot_id": (
+                        "TEXT REFERENCES discovery_job_snapshots(id) ON DELETE SET NULL"
+                    ),
+                    "fresh_until": "TEXT",
+                    "fetch_duration_ms": "INTEGER CHECK (fetch_duration_ms IS NULL OR fetch_duration_ms >= 0)",
+                    "wait_duration_ms": "INTEGER CHECK (wait_duration_ms IS NULL OR wait_duration_ms >= 0)",
+                    "fetch_policy_version": "TEXT",
+                    "source_fetched_at": "TEXT",
+                },
+                "job_direction_assessments": {
+                    "evaluation_group_id": "TEXT",
+                    "input_hash": "TEXT",
+                    "evaluation_duration_ms": "INTEGER CHECK (evaluation_duration_ms IS NULL OR evaluation_duration_ms >= 0)",
+                    "ai_call_count": "INTEGER CHECK (ai_call_count IS NULL OR ai_call_count >= 0)",
+                    "result_revision": "INTEGER CHECK (result_revision IS NULL OR result_revision >= 0)",
+                },
+            }
+            for table, columns in additions.items():
+                existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                for name, definition in columns.items():
+                    if name not in existing:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (15, ?, '005 candidate profiles and durable discovery candidates')",
+                (_now(),),
             )
 
     def _copy_legacy_default_profile(self):
@@ -2290,11 +2676,13 @@ class TaskStore:
             )
         return {"id": aid, "resume_id": resume_id, "profile_id": profile_id, "version": version,
                 "status": "queued", "stage": "queued", "quality_status": "complete",
-                "quality_warnings": [], "created_at": ts}
+                "quality_warnings": [], "model_name": model_name,
+                "contract_version": contract_version,
+                "candidate_profile_version_id": None, "created_at": ts}
 
     def update_analysis_status(self, analysis_id, status, *, failure_code=None, summary=None, unknowns=None,
                                analysis_stage=None, stage=None, quality_status=None, quality_warnings=None,
-                               expected_statuses=None, expected_stages=None):
+                               expected_statuses=None, expected_stages=None, provider_call_count=None):
         aid = str(analysis_id)
         sets = ["status = ?"]
         params = [status]
@@ -2309,6 +2697,9 @@ class TaskStore:
         if failure_code is not None:
             sets.append("failure_code = ?")
             params.append(failure_code)
+        if provider_call_count is not None:
+            sets.append("provider_call_count = ?")
+            params.append(int(provider_call_count))
         if summary is not None:
             sets.append("summary_json = ?")
             params.append(json.dumps(summary, ensure_ascii=False))
@@ -2348,6 +2739,12 @@ class TaskStore:
             d["unknowns"] = _decode_json(d.pop("unknowns_json"), [])
             d["quality_warnings"] = _safe_quality_warnings(_decode_json(d.pop("quality_warnings_json", "[]"), []))
             d["stage"] = d.pop("analysis_stage", "queued")
+            profile_version = conn.execute(
+                "SELECT id FROM candidate_profile_versions WHERE analysis_id=? "
+                "ORDER BY version DESC LIMIT 1",
+                (str(analysis_id),),
+            ).fetchone()
+            d["candidate_profile_version_id"] = profile_version["id"] if profile_version else None
             return d
 
     def list_analyses(self, resume_id) -> list:
@@ -2364,6 +2761,12 @@ class TaskStore:
             d["unknowns"] = _decode_json(d.pop("unknowns_json"), [])
             d["quality_warnings"] = _safe_quality_warnings(_decode_json(d.pop("quality_warnings_json", "[]"), []))
             d["stage"] = d.pop("analysis_stage", "queued")
+            with self._connection() as lookup:
+                profile_version = lookup.execute(
+                    "SELECT id FROM candidate_profile_versions WHERE analysis_id=? "
+                    "ORDER BY version DESC LIMIT 1", (d["id"],),
+                ).fetchone()
+            d["candidate_profile_version_id"] = profile_version["id"] if profile_version else None
             out.append(d)
         return out
 
@@ -2511,6 +2914,51 @@ class TaskStore:
         return {"id": cid, "profile_id": str(profile_id), "resume_id": str(resume_id),
                 "analysis_id": str(analysis_id), "version": version, "confirmed_at": ts}
 
+    def create_confirmation_v2(
+        self, *, candidate_profile_version_id, expected_content_hash, hard_constraints,
+        soft_preferences, safe_limits, directions, intent_hash,
+    ) -> dict:
+        """Atomically confirm one profile draft and freeze its typed intent."""
+        cid = _uuid()
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            profile_version = self._candidate_profile_version_view(
+                conn, candidate_profile_version_id,
+            )
+            if profile_version["status"] != "draft":
+                raise ValueError("candidate_version_not_draft")
+            if profile_version["content_hash"] != expected_content_hash:
+                raise ValueError("candidate_version_conflict")
+            version = int(conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM direction_confirmations WHERE profile_id=?",
+                (profile_version["profile_id"],),
+            ).fetchone()[0])
+            conn.execute(
+                "UPDATE candidate_profile_versions SET status='confirmed', confirmed_at=?, updated_at=? WHERE id=?",
+                (ts, ts, str(candidate_profile_version_id)),
+            )
+            conn.execute(
+                "INSERT INTO direction_confirmations "
+                "(id, profile_id, resume_id, analysis_id, version, hard_constraints_json, "
+                "soft_preferences_json, safe_limits_json, confirmed_at, candidate_profile_version_id, "
+                "intent_contract_version, intent_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'intent_v2', ?)",
+                (cid, profile_version["profile_id"], profile_version["resume_id"],
+                 profile_version["analysis_id"], version,
+                 json.dumps(hard_constraints or {}, ensure_ascii=False),
+                 json.dumps(soft_preferences or {}, ensure_ascii=False),
+                 json.dumps(safe_limits or {}, ensure_ascii=False), ts,
+                 str(candidate_profile_version_id), str(intent_hash)),
+            )
+            for direction in directions:
+                conn.execute(
+                    "INSERT INTO confirmation_directions "
+                    "(confirmation_id, direction_id, enabled, user_added, user_label) VALUES (?, ?, ?, ?, ?)",
+                    (cid, str(direction["direction_id"]), int(bool(direction.get("enabled", True))),
+                     int(bool(direction.get("user_added", False))), direction.get("user_label")),
+                )
+        return self.get_confirmation(cid)
+
     def get_confirmation(self, confirmation_id) -> dict:
         with self._connection() as conn:
             row = conn.execute(
@@ -2533,6 +2981,213 @@ class TaskStore:
             return d
 
     # ===================================================================
+    # 005 candidate profile versions and fact drafts
+    # ===================================================================
+
+    def _candidate_profile_version_view(self, conn, version_id) -> dict:
+        row = conn.execute(
+            "SELECT * FROM candidate_profile_versions WHERE id=?", (str(version_id),),
+        ).fetchone()
+        if row is None:
+            raise KeyError(version_id)
+        result = dict(row)
+        result["summary"] = _decode_json(result.pop("summary_json"), {})
+        result["unknowns"] = _decode_json(result.pop("unknowns_json"), [])
+        fact_rows = conn.execute(
+            "SELECT * FROM candidate_fact_items WHERE profile_version_id=? "
+            "ORDER BY created_at ASC, id ASC",
+            (str(version_id),),
+        ).fetchall()
+        facts = []
+        for fact_row in fact_rows:
+            fact = dict(fact_row)
+            fact["value"] = _decode_json(fact.pop("value_json"), {})
+            evidence_rows = conn.execute(
+                "SELECT evidence_id FROM candidate_fact_evidence WHERE fact_id=? ORDER BY evidence_id",
+                (fact["id"],),
+            ).fetchall()
+            fact["evidence_ids"] = [item["evidence_id"] for item in evidence_rows]
+            facts.append(fact)
+        result["facts"] = facts
+        return result
+
+    def get_candidate_profile_version(self, version_id) -> dict:
+        with self._connection() as conn:
+            return self._candidate_profile_version_view(conn, version_id)
+
+    def create_candidate_profile_version(
+        self, *, profile_id, resume_id, analysis_id, summary=None, unknowns=None,
+        facts=None, contract_version="candidate_profile_v1",
+    ) -> dict:
+        ts = _now()
+        version_id = _uuid()
+        fact_inputs = list(facts or [])
+        prepared = []
+        for item in fact_inputs:
+            prepared.append({
+                "id": _uuid(),
+                "fact_type": item["fact_type"],
+                "stable_key": item.get("stable_key") or f"{item['fact_type']}:{item.get('client_ref') or _uuid()}",
+                "value": dict(item.get("value") or {}),
+                "normalized_value": str(item.get("normalized_value") or ""),
+                "source_kind": item.get("source_kind", "resume_explicit"),
+                "assertion_type": item.get("assertion_type", "explicit"),
+                "confidence": int(item.get("confidence", 0)),
+                "verification_status": item.get("verification_status", "extracted"),
+                "supersedes_fact_id": item.get("supersedes_fact_id"),
+                "evidence_ids": list(dict.fromkeys(item.get("evidence_ids", []) or [])),
+            })
+        content_hash = _candidate_profile_content_hash(summary, unknowns, prepared)
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            next_version = int(conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM candidate_profile_versions WHERE profile_id=?",
+                (str(profile_id),),
+            ).fetchone()[0])
+            conn.execute(
+                "INSERT INTO candidate_profile_versions "
+                "(id, profile_id, resume_id, analysis_id, version, status, summary_json, "
+                "unknowns_json, contract_version, content_hash, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)",
+                (version_id, str(profile_id), str(resume_id), _opt_str(analysis_id), next_version,
+                 json.dumps(summary or {}, ensure_ascii=False),
+                 json.dumps(unknowns or [], ensure_ascii=False), contract_version,
+                 content_hash, ts, ts),
+            )
+            for fact in prepared:
+                conn.execute(
+                    "INSERT INTO candidate_fact_items "
+                    "(id, profile_version_id, fact_type, stable_key, value_json, normalized_value, "
+                    "source_kind, assertion_type, confidence, verification_status, supersedes_fact_id, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (fact["id"], version_id, fact["fact_type"], fact["stable_key"],
+                     json.dumps(fact["value"], ensure_ascii=False), fact["normalized_value"],
+                     fact["source_kind"], fact["assertion_type"], fact["confidence"],
+                     fact["verification_status"], _opt_str(fact["supersedes_fact_id"]), ts, ts),
+                )
+                for evidence_id in fact["evidence_ids"]:
+                    conn.execute(
+                        "INSERT INTO candidate_fact_evidence (fact_id, evidence_id, role) VALUES (?, ?, 'primary')",
+                        (fact["id"], str(evidence_id)),
+                    )
+        return self.get_candidate_profile_version(version_id)
+
+    def update_candidate_profile_draft(
+        self, version_id, *, expected_content_hash, operations=None, unknown_resolutions=None,
+    ) -> dict:
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._candidate_profile_version_view(conn, version_id)
+            if current["status"] != "draft":
+                raise ValueError("candidate_version_not_draft")
+            if current["content_hash"] != expected_content_hash:
+                raise ValueError("candidate_version_conflict")
+            for operation in operations or []:
+                op = operation.get("op") if isinstance(operation, dict) else None
+                if op in {"correct", "reject"}:
+                    fact_id = str(operation.get("fact_id") or "")
+                    fact = conn.execute(
+                        "SELECT * FROM candidate_fact_items WHERE id=? AND profile_version_id=?",
+                        (fact_id, str(version_id)),
+                    ).fetchone()
+                    if fact is None:
+                        raise ValueError("candidate_fact_invalid")
+                if op == "reject":
+                    conn.execute(
+                        "UPDATE candidate_fact_items SET verification_status='rejected', updated_at=? WHERE id=?",
+                        (ts, fact_id),
+                    )
+                elif op == "correct":
+                    old = dict(fact)
+                    conn.execute(
+                        "UPDATE candidate_fact_items SET stable_key=?, verification_status='rejected', updated_at=? WHERE id=?",
+                        (f"rejected:{fact_id}", ts, fact_id),
+                    )
+                    new_id = _uuid()
+                    conn.execute(
+                        "INSERT INTO candidate_fact_items "
+                        "(id, profile_version_id, fact_type, stable_key, value_json, normalized_value, "
+                        "source_kind, assertion_type, confidence, verification_status, supersedes_fact_id, "
+                        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'user_corrected', "
+                        "'explicit', 100, 'corrected', ?, ?, ?)",
+                        (new_id, str(version_id), old["fact_type"], old["stable_key"],
+                         json.dumps(operation.get("value") or {}, ensure_ascii=False),
+                         str(operation.get("normalized_value") or ""), fact_id, ts, ts),
+                    )
+                elif op == "add":
+                    fact_type = operation.get("fact_type")
+                    new_id = _uuid()
+                    conn.execute(
+                        "INSERT INTO candidate_fact_items "
+                        "(id, profile_version_id, fact_type, stable_key, value_json, normalized_value, "
+                        "source_kind, assertion_type, confidence, verification_status, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, 'user_added', 'explicit', 100, 'confirmed', ?, ?)",
+                        (new_id, str(version_id), fact_type,
+                         operation.get("stable_key") or f"{fact_type}:user:{new_id}",
+                         json.dumps(operation.get("value") or {}, ensure_ascii=False),
+                         str(operation.get("normalized_value") or ""), ts, ts),
+                    )
+                else:
+                    raise ValueError("candidate_fact_invalid")
+            unknowns = current["unknowns"] if unknown_resolutions is None else list(unknown_resolutions)
+            refreshed = self._candidate_profile_version_view(conn, version_id)
+            content_hash = _candidate_profile_content_hash(current["summary"], unknowns, refreshed["facts"])
+            conn.execute(
+                "UPDATE candidate_profile_versions SET unknowns_json=?, content_hash=?, updated_at=? WHERE id=?",
+                (json.dumps(unknowns, ensure_ascii=False), content_hash, ts, str(version_id)),
+            )
+        return self.get_candidate_profile_version(version_id)
+
+    def confirm_candidate_profile_version(self, version_id, *, expected_content_hash) -> dict:
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._candidate_profile_version_view(conn, version_id)
+            if current["status"] != "draft":
+                raise ValueError("candidate_version_not_draft")
+            if current["content_hash"] != expected_content_hash:
+                raise ValueError("candidate_version_conflict")
+            ts = _now()
+            conn.execute(
+                "UPDATE candidate_profile_versions SET status='confirmed', confirmed_at=?, updated_at=? WHERE id=?",
+                (ts, ts, str(version_id)),
+            )
+        return self.get_candidate_profile_version(version_id)
+
+    def copy_candidate_profile_draft(self, source_version_id) -> dict:
+        source = self.get_candidate_profile_version(source_version_id)
+        copied = self.create_candidate_profile_version(
+            profile_id=source["profile_id"], resume_id=source["resume_id"],
+            analysis_id=source["analysis_id"], summary=source["summary"],
+            unknowns=source["unknowns"], contract_version=source["contract_version"],
+            facts=[{
+                **fact,
+                "evidence_ids": fact.get("evidence_ids", []),
+            } for fact in source["facts"]],
+        )
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE candidate_profile_versions SET supersedes_version_id=?, updated_at=? WHERE id=?",
+                (str(source_version_id), _now(), copied["id"]),
+            )
+        return self.get_candidate_profile_version(copied["id"])
+
+    def tombstone_candidate_profile_version(self, version_id) -> dict:
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._candidate_profile_version_view(conn, version_id)
+            if current["status"] != "draft":
+                raise ValueError("candidate_version_not_draft")
+            conn.execute("DELETE FROM candidate_fact_items WHERE profile_version_id=?", (str(version_id),))
+            empty_hash = _candidate_profile_content_hash({}, [], [])
+            conn.execute(
+                "UPDATE candidate_profile_versions SET status='deleted', summary_json='{}', "
+                "unknowns_json='[]', content_hash=?, updated_at=? WHERE id=?",
+                (empty_hash, _now(), str(version_id)),
+            )
+        return self.get_candidate_profile_version(version_id)
+
+    # ===================================================================
     # 004 discovery: runs, plans, snapshots, assessments, feedback
     # ===================================================================
 
@@ -2541,13 +3196,25 @@ class TaskStore:
         rid = _uuid()
         ts = _now()
         with self._connection() as conn:
-            conn.execute(
-                "INSERT INTO discovery_runs (id, profile_id, resume_id, analysis_id, confirmation_id, "
-                "status, stage, policy_version, input_hash, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 'created', 'created', ?, ?, ?, ?)",
-                (rid, str(profile_id), str(resume_id), str(analysis_id), str(confirmation_id),
-                 policy_version, input_hash, ts, ts),
-            )
+            if policy_version == "discovery_v2":
+                conn.execute(
+                    "INSERT INTO discovery_runs (id, profile_id, resume_id, analysis_id, confirmation_id, "
+                    "status, stage, policy_version, input_hash, list_candidate_count, "
+                    "detail_selected_count, detail_completed_count, assessment_completed_count, "
+                    "recommendation_count, detail_reused_count, ai_call_count, result_revision, "
+                    "created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'created', 'created', ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, ?, ?)",
+                    (rid, str(profile_id), str(resume_id), str(analysis_id), str(confirmation_id),
+                     policy_version, input_hash, ts, ts),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO discovery_runs (id, profile_id, resume_id, analysis_id, confirmation_id, "
+                    "status, stage, policy_version, input_hash, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'created', 'created', ?, ?, ?, ?)",
+                    (rid, str(profile_id), str(resume_id), str(analysis_id), str(confirmation_id),
+                     policy_version, input_hash, ts, ts),
+                )
         return {"id": rid, "profile_id": str(profile_id), "resume_id": str(resume_id),
                 "analysis_id": str(analysis_id), "confirmation_id": str(confirmation_id),
                 "status": "created", "stage": "created", "policy_version": policy_version,
@@ -2592,7 +3259,9 @@ class TaskStore:
             params.append(_now())
         if counters and isinstance(counters, dict):
             for key in ("source_count", "detail_count", "evaluated_count", "high_count",
-                        "adjacent_count", "growth_count", "review_count", "unsuitable_count"):
+                        "adjacent_count", "growth_count", "review_count", "unsuitable_count",
+                        "result_revision", "list_candidate_count", "detail_selected_count",
+                        "detail_completed_count", "assessment_completed_count"):
                 if key in counters:
                     sets.append(f"{key} = ?")
                     params.append(int(counters[key]))
@@ -2600,15 +3269,209 @@ class TaskStore:
         with self._connection() as conn:
             conn.execute(f"UPDATE discovery_runs SET {', '.join(sets)} WHERE id = ?", params)
 
+    def mark_run_timing(self, run_id, *, first_result_at=None, first_batch_at=None,
+                        list_completed_at=None, processing_completed_at=None):
+        """T077: set additive timing fields on discovery_runs.
+
+        ``first_result_at`` and ``first_batch_at`` are monotonic: once set
+        they are never overwritten (NULL → value only). This supports the
+        http-api.md L218-220 contract where these timestamps mark the first
+        occurrence of a visible result / first batch of five.
+
+        ``list_completed_at`` and ``processing_completed_at`` mark stage
+        boundaries and may be re-stamped on resume.
+        """
+        sets: list[str] = []
+        params: list = []
+        if first_result_at is not None:
+            # COALESCE keeps the existing value if already non-NULL.
+            sets.append("first_result_at = COALESCE(first_result_at, ?)")
+            params.append(first_result_at)
+        if first_batch_at is not None:
+            sets.append("first_batch_at = COALESCE(first_batch_at, ?)")
+            params.append(first_batch_at)
+        if list_completed_at is not None:
+            sets.append("list_completed_at = ?")
+            params.append(list_completed_at)
+        if processing_completed_at is not None:
+            sets.append("processing_completed_at = ?")
+            params.append(processing_completed_at)
+        if not sets:
+            return
+        sets.append("updated_at = ?")
+        params.append(_now())
+        params.append(str(run_id))
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE discovery_runs SET {', '.join(sets)} WHERE id = ?", params,
+            )
+
+    def transition_discovery_run_v2(
+        self,
+        run_id,
+        *,
+        expected_state,
+        target_state,
+        input_hash,
+        counters=None,
+        event_type=None,
+        event_payload=None,
+    ) -> dict:
+        """CAS one policy-v2 run transition with counters and event in one transaction."""
+        from webui.discovery import (
+            DiscoveryError,
+            require_matching_input_hash,
+            sanitize_discovery_payload,
+            validate_v2_run_transition,
+        )
+
+        counter_fields = {
+            "list_candidate_count", "detail_selected_count", "detail_completed_count",
+            "assessment_completed_count", "recommendation_count", "detail_reused_count",
+            "ai_call_count", "result_revision",
+        }
+        clean_counters = {}
+        if counters is not None:
+            if not isinstance(counters, dict) or not set(counters).issubset(counter_fields):
+                raise DiscoveryError("state_conflict")
+            for key, value in counters.items():
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise DiscoveryError("state_conflict")
+                clean_counters[key] = value
+        clean_event = None
+        if event_type is not None:
+            if not isinstance(event_type, str) or not event_type or len(event_type) > 100:
+                raise DiscoveryError("detail_event_invalid")
+            clean_event = sanitize_discovery_payload(event_payload or {}, payload_kind="event")
+
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM discovery_runs WHERE id=?", (str(run_id),),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            current = dict(row)
+            if current["policy_version"] != "discovery_v2":
+                raise DiscoveryError("state_conflict")
+            if current["stage"] != expected_state:
+                raise DiscoveryError("state_conflict")
+            require_matching_input_hash(input_hash, current["input_hash"])
+            validate_v2_run_transition(current["stage"], target_state)
+
+            sets = ["status=?", "stage=?", "updated_at=?"]
+            params = [target_state, target_state, _now()]
+            for key, value in clean_counters.items():
+                sets.append(f"{key}=?")
+                params.append(value)
+            if target_state in {"succeeded", "partial", "failed", "cancelled"}:
+                sets.append("completed_at=?")
+                params.append(_now())
+            params.extend([str(run_id), expected_state, input_hash])
+            changed = conn.execute(
+                f"UPDATE discovery_runs SET {', '.join(sets)} "
+                "WHERE id=? AND stage=? AND input_hash=?",
+                params,
+            ).rowcount
+            if changed != 1:
+                raise DiscoveryError("state_conflict")
+            if event_type is not None:
+                seq = int(conn.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM discovery_run_events WHERE run_id=?",
+                    (str(run_id),),
+                ).fetchone()[0])
+                conn.execute(
+                    "INSERT INTO discovery_run_events "
+                    "(run_id, sequence, event_type, safe_payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (str(run_id), seq, event_type,
+                     json.dumps(clean_event, ensure_ascii=False), _now()),
+                )
+        return self.get_discovery_run(run_id)
+
+    def reconcile_discovery_run_v2(self, run_id) -> dict:
+        """Rebuild v2 counters from persisted rows and append a safe checkpoint event."""
+        from webui.discovery import DiscoveryError, sanitize_discovery_payload
+
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT policy_version FROM discovery_runs WHERE id=?", (str(run_id),),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            if row["policy_version"] != "discovery_v2":
+                raise DiscoveryError("state_conflict")
+
+            scalar_queries = {
+                "list_candidate_count": (
+                    "SELECT COUNT(*) FROM discovery_run_candidates WHERE run_id=?"
+                ),
+                "detail_selected_count": (
+                    "SELECT COUNT(*) FROM discovery_run_candidates "
+                    "WHERE run_id=? AND selection_decision='selected'"
+                ),
+                "detail_completed_count": (
+                    "SELECT COUNT(*) FROM discovery_job_snapshots WHERE run_id=? "
+                    "AND completeness IN ('complete','partial','unavailable') "
+                    "AND fetch_status NOT IN ('queued','fetching')"
+                ),
+                "assessment_completed_count": (
+                    "SELECT COUNT(*) FROM job_direction_assessments WHERE run_id=? "
+                    "AND status NOT IN ('queued','running','evaluating')"
+                ),
+                "recommendation_count": (
+                    "SELECT COUNT(DISTINCT snapshot_id) FROM job_direction_assessments WHERE run_id=? "
+                    "AND status NOT IN ('queued','running','evaluating') "
+                    "AND category IN ('high_match','adjacent_match','growth_match')"
+                ),
+                "detail_reused_count": (
+                    "SELECT COUNT(*) FROM discovery_job_snapshots WHERE run_id=? "
+                    "AND reused_from_snapshot_id IS NOT NULL"
+                ),
+                "ai_call_count": (
+                    "SELECT COALESCE(SUM(ai_call_count), 0) FROM job_direction_assessments WHERE run_id=?"
+                ),
+            }
+            counters = {
+                key: int(conn.execute(sql, (str(run_id),)).fetchone()[0] or 0)
+                for key, sql in scalar_queries.items()
+            }
+            assignments = ", ".join(f"{key}=?" for key in counters)
+            conn.execute(
+                f"UPDATE discovery_runs SET {assignments}, updated_at=? WHERE id=?",
+                [*counters.values(), _now(), str(run_id)],
+            )
+            payload = sanitize_discovery_payload(counters, payload_kind="event")
+            seq = int(conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM discovery_run_events WHERE run_id=?",
+                (str(run_id),),
+            ).fetchone()[0])
+            conn.execute(
+                "INSERT INTO discovery_run_events "
+                "(run_id, sequence, event_type, safe_payload_json, created_at) VALUES (?, ?, 'progress_reconciled', ?, ?)",
+                (str(run_id), seq, json.dumps(payload, ensure_ascii=False), _now()),
+            )
+        return self.get_discovery_run(run_id)
+
     def get_discovery_run(self, run_id) -> dict:
         with self._connection() as conn:
             row = conn.execute("SELECT * FROM discovery_runs WHERE id = ?", (str(run_id),)).fetchone()
             if row is None:
                 raise KeyError(run_id)
             d = dict(row)
+        # T077: v2 four-class progress names (http-api.md L203-208).
+        # Legacy v1 names (source_count/detail_count/evaluated_count) kept as
+        # compatibility aliases; v2 names are authoritative for policy v2 runs.
         d["progress"] = {
             "source_count": d["source_count"], "detail_count": d["detail_count"],
             "evaluated_count": d["evaluated_count"],
+            # v2 four-class progress (authoritative for discovery_v2 runs).
+            "search_queries_completed": d["source_count"],
+            "list_candidates": d.get("list_candidate_count"),
+            "details_selected": d.get("detail_selected_count"),
+            "details_completed": d.get("detail_completed_count"),
+            "assessments_completed": d.get("assessment_completed_count"),
+            "recommendations": d.get("recommendation_count"),
         }
         d["counts"] = {
             "high": d["high_count"], "adjacent": d["adjacent_count"], "growth": d["growth_count"],
@@ -2655,6 +3518,144 @@ class TaskStore:
             d["payload"] = json.loads(d.pop("safe_payload_json") or "{}")
             out.append(d)
         return out
+
+    # -- discovery run candidates (005 US2) --------------------------------
+
+    def upsert_run_candidate(self, *, run_id, job_id, source_url, direction_ids,
+                             search_terms, source_positions, list_fields, input_hash) -> dict:
+        """Create or merge a run candidate. Same (run_id, job_id) merges provenance."""
+        rid, jid = str(run_id), str(job_id)
+        canonical = source_url.split("?")[0].rstrip("/")
+        dedupe_key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+        ts = _now()
+        with self._connection() as conn:
+            existing = conn.execute(
+                "SELECT id, direction_ids_json, search_terms_json, source_positions_json, list_fields_json "
+                "FROM discovery_run_candidates WHERE run_id = ? AND job_id = ?",
+                (rid, jid),
+            ).fetchone()
+            if existing is None:
+                cid = _uuid()
+                conn.execute(
+                    "INSERT INTO discovery_run_candidates "
+                    "(id, run_id, job_id, source_url, direction_ids_json, search_terms_json, "
+                    "source_positions_json, list_fields_json, dedupe_key, precheck_outcome, "
+                    "precheck_json, priority_components_json, selection_decision, state, "
+                    "attempt_count, input_hash, discovered_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', '{}', '{}', 'pending', 'discovered', 0, ?, ?, ?)",
+                    (cid, rid, jid, source_url,
+                     json.dumps(direction_ids, ensure_ascii=False),
+                     json.dumps(search_terms, ensure_ascii=False),
+                     json.dumps(source_positions, ensure_ascii=False),
+                     json.dumps(list_fields, ensure_ascii=False),
+                     dedupe_key, input_hash, ts, ts),
+                )
+            else:
+                cid = existing["id"]
+                merged_dirs = json.loads(existing["direction_ids_json"] or "[]")
+                for d in direction_ids:
+                    if d not in merged_dirs:
+                        merged_dirs.append(d)
+                merged_terms = json.loads(existing["search_terms_json"] or "[]")
+                for t in search_terms:
+                    if t not in merged_terms:
+                        merged_terms.append(t)
+                merged_positions = json.loads(existing["source_positions_json"] or "[]")
+                merged_positions.extend(source_positions)
+                merged_fields = json.loads(existing["list_fields_json"] or "{}")
+                merged_fields.update(list_fields)
+                conn.execute(
+                    "UPDATE discovery_run_candidates SET "
+                    "direction_ids_json = ?, search_terms_json = ?, source_positions_json = ?, "
+                    "list_fields_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(merged_dirs, ensure_ascii=False),
+                     json.dumps(merged_terms, ensure_ascii=False),
+                     json.dumps(merged_positions, ensure_ascii=False),
+                     json.dumps(merged_fields, ensure_ascii=False),
+                     ts, cid),
+                )
+        return self.get_run_candidate(cid)
+
+    def get_run_candidate(self, candidate_id) -> dict:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM discovery_run_candidates WHERE id = ?", (str(candidate_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(candidate_id)
+        d = dict(row)
+        d["direction_ids"] = json.loads(d.pop("direction_ids_json") or "[]")
+        d["search_terms"] = json.loads(d.pop("search_terms_json") or "[]")
+        d["source_positions"] = json.loads(d.pop("source_positions_json") or "[]")
+        d["list_fields"] = json.loads(d.pop("list_fields_json") or "{}")
+        d["precheck"] = json.loads(d.pop("precheck_json") or "{}")
+        d["priority_components"] = json.loads(d.pop("priority_components_json") or "{}")
+        return d
+
+    def list_run_candidates(self, run_id, *, state=None, selection_decision=None) -> list:
+        query = "SELECT * FROM discovery_run_candidates WHERE run_id = ?"
+        params: list = [str(run_id)]
+        if state is not None:
+            query += " AND state = ?"
+            params.append(state)
+        if selection_decision is not None:
+            query += " AND selection_decision = ?"
+            params.append(selection_decision)
+        query += " ORDER BY discovered_at ASC"
+        with self._connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["direction_ids"] = json.loads(d.pop("direction_ids_json") or "[]")
+            d["search_terms"] = json.loads(d.pop("search_terms_json") or "[]")
+            d["source_positions"] = json.loads(d.pop("source_positions_json") or "[]")
+            d["list_fields"] = json.loads(d.pop("list_fields_json") or "{}")
+            d["precheck"] = json.loads(d.pop("precheck_json") or "{}")
+            d["priority_components"] = json.loads(d.pop("priority_components_json") or "{}")
+            out.append(d)
+        return out
+
+    def update_run_candidate_state(self, candidate_id, *, state=None, selection_decision=None,
+                                   selection_reason=None, selection_rank=None,
+                                   precheck_outcome=None, precheck=None,
+                                   priority_components=None, failure_code=None,
+                                   expected_state=None) -> dict:
+        """CAS-guarded state update for a run candidate."""
+        cid = str(candidate_id)
+        sets = ["updated_at = ?"]
+        params: list = [_now()]
+        if state is not None:
+            sets.append("state = ?"); params.append(state)
+        if selection_decision is not None:
+            sets.append("selection_decision = ?"); params.append(selection_decision)
+        if selection_reason is not None:
+            sets.append("selection_reason = ?"); params.append(selection_reason)
+        if selection_rank is not None:
+            sets.append("selection_rank = ?"); params.append(int(selection_rank))
+        if precheck_outcome is not None:
+            sets.append("precheck_outcome = ?"); params.append(precheck_outcome)
+        if precheck is not None:
+            sets.append("precheck_json = ?"); params.append(json.dumps(precheck, ensure_ascii=False))
+        if priority_components is not None:
+            sets.append("priority_components_json = ?"); params.append(json.dumps(priority_components, ensure_ascii=False))
+        if failure_code is not None:
+            sets.append("failure_code = ?"); params.append(failure_code)
+        where = "id = ?"
+        where_params: list = [cid]
+        if expected_state is not None:
+            where += " AND state = ?"
+            where_params.append(expected_state)
+        params.extend(where_params)
+        with self._connection() as conn:
+            cursor = conn.execute(
+                f"UPDATE discovery_run_candidates SET {', '.join(sets)} WHERE {where}", params,
+            )
+            if cursor.rowcount == 0 and expected_state is not None:
+                raise DiscoveryStoreConflictError(
+                    f"run candidate {cid} state conflict (expected {expected_state})"
+                )
+        return self.get_run_candidate(cid)
 
     def create_search_plan(self, run_id, *, plan_version="v1", detail_budget=60,
                            items=None) -> dict:
@@ -2785,6 +3786,7 @@ class TaskStore:
             d = dict(row)
             d["company_json"] = json.loads(d.pop("company_json") or "{}")
             d["missing_fields"] = json.loads(d.pop("missing_fields_json") or "[]")
+            d["reused"] = bool(d.get("reused_from_snapshot_id"))
             return d
 
     def reset_job_snapshot(self, run_id, job_id) -> None:
@@ -2807,16 +3809,249 @@ class TaskStore:
             d = dict(row)
             d["company_json"] = json.loads(d.pop("company_json") or "{}")
             d["missing_fields"] = json.loads(d.pop("missing_fields_json") or "[]")
+            # T073: projection metadata for reuse. ``reused`` is derived from
+            # ``reused_from_snapshot_id`` so callers don't need to know the
+            # column name. ``source_fetched_at`` exposes the original capture
+            # time for reused snapshots (NULL for fresh captures).
+            d["reused"] = bool(d.get("reused_from_snapshot_id"))
             out.append(d)
         return out
+
+    # ------------------------------------------------------------------
+    # T073: Detail reuse (data-model.md L332-341)
+    # ------------------------------------------------------------------
+
+    _REUSE_FRESHNESS_HOURS = 12
+    _REUSE_IDENTITY_FIELDS = ("title", "company", "salary", "location")
+
+    @staticmethod
+    def _canonical_source_url(source_url: str) -> str:
+        """Canonicalize source URL for reuse identity: strip query, rstrip /."""
+        return (source_url or "").split("?")[0].rstrip("/")
+
+    def find_reusable_snapshot(
+        self,
+        job_id,
+        source_url,
+        current_list_fields,
+        *,
+        refresh_requested=False,
+        max_age_hours=None,
+        now_iso=None,
+        exclude_run_id=None,
+    ) -> dict | None:
+        """Find a prior snapshot that can be reused for the current run.
+
+        Returns None when any of these guards fail:
+        - ``refresh_requested`` is True (user asked for fresh capture);
+        - no prior snapshot exists for ``job_id`` with matching canonical URL;
+        - prior snapshot ``completeness`` != ``'complete'``;
+        - prior snapshot ``source_status`` != ``'active'``;
+        - prior snapshot ``fresh_until`` is NULL or earlier than ``now_iso``;
+        - prior snapshot identity fields (title/company/salary/location)
+          drift from ``current_list_fields``.
+
+        ``exclude_run_id`` skips snapshots belonging to the given run
+        (typically the current run, to avoid self-reuse).
+
+        Returned dict is the raw snapshot row (including ``run_id``) so
+        callers can inspect provenance and pass it to
+        :meth:`create_reused_snapshot`.
+        """
+        if refresh_requested:
+            return None
+        if not job_id or not source_url:
+            return None
+        jid = str(job_id)
+        canonical = self._canonical_source_url(source_url)
+        if not canonical:
+            return None
+        now = now_iso or _now()
+        max_age = self._REUSE_FRESHNESS_HOURS if max_age_hours is None else int(max_age_hours)
+        with self._connection() as conn:
+            query = (
+                "SELECT * FROM discovery_job_snapshots "
+                "WHERE job_id = ? AND completeness = 'complete' "
+                "AND source_status = 'active' "
+                "AND fresh_until IS NOT NULL AND fresh_until >= ? "
+            )
+            params: list = [jid, now]
+            if exclude_run_id is not None:
+                query += "AND run_id != ? "
+                params.append(str(exclude_run_id))
+            query += "ORDER BY fetched_at DESC LIMIT 10"
+            rows = conn.execute(query, params).fetchall()
+        if not rows:
+            return None
+        current_fields = current_list_fields or {}
+        for row in rows:
+            d = dict(row)
+            prior_canonical = self._canonical_source_url(d.get("source_url", ""))
+            if prior_canonical != canonical:
+                continue
+            # Identity drift check: title/company/salary/location must match.
+            drift = False
+            for field in self._REUSE_IDENTITY_FIELDS:
+                prior_val = str(d.get(field, "") or "").strip()
+                curr_val = str(current_fields.get(field, "") or "").strip()
+                if prior_val != curr_val:
+                    drift = True
+                    break
+            if drift:
+                continue
+            # Found a reusable snapshot.
+            d["company_json"] = json.loads(d.pop("company_json") or "{}")
+            d["missing_fields"] = json.loads(d.pop("missing_fields_json") or "[]")
+            d["reused"] = bool(d.get("reused_from_snapshot_id"))
+            return d
+        return None
+
+    def create_reused_snapshot(
+        self,
+        run_id,
+        run_candidate_id,
+        source_snapshot,
+        *,
+        fetch_policy_version="discovery_v2",
+        now_iso=None,
+        max_age_hours=None,
+    ) -> dict:
+        """Create a new snapshot in ``run_id`` by copying ``source_snapshot``.
+
+        The new snapshot is self-sufficient: it copies all content fields
+        (jd/tags/company_json/completeness/source_status/content_hash) from
+        the source, sets ``reused_from_snapshot_id`` to the source id, and
+        records the original capture time in ``source_fetched_at`` so the
+        chain remains readable even after the parent row is deleted.
+
+        ``fetched_at`` is set to ``now_iso`` (current run time), and
+        ``fresh_until`` is renewed to ``now_iso + max_age_hours`` so the
+        reused snapshot itself can be reused by future runs within the
+        freshness window.
+
+        Increments ``detail_reused_count`` on the run.
+        """
+        if not isinstance(source_snapshot, dict):
+            raise TypeError("source_snapshot must be a dict")
+        rid = str(run_id)
+        ts = now_iso or _now()
+        max_age = self._REUSE_FRESHNESS_HOURS if max_age_hours is None else int(max_age_hours)
+        try:
+            from datetime import datetime, timedelta, timezone
+            base = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            base = datetime.now(timezone.utc)
+        fresh_until_dt = base + timedelta(hours=max_age)
+        fresh_until = fresh_until_dt.isoformat()
+        sid = _uuid()
+        source_id = source_snapshot.get("id")
+        if not source_id:
+            raise ValueError("source_snapshot must contain 'id'")
+        source_fetched_at = source_snapshot.get("fetched_at") or ""
+        company_json = source_snapshot.get("company_json")
+        if isinstance(company_json, str):
+            try:
+                company_json = json.loads(company_json or "{}")
+            except json.JSONDecodeError:
+                company_json = {}
+        elif company_json is None:
+            company_json = {}
+        missing_fields = source_snapshot.get("missing_fields")
+        if isinstance(missing_fields, str):
+            try:
+                missing_fields = json.loads(missing_fields or "[]")
+            except json.JSONDecodeError:
+                missing_fields = []
+        elif missing_fields is None:
+            missing_fields = []
+        with self._connection() as conn:
+            # Ensure no stale snapshot for (run_id, job_id) — reuse the row
+            # if it exists (e.g., re-running progressive eval after interrupt).
+            existing = conn.execute(
+                "SELECT id FROM discovery_job_snapshots WHERE run_id = ? AND job_id = ?",
+                (rid, str(source_snapshot.get("job_id", ""))),
+            ).fetchone()
+            if existing:
+                sid = existing["id"]
+                conn.execute(
+                    "UPDATE discovery_job_snapshots SET "
+                    "source_url=?, title=?, company=?, salary=?, location=?, tags=?, jd=?, "
+                    "company_json=?, completeness=?, missing_fields_json=?, source_status=?, "
+                    "content_hash=?, fetch_status='completed', fetched_at=?, fresh_until=?, "
+                    "updated_at=?, run_candidate_id=?, reused_from_snapshot_id=?, "
+                    "fetch_policy_version=?, source_fetched_at=? WHERE id=?",
+                    (
+                        str(source_snapshot.get("source_url", "")),
+                        str(source_snapshot.get("title", "")),
+                        str(source_snapshot.get("company", "")),
+                        str(source_snapshot.get("salary", "")),
+                        str(source_snapshot.get("location", "")),
+                        str(source_snapshot.get("tags", "")),
+                        str(source_snapshot.get("jd", "")),
+                        json.dumps(company_json, ensure_ascii=False),
+                        str(source_snapshot.get("completeness", "complete")),
+                        json.dumps(missing_fields, ensure_ascii=False),
+                        str(source_snapshot.get("source_status", "active")),
+                        str(source_snapshot.get("content_hash", "")),
+                        ts, fresh_until, ts,
+                        str(run_candidate_id) if run_candidate_id else None,
+                        str(source_id),
+                        str(fetch_policy_version),
+                        source_fetched_at or None,
+                        sid,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO discovery_job_snapshots ("
+                    "id, run_id, job_id, source_url, title, company, salary, location, "
+                    "tags, jd, company_json, completeness, missing_fields_json, "
+                    "source_status, content_hash, fetch_status, fetched_at, fresh_until, "
+                    "updated_at, run_candidate_id, reused_from_snapshot_id, "
+                    "fetch_policy_version, source_fetched_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        sid, rid, str(source_snapshot.get("job_id", "")),
+                        str(source_snapshot.get("source_url", "")),
+                        str(source_snapshot.get("title", "")),
+                        str(source_snapshot.get("company", "")),
+                        str(source_snapshot.get("salary", "")),
+                        str(source_snapshot.get("location", "")),
+                        str(source_snapshot.get("tags", "")),
+                        str(source_snapshot.get("jd", "")),
+                        json.dumps(company_json, ensure_ascii=False),
+                        str(source_snapshot.get("completeness", "complete")),
+                        json.dumps(missing_fields, ensure_ascii=False),
+                        str(source_snapshot.get("source_status", "active")),
+                        str(source_snapshot.get("content_hash", "")),
+                        "completed", ts, fresh_until, ts,
+                        str(run_candidate_id) if run_candidate_id else None,
+                        str(source_id),
+                        str(fetch_policy_version),
+                        source_fetched_at or None,
+                    ),
+                )
+            # Increment detail_reused_count atomically.
+            conn.execute(
+                "UPDATE discovery_runs SET detail_reused_count = "
+                "COALESCE(detail_reused_count, 0) + 1, updated_at = ? WHERE id = ?",
+                (ts, rid),
+            )
+        return self.get_snapshot(rid, source_snapshot.get("job_id", ""))
 
     def create_assessment(self, run_id, snapshot_id, direction_id, *, hard_outcome="unknown",
                           hard_checks=None, dimensions=None, match_score=None, confidence=None,
                           category="needs_review", candidate_evidence_ids=None, job_evidence=None,
                           gaps=None, policy_version="v1", contract_version="v1",
-                          failure_code=None, status="queued") -> dict:
+                          failure_code=None, status="queued",
+                          evaluation_group_id=None, input_hash=None, ai_call_count=None) -> dict:
         asid = _uuid()
         ts = _now()
+        # Migration-015 columns are only written when supplied, so legacy v1
+        # calls stay compatible with schema-14 databases (pre-migration-015).
+        has_v2_cols = (
+            evaluation_group_id is not None or input_hash is not None or ai_call_count is not None
+        )
         with self._connection() as conn:
             existing = conn.execute(
                 "SELECT id FROM job_direction_assessments WHERE run_id=? AND snapshot_id=? AND direction_id=?",
@@ -2824,36 +4059,58 @@ class TaskStore:
             ).fetchone()
             if existing:
                 asid = existing["id"]
+                set_clause = (
+                    "hard_outcome=?, hard_checks_json=?, dimensions_json=?, match_score=?, confidence=?, "
+                    "category=?, candidate_evidence_ids_json=?, job_evidence_json=?, gaps_json=?, "
+                    "failure_code=?, status=?"
+                )
+                params = [
+                    hard_outcome, json.dumps(hard_checks or {}, ensure_ascii=False),
+                    json.dumps(dimensions or {}, ensure_ascii=False), match_score, confidence, category,
+                    json.dumps(candidate_evidence_ids or [], ensure_ascii=False),
+                    json.dumps(job_evidence or {}, ensure_ascii=False),
+                    json.dumps(gaps or [], ensure_ascii=False), failure_code, status,
+                ]
+                if has_v2_cols:
+                    set_clause += ", evaluation_group_id=?, input_hash=?, ai_call_count=?"
+                    params.extend([_opt_str(evaluation_group_id), _opt_str(input_hash), ai_call_count])
+                set_clause += ", updated_at=?"
+                params.extend([ts, asid])
                 conn.execute(
-                    "UPDATE job_direction_assessments SET hard_outcome=?, hard_checks_json=?, dimensions_json=?, "
-                    "match_score=?, confidence=?, category=?, candidate_evidence_ids_json=?, job_evidence_json=?, "
-                    "gaps_json=?, failure_code=?, status=?, updated_at=? WHERE id=?",
-                    (hard_outcome, json.dumps(hard_checks or {}, ensure_ascii=False),
-                     json.dumps(dimensions or {}, ensure_ascii=False), match_score, confidence, category,
-                     json.dumps(candidate_evidence_ids or [], ensure_ascii=False),
-                     json.dumps(job_evidence or {}, ensure_ascii=False),
-                     json.dumps(gaps or [], ensure_ascii=False), failure_code, status, ts, asid),
+                    f"UPDATE job_direction_assessments SET {set_clause} WHERE id=?", params,
                 )
             else:
+                columns = [
+                    "id", "run_id", "snapshot_id", "direction_id", "status", "hard_outcome",
+                    "hard_checks_json", "dimensions_json", "match_score", "confidence", "category",
+                    "candidate_evidence_ids_json", "job_evidence_json", "gaps_json", "policy_version",
+                    "contract_version", "failure_code",
+                ]
+                values = [
+                    asid, str(run_id), str(snapshot_id), str(direction_id), status, hard_outcome,
+                    json.dumps(hard_checks or {}, ensure_ascii=False),
+                    json.dumps(dimensions or {}, ensure_ascii=False), match_score, confidence, category,
+                    json.dumps(candidate_evidence_ids or [], ensure_ascii=False),
+                    json.dumps(job_evidence or {}, ensure_ascii=False),
+                    json.dumps(gaps or [], ensure_ascii=False), policy_version, contract_version,
+                    failure_code,
+                ]
+                if has_v2_cols:
+                    columns.extend(["evaluation_group_id", "input_hash", "ai_call_count"])
+                    values.extend([_opt_str(evaluation_group_id), _opt_str(input_hash), ai_call_count])
+                columns.extend(["created_at", "updated_at"])
+                values.extend([ts, ts])
+                placeholders = ", ".join(["?"] * len(columns))
                 conn.execute(
-                    "INSERT INTO job_direction_assessments (id, run_id, snapshot_id, direction_id, status, "
-                    "hard_outcome, hard_checks_json, dimensions_json, match_score, confidence, category, "
-                    "candidate_evidence_ids_json, job_evidence_json, gaps_json, policy_version, "
-                    "contract_version, failure_code, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (asid, str(run_id), str(snapshot_id), str(direction_id), status, hard_outcome,
-                     json.dumps(hard_checks or {}, ensure_ascii=False),
-                     json.dumps(dimensions or {}, ensure_ascii=False), match_score, confidence, category,
-                     json.dumps(candidate_evidence_ids or [], ensure_ascii=False),
-                     json.dumps(job_evidence or {}, ensure_ascii=False),
-                     json.dumps(gaps or [], ensure_ascii=False), policy_version, contract_version,
-                     failure_code, ts, ts),
+                    f"INSERT INTO job_direction_assessments ({', '.join(columns)}) VALUES ({placeholders})",
+                    values,
                 )
             if status == "completed":
                 conn.execute("UPDATE job_direction_assessments SET completed_at=? WHERE id=?", (ts, asid))
         return {"id": asid, "run_id": str(run_id), "snapshot_id": str(snapshot_id),
                 "direction_id": str(direction_id), "category": category, "hard_outcome": hard_outcome,
-                "status": status}
+                "status": status, "evaluation_group_id": _opt_str(evaluation_group_id),
+                "input_hash": _opt_str(input_hash)}
 
     def get_assessment(self, run_id, snapshot_id, direction_id) -> dict:
         with self._connection() as conn:

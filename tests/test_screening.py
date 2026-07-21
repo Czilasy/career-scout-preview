@@ -1298,5 +1298,115 @@ class TriStateHardRulesTests(unittest.TestCase):
         self.assertIn(result["outcome"], ("violation", "unknown", "pass"))
 
 
+class MinSalaryV2ParserTests(unittest.TestCase):
+    """T052 RED: policy v2 数值 min_salary 月薪 K 下限三态解析。
+
+    契约来源: research.md:93
+      - 岗位月薪区间上限明确低于下限 → violation；
+      - 区间能够达到下限 → pass；
+      - `x-yK·N薪` 使用基础月薪区间；
+      - 明确年薪可折算为月均区间；
+      - 日薪、面议、缺失或无法识别格式 → unknown；
+      - min_salary 不伪装成旧 BOSS salary code，旧 code 由 v1 处理。
+
+    RED 状态：webui.screening.check_min_salary_v2 尚不存在。
+    """
+
+    def _check(self, job_salary, floor_k):
+        from webui.screening import check_min_salary_v2
+        return check_min_salary_v2(
+            job_salary, {"amount": floor_k, "unit": "K", "source": "user_confirmed"},
+        )
+
+    # --- 月薪区间 ------------------------------------------------------
+
+    def test_monthly_range_above_floor_passes(self):
+        result = self._check("15-25K", 20)
+        self.assertEqual(result["outcome"], "pass")
+
+    def test_monthly_range_upper_below_floor_violation(self):
+        result = self._check("10-15K", 20)
+        self.assertEqual(result["outcome"], "violation")
+
+    def test_monthly_range_upper_equal_floor_passes(self):
+        result = self._check("15-20K", 20)
+        self.assertEqual(result["outcome"], "pass")
+
+    # --- N薪：使用基础月薪区间 ----------------------------------------
+
+    def test_n_salary_uses_base_range_pass(self):
+        # 基础 18-22K，上限 22 >= floor 20 → pass（不因 13 薪放大）
+        result = self._check("18-22K·13薪", 20)
+        self.assertEqual(result["outcome"], "pass")
+
+    def test_n_salary_base_below_floor_violation(self):
+        # 基础 10-15K·16薪，上限 15 < floor 20 → violation（不用 N 薪放大绕过）
+        result = self._check("10-15K·16薪", 20)
+        self.assertEqual(result["outcome"], "violation")
+
+    # --- 年薪：折算月均区间 -------------------------------------------
+
+    def test_annual_salary_folded_to_monthly_pass(self):
+        # 年薪 240K → 月均 20K，可达 floor 20 → pass
+        result = self._check("年薪240K", 20)
+        self.assertEqual(result["outcome"], "pass")
+
+    def test_annual_salary_folded_to_monthly_violation(self):
+        # 年薪 120K → 月均 10K < floor 20 → violation
+        result = self._check("年薪120K", 20)
+        self.assertEqual(result["outcome"], "violation")
+
+    # --- 日薪 / 面议 / 缺失 / 不可解析 → unknown ----------------------
+
+    def test_daily_salary_is_unknown(self):
+        result = self._check("200/天", 20)
+        self.assertEqual(result["outcome"], "unknown")
+
+    def test_negotiable_salary_is_unknown(self):
+        result = self._check("面议", 20)
+        self.assertEqual(result["outcome"], "unknown")
+
+    def test_missing_salary_is_unknown(self):
+        result = self._check("", 20)
+        self.assertEqual(result["outcome"], "unknown")
+
+    def test_none_salary_is_unknown(self):
+        result = self._check(None, 20)
+        self.assertEqual(result["outcome"], "unknown")
+
+    def test_unparseable_salary_is_unknown(self):
+        result = self._check("有竞争力", 20)
+        self.assertEqual(result["outcome"], "unknown")
+
+    # --- 边界与守卫 ----------------------------------------------------
+
+    def test_single_value_k_above_floor_passes(self):
+        result = self._check("25K", 20)
+        self.assertEqual(result["outcome"], "pass")
+
+    def test_single_value_k_below_floor_violation(self):
+        result = self._check("15K", 20)
+        self.assertEqual(result["outcome"], "violation")
+
+    def test_above_suffix_uses_lower_bound(self):
+        # "20K以上" 下限即 20，可达 floor 20 → pass
+        result = self._check("20K以上", 20)
+        self.assertEqual(result["outcome"], "pass")
+
+    def test_non_user_confirmed_source_is_unknown(self):
+        # 非 user_confirmed 的 min_salary 不参与硬判定
+        from webui.screening import check_min_salary_v2
+        result = check_min_salary_v2(
+            "10-15K", {"amount": 20, "unit": "K", "source": "inferred"},
+        )
+        self.assertEqual(result["outcome"], "unknown")
+
+    def test_result_carries_tri_state_reason(self):
+        result = self._check("10-15K", 20)
+        self.assertIn("outcome", result)
+        self.assertIn("reason", result)
+        self.assertEqual(result["field"], "min_salary")
+
+
 if __name__ == "__main__":
     unittest.main()

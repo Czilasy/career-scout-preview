@@ -45,7 +45,9 @@ from webui.discovery import (
     analyze_resume as _discovery_analyze_resume,
     confirm_directions as _discovery_confirm_directions,
     compile_search_plan as _discovery_compile_plan,
+    compute_discovery_input_hash as _compute_discovery_input_hash,
     normalize_portfolio_assessment as _normalize_discovery_assessment,
+    project_recommendations as _project_recommendations,
 )
 from webui.discovery_runner import DiscoveryTaskRuntime as _DiscoveryTaskRuntime
 from webui.source import BossCdpSource as _BossCdpSource
@@ -993,12 +995,16 @@ def create_app(config=None):
             resume_service.validate_format(filename),
             app.config["RESUME_DIR"], store,
         )
+        discovery_flow = (
+            request.form.get("flow") == "discovery"
+            or request.args.get("flow") == "discovery"
+        )
         # AI parse occurs only after the user has seen and accepted the
         # pre-upload notice in the UI.  The raw text never leaves this scope.
         ai_suggestion = {}
         settings = store.get_ai_settings()
         consent = request.form.get("ai_consent") == "true"
-        if settings.get("is_configured") and consent:
+        if not discovery_flow and settings.get("is_configured") and consent:
             cred_ref = store.get_credential_ref()
             api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
             if api_key:
@@ -1017,13 +1023,16 @@ def create_app(config=None):
         merged = merge_profile_fields(
             profile.get("confirmed_fields") or {}, ai_suggestion,
         )
-        return jsonify({
+        response = jsonify({
             "resume_id": record["id"],
             "profile_id": profile_id,
+            "format": record.get("format"),
+            "extraction_status": "ready" if (record.get("extracted_text") or "").strip() else "empty",
             "ai_suggestion": ai_suggestion,
             "merged_fields": merged,
             "privacy_notice": "如勾选 AI 解析，简历文本会发送至你配置的 AI 服务；不会写入日志或接口响应。",
         })
+        return (response, 201) if discovery_flow else response
 
     @app.route("/api/profiles/<profile_id>/resumes")
     def profile_resume_list(profile_id):
@@ -2056,7 +2065,7 @@ def create_app(config=None):
         code = error.error_code
         if code == "not_found":
             return 404
-        if code == "state_conflict":
+        if code in {"state_conflict", "candidate_version_conflict"}:
             return 409
         return 400
 
@@ -2091,7 +2100,7 @@ def create_app(config=None):
         analysis = store.create_analysis(
             resume_id, profile_id,
             model_name=ai_settings.get("model", ""),
-            contract_version="v3",
+            contract_version=(raw.get("contract_version") or "v3"),
         )
         discovery_runtime = app.config["DISCOVERY_RUNTIME"]
         discovery_runtime.submit_analysis(analysis["id"], ai_consent=True)
@@ -2144,7 +2153,34 @@ def create_app(config=None):
                 for d in directions
             ],
             "failure": _analysis_failure(analysis),
+            "candidate_profile_version_id": analysis.get("candidate_profile_version_id"),
         }), 200
+
+    @app.route("/api/discovery/candidate-versions/<version_id>", methods=["GET", "PATCH"])
+    def discovery_candidate_version(version_id):
+        try:
+            if request.method == "GET":
+                return jsonify(store.get_candidate_profile_version(version_id)), 200
+            raw = request.get_json(silent=True) or {}
+            expected_hash = raw.get("expected_content_hash")
+            if not expected_hash:
+                raise _DiscoveryError("candidate_version_conflict")
+            try:
+                updated = store.update_candidate_profile_draft(
+                    version_id, expected_content_hash=expected_hash,
+                    operations=raw.get("operations", []),
+                    unknown_resolutions=raw.get("unknown_resolutions"),
+                )
+            except ValueError as exc:
+                code = str(exc)
+                if code == "candidate_version_conflict":
+                    raise _DiscoveryError("candidate_version_conflict") from None
+                if code == "candidate_version_not_draft":
+                    raise _DiscoveryError("state_conflict") from None
+                raise _DiscoveryError("candidate_fact_invalid") from None
+            return jsonify(updated), 200
+        except KeyError:
+            raise _DiscoveryError("not_found", user_message="候选人画像版本不存在。") from None
 
     @app.route("/api/discovery/analyses/<analysis_id>/retry", methods=["POST"])
     def discovery_retry_analysis(analysis_id):
@@ -2178,6 +2214,50 @@ def create_app(config=None):
         soft_preferences = raw.get("soft_preferences", {})
         safe_limits = raw.get("safe_limits", {})
         user_directions = raw.get("user_directions", [])
+        candidate_profile_version_id = raw.get("candidate_profile_version_id")
+        if candidate_profile_version_id:
+            analysis = store.get_analysis(analysis_id)
+            valid_direction_ids = {item["id"] for item in store.list_directions(analysis_id)}
+            if not enabled_direction_ids or any(
+                direction_id not in valid_direction_ids for direction_id in enabled_direction_ids
+            ):
+                raise _DiscoveryError("intent_invalid")
+            expected_hash = raw.get("expected_content_hash")
+            intent_hash = _compute_discovery_input_hash({
+                "candidate_profile_version_id": candidate_profile_version_id,
+                "profile_content_hash": expected_hash,
+                "enabled_direction_ids": sorted(enabled_direction_ids),
+                "hard_constraints": hard_constraints,
+                "soft_preferences": soft_preferences,
+                "safe_limits": safe_limits,
+            }, policy_version="discovery_v2")
+            try:
+                confirmation = store.create_confirmation_v2(
+                    candidate_profile_version_id=candidate_profile_version_id,
+                    expected_content_hash=expected_hash,
+                    hard_constraints=hard_constraints,
+                    soft_preferences=soft_preferences,
+                    safe_limits=safe_limits,
+                    directions=[{
+                        "direction_id": direction_id, "enabled": True,
+                        "user_added": False, "user_label": None,
+                    } for direction_id in enabled_direction_ids],
+                    intent_hash=intent_hash,
+                )
+            except ValueError as exc:
+                if str(exc) == "candidate_version_conflict":
+                    raise _DiscoveryError("candidate_version_conflict") from None
+                raise _DiscoveryError("state_conflict") from None
+            return jsonify({
+                "confirmation_id": confirmation["id"],
+                "analysis_id": confirmation["analysis_id"],
+                "candidate_profile_version_id": candidate_profile_version_id,
+                "intent_contract_version": "intent_v2",
+                "intent_hash": intent_hash,
+                "version": confirmation["version"],
+                "enabled_direction_ids": enabled_direction_ids,
+                "confirmed_at": confirmation["confirmed_at"],
+            }), 201
         confirmation = _discovery_confirm_directions(
             store, analysis_id, enabled_direction_ids,
             hard_constraints=hard_constraints,
@@ -2199,6 +2279,9 @@ def create_app(config=None):
         confirmation_id = raw.get("confirmation_id")
         if not confirmation_id:
             raise ValueError("confirmation_id 不能为空")
+        policy_version = raw.get("policy_version", "discovery_v1")
+        if policy_version not in ("discovery_v1", "discovery_v2"):
+            raise _DiscoveryError("state_conflict", user_message="不支持的 policy_version。")
         try:
             confirmation = store.get_confirmation(confirmation_id)
         except KeyError:
@@ -2226,6 +2309,7 @@ def create_app(config=None):
             analysis_id=confirmation["analysis_id"],
             confirmation_id=confirmation_id,
             input_hash=plan["input_hash"],
+            policy_version=policy_version,
         )
         # T101/T133: 不在路由预创建 search_plan_items。
         # 1. 旧实现给所有 items 设置同一个 plan 级 input_hash，违反
@@ -2245,6 +2329,47 @@ def create_app(config=None):
         except KeyError:
             raise _DiscoveryError("not_found", user_message="运行不存在。")
         return jsonify(_run_summary(run, store)), 200
+
+    @app.route("/api/discovery/runs/<run_id>/candidates")
+    def discovery_run_candidates(run_id):
+        """T048: Candidate diagnostic endpoint (http-api.md).
+
+        Returns safe list fields, precheck, selection rank/reason and work
+        state.  Never returns resume text or raw prompt.
+        """
+        try:
+            store.get_discovery_run(run_id)
+        except KeyError:
+            raise _DiscoveryError("not_found", user_message="运行不存在。")
+        decision = request.args.get("decision")
+        state = request.args.get("state")
+        direction_id = request.args.get("direction_id")
+        limit = min(100, max(1, request.args.get("limit", 100, type=int) or 100))
+        candidates = store.list_run_candidates(
+            run_id,
+            state=state,
+            selection_decision=decision,
+        )
+        if direction_id:
+            candidates = [
+                c for c in candidates
+                if direction_id in (c.get("direction_ids") or [])
+            ]
+        items = []
+        for c in candidates[:limit]:
+            items.append({
+                "candidate_id": c["id"],
+                "job_id": c["job_id"],
+                "source_url": c.get("source_url", ""),
+                "state": c.get("state", "discovered"),
+                "selection_decision": c.get("selection_decision", "pending"),
+                "selection_rank": c.get("selection_rank"),
+                "selection_reason": c.get("selection_reason"),
+                "precheck_outcome": c.get("precheck_outcome"),
+                "direction_ids": c.get("direction_ids") or [],
+                "list_fields": c.get("list_fields") or {},
+            })
+        return jsonify({"items": items, "next": None}), 200
 
     @app.route("/api/discovery/runs/<run_id>/cancel", methods=["POST"])
     def discovery_cancel_run(run_id):
@@ -2272,6 +2397,15 @@ def create_app(config=None):
         resumable = {"interrupted", "partial"}
         if run["status"] not in resumable:
             raise _DiscoveryError("state_conflict", user_message=f"运行状态 {run['status']} 不可恢复。")
+        # T083: Synchronous hash drift check (http-api.md L319).
+        # Reject profile/confirmation/policy/input hash drift with 409 before
+        # re-submitting work, so clients can immediately detect drift instead
+        # of waiting for the background thread to fail asynchronously.
+        from webui.discovery_runner import check_v2_resume_hash_drift
+        try:
+            check_v2_resume_hash_drift(store, run)
+        except _DiscoveryError:
+            raise
         # T101: 真实重新提交未完成工作，不得仅修改显示状态。
         discovery_runtime = app.config["DISCOVERY_RUNTIME"]
         discovery_runtime.resume_run(run_id)
@@ -2286,32 +2420,110 @@ def create_app(config=None):
         category = request.args.get("category")
         direction_id = request.args.get("direction_id")
         limit = min(100, max(1, request.args.get("limit", 20, type=int) or 20))
-        # T047: Build JobResult objects per openapi.yaml contract.
-        # Each job (snapshot) becomes one JobResult with primary_assessment + assessments.
+        after_revision = request.args.get("after_revision", type=int)
+        policy_version = run.get("policy_version", "discovery_v1")
+        server_revision = int(run.get("result_revision") or 0)
+        # T048: v2 after_revision short-circuit — if client is up-to-date,
+        # return changed=false with empty items (http-api.md).
+        if policy_version == "discovery_v2" and after_revision is not None:
+            if after_revision >= server_revision:
+                return jsonify({
+                    "run_id": run_id,
+                    "run_status": run["status"],
+                    "revision": server_revision,
+                    "changed": False,
+                    "complete": run["status"] in ("succeeded", "partial", "failed", "cancelled"),
+                    "items": [],
+                    "counts": {},
+                    "next": None,
+                }), 200
+
         snapshots = store.list_snapshots(run_id) if hasattr(store, "list_snapshots") else []
         assessments = store.list_assessments(run_id) if hasattr(store, "list_assessments") else []
-        # Look up direction names for AssessmentSummary
         directions_by_id = {}
         try:
             dirs = store.list_directions(run.get("analysis_id", ""))
             directions_by_id = {d["id"]: d for d in dirs}
         except Exception:
             pass
-        # Group assessments by snapshot_id
+
+        # T064: v2 runs use the canonical recommendation projector.
+        if policy_version == "discovery_v2":
+            # Normalize assessments: attach snapshot_completeness from snapshot.
+            snap_by_id = {s["id"]: s for s in snapshots}
+            normalized_assessments = []
+            for a in assessments:
+                snap = snap_by_id.get(a.get("snapshot_id", ""), {})
+                normalized_assessments.append({
+                    **a,
+                    "job_id": snap.get("job_id", a.get("job_id", "")),
+                    "snapshot_completeness": snap.get("completeness", "unavailable"),
+                })
+            # Build snapshot dicts for the projector.
+            snap_dicts = [
+                {
+                    "id": s["id"],
+                    "job_id": s.get("job_id", ""),
+                    "fields": {
+                        "title": s.get("title", ""),
+                        "company": s.get("company", ""),
+                        "salary": s.get("salary", ""),
+                        "location": s.get("location", ""),
+                        "jd": s.get("jd", ""),
+                        "tags": s.get("tags") or [],
+                    },
+                    "source_url": normalize_job_link(s.get("source_url", "")),
+                    "source_status": s.get("source_status", "unknown"),
+                    "fetched_at": s.get("fetched_at", ""),
+                    "completeness": s.get("completeness", "unavailable"),
+                    "reused": bool(s.get("reused")),
+                }
+                for s in snapshots
+            ]
+            # Only include snapshots with valid BOSS HTTPS links (FR-042).
+            snap_dicts = [s for s in snap_dicts if s["source_url"]]
+            direction_list = list(directions_by_id.values())
+            items = _project_recommendations(
+                run_id, snap_dicts, normalized_assessments, direction_list,
+                direction_filter=direction_id,
+                category_filter=category,
+            )
+            # Enrich assessments with direction_name.
+            for item in items:
+                for a in item.get("assessments", []):
+                    did = a.get("direction_id", "")
+                    a["direction_name"] = (directions_by_id.get(did) or {}).get("name", "")
+                pa = item.get("primary_assessment", {})
+                pa["direction_name"] = (
+                    directions_by_id.get(pa.get("direction_id", ""), {}).get("name", "")
+                )
+            counts: dict[str, int] = {}
+            for item in items:
+                cat = item.get("category", "needs_review")
+                counts[cat] = counts.get(cat, 0) + 1
+            items = items[:limit]
+            return jsonify({
+                "run_id": run_id,
+                "run_status": run["status"],
+                "revision": server_revision,
+                "changed": True,
+                "complete": run["status"] in ("succeeded", "partial", "failed", "cancelled"),
+                "items": items,
+                "counts": counts,
+                "next": None,
+            }), 200
+
+        # v1 fallback: legacy per-snapshot assembly.
         assessments_by_snapshot: dict[str, list[dict]] = {}
         for a in assessments:
             sid = a.get("snapshot_id", "")
             assessments_by_snapshot.setdefault(sid, []).append(a)
-        # Build JobResult per snapshot
         category_priority = {"high_match": 0, "adjacent_match": 1, "growth_match": 2,
                              "needs_review": 3, "not_suitable": 4}
         items = []
         for snap in snapshots:
             source_url = normalize_job_link(snap.get("source_url", ""))
             if not source_url:
-                # FR-042: diagnostics may retain an incomplete snapshot, but
-                # only a validated, user-accessible BOSS HTTPS detail link is
-                # eligible for the formal result collection.
                 continue
             snap_id = snap["id"]
             snap_assessments = [
@@ -2323,21 +2535,17 @@ def create_app(config=None):
             ]
             if not snap_assessments:
                 continue
-            # Filter by direction_id if specified
             if direction_id:
                 snap_assessments = [a for a in snap_assessments if a.get("direction_id") == direction_id]
                 if not snap_assessments:
                     continue
-            # Select primary_assessment by best category (lowest priority number)
             primary_idx = min(range(len(snap_assessments)),
                               key=lambda i: category_priority.get(
                                   snap_assessments[i].get("category", "needs_review"), 99))
             primary = snap_assessments[primary_idx]
             primary_category = primary.get("category", "needs_review")
-            # Filter by category if specified (on primary_assessment category)
             if category and primary_category != category:
                 continue
-            # Build AssessmentSummary list
             def _to_summary(a):
                 did = a.get("direction_id", "")
                 return {
@@ -2365,8 +2573,7 @@ def create_app(config=None):
                 "primary_assessment": assessment_summaries[primary_idx],
                 "assessments": assessment_summaries,
             })
-        # Counts by primary_assessment category
-        counts: dict[str, int] = {}
+        counts = {}
         for item in items:
             cat = item["primary_assessment"]["category"]
             counts[cat] = counts.get(cat, 0) + 1
@@ -2489,6 +2696,8 @@ def create_app(config=None):
             "stage": analysis.get("stage", "queued"),
             "quality_status": analysis.get("quality_status", "complete"),
             "quality_warnings": analysis.get("quality_warnings", []),
+            "contract_version": analysis.get("contract_version", "v3"),
+            "candidate_profile_version_id": analysis.get("candidate_profile_version_id"),
         }
 
     def _analysis_failure(analysis):
@@ -2514,16 +2723,45 @@ def create_app(config=None):
                 "code": run["failure_code"],
                 "stage": run.get("failure_stage", ""),
             }
-        return {
+        policy_version = run.get("policy_version", "discovery_v1")
+        # T083: v2 authoritative progress names (http-api.md L203-208).
+        # v1 aliases (source_count/detail_count/evaluated_count) kept as
+        # compatibility aliases; v2 names are authoritative.
+        source_count = int(run.get("source_count", 0))
+        detail_count = int(run.get("detail_count", 0))
+        evaluated_count = int(run.get("evaluated_count", 0))
+        # recommendations = high_match + adjacent_match + growth_match
+        # (categorized recommendation count, not the raw recommendation_count
+        # column which is never written by the runner).
+        recommendations = (
+            int(run.get("high_count", 0))
+            + int(run.get("adjacent_count", 0))
+            + int(run.get("growth_count", 0))
+        )
+        progress = {
+            "source_count": source_count,
+            "detail_count": detail_count,
+            "evaluated_count": evaluated_count,
+            # v2 authoritative names (http-api.md L203-208)
+            "search_queries_completed": source_count,
+            "list_candidates": int(run.get("list_candidate_count") or 0),
+            "details_selected": int(run.get("detail_selected_count") or 0),
+            "details_completed": int(run.get("detail_completed_count") or 0),
+            "assessments_completed": int(run.get("assessment_completed_count") or 0),
+            "recommendations": recommendations,
+        }
+        # T083: complete flag distinguishes terminal (true) from recoverable
+        # (false). Terminal statuses: succeeded/failed/cancelled/partial.
+        # interrupted and active statuses are not complete.
+        status = run["status"]
+        complete = status in {"succeeded", "failed", "cancelled", "partial"}
+        summary = {
             "run_id": run["id"],
             "confirmation_id": run.get("confirmation_id", ""),
-            "status": run["status"],
-            "stage": run.get("stage", run["status"]),
-            "progress": {
-                "source_count": int(run.get("source_count", 0)),
-                "detail_count": int(run.get("detail_count", 0)),
-                "evaluated_count": int(run.get("evaluated_count", 0)),
-            },
+            "policy_version": policy_version,
+            "status": status,
+            "stage": run.get("stage", status),
+            "progress": progress,
             "counts": {
                 "high": int(run.get("high_count", 0)),
                 "adjacent": int(run.get("adjacent_count", 0)),
@@ -2533,7 +2771,16 @@ def create_app(config=None):
             },
             "failure": failure,
             "updated_at": run.get("updated_at", run.get("created_at", "")),
+            "complete": complete,
         }
+        # T083: cancel_requested_at present only when cancel has been requested
+        # (http-api.md L318). Avoids null fields in non-cancelled runs.
+        cancel_requested_at = run.get("cancel_requested_at")
+        if cancel_requested_at:
+            summary["cancel_requested_at"] = cancel_requested_at
+        if policy_version == "discovery_v2":
+            summary["result_revision"] = int(run.get("result_revision") or 0)
+        return summary
 
     def _build_ai_provider(store):
         """Construct a DiscoveryAIProvider from current AI settings.

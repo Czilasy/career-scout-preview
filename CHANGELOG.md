@@ -2,6 +2,20 @@
 
 ## 未发布
 
+### 新增 — 岗位发现 v2 收口（feature 005）
+- 独立 `discovery_v2` policy：005 新运行使用 `discovery_v2`，004 历史运行继续使用 `policy v1`；迁移 015 additive（只新增列与表，不重写 001–014），老库可直接升级。
+- 四类进度计数：`search_queries_completed` / `list_candidates` / `details_selected` / `details_completed` / `assessments_completed` / `recommendations`；工作单元完成后 ≤10 模拟秒可见，刷新保留计数（SC-004）。
+- 渐进结果：3 秒轮询，revision-based 不重绘；非终态结果可见；卡片稳定身份；消失原因可解释。
+- 取消/恢复：cancel ≤30 wall-clock 秒进入 `cancelled` 终态，已完成 snapshots/assessments/candidates 100% 保留（SC-010）；输入身份一致的 resume 0 重复 detail 抓取、0 重复 AI 调用（SC-011）。
+- 12h 详情复用：同一 job 在 12h 内的运行命中复用，不重复抓；freshness/identity 守卫防止误用陈旧快照。
+- 来源断路器：连续失败超阈值时 `source_rate_limited` / `source_verification_required`，阻止后续抓取并保留已完成结果。
+- 分级反馈：`exact_job` / `exact_direction` / `exact_assessment` 三类作用域；可撤销；仅影响后续运行或当前可见性，不改写历史 profile/confirmation/assessment 事实（FR-050/FR-051）。
+- 确定性性能合同：`DiscoveryPerformanceMetrics` + `FakeMonotonicClock` 注入式时钟；SC-003 编排门（15 详情 + 所需评估 ≤600 模拟秒）、SC-004/010/011 自动化门全部通过。
+- 候选人分析升级到 v4：后端拥有 typed-empty shape、quarantine 无效 evidence、unverified 搜索字段永不成为 confirmed 约束。
+- 岗位评估升级到 v2：固定四维度结构化合同、单方向降级、评估分组、证据范围绑定。
+- 三态薪资硬规则（月薪 K 数值下限）：unknown 不参与硬规则，confirmed 必须满足，inferred 不参与硬规则。
+- 黄金样本评估：`tests/fixtures/discovery/evaluate.py` 验证 SC-003–SC-009 标注一致性（不调真实 AI）。
+
 ### 新增
 - 城市码表外置为 `data/city_codes.json`（全量 300+ 城市，覆盖一二三四五线），新增 `--list-cities [关键词]` 命令查看支持的城市；`resolve_city` 查询链改为「本地静态码表 → 运行时拉 BOSS 接口 → 原样兜底」。城市码表打进 wheel，`pip install` 用户也可用。（#24）
 

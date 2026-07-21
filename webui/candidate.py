@@ -9,6 +9,7 @@ persisted or returned to the browser.
 from __future__ import annotations
 
 import re
+import json
 from typing import Iterable
 import copy
 import unicodedata
@@ -279,6 +280,221 @@ def normalize_candidate_analysis(data, resume_text):
     else:
         out["quality"]["status"] = "manual_required" if not executable else ("partial" if warnings else "complete")
     return out
+
+
+# ---------------------------------------------------------------------------
+# Feature 005: candidate-analysis v4 typed fact contract
+# ---------------------------------------------------------------------------
+
+CANDIDATE_ANALYSIS_V4_VERSION = "v4"
+MAX_CANDIDATE_FACTS = 100
+FACT_TYPES = (
+    "work", "project", "skill", "industry", "education", "achievement", "seniority",
+)
+_FACT_VALUE_FIELDS = {
+    "work": {"employer", "title", "start_date", "end_date", "current", "responsibilities", "achievements", "industry"},
+    "project": {"name", "role", "start_date", "end_date", "responsibilities", "technologies", "outcomes"},
+    "skill": {"name", "usage_years", "last_used", "level", "contexts"},
+    "industry": {"name", "duration_years", "contexts"},
+    "education": {"school", "degree", "major", "start_date", "end_date"},
+    "achievement": {"statement", "metric", "context"},
+    "seniority": {"level", "management_scope", "years"},
+}
+
+
+def _safe_fact_value(fact_type: str, value, *, path: str, warnings: list[dict]):
+    if not isinstance(value, dict):
+        _warn(warnings, "invalid_type", path)
+        return None
+    allowed = _FACT_VALUE_FIELDS[fact_type]
+    result = {}
+    for key, item in value.items():
+        if key not in allowed:
+            _warn(warnings, "unverified_field", f"{path}.extra")
+            continue
+        if item is None or isinstance(item, bool):
+            result[key] = item
+        elif isinstance(item, (int, float)) and not isinstance(item, bool):
+            if item < 0 or item > 1000:
+                _warn(warnings, "invalid_type", f"{path}.{key}")
+                continue
+            result[key] = item
+        elif isinstance(item, str):
+            if len(item) > 500 or _is_sensitive(item):
+                _warn(warnings, "sensitive_value" if _is_sensitive(item) else "invalid_type", f"{path}.{key}")
+                continue
+            result[key] = item
+        elif isinstance(item, list):
+            if len(item) > 20 or any(
+                not isinstance(entry, str) or len(entry) > 500 or _is_sensitive(entry)
+                for entry in item
+            ):
+                _warn(warnings, "invalid_type", f"{path}.{key}")
+                continue
+            result[key] = list(item)
+        else:
+            _warn(warnings, "invalid_type", f"{path}.{key}")
+    if _is_sensitive(json.dumps(result, ensure_ascii=False, sort_keys=True)):
+        _warn(warnings, "sensitive_value", path)
+        return None
+    return result
+
+
+def normalize_candidate_analysis_v4(data, resume_text):
+    """Normalize v4 facts and refs while deriving every backend-owned field."""
+    if not isinstance(data, dict):
+        result = build_empty_candidate_analysis()
+        result.update({"contract_version": CANDIDATE_ANALYSIS_V4_VERSION, "facts": []})
+        result["quality"] = {
+            "status": "manual_required",
+            "warnings": [_v3_warning("invalid_type", "root")],
+        }
+        return result
+
+    base_input = copy.deepcopy(data)
+    raw_facts = base_input.pop("facts", None)
+    base_input["contract_version"] = CANDIDATE_ANALYSIS_V3_CONTRACT["version"]
+    if "quality" in base_input:
+        base_input.pop("quality", None)
+    raw_directions = data.get("directions", []) if isinstance(data.get("directions"), list) else []
+    if isinstance(base_input.get("directions"), list):
+        for direction in base_input["directions"]:
+            if isinstance(direction, dict):
+                direction.pop("fact_refs", None)
+
+    base = normalize_candidate_analysis(base_input, resume_text)
+    warnings = list(base.get("quality", {}).get("warnings", []))
+    if data.get("contract_version") != CANDIDATE_ANALYSIS_V4_VERSION:
+        _warn(warnings, "invalid_enum", "contract_version")
+    if "quality" in data:
+        _warn(warnings, "unverified_field", "quality")
+
+    evidence_refs = {
+        item.get("client_ref")
+        for item in base.get("evidence", [])
+        if item.get("client_ref")
+    }
+    facts = []
+    accepted_fact_refs = set()
+    if not isinstance(raw_facts, list):
+        _warn(warnings, "missing_required" if raw_facts is None else "invalid_type", "facts")
+        raw_facts = []
+    if len(raw_facts) > MAX_CANDIDATE_FACTS:
+        _warn(warnings, "invalid_type", "facts")
+    allowed_fact_keys = {
+        "client_ref", "fact_type", "value", "normalized_value", "evidence_refs",
+        "assertion_type", "confidence",
+    }
+    for index, item in enumerate(raw_facts[:MAX_CANDIDATE_FACTS]):
+        path = f"facts[{index}]"
+        if not isinstance(item, dict):
+            _warn(warnings, "invalid_type", path)
+            continue
+        if any(key not in allowed_fact_keys for key in item):
+            _warn(warnings, "unverified_field", f"{path}.extra")
+        client_ref = item.get("client_ref")
+        fact_type = item.get("fact_type")
+        normalized = item.get("normalized_value", "")
+        refs = item.get("evidence_refs")
+        assertion = item.get("assertion_type")
+        confidence = item.get("confidence")
+        if (
+            not isinstance(client_ref, str)
+            or not client_ref
+            or len(client_ref) > 128
+            or client_ref in accepted_fact_refs
+        ):
+            _warn(warnings, "reference_invalid", f"{path}.client_ref")
+            continue
+        if fact_type not in FACT_TYPES:
+            _warn(warnings, "invalid_enum", f"{path}.fact_type")
+            continue
+        if not isinstance(normalized, str) or len(normalized) > 500:
+            _warn(warnings, "invalid_type", f"{path}.normalized_value")
+            continue
+        if _is_sensitive(normalized):
+            _warn(warnings, "sensitive_value", f"{path}.normalized_value")
+            continue
+        if (
+            not isinstance(refs, list)
+            or not refs
+            or any(not isinstance(ref, str) or ref not in evidence_refs for ref in refs)
+        ):
+            _warn(warnings, "reference_invalid", f"{path}.evidence_refs")
+            continue
+        if assertion not in ASSERTION_TYPES:
+            _warn(warnings, "invalid_enum", f"{path}.assertion_type")
+            continue
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, int)
+            or not 0 <= confidence <= 100
+        ):
+            _warn(warnings, "invalid_type", f"{path}.confidence")
+            continue
+        value = _safe_fact_value(
+            fact_type, item.get("value"), path=f"{path}.value", warnings=warnings,
+        )
+        if value is None:
+            continue
+        accepted_fact_refs.add(client_ref)
+        facts.append({
+            "client_ref": client_ref,
+            "fact_type": fact_type,
+            "stable_key": f"{fact_type}:{client_ref}",
+            "value": value,
+            "normalized_value": normalized,
+            "evidence_refs": list(dict.fromkeys(refs)),
+            "source_kind": "resume_explicit" if assertion == "explicit" else "resume_inferred",
+            "assertion_type": assertion,
+            "confidence": confidence,
+            "verification_status": "extracted",
+        })
+
+    raw_direction_by_ref = {
+        item.get("client_ref"): item
+        for item in raw_directions
+        if isinstance(item, dict) and isinstance(item.get("client_ref"), str)
+    }
+    directions = []
+    for direction in base.get("directions", []):
+        output = dict(direction)
+        raw = raw_direction_by_ref.get(direction.get("client_ref"), {})
+        requested_fact_refs = raw.get("fact_refs", [])
+        if not isinstance(requested_fact_refs, list):
+            requested_fact_refs = []
+            _warn(warnings, "invalid_type", "directions.fact_refs")
+        valid_fact_refs = [
+            ref for ref in requested_fact_refs
+            if isinstance(ref, str) and ref in accepted_fact_refs
+        ]
+        if len(valid_fact_refs) != len(requested_fact_refs):
+            _warn(warnings, "reference_invalid", "directions.fact_refs")
+        output["fact_refs"] = list(dict.fromkeys(valid_fact_refs))
+        output["default_enabled"] = bool(
+            output.get("default_enabled")
+            and output["fact_refs"]
+            and output.get("evidence_refs")
+            and output.get("search_terms")
+        )
+        directions.append(output)
+
+    if not facts:
+        _warn(warnings, "missing_required", "facts")
+    if not any(direction.get("default_enabled") for direction in directions):
+        _warn(warnings, "missing_required", "directions")
+    status = "complete" if not warnings else (
+        "partial" if facts and directions else "manual_required"
+    )
+    return {
+        "contract_version": CANDIDATE_ANALYSIS_V4_VERSION,
+        "summary": base.get("summary", {}),
+        "evidence": base.get("evidence", []),
+        "facts": facts,
+        "unknowns": base.get("unknowns", []),
+        "directions": directions,
+        "quality": {"status": status, "warnings": warnings},
+    }
 
 
 def _is_sensitive(text: str) -> bool:

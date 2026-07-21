@@ -192,6 +192,51 @@ The AI is only responsible for reading the résumé to suggest filter values (an
 - Dependencies: reuses 001's existing dependencies; no new third-party libraries.
 - Automated tests: `python -m unittest discover -s tests -v`
 
+### Fast Resume-Driven Discovery Closure (005)
+
+Deterministic closure layered on the 004 workbench: an independent `discovery_v2` policy, four-class progress, progressive results, cancel/resume, 12-hour detail reuse, a source circuit breaker and scoped feedback confine "fast resume-driven job recommendation" within verifiable performance and security boundaries. 004 historical runs keep `policy v1`; new 005 runs use `discovery_v2`; migration 015 is additive and never rewrites 001–014.
+
+#### Default user flow
+
+1. **Upload résumé** → 2. **AI analysis (candidate v4) + direction confirmation** → 3. **Run progress (four-class counters + cancel/resume)** → 4. **Progressive results (3-second polling, revision-based no-redraw)** → 5. **Job/direction/judgment-error feedback (declared scope + revocable)**. The root path `/` is the only official frontend entry, covering upload → correction → confirmation → first batch → cancel/resume → feedback end-to-end.
+
+#### Performance and security boundaries (automated gates SC-001–SC-011)
+
+| Gate | Boundary | Automated verification |
+|---|---|---|
+| SC-003 | 15 details + required assessments ≤ 600 simulated seconds | `tests/test_discovery_performance.py::Sc003DeterministicOrchestrationGateTests` |
+| SC-004 | Progress visible within 10 simulated seconds of work-unit completion; refresh preserves counts | `tests/test_discovery_performance.py::Sc004Sc010Sc011PerformanceGateTests` |
+| SC-010 | After cancel, reaches `cancelled` terminal state within 30 wall-clock seconds; completed snapshots/assessments/candidates preserved 100% | same as above |
+| SC-011 | Resume with identical input identity does not re-fetch details or re-invoke AI | same as above |
+| Default detail concurrency | Stays at 1 (policy ceiling 2 only after real small-sample stability evidence) | `webui/source.py` default |
+| 12-hour detail reuse | Same job reused within 12h across runs, not re-fetched | `webui/store.py` reuse guard |
+| Source circuit breaker | Trips to `source_rate_limited`/`source_verification_required` after consecutive failures, blocks further fetches | `webui/source.py` breaker |
+| Feedback scope | `exact_job` / `exact_direction` / `exact_assessment`; revocable; affects only subsequent runs or current visibility, never rewrites history | `webui/store.py` + `webui/discovery.py::apply_feedback_to_next_run` |
+
+#### Run commands and compatibility notes
+
+```bash
+# Launch the dedicated BOSS Chrome (first time)
+python3 scripts/boss_cdp_raw.py --setup-chrome
+
+# Launch the web workbench
+python3 webui/app.py
+# Open http://127.0.0.1:5000 in the browser
+
+# Automated tests (no real Chrome/network, fully mocked)
+python3 -m unittest discover -s tests -v
+
+# Golden-sample evaluation (SC-003–SC-009 annotation consistency, no real AI)
+python3 tests/fixtures/discovery/evaluate.py
+```
+
+Compatibility notes:
+
+- 004 historical runs keep `policy v1`; new 005 runs use `discovery_v2`; both policies coexist, neither rewrites the other's history.
+- Migration 015 is additive: only new columns and tables, never rewrites 001–014; existing databases can upgrade in place.
+- Default detail concurrency is 1; the policy ceiling of 2 is only enabled after real small-sample stability evidence (out of scope for feature 005).
+- Feedback affects only the declared scope and subsequent runs; historical profile/confirmation/assessment facts are never rewritten.
+
 ## ✨ Features
 
 - Plaintext salary (API mode, bypasses font-based obfuscation)

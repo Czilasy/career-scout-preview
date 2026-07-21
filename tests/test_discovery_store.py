@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from webui.store import TaskStore
 
@@ -80,8 +81,8 @@ class _StoreTestCase(unittest.TestCase):
 
 
 class Migration011Tests(_StoreTestCase):
-    def test_schema_version_upgraded_to_14(self):
-        self.assertEqual(self._schema_version(), 14)
+    def test_schema_version_upgraded_to_15(self):
+        self.assertEqual(self._schema_version(), 15)
 
     def test_candidate_analyses_table_structure(self):
         self.assertTrue(self._table_exists("candidate_analyses"))
@@ -124,7 +125,7 @@ class Migration011Tests(_StoreTestCase):
     def test_idempotent_reopen(self):
         TaskStore(self._tmp.name)
         TaskStore(self._tmp.name)
-        self.assertEqual(self._schema_version(), 14)
+        self.assertEqual(self._schema_version(), 15)
 
     def test_connections_use_wal_and_busy_timeout(self):
         with self.store._connection() as conn:
@@ -311,6 +312,347 @@ class Migration013Tests(_StoreTestCase):
         }
         self.assertTrue(required.issubset(cols))
 
+
+# ---------------------------------------------------------------------------
+# T008-T010: Migration 015
+# ---------------------------------------------------------------------------
+
+
+class Migration015Tests(_StoreTestCase):
+    def test_schema_14_upgrades_additively_and_preserves_v1_rows(self):
+        legacy_path = self._tmp.name + ".v14"
+        try:
+            # Build a real schema-14 database by suppressing only migration 015.
+            # ``create=True`` keeps this RED test runnable before the method exists.
+            with mock.patch.object(TaskStore, "_migration_015", lambda _self: None, create=True):
+                legacy = TaskStore(legacy_path)
+            self.assertEqual(legacy.schema_version(), 14)
+
+            run = _make_confirmed_run(legacy, input_hash="legacy-input-hash")
+            with legacy._connection() as conn:
+                conn.execute(
+                    "UPDATE discovery_runs SET status='succeeded', stage='succeeded', "
+                    "source_count=3, detail_count=1, evaluated_count=1 WHERE id=?",
+                    (run["id"],),
+                )
+            _insert_job(legacy, "legacy-job")
+            snapshot = legacy.save_job_snapshot(
+                run_id=run["id"], job_id="legacy-job", source_url="https://x",
+                title="旧岗位", company="旧公司", salary="20-30K", location="北京",
+                tags="Python", jd="legacy jd", company_json={"stage": "A"},
+                completeness="complete", missing_fields=[], source_status="active",
+                content_hash="legacy-content", fetch_status="completed",
+            )
+            with legacy._connection() as conn:
+                direction_id = conn.execute(
+                    "SELECT direction_id FROM confirmation_directions "
+                    "WHERE confirmation_id=?",
+                    (run["confirmation_id"],),
+                ).fetchone()["direction_id"]
+            assessment = legacy.create_assessment(
+                run["id"], snapshot["id"], direction_id,
+                hard_outcome="pass", match_score=88, confidence=81,
+                category="high_match", policy_version="v1", contract_version="v1",
+                status="completed",
+            )
+
+            with legacy._connection() as conn:
+                before = {
+                    "confirmations": conn.execute("SELECT COUNT(*) FROM direction_confirmations").fetchone()[0],
+                    "runs": conn.execute("SELECT COUNT(*) FROM discovery_runs").fetchone()[0],
+                    "snapshots": conn.execute("SELECT COUNT(*) FROM discovery_job_snapshots").fetchone()[0],
+                    "assessments": conn.execute("SELECT COUNT(*) FROM job_direction_assessments").fetchone()[0],
+                    "run": tuple(conn.execute(
+                        "SELECT policy_version, input_hash, source_count, detail_count, evaluated_count "
+                        "FROM discovery_runs WHERE id=?", (run["id"],),
+                    ).fetchone()),
+                    "snapshot": tuple(conn.execute(
+                        "SELECT title, company, content_hash FROM discovery_job_snapshots WHERE id=?",
+                        (snapshot["id"],),
+                    ).fetchone()),
+                }
+
+            upgraded = TaskStore(legacy_path)
+            self.assertEqual(upgraded.schema_version(), 15)
+            with upgraded._connection() as conn:
+                after = {
+                    "confirmations": conn.execute("SELECT COUNT(*) FROM direction_confirmations").fetchone()[0],
+                    "runs": conn.execute("SELECT COUNT(*) FROM discovery_runs").fetchone()[0],
+                    "snapshots": conn.execute("SELECT COUNT(*) FROM discovery_job_snapshots").fetchone()[0],
+                    "assessments": conn.execute("SELECT COUNT(*) FROM job_direction_assessments").fetchone()[0],
+                    "run": tuple(conn.execute(
+                        "SELECT policy_version, input_hash, source_count, detail_count, evaluated_count "
+                        "FROM discovery_runs WHERE id=?", (run["id"],),
+                    ).fetchone()),
+                    "snapshot": tuple(conn.execute(
+                        "SELECT title, company, content_hash FROM discovery_job_snapshots WHERE id=?",
+                        (snapshot["id"],),
+                    ).fetchone()),
+                }
+                legacy_v1_fields = conn.execute(
+                    "SELECT candidate_profile_version_id, list_candidate_count, "
+                    "detail_selected_count, detail_completed_count, assessment_completed_count, "
+                    "recommendation_count, detail_reused_count, ai_call_count, result_revision, "
+                    "first_result_at, first_batch_at, list_completed_at, processing_completed_at "
+                    "FROM discovery_runs WHERE id=?",
+                    (run["id"],),
+                ).fetchone()
+                legacy_confirmation_fields = conn.execute(
+                    "SELECT candidate_profile_version_id, intent_contract_version, intent_hash "
+                    "FROM direction_confirmations WHERE id=?",
+                    (run["confirmation_id"],),
+                ).fetchone()
+                legacy_snapshot_fields = conn.execute(
+                    "SELECT run_candidate_id, reused_from_snapshot_id, fresh_until, "
+                    "fetch_duration_ms, wait_duration_ms, fetch_policy_version "
+                    "FROM discovery_job_snapshots WHERE id=?",
+                    (snapshot["id"],),
+                ).fetchone()
+                legacy_assessment_fields = conn.execute(
+                    "SELECT evaluation_group_id, input_hash, evaluation_duration_ms, "
+                    "ai_call_count, result_revision FROM job_direction_assessments WHERE id=?",
+                    (assessment["id"],),
+                ).fetchone()
+            self.assertEqual(after, before)
+            for row in (
+                legacy_v1_fields,
+                legacy_confirmation_fields,
+                legacy_snapshot_fields,
+                legacy_assessment_fields,
+            ):
+                self.assertTrue(all(value is None for value in row))
+        finally:
+            if os.path.exists(legacy_path):
+                os.unlink(legacy_path)
+
+    def test_migration_015_reopen_is_idempotent(self):
+        TaskStore(self._tmp.name)
+        TaskStore(self._tmp.name)
+        with self.store._connection() as conn:
+            applied = conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=15"
+            ).fetchone()[0]
+        self.assertEqual(self._schema_version(), 15)
+        self.assertEqual(applied, 1)
+
+    def test_candidate_profile_tables_have_required_columns(self):
+        expected = {
+            "candidate_profile_versions": {
+                "id", "profile_id", "resume_id", "analysis_id", "version", "status",
+                "summary_json", "unknowns_json", "contract_version", "content_hash",
+                "created_at", "updated_at", "confirmed_at", "supersedes_version_id",
+            },
+            "candidate_fact_items": {
+                "id", "profile_version_id", "fact_type", "stable_key", "value_json",
+                "normalized_value", "source_kind", "assertion_type", "confidence",
+                "verification_status", "supersedes_fact_id", "created_at", "updated_at",
+            },
+            "candidate_fact_evidence": {"fact_id", "evidence_id", "role"},
+        }
+        for table, required in expected.items():
+            self.assertTrue(self._table_exists(table), table)
+            columns = set(self._table_columns(table))
+            self.assertTrue(required.issubset(columns), f"{table} missing {required - columns}")
+
+    def test_candidate_profile_version_foreign_keys_unique_status_and_immutability(self):
+        pid, rid = _make_profile_and_resume(self.store)
+        analysis = self.store.create_analysis(rid, pid)
+        values = (pid, rid, analysis["id"], "2026-01-01T00:00:00Z")
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO candidate_profile_versions "
+                "(id, profile_id, resume_id, analysis_id, version, status, summary_json, "
+                "unknowns_json, contract_version, content_hash, created_at, updated_at) "
+                "VALUES ('cpv-1', ?, ?, ?, 1, 'draft', '{}', '[]', "
+                "'candidate_profile_v1', 'hash-1', ?, ?)",
+                values + (values[-1],),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO candidate_profile_versions "
+                    "(id, profile_id, resume_id, analysis_id, version, status, summary_json, "
+                    "unknowns_json, contract_version, content_hash, created_at, updated_at) "
+                    "VALUES ('cpv-dup', ?, ?, ?, 1, 'draft', '{}', '[]', "
+                    "'candidate_profile_v1', 'hash-dup', ?, ?)",
+                    values + (values[-1],),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO candidate_profile_versions "
+                    "(id, profile_id, resume_id, analysis_id, version, status, summary_json, "
+                    "unknowns_json, contract_version, content_hash, created_at, updated_at) "
+                    "VALUES ('cpv-bad-status', ?, ?, ?, 2, 'ready', '{}', '[]', "
+                    "'candidate_profile_v1', 'hash-bad', ?, ?)",
+                    values + (values[-1],),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO candidate_profile_versions "
+                    "(id, profile_id, resume_id, analysis_id, version, status, summary_json, "
+                    "unknowns_json, contract_version, content_hash, created_at, updated_at) "
+                    "VALUES ('cpv-orphan', 'missing-profile', ?, ?, 2, 'draft', '{}', '[]', "
+                    "'candidate_profile_v1', 'hash-orphan', ?, ?)",
+                    (rid, analysis["id"], values[-1], values[-1]),
+                )
+            conn.execute(
+                "UPDATE candidate_profile_versions SET status='confirmed', confirmed_at=? WHERE id='cpv-1'",
+                (values[-1],),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE candidate_profile_versions SET summary_json='{\"changed\":true}' "
+                    "WHERE id='cpv-1'"
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE candidate_profile_versions SET status='draft' WHERE id='cpv-1'"
+                )
+
+    def test_candidate_facts_enforce_types_lineage_and_confirmed_immutability(self):
+        pid, rid = _make_profile_and_resume(self.store)
+        analysis = self.store.create_analysis(rid, pid)
+        other = self.store.create_analysis(rid, pid)
+        evidence = self.store.add_evidence(
+            analysis["id"], evidence_type="skill", normalized_value="Python",
+            safe_excerpt="Python", source_locator={}, assertion_type="explicit",
+            confidence=90, sensitive=False,
+        )
+        other_evidence = self.store.add_evidence(
+            other["id"], evidence_type="skill", normalized_value="Java",
+            safe_excerpt="Java", source_locator={}, assertion_type="explicit",
+            confidence=90, sensitive=False,
+        )
+        ts = "2026-01-01T00:00:00Z"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO candidate_profile_versions "
+                "(id, profile_id, resume_id, analysis_id, version, status, summary_json, "
+                "unknowns_json, contract_version, content_hash, created_at, updated_at) "
+                "VALUES ('cpv-facts', ?, ?, ?, 1, 'draft', '{}', '[]', "
+                "'candidate_profile_v1', 'facts-hash', ?, ?)",
+                (pid, rid, analysis["id"], ts, ts),
+            )
+            conn.execute(
+                "INSERT INTO candidate_fact_items "
+                "(id, profile_version_id, fact_type, stable_key, value_json, normalized_value, "
+                "source_kind, assertion_type, confidence, verification_status, created_at, updated_at) "
+                "VALUES ('fact-1', 'cpv-facts', 'skill', 'skill:python', '{}', 'Python', "
+                "'resume_explicit', 'explicit', 90, 'extracted', ?, ?)",
+                (ts, ts),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO candidate_fact_items "
+                    "(id, profile_version_id, fact_type, stable_key, value_json, normalized_value, "
+                    "source_kind, assertion_type, confidence, verification_status, created_at, updated_at) "
+                    "VALUES ('fact-dup', 'cpv-facts', 'skill', 'skill:python', '{}', 'Python', "
+                    "'resume_explicit', 'explicit', 90, 'extracted', ?, ?)",
+                    (ts, ts),
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO candidate_fact_items "
+                    "(id, profile_version_id, fact_type, stable_key, value_json, normalized_value, "
+                    "source_kind, assertion_type, confidence, verification_status, created_at, updated_at) "
+                    "VALUES ('fact-bad', 'cpv-facts', 'preference', 'bad', '{}', '', "
+                    "'resume_explicit', 'explicit', 101, 'extracted', ?, ?)",
+                    (ts, ts),
+                )
+            conn.execute(
+                "INSERT INTO candidate_fact_evidence (fact_id, evidence_id, role) "
+                "VALUES ('fact-1', ?, 'primary')",
+                (evidence["id"],),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO candidate_fact_evidence (fact_id, evidence_id, role) "
+                    "VALUES ('fact-1', ?, 'supporting')",
+                    (other_evidence["id"],),
+                )
+            conn.execute(
+                "UPDATE candidate_profile_versions SET status='confirmed', confirmed_at=? "
+                "WHERE id='cpv-facts'",
+                (ts,),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "UPDATE candidate_fact_items SET normalized_value='Go' WHERE id='fact-1'"
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "DELETE FROM candidate_fact_evidence WHERE fact_id='fact-1' "
+                    "AND evidence_id=?",
+                    (evidence["id"],),
+                )
+
+    def test_discovery_run_candidates_constraints(self):
+        run = _make_confirmed_run(self.store)
+        _insert_job(self.store, "candidate-job")
+        ts = "2026-01-01T00:00:00Z"
+        insert = (
+            "INSERT INTO discovery_run_candidates "
+            "(id, run_id, job_id, source_url, direction_ids_json, search_terms_json, "
+            "source_positions_json, list_fields_json, dedupe_key, precheck_outcome, "
+            "precheck_json, priority_components_json, selection_decision, selection_reason, "
+            "selection_rank, state, attempt_count, input_hash, discovered_at, updated_at) "
+            "VALUES (?, ?, ?, 'https://www.zhipin.com/job_detail/x.html', '[]', '[]', '[]', "
+            "'{}', 'job-hash', ?, '{}', '{}', ?, NULL, ?, ?, 0, 'input-hash', ?, ?)"
+        )
+        with self.store._connection() as conn:
+            conn.execute(insert, (
+                "candidate-1", run["id"], "candidate-job", "pass", "selected", 1,
+                "selected", ts, ts,
+            ))
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(insert, (
+                    "candidate-dup", run["id"], "candidate-job", "pass", "deferred", None,
+                    "deferred", ts, ts,
+                ))
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(insert, (
+                    "candidate-bad", run["id"], "candidate-job", "maybe", "pending", None,
+                    "invented", ts, ts,
+                ))
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("UPDATE discovery_run_candidates SET input_hash='changed' WHERE id='candidate-1'")
+
+    def test_migration_015_additive_columns_and_foreign_keys(self):
+        expected = {
+            "direction_confirmations": {
+                "candidate_profile_version_id", "intent_contract_version", "intent_hash",
+            },
+            "discovery_runs": {
+                "candidate_profile_version_id", "list_candidate_count", "detail_selected_count",
+                "detail_completed_count", "assessment_completed_count", "recommendation_count",
+                "detail_reused_count", "ai_call_count", "result_revision", "first_result_at",
+                "first_batch_at", "list_completed_at", "processing_completed_at",
+            },
+            "discovery_job_snapshots": {
+                "run_candidate_id", "reused_from_snapshot_id", "fresh_until",
+                "fetch_duration_ms", "wait_duration_ms", "fetch_policy_version",
+            },
+            "job_direction_assessments": {
+                "evaluation_group_id", "input_hash", "evaluation_duration_ms",
+                "ai_call_count", "result_revision",
+            },
+        }
+        for table, required in expected.items():
+            columns = set(self._table_columns(table))
+            self.assertTrue(required.issubset(columns), f"{table} missing {required - columns}")
+
+        expected_fks = {
+            ("direction_confirmations", "candidate_profile_version_id", "candidate_profile_versions"),
+            ("discovery_runs", "candidate_profile_version_id", "candidate_profile_versions"),
+            ("discovery_job_snapshots", "run_candidate_id", "discovery_run_candidates"),
+            ("discovery_job_snapshots", "reused_from_snapshot_id", "discovery_job_snapshots"),
+        }
+        actual = set()
+        with self.store._connection() as conn:
+            for table, _, _ in expected_fks:
+                for row in conn.execute(f"PRAGMA foreign_key_list({table})"):
+                    actual.add((table, row["from"], row["table"]))
+        self.assertTrue(expected_fks.issubset(actual), f"missing foreign keys: {expected_fks - actual}")
+
     def test_snapshot_unique_run_job(self):
         run = _make_confirmed_run(self.store)
         _insert_job(self.store, "job-x")
@@ -335,6 +677,112 @@ class Migration013Tests(_StoreTestCase):
                     "VALUES ('s2', ?, 'job-x', 'https://x', 'dup', 'dup', '20k', '北京', 'Python', 'jd', '{}', 'complete', '[]', 'active', 'ch3', 'completed', ?)",
                     (run["id"], "2026-01-01T00:00:00Z"),
                 )
+
+
+class CandidateProfileVersionCrudV2Tests(_StoreTestCase):
+    """T026/T027: draft edits, immutable confirmations and version copies."""
+
+    def setUp(self):
+        super().setUp()
+        self.profile_id, self.resume_id = _make_profile_and_resume(
+            self.store, "5年 Python 后端经验，主导订单服务重构。",
+        )
+        self.analysis = self.store.create_analysis(self.resume_id, self.profile_id, contract_version="v4")
+        self.evidence = self.store.add_evidence(
+            self.analysis["id"], evidence_type="skill", normalized_value="Python",
+            safe_excerpt="Python 后端经验", source_locator={"start": 3, "end": 14},
+            assertion_type="explicit", confidence=95, sensitive=False,
+        )
+
+    def _create_draft(self):
+        return self.store.create_candidate_profile_version(
+            profile_id=self.profile_id, resume_id=self.resume_id,
+            analysis_id=self.analysis["id"],
+            summary={"headline": "后端工程师"},
+            unknowns=[{"field": "current_city", "message": "待确认"}],
+            facts=[{
+                "client_ref": "f1", "fact_type": "skill", "stable_key": "skill:python",
+                "value": {"name": "Python"}, "normalized_value": "Python",
+                "source_kind": "resume_explicit", "assertion_type": "explicit",
+                "confidence": 95, "verification_status": "extracted",
+                "evidence_ids": [self.evidence["id"]],
+            }],
+        )
+
+    def test_create_and_read_draft_with_fact_evidence_and_stable_hash(self):
+        draft = self._create_draft()
+        self.assertEqual((draft["version"], draft["status"]), (1, "draft"))
+        self.assertEqual(draft["summary"], {"headline": "后端工程师"})
+        self.assertEqual(len(draft["facts"]), 1)
+        self.assertEqual(draft["facts"][0]["evidence_ids"], [self.evidence["id"]])
+        self.assertEqual(len(draft["content_hash"]), 64)
+        self.assertEqual(
+            self.store.get_candidate_profile_version(draft["id"])["content_hash"],
+            draft["content_hash"],
+        )
+
+    def test_draft_correct_add_reject_and_user_value_wins(self):
+        draft = self._create_draft()
+        original = draft["facts"][0]
+        updated = self.store.update_candidate_profile_draft(
+            draft["id"], expected_content_hash=draft["content_hash"],
+            operations=[
+                {"op": "correct", "fact_id": original["id"], "value": {"name": "Go"}, "normalized_value": "Go"},
+                {"op": "add", "fact_type": "industry", "value": {"name": "金融科技", "contexts": []}, "normalized_value": "金融科技"},
+            ],
+            unknown_resolutions=[{"field": "current_city", "value": "上海", "intent_only": True}],
+        )
+        active = [fact for fact in updated["facts"] if fact["verification_status"] != "rejected"]
+        self.assertEqual({fact["normalized_value"] for fact in active}, {"Go", "金融科技"})
+        corrected = next(fact for fact in active if fact["normalized_value"] == "Go")
+        self.assertEqual((corrected["source_kind"], corrected["confidence"]), ("user_corrected", 100))
+        self.assertEqual(corrected["supersedes_fact_id"], original["id"])
+        self.assertEqual(updated["unknowns"], [{"field": "current_city", "value": "上海", "intent_only": True}])
+        self.assertNotEqual(updated["content_hash"], draft["content_hash"])
+
+        rejected = self.store.update_candidate_profile_draft(
+            updated["id"], expected_content_hash=updated["content_hash"],
+            operations=[{"op": "reject", "fact_id": corrected["id"]}],
+        )
+        self.assertEqual(
+            next(f for f in rejected["facts"] if f["id"] == corrected["id"])["verification_status"],
+            "rejected",
+        )
+
+    def test_stale_hash_and_editing_confirmed_version_are_rejected(self):
+        draft = self._create_draft()
+        with self.assertRaises(ValueError):
+            self.store.update_candidate_profile_draft(
+                draft["id"], expected_content_hash="stale",
+                operations=[{"op": "reject", "fact_id": draft["facts"][0]["id"]}],
+            )
+        confirmed = self.store.confirm_candidate_profile_version(
+            draft["id"], expected_content_hash=draft["content_hash"],
+        )
+        self.assertEqual(confirmed["status"], "confirmed")
+        with self.assertRaises(ValueError):
+            self.store.update_candidate_profile_draft(
+                confirmed["id"], expected_content_hash=confirmed["content_hash"],
+                operations=[],
+            )
+
+    def test_copy_confirmed_version_creates_independent_next_draft(self):
+        first = self._create_draft()
+        confirmed = self.store.confirm_candidate_profile_version(
+            first["id"], expected_content_hash=first["content_hash"],
+        )
+        copied = self.store.copy_candidate_profile_draft(confirmed["id"])
+        self.assertEqual((copied["version"], copied["status"]), (2, "draft"))
+        self.assertEqual(copied["supersedes_version_id"], confirmed["id"])
+        self.assertNotEqual(copied["facts"][0]["id"], confirmed["facts"][0]["id"])
+        self.assertEqual(copied["facts"][0]["evidence_ids"], confirmed["facts"][0]["evidence_ids"])
+
+    def test_tombstone_clears_candidate_content_but_keeps_safe_identity(self):
+        draft = self._create_draft()
+        deleted = self.store.tombstone_candidate_profile_version(draft["id"])
+        self.assertEqual(deleted["status"], "deleted")
+        self.assertEqual((deleted["summary"], deleted["unknowns"], deleted["facts"]), ({}, [], []))
+        self.assertEqual(deleted["id"], draft["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +1088,149 @@ class RunPlanSnapshotAssessmentCrudTests(_StoreTestCase):
 
 
 # ---------------------------------------------------------------------------
+# T037: Run candidate upsert, canonical identity, cross-direction dedup
+# ---------------------------------------------------------------------------
+
+
+class RunCandidateUpsertTests(_StoreTestCase):
+    """T037: list candidate upsert, canonical URL/job identity, cross-direction dedup and provenance merge."""
+
+    def _setup_run_and_job(self, job_id="job-upsert"):
+        run = _make_confirmed_run(self.store)
+        _insert_job(self.store, job_id)
+        return run
+
+    def test_upsert_creates_new_candidate(self):
+        run = self._setup_run_and_job()
+        candidate = self.store.upsert_run_candidate(
+            run_id=run["id"], job_id="job-upsert",
+            source_url="https://www.zhipin.com/job_detail/abc.html",
+            direction_ids=["d1"], search_terms=["Python"],
+            source_positions=[{"item": 0, "page": 1, "rank": 3}],
+            list_fields={"title": "后端", "salary": "20-30K"},
+            input_hash="hash-1",
+        )
+        self.assertIn("id", candidate)
+        self.assertEqual(candidate["run_id"], run["id"])
+        self.assertEqual(candidate["job_id"], "job-upsert")
+        self.assertEqual(candidate["direction_ids"], ["d1"])
+        self.assertEqual(candidate["search_terms"], ["Python"])
+        self.assertEqual(candidate["state"], "discovered")
+        self.assertEqual(candidate["selection_decision"], "pending")
+
+    def test_upsert_same_run_and_job_merges_not_duplicates(self):
+        run = self._setup_run_and_job()
+        first = self.store.upsert_run_candidate(
+            run_id=run["id"], job_id="job-upsert",
+            source_url="https://www.zhipin.com/job_detail/abc.html",
+            direction_ids=["d1"], search_terms=["Python"],
+            source_positions=[{"item": 0, "page": 1, "rank": 3}],
+            list_fields={"title": "后端"},
+            input_hash="hash-1",
+        )
+        second = self.store.upsert_run_candidate(
+            run_id=run["id"], job_id="job-upsert",
+            source_url="https://www.zhipin.com/job_detail/abc.html",
+            direction_ids=["d2"], search_terms=["Go"],
+            source_positions=[{"item": 1, "page": 2, "rank": 1}],
+            list_fields={"title": "后端开发"},
+            input_hash="hash-1",
+        )
+        self.assertEqual(first["id"], second["id"])
+        candidates = self.store.list_run_candidates(run["id"])
+        self.assertEqual(len(candidates), 1)
+
+    def test_cross_direction_dedup_merges_direction_ids(self):
+        run = self._setup_run_and_job()
+        self.store.upsert_run_candidate(
+            run_id=run["id"], job_id="job-upsert",
+            source_url="https://www.zhipin.com/job_detail/abc.html",
+            direction_ids=["d1"], search_terms=["Python"],
+            source_positions=[], list_fields={},
+            input_hash="hash-1",
+        )
+        merged = self.store.upsert_run_candidate(
+            run_id=run["id"], job_id="job-upsert",
+            source_url="https://www.zhipin.com/job_detail/abc.html",
+            direction_ids=["d2", "d3"], search_terms=["Go"],
+            source_positions=[], list_fields={},
+            input_hash="hash-1",
+        )
+        self.assertEqual(sorted(merged["direction_ids"]), ["d1", "d2", "d3"])
+
+    def test_provenance_merging_accumulates_search_terms_and_positions(self):
+        run = self._setup_run_and_job()
+        self.store.upsert_run_candidate(
+            run_id=run["id"], job_id="job-upsert",
+            source_url="https://www.zhipin.com/job_detail/abc.html",
+            direction_ids=["d1"], search_terms=["Python"],
+            source_positions=[{"item": 0, "page": 1, "rank": 3}],
+            list_fields={"title": "后端"},
+            input_hash="hash-1",
+        )
+        merged = self.store.upsert_run_candidate(
+            run_id=run["id"], job_id="job-upsert",
+            source_url="https://www.zhipin.com/job_detail/abc.html",
+            direction_ids=["d2"], search_terms=["Python", "Go"],
+            source_positions=[{"item": 2, "page": 1, "rank": 5}],
+            list_fields={"title": "后端", "salary": "25K"},
+            input_hash="hash-1",
+        )
+        self.assertIn("Python", merged["search_terms"])
+        self.assertIn("Go", merged["search_terms"])
+        self.assertEqual(len(merged["source_positions"]), 2)
+
+    def test_canonical_dedupe_key_derived_from_job_identity(self):
+        run = self._setup_run_and_job()
+        candidate = self.store.upsert_run_candidate(
+            run_id=run["id"], job_id="job-upsert",
+            source_url="https://www.zhipin.com/job_detail/abc.html?ka=track",
+            direction_ids=["d1"], search_terms=["Python"],
+            source_positions=[], list_fields={},
+            input_hash="hash-1",
+        )
+        self.assertIn("dedupe_key", candidate)
+        self.assertTrue(len(candidate["dedupe_key"]) > 0)
+
+    def test_get_run_candidate_by_id(self):
+        run = self._setup_run_and_job()
+        created = self.store.upsert_run_candidate(
+            run_id=run["id"], job_id="job-upsert",
+            source_url="https://www.zhipin.com/job_detail/abc.html",
+            direction_ids=["d1"], search_terms=["Python"],
+            source_positions=[], list_fields={},
+            input_hash="hash-1",
+        )
+        fetched = self.store.get_run_candidate(created["id"])
+        self.assertEqual(fetched["id"], created["id"])
+        self.assertEqual(fetched["job_id"], "job-upsert")
+
+    def test_list_run_candidates_filters_by_run(self):
+        run = self._setup_run_and_job("job-a")
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                "VALUES ('job-b', 'https://y', 'https://y', '前端', '公司B', '15k', '上海', 'jd', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+            )
+        self.store.upsert_run_candidate(
+            run_id=run["id"], job_id="job-a",
+            source_url="https://www.zhipin.com/job_detail/a.html",
+            direction_ids=["d1"], search_terms=[], source_positions=[],
+            list_fields={}, input_hash="hash-1",
+        )
+        self.store.upsert_run_candidate(
+            run_id=run["id"], job_id="job-b",
+            source_url="https://www.zhipin.com/job_detail/b.html",
+            direction_ids=["d1"], search_terms=[], source_positions=[],
+            list_fields={}, input_hash="hash-1",
+        )
+        candidates = self.store.list_run_candidates(run["id"])
+        self.assertEqual(len(candidates), 2)
+        other_run = _make_confirmed_run(self.store, input_hash="h2")
+        self.assertEqual(len(self.store.list_run_candidates(other_run["id"])), 0)
+
+
+# ---------------------------------------------------------------------------
 # T055: Feedback CRUD
 # ---------------------------------------------------------------------------
 
@@ -672,6 +1263,191 @@ class FeedbackCrudTests(_StoreTestCase):
         self.store.revoke_discovery_feedback(fb2["id"])
         effective = self.store.list_discovery_feedback(pid, effective_only=True)
         self.assertEqual({f["id"] for f in effective}, {fb1["id"]})
+
+
+# ---------------------------------------------------------------------------
+# T086: Feedback CRUD scope/revoked_at/history-invariant verification (US5)
+# ---------------------------------------------------------------------------
+
+
+class FeedbackScopeAndHistoryInvariantsTests(_StoreTestCase):
+    """T086 验证 US5 反馈 CRUD 的作用域默认值、维度覆盖和历史不变性。
+
+    合同来源:
+    - spec.md FR-050: 岗位和方向反馈必须作用于后续运行，不得改写历史画像、
+      确认快照和评估事实。
+    - spec.md US5 acceptance scenario 3: 判断错误反馈记录受影响维度，不得
+      直接改写历史评分。
+    - data-model.md L33: discovery_feedback 表继续保存岗位、方向、评估和约束反馈。
+    """
+
+    def test_default_scope_is_exact_job_when_unspecified(self):
+        """spec.md US5 scenario 1: 单个岗位不感兴趣默认只排除该岗位。"""
+        pid, _ = _make_profile_and_resume(self.store)
+        fb = self.store.create_discovery_feedback(
+            pid, "job", "not_interested", job_id="j1",
+        )
+        self.assertEqual(fb["scope"], "exact_job",
+                         "T086: 岗位反馈默认 scope 必须为 exact_job")
+        rows = self.store.list_discovery_feedback(pid)
+        self.assertEqual(rows[0]["scope"], "exact_job")
+
+    def test_direction_feedback_persists_direction_id(self):
+        """spec.md US5 scenario 2: 关闭方向反馈必须记录 direction_id 维度。"""
+        pid, rid = _make_profile_and_resume(self.store)
+        a = self.store.create_analysis(rid, pid)
+        d = self.store.add_direction(
+            a["id"], name="后端", direction_type="core", rationale="r",
+            gaps=[], confidence=80, default_enabled=True, search_terms=["Python"],
+        )
+        fb = self.store.create_discovery_feedback(
+            pid, "direction", "direction_disable",
+            direction_id=d["id"], scope="exact_direction",
+        )
+        rows = self.store.list_discovery_feedback(pid)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["target_type"], "direction")
+        self.assertEqual(rows[0]["direction_id"], d["id"])
+        self.assertEqual(rows[0]["scope"], "exact_direction")
+
+    def test_assessment_judgment_error_feedback_persists_assessment_id(self):
+        """spec.md US5 scenario 3: 判断错误反馈必须记录 assessment_id 维度。"""
+        pid, _ = _make_profile_and_resume(self.store)
+        fb = self.store.create_discovery_feedback(
+            pid, "assessment", "judgment_error",
+            assessment_id="a-1", reason_code="dimension_wrong",
+            scope="exact_assessment",
+        )
+        rows = self.store.list_discovery_feedback(pid)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["target_type"], "assessment")
+        self.assertEqual(rows[0]["assessment_id"], "a-1")
+        self.assertEqual(rows[0]["action"], "judgment_error")
+
+    def test_revoke_sets_revoked_at_timestamp(self):
+        """FR-051: 撤销反馈必须写入 revoked_at 时间戳。"""
+        pid, _ = _make_profile_and_resume(self.store)
+        fb = self.store.create_discovery_feedback(
+            pid, "job", "not_interested", job_id="j1",
+        )
+        self.assertIsNone(self.store.list_discovery_feedback(pid)[0]["revoked_at"])
+        self.store.revoke_discovery_feedback(fb["id"])
+        row = self.store.list_discovery_feedback(pid)[0]
+        self.assertIsNotNone(row["revoked_at"],
+                             "T086: revoke 必须写入 revoked_at")
+
+    def test_revoke_is_idempotent_for_already_revoked_feedback(self):
+        """FR-051: 重复撤销不应报错或刷新 revoked_at。"""
+        pid, _ = _make_profile_and_resume(self.store)
+        fb = self.store.create_discovery_feedback(
+            pid, "job", "not_interested", job_id="j1",
+        )
+        first = self.store.revoke_discovery_feedback(fb["id"])
+        first_ts = first["revoked_at"]
+        second = self.store.revoke_discovery_feedback(fb["id"])
+        self.assertEqual(second["revoked_at"], first_ts,
+                         "T086: 重复撤销必须保持原 revoked_at 不变")
+
+    def test_revoke_unknown_feedback_raises_keyerror(self):
+        pid, _ = _make_profile_and_resume(self.store)
+        with self.assertRaises(KeyError):
+            self.store.revoke_discovery_feedback("nonexistent-fb-id")
+
+    def test_feedback_does_not_modify_historical_run_counters(self):
+        """FR-050: 反馈不得改写历史 run 的计数器。"""
+        run = _make_confirmed_run(self.store)
+        pid = run["profile_id"]
+        self.store.update_discovery_run(
+            run["id"], status="succeeded", stage="assembling", started=True,
+            counters={"high_count": 5, "adjacent_count": 3, "growth_count": 2,
+                      "list_candidate_count": 50, "detail_completed_count": 15,
+                      "assessment_completed_count": 15},
+        )
+        before = self.store.get_discovery_run(run["id"])
+        # Submit feedback targeting this historical run.
+        self.store.create_discovery_feedback(
+            pid, "job", "not_interested", run_id=run["id"], job_id="j_hist",
+            scope="exact_job",
+        )
+        after = self.store.get_discovery_run(run["id"])
+        # All counters must remain unchanged.
+        for key in ("high_count", "adjacent_count", "growth_count",
+                    "list_candidate_count", "detail_completed_count",
+                    "assessment_completed_count"):
+            self.assertEqual(before.get(key), after.get(key),
+                             f"T086/FR-050: 反馈不得改写历史 run 的 {key}")
+
+    def test_feedback_does_not_modify_historical_snapshot(self):
+        """FR-050: 反馈不得改写历史 snapshot 内容。"""
+        run = _make_confirmed_run(self.store)
+        pid = run["profile_id"]
+        _insert_job(self.store, "snap-job-1")
+        snap_id = "snap-" + run["id"]
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO discovery_job_snapshots "
+                "(id, run_id, job_id, completeness, jd, fetched_at, updated_at) VALUES "
+                "(?, ?, ?, 'complete', 'jd-text', '2026-01-01', '2026-01-01')",
+                (snap_id, run["id"], "snap-job-1"),
+            )
+        # Submit feedback targeting this snapshot's job.
+        self.store.create_discovery_feedback(
+            pid, "job", "not_interested", run_id=run["id"], job_id="snap-job-1",
+            scope="exact_job",
+        )
+        with self.store._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM discovery_job_snapshots WHERE id = ?",
+                (snap_id,),
+            ).fetchone()
+        self.assertEqual(dict(row)["jd"], "jd-text",
+                         "T086/FR-050: 反馈不得改写历史 snapshot 内容")
+        self.assertEqual(dict(row)["completeness"], "complete")
+
+    def test_feedback_does_not_modify_historical_assessment_scores(self):
+        """FR-050 + US5 scenario 3: 判断错误反馈不得改写历史 assessment 分数。"""
+        # _make_confirmed_run creates a real direction we can FK-reference.
+        run = _make_confirmed_run(self.store)
+        pid = run["profile_id"]
+        # Look up the direction created by _make_confirmed_run.
+        with self.store._connection() as conn:
+            d_row = conn.execute(
+                "SELECT id FROM career_directions WHERE analysis_id = ? LIMIT 1",
+                (run["analysis_id"],),
+            ).fetchone()
+        direction_id = dict(d_row)["id"]
+        _insert_job(self.store, "score-job-1")
+        # Insert a historical snapshot + assessment with scores.
+        snap_id = "snap-score-" + run["id"]
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO discovery_job_snapshots "
+                "(id, run_id, job_id, completeness, jd, fetched_at, updated_at) VALUES "
+                "(?, ?, ?, 'complete', 'jd', '2026-01-01', '2026-01-01')",
+                (snap_id, run["id"], "score-job-1"),
+            )
+            conn.execute(
+                "INSERT INTO job_direction_assessments "
+                "(id, snapshot_id, direction_id, run_id, dimensions_json, match_score, "
+                "confidence, gaps_json, contract_version, created_at, updated_at, status) "
+                "VALUES (?, ?, ?, ?, ?, 85, 80, '[]', 'job_assessment_v2', '2026-01-01', '2026-01-01', 'completed')",
+                ("a-score-1", snap_id, direction_id, run["id"],
+                 '{"capability": {"score": 85}}'),
+            )
+        # Submit judgment_error feedback targeting this assessment.
+        self.store.create_discovery_feedback(
+            pid, "assessment", "judgment_error",
+            run_id=run["id"], assessment_id="a-score-1",
+            reason_code="dimension_wrong", scope="exact_assessment",
+        )
+        with self.store._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM job_direction_assessments WHERE id = ?",
+                ("a-score-1",),
+            ).fetchone()
+        self.assertEqual(dict(row)["match_score"], 85,
+                         "T086/FR-050/US5-3: 判断错误反馈不得改写历史 assessment 分数")
+        self.assertEqual(dict(row)["status"], "completed")
 
 
 # ---------------------------------------------------------------------------

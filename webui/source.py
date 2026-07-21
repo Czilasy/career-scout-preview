@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -96,7 +97,113 @@ SAFE_FAILURE_CODES = frozenset({
     "source_input_drift",
     "source_timeout",
     "source_unknown_error",
+    "source_verification_required",
+    "source_rate_limited",
 })
+
+
+# ---------------------------------------------------------------------------
+# T075: Source circuit breaker (state-machine.md L92-107)
+# ---------------------------------------------------------------------------
+
+
+class SourceCircuitBreaker:
+    """Stateful circuit breaker for source-blocking signals.
+
+    Contract (specs/005-fast-resume-discovery/contracts/state-machine.md
+    L92-107):
+
+    - Opens after two consecutive source signals from: login wall,
+      verification page, explicit rate-limit response, or repeated
+      invalid navigation shell attributable to source blocking.
+    - When open: no new source job starts; queued work stays
+      retryable/blocked rather than failed as user fault.
+    - Automatic restart requires preflight success AND bounded cooldown;
+      no unbounded retry loop.
+
+    The breaker is a pure state machine. It does NOT invoke preflight
+    itself; the orchestrator calls ``try_reset`` with the preflight
+    outcome after the cooldown has elapsed.
+    """
+
+    # The four source-blocking signal kinds. Other safe failure codes
+    # (input_drift, invalid_output, timeout, ...) are user/system faults
+    # and do NOT advance the breaker counter.
+    SIGNAL_CODES = frozenset({
+        "source_login_required",
+        "source_verification_required",
+        "source_rate_limited",
+        "source_blocked",
+    })
+
+    DEFAULT_COOLDOWN_SECONDS = 60
+
+    def __init__(
+        self,
+        *,
+        cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
+        clock: Callable[[], float] | None = None,
+    ):
+        self._cooldown = max(1, int(cooldown_seconds))
+        self._clock = clock or time.monotonic
+        self._consecutive = 0
+        self._last_signal: str | None = None
+        self._opened_at: float | None = None
+        self._cooldown_until: float | None = None
+
+    def record_signal(self, safe_code: str) -> None:
+        """Record a source-blocking signal. Opens the breaker at >=2 consecutive."""
+        if safe_code not in self.SIGNAL_CODES:
+            return  # non-signal codes do not advance the counter
+        self._consecutive += 1
+        self._last_signal = safe_code
+        if self._consecutive >= 2 and self._opened_at is None:
+            now = self._clock()
+            self._opened_at = now
+            self._cooldown_until = now + self._cooldown
+
+    def record_success(self) -> None:
+        """Record a successful source fetch. Resets the consecutive counter.
+
+        Does NOT close an already-open breaker; only ``try_reset`` can close
+        it (after cooldown + preflight success).
+        """
+        self._consecutive = 0
+        self._last_signal = None
+
+    def is_open(self, *, now: float | None = None) -> bool:
+        """True if the breaker is open (no new source job should start)."""
+        return self._opened_at is not None
+
+    def try_reset(self, preflight_ok: bool, *, now: float | None = None) -> bool:
+        """Attempt to close the breaker.
+
+        Returns True iff both conditions hold: cooldown has elapsed AND
+        ``preflight_ok`` is True. On success, resets all breaker state.
+        Returns False otherwise (breaker stays open).
+        """
+        if self._opened_at is None:
+            return True  # already closed
+        if not preflight_ok:
+            return False
+        current = now if now is not None else self._clock()
+        if self._cooldown_until is None or current < self._cooldown_until:
+            return False
+        self._consecutive = 0
+        self._last_signal = None
+        self._opened_at = None
+        self._cooldown_until = None
+        return True
+
+    def state(self) -> dict:
+        """Return a queryable snapshot of breaker state."""
+        return {
+            "open": self._opened_at is not None,
+            "consecutive": self._consecutive,
+            "last_signal": self._last_signal,
+            "opened_at": self._opened_at,
+            "cooldown_until": self._cooldown_until,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +240,7 @@ class BossCdpSource:
         artifact_root: Path | str | None = None,
         max_artifact_bytes: int = 20_000_000,
         cdp_port: int = boss.DEFAULT_CDP_PORT,
+        breaker: SourceCircuitBreaker | None = None,
     ):
         self.python_executable = python_executable or sys.executable or "python"
         self.cwd = Path(cwd) if cwd else PROJECT_ROOT
@@ -145,6 +253,7 @@ class BossCdpSource:
         self.max_artifact_bytes = max(1, int(max_artifact_bytes))
         self.cdp_port = int(cdp_port)
         self._runner = runner or self._default_run
+        self.breaker = breaker or SourceCircuitBreaker()
 
     # ------------------------------------------------------------------
     # Public API
@@ -231,6 +340,11 @@ class BossCdpSource:
             )
         command = self._build_list_command(keyword, city, target_pages, source_filters, str(output_path))
         safe_log = f"list keyword_present=1 city_present={bool(city)} pages={target_pages}"
+        if self.breaker.is_open():
+            return SourceOutcome.failure(
+                failed_code="source_blocked",
+                safe_log=f"{safe_log} breaker_open",
+            )
         try:
             returncode, captured = self._runner(command, self.timeout_seconds)
         except subprocess.TimeoutExpired:
@@ -240,6 +354,7 @@ class BossCdpSource:
         except OSError as exc:
             return SourceOutcome.failure(failed_code="source_unreachable", safe_log=f"{safe_log} os_error_type={type(exc).__name__}")
         if returncode != 0:
+            self.breaker.record_signal("source_blocked")
             return SourceOutcome.failure(
                 failed_code="source_blocked",
                 safe_log=f"{safe_log} returncode={returncode} stderr_tail_safe={_safe_tail(captured)}",
@@ -273,6 +388,7 @@ class BossCdpSource:
         # every job's source_url and job_id appear empty, causing fetch_detail
         # to fail with source_invalid_output and detail_count stays at 0.
         normalized_jobs = [_normalize_job_fields(j) for j in jobs]
+        self.breaker.record_success()
         return SourceOutcome.success(
             jobs=normalized_jobs,
             safe_log=f"{safe_log} job_count={len(normalized_jobs)}",
@@ -319,6 +435,15 @@ class BossCdpSource:
             )
         command = self._build_detail_command(detail_input_path, str(detail_path))
         safe_log = f"detail job_id_present=1 url_host_safe={_safe_host(source_url)}"
+        if self.breaker.is_open():
+            try:
+                Path(detail_input_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+            return SourceOutcome.failure(
+                failed_code="source_blocked",
+                safe_log=f"{safe_log} breaker_open",
+            )
         try:
             returncode, captured = self._runner(command, self.timeout_seconds)
         except subprocess.TimeoutExpired:
@@ -333,6 +458,7 @@ class BossCdpSource:
             except OSError:
                 pass
         if returncode != 0:
+            self.breaker.record_signal("source_blocked")
             return SourceOutcome.failure(
                 failed_code="source_blocked",
                 safe_log=f"{safe_log} returncode={returncode} stderr_tail_safe={_safe_tail(captured)}",
@@ -342,7 +468,396 @@ class BossCdpSource:
             return SourceOutcome.failure(failed_code="source_invalid_output", safe_log=f"{safe_log} detail_not_json")
         if not isinstance(detail, dict):
             return SourceOutcome.failure(failed_code="source_invalid_output", safe_log=f"{safe_log} detail_not_dict")
+        self.breaker.record_success()
         return SourceOutcome.success(detail=detail, safe_log=f"{safe_log} fields={sorted(detail.keys())[:5]}")
+
+    # ------------------------------------------------------------------
+    # T071: Batched detail fetch (feature 005 US4)
+    # ------------------------------------------------------------------
+
+    # Fields a terminal safe event MUST NOT carry (privacy contract).
+    # If any of these appear in an event, the event is rejected as invalid
+    # because the producer contract forbids JD body, credentials and PII
+    # from crossing the producer/consumer boundary.
+    _EVENT_FORBIDDEN_FIELDS = frozenset({
+        "jd", "jd_body", "description",
+        "encrypt_job_id", "encryptJobId", "security_id", "securityId",
+        "token", "secret", "api_key", "apikey",
+        "prompt", "model_response", "raw_response",
+        "resume_text", "resume_body",
+        "phone", "email", "id_card",
+    })
+
+    _EVENT_REQUIRED_FIELDS = ("kind", "status", "job_id", "duration_ms", "safe_code")
+
+    _EVENT_VALID_STATUSES = frozenset({"completed", "unavailable", "failed", "cancelled"})
+
+    def fetch_details_batch(
+        self,
+        jobs: list[dict],
+        *,
+        detail_output_path: str,
+        event_callback: Callable[[dict], None] | None = None,
+        max_batch_size: int = 5,
+    ) -> dict[str, SourceOutcome]:
+        """Fetch details for a batch of jobs (≤5) using one scraper subprocess.
+
+        Returns a mapping of ``job_id -> SourceOutcome``. Each job's outcome
+        is built from its atomic detail record (split from the combined
+        output by ``job_link``) and the corresponding terminal safe event
+        parsed from the events JSONL file.
+
+        Contract (see specs/005-fast-resume-discovery/contracts/state-machine.md
+        §Producer / Consumer Boundaries):
+
+        - Each batch contains at most 5 selected candidates.
+        - Each job emits exactly one terminal safe event:
+          ``{kind:"detail", status, job_id, duration_ms, safe_code}``.
+        - Events never carry JD body, credentials or PII; events containing
+          any forbidden field are rejected.
+        - Malformed, unknown-kind, unknown-status or job-mismatched events
+          are rejected (logged safe, not dispatched to ``event_callback``)
+          and the corresponding job's outcome is ``source_invalid_output``
+          with ``detail_event_invalid`` in the safe log.
+        - ``event_callback`` is invoked exactly once per valid, job-matched
+          event, after validation and before outcome construction.
+
+        Failure modes that surface as per-job ``failed_code``:
+
+        - ``source_invalid_output``: batch-size exceeded, job missing
+          ``source_url``/``job_id``, event missing required fields, event
+          with wrong types, event with unknown kind/status, event for a job
+          not in the batch, completed event without a matching detail
+          record, or detail record missing ``job_link``/``source_url``.
+        - ``source_blocked``: scraper subprocess exited non-zero.
+        - ``source_timeout``: subprocess exceeded ``timeout_seconds``.
+        - ``source_unreachable``: scraper binary not found or OS error.
+        - The event's ``safe_code`` is surfaced as ``failed_code`` for
+          ``unavailable``/``failed``/``cancelled`` statuses (e.g.
+          ``source_login_required``, ``source_invalid_output``).
+        """
+        # 1. Reject batches larger than max_batch_size without invoking the
+        #    scraper. Each job still gets an individual outcome so the
+        #    orchestrator can mark it as failed.
+        if len(jobs) > max_batch_size:
+            return {
+                str(job.get("job_id") or job.get("id") or f"idx{i}"):
+                    SourceOutcome.failure(
+                        failed_code="source_invalid_output",
+                        safe_log=f"batch_size_exceeded limit={max_batch_size} "
+                                 f"actual={len(jobs)}",
+                    )
+                for i, job in enumerate(jobs)
+            }
+
+        results: dict[str, SourceOutcome] = {}
+        valid_jobs: list[dict] = []
+        expected_urls_by_job_id: dict[str, str] = {}
+
+        # 2. Validate each job individually. Invalid jobs get an immediate
+        #    failure outcome; valid jobs proceed to the batch.
+        for i, job in enumerate(jobs):
+            if not isinstance(job, dict):
+                results[f"idx{i}"] = SourceOutcome.failure(
+                    failed_code="source_invalid_output",
+                    safe_log="job_not_dict",
+                )
+                continue
+            job_id = str(job.get("job_id") or job.get("id") or "").strip()
+            if not job_id:
+                results[f"idx{i}"] = SourceOutcome.failure(
+                    failed_code="source_invalid_output",
+                    safe_log="job_missing_id",
+                )
+                continue
+            source_url = normalize_job_link(job.get("source_url") or job.get("url") or job.get("job_link") or "")
+            if not source_url:
+                results[job_id] = SourceOutcome.failure(
+                    failed_code="source_invalid_output",
+                    safe_log="job_missing_source_url",
+                )
+                continue
+            # Deduplicate by source_url within the batch; first occurrence wins.
+            if any(existing == source_url for existing in expected_urls_by_job_id.values()):
+                results[job_id] = SourceOutcome.failure(
+                    failed_code="source_invalid_output",
+                    safe_log="job_duplicate_in_batch",
+                )
+                continue
+            expected_urls_by_job_id[job_id] = source_url
+            # The scraper reads job_link to build detail URLs and emits
+            # job_id = job_link in events. Set both explicitly.
+            valid_jobs.append({**job, "job_link": source_url, "job_id": job_id})
+
+        if not valid_jobs:
+            return results
+
+        # 3. Validate output paths and write the batch input JSON.
+        if not detail_output_path or not self._artifact_path_allowed(detail_output_path):
+            for job_id in expected_urls_by_job_id:
+                results[job_id] = SourceOutcome.failure(
+                    failed_code="source_invalid_output",
+                    safe_log="detail_output_path_invalid",
+                )
+            return results
+
+        events_output_path = f"{detail_output_path}.events.jsonl"
+        batch_input_path = f"{detail_output_path}.input.json"
+        try:
+            Path(batch_input_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(batch_input_path).write_text(
+                json.dumps({"jobs": valid_jobs}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            for job_id in expected_urls_by_job_id:
+                results[job_id] = SourceOutcome.failure(
+                    failed_code="source_unreachable",
+                    safe_log="batch_input_write_failed",
+                )
+            return results
+
+        # 4. Invoke the scraper subprocess.
+        command = self._build_detail_batch_command(
+            batch_input_path, detail_output_path, events_output_path,
+            batch_size=len(valid_jobs),
+        )
+        safe_log = f"batch_detail job_count={len(valid_jobs)}"
+        if self.breaker.is_open():
+            try:
+                Path(batch_input_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+            for job_id in expected_urls_by_job_id:
+                results[job_id] = SourceOutcome.failure(
+                    failed_code="source_blocked",
+                    safe_log=f"{safe_log} breaker_open",
+                )
+            return results
+        try:
+            returncode, captured = self._runner(command, self.timeout_seconds)
+        except subprocess.TimeoutExpired:
+            for job_id in expected_urls_by_job_id:
+                results[job_id] = SourceOutcome.failure(
+                    failed_code="source_timeout",
+                    safe_log=f"{safe_log} timeout={self.timeout_seconds}",
+                )
+            return results
+        except FileNotFoundError:
+            for job_id in expected_urls_by_job_id:
+                results[job_id] = SourceOutcome.failure(
+                    failed_code="source_unreachable",
+                    safe_log=f"{safe_log} scraper_not_found",
+                )
+            return results
+        except OSError as exc:
+            for job_id in expected_urls_by_job_id:
+                results[job_id] = SourceOutcome.failure(
+                    failed_code="source_unreachable",
+                    safe_log=f"{safe_log} os_error_type={type(exc).__name__}",
+                )
+            return results
+        finally:
+            try:
+                Path(batch_input_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        # 5. Subprocess non-zero exit: no partial results from a failed batch.
+        if returncode != 0:
+            for job_id in expected_urls_by_job_id:
+                results[job_id] = SourceOutcome.failure(
+                    failed_code="source_blocked",
+                    safe_log=f"{safe_log} returncode={returncode} "
+                             f"stderr_tail_safe={_safe_tail(captured)}",
+                )
+            # One batch-level source_blocked signal (the whole batch was blocked).
+            self.breaker.record_signal("source_blocked")
+            return results
+
+        # 6. Parse events JSONL; validate each event; dispatch valid events.
+        expected_urls = set(expected_urls_by_job_id.values())
+        parsed_events = self._read_events_file(events_output_path)
+        matched_event_by_url: dict[str, dict] = {}
+        for event in parsed_events:
+            ok, reason = self._validate_detail_event(event, expected_urls)
+            if not ok:
+                continue  # rejected events are silently dropped
+            # First valid event for a given job wins; later duplicates are
+            # dropped to avoid double-dispatch.
+            if event["job_id"] in matched_event_by_url:
+                continue
+            matched_event_by_url[event["job_id"]] = event
+            if event_callback is not None:
+                try:
+                    event_callback(event)
+                except Exception:
+                    # The callback must never crash the batch; swallow and
+                    # continue. The outcome is built from the event itself.
+                    pass
+
+        # 7. Read the combined detail JSON and index by job_link/source_url.
+        details_by_url = self._read_combined_details(detail_output_path)
+
+        # 8. Build per-job outcomes from the matched event + detail record.
+        for job_id, source_url in expected_urls_by_job_id.items():
+            event = matched_event_by_url.get(source_url)
+            if event is None:
+                results[job_id] = SourceOutcome.failure(
+                    failed_code="source_invalid_output",
+                    safe_log=f"{safe_log} detail_event_invalid no_matching_event",
+                )
+                continue
+            status = event["status"]
+            safe_code = event["safe_code"]
+            if status == "completed":
+                detail = details_by_url.get(source_url)
+                if not detail:
+                    results[job_id] = SourceOutcome.failure(
+                        failed_code="source_invalid_output",
+                        safe_log=f"{safe_log} detail_event_invalid completed_but_no_detail",
+                    )
+                    continue
+                results[job_id] = SourceOutcome.success(
+                    detail=detail,
+                    safe_log=f"{safe_log} status=completed "
+                             f"fields={sorted(detail.keys())[:5]}",
+                )
+            elif status in ("unavailable", "failed"):
+                # safe_code carries the specific source failure reason
+                # (e.g. source_login_required, source_invalid_output).
+                results[job_id] = SourceOutcome.failure(
+                    failed_code=safe_code,
+                    safe_log=f"{safe_log} status={status} safe_code={safe_code}",
+                )
+            elif status == "cancelled":
+                # cancelled events surface a recognizable code; if the
+                # scraper emitted "ok" (which would be ambiguous), normalize
+                # to source_unknown_error so the orchestrator can route the
+                # unit back to retryable/cancelled state.
+                code = safe_code if safe_code != "ok" else "source_unknown_error"
+                results[job_id] = SourceOutcome.failure(
+                    failed_code=code,
+                    safe_log=f"{safe_log} status=cancelled safe_code={safe_code}",
+                )
+            else:
+                # Unreachable: _validate_detail_event already rejected
+                # unknown statuses. Defensive guard for future changes.
+                results[job_id] = SourceOutcome.failure(
+                    failed_code="source_invalid_output",
+                    safe_log=f"{safe_log} detail_event_invalid unknown_status={status}",
+                )
+
+        # 9. T075: feed per-job outcomes to the breaker. Signal codes advance
+        #    the consecutive counter; successes reset it. Non-signal failures
+        #    (invalid_output, timeout, ...) are neutral. Processing in job_id
+        #    order preserves the consecutive-chain semantics: two jobs in the
+        #    same batch both returning source_login_required open the breaker.
+        for job_id in expected_urls_by_job_id:
+            outcome = results.get(job_id)
+            if outcome is None:
+                continue
+            if outcome.ok:
+                self.breaker.record_success()
+            elif outcome.failed_code in SourceCircuitBreaker.SIGNAL_CODES:
+                self.breaker.record_signal(outcome.failed_code)
+
+        return results
+
+    def _validate_detail_event(self, event: Any, expected_urls: set[str]) -> tuple[bool, str]:
+        """Validate a terminal safe event.
+
+        Returns ``(ok, reason)``. ``ok`` is True iff the event is a dict
+        with all required fields, correct types, ``kind == "detail"``,
+        ``status`` in the allowed set, ``job_id`` in ``expected_urls``,
+        and no forbidden fields (JD body, credentials, PII).
+        """
+        if not isinstance(event, dict):
+            return False, "not_dict"
+        for field in self._EVENT_REQUIRED_FIELDS:
+            if field not in event:
+                return False, f"missing_{field}"
+        # Type checks. Note: bool is a subclass of int in Python, so we
+        # explicitly exclude it for duration_ms.
+        kind = event["kind"]
+        if not isinstance(kind, str) or kind != "detail":
+            return False, "unknown_kind"
+        status = event["status"]
+        if not isinstance(status, str) or status not in self._EVENT_VALID_STATUSES:
+            return False, "unknown_status"
+        duration_ms = event["duration_ms"]
+        if not isinstance(duration_ms, int) or isinstance(duration_ms, bool) or duration_ms < 0:
+            return False, "wrong_type_duration_ms"
+        safe_code = event["safe_code"]
+        if not isinstance(safe_code, str) or not safe_code:
+            return False, "wrong_type_safe_code"
+        job_id = event["job_id"]
+        if not isinstance(job_id, str) or not job_id:
+            return False, "wrong_type_job_id"
+        if job_id not in expected_urls:
+            return False, "job_mismatch"
+        # Privacy: reject events carrying forbidden fields.
+        for field in self._EVENT_FORBIDDEN_FIELDS:
+            if field in event:
+                return False, f"forbidden_field_{field}"
+        return True, "ok"
+
+    def _read_events_file(self, events_path: str) -> list[Any]:
+        """Read events JSONL file. Returns a list of parsed objects.
+
+        Malformed JSON lines are recorded as ``None`` so callers can
+        distinguish "missing file" (empty list) from "file had malformed
+        lines" (list with None entries). ``None`` entries are dropped by
+        ``_validate_detail_event`` (which returns ``False, "not_dict"``).
+        """
+        path = Path(events_path)
+        if not path.is_file() or path.stat().st_size > self.max_artifact_bytes:
+            return []
+        events: list[Any] = []
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        events.append(json.loads(line))
+                    except (json.JSONDecodeError, ValueError):
+                        events.append(None)
+        except OSError:
+            return []
+        return events
+
+    def _read_combined_details(self, detail_path: str) -> dict[str, dict]:
+        """Read the combined detail JSON (a list of records) and index by
+        ``job_link`` (or ``source_url`` fallback).
+
+        Returns a mapping of ``source_url -> detail_record``. Records
+        without ``job_link``/``source_url`` cannot be attributed to any
+        job and are dropped (the corresponding job's outcome will surface
+        as ``completed_but_no_detail`` invalid output).
+        """
+        path = Path(detail_path)
+        if not path.is_file() or path.stat().st_size > self.max_artifact_bytes:
+            return {}
+        try:
+            with path.open(encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (json.JSONDecodeError, OSError):
+            return {}
+        if not isinstance(payload, list):
+            return {}
+        details_by_url: dict[str, dict] = {}
+        for record in payload:
+            if not isinstance(record, dict):
+                continue
+            url = record.get("job_link") or record.get("source_url") or ""
+            if url:
+                # First occurrence wins; later duplicates are dropped to
+                # avoid attributing one detail record to multiple jobs.
+                if url not in details_by_url:
+                    details_by_url[url] = record
+        return details_by_url
 
     # ------------------------------------------------------------------
     # Command building
@@ -378,6 +893,31 @@ class BossCdpSource:
             "--input", detail_input_path,
             "--detail-output", detail_output_path,
             "--max-details", "1",
+            "--detail",
+        ]
+
+    def _build_detail_batch_command(
+        self,
+        batch_input_path: str,
+        detail_output_path: str,
+        events_output_path: str,
+        batch_size: int,
+    ) -> list[str]:
+        """Build the scraper CLI command for a batched detail fetch.
+
+        ``--max-details`` is set to 5 (the producer contract maximum) so
+        the scraper enforces the cap independently. The batch input is
+        already ≤5 jobs, so this never truncates a valid batch.
+        ``--events-output`` directs the scraper to write terminal safe
+        events as JSONL so this adapter can parse/validate them.
+        """
+        return [
+            self.python_executable,
+            str(self.scraper_path),
+            "--input", batch_input_path,
+            "--detail-output", detail_output_path,
+            "--events-output", events_output_path,
+            "--max-details", "5",
             "--detail",
         ]
 

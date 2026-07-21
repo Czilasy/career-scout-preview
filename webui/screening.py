@@ -424,6 +424,81 @@ def _ranges_overlap(r1, r2) -> bool:
     return max(r1[0], r2[0]) <= min(r1[1], r2[1])
 
 
+# ---------------------------------------------------------------------------
+# Policy v2: numeric min_salary (monthly K floor) tri-state check
+# ---------------------------------------------------------------------------
+
+def _parse_monthly_salary_k_v2(salary_str):
+    """解析薪资字符串为月薪 (low_k, high_k) 区间（单位 K），无法解析返回 None。
+
+    Policy v2 数值 min_salary 基准 (research.md:93)：
+      - 月薪区间 "15-25K" -> (15.0, 25.0)
+      - N薪 "18-22K·13薪" -> 取基础月薪区间 (18.0, 22.0)，不用 N 薪放大
+      - 单值 "25K" -> (25.0, 25.0)
+      - "20K以上" -> (20.0, inf)；"3K以下" -> (0.0, 3.0)
+      - 明确年薪 "年薪240K" -> 折算月均 (20.0, 20.0)
+      - 日薪 "200/天"、面议、缺失、不可解析格式 -> None
+    """
+    if not salary_str or not isinstance(salary_str, str):
+        return None
+    s = salary_str.strip()
+    if not s or "面议" in s or "/" in s:
+        return None
+    # 明确年薪：折算为月均区间
+    m = re.match(r"^年薪\s*(\d+(?:\.\d+)?)\s*[Kk]$", s)
+    if m:
+        monthly = float(m.group(1)) / 12.0
+        return (monthly, monthly)
+    base = s.split("·")[0].strip()
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*[Kk]$", base)
+    if m:
+        return (float(m.group(1)), float(m.group(2)))
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*[Kk]\s*以上$", base)
+    if m:
+        return (float(m.group(1)), float("inf"))
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*[Kk]\s*以下$", base)
+    if m:
+        return (0.0, float(m.group(1)))
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*[Kk]$", base)
+    if m:
+        v = float(m.group(1))
+        return (v, v)
+    return None
+
+
+def check_min_salary_v2(job_salary, min_salary_constraint):
+    """Policy v2 数值 min_salary 月薪 K 下限三态核验。
+
+    契约 (research.md:93)：
+      - 岗位月薪区间上限明确低于下限 -> violation；
+      - 区间能够达到下限 -> pass；
+      - 无法比较（日薪/面议/缺失/不可解析/非 user_confirmed）-> unknown。
+
+    不伪装成旧 BOSS ``salary`` code；旧 code 由 v1 路径处理。
+
+    返回 ``{"outcome": "pass"|"violation"|"unknown", "reason": str,
+    "field": "min_salary"}``。
+    """
+    field = "min_salary"
+    constraint = min_salary_constraint or {}
+    if not isinstance(constraint, dict) or constraint.get("source") != "user_confirmed":
+        return {"outcome": "unknown", "reason": "constraint_not_confirmed", "field": field}
+    try:
+        floor_k = float(constraint.get("amount"))
+    except (TypeError, ValueError):
+        return {"outcome": "unknown", "reason": "invalid_floor", "field": field}
+
+    parsed = _parse_monthly_salary_k_v2(job_salary)
+    if parsed is None:
+        return {"outcome": "unknown", "reason": "unparseable_salary", "field": field}
+    _low_k, high_k = parsed
+    if high_k < floor_k:
+        return {"outcome": "violation",
+                "reason": f"上限 {high_k:g}K < 最低 {floor_k:g}K", "field": field}
+    return {"outcome": "pass",
+            "reason": f"区间可达最低 {floor_k:g}K", "field": field}
+
+
 def _tags_contains(tags, target_label) -> bool:
     """检查 tags 中是否包含 target_label。tags 格式 '3-5年 | 本科'。
 

@@ -724,6 +724,11 @@
     .discovery-evidence-list {
       display: flex; flex-direction: column; gap: 6px;
     }
+    .discovery-profile-section { margin-bottom: 16px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+    .discovery-profile-section h3 { margin-bottom: 8px; }
+    .discovery-fact-row { display: grid; grid-template-columns: 110px 1fr auto; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--line); }
+    .discovery-fact-row:last-child { border-bottom: 0; }
+    .discovery-fact-actions { display: flex; gap: 5px; }
     .discovery-evidence-item {
       background: var(--surface); border: 1px solid var(--line);
       border-radius: 6px; padding: 8px 12px;
@@ -2833,6 +2838,8 @@
 
     // == 发现工作区（feature 004：简历驱动岗位发现）==
     let discoveryAnalysisId = "";
+    let discoveryCandidateProfileVersion = null;
+    let discoveryCurrentAnalysis = null;
     let discoveryConfirmationId = "";
     let discoveryRunId = "";
     let discoveryDirections = [];
@@ -2844,9 +2851,13 @@
     let discoveryPreferenceChanges = [];
     let lastDiscoveryFeedbackId = "";
     let lastDiscoveryFeedbackJobId = "";
+    // T064: canonical projector filter state
+    let directionFilter = "";
+    let categoryFilter = "";
     const DISCOVERY_RUN_STORAGE_KEY = "boss-discovery-run";
     const DiscoveryAPI = {
       analyses: "/api/discovery/analyses",
+      candidateVersions: "/api/discovery/candidate-versions",
       confirmations: "/api/discovery/confirmations",
       runs: "/api/discovery/runs",
       feedback: "/api/discovery/feedback",
@@ -2972,6 +2983,7 @@
         // 1. 上传简历文件
         const formData = new FormData();
         formData.append("file", fileInput.files[0]);
+        formData.append("flow", "discovery");
         formData.append("ai_consent", String(aiConsent));
         const uploadResp = await api(`/api/profiles/${currentProfileId}/resume`, {
           method: "POST", body: formData,
@@ -2996,7 +3008,7 @@
         const analysisResp = await api(DiscoveryAPI.analyses, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ resume_id: resumeId, ai_consent: aiConsent }),
+          body: JSON.stringify({ resume_id: resumeId, ai_consent: aiConsent, contract_version: "v4" }),
         });
         if (!analysisResp.ok) {
           const err = await analysisResp.json().catch(() => ({}));
@@ -3033,6 +3045,11 @@
             lastNotice = "analyzing";
           }
         } else if (analysis.status === "ready") {
+          discoveryCandidateProfileVersion = null;
+          if (analysis.candidate_profile_version_id) {
+            const versionResp = await api(`${DiscoveryAPI.candidateVersions}/${analysis.candidate_profile_version_id}`);
+            if (versionResp.ok) discoveryCandidateProfileVersion = await versionResp.json();
+          }
           renderAnalysis(analysis);
           switchToDiscovery("review");
           const qualityStatus = (analysis.quality || {}).status || analysis.quality_status || "complete";
@@ -3052,7 +3069,118 @@
       return false;
     }
 
+    function renderCandidateProfileVersion(version, container) {
+      if (!version || !container) return;
+      const groups = [
+        { key: "explicit", className: "discovery-facts-explicit", title: "简历事实" },
+        { key: "inferred", className: "discovery-facts-inferred", title: "推断（需确认）" },
+      ];
+      for (const group of groups) {
+        const facts = (version.facts || []).filter(fact =>
+          fact.verification_status !== "rejected" &&
+          (group.key === "inferred" ? fact.assertion_type === "inferred" : fact.assertion_type !== "inferred")
+        );
+        const section = document.createElement("section");
+        section.className = `discovery-profile-section ${group.className}`;
+        const heading = document.createElement("h3");
+        heading.textContent = group.title;
+        section.appendChild(heading);
+        if (!facts.length) {
+          const empty = document.createElement("div");
+          empty.className = "discovery-empty-value";
+          empty.textContent = "暂无";
+          section.appendChild(empty);
+        }
+        for (const fact of facts) {
+          const row = document.createElement("div");
+          row.className = "discovery-fact-row";
+          const factType = document.createElement("span");
+          factType.textContent = fact.fact_type || "fact";
+          const factValue = document.createElement("span");
+          factValue.textContent = fact.normalized_value || JSON.stringify(fact.value || {});
+          const actions = document.createElement("span");
+          actions.className = "discovery-fact-actions";
+          const edit = document.createElement("button");
+          edit.type = "button"; edit.className = "btn"; edit.textContent = "纠正";
+          edit.onclick = () => editCandidateFact(fact.id);
+          const reject = document.createElement("button");
+          reject.type = "button"; reject.className = "btn"; reject.textContent = "拒绝";
+          reject.onclick = () => rejectCandidateFact(fact.id);
+          actions.append(edit, reject);
+          row.append(factType, factValue, actions);
+          section.appendChild(row);
+        }
+        if (group.key === "explicit") {
+          const add = document.createElement("button");
+          add.type = "button"; add.className = "btn"; add.textContent = "补充事实";
+          add.onclick = () => addCandidateFact();
+          section.appendChild(add);
+        }
+        container.appendChild(section);
+      }
+      const unknowns = document.createElement("section");
+      unknowns.className = "discovery-profile-section discovery-profile-unknowns";
+      const unknownHeading = document.createElement("h3");
+      unknownHeading.textContent = "未知项";
+      unknowns.appendChild(unknownHeading);
+      for (const item of version.unknowns || []) {
+        const row = document.createElement("div");
+        row.className = "discovery-unknown-item";
+        row.textContent = item.message || item.field || "待确认";
+        unknowns.appendChild(row);
+      }
+      container.appendChild(unknowns);
+      const intent = document.createElement("section");
+      intent.className = "discovery-profile-section discovery-current-intent";
+      const intentHeading = document.createElement("h3");
+      intentHeading.textContent = "当前求职意愿";
+      intent.appendChild(intentHeading);
+      const hint = document.createElement("div");
+      hint.className = "discovery-step-hint";
+      hint.textContent = "城市和最低薪资只采用你在下方明确填写的值，不从历史经历补造。";
+      intent.appendChild(hint);
+      container.appendChild(intent);
+    }
+
+    async function saveCandidateProfileEdits(operations, unknownResolutions = null) {
+      const version = discoveryCandidateProfileVersion;
+      if (!version) return false;
+      const resp = await api(`${DiscoveryAPI.candidateVersions}/${version.id}`, {
+        method: "PATCH", json: {
+          expected_content_hash: version.content_hash,
+          operations,
+          unknown_resolutions: unknownResolutions,
+        },
+      });
+      if (!resp.ok) {
+        const error = await resp.json().catch(() => ({}));
+        const code = error.error_code || "candidate_fact_invalid";
+        setAppNotice(code === "candidate_version_conflict" ? "画像已更新，请刷新后重试" : "画像事实无效，请检查后重试", "error");
+        return false;
+      }
+      discoveryCandidateProfileVersion = await resp.json();
+      if (discoveryCurrentAnalysis) renderAnalysis(discoveryCurrentAnalysis);
+      return true;
+    }
+
+    async function editCandidateFact(factId) {
+      const value = window.prompt("请输入纠正后的事实");
+      if (!value || !value.trim()) return;
+      await saveCandidateProfileEdits([{ op: "correct", fact_id: factId, value: { text: value.trim() }, normalized_value: value.trim() }]);
+    }
+
+    async function addCandidateFact() {
+      const value = window.prompt("请输入要补充的技能或事实");
+      if (!value || !value.trim()) return;
+      await saveCandidateProfileEdits([{ op: "add", fact_type: "skill", value: { name: value.trim() }, normalized_value: value.trim() }]);
+    }
+
+    async function rejectCandidateFact(factId) {
+      await saveCandidateProfileEdits([{ op: "reject", fact_id: factId }]);
+    }
+
     function renderAnalysis(analysis) {
+      discoveryCurrentAnalysis = analysis;
       discoveryDirections = analysis.directions || [];
       const container = document.getElementById("discoveryAnalysisContent");
       if (!container) return;
@@ -3072,6 +3200,7 @@
         qualityBox.appendChild(item);
       }
       container.appendChild(qualityBox);
+      renderCandidateProfileVersion(discoveryCandidateProfileVersion, container);
       // 摘要
       const summary = analysis.summary || {};
       {
@@ -3301,7 +3430,7 @@
       updateManualDirectionState();
       // 硬约束输入
       const hcDiv = document.createElement("div");
-      hcDiv.className = "discovery-hard-constraints";
+      hcDiv.className = "discovery-hard-constraints discovery-current-intent";
       const hcTitle = document.createElement("div");
       hcTitle.className = "discovery-hard-constraints-title";
       hcTitle.textContent = "硬约束（可选）";
@@ -3388,7 +3517,10 @@
       const cityEl = document.getElementById("discoveryHardCity");
       const salaryEl = document.getElementById("discoveryHardSalary");
       if (cityEl && cityEl.value.trim()) hardConstraints.city = cityEl.value.trim();
-      if (salaryEl && salaryEl.value.trim()) hardConstraints.min_salary = salaryEl.value.trim();
+      if (salaryEl && salaryEl.value.trim()) hardConstraints.min_salary = {
+        amount: Number(salaryEl.value), currency: "CNY", pay_period: "month",
+        unit: "K", semantics: "monthly_floor", source: "user_confirmed",
+      };
       if (btn) { btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
       const label = btn ? btn.querySelector(".btn-label") : null;
       if (label) label.textContent = "确认中…";
@@ -3396,6 +3528,8 @@
         const resp = await api(DiscoveryAPI.confirmations, {
           method: "POST", json: {
             analysis_id: discoveryAnalysisId,
+            candidate_profile_version_id: discoveryCandidateProfileVersion?.id || null,
+            expected_content_hash: discoveryCandidateProfileVersion?.content_hash || null,
             enabled_direction_ids: enabledDirectionIds,
             hard_constraints: hardConstraints,
             soft_preferences: {},
@@ -3574,6 +3708,47 @@
         countsDiv.appendChild(s);
       }
       container.appendChild(countsDiv);
+      // T083: v2 四类进度权威名（http-api.md L203-208）。
+      // search_queries_completed / list_candidates / details_selected /
+      // details_completed / assessments_completed / recommendations。
+      // v1 别名（source_count/detail_count/evaluated_count）继续展示以兼容旧客户端。
+      const v2ProgressDiv = document.createElement("div");
+      v2ProgressDiv.className = "discovery-progress-v2";
+      const v2Labels = {
+        search_queries_completed: "已完成搜索查询",
+        list_candidates: "候选岗位",
+        details_selected: "入选详情",
+        details_completed: "已完成详情",
+        assessments_completed: "已完成评估",
+        recommendations: "推荐结果",
+      };
+      for (const [key, label] of Object.entries(v2Labels)) {
+        if (progress[key] != null) {
+          const s = document.createElement("span");
+          s.className = "discovery-progress-v2-item";
+          s.dataset.progressKey = key;
+          s.innerHTML = label + "：<strong>" + progress[key] + "</strong>";
+          v2ProgressDiv.appendChild(s);
+        }
+      }
+      container.appendChild(v2ProgressDiv);
+      // T083: cancel_requested_at 展示（http-api.md L318）。
+      // 仅在 cancel 已请求时展示，避免空字段。
+      if (run.cancel_requested_at) {
+        const cancelDiv = document.createElement("div");
+        cancelDiv.className = "discovery-progress-cancel-requested";
+        cancelDiv.dataset.cancelRequestedAt = run.cancel_requested_at;
+        cancelDiv.textContent = "取消请求时间：" + run.cancel_requested_at;
+        container.appendChild(cancelDiv);
+      }
+      // T083: complete 终态指示（http-api.md L228）。
+      // complete=true 表示终态（succeeded/failed/cancelled/partial）；
+      // complete=false 表示可恢复（interrupted 或活动态）。
+      const completeDiv = document.createElement("div");
+      completeDiv.className = "discovery-progress-complete";
+      completeDiv.dataset.complete = run.complete ? "true" : "false";
+      completeDiv.textContent = run.complete ? "运行已结束" : "运行可恢复";
+      container.appendChild(completeDiv);
       // 更新时间
       if (run.updated_at) {
         const upd = document.createElement("div");
@@ -3615,6 +3790,23 @@
         const resp = await api(`${DiscoveryAPI.runs}/${discoveryRunId}/resume`, { method: "POST" });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
+          // T083: resume 409 state_conflict 处理（http-api.md L319）。
+          // input_hash 或 policy_version 漂移时后端同步返回 409 + state_conflict，
+          // 前端必须明确告知用户「无法恢复」并展示冲突原因，而非通用错误。
+          if (resp.status === 409 && err.error_code === "state_conflict") {
+            const conflictDiv = document.createElement("div");
+            conflictDiv.className = "discovery-resume-conflict";
+            conflictDiv.dataset.errorCode = "state_conflict";
+            conflictDiv.dataset.httpStatus = "409";
+            conflictDiv.textContent = "恢复冲突：" + (err.user_message || "input_hash 或 policy_version 漂移，无法恢复运行。");
+            const progressContent = document.getElementById("discoveryProgressContent");
+            if (progressContent) {
+              progressContent.innerHTML = "";
+              progressContent.appendChild(conflictDiv);
+            }
+            setAppNotice("无法恢复：" + (err.user_message || "运行状态冲突"), "error");
+            return;
+          }
           setAppNotice("继续失败：" + (err.user_message || resp.status), "error");
           return;
         }
@@ -3639,6 +3831,102 @@
         renderResults(data.items || [], data.counts || {});
       } catch (_e) {
         setAppNotice("结果加载失败，请稍后重试", "error");
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // T050: Progressive results (policy v2)
+    // ------------------------------------------------------------------
+
+    let lastResultRevision = 0;
+    const cardRegistry = new Map(); // job_id -> DOM element, stable card identity
+    let progressivePollTimer = null;
+
+    function startProgressivePoll(runId) {
+      if (progressivePollTimer) clearTimeout(progressivePollTimer);
+      const poll = async () => {
+        try {
+          const url = `${DiscoveryAPI.runs}/${runId}/results?limit=100&after_revision=${lastResultRevision}`;
+          const resp = await api(url);
+          if (!resp.ok) { progressivePollTimer = setTimeout(poll, 3000); return; }
+          const data = await resp.json();
+          // revision 不变时跳过重绘 (changed=false short-circuit)
+          if (data.changed === false) {
+            progressivePollTimer = setTimeout(poll, 3000);
+            return;
+          }
+          lastResultRevision = data.revision || lastResultRevision;
+          renderProgressiveResults(data);
+          const terminal = ["succeeded", "failed", "cancelled", "partial"];
+          if (data.complete || terminal.includes(data.run_status)) {
+            progressivePollTimer = null;
+            return;
+          }
+          progressivePollTimer = setTimeout(poll, 3000);
+        } catch (_e) {
+          progressivePollTimer = setTimeout(poll, 5000);
+        }
+      };
+      progressivePollTimer = setTimeout(poll, 3000);
+    }
+
+    function pollProgressiveResults(runId) {
+      startProgressivePoll(runId);
+    }
+
+    function renderProgressiveResults(data) {
+      const list = document.getElementById("discoveryResultsList");
+      if (!list) return;
+      const items = data.items || [];
+      const runStatus = data.run_status || "";
+      // Track which job_ids are present in this batch.
+      const presentIds = new Set(items.map(j => j.job_id));
+      // Explainable disappearance: mark cards no longer present.
+      for (const [jobId, card] of cardRegistry.entries()) {
+        if (!presentIds.has(jobId)) {
+          const reason = card.dataset.disappearanceReason || "budget_deferred";
+          const reasonEl = card.querySelector(".disappearance-reason");
+          if (!reasonEl) {
+            const el = document.createElement("div");
+            el.className = "disappearance-reason";
+            el.textContent = "已移出结果：" + (reason === "budget_deferred" ? "预算限制" : reason);
+            card.appendChild(el);
+          }
+          card.classList.add("discovery-card-hidden");
+        }
+      }
+      // Render or update cards with stable identity keyed by data-job-id.
+      for (const job of items) {
+        const jobId = job.job_id || "";
+        let card = cardRegistry.get(jobId);
+        if (!card) {
+          card = createDiscoveryCard(job);
+          card.setAttribute("data-job-id", jobId);
+          cardRegistry.set(jobId, card);
+          list.appendChild(card);
+        } else {
+          // Update existing card in place (stable identity, no redraw).
+          card.classList.remove("discovery-card-hidden");
+          const badge = card.querySelector(".discovery-job-card-badge");
+          if (badge && job.category) {
+            const catLabels = {
+              high_match: "高度匹配", adjacent_match: "邻近匹配", growth_match: "发展匹配",
+              needs_review: "待确认", not_suitable: "不适合",
+            };
+            badge.textContent = catLabels[job.category] || job.category;
+          }
+        }
+      }
+      // Show non-terminal status indicator.
+      if (runStatus && runStatus !== "succeeded" && runStatus !== "failed") {
+        let indicator = document.getElementById("discoveryProgressiveStatus");
+        if (!indicator) {
+          indicator = document.createElement("div");
+          indicator.id = "discoveryProgressiveStatus";
+          indicator.className = "discovery-progressive-status";
+          list.parentNode.insertBefore(indicator, list);
+        }
+        indicator.textContent = "运行中（" + runStatus + "），结果持续更新…";
       }
     }
 
@@ -3850,21 +4138,84 @@
         comp.textContent = "完整度：" + job.completeness;
         card.appendChild(comp);
       }
+      // T064: JD 摘要
+      const jdText = job.jd || job.jd_excerpt || "";
+      if (jdText) {
+        const jd = document.createElement("div");
+        jd.className = "discovery-job-card-jd";
+        jd.textContent = jdText.length > 200 ? jdText.slice(0, 200) + "…" : jdText;
+        card.appendChild(jd);
+      }
+      // T064: 来源链接和抓取时间
+      const sourceLine = document.createElement("div");
+      sourceLine.className = "discovery-job-card-source";
+      if (job.source_url) {
+        const srcLink = document.createElement("a");
+        srcLink.href = job.source_url;
+        srcLink.target = "_blank";
+        srcLink.rel = "noopener";
+        srcLink.textContent = "原始详情";
+        sourceLine.appendChild(srcLink);
+      }
+      if (job.fetched_at) {
+        const fetched = document.createElement("span");
+        fetched.className = "discovery-job-card-fetched";
+        fetched.textContent = "抓取于 " + job.fetched_at;
+        sourceLine.appendChild(fetched);
+      }
+      if (sourceLine.children.length) card.appendChild(sourceLine);
+      // T064: 排序原因 (sort_components)
+      if (job.sort_components) {
+        const sortInfo = document.createElement("div");
+        sortInfo.className = "discovery-job-card-sort";
+        sortInfo.dataset.sortComponents = JSON.stringify(job.sort_components);
+        sortInfo.textContent = "排序依据：类别 " + (job.sort_components.category_rank ?? "—") +
+          " / 分数 " + (job.sort_components.match_score ?? "—") +
+          " / 置信度 " + (job.sort_components.confidence ?? "—");
+        card.appendChild(sortInfo);
+      }
       // 解释
       const gaps = job.gaps_json || job.gaps || [];
-      if (job.explanation || (gaps && gaps.length)) {
+      const explanation = job.explanation || null;
+      if (explanation || (gaps && gaps.length)) {
         const expl = document.createElement("div");
         expl.className = "discovery-job-card-explanation";
-        if (job.explanation) {
+        if (explanation && explanation.positive && explanation.positive.length) {
+          const strong = document.createElement("strong");
+          strong.textContent = "正向依据：";
+          expl.appendChild(strong);
+          const posList = document.createElement("ul");
+          posList.className = "discovery-positive-list";
+          for (const p of explanation.positive) {
+            const li = document.createElement("li");
+            li.textContent = (p.dimension || "维度") + "（分数 " + (p.score ?? "—") + "）";
+            // T064: 双方证据 refs
+            if (p.candidate_evidence_refs && p.candidate_evidence_refs.length) {
+              const cRefs = document.createElement("span");
+              cRefs.className = "candidate_evidence_refs";
+              cRefs.textContent = " [候选人证据: " + p.candidate_evidence_refs.join(", ") + "]";
+              li.appendChild(cRefs);
+            }
+            if (p.job_evidence_refs && p.job_evidence_refs.length) {
+              const jRefs = document.createElement("span");
+              jRefs.className = "job_evidence_refs";
+              jRefs.textContent = " [岗位证据: " + p.job_evidence_refs.join(", ") + "]";
+              li.appendChild(jRefs);
+            }
+            posList.appendChild(li);
+          }
+          expl.appendChild(posList);
+        } else if (typeof job.explanation === "string" && job.explanation) {
           const strong = document.createElement("strong");
           strong.textContent = "依据：";
           expl.appendChild(strong);
           expl.appendChild(document.createTextNode(job.explanation));
         }
-        if (gaps && gaps.length) {
+        const explGaps = (explanation && explanation.gaps) || gaps;
+        if (explGaps && explGaps.length) {
           const gapDiv = document.createElement("div");
           gapDiv.className = "discovery-job-card-gaps";
-          const gapTexts = gaps.map(g => typeof g === "string" ? g : (g.text || ""));
+          const gapTexts = explGaps.map(g => typeof g === "string" ? g : (g.text || ""));
           gapDiv.textContent = "缺口：" + gapTexts.filter(Boolean).join("；");
           expl.appendChild(gapDiv);
         }

@@ -22,6 +22,7 @@ Usage:
     python tests/fixtures/discovery/e2e_real_boss.py
     python tests/fixtures/discovery/e2e_real_boss.py --resume resume_cross_family.txt
     python tests/fixtures/discovery/e2e_real_boss.py --close-browser-after
+    python tests/fixtures/discovery/e2e_real_boss.py --output specs/005-fast-resume-discovery/validation/real_e2e_result.json
 """
 
 from __future__ import annotations
@@ -588,13 +589,6 @@ def _run_e2e(resume_name: str = "resume_cross_family.txt") -> dict:
                 "analysis_id": analysis_id,
                 "enabled_direction_ids": direction_ids,
                 "hard_constraints": {"city": "北京"},
-                # T133: 减少 detail_budget 让 E2E 在合理时间内完成。
-                # 默认 60 个 detail × 3 directions = 180 次 AI 评估调用，
-                # 免费模型每次 5-10 秒，总共 15-30 分钟会超时。
-                # T133 只要求至少 1 个真实详情/评估；固定 2 个已确认方向
-                # 和 1 个详情，将真实外部评估限制为 2 次，避免未确认方向
-                # 或过量详情把受控验收拖入超时。
-                "safe_limits": {"max_details": 1},
             },
         )
         if resp.status_code != 201:
@@ -631,9 +625,9 @@ def _run_e2e(resume_name: str = "resume_cross_family.txt") -> dict:
         report["write_scope"]["db"] = tmp_db.name
 
         # Step 5: 轮询 GET /api/discovery/runs/{id} 直到终态
-        # source.fetch_list 单 item timeout=600s，3 items 可能需要最多 18 分钟。
-        # 设 480s 足以完成 1-2 items 并观察部分行为；未到终态也记录诊断信息。
-        run_status = _poll_run_status(client, run_id, timeout=480.0)
+        # 真实场景：max_details=60 × 5-10s/detail + 评估 = 15-25 分钟。
+        # 设 1800s（30 分钟）足够跑完整流程；未到终态也记录诊断信息。
+        run_status = _poll_run_status(client, run_id, timeout=1800.0)
         run = store.get_discovery_run(run_id)
         # T133: get_discovery_run 返回的字典中没有 "counters" key。
         # 直接列名 source_count/detail_count/evaluated_count/high_count/...
@@ -1088,8 +1082,8 @@ def _test_resume_flow(client, store, profile, resume, analysis_id,
                     "reason": f"POST /resume returned {resp.status_code}: "
                                f"{resp.get_data(as_text=True)}"}
 
-        # 轮询直到终态
-        run_status = _poll_run_status(client, run_id, timeout=480.0)
+        # 轮询直到终态（真实场景需要 15-25 分钟，设 1800s 足够）
+        run_status = _poll_run_status(client, run_id, timeout=1800.0)
         final_run = store.get_discovery_run(run_id)
         report["post_resume_status"] = run_status
         report["post_resume_counts"] = {
@@ -1396,7 +1390,13 @@ def main(browser_backend=None) -> int:
     if report["browser_lifecycle"]["close_status"] == "close_failed":
         report.setdefault("operational_blockers", []).append("browser_close_failed")
         exit_code = 1
-    report_path = FIXTURE_DIR / "e2e_real_boss_result.json"
+    # T099: 默认写回 fixture 目录（保留基线行为）；--output 可覆盖到 005 validation/
+    if "--output" in sys.argv:
+        output_arg = sys.argv[sys.argv.index("--output") + 1]
+        report_path = Path(output_arg).resolve()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        report_path = FIXTURE_DIR / "e2e_real_boss_result.json"
     with report_path.open("w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=2)
     print(f"\nReport written to: {report_path}")

@@ -202,6 +202,51 @@ $env:PYTHONIOENCODING = "utf-8"
 python webui/app.py
 ```
 
+### 岗位发现 v2 收口（005）
+
+在 004 工作台基础上叠加的确定性收口：通过独立 `discovery_v2` policy、四类进度、渐进结果、取消/恢复、12h 详情复用、来源断路器和分级反馈，把"快速简历驱动岗位推荐"约束在可验证的性能与安全边界内。004 历史运行继续使用 `policy v1`，005 新运行使用 `discovery_v2`，迁移 015 是 additive，不重写 001–014。
+
+#### 默认用户流程
+
+1. **上传简历** → 2. **AI 分析（候选人 v4）+ 方向确认** → 3. **运行进度（四类计数 + 取消/恢复）** → 4. **渐进结果（3 秒轮询，revision-based 不重绘）** → 5. **岗位/方向/判断错误反馈（声明 scope + 可撤销）**。前端根路径 `/` 是唯一正式入口，扫描上传→纠正→确认→首批结果→取消/恢复→反馈全链路。
+
+#### 性能与安全边界（自动化门 SC-001–SC-011）
+
+| 门 | 边界 | 自动化验证位置 |
+|---|---|---|
+| SC-003 | 15 详情 + 所需评估 ≤ 600 模拟秒 | `tests/test_discovery_performance.py::Sc003DeterministicOrchestrationGateTests` |
+| SC-004 | 工作单元完成后 ≤ 10 模拟秒内进度可见；刷新保留计数 | `tests/test_discovery_performance.py::Sc004Sc010Sc011PerformanceGateTests` |
+| SC-010 | cancel 后 ≤ 30 wall-clock 秒进入 `cancelled` 终态；已完成 snapshots/assessments/candidates 100% 保留 | 同上 |
+| SC-011 | 输入身份一致的 resume 不重复抓 detail、不重复调 AI | 同上 |
+| 默认详情并发 | 保持 1（policy 上限 2 需真实小样本稳定性证据后才允许提升） | `webui/source.py` 默认值 |
+| 12h 详情复用 | 同一 job 在 12h 内的运行命中复用，不重复抓 | `webui/store.py` 复用守卫 |
+| 来源断路器 | 连续失败超阈值时 `source_rate_limited`/`source_verification_required`，阻止后续抓取 | `webui/source.py` breaker |
+| 反馈作用域 | `exact_job` / `exact_direction` / `exact_assessment`；可撤销；仅影响后续运行或当前可见性，不改写历史 | `webui/store.py` + `webui/discovery.py::apply_feedback_to_next_run` |
+
+#### 运行命令与兼容说明
+
+```bash
+# 启动 BOSS 专用 Chrome（首次）
+python3 scripts/boss_cdp_raw.py --setup-chrome
+
+# 启动 Web 工作台
+python3 webui/app.py
+# 浏览器访问 http://127.0.0.1:5000
+
+# 自动化测试（无需真实 Chrome/网络，全 mock）
+python3 -m unittest discover -s tests -v
+
+# 黄金样本评估（SC-003–SC-009 标注一致性，不调真实 AI）
+python3 tests/fixtures/discovery/evaluate.py
+```
+
+兼容说明：
+
+- 004 历史运行继续使用 `policy v1`；005 新运行使用 `discovery_v2`；两套策略共存，不互相改写历史。
+- Migration 015 additive：只新增列与表，不重写 001–014；老库可直接升级。
+- 默认详情并发为 1；只有真实小样本稳定性证据通过后才允许 policy 上限 2（不在 feature 005 范围内）。
+- 反馈只作用于声明 scope 和后续运行；历史 profile/confirmation/assessment 事实永不改写。
+
 ## ✨ 特性
 
 - 明文薪资（API 模式，绕过字体反爬）

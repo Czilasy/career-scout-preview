@@ -23,6 +23,7 @@ from webui.candidate import (
     CANDIDATE_ANALYSIS_V3_CONTRACT,
     build_empty_candidate_analysis,
     normalize_candidate_analysis,
+    normalize_candidate_analysis_v4,
 )
 
 
@@ -698,7 +699,7 @@ class DiscoveryAIProvider:
 
     # -- Candidate analysis v3 --
 
-    def analyze(self, *, resume_text: str) -> dict:
+    def analyze(self, *, resume_text: str, contract_version: str = "v3") -> dict:
         """Return a normalized v3 candidate analysis.
 
         Unparseable output and transport failures are terminal. A parseable
@@ -707,6 +708,11 @@ class DiscoveryAIProvider:
         quality fields are derived by the normalizer; raw provider output is
         never returned or persisted.
         """
+        if contract_version == "v4":
+            return self._analyze_v4(resume_text)
+        if contract_version != "v3":
+            raise ValueError(f"unsupported candidate analysis contract: {contract_version}")
+
         messages = self._build_analyze_messages(resume_text)
         original = None
         for attempt in range(2):
@@ -734,11 +740,66 @@ class DiscoveryAIProvider:
             return normalized if self._quality_score(normalized) > self._quality_score(original) else original
         return original or build_empty_candidate_analysis()
 
+    def _analyze_v4(self, resume_text: str) -> dict:
+        """Run one candidate-v4 request chain with at most one correction."""
+        messages = self._build_analyze_v4_messages(resume_text)
+        best = None
+        provider_call_count = 0
+        for attempt in range(2):
+            try:
+                response = call_ai(
+                    self.endpoint, self.api_key, messages, model=self.model,
+                    timeout=120,
+                )
+                provider_call_count += 1
+            except AISecurityError as exc:
+                raise _map_provider_error(exc) from None
+            try:
+                parsed = self._clean_candidate_response(response)
+            except (ValueError, TypeError, json.JSONDecodeError):
+                raise AISecurityError("ai_invalid_output") from None
+            normalized = normalize_candidate_analysis_v4(parsed, resume_text)
+            if best is None or self._quality_score(normalized) > self._quality_score(best):
+                best = normalized
+            if normalized.get("quality", {}).get("status") == "complete":
+                result = copy.deepcopy(normalized)
+                result["metrics"] = {"provider_call_count": provider_call_count}
+                return result
+            if attempt == 0:
+                warnings = normalized.get("quality", {}).get("warnings", [])
+                safe_warnings = [
+                    {"code": item.get("code", "invalid_type"), "path": item.get("path", "root")}
+                    for item in warnings
+                    if isinstance(item, dict)
+                ]
+                prior = {
+                    key: copy.deepcopy(parsed[key])
+                    for key in (
+                        "contract_version", "summary", "evidence", "facts", "unknowns", "directions"
+                    )
+                    if key in parsed
+                }
+                messages = messages + [
+                    {"role": "assistant", "content": json.dumps(prior, ensure_ascii=False)},
+                    {
+                        "role": "user",
+                        "content": "仅修正以下安全契约路径并返回完整v4 JSON："
+                        + json.dumps(safe_warnings, ensure_ascii=False),
+                    },
+                ]
+        result = copy.deepcopy(best) if best is not None else {
+            "contract_version": "v4", "summary": {}, "evidence": [], "facts": [],
+            "unknowns": [], "directions": [],
+            "quality": {"status": "manual_required", "warnings": []},
+        }
+        result["metrics"] = {"provider_call_count": provider_call_count}
+        return result
+
     @staticmethod
     def _quality_score(result):
         q = result.get("quality", {})
         rank = {"manual_required": 0, "partial": 1, "complete": 2}
-        useful = (len(result.get("evidence", [])) + len(result.get("directions", [])) +
+        useful = (len(result.get("evidence", [])) + len(result.get("facts", [])) + len(result.get("directions", [])) +
                   len(result.get("summary", {}).get("strengths", [])) +
                   bool(result.get("summary", {}).get("headline")))
         return (rank.get(q.get("status"), 0), useful)
@@ -807,8 +868,17 @@ class DiscoveryAIProvider:
 
     # -- Job-direction assessment v1 (T114) --
 
-    def assess_job(self, *, candidate_summary: dict, direction: dict,
-                   evidence: list, job_snapshot: dict) -> dict:
+    def assess_job(
+        self,
+        *,
+        candidate_summary: dict | None = None,
+        direction: dict | None = None,
+        evidence: list | None = None,
+        job_snapshot: dict | None = None,
+        candidate_profile: dict | None = None,
+        directions: list | None = None,
+        contract_version: str = "v1",
+    ) -> dict:
         """Call AI to assess one job against one direction.
 
         Constructs the v1 assessment prompt with sanitized input, calls
@@ -817,6 +887,12 @@ class DiscoveryAIProvider:
         T114: 允许一次纠正性重试（结构性失败时）。第二次仍失败抛
         AISecurityError("ai_invalid_output")。
         """
+        if contract_version == "job_assessment_v2":
+            if not isinstance(directions, list) or not 1 <= len(directions) <= 2:
+                raise ValueError("job-assessment v2 requires one or two directions")
+            return self._assess_job_v2(candidate_profile, directions, job_snapshot)
+        if contract_version != "v1":
+            raise ValueError(f"unsupported job assessment contract: {contract_version}")
         messages = self._build_assess_messages(
             candidate_summary, direction, evidence, job_snapshot,
         )
@@ -859,6 +935,292 @@ class DiscoveryAIProvider:
             return False
         return True
 
+    # -- Job-direction assessment v2 (T056) --
+
+    _V2_DIMS = (
+        "direction_alignment", "skill_coverage",
+        "experience_match", "industry_relevance",
+    )
+    _V2_BANDS = frozenset({"high", "adjacent", "growth", "unsuitable", "uncertain"})
+
+    def _assess_job_v2(self, candidate_profile, directions, job_snapshot) -> dict:
+        """Run one job-assessment v2 request chain with at most one correction.
+
+        One request evaluates one job and up to two relevant directions. Each
+        direction is validated independently; an invalid direction is
+        quarantined without polluting a valid sibling. If the envelope is
+        parseable and only some directions are invalid, at most one corrective
+        call targets just the invalid direction ids with safe validation paths.
+        Raw provider output is validated in memory and discarded.
+        """
+        direction_scope = {}
+        for d in directions or []:
+            if isinstance(d, dict) and d.get("id"):
+                direction_scope[d["id"]] = {
+                    "fact_refs": set(d.get("fact_refs") or []),
+                    "evidence_refs": set(d.get("evidence_refs") or []),
+                }
+        job_fields = set()
+        if isinstance(job_snapshot, dict):
+            fields = job_snapshot.get("fields")
+            if isinstance(fields, dict):
+                job_fields = set(fields.keys())
+
+        messages = self._build_assess_v2_messages(candidate_profile, directions, job_snapshot)
+        provider_call_count = 0
+        valid: dict = {}
+        quarantined: dict = {}
+
+        for attempt in range(2):
+            try:
+                response = call_ai(
+                    self.endpoint, self.api_key, messages, model=self.model,
+                    timeout=120,
+                )
+                provider_call_count += 1
+            except AISecurityError as exc:
+                raise _map_provider_error(exc) from None
+            try:
+                parsed = self._clean_assessment_v2_response(response)
+            except (ValueError, TypeError, json.JSONDecodeError):
+                raise AISecurityError("ai_invalid_output") from None
+
+            seen_ids = set()
+            for assessment in parsed.get("assessments", []):
+                if not isinstance(assessment, dict):
+                    continue
+                direction_id = assessment.get("direction_id")
+                if direction_id not in direction_scope or direction_id in seen_ids:
+                    continue
+                seen_ids.add(direction_id)
+                ok, reason, cleaned = self._validate_assessment_v2(
+                    assessment, direction_scope[direction_id], job_fields,
+                )
+                if ok:
+                    valid[direction_id] = cleaned
+                    quarantined.pop(direction_id, None)
+                elif direction_id not in valid:
+                    quarantined[direction_id] = reason
+
+            if set(direction_scope) <= set(valid):
+                break
+            if attempt == 0:
+                invalid_ids = [d for d in direction_scope if d not in valid]
+                if not invalid_ids:
+                    break
+                safe_warnings = [
+                    {"direction_id": d, "code": quarantined.get(d, "invalid"),
+                     "path": f"assessments[{d}]"}
+                    for d in invalid_ids
+                ]
+                prior = {
+                    "contract_version": "job_assessment_v2",
+                    "assessments": [
+                        a for a in parsed.get("assessments", [])
+                        if isinstance(a, dict) and a.get("direction_id") in invalid_ids
+                    ],
+                }
+                messages = messages + [
+                    {"role": "assistant", "content": json.dumps(prior, ensure_ascii=False)},
+                    {"role": "user", "content": (
+                        "仅修正以下无效方向并返回完整 job_assessment_v2 JSON："
+                        + json.dumps(safe_warnings, ensure_ascii=False)
+                    )},
+                ]
+                continue
+            break
+
+        assessments = [valid[d] for d in valid]
+        quarantined_list = [{"direction_id": d, "reason": r} for d, r in quarantined.items()]
+        total = len(direction_scope)
+        n_valid = len(valid)
+        if n_valid == total:
+            status = "complete"
+        elif n_valid > 0:
+            status = "partial"
+        else:
+            status = "manual_required"
+        warnings = [{"code": r, "direction_id": d} for d, r in quarantined.items()]
+        return {
+            "contract_version": "job_assessment_v2",
+            "assessments": assessments,
+            "quarantined": quarantined_list,
+            "quality": {"status": status, "warnings": warnings},
+            "metrics": {"provider_call_count": provider_call_count},
+        }
+
+    @classmethod
+    def _validate_assessment_v2(cls, assessment, scope, job_fields):
+        """Validate one direction's assessment.
+
+        Returns ``(ok, reason, cleaned)``. ``ok`` is True only when all four
+        dimensions exist with integer 0-100 scores, candidate refs stay within
+        the direction's supplied refs, and job refs name supplied snapshot
+        fields. Positive items lacking bilateral (candidate-side and job-side)
+        evidence are dropped, not fatal.
+        """
+        dims = assessment.get("dimensions")
+        if not isinstance(dims, dict):
+            return False, "missing_dimensions", None
+        cleaned_dims = {}
+        for name in cls._V2_DIMS:
+            item = dims.get(name)
+            if not isinstance(item, dict):
+                return False, f"missing_dimension:{name}", None
+            score = item.get("score")
+            if not cls._is_int_score(score):
+                return False, f"non_integer_score:{name}", None
+            fact_refs = item.get("candidate_fact_refs") or []
+            evidence_refs = item.get("candidate_evidence_refs") or []
+            job_refs = item.get("job_evidence_refs") or []
+            if any(ref not in scope["fact_refs"] for ref in fact_refs):
+                return False, f"cross_direction_fact_ref:{name}", None
+            if any(ref not in scope["evidence_refs"] for ref in evidence_refs):
+                return False, f"cross_direction_evidence_ref:{name}", None
+            if job_fields and any(ref not in job_fields for ref in job_refs):
+                return False, f"unknown_job_ref:{name}", None
+            cleaned_dims[name] = {
+                "score": int(score),
+                "candidate_fact_refs": list(fact_refs),
+                "candidate_evidence_refs": list(evidence_refs),
+                "job_evidence_refs": list(job_refs),
+            }
+        for key in ("match_score", "confidence"):
+            if not cls._is_int_score(assessment.get(key)):
+                return False, f"non_integer_{key}", None
+
+        positive = []
+        for item in assessment.get("positive") or []:
+            if not isinstance(item, dict):
+                continue
+            cand = item.get("candidate_evidence_refs") or []
+            job = item.get("job_evidence_refs") or []
+            if not cand or not job:
+                continue  # positive must carry bilateral evidence
+            if any(ref not in scope["evidence_refs"] for ref in cand):
+                continue
+            if job_fields and any(ref not in job_fields for ref in job):
+                continue
+            positive.append({
+                "text": str(item.get("text", "")),
+                "candidate_fact_refs": list(item.get("candidate_fact_refs") or []),
+                "candidate_evidence_refs": list(cand),
+                "job_evidence_refs": list(job),
+            })
+
+        gaps = []
+        for item in assessment.get("gaps") or []:
+            if not isinstance(item, dict):
+                continue
+            fact_refs = item.get("candidate_fact_refs") or []
+            job_refs = item.get("job_evidence_refs") or []
+            if any(ref not in scope["fact_refs"] for ref in fact_refs):
+                continue
+            if job_fields and any(ref not in job_fields for ref in job_refs):
+                continue
+            gaps.append({
+                "text": str(item.get("text", "")),
+                "candidate_fact_refs": list(fact_refs),
+                "job_evidence_refs": list(job_refs),
+            })
+
+        band = assessment.get("proposed_band")
+        if band not in cls._V2_BANDS:
+            band = "uncertain"
+
+        cleaned = {
+            "direction_id": assessment.get("direction_id"),
+            "dimensions": cleaned_dims,
+            "match_score": int(assessment["match_score"]),
+            "confidence": int(assessment["confidence"]),
+            "positive": positive,
+            "gaps": gaps,
+            "proposed_band": band,
+        }
+        return True, "", cleaned
+
+    @staticmethod
+    def _is_int_score(value) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100
+
+    @staticmethod
+    def _clean_assessment_v2_response(response):
+        if isinstance(response, dict):
+            obj = response
+        elif isinstance(response, str):
+            text = response.strip()
+            if text.startswith("```"):
+                lines = text.splitlines()
+                if (len(lines) < 3 or lines[0].strip() not in ("```", "```json")
+                        or lines[-1].strip() != "```"):
+                    raise ValueError("fence")
+                text = "\n".join(lines[1:-1]).strip()
+            obj = json.loads(text)
+        else:
+            raise ValueError("json")
+        if not isinstance(obj, dict):
+            raise ValueError("object")
+        envelopes = [key for key in ("data", "result") if key in obj]
+        if len(envelopes) > 1:
+            raise ValueError("envelope")
+        if envelopes:
+            key = envelopes[0]
+            if len(obj) != 1 or not isinstance(obj[key], dict):
+                raise ValueError("envelope")
+            obj = obj[key]
+        if not isinstance(obj.get("assessments"), list):
+            raise ValueError("assessments")
+        return obj
+
+    @staticmethod
+    def _build_assess_v2_messages(candidate_profile, directions, job_snapshot):
+        profile = candidate_profile or {}
+        allowed_facts: set = set()
+        allowed_evidence: set = set()
+        for d in directions or []:
+            if isinstance(d, dict):
+                allowed_facts.update(d.get("fact_refs") or [])
+                allowed_evidence.update(d.get("evidence_refs") or [])
+        facts = [
+            f for f in profile.get("facts", [])
+            if isinstance(f, dict) and f.get("client_ref") in allowed_facts
+        ]
+        evidence = [
+            e for e in profile.get("evidence", [])
+            if isinstance(e, dict) and e.get("client_ref") in allowed_evidence
+        ]
+        payload = {
+            "contract_version": "job_assessment_v2",
+            "candidate": {
+                "profile_version_id": profile.get("profile_version_id"),
+                "summary": profile.get("summary", {}),
+                "facts": facts,
+                "evidence": evidence,
+            },
+            "job": job_snapshot or {},
+            "directions": directions or [],
+        }
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "你是岗位评估助手。一次只评估一个岗位的最多两个相关方向，按 direction_id 分隔返回 "
+                    "job_assessment_v2 JSON。结构：assessments[{direction_id, "
+                    "dimensions{direction_alignment,skill_coverage,experience_match,industry_relevance}"
+                    "{score,candidate_fact_refs,candidate_evidence_refs,job_evidence_refs}, "
+                    "match_score, confidence, positive[{text,candidate_fact_refs,"
+                    "candidate_evidence_refs,job_evidence_refs}], "
+                    "gaps[{text,candidate_fact_refs,job_evidence_refs}], proposed_band}]。"
+                    "score/match_score/confidence 必须是 0-100 的整数。"
+                    "candidate_fact_refs/candidate_evidence_refs 只能引用该方向 supplied 的 ID；"
+                    "job_evidence_refs 只能命名岗位字段。positive 必须同时含候选侧与岗位侧证据。"
+                    "proposed_band 只能是 high/adjacent/growth/unsuitable/uncertain，仅为建议。"
+                    "禁止输出原始响应、凭据、locator 或完整简历文本。"
+                ),
+            },
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+
     # -- Prompt construction (T106/T114 will refine) --
 
     @staticmethod
@@ -889,6 +1251,41 @@ class DiscoveryAIProvider:
                 "role": "system",
                 "content": (
                     "你是候选人分析助手。严格按以下v3契约返回JSON。仅输出provider拥有字段；quality由程序生成，禁止输出source_locator和safe_excerpt。字段缺失使用契约typed-empty。CANONICAL_CANDIDATE_V3_SCHEMA_BEGIN\n" + schema + "\nCANONICAL_CANDIDATE_V3_SCHEMA_END\n示例:" + example + "。"
+                ),
+            },
+            {"role": "user", "content": resume_text},
+        ]
+
+    @staticmethod
+    def _build_analyze_v4_messages(resume_text: str) -> list:
+        provider_shape = {
+            "contract_version": "v4",
+            "summary": {},
+            "evidence": [{
+                "client_ref": "e1", "type": "skill", "normalized_value": "",
+                "source_quote": "", "assertion_type": "explicit", "confidence": 0,
+            }],
+            "facts": [{
+                "client_ref": "f1", "fact_type": "skill", "value": {},
+                "normalized_value": "", "evidence_refs": ["e1"],
+                "assertion_type": "explicit", "confidence": 0,
+            }],
+            "unknowns": [],
+            "directions": [{
+                "client_ref": "d1", "name": "", "type": "core", "rationale": "",
+                "evidence_refs": ["e1"], "fact_refs": ["f1"], "gaps": [],
+                "confidence": 0, "default_enabled": False, "search_terms": [],
+            }],
+        }
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "你是候选人分析助手。只返回 candidate-analysis v4 JSON。"
+                    "facts 仅允许 work/project/skill/industry/education/achievement/seniority；"
+                    "每个事实必须引用本次响应 evidence；禁止输出 locator、safe_excerpt、quality、"
+                    "后台ID、用户确认值、prompt、凭据或原始响应字段。结构："
+                    + json.dumps(provider_shape, ensure_ascii=False)
                 ),
             },
             {"role": "user", "content": resume_text},

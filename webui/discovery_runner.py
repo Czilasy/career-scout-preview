@@ -42,6 +42,7 @@ from webui.source import (
     SourceOutcome,
     _input_hash as _source_input_hash,
 )
+from webui.store import _now
 from webui.workbench import normalize_job_link
 
 
@@ -52,6 +53,8 @@ from webui.workbench import normalize_job_link
 STAGE_CREATED = "created"
 STAGE_PLANNING = "planning"
 STAGE_FETCHING_LISTS = "fetching_lists"
+STAGE_PRIORITIZING = "prioritizing"
+STAGE_PROCESSING_JOBS = "processing_jobs"
 STAGE_FETCHING_DETAILS = "fetching_details"
 STAGE_EVALUATING = "evaluating"
 STAGE_ASSEMBLING = "assembling"
@@ -59,6 +62,8 @@ STAGE_ASSEMBLING = "assembling"
 STATUS_CREATED = "created"
 STATUS_PLANNING = "planning"
 STATUS_FETCHING_LISTS = "fetching_lists"
+STATUS_PRIORITIZING = "prioritizing"
+STATUS_PROCESSING_JOBS = "processing_jobs"
 STATUS_FETCHING_DETAILS = "fetching_details"
 STATUS_EVALUATING = "evaluating"
 STATUS_ASSEMBLING = "assembling"
@@ -74,6 +79,203 @@ ACTIVE_STATUSES = frozenset({
 })
 TERMINAL_STATUSES = frozenset({STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED})
 RESUMABLE_STATUSES = frozenset({STATUS_INTERRUPTED, STATUS_PARTIAL})
+
+
+# ---------------------------------------------------------------------------
+# Policy v2 direction relevance selection (T058)
+# ---------------------------------------------------------------------------
+
+_DIRECTION_TYPE_PRIORITY = {"core": 0, "adjacent": 1, "growth": 2}
+
+
+def select_job_directions_v2(enabled_directions, candidate_direction_ids, *, limit=2):
+    """Select at most ``limit`` relevant enabled directions for one job.
+
+    Relevance signal is the set of directions that surfaced this candidate
+    (``candidate_direction_ids``). Among those, order by direction type
+    priority (core < adjacent < growth), then confidence descending, then id.
+    Falls back to all enabled directions when the candidate carries no
+    direction ids. Never returns more than ``limit`` directions.
+    """
+    enabled = [d for d in (enabled_directions or []) if isinstance(d, dict) and d.get("id")]
+    candidate_ids = set(candidate_direction_ids or [])
+    relevant = [d for d in enabled if d["id"] in candidate_ids] if candidate_ids else []
+    if not relevant:
+        relevant = list(enabled)
+
+    def sort_key(d):
+        dtype = d.get("type") or d.get("direction_type") or ""
+        try:
+            conf = int(d.get("confidence") or 0)
+        except (TypeError, ValueError):
+            conf = 0
+        return (_DIRECTION_TYPE_PRIORITY.get(dtype, 99), -conf, str(d["id"]))
+
+    relevant.sort(key=sort_key)
+    return relevant[:limit]
+
+
+# ---------------------------------------------------------------------------
+# DiscoveryPerformanceMetrics (feature 005 deterministic performance gates)
+# ---------------------------------------------------------------------------
+
+
+class DiscoveryPerformanceMetrics:
+    """Deterministic, injectable-clock performance metrics for policy v2 runs.
+
+    SC-001: candidate pool assembled within 90 simulated seconds.
+    SC-002: first five assessed results visible within 300 simulated seconds.
+    """
+
+    CONTRACT_VERSION = "perf_v1"
+
+    def __init__(self, *, monotonic_clock=None):
+        import time as _time
+        self._clock = monotonic_clock or _time.monotonic
+        self._start: float | None = None
+        self._list_completed_at: float | None = None
+        self._list_query_count = 0
+        self._list_job_count = 0
+        self._selection: dict = {}
+        self._details: list[dict] = []
+        self._ai_groups: list[dict] = []
+        self._result_visible: list[tuple[str, float]] = []
+        self._all_complete_at: float | None = None
+        self._blockers: list[dict] = []
+        self._resume_count = 0
+        self._source_breaker_events: list[dict] = []
+
+    def start(self) -> None:
+        self._start = self._clock()
+
+    def mark_list_completed(self, *, query_count: int, job_count: int) -> None:
+        self._list_completed_at = self._clock()
+        self._list_query_count = query_count
+        self._list_job_count = job_count
+
+    def record_selection(self, *, selected_count: int, deferred_count: int,
+                         reasons: dict | None = None) -> None:
+        self._selection = {
+            "selected_count": selected_count,
+            "deferred_count": deferred_count,
+            "reasons": reasons or {},
+        }
+
+    def record_detail_completed(self, *, job_id: str, total_seconds: float,
+                                wait_seconds: float, wait_reason: str,
+                                batch: int, concurrency: int,
+                                reused: bool = False) -> None:
+        self._details.append({
+            "job_id": job_id,
+            "total_seconds": total_seconds,
+            "wait_seconds": wait_seconds,
+            "wait_reason": wait_reason,
+            "batch": batch,
+            "concurrency": concurrency,
+            "reused": reused,
+        })
+
+    def record_ai_group_completed(self, *, job_id: str, direction_count: int,
+                                  call_count: int, duration_seconds: float) -> None:
+        self._ai_groups.append({
+            "job_id": job_id,
+            "direction_count": direction_count,
+            "call_count": call_count,
+            "duration_seconds": duration_seconds,
+        })
+
+    def record_result_visible(self, *, job_id: str) -> None:
+        self._result_visible.append((job_id, self._clock()))
+
+    def mark_all_complete(self) -> None:
+        self._all_complete_at = self._clock()
+
+    def record_blocker(self, *, code: str, stage: str, external: bool) -> None:
+        self._blockers.append({"code": code, "stage": stage, "external": external})
+
+    def record_resume(self) -> None:
+        self._resume_count += 1
+
+    def record_source_breaker(self, *, code: str, stage: str) -> None:
+        self._source_breaker_events.append({"code": code, "stage": stage})
+
+    def build_report(self) -> dict:
+        start = self._start or 0.0
+        list_duration = (self._list_completed_at - start) if self._list_completed_at is not None else None
+
+        # Detail percentiles.
+        detail_totals = sorted(d["total_seconds"] for d in self._details)
+        detail_waits = sorted(d["wait_seconds"] for d in self._details)
+
+        def _p(values: list[float], pct: float) -> float | None:
+            if not values:
+                return None
+            idx = max(0, min(len(values) - 1, int(len(values) * pct / 100.0)))
+            return values[idx]
+
+        # Timing milestones.
+        first_result_seconds = None
+        first_five_seconds = None
+        if self._result_visible:
+            times = [t for _, t in self._result_visible]
+            first_result_seconds = times[0] - start
+            if len(times) >= 5:
+                first_five_seconds = times[4] - start
+        all_complete_seconds = (
+            (self._all_complete_at - start) if self._all_complete_at is not None else None
+        )
+
+        # Gates.
+        has_external_blocker = any(b.get("external") for b in self._blockers)
+        list_pool_ok = list_duration is not None and list_duration <= 90.0
+        first_five_ok = first_five_seconds is not None and first_five_seconds <= 300.0
+        all_complete_ok = all_complete_seconds is not None and all_complete_seconds <= 600.0
+        no_blocker = not has_external_blocker
+        overall = list_pool_ok and first_five_ok and all_complete_ok and no_blocker
+
+        status = "blocked" if has_external_blocker else ("complete" if self._all_complete_at is not None else "running")
+
+        return {
+            "contract_version": self.CONTRACT_VERSION,
+            "status": status,
+            "list": {
+                "query_count": self._list_query_count,
+                "job_count": self._list_job_count,
+                "duration_seconds": list_duration,
+            },
+            "selection": self._selection or {"selected_count": 0, "deferred_count": 0, "reasons": {}},
+            "details": {
+                "processed_count": len(self._details),
+                "reused_count": sum(1 for d in self._details if d.get("reused")),
+                "failed_count": 0,
+                "cancelled_count": 0,
+                "items": self._details,
+                "duration_seconds": {"p50": _p(detail_totals, 50), "p95": _p(detail_totals, 95)},
+                "wait_duration_seconds": {"p50": _p(detail_waits, 50), "p95": _p(detail_waits, 95)},
+                "batch_count": len({d["batch"] for d in self._details}),
+                "peak_concurrency": max((d["concurrency"] for d in self._details), default=0),
+            },
+            "ai": {
+                "group_count": len(self._ai_groups),
+                "call_count": sum(g["call_count"] for g in self._ai_groups),
+                "duration_seconds": sum(g["duration_seconds"] for g in self._ai_groups),
+            },
+            "timing": {
+                "first_result_seconds": first_result_seconds,
+                "first_five_seconds": first_five_seconds,
+                "all_complete_seconds": all_complete_seconds,
+            },
+            "resume_count": self._resume_count,
+            "source_breaker_events": self._source_breaker_events,
+            "blockers": self._blockers,
+            "gates": {
+                "list_pool_within_90_seconds": list_pool_ok,
+                "first_five_within_300_seconds": first_five_ok,
+                "all_complete_within_600_seconds": all_complete_ok,
+                "no_external_blocker": no_blocker,
+                "overall": overall,
+            },
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +320,7 @@ class DiscoveryRunner:
         result_dir: Path | str | None = None,
         max_workers: int = 1,
         cancel_event: threading.Event | None = None,
+        monotonic_clock: Any = None,
     ):
         self.store = store
         self.source = source
@@ -130,6 +333,7 @@ class DiscoveryRunner:
         self._list_jobs_cache = _list_jobs_cache
         self._lock = threading.Lock()
         self._external_cancel_event = cancel_event
+        self._monotonic_clock = monotonic_clock
 
     # ------------------------------------------------------------------
     # Public API
@@ -143,8 +347,16 @@ class DiscoveryRunner:
             raise DiscoveryError("not_found", user_message="运行不存在。")
         if run["status"] in TERMINAL_STATUSES:
             return run
-        # Resume: if interrupted/partial, just continue.
+        # Resume: if interrupted/partial, verify identity before re-activating.
         if run["status"] not in (STATUS_CREATED,) and run["status"] not in ACTIVE_STATUSES:
+            # T081/T083: v2 runs must reject policy_version and input_hash drift
+            # (http-api.md L319-320). v1 runs keep the legacy resume behavior
+            # (no hash drift check) so existing 004 historical runs and
+            # 005-code-created v1 runs continue to resume under policy v1.
+            # Note: drift of policy_version from "discovery_v2" to a valid
+            # v1 value is NOT detectable without a separate immutable field;
+            # we only reject drift to invalid policy_version values.
+            check_v2_resume_hash_drift(self.store, run)
             # interrupted or partial -> re-activate
             self.store.update_discovery_run(run_id, status=STATUS_CREATED)
 
@@ -180,6 +392,149 @@ class DiscoveryRunner:
         except Exception:  # noqa: BLE001
             # Error already persisted inside run(); swallow to keep thread alive.
             pass
+
+    def run_progressive_detail_eval(self, run_id: str) -> dict:
+        """V2 progressive orchestration: detail→assessment→result_revision per candidate.
+
+        Processes only *selected* candidates in rank order.  For each
+        candidate the detail is fetched, a snapshot persisted, an
+        assessment created for every enabled direction, and
+        ``result_revision`` incremented immediately — the frontend can
+        poll and see results appear one-by-one without waiting for the
+        entire run to finish.
+
+        Every assessment is independently checkpointed to SQLite so an
+        interrupt at any point leaves completed work recoverable.
+        """
+        run = self.store.get_discovery_run(run_id)
+        if run.get("policy_version") != "discovery_v2":
+            raise DiscoveryError("state_conflict", user_message="仅支持 policy v2 运行。")
+
+        # Enter processing_jobs stage.
+        self.store.update_discovery_run(
+            run_id, status=STATUS_PROCESSING_JOBS, stage=STAGE_PROCESSING_JOBS,
+        )
+        self.store.append_discovery_event(run_id, "stage_entered", {"stage": STAGE_PROCESSING_JOBS})
+
+        # Load confirmation context once.
+        confirmation = self._load_confirmation_view(run)
+        hard_constraints = confirmation.get("hard_constraints", {}) or {}
+        # _load_confirmation_view already filters to enabled directions.
+        enabled_directions = confirmation.get("enabled_directions", [])
+        directions = [
+            d for d in self.store.list_directions(run["analysis_id"])
+            if d["id"] in {ed["id"] for ed in enabled_directions}
+        ]
+        evidence = self.store.list_evidence(run["analysis_id"])
+        evidence_ids = {e["id"] for e in evidence}
+
+        # Iterate selected candidates in stable rank order.
+        selected = self.store.list_run_candidates(run_id, selection_decision="selected")
+        selected.sort(key=lambda c: (c.get("selection_rank") or 9999, c["job_id"]))
+
+        result_revision = 0
+        detail_completed = 0
+        assessment_completed = 0
+
+        # T077: ensure detail_selected_count reflects the actual selected
+        # candidates being processed. This is normally set by _stage_prioritizing,
+        # but progressive eval can be entered directly on a resumed run where
+        # the counter was never stamped.
+        if selected:
+            self.store.update_discovery_run(run_id, counters={
+                "detail_selected_count": len(selected),
+            })
+
+        for candidate in selected:
+            job_id = candidate["job_id"]
+            source_url = candidate.get("source_url", "")
+
+            # T079: cancel signal — when set, no new candidate work starts.
+            # Already-persisted snapshots/assessments are preserved; the run
+            # transitions to cancelled via the stage-loop cancel check.
+            cancel_event = self._cancel_events.get(run_id)
+            if cancel_event is not None and cancel_event.is_set():
+                return self.store.get_discovery_run(run_id)
+            if self.is_cancelled(run_id):
+                return self.store.get_discovery_run(run_id)
+
+            # T075: circuit breaker — when open, no new source work starts.
+            # Already-assessed candidates keep their results; the run
+            # transitions to partial (if usable results exist) or failed.
+            if self._source_breaker_open(run_id, STAGE_PROCESSING_JOBS):
+                self._finalize_breaker_open(run_id, STAGE_PROCESSING_JOBS)
+                return self.store.get_discovery_run(run_id)
+
+            # --- Fetch detail → snapshot -----------------------------------
+            job_dict = {
+                "job_id": job_id,
+                "source_url": source_url,
+                "title": (candidate.get("list_fields") or {}).get("title", ""),
+                "company": (candidate.get("list_fields") or {}).get("company", ""),
+                "salary": (candidate.get("list_fields") or {}).get("salary", ""),
+                "location": (candidate.get("list_fields") or {}).get("location", ""),
+            }
+            detail_ok = self._fetch_one_detail(
+                run_id, job_dict,
+                run_candidate_id=candidate.get("id"),
+                list_fields=candidate.get("list_fields") or {},
+            )
+            if detail_ok:
+                detail_completed += 1
+
+            # Retrieve the snapshot we just saved.
+            snapshots = self._list_snapshots(run_id)
+            snapshot = next((s for s in snapshots if s["job_id"] == job_id), None)
+            if snapshot is None:
+                continue
+
+            # --- Assess immediately: one v2 group of ≤2 relevant directions ---
+            selected_dirs = select_job_directions_v2(
+                directions, candidate.get("direction_ids"), limit=2,
+            )
+            pending_dirs = []
+            for direction in selected_dirs:
+                existing = self._get_assessment(run_id, snapshot["id"], direction["id"])
+                if existing and existing.get("status") == "completed":
+                    assessment_completed += 1
+                else:
+                    pending_dirs.append(direction)
+            if pending_dirs:
+                assessment_completed += self._evaluate_job_v2_group(
+                    run_id, snapshot, pending_dirs, hard_constraints, evidence_ids,
+                )
+
+            # --- Checkpoint: increment result_revision immediately ---------
+            result_revision += 1
+            self.store.update_discovery_run(run_id, counters={
+                "result_revision": result_revision,
+                "detail_completed_count": detail_completed,
+                "assessment_completed_count": assessment_completed,
+            })
+            self.store.append_discovery_event(run_id, "progressive_result_visible", {
+                "job_id": job_id,
+                "result_revision": result_revision,
+            })
+            # T077: timing — first_result_at on first visible result,
+            # first_batch_at on 5th. Monotonic (COALESCE in mark_run_timing
+            # keeps the first non-NULL value across resumes/re-runs).
+            timing_kwargs = {"first_result_at": _now()}
+            if result_revision >= 5:
+                timing_kwargs["first_batch_at"] = _now()
+            self.store.mark_run_timing(run_id, **timing_kwargs)
+
+            # Mark candidate as detail_ready → assessed.
+            try:
+                self.store.update_run_candidate_state(
+                    candidate["id"], state="assessed",
+                    expected_state="selected",
+                )
+            except Exception:  # noqa: BLE001 - CAS conflict on resume
+                pass
+
+        # T077: mark processing stage completion timestamp.
+        self.store.mark_run_timing(run_id, processing_completed_at=_now())
+        return self.store.get_discovery_run(run_id)
 
     def request_cancel(self, run_id: str) -> dict:
         """Request cancellation. The main loop checks before each unit of work."""
@@ -231,13 +586,28 @@ class DiscoveryRunner:
         if cancel_event.is_set() or self.is_cancelled(run_id):
             return self._handle_cancel(run_id)
 
-        # Stage 3: fetching details
-        self._stage_fetching_details(run_id, cancel_event)
-        if cancel_event.is_set() or self.is_cancelled(run_id):
-            return self._handle_cancel(run_id)
+        # Stage 2.5 (v2): prioritizing — persist candidates, precheck, select
+        run = self.store.get_discovery_run(run_id)
+        if run.get("policy_version") == "discovery_v2":
+            self._stage_prioritizing(run_id, cancel_event)
+            if cancel_event.is_set() or self.is_cancelled(run_id):
+                return self._handle_cancel(run_id)
 
-        # Stage 4: evaluating
-        self._stage_evaluating(run_id, cancel_event)
+        # Stage 3+4: v2 progressive (detail+assessment per candidate) or v1
+        # sequential (fetch all details, then evaluate all).
+        run = self.store.get_discovery_run(run_id)
+        if run.get("policy_version") == "discovery_v2":
+            # T081: v2 progressive path — run_progressive_detail_eval handles
+            # detail fetch + assessment + result_revision per candidate. It
+            # checks cancel_event internally via self._cancel_events.
+            if cancel_event.is_set() or self.is_cancelled(run_id):
+                return self._handle_cancel(run_id)
+            self.run_progressive_detail_eval(run_id)
+        else:
+            self._stage_fetching_details(run_id, cancel_event)
+            if cancel_event.is_set() or self.is_cancelled(run_id):
+                return self._handle_cancel(run_id)
+            self._stage_evaluating(run_id, cancel_event)
         if cancel_event.is_set() or self.is_cancelled(run_id):
             return self._handle_cancel(run_id)
 
@@ -246,7 +616,11 @@ class DiscoveryRunner:
 
     def _stage_planning(self, run_id: str, cancel_event: threading.Event) -> None:
         run = self.store.get_discovery_run(run_id)
-        if run["stage"] in (STAGE_FETCHING_LISTS, STAGE_FETCHING_DETAILS, STAGE_EVALUATING, STAGE_ASSEMBLING):
+        # T081: include PRIORITIZING and PROCESSING_JOBS so resume from a
+        # later v2 stage skips plan recompilation.
+        if run["stage"] in (STAGE_FETCHING_LISTS, STAGE_PRIORITIZING,
+                            STAGE_PROCESSING_JOBS, STAGE_FETCHING_DETAILS,
+                            STAGE_EVALUATING, STAGE_ASSEMBLING):
             return  # plan already compiled
         self.store.update_discovery_run(run_id, status=STATUS_PLANNING, stage=STAGE_PLANNING, started=True)
         self.store.append_discovery_event(run_id, "stage_entered", {"stage": STAGE_PLANNING})
@@ -273,12 +647,18 @@ class DiscoveryRunner:
 
     def _stage_fetching_lists(self, run_id: str, cancel_event: threading.Event) -> bool:
         run = self.store.get_discovery_run(run_id)
-        if run["stage"] in (STAGE_FETCHING_DETAILS, STAGE_EVALUATING, STAGE_ASSEMBLING):
+        # T081: include PRIORITIZING and PROCESSING_JOBS so resume from a
+        # later v2 stage skips list fetching.
+        if run["stage"] in (STAGE_PRIORITIZING, STAGE_PROCESSING_JOBS,
+                            STAGE_FETCHING_DETAILS, STAGE_EVALUATING, STAGE_ASSEMBLING):
             return True
         self.store.update_discovery_run(run_id, status=STATUS_FETCHING_LISTS, stage=STAGE_FETCHING_LISTS)
         self.store.append_discovery_event(run_id, "stage_entered", {"stage": STAGE_FETCHING_LISTS})
 
         plan = self.store.get_search_plan(run_id)
+        # T075: if the breaker is open from a prior run/retry, try to reset
+        # it via preflight + cooldown before abandoning new source work.
+        self._try_reset_source_breaker()
         preflight = getattr(self.source, "preflight", None)
         if callable(preflight):
             outcome = preflight()
@@ -311,6 +691,11 @@ class DiscoveryRunner:
                 return
             if item["status"] in ("completed", "failed", "cancelled", "skipped"):
                 continue
+            # T075: circuit breaker — when open, stop starting new list fetches.
+            # Remaining items stay non-terminal so the run can resume later.
+            if self._source_breaker_open(run_id, STAGE_FETCHING_LISTS):
+                self.store.update_discovery_run(run_id, counters={"source_count": source_count})
+                return False
             # M6: verify input_hash integrity on resume (state-machine.md:51).
             current_hash = _source_input_hash({
                 "keyword": item.get("keyword", ""),
@@ -332,7 +717,126 @@ class DiscoveryRunner:
             if updated_item["status"] == "completed":
                 source_count += 1
         self.store.update_discovery_run(run_id, counters={"source_count": source_count})
+        # T077: mark list stage completion timestamp.
+        self.store.mark_run_timing(run_id, list_completed_at=_now())
         return True
+
+    def _stage_prioritizing(self, run_id: str, cancel_event: threading.Event) -> None:
+        """V2 candidate pool: persist all, precheck, select priority details."""
+        from webui.discovery import precheck_list_candidate, select_priority_details
+
+        run = self.store.get_discovery_run(run_id)
+        # T081: include PROCESSING_JOBS so resume from the progressive stage
+        # skips re-prioritizing (candidates are already selected).
+        if run["stage"] in (STAGE_PROCESSING_JOBS, STAGE_FETCHING_DETAILS,
+                            STAGE_EVALUATING, STAGE_ASSEMBLING):
+            return  # already past prioritizing
+        self.store.update_discovery_run(run_id, status=STATUS_PRIORITIZING, stage=STAGE_PRIORITIZING)
+        self.store.append_discovery_event(run_id, "stage_entered", {"stage": STAGE_PRIORITIZING})
+
+        # Check if candidates already persisted (resume case).
+        existing = self.store.list_run_candidates(run_id)
+        if not existing:
+            # Persist all list jobs as candidates.
+            plan = self.store.get_search_plan(run_id)
+            confirmation = self._load_confirmation_view(run)
+            hard_constraints = confirmation.get("hard_constraints", {})
+            input_hash = run.get("input_hash", "")
+            enabled_dirs = [
+                d.get("direction_id", d.get("id", ""))
+                for d in confirmation.get("directions", [])
+                if d.get("enabled")
+            ]
+            for item in plan["items"]:
+                if item["status"] != "completed":
+                    continue
+                jobs = self._read_list_jobs(item)
+                direction_ids = item.get("direction_ids", [])
+                search_terms = [item.get("keyword", "")] if item.get("keyword") else []
+                for idx, job in enumerate(jobs):
+                    if cancel_event.is_set():
+                        return
+                    job_id = str(job.get("job_id") or job.get("id") or "")
+                    source_url = normalize_job_link(job.get("source_url") or job.get("url") or "")
+                    if not job_id or not source_url:
+                        continue
+                    list_fields = {
+                        "title": job.get("title", ""),
+                        "salary": job.get("salary", ""),
+                        "location": job.get("location", job.get("city", "")),
+                        "company": job.get("company", ""),
+                    }
+                    self.store.upsert_run_candidate(
+                        run_id=run_id, job_id=job_id, source_url=source_url,
+                        direction_ids=direction_ids, search_terms=search_terms,
+                        source_positions=[{"item": item.get("keyword", ""), "page": item.get("page_cursor", 0), "rank": idx}],
+                        list_fields=list_fields, input_hash=input_hash,
+                    )
+
+        # Run precheck on all discovered candidates.
+        candidates = self.store.list_run_candidates(run_id, state="discovered")
+        confirmation = self._load_confirmation_view(run)
+        hard_constraints = confirmation.get("hard_constraints", {})
+        for c in candidates:
+            if cancel_event.is_set():
+                return
+            result = precheck_list_candidate(c.get("list_fields", {}), hard_constraints)
+            if result["outcome"] == "violation":
+                self.store.update_run_candidate_state(
+                    c["id"], state="excluded", selection_decision="excluded",
+                    precheck_outcome="violation", precheck=result["checks"],
+                    selection_reason=result.get("reason", "hard_violation"),
+                    expected_state="discovered",
+                )
+            elif result["outcome"] == "unknown":
+                self.store.update_run_candidate_state(
+                    c["id"], state="prechecked_unknown",
+                    precheck_outcome="unknown", precheck=result["checks"],
+                    expected_state="discovered",
+                )
+            else:
+                self.store.update_run_candidate_state(
+                    c["id"], state="prechecked_pass",
+                    precheck_outcome="pass", precheck=result["checks"],
+                    expected_state="discovered",
+                )
+
+        # Priority selection on eligible candidates.
+        eligible = self.store.list_run_candidates(run_id)
+        eligible = [c for c in eligible if c["selection_decision"] == "pending"]
+        plan = self.store.get_search_plan(run_id)
+        detail_budget = int(plan.get("detail_budget", 15))
+        enabled_dirs = [
+            d.get("direction_id", d.get("id", ""))
+            for d in confirmation.get("directions", [])
+            if d.get("enabled")
+        ]
+        selection = select_priority_details(
+            eligible, detail_budget=detail_budget, directions=enabled_dirs,
+        )
+        for item in selection["selected"]:
+            self.store.update_run_candidate_state(
+                item["id"], state="selected", selection_decision="selected",
+                selection_rank=item["selection_rank"],
+                selection_reason="priority_score",
+            )
+        for item in selection["deferred"]:
+            if item.get("selection_decision") != "excluded":
+                self.store.update_run_candidate_state(
+                    item["id"], selection_decision="deferred",
+                    selection_reason="budget_deferred",
+                )
+
+        selected_count = len(selection["selected"])
+        self.store.update_discovery_run(run_id, counters={
+            "list_candidate_count": len(existing) if existing else len(self.store.list_run_candidates(run_id)),
+            "detail_selected_count": selected_count,
+        })
+        self.store.append_discovery_event(run_id, "prioritizing_complete", {
+            "total_candidates": len(self.store.list_run_candidates(run_id)),
+            "selected": selected_count,
+            "deferred": len(selection["deferred"]),
+        })
 
     def _stage_fetching_details(self, run_id: str, cancel_event: threading.Event) -> None:
         run = self.store.get_discovery_run(run_id)
@@ -372,6 +876,10 @@ class DiscoveryRunner:
         detail_count = 0
         for job in jobs_to_fetch:
             if cancel_event.is_set() or self.is_cancelled(run_id):
+                return
+            # T075: circuit breaker — when open, stop starting new detail fetches.
+            if self._source_breaker_open(run_id, STAGE_FETCHING_DETAILS):
+                self.store.update_discovery_run(run_id, counters={"detail_count": detail_count})
                 return
             if self._fetch_one_detail(run_id, job):
                 detail_count += 1
@@ -485,6 +993,90 @@ class DiscoveryRunner:
         )
 
     # ------------------------------------------------------------------
+    # T075: Source circuit breaker integration
+    # ------------------------------------------------------------------
+
+    def _source_breaker_open(self, run_id: str, stage: str) -> bool:
+        """Check whether the source circuit breaker is open.
+
+        When open, records a ``source_breaker_open`` event and metrics entry
+        so the run can transition to partial/failed. Returns True iff the
+        breaker is open (no new source work should start).
+        """
+        breaker = getattr(self.source, "breaker", None)
+        if breaker is None or not breaker.is_open():
+            return False
+        state = breaker.state()
+        self.store.append_discovery_event(
+            run_id, "source_breaker_open",
+            {
+                "stage": stage,
+                "last_signal": state.get("last_signal"),
+                "consecutive": state.get("consecutive"),
+            },
+        )
+        self.metrics.record_source_breaker(
+            code=state.get("last_signal") or "source_blocked",
+            stage=stage,
+        )
+        return True
+
+    def _try_reset_source_breaker(self) -> bool:
+        """Attempt to reset an open breaker via preflight + cooldown.
+
+        Returns True iff the breaker is now closed (or was already closed).
+        The reset requires BOTH cooldown elapsed AND preflight success
+        (state-machine.md L107).
+        """
+        breaker = getattr(self.source, "breaker", None)
+        if breaker is None or not breaker.is_open():
+            return True  # already closed
+        preflight = getattr(self.source, "preflight", None)
+        if not callable(preflight):
+            return False
+        try:
+            outcome = preflight()
+        except Exception:  # noqa: BLE001 - preflight must never crash the run
+            return False
+        return breaker.try_reset(outcome.ok)
+
+    def _finalize_breaker_open(self, run_id: str, stage: str) -> None:
+        """Transition a run to partial/failed when the breaker is open.
+
+        Contract (state-machine.md L106): run becomes partial when usable
+        results exist, otherwise failed/blocked with safe source code.
+        """
+        assessments = self.store.list_assessments(run_id)
+        usable_categories = {"high_match", "adjacent_match", "growth_match"}
+        has_usable = any(a.get("category") in usable_categories for a in assessments)
+        failure_code = "source_blocked"
+        if has_usable:
+            self.store.update_discovery_run(
+                run_id,
+                status=STATUS_PARTIAL,
+                stage=stage,
+                failure_code=failure_code,
+                failure_stage=stage,
+            )
+            self.store.append_discovery_event(
+                run_id, "run_partial",
+                {"reason": "source_breaker_open", "usable_count": len(assessments)},
+            )
+        else:
+            self.store.update_discovery_run(
+                run_id,
+                status=STATUS_FAILED,
+                stage=stage,
+                failure_code=failure_code,
+                failure_stage=stage,
+                completed=True,
+            )
+            self.store.append_discovery_event(
+                run_id, "run_failed",
+                {"reason": "source_breaker_open", "failure_code": failure_code},
+            )
+
+    # ------------------------------------------------------------------
     # Per-unit work
     # ------------------------------------------------------------------
 
@@ -528,7 +1120,11 @@ class DiscoveryRunner:
                 {"item_id": item["id"], "code": outcome.failed_code, "safe_log": outcome.safe_log},
             )
 
-    def _fetch_one_detail(self, run_id: str, job: dict) -> bool:
+    def _fetch_one_detail(
+        self, run_id: str, job: dict, *,
+        run_candidate_id: str | None = None,
+        list_fields: dict | None = None,
+    ) -> bool:
         if self.source is None:
             return False
         job_id = str(job.get("job_id") or job.get("id") or "")
@@ -536,6 +1132,63 @@ class DiscoveryRunner:
         if not job_id or not source_url:
             return False
         job = {**job, "source_url": source_url}
+
+        # T081 SC-011: on resume, if this run already has a completed snapshot
+        # for this job, skip source.fetch_detail entirely. find_reusable_snapshot
+        # excludes the current run (exclude_run_id=run_id), so without this
+        # check, resume would re-fetch details that are already persisted.
+        try:
+            existing = self.store.get_snapshot(run_id, job_id)
+        except KeyError:
+            existing = None
+        except Exception:  # noqa: BLE001 - snapshot lookup must never crash
+            existing = None
+        if existing is not None and existing.get("fetch_status") == "completed":
+            self.store.append_discovery_event(
+                run_id, "detail_skipped_existing",
+                {"job_id": job_id, "snapshot_id": existing.get("id")},
+            )
+            return True
+
+        # T073: try to reuse a prior fresh snapshot before hitting the source.
+        # This skips source.fetch_detail entirely when a valid prior capture
+        # exists within the 12h freshness window with matching identity.
+        if run_candidate_id and list_fields is not None:
+            try:
+                reusable = self.store.find_reusable_snapshot(
+                    job_id=job_id,
+                    source_url=source_url,
+                    current_list_fields=list_fields,
+                    exclude_run_id=run_id,
+                )
+            except Exception:  # noqa: BLE001 - reuse lookup must never crash the run
+                reusable = None
+            if reusable is not None:
+                self.store.append_discovery_event(
+                    run_id, "detail_reused",
+                    {
+                        "job_id": job_id,
+                        "source_snapshot_id": reusable.get("id"),
+                        "source_run_id": reusable.get("run_id"),
+                    },
+                )
+                try:
+                    self.store.create_reused_snapshot(
+                        run_id=run_id,
+                        run_candidate_id=run_candidate_id,
+                        source_snapshot=reusable,
+                        fetch_policy_version="discovery_v2",
+                    )
+                except Exception:  # noqa: BLE001 - reuse failure falls back to fetch
+                    pass
+                else:
+                    self.store.append_discovery_event(
+                        run_id, "snapshot_saved",
+                        {"job_id": job_id, "completeness": reusable.get("completeness"),
+                         "ok": True, "reused": True},
+                    )
+                    return True
+
         detail_output_path = str(self.result_dir / f"detail_{run_id}_{job_id}.json")
         self.store.append_discovery_event(
             run_id, "detail_fetch_started", {"job_id": job_id},
@@ -715,13 +1368,187 @@ class DiscoveryRunner:
             status="completed",
         )
 
+    def _evaluate_job_v2_group(
+        self, run_id: str, snapshot: dict, selected_directions: list,
+        hard_constraints: dict, analysis_evidence_ids: set,
+    ) -> int:
+        """Evaluate one job against ≤2 relevant directions in a single v2 group.
+
+        One job-assessment v2 request covers the whole group; each direction is
+        persisted as an independent assessment row sharing one
+        ``evaluation_group_id`` but carrying its own ``input_hash``. A
+        quarantined or missing direction (or a provider failure) degrades to
+        ``needs_review`` without affecting a valid sibling. Returns the number
+        of directions processed.
+        """
+        if not selected_directions:
+            return 0
+
+        run_dict = self.store.get_discovery_run(run_id)
+        analysis = self.store.get_analysis(run_dict["analysis_id"])
+        summary = analysis.get("summary", {}) or {}
+        all_evidence = self.store.list_evidence(run_dict["analysis_id"])
+
+        direction_payloads = []
+        for direction in selected_directions:
+            ev_rows = self.store.list_direction_evidence(direction["id"])
+            ev_ids = [r["evidence_id"] for r in ev_rows]
+            direction_payloads.append({
+                "id": direction["id"],
+                "name": direction.get("name", ""),
+                "type": direction.get("direction_type", ""),
+                "rationale": direction.get("rationale", ""),
+                "gaps": direction.get("gaps", []),
+                "fact_refs": [],
+                "evidence_refs": ev_ids,
+            })
+
+        candidate_profile = {
+            "profile_version_id": analysis.get("profile_version_id") or run_dict["analysis_id"],
+            "summary": {
+                "headline": summary.get("headline", ""),
+                "experience_level": summary.get("experience_level", ""),
+                "domains": summary.get("domains", []),
+                "strengths": summary.get("strengths", []),
+            },
+            "facts": [],
+            "evidence": [
+                {
+                    "client_ref": ev["id"],
+                    "type": ev.get("evidence_type", ""),
+                    "normalized_value": ev.get("normalized_value", ""),
+                }
+                for ev in all_evidence
+            ],
+        }
+        job_snapshot = {
+            "snapshot_id": snapshot["id"],
+            "content_hash": snapshot.get("content_hash", "") or "",
+            "fields": {
+                "title": snapshot.get("title", ""),
+                "company": snapshot.get("company", ""),
+                "jd": snapshot.get("jd", ""),
+                "salary": snapshot.get("salary", ""),
+                "location": snapshot.get("location", ""),
+                "tags": snapshot.get("tags", ""),
+            },
+        }
+
+        evaluation_group_id = str(uuid.uuid4())
+        envelope = None
+        group_failure_code = None
+        ai_call_count = None
+        if self.ai_provider is not None:
+            try:
+                envelope = self.ai_provider.assess_job(
+                    candidate_profile=candidate_profile,
+                    directions=direction_payloads,
+                    job_snapshot=job_snapshot,
+                    contract_version="job_assessment_v2",
+                )
+                if isinstance(envelope, dict):
+                    ai_call_count = (envelope.get("metrics") or {}).get("provider_call_count")
+            except TimeoutError:
+                group_failure_code = "ai_timeout"
+            except ConnectionError:
+                group_failure_code = "ai_network_error"
+            except AIProviderSecurityError as exc:
+                code = getattr(exc, "error_code", None)
+                group_failure_code = code if code in ERROR_CODE_MAP else "ai_invalid_output"
+            except Exception:  # noqa: BLE001 - provider adapter boundary
+                group_failure_code = "ai_invalid_output"
+
+        valid_by_dir: dict = {}
+        quarantined_by_dir: dict = {}
+        if isinstance(envelope, dict):
+            for assessment in envelope.get("assessments") or []:
+                if isinstance(assessment, dict) and assessment.get("direction_id"):
+                    valid_by_dir[assessment["direction_id"]] = assessment
+            for item in envelope.get("quarantined") or []:
+                if isinstance(item, dict) and item.get("direction_id"):
+                    quarantined_by_dir[item["direction_id"]] = item.get("reason") or "quarantined"
+
+        processed = 0
+        for direction in selected_directions:
+            direction_id = direction["id"]
+            input_hash = _source_input_hash({
+                "snapshot_id": snapshot["id"],
+                "content_hash": job_snapshot["content_hash"],
+                "direction_id": direction_id,
+            })
+            common = dict(
+                run_id=run_id, snapshot_id=snapshot["id"], direction_id=direction_id,
+                policy_version="discovery_v2", contract_version="job_assessment_v2",
+                evaluation_group_id=evaluation_group_id, input_hash=input_hash,
+                ai_call_count=ai_call_count, status="completed",
+            )
+            if direction_id in valid_by_dir:
+                assessment = valid_by_dir[direction_id]
+                dimensions = assessment.get("dimensions") or {}
+                candidate_evidence_ids = sorted({
+                    ref
+                    for dim in dimensions.values()
+                    if isinstance(dim, dict)
+                    for ref in (dim.get("candidate_evidence_refs") or [])
+                })
+                job_evidence = {
+                    name: list(dim.get("job_evidence_refs") or [])
+                    for name, dim in dimensions.items()
+                    if isinstance(dim, dict) and dim.get("job_evidence_refs")
+                }
+                self.store.create_assessment(
+                    hard_outcome="unknown", hard_checks={},
+                    dimensions=dimensions,
+                    match_score=assessment.get("match_score"),
+                    confidence=assessment.get("confidence"),
+                    category=self._v2_category_from_band(assessment.get("proposed_band")),
+                    candidate_evidence_ids=candidate_evidence_ids,
+                    job_evidence=job_evidence,
+                    gaps=assessment.get("gaps") or [],
+                    failure_code=None,
+                    **common,
+                )
+            else:
+                reason = quarantined_by_dir.get(direction_id)
+                failure_code = (
+                    f"quarantine:{reason}" if reason
+                    else (group_failure_code or "ai_missing_direction")
+                )
+                self.store.create_assessment(
+                    hard_outcome="unknown", hard_checks={},
+                    dimensions={}, match_score=None, confidence=None,
+                    category="needs_review",
+                    candidate_evidence_ids=[], job_evidence={}, gaps=[],
+                    failure_code=failure_code,
+                    **common,
+                )
+            processed += 1
+        return processed
+
+    @staticmethod
+    def _v2_category_from_band(proposed_band) -> str:
+        """Map the advisory ``proposed_band`` to a program category (T058).
+
+        Full hard-rule / soft-preference classification guards land in
+        T059–T062; here ``uncertain`` or unknown bands degrade to needs_review.
+        """
+        if proposed_band in ("high", "adjacent", "growth", "unsuitable"):
+            return proposed_band
+        return "needs_review"
+
     # ------------------------------------------------------------------
     # Cancel handling
     # ------------------------------------------------------------------
 
     def _handle_cancel(self, run_id: str) -> None:
-        # Mark pending plan items as cancelled.
-        plan = self.store.get_search_plan(run_id)
+        # Mark pending plan items as cancelled. Plan may not exist yet if
+        # cancel arrives before _stage_planning compiled it (e.g. cancel
+        # during planning stage or resume of a run that only ran
+        # run_progressive_detail_eval directly).
+        try:
+            plan = self.store.get_search_plan(run_id)
+        except KeyError:
+            plan = {"items": []}
         for item in plan["items"]:
             if item["status"] not in ("completed", "failed", "cancelled", "skipped"):
                 self.store.update_plan_item(item["id"], status="cancelled", completed=True)
@@ -745,38 +1572,7 @@ class DiscoveryRunner:
             self._cancel_events.pop(run_id, None)
 
     def _load_confirmation_view(self, run: dict) -> dict:
-        confirmation = self.store.get_confirmation(run["confirmation_id"])
-        directions = self.store.list_directions(run["analysis_id"])
-        # T133: 只加载 confirmation 中 enabled=True 的 directions。
-        # 旧实现加载所有 directions，当 analysis 生成的非 confirmed directions
-        # 没有 search_terms 时，compile_search_plan 会抛 input_incomplete
-        # （要求每个 direction 都有至少一个 search item）。
-        confirmed_ids = {
-            cd["direction_id"] for cd in confirmation.get("directions", [])
-            if cd.get("enabled")
-        }
-        enabled_directions = []
-        for d in directions:
-            if d["id"] not in confirmed_ids:
-                continue
-            direction_evidence = self.store.list_direction_evidence(d["id"])
-            evidence_refs = [r["evidence_id"] for r in direction_evidence]
-            enabled_directions.append({
-                "id": d["id"],
-                "direction_id": d["id"],
-                "name": d.get("name", ""),
-                "type": d.get("direction_type", ""),
-                "search_terms": d.get("search_terms", []),
-                "default_enabled": d.get("default_enabled", False),
-                "evidence_refs": evidence_refs,
-            })
-        return {
-            "id": confirmation["id"],
-            "hard_constraints": confirmation.get("hard_constraints", {}),
-            "soft_preferences": confirmation.get("soft_preferences", {}),
-            "safe_limits": confirmation.get("safe_limits", {}),
-            "enabled_directions": enabled_directions,
-        }
+        return build_confirmation_view(self.store, run)
 
     def _materialize_plan_items(self, compiled: dict, run_id: str) -> list[dict]:
         """Convert compile_search_plan output to store.create_search_plan items."""
@@ -1234,3 +2030,78 @@ __all__ = [
     "STATUS_INTERRUPTED",
     "STATUS_CANCELLED",
 ]
+
+
+# ---------------------------------------------------------------------------
+# T083: Module-level helpers shared by runner and HTTP resume endpoint
+# ---------------------------------------------------------------------------
+
+
+def build_confirmation_view(store, run: dict) -> dict:
+    """T083: 模块级 helper，供 runner 和 HTTP resume 端点共享。
+
+    构建 compile_search_plan 所需的 confirmation view：
+    - 只包含 confirmation 中 enabled=True 的 directions（T133）
+    - 每个 direction 附带 evidence_refs
+    - hard_constraints / soft_preferences / safe_limits 来自 confirmation
+    """
+    confirmation = store.get_confirmation(run["confirmation_id"])
+    directions = store.list_directions(run["analysis_id"])
+    confirmed_ids = {
+        cd["direction_id"] for cd in confirmation.get("directions", [])
+        if cd.get("enabled")
+    }
+    enabled_directions = []
+    for d in directions:
+        if d["id"] not in confirmed_ids:
+            continue
+        direction_evidence = store.list_direction_evidence(d["id"])
+        evidence_refs = [r["evidence_id"] for r in direction_evidence]
+        enabled_directions.append({
+            "id": d["id"],
+            "direction_id": d["id"],
+            "name": d.get("name", ""),
+            "type": d.get("direction_type", ""),
+            "search_terms": d.get("search_terms", []),
+            "default_enabled": d.get("default_enabled", False),
+            "evidence_refs": evidence_refs,
+        })
+    return {
+        "id": confirmation["id"],
+        "hard_constraints": confirmation.get("hard_constraints", {}),
+        "soft_preferences": confirmation.get("soft_preferences", {}),
+        "safe_limits": confirmation.get("safe_limits", {}),
+        "enabled_directions": enabled_directions,
+    }
+
+
+def check_v2_resume_hash_drift(store, run: dict) -> None:
+    """T083: 同步校验 v2 run resume 时的 hash drift。
+
+    - policy_version 必须是合法值（v1 / discovery_v1 / discovery_v2）
+    - 对 discovery_v2 run：重算 compile_search_plan input_hash 并与 stored 比对
+
+    校验失败时抛 DiscoveryError("state_conflict")，HTTP 层映射为 409。
+    v1 run 保留 legacy 行为（不做 hash drift check），保证 004 历史 run 可 resume。
+    """
+    policy_version = run.get("policy_version") or ""
+    if policy_version not in ("v1", "discovery_v1", "discovery_v2"):
+        raise DiscoveryError(
+            "state_conflict",
+            user_message="policy_version 漂移，无法恢复运行。",
+        )
+    if policy_version == "discovery_v2":
+        stored_hash = run.get("input_hash") or ""
+        try:
+            confirmation_view = build_confirmation_view(store, run)
+            plan = compile_search_plan(confirmation_view)
+            recomputed_hash = plan.get("input_hash", "")
+        except DiscoveryError:
+            raise
+        except Exception:
+            recomputed_hash = None
+        if not recomputed_hash or recomputed_hash != stored_hash:
+            raise DiscoveryError(
+                "state_conflict",
+                user_message="input_hash 漂移，无法恢复运行。",
+            )

@@ -1327,113 +1327,174 @@ def build_detail_record(job, extracted):
     }
 
 
-def scrape_details(list_data, max_details=None, output_path=None,
-                   cdp_port=DEFAULT_CDP_PORT, fmt="json"):
-    jobs = list_data.get("jobs", [])
-    if max_details:
-        jobs = jobs[:max_details]
-    if not output_path:
-        output_path = default_output_path("details")
+# Readiness probe marker — tests and fakes detect the readiness probe by
+# looking for this literal substring in the evaluated JS expression.
+_READINESS_PROBE_MARKER = "__boss_readiness_probe__"
 
-    print(f"\n=== 抓取岗位详情 ({len(jobs)} 个) ===\n")
-    results = []
-    seen_links = set()
+_READINESS_PROBE_JS = (
+    "/* " + _READINESS_PROBE_MARKER + " */"
+    "(function(){"
+    "  if (document.readyState !== 'complete') return 'not_ready';"
+    "  var body = document.body || {};"
+    "  var text = body.innerText || '';"
+    "  if (text.length < 50) return 'not_ready';"
+    "  return 'ready';"
+    "})()"
+)
 
-    for idx, job in enumerate(jobs):
-        link = job.get("job_link", "")
-        title = job.get("title", "")
-        company = job.get("boss_name", "")
-        if not link:
-            continue
 
-        # 按 link 去重
-        if link in seen_links:
-            print(f"[{idx+1}/{len(jobs)}] 跳过重复: {company} - {title}")
-            continue
-        seen_links.add(link)
+def _default_scrape_sleeper(seconds, label=None):
+    """Default sleeper delegating to ``time.sleep``.
 
-        t0 = time.time()
-        print(f"[{idx+1}/{len(jobs)}] {company} - {title}")
+    The ``label`` argument is accepted so that tests and contract checks
+    can distinguish kinds of waits (readiness, inter-job gap, etc.).
+    """
+    time.sleep(seconds)
 
-        incr_request()
 
-        # 每个详情页用新 session 避免检测
-        # background=True：后台创建标签页，不抢占前台焦点，避免抓取时反复弹窗
-        ws = CDPSession(cdp_port)
-        r = ws.send("Target.createTarget", {"url": "about:blank", "background": True})
-        tid = r["result"]["targetId"]
-        r = ws.send("Target.attachToTarget", {"targetId": tid, "flatten": True})
-        sid = r["result"]["sessionId"]
+def _wait_for_detail_readiness(ws, sid, *, sleeper, timeout_seconds, max_retries):
+    """Poll page readiness with a bounded wait and at most one scroll retry.
 
-        # background 标签页 document.hidden=true、visibilityState=hidden，
-        # BOSS直聘据此判定为非真人浏览而拒绝渲染/重定向到登录页。
-        # 在导航前注入，覆盖可见性属性为 visible，骗过 visibility 反爬。
-        ws.send("Page.addScriptToEvaluateOnNewDocument", {
-            "source": (
-                "Object.defineProperty(document, 'hidden', {get: () => false});"
-                "Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});"
-                "Object.defineProperty(document, 'webkitHidden', {get: () => false});"
-                "Object.defineProperty(document, 'webkitVisibilityState', {get: () => 'visible'});"
-            )
-        }, sid)
+    The readiness probe is a small JS expression that returns ``"ready"``
+    when ``document.readyState`` is complete and the body has meaningful
+    text. When the probe returns anything else (including ``None``), we
+    sleep briefly (counted against ``timeout_seconds``) and, if retries
+    remain, perform a single controlled scroll before re-probing.
 
-        detail_url = build_detail_url(job)
-        ws.send("Page.navigate", {"url": detail_url}, sid)
-        print(f"  加载页面...")
-        time.sleep(random.uniform(5, 10))
+    Returns when the page is ready or when the retry/budget is exhausted.
+    Exhaustion is not fatal — extraction proceeds and the existing
+    ``DetailLoginRequiredError`` / ``DetailExtractionError`` paths handle
+    invalid pages.
+    """
+    remaining_budget = float(timeout_seconds)
+    retries = 0
+    while True:
+        value = ws.eval_js(_READINESS_PROBE_JS, sid)
+        if value == "ready":
+            return
+        if retries >= max_retries:
+            return
+        # Single controlled scroll, then a short wait counted against budget.
+        ws.eval_js("window.scrollBy(0, 300)", sid)
+        retries += 1
+        wait = min(2.0, remaining_budget) if remaining_budget > 0 else 0.0
+        if wait > 0:
+            sleeper(wait, label="readiness_wait")
+            remaining_budget -= wait
 
-        # 模拟人类阅读详情页的滚动行为
-        scroll_count = random.randint(3, 7)
-        print(f"  模拟滚动 ({scroll_count} 次)...")
-        for i in range(scroll_count):
-            if random.random() < 0.12:
-                # 偶尔往上回滚（回看内容）
-                delta = -random.randint(80, 200)
-            else:
-                delta = random.randint(200, 600)
-            ws.eval_js(f"window.scrollBy(0,{delta})", sid)
-            # 有时快滚，有时停下来"阅读"
-            if random.random() < 0.35:
-                time.sleep(random.uniform(2.0, 5.0))
-            else:
-                time.sleep(random.uniform(0.8, 1.8))
 
-        # 偶尔模拟鼠标移动
-        if random.random() < 0.5:
-            ws.send("Input.dispatchMouseEvent", {
-                "type": "mouseMoved",
-                "x": random.randint(200, 800),
-                "y": random.randint(200, 600)
-            }, sid)
-            time.sleep(random.uniform(0.5, 1.5))
+def _emit_detail_safe_event(event_callback, job, status, safe_code, started_at):
+    """Emit one terminal safe event for a detail job.
 
-        print(f"  提取 JD...")
-        val = ws.eval_js(EXTRACT_DETAIL_JS, sid)
-        try:
-            d = json.loads(val) if isinstance(val, str) else {"jd": "", "tags": []}
-        except (json.JSONDecodeError, ValueError, TypeError):
-            d = {"jd": "", "tags": []}
+    The payload deliberately excludes JD body, prompts, outputs and
+    credential-shaped fields (encrypt_*_id, security_id). It carries only
+    producer kind, terminal status, job identity (job_link), duration and
+    a safe code.
+    """
+    if event_callback is None:
+        return
+    duration_ms = int((time.time() - started_at) * 1000)
+    event = {
+        "kind": "detail",
+        "status": status,
+        "job_id": job.get("job_link", ""),
+        "duration_ms": duration_ms,
+        "safe_code": safe_code,
+    }
+    event_callback(event)
 
+
+def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
+                       sleeper, event_callback, readiness_timeout_seconds,
+                       max_readiness_retries, inter_job_gap_range,
+                       is_last_in_run, trailing_wait):
+    """Scrape a single detail page within a reused CDP session.
+
+    Emits exactly one terminal safe event via ``event_callback`` (when
+    provided) and appends the built detail record to ``results`` on
+    success. Returns ``True`` on success, ``False`` on isolated failure.
+    Re-raises ``RuntimeError`` for login-wall truncation so the caller
+    can stop the run before persisting truncated data.
+
+    The inter-job gap is slept via ``sleeper(label="inter_job_gap")``
+    for every non-terminal-excepted job (success or isolated failure)
+    unless this is the last job in the run and ``trailing_wait`` is
+    False. This preserves rate-limit protection between jobs even when
+    one JD fails validation.
+    """
+    title = job.get("title", "")
+    company = job.get("boss_name", "")
+    print(f"[{global_idx + 1}/{total}] {company} - {title}")
+
+    incr_request()
+
+    # background=True：后台创建标签页，不抢占前台焦点，避免抓取时反复弹窗
+    r = ws.send("Target.createTarget", {"url": "about:blank", "background": True})
+    tid = r["result"]["targetId"]
+    r = ws.send("Target.attachToTarget", {"targetId": tid, "flatten": True})
+    sid = r["result"]["sessionId"]
+
+    # background 标签页 document.hidden=true、visibilityState=hidden，
+    # BOSS直聘据此判定为非真人浏览而拒绝渲染/重定向到登录页。
+    # 在导航前注入，覆盖可见性属性为 visible，骗过 visibility 反爬。
+    ws.send("Page.addScriptToEvaluateOnNewDocument", {
+        "source": (
+            "Object.defineProperty(document, 'hidden', {get: () => false});"
+            "Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});"
+            "Object.defineProperty(document, 'webkitHidden', {get: () => false});"
+            "Object.defineProperty(document, 'webkitVisibilityState', {get: () => 'visible'});"
+        )
+    }, sid)
+
+    detail_url = build_detail_url(job)
+    ws.send("Page.navigate", {"url": detail_url}, sid)
+    print(f"  加载页面...")
+
+    started_at = time.time()
+    _wait_for_detail_readiness(
+        ws, sid,
+        sleeper=sleeper,
+        timeout_seconds=readiness_timeout_seconds,
+        max_retries=max_readiness_retries,
+    )
+
+    print(f"  提取 JD...")
+    val = ws.eval_js(EXTRACT_DETAIL_JS, sid)
+    try:
+        d = json.loads(val) if isinstance(val, str) else {"jd": "", "tags": []}
+    except (json.JSONDecodeError, ValueError, TypeError):
+        d = {"jd": "", "tags": []}
+
+    skip_gap = False
+    try:
         try:
             d["jd"] = extract_job_description(d)
         except DetailLoginRequiredError as exc:
             ws.send("Target.closeTarget", {"targetId": tid})
-            ws.close()
+            _emit_detail_safe_event(
+                event_callback, job, "unavailable",
+                "source_login_required", started_at,
+            )
+            # Run is stopping — do not sleep the inter-job gap.
+            skip_gap = True
             raise RuntimeError(
                 "BOSS detail login expired; stopped before writing truncated JD data"
             ) from exc
         except DetailExtractionError as exc:
             print(f"  跳过无效详情页: {exc}")
             ws.send("Target.closeTarget", {"targetId": tid})
-            ws.close()
-            continue
+            _emit_detail_safe_event(
+                event_callback, job, "failed",
+                "source_invalid_output", started_at,
+            )
+            return False
 
         detail = build_detail_record(job, d)
         results.append(detail)
 
         if d.get("tags"):
             print(f"  技能: {', '.join(d['tags'])}")
-        print(f"  JD: {len(d.get('jd',''))} 字 ({time.time()-t0:.0f}s)")
+        print(f"  JD: {len(d.get('jd', ''))} 字 ({time.time() - started_at:.0f}s)")
 
         # 每抓完一个详情就写入，异常退出也能保留
         if output_path:
@@ -1441,11 +1502,110 @@ def scrape_details(list_data, max_details=None, output_path=None,
             write_json_atomic(output_path, results)
 
         ws.send("Target.closeTarget", {"targetId": tid})
-        ws.close()
-        # 详情页间隔加大，随机 10-25 秒
-        gap = random.uniform(10, 25)
-        print(f"  等待 {gap:.0f}s 后抓下一个...\n")
-        time.sleep(gap)
+        _emit_detail_safe_event(
+            event_callback, job, "completed", "ok", started_at,
+        )
+        return True
+    finally:
+        # Inter-job gap is rate-limit protection between jobs. It applies
+        # to successful and isolated-failure jobs alike. It is skipped
+        # for the last job in the run (unless trailing_wait=True) and
+        # for the login-wall case where the whole run is stopping.
+        if not skip_gap and (not is_last_in_run or trailing_wait):
+            gap = random.uniform(inter_job_gap_range[0], inter_job_gap_range[1])
+            print(f"  等待 {gap:.1f}s 后抓下一个...\n")
+            sleeper(gap, label="inter_job_gap")
+
+
+def scrape_details(list_data, max_details=None, output_path=None,
+                   cdp_port=DEFAULT_CDP_PORT, fmt="json", *,
+                   batch_size=5, session_factory=None, sleeper=None,
+                   event_callback=None, readiness_timeout_seconds=12,
+                   max_readiness_retries=1, inter_job_gap_range=(3, 7),
+                   trailing_wait=False):
+    """抓取岗位详情页并返回结构化结果。
+
+    Policy v2 keyword-only parameters (feature 005):
+
+    - ``batch_size``: 每批最多 5 个候选岗位（默认 5，上限 5）。
+    - ``session_factory``: 返回 CDP 会话的可调用对象，默认 ``CDPSession``。
+      测试可通过它注入 fake 会话；CLI 调用不传该参数时走真实 ``CDPSession``。
+    - ``sleeper``: ``sleeper(seconds, label=None)`` 用于所有受控等待，
+      默认委托 ``time.sleep``。``label`` 用于测试区分 readiness_wait /
+      inter_job_gap 等不同等待类型。
+    - ``event_callback``: 每个岗位处理完成时回调一次，收到只含安全字段
+      (kind/status/job_id/duration_ms/safe_code) 的 terminal 事件，
+      不含 JD 正文、凭据或 PII。
+    - ``readiness_timeout_seconds``: readiness 总等待预算，默认 12 秒。
+    - ``max_readiness_retries``: 首次未就绪时最多进行 N 次受控滚动重试，
+      默认 1。
+    - ``inter_job_gap_range``: 同批次岗位间等待秒数范围，默认 (3, 7)。
+    - ``trailing_wait``: 运行最后一项之后是否再等待一次 gap，默认 False。
+
+    实现要点（见 specs/005-fast-resume-discovery/contracts/state-machine.md）：
+    - 每批最多 5 个候选；每批复用一个 CDP 会话，逐岗位开 target。
+    - readiness-driven 提取：先探针，未就绪仅一次受控滚动重试。
+    - 每个岗位发出且仅发出一个 terminal safe event。
+    - 运行最后一项之后不再等待 gap（除非 trailing_wait=True）。
+    """
+    if not isinstance(batch_size, int) or batch_size < 1 or batch_size > 5:
+        raise ValueError(
+            f"batch_size must be an integer between 1 and 5, got {batch_size!r}"
+        )
+    if session_factory is None:
+        session_factory = CDPSession
+    if sleeper is None:
+        sleeper = _default_scrape_sleeper
+    if not inter_job_gap_range or len(inter_job_gap_range) != 2:
+        raise ValueError("inter_job_gap_range must be a (min, max) pair")
+    gap_lo, gap_hi = inter_job_gap_range
+    if gap_lo < 0 or gap_hi < gap_lo:
+        raise ValueError(
+            f"inter_job_gap_range invalid: {inter_job_gap_range!r}"
+        )
+
+    raw_jobs = list_data.get("jobs", [])
+    if max_details:
+        raw_jobs = raw_jobs[:max_details]
+    if not output_path:
+        output_path = default_output_path("details")
+
+    # 按 job_link 去重，保持原始顺序
+    seen_links = set()
+    unique_jobs = []
+    for job in raw_jobs:
+        link = job.get("job_link", "")
+        if not link or link in seen_links:
+            continue
+        seen_links.add(link)
+        unique_jobs.append(job)
+
+    total = len(unique_jobs)
+    print(f"\n=== 抓取岗位详情 ({total} 个, 每批 {batch_size}) ===\n")
+    results = []
+
+    for batch_start in range(0, total, batch_size):
+        batch = unique_jobs[batch_start:batch_start + batch_size]
+        batch_idx = batch_start // batch_size
+        print(f"--- 批次 {batch_idx + 1} ({len(batch)} 个岗位) ---")
+
+        ws = session_factory(cdp_port)
+        try:
+            for i, job in enumerate(batch):
+                global_idx = batch_start + i
+                is_last_in_run = global_idx == total - 1
+                _scrape_one_detail(
+                    ws, job, global_idx, total, results, output_path,
+                    sleeper=sleeper,
+                    event_callback=event_callback,
+                    readiness_timeout_seconds=readiness_timeout_seconds,
+                    max_readiness_retries=max_readiness_retries,
+                    inter_job_gap_range=inter_job_gap_range,
+                    is_last_in_run=is_last_in_run,
+                    trailing_wait=trailing_wait,
+                )
+        finally:
+            ws.close()
 
     # 最终保存（dirname 为空时回退到当前目录，与循环内/其它写文件处保持一致）
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -2327,6 +2487,10 @@ def main():
     p.add_argument("--detail", action="store_true", default=True, help="抓取详情页 JD（默认开启）")
     p.add_argument("--no-detail", dest="detail", action="store_false", help="不抓取详情页")
     p.add_argument("--max-details", type=int, default=None, help="最多抓几个详情")
+    p.add_argument("--events-output", default=None,
+                   help="详情 terminal safe event 输出路径 (JSONL；每行一个事件，"
+                        "仅含 kind/status/job_id/duration_ms/safe_code，"
+                        "供 source 批量解析；不传则不写事件文件)")
     p.add_argument("--analysis", action="store_true", help="输出分析报告")
     p.add_argument("--input", default=None, help="从已有 JSON 文件读取（跳过抓取）")
     p.add_argument("--allow-dom-fallback", action="store_true",
@@ -2458,10 +2622,40 @@ def main():
     # 抓详情
     details = None
     if args.detail and list_data.get("jobs"):
-        details = scrape_details(
-            list_data, args.max_details, args.detail_output,
-            cdp_port=args.cdp_port, fmt=args.format,
-        )
+        # 005 US4: 当 --events-output 提供时，把每个岗位的 terminal safe
+        # event 写成 JSONL（每行一个事件），供 BossCdpSource.fetch_details_batch
+        # 解析/校验。事件只含 kind/status/job_id/duration_ms/safe_code，
+        # 不含 JD/凭据/PII（见 _emit_detail_safe_event）。
+        events_callback = None
+        events_file_handle = None
+        if args.events_output:
+            try:
+                os.makedirs(os.path.dirname(args.events_output) or ".", exist_ok=True)
+                events_file_handle = open(args.events_output, "w", encoding="utf-8")
+                def events_callback(event, _f=events_file_handle):
+                    _f.write(json.dumps(event, ensure_ascii=False) + "\n")
+                    _f.flush()
+            except OSError as exc:
+                print(f"⚠️ 无法写入事件文件 ({args.events_output}): {exc}")
+                events_callback = None
+                if events_file_handle is not None:
+                    try:
+                        events_file_handle.close()
+                    except OSError:
+                        pass
+                    events_file_handle = None
+        try:
+            details = scrape_details(
+                list_data, args.max_details, args.detail_output,
+                cdp_port=args.cdp_port, fmt=args.format,
+                event_callback=events_callback,
+            )
+        finally:
+            if events_file_handle is not None:
+                try:
+                    events_file_handle.close()
+                except OSError:
+                    pass
         # 若处于合并流程，把旧详情并入本次抓取结果并重新落盘，保证 --merge 后详情不丢失
         if merged_details and args.detail_output:
             details = merge_details_from_lists(merged_details, details)

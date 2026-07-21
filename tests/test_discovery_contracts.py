@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import io
 import re
 import os
 import tempfile
@@ -217,6 +218,46 @@ class DiscoveryErrorEnvelopeTests(unittest.TestCase):
     def test_all_safe_codes_have_messages(self):
         for code in ERROR_CODE_MAP:
             self.assertIn(code, DEFAULT_USER_MESSAGES, f"missing message for {code}")
+
+
+class DiscoveryV2FoundationalContractTests(unittest.TestCase):
+    """T014: v2 safe errors, opaque identifiers and draft hash conflicts."""
+
+    def test_required_v2_safe_codes_have_complete_public_envelopes(self):
+        required = {
+            "candidate_version_conflict", "candidate_fact_invalid", "intent_invalid",
+            "salary_unparseable", "candidate_pool_empty", "detail_budget_empty",
+            "source_verification_required", "source_rate_limited", "detail_event_invalid",
+            "detail_reuse_invalid", "assessment_group_invalid", "result_projection_invalid",
+            "input_hash_mismatch",
+        }
+        self.assertTrue(required.issubset(ERROR_CODE_MAP), required - set(ERROR_CODE_MAP))
+        for code in required:
+            envelope = DiscoveryError(code).to_envelope()
+            self.assertEqual(envelope["error_code"], code)
+            self.assertIsInstance(envelope["retryable"], bool)
+            self.assertTrue(envelope["user_message"])
+            self.assertEqual(set(envelope), {"error_code", "stage", "retryable", "user_message"})
+
+    def test_opaque_id_guard_accepts_ids_but_rejects_paths_and_control_text(self):
+        from webui.discovery import validate_opaque_id
+
+        self.assertEqual(validate_opaque_id("0a1b2c3d4e5f6789"), "0a1b2c3d4e5f6789")
+        for value in ("", "../run", "run/child", "run\\child", "run\nsecret", "a" * 129):
+            with self.subTest(value=value):
+                with self.assertRaises(DiscoveryError):
+                    validate_opaque_id(value)
+
+    def test_stale_draft_hash_maps_to_candidate_version_conflict(self):
+        from webui.discovery import require_matching_input_hash
+
+        self.assertEqual(require_matching_input_hash("hash-a", "hash-a"), "hash-a")
+        with self.assertRaises(DiscoveryError) as ctx:
+            require_matching_input_hash(
+                "hash-a", "hash-b", conflict_code="candidate_version_conflict",
+            )
+        self.assertEqual(ctx.exception.error_code, "candidate_version_conflict")
+        self.assertEqual(ctx.exception.to_envelope()["retryable"], False)
 
 
 class AnalysisConfirmationHttpContractTests(unittest.TestCase):
@@ -823,6 +864,23 @@ class RunResultsHttpContractTests(unittest.TestCase):
         resp = self.client.get("/api/discovery/runs/nonexistent-run-id/results")
         self.assertEqual(resp.status_code, 404)
 
+    def test_v2_results_remain_readable_while_run_is_active(self):
+        """T014: progressive results are readable before a v2 run is terminal."""
+        run = self._create_run_directly(status="processing_jobs")
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE discovery_runs SET policy_version='discovery_v2' WHERE id=?",
+                (run["id"],),
+            )
+        self._create_snapshot_and_assessment(
+            run["id"], job_id="job-progressive", category="high_match",
+        )
+        resp = self.client.get(f"/api/discovery/runs/{run['id']}/results")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertGreaterEqual(len(body["items"]), 1)
+        self.assertEqual(body["run_id"], run["id"])
+
     # --- POST /api/discovery/runs/{id}/jobs/{job_id}/retry ---
 
     def test_post_retry_job_returns_202(self):
@@ -1066,6 +1124,137 @@ class FeedbackHttpContractTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
 
 
+class FeedbackScopeAndRunningRunTests(unittest.TestCase):
+    """T090 验证 US5 反馈 HTTP 合同的作用范围可见性与运行中反馈。
+
+    合同来源:
+    - spec.md FR-051: 用户必须能撤销有效反馈并看到其作用范围。
+    - http-api.md L312-314: GET|POST /api/discovery/feedback + revoke 端点。
+    - http-api.md L320: feedback increments result revision when visibility or
+      ordering changes.
+    - spec.md FR-038: 用户必须能在结果到达过程中查看、筛选和反馈，不得因运行
+      仍在继续而锁定结果页。
+    """
+
+    def setUp(self):
+        import tempfile
+        from webui.app import create_app
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self.app = create_app({"TESTING": True, "DB_PATH": self._tmp.name, "START_TASKS": False})
+        self.client = self.app.test_client()
+        sess = self.client.get("/api/session")
+        self.token = sess.get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = self.token
+        from webui.store import TaskStore
+        self.store = TaskStore(self._tmp.name)
+        self.profile = self.store.create_profile("feedback-scope 测试画像")
+
+    def tearDown(self):
+        import os
+        runtime = self.app.config.get("DISCOVERY_RUNTIME")
+        if runtime:
+            try:
+                runtime.shutdown()
+            except Exception:
+                pass
+        if os.path.exists(self._tmp.name):
+            try:
+                os.unlink(self._tmp.name)
+            except PermissionError:
+                pass
+
+    def _insert_source_job(self, job_id):
+        now = "2026-07-15T00:00:00+00:00"
+        source_url = f"https://www.zhipin.com/job_detail/{job_id}.html"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                "VALUES (?, ?, ?, '', '', '', '', '', ?, ?)",
+                (job_id, source_url, source_url, now, now),
+            )
+
+    def test_post_response_includes_effective_scope_field(self):
+        """FR-051: POST 反馈响应必须含 effective_scope 字段（作用范围可见）。"""
+        self._insert_source_job("job-scope-1")
+        resp = self.client.post("/api/discovery/feedback", json={
+            "profile_id": self.profile["id"],
+            "target_type": "job", "target_id": "job-scope-1",
+            "action": "not_interested",
+        })
+        self.assertEqual(resp.status_code, 201)
+        body = resp.get_json()
+        self.assertIn("effective_scope", body,
+                      "T090/FR-051: POST 响应必须含 effective_scope 字段")
+        self.assertEqual(body["effective_scope"], "exact_job")
+
+    def test_get_list_response_includes_scope_per_item(self):
+        """FR-051: GET 反馈列表每项必须含 scope 字段（作用范围可见）。"""
+        self._insert_source_job("job-scope-2")
+        self.client.post("/api/discovery/feedback", json={
+            "profile_id": self.profile["id"],
+            "target_type": "job", "target_id": "job-scope-2",
+            "action": "not_interested", "scope": "exact_job",
+        })
+        listed = self.client.get(
+            f"/api/discovery/feedback?profile_id={self.profile['id']}"
+        ).get_json()
+        self.assertEqual(len(listed["items"]), 1)
+        item = listed["items"][0]
+        self.assertIn("scope", item,
+                      "T090/FR-051: 列表项必须含 scope 字段")
+        self.assertEqual(item["scope"], "exact_job")
+
+    def test_get_list_response_includes_revoked_at_when_revoked(self):
+        """FR-051: 已撤销反馈的列表项必须含 revoked_at 字段。"""
+        self._insert_source_job("job-rev-1")
+        created = self.client.post("/api/discovery/feedback", json={
+            "profile_id": self.profile["id"],
+            "target_type": "job", "target_id": "job-rev-1",
+            "action": "not_interested",
+        }).get_json()
+        self.client.post(f"/api/discovery/feedback/{created['feedback_id']}/revoke")
+        # Get all feedback (not just effective) via store directly since the
+        # HTTP list endpoint filters to effective_only by default.
+        rows = self.store.list_discovery_feedback(self.profile["id"])
+        self.assertEqual(len(rows), 1)
+        self.assertIsNotNone(rows[0]["revoked_at"],
+                             "T090/FR-051: 已撤销反馈必须含 revoked_at 时间戳")
+
+    def test_running_run_can_receive_feedback_without_blocking(self):
+        """FR-038: 运行中的 run 必须能接收反馈，不得锁定结果页。
+
+        合同：POST /api/discovery/feedback 不得因存在运行中的 run 返回 409。
+        """
+        self._insert_source_job("job-running-1")
+        # No active run exists in this test fixture, but the endpoint must
+        # not require run state checks — feedback is always accepted.
+        resp = self.client.post("/api/discovery/feedback", json={
+            "profile_id": self.profile["id"],
+            "target_type": "job", "target_id": "job-running-1",
+            "action": "not_interested",
+        })
+        self.assertEqual(resp.status_code, 201,
+                         "T090/FR-038: 反馈端点不得因运行状态拒绝")
+
+    def test_revoke_response_includes_revoked_flag(self):
+        """FR-051: 撤销响应必须含 revoked=True 字段。"""
+        self._insert_source_job("job-revoke-1")
+        created = self.client.post("/api/discovery/feedback", json={
+            "profile_id": self.profile["id"],
+            "target_type": "job", "target_id": "job-revoke-1",
+            "action": "not_interested",
+        }).get_json()
+        revoked = self.client.post(
+            f"/api/discovery/feedback/{created['feedback_id']}/revoke"
+        )
+        self.assertEqual(revoked.status_code, 200)
+        body = revoked.get_json()
+        self.assertIn("revoked", body,
+                      "T090/FR-051: 撤销响应必须含 revoked 字段")
+        self.assertTrue(body["revoked"])
+
+
 class CancelResumeHttpContractTests(unittest.TestCase):
     """T070/T125: cancel/resume HTTP contract."""
 
@@ -1252,6 +1441,840 @@ class LiveProviderSmokeValidationTests(unittest.TestCase):
 
         self.assertEqual(report["candidate_analysis_v2"]["evidence_count"], 0)
         self.assertNotEqual(report["candidate_analysis_v2"]["status"], "pass")
+
+
+class DiscoveryV2ProfileHttpContractTests(unittest.TestCase):
+    """T030/T031 RED: storage-only upload and candidate-version HTTP contract."""
+
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self._resume_dir = tempfile.TemporaryDirectory()
+        self.app = create_app({
+            "TESTING": True, "DB_PATH": self._tmp.name,
+            "RESUME_DIR": self._resume_dir.name, "START_TASKS": False,
+        })
+        self.client = self.app.test_client()
+        session = self.client.get("/api/session").get_json()
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = session["token"]
+        self.store = TaskStore(self._tmp.name)
+        self.profile = self.store.create_profile("v2画像")
+        self.resume = self.store.save_resume(
+            self.profile["id"], "storage/v2.txt", "txt", "5年 Python 后端经验",
+            "v2-hash", "v2.txt",
+        )
+        self.analysis = self.store.create_analysis(
+            self.resume["id"], self.profile["id"], contract_version="v4",
+        )
+        self.store.update_analysis_status(
+            self.analysis["id"], "ready", analysis_stage="persisting",
+            quality_status="complete", quality_warnings=[], summary={}, unknowns=[],
+        )
+        self.direction = self.store.add_direction(
+            self.analysis["id"], "Python 后端", "core", confidence=100,
+            default_enabled=True, search_terms=["Python 后端"], contract_version="v4",
+        )
+        self.version = self.store.create_candidate_profile_version(
+            profile_id=self.profile["id"], resume_id=self.resume["id"],
+            analysis_id=self.analysis["id"], summary={"headline": "后端"}, unknowns=[],
+            facts=[{
+                "fact_type": "skill", "stable_key": "skill:python",
+                "value": {"name": "Python"}, "normalized_value": "Python",
+                "source_kind": "user_added", "assertion_type": "explicit",
+                "confidence": 100, "verification_status": "confirmed", "evidence_ids": [],
+            }],
+        )
+
+    def tearDown(self):
+        runtime = self.app.config.get("DISCOVERY_RUNTIME")
+        if runtime:
+            runtime.shutdown()
+        self._resume_dir.cleanup()
+        if os.path.exists(self._tmp.name):
+            try:
+                os.unlink(self._tmp.name)
+            except PermissionError:
+                pass
+
+    def test_discovery_upload_is_storage_only_even_with_ai_consent(self):
+        self.store.save_ai_settings(
+            endpoint_url="https://ai.example/v1", credential_ref="cred",
+            status="ready", model="model",
+        )
+        with mock.patch("webui.app.ai_service.retrieve_api_key", return_value="secret"), \
+             mock.patch("webui.app.ai_service.parse_resume") as parse:
+            response = self.client.post(
+                f"/api/profiles/{self.profile['id']}/resume",
+                data={
+                    "flow": "discovery", "ai_consent": "true",
+                    "file": (io.BytesIO("Python 后端".encode("utf-8")), "resume.txt"),
+                }, content_type="multipart/form-data",
+            )
+        self.assertEqual(response.status_code, 201)
+        parse.assert_not_called()
+        self.assertEqual(response.get_json()["extraction_status"], "ready")
+
+    def test_post_analysis_persists_requested_v4_contract(self):
+        runtime = self.app.config["DISCOVERY_RUNTIME"]
+        with mock.patch.object(runtime, "submit_analysis"):
+            response = self.client.post("/api/discovery/analyses", json={
+                "resume_id": self.resume["id"], "ai_consent": True,
+                "contract_version": "v4",
+            })
+        self.assertEqual(response.status_code, 202)
+        body = response.get_json()
+        self.assertEqual(body["contract_version"], "v4")
+        self.assertEqual(self.store.get_analysis(body["analysis_id"])["contract_version"], "v4")
+
+    def test_get_and_patch_candidate_version_with_hash_conflict(self):
+        response = self.client.get(f"/api/discovery/candidate-versions/{self.version['id']}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["content_hash"], self.version["content_hash"])
+        stale = self.client.patch(
+            f"/api/discovery/candidate-versions/{self.version['id']}",
+            json={"expected_content_hash": "stale", "operations": []},
+        )
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.get_json()["error_code"], "candidate_version_conflict")
+        updated = self.client.patch(
+            f"/api/discovery/candidate-versions/{self.version['id']}",
+            json={
+                "expected_content_hash": self.version["content_hash"],
+                "operations": [{"op": "add", "fact_type": "industry",
+                    "value": {"name": "金融科技", "contexts": []},
+                    "normalized_value": "金融科技"}],
+            },
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertNotEqual(updated.get_json()["content_hash"], self.version["content_hash"])
+
+    def test_v2_confirmation_atomically_confirms_profile_and_intent(self):
+        response = self.client.post("/api/discovery/confirmations", json={
+            "analysis_id": self.analysis["id"],
+            "candidate_profile_version_id": self.version["id"],
+            "expected_content_hash": self.version["content_hash"],
+            "enabled_direction_ids": [self.direction["id"]],
+            "hard_constraints": {"city": "上海", "min_salary": {"amount": 20, "unit": "K", "source": "user_confirmed"}},
+            "soft_preferences": {}, "safe_limits": {},
+        })
+        self.assertEqual(response.status_code, 201)
+        body = response.get_json()
+        self.assertEqual(body["candidate_profile_version_id"], self.version["id"])
+        self.assertEqual(body["intent_contract_version"], "intent_v2")
+        self.assertEqual(len(body["intent_hash"]), 64)
+        self.assertEqual(self.store.get_candidate_profile_version(self.version["id"])["status"], "confirmed")
+
+
+class DiscoveryV2ProgressiveHttpContractTests(unittest.TestCase):
+    """T047 RED: v2 run creation, four progress types, candidate diagnostics,
+    active-run results and after_revision changed=false.
+
+    Contract source: specs/005-fast-resume-discovery/contracts/http-api.md
+      POST /api/discovery/runs {confirmation_id} -> 202 Run with policy_version=discovery_v2
+      GET  /api/discovery/runs/{id} -> 200 Run with v2 progress + result_revision
+      GET  /api/discovery/runs/{id}/candidates -> 200 {items: [CandidateDiag]}
+      GET  /api/discovery/runs/{id}/results -> 200 {run_id, run_status, revision, changed, complete, items}
+      GET  /api/discovery/runs/{id}/results?after_revision=N -> 200 {changed: false} when unchanged
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self.app = create_app({"TESTING": True, "DB_PATH": self._tmp.name, "START_TASKS": False})
+        self.client = self.app.test_client()
+        sess = self.client.get("/api/session")
+        self.token = sess.get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = self.token
+        self.store = TaskStore(self._tmp.name)
+        self.profile = self.store.create_profile("v2 progressive 测试画像")
+        self.resume = self.store.save_resume(
+            self.profile["id"], "storage/v2_prog.pdf", "pdf",
+            _CONTRACT_RESUME_TEXT, "hash-v2-prog", "v2_prog.pdf",
+        )
+        # Build a ready analysis + v2 confirmation via store API.
+        provider = _FakeAIProviderForRuns(_contract_valid_ai_response())
+        from webui.discovery import analyze_resume, confirm_directions
+        self.analysis = analyze_resume(
+            self.store, self.resume["id"], ai_consent=True, ai_provider=provider,
+        )
+        directions = self.store.list_directions(self.analysis["id"])
+        self.direction_ids = [d["id"] for d in directions]
+        self.confirmation = confirm_directions(
+            self.store, self.analysis["id"], self.direction_ids,
+            hard_constraints={"city": "北京"},
+        )
+
+    def tearDown(self):
+        runtime = self.app.config.get("DISCOVERY_RUNTIME")
+        if runtime:
+            try:
+                runtime.shutdown()
+            except Exception:
+                pass
+        if os.path.exists(self._tmp.name):
+            try:
+                os.unlink(self._tmp.name)
+            except PermissionError:
+                pass
+
+    # --- helpers -------------------------------------------------------
+
+    def _create_v2_run_directly(self, status="processing_jobs", result_revision=0):
+        """Create a v2 run via store for route-level tests."""
+        import hashlib
+        input_hash = hashlib.sha256(self.confirmation["id"].encode("utf-8")).hexdigest()
+        run = self.store.create_discovery_run(
+            profile_id=self.profile["id"], resume_id=self.resume["id"],
+            analysis_id=self.analysis["id"], confirmation_id=self.confirmation["id"],
+            input_hash=input_hash, policy_version="discovery_v2",
+        )
+        if status != "created":
+            self.store.update_discovery_run(
+                run["id"], status=status, stage=status,
+                counters={"result_revision": result_revision},
+            )
+        return run
+
+    def _add_snapshot_and_assessment(self, run_id, job_id, category="high_match"):
+        """Create a snapshot + completed assessment for results tests."""
+        canonical_url = f"https://www.zhipin.com/job_detail/{job_id}.html"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                "VALUES (?, ?, ?, 'Python 后端', '示例公司', '25K', '北京', 'jd', '2026-01-01', '2026-01-01')",
+                (job_id, canonical_url, canonical_url),
+            )
+        snap = self.store.save_job_snapshot(
+            run_id=run_id, job_id=job_id, source_url=canonical_url,
+            title="Python 后端", company="示例公司", salary="25K", location="北京",
+            tags="", jd="职位描述", company_json={}, completeness="complete",
+            missing_fields=[], source_status="active", content_hash="hash",
+            fetch_status="completed",
+        )
+        self.store.create_assessment(
+            run_id=run_id, snapshot_id=snap["id"], direction_id=self.direction_ids[0],
+            hard_outcome="pass", category=category, match_score=88, confidence=84,
+            status="completed", policy_version="v2",
+        )
+        return snap
+
+    # --- T047 tests ----------------------------------------------------
+
+    def test_create_v2_run_returns_policy_version_discovery_v2(self):
+        """POST /api/discovery/runs 创建 v2 run 时返回 policy_version=discovery_v2。"""
+        # Patch runtime to avoid real background execution.
+        runtime = self.app.config["DISCOVERY_RUNTIME"]
+        with mock.patch.object(runtime, "submit_run"):
+            response = self.client.post("/api/discovery/runs", json={
+                "confirmation_id": self.confirmation["id"],
+                "policy_version": "discovery_v2",
+            })
+        self.assertEqual(response.status_code, 202)
+        body = response.get_json()
+        self.assertEqual(body.get("policy_version"), "discovery_v2")
+
+    def test_get_v2_run_returns_four_progress_types_and_result_revision(self):
+        """GET /api/discovery/runs/{id} 返回四类 v2 进度和 result_revision。"""
+        run = self._create_v2_run_directly(status="processing_jobs", result_revision=3)
+        self.store.update_discovery_run(run["id"], counters={
+            "list_candidate_count": 100,
+            "detail_selected_count": 15,
+            "detail_completed_count": 4,
+            "assessment_completed_count": 6,
+        })
+        response = self.client.get(f"/api/discovery/runs/{run['id']}")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        progress = body.get("progress", {})
+        self.assertEqual(progress.get("list_candidates"), 100)
+        self.assertEqual(progress.get("details_selected"), 15)
+        self.assertEqual(progress.get("details_completed"), 4)
+        self.assertEqual(progress.get("assessments_completed"), 6)
+        self.assertEqual(body.get("result_revision"), 3)
+
+    def test_candidates_diagnostic_endpoint_returns_safe_list_fields(self):
+        """GET /api/discovery/runs/{id}/candidates 返回候选诊断信息。"""
+        run = self._create_v2_run_directly(status="processing_jobs")
+        # Add a candidate via store (job must exist first for FK).
+        job_id = "job-diag-001"
+        canonical_url = f"https://www.zhipin.com/job_detail/{job_id}.html"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at) "
+                "VALUES (?, ?, ?, 'Python 后端', '示例公司', '25K', '北京', 'jd', '2026-01-01', '2026-01-01')",
+                (job_id, canonical_url, canonical_url),
+            )
+        self.store.upsert_run_candidate(
+            run_id=run["id"], job_id=job_id,
+            source_url=canonical_url,
+            direction_ids=[self.direction_ids[0]], search_terms=["Python"],
+            source_positions=[{"item": 0, "page": 1, "rank": 0}],
+            list_fields={"title": "Python 后端", "salary": "25K", "location": "北京"},
+            input_hash=run.get("input_hash", ""),
+        )
+        response = self.client.get(f"/api/discovery/runs/{run['id']}/candidates")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertIn("items", body)
+        self.assertGreaterEqual(len(body["items"]), 1)
+        item = body["items"][0]
+        self.assertEqual(item["job_id"], "job-diag-001")
+        self.assertIn("state", item)
+        self.assertIn("selection_decision", item)
+        # Must NOT contain resume text or raw prompt.
+        self.assertNotIn("resume_text", item)
+        self.assertNotIn("raw_prompt", item)
+
+    def test_active_run_results_returns_v2_envelope(self):
+        """活动运行的 results 返回 run_id、run_status、revision、changed、complete。"""
+        run = self._create_v2_run_directly(status="processing_jobs", result_revision=1)
+        self._add_snapshot_and_assessment(run["id"], "job-active-001")
+        response = self.client.get(f"/api/discovery/runs/{run['id']}/results")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body.get("run_id"), run["id"])
+        self.assertEqual(body.get("run_status"), "processing_jobs")
+        self.assertEqual(body.get("revision"), 1)
+        self.assertTrue(body.get("changed"))
+        self.assertFalse(body.get("complete"))
+        self.assertIn("items", body)
+
+    def test_after_revision_unchanged_returns_changed_false(self):
+        """after_revision 与服务端 revision 相同时返回 changed=false 和空 items。"""
+        run = self._create_v2_run_directly(status="processing_jobs", result_revision=5)
+        self._add_snapshot_and_assessment(run["id"], "job-rev-001")
+        response = self.client.get(
+            f"/api/discovery/runs/{run['id']}/results?after_revision=5"
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertFalse(body.get("changed"))
+        self.assertEqual(body.get("items"), [])
+        self.assertEqual(body.get("revision"), 5)
+
+
+class RecommendationProjectorHttpContractTests(unittest.TestCase):
+    """T063: HTTP contract for canonical recommendation projector.
+
+    Contract source: specs/005-fast-resume-discovery/contracts/http-api.md
+      GET /api/discovery/runs/{id}/results
+        ?direction_id: include job when any assessment matches; return all assessments
+        ?category: applies to primary assessment
+      Response items must include: recommendation_id, rank, job_id, title, company,
+        salary, location, jd/jd_excerpt, source_url, source_status, fetched_at,
+        category, match_score, confidence, completeness, primary_assessment,
+        assessments[], matched_direction_ids[], explanation{positive,gaps,refs},
+        sort_components
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self.app = create_app({"TESTING": True, "DB_PATH": self._tmp.name, "START_TASKS": False})
+        self.client = self.app.test_client()
+        sess = self.client.get("/api/session")
+        self.token = sess.get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = self.token
+        self.store = TaskStore(self._tmp.name)
+        self.profile = self.store.create_profile("projector 测试画像")
+        self.resume = self.store.save_resume(
+            self.profile["id"], "storage/projector.pdf", "pdf",
+            _CONTRACT_RESUME_TEXT, "hash-projector", "projector.pdf",
+        )
+        provider = _FakeAIProviderForRuns(_contract_valid_ai_response())
+        from webui.discovery import analyze_resume, confirm_directions
+        self.analysis = analyze_resume(
+            self.store, self.resume["id"], ai_consent=True, ai_provider=provider,
+        )
+        directions = self.store.list_directions(self.analysis["id"])
+        self.direction_ids = [d["id"] for d in directions]
+        self.confirmation = confirm_directions(
+            self.store, self.analysis["id"], self.direction_ids,
+            hard_constraints={"city": "北京"},
+        )
+
+    def tearDown(self):
+        import os as _os
+        runtime = self.app.config.get("DISCOVERY_RUNTIME")
+        if runtime:
+            try:
+                runtime.shutdown()
+            except Exception:
+                pass
+        if _os.path.exists(self._tmp.name):
+            try:
+                _os.unlink(self._tmp.name)
+            except PermissionError:
+                pass
+
+    def _make_run(self, status="succeeded"):
+        import hashlib
+        input_hash = hashlib.sha256(self.confirmation["id"].encode()).hexdigest()
+        run = self.store.create_discovery_run(
+            profile_id=self.profile["id"], resume_id=self.resume["id"],
+            analysis_id=self.analysis["id"], confirmation_id=self.confirmation["id"],
+            input_hash=input_hash, policy_version="discovery_v2",
+        )
+        if status != "created":
+            self.store.update_discovery_run(run["id"], status=status, stage="assembling")
+        return run
+
+    def _add_job(self, run_id, job_id, *, category="high_match", direction_id=None,
+                 match_score=85, confidence=88, completeness="complete",
+                 hard_outcome="pass", salary="20-40K", location="北京",
+                 jd="负责后端服务开发与架构设计", source_status="active"):
+        url = f"https://www.zhipin.com/job_detail/{job_id}.html"
+        job = self.store.save_job(
+            canonical_url=url, source_url=url,
+            title=f"岗位 {job_id}", company=f"公司 {job_id}",
+            salary=salary, location=location, jd=jd,
+        )
+        snap = self.store.save_job_snapshot(
+            run_id, job["id"], source_url=url,
+            title=f"岗位 {job_id}", company=f"公司 {job_id}",
+            salary=salary, location=location, jd=jd, completeness=completeness,
+            source_status=source_status, fetch_status="ok",
+        )
+        did = direction_id or self.direction_ids[0]
+        self.store.create_assessment(
+            run_id, snap["id"], did,
+            hard_outcome=hard_outcome, category=category,
+            match_score=match_score, confidence=confidence,
+            dimensions={
+                "direction_alignment": {"score": 80, "candidate_evidence_refs": ["e1"], "job_evidence_refs": ["title"]},
+                "skill_coverage": {"score": 75, "candidate_evidence_refs": ["e1"], "job_evidence_refs": ["jd"]},
+            },
+            gaps=[], status="completed",
+        )
+        return snap
+
+    def test_results_items_contain_recommendation_id_and_rank(self):
+        """T063: 每条结果包含 recommendation_id 和 rank。"""
+        run = self._make_run()
+        self._add_job(run["id"], "job-r1")
+        data = self.client.get(f"/api/discovery/runs/{run['id']}/results").get_json()
+        item = data["items"][0]
+        self.assertIn("recommendation_id", item)
+        self.assertIn("rank", item)
+        self.assertEqual(item["rank"], 1)
+        self.assertTrue(item["recommendation_id"].startswith(f"{run['id']}:"))
+
+    def test_results_items_contain_full_job_fields(self):
+        """T063: 结果包含公司/岗位/薪资/地点/JD/source/status/fetched_at。"""
+        run = self._make_run()
+        self._add_job(run["id"], "job-fields", salary="30-50K", location="上海",
+                      jd="负责核心系统架构")
+        data = self.client.get(f"/api/discovery/runs/{run['id']}/results").get_json()
+        item = data["items"][0]
+        self.assertEqual(item["company"], "公司 job-fields")
+        self.assertEqual(item["title"], "岗位 job-fields")
+        self.assertEqual(item["salary"], "30-50K")
+        self.assertEqual(item["location"], "上海")
+        self.assertTrue(item.get("jd") or item.get("jd_excerpt"))
+        self.assertIn("zhipin.com", item["source_url"])
+        self.assertEqual(item["source_status"], "active")
+        # fetched_at may be empty if snapshot table doesn't store it
+        self.assertIn("fetched_at", item)
+
+    def test_results_items_contain_explanation_with_bilateral_refs(self):
+        """T063: 结果包含 explanation，含正向依据和双方 refs。"""
+        run = self._make_run()
+        self._add_job(run["id"], "job-expl")
+        data = self.client.get(f"/api/discovery/runs/{run['id']}/results").get_json()
+        item = data["items"][0]
+        self.assertIn("explanation", item)
+        expl = item["explanation"]
+        self.assertIn("positive", expl)
+        self.assertIn("gaps", expl)
+        self.assertIn("candidate_evidence_refs", expl)
+        self.assertIn("job_evidence_refs", expl)
+        self.assertTrue(len(expl["positive"]) >= 1)
+        self.assertTrue(len(expl["candidate_evidence_refs"]) >= 1)
+        self.assertTrue(len(expl["job_evidence_refs"]) >= 1)
+
+    def test_direction_filter_returns_all_assessments_for_matching_job(self):
+        """T063: direction_id 筛选时，匹配岗位返回全部方向评估。"""
+        run = self._make_run()
+        # Job with two direction assessments (if 2+ directions exist)
+        url = f"https://www.zhipin.com/job_detail/job-multi.html"
+        job = self.store.save_job(canonical_url=url, source_url=url,
+                                  title="多方向岗位", company="多方向公司",
+                                  salary="20-40K", location="北京", jd="Python")
+        snap = self.store.save_job_snapshot(
+            run["id"], job["id"], source_url=url,
+            title="多方向岗位", company="多方向公司",
+            salary="20-40K", location="北京", jd="Python", completeness="complete",
+            source_status="active", fetch_status="ok",
+        )
+        dirs_to_use = self.direction_ids[:2] if len(self.direction_ids) >= 2 else self.direction_ids[:1]
+        for did in dirs_to_use:
+            self.store.create_assessment(
+                run["id"], snap["id"], did,
+                hard_outcome="pass", category="high_match",
+                match_score=85, confidence=88,
+                dimensions={"direction_alignment": {"score": 80, "candidate_evidence_refs": ["e1"], "job_evidence_refs": ["title"]}},
+                status="completed",
+            )
+        # Filter by the direction we used
+        did_filter = dirs_to_use[0]
+        data = self.client.get(
+            f"/api/discovery/runs/{run['id']}/results?direction_id={did_filter}"
+        ).get_json()
+        self.assertEqual(len(data["items"]), 1)
+        item = data["items"][0]
+        # Must return all assessments, not just the filtered direction
+        self.assertGreaterEqual(len(item["assessments"]), len(dirs_to_use))
+        self.assertIn("matched_direction_ids", item)
+        self.assertIn(did_filter, item["matched_direction_ids"])
+
+    def test_category_filter_applies_to_primary_assessment(self):
+        """T063: category 筛选作用于主评估。"""
+        run = self._make_run()
+        self._add_job(run["id"], "job-high", category="high_match")
+        self._add_job(run["id"], "job-review", category="needs_review")
+        data = self.client.get(
+            f"/api/discovery/runs/{run['id']}/results?category=high_match"
+        ).get_json()
+        for item in data["items"]:
+            self.assertEqual(item["primary_assessment"]["category"], "high_match")
+
+    def test_sort_order_is_canonical_category_then_score(self):
+        """T063: 排序按类别→分数→置信度→完整度→job_id 稳定排序。"""
+        run = self._make_run()
+        # adjacent with high score
+        snap_adj = self._add_job(run["id"], "job-adj", category="adjacent_match", match_score=95)
+        # high with lower score
+        snap_high_low = self._add_job(run["id"], "job-high-low", category="high_match", match_score=70)
+        # high with higher score
+        snap_high_hi = self._add_job(run["id"], "job-high-hi", category="high_match", match_score=90)
+        data = self.client.get(f"/api/discovery/runs/{run['id']}/results").get_json()
+        job_ids = [it["job_id"] for it in data["items"]]
+        # Get actual job UUIDs
+        job_adj_id = snap_adj["job_id"]
+        job_high_low_id = snap_high_low["job_id"]
+        job_high_hi_id = snap_high_hi["job_id"]
+        # high_match before adjacent; within high: score desc
+        high_items = [j for j in job_ids if j in (job_high_low_id, job_high_hi_id)]
+        adj_items = [j for j in job_ids if j == job_adj_id]
+        self.assertTrue(all(
+            job_ids.index(h) < job_ids.index(a)
+            for h in high_items for a in adj_items
+        ))
+        self.assertEqual(job_ids.index(job_high_hi_id), 0)
+
+    def test_hard_violation_never_in_recommended_partition(self):
+        """T063/SC-005: 硬约束违规岗位不进入推荐组合。"""
+        run = self._make_run()
+        self._add_job(run["id"], "job-violation", category="high_match",
+                      hard_outcome="violation", match_score=99)
+        self._add_job(run["id"], "job-ok", category="high_match")
+        data = self.client.get(f"/api/discovery/runs/{run['id']}/results").get_json()
+        recommended = [
+            it for it in data["items"]
+            if it["primary_assessment"]["category"] in ("high_match", "adjacent_match", "growth_match")
+        ]
+        violation_ids = {it["job_id"] for it in data["items"]
+                         if it["job_id"] == "job-violation" or
+                         it.get("primary_assessment", {}).get("hard_outcome") == "violation"}
+        self.assertNotIn("job-violation", {it["job_id"] for it in recommended})
+
+    def test_repeated_load_returns_identical_order(self):
+        """T063/SC-006: 重复加载排序完全一致。"""
+        run = self._make_run()
+        for i in range(5):
+            self._add_job(run["id"], f"job-{i}", match_score=80 + i)
+        first = [it["job_id"] for it in self.client.get(
+            f"/api/discovery/runs/{run['id']}/results").get_json()["items"]]
+        second = [it["job_id"] for it in self.client.get(
+            f"/api/discovery/runs/{run['id']}/results").get_json()["items"]]
+        self.assertEqual(first, second)
+
+
+class DiscoveryV2ResumeStatusContractTests(unittest.TestCase):
+    """T082 RED: v2 four-class progress authoritative names, cancel response
+    with cancel_requested_at + four-part progress, resume 409 on hash drift,
+    partial/failed/interrupted/cancelled status visibility, refresh recovery.
+
+    Contract source: specs/005-fast-resume-discovery/contracts/http-api.md
+      - L203-208: progress has search_queries_completed, list_candidates,
+        details_selected, details_completed, assessments_completed, recommendations
+      - L318: cancel response includes cancel_requested_at and current four-part progress
+      - L319: resume rejects profile/confirmation/policy/input hash drift with 409
+      - L228: v2 names are authoritative; source_count/detail_count/evaluated_count
+        are compatibility aliases only
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self.app = create_app({"TESTING": True, "DB_PATH": self._tmp.name, "START_TASKS": False})
+        self.client = self.app.test_client()
+        sess = self.client.get("/api/session")
+        self.token = sess.get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = self.token
+        self.store = TaskStore(self._tmp.name)
+        self.profile = self.store.create_profile("v2 resume/status 测试画像")
+        self.resume = self.store.save_resume(
+            self.profile["id"], "storage/v2_resume.pdf", "pdf",
+            _CONTRACT_RESUME_TEXT, "hash-v2-resume", "v2_resume.pdf",
+        )
+        provider = _FakeAIProviderForRuns(_contract_valid_ai_response())
+        from webui.discovery import analyze_resume, confirm_directions, compile_search_plan
+        self.analysis = analyze_resume(
+            self.store, self.resume["id"], ai_consent=True, ai_provider=provider,
+        )
+        directions = self.store.list_directions(self.analysis["id"])
+        self.direction_ids = [d["id"] for d in directions]
+        self.confirmation = confirm_directions(
+            self.store, self.analysis["id"], self.direction_ids,
+            hard_constraints={"city": "北京"},
+        )
+        # confirm_directions 返回的 dict 不含 directions/hard_constraints 等字段；
+        # 通过 store.get_confirmation 取回完整结构。
+        self.confirmation = self.store.get_confirmation(self.confirmation["id"])
+        # Build confirmation view to compute real input_hash via compile_search_plan.
+        enabled_directions = []
+        for d in directions:
+            for cd in self.confirmation["directions"]:
+                if cd["direction_id"] == d["id"] and cd.get("enabled"):
+                    enabled_directions.append({
+                        "id": d["id"], "direction_id": d["id"],
+                        "name": d.get("name", ""),
+                        "type": d.get("direction_type", ""),
+                        "search_terms": d.get("search_terms", []),
+                        "default_enabled": d.get("default_enabled", False),
+                        "evidence_refs": [],
+                    })
+        self._confirmation_view = {
+            "id": self.confirmation["id"], "analysis_id": self.analysis["id"],
+            "hard_constraints": self.confirmation.get("hard_constraints", {}),
+            "soft_preferences": self.confirmation.get("soft_preferences", {}),
+            "safe_limits": self.confirmation.get("safe_limits", {}),
+            "enabled_directions": enabled_directions,
+            "directions": self.confirmation.get("directions", []),
+        }
+        plan = compile_search_plan(self._confirmation_view)
+        self._real_input_hash = plan["input_hash"]
+
+    def tearDown(self):
+        import os as _os
+        runtime = self.app.config.get("DISCOVERY_RUNTIME")
+        if runtime:
+            try:
+                runtime.shutdown()
+            except Exception:
+                pass
+        if _os.path.exists(self._tmp.name):
+            try:
+                _os.unlink(self._tmp.name)
+            except PermissionError:
+                pass
+
+    # --- helpers -------------------------------------------------------
+
+    def _create_v2_run(self, status="processing_jobs", stage=None,
+                       counters=None, input_hash=None, policy_version="discovery_v2"):
+        """Create a v2 run with real input_hash (or override for drift tests)."""
+        run = self.store.create_discovery_run(
+            profile_id=self.profile["id"], resume_id=self.resume["id"],
+            analysis_id=self.analysis["id"], confirmation_id=self.confirmation["id"],
+            input_hash=input_hash or self._real_input_hash,
+            policy_version=policy_version,
+        )
+        if status != "created":
+            self.store.update_discovery_run(
+                run["id"], status=status, stage=stage or status,
+                counters=counters or {}, started=True,
+            )
+        return run
+
+    # --- T082: four-class progress authoritative names ----------------
+
+    def test_get_v2_run_returns_search_queries_completed_in_progress(self):
+        """http-api.md L203-208: progress 必须包含 search_queries_completed（v2 权威名）。
+
+        RED: 当前 _run_summary 只返回 source_count（v1 别名），缺少 v2 权威名
+        search_queries_completed。
+        """
+        run = self._create_v2_run(
+            status="processing_jobs",
+            counters={"source_count": 5, "list_candidate_count": 100},
+        )
+        resp = self.client.get(f"/api/discovery/runs/{run['id']}")
+        self.assertEqual(resp.status_code, 200)
+        progress = resp.get_json().get("progress", {})
+        self.assertIn("search_queries_completed", progress,
+                      "v2 progress 必须包含 search_queries_completed 权威名")
+        self.assertEqual(progress["search_queries_completed"], 5)
+
+    def test_get_v2_run_returns_recommendations_in_progress(self):
+        """http-api.md L203-208: progress 必须包含 recommendations（推荐结果数）。
+
+        RED: 当前 _run_summary 不返回 recommendations 字段。
+        """
+        run = self._create_v2_run(
+            status="processing_jobs",
+            counters={"high_count": 3, "adjacent_count": 2, "growth_count": 1},
+        )
+        resp = self.client.get(f"/api/discovery/runs/{run['id']}")
+        self.assertEqual(resp.status_code, 200)
+        progress = resp.get_json().get("progress", {})
+        self.assertIn("recommendations", progress,
+                      "v2 progress 必须包含 recommendations 字段")
+        # recommendations = high_match + adjacent_match + growth_match
+        self.assertEqual(progress["recommendations"], 6)
+
+    # --- T082: cancel response includes cancel_requested_at + progress -
+
+    def test_cancel_response_includes_cancel_requested_at(self):
+        """http-api.md L318: cancel response 必须包含 cancel_requested_at。
+
+        RED: 当前 _run_summary 不返回 cancel_requested_at 字段。
+        """
+        run = self._create_v2_run(status="fetching_lists")
+        resp = self.client.post(f"/api/discovery/runs/{run['id']}/cancel")
+        self.assertEqual(resp.status_code, 202)
+        body = resp.get_json()
+        self.assertIn("cancel_requested_at", body,
+                      "cancel response 必须包含 cancel_requested_at")
+        self.assertIsNotNone(body["cancel_requested_at"],
+                             "cancel_requested_at 不得为 null")
+
+    def test_cancel_response_includes_four_part_progress(self):
+        """http-api.md L318: cancel response 必须包含当前四类进度。"""
+        run = self._create_v2_run(
+            status="fetching_lists",
+            counters={
+                "list_candidate_count": 50,
+                "detail_selected_count": 10,
+                "detail_completed_count": 3,
+                "assessment_completed_count": 2,
+            },
+        )
+        resp = self.client.post(f"/api/discovery/runs/{run['id']}/cancel")
+        self.assertEqual(resp.status_code, 202)
+        progress = resp.get_json().get("progress", {})
+        self.assertEqual(progress.get("list_candidates"), 50)
+        self.assertEqual(progress.get("details_selected"), 10)
+        self.assertEqual(progress.get("details_completed"), 3)
+        self.assertEqual(progress.get("assessments_completed"), 2)
+
+    # --- T082: resume 409 on hash drift (synchronous) -----------------
+
+    def test_resume_rejects_input_hash_drift_with_409(self):
+        """http-api.md L319: resume 必须同步拒绝 input_hash 漂移（409）。
+
+        RED: 当前 HTTP resume 端点直接返回 202 并在后台线程中检查 hash drift，
+        客户端无法同步感知 409。GREEN 应在 HTTP 层同步检查 hash drift。
+        """
+        run = self._create_v2_run(status="interrupted", stage="processing_jobs")
+        # Drift the stored input_hash via direct SQL.
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE discovery_runs SET input_hash = ? WHERE id = ?",
+                ("drifted-hash", run["id"]),
+            )
+        resp = self.client.post(f"/api/discovery/runs/{run['id']}/resume")
+        self.assertEqual(resp.status_code, 409,
+                         "input_hash 漂移时 resume 必须同步返回 409")
+        body = resp.get_json() or {}
+        self.assertEqual(body.get("error_code"), "state_conflict")
+
+    def test_resume_rejects_invalid_policy_version_with_409(self):
+        """http-api.md L319: resume 必须同步拒绝 policy_version 漂移到非法值（409）。
+
+        RED: 当前 HTTP resume 端点不校验 policy_version 合法性。
+        """
+        run = self._create_v2_run(status="interrupted", stage="processing_jobs")
+        # Drift policy_version to an invalid value via direct SQL.
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE discovery_runs SET policy_version = ? WHERE id = ?",
+                ("drifted-policy", run["id"]),
+            )
+        resp = self.client.post(f"/api/discovery/runs/{run['id']}/resume")
+        self.assertEqual(resp.status_code, 409,
+                         "policy_version 非法值时 resume 必须同步返回 409")
+        body = resp.get_json() or {}
+        self.assertEqual(body.get("error_code"), "state_conflict")
+
+    # --- T082: partial/failed/interrupted/cancelled clearly visible ----
+
+    def test_partial_status_visible_in_get_run(self):
+        """partial 状态必须在 GET /runs/{id} 中清晰可见，且 complete=true。"""
+        run = self._create_v2_run(status="partial", stage="assembling")
+        resp = self.client.get(f"/api/discovery/runs/{run['id']}")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body.get("status"), "partial")
+        self.assertTrue(body.get("complete", False),
+                        "partial 是终态，complete 必须为 true")
+
+    def test_failed_status_visible_in_get_run(self):
+        """failed 状态必须在 GET /runs/{id} 中清晰可见，且 complete=true。"""
+        run = self._create_v2_run(
+            status="failed", stage="assembling",
+            counters={"failure_code": "source_blocked"},
+        )
+        # failure_code is stored on the run row, not in counters.
+        self.store.update_discovery_run(
+            run["id"], failure_code="source_blocked", failure_stage="fetching_lists",
+        )
+        resp = self.client.get(f"/api/discovery/runs/{run['id']}")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body.get("status"), "failed")
+        self.assertTrue(body.get("complete", False),
+                        "failed 是终态，complete 必须为 true")
+        self.assertIsNotNone(body.get("failure"),
+                             "failed 状态必须包含 failure 详情")
+
+    def test_interrupted_status_visible_in_get_run(self):
+        """interrupted 状态必须在 GET /runs/{id} 中清晰可见，且 complete=false（可恢复）。"""
+        run = self._create_v2_run(status="interrupted", stage="processing_jobs")
+        resp = self.client.get(f"/api/discovery/runs/{run['id']}")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body.get("status"), "interrupted")
+        self.assertFalse(body.get("complete", True),
+                         "interrupted 是可恢复终态，complete 必须为 false")
+
+    def test_cancelled_status_visible_in_get_run(self):
+        """cancelled 状态必须在 GET /runs/{id} 中清晰可见，且 complete=true。"""
+        run = self._create_v2_run(status="cancelled", stage="processing_jobs")
+        resp = self.client.get(f"/api/discovery/runs/{run['id']}")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body.get("status"), "cancelled")
+        self.assertTrue(body.get("complete", False),
+                        "cancelled 是终态，complete 必须为 true")
+
+    # --- T082: refresh recovery ----------------------------------------
+
+    def test_refresh_after_interrupt_preserves_progress(self):
+        """刷新恢复：interrupted 后 GET /runs/{id} 必须保留进度数据。"""
+        run = self._create_v2_run(
+            status="interrupted", stage="processing_jobs",
+            counters={
+                "source_count": 3,
+                "list_candidate_count": 45,
+                "detail_selected_count": 8,
+                "detail_completed_count": 2,
+                "assessment_completed_count": 1,
+                "result_revision": 2,
+            },
+        )
+        # Simulate page refresh — client re-fetches run summary.
+        resp = self.client.get(f"/api/discovery/runs/{run['id']}")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body.get("status"), "interrupted")
+        progress = body.get("progress", {})
+        self.assertEqual(progress.get("list_candidates"), 45)
+        self.assertEqual(progress.get("details_selected"), 8)
+        self.assertEqual(progress.get("details_completed"), 2)
+        self.assertEqual(progress.get("assessments_completed"), 1)
+        self.assertEqual(body.get("result_revision"), 2)
 
 
 if __name__ == "__main__":  # pragma: no cover

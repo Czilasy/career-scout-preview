@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any, Iterable
 
 from webui.candidate import (
@@ -22,8 +24,88 @@ from webui.candidate import (
     redact_pii,
     validate_candidate_analysis,
     normalize_candidate_analysis,
+    normalize_candidate_analysis_v4,
 )
 from webui.ai import AISecurityError as AIProviderError
+
+
+# ---------------------------------------------------------------------------
+# T013: Versioned discovery policy foundation
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DiscoveryPolicyV1Adapter:
+    """Read-only adapter for historical 004 runs.
+
+    The adapter deliberately retains the pre-005 detail-budget behavior. It
+    never mutates a run row or silently upgrades its ``policy_version``.
+    """
+
+    policy_version: str = "v1"
+    default_detail_budget: int = 60
+    min_detail_budget: int = 1
+    max_detail_budget: int = 200
+    max_detail_batch_size: int = 1
+    default_source_concurrency: int = 1
+    max_source_concurrency: int = 1
+    detail_ttl_hours: int | None = None
+    poll_interval_seconds: int = 3
+
+    def validate_detail_budget(self, value: int | None) -> int:
+        if value is None:
+            return self.default_detail_budget
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("detail budget must be an integer")
+        if not self.min_detail_budget <= value <= self.max_detail_budget:
+            raise ValueError(
+                f"detail budget must be between {self.min_detail_budget} "
+                f"and {self.max_detail_budget}"
+            )
+        return value
+
+
+@dataclass(frozen=True)
+class DiscoveryPolicyV2:
+    """Frozen 005 defaults for bounded, progressive discovery."""
+
+    policy_version: str = "discovery_v2"
+    default_detail_budget: int = 15
+    min_detail_budget: int = 12
+    max_detail_budget: int = 20
+    max_detail_batch_size: int = 5
+    default_source_concurrency: int = 1
+    max_source_concurrency: int = 2
+    detail_ttl_hours: int = 12
+    poll_interval_seconds: int = 3
+
+    def validate_detail_budget(self, value: int | None) -> int:
+        if value is None:
+            return self.default_detail_budget
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("detail budget must be an integer")
+        if not self.min_detail_budget <= value <= self.max_detail_budget:
+            raise ValueError(
+                f"detail budget must be between {self.min_detail_budget} "
+                f"and {self.max_detail_budget}"
+            )
+        return value
+
+
+def resolve_discovery_policy(policy_version: str | None):
+    """Resolve a persisted policy identifier without rewriting it."""
+    if policy_version in (None, "", "v1"):
+        return DiscoveryPolicyV1Adapter()
+    if policy_version == "discovery_v2":
+        return DiscoveryPolicyV2()
+    raise ValueError(f"unsupported discovery policy: {policy_version}")
+
+
+def policy_for_run(run: Mapping[str, Any]):
+    """Return the policy for a persisted run while leaving the row untouched."""
+    if not isinstance(run, Mapping):
+        raise ValueError("run must be a mapping")
+    return resolve_discovery_policy(run.get("policy_version"))
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +133,19 @@ ERROR_CODE_MAP: dict[str, dict] = {
     "cancelled": {"retryable": False, "stage": None},
     "consent_required": {"retryable": False, "stage": None},
     "analysis_interrupted": {"retryable": True, "stage": "analyzing"},
+    "candidate_version_conflict": {"retryable": False, "stage": "confirmation"},
+    "candidate_fact_invalid": {"retryable": False, "stage": "confirmation"},
+    "intent_invalid": {"retryable": False, "stage": "confirmation"},
+    "salary_unparseable": {"retryable": False, "stage": "screening"},
+    "candidate_pool_empty": {"retryable": False, "stage": "prioritizing"},
+    "detail_budget_empty": {"retryable": False, "stage": "prioritizing"},
+    "source_verification_required": {"retryable": True, "stage": "processing_jobs"},
+    "source_rate_limited": {"retryable": True, "stage": "processing_jobs"},
+    "detail_event_invalid": {"retryable": False, "stage": "processing_jobs"},
+    "detail_reuse_invalid": {"retryable": False, "stage": "processing_jobs"},
+    "assessment_group_invalid": {"retryable": False, "stage": "processing_jobs"},
+    "result_projection_invalid": {"retryable": False, "stage": "assembling"},
+    "input_hash_mismatch": {"retryable": False, "stage": None},
 }
 
 DEFAULT_USER_MESSAGES: dict[str, str] = {
@@ -72,6 +167,19 @@ DEFAULT_USER_MESSAGES: dict[str, str] = {
     "cancelled": "操作已取消。",
     "consent_required": "需要明确同意后才能调用 AI。",
     "analysis_interrupted": "分析因服务重启而中断，请重试。",
+    "candidate_version_conflict": "候选人画像已更新，请刷新后重试。",
+    "candidate_fact_invalid": "候选人事实无效，请检查后重试。",
+    "intent_invalid": "求职意愿信息无效，请检查后重试。",
+    "salary_unparseable": "最低薪资格式无法识别，请重新填写。",
+    "candidate_pool_empty": "没有可处理的岗位候选，请调整条件后重试。",
+    "detail_budget_empty": "详情处理预算为空，请调整后重试。",
+    "source_verification_required": "岗位来源需要在浏览器中完成验证。",
+    "source_rate_limited": "岗位来源暂时限流，请稍后重试。",
+    "detail_event_invalid": "岗位详情事件无效，已停止处理该岗位。",
+    "detail_reuse_invalid": "历史岗位详情无法安全复用，将重新获取。",
+    "assessment_group_invalid": "岗位评估分组无效，已转入待确认。",
+    "result_projection_invalid": "推荐结果暂时无法生成，请稍后重试。",
+    "input_hash_mismatch": "运行输入已变化，无法继续原运行。",
 }
 
 
@@ -124,6 +232,101 @@ class AISecurityError(DiscoveryError):
     def __init__(self, error_code: str = "ai_invalid_output", **kwargs):
         kwargs.setdefault("stage", "analyzing")
         super().__init__(error_code, **kwargs)
+
+
+_OPAQUE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_FORBIDDEN_PAYLOAD_KEYS = {
+    "phone", "email", "contact", "id_number", "identity_number", "address",
+    "resume", "resume_body", "resume_text", "jd", "jd_body", "jd_text",
+    "prompt", "system_prompt", "api_key", "key", "credential", "token", "secret",
+    "raw", "raw_output", "raw_model_output", "raw_response", "model_response",
+}
+_SENSITIVE_PAYLOAD_PATTERNS = (
+    re.compile(r"\b1[3-9]\d{9}\b"),
+    re.compile(r"\b\d{17}[\dXx]\b"),
+    re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"),
+    re.compile(r"(?:路|街|道|巷|弄)\s*\d+\s*号"),
+)
+
+
+def validate_opaque_id(value: str) -> str:
+    """Validate an API identifier without assigning meaning to its contents."""
+    if not isinstance(value, str) or not _OPAQUE_ID_RE.fullmatch(value):
+        raise DiscoveryError("input_incomplete", user_message="资源标识无效。")
+    return value
+
+
+def require_matching_input_hash(
+    expected_hash: str,
+    actual_hash: str,
+    *,
+    conflict_code: str = "input_hash_mismatch",
+) -> str:
+    """Require an exact non-empty hash match for mutable/CAS operations."""
+    if not isinstance(expected_hash, str) or not expected_hash or expected_hash != actual_hash:
+        raise DiscoveryError(conflict_code)
+    return expected_hash
+
+
+def compute_discovery_input_hash(payload: Any, *, policy_version: str) -> str:
+    """Return a stable policy-scoped identity hash for persisted work."""
+    if policy_version not in {"v1", "discovery_v2"}:
+        raise DiscoveryError("input_hash_mismatch")
+    return _input_hash({"policy_version": policy_version, "payload": payload})
+
+
+V2_TERMINAL_RUN_STATES = frozenset({"succeeded", "partial", "failed", "cancelled"})
+V2_RUN_TRANSITIONS = {
+    "created": frozenset({"planning"}),
+    "planning": frozenset({"fetching_lists", "failed", "cancelled", "interrupted"}),
+    "fetching_lists": frozenset({"prioritizing", "partial", "failed", "cancelled", "interrupted"}),
+    "prioritizing": frozenset({"processing_jobs", "succeeded", "partial", "failed", "cancelled", "interrupted"}),
+    "processing_jobs": frozenset({"assembling", "partial", "failed", "cancelled", "interrupted"}),
+    "assembling": frozenset({"succeeded", "partial", "failed"}),
+    "interrupted": frozenset({"planning", "fetching_lists", "prioritizing", "processing_jobs"}),
+    "succeeded": frozenset(),
+    "partial": frozenset(),
+    "failed": frozenset(),
+    "cancelled": frozenset(),
+}
+
+
+def validate_v2_run_transition(current_state: str, target_state: str) -> str:
+    """Validate one policy-v2 run transition; terminal states are irreversible."""
+    if target_state not in V2_RUN_TRANSITIONS.get(current_state, frozenset()):
+        raise DiscoveryError("state_conflict")
+    return target_state
+
+
+def sanitize_discovery_payload(payload: Any, *, payload_kind: str = "event") -> Any:
+    """Return a JSON-safe copy or reject payloads containing private/raw bodies."""
+    if payload_kind not in {"event", "result"}:
+        raise DiscoveryError("detail_event_invalid")
+
+    def clean(value: Any, path: tuple[str, ...] = ()) -> Any:
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            if len(value) > 2000 or any(pattern.search(value) for pattern in _SENSITIVE_PAYLOAD_PATTERNS):
+                raise DiscoveryError("detail_event_invalid")
+            return value
+        if isinstance(value, list):
+            if len(value) > 100:
+                raise DiscoveryError("detail_event_invalid")
+            return [clean(item, path) for item in value]
+        if isinstance(value, dict):
+            result = {}
+            for raw_key, item in value.items():
+                if not isinstance(raw_key, str):
+                    raise DiscoveryError("detail_event_invalid")
+                key = raw_key.lower()
+                if key in _FORBIDDEN_PAYLOAD_KEYS:
+                    raise DiscoveryError("detail_event_invalid")
+                result[raw_key] = clean(item, (*path, raw_key))
+            return result
+        raise DiscoveryError("detail_event_invalid")
+
+    return clean(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -188,27 +391,39 @@ def compile_search_plan(confirmation: dict) -> dict:
 
     seen_terms: dict[str, list[str]] = {}
     items: list[dict] = []
+
+    # Collect per-direction term lists (capped, PII-filtered, name-fallback).
+    direction_terms: list[tuple[str, list[str]]] = []
     for direction in enabled_directions:
         direction_id = direction.get("id") or direction.get("direction_id", "")
         if not direction_id:
             continue
         terms = list(direction.get("search_terms", []))[:MAX_SEARCH_TERMS]
         if not terms:
-            # Fall back to the direction name itself.
             name = direction.get("name", "").strip()
             if name:
                 terms = [name]
-        if not terms:
-            continue
+        cleaned: list[str] = []
         for term in terms:
             if not isinstance(term, str) or not term.strip():
                 continue
             term = term.strip()
             if redact_pii(term) != term:
                 continue
+            cleaned.append(term)
+        if cleaned:
+            direction_terms.append((direction_id, cleaned))
+
+    # Round-robin allocation: one term per direction per round until cap.
+    max_rounds = max((len(t) for _, t in direction_terms), default=0)
+    for round_idx in range(max_rounds):
+        for direction_id, terms in direction_terms:
+            if round_idx >= len(terms):
+                continue
+            term = terms[round_idx]
             if term not in seen_terms:
                 if len(items) >= MAX_GLOBAL_SEARCH_ITEMS:
-                    break
+                    continue
                 seen_terms[term] = [direction_id]
                 items.append({
                     "term": term,
@@ -220,7 +435,6 @@ def compile_search_plan(confirmation: dict) -> dict:
             else:
                 if direction_id not in seen_terms[term]:
                     seen_terms[term].append(direction_id)
-                # Update existing item's direction attribution.
                 for item in items:
                     if item["term"] == term:
                         if direction_id not in item["direction_ids"]:
@@ -253,6 +467,192 @@ def compile_search_plan(confirmation: dict) -> dict:
         }),
     }
     return plan
+
+
+# ---------------------------------------------------------------------------
+# T039/T040: List candidate tri-state precheck
+# ---------------------------------------------------------------------------
+
+
+def _parse_monthly_salary_k(salary_str: str):
+    """Parse a salary string to (low_k, high_k) monthly range, or None if unparseable.
+
+    Handles: "10-15K", "25-35K·13薪", "50K以上", "3K以下".
+    Returns None for: "面议", "200/天", annual/daily formats, empty.
+    N薪 (e.g. "15-20K·16薪") is parseable from the base part.
+    """
+    if not salary_str or not isinstance(salary_str, str):
+        return None
+    s = salary_str.strip()
+    if not s or "面议" in s or "/" in s:
+        return None
+    base = s.split("·")[0].strip()
+    import re
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*[Kk]$", base)
+    if m:
+        return (float(m.group(1)), float(m.group(2)))
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*[Kk]\s*以上$", base)
+    if m:
+        return (float(m.group(1)), float("inf"))
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*[Kk]\s*以下$", base)
+    if m:
+        return (0.0, float(m.group(1)))
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*[Kk]$", base)
+    if m:
+        v = float(m.group(1))
+        return (v, v)
+    return None
+
+
+def precheck_list_candidate(list_fields: dict, hard_constraints: dict, *,
+                            source_status: str | None = None,
+                            feedback_excluded: bool = False) -> dict:
+    """Tri-state hard constraint precheck on list-level fields.
+
+    Returns ``{"outcome": "pass"|"violation"|"unknown", "checks": [...],
+    "exclude": bool, "reason": str|None}``.
+
+    - source_status invalid/closed → immediate violation + exclude.
+    - feedback_excluded → immediate violation + exclude.
+    - min_salary: numeric monthly floor in K; job salary upper < floor → violation;
+      unparseable/missing → unknown.
+    - city: job location first segment mismatch → violation; missing → unknown.
+    - Aggregation: any violation → violation; else any unknown → unknown; else pass.
+    """
+    if source_status in ("invalid", "unreachable"):
+        return {"outcome": "violation", "checks": [], "exclude": True, "reason": "invalid_source"}
+    if source_status == "closed":
+        return {"outcome": "violation", "checks": [], "exclude": True, "reason": "source_closed"}
+    if feedback_excluded:
+        return {"outcome": "violation", "checks": [], "exclude": True, "reason": "feedback_excluded"}
+
+    checks: list[dict] = []
+    has_violation = False
+    has_unknown = False
+
+    min_salary = hard_constraints.get("min_salary")
+    if isinstance(min_salary, dict) and min_salary.get("amount") and min_salary.get("source") == "user_confirmed":
+        floor_k = float(min_salary["amount"])
+        salary_str = (list_fields.get("salary") or "").strip()
+        if not salary_str:
+            checks.append({"field": "min_salary", "outcome": "unknown", "reason": "薪资字段缺失"})
+            has_unknown = True
+        else:
+            parsed = _parse_monthly_salary_k(salary_str)
+            if parsed is None:
+                checks.append({"field": "min_salary", "outcome": "unknown", "reason": f"无法解析: {salary_str}"})
+                has_unknown = True
+            else:
+                low_k, high_k = parsed
+                if high_k < floor_k:
+                    checks.append({"field": "min_salary", "outcome": "violation",
+                                   "reason": f"上限 {high_k}K < 最低 {floor_k}K"})
+                    has_violation = True
+                else:
+                    checks.append({"field": "min_salary", "outcome": "pass", "reason": ""})
+
+    city = (hard_constraints.get("city") or "").strip()
+    if city:
+        location = (list_fields.get("location") or "").strip()
+        if not location:
+            checks.append({"field": "city", "outcome": "unknown", "reason": "地点字段缺失"})
+            has_unknown = True
+        else:
+            job_city = location.split("·")[0].split("-")[0].strip()
+            if job_city == city or city in job_city or job_city in city:
+                checks.append({"field": "city", "outcome": "pass", "reason": ""})
+            else:
+                checks.append({"field": "city", "outcome": "violation",
+                               "reason": f"岗位 {job_city} ≠ 要求 {city}"})
+                has_violation = True
+
+    if has_violation:
+        outcome = "violation"
+    elif has_unknown:
+        outcome = "unknown"
+    else:
+        outcome = "pass"
+
+    return {
+        "outcome": outcome,
+        "checks": checks,
+        "exclude": outcome == "violation",
+        "reason": "hard_violation" if outcome == "violation" else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# T041/T042: Priority detail selection
+# ---------------------------------------------------------------------------
+
+DIRECTION_FLOOR_MAX = 2
+
+
+def select_priority_details(candidates: list[dict], *, detail_budget: int = 15,
+                            directions: list[str] | None = None) -> dict:
+    """Deterministic priority detail selection from the candidate pool.
+
+    - Violation candidates are never selected.
+    - Each enabled direction with eligible candidates gets a floor of at least 1
+      (capped at DIRECTION_FLOOR_MAX=2) before general scoring fills the rest.
+    - Shared candidates (multi-direction) count once toward budget.
+    - Tie-break is stable: sorted by job_id lexicographically.
+    - Returns ``{"selected": [...], "deferred": [...]}`` with selection_rank on selected.
+    """
+    budget = max(1, int(detail_budget))
+    enabled_dirs = list(directions or [])
+
+    eligible = [c for c in candidates if c.get("precheck_outcome") != "violation"]
+    excluded = [c for c in candidates if c.get("precheck_outcome") == "violation"]
+
+    # Stable sort by job_id for deterministic tie-break.
+    eligible.sort(key=lambda c: c.get("job_id", ""))
+
+    selected: list[dict] = []
+    selected_ids: set[str] = set()
+
+    def _add(candidate: dict) -> None:
+        if candidate["id"] not in selected_ids and len(selected) < budget:
+            selected.append(candidate)
+            selected_ids.add(candidate["id"])
+
+    # Phase 1: per-direction floor (at least 1, max DIRECTION_FLOOR_MAX per direction).
+    if enabled_dirs:
+        for direction_id in enabled_dirs:
+            dir_candidates = [
+                c for c in eligible
+                if direction_id in c.get("direction_ids", []) and c["id"] not in selected_ids
+            ]
+            floor_count = 0
+            for c in dir_candidates:
+                if floor_count >= DIRECTION_FLOOR_MAX:
+                    break
+                if len(selected) >= budget:
+                    break
+                _add(c)
+                floor_count += 1
+
+    # Phase 2: fill remaining budget by stable order.
+    for c in eligible:
+        if len(selected) >= budget:
+            break
+        _add(c)
+
+    # Assign sequential ranks.
+    for rank, item in enumerate(selected, start=1):
+        item["selection_rank"] = rank
+        item["selection_decision"] = "selected"
+        item["selection_reason"] = "priority_score"
+
+    deferred = [c for c in eligible if c["id"] not in selected_ids]
+    for item in deferred:
+        item["selection_decision"] = "deferred"
+        item["selection_reason"] = "budget_deferred"
+    for item in excluded:
+        item["selection_decision"] = "excluded"
+        item["selection_reason"] = "hard_violation"
+
+    return {"selected": selected, "deferred": deferred + excluded}
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +1216,7 @@ def analyze_resume(
     ai_provider=None,
     model_name: str = "",
     analysis_id: str = "",
+    contract_version: str | None = None,
 ) -> dict:
     """Orchestrate candidate analysis: consent -> read resume -> AI -> validate -> persist.
 
@@ -858,13 +1259,17 @@ def analyze_resume(
             **conditional, **kwargs,
         )
 
+    requested_contract = contract_version or "v3"
     if analysis_id:
         # T109: Use existing analysis created by the HTTP route.
         analysis = store.get_analysis(analysis_id)
+        requested_contract = analysis.get("contract_version") or requested_contract
+        if contract_version is not None and contract_version != requested_contract:
+            raise DiscoveryError("state_conflict", user_message="分析契约版本不匹配。")
     else:
         analysis = store.create_analysis(
             resume_id, profile_id,
-            model_name=model_name, contract_version="v3",
+            model_name=model_name, contract_version=requested_contract,
         )
 
     if not store.claim_analysis(analysis["id"]):
@@ -879,7 +1284,10 @@ def analyze_resume(
         raise DiscoveryError("ai_unavailable", user_message="AI 服务未配置。")
 
     try:
-        raw = ai_provider.analyze(resume_text=resume_text)
+        if requested_contract == "v4":
+            raw = ai_provider.analyze(resume_text=resume_text, contract_version="v4")
+        else:
+            raw = ai_provider.analyze(resume_text=resume_text)
     except TimeoutError:
         set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_timeout")
         raise DiscoveryError("ai_timeout")
@@ -905,6 +1313,90 @@ def analyze_resume(
         raise AISecurityError("ai_invalid_output", log_detail=str(exc))
 
     set_stage("normalizing", status="analyzing")
+    if requested_contract == "v4":
+        if (
+            isinstance(raw, dict)
+            and raw.get("contract_version") == "v4"
+            and isinstance(raw.get("quality"), dict)
+            and all(
+                isinstance(item, dict) and "source_kind" in item
+                for item in raw.get("facts", [])
+            )
+        ):
+            validated = {
+                key: raw.get(key)
+                for key in (
+                    "contract_version", "summary", "evidence", "facts", "unknowns",
+                    "directions", "quality", "metrics",
+                )
+            }
+        else:
+            validated = normalize_candidate_analysis_v4(raw, resume_text)
+        quality = validated.get("quality", {})
+        set_stage(
+            "validating", status="analyzing",
+            quality_status=quality.get("status"),
+            quality_warnings=quality.get("warnings", []),
+        )
+        normalized_evidence = normalize_evidence(validated.get("evidence", []), resume_text)
+        evidence_id_map = {}
+        for item in normalized_evidence:
+            stored = store.add_evidence(
+                analysis["id"], item["evidence_type"], item["normalized_value"],
+                safe_excerpt=item.get("safe_excerpt", ""),
+                source_locator=item.get("source_locator"),
+                assertion_type=item.get("assertion_type", "explicit"),
+                confidence=item.get("confidence", 0), sensitive=False,
+            )
+            evidence_id_map[item["id"]] = stored["id"]
+
+        stored_direction_ids = []
+        for direction in validated.get("directions", []):
+            stored_direction = store.add_direction(
+                analysis["id"], direction.get("name", ""), direction.get("type", "core"),
+                rationale=direction.get("rationale", ""), gaps=direction.get("gaps", []),
+                confidence=direction.get("confidence", 0),
+                default_enabled=direction.get("default_enabled", False),
+                search_terms=direction.get("search_terms", []), contract_version="v4",
+            )
+            stored_direction_ids.append(stored_direction["id"])
+            for ref in direction.get("evidence_refs", []):
+                evidence_id = evidence_id_map.get(ref)
+                if evidence_id:
+                    store.link_direction_evidence(stored_direction["id"], evidence_id)
+
+        profile_facts = []
+        for fact in validated.get("facts", []):
+            profile_facts.append({
+                **fact,
+                "evidence_ids": [
+                    evidence_id_map[ref]
+                    for ref in fact.get("evidence_refs", [])
+                    if ref in evidence_id_map
+                ],
+            })
+        profile_version = store.create_candidate_profile_version(
+            profile_id=profile_id, resume_id=resume_id, analysis_id=analysis["id"],
+            summary=validated.get("summary", {}), unknowns=validated.get("unknowns", []),
+            facts=profile_facts,
+        )
+        redacted_summary = {
+            key: redact_pii(value) if isinstance(value, str) else value
+            for key, value in validated.get("summary", {}).items()
+        }
+        set_stage(
+            "persisting", status="ready",
+            quality_status=quality.get("status", "complete"),
+            quality_warnings=quality.get("warnings", []),
+            summary=redacted_summary, unknowns=validated.get("unknowns", []),
+            provider_call_count=validated.get("metrics", {}).get("provider_call_count"),
+        )
+        result = store.get_analysis(analysis["id"])
+        result["candidate_profile_version_id"] = profile_version["id"]
+        result["direction_ids"] = stored_direction_ids
+        result["metrics"] = validated.get("metrics", {})
+        return result
+
     if isinstance(raw, dict) and raw.get("contract_version") == "v3":
         validated = normalize_candidate_analysis(raw, resume_text)
     else:
@@ -981,6 +1473,57 @@ def analyze_resume(
         unknowns=validated["unknowns"],
     )
     return store.get_analysis(analysis["id"])
+
+
+def create_manual_candidate_profile(
+    store, resume_id: str, *, facts: list[dict], directions: list[dict], unknowns=None,
+) -> dict:
+    """Create a draft candidate profile without any remote AI call."""
+    try:
+        resume = store.get_resume(resume_id)
+    except KeyError:
+        raise DiscoveryError("not_found", user_message="简历不存在。")
+    if not facts or not directions:
+        raise DiscoveryError("input_incomplete", user_message="请至少填写一项事实和一个求职方向。")
+    analysis = store.create_analysis(
+        resume_id, resume["profile_id"], contract_version="manual_v1",
+    )
+    if not store.claim_analysis(analysis["id"]):
+        raise DiscoveryError("state_conflict")
+    prepared_facts = [
+        {
+            "client_ref": f"manual-{index}",
+            "fact_type": item["fact_type"],
+            "stable_key": item.get("stable_key") or f"{item['fact_type']}:manual:{index}",
+            "value": item.get("value") or {},
+            "normalized_value": item.get("normalized_value") or "",
+            "source_kind": "user_added", "assertion_type": "explicit",
+            "confidence": 100, "verification_status": "confirmed", "evidence_ids": [],
+        }
+        for index, item in enumerate(facts)
+    ]
+    profile_version = store.create_candidate_profile_version(
+        profile_id=resume["profile_id"], resume_id=resume_id, analysis_id=analysis["id"],
+        summary={}, unknowns=unknowns or [], facts=prepared_facts,
+    )
+    for item in directions:
+        terms = [str(term).strip() for term in item.get("search_terms", []) if str(term).strip()]
+        if not item.get("name") or not terms:
+            raise DiscoveryError("input_incomplete", user_message="人工方向和搜索词不能为空。")
+        store.add_direction(
+            analysis["id"], str(item["name"]), item.get("type", "core"),
+            rationale="用户手动添加", confidence=100, default_enabled=True,
+            search_terms=terms[:3], contract_version="manual_v1",
+        )
+    store.update_analysis_status(
+        analysis["id"], "ready", analysis_stage="persisting",
+        quality_status="manual_required", quality_warnings=[], summary={},
+        unknowns=unknowns or [], expected_statuses={"analyzing"},
+    )
+    return {
+        "analysis": store.get_analysis(analysis["id"]),
+        "candidate_profile_version": profile_version,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1086,3 +1629,259 @@ def apply_feedback_to_next_run(
     adjusted["enabled_directions"] = enabled
     adjusted["excluded_job_ids"] = list(excluded_job_ids)
     return adjusted
+
+
+# ---------------------------------------------------------------------------
+# T062: Canonical recommendation projector
+# ---------------------------------------------------------------------------
+
+# Canonical category sort priority (lower = better).
+_CATEGORY_RANK = {
+    "high_match": 0,
+    "adjacent_match": 1,
+    "growth_match": 2,
+    "needs_review": 3,
+    "not_suitable": 4,
+}
+
+# Completeness rank: complete before partial/unavailable.
+_COMPLETENESS_RANK = {"complete": 0, "partial": 1, "unavailable": 2}
+
+_JD_EXCERPT_MAX = 300
+
+
+def _guard_category(category: str, hard_outcome: str, completeness: str,
+                    dimensions: dict, gaps: list) -> str:
+    """Apply classification guards and return the effective category.
+
+    Guards (data-model.md §Projection guards):
+    - hard violation → always not_suitable
+    - hard unknown → cannot be high_match (→ needs_review)
+    - high_match requires complete detail and two-sided evidence
+    - growth_match requires at least one explicit gap
+    """
+    if hard_outcome == "violation":
+        return "not_suitable"
+    if category == "high_match" and hard_outcome != "pass":
+        return "needs_review"
+    if category == "high_match":
+        if completeness != "complete":
+            return "needs_review"
+        two_sided = bool(dimensions) and all(
+            dim.get("candidate_evidence_refs") and dim.get("job_evidence_refs")
+            for dim in dimensions.values()
+            if isinstance(dim, dict)
+        )
+        if not two_sided:
+            return "needs_review"
+    if category == "growth_match" and not gaps:
+        return "needs_review"
+    return category
+
+
+def _soft_preference_score(snapshot: dict, soft_preferences: dict | None) -> int:
+    """Compute a soft preference boost for a job. Only affects sorting."""
+    if not soft_preferences:
+        return 0
+    score = 0
+    fields = snapshot.get("fields", {})
+    preferred_companies = soft_preferences.get("preferred_companies") or []
+    if fields.get("company") in preferred_companies:
+        score += 10
+    preferred_locations = soft_preferences.get("preferred_locations") or []
+    if fields.get("location") in preferred_locations:
+        score += 5
+    preferred_industries = soft_preferences.get("preferred_industries") or []
+    tags = fields.get("tags") or []
+    if any(tag in preferred_industries for tag in tags):
+        score += 3
+    return score
+
+
+def _build_explanation(assessment: dict) -> dict:
+    """Build a safe explanation from an assessment's dimensions and gaps.
+
+    Returns positive items (dimensions with bilateral evidence), gaps,
+    and aggregated candidate/job evidence refs. Never includes raw model text.
+    """
+    dimensions = assessment.get("dimensions") or {}
+    positive = []
+    candidate_refs: list[str] = []
+    job_refs: list[str] = []
+    for dim_name, dim in dimensions.items():
+        if not isinstance(dim, dict):
+            continue
+        c_refs = dim.get("candidate_evidence_refs") or []
+        j_refs = dim.get("job_evidence_refs") or []
+        if c_refs and j_refs:
+            positive.append({
+                "dimension": dim_name,
+                "score": dim.get("score"),
+                "candidate_evidence_refs": list(c_refs),
+                "job_evidence_refs": list(j_refs),
+            })
+            candidate_refs.extend(c_refs)
+            job_refs.extend(j_refs)
+    gaps = [
+        {"text": g.get("text", ""), "job_evidence_refs": g.get("job_evidence_refs") or []}
+        for g in (assessment.get("gaps") or [])
+        if isinstance(g, dict)
+    ]
+    return {
+        "positive": positive,
+        "gaps": gaps,
+        "candidate_evidence_refs": sorted(set(candidate_refs)),
+        "job_evidence_refs": sorted(set(job_refs)),
+    }
+
+
+def project_recommendations(
+    run_id: str,
+    snapshots: list[dict],
+    assessments: list[dict],
+    directions: list[dict],
+    *,
+    soft_preferences: dict | None = None,
+    direction_filter: str | None = None,
+    category_filter: str | None = None,
+) -> list[dict]:
+    """Canonical recommendation projector (T062).
+
+    Builds a stable, deterministic list of RecommendationItem dicts from
+    persisted snapshots and assessments. HTTP, frontend and export must all
+    use this single projector — no independent sorting or guard logic.
+
+    Sort tuple (data-model.md §Canonical sort tuple):
+    1. category priority (high < adjacent < growth < review < unsuitable)
+    2. match_score descending
+    3. confidence descending
+    4. completeness (complete < partial < unavailable)
+    5. soft_preference_score descending
+    6. job_id ascending (stable tiebreaker)
+    """
+    snap_by_job: dict[str, dict] = {
+        s.get("job_id", s.get("id", "")): s for s in (snapshots or [])
+    }
+
+    # Group assessments by job_id.
+    by_job: dict[str, list[dict]] = {}
+    for a in (assessments or []):
+        by_job.setdefault(a.get("job_id", ""), []).append(a)
+
+    items: list[dict] = []
+    for job_id, job_assessments in by_job.items():
+        snap = snap_by_job.get(job_id, {})
+        fields = snap.get("fields", {})
+
+        # Apply guards and compute effective category per assessment.
+        guarded: list[dict] = []
+        for a in job_assessments:
+            dims = a.get("dimensions") or {}
+            gaps = a.get("gaps") or []
+            hard = a.get("hard_outcome", a.get("hard_rule_outcome", "unknown"))
+            completeness = a.get("snapshot_completeness", a.get("completeness", "unavailable"))
+            effective = _guard_category(
+                a.get("category", "needs_review"), hard, completeness, dims, gaps,
+            )
+            guarded.append({**a, "_effective_category": effective})
+
+        # Select primary: best category rank, then highest match_score.
+        primary = min(
+            guarded,
+            key=lambda a: (
+                _CATEGORY_RANK.get(a["_effective_category"], 99),
+                -(a.get("match_score") or 0),
+                -(a.get("confidence") or 0),
+            ),
+        )
+        primary_category = primary["_effective_category"]
+        primary_score = primary.get("match_score") or 0
+        primary_confidence = primary.get("confidence") or 0
+        primary_completeness = primary.get(
+            "snapshot_completeness", primary.get("completeness", "unavailable")
+        )
+
+        # Direction filter: include job if any assessment matches the filter.
+        matched_dir_ids = sorted({a.get("direction_id", "") for a in guarded})
+        if direction_filter and direction_filter not in matched_dir_ids:
+            continue
+
+        # Category filter applies to the primary assessment.
+        if category_filter and primary_category != category_filter:
+            continue
+
+        soft_score = _soft_preference_score(snap, soft_preferences)
+        explanation = _build_explanation(primary)
+
+        # JD: use full jd if short enough, else excerpt.
+        jd_text = fields.get("jd") or ""
+        jd_excerpt = jd_text[:_JD_EXCERPT_MAX] if len(jd_text) > _JD_EXCERPT_MAX else jd_text
+
+        item = {
+            "recommendation_id": f"{run_id}:{job_id}",
+            "job_id": job_id,
+            "snapshot_id": snap.get("id", ""),
+            "title": fields.get("title", ""),
+            "company": fields.get("company", ""),
+            "salary": fields.get("salary", ""),
+            "location": fields.get("location", ""),
+            "tags": fields.get("tags") or [],
+            "jd": jd_text if len(jd_text) <= _JD_EXCERPT_MAX else "",
+            "jd_excerpt": jd_excerpt,
+            "source_url": snap.get("source_url", ""),
+            "source_status": snap.get("source_status", "unknown"),
+            "fetched_at": snap.get("fetched_at", ""),
+            "reused": snap.get("reused", False),
+            "category": primary_category,
+            "match_score": primary_score,
+            "confidence": primary_confidence,
+            "completeness": primary_completeness,
+            "primary_assessment": {
+                "direction_id": primary.get("direction_id", ""),
+                "category": primary_category,
+                "match_score": primary_score,
+                "confidence": primary_confidence,
+                "dimensions": primary.get("dimensions") or {},
+                "gaps": primary.get("gaps") or [],
+            },
+            "assessments": [
+                {
+                    "direction_id": a.get("direction_id", ""),
+                    "category": a["_effective_category"],
+                    "match_score": a.get("match_score") or 0,
+                    "confidence": a.get("confidence") or 0,
+                }
+                for a in guarded
+            ],
+            "matched_direction_ids": matched_dir_ids,
+            "explanation": explanation,
+            "soft_preference_score": soft_score,
+            "sort_components": {
+                "category_rank": _CATEGORY_RANK.get(primary_category, 99),
+                "match_score": primary_score,
+                "confidence": primary_confidence,
+                "completeness_rank": _COMPLETENESS_RANK.get(primary_completeness, 99),
+                "soft_preference_score": soft_score,
+                "job_id": job_id,
+            },
+            "interest_state": "none",
+            "visible": True,
+            "removal_reason": None,
+        }
+        items.append(item)
+
+    # Canonical stable sort.
+    items.sort(key=lambda it: (
+        it["sort_components"]["category_rank"],
+        -it["sort_components"]["match_score"],
+        -it["sort_components"]["confidence"],
+        it["sort_components"]["completeness_rank"],
+        -it["sort_components"]["soft_preference_score"],
+        it["sort_components"]["job_id"],
+    ))
+
+    # Assign 1-based ranks.
+    for rank, item in enumerate(items, 1):
+        item["rank"] = rank
+
+    return items
