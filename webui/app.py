@@ -68,6 +68,8 @@ from webui.screening import (
 
 SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
 DEFAULT_STATE_DIR = Path(os.path.expanduser("~/.career-scout/webui"))
+# 最新一轮流水线结果的持久化文件（刷新页面后据此恢复展示，新一轮运行覆盖它）
+LATEST_PIPELINE_RESULT_PATH = DEFAULT_STATE_DIR / "latest_pipeline_result.json"
 
 
 def _optional_positive_int(value, field, *, maximum=None):
@@ -2802,6 +2804,261 @@ def create_app(config=None):
             model=settings.get("model", ""),
             api_key=api_key,
         )
+
+    # ------------------------------------------------------------------
+    # Three-stage pipeline: resume → AI fields → user confirm → script
+    # ------------------------------------------------------------------
+
+    # Stage-3 execution: in-memory progress tracker + single-worker executor.
+    # Each run is keyed by a task_id; progress snapshots and final results are
+    # stored here and polled by the frontend. Local single-user app, so an
+    # in-memory dict is sufficient.
+    import threading as _threading
+    _pipeline_tasks = {}
+    _pipeline_lock = _threading.Lock()
+    _pipeline_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="boss-pipeline")
+
+    def _save_latest_pipeline_result(result, script_params):
+        """Persist the latest successful run so a page refresh can restore it.
+
+        Writes atomically (temp file + os.replace) so an interrupted write
+        never leaves a corrupt latest-result file.  Each new successful run
+        overwrites the previous one.
+        """
+        payload = {
+            "saved_at": time.time(),
+            "script_params": script_params,
+            "result": result,
+        }
+        try:
+            LATEST_PIPELINE_RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = LATEST_PIPELINE_RESULT_PATH.with_suffix(".json.tmp")
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            os.replace(tmp, LATEST_PIPELINE_RESULT_PATH)
+        except OSError:
+            pass  # persistence is best-effort; the in-memory result still works
+
+    def _load_latest_pipeline_result():
+        """Return the persisted latest run payload, or None if absent/unreadable."""
+        try:
+            with open(LATEST_PIPELINE_RESULT_PATH, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("result"), dict):
+            return None
+        return payload
+
+    def _run_pipeline_task(task_id, script_params):
+        from webui.pipeline_exec import run_search
+        with _pipeline_lock:
+            _pipeline_tasks[task_id] = {
+                "status": "running", "progress": {}, "logs": [],
+                "result": None, "error": "",
+            }
+
+        def on_progress(snapshot):
+            with _pipeline_lock:
+                task = _pipeline_tasks.get(task_id)
+                if task is None:
+                    return
+                task["progress"] = snapshot
+                msg = snapshot.get("message")
+                if msg:
+                    task["logs"].append(msg)
+
+        try:
+            source = _make_discovery_source()
+            if source is None:
+                raise RuntimeError("source_unavailable")
+            result = run_search(
+                script_params, source,
+                pages=3, progress=on_progress,
+                artifact_dir=app.config["RESULT_DIR"],
+            )
+            with _pipeline_lock:
+                task = _pipeline_tasks.get(task_id)
+                if task is not None:
+                    task["result"] = result
+                    task["error"] = result.get("error", "")
+                    task["status"] = "done" if result.get("ok") else "failed"
+            # 成功的运行持久化为"最新结果"，刷新页面可恢复；失败不覆盖旧数据
+            if result.get("ok"):
+                _save_latest_pipeline_result(result, script_params)
+        except Exception as exc:
+            with _pipeline_lock:
+                task = _pipeline_tasks.get(task_id)
+                if task is not None:
+                    task["status"] = "failed"
+                    task["error"] = f"执行异常：{type(exc).__name__}"
+
+    @app.route("/api/analyze-resume", methods=["POST"])
+    def analyze_resume():
+        """Stage 1: Upload resume file → AI reads it → returns unified search fields.
+
+        Accepts multipart form with 'file' field (PDF/DOCX/TXT).
+        Returns JSON with the unified schema fields for user confirmation.
+        """
+        from webui.resume import validate_format, validate_size
+        from webui.ai import analyze_resume_to_fields, AISecurityError
+
+        file = request.files.get("file")
+        if not file or not file.filename:
+            return jsonify({"ok": False, "error": "未上传文件"}), 400
+
+        try:
+            fmt = validate_format(file.filename)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+        file_bytes = file.read()
+        try:
+            validate_size(file_bytes)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+        # Get AI credentials
+        settings = store.get_ai_settings()
+        if not settings.get("is_configured"):
+            return jsonify({"ok": False, "error": "AI 未配置，请先设置 API 地址和密钥"}), 400
+        cred_ref = store.get_credential_ref()
+        if not cred_ref:
+            return jsonify({"ok": False, "error": "未找到 API 密钥"}), 400
+        api_key = ai_service.retrieve_api_key(cred_ref)
+        if not api_key:
+            return jsonify({"ok": False, "error": "API 密钥读取失败"}), 400
+
+        try:
+            fields = analyze_resume_to_fields(
+                file_bytes, fmt,
+                endpoint_url=settings.get("endpoint_url", ""),
+                api_key=api_key,
+                model=settings.get("model", ""),
+            )
+        except AISecurityError as exc:
+            return jsonify({"ok": False, "error": f"AI 分析失败: {exc.error_code}"}), 502
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+        # Return fields with human-readable labels for confirmation UI
+        field_labels = {
+            "keyword": ("搜索关键词", fields["keyword"], "text"),
+            "city": ("城市", fields["city"], "city"),
+            "salary": ("薪资范围", fields["salary"], boss.SALARY_MAP),
+            "experience": ("经验要求", fields["experience"], boss.EXPERIENCE_MAP),
+            "degree": ("学历", fields["degree"], boss.DEGREE_MAP),
+            "industry": ("行业", fields["industry"], boss.INDUSTRY_MAP),
+            "scale": ("公司规模", fields["scale"], boss.SCALE_MAP),
+            "stage": ("融资阶段", fields["stage"], boss.STAGE_MAP),
+        }
+
+        return jsonify({"ok": True, "fields": fields, "labels": field_labels})
+
+    @app.route("/api/confirm-fields", methods=["POST"])
+    def confirm_fields():
+        """Stage 2: User confirms/edits the AI-extracted fields.
+
+        Accepts JSON body with the unified fields (user may have edited them).
+        Validates all values and returns ready-to-execute script parameters.
+        """
+        from webui.ai import _validate_unified_fields, UNIFIED_SEARCH_FIELDS
+
+        body = request.get_json(silent=True)
+        if not body or not isinstance(body, dict):
+            return jsonify({"ok": False, "error": "无效的请求体"}), 400
+
+        # Validate the confirmed fields
+        fields = _validate_unified_fields(body)
+
+        if not fields.get("keyword"):
+            return jsonify({"ok": False, "error": "搜索关键词不能为空"}), 400
+        if not fields.get("city"):
+            return jsonify({"ok": False, "error": "城市无效，请选择支持的城市"}), 400
+
+        # Build the exact parameters the script consumes
+        script_params = {
+            "keyword": fields["keyword"],
+            "city": fields["city"],
+            "filters": {},
+        }
+        for key in ("salary", "experience", "degree", "industry", "scale", "stage"):
+            if fields.get(key):
+                script_params["filters"][key] = fields[key]
+
+        return jsonify({"ok": True, "confirmed_fields": fields, "script_params": script_params})
+
+    @app.route("/api/execute-search", methods=["POST"])
+    def execute_search():
+        """Stage 3: Start the scraping run with confirmed script_params.
+
+        Accepts JSON ``{"script_params": {...}}`` (or the params directly).
+        Launches a background task and returns a ``task_id`` for polling.
+        """
+        body = request.get_json(silent=True) or {}
+        script_params = body.get("script_params") or body
+        if not isinstance(script_params, dict):
+            return jsonify({"ok": False, "error": "无效的请求体"}), 400
+        if not script_params.get("keyword") or not script_params.get("city"):
+            return jsonify({"ok": False, "error": "缺少关键词或城市"}), 400
+
+        task_id = uuid.uuid4().hex
+        _pipeline_executor.submit(_run_pipeline_task, task_id, script_params)
+        return jsonify({"ok": True, "task_id": task_id})
+
+    @app.route("/api/search-progress/<task_id>")
+    def search_progress(task_id):
+        """Poll the progress of a pipeline run.
+
+        Returns ``{status, progress, logs, result, error}``. ``status`` is one
+        of ``running`` / ``done`` / ``failed``. ``result`` (present when done)
+        carries the matched ``jobs`` and counts.
+        """
+        with _pipeline_lock:
+            task = _pipeline_tasks.get(task_id)
+            if task is None:
+                return jsonify({"ok": False, "error": "任务不存在"}), 404
+            snapshot = {
+                "ok": True,
+                "status": task["status"],
+                "progress": task["progress"],
+                "logs": list(task["logs"][-50:]),
+                "error": task["error"],
+            }
+            if task["status"] in ("done", "failed") and task["result"] is not None:
+                result = task["result"]
+                snapshot["result"] = {
+                    "total_scraped": result.get("total_scraped", 0),
+                    "total_matched": result.get("total_matched", 0),
+                    "combinations": result.get("combinations", 0),
+                    "jobs": result.get("jobs", []),
+                }
+        return jsonify(snapshot)
+
+    @app.route("/api/latest-pipeline-result")
+    def latest_pipeline_result():
+        """Return the persisted latest pipeline run (survives page refresh).
+
+        Only a successful run is persisted, so this always reflects the most
+        recent good data.  ``has_result`` is false until the first successful
+        run (or if the file is missing/unreadable).
+        """
+        payload = _load_latest_pipeline_result()
+        if payload is None:
+            return jsonify({"ok": True, "has_result": False})
+        result = payload["result"]
+        return jsonify({
+            "ok": True,
+            "has_result": True,
+            "saved_at": payload.get("saved_at"),
+            "script_params": payload.get("script_params", {}),
+            "result": {
+                "total_scraped": result.get("total_scraped", 0),
+                "total_matched": result.get("total_matched", 0),
+                "combinations": result.get("combinations", 0),
+                "jobs": result.get("jobs", []),
+            },
+        })
 
     return app
 

@@ -687,7 +687,7 @@ class CandidateProfileVersionCrudV2Tests(_StoreTestCase):
         self.profile_id, self.resume_id = _make_profile_and_resume(
             self.store, "5年 Python 后端经验，主导订单服务重构。",
         )
-        self.analysis = self.store.create_analysis(self.resume_id, self.profile_id, contract_version="v4")
+        self.analysis = self.store.create_analysis(self.resume_id, self.profile_id, contract_version="v3")
         self.evidence = self.store.add_evidence(
             self.analysis["id"], evidence_type="skill", normalized_value="Python",
             safe_excerpt="Python 后端经验", source_locator={"start": 3, "end": 14},

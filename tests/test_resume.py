@@ -1,5 +1,5 @@
-"""Tests for webui.resume: format validation, size limit, text extraction,
-truncation, delete behaviour and path-traversal hardening (T013)."""
+"""Tests for webui.resume: format validation, size limit,
+delete behaviour and path-traversal hardening (T013)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from unittest import mock
 from webui.resume import (
     build_safe_path,
     delete_resume,
-    extract_text,
     save_resume,
     validate_format,
     validate_size,
@@ -88,57 +87,6 @@ class SizeValidationTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Text extraction & truncation
-# ---------------------------------------------------------------------------
-
-class TextExtractionTests(unittest.TestCase):
-    def test_truncates_long_txt(self):
-        with temp_state_layout() as (_root, _state, _result, resume_dir):
-            long_text = "A" * 60_000
-            file_path = resume_dir / "long.txt"
-            file_path.write_text(long_text, encoding="utf-8")
-            result = extract_text(file_path, "txt")
-            self.assertEqual(len(result), 50_000)
-
-    def test_truncates_multibyte_text_by_character(self):
-        with temp_state_layout() as (_root, _state, _result, resume_dir):
-            # 60 000 characters — exceeds the 50 000 char cap.
-            long_text = "中" * 60_000
-            file_path = resume_dir / "multi.txt"
-            file_path.write_text(long_text, encoding="utf-8")
-            result = extract_text(file_path, "txt")
-            self.assertEqual(len(result), 50_000)
-
-    def test_keeps_short_txt(self):
-        with temp_state_layout() as (_root, _state, _result, resume_dir):
-            text = sample_resume_text()
-            file_path = resume_dir / "short.txt"
-            file_path.write_text(text, encoding="utf-8")
-            result = extract_text(file_path, "txt")
-            self.assertEqual(result, text)
-
-    def test_extracts_docx(self):
-        with temp_state_layout() as (_root, _state, _result, resume_dir):
-            file_path = resume_dir / "resume.docx"
-            file_path.write_bytes(sample_docx_bytes())
-            result = extract_text(file_path, "docx")
-            self.assertIn("张三", result)
-            self.assertIn("Python", result)
-
-    def test_extracts_pdf_without_error(self):
-        """The fixture PDF is blank; extraction must succeed and return str."""
-        with temp_state_layout() as (_root, _state, _result, resume_dir):
-            file_path = resume_dir / "blank.pdf"
-            file_path.write_bytes(sample_pdf_bytes())
-            result = extract_text(file_path, "pdf")
-            self.assertIsInstance(result, str)
-
-    def test_rejects_unknown_format(self):
-        with self.assertRaises(ValueError):
-            extract_text("irrelevant", "rtf")
-
-
-# ---------------------------------------------------------------------------
 # build_safe_path
 # ---------------------------------------------------------------------------
 
@@ -190,7 +138,7 @@ class SaveResumeTests(unittest.TestCase):
                 profile["id"], file_bytes, "resume.txt", "txt", resume_dir, store
             )
             self.assertEqual(result["format"], "txt")
-            self.assertIn("张三", result["extracted_text"])
+            self.assertEqual(result["extracted_text"], "")
             self.assertEqual(
                 result["content_hash"], hashlib.sha256(file_bytes).hexdigest()
             )
@@ -206,7 +154,7 @@ class SaveResumeTests(unittest.TestCase):
                 profile["id"], file_bytes, "resume.pdf", "pdf", resume_dir, store
             )
             self.assertEqual(result["format"], "pdf")
-            self.assertIsInstance(result["extracted_text"], str)
+            self.assertEqual(result["extracted_text"], "")
             self.assertEqual(
                 result["content_hash"], hashlib.sha256(file_bytes).hexdigest()
             )
@@ -221,14 +169,15 @@ class SaveResumeTests(unittest.TestCase):
                 profile["id"], file_bytes, "resume.docx", "docx", resume_dir, store
             )
             self.assertEqual(result["format"], "docx")
-            self.assertIn("张三", result["extracted_text"])
+            self.assertEqual(result["extracted_text"], "")
             self.assertEqual(
                 result["content_hash"], hashlib.sha256(file_bytes).hexdigest()
             )
             file_path = pathlib.Path(resume_dir) / result["storage_path"]
             self.assertTrue(file_path.is_file())
 
-    def test_save_truncates_long_text(self):
+    def test_save_long_file_no_local_extraction(self):
+        """Long files are stored as-is; no local text extraction or truncation."""
         with temp_state_layout() as (_root, state_dir, _result, resume_dir):
             store, profile = self._setup(state_dir, resume_dir)
             long_text = "B" * 60_000
@@ -236,7 +185,7 @@ class SaveResumeTests(unittest.TestCase):
             result = save_resume(
                 profile["id"], file_bytes, "long.txt", "txt", resume_dir, store
             )
-            self.assertEqual(len(result["extracted_text"]), 50_000)
+            self.assertEqual(result["extracted_text"], "")
 
     def test_save_rejects_oversize_file(self):
         with temp_state_layout() as (_root, state_dir, _result, resume_dir):

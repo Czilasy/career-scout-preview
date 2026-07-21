@@ -295,6 +295,7 @@
     }
     .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
     .modal-close { font-size: 18px; color: var(--muted); cursor: pointer; }
+    .ai-settings-modal-content { max-width: 560px; }
 
     /* == 通用确认对话框 == */
     .confirm-modal-content {
@@ -690,6 +691,45 @@
       font-size: 20px; font-weight: 650; margin-bottom: 8px; color: var(--text);
     }
     .discovery-step-hint { font-size: 13px; color: var(--muted); margin-bottom: 16px; line-height: 1.6; }
+    .unified-fields-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 16px; }
+    .unified-field-group { display: flex; flex-direction: column; gap: 6px; }
+    .unified-field-label { font-size: 12px; color: var(--muted); font-weight: 600; }
+    .unified-field-input {
+      width: 100%; padding: 9px 12px; background: var(--surface-2);
+      border: 1px solid var(--line); border-radius: var(--radius);
+      color: var(--text); font-size: 14px; outline: none;
+    }
+    .unified-field-input:focus { border-color: var(--gold); }
+    select.unified-field-input { appearance: auto; }
+    .multi-select-wrap { display: flex; flex-wrap: wrap; gap: 8px; }
+    .multi-chip {
+      padding: 6px 12px; background: var(--surface-2); border: 1px solid var(--line);
+      border-radius: 16px; color: var(--muted); font-size: 13px; cursor: pointer;
+      transition: all .15s; line-height: 1.2;
+    }
+    .multi-chip:hover { border-color: var(--gold); color: var(--text); }
+    .multi-chip.selected { background: var(--gold); border-color: var(--gold); color: #101216; font-weight: 600; }
+    .confirmed-params-box {
+      background: var(--surface-2); border: 1px solid var(--line);
+      border-radius: var(--radius); padding: 16px; font-family: monospace;
+      font-size: 13px; color: var(--success); white-space: pre-wrap; word-break: break-all;
+    }
+    .pipeline-progress-bar { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; margin: 12px 0; }
+    .pipeline-progress-fill { height: 100%; background: var(--gold); transition: width .4s; }
+    .pipeline-log-box {
+      background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius);
+      padding: 12px; max-height: 220px; overflow-y: auto; font-family: monospace;
+      font-size: 12px; color: var(--muted); line-height: 1.7; margin: 12px 0;
+    }
+    .pipeline-job-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+    .pipeline-job-item {
+      background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius);
+      padding: 12px 14px; display: flex; flex-direction: column; gap: 4px;
+    }
+    .pipeline-job-title { color: var(--text); font-size: 14px; font-weight: 600; text-decoration: none; }
+    .pipeline-job-title:hover { color: var(--gold); }
+    .pipeline-job-meta { color: var(--muted); font-size: 12px; }
+    @media (max-width: 640px) { .unified-fields-grid { grid-template-columns: 1fr; } }
     .discovery-review-card h3, .discovery-progress-card h3 {
       font-size: 12px; font-weight: 600; color: var(--faint);
       letter-spacing: .08em; text-transform: uppercase; margin: 16px 0 8px;
@@ -1008,10 +1048,10 @@
     <div class="brand"><span class="brand-dot"></span>AI 求职工作台</div>
     <div class="view-tabs">
       <div class="view-tab active" onclick="switchView('discovery')">岗位发现</div>
-      <div class="view-tab" onclick="switchView('workbench')">搜索工作台</div>
       <div class="view-tab" onclick="switchView('screening')">筛选工作台</div>
     </div>
     <div class="header-actions">
+      <button class="btn" type="button" onclick="openAiSettingsModal()">AI 设置</button>
       <span class="conn-status" id="connectionStatus">未连接</span>
     </div>
   </div>
@@ -1078,11 +1118,11 @@
     <div class="discovery-step" data-step="review" id="discoveryStepReview">
       <div class="discovery-review-card discovery-analysis-card">
         <h2>确认系统理解</h2>
-        <p class="discovery-step-hint">下方为系统从简历中提取的证据、推断方向和未知项。可关闭/开启方向、调整硬约束，确认后将冻结为不可变输入。</p>
+        <p class="discovery-step-hint">下方为 AI 从简历中提取的搜索参数。请确认或修改后执行。</p>
         <div id="discoveryAnalysisContent"></div>
         <div class="btn-row" style="margin-top:16px;">
           <button class="btn primary btn-with-loading" id="discoveryConfirmButton" type="button" aria-busy="false" onclick="confirmDirections()">
-            <span class="btn-label">确认方向并开始发现</span>
+            <span class="btn-label">确认参数</span>
             <span class="btn-spinner" aria-hidden="true"></span>
           </button>
         </div>
@@ -1105,11 +1145,11 @@
 
     <!-- 步骤 4：结果 -->
     <div class="discovery-step" data-step="results" id="discoveryStepResults">
-      <div class="discovery-results-header" id="discoveryResultsHeader">
+      <div class="discovery-results-header" id="discoveryResultsHeader" hidden>
         <div class="discovery-direction-selector" id="discoveryDirectionSelector"></div>
         <div class="discovery-category-filter" id="discoveryCategoryFilter"></div>
       </div>
-      <div class="discovery-feedback-tools" aria-label="方向反馈">
+      <div class="discovery-feedback-tools" aria-label="方向反馈" hidden>
         <label for="discoveryFeedbackDirection">方向反馈</label>
         <select id="discoveryFeedbackDirection" aria-label="选择反馈方向"></select>
         <select id="discoveryDirectionReason" aria-label="选择方向反馈原因">
@@ -1191,40 +1231,6 @@
           </div>
         </div>
 
-        <!-- AI 服务设置（折叠带状态） -->
-        <div class="section accordion-section" id="aiSettingsSection">
-          <button class="accordion-toggle" type="button" onclick="togglePanelAccordion('aiSettingsSection')">
-            <span class="section-title">AI 服务设置</span>
-            <span class="accordion-status" id="aiStatus">未连接</span>
-            <span class="accordion-action">展开</span>
-          </button>
-          <div class="accordion-content" id="aiSettingsContent" hidden>
-            <div class="field">
-              <label>AI 服务 URL（填到 /v1 这一级，/chat/completions 会自动补全）</label>
-              <input type="url" id="aiEndpointUrl" placeholder="https://api.example.com/v1">
-            </div>
-            <div class="field">
-              <label>API Key</label>
-              <input type="text" id="aiApiKey" placeholder="sk-..." autocomplete="off">
-              <span id="aiApiKeyHint" style="margin-left:8px;color:#6b7280;font-size:13px;"></span>
-            </div>
-            <div class="field">
-              <label>模型</label>
-              <div class="btn-row model-picker-row">
-                <select id="aiModel"><option value="">请先拉取</option></select>
-                <button class="btn model-fetch-button" id="aiModelFetchButton" type="button" onclick="fetchAiModels()" aria-busy="false" aria-label="拉取可用模型" title="拉取可用模型">
-                  <span class="btn-label">拉取</span><span class="btn-spinner" aria-hidden="true"></span>
-                </button>
-              </div>
-            </div>
-            <div class="btn-row">
-              <button class="btn primary" onclick="saveAiSettings()">保存</button>
-              <button class="btn" id="aiConnectionTestButton" type="button" onclick="testAiConnection()" aria-busy="false">
-                <span class="btn-label">测试</span><span class="btn-spinner" aria-hidden="true"></span>
-              </button>
-            </div>
-          </div>
-        </div>
       </div>
 
       <!-- 搜索 Tab -->
@@ -1401,6 +1407,42 @@
       <div class="confirm-modal-actions">
         <button class="btn" id="confirmModalCancel" onclick="resolveConfirm(false)">取消</button>
         <button class="btn danger" id="confirmModalOk" onclick="resolveConfirm(true)">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI 服务设置（全局弹层，从头部入口打开） -->
+  <div class="modal-overlay" id="aiSettingsModal" onclick="closeAiSettingsModal(event)">
+    <div class="modal-content ai-settings-modal-content" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div class="section-title" style="display:flex;align-items:center;gap:10px;">AI 服务设置 <span class="accordion-status" id="aiStatus">未连接</span></div>
+        <span class="modal-close" onclick="closeAiSettingsModalDirect()">&times;</span>
+      </div>
+      <div id="aiSettingsContent">
+        <div class="field">
+          <label>AI 服务 URL（填到 /v1 这一级，/chat/completions 会自动补全）</label>
+          <input type="url" id="aiEndpointUrl" placeholder="https://api.example.com/v1">
+        </div>
+        <div class="field">
+          <label>API Key</label>
+          <input type="text" id="aiApiKey" placeholder="sk-..." autocomplete="off">
+          <span id="aiApiKeyHint" style="margin-left:8px;color:#6b7280;font-size:13px;"></span>
+        </div>
+        <div class="field">
+          <label>模型</label>
+          <div class="btn-row model-picker-row">
+            <select id="aiModel"><option value="">请先拉取</option></select>
+            <button class="btn model-fetch-button" id="aiModelFetchButton" type="button" onclick="fetchAiModels()" aria-busy="false" aria-label="拉取可用模型" title="拉取可用模型">
+              <span class="btn-label">拉取</span><span class="btn-spinner" aria-hidden="true"></span>
+            </button>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button class="btn primary" onclick="saveAiSettings()">保存</button>
+          <button class="btn" id="aiConnectionTestButton" type="button" onclick="testAiConnection()" aria-busy="false">
+            <span class="btn-label">测试</span><span class="btn-spinner" aria-hidden="true"></span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -1596,7 +1638,7 @@
       await checkConnection();
       await restoreSearchRun();
       await restoreScreeningRun();
-      await restoreDiscoveryRun();
+      await loadLatestPipelineResult();
     }
 
     async function checkConnection() {
@@ -2185,32 +2227,29 @@
 
     // == 筛选视图（T054-T057）==
 
-    // 视图切换
+    // 视图切换（搜索工作台已拆解合并：AI 设置移到全局弹层，手动搜索由三阶段流水线取代）
     function switchView(view) {
       const workbench = document.querySelector(".workspace");
       const screening = document.getElementById("screeningWorkspace");
       const discovery = document.getElementById("discoveryWorkspace");
       const tabs = document.querySelectorAll(".view-tab");
       tabs.forEach(t => t.classList.remove("active"));
-      // 先隐藏全部视图
-      workbench.classList.add("hidden");
+      // 先隐藏全部视图（旧搜索工作台残留容器始终保持隐藏）
+      if (workbench) workbench.classList.add("hidden");
       screening.classList.remove("active");
       if (discovery) discovery.classList.remove("active");
-      if (view === "discovery") {
-        if (discovery) discovery.classList.add("active");
-        tabs[0].classList.add("active");
-      } else if (view === "screening") {
+      if (view === "screening") {
         screening.classList.add("active");
-        tabs[2].classList.add("active");
+        tabs[1].classList.add("active");
         if (!screening._initialized) {
           loadScreeningFilterOptions();
           initializeScreeningFilterSummary();
           screening._initialized = true;
         }
       } else {
-        // workbench（历史搜索）
-        workbench.classList.remove("hidden");
-        tabs[1].classList.add("active");
+        // 默认：岗位发现
+        if (discovery) discovery.classList.add("active");
+        tabs[0].classList.add("active");
       }
     }
 
@@ -2815,6 +2854,20 @@
       document.getElementById("zoneModal").classList.remove("show");
     }
 
+    // == AI 服务设置全局弹层 ==
+    async function openAiSettingsModal() {
+      document.getElementById("aiSettingsModal").classList.add("show");
+      try { await loadAiSettings(); } catch (_e) { /* 弹层仍可手动填写 */ }
+    }
+    function closeAiSettingsModal(event) {
+      if (event.target === event.currentTarget) {
+        document.getElementById("aiSettingsModal").classList.remove("show");
+      }
+    }
+    function closeAiSettingsModalDirect() {
+      document.getElementById("aiSettingsModal").classList.remove("show");
+    }
+
     // 安全跳转（复用 001 的 openSafe 逻辑）
     function openScreeningJobLink(event, url) {
       event.preventDefault();
@@ -2838,6 +2891,9 @@
 
     // == 发现工作区（feature 004：简历驱动岗位发现）==
     let discoveryAnalysisId = "";
+    let discoveryUnifiedFields = {};
+    let discoveryFieldLabels = {};
+    let discoveryConfirmedParams = {};
     let discoveryCandidateProfileVersion = null;
     let discoveryCurrentAnalysis = null;
     let discoveryConfirmationId = "";
@@ -2923,6 +2979,10 @@
       document.querySelectorAll(".discovery-step").forEach(s => {
         s.classList.toggle("active", s.dataset.step === step);
       });
+      // 切到"结果"页时渲染流水线命中的岗位
+      if (step === "results" && pipelineResultJobs && pipelineResultJobs.length) {
+        renderPipelineResults();
+      }
     }
 
     function setDiscoveryUploadState(state) {
@@ -3005,20 +3065,21 @@
           setAppNotice("简历已在本地保存；未勾选 AI 同意，因此未启动分析", "success");
           return;
         }
-        const analysisResp = await api(DiscoveryAPI.analyses, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ resume_id: resumeId, ai_consent: aiConsent, contract_version: "v4" }),
+        const analysisResp = await api("/api/analyze-resume", {
+          method: "POST", body: formData,
         });
         if (!analysisResp.ok) {
           const err = await analysisResp.json().catch(() => ({}));
-          setAppNotice("分析启动失败：" + (err.user_message || analysisResp.status), "error");
+          setAppNotice("分析失败：" + (err.error || analysisResp.status), "error");
           return;
         }
-        const summary = await analysisResp.json();
-        discoveryAnalysisId = summary.analysis_id;
-        const analysisSucceeded = await pollDiscoveryAnalysis(discoveryAnalysisId);
-        uploadState = analysisSucceeded ? "success" : "error";
+        const analysisData = await analysisResp.json();
+        discoveryUnifiedFields = analysisData.fields || {};
+        discoveryFieldLabels = analysisData.labels || {};
+        renderUnifiedFields(discoveryUnifiedFields, discoveryFieldLabels);
+        switchToDiscovery("review");
+        setAppNotice("分析完成，请确认搜索参数", "success");
+        uploadState = "success";
       } catch (_e) {
         setAppNotice("上传或分析失败，请检查连接后重试", "error");
       } finally {
@@ -3177,6 +3238,95 @@
 
     async function rejectCandidateFact(factId) {
       await saveCandidateProfileEdits([{ op: "reject", fact_id: factId }]);
+    }
+
+    // 三阶段流程：渲染 AI 提取的统一搜索字段，供用户在"确认理解"步骤编辑
+    const UNIFIED_FIELD_META = {
+      keyword: { label: "搜索关键词", type: "text", placeholder: "如：Java后端,Python开发" },
+      city: { label: "城市（多个用逗号分隔）", type: "text", placeholder: "如：上海、杭州、北京" },
+      salary: { label: "薪资范围（可多选）", type: "multi" },
+      experience: { label: "经验要求（可多选）", type: "multi" },
+      degree: { label: "学历（可多选）", type: "multi" },
+      industry: { label: "行业（可多选）", type: "multi" },
+      scale: { label: "公司规模（可多选）", type: "multi" },
+      stage: { label: "融资阶段（可多选）", type: "multi" },
+    };
+
+    // 各字段选项的展示顺序（从低到高 / 逻辑递进）；"不限"由空选项单独处理
+    const FIELD_ORDER = {
+      salary: ["402","403","404","405","406","407"],
+      experience: ["108","102","101","103","104","105","106","107"],
+      degree: ["209","208","206","202","203","204","205"],
+      scale: ["301","302","303","304","305","306"],
+      stage: ["801","802","803","804","805","806","807","808"],
+      industry: ["1001","1002","1003","1004","1005","1006","1007","1008","1009","1010"],
+    };
+
+    function renderUnifiedFields(fields, labels) {
+      const container = document.getElementById("discoveryAnalysisContent");
+      if (!container) return;
+      container.innerHTML = "";
+      const grid = document.createElement("div");
+      grid.className = "unified-fields-grid";
+      for (const key of Object.keys(UNIFIED_FIELD_META)) {
+        const meta = UNIFIED_FIELD_META[key];
+        const value = fields[key] || "";
+        const group = document.createElement("div");
+        group.className = "unified-field-group";
+        const label = document.createElement("label");
+        label.className = "unified-field-label";
+        label.textContent = meta.label;
+        group.appendChild(label);
+        if (meta.type === "multi") {
+          const rawValue = fields[key];
+          const selected = Array.isArray(rawValue)
+            ? rawValue.map(String)
+            : (rawValue ? [String(rawValue)] : []);
+          const wrap = document.createElement("div");
+          wrap.className = "multi-select-wrap";
+          wrap.dataset.field = key;
+          const labelEntry = labels[key];
+          const enumMap = (labelEntry && typeof labelEntry[2] === "object") ? labelEntry[2] : {};
+          const codeToName = {};
+          for (const [name, code] of Object.entries(enumMap)) codeToName[String(code)] = name;
+          const order = FIELD_ORDER[key] || Object.values(enumMap).map(String);
+          for (const code of order) {
+            if (code === "0") continue;
+            const name = codeToName[code];
+            if (!name) continue;
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "multi-chip" + (selected.includes(code) ? " selected" : "");
+            chip.dataset.code = code;
+            chip.textContent = name;
+            chip.addEventListener("click", () => chip.classList.toggle("selected"));
+            wrap.appendChild(chip);
+          }
+          group.appendChild(wrap);
+        } else {
+          const input = document.createElement("input");
+          input.className = "field-input unified-field-input";
+          input.type = "text";
+          input.value = value;
+          input.dataset.field = key;
+          if (meta.placeholder) input.placeholder = meta.placeholder;
+          group.appendChild(input);
+        }
+        grid.appendChild(group);
+      }
+      container.appendChild(grid);
+    }
+
+    function collectUnifiedFields() {
+      const fields = {};
+      document.querySelectorAll("#discoveryAnalysisContent input[data-field]").forEach(el => {
+        fields[el.dataset.field] = el.value;
+      });
+      document.querySelectorAll("#discoveryAnalysisContent .multi-select-wrap").forEach(wrap => {
+        const codes = Array.from(wrap.querySelectorAll(".multi-chip.selected")).map(c => c.dataset.code);
+        fields[wrap.dataset.field] = codes;
+      });
+      return fields;
     }
 
     function renderAnalysis(analysis) {
@@ -3496,63 +3646,198 @@
     }
 
     async function confirmDirections() {
-      if (!discoveryAnalysisId) { setAppNotice("请先上传简历", "warning"); return; }
       const btn = document.getElementById("discoveryConfirmButton");
       if (btn && btn.disabled) return;
-      const enabledDirectionIds = [];
-      document.querySelectorAll(".discovery-direction-card input[type=checkbox]").forEach(cb => {
-        if (cb.checked) enabledDirectionIds.push(cb.dataset.directionId);
-      });
-      const manualDirection = updateManualDirectionState({ normalize: true });
-      const userDirections = manualDirection.present ? [{ name: manualDirection.name, search_terms: manualDirection.search_terms }] : [];
-      if (userDirections.length && !manualDirection.valid) {
-        setAppNotice("手动方向需要名称和 1–3 个搜索词", "warning");
+      const fields = collectUnifiedFields();
+      if (!fields.keyword || !fields.keyword.trim()) {
+        setAppNotice("搜索关键词不能为空", "warning");
         return;
       }
-      if (!enabledDirectionIds.length && !userDirections.length) {
-        setAppNotice("请至少启用一个方向", "warning");
+      if (!fields.city || !fields.city.trim()) {
+        setAppNotice("城市不能为空", "warning");
         return;
       }
-      const hardConstraints = {};
-      const cityEl = document.getElementById("discoveryHardCity");
-      const salaryEl = document.getElementById("discoveryHardSalary");
-      if (cityEl && cityEl.value.trim()) hardConstraints.city = cityEl.value.trim();
-      if (salaryEl && salaryEl.value.trim()) hardConstraints.min_salary = {
-        amount: Number(salaryEl.value), currency: "CNY", pay_period: "month",
-        unit: "K", semantics: "monthly_floor", source: "user_confirmed",
-      };
       if (btn) { btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
       const label = btn ? btn.querySelector(".btn-label") : null;
       if (label) label.textContent = "确认中…";
       try {
-        const resp = await api(DiscoveryAPI.confirmations, {
-          method: "POST", json: {
-            analysis_id: discoveryAnalysisId,
-            candidate_profile_version_id: discoveryCandidateProfileVersion?.id || null,
-            expected_content_hash: discoveryCandidateProfileVersion?.content_hash || null,
-            enabled_direction_ids: enabledDirectionIds,
-            hard_constraints: hardConstraints,
-            soft_preferences: {},
-            safe_limits: {},
-            user_directions: userDirections,
-          },
+        const resp = await api("/api/confirm-fields", {
+          method: "POST", json: fields,
         });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
-          setAppNotice("确认失败：" + (err.user_message || resp.status), "error");
+          setAppNotice("确认失败：" + (err.error || resp.status), "error");
           return;
         }
         const data = await resp.json();
-        discoveryConfirmationId = data.confirmation_id;
-        setAppNotice("方向已确认，开始发现", "success");
+        discoveryConfirmedParams = data.script_params || {};
+        setAppNotice("参数已确认，开始执行抓取", "success");
         document.querySelector('.discovery-step-indicator[data-step="review"]').classList.add("done");
-        await startDiscoveryRun(discoveryConfirmationId);
+        switchToDiscovery("progress");
+        startPipelineExecution(discoveryConfirmedParams);
       } catch (_e) {
         setAppNotice("确认失败，请检查连接后重试", "error");
       } finally {
         if (btn) { btn.disabled = false; btn.setAttribute("aria-busy", "false"); }
-        if (label) label.textContent = "确认方向并开始发现";
+        if (label) label.textContent = "确认参数";
       }
+    }
+
+    let pipelineTaskId = "";
+    let pipelinePollTimer = null;
+    // 流水线命中的岗位，进度页只存不渲染，岗位列表统一在"结果"页展示
+    let pipelineResultJobs = [];
+
+    async function startPipelineExecution(scriptParams) {
+      const container = document.getElementById("discoveryProgressContent");
+      if (container) container.innerHTML = '<p class="discovery-step-hint">正在启动抓取任务…</p>';
+      try {
+        const resp = await api("/api/execute-search", {
+          method: "POST", json: { script_params: scriptParams },
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) {
+          if (container) container.innerHTML = '<p class="discovery-step-hint" style="color:var(--danger)">启动失败：' + (data.error || resp.status) + '</p>';
+          return;
+        }
+        pipelineTaskId = data.task_id;
+        pollPipelineProgress();
+      } catch (e) {
+        if (container) container.innerHTML = '<p class="discovery-step-hint" style="color:var(--danger)">启动失败：' + e.message + '</p>';
+      }
+    }
+
+    async function pollPipelineProgress() {
+      if (!pipelineTaskId) return;
+      try {
+        const resp = await api("/api/search-progress/" + pipelineTaskId);
+        const data = await resp.json();
+        if (data.ok) renderPipelineProgress(data);
+        if (data.status === "running") {
+          pipelinePollTimer = setTimeout(pollPipelineProgress, 2000);
+        } else {
+          document.querySelector('.discovery-step-indicator[data-step="progress"]').classList.add("done");
+        }
+      } catch (_e) {
+        pipelinePollTimer = setTimeout(pollPipelineProgress, 3000);
+      }
+    }
+
+    function renderPipelineProgress(data) {
+      const container = document.getElementById("discoveryProgressContent");
+      if (!container) return;
+      container.innerHTML = "";
+
+      const progress = data.progress || {};
+      // Status line
+      const status = document.createElement("p");
+      status.className = "discovery-step-hint";
+      status.textContent = progress.message || ("状态：" + data.status);
+      container.appendChild(status);
+
+      // Progress bar (current/total combinations)
+      if (progress.current && progress.total) {
+        const bar = document.createElement("div");
+        bar.className = "pipeline-progress-bar";
+        const fill = document.createElement("div");
+        fill.className = "pipeline-progress-fill";
+        fill.style.width = Math.round((progress.current / progress.total) * 100) + "%";
+        bar.appendChild(fill);
+        container.appendChild(bar);
+      }
+
+      // Live logs
+      if (data.logs && data.logs.length) {
+        const logBox = document.createElement("div");
+        logBox.className = "pipeline-log-box";
+        for (const line of data.logs) {
+          const div = document.createElement("div");
+          div.textContent = line;
+          logBox.appendChild(div);
+        }
+        container.appendChild(logBox);
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+
+      // 完成汇总：岗位列表不在此展开（进度页保持紧凑），统一去"结果"页查看
+      if (data.status === "done" && data.result) {
+        const r = data.result;
+        pipelineResultJobs = r.jobs || [];
+        const summary = document.createElement("p");
+        summary.className = "discovery-step-hint";
+        summary.style.color = "var(--success)";
+        summary.textContent = "抓取完成：共抓 " + r.total_scraped + " 条，符合筛选 " + r.total_matched + " 条";
+        container.appendChild(summary);
+        const btn = document.getElementById("discoveryViewResultsBtn");
+        if (btn) btn.hidden = false;
+        const resInd = document.querySelector('.discovery-step-indicator[data-step="results"]');
+        if (resInd) resInd.classList.add("done");
+      } else if (data.status === "failed") {
+        const err = document.createElement("p");
+        err.className = "discovery-step-hint";
+        err.style.color = "var(--danger)";
+        err.textContent = "执行失败：" + (data.error || "未知错误");
+        container.appendChild(err);
+      }
+    }
+
+    // 结果页：渲染流水线命中的岗位（进度页不再内联岗位列表）
+    function renderPipelineResults() {
+      const list = document.getElementById("discoveryResultsList");
+      if (!list) return;
+      // 旧发现运行的头部工具（方向选择/分类筛选/方向反馈）对流水线结果不适用，隐藏
+      const legacyHeader = document.getElementById("discoveryResultsHeader");
+      if (legacyHeader) legacyHeader.hidden = true;
+      document.querySelectorAll(".discovery-feedback-tools").forEach(el => { el.hidden = true; });
+      const prefChanges = document.getElementById("discoveryPreferenceChanges");
+      if (prefChanges) prefChanges.hidden = true;
+
+      list.innerHTML = "";
+      if (!pipelineResultJobs.length) {
+        const empty = document.createElement("p");
+        empty.className = "discovery-step-hint";
+        empty.textContent = "暂无结果，请先完成一次岗位发现。";
+        list.appendChild(empty);
+        return;
+      }
+      const count = document.createElement("p");
+      count.className = "discovery-step-hint";
+      count.textContent = "共 " + pipelineResultJobs.length + " 个符合条件的岗位";
+      list.appendChild(count);
+      const wrap = document.createElement("div");
+      wrap.className = "pipeline-job-list";
+      for (const job of pipelineResultJobs) {
+        const item = document.createElement("div");
+        item.className = "pipeline-job-item";
+        const title = document.createElement("a");
+        title.className = "pipeline-job-title";
+        title.textContent = job.title || "(无标题)";
+        title.href = job.source_url || job.job_link || "#";
+        title.target = "_blank";
+        item.appendChild(title);
+        const meta = document.createElement("span");
+        meta.className = "pipeline-job-meta";
+        meta.textContent = [job.salary, job.tags, job.company_scale].filter(Boolean).join(" · ");
+        item.appendChild(meta);
+        wrap.appendChild(item);
+      }
+      list.appendChild(wrap);
+    }
+
+    // 页面加载时恢复"最新一轮"的流水线结果（刷新后依然可见，新一轮运行会覆盖它）
+    async function loadLatestPipelineResult() {
+      try {
+        const resp = await api("/api/latest-pipeline-result");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data.ok || !data.has_result || !data.result) return;
+        const jobs = data.result.jobs || [];
+        if (!jobs.length) return;
+        pipelineResultJobs = jobs;
+        // 点亮"结果"步骤，用户点进去即可查看上次结果
+        const ind = document.querySelector('.discovery-step-indicator[data-step="results"]');
+        if (ind) ind.classList.add("done");
+      } catch (_e) { /* 恢复失败不影响主流程 */ }
     }
 
     async function startDiscoveryRun(confirmationId) {

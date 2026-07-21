@@ -24,7 +24,6 @@ from webui.candidate import (
     redact_pii,
     validate_candidate_analysis,
     normalize_candidate_analysis,
-    normalize_candidate_analysis_v4,
 )
 from webui.ai import AISecurityError as AIProviderError
 
@@ -1284,10 +1283,7 @@ def analyze_resume(
         raise DiscoveryError("ai_unavailable", user_message="AI 服务未配置。")
 
     try:
-        if requested_contract == "v4":
-            raw = ai_provider.analyze(resume_text=resume_text, contract_version="v4")
-        else:
-            raw = ai_provider.analyze(resume_text=resume_text)
+        raw = ai_provider.analyze(resume_text=resume_text)
     except TimeoutError:
         set_stage("requesting", status="failed", quality_status="manual_required", quality_warnings=[], failure_code="ai_timeout")
         raise DiscoveryError("ai_timeout")
@@ -1313,90 +1309,6 @@ def analyze_resume(
         raise AISecurityError("ai_invalid_output", log_detail=str(exc))
 
     set_stage("normalizing", status="analyzing")
-    if requested_contract == "v4":
-        if (
-            isinstance(raw, dict)
-            and raw.get("contract_version") == "v4"
-            and isinstance(raw.get("quality"), dict)
-            and all(
-                isinstance(item, dict) and "source_kind" in item
-                for item in raw.get("facts", [])
-            )
-        ):
-            validated = {
-                key: raw.get(key)
-                for key in (
-                    "contract_version", "summary", "evidence", "facts", "unknowns",
-                    "directions", "quality", "metrics",
-                )
-            }
-        else:
-            validated = normalize_candidate_analysis_v4(raw, resume_text)
-        quality = validated.get("quality", {})
-        set_stage(
-            "validating", status="analyzing",
-            quality_status=quality.get("status"),
-            quality_warnings=quality.get("warnings", []),
-        )
-        normalized_evidence = normalize_evidence(validated.get("evidence", []), resume_text)
-        evidence_id_map = {}
-        for item in normalized_evidence:
-            stored = store.add_evidence(
-                analysis["id"], item["evidence_type"], item["normalized_value"],
-                safe_excerpt=item.get("safe_excerpt", ""),
-                source_locator=item.get("source_locator"),
-                assertion_type=item.get("assertion_type", "explicit"),
-                confidence=item.get("confidence", 0), sensitive=False,
-            )
-            evidence_id_map[item["id"]] = stored["id"]
-
-        stored_direction_ids = []
-        for direction in validated.get("directions", []):
-            stored_direction = store.add_direction(
-                analysis["id"], direction.get("name", ""), direction.get("type", "core"),
-                rationale=direction.get("rationale", ""), gaps=direction.get("gaps", []),
-                confidence=direction.get("confidence", 0),
-                default_enabled=direction.get("default_enabled", False),
-                search_terms=direction.get("search_terms", []), contract_version="v4",
-            )
-            stored_direction_ids.append(stored_direction["id"])
-            for ref in direction.get("evidence_refs", []):
-                evidence_id = evidence_id_map.get(ref)
-                if evidence_id:
-                    store.link_direction_evidence(stored_direction["id"], evidence_id)
-
-        profile_facts = []
-        for fact in validated.get("facts", []):
-            profile_facts.append({
-                **fact,
-                "evidence_ids": [
-                    evidence_id_map[ref]
-                    for ref in fact.get("evidence_refs", [])
-                    if ref in evidence_id_map
-                ],
-            })
-        profile_version = store.create_candidate_profile_version(
-            profile_id=profile_id, resume_id=resume_id, analysis_id=analysis["id"],
-            summary=validated.get("summary", {}), unknowns=validated.get("unknowns", []),
-            facts=profile_facts,
-        )
-        redacted_summary = {
-            key: redact_pii(value) if isinstance(value, str) else value
-            for key, value in validated.get("summary", {}).items()
-        }
-        set_stage(
-            "persisting", status="ready",
-            quality_status=quality.get("status", "complete"),
-            quality_warnings=quality.get("warnings", []),
-            summary=redacted_summary, unknowns=validated.get("unknowns", []),
-            provider_call_count=validated.get("metrics", {}).get("provider_call_count"),
-        )
-        result = store.get_analysis(analysis["id"])
-        result["candidate_profile_version_id"] = profile_version["id"]
-        result["direction_ids"] = stored_direction_ids
-        result["metrics"] = validated.get("metrics", {})
-        return result
-
     if isinstance(raw, dict) and raw.get("contract_version") == "v3":
         validated = normalize_candidate_analysis(raw, resume_text)
     else:

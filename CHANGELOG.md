@@ -2,6 +2,12 @@
 
 ## 未发布
 
+### 变更 — 候选人分析协议从 v4 降回 v3
+- 移除 `webui/ai.py` 的 `_analyze_v4` / `_build_analyze_v4_messages` 方法与 v4 分支；`webui/discovery.py` 的 v4 持久化路径（facts / evidence_refs / profile_version 整段）；`webui/candidate.py` 的 `normalize_candidate_analysis_v4` 函数、`_safe_fact_value`、v4 常量与注释；前端 `index.html` 的 `contract_version` 改回 `"v3"`。
+- v4 的事实关联证据结构对 AI 负担过重、分析失败率高、接不住，属于过度设计；v3 扁平化管理已够用。
+- 保留不动：DB 历史 v4 分析记录、migration 015 的 candidate_profile_versions / candidate_fact_items / candidate_fact_evidence 表结构（v3 不写入，留空）、job_assessment_v2 协议、manual_v1 手动分析路径。
+- 测试：删除 v4 专属测试类与方法（`CandidateAnalysisV4Tests` / `CandidateAnalysisV4ProviderTests` / v4 持久化与 correction chain 测试），`CandidateProfileConfirmationAcceptanceTests` 改用 manual 路径造数，store / HTTP 契约测试的 setUp `contract_version` 由 `"v4"` 改 `"v3"`；删除 fixture `tests/fixtures/discovery/ai_candidate_v4.json`。608 项测试全绿。
+
 ### 新增 — 岗位发现 v2 收口（feature 005）
 - 独立 `discovery_v2` policy：005 新运行使用 `discovery_v2`，004 历史运行继续使用 `policy v1`；迁移 015 additive（只新增列与表，不重写 001–014），老库可直接升级。
 - 四类进度计数：`search_queries_completed` / `list_candidates` / `details_selected` / `details_completed` / `assessments_completed` / `recommendations`；工作单元完成后 ≤10 模拟秒可见，刷新保留计数（SC-004）。

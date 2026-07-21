@@ -23,7 +23,6 @@ from webui.candidate import (
     CANDIDATE_ANALYSIS_V3_CONTRACT,
     build_empty_candidate_analysis,
     normalize_candidate_analysis,
-    normalize_candidate_analysis_v4,
 )
 
 
@@ -230,6 +229,146 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
 
 
 # ---------------------------------------------------------------------------
+# Resume → unified search fields (Stage 1 of the three-stage pipeline)
+# ---------------------------------------------------------------------------
+
+# The unified schema: AI outputs these fields, user confirms them, script
+# consumes them.  No translation layer between stages.
+UNIFIED_SEARCH_FIELDS = ("keyword", "city", "salary", "experience", "degree", "industry", "scale", "stage")
+
+
+def _build_field_options_prompt() -> str:
+    """Build a prompt fragment listing all valid values for each filter field."""
+    lines = []
+    lines.append("keyword: 推荐搜索关键词(1-3个岗位方向词,如'Python后端','AI工程师'),用逗号分隔")
+    lines.append(f"city: 城市名,必须是以下之一: {', '.join(list(boss.CITY_MAP.keys())[:50])}...等")
+    lines.append(f"salary: 薪资段代码,可选值: {json.dumps(boss.SALARY_MAP, ensure_ascii=False)}")
+    lines.append(f"experience: 经验要求代码,可选值: {json.dumps(boss.EXPERIENCE_MAP, ensure_ascii=False)}")
+    lines.append(f"degree: 学历代码,可选值: {json.dumps(boss.DEGREE_MAP, ensure_ascii=False)}")
+    lines.append(f"industry: 行业代码,可选值: {json.dumps(boss.INDUSTRY_MAP, ensure_ascii=False)}")
+    lines.append(f"scale: 公司规模代码,可选值: {json.dumps(boss.SCALE_MAP, ensure_ascii=False)}")
+    lines.append(f"stage: 融资阶段代码,可选值: {json.dumps(boss.STAGE_MAP, ensure_ascii=False)}")
+    return "\n".join(lines)
+
+
+def _resume_bytes_to_text(file_bytes: bytes, fmt: str) -> str:
+    """Convert resume file bytes to plain text for transport to the AI API.
+
+    The AI endpoint only accepts text, so PDF/DOCX uploads are converted to
+    text first.  This is pure transport preparation — no content
+    understanding happens here; the AI does all the reading.
+    """
+    if fmt == "txt":
+        return file_bytes.decode("utf-8", errors="replace")
+    if fmt == "pdf":
+        import io
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(file_bytes))
+        return "\n".join((page.extract_text() or "") for page in reader.pages)
+    if fmt == "docx":
+        import io
+        from docx import Document
+
+        doc = Document(io.BytesIO(file_bytes))
+        return "\n".join(para.text for para in doc.paragraphs)
+    raise ValueError(f"不支持的简历格式: {fmt}")
+
+
+def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
+                             api_key: str, model: str = "",
+                             timeout: int = DEFAULT_TIMEOUT) -> dict:
+    """Convert a resume (TXT/PDF/DOCX) to text and extract unified search fields.
+
+    The resume is converted to plain text (transport preparation only), then
+    sent directly as the user message.  The AI reads the content and outputs
+    fields that map 1:1 to the scraper's CLI parameters.
+
+    Returns a dict with keys: keyword, city, salary, experience, degree,
+    industry, scale, stage.  Each value is validated against the script's
+    enum maps; invalid values are coerced to empty string.
+
+    Raises :class:`AISecurityError` on transport/auth/parse failures.
+    """
+    resume_text = _resume_bytes_to_text(file_bytes, fmt).strip()
+    if not resume_text:
+        raise ValueError("简历内容为空")
+
+    field_options = _build_field_options_prompt()
+    system_prompt = (
+        "你是简历分析助手。阅读用户的简历内容，提取求职搜索参数。\n"
+        "严格按以下字段输出JSON，每个字段的值必须是对应可选值之一：\n"
+        f"{field_options}\n\n"
+        "规则：\n"
+        "- keyword: 根据简历中的技能、经历、求职意向，给出1-3个最匹配的搜索关键词，逗号分隔\n"
+        "- city: 从简历中的期望城市/工作地点/当前所在城市推断\n"
+        "- salary: 从期望薪资推断，无法确定则留空字符串\n"
+        "- experience: 从工作年限/毕业时间推断\n"
+        "- degree: 从最高学历推断\n"
+        "- industry: 从行业经历/求职意向推断\n"
+        "- scale/stage: 从简历中对公司规模的偏好推断，无法确定则留空字符串\n"
+        "- 无法从简历确定的字段一律返回空字符串，禁止编造\n"
+        "- 代码值必须精确匹配可选值中的代码(如'405'而非'10-20K')"
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": resume_text},
+    ]
+
+    data = call_ai(endpoint_url, api_key, messages, timeout=timeout, model=model)
+    return _validate_unified_fields(data)
+
+
+def _validate_unified_fields(data) -> dict:
+    """Validate AI/user fields against the script's enum maps.
+
+    Supports multi-select: ``city`` is split on Chinese/English commas and
+    each city is validated; enum fields accept a single value or a list and
+    return a validated list of codes.  Invalid values are dropped so the
+    downstream script simply skips them.  ``keyword`` stays a free-text
+    string.
+    """
+    if not isinstance(data, dict):
+        raise AISecurityError(ERROR_INVALID)
+
+    result = {}
+
+    # keyword: free text string
+    keyword = data.get("keyword", "")
+    result["keyword"] = str(keyword).strip() if isinstance(keyword, str) else ""
+
+    # city: split on commas (Chinese ， and English ,), validate each city
+    city = data.get("city", "")
+    if isinstance(city, list):
+        city_parts = [str(c).strip() for c in city]
+    else:
+        city_parts = str(city).replace("，", ",").split(",")
+    cities = [c.strip() for c in city_parts if c.strip() in boss.CITY_MAP]
+    result["city"] = cities
+
+    # Enum code fields: accept single value or list, validate each code
+    enum_fields = {
+        "salary": boss.SALARY_MAP,
+        "experience": boss.EXPERIENCE_MAP,
+        "degree": boss.DEGREE_MAP,
+        "industry": boss.INDUSTRY_MAP,
+        "scale": boss.SCALE_MAP,
+        "stage": boss.STAGE_MAP,
+    }
+    for field, mapping in enum_fields.items():
+        val = data.get(field, "")
+        if isinstance(val, list):
+            parts = [str(v).strip() for v in val]
+        else:
+            parts = [str(val).strip()] if str(val).strip() else []
+        valid_codes = set(mapping.values())
+        result[field] = [v for v in parts if v in valid_codes]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # JSON validation helpers
 # ---------------------------------------------------------------------------
 
@@ -254,44 +393,6 @@ def _require_str_list(data: dict, field: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # JSON validation — application-side contracts for AI outputs
 # ---------------------------------------------------------------------------
-
-def validate_resume_response(data) -> dict:
-    """Validate an AI resume parsing response.
-
-    Returns a dict with ``profile_name``, ``city``, ``roles``, ``skills``,
-    ``keywords`` and ``suggestions``.  Raises :class:`ValueError` on missing
-    fields or type mismatches — the AI does not decide what is valid.
-    """
-    if not isinstance(data, dict):
-        raise ValueError("invalid_response")
-
-    profile_name = _require(data, "profile_name", str)
-    city = _require(data, "city", str)
-    roles = _require_str_list(data, "roles")
-    skills = _require_str_list(data, "skills")
-    keywords = _require_str_list(data, "keywords")
-    suggestions = _require(data, "suggestions", list)
-
-    for sug in suggestions:
-        if not isinstance(sug, dict):
-            raise ValueError("invalid_suggestion")
-        if "field" not in sug or not isinstance(sug["field"], str):
-            raise ValueError("invalid_suggestion")
-        if "source" not in sug or not isinstance(sug["source"], str):
-            raise ValueError("invalid_suggestion")
-        if "uncertain" not in sug or not isinstance(sug["uncertain"], bool):
-            raise ValueError("invalid_suggestion")
-        if "value" not in sug:
-            raise ValueError("invalid_suggestion")
-
-    return {
-        "profile_name": profile_name,
-        "city": city,
-        "roles": roles,
-        "skills": skills,
-        "keywords": keywords,
-        "suggestions": suggestions,
-    }
 
 
 def validate_rank_response(data, input_job_ids) -> list[str]:
@@ -350,164 +451,6 @@ def validate_preference_response(data) -> dict:
 # ---------------------------------------------------------------------------
 # High-level AI operations
 # ---------------------------------------------------------------------------
-
-def parse_resume(resume_text: str, endpoint_url: str, api_key: str, model: str = "") -> dict:
-    """Call AI to parse a resume and return validated fields.
-
-    Returns ``{profile_name, city, roles, skills, keywords, suggestions}``.
-    The output is validated by :func:`validate_resume_response`.
-    """
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "你是简历解析助手。根据简历内容提取JSON："
-                "profile_name(画像名,str), city(城市,str), "
-                "roles(岗位方向,list[str]), skills(技能,list[str]), "
-                "keywords(搜索关键词,list[str],最多3个), "
-                "suggestions(建议,list[{field,value,source,uncertain}])。"
-                "仅使用简历明确内容，无依据时返回空数组。"
-                "禁止编造经历、学历、薪资、证书或项目。"
-            ),
-        },
-        {"role": "user", "content": resume_text},
-    ]
-    data = call_ai(endpoint_url, api_key, messages, model=model)
-    return validate_resume_response(data)
-
-
-def suggest_screening_filters(resume_text: str, endpoint_url: str, api_key: str,
-                              timeout: int = DEFAULT_TIMEOUT, model: str = "") -> dict:
-    """Call AI to read a resume and suggest BOSS filter values.
-
-    Returns ``{city, salary, experience, degree, scale, stage, industry}``
-    where each value is a valid code or empty string. Invalid codes are
-    coerced to empty so downstream merging skips them. "0" (不限) is treated
-    as empty to match build_screening_filter_options.
-
-    Raises :class:`AISecurityError` on timeout/network/invalid responses.
-    The exception never contains the resume text or API key.
-    """
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "你是简历筛选助手。根据简历内容给出BOSS直聘筛选项建议值，返回JSON："
-                "city(城市名,str,如上海), salary(薪资段代码,str,如405代表10-20K), "
-                "experience(经验代码,str,如105代表3-5年), degree(学历代码,str,如203代表本科), "
-                "scale(公司规模代码,str,如303代表100-499人), "
-                "stage(融资阶段代码,str,如804代表B轮), "
-                "industry(行业代码,str,如1001代表互联网)。"
-                "无法从简历提取的字段返回空字符串。禁止编造。"
-            ),
-        },
-        {"role": "user", "content": resume_text},
-    ]
-    data = call_ai(endpoint_url, api_key, messages, timeout=timeout, model=model)
-    return _validate_suggest_response(data)
-
-
-def _validate_suggest_response(data) -> dict:
-    """Validate AI suggest response: keep only valid codes, coerce invalid to empty."""
-    if not isinstance(data, dict):
-        raise AISecurityError(ERROR_INVALID)
-    valid_sets = {
-        name: {v for v in mapping.values() if v != "0"}
-        for name, mapping in (
-            ("salary", boss.SALARY_MAP),
-            ("experience", boss.EXPERIENCE_MAP),
-            ("degree", boss.DEGREE_MAP),
-            ("scale", boss.SCALE_MAP),
-            ("stage", boss.STAGE_MAP),
-            ("industry", boss.INDUSTRY_MAP),
-        )
-    }
-    valid_sets["city"] = {n for n in boss.CITY_MAP if n != "全国"}
-    result = {}
-    for field in ("city", "salary", "experience", "degree", "scale", "stage", "industry"):
-        val = data.get(field, "")
-        if not isinstance(val, str):
-            val = ""
-        val = val.strip()
-        result[field] = val if val in valid_sets[field] else ""
-    return result
-
-
-SCREENING_FIELDS = ("city", "salary", "experience", "degree", "scale", "stage", "industry")
-SUGGESTION_CONFIDENCE_THRESHOLD = 70
-
-
-def _screening_valid_sets():
-    valid_sets = {
-        name: {value for value in mapping.values() if value != "0"}
-        for name, mapping in (
-            ("salary", boss.SALARY_MAP),
-            ("experience", boss.EXPERIENCE_MAP),
-            ("degree", boss.DEGREE_MAP),
-            ("scale", boss.SCALE_MAP),
-            ("stage", boss.STAGE_MAP),
-            ("industry", boss.INDUSTRY_MAP),
-        )
-    }
-    valid_sets["city"] = {name for name in boss.CITY_MAP if name != "全国"}
-    return valid_sets
-
-
-def validate_cautious_screening_suggestions(data, confirmed_fields=None,
-                                             threshold=SUGGESTION_CONFIDENCE_THRESHOLD):
-    """Apply enum, confidence and user-lock gates to screening suggestions."""
-    raw = data if isinstance(data, dict) else {}
-    confirmed = confirmed_fields if isinstance(confirmed_fields, dict) else {}
-    valid_sets = _screening_valid_sets()
-    values = {}
-    meta = {}
-    for field in SCREENING_FIELDS:
-        locked = confirmed.get(field)
-        if isinstance(locked, str) and locked.strip():
-            values[field] = locked.strip()
-            meta[field] = {"status": "user_confirmed", "confidence": None}
-            continue
-        item = raw.get(field)
-        value = item.get("value", "") if isinstance(item, dict) else ""
-        confidence = item.get("confidence") if isinstance(item, dict) else None
-        valid_confidence = (
-            isinstance(confidence, (int, float))
-            and not isinstance(confidence, bool)
-            and 0 <= confidence <= 100
-        )
-        valid_value = isinstance(value, str) and value.strip() in valid_sets[field]
-        if valid_value and valid_confidence and confidence >= threshold:
-            values[field] = value.strip()
-            meta[field] = {"status": "ai_suggested", "confidence": confidence}
-        else:
-            values[field] = ""
-            meta[field] = {
-                "status": "pending_confirmation",
-                "confidence": confidence if valid_confidence else None,
-            }
-    return {"values": values, "meta": meta}
-
-
-def suggest_screening_filters_cautious(resume_text, endpoint_url, api_key,
-                                       confirmed_fields=None, timeout=DEFAULT_TIMEOUT, model=""):
-    """Generate deterministic, confidence-bearing suggestions and validate them."""
-    unlocked = [
-        field for field in SCREENING_FIELDS
-        if not str((confirmed_fields or {}).get(field) or "").strip()
-    ]
-    messages = [{
-        "role": "system",
-        "content": (
-            "根据简历为未锁定的 BOSS 筛选字段给建议。仅返回 JSON；每个字段必须是"
-            "{value:string, confidence:number 0-100}。没有明确依据时 value 为空且低置信度。"
-            f"未锁定字段：{','.join(unlocked)}。禁止输出近似枚举或改写已确认字段。"
-        ),
-    }, {"role": "user", "content": resume_text}]
-    data = call_ai(
-        endpoint_url, api_key, messages, timeout=timeout, temperature=0, model=model,
-    )
-    return validate_cautious_screening_suggestions(data, confirmed_fields=confirmed_fields)
-
 
 def rank_jds(confirmed_fields: dict, jobs_with_jd: list, endpoint_url: str, api_key: str, model: str = "") -> list[str]:
     """Call AI to rank jobs by relevance, in batches of at most 10.
@@ -708,8 +651,6 @@ class DiscoveryAIProvider:
         quality fields are derived by the normalizer; raw provider output is
         never returned or persisted.
         """
-        if contract_version == "v4":
-            return self._analyze_v4(resume_text)
         if contract_version != "v3":
             raise ValueError(f"unsupported candidate analysis contract: {contract_version}")
 
@@ -739,61 +680,6 @@ class DiscoveryAIProvider:
                 continue
             return normalized if self._quality_score(normalized) > self._quality_score(original) else original
         return original or build_empty_candidate_analysis()
-
-    def _analyze_v4(self, resume_text: str) -> dict:
-        """Run one candidate-v4 request chain with at most one correction."""
-        messages = self._build_analyze_v4_messages(resume_text)
-        best = None
-        provider_call_count = 0
-        for attempt in range(2):
-            try:
-                response = call_ai(
-                    self.endpoint, self.api_key, messages, model=self.model,
-                    timeout=120,
-                )
-                provider_call_count += 1
-            except AISecurityError as exc:
-                raise _map_provider_error(exc) from None
-            try:
-                parsed = self._clean_candidate_response(response)
-            except (ValueError, TypeError, json.JSONDecodeError):
-                raise AISecurityError("ai_invalid_output") from None
-            normalized = normalize_candidate_analysis_v4(parsed, resume_text)
-            if best is None or self._quality_score(normalized) > self._quality_score(best):
-                best = normalized
-            if normalized.get("quality", {}).get("status") == "complete":
-                result = copy.deepcopy(normalized)
-                result["metrics"] = {"provider_call_count": provider_call_count}
-                return result
-            if attempt == 0:
-                warnings = normalized.get("quality", {}).get("warnings", [])
-                safe_warnings = [
-                    {"code": item.get("code", "invalid_type"), "path": item.get("path", "root")}
-                    for item in warnings
-                    if isinstance(item, dict)
-                ]
-                prior = {
-                    key: copy.deepcopy(parsed[key])
-                    for key in (
-                        "contract_version", "summary", "evidence", "facts", "unknowns", "directions"
-                    )
-                    if key in parsed
-                }
-                messages = messages + [
-                    {"role": "assistant", "content": json.dumps(prior, ensure_ascii=False)},
-                    {
-                        "role": "user",
-                        "content": "仅修正以下安全契约路径并返回完整v4 JSON："
-                        + json.dumps(safe_warnings, ensure_ascii=False),
-                    },
-                ]
-        result = copy.deepcopy(best) if best is not None else {
-            "contract_version": "v4", "summary": {}, "evidence": [], "facts": [],
-            "unknowns": [], "directions": [],
-            "quality": {"status": "manual_required", "warnings": []},
-        }
-        result["metrics"] = {"provider_call_count": provider_call_count}
-        return result
 
     @staticmethod
     def _quality_score(result):
@@ -1251,41 +1137,6 @@ class DiscoveryAIProvider:
                 "role": "system",
                 "content": (
                     "你是候选人分析助手。严格按以下v3契约返回JSON。仅输出provider拥有字段；quality由程序生成，禁止输出source_locator和safe_excerpt。字段缺失使用契约typed-empty。CANONICAL_CANDIDATE_V3_SCHEMA_BEGIN\n" + schema + "\nCANONICAL_CANDIDATE_V3_SCHEMA_END\n示例:" + example + "。"
-                ),
-            },
-            {"role": "user", "content": resume_text},
-        ]
-
-    @staticmethod
-    def _build_analyze_v4_messages(resume_text: str) -> list:
-        provider_shape = {
-            "contract_version": "v4",
-            "summary": {},
-            "evidence": [{
-                "client_ref": "e1", "type": "skill", "normalized_value": "",
-                "source_quote": "", "assertion_type": "explicit", "confidence": 0,
-            }],
-            "facts": [{
-                "client_ref": "f1", "fact_type": "skill", "value": {},
-                "normalized_value": "", "evidence_refs": ["e1"],
-                "assertion_type": "explicit", "confidence": 0,
-            }],
-            "unknowns": [],
-            "directions": [{
-                "client_ref": "d1", "name": "", "type": "core", "rationale": "",
-                "evidence_refs": ["e1"], "fact_refs": ["f1"], "gaps": [],
-                "confidence": 0, "default_enabled": False, "search_terms": [],
-            }],
-        }
-        return [
-            {
-                "role": "system",
-                "content": (
-                    "你是候选人分析助手。只返回 candidate-analysis v4 JSON。"
-                    "facts 仅允许 work/project/skill/industry/education/achievement/seniority；"
-                    "每个事实必须引用本次响应 evidence；禁止输出 locator、safe_excerpt、quality、"
-                    "后台ID、用户确认值、prompt、凭据或原始响应字段。结构："
-                    + json.dumps(provider_shape, ensure_ascii=False)
                 ),
             },
             {"role": "user", "content": resume_text},

@@ -2636,65 +2636,14 @@ class DiscoveryV2StateAndPrivacyFoundationTests(_IntegrationTestCase):
 
 
 class DiscoveryV4ProfileOrchestrationTests(_IntegrationTestCase):
-    """T028/T029: one v4 persistence path and manual recovery boundary."""
-
-    @classmethod
-    def setUpClass(cls):
-        path = Path(__file__).parent / "fixtures" / "discovery" / "ai_candidate_v4.json"
-        cls.fixture = json.loads(path.read_text(encoding="utf-8"))
+    """Manual candidate profile creation without AI."""
 
     def setUp(self):
         super().setUp()
         self.resume = self.store.save_resume(
-            self.profile["id"], "storage/v4.txt", "txt", self.fixture["resume_text"],
-            "v4-resume-hash", "v4.txt",
+            self.profile["id"], "storage/manual.txt", "txt",
+            "5年 Python 后端经验，主导订单服务重构", "manual-resume-hash", "manual.txt",
         )
-
-    class Provider:
-        def __init__(self, response):
-            self.response = response
-            self.calls = []
-
-        def analyze(self, *, resume_text, contract_version="v3"):
-            self.calls.append({"resume_text": resume_text, "contract_version": contract_version})
-            return self.response
-
-    def test_v4_analysis_persists_exactly_one_profile_version_and_call_count(self):
-        provider = self.Provider(self.fixture["valid"])
-        result = analyze_resume(
-            self.store, self.resume["id"], ai_consent=True,
-            ai_provider=provider, contract_version="v4",
-        )
-        self.assertEqual(len(provider.calls), 1)
-        self.assertEqual(provider.calls[0]["contract_version"], "v4")
-        self.assertEqual(result["contract_version"], "v4")
-        self.assertTrue(result["candidate_profile_version_id"])
-        version = self.store.get_candidate_profile_version(result["candidate_profile_version_id"])
-        self.assertEqual(len(version["facts"]), 2)
-        with self.store._connection() as conn:
-            count = conn.execute(
-                "SELECT COUNT(*) FROM candidate_profile_versions WHERE analysis_id=?",
-                (result["id"],),
-            ).fetchone()[0]
-        self.assertEqual(count, 1)
-
-    def test_empty_resume_blocks_v4_before_profile_version_persistence(self):
-        empty = self.store.save_resume(
-            self.profile["id"], "storage/scan.pdf", "pdf", "", "scan-hash", "scan.pdf",
-        )
-        provider = self.Provider(self.fixture["valid"])
-        with self.assertRaises(DiscoveryError) as ctx:
-            analyze_resume(
-                self.store, empty["id"], ai_consent=True,
-                ai_provider=provider, contract_version="v4",
-            )
-        self.assertEqual(ctx.exception.error_code, "input_incomplete")
-        self.assertEqual(provider.calls, [])
-        with self.store._connection() as conn:
-            count = conn.execute(
-                "SELECT COUNT(*) FROM candidate_profile_versions WHERE resume_id=?", (empty["id"],),
-            ).fetchone()[0]
-        self.assertEqual(count, 0)
 
     def test_manual_facts_and_direction_create_editable_profile_without_ai(self):
         from webui.discovery import create_manual_candidate_profile
@@ -2718,31 +2667,30 @@ class DiscoveryV4ProfileOrchestrationTests(_IntegrationTestCase):
 
 
 class CandidateProfileConfirmationAcceptanceTests(_IntegrationTestCase):
-    """T034: SC-008/SC-009 user edits and provider calls remain exact."""
-
-    @classmethod
-    def setUpClass(cls):
-        path = Path(__file__).parent / "fixtures" / "discovery" / "ai_candidate_v4.json"
-        cls.fixture = json.loads(path.read_text(encoding="utf-8"))
+    """T034: SC-008/SC-009 user edits remain exact across confirmations."""
 
     def setUp(self):
         super().setUp()
         self.resume = self.store.save_resume(
             self.profile["id"], "storage/acceptance.txt", "txt",
-            self.fixture["resume_text"], "acceptance-hash", "acceptance.txt",
-        )
-
-    def _analyze_v4(self):
-        provider = DiscoveryV4ProfileOrchestrationTests.Provider(self.fixture["valid"])
-        return analyze_resume(
-            self.store, self.resume["id"], ai_consent=True,
-            ai_provider=provider, contract_version="v4",
+            "5年 Python 后端经验，主导订单服务重构", "acceptance-hash", "acceptance.txt",
         )
 
     def test_each_user_edit_is_frozen_into_next_confirmation_without_mutating_previous(self):
-        analysis = self._analyze_v4()
+        from webui.discovery import create_manual_candidate_profile
+        manual = create_manual_candidate_profile(
+            self.store, self.resume["id"],
+            facts=[{
+                "fact_type": "skill", "value": {"name": "Python"},
+                "normalized_value": "Python",
+            }],
+            directions=[{
+                "name": "Python 后端工程师", "type": "core",
+                "search_terms": ["Python 后端"],
+            }],
+        )
         first_draft = self.store.get_candidate_profile_version(
-            analysis["candidate_profile_version_id"],
+            manual["candidate_profile_version"]["id"],
         )
         skill = next(f for f in first_draft["facts"] if f["fact_type"] == "skill")
         corrected = self.store.update_candidate_profile_draft(
@@ -2750,7 +2698,7 @@ class CandidateProfileConfirmationAcceptanceTests(_IntegrationTestCase):
             operations=[{"op": "correct", "fact_id": skill["id"],
                          "value": {"name": "Go"}, "normalized_value": "Go"}],
         )
-        directions = self.store.list_directions(analysis["id"])
+        directions = self.store.list_directions(manual["analysis"]["id"])
         first_confirmation = self.store.create_confirmation_v2(
             candidate_profile_version_id=corrected["id"],
             expected_content_hash=corrected["content_hash"],
@@ -2779,21 +2727,6 @@ class CandidateProfileConfirmationAcceptanceTests(_IntegrationTestCase):
         first_after = self.store.get_candidate_profile_version(corrected["id"])
         self.assertIn("Go", [f["normalized_value"] for f in first_after["facts"]])
         self.assertNotIn("Rust", [f["normalized_value"] for f in first_after["facts"]])
-
-    def test_v4_correction_chain_persists_exact_provider_call_count(self):
-        from webui.ai import DiscoveryAIProvider
-        partial = json.loads(json.dumps(self.fixture["valid"], ensure_ascii=False))
-        partial["facts"][0]["evidence_refs"] = ["missing"]
-        provider = DiscoveryAIProvider("https://ai.example/v1", "model", "secret")
-        with mock.patch("webui.ai.call_ai", side_effect=[partial, self.fixture["valid"]]):
-            result = analyze_resume(
-                self.store, self.resume["id"], ai_consent=True,
-                ai_provider=provider, contract_version="v4",
-            )
-        self.assertEqual(result["metrics"]["provider_call_count"], 2)
-        self.assertEqual(
-            self.store.get_analysis(result["id"])["provider_call_count"], 2,
-        )
 
 
 class CandidatePoolOrchestrationTests(_IntegrationTestCase):

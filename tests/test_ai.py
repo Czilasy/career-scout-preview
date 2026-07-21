@@ -1490,58 +1490,11 @@ class CandidateV3ProviderAdapterTests(unittest.TestCase):
 
 
 class DiscoveryAIVersionRoutingV2Tests(unittest.TestCase):
-    """T015 RED contracts for candidate-analysis v4 and job-assessment v2."""
+    """T015 RED contracts for job-assessment v2 and unknown-version rejection."""
 
     def setUp(self):
         from webui.ai import DiscoveryAIProvider
         self.provider = DiscoveryAIProvider("https://ai.example/v1", "model", "secret-key")
-
-    def test_candidate_v4_routes_by_explicit_version_and_discards_raw_fields(self):
-        response = {
-                "contract_version": "v4",
-            "summary": {"headline": "后端", "experience_level": "高级", "domains": [], "strengths": []},
-            "evidence": [{
-                "client_ref": "e1", "type": "skill", "normalized_value": "Python",
-                "source_quote": "Python 后端", "assertion_type": "explicit", "confidence": 90,
-            }],
-            "facts": [{
-                "client_ref": "f1", "fact_type": "skill", "value": {"name": "Python"},
-                "normalized_value": "Python", "evidence_refs": ["e1"],
-                "assertion_type": "explicit", "confidence": 90,
-            }],
-            "unknowns": [],
-            "directions": [],
-            "raw_response": "RAW-MODEL-SECRET",
-        }
-        with patch("webui.ai.call_ai", return_value=response):
-            result = self.provider.analyze(
-                resume_text="5年 Python 后端经验",
-                contract_version="v4",
-            )
-        self.assertEqual(result["contract_version"], "v4")
-        self.assertNotIn("raw_response", result)
-        self.assertNotIn("RAW-MODEL-SECRET", json.dumps(result, ensure_ascii=False))
-        self.assertLessEqual(len(result.get("facts", [])), 100)
-        self.assertTrue(all(len(item.get("normalized_value", "")) <= 500 for item in result.get("facts", [])))
-
-    def test_candidate_v4_rejects_cross_response_reference_domain(self):
-        response = {
-            "contract_version": "v4", "summary": {},
-            "evidence": [],
-            "facts": [{
-                "client_ref": "f1", "fact_type": "skill", "value": {"name": "Python"},
-                "normalized_value": "Python", "evidence_refs": ["evidence-from-old-response"],
-                "assertion_type": "explicit", "confidence": 90,
-            }],
-            "unknowns": [], "directions": [],
-        }
-        with patch("webui.ai.call_ai", return_value=response):
-            result = self.provider.analyze(
-                resume_text="Python 后端",
-                contract_version="v4",
-            )
-        self.assertEqual(result.get("facts"), [])
-        self.assertTrue(result.get("quality", {}).get("warnings"))
 
     def test_job_assessment_v2_accepts_one_job_and_at_most_two_direction_refs(self):
         response = {
@@ -1569,62 +1522,6 @@ class DiscoveryAIVersionRoutingV2Tests(unittest.TestCase):
                 resume_text="Python 后端",
                 contract_version="v999",
             )
-
-
-class CandidateAnalysisV4ProviderTests(unittest.TestCase):
-    """T024/T025: one bounded request chain and validated-result-only return."""
-
-    @classmethod
-    def setUpClass(cls):
-        from pathlib import Path
-        fixture_path = Path(__file__).parent / "fixtures" / "discovery" / "ai_candidate_v4.json"
-        cls.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
-
-    def setUp(self):
-        from webui.ai import DiscoveryAIProvider
-        self.provider = DiscoveryAIProvider("https://ai.example/v1", "model", "secret-key")
-
-    def test_complete_v4_uses_one_provider_call_and_records_safe_count(self):
-        with patch("webui.ai.call_ai", return_value=self.fixture["valid"]) as call:
-            result = self.provider.analyze(
-                resume_text=self.fixture["resume_text"], contract_version="v4",
-            )
-        self.assertEqual(call.call_count, 1)
-        self.assertEqual(result["metrics"], {"provider_call_count": 1})
-        self.assertEqual(result["quality"]["status"], "complete")
-
-    def test_parseable_partial_gets_at_most_one_safe_correction(self):
-        partial = copy.deepcopy(self.fixture["valid"])
-        partial["facts"][0]["evidence_refs"] = ["missing-evidence"]
-        with patch("webui.ai.call_ai", side_effect=[partial, self.fixture["valid"]]) as call:
-            result = self.provider.analyze(
-                resume_text=self.fixture["resume_text"], contract_version="v4",
-            )
-        self.assertEqual(call.call_count, 2)
-        self.assertEqual(result["metrics"], {"provider_call_count": 2})
-        correction = call.call_args_list[1].args[2][-1]["content"]
-        self.assertNotIn("secret-key", correction)
-        self.assertNotIn(self.fixture["resume_text"], correction)
-
-    def test_unparseable_v4_is_terminal_without_correction(self):
-        from webui.ai import AISecurityError
-        with patch("webui.ai.call_ai", return_value="not-json") as call:
-            with self.assertRaises(AISecurityError):
-                self.provider.analyze(
-                    resume_text=self.fixture["resume_text"], contract_version="v4",
-                )
-        self.assertEqual(call.call_count, 1)
-
-    def test_raw_provider_fields_never_survive_v4_return(self):
-        response = copy.deepcopy(self.fixture["valid"])
-        response["raw_model_output"] = "RAW-V4-SECRET"
-        with patch("webui.ai.call_ai", return_value=response):
-            result = self.provider.analyze(
-                resume_text=self.fixture["resume_text"], contract_version="v4",
-            )
-        rendered = json.dumps(result, ensure_ascii=False)
-        self.assertNotIn("raw_model_output", rendered)
-        self.assertNotIn("RAW-V4-SECRET", rendered)
 
 
 class JobAssessmentV2ProviderTests(unittest.TestCase):

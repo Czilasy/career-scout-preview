@@ -737,10 +737,22 @@ def check_login_state(cdp_port=DEFAULT_CDP_PORT):
     """
     try:
         cdp = CDPSession(cdp_port)
-        r = cdp.send("Target.createTarget", {"url": "about:blank"})
+        # background=True：后台创建标签页，不抢占前台焦点，避免检测登录时弹窗
+        r = cdp.send("Target.createTarget", {"url": "about:blank", "background": True})
         tid = r["result"]["targetId"]
         r = cdp.send("Target.attachToTarget", {"targetId": tid, "flatten": True})
         sid = r["result"]["sessionId"]
+
+        # background 标签页 document.hidden=true、visibilityState=hidden，
+        # BOSS直聘据此判定为非真人浏览。导航前注入覆盖可见性属性为 visible。
+        cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+            "source": (
+                "Object.defineProperty(document, 'hidden', {get: () => false});"
+                "Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});"
+                "Object.defineProperty(document, 'webkitHidden', {get: () => false});"
+                "Object.defineProperty(document, 'webkitVisibilityState', {get: () => 'visible'});"
+            )
+        }, sid)
 
         # 先导航到 BOSS直聘，确保 cookie 域名正确
         cdp.send("Page.navigate", {"url": "https://www.zhipin.com/"}, sid)
@@ -1139,10 +1151,23 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
         print(f"筛选: {' | '.join(filter_desc)}")
     print()
 
-    r = cdp.send("Target.createTarget", {"url": "about:blank"})
+    # background=True：后台创建标签页，不抢占前台焦点，避免抓取时反复弹窗
+    # （否则最小化的 Chrome 窗口会被新标签页唤起并放大到前台）
+    r = cdp.send("Target.createTarget", {"url": "about:blank", "background": True})
     tid = r["result"]["targetId"]
     r = cdp.send("Target.attachToTarget", {"targetId": tid, "flatten": True})
     sid = r["result"]["sessionId"]
+
+    # background 标签页 document.hidden=true、visibilityState=hidden，
+    # BOSS直聘据此判定为非真人浏览。导航前注入覆盖可见性属性为 visible。
+    cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+        "source": (
+            "Object.defineProperty(document, 'hidden', {get: () => false});"
+            "Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});"
+            "Object.defineProperty(document, 'webkitHidden', {get: () => false});"
+            "Object.defineProperty(document, 'webkitVisibilityState', {get: () => 'visible'});"
+        )
+    }, sid)
 
     def human_scroll(cdp, sid):
         """模拟人类滚动: 随机次数、随机距离、随机停顿，偶尔回滚一点"""

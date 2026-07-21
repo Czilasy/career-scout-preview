@@ -1,9 +1,10 @@
-"""Resume storage, extraction and deletion for the AI job workbench.
+"""Resume storage and deletion for the AI job workbench.
 
-Handles file validation, safe path construction, text extraction from
-TXT/PDF/DOCX, content hashing and deletion.  All storage paths are
-relative to the resume directory to avoid leaking absolute filesystem
-locations.  Extracted text is never written to logs.
+Handles file validation, safe path construction, content hashing and
+deletion.  The resume file is stored as-is and sent directly to the AI
+API for reading — no local text extraction is performed.  All storage
+paths are relative to the resume directory to avoid leaking absolute
+filesystem locations.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ import uuid
 # ---------------------------------------------------------------------------
 
 ALLOWED_FORMATS = {"txt", "pdf", "docx"}
-MAX_TEXT_LENGTH = 50_000
 DEFAULT_MAX_BYTES = 10_000_000  # 10 MB
 
 
@@ -80,36 +80,11 @@ def build_safe_path(resume_dir, resume_id, fmt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Text extraction
+# Text extraction — ABOLISHED
+# Local text extraction (pypdf / python-docx) has been removed.  The resume
+# file is stored as-is and sent directly to the AI API, which reads the
+# document natively.  No local "understanding" of the resume content happens.
 # ---------------------------------------------------------------------------
-
-def extract_text(path, fmt: str) -> str:
-    """Extract text from a TXT/PDF/DOCX file at *path*.
-
-    The result is truncated to ``MAX_TEXT_LENGTH`` characters.  The
-    extracted text is never logged.
-    """
-    file_path = pathlib.Path(os.fspath(path))
-    if fmt == "txt":
-        text = file_path.read_text(encoding="utf-8", errors="replace")
-    elif fmt == "pdf":
-        from pypdf import PdfReader
-
-        reader = PdfReader(str(file_path))
-        parts: list[str] = []
-        for page in reader.pages:
-            parts.append(page.extract_text() or "")
-        text = "\n".join(parts)
-    elif fmt == "docx":
-        from docx import Document
-
-        doc = Document(str(file_path))
-        text = "\n".join(para.text for para in doc.paragraphs)
-    else:
-        raise ValueError(f"不支持的简历格式: {fmt}")
-    if len(text) > MAX_TEXT_LENGTH:
-        text = text[:MAX_TEXT_LENGTH]
-    return text
 
 
 # ---------------------------------------------------------------------------
@@ -117,17 +92,17 @@ def extract_text(path, fmt: str) -> str:
 # ---------------------------------------------------------------------------
 
 def save_resume(profile_id, file_bytes, filename, fmt, resume_dir, store) -> dict:
-    """Validate, persist and extract a resume file.
+    """Validate, persist and store a resume file.
 
     Steps:
       1. Validate the filename extension and file size.
       2. Build a safe storage path inside *resume_dir*.
       3. Write the raw bytes to disk.
-      4. Extract text (truncated to ``MAX_TEXT_LENGTH``).
-      5. Compute a sha256 content hash.
-      6. Persist via ``store.save_resume``.
+      4. Compute a sha256 content hash.
+      5. Persist via ``store.save_resume``.
 
-    Returns the resume record produced by the store.
+    No local text extraction is performed — the AI API reads the file
+    directly.  Returns the resume record produced by the store.
     """
     validated_fmt = validate_format(filename)
     validate_size(file_bytes)
@@ -137,7 +112,8 @@ def save_resume(profile_id, file_bytes, filename, fmt, resume_dir, store) -> dic
     absolute_path = base / relative_path
     absolute_path.parent.mkdir(parents=True, exist_ok=True)
     absolute_path.write_bytes(file_bytes)
-    extracted_text = extract_text(absolute_path, validated_fmt)
+    # No local text extraction — the AI API reads the document directly.
+    extracted_text = ""
     content_hash = hashlib.sha256(file_bytes).hexdigest()
     # Store only the basename to avoid retaining directory components from
     # user-supplied filenames (path-traversal hardening).

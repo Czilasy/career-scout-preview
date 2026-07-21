@@ -1464,7 +1464,7 @@ class DiscoveryV2ProfileHttpContractTests(unittest.TestCase):
             "v2-hash", "v2.txt",
         )
         self.analysis = self.store.create_analysis(
-            self.resume["id"], self.profile["id"], contract_version="v4",
+            self.resume["id"], self.profile["id"], contract_version="v3",
         )
         self.store.update_analysis_status(
             self.analysis["id"], "ready", analysis_stage="persisting",
@@ -1472,7 +1472,7 @@ class DiscoveryV2ProfileHttpContractTests(unittest.TestCase):
         )
         self.direction = self.store.add_direction(
             self.analysis["id"], "Python 后端", "core", confidence=100,
-            default_enabled=True, search_terms=["Python 后端"], contract_version="v4",
+            default_enabled=True, search_terms=["Python 后端"], contract_version="v3",
         )
         self.version = self.store.create_candidate_profile_version(
             profile_id=self.profile["id"], resume_id=self.resume["id"],
@@ -1513,18 +1513,6 @@ class DiscoveryV2ProfileHttpContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         parse.assert_not_called()
         self.assertEqual(response.get_json()["extraction_status"], "ready")
-
-    def test_post_analysis_persists_requested_v4_contract(self):
-        runtime = self.app.config["DISCOVERY_RUNTIME"]
-        with mock.patch.object(runtime, "submit_analysis"):
-            response = self.client.post("/api/discovery/analyses", json={
-                "resume_id": self.resume["id"], "ai_consent": True,
-                "contract_version": "v4",
-            })
-        self.assertEqual(response.status_code, 202)
-        body = response.get_json()
-        self.assertEqual(body["contract_version"], "v4")
-        self.assertEqual(self.store.get_analysis(body["analysis_id"])["contract_version"], "v4")
 
     def test_get_and_patch_candidate_version_with_hash_conflict(self):
         response = self.client.get(f"/api/discovery/candidate-versions/{self.version['id']}")
