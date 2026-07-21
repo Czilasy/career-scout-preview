@@ -909,6 +909,38 @@
       font-size: 11px; color: var(--faint); margin-bottom: 12px;
     }
 
+    /* 新流程统一字段表单 */
+    .discovery-unified-form { display: grid; gap: 24px; }
+    .unified-section { display: grid; gap: 14px; }
+    .unified-section-title {
+      font-size: 12px; font-weight: 600; color: var(--faint);
+      letter-spacing: .08em; margin: 0; padding-bottom: 8px; border-bottom: 1px solid var(--line);
+    }
+    .unified-section-hint { font-size: 11px; font-weight: 400; color: var(--faint); letter-spacing: normal; margin-left: 8px; }
+    .unified-text-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 16px; }
+    .unified-chip-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 28px; }
+    .unified-field-block { display: flex; flex-direction: column; gap: 8px; }
+    .discovery-unified-input {
+      width: 100%; box-sizing: border-box; padding: 9px 12px;
+      border: 1px solid var(--line); border-radius: 8px;
+      font-size: 14px; background: var(--surface-2); color: var(--text);
+      outline: none; transition: border-color .15s;
+    }
+    .discovery-unified-input:focus { border-color: var(--gold); }
+    .discovery-progress-logs {
+      margin-top: 12px; max-height: 200px; overflow-y: auto;
+      background: var(--code-bg); border-radius: 6px; padding: 8px;
+    }
+    .discovery-progress-log-line { font-size: 12px; color: var(--muted); line-height: 1.6; }
+    .discovery-results-stats {
+      grid-column: 1 / -1; display: flex; gap: 16px; padding: 10px 0;
+      border-bottom: 1px solid var(--line); margin-bottom: 12px; font-size: 13px;
+    }
+    .discovery-results-stats strong { color: var(--text); }
+    @media (max-width: 640px) {
+      .unified-text-fields, .unified-chip-fields { grid-template-columns: 1fr; }
+    }
+
     .discovery-results-header {
       display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
       padding: 12px 0; border-bottom: 1px solid var(--line); margin-bottom: 16px;
@@ -955,9 +987,15 @@
     .discovery-preference-changes[hidden] { display: none; }
     .discovery-preference-change { display: flex; gap: 6px; align-items: center; }
 
+    #discoveryResultsList {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 12px;
+      align-items: start;
+    }
     .discovery-job-card {
       background: var(--surface); border: 1px solid var(--line);
-      border-radius: 8px; padding: 14px 16px; margin-bottom: 10px;
+      border-radius: 8px; padding: 14px 16px;
       display: flex; flex-direction: column; gap: 8px;
       animation: cardEnter .2s ease-out;
     }
@@ -1003,6 +1041,7 @@
       display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
       padding-top: 8px; border-top: 1px solid var(--line);
     }
+    .discovery-job-card.marked-rejected { opacity: 0.5; filter: grayscale(0.6); }
     .discovery-job-card-actions .card-link {
       font-size: 12px; padding: 4px 10px; border: 1px solid var(--gold);
       border-radius: 4px; color: var(--gold); text-decoration: none;
@@ -1022,6 +1061,41 @@
     .discovery-job-card-actions .card-btn.trash { color: var(--faint); border-color: var(--line-strong); }
     .discovery-job-card-actions .card-btn:disabled { opacity: .6; cursor: default; }
     .discovery-job-card-actions .card-btn.undo { color: var(--gold); border-color: var(--gold); }
+
+    /* 新卡片布局：副标题行 / 标签摘要 / JD 展示区 */
+    .discovery-job-card-title { white-space: normal; line-height: 1.4; }
+    .discovery-job-card-subtitle {
+      display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    }
+    .discovery-job-card-subtitle .discovery-job-card-salary { font-size: 14px; }
+    .discovery-job-card-submeta { font-size: 12px; color: var(--muted); }
+    .discovery-job-card-tagline {
+      font-size: 11px; color: var(--faint); line-height: 1.5;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .discovery-job-card-jd {
+      font-size: 12px; color: var(--muted); line-height: 1.6;
+      background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+      padding: 10px 12px; word-break: break-word; white-space: pre-wrap;
+    }
+    .discovery-job-card-jd.loaded { max-height: 200px; overflow-y: auto; }
+    .discovery-job-card-jd.placeholder {
+      display: flex; flex-direction: column; align-items: center; gap: 6px;
+      padding: 16px 12px; text-align: center;
+    }
+    .discovery-job-card-jd.loading {
+      color: var(--faint); text-align: center; padding: 16px 12px;
+    }
+    .jd-load-btn {
+      padding: 6px 16px; font-size: 12px; cursor: pointer;
+      border: 1px solid var(--gold); border-radius: 4px;
+      background: transparent; color: var(--gold);
+      transition: background .12s;
+    }
+    .jd-load-btn:hover:not(:disabled) { background: var(--accent-soft); }
+    .jd-load-btn:disabled { opacity: .6; cursor: default; }
+    .jd-load-hint { font-size: 11px; color: var(--faint); }
 
     @media (max-width: 720px) {
       .discovery-topbar { padding: 10px 12px; gap: 8px; flex-wrap: wrap; }
@@ -1051,6 +1125,7 @@
       <div class="view-tab" onclick="switchView('screening')">筛选工作台</div>
     </div>
     <div class="header-actions">
+      <button class="btn" type="button" onclick="switchToDiscovery('upload')">重新上传</button>
       <button class="btn" type="button" onclick="openAiSettingsModal()">AI 设置</button>
       <span class="conn-status" id="connectionStatus">未连接</span>
     </div>
@@ -1063,15 +1138,6 @@
 
   <!-- 发现工作区（feature 004 默认入口，4 步主流程） -->
   <div class="discovery-workspace active" id="discoveryWorkspace">
-    <div class="discovery-topbar">
-      <div class="discovery-topbar-copy">
-        <span class="discovery-eyebrow">简历驱动发现</span>
-        <strong class="discovery-title">上传简历 · 确认方向 · 发现岗位</strong>
-      </div>
-      <div class="discovery-topbar-actions">
-        <button class="btn" type="button" onclick="switchToDiscovery('upload')">重新上传</button>
-      </div>
-    </div>
     <div class="discovery-stepper">
       <div class="discovery-step-indicator active" data-step="upload" onclick="switchToDiscovery('upload')">
         <span class="step-num">1</span><span class="step-label">上传简历</span>
@@ -1136,8 +1202,8 @@
         <p class="discovery-step-hint">系统正在按确认方向搜索、抓取详情并评估岗位。</p>
         <div id="discoveryProgressContent"></div>
         <div class="btn-row" style="margin-top:12px;">
-          <button class="btn danger" id="discoveryCancelBtn" type="button" onclick="cancelDiscoveryRun()" hidden>取消运行</button>
-          <button class="btn primary" id="discoveryResumeBtn" type="button" onclick="resumeDiscoveryRun()" hidden>继续运行</button>
+          <button class="btn danger" id="discoveryCancelBtn" type="button" hidden>取消运行</button>
+          <button class="btn primary" id="discoveryResumeBtn" type="button" hidden>继续运行</button>
           <button class="btn" id="discoveryViewResultsBtn" type="button" onclick="switchToDiscovery('results')" hidden>查看结果</button>
         </div>
       </div>
@@ -1145,19 +1211,6 @@
 
     <!-- 步骤 4：结果 -->
     <div class="discovery-step" data-step="results" id="discoveryStepResults">
-      <div class="discovery-results-header" id="discoveryResultsHeader" hidden>
-        <div class="discovery-direction-selector" id="discoveryDirectionSelector"></div>
-        <div class="discovery-category-filter" id="discoveryCategoryFilter"></div>
-      </div>
-      <div class="discovery-feedback-tools" aria-label="方向反馈" hidden>
-        <label for="discoveryFeedbackDirection">方向反馈</label>
-        <select id="discoveryFeedbackDirection" aria-label="选择反馈方向"></select>
-        <select id="discoveryDirectionReason" aria-label="选择方向反馈原因">
-          <option value="direction_not_wanted">不想找这个方向</option>
-          <option value="skill_assessment_inaccurate">技能判断不准确</option>
-        </select>
-        <button class="btn" type="button" onclick="recordDirectionFeedback()">提交方向反馈</button>
-      </div>
       <div class="discovery-preference-changes" id="discoveryPreferenceChanges" role="status" hidden></div>
       <div id="discoveryResultsList"></div>
     </div>
@@ -1634,11 +1687,11 @@
       initResumeConsentTooltip();
       initDiscoveryDropZone();
       await loadProfiles();
+      await restoreDiscoveryRun();
       await loadAiSettings();
       await checkConnection();
       await restoreSearchRun();
       await restoreScreeningRun();
-      await loadLatestPipelineResult();
     }
 
     async function checkConnection() {
@@ -2891,9 +2944,6 @@
 
     // == 发现工作区（feature 004：简历驱动岗位发现）==
     let discoveryAnalysisId = "";
-    let discoveryUnifiedFields = {};
-    let discoveryFieldLabels = {};
-    let discoveryConfirmedParams = {};
     let discoveryCandidateProfileVersion = null;
     let discoveryCurrentAnalysis = null;
     let discoveryConfirmationId = "";
@@ -2907,6 +2957,10 @@
     let discoveryPreferenceChanges = [];
     let lastDiscoveryFeedbackId = "";
     let lastDiscoveryFeedbackJobId = "";
+    // 新流程统一字段状态
+    let discoveryUnifiedFields = {};
+    let discoveryFieldLabels = {};
+    let discoveryPipelineTaskId = "";
     // T064: canonical projector filter state
     let directionFilter = "";
     let categoryFilter = "";
@@ -2979,10 +3033,6 @@
       document.querySelectorAll(".discovery-step").forEach(s => {
         s.classList.toggle("active", s.dataset.step === step);
       });
-      // 切到"结果"页时渲染流水线命中的岗位
-      if (step === "results" && pipelineResultJobs && pipelineResultJobs.length) {
-        renderPipelineResults();
-      }
     }
 
     function setDiscoveryUploadState(state) {
@@ -3009,76 +3059,166 @@
       setDiscoveryUploadState(isLoading ? "loading" : "idle");
     }
 
+    // 新流程 Stage 2：渲染 8 个统一字段的可编辑表单。
+    // fields: {keyword, city, salary[], experience[], degree[], industry[], scale[], stage[]}
+    // labels: {field: [显示名, 当前值, type]}  type 为 "text"/"city" 或 BOSS 码表 dict
+    function renderUnifiedFields(fields, labels) {
+      const container = document.getElementById("discoveryAnalysisContent");
+      if (!container) return;
+      container.innerHTML = "";
+      const form = document.createElement("div");
+      form.className = "discovery-unified-form";
+      // 字段顺序：keyword → city → salary → experience → degree → industry → scale → stage
+      const order = ["keyword", "city", "salary", "experience", "degree", "industry", "scale", "stage"];
+
+      // —— 搜索条件区：keyword + city，文本输入，支持中英文逗号分隔 ——
+      const searchSection = document.createElement("div");
+      searchSection.className = "unified-section";
+      const searchTitle = document.createElement("h3");
+      searchTitle.className = "unified-section-title";
+      searchTitle.textContent = "搜索条件";
+      searchSection.appendChild(searchTitle);
+      const textGrid = document.createElement("div");
+      textGrid.className = "unified-text-fields";
+      for (const key of order.slice(0, 2)) {
+        const meta = labels[key];
+        if (!meta) continue;
+        const [displayName, currentVal] = meta;
+        const block = document.createElement("div");
+        block.className = "unified-field-block";
+        const lbl = document.createElement("label");
+        lbl.className = "unified-field-label";
+        lbl.textContent = displayName;
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "discovery-unified-input";
+        input.dataset.field = key;
+        // city 是列表，展示为逗号分隔；keyword 是字符串
+        input.value = Array.isArray(currentVal) ? currentVal.join(",") : (currentVal || "");
+        input.placeholder = key === "city"
+          ? "如：上海，杭州（支持中英文逗号）"
+          : "如：Python 后端，FastAPI（支持中英文逗号）";
+        block.appendChild(lbl);
+        block.appendChild(input);
+        textGrid.appendChild(block);
+      }
+      searchSection.appendChild(textGrid);
+      form.appendChild(searchSection);
+
+      // —— 筛选条件区：6 个码表字段，chip 点选多选 ——
+      const filterSection = document.createElement("div");
+      filterSection.className = "unified-section";
+      const filterTitle = document.createElement("h3");
+      filterTitle.className = "unified-section-title";
+      filterTitle.textContent = "筛选条件";
+      const filterHint = document.createElement("span");
+      filterHint.className = "unified-section-hint";
+      filterHint.textContent = "点击选择，可多选；不选则不过滤";
+      filterTitle.appendChild(filterHint);
+      filterSection.appendChild(filterTitle);
+      const chipGrid = document.createElement("div");
+      chipGrid.className = "unified-chip-fields";
+      for (const key of order.slice(2)) {
+        const meta = labels[key];
+        if (!meta) continue;
+        const [displayName, currentVal, type] = meta;
+        if (typeof type !== "object" || type === null) continue;
+        const block = document.createElement("div");
+        block.className = "unified-field-block";
+        const lbl = document.createElement("label");
+        lbl.className = "unified-field-label";
+        lbl.textContent = displayName;
+        block.appendChild(lbl);
+        const wrap = document.createElement("div");
+        wrap.className = "multi-select-wrap";
+        wrap.dataset.field = key;
+        const selected = new Set(Array.isArray(currentVal) ? currentVal : (currentVal ? [currentVal] : []));
+        selected.delete("0"); // 码表中的"不限"(code 0) 由专属 chip-any 表达
+        // "不限" chip 固定第一位：选中 = 不过滤（提交空数组），与其余选项互斥
+        const anyChip = document.createElement("span");
+        anyChip.className = "multi-chip chip-any" + (selected.size === 0 ? " selected" : "");
+        anyChip.textContent = "不限";
+        anyChip.addEventListener("click", () => {
+          wrap.querySelectorAll(".multi-chip.selected").forEach(c => c.classList.remove("selected"));
+          anyChip.classList.add("selected");
+        });
+        wrap.appendChild(anyChip);
+        for (const [label, code] of Object.entries(type)) {
+          if (code === "0") continue; // 跳过码表"不限"，已由 chip-any 表达
+          const chip = document.createElement("span");
+          chip.className = "multi-chip" + (selected.has(code) ? " selected" : "");
+          chip.textContent = label;
+          chip.dataset.code = code;
+          chip.addEventListener("click", () => {
+            chip.classList.toggle("selected");
+            // "不限" 状态自动同步：无其他选中时恢复选中
+            const hasOther = wrap.querySelectorAll(".multi-chip.selected:not(.chip-any)").length > 0;
+            anyChip.classList.toggle("selected", !hasOther);
+          });
+          wrap.appendChild(chip);
+        }
+        block.appendChild(wrap);
+        chipGrid.appendChild(block);
+      }
+      filterSection.appendChild(chipGrid);
+      form.appendChild(filterSection);
+
+      container.appendChild(form);
+    }
+
+    // 收集表单中用户编辑后的字段值，返回给 /api/confirm-fields
+    function collectUnifiedFields() {
+      const result = {};
+      const form = document.querySelector(".discovery-unified-form");
+      if (!form) return result;
+      form.querySelectorAll("input.discovery-unified-input").forEach(inp => {
+        const key = inp.dataset.field;
+        if (!key) return;
+        const val = (inp.value || "").trim();
+        if (key === "city") {
+          result[key] = val ? val.replace(/，/g, ",").split(",").map(s => s.trim()).filter(Boolean) : [];
+        } else {
+          result[key] = val;
+        }
+      });
+      form.querySelectorAll(".multi-select-wrap[data-field]").forEach(wrap => {
+        const key = wrap.dataset.field;
+        if (!key) return;
+        // chip-any（"不限"）不提交 code；空数组 = 该维度不过滤
+        result[key] = Array.from(wrap.querySelectorAll(".multi-chip.selected:not(.chip-any)"))
+          .map(c => c.dataset.code).filter(Boolean);
+      });
+      return result;
+    }
+
     async function uploadResumeDiscovery() {
       const uploadButton = document.getElementById("discoveryUploadButton");
       if (uploadButton && uploadButton.disabled) return;
       const fileInput = document.getElementById("discoveryResumeFile");
       if (!fileInput.files.length) { setAppNotice("请选择简历文件", "warning"); return; }
-      // 无画像时自动创建（简历是入口，画像是产物）
-      if (!currentProfileId) {
-        const fileName = fileInput.files[0].name || "新简历";
-        const profileName = fileName.replace(/\.[^.]+$/, "").slice(0, 70) + " 求职画像";
-        try {
-          const createResp = await api(API.profiles, {
-            method: "POST", json: { name: profileName, confirmed_fields: {} },
-          });
-          if (!createResp.ok) {
-            setDiscoveryUploadState("error");
-            setAppNotice("创建画像失败", "error");
-            return;
-          }
-          const created = await createResp.json();
-          currentProfileId = created.id;
-          await loadProfiles();
-        } catch (_e) {
-          setDiscoveryUploadState("error");
-          setAppNotice("创建画像失败，请检查连接后重试", "error");
-          return;
-        }
+      const aiConsent = document.getElementById("discoveryAiConsent");
+      if (!aiConsent || !aiConsent.checked) {
+        setAppNotice("请勾选 AI 解析同意后再上传", "warning");
+        return;
       }
-      const aiConsent = document.getElementById("discoveryAiConsent").checked;
       setDiscoveryUploadLoading(true);
       let uploadState = "error";
       try {
-        // 1. 上传简历文件
+        // 新流程 Stage 1：上传简历 → AI 提取 8 个统一字段（无状态，无需 profile）
         const formData = new FormData();
         formData.append("file", fileInput.files[0]);
-        formData.append("flow", "discovery");
-        formData.append("ai_consent", String(aiConsent));
-        const uploadResp = await api(`/api/profiles/${currentProfileId}/resume`, {
-          method: "POST", body: formData,
-        });
-        if (!uploadResp.ok) {
-          const err = await uploadResp.json().catch(() => ({}));
-          setAppNotice("简历上传失败：" + (err.user_message || uploadResp.status), "error");
+        const resp = await api("/api/analyze-resume", { method: "POST", body: formData });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          setAppNotice("分析失败：" + (err.error || resp.status), "error");
           return;
         }
-        // 2. 启动分析（T110: JSON body {resume_id, ai_consent} 匹配 T109 异步提交路径）
-        const uploadData = await uploadResp.json();
-        const resumeId = uploadData.resume_id;
-        if (!resumeId) {
-          setAppNotice("简历上传未返回 resume_id", "error");
-          return;
-        }
-        if (!aiConsent) {
-          uploadState = "saved";
-          setAppNotice("简历已在本地保存；未勾选 AI 同意，因此未启动分析", "success");
-          return;
-        }
-        const analysisResp = await api("/api/analyze-resume", {
-          method: "POST", body: formData,
-        });
-        if (!analysisResp.ok) {
-          const err = await analysisResp.json().catch(() => ({}));
-          setAppNotice("分析失败：" + (err.error || analysisResp.status), "error");
-          return;
-        }
-        const analysisData = await analysisResp.json();
-        discoveryUnifiedFields = analysisData.fields || {};
-        discoveryFieldLabels = analysisData.labels || {};
+        const data = await resp.json();
+        discoveryUnifiedFields = data.fields || {};
+        discoveryFieldLabels = data.labels || {};
         renderUnifiedFields(discoveryUnifiedFields, discoveryFieldLabels);
         switchToDiscovery("review");
-        setAppNotice("分析完成，请确认搜索参数", "success");
+        setAppNotice("AI 已提取搜索参数，请确认后执行", "success");
         uploadState = "success";
       } catch (_e) {
         setAppNotice("上传或分析失败，请检查连接后重试", "error");
@@ -3087,573 +3227,16 @@
       }
     }
 
-    async function pollDiscoveryAnalysis(analysisId) {
-      const maxAttempts = 60;
-      let lastNotice = "";
-      for (let i = 0; i < maxAttempts; i++) {
-        const resp = await api(`${DiscoveryAPI.analyses}/${analysisId}`);
-        if (!resp.ok) { setAppNotice("分析结果获取失败", "error"); return false; }
-        const analysis = await resp.json();
-        // T110: 显式处理 queued/analyzing 状态，告知用户当前进度，避免静默等待
-        if (analysis.status === "queued") {
-          if (lastNotice !== "queued") {
-            setAppNotice("分析已排队，等待执行…", "info");
-            lastNotice = "queued";
-          }
-        } else if (analysis.status === "analyzing") {
-          if (lastNotice !== "analyzing") {
-            setAppNotice("正在分析简历…", "info");
-            lastNotice = "analyzing";
-          }
-        } else if (analysis.status === "ready") {
-          discoveryCandidateProfileVersion = null;
-          if (analysis.candidate_profile_version_id) {
-            const versionResp = await api(`${DiscoveryAPI.candidateVersions}/${analysis.candidate_profile_version_id}`);
-            if (versionResp.ok) discoveryCandidateProfileVersion = await versionResp.json();
-          }
-          renderAnalysis(analysis);
-          switchToDiscovery("review");
-          const qualityStatus = (analysis.quality || {}).status || analysis.quality_status || "complete";
-          setAppNotice(qualityStatus === "complete" ? "分析完成，请确认方向" : qualityStatus === "partial" ? "分析部分完成，请确认标记字段" : "分析需要人工补充方向和搜索词", qualityStatus === "complete" ? "success" : "warning");
-          return true;
-        } else if (analysis.status === "failed") {
-          // T110: 安全失败信封，仅展示 error_code + user_message，不泄漏原始异常
-          const failure = analysis.failure || {};
-          const code = failure.error_code || "未知错误";
-          const msg = failure.user_message || code;
-          setAppNotice("分析失败：" + msg + "（" + code + "）", "error");
-          return false;
-        }
-        await new Promise(r => setTimeout(r, 2000));
-      }
-      setAppNotice("分析超时，请稍后重试", "warning");
-      return false;
-    }
-
-    function renderCandidateProfileVersion(version, container) {
-      if (!version || !container) return;
-      const groups = [
-        { key: "explicit", className: "discovery-facts-explicit", title: "简历事实" },
-        { key: "inferred", className: "discovery-facts-inferred", title: "推断（需确认）" },
-      ];
-      for (const group of groups) {
-        const facts = (version.facts || []).filter(fact =>
-          fact.verification_status !== "rejected" &&
-          (group.key === "inferred" ? fact.assertion_type === "inferred" : fact.assertion_type !== "inferred")
-        );
-        const section = document.createElement("section");
-        section.className = `discovery-profile-section ${group.className}`;
-        const heading = document.createElement("h3");
-        heading.textContent = group.title;
-        section.appendChild(heading);
-        if (!facts.length) {
-          const empty = document.createElement("div");
-          empty.className = "discovery-empty-value";
-          empty.textContent = "暂无";
-          section.appendChild(empty);
-        }
-        for (const fact of facts) {
-          const row = document.createElement("div");
-          row.className = "discovery-fact-row";
-          const factType = document.createElement("span");
-          factType.textContent = fact.fact_type || "fact";
-          const factValue = document.createElement("span");
-          factValue.textContent = fact.normalized_value || JSON.stringify(fact.value || {});
-          const actions = document.createElement("span");
-          actions.className = "discovery-fact-actions";
-          const edit = document.createElement("button");
-          edit.type = "button"; edit.className = "btn"; edit.textContent = "纠正";
-          edit.onclick = () => editCandidateFact(fact.id);
-          const reject = document.createElement("button");
-          reject.type = "button"; reject.className = "btn"; reject.textContent = "拒绝";
-          reject.onclick = () => rejectCandidateFact(fact.id);
-          actions.append(edit, reject);
-          row.append(factType, factValue, actions);
-          section.appendChild(row);
-        }
-        if (group.key === "explicit") {
-          const add = document.createElement("button");
-          add.type = "button"; add.className = "btn"; add.textContent = "补充事实";
-          add.onclick = () => addCandidateFact();
-          section.appendChild(add);
-        }
-        container.appendChild(section);
-      }
-      const unknowns = document.createElement("section");
-      unknowns.className = "discovery-profile-section discovery-profile-unknowns";
-      const unknownHeading = document.createElement("h3");
-      unknownHeading.textContent = "未知项";
-      unknowns.appendChild(unknownHeading);
-      for (const item of version.unknowns || []) {
-        const row = document.createElement("div");
-        row.className = "discovery-unknown-item";
-        row.textContent = item.message || item.field || "待确认";
-        unknowns.appendChild(row);
-      }
-      container.appendChild(unknowns);
-      const intent = document.createElement("section");
-      intent.className = "discovery-profile-section discovery-current-intent";
-      const intentHeading = document.createElement("h3");
-      intentHeading.textContent = "当前求职意愿";
-      intent.appendChild(intentHeading);
-      const hint = document.createElement("div");
-      hint.className = "discovery-step-hint";
-      hint.textContent = "城市和最低薪资只采用你在下方明确填写的值，不从历史经历补造。";
-      intent.appendChild(hint);
-      container.appendChild(intent);
-    }
-
-    async function saveCandidateProfileEdits(operations, unknownResolutions = null) {
-      const version = discoveryCandidateProfileVersion;
-      if (!version) return false;
-      const resp = await api(`${DiscoveryAPI.candidateVersions}/${version.id}`, {
-        method: "PATCH", json: {
-          expected_content_hash: version.content_hash,
-          operations,
-          unknown_resolutions: unknownResolutions,
-        },
-      });
-      if (!resp.ok) {
-        const error = await resp.json().catch(() => ({}));
-        const code = error.error_code || "candidate_fact_invalid";
-        setAppNotice(code === "candidate_version_conflict" ? "画像已更新，请刷新后重试" : "画像事实无效，请检查后重试", "error");
-        return false;
-      }
-      discoveryCandidateProfileVersion = await resp.json();
-      if (discoveryCurrentAnalysis) renderAnalysis(discoveryCurrentAnalysis);
-      return true;
-    }
-
-    async function editCandidateFact(factId) {
-      const value = window.prompt("请输入纠正后的事实");
-      if (!value || !value.trim()) return;
-      await saveCandidateProfileEdits([{ op: "correct", fact_id: factId, value: { text: value.trim() }, normalized_value: value.trim() }]);
-    }
-
-    async function addCandidateFact() {
-      const value = window.prompt("请输入要补充的技能或事实");
-      if (!value || !value.trim()) return;
-      await saveCandidateProfileEdits([{ op: "add", fact_type: "skill", value: { name: value.trim() }, normalized_value: value.trim() }]);
-    }
-
-    async function rejectCandidateFact(factId) {
-      await saveCandidateProfileEdits([{ op: "reject", fact_id: factId }]);
-    }
-
-    // 三阶段流程：渲染 AI 提取的统一搜索字段，供用户在"确认理解"步骤编辑
-    const UNIFIED_FIELD_META = {
-      keyword: { label: "搜索关键词", type: "text", placeholder: "如：Java后端,Python开发" },
-      city: { label: "城市（多个用逗号分隔）", type: "text", placeholder: "如：上海、杭州、北京" },
-      salary: { label: "薪资范围（可多选）", type: "multi" },
-      experience: { label: "经验要求（可多选）", type: "multi" },
-      degree: { label: "学历（可多选）", type: "multi" },
-      industry: { label: "行业（可多选）", type: "multi" },
-      scale: { label: "公司规模（可多选）", type: "multi" },
-      stage: { label: "融资阶段（可多选）", type: "multi" },
-    };
-
-    // 各字段选项的展示顺序（从低到高 / 逻辑递进）；"不限"由空选项单独处理
-    const FIELD_ORDER = {
-      salary: ["402","403","404","405","406","407"],
-      experience: ["108","102","101","103","104","105","106","107"],
-      degree: ["209","208","206","202","203","204","205"],
-      scale: ["301","302","303","304","305","306"],
-      stage: ["801","802","803","804","805","806","807","808"],
-      industry: ["1001","1002","1003","1004","1005","1006","1007","1008","1009","1010"],
-    };
-
-    function renderUnifiedFields(fields, labels) {
-      const container = document.getElementById("discoveryAnalysisContent");
-      if (!container) return;
-      container.innerHTML = "";
-      const grid = document.createElement("div");
-      grid.className = "unified-fields-grid";
-      for (const key of Object.keys(UNIFIED_FIELD_META)) {
-        const meta = UNIFIED_FIELD_META[key];
-        const value = fields[key] || "";
-        const group = document.createElement("div");
-        group.className = "unified-field-group";
-        const label = document.createElement("label");
-        label.className = "unified-field-label";
-        label.textContent = meta.label;
-        group.appendChild(label);
-        if (meta.type === "multi") {
-          const rawValue = fields[key];
-          const selected = Array.isArray(rawValue)
-            ? rawValue.map(String)
-            : (rawValue ? [String(rawValue)] : []);
-          const wrap = document.createElement("div");
-          wrap.className = "multi-select-wrap";
-          wrap.dataset.field = key;
-          const labelEntry = labels[key];
-          const enumMap = (labelEntry && typeof labelEntry[2] === "object") ? labelEntry[2] : {};
-          const codeToName = {};
-          for (const [name, code] of Object.entries(enumMap)) codeToName[String(code)] = name;
-          const order = FIELD_ORDER[key] || Object.values(enumMap).map(String);
-          for (const code of order) {
-            if (code === "0") continue;
-            const name = codeToName[code];
-            if (!name) continue;
-            const chip = document.createElement("button");
-            chip.type = "button";
-            chip.className = "multi-chip" + (selected.includes(code) ? " selected" : "");
-            chip.dataset.code = code;
-            chip.textContent = name;
-            chip.addEventListener("click", () => chip.classList.toggle("selected"));
-            wrap.appendChild(chip);
-          }
-          group.appendChild(wrap);
-        } else {
-          const input = document.createElement("input");
-          input.className = "field-input unified-field-input";
-          input.type = "text";
-          input.value = value;
-          input.dataset.field = key;
-          if (meta.placeholder) input.placeholder = meta.placeholder;
-          group.appendChild(input);
-        }
-        grid.appendChild(group);
-      }
-      container.appendChild(grid);
-    }
-
-    function collectUnifiedFields() {
-      const fields = {};
-      document.querySelectorAll("#discoveryAnalysisContent input[data-field]").forEach(el => {
-        fields[el.dataset.field] = el.value;
-      });
-      document.querySelectorAll("#discoveryAnalysisContent .multi-select-wrap").forEach(wrap => {
-        const codes = Array.from(wrap.querySelectorAll(".multi-chip.selected")).map(c => c.dataset.code);
-        fields[wrap.dataset.field] = codes;
-      });
-      return fields;
-    }
-
-    function renderAnalysis(analysis) {
-      discoveryCurrentAnalysis = analysis;
-      discoveryDirections = analysis.directions || [];
-      const container = document.getElementById("discoveryAnalysisContent");
-      if (!container) return;
-      container.innerHTML = "";
-      const quality = analysis.quality || { status: analysis.quality_status || "complete", warnings: analysis.quality_warnings || [] };
-      const qualityBox = document.createElement("div");
-      qualityBox.className = "discovery-quality-state " + quality.status;
-      const qualityTitle = document.createElement("strong");
-      qualityTitle.textContent = quality.status === "complete" ? "提取完整" : quality.status === "partial" ? "部分字段需要确认" : "需要人工补充";
-      qualityBox.appendChild(qualityTitle);
-      const safeFieldLabels = { summary: "候选人摘要", evidence: "简历证据", directions: "求职方向", unknowns: "未知项", contract_version: "契约版本", quality: "质量状态", root: "分析结果" };
-      for (const warning of quality.warnings || []) {
-        const item = document.createElement("div");
-        item.className = "discovery-warning-item";
-        const root = String(warning.path || "root").split(/[.\[]/, 1)[0];
-        item.textContent = "需要确认：" + (safeFieldLabels[root] || "分析字段") + "（" + String(warning.code || "unverified_field") + "）";
-        qualityBox.appendChild(item);
-      }
-      container.appendChild(qualityBox);
-      renderCandidateProfileVersion(discoveryCandidateProfileVersion, container);
-      // 摘要
-      const summary = analysis.summary || {};
-      {
-        const sumDiv = document.createElement("div");
-        sumDiv.className = "discovery-summary";
-        const h = document.createElement("div");
-        h.className = "discovery-summary-headline" + (summary.headline ? "" : " discovery-empty-value");
-        h.textContent = summary.headline || "简历未提供";
-        sumDiv.appendChild(h);
-        {
-          const meta = document.createElement("div");
-          meta.className = "discovery-summary-meta";
-          const experience = document.createElement("span");
-          experience.textContent = "经验：" + (summary.experience_level || "简历未提供");
-          if (!summary.experience_level) experience.classList.add("discovery-empty-value");
-          meta.appendChild(experience);
-          const domains = document.createElement("span");
-          domains.textContent = "领域：" + ((summary.domains || []).join("、") || "简历未提供");
-          if (!(summary.domains || []).length) domains.classList.add("discovery-empty-value");
-          meta.appendChild(domains);
-          sumDiv.appendChild(meta);
-        }
-        if (summary.strengths && summary.strengths.length) {
-          const div = document.createElement("div");
-          div.className = "discovery-summary-domains";
-          for (const st of summary.strengths) {
-            const tag = document.createElement("span");
-            tag.className = "discovery-tag";
-            tag.textContent = st;
-            div.appendChild(tag);
-          }
-          sumDiv.appendChild(div);
-        } else {
-          const empty = document.createElement("div");
-          empty.className = "discovery-empty-value";
-          empty.textContent = "优势：简历未提供";
-          sumDiv.appendChild(empty);
-        }
-        container.appendChild(sumDiv);
-      }
-      // 证据分组
-      const evidence = analysis.evidence || [];
-      if (evidence.length) {
-        const groups = { explicit: [], inferred: [] };
-        for (const e of evidence) {
-          const key = e.assertion_type === "inferred" ? "inferred" : "explicit";
-          groups[key].push(e);
-        }
-        const labels = { explicit: "事实证据", inferred: "推断证据" };
-        for (const key of ["explicit", "inferred"]) {
-          if (!groups[key].length) continue;
-          const grp = document.createElement("div");
-          grp.className = "discovery-evidence-group";
-          const title = document.createElement("div");
-          title.className = "discovery-evidence-group-title";
-          title.textContent = labels[key];
-          const badge = document.createElement("span");
-          badge.className = "badge";
-          badge.textContent = String(groups[key].length);
-          title.appendChild(badge);
-          grp.appendChild(title);
-          const list = document.createElement("div");
-          list.className = "discovery-evidence-list";
-          for (const e of groups[key]) {
-            const item = document.createElement("div");
-            item.className = "discovery-evidence-item";
-            const type = document.createElement("span");
-            type.className = "discovery-evidence-type";
-            type.textContent = e.type || "other";
-            const val = document.createElement("span");
-            val.className = "discovery-evidence-value";
-            val.textContent = e.normalized_value || e.safe_excerpt || "—";
-            const conf = document.createElement("span");
-            conf.className = "discovery-evidence-confidence";
-            conf.textContent = (e.confidence != null ? e.confidence : "—") + "%";
-            item.append(type, val, conf);
-            list.appendChild(item);
-          }
-          grp.appendChild(list);
-          container.appendChild(grp);
-        }
-      } else {
-        const emptyEvidence = document.createElement("div");
-        emptyEvidence.className = "discovery-empty-value";
-        emptyEvidence.textContent = "简历证据：简历未提供";
-        container.appendChild(emptyEvidence);
-      }
-      // 方向卡片
-      if (discoveryDirections.length) {
-        const grp = document.createElement("div");
-        grp.className = "discovery-evidence-group";
-        const title = document.createElement("div");
-        title.className = "discovery-evidence-group-title";
-        title.textContent = "候选方向";
-        grp.appendChild(title);
-        for (const d of discoveryDirections) {
-          const card = document.createElement("div");
-          card.className = "discovery-direction-card" + (d.default_enabled === false ? " disabled" : "");
-          card.dataset.directionId = d.id;
-          const header = document.createElement("div");
-          header.className = "discovery-direction-header";
-          const name = document.createElement("span");
-          name.className = "discovery-direction-name";
-          name.textContent = d.name || "未命名方向";
-          const typeBadge = document.createElement("span");
-          typeBadge.className = "discovery-direction-type " + (d.type || "core");
-          typeBadge.textContent = d.type || "core";
-          const toggle = document.createElement("label");
-          toggle.className = "discovery-direction-toggle";
-          const cb = document.createElement("input");
-          cb.type = "checkbox";
-          cb.checked = d.default_enabled === true;
-          cb.dataset.directionId = d.id;
-          toggle.appendChild(cb);
-          const toggleLabel = document.createElement("span");
-          toggleLabel.textContent = "启用";
-          toggle.appendChild(toggleLabel);
-          header.append(name, typeBadge, toggle);
-          card.appendChild(header);
-          if (d.rationale) {
-            const r = document.createElement("div");
-            r.className = "discovery-direction-rationale";
-            r.textContent = d.rationale;
-            card.appendChild(r);
-          }
-          const meta = document.createElement("div");
-          meta.className = "discovery-direction-meta";
-          const confSpan = document.createElement("span");
-          confSpan.textContent = "置信度：" + (d.confidence != null ? d.confidence : "—");
-          meta.appendChild(confSpan);
-          if (d.evidence_ids && d.evidence_ids.length) {
-            const evSpan = document.createElement("span");
-            evSpan.textContent = "证据：" + d.evidence_ids.length;
-            meta.appendChild(evSpan);
-          }
-          card.appendChild(meta);
-          if (d.gaps && d.gaps.length) {
-            const gaps = document.createElement("div");
-            gaps.className = "discovery-direction-gaps";
-            gaps.textContent = "缺口：" + d.gaps.join("；");
-            card.appendChild(gaps);
-          }
-          if (d.search_terms && d.search_terms.length) {
-            const terms = document.createElement("div");
-            terms.className = "discovery-direction-search-terms";
-            for (const t of d.search_terms) {
-              const tag = document.createElement("span");
-              tag.className = "discovery-tag";
-              tag.textContent = t;
-              terms.appendChild(tag);
-            }
-            card.appendChild(terms);
-          }
-          grp.appendChild(card);
-        }
-        container.appendChild(grp);
-      }
-      // 人工方向：manual_required 或 AI 方向不合适时仍可继续。
-      const manual = document.createElement("div");
-      manual.className = "discovery-manual-direction";
-      const manualHeader = document.createElement("div");
-      manualHeader.className = "discovery-manual-header";
-      const manualCopy = document.createElement("div");
-      const manualTitle = document.createElement("strong");
-      manualTitle.className = "discovery-manual-title";
-      manualTitle.textContent = "手动添加方向";
-      const manualHint = document.createElement("div");
-      manualHint.className = "discovery-step-hint";
-      manualHint.textContent = "补充一个方向和 1–3 个搜索词；手动输入优先于 AI 建议。";
-      manualCopy.append(manualTitle, manualHint);
-      manualHeader.appendChild(manualCopy);
-      const manualGrid = document.createElement("div");
-      manualGrid.className = "discovery-manual-grid";
-      const nameField = document.createElement("div");
-      nameField.className = "discovery-manual-field";
-      const nameLabel = document.createElement("label");
-      nameLabel.htmlFor = "discoveryManualDirection";
-      nameLabel.textContent = "方向名称";
-      const manualName = document.createElement("input");
-      manualName.id = "discoveryManualDirection"; manualName.type = "text"; manualName.placeholder = "例如：AI 应用开发工程师"; manualName.setAttribute("aria-label", "手动方向");
-      nameField.append(nameLabel, manualName);
-      const termsField = document.createElement("div");
-      termsField.className = "discovery-manual-field";
-      const termsLabel = document.createElement("label");
-      termsLabel.htmlFor = "discoveryManualTerms";
-      termsLabel.textContent = "搜索词（1–3 个）";
-      const manualTerms = document.createElement("input");
-      manualTerms.id = "discoveryManualTerms"; manualTerms.type = "text"; manualTerms.placeholder = "例如：AI Agent，RAG，LangGraph"; manualTerms.setAttribute("aria-label", "手动搜索词");
-      const manualMeta = document.createElement("div");
-      manualMeta.className = "discovery-manual-meta";
-      const manualStatus = document.createElement("span");
-      manualStatus.id = "discoveryManualStatus";
-      manualStatus.className = "discovery-manual-status";
-      const manualCount = document.createElement("span");
-      manualCount.id = "discoveryManualTermCount";
-      manualCount.className = "discovery-manual-term-count";
-      manualMeta.append(manualStatus, manualCount);
-      termsField.append(termsLabel, manualTerms, manualMeta);
-      manualGrid.append(nameField, termsField);
-      manual.append(manualHeader, manualGrid);
-      // 未知项
-      const unknowns = analysis.unknowns || [];
-      if (unknowns.length) {
-        const unkDiv = document.createElement("div");
-        unkDiv.className = "discovery-unknowns";
-        const title = document.createElement("div");
-        title.className = "discovery-evidence-group-title";
-        title.textContent = "简历中待确认（" + unknowns.length + "）";
-        unkDiv.appendChild(title);
-        for (const u of unknowns) {
-          const item = document.createElement("div");
-          item.className = "discovery-unknown-item";
-          item.textContent = u.message || u.field || "—";
-          unkDiv.appendChild(item);
-        }
-        manual.appendChild(unkDiv);
-      } else {
-        const emptyUnknowns = document.createElement("div");
-        emptyUnknowns.className = "discovery-empty-value discovery-unknowns";
-        emptyUnknowns.textContent = "未知项：简历未提供";
-        manual.appendChild(emptyUnknowns);
-      }
-      container.appendChild(manual);
-      manualName.addEventListener("input", () => updateManualDirectionState());
-      manualTerms.addEventListener("input", () => updateManualDirectionState());
-      manualName.addEventListener("blur", () => updateManualDirectionState({ normalize: true }));
-      updateManualDirectionState();
-      // 硬约束输入
-      const hcDiv = document.createElement("div");
-      hcDiv.className = "discovery-hard-constraints discovery-current-intent";
-      const hcTitle = document.createElement("div");
-      hcTitle.className = "discovery-hard-constraints-title";
-      hcTitle.textContent = "硬约束（可选）";
-      hcDiv.appendChild(hcTitle);
-      const cityField = document.createElement("div");
-      cityField.className = "field";
-      cityField.innerHTML = '<label>城市</label><input type="text" id="discoveryHardCity" placeholder="如：上海">';
-      hcDiv.appendChild(cityField);
-      const salaryField = document.createElement("div");
-      salaryField.className = "field";
-      salaryField.innerHTML = '<label>最低薪资（K）</label><input type="number" id="discoveryHardSalary" placeholder="如：20">';
-      hcDiv.appendChild(salaryField);
-      const hint = document.createElement("div");
-      hint.className = "discovery-hard-constraints-hint";
-      hint.textContent = "留空则不作为硬约束；确认后不可修改。";
-      hcDiv.appendChild(hint);
-      container.appendChild(hcDiv);
-    }
-
-    function readManualDirectionInputs({ normalize = false } = {}) {
-      const nameInput = document.getElementById("discoveryManualDirection");
-      const termsInput = document.getElementById("discoveryManualTerms");
-      let name = (nameInput?.value || "").trim();
-      let searchTerms = (termsInput?.value || "").split(/[，,]/).map(v => v.trim()).filter(Boolean);
-      if (!searchTerms.length && /[，,]/.test(name)) {
-        const shorthand = name.split(/[，,]/).map(v => v.trim()).filter(Boolean);
-        if (shorthand.length > 1) {
-          name = shorthand.shift();
-          searchTerms = shorthand;
-          if (normalize) {
-            nameInput.value = name;
-            termsInput.value = searchTerms.join("，");
-          }
-        }
-      }
-      const present = Boolean(name || searchTerms.length);
-      return { name, search_terms: searchTerms, valid: Boolean(name && searchTerms.length >= 1 && searchTerms.length <= 3), present };
-    }
-
-    function updateManualDirectionState(options = {}) {
-      const value = readManualDirectionInputs(options);
-      const status = document.getElementById("discoveryManualStatus");
-      const count = document.getElementById("discoveryManualTermCount");
-      if (count) count.textContent = value.search_terms.length + " / 3";
-      if (status) {
-        status.className = "discovery-manual-status";
-        if (!value.present) {
-          status.textContent = "可选：也可只启用上方 AI 方向";
-        } else if (value.valid) {
-          status.textContent = "已识别，可提交";
-          status.classList.add("valid");
-        } else {
-          status.textContent = value.name ? "请补充 1–3 个搜索词" : "请填写方向名称";
-          status.classList.add("invalid");
-        }
-      }
-      const notice = document.getElementById("appNotice");
-      const noticeText = document.getElementById("appNoticeText");
-      if (value.valid && notice?.dataset.tone === "warning" && noticeText?.textContent === "手动方向需要名称和 1–3 个搜索词") {
-        setAppNotice("");
-      }
-      return value;
-    }
-
     async function confirmDirections() {
       const btn = document.getElementById("discoveryConfirmButton");
       if (btn && btn.disabled) return;
+      // 收集用户编辑后的 8 个统一字段
       const fields = collectUnifiedFields();
       if (!fields.keyword || !fields.keyword.trim()) {
         setAppNotice("搜索关键词不能为空", "warning");
         return;
       }
-      if (!fields.city || !fields.city.trim()) {
+      if (!fields.city || !fields.city.length) {
         setAppNotice("城市不能为空", "warning");
         return;
       }
@@ -3661,20 +3244,32 @@
       const label = btn ? btn.querySelector(".btn-label") : null;
       if (label) label.textContent = "确认中…";
       try {
-        const resp = await api("/api/confirm-fields", {
+        // Stage 2: 确认字段 → 拿 script_params
+        const confirmResp = await api("/api/confirm-fields", {
           method: "POST", json: fields,
         });
-        if (!resp.ok) {
-          const err = await resp.json().catch(() => ({}));
-          setAppNotice("确认失败：" + (err.error || resp.status), "error");
+        if (!confirmResp.ok) {
+          const err = await confirmResp.json().catch(() => ({}));
+          setAppNotice("确认失败：" + (err.error || confirmResp.status), "error");
           return;
         }
-        const data = await resp.json();
-        discoveryConfirmedParams = data.script_params || {};
+        const confirmData = await confirmResp.json();
+        const scriptParams = confirmData.script_params;
+        // Stage 3: 启动抓取 → 拿 task_id
+        const execResp = await api("/api/execute-search", {
+          method: "POST", json: { script_params: scriptParams },
+        });
+        if (!execResp.ok) {
+          const err = await execResp.json().catch(() => ({}));
+          setAppNotice("启动失败：" + (err.error || execResp.status), "error");
+          return;
+        }
+        const execData = await execResp.json();
+        discoveryPipelineTaskId = execData.task_id;
         setAppNotice("参数已确认，开始执行抓取", "success");
         document.querySelector('.discovery-step-indicator[data-step="review"]').classList.add("done");
         switchToDiscovery("progress");
-        startPipelineExecution(discoveryConfirmedParams);
+        startPipelinePoll(discoveryPipelineTaskId);
       } catch (_e) {
         setAppNotice("确认失败，请检查连接后重试", "error");
       } finally {
@@ -3683,440 +3278,91 @@
       }
     }
 
-    let pipelineTaskId = "";
-    let pipelinePollTimer = null;
-    // 流水线命中的岗位，进度页只存不渲染，岗位列表统一在"结果"页展示
-    let pipelineResultJobs = [];
-
-    async function startPipelineExecution(scriptParams) {
-      const container = document.getElementById("discoveryProgressContent");
-      if (container) container.innerHTML = '<p class="discovery-step-hint">正在启动抓取任务…</p>';
-      try {
-        const resp = await api("/api/execute-search", {
-          method: "POST", json: { script_params: scriptParams },
-        });
-        const data = await resp.json();
-        if (!resp.ok || !data.ok) {
-          if (container) container.innerHTML = '<p class="discovery-step-hint" style="color:var(--danger)">启动失败：' + (data.error || resp.status) + '</p>';
-          return;
-        }
-        pipelineTaskId = data.task_id;
-        pollPipelineProgress();
-      } catch (e) {
-        if (container) container.innerHTML = '<p class="discovery-step-hint" style="color:var(--danger)">启动失败：' + e.message + '</p>';
-      }
-    }
-
-    async function pollPipelineProgress() {
-      if (!pipelineTaskId) return;
-      try {
-        const resp = await api("/api/search-progress/" + pipelineTaskId);
-        const data = await resp.json();
-        if (data.ok) renderPipelineProgress(data);
-        if (data.status === "running") {
-          pipelinePollTimer = setTimeout(pollPipelineProgress, 2000);
-        } else {
-          document.querySelector('.discovery-step-indicator[data-step="progress"]').classList.add("done");
-        }
-      } catch (_e) {
-        pipelinePollTimer = setTimeout(pollPipelineProgress, 3000);
-      }
-    }
-
-    function renderPipelineProgress(data) {
-      const container = document.getElementById("discoveryProgressContent");
-      if (!container) return;
-      container.innerHTML = "";
-
-      const progress = data.progress || {};
-      // Status line
-      const status = document.createElement("p");
-      status.className = "discovery-step-hint";
-      status.textContent = progress.message || ("状态：" + data.status);
-      container.appendChild(status);
-
-      // Progress bar (current/total combinations)
-      if (progress.current && progress.total) {
-        const bar = document.createElement("div");
-        bar.className = "pipeline-progress-bar";
-        const fill = document.createElement("div");
-        fill.className = "pipeline-progress-fill";
-        fill.style.width = Math.round((progress.current / progress.total) * 100) + "%";
-        bar.appendChild(fill);
-        container.appendChild(bar);
-      }
-
-      // Live logs
-      if (data.logs && data.logs.length) {
-        const logBox = document.createElement("div");
-        logBox.className = "pipeline-log-box";
-        for (const line of data.logs) {
-          const div = document.createElement("div");
-          div.textContent = line;
-          logBox.appendChild(div);
-        }
-        container.appendChild(logBox);
-        logBox.scrollTop = logBox.scrollHeight;
-      }
-
-      // 完成汇总：岗位列表不在此展开（进度页保持紧凑），统一去"结果"页查看
-      if (data.status === "done" && data.result) {
-        const r = data.result;
-        pipelineResultJobs = r.jobs || [];
-        const summary = document.createElement("p");
-        summary.className = "discovery-step-hint";
-        summary.style.color = "var(--success)";
-        summary.textContent = "抓取完成：共抓 " + r.total_scraped + " 条，符合筛选 " + r.total_matched + " 条";
-        container.appendChild(summary);
-        const btn = document.getElementById("discoveryViewResultsBtn");
-        if (btn) btn.hidden = false;
-        const resInd = document.querySelector('.discovery-step-indicator[data-step="results"]');
-        if (resInd) resInd.classList.add("done");
-      } else if (data.status === "failed") {
-        const err = document.createElement("p");
-        err.className = "discovery-step-hint";
-        err.style.color = "var(--danger)";
-        err.textContent = "执行失败：" + (data.error || "未知错误");
-        container.appendChild(err);
-      }
-    }
-
-    // 结果页：渲染流水线命中的岗位（进度页不再内联岗位列表）
-    function renderPipelineResults() {
-      const list = document.getElementById("discoveryResultsList");
-      if (!list) return;
-      // 旧发现运行的头部工具（方向选择/分类筛选/方向反馈）对流水线结果不适用，隐藏
-      const legacyHeader = document.getElementById("discoveryResultsHeader");
-      if (legacyHeader) legacyHeader.hidden = true;
-      document.querySelectorAll(".discovery-feedback-tools").forEach(el => { el.hidden = true; });
-      const prefChanges = document.getElementById("discoveryPreferenceChanges");
-      if (prefChanges) prefChanges.hidden = true;
-
-      list.innerHTML = "";
-      if (!pipelineResultJobs.length) {
-        const empty = document.createElement("p");
-        empty.className = "discovery-step-hint";
-        empty.textContent = "暂无结果，请先完成一次岗位发现。";
-        list.appendChild(empty);
-        return;
-      }
-      const count = document.createElement("p");
-      count.className = "discovery-step-hint";
-      count.textContent = "共 " + pipelineResultJobs.length + " 个符合条件的岗位";
-      list.appendChild(count);
-      const wrap = document.createElement("div");
-      wrap.className = "pipeline-job-list";
-      for (const job of pipelineResultJobs) {
-        const item = document.createElement("div");
-        item.className = "pipeline-job-item";
-        const title = document.createElement("a");
-        title.className = "pipeline-job-title";
-        title.textContent = job.title || "(无标题)";
-        title.href = job.source_url || job.job_link || "#";
-        title.target = "_blank";
-        item.appendChild(title);
-        const meta = document.createElement("span");
-        meta.className = "pipeline-job-meta";
-        meta.textContent = [job.salary, job.tags, job.company_scale].filter(Boolean).join(" · ");
-        item.appendChild(meta);
-        wrap.appendChild(item);
-      }
-      list.appendChild(wrap);
-    }
-
-    // 页面加载时恢复"最新一轮"的流水线结果（刷新后依然可见，新一轮运行会覆盖它）
-    async function loadLatestPipelineResult() {
-      try {
-        const resp = await api("/api/latest-pipeline-result");
-        if (!resp.ok) return;
-        const data = await resp.json();
-        if (!data.ok || !data.has_result || !data.result) return;
-        const jobs = data.result.jobs || [];
-        if (!jobs.length) return;
-        pipelineResultJobs = jobs;
-        // 点亮"结果"步骤，用户点进去即可查看上次结果
-        const ind = document.querySelector('.discovery-step-indicator[data-step="results"]');
-        if (ind) ind.classList.add("done");
-      } catch (_e) { /* 恢复失败不影响主流程 */ }
-    }
-
-    async function startDiscoveryRun(confirmationId) {
-      try {
-        const resp = await api(DiscoveryAPI.runs, {
-          method: "POST", json: { confirmation_id: confirmationId },
-        });
-        if (!resp.ok) {
-          const err = await resp.json().catch(() => ({}));
-          setAppNotice("启动失败：" + (err.user_message || resp.status), "error");
-          return;
-        }
-        const run = await resp.json();
-        discoveryRunId = run.run_id;
-        saveDiscoveryRun(discoveryRunId);
-        switchToDiscovery("progress");
-        renderRunProgress(run);
-        startDiscoveryPoll(discoveryRunId);
-      } catch (_e) {
-        setAppNotice("启动失败，请检查连接后重试", "error");
-      }
-    }
-
-    function startDiscoveryPoll(runId) {
+    // 新流程进度轮询：轮询 /api/search-progress/<task_id>
+    function startPipelinePoll(taskId) {
       if (discoveryPollTimer) clearTimeout(discoveryPollTimer);
       const poll = async () => {
         try {
-          const resp = await api(`${DiscoveryAPI.runs}/${runId}`);
+          const resp = await api(`/api/search-progress/${taskId}`);
           if (!resp.ok) return;
-          const run = await resp.json();
-          renderRunProgress(run);
-          const terminal = ["succeeded", "failed", "cancelled"];
-          if (terminal.includes(run.status)) {
+          const data = await resp.json();
+          renderPipelineProgress(data);
+          if (data.status === "done") {
             discoveryPollTimer = null;
-            if (run.status === "succeeded" || run.status === "partial") {
-              document.querySelector('.discovery-step-indicator[data-step="progress"]').classList.add("done");
-              document.getElementById("discoveryViewResultsBtn").hidden = false;
-              setAppNotice("发现完成，可查看结果", "success");
-              await loadDiscoveryResults(runId);
-            } else if (run.status === "failed") {
-              setAppNotice(getDiscoveryFailureMessage(run), "error");
-            } else if (run.status === "cancelled") {
-              setAppNotice("运行已取消", "warning");
-            }
+            document.querySelector('.discovery-step-indicator[data-step="progress"]').classList.add("done");
+            document.getElementById("discoveryViewResultsBtn").hidden = false;
+            setAppNotice("发现完成，可查看结果", "success");
+            renderPipelineResults(data.result || {});
             return;
           }
-          if (run.status === "interrupted") {
-            document.getElementById("discoveryResumeBtn").hidden = false;
-            document.getElementById("discoveryCancelBtn").hidden = true;
-            setAppNotice("运行已中断，可继续", "warning");
+          if (data.status === "failed") {
+            discoveryPollTimer = null;
+            setAppNotice("运行失败：" + (data.error || "未知错误"), "error");
             return;
           }
-          discoveryPollTimer = setTimeout(poll, 3000);
+          discoveryPollTimer = setTimeout(poll, 2000);
         } catch (_e) {
           discoveryPollTimer = setTimeout(poll, 5000);
         }
       };
-      discoveryPollTimer = setTimeout(poll, 3000);
+      discoveryPollTimer = setTimeout(poll, 1500);
     }
 
-    function getDiscoveryFailureMessage(run) {
-      const code = (run && run.failure_code) || "";
-      const messages = {
-        source_cdp_unavailable: "BOSS 专用浏览器未连接。请先启动专用浏览器并打开 BOSS直聘，然后重新运行。",
-        source_login_required: "尚未登录 BOSS直聘。请在 BOSS 专用浏览器中完成登录，然后重新运行。",
-        source_blocked: "BOSS 数据源当前不可用，请检查专用浏览器的连接和登录状态后重试。",
-        source_unreachable: "BOSS 数据源无法访问，请检查本地运行环境后重试。",
-        source_timeout: "连接 BOSS 数据源超时，请检查专用浏览器后重试。",
-        dispatch_failed: "发现任务调度失败，请重试或检查本地服务。",
-      };
-      return messages[code] || "发现失败，请检查 BOSS 专用浏览器的连接和登录状态后重试。";
-    }
-
-    function renderRunProgress(run) {
+    // 渲染新流程进度（logs 列表 + 计数）
+    function renderPipelineProgress(data) {
       const container = document.getElementById("discoveryProgressContent");
       if (!container) return;
       container.innerHTML = "";
-      // 阶段进度条
-      const stages = ["planning", "fetching_lists", "fetching_details", "evaluating", "assembling"];
-      const stageLabels = {
-        planning: "规划", fetching_lists: "抓取列表", fetching_details: "抓取详情",
-        evaluating: "评估", assembling: "组装",
-      };
-      const currentStage = run.stage || run.status || "planning";
-      const stageBar = document.createElement("div");
-      stageBar.className = "discovery-progress-stage";
-      const currentIdx = stages.indexOf(currentStage);
-      for (const s of stages) {
-        const item = document.createElement("div");
-        item.className = "discovery-progress-stage-item";
-        const idx = stages.indexOf(s);
-        if (idx < currentIdx) item.classList.add("done");
-        if (s === currentStage || (currentIdx === -1 && s === "planning")) item.classList.add("active");
-        item.textContent = stageLabels[s] || s;
-        stageBar.appendChild(item);
-      }
-      container.appendChild(stageBar);
-      // 状态文本
       const statusDiv = document.createElement("div");
       statusDiv.className = "discovery-progress-status";
-      const statusLabels = {
-        created: "已创建", planning: "规划中", fetching_lists: "抓取列表中",
-        fetching_details: "抓取详情中", evaluating: "评估中", assembling: "组装中",
-        succeeded: "成功", partial: "部分成功", failed: "失败",
-        interrupted: "已中断", cancelled: "已取消",
-      };
-      statusDiv.innerHTML = "状态：<strong>" + (statusLabels[run.status] || run.status) + "</strong>";
+      const statusLabels = { running: "运行中", done: "成功", failed: "失败" };
+      statusDiv.innerHTML = "状态：<strong>" + (statusLabels[data.status] || data.status) + "</strong>";
       container.appendChild(statusDiv);
-      // T126: created 超时阻断和 dispatch_failed 展示
-      if (run.status === "created" && run.created_at) {
-        const createdMs = new Date(run.created_at).getTime();
-        if (Date.now() - createdMs > 30000) {
-          const warn = document.createElement("div");
-          warn.className = "discovery-progress-warn";
-          warn.textContent = "运行已创建超过 30 秒仍未开始，可能调度失败。";
-          container.appendChild(warn);
-        }
-      }
-      if (run.failure_code === "dispatch_failed" || run.failure_stage === "dispatch_failed") {
-        const warn = document.createElement("div");
-        warn.className = "discovery-progress-warn";
-        warn.textContent = "调度失败，请重试或检查配置。";
-        container.appendChild(warn);
-      }
-      if (run.status === "failed" && run.failure_code !== "dispatch_failed") {
-        const warn = document.createElement("div");
-        warn.className = "discovery-progress-warn";
-        warn.textContent = getDiscoveryFailureMessage(run);
-        container.appendChild(warn);
-      }
       // 进度计数
-      const progress = run.progress || {};
-      const counts = run.counts || {};
+      const p = data.progress || {};
       const countsDiv = document.createElement("div");
       countsDiv.className = "discovery-progress-counts";
-      if (progress.fetched != null) {
+      if (p.current != null && p.total != null) {
         const s = document.createElement("span");
-        s.innerHTML = "已抓取：<strong>" + progress.fetched + "</strong>";
+        s.innerHTML = "组合进度：<strong>" + p.current + "/" + p.total + "</strong>";
         countsDiv.appendChild(s);
       }
-      if (progress.assessed != null) {
+      if (p.scraped != null) {
         const s = document.createElement("span");
-        s.innerHTML = "已评估：<strong>" + progress.assessed + "</strong>";
+        s.innerHTML = "本页抓取：<strong>" + p.scraped + "</strong>";
         countsDiv.appendChild(s);
       }
-      const catLabels = {
-        high_match: "高度匹配", adjacent_match: "邻近匹配", growth_match: "发展匹配",
-        needs_review: "待确认", not_suitable: "不适合",
-      };
-      for (const [cat, count] of Object.entries(counts)) {
+      if (p.merged != null) {
         const s = document.createElement("span");
-        s.innerHTML = (catLabels[cat] || cat) + "：<strong>" + count + "</strong>";
+        s.innerHTML = "累计去重：<strong>" + p.merged + "</strong>";
         countsDiv.appendChild(s);
       }
       container.appendChild(countsDiv);
-      // T083: v2 四类进度权威名（http-api.md L203-208）。
-      // search_queries_completed / list_candidates / details_selected /
-      // details_completed / assessments_completed / recommendations。
-      // v1 别名（source_count/detail_count/evaluated_count）继续展示以兼容旧客户端。
-      const v2ProgressDiv = document.createElement("div");
-      v2ProgressDiv.className = "discovery-progress-v2";
-      const v2Labels = {
-        search_queries_completed: "已完成搜索查询",
-        list_candidates: "候选岗位",
-        details_selected: "入选详情",
-        details_completed: "已完成详情",
-        assessments_completed: "已完成评估",
-        recommendations: "推荐结果",
+      // 日志
+      const logs = data.logs || [];
+      if (logs.length) {
+        const logBox = document.createElement("div");
+        logBox.className = "discovery-progress-logs";
+        for (const line of logs.slice(-20)) {
+          const ln = document.createElement("div");
+          ln.className = "discovery-progress-log-line";
+          ln.textContent = line;
+          logBox.appendChild(ln);
+        }
+        container.appendChild(logBox);
+      }
+    }
+
+    // 渲染新流程结果
+    function renderPipelineResults(result) {
+      discoveryResultsCache = result.jobs || [];
+      const counts = {
+        total_scraped: result.total_scraped || 0,
+        total_matched: result.total_matched || 0,
+        combinations: result.combinations || 0,
       };
-      for (const [key, label] of Object.entries(v2Labels)) {
-        if (progress[key] != null) {
-          const s = document.createElement("span");
-          s.className = "discovery-progress-v2-item";
-          s.dataset.progressKey = key;
-          s.innerHTML = label + "：<strong>" + progress[key] + "</strong>";
-          v2ProgressDiv.appendChild(s);
-        }
-      }
-      container.appendChild(v2ProgressDiv);
-      // T083: cancel_requested_at 展示（http-api.md L318）。
-      // 仅在 cancel 已请求时展示，避免空字段。
-      if (run.cancel_requested_at) {
-        const cancelDiv = document.createElement("div");
-        cancelDiv.className = "discovery-progress-cancel-requested";
-        cancelDiv.dataset.cancelRequestedAt = run.cancel_requested_at;
-        cancelDiv.textContent = "取消请求时间：" + run.cancel_requested_at;
-        container.appendChild(cancelDiv);
-      }
-      // T083: complete 终态指示（http-api.md L228）。
-      // complete=true 表示终态（succeeded/failed/cancelled/partial）；
-      // complete=false 表示可恢复（interrupted 或活动态）。
-      const completeDiv = document.createElement("div");
-      completeDiv.className = "discovery-progress-complete";
-      completeDiv.dataset.complete = run.complete ? "true" : "false";
-      completeDiv.textContent = run.complete ? "运行已结束" : "运行可恢复";
-      container.appendChild(completeDiv);
-      // 更新时间
-      if (run.updated_at) {
-        const upd = document.createElement("div");
-        upd.className = "discovery-progress-updated";
-        upd.textContent = "最后更新：" + run.updated_at;
-        container.appendChild(upd);
-      }
-      // 按钮状态
-      const cancelBtn = document.getElementById("discoveryCancelBtn");
-      const resumeBtn = document.getElementById("discoveryResumeBtn");
-      const viewResultsBtn = document.getElementById("discoveryViewResultsBtn");
-      const terminal = ["succeeded", "failed", "cancelled"];
-      const resumable = ["interrupted", "partial"];
-      if (cancelBtn) cancelBtn.hidden = terminal.includes(run.status) || resumable.includes(run.status);
-      if (resumeBtn) resumeBtn.hidden = !resumable.includes(run.status);
-      if (viewResultsBtn) viewResultsBtn.hidden = !(run.status === "succeeded" || run.status === "partial");
-    }
-
-    async function cancelDiscoveryRun() {
-      if (!discoveryRunId) return;
-      try {
-        const resp = await api(`${DiscoveryAPI.runs}/${discoveryRunId}/cancel`, { method: "POST" });
-        if (!resp.ok) {
-          const err = await resp.json().catch(() => ({}));
-          setAppNotice("取消失败：" + (err.user_message || resp.status), "error");
-          return;
-        }
-        const run = await resp.json();
-        renderRunProgress(run);
-        setAppNotice("运行已取消", "warning");
-      } catch (_e) {
-        setAppNotice("取消失败，请稍后重试", "error");
-      }
-    }
-
-    async function resumeDiscoveryRun() {
-      if (!discoveryRunId) return;
-      try {
-        const resp = await api(`${DiscoveryAPI.runs}/${discoveryRunId}/resume`, { method: "POST" });
-        if (!resp.ok) {
-          const err = await resp.json().catch(() => ({}));
-          // T083: resume 409 state_conflict 处理（http-api.md L319）。
-          // input_hash 或 policy_version 漂移时后端同步返回 409 + state_conflict，
-          // 前端必须明确告知用户「无法恢复」并展示冲突原因，而非通用错误。
-          if (resp.status === 409 && err.error_code === "state_conflict") {
-            const conflictDiv = document.createElement("div");
-            conflictDiv.className = "discovery-resume-conflict";
-            conflictDiv.dataset.errorCode = "state_conflict";
-            conflictDiv.dataset.httpStatus = "409";
-            conflictDiv.textContent = "恢复冲突：" + (err.user_message || "input_hash 或 policy_version 漂移，无法恢复运行。");
-            const progressContent = document.getElementById("discoveryProgressContent");
-            if (progressContent) {
-              progressContent.innerHTML = "";
-              progressContent.appendChild(conflictDiv);
-            }
-            setAppNotice("无法恢复：" + (err.user_message || "运行状态冲突"), "error");
-            return;
-          }
-          setAppNotice("继续失败：" + (err.user_message || resp.status), "error");
-          return;
-        }
-        const run = await resp.json();
-        renderRunProgress(run);
-        document.getElementById("discoveryResumeBtn").hidden = true;
-        document.getElementById("discoveryCancelBtn").hidden = false;
-        setAppNotice("运行已继续", "success");
-        startDiscoveryPoll(discoveryRunId);
-      } catch (_e) {
-        setAppNotice("继续失败，请稍后重试", "error");
-      }
-    }
-
-    async function loadDiscoveryResults(runId) {
-      if (!runId) return;
-      try {
-        const resp = await api(`${DiscoveryAPI.runs}/${runId}/results?limit=100`);
-        if (!resp.ok) { setAppNotice("结果加载失败", "error"); return; }
-        const data = await resp.json();
-        await loadDiscoveryFeedbackState();
-        renderResults(data.items || [], data.counts || {});
-      } catch (_e) {
-        setAppNotice("结果加载失败，请稍后重试", "error");
-      }
+      renderResults(discoveryResultsCache, counts);
+      switchToDiscovery("results");
     }
 
     // ------------------------------------------------------------------
@@ -4127,172 +3373,39 @@
     const cardRegistry = new Map(); // job_id -> DOM element, stable card identity
     let progressivePollTimer = null;
 
-    function startProgressivePoll(runId) {
-      if (progressivePollTimer) clearTimeout(progressivePollTimer);
-      const poll = async () => {
-        try {
-          const url = `${DiscoveryAPI.runs}/${runId}/results?limit=100&after_revision=${lastResultRevision}`;
-          const resp = await api(url);
-          if (!resp.ok) { progressivePollTimer = setTimeout(poll, 3000); return; }
-          const data = await resp.json();
-          // revision 不变时跳过重绘 (changed=false short-circuit)
-          if (data.changed === false) {
-            progressivePollTimer = setTimeout(poll, 3000);
-            return;
-          }
-          lastResultRevision = data.revision || lastResultRevision;
-          renderProgressiveResults(data);
-          const terminal = ["succeeded", "failed", "cancelled", "partial"];
-          if (data.complete || terminal.includes(data.run_status)) {
-            progressivePollTimer = null;
-            return;
-          }
-          progressivePollTimer = setTimeout(poll, 3000);
-        } catch (_e) {
-          progressivePollTimer = setTimeout(poll, 5000);
-        }
-      };
-      progressivePollTimer = setTimeout(poll, 3000);
-    }
-
-    function pollProgressiveResults(runId) {
-      startProgressivePoll(runId);
-    }
-
-    function renderProgressiveResults(data) {
+    function renderResults(items, counts) {
       const list = document.getElementById("discoveryResultsList");
       if (!list) return;
-      const items = data.items || [];
-      const runStatus = data.run_status || "";
-      // Track which job_ids are present in this batch.
-      const presentIds = new Set(items.map(j => j.job_id));
-      // Explainable disappearance: mark cards no longer present.
-      for (const [jobId, card] of cardRegistry.entries()) {
-        if (!presentIds.has(jobId)) {
-          const reason = card.dataset.disappearanceReason || "budget_deferred";
-          const reasonEl = card.querySelector(".disappearance-reason");
-          if (!reasonEl) {
-            const el = document.createElement("div");
-            el.className = "disappearance-reason";
-            el.textContent = "已移出结果：" + (reason === "budget_deferred" ? "预算限制" : reason);
-            card.appendChild(el);
-          }
-          card.classList.add("discovery-card-hidden");
-        }
+      discoveryResultsCache = items.map(item => ({
+        job_id: item.job_id || item.id || "",
+        title: item.title || item.job_title || "",
+        salary: item.salary || "",
+        location: item.location || "",
+        experience: item.experience || "",
+        degree: item.degree || "",
+        jd: item.jd || item.jd_excerpt || "",
+        source_url: item.source_url || item.canonical_url || "",
+        // 卡片展示 + 感兴趣标记所需字段（列表 API 返回，JD 除外）
+        company: item.company || item.boss_name || "",
+        job_link: item.job_link || item.source_url || item.canonical_url || "",
+        company_scale: item.company_scale || "",
+        company_stage: item.company_stage || "",
+        company_industry: item.company_industry || "",
+        skills: item.skills || "",
+        welfare: item.welfare || "",
+        job_labels: item.job_labels || "",
+        tags: item.tags || "",
+      }));
+      // 顶部统计摘要（占满网格整行）
+      const c = counts || {};
+      let stats = list.querySelector(".discovery-results-stats");
+      if (!stats) {
+        stats = document.createElement("div");
+        stats.className = "discovery-results-stats";
+        stats.style.gridColumn = "1 / -1";
+        list.prepend(stats);
       }
-      // Render or update cards with stable identity keyed by data-job-id.
-      for (const job of items) {
-        const jobId = job.job_id || "";
-        let card = cardRegistry.get(jobId);
-        if (!card) {
-          card = createDiscoveryCard(job);
-          card.setAttribute("data-job-id", jobId);
-          cardRegistry.set(jobId, card);
-          list.appendChild(card);
-        } else {
-          // Update existing card in place (stable identity, no redraw).
-          card.classList.remove("discovery-card-hidden");
-          const badge = card.querySelector(".discovery-job-card-badge");
-          if (badge && job.category) {
-            const catLabels = {
-              high_match: "高度匹配", adjacent_match: "邻近匹配", growth_match: "发展匹配",
-              needs_review: "待确认", not_suitable: "不适合",
-            };
-            badge.textContent = catLabels[job.category] || job.category;
-          }
-        }
-      }
-      // Show non-terminal status indicator.
-      if (runStatus && runStatus !== "succeeded" && runStatus !== "failed") {
-        let indicator = document.getElementById("discoveryProgressiveStatus");
-        if (!indicator) {
-          indicator = document.createElement("div");
-          indicator.id = "discoveryProgressiveStatus";
-          indicator.className = "discovery-progressive-status";
-          list.parentNode.insertBefore(indicator, list);
-        }
-        indicator.textContent = "运行中（" + runStatus + "），结果持续更新…";
-      }
-    }
-
-    function renderResults(items, counts) {
-      const dirSelector = document.getElementById("discoveryDirectionSelector");
-      const catFilter = document.getElementById("discoveryCategoryFilter");
-      const list = document.getElementById("discoveryResultsList");
-      if (!dirSelector || !catFilter || !list) return;
-      // 方向选择器
-      dirSelector.innerHTML = "";
-      const allBtn = document.createElement("button");
-      allBtn.className = "discovery-direction-tab active";
-      allBtn.textContent = "全部方向";
-      allBtn.dataset.directionId = "";
-      allBtn.onclick = () => {
-        discoveryCurrentDirectionId = "";
-        filterDiscoveryResults();
-      };
-      dirSelector.appendChild(allBtn);
-      for (const d of discoveryDirections) {
-        const btn = document.createElement("button");
-        btn.className = "discovery-direction-tab";
-        btn.textContent = d.name;
-        btn.dataset.directionId = d.id;
-        btn.onclick = () => {
-          discoveryCurrentDirectionId = d.id;
-          filterDiscoveryResults();
-        };
-        dirSelector.appendChild(btn);
-      }
-      const directionFeedbackSelect = document.getElementById("discoveryFeedbackDirection");
-      if (directionFeedbackSelect) {
-        directionFeedbackSelect.innerHTML = "";
-        for (const d of discoveryDirections) {
-          const option = document.createElement("option");
-          option.value = d.id;
-          option.textContent = d.name;
-          directionFeedbackSelect.appendChild(option);
-        }
-      }
-      // 分类筛选器
-      catFilter.innerHTML = "";
-      const categories = [
-        { key: "", label: "全部" },
-        { key: "high_match", label: "高度匹配" },
-        { key: "adjacent_match", label: "邻近匹配" },
-        { key: "growth_match", label: "发展匹配" },
-        { key: "needs_review", label: "待确认" },
-        { key: "not_suitable", label: "不适合" },
-        { key: "interested", label: "感兴趣" },
-        { key: "trash", label: "垃圾桶" },
-      ];
-      for (const cat of categories) {
-        const btn = document.createElement("button");
-        btn.className = "discovery-category-tab" + (cat.key === discoveryCurrentCategory ? " active" : "");
-        btn.textContent = cat.label;
-        btn.dataset.category = cat.key;
-        if (cat.key) {
-          const c = document.createElement("span");
-          c.className = "count";
-          c.textContent = String(counts[cat.key] || 0);
-          btn.appendChild(c);
-        }
-        btn.onclick = () => {
-          discoveryCurrentCategory = cat.key;
-          filterDiscoveryResults();
-        };
-        catFilter.appendChild(btn);
-      }
-      // 渲染岗位卡片
-      list.innerHTML = "";
-      discoveryResultsCache = items.map(item => {
-        const primary = item.primary_assessment || {};
-        return {
-          ...item,
-          category: item.category || primary.category || "needs_review",
-          direction_id: item.direction_id || primary.direction_id || "",
-          match_score: item.match_score != null ? item.match_score : primary.match_score,
-          gaps: item.gaps || primary.gaps || [],
-        };
-      });
+      stats.textContent = `共抓取 ${c.total_scraped || 0} 条，匹配 ${c.total_matched || 0} 条，组合 ${c.combinations || 0} 个`;
       filterDiscoveryResults();
     }
 
@@ -4307,50 +3420,19 @@
     function filterDiscoveryResults() {
       const list = document.getElementById("discoveryResultsList");
       if (!list) return;
-      const stateCounts = { interested: 0, trash: 0 };
-      for (const item of discoveryResultsCache) {
-        const action = (discoveryFeedbackForJob(item.job_id) || {}).action;
-        if (action === "interested") stateCounts.interested += 1;
-        if (action === "not_interested") stateCounts.trash += 1;
-      }
-      for (const key of ["interested", "trash"]) {
-        const count = document.querySelector(`.discovery-category-tab[data-category="${key}"] .count`);
-        if (count) count.textContent = String(stateCounts[key]);
-      }
-      // 更新方向 tab active
-      document.querySelectorAll(".discovery-direction-tab").forEach(t => {
-        const isActive = (t.dataset.directionId || "") === discoveryCurrentDirectionId;
-        t.classList.toggle("active", isActive);
-      });
-      // 更新分类 tab active
-      document.querySelectorAll(".discovery-category-tab").forEach(t => {
-        const isActive = (t.dataset.category || "") === discoveryCurrentCategory;
-        t.classList.toggle("active", isActive);
-      });
-      // 筛选
-      let filtered = discoveryResultsCache;
-      if (discoveryCurrentDirectionId) {
-        filtered = filtered.filter(i => i.direction_id === discoveryCurrentDirectionId);
-      }
-      if (discoveryCurrentCategory === "interested") {
-        filtered = filtered.filter(i => (discoveryFeedbackForJob(i.job_id) || {}).action === "interested");
-      } else if (discoveryCurrentCategory === "trash") {
-        filtered = filtered.filter(i => (discoveryFeedbackForJob(i.job_id) || {}).action === "not_interested");
-      } else if (discoveryCurrentCategory) {
-        filtered = filtered.filter(i => i.category === discoveryCurrentCategory);
-        filtered = filtered.filter(i => (discoveryFeedbackForJob(i.job_id) || {}).action !== "not_interested");
-      } else {
-        filtered = filtered.filter(i => (discoveryFeedbackForJob(i.job_id) || {}).action !== "not_interested");
-      }
+      // 保留顶部统计摘要，清空其余内容
+      const stats = list.querySelector(".discovery-results-stats");
       list.innerHTML = "";
-      if (!filtered.length) {
+      if (stats) list.appendChild(stats);
+      if (!discoveryResultsCache.length) {
         const empty = document.createElement("div");
         empty.className = "empty-state";
+        empty.style.gridColumn = "1 / -1";
         empty.textContent = "暂无岗位";
         list.appendChild(empty);
         return;
       }
-      for (const item of filtered) {
+      for (const item of discoveryResultsCache) {
         list.appendChild(createDiscoveryCard(item));
       }
     }
@@ -4360,156 +3442,70 @@
       card.className = "discovery-job-card";
       const jobId = job.job_id || job.id || "";
       card.dataset.jobId = jobId;
-      // 头部
-      const header = document.createElement("div");
-      header.className = "discovery-job-card-header";
-      const titleBlock = document.createElement("div");
-      titleBlock.className = "discovery-job-card-title-block";
+      const safeUrl = job.source_url || job.job_link || "";
+
+      // 区域 1：标题
       const title = document.createElement("div");
       title.className = "discovery-job-card-title";
-      title.textContent = job.title || job.job_title || "未知岗位";
-      titleBlock.appendChild(title);
-      const company = document.createElement("div");
-      company.className = "discovery-job-card-company";
-      company.textContent = job.company || job.company_name || "—";
-      titleBlock.appendChild(company);
-      const salary = document.createElement("div");
+      title.textContent = job.title || "未知岗位";
+      if (safeUrl) {
+        title.style.cursor = "pointer";
+        title.title = "点击在新标签打开 BOSS 直聘";
+        title.onclick = (event) => openDiscoveryJobLink(event, safeUrl);
+      }
+      card.appendChild(title);
+
+      // 区域 2：薪资 · 城市 · 公司
+      const subtitle = document.createElement("div");
+      subtitle.className = "discovery-job-card-subtitle";
+      const salary = document.createElement("span");
       salary.className = "discovery-job-card-salary";
-      salary.textContent = job.salary || "—";
-      header.append(titleBlock, salary);
-      card.appendChild(header);
-      // 元信息
-      const meta = document.createElement("div");
-      meta.className = "discovery-job-card-meta";
-      if (job.location) {
-        const s = document.createElement("span");
-        s.textContent = "📍 " + job.location;
-        meta.appendChild(s);
+      salary.textContent = job.salary || "薪资面议";
+      subtitle.appendChild(salary);
+      const submeta = [job.location || "", job.company || ""].filter(Boolean).join(" · ");
+      if (submeta) {
+        const meta = document.createElement("span");
+        meta.className = "discovery-job-card-submeta";
+        meta.textContent = submeta;
+        subtitle.appendChild(meta);
       }
-      if (job.experience) {
-        const s = document.createElement("span");
-        s.textContent = "经验 " + job.experience;
-        meta.appendChild(s);
+      card.appendChild(subtitle);
+
+      // 区域 3：技能/福利/标签摘要（列表 API 现成字段）
+      const tagBits = [job.skills, job.job_labels, job.tags, job.welfare]
+        .map(s => (s || "").trim()).filter(Boolean);
+      if (tagBits.length) {
+        const tagline = document.createElement("div");
+        tagline.className = "discovery-job-card-tagline";
+        tagline.textContent = tagBits.join(" | ");
+        card.appendChild(tagline);
       }
-      if (job.degree) {
-        const s = document.createElement("span");
-        s.textContent = "学历 " + job.degree;
-        meta.appendChild(s);
+
+      // 区域 4：JD 展示区（列表不含 JD，按需抓取）
+      const jdBox = document.createElement("div");
+      jdBox.className = "discovery-job-card-jd";
+      if (job.jd) {
+        jdBox.classList.add("loaded");
+        jdBox.textContent = job.jd;
+      } else {
+        buildJdPlaceholder(job, jdBox);
       }
-      if (meta.children.length) card.appendChild(meta);
-      // 徽章
-      const badges = document.createElement("div");
-      badges.className = "discovery-job-card-badges";
-      if (job.category) {
-        const b = document.createElement("span");
-        b.className = "discovery-job-card-badge cat-" + job.category;
-        const catLabels = {
-          high_match: "高度匹配", adjacent_match: "邻近匹配", growth_match: "发展匹配",
-          needs_review: "待确认", not_suitable: "不适合",
-        };
-        b.textContent = catLabels[job.category] || job.category;
-        badges.appendChild(b);
-      }
-      if (job.match_score != null) {
-        const b = document.createElement("span");
-        b.className = "discovery-job-card-badge";
-        b.textContent = "匹配 " + job.match_score;
-        badges.appendChild(b);
-      }
-      if (badges.children.length) card.appendChild(badges);
-      if (job.completeness) {
-        const comp = document.createElement("div");
-        comp.className = "discovery-job-card-completeness";
-        comp.textContent = "完整度：" + job.completeness;
-        card.appendChild(comp);
-      }
-      // T064: JD 摘要
-      const jdText = job.jd || job.jd_excerpt || "";
-      if (jdText) {
-        const jd = document.createElement("div");
-        jd.className = "discovery-job-card-jd";
-        jd.textContent = jdText.length > 200 ? jdText.slice(0, 200) + "…" : jdText;
-        card.appendChild(jd);
-      }
-      // T064: 来源链接和抓取时间
-      const sourceLine = document.createElement("div");
-      sourceLine.className = "discovery-job-card-source";
-      if (job.source_url) {
-        const srcLink = document.createElement("a");
-        srcLink.href = job.source_url;
-        srcLink.target = "_blank";
-        srcLink.rel = "noopener";
-        srcLink.textContent = "原始详情";
-        sourceLine.appendChild(srcLink);
-      }
-      if (job.fetched_at) {
-        const fetched = document.createElement("span");
-        fetched.className = "discovery-job-card-fetched";
-        fetched.textContent = "抓取于 " + job.fetched_at;
-        sourceLine.appendChild(fetched);
-      }
-      if (sourceLine.children.length) card.appendChild(sourceLine);
-      // T064: 排序原因 (sort_components)
-      if (job.sort_components) {
-        const sortInfo = document.createElement("div");
-        sortInfo.className = "discovery-job-card-sort";
-        sortInfo.dataset.sortComponents = JSON.stringify(job.sort_components);
-        sortInfo.textContent = "排序依据：类别 " + (job.sort_components.category_rank ?? "—") +
-          " / 分数 " + (job.sort_components.match_score ?? "—") +
-          " / 置信度 " + (job.sort_components.confidence ?? "—");
-        card.appendChild(sortInfo);
-      }
-      // 解释
-      const gaps = job.gaps_json || job.gaps || [];
-      const explanation = job.explanation || null;
-      if (explanation || (gaps && gaps.length)) {
-        const expl = document.createElement("div");
-        expl.className = "discovery-job-card-explanation";
-        if (explanation && explanation.positive && explanation.positive.length) {
-          const strong = document.createElement("strong");
-          strong.textContent = "正向依据：";
-          expl.appendChild(strong);
-          const posList = document.createElement("ul");
-          posList.className = "discovery-positive-list";
-          for (const p of explanation.positive) {
-            const li = document.createElement("li");
-            li.textContent = (p.dimension || "维度") + "（分数 " + (p.score ?? "—") + "）";
-            // T064: 双方证据 refs
-            if (p.candidate_evidence_refs && p.candidate_evidence_refs.length) {
-              const cRefs = document.createElement("span");
-              cRefs.className = "candidate_evidence_refs";
-              cRefs.textContent = " [候选人证据: " + p.candidate_evidence_refs.join(", ") + "]";
-              li.appendChild(cRefs);
-            }
-            if (p.job_evidence_refs && p.job_evidence_refs.length) {
-              const jRefs = document.createElement("span");
-              jRefs.className = "job_evidence_refs";
-              jRefs.textContent = " [岗位证据: " + p.job_evidence_refs.join(", ") + "]";
-              li.appendChild(jRefs);
-            }
-            posList.appendChild(li);
-          }
-          expl.appendChild(posList);
-        } else if (typeof job.explanation === "string" && job.explanation) {
-          const strong = document.createElement("strong");
-          strong.textContent = "依据：";
-          expl.appendChild(strong);
-          expl.appendChild(document.createTextNode(job.explanation));
-        }
-        const explGaps = (explanation && explanation.gaps) || gaps;
-        if (explGaps && explGaps.length) {
-          const gapDiv = document.createElement("div");
-          gapDiv.className = "discovery-job-card-gaps";
-          const gapTexts = explGaps.map(g => typeof g === "string" ? g : (g.text || ""));
-          gapDiv.textContent = "缺口：" + gapTexts.filter(Boolean).join("；");
-          expl.appendChild(gapDiv);
-        }
-        card.appendChild(expl);
-      }
-      // 操作
+      card.appendChild(jdBox);
+
+      // 区域 5：感兴趣 / 不感兴趣 + 查看详情
       const actions = document.createElement("div");
       actions.className = "discovery-job-card-actions";
-      const safeUrl = job.source_url || job.canonical_url || "";
+      const interestBtn = document.createElement("button");
+      interestBtn.type = "button";
+      interestBtn.className = "card-btn interested";
+      interestBtn.textContent = "感兴趣";
+      interestBtn.onclick = () => markPipelineInterest(job, interestBtn);
+      const rejectBtn = document.createElement("button");
+      rejectBtn.type = "button";
+      rejectBtn.className = "card-btn not_interested";
+      rejectBtn.textContent = "不感兴趣";
+      rejectBtn.onclick = () => markPipelineReject(job, rejectBtn, card);
+      actions.append(interestBtn, rejectBtn);
       if (safeUrl) {
         const link = document.createElement("a");
         link.className = "card-link";
@@ -4518,46 +3514,136 @@
         link.onclick = (event) => openDiscoveryJobLink(event, safeUrl);
         actions.appendChild(link);
       }
-      const activeFeedback = discoveryFeedbackForJob(jobId);
-      if (activeFeedback && activeFeedback.action === "not_interested") {
-        const restoreBtn = document.createElement("button");
-        restoreBtn.type = "button";
-        restoreBtn.className = "card-btn interested";
-        restoreBtn.textContent = "恢复";
-        restoreBtn.onclick = (event) => { event.preventDefault(); event.stopPropagation(); restoreDiscoveryJob(jobId); };
-        actions.appendChild(restoreBtn);
-      } else {
-        const interestBtn = document.createElement("button");
-        interestBtn.type = "button";
-        interestBtn.className = "card-btn interested";
-        interestBtn.textContent = activeFeedback && activeFeedback.action === "interested" ? "取消感兴趣" : "感兴趣";
-        interestBtn.onclick = (event) => {
-          event.preventDefault(); event.stopPropagation();
-          if (activeFeedback && activeFeedback.action === "interested") revokeFeedback(activeFeedback.id);
-          else markDiscoveryInterest(jobId);
-        };
-        actions.appendChild(interestBtn);
-        const reasonSelect = document.createElement("select");
-        reasonSelect.className = "discovery-feedback-reason";
-        reasonSelect.setAttribute("aria-label", "不感兴趣原因");
-        reasonSelect.innerHTML = '<option value="job_not_interested">岗位不合适</option>' +
-          '<option value="company_unsuitable">公司不合适</option>' +
-          '<option value="location_unsuitable">地点不合适</option>' +
-          '<option value="salary_unsuitable">薪资不合适</option>' +
-          '<option value="skill_assessment_inaccurate">技能判断不准确</option>';
-        actions.appendChild(reasonSelect);
-        const rejectBtn = document.createElement("button");
-        rejectBtn.type = "button";
-        rejectBtn.className = "card-btn not_interested";
-        rejectBtn.textContent = "不感兴趣 / 移入垃圾桶";
-        rejectBtn.onclick = (event) => {
-          event.preventDefault(); event.stopPropagation();
-          markDiscoveryReject(jobId, reasonSelect.value);
-        };
-        actions.appendChild(rejectBtn);
-      }
       card.appendChild(actions);
+
+      // 已标记状态回显（重渲染时保留）
+      if (job._marked === "interested") {
+        interestBtn.textContent = "已标记感兴趣";
+        interestBtn.disabled = true;
+      } else if (job._marked === "rejected") {
+        card.classList.add("marked-rejected");
+      }
       return card;
+    }
+
+    // JD 展示区占位：一个"加载完整 JD"按钮 + 提示
+    function buildJdPlaceholder(job, jdBox) {
+      jdBox.classList.add("placeholder");
+      const loadBtn = document.createElement("button");
+      loadBtn.type = "button";
+      loadBtn.className = "jd-load-btn";
+      loadBtn.textContent = "加载完整 JD";
+      loadBtn.onclick = () => loadJobDetailOnDemand(job, jdBox);
+      const hint = document.createElement("span");
+      hint.className = "jd-load-hint";
+      hint.textContent = "列表不含 JD，点击按需抓取";
+      jdBox.append(loadBtn, hint);
+    }
+
+    // 按需抓取 JD：调 /api/job-detail（后端自动重开调试浏览器），成功后写回缓存
+    async function loadJobDetailOnDemand(job, jdBox) {
+      jdBox.classList.remove("placeholder");
+      jdBox.classList.add("loading");
+      jdBox.textContent = "正在抓取 JD，请稍候（约 5~20 秒）…";
+      try {
+        const resp = await api("/api/job-detail", {
+          method: "POST",
+          json: { job_id: job.job_id, source_url: job.source_url || job.job_link },
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || !data.ok) {
+          throw new Error(data.error || ("HTTP " + resp.status));
+        }
+        job.jd = data.jd; // 写回 discoveryResultsCache，重渲染时保留
+        jdBox.classList.remove("loading");
+        jdBox.classList.add("loaded");
+        jdBox.textContent = data.jd;
+      } catch (e) {
+        jdBox.classList.remove("loading");
+        jdBox.innerHTML = "";
+        buildJdPlaceholder(job, jdBox);
+        setAppNotice("JD 加载失败：" + (e && e.message ? e.message : e), "error");
+      }
+    }
+
+    // 确保有可用画像：优先用已选中的，其次加载第一个，最后自动建默认画像
+    async function ensureProfileForFeedback() {
+      if (currentProfileId) return currentProfileId;
+      try {
+        const resp = await api(API.profiles);
+        const data = await resp.json();
+        if (data.profiles && data.profiles.length) {
+          currentProfileId = data.profiles[0].id;
+          return currentProfileId;
+        }
+      } catch (_e) { /* 继续走自动创建 */ }
+      try {
+        const resp = await api(API.profiles, {
+          method: "POST", json: { name: "默认画像", confirmed_fields: {} },
+        });
+        if (resp.ok) {
+          const created = await resp.json();
+          currentProfileId = created.id;
+          return currentProfileId;
+        }
+      } catch (_e) { /* 返回空，调用方提示失败 */ }
+      return "";
+    }
+
+    function _pipelineFeedbackPayload(job, profileId) {
+      return {
+        profile_id: profileId,
+        job: {
+          job_id: job.job_id,
+          title: job.title,
+          salary: job.salary,
+          location: job.location,
+          company: job.company,
+          job_link: job.job_link || job.source_url,
+        },
+      };
+    }
+
+    async function markPipelineInterest(job, btn) {
+      const profileId = await ensureProfileForFeedback();
+      if (!profileId) { setAppNotice("无法确定画像，标记失败", "error"); return; }
+      btn.disabled = true;
+      try {
+        const resp = await api("/api/pipeline/jobs/interest", {
+          method: "POST", json: _pipelineFeedbackPayload(job, profileId),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.user_message || err.error || ("HTTP " + resp.status));
+        }
+        job._marked = "interested";
+        btn.textContent = "已标记感兴趣";
+        setAppNotice("已标记感兴趣，可在筛选工作台查看", "success");
+      } catch (e) {
+        btn.disabled = false;
+        setAppNotice("标记失败：" + (e && e.message ? e.message : e), "error");
+      }
+    }
+
+    async function markPipelineReject(job, btn, card) {
+      const profileId = await ensureProfileForFeedback();
+      if (!profileId) { setAppNotice("无法确定画像，标记失败", "error"); return; }
+      btn.disabled = true;
+      try {
+        const resp = await api("/api/pipeline/jobs/reject", {
+          method: "POST", json: _pipelineFeedbackPayload(job, profileId),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.user_message || err.error || ("HTTP " + resp.status));
+        }
+        job._marked = "rejected";
+        card.classList.add("marked-rejected");
+        setAppNotice("已标记不感兴趣", "info");
+      } catch (e) {
+        btn.disabled = false;
+        setAppNotice("标记失败：" + (e && e.message ? e.message : e), "error");
+      }
     }
 
     async function markDiscoveryInterest(jobId) {
@@ -4711,30 +3797,17 @@
     }
 
     async function restoreDiscoveryRun() {
-      const saved = readDiscoveryRun();
-      if (!saved || saved.profile_id !== currentProfileId) {
-        if (saved) clearDiscoveryRun();
-        return;
-      }
-      const runId = saved.run_id;
+      // 新流程：从 /api/latest-pipeline-result 恢复上次成功运行的结果
       try {
-        const resp = await api(`${DiscoveryAPI.runs}/${runId}`);
-        if (!resp.ok) { clearDiscoveryRun(); return; }
-        const run = await resp.json();
-        discoveryRunId = runId;
-        const terminal = ["succeeded", "failed", "cancelled"];
-        if (!terminal.includes(run.status)) {
-          switchToDiscovery("progress");
-          renderRunProgress(run);
-          startDiscoveryPoll(runId);
-        } else if (run.status === "succeeded" || run.status === "partial") {
-          switchToDiscovery("progress");
-          renderRunProgress(run);
-          await loadDiscoveryResults(runId);
-          document.querySelector('.discovery-step-indicator[data-step="progress"]').classList.add("done");
-        }
+        const resp = await api("/api/latest-pipeline-result");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data || !data.result) return;
+        renderPipelineResults(data.result);
+        document.querySelector('.discovery-step-indicator[data-step="progress"]').classList.add("done");
+        document.querySelector('.discovery-step-indicator[data-step="review"]').classList.add("done");
       } catch (_e) {
-        clearDiscoveryRun();
+        // 恢复失败静默处理，用户可重新上传
       }
     }
 

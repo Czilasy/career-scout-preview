@@ -3060,6 +3060,109 @@ def create_app(config=None):
             },
         })
 
+    # ------------------------------------------------------------------
+    # Pipeline 结果增强：按需抓 JD 详情 + 感兴趣/不感兴趣（接入筛选工作台）
+    # ------------------------------------------------------------------
+    _job_detail_lock = threading.Lock()
+
+    @app.route("/api/job-detail", methods=["POST"])
+    def job_detail():
+        """按需抓取单个岗位的 JD 正文（pipeline 列表结果不含 JD）。
+
+        结果页卡片点"加载完整 JD"时调用：pipeline 运行完会自动关闭调试浏览器，
+        这里先 ensure_chrome_ready 自动重新拉起，再经 CDP 打开详情页提取 JD。
+        单次约 5~20s；用锁串行化并发请求，避免多个抓取争抢同一个 CDP。
+        """
+        from webui.pipeline_exec import ensure_chrome_ready
+
+        raw = request.get_json(silent=True) or {}
+        job_id = str(raw.get("job_id") or "").strip()
+        source_url = normalize_job_link(
+            raw.get("source_url") or raw.get("job_link") or ""
+        )
+        if not job_id or not source_url:
+            return jsonify({"ok": False, "error": "缺少 job_id 或 source_url"}), 400
+
+        if not ensure_chrome_ready():
+            return jsonify({"ok": False,
+                            "error": "调试浏览器未能就绪，无法抓取详情"}), 503
+
+        source = _make_discovery_source()
+        if source is None:
+            return jsonify({"ok": False, "error": "抓取源不可用"}), 500
+
+        job = {"job_id": job_id, "source_url": source_url, "job_link": source_url}
+        detail_path = str(
+            Path(app.config["RESULT_DIR"]) / f"job_detail_{job_id}.json"
+        )
+        with _job_detail_lock:
+            outcome = source.fetch_detail(job, detail_output_path=detail_path)
+        if not outcome.ok:
+            return jsonify({"ok": False,
+                            "error": f"详情抓取失败（{outcome.failed_code}），请确认已登录 BOSS 后重试"}), 502
+        jd = str((outcome.detail or {}).get("jd", "")).strip()
+        if not jd:
+            return jsonify({"ok": False,
+                            "error": "详情页未提取到 JD 正文，岗位可能已下架"}), 502
+        return jsonify({"ok": True, "jd": jd})
+
+    def _save_pipeline_job_to_store(job):
+        """把 pipeline 结果岗位落库到 jobs 表，返回 jobs 记录（链接不安全返回 None）。"""
+        canonical_url = normalize_job_link(
+            job.get("job_link") or job.get("source_url") or ""
+        )
+        if not canonical_url:
+            return None
+        company = job.get("boss_name") or job.get("company") or ""
+        return store.save_job(
+            canonical_url, canonical_url,
+            job.get("title", ""), company,
+            job.get("salary", ""), job.get("location", ""), "",
+        )
+
+    @app.route("/api/pipeline/jobs/interest", methods=["POST"])
+    def pipeline_mark_interest():
+        """标记 pipeline 结果岗位为感兴趣：save_job + profile_jobs(interested)。
+
+        复用筛选工作台的持久感兴趣区——标记后可在工作台"感兴趣"区看到
+        （list_screening_interested 不按 run_id 过滤）。
+        """
+        raw = request.get_json(silent=True) or {}
+        profile_id = raw.get("profile_id")
+        job = raw.get("job") or {}
+        if not profile_id:
+            raise ValueError("profile_id 不能为空")
+        try:
+            store.get_profile(profile_id)
+        except KeyError:
+            return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
+        saved = _save_pipeline_job_to_store(job)
+        if not saved:
+            return jsonify({"error_code": "invalid_link", "user_message": "岗位链接不安全"}), 400
+        store.mark_screening_interest(profile_id, saved["id"], run_id=None)
+        return jsonify({"interest_state": "interested", "job_id": saved["id"]})
+
+    @app.route("/api/pipeline/jobs/reject", methods=["POST"])
+    def pipeline_mark_reject():
+        """标记 pipeline 结果岗位为不感兴趣：save_job + profile_jobs(deleted)。
+
+        标记后进入筛选工作台垃圾桶区。
+        """
+        raw = request.get_json(silent=True) or {}
+        profile_id = raw.get("profile_id")
+        job = raw.get("job") or {}
+        if not profile_id:
+            raise ValueError("profile_id 不能为空")
+        try:
+            store.get_profile(profile_id)
+        except KeyError:
+            return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
+        saved = _save_pipeline_job_to_store(job)
+        if not saved:
+            return jsonify({"error_code": "invalid_link", "user_message": "岗位链接不安全"}), 400
+        store.mark_screening_reject(profile_id, saved["id"], run_id=None)
+        return jsonify({"reject_state": "rejected", "job_id": saved["id"]})
+
     return app
 
 
