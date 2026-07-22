@@ -381,9 +381,31 @@ class VueWebUIBrowserTests(unittest.TestCase):
 
     def test_large_result_set_is_batched_with_one_detail_panel(self):
         self._show_latest_results([_job(index) for index in range(65)])
+        self.assertEqual(self.page.locator(".result-overview").count(), 0)
         self.assertEqual(self.page.locator('[data-testid="job-row"]').count(), 30)
         self.assertEqual(self.page.locator('[data-testid="job-detail"]').count(), 1)
         self.assertIn("已加载 30", self.page.locator(".job-list-heading").inner_text())
+
+        layout = self.page.evaluate("""() => {
+            const list = document.querySelector('.job-list');
+            const workspace = document.querySelector('.job-workspace');
+            return {
+                bodyOverflow: getComputedStyle(document.body).overflow,
+                documentClientHeight: document.documentElement.clientHeight,
+                documentScrollHeight: document.documentElement.scrollHeight,
+                listClientHeight: list.clientHeight,
+                listScrollHeight: list.scrollHeight,
+                workspaceBottom: workspace.getBoundingClientRect().bottom,
+                viewportHeight: window.innerHeight,
+            };
+        }""")
+        self.assertEqual(layout["bodyOverflow"], "hidden")
+        self.assertLessEqual(
+            layout["documentScrollHeight"], layout["documentClientHeight"] + 1,
+        )
+        self.assertGreater(layout["listScrollHeight"], layout["listClientHeight"])
+        self.assertLessEqual(layout["workspaceBottom"], layout["viewportHeight"] + 1)
+
         self.page.locator('[data-testid="load-more"]').click()
         self.assertEqual(self.page.locator('[data-testid="job-row"]').count(), 60)
         self.assertEqual(self.page.locator('[data-testid="job-detail"]').count(), 1)

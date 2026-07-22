@@ -67,6 +67,10 @@ class VueDiscoveryFrontendTests(unittest.TestCase):
         self.assertIn('data-testid="load-more"', JOBS)
         self.assertEqual(JOBS.count('data-testid="job-detail"'), 1)
 
+    def test_results_use_category_tabs_without_duplicate_summary_cards(self):
+        self.assertNotIn('class="result-overview"', DISCOVERY)
+        self.assertIn("'results-view': activeStep === 'results'", DISCOVERY)
+
     def test_feedback_preserves_persistence_boundary(self):
         self.assertIn('"/api/pipeline/jobs/interest"', DISCOVERY)
         self.assertIn('"/api/pipeline/jobs/interest/cancel"', DISCOVERY)

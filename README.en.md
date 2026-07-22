@@ -71,7 +71,7 @@ npm run build
 
 1. **Four-step job discovery**: The workflow stays in this order: upload and analyze the résumé → confirm keywords/cities and scrape broadly → confirm six filter groups and run Stage A, fetch JDs, then run Stage B → review results. Scraping and AI screening remain two separate user actions.
 2. **Failures never masquerade as success**: A Stage B provider failure or missing verdict routes the job to Needs Review instead of defaulting to Match. Each AI screening request is bound to the exact completed scrape task ID to prevent cross-run result mix-ups.
-3. **Large-result workspace**: Match, Not Match, Needs Review, and Screened Out are separate views. The UI initially renders 30 rows, loads more on demand, and creates only one detail panel instead of hundreds of full-JD DOM trees.
+3. **Large-result workspace**: Match, Not Match, Needs Review, and Screened Out live directly in the category tabs without duplicate summary cards. On desktop, the result workspace fits one viewport and only the job list or an oversized detail pane scrolls. The UI initially renders 30 rows, loads more on demand, and creates only one detail panel.
 4. **Explicit feedback boundary**: In Job Discovery, Interested persists to the current profile; Not Interested stays in memory for the current run and is revocable. JD retry updates only the JD and never reruns AI or changes the existing verdict.
 5. **Screening Workbench**: Keeps seven filter fields, page/detail limits, résumé-based AI suggestions, run cancel/resume, temporary match/mismatch/pending zones, persistent interested/trash zones, and 30-day cleanup for temporary runs.
 

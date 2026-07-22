@@ -521,7 +521,11 @@ async function retryJd(job: JobItem) {
 </script>
 
 <template>
-  <main class="view-shell" data-testid="discovery-view">
+  <main
+    class="view-shell"
+    :class="{ 'results-view': activeStep === 'results' }"
+    data-testid="discovery-view"
+  >
     <StepNavigator
       :steps="steps"
       :active-step="activeStep"
@@ -688,13 +692,6 @@ async function retryJd(job: JobItem) {
       </section>
 
       <section v-else class="results-stage">
-        <div class="result-overview">
-          <div><span>抓取</span><strong>{{ pipelineResult?.total_scraped || 0 }}</strong></div>
-          <div><span>保留</span><strong>{{ pipelineResult?.total_kept || groups.matched.length + groups.unmatched.length + groups.uncertain.length }}</strong></div>
-          <div><span>匹配</span><strong>{{ pipelineResult?.total_matched || groups.matched.length }}</strong></div>
-          <div><span>筛除</span><strong>{{ pipelineResult?.total_dropped || groups.dropped.length }}</strong></div>
-        </div>
-
         <div class="result-tabs" role="tablist" aria-label="AI 筛选结果分类">
           <button
             v-for="tab in resultTabs"

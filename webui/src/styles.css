@@ -1053,32 +1053,6 @@ button:disabled {
   line-height: 1.65;
 }
 
-.result-overview {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.result-overview > div {
-  display: flex;
-  min-height: 70px;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: var(--surface-1);
-}
-
-.result-overview span {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.result-overview strong {
-  font-size: 24px;
-}
-
 .result-tabs {
   display: flex;
   gap: 5px;
@@ -1431,6 +1405,96 @@ button:disabled {
   line-height: 1.5;
 }
 
+@media (min-width: 761px) {
+  html,
+  body,
+  #app {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .app-shell {
+    display: flex;
+    height: 100dvh;
+    min-height: 0;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .app-header {
+    position: relative;
+    flex: 0 0 auto;
+  }
+
+  .app-content {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .view-shell,
+  .screening-shell {
+    height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .view-shell.results-view {
+    padding-top: 18px;
+    padding-bottom: 18px;
+    overflow: hidden;
+  }
+
+  .results-view .step-nav {
+    position: static;
+  }
+
+  .results-view .view-stage {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+  }
+
+  .results-view .stage-header {
+    min-height: 64px;
+    margin-bottom: 12px;
+    flex: 0 0 auto;
+  }
+
+  .results-view .results-stage {
+    grid-template-rows: auto minmax(0, 1fr);
+    min-height: 0;
+    flex: 1;
+  }
+
+  .results-view .job-workspace,
+  .results-view .empty-panel {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .results-view .job-list-pane {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .results-view .job-list,
+  .results-view .job-detail-pane {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+
+  .results-view .job-list {
+    flex: 1;
+  }
+}
+
 @media (max-width: 1050px) {
   .app-header {
     grid-template-columns: auto 1fr auto;
@@ -1605,14 +1669,6 @@ button:disabled {
 
   .advanced-grid {
     grid-template-columns: 1fr;
-  }
-
-  .result-overview {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .result-overview > div {
-    min-height: 62px;
   }
 
   .result-tabs {
