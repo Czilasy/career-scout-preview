@@ -35,7 +35,7 @@ describe("App", () => {
     await flushPromises();
 
     const tabs = wrapper.get('[role="tablist"]');
-    expect(tabs.get('[role="tab"][aria-selected="true"]').text()).toContain("智能选岗");
+    expect(tabs.get('[role="tab"][aria-selected="true"]').text()).toContain("岗位发现");
 
     await tabs.get('[data-testid="screening-tab"]').trigger("click");
     expect(wrapper.get('[data-testid="screening-view"]').isVisible()).toBe(true);

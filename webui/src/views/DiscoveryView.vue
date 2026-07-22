@@ -19,7 +19,7 @@ import type { PipelineResult } from "../discovery";
 import type { CandidateProfile, JobItem, Notice } from "../types";
 
 type StepId = "upload" | "search" | "screen" | "results";
-type ResultCategory = "priority" | "considered" | "uncertain" | "notRecommended" | "dropped";
+type ResultCategory = "matched" | "unmatched" | "uncertain" | "dropped";
 type FieldLabel = [string, unknown, string | Record<string, string>];
 
 interface AnalyzeResponse {
@@ -66,8 +66,8 @@ const stepCopy: Record<StepId, { eyebrow: string; title: string; description: st
   },
   results: {
     eyebrow: "04 · 集中决策",
-    title: "优先处理值得投递的岗位",
-    description: "先看严格门槛通过的岗位，再按需要复核其他结果。",
+    title: "查看与整理岗位",
+    description: "匹配、不匹配、待确认与粗筛剔除分开展示。",
   },
 };
 
@@ -92,7 +92,7 @@ const scrapeSnapshot = ref<TaskSnapshot | null>(null);
 const screenBusy = ref(false);
 const screenSnapshot = ref<TaskSnapshot | null>(null);
 const pipelineResult = ref<PipelineResult | null>(null);
-const activeCategory = ref<ResultCategory>("priority");
+const activeCategory = ref<ResultCategory>("matched");
 const rejectedIds = ref(new Set<string>());
 const feedbackBusyIds = ref(new Set<string>());
 const jdBusyIds = ref(new Set<string>());
@@ -150,18 +150,16 @@ const filterGroups = computed(() => {
 });
 const groups = computed(() => partitionPipelineResult(pipelineResult.value || {}));
 const resultTabs = computed(() => [
-  { id: "priority" as const, label: "优先投递", count: groups.value.priority.length },
-  { id: "considered" as const, label: "可以考虑", count: groups.value.considered.length },
+  { id: "matched" as const, label: "匹配", count: groups.value.matched.length },
+  { id: "unmatched" as const, label: "不匹配", count: groups.value.unmatched.length },
   { id: "uncertain" as const, label: "待确认", count: groups.value.uncertain.length },
-  { id: "notRecommended" as const, label: "不推荐", count: groups.value.notRecommended.length },
   { id: "dropped" as const, label: "已筛除", count: groups.value.dropped.length },
 ]);
 const currentJobs = computed(() => groups.value[activeCategory.value]);
 const currentEmptyMessage = computed(() => ({
-  priority: "本轮没有达到严格门槛的优先投递岗位",
-  considered: "没有需要快速复核的可考虑岗位",
+  matched: "没有明确匹配的岗位",
+  unmatched: "没有明确不匹配的岗位",
   uncertain: "没有需要人工确认的岗位",
-  notRecommended: "没有明确不推荐的岗位",
   dropped: "没有在粗筛阶段被移除的岗位",
 })[activeCategory.value]);
 
@@ -391,11 +389,9 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
 function setPipelineResult(result: PipelineResult) {
   pipelineResult.value = result;
   resultLoaded.value = true;
-  const next = groupsForResult(result);
-  activeCategory.value = next.priority.length ? "priority"
-    : next.considered.length ? "considered"
-      : next.uncertain.length ? "uncertain"
-        : next.notRecommended.length ? "notRecommended" : "dropped";
+  activeCategory.value = groupsForResult(result).matched.length ? "matched"
+    : groupsForResult(result).uncertain.length ? "uncertain"
+      : groupsForResult(result).unmatched.length ? "unmatched" : "dropped";
 }
 
 function groupsForResult(result: PipelineResult) {
@@ -442,7 +438,7 @@ async function ensureFeedbackProfile(): Promise<string> {
   if (props.profileId) return props.profileId;
   const profile = await apiRequest<CandidateProfile>("/api/profiles", {
     method: "POST",
-    json: { name: "智能选岗", confirmed_fields: {} },
+    json: { name: "岗位发现", confirmed_fields: {} },
   });
   emit("profile-created", profile);
   return profile.id;
@@ -558,7 +554,7 @@ async function retryJd(job: JobItem) {
           <ul class="feature-list">
             <li><Check :size="17" aria-hidden="true" />抓取前确认关键词和城市</li>
             <li><Check :size="17" aria-hidden="true" />筛选前确认六类业务条件</li>
-            <li><Check :size="17" aria-hidden="true" />AI 失败进入待确认，不伪装成推荐</li>
+            <li><Check :size="17" aria-hidden="true" />AI 失败进入待确认，不伪装成匹配</li>
           </ul>
         </div>
 
@@ -691,7 +687,7 @@ async function retryJd(job: JobItem) {
           <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="screenBusy || !scrapeCompleted" @click="startAiScreen">
             <Sparkles :size="18" aria-hidden="true" />{{ screenBusy ? "筛选中…" : "开始 AI 筛选" }}
           </button>
-          <span class="action-hint">Stage A 排除冲突 → 抓取 JD → Stage B 四维严格评估</span>
+          <span class="action-hint">Stage A 粗筛 → 抓取 JD → Stage B 精筛</span>
         </div>
       </section>
 

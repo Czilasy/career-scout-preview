@@ -341,7 +341,7 @@ async function ensureProfile(): Promise<string> {
   if (props.profileId) return props.profileId;
   const profile = await apiRequest<CandidateProfile>("/api/profiles", {
     method: "POST",
-    json: { name: "高级筛选", confirmed_fields: currentFilters() },
+    json: { name: "筛选工作台", confirmed_fields: currentFilters() },
   });
   emit("profile-created", profile);
   return profile.id;
@@ -483,9 +483,9 @@ async function confirmCleanup() {
   <main class="screening-shell" data-testid="screening-view">
     <header class="screening-hero">
       <div>
-        <span class="eyebrow">高级筛选</span>
-        <h1>手动控制筛选条件与结果去向</h1>
-        <p>适合需要调整硬规则、控制抓取范围或处理待核验岗位时使用。</p>
+        <span class="eyebrow">筛选工作台</span>
+        <h1>把岗位快速分到该去的位置</h1>
+        <p>此模式保留原有硬规则筛选、简历建议、待核验与长期结果区。</p>
       </div>
       <button class="button secondary" type="button" :aria-expanded="filtersOpen" aria-controls="screening-filters" @click="filtersOpen = !filtersOpen">
         <Filter :size="17" aria-hidden="true" />{{ filtersOpen ? "收起筛选" : "修改筛选" }}

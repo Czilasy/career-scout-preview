@@ -87,7 +87,7 @@ function acceptCreatedProfile(profile: CandidateProfile) {
           :class="{ active: activeView === 'discovery' }"
           @click="activeView = 'discovery'"
         >
-          <BriefcaseBusiness :size="17" aria-hidden="true" />智能选岗
+          <BriefcaseBusiness :size="17" aria-hidden="true" />岗位发现
         </button>
         <button
           type="button"
@@ -97,7 +97,7 @@ function acceptCreatedProfile(profile: CandidateProfile) {
           :class="{ active: activeView === 'screening' }"
           @click="activeView = 'screening'"
         >
-          <SlidersHorizontal :size="17" aria-hidden="true" />高级筛选
+          <SlidersHorizontal :size="17" aria-hidden="true" />筛选工作台
         </button>
       </nav>
 

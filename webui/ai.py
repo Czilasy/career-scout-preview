@@ -635,67 +635,13 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
 
 def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
               batch_size=None, progress=None):
-    """Stage B 精筛：结构化评估 JD 与简历派生画像并由程序分层。
+    """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
 
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
-    返回 priority / consider / not_match / uncertain，并保留经程序校验的
-    匹配分、置信度和四维分数。AI 只提出结构化判断，最终分层由程序门槛决定。
+    返回 {"verdicts": {job_id: {"verdict": "match"/"not_match", "reason"}}}。
     AI 调用失败或漏回结果的岗位标记为 uncertain，保留给用户人工确认，
     不能把未完成的判定伪装成已匹配。
     """
-    from webui.semantic import validate_semantic_output
-
-    dimension_labels = {
-        "direction_alignment": "方向",
-        "skill_coverage": "技能",
-        "experience_match": "经验",
-        "industry_relevance": "行业",
-    }
-
-    def _result_payload(raw):
-        assessment = validate_semantic_output(raw)
-        safe = {
-            "match_score": assessment.get("match_score"),
-            "confidence": assessment.get("confidence"),
-            "dimensions": assessment.get("dimensions", {}),
-            "failure_stage": assessment.get("failure_stage"),
-        }
-        if assessment.get("verdict") == "pending":
-            return {
-                **safe,
-                "verdict": "uncertain",
-                "reason": "结构化评估不完整，需要确认",
-            }
-
-        model_verdict = raw.get("verdict")
-        score = assessment.get("match_score")
-        confidence = assessment.get("confidence")
-        dimensions = assessment.get("dimensions", {})
-        lowest_name, lowest_score = min(
-            (
-                (dimension_labels.get(name, name), item.get("score", 0))
-                for name, item in dimensions.items()
-            ),
-            key=lambda pair: pair[1],
-        )
-        if model_verdict == "match" and assessment.get("verdict") == "match":
-            return {
-                **safe,
-                "verdict": "priority",
-                "reason": f"四维通过 · 匹配 {score} · 置信 {confidence}",
-            }
-        if model_verdict == "match":
-            return {
-                **safe,
-                "verdict": "consider",
-                "reason": f"{lowest_name} {lowest_score} 未达优先门槛，建议快速复核",
-            }
-        return {
-            **safe,
-            "verdict": "not_match",
-            "reason": f"{lowest_name} {lowest_score} · 匹配 {score}，不建议优先",
-        }
-
     if batch_size is None:
         batch_size = int(_adv_setting("match_batch_size", MATCH_BATCH_SIZE))
     verdicts = {}
@@ -703,18 +649,12 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         return {"verdicts": verdicts}
     summary = (profile_summary or "").strip() or "（无候选人画像）"
     system_prompt = (
-        "你是求职匹配度评估助手。根据简历派生的候选人画像与完整JD做结构化对比。\n"
+        "你是求职匹配度评估助手。根据候选人画像，判断每个岗位的JD工作内容是否适合候选人。\n"
         f"候选人画像：{summary}\n\n"
-        "只评估四个固定维度：direction_alignment、skill_coverage、"
-        "experience_match、industry_relevance。每个维度必须给出 0-100 整数分。\n"
-        "严格输出JSON，不添加其它字段：\n"
-        '{"results":[{"i":0,"verdict":"match|mismatch|uncertain",'
-        '"match_score":0,"confidence":0,"dimensions":{'
-        '"direction_alignment":{"score":0,"reason":"简短证据"},'
-        '"skill_coverage":{"score":0,"reason":"简短证据"},'
-        '"experience_match":{"score":0,"reason":"简短证据"},'
-        '"industry_relevance":{"score":0,"reason":"简短证据"}}}]}\n'
-        "match_score、confidence 和所有维度分均为 0-100 整数。"
+        "判断要点：岗位职责与候选人技能/方向的契合度；岗位性质(全职/实习)与候选人诉求是否一致。\n"
+        "对每个岗位输出判定。严格输出JSON：\n"
+        '{"results":[{"i":0,"match":true,"reason":"一句话理由"},...]}\n'
+        "i 为岗位序号；match=true 适合，false 不适合；reason 简短（20字内）。"
     )
     for start in range(0, len(jobs_with_jd), batch_size):
         batch = jobs_with_jd[start:start + batch_size]
@@ -747,13 +687,18 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 }
                 continue
             r = by_i.get(idx)
-            if not isinstance(r, dict):
+            if not isinstance(r, dict) or not isinstance(r.get("match"), bool):
                 verdicts[jid] = {
                     "verdict": "uncertain",
                     "reason": "AI 未返回判定，待人工确认",
                 }
                 continue
-            verdicts[jid] = _result_payload(r)
+            match = r["match"]
+            reason = str(r.get("reason", "")).strip()
+            verdicts[jid] = {
+                "verdict": "match" if match else "not_match",
+                "reason": reason,
+            }
         if progress is not None:
             try:
                 progress(min(start + batch_size, len(jobs_with_jd)), len(jobs_with_jd))

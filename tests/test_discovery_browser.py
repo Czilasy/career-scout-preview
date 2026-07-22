@@ -271,7 +271,7 @@ class VueWebUIBrowserTests(unittest.TestCase):
 
     def test_desktop_navigation_and_four_gated_steps_render_without_overflow(self):
         labels = self.page.locator('.view-tabs [role="tab"]').all_inner_texts()
-        self.assertEqual(labels, ["智能选岗", "高级筛选"])
+        self.assertEqual(labels, ["岗位发现", "筛选工作台"])
         steps = self.page.locator(".step-nav button")
         self.assertEqual(steps.all_inner_texts(), [
             "1\n上传简历",
@@ -335,7 +335,7 @@ class VueWebUIBrowserTests(unittest.TestCase):
             "logs": [],
             "result": {
                 "ok": True,
-                "jobs": [_job(1, "priority"), _job(2, "uncertain")],
+                "jobs": [_job(1, "match"), _job(2, "uncertain")],
                 "dropped": [],
                 "total_scraped": 2,
                 "total_kept": 2,
@@ -355,7 +355,7 @@ class VueWebUIBrowserTests(unittest.TestCase):
             "".join(text.split())
             for text in self.page.locator('.result-tabs [role="tab"]').all_inner_texts()
         ]
-        self.assertEqual(result_labels, ["优先投递1", "可以考虑0", "待确认1", "不推荐0", "已筛除0"])
+        self.assertEqual(result_labels, ["匹配1", "不匹配0", "待确认1", "已筛除0"])
 
     def test_running_and_failed_scrape_states_are_actionable(self):
         self._analyze_resume()

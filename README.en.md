@@ -56,7 +56,7 @@ After installing dependencies, start the local workspace:
 python3 webui/app.py
 ```
 
-Open `http://127.0.0.1:5000`. The root path `/` is the only supported frontend entry point. The frontend uses Vue 3 + TypeScript + Vite. Its shared header switches between Smart Matching and Advanced Filters: Smart Matching is the default path, while Advanced Filters exposes manual hard-rule, scrape-range, and pending-result controls. Both reuse profile selection, browser status, AI settings, notices, and the job list/detail components. Desktop uses a compact list plus detail pane; job rows in sparse categories keep their compact height and stay top-aligned instead of stretching into unused list space. Narrow screens open a full-screen detail view, and the AI Settings action remains directly reachable on mobile.
+Open `http://127.0.0.1:5000`. The root path `/` is the only supported frontend entry point. The frontend uses Vue 3 + TypeScript + Vite. Its shared header switches between the Job Discovery and Screening Workbench modes while reusing profile selection, browser status, AI settings, notices, and the job list/detail components. Desktop uses a compact list plus detail pane; job rows in sparse categories keep their compact height and stay top-aligned instead of stretching into unused list space. Narrow screens open a full-screen detail view, and the AI Settings action remains directly reachable on mobile.
 
 The repository includes the built `webui/dist/`, so regular users do not need Node.js. When changing frontend source, run:
 
@@ -69,12 +69,11 @@ npm run build
 
 ### Core Capabilities
 
-1. **Four-step Smart Matching**: The workflow stays in this order: upload and analyze the résumé → confirm keywords/cities and scrape broadly → confirm six filter groups, run Stage A field elimination, fetch JDs, then run the strict four-dimension Stage B assessment → review results. Scraping and AI screening remain separate; no third screening step is added.
-2. **Program-owned priority gate**: Stage B requires direction, skill, experience, and industry scores plus an overall match score and confidence. Only an AI match proposal that also clears every program threshold enters Priority Apply; proposals below the strict gate enter Consider; explicit mismatches enter Not Recommended.
-3. **Failures never masquerade as recommendations**: Provider failures, invalid contracts, and missing verdicts route to Needs Review. Each AI screening request remains bound to the exact completed scrape task ID.
-4. **Decision-first result workspace**: Priority Apply, Consider, Needs Review, Not Recommended, and Filtered Out are direct tabs, with Priority Apply selected first when available. Details show sanitized match score, confidence, four dimension scores, and a deterministic recommendation explanation. Desktop results stay within one viewport with independent list/detail scrolling.
-5. **Explicit feedback boundary**: In Smart Matching, Interested persists to the current profile; Not Interested stays in memory for the current run and is revocable. JD retry updates only the JD and never reruns AI or changes the existing verdict.
-6. **Advanced Filters**: Keeps seven filter fields, page/detail limits, résumé-based AI suggestions, run cancel/resume, temporary match/mismatch/pending zones, persistent interested/trash zones, and 30-day cleanup for temporary runs.
+1. **Four-step job discovery**: The workflow stays in this order: upload and analyze the résumé → confirm keywords/cities and scrape broadly → confirm six filter groups and run Stage A, fetch JDs, then run Stage B → review results. Scraping and AI screening remain two separate user actions.
+2. **Failures never masquerade as success**: A Stage B provider failure or missing verdict routes the job to Needs Review instead of defaulting to Match. Each AI screening request is bound to the exact completed scrape task ID to prevent cross-run result mix-ups.
+3. **Large-result workspace**: Match, Not Match, Needs Review, and Screened Out live directly in the category tabs without duplicate summary cards. On desktop, the result workspace fits one viewport and only the job list or an oversized detail pane scrolls. The UI initially renders 30 rows, loads more on demand, and creates only one detail panel.
+4. **Explicit feedback boundary**: In Job Discovery, Interested persists to the current profile; Not Interested stays in memory for the current run and is revocable. JD retry updates only the JD and never reruns AI or changes the existing verdict.
+5. **Screening Workbench**: Keeps seven filter fields, page/detail limits, résumé-based AI suggestions, run cancel/resume, temporary match/mismatch/pending zones, persistent interested/trash zones, and 30-day cleanup for temporary runs.
 
 ### AI URL & Key Configuration
 
@@ -104,7 +103,7 @@ Users only configure two items: the AI service URL and the API Key.
 
 - Desktop keeps a compact job list on the left and only the selected job's full details on the right; mobile uses a closeable full-screen detail view.
 - "View original job" opens only a validated HTTPS BOSS link in a **new tab** with `noopener noreferrer`.
-- In Smart Matching, Interested / Not Interested never trigger job navigation. Interested is revocable; Not Interested is explicitly limited to the current run.
+- In Job Discovery, Interested / Not Interested never trigger job navigation. Interested is revocable; Not Interested is explicitly limited to the current run.
 - Missing JDs can be retried individually. A retry does not rerun AI and leaves the existing verdict unchanged.
 - AI output is program-validated; **the AI cannot decide task status or bypass manual filtering**.
 

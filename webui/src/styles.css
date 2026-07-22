@@ -1258,17 +1258,10 @@ button:disabled {
   font-weight: 750;
 }
 
-.status-pill[data-verdict="priority"] {
+.status-pill[data-verdict="match"] {
   border-color: rgb(82 210 160 / 44%);
   color: var(--success);
   background: rgb(82 210 160 / 8%);
-}
-
-.status-pill[data-verdict="consider"],
-.status-pill[data-verdict="match"] {
-  border-color: rgb(244 199 107 / 46%);
-  color: var(--warning);
-  background: rgb(244 199 107 / 8%);
 }
 
 .status-pill[data-verdict="not_match"] {
@@ -1325,22 +1318,6 @@ button:disabled {
   color: var(--text-soft);
   line-height: 1.75;
   white-space: pre-wrap;
-}
-
-.assessment-dimensions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 10px;
-}
-
-.assessment-dimensions span {
-  padding: 3px 7px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
 }
 
 .jd-content p {
