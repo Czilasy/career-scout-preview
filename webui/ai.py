@@ -639,7 +639,8 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
 
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
     返回 {"verdicts": {job_id: {"verdict": "match"/"not_match", "reason"}}}。
-    AI 调用失败的批次默认 match（宁可多留不可错杀）。
+    AI 调用失败或漏回结果的岗位标记为 uncertain，保留给用户人工确认，
+    不能把未完成的判定伪装成已匹配。
     """
     if batch_size is None:
         batch_size = int(_adv_setting("match_batch_size", MATCH_BATCH_SIZE))
@@ -676,13 +677,28 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             results = data.get("results", []) if isinstance(data, dict) else []
             by_i = {r.get("i"): r for r in results if isinstance(r, dict)}
         except AISecurityError:
-            by_i = {}
+            by_i = None
         for idx, job in enumerate(batch):
             jid = str(job.get("job_id", ""))
-            r = by_i.get(idx) or {}
-            match = bool(r.get("match", True))
+            if by_i is None:
+                verdicts[jid] = {
+                    "verdict": "uncertain",
+                    "reason": "AI 精筛失败，待人工确认",
+                }
+                continue
+            r = by_i.get(idx)
+            if not isinstance(r, dict) or not isinstance(r.get("match"), bool):
+                verdicts[jid] = {
+                    "verdict": "uncertain",
+                    "reason": "AI 未返回判定，待人工确认",
+                }
+                continue
+            match = r["match"]
             reason = str(r.get("reason", "")).strip()
-            verdicts[jid] = {"verdict": "match" if match else "not_match", "reason": reason}
+            verdicts[jid] = {
+                "verdict": "match" if match else "not_match",
+                "reason": reason,
+            }
         if progress is not None:
             try:
                 progress(min(start + batch_size, len(jobs_with_jd)), len(jobs_with_jd))
@@ -716,6 +732,40 @@ def _require_str_list(data: dict, field: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # JSON validation — application-side contracts for AI outputs
 # ---------------------------------------------------------------------------
+
+
+def validate_resume_response(data) -> dict:
+    """Validate the persistent workbench resume-extraction contract."""
+    if not isinstance(data, dict):
+        raise ValueError("invalid_response")
+
+    profile_name = _require(data, "profile_name", str)
+    city = _require(data, "city", str)
+    roles = _require_str_list(data, "roles")
+    skills = _require_str_list(data, "skills")
+    keywords = _require_str_list(data, "keywords")
+    suggestions = _require(data, "suggestions", list)
+
+    for suggestion in suggestions:
+        if not isinstance(suggestion, dict):
+            raise ValueError("invalid_suggestion")
+        if not isinstance(suggestion.get("field"), str):
+            raise ValueError("invalid_suggestion")
+        if not isinstance(suggestion.get("source"), str):
+            raise ValueError("invalid_suggestion")
+        if not isinstance(suggestion.get("uncertain"), bool):
+            raise ValueError("invalid_suggestion")
+        if "value" not in suggestion:
+            raise ValueError("invalid_suggestion")
+
+    return {
+        "profile_name": profile_name,
+        "city": city,
+        "roles": roles,
+        "skills": skills,
+        "keywords": keywords,
+        "suggestions": suggestions,
+    }
 
 
 def validate_rank_response(data, input_job_ids) -> list[str]:
@@ -772,8 +822,163 @@ def validate_preference_response(data) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Resume-driven screening suggestions
+# ---------------------------------------------------------------------------
+
+SCREENING_FIELDS = (
+    "city", "salary", "experience", "degree", "scale", "stage", "industry",
+)
+SUGGESTION_CONFIDENCE_THRESHOLD = 70
+
+
+def _screening_valid_sets():
+    valid_sets = {
+        name: {value for value in mapping.values() if value != "0"}
+        for name, mapping in (
+            ("salary", boss.SALARY_MAP),
+            ("experience", boss.EXPERIENCE_MAP),
+            ("degree", boss.DEGREE_MAP),
+            ("scale", boss.SCALE_MAP),
+            ("stage", boss.STAGE_MAP),
+            ("industry", boss.INDUSTRY_MAP),
+        )
+    }
+    valid_sets["city"] = {name for name in boss.CITY_MAP if name != "全国"}
+    return valid_sets
+
+
+def _validate_suggest_response(data) -> dict:
+    """Keep only supported BOSS enum values; never guess invalid values."""
+    if not isinstance(data, dict):
+        raise AISecurityError(ERROR_INVALID)
+    valid_sets = _screening_valid_sets()
+    result = {}
+    for field in SCREENING_FIELDS:
+        value = data.get(field, "")
+        if not isinstance(value, str):
+            value = ""
+        value = value.strip()
+        result[field] = value if value in valid_sets[field] else ""
+    return result
+
+
+def suggest_screening_filters(resume_text: str, endpoint_url: str, api_key: str,
+                              timeout: int = DEFAULT_TIMEOUT,
+                              model: str = "") -> dict:
+    """Return seven validated BOSS filter suggestions from resume text."""
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是简历筛选助手。根据简历内容给出BOSS直聘筛选项建议值，返回JSON："
+                "city(城市名,str), salary(薪资段代码,str), "
+                "experience(经验代码,str), degree(学历代码,str), "
+                "scale(公司规模代码,str), stage(融资阶段代码,str), "
+                "industry(行业代码,str)。无法从简历提取的字段返回空字符串。禁止编造。"
+            ),
+        },
+        {"role": "user", "content": resume_text},
+    ]
+    data = call_ai(
+        endpoint_url, api_key, messages, timeout=timeout, model=model,
+    )
+    return _validate_suggest_response(data)
+
+
+def validate_cautious_screening_suggestions(
+        data, confirmed_fields=None,
+        threshold=SUGGESTION_CONFIDENCE_THRESHOLD):
+    """Apply enum, confidence and user-lock gates to screening suggestions."""
+    raw = data if isinstance(data, dict) else {}
+    confirmed = confirmed_fields if isinstance(confirmed_fields, dict) else {}
+    valid_sets = _screening_valid_sets()
+    values = {}
+    meta = {}
+    for field in SCREENING_FIELDS:
+        locked = confirmed.get(field)
+        if isinstance(locked, str) and locked.strip():
+            values[field] = locked.strip()
+            meta[field] = {"status": "user_confirmed", "confidence": None}
+            continue
+        item = raw.get(field)
+        value = item.get("value", "") if isinstance(item, dict) else ""
+        confidence = item.get("confidence") if isinstance(item, dict) else None
+        valid_confidence = (
+            isinstance(confidence, (int, float))
+            and not isinstance(confidence, bool)
+            and 0 <= confidence <= 100
+        )
+        valid_value = (
+            isinstance(value, str) and value.strip() in valid_sets[field]
+        )
+        if valid_value and valid_confidence and confidence >= threshold:
+            values[field] = value.strip()
+            meta[field] = {
+                "status": "ai_suggested", "confidence": confidence,
+            }
+        else:
+            values[field] = ""
+            meta[field] = {
+                "status": "pending_confirmation",
+                "confidence": confidence if valid_confidence else None,
+            }
+    return {"values": values, "meta": meta}
+
+
+def suggest_screening_filters_cautious(
+        resume_text, endpoint_url, api_key, confirmed_fields=None,
+        timeout=DEFAULT_TIMEOUT, model=""):
+    """Generate deterministic confidence-bearing suggestions and validate them."""
+    unlocked = [
+        field for field in SCREENING_FIELDS
+        if not str((confirmed_fields or {}).get(field) or "").strip()
+    ]
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "根据简历为未锁定的 BOSS 筛选字段给建议。仅返回 JSON；每个字段必须是"
+                "{value:string, confidence:number 0-100}。没有明确依据时 value 为空且低置信度。"
+                f"未锁定字段：{','.join(unlocked)}。禁止输出近似枚举或改写已确认字段。"
+            ),
+        },
+        {"role": "user", "content": resume_text},
+    ]
+    data = call_ai(
+        endpoint_url, api_key, messages, timeout=timeout,
+        temperature=0, model=model,
+    )
+    return validate_cautious_screening_suggestions(
+        data, confirmed_fields=confirmed_fields,
+    )
+
+
+# ---------------------------------------------------------------------------
 # High-level AI operations
 # ---------------------------------------------------------------------------
+
+
+def parse_resume(resume_text: str, endpoint_url: str, api_key: str,
+                 model: str = "") -> dict:
+    """Parse résumé text for the persistent workbench and validate all fields."""
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是简历解析助手。根据简历内容提取JSON："
+                "profile_name(画像名,str), city(城市,str), "
+                "roles(岗位方向,list[str]), skills(技能,list[str]), "
+                "keywords(搜索关键词,list[str],最多3个), "
+                "suggestions(建议,list[{field,value,source,uncertain}])。"
+                "仅使用简历明确内容，无依据时返回空数组。"
+                "禁止编造经历、学历、薪资、证书或项目。"
+            ),
+        },
+        {"role": "user", "content": resume_text},
+    ]
+    data = call_ai(endpoint_url, api_key, messages, model=model)
+    return validate_resume_response(data)
+
 
 def rank_jds(confirmed_fields: dict, jobs_with_jd: list, endpoint_url: str, api_key: str, model: str = "") -> list[str]:
     """Call AI to rank jobs by relevance, in batches of at most 10.

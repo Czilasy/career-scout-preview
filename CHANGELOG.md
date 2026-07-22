@@ -2,6 +2,14 @@
 
 ## 未发布
 
+### 重构 — Vue 3 求职工作台
+- 将 200KB 级内联 `webui/index.html` 重构为 Vue 3 + TypeScript + Vite；Flask 根路径托管带哈希的 `webui/dist`，源码拆分为共享外壳、语义化对话框、四步岗位发现、筛选工作台和岗位列表/详情组件。
+- 保留现有业务顺序：上传简历并提取条件 → 用户确认关键词/城市 → 广泛抓取 → 用户确认六类筛选条件 → Stage A 粗筛 → 抓取 JD → Stage B 精筛 → 查看匹配/不匹配/待确认/已筛除结果；抓取与 AI 筛选仍是两个独立动作。
+- 结果区改为紧凑列表 + 单详情面板，首次只渲染 30 条并按需加载；375px 窄屏使用全屏详情，AI 设置入口保持可达；tab、button、dialog、焦点锁定、Escape 关闭、44px 触控目标和 reduced-motion 均有显式契约。
+- 修复 Stage B AI 失败默认判为匹配的问题，失败或缺失判定改为“待确认”；恢复置信度门控的简历筛选建议及旧路由依赖的简历解析兼容函数，低置信度继续留空且不覆盖用户确认值。
+- 修复 pipeline 感兴趣撤销把外部 BOSS ID 当内部 UUID 的问题；AI 筛选改为绑定并读取明确的已完成抓取任务，降低多轮任务结果串线风险。
+- 新增 Vitest 组件/行为测试、Vite 类型检查与生产构建门；Python 前端契约改为检查 Vue 源码和构建产物，不再依赖已删除的内联函数名。
+
 ### 变更 — 候选人分析协议从 v4 降回 v3
 - 移除 `webui/ai.py` 的 `_analyze_v4` / `_build_analyze_v4_messages` 方法与 v4 分支；`webui/discovery.py` 的 v4 持久化路径（facts / evidence_refs / profile_version 整段）；`webui/candidate.py` 的 `normalize_candidate_analysis_v4` 函数、`_safe_fact_value`、v4 常量与注释；前端 `index.html` 的 `contract_version` 改回 `"v3"`。
 - v4 的事实关联证据结构对 AI 负担过重、分析失败率高、接不住，属于过度设计；v3 扁平化管理已够用。

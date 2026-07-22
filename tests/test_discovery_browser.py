@@ -1,20 +1,19 @@
-"""Browser rendering tests for feature 004 discovery frontend (T088/T089).
+"""Real-browser acceptance tests for the Vue WebUI.
 
-Uses Playwright to verify the unified four-step discovery workspace renders
-correctly at desktop (1366x768) and narrow (720px) widths, across empty /
-loading / success / partial / failed / needs-review / no-results states.
-
-Checks: no horizontal overflow, primary actions reachable, focus-visible
-state present. These are *real browser* renders, not simulated DOM asserts.
+The former version of this module called global functions from the legacy
+inline application (``renderAnalysis``, ``renderResults`` and friends).  The
+Vue build deliberately has no such globals, so these tests exercise the
+compiled application through its visible controls and HTTP boundary instead.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import threading
-import time
 import unittest
+from urllib.parse import urlparse
 
 from webui.app import create_app
 
@@ -25,13 +24,60 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 
-def _skip_if_no_playwright():
-    if not PLAYWRIGHT_AVAILABLE:
-        raise unittest.SkipTest("playwright not installed")
+ADVANCED_SETTINGS = {
+    "pages": 3,
+    "inter_combo_delay": 30,
+    "detail_batch_size": 5,
+    "screen_batch_size": 50,
+    "screen_concurrency": 1,
+    "match_batch_size": 4,
+}
+
+ANALYSIS_RESPONSE = {
+    "ok": True,
+    "fields": {
+        "keyword": [
+            {"word": "Python 后端", "recommended": True},
+            {"word": "AI Agent", "recommended": False},
+        ],
+        "city": ["上海"],
+        "salary": ["406"],
+        "experience": [],
+        "degree": [],
+        "industry": [],
+        "scale": [],
+        "stage": [],
+        "profile_summary": "Python 后端候选人",
+    },
+    "labels": {
+        "keyword": ["搜索关键词", [], "keyword_chips"],
+        "city": ["城市", ["上海"], "city"],
+        "salary": ["薪资范围", ["406"], {"不限": "0", "20-50K": "406"}],
+        "experience": ["经验要求", [], {"不限": "0", "3-5年": "105"}],
+        "degree": ["学历", [], {"不限": "0", "本科": "203"}],
+        "industry": ["行业", [], {"不限": "0", "互联网": "100020"}],
+        "scale": ["公司规模", [], {"不限": "0", "100-499人": "304"}],
+        "stage": ["融资阶段", [], {"不限": "0", "B轮": "804"}],
+    },
+}
+
+
+def _job(index: int, verdict: str = "match") -> dict:
+    return {
+        "job_id": f"job-{index}",
+        "title": f"Python 工程师 {index}",
+        "company": f"测试公司 {index}",
+        "salary": "20-30K",
+        "location": "上海",
+        "jd": f"岗位描述 {index}",
+        "verdict": verdict,
+        "verdict_reason": "技能与岗位要求相符",
+        "canonical_url": f"https://www.zhipin.com/job_detail/job-{index}.html",
+    }
 
 
 class _BrowserServer:
-    """Start a real Flask server on a free port in a background thread."""
+    """Serve the production Vite bundle from Flask on a free local port."""
 
     def __init__(self):
         self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -42,6 +88,7 @@ class _BrowserServer:
             "START_TASKS": False,
         })
         from werkzeug.serving import make_server
+
         self._server = make_server("127.0.0.1", 0, self.app, threaded=True)
         self.port = self._server.port
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -58,12 +105,11 @@ class _BrowserServer:
 
 
 @unittest.skipUnless(PLAYWRIGHT_AVAILABLE, "playwright not installed")
-class DiscoveryBrowserRenderTests(unittest.TestCase):
-    """T088: browser rendering across viewport sizes and run states."""
+class VueWebUIBrowserTests(unittest.TestCase):
+    """Exercise the compiled Vue application, not component test doubles."""
 
     @classmethod
     def setUpClass(cls):
-        _skip_if_no_playwright()
         cls.server = _BrowserServer()
         cls._pw = sync_playwright().start()
         cls._browser = cls._pw.chromium.launch(headless=True)
@@ -75,428 +121,364 @@ class DiscoveryBrowserRenderTests(unittest.TestCase):
         cls.server.stop()
 
     def setUp(self):
-        self._context = self._browser.new_context(viewport={"width": 1366, "height": 768})
+        self._context = self._browser.new_context(
+            viewport={"width": 1366, "height": 768},
+        )
         self.page = self._context.new_page()
+        self.api_calls: list[dict] = []
+        self.latest_result: dict | None = None
+        self.scrape_progress: list[dict] = []
+        self.screen_progress: list[dict] = []
+        self.screening_run: dict | None = None
+        self.page.route("**/api/**", self._handle_api)
         self.page.goto(self.server.url("/"), wait_until="networkidle")
 
     def tearDown(self):
         self._context.close()
 
-    # ------------------------------------------------------------------
-    # Viewport: desktop 1366x768
-    # ------------------------------------------------------------------
+    def _json_body(self, request):
+        try:
+            return request.post_data_json
+        except Exception:  # Playwright raises when a body is not JSON.
+            return None
 
-    def test_desktop_no_horizontal_overflow(self):
-        """No horizontal scrollbar at 1366x768."""
-        overflow = self.page.evaluate(
-            "() => document.documentElement.scrollWidth > document.documentElement.clientWidth"
-        )
-        self.assertFalse(overflow, "horizontal overflow at 1366x768")
-
-    def test_desktop_four_steps_present(self):
-        """All four discovery step sections exist in DOM."""
-        for step_id in ["discoveryStepUpload", "discoveryStepReview",
-                        "discoveryStepProgress", "discoveryStepResults"]:
-            el = self.page.query_selector(f"#{step_id}")
-            self.assertIsNotNone(el, f"missing #{step_id}")
-
-    def test_desktop_primary_actions_reachable(self):
-        """Primary action buttons are visible and not disabled."""
-        # Upload button
-        btn = self.page.query_selector("#discoveryUploadButton")
-        self.assertIsNotNone(btn)
-        self.assertTrue(btn.is_visible())
-        # Confirm button
-        btn = self.page.query_selector("#discoveryConfirmButton")
-        self.assertIsNotNone(btn)
-
-    def test_upload_button_exposes_success_and_retry_states(self):
-        """Upload outcome stays on the action that initiated it."""
-        button = self.page.locator("#discoveryUploadButton")
-
-        self.page.evaluate("() => setDiscoveryUploadState('success')")
-        self.assertEqual(button.locator(".btn-label").inner_text(), "上传分析成功")
-        self.assertTrue(button.evaluate("element => element.classList.contains('upload-success')"))
-        self.assertTrue(button.is_disabled())
-
-        self.page.evaluate("() => setDiscoveryUploadState('error')")
-        self.assertEqual(button.locator(".btn-label").inner_text(), "失败，点击重试")
-        self.assertTrue(button.evaluate("element => element.classList.contains('upload-error')"))
-        self.assertFalse(button.is_disabled())
-
-        self.page.evaluate("() => setDiscoveryUploadState('idle')")
-        self.assertEqual(button.locator(".btn-label").inner_text(), "上传并分析")
-        self.assertFalse(button.evaluate("element => element.classList.contains('upload-success')"))
-        self.assertFalse(button.evaluate("element => element.classList.contains('upload-error')"))
-
-    def test_ai_setting_buttons_expose_loading_success_and_failure(self):
-        """Model fetch and connection test report progress on their own buttons."""
-        fetch_button = self.page.locator("#aiModelFetchButton")
-        test_button = self.page.locator("#aiConnectionTestButton")
-
-        self.page.evaluate("() => setAiActionButtonState('fetch', 'loading')")
-        self.assertEqual(fetch_button.locator(".btn-label").inner_text(), "拉取中…")
-        self.assertTrue(fetch_button.is_disabled())
-
-        self.page.evaluate("() => setAiActionButtonState('fetch', 'success')")
-        self.assertEqual(fetch_button.locator(".btn-label").inner_text(), "拉取成功")
-        self.assertTrue(fetch_button.evaluate("el => el.classList.contains('upload-success')"))
-
-        self.page.evaluate("() => setAiActionButtonState('test', 'loading')")
-        self.assertEqual(test_button.locator(".btn-label").inner_text(), "测试中…")
-        self.assertTrue(test_button.is_disabled())
-
-        self.page.evaluate("() => setAiActionButtonState('test', 'error')")
-        self.assertEqual(test_button.locator(".btn-label").inner_text(), "测试失败，重试")
-        self.assertTrue(test_button.evaluate("el => el.classList.contains('upload-error')"))
-        self.assertFalse(test_button.is_disabled())
-
-    def test_error_notice_auto_dismisses(self):
-        """Even retryable errors leave the global notice after a bounded delay."""
-        self.page.evaluate("() => setAppNotice('连接失败', 'error', () => {}, 50)")
-        notice = self.page.locator("#appNotice")
-        self.assertTrue(notice.is_visible())
-        self.page.wait_for_timeout(100)
-        self.assertTrue(notice.is_hidden())
-
-    def test_upload_without_ai_consent_stops_after_local_save(self):
-        """Local-only upload must not create an analysis that stays queued forever."""
-        self.page.set_input_files(
-            "#discoveryResumeFile",
-            {"name": "resume.txt", "mimeType": "text/plain", "buffer": b"Python developer"},
-        )
-        self.page.evaluate("""() => {
-            currentProfileId = 'profile-test';
-            document.getElementById('discoveryAiConsent').checked = false;
-            window.__analysisSubmitted = false;
-            api = async path => {
-                if (path === DiscoveryAPI.analyses) {
-                    window.__analysisSubmitted = true;
-                    return {ok: true, status: 202, json: async () => ({analysis_id: 'analysis-test'})};
-                }
-                if (path.includes('/resume')) {
-                    return {ok: true, status: 201, json: async () => ({resume_id: 'resume-test'})};
-                }
-                return {
-                    ok: true, status: 200,
-                    json: async () => ({status: 'failed', failure: {error_code: 'unexpected'}}),
-                };
-            };
-        }""")
-
-        self.page.locator("#discoveryUploadButton").click()
-        self.page.wait_for_function(
-            "() => document.querySelector('#discoveryUploadButton .btn-label').textContent.includes('上传成功')"
-        )
-        self.assertFalse(self.page.evaluate("() => window.__analysisSubmitted"))
-        self.assertEqual(
-            self.page.locator("#discoveryUploadButton .btn-label").inner_text(),
-            "上传成功（未分析）",
+    def _fulfill(self, route, body: dict, status: int = 200):
+        route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body, ensure_ascii=False),
         )
 
-    def test_top_navigation_names_the_workspaces(self):
-        labels = self.page.locator(".app-header .view-tab").all_inner_texts()
-        self.assertEqual(labels, ["岗位发现", "搜索工作台", "筛选工作台"])
-
-    def test_desktop_focus_visible(self):
-        """Tabbing to a button shows a focus indicator."""
-        self.page.keyboard.press("Tab")
-        # At least one element should be focused
-        focused_tag = self.page.evaluate("() => document.activeElement ? document.activeElement.tagName : null")
-        self.assertIsNotNone(focused_tag)
-
-    # ------------------------------------------------------------------
-    # Viewport: narrow 720px
-    # ------------------------------------------------------------------
-
-    def test_narrow_no_horizontal_overflow(self):
-        """No horizontal scrollbar at 720px width."""
-        self.page.set_viewport_size({"width": 720, "height": 900})
-        self.page.wait_for_timeout(300)
-        overflow = self.page.evaluate(
-            "() => document.documentElement.scrollWidth > document.documentElement.clientWidth"
-        )
-        self.assertFalse(overflow, "horizontal overflow at 720px")
-
-    def test_narrow_four_steps_present(self):
-        self.page.set_viewport_size({"width": 720, "height": 900})
-        self.page.wait_for_timeout(300)
-        for step_id in ["discoveryStepUpload", "discoveryStepReview",
-                        "discoveryStepProgress", "discoveryStepResults"]:
-            el = self.page.query_selector(f"#{step_id}")
-            self.assertIsNotNone(el, f"missing #{step_id} at 720px")
-
-    def test_partial_and_manual_analysis_states_render_without_overflow(self):
-        for width, quality in ((1366, "partial"), (720, "manual_required")):
-            with self.subTest(width=width, quality=quality):
-                self.page.set_viewport_size({"width": width, "height": 900})
-                self.page.evaluate("""quality => renderAnalysis({
-                    contract_version: 'v3', summary: {headline:'', experience_level:'', domains:[], strengths:[]},
-                    evidence: [], unknowns: [], directions: [],
-                    quality: {status: quality, warnings: [{code:'missing_required', path:'directions'}]}
-                })""", quality)
-                self.page.evaluate("() => switchToDiscovery('review')")
-                text = self.page.locator("#discoveryAnalysisContent").inner_text()
-                self.assertIn("需要", text)
-                self.assertIn("简历未提供", text)
-                self.assertTrue(self.page.locator("#discoveryManualDirection").is_visible())
-                overflow = self.page.evaluate("() => document.documentElement.scrollWidth > document.documentElement.clientWidth")
-                self.assertFalse(overflow)
-
-    def test_direction_default_and_dynamic_text_are_safe(self):
-        self.page.evaluate("""() => renderAnalysis({
-            summary:{headline:'<img src=x onerror=window.__xss=1>', experience_level:'', domains:[], strengths:[]},
-            evidence:[], unknowns:[], quality:{status:'complete', warnings:[]},
-            directions:[{id:'d1', name:'方向', type:'core', default_enabled:false, search_terms:['Python']}]
-        })""")
-        self.assertEqual(self.page.locator(".discovery-summary-headline").inner_text(), "<img src=x onerror=window.__xss=1>")
-        self.assertFalse(self.page.locator('.discovery-direction-card input[type="checkbox"]').is_checked())
-        self.assertIsNone(self.page.evaluate("() => window.__xss"))
-
-    def test_manual_direction_accepts_comma_shorthand_and_clears_stale_warning(self):
-        self.page.evaluate("""() => renderAnalysis({
-            summary:{headline:'', experience_level:'', domains:[], strengths:[]},
-            evidence:[], directions:[],
-            unknowns:[{field:'city', message:'简历未提及当前城市'}],
-            quality:{status:'manual_required', warnings:[]}
-        })""")
-        self.page.evaluate("() => switchToDiscovery('review')")
-        self.page.locator("#discoveryManualDirection").fill("AI初级应用开发，AI Agent")
-        self.page.evaluate("() => setAppNotice('手动方向需要名称和 1–3 个搜索词', 'warning', null, 10000)")
-        self.page.locator("#discoveryManualDirection").press("Tab")
-
-        parsed = self.page.evaluate("() => readManualDirectionInputs({normalize: true})")
-        self.assertEqual(parsed, {
-            "name": "AI初级应用开发",
-            "search_terms": ["AI Agent"],
-            "valid": True,
-            "present": True,
+    def _handle_api(self, route):
+        request = route.request
+        path = urlparse(request.url).path
+        method = request.method
+        self.api_calls.append({
+            "path": path,
+            "method": method,
+            "json": self._json_body(request),
         })
-        self.assertEqual(self.page.locator("#discoveryManualDirection").input_value(), "AI初级应用开发")
-        self.assertEqual(self.page.locator("#discoveryManualTerms").input_value(), "AI Agent")
-        self.assertIn("1 / 3", self.page.locator("#discoveryManualTermCount").inner_text())
-        self.assertTrue(self.page.locator("#appNotice").is_hidden())
 
-        self.page.evaluate("""() => {
-            discoveryAnalysisId = 'analysis-test';
-            window.__confirmationPayload = null;
-            api = async (path, options) => {
-                if (path === DiscoveryAPI.confirmations) {
-                    window.__confirmationPayload = options.json;
-                    return {ok:true, status:201, json:async () => ({confirmation_id:'confirmation-test'})};
-                }
-                return {ok:false, status:400, json:async () => ({user_message:'stop after confirmation'})};
-            };
-        }""")
-        self.page.locator("#discoveryConfirmButton").click()
-        self.page.wait_for_function("() => window.__confirmationPayload !== null")
-        payload = self.page.evaluate("() => window.__confirmationPayload")
-        self.assertEqual(payload["user_directions"], [{
-            "name": "AI初级应用开发",
-            "search_terms": ["AI Agent"],
-        }])
+        if path == "/api/session":
+            return self._fulfill(route, {"token": "browser-test-token"})
+        if path == "/api/check":
+            return self._fulfill(route, {"connected": True})
+        if path == "/api/profiles":
+            return self._fulfill(route, {
+                "profiles": [{"id": "profile-1", "name": "默认画像"}],
+            })
+        if path == "/api/advanced-settings":
+            return self._fulfill(route, {"settings": ADVANCED_SETTINGS})
+        if path == "/api/latest-pipeline-result":
+            return self._fulfill(route, {
+                "has_result": self.latest_result is not None,
+                "result": self.latest_result,
+            })
+        if path == "/api/screening/filter-options":
+            return self._fulfill(route, {"options": {}})
+        if path in ("/api/screening/interested", "/api/screening/trash"):
+            return self._fulfill(route, {"items": []})
+        if path == "/api/ai-settings":
+            return self._fulfill(route, {
+                "endpoint_url": "https://example.invalid/v1/chat/completions",
+                "model": "test-model",
+                "masked_key": "sk-****",
+            })
+        if path == "/api/analyze-resume":
+            return self._fulfill(route, ANALYSIS_RESPONSE)
+        if path == "/api/execute-search":
+            return self._fulfill(route, {"task_id": "scrape-1"})
+        if path == "/api/search-progress/scrape-1":
+            snapshot = self.scrape_progress.pop(0) if self.scrape_progress else {
+                "status": "done",
+                "progress": {"current": 1, "total": 1, "message": "抓取完成"},
+                "logs": [],
+                "result": {"ok": True, "jobs": []},
+            }
+            return self._fulfill(route, snapshot)
+        if path == "/api/ai-screen":
+            return self._fulfill(route, {"task_id": "screen-1"})
+        if path == "/api/search-progress/screen-1":
+            snapshot = self.screen_progress.pop(0) if self.screen_progress else {
+                "status": "done",
+                "progress": {"current": 1, "total": 1, "message": "筛选完成"},
+                "logs": [],
+                "result": {"ok": True, "jobs": [], "dropped": []},
+            }
+            return self._fulfill(route, snapshot)
+        if path in (
+            "/api/pipeline/jobs/interest",
+            "/api/pipeline/jobs/interest/cancel",
+        ):
+            return self._fulfill(route, {"ok": True})
+        if path == "/api/screening/runs" and method == "POST":
+            self.screening_run = {
+                "run_id": "screening-run-1",
+                "status": "running",
+                "processed_count": 0,
+                "source_count": 10,
+                "parse_failure_count": 0,
+            }
+            return self._fulfill(route, self.screening_run)
+        if path == "/api/screening/runs/screening-run-1" and method == "GET":
+            return self._fulfill(route, self.screening_run or {
+                "run_id": "screening-run-1",
+                "status": "running",
+            })
+        if path == "/api/screening/runs/screening-run-1/cancel":
+            self.screening_run = {
+                "run_id": "screening-run-1",
+                "status": "cancelled",
+                "processed_count": 3,
+                "source_count": 10,
+                "parse_failure_count": 0,
+            }
+            return self._fulfill(route, self.screening_run)
+        if path.startswith("/api/screening/runs/screening-run-1/"):
+            return self._fulfill(route, {"items": []})
 
-    def test_manual_completion_panel_groups_inputs_and_unknowns_without_touching(self):
-        self.page.evaluate("""() => renderAnalysis({
-            summary:{headline:'', experience_level:'', domains:[], strengths:[]},
-            evidence:[], directions:[],
-            unknowns:[{field:'city', message:'简历未提及当前城市'}],
-            quality:{status:'manual_required', warnings:[]}
-        })""")
-        self.page.evaluate("() => switchToDiscovery('review')")
-        panel = self.page.locator(".discovery-manual-direction")
-        self.assertEqual(panel.locator(".discovery-manual-field").count(), 2)
-        self.assertEqual(panel.locator(".discovery-unknowns").count(), 1)
-        first_box = panel.locator(".discovery-manual-field").nth(0).bounding_box()
-        second_box = panel.locator(".discovery-manual-field").nth(1).bounding_box()
-        self.assertGreater(second_box["x"] - (first_box["x"] + first_box["width"]), 10)
+        return self._fulfill(route, {"ok": True, "items": []})
 
-        self.page.set_viewport_size({"width": 720, "height": 900})
+    def _reload(self):
+        self.page.reload(wait_until="networkidle")
+
+    def _analyze_resume(self):
+        self.page.set_input_files(
+            '[data-testid="resume-input"]',
+            {
+                "name": "resume.txt",
+                "mimeType": "text/plain",
+                "buffer": b"Python backend developer",
+            },
+        )
+        self.page.locator('[data-testid="resume-consent"]').check()
+        self.page.locator('[data-testid="analyze-resume"]').click()
+        self.page.get_by_role("heading", name="确认关键词与城市").wait_for()
+
+    def _show_latest_results(self, jobs: list[dict], dropped=None):
+        dropped = dropped or []
+        self.latest_result = {
+            "ok": True,
+            "jobs": jobs,
+            "dropped": dropped,
+            "total_scraped": len(jobs) + len(dropped),
+            "total_kept": len(jobs),
+            "total_matched": sum(job.get("verdict") == "match" for job in jobs),
+            "total_dropped": len(dropped),
+        }
+        self._reload()
+        self.page.locator(".step-nav button", has_text="查看结果").click()
+
+    def test_desktop_navigation_and_four_gated_steps_render_without_overflow(self):
+        labels = self.page.locator('.view-tabs [role="tab"]').all_inner_texts()
+        self.assertEqual(labels, ["岗位发现", "筛选工作台"])
+        steps = self.page.locator(".step-nav button")
+        self.assertEqual(steps.all_inner_texts(), [
+            "1\n上传简历",
+            "2\n广泛抓取",
+            "3\nAI 筛选",
+            "4\n查看结果",
+        ])
+        self.assertFalse(steps.nth(0).is_disabled())
+        self.assertTrue(all(steps.nth(i).is_disabled() for i in range(1, 4)))
+        overflow = self.page.evaluate(
+            "() => document.documentElement.scrollWidth > document.documentElement.clientWidth"
+        )
+        self.assertFalse(overflow)
+
+    def test_resume_upload_requires_file_and_explicit_ai_consent(self):
+        self.page.locator('[data-testid="analyze-resume"]').click()
+        self.assertIn("请先选择简历文件", self.page.locator(".notice-bar").inner_text())
+
+        self.page.set_input_files(
+            '[data-testid="resume-input"]',
+            {"name": "resume.txt", "mimeType": "text/plain", "buffer": b"resume"},
+        )
+        self.page.locator('[data-testid="analyze-resume"]').click()
+        self.assertIn("请勾选 AI 解析同意", self.page.locator(".notice-bar").inner_text())
+
+        self.page.locator('[data-testid="resume-consent"]').check()
+        self.page.locator('[data-testid="analyze-resume"]').click()
+        self.page.get_by_role("heading", name="确认关键词与城市").wait_for()
+        self.assertTrue(
+            self.page.locator('[data-testid="keyword-chip"]').first.is_visible()
+        )
+
+    def test_four_step_requests_remain_separate_and_bound_to_one_scrape(self):
+        self._analyze_resume()
+        self.scrape_progress = [{
+            "status": "done",
+            "progress": {"current": 1, "total": 1, "message": "抓取完成"},
+            "logs": ["已保存 2 个岗位"],
+            "result": {"ok": True, "jobs": [_job(1), _job(2)]},
+        }]
+        self.page.locator('[data-testid="start-scrape"]').click()
+        self.page.locator('[data-testid="continue-to-screen"]').wait_for()
+
+        scrape_call = next(
+            call for call in self.api_calls
+            if call["path"] == "/api/execute-search" and call["method"] == "POST"
+        )
+        self.assertEqual(scrape_call["json"], {
+            "script_params": {
+                "keyword": "Python 后端",
+                "city": ["上海"],
+                "filters": {},
+            },
+        })
+
+        self.page.locator('[data-testid="continue-to-screen"]').click()
+        self.assertEqual(self.page.locator(".filter-group").count(), 6)
+        self.screen_progress = [{
+            "status": "done",
+            "progress": {"current": 2, "total": 2, "message": "筛选完成"},
+            "logs": [],
+            "result": {
+                "ok": True,
+                "jobs": [_job(1, "match"), _job(2, "uncertain")],
+                "dropped": [],
+                "total_scraped": 2,
+                "total_kept": 2,
+                "total_matched": 1,
+                "total_dropped": 0,
+            },
+        }]
+        self.page.locator('[data-testid="start-ai-screen"]').click()
+        self.page.locator('.result-tabs [role="tab"]').first.wait_for()
+
+        screen_call = next(
+            call for call in self.api_calls
+            if call["path"] == "/api/ai-screen" and call["method"] == "POST"
+        )
+        self.assertEqual(screen_call["json"]["scrape_task_id"], "scrape-1")
+        result_labels = [
+            "".join(text.split())
+            for text in self.page.locator('.result-tabs [role="tab"]').all_inner_texts()
+        ]
+        self.assertEqual(result_labels, ["匹配1", "不匹配0", "待确认1", "已筛除0"])
+
+    def test_running_and_failed_scrape_states_are_actionable(self):
+        self._analyze_resume()
+        self.scrape_progress = [{
+            "status": "failed",
+            "progress": {"message": "连接检查失败"},
+            "logs": [],
+            "error": "BOSS 专用浏览器未连接",
+        }]
+        self.page.locator('[data-testid="start-scrape"]').click()
+        progress = self.page.locator(".task-progress")
+        progress.get_by_text("执行失败").wait_for()
+        self.assertIn("BOSS 专用浏览器未连接", progress.inner_text())
+        self.assertIn("BOSS 专用浏览器未连接", self.page.locator(".notice-bar").inner_text())
+        self.assertNotIn("未知错误", self.page.locator("body").inner_text())
+
+    def test_empty_result_has_a_clear_state(self):
+        self._show_latest_results([])
+        panel = self.page.locator('[data-testid="discovery-view"] .empty-panel')
+        self.assertTrue(panel.is_visible())
+        self.assertIn("没有", panel.inner_text())
+        self.assertIn("完成当前步骤后", panel.inner_text())
+
+    def test_large_result_set_is_batched_with_one_detail_panel(self):
+        self._show_latest_results([_job(index) for index in range(65)])
+        self.assertEqual(self.page.locator('[data-testid="job-row"]').count(), 30)
+        self.assertEqual(self.page.locator('[data-testid="job-detail"]').count(), 1)
+        self.assertIn("已加载 30", self.page.locator(".job-list-heading").inner_text())
+        self.page.locator('[data-testid="load-more"]').click()
+        self.assertEqual(self.page.locator('[data-testid="job-row"]').count(), 60)
+        self.assertEqual(self.page.locator('[data-testid="job-detail"]').count(), 1)
+
+    def test_untrusted_job_text_is_rendered_as_text_and_link_is_hardened(self):
+        job = _job(1)
+        job["title"] = "<img src=x onerror=window.__xss=1>"
+        self._show_latest_results([job])
+        detail = self.page.locator('[data-testid="job-detail"]')
+        self.assertIn("<img src=x onerror=window.__xss=1>", detail.inner_text())
+        self.assertIsNone(self.page.evaluate("() => window.__xss"))
+        link = detail.get_by_role("link", name="查看原岗位")
+        self.assertEqual(link.get_attribute("target"), "_blank")
+        self.assertEqual(link.get_attribute("rel"), "noopener noreferrer")
+
+    def test_interest_persists_cancel_uses_http_and_reject_stays_local(self):
+        self._show_latest_results([_job(1)])
+        detail = self.page.locator('[data-testid="job-detail"]')
+        detail.get_by_role("button", name="感兴趣", exact=True).click()
+        detail.get_by_role("button", name="撤销感兴趣", exact=True).wait_for()
+        detail.get_by_role("button", name="撤销感兴趣", exact=True).click()
+        detail.get_by_role("button", name="感兴趣", exact=True).wait_for()
+
+        interest_paths = [
+            call["path"] for call in self.api_calls
+            if call["path"].startswith("/api/pipeline/jobs/interest")
+        ]
+        self.assertEqual(interest_paths, [
+            "/api/pipeline/jobs/interest",
+            "/api/pipeline/jobs/interest/cancel",
+        ])
+
+        before = len(self.api_calls)
+        detail.get_by_role("button", name="不感兴趣", exact=True).click()
+        detail.get_by_role("button", name="撤销不感兴趣", exact=True).wait_for()
+        self.assertEqual(len(self.api_calls), before)
+        self.assertIn("仅本轮有效", self.page.locator(".notice-bar").inner_text())
+
+    def test_ai_settings_dialog_has_focus_management_and_escape_cancel(self):
+        trigger = self.page.locator('[data-testid="ai-settings-trigger"]')
+        trigger.click()
+        dialog = self.page.get_by_role("dialog", name="AI 设置")
+        dialog.wait_for()
+        self.assertEqual(dialog.get_attribute("aria-modal"), "true")
+        self.assertTrue(dialog.evaluate("el => el.contains(document.activeElement)"))
+        self.page.keyboard.press("Escape")
+        self.assertTrue(dialog.is_hidden())
+        self.assertTrue(trigger.evaluate("el => document.activeElement === el"))
+
+    def test_375px_layout_keeps_header_actions_and_tabs_reachable(self):
+        self.page.set_viewport_size({"width": 375, "height": 812})
         self.page.wait_for_timeout(100)
         overflow = self.page.evaluate(
             "() => document.documentElement.scrollWidth > document.documentElement.clientWidth"
         )
         self.assertFalse(overflow)
 
-    # ------------------------------------------------------------------
-    # Run state injection (JS-level simulation)
-    # ------------------------------------------------------------------
+        trigger = self.page.locator('[data-testid="ai-settings-trigger"]')
+        trigger_box = trigger.bounding_box()
+        self.assertGreaterEqual(trigger_box["width"], 44)
+        self.assertGreaterEqual(trigger_box["height"], 44)
+        self.assertTrue(self.page.get_by_label("当前画像").is_visible())
 
-    def _inject_run_state(self, status, stage="assembling"):
-        """Inject a discovery run state via JS to test rendering."""
-        self.page.evaluate(f"""() => {{
-            if (typeof renderRunProgress === 'function') {{
-                renderRunProgress({{
-                    id: 'test-run', status: '{status}', stage: '{stage}',
-                    progress: {{ fetched: 10, assessed: 8 }},
-                    counts: {{ high_match: 3, adjacent_match: 2, growth_match: 1,
-                              needs_review: 1, not_suitable: 2 }},
-                    updated_at: '2026-07-14T12:00:00Z'
-                }});
-            }}
-        }}""")
+        self.page.locator('[data-testid="screening-tab"]').click()
+        zone_tabs = self.page.locator(".screening-zone-tabs")
+        self.assertTrue(zone_tabs.is_visible())
+        self.assertFalse(zone_tabs.evaluate("el => el.scrollWidth > el.clientWidth"))
+        self.assertEqual(zone_tabs.locator('[role="tab"]').count(), 5)
 
-    def test_state_loading_renders(self):
-        """Loading state (planning stage) renders without error."""
-        self._inject_run_state("planning", "planning")
-        content = self.page.query_selector("#discoveryProgressContent")
-        self.assertIsNotNone(content)
-        self.assertTrue(content.inner_html() != "")
+    def test_mobile_job_detail_is_full_screen_and_can_reopen(self):
+        self.page.set_viewport_size({"width": 375, "height": 812})
+        self._show_latest_results([_job(1), _job(2)])
+        detail = self.page.locator('[data-testid="job-detail"]')
+        box = detail.bounding_box()
+        self.assertEqual(detail.evaluate("el => getComputedStyle(el).position"), "fixed")
+        self.assertLessEqual(abs(box["x"]), 1)
+        self.assertLessEqual(abs(box["y"]), 1)
+        self.assertGreaterEqual(box["width"], 374)
+        self.assertGreaterEqual(box["height"], 811)
 
-    def test_state_success_renders(self):
-        self._inject_run_state("succeeded")
-        content = self.page.query_selector("#discoveryProgressContent")
-        self.assertTrue(content.inner_html() != "")
+        detail.get_by_role("button", name="关闭岗位详情").click()
+        self.assertTrue(detail.is_hidden())
+        self.page.locator('[data-testid="job-row"]').first.click()
+        self.assertTrue(detail.is_visible())
 
-    def test_state_partial_renders(self):
-        self._inject_run_state("partial")
-        content = self.page.query_selector("#discoveryProgressContent")
-        self.assertTrue(content.inner_html() != "")
-
-    def test_state_failed_renders(self):
-        self._inject_run_state("failed")
-        content = self.page.query_selector("#discoveryProgressContent")
-        self.assertTrue(content.inner_html() != "")
-
-    def test_source_failures_render_actionable_messages_instead_of_unknown_error(self):
-        cases = (
-            ("source_cdp_unavailable", "BOSS 专用浏览器未连接"),
-            ("source_login_required", "尚未登录 BOSS直聘"),
-        )
-        for failure_code, expected in cases:
-            with self.subTest(failure_code=failure_code):
-                message = self.page.evaluate(
-                    "code => getDiscoveryFailureMessage({status:'failed', failure_code:code})",
-                    failure_code,
-                )
-                self.assertIn(expected, message)
-                self.assertNotIn("未知错误", message)
-                self.page.evaluate(
-                    "code => renderRunProgress({status:'failed', stage:'fetching_lists', failure_code:code, counts:{}})",
-                    failure_code,
-                )
-                self.assertIn(expected, self.page.locator("#discoveryProgressContent").inner_text())
-
-    def test_state_interrupted_renders(self):
-        self._inject_run_state("interrupted")
-        content = self.page.query_selector("#discoveryProgressContent")
-        self.assertTrue(content.inner_html() != "")
-
-    def test_state_cancelled_renders(self):
-        self._inject_run_state("cancelled")
-        content = self.page.query_selector("#discoveryProgressContent")
-        self.assertTrue(content.inner_html() != "")
-
-    def test_results_empty_state(self):
-        """No-results state renders empty-state message."""
-        self.page.evaluate("""() => {
-            if (typeof renderResults === 'function') {
-                renderResults([], {});
-            }
-        }""")
-        list_el = self.page.query_selector("#discoveryResultsList")
-        self.assertIsNotNone(list_el)
-        html = list_el.inner_html()
-        # Should contain an empty-state element or be empty
-        self.assertTrue(html is not None, "结果列表 DOM 应存在")
-
-    def test_results_with_items_renders_cards(self):
-        """Results with items render discovery cards."""
-        self.page.evaluate("""() => {
-            if (typeof renderResults === 'function') {
-                renderResults([{
-                    job_id: 'job-test-1', direction_id: 'd1',
-                    title: '测试后端岗位', company: '测试公司', salary: '25-40K',
-                    location: '北京', category: 'high_match', match_score: 85,
-                    source_url: 'https://www.zhipin.com/test/123',
-                    explanation: 'Python 后端经验匹配',
-                    gaps: []
-                }], { high_match: 1 });
-            }
-        }""")
-        card = self.page.query_selector(".discovery-job-card")
-        self.assertIsNotNone(card, "discovery job card not rendered")
-
-    def test_feedback_trash_restore_direction_and_preference_changes_use_real_http(self):
-        """T078/T079: browser actions persist through the actual feedback routes."""
-        from webui.store import TaskStore
-
-        store = TaskStore(self.server._tmp.name)
-        profile = store.create_profile("浏览器反馈画像")
-        resume = store.save_resume(
-            profile["id"], "browser/resume.txt", "txt", "脱敏简历", "browser-feedback", "resume.txt"
-        )
-        analysis = store.create_analysis(resume["id"], profile["id"])
-        direction = store.add_direction(
-            analysis["id"], "后端工程", "core", search_terms=["Python"]
-        )
-        self.page.evaluate("""args => {
-            currentProfileId = args.profileId;
-            discoveryRunId = "";
-            discoveryDirections = [{id: args.directionId, name: "后端工程"}];
-            switchToDiscovery("results");
-            renderResults([{
-                job_id: "browser-job-1",
-                primary_assessment: {
-                    direction_id: args.directionId,
-                    category: "high_match",
-                    match_score: 88,
-                    gaps: [],
-                },
-                title: "浏览器测试岗位",
-                company: "测试公司",
-                salary: "25-35K",
-                location: "上海",
-                completeness: "complete",
-                source_url: "https://www.zhipin.com/job_detail/browser-job-1.html",
-            }], {high_match: 1});
-        }""", {"profileId": profile["id"], "directionId": direction["id"]})
-
-        self.page.select_option(".discovery-feedback-reason", "company_unsuitable")
-        self.page.get_by_role("button", name="不感兴趣 / 移入垃圾桶").click()
-        self.page.wait_for_function(
-            "() => discoveryFeedbackItems.some(item => item.job_id === 'browser-job-1' && item.action === 'not_interested')"
-        )
-        self.page.locator('.discovery-category-tab[data-category="trash"]').click()
-        self.page.get_by_role("button", name="恢复").click()
-        self.page.wait_for_function(
-            "() => !discoveryFeedbackItems.some(item => item.job_id === 'browser-job-1' && item.action === 'not_interested')"
-        )
-        self.page.locator('.discovery-category-tab[data-category=""]').click()
-        self.assertTrue(self.page.locator(".discovery-job-card").is_visible())
-
-        self.page.get_by_role("button", name="感兴趣", exact=True).last.click()
-        self.page.wait_for_function(
-            "() => discoveryFeedbackItems.some(item => item.job_id === 'browser-job-1' && item.action === 'interested')"
-        )
-        self.page.locator('.discovery-category-tab[data-category="interested"]').click()
-        self.assertTrue(self.page.locator(".discovery-job-card").is_visible())
-
-        self.page.select_option("#discoveryFeedbackDirection", direction["id"])
-        self.page.select_option("#discoveryDirectionReason", "direction_not_wanted")
-        self.page.get_by_role("button", name="提交方向反馈").click()
-        changes = self.page.locator("#discoveryPreferenceChanges")
-        self.page.wait_for_function(
-            "() => document.getElementById('discoveryPreferenceChanges').innerText.includes('下次不再搜索该方向')"
-        )
-        self.assertIn("下次不再搜索该方向", changes.inner_text())
-
-        active = store.list_discovery_feedback(profile["id"], effective_only=True)
-        self.assertTrue(any(item["action"] == "interested" for item in active))
-        self.assertTrue(any(item["action"] == "direction_disable" for item in active))
-
-    # ------------------------------------------------------------------
-    # Legacy compatibility in browser
-    # ------------------------------------------------------------------
-
-    def test_legacy_workbench_section_present(self):
-        el = self.page.query_selector(".workspace")
-        self.assertIsNotNone(el, "legacy .workspace section missing")
-
-    def test_legacy_screening_section_present(self):
-        # screening may be a class or id
-        html = self.page.content().lower()
-        self.assertIn("screening", html)
+    def test_screening_run_can_be_cancelled_without_losing_the_page(self):
+        self.page.locator('[data-testid="screening-tab"]').click()
+        self.page.locator('[data-testid="screening-keyword"]').fill("Python 后端")
+        self.page.locator('[data-testid="start-screening"]').click()
+        cancel = self.page.get_by_role("button", name="取消", exact=True)
+        cancel.wait_for()
+        cancel.click()
+        self.page.get_by_text("筛选已取消，已完成结果已保留").wait_for()
+        self.assertIn("cancelled", self.page.locator(".run-status-strip").inner_text())
+        self.assertTrue(self.page.locator('[data-testid="screening-view"]').is_visible())
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -13,6 +13,9 @@ ENV/
 # Build and package artifacts
 build/
 dist/
+webui/node_modules/
+!webui/dist/
+!webui/dist/**
 *.egg-info/
 .eggs/
 *.egg

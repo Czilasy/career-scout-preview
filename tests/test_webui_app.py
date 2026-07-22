@@ -1,5 +1,6 @@
 import json
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -224,31 +225,21 @@ class WebUIAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["jobs"], [])
 
-    def test_frontend_uses_persistent_responsive_workspace_contract(self):
+    def test_frontend_serves_built_vue_entry_and_hashed_assets(self):
         response = self.client.get("/")
         html = response.get_data(as_text=True)
-        response.close()
+        assets = re.findall(r'(?:src|href)="(/static/assets/[^"]+)"', html)
 
-        # Dark theme workbench
-        self.assertIn("color-scheme: dark", html)
-        # Settings panel on the left (default expanded, no collapse toggle)
-        self.assertIn('id="settingsPanel"', html)
-        self.assertIn('data-pane="config"', html)
-        # Single-column job card flow
-        self.assertIn('id="jobCardList"', html)
-        # Card fields: name, company, salary, location, JD excerpt
-        self.assertIn("job-card", html)
-        # Feedback buttons (interested / not interested) — no navigation
-        self.assertIn("感兴趣", html)
-        self.assertIn("不感兴趣", html)
-        # Search and profile endpoints
-        self.assertIn("/api/profiles", html)
-        self.assertIn("/api/search-runs", html)
-        self.assertIn("/api/ai-settings", html)
-        # Responsive: narrow-screen drawer
-        self.assertIn("@media (max-width: 720px)", html)
-        # No external CDN, no raw AI scores/reasons, no auto-apply.
-        # Note: match_score is approved by spec 004 for program-validated
+        self.assertIn('<div id="app"></div>', html)
+        self.assertNotIn('/src/main.ts', html)
+        self.assertGreaterEqual(len(assets), 2)
+        self.assertIn("no-cache", response.headers.get("Cache-Control", ""))
+        for asset in assets:
+            with self.subTest(asset=asset):
+                asset_response = self.client.get(asset)
+                self.assertEqual(asset_response.status_code, 200)
+                self.assertGreater(len(asset_response.data), 100)
+                asset_response.close()
         # discovery result cards (FR-064); raw AI fields stay excluded.
         self.assertNotIn("cdn.jsdelivr.net", html)
         self.assertNotIn("ai_rank", html)
@@ -1618,13 +1609,35 @@ class ScreeningDegradationIntegrationTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 403)
 
 
-class ScreeningDOMContractTests(unittest.TestCase):
-    """T052: 筛选页 DOM 契约（筛选栏、执行按钮、两区切换、卡片、反馈按钮、感兴趣区与垃圾桶区入口）。
+class VueScreeningEntryContractTests(unittest.TestCase):
+    """The Flask entry mounts Vue; component contracts live in source/tests."""
 
-    GET / 返回的 HTML 必须包含 US6 所需 DOM 元素（以 data-screening / data-zone /
-    data-filter / data-feedback 属性标识），供 JS 挂载交互。本类只测 DOM 契约存在性，
-    不测交互行为（交互在 T053 浏览器测试覆盖）。
-    """
+    @classmethod
+    def setUpClass(cls):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        cls.source = (
+            root / "webui" / "src" / "views" / "ScreeningView.vue"
+        ).read_text(encoding="utf-8")
+
+    def test_filter_and_execution_controls_live_in_vue_source(self):
+        self.assertIn('data-testid="screening-keyword"', self.source)
+        self.assertIn('data-testid="start-screening"', self.source)
+        for field in ("city", "salary", "experience", "degree", "scale", "stage", "industry"):
+            self.assertIn(f'{field}: "', self.source)
+
+    def test_result_zones_and_feedback_actions_live_in_vue_source(self):
+        self.assertIn(':data-zone-tab="zone.id"', self.source)
+        self.assertIn("markInterest(job)", self.source)
+        self.assertIn("markReject(job)", self.source)
+        self.assertIn("restoreTrash(job)", self.source)
+
+    def test_degraded_manual_path_remains_visible(self):
+        self.assertIn("ai_unavailable", self.source)
+        self.assertIn("跳过简历，手动填筛", self.source)
+
+
+class PipelineFeedbackRegressionTests(unittest.TestCase):
+    """Regression coverage for pipeline feedback ID mapping."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -1637,121 +1650,80 @@ class ScreeningDOMContractTests(unittest.TestCase):
             "PYTHON_EXECUTABLE": sys.executable,
         })
         self.client = self.app.test_client()
-        session = self.client.get("/api/session")
-        self.token = session.get_json()["token"]
-        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = self.token
-        resp = self.client.get("/")
-        self.assertEqual(resp.status_code, 200)
-        self.html = resp.get_data(as_text=True)
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        profile = self.client.post(
+            "/api/profiles",
+            json={"name": "pipeline-feedback", "confirmed_fields": {}},
+        )
+        self.profile_id = profile.get_json()["id"]
 
     def tearDown(self):
         self.temp.cleanup()
 
-    # -- 筛选栏 --
+    def test_interest_can_be_cancelled_with_original_pipeline_job_payload(self):
+        job = {
+            "job_id": "boss-external-001",
+            "title": "Python 后端工程师",
+            "salary": "20-30K",
+            "location": "上海",
+            "company": "示例公司",
+            "job_link": "https://www.zhipin.com/job_detail/boss-external-001.html",
+        }
+        payload = {"profile_id": self.profile_id, "job": job}
 
-    def test_filter_bar_container_present(self):
-        self.assertIn('data-screening="filters"', self.html)
-
-    def test_seven_filter_selects_present(self):
-        for field in ("city", "salary", "experience", "degree", "scale", "stage", "industry"):
-            with self.subTest(field=field):
-                self.assertIn(f'data-filter="{field}"', self.html)
-
-    # -- 简历上传 --
-
-    def test_resume_upload_input_present(self):
-        self.assertIn('data-screening="resume-upload"', self.html)
-
-    def test_resume_upload_button_has_loading_feedback(self):
-        self.assertIn('id="resumeUploadButton"', self.html)
-        self.assertIn('aria-busy="false"', self.html)
-        self.assertIn('class="btn-label">上传解析</span>', self.html)
-        self.assertIn('class="btn-spinner" aria-hidden="true"', self.html)
-        self.assertIn("@keyframes btnSpin", self.html)
-        self.assertIn("function setResumeUploadLoading(isLoading)", self.html)
-        self.assertIn("button.disabled = isLoading", self.html)
-        self.assertIn('button.setAttribute("aria-busy", String(isLoading))', self.html)
-
-        upload_source = self.html.split("async function uploadResume()", 1)[1].split(
-            "function showAiSuggestion", 1
-        )[0]
-        self.assertIn("if (uploadButton && uploadButton.disabled) return;", upload_source)
-        self.assertIn("setResumeUploadLoading(true);", upload_source)
-        self.assertIn("finally", upload_source)
-        self.assertIn("setResumeUploadLoading(false);", upload_source)
-
-    def test_suggest_button_present(self):
-        self.assertIn('data-screening="suggest-btn"', self.html)
-
-    def test_resume_consent_tooltip_releases_mouse_focus(self):
-        self.assertIn(
-            ".consent-wrap:hover .consent-tooltip,\n"
-            "    .consent-wrap:focus-within .consent-tooltip { opacity: 1; visibility: visible; }",
-            self.html,
+        marked = self.client.post("/api/pipeline/jobs/interest", json=payload)
+        self.assertEqual(marked.status_code, 200)
+        self.assertEqual(
+            len(self.app.config["TASK_STORE"].list_screening_interested(self.profile_id)),
+            1,
         )
-        self.assertNotIn(
-            ".consent-wrap:has(input:checked) .consent-tooltip",
-            self.html,
+
+        cancelled = self.client.post(
+            "/api/pipeline/jobs/interest/cancel",
+            json=payload,
         )
-        self.assertIn("function initResumeConsentTooltip()", self.html)
-        self.assertIn("consentWrap.addEventListener(\"pointerdown\"", self.html)
-        self.assertIn("consentInput.blur()", self.html)
-        self.assertIn("setTimeout(() => consentInput.blur(), 0)", self.html)
-        self.assertIn("initResumeConsentTooltip();", self.html)
 
-    # -- 执行按钮与关键词 --
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(
+            self.app.config["TASK_STORE"].list_screening_interested(self.profile_id),
+            [],
+        )
 
-    def test_keyword_input_present(self):
-        self.assertIn('data-screening="keyword"', self.html)
+    def test_ai_screen_requires_the_exact_completed_scrape_task(self):
+        missing = self.client.post("/api/ai-screen", json={
+            "screening_fields": {},
+            "profile_summary": "Python 后端",
+        })
+        unknown = self.client.post("/api/ai-screen", json={
+            "screening_fields": {},
+            "profile_summary": "Python 后端",
+            "scrape_task_id": "unknown-task",
+        })
 
-    def test_execute_button_present(self):
-        self.assertIn('data-screening="execute-btn"', self.html)
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(unknown.status_code, 404)
 
-    # -- 运行状态 --
+        self.app.config["PIPELINE_TASKS"]["scrape-finished"] = {
+            "kind": "scrape",
+            "status": "done",
+            "progress": {},
+            "logs": [],
+            "result": {"ok": True, "jobs": [{"job_id": "job-1"}]},
+            "error": "",
+        }
+        with mock.patch.object(
+            self.app.config["PIPELINE_EXECUTOR"], "submit",
+        ) as submit:
+            accepted = self.client.post("/api/ai-screen", json={
+                "screening_fields": {"salary": ["406"]},
+                "profile_summary": "Python 后端",
+                "scrape_task_id": "scrape-finished",
+            })
 
-    def test_run_status_container_present(self):
-        self.assertIn('data-screening="status"', self.html)
-
-    # -- 两区切换 --
-
-    def test_match_zone_tab_present(self):
-        self.assertIn('data-zone-tab="match"', self.html)
-
-    def test_mismatch_zone_tab_present(self):
-        self.assertIn('data-zone-tab="mismatch"', self.html)
-
-    def test_match_zone_container_present(self):
-        self.assertIn('data-zone="match"', self.html)
-
-    def test_mismatch_zone_container_present(self):
-        self.assertIn('data-zone="mismatch"', self.html)
-
-    # -- 岗位卡片与反馈按钮 --
-
-    def test_job_card_template_present(self):
-        self.assertIn('data-screening="job-card"', self.html)
-
-    def test_interest_button_present(self):
-        self.assertIn('data-feedback="interest"', self.html)
-
-    def test_reject_button_present(self):
-        self.assertIn('data-feedback="reject"', self.html)
-
-    # -- 感兴趣区与垃圾桶区入口 --
-
-    def test_interested_zone_entry_present(self):
-        self.assertIn('data-screening="interested-entry"', self.html)
-
-    def test_trash_zone_entry_present(self):
-        self.assertIn('data-screening="trash-entry"', self.html)
-
-    # -- 降级态 --
-
-    def test_ai_unavailable_prompt_present(self):
-        self.assertIn('data-screening="ai-unavailable"', self.html)
-
-    def test_skip_resume_option_present(self):
-        self.assertIn('data-screening="skip-resume"', self.html)
+        self.assertEqual(accepted.status_code, 200)
+        submit.assert_called_once()
+        self.assertEqual(submit.call_args.args[-1], "scrape-finished")
 
 
 if __name__ == "__main__":

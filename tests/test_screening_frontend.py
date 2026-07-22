@@ -1,66 +1,71 @@
-"""Formal five-view screening UI contract tests."""
+"""Source contracts for the Vue screening workbench."""
 
-from __future__ import annotations
-
-import pathlib
-import re
+from pathlib import Path
 import unittest
 
 
-HTML = pathlib.Path(__file__).parents[1] / "webui" / "index.html"
+ROOT = Path(__file__).resolve().parents[1]
+VIEW = (ROOT / "webui" / "src" / "views" / "ScreeningView.vue").read_text(encoding="utf-8")
+JOBS = (ROOT / "webui" / "src" / "components" / "JobWorkspace.vue").read_text(encoding="utf-8")
+CSS = (ROOT / "webui" / "src" / "styles.css").read_text(encoding="utf-8")
 
 
-class ScreeningFiveViewContractTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.html = HTML.read_text(encoding="utf-8")
+class VueScreeningFrontendTests(unittest.TestCase):
+    def test_seven_filter_fields_and_execution_limits_are_present(self):
+        for field in ("city", "salary", "experience", "degree", "scale", "stage", "industry"):
+            with self.subTest(field=field):
+                self.assertIn(f'{field}: "', VIEW)
+        self.assertIn('data-testid="screening-keyword"', VIEW)
+        self.assertIn("v-model.number=\"pages\"", VIEW)
+        self.assertIn("v-model.number=\"maxDetails\"", VIEW)
 
-    def test_all_five_formal_views_are_present(self):
+    def test_resume_suggestion_and_manual_degradation_are_both_available(self):
+        self.assertIn('"/api/screening/resume"', VIEW)
+        self.assertIn('"/api/screening/resume/suggest"', VIEW)
+        self.assertIn("ai_unavailable", VIEW)
+        self.assertIn("跳过简历，手动填筛", VIEW)
+
+    def test_five_zones_are_semantic_tabs(self):
         for zone in ("match", "mismatch", "pending", "interested", "trash"):
-            self.assertIn(f'data-zone-tab="{zone}"', self.html)
-            self.assertIn(f'data-zone="{zone}"', self.html)
+            with self.subTest(zone=zone):
+                self.assertIn(f'{zone}: "', VIEW)
+        self.assertIn('role="tablist"', VIEW)
+        self.assertIn('role="tab"', VIEW)
+        self.assertIn(':data-zone-tab="zone.id"', VIEW)
 
-    def test_pending_has_retry_all_and_manual_routing(self):
-        self.assertIn("retryScreeningPendingAll", self.html)
-        self.assertIn("routeScreeningPending", self.html)
-        self.assertIn("/pending/retry-all", self.html)
+    def test_pending_retry_and_manual_routing_use_existing_endpoints(self):
+        self.assertIn("/pending/${encodeURIComponent(id)}/retry", VIEW)
+        self.assertIn("/pending/${encodeURIComponent(id)}/route", VIEW)
+        self.assertIn("/pending/retry-all", VIEW)
+        self.assertIn("人工通过", VIEW)
+        self.assertIn("人工不通过", VIEW)
 
-    def test_active_screening_run_has_cancel_control(self):
-        self.assertIn('id="screeningCancelBtn"', self.html)
-        self.assertIn("cancelScreeningRun", self.html)
-        self.assertIn("/cancel", self.html)
-        self.assertIn("resumeScreeningRun", self.html)
-        self.assertIn("/resume", self.html)
+    def test_run_cancel_resume_and_profile_scoped_restore_are_preserved(self):
+        self.assertIn("/cancel", VIEW)
+        self.assertIn("/resume", VIEW)
+        self.assertIn('localStorage.setItem("boss-screening-run"', VIEW)
+        self.assertIn("saved.profile_id !== props.profileId", VIEW)
 
-    def test_trash_has_permanent_restore_action(self):
-        self.assertIn("restoreScreeningTrash", self.html)
-        self.assertIn("/restore", self.html)
+    def test_long_term_zones_use_the_persistent_apis(self):
+        self.assertIn("/api/screening/interested?profile_id=", VIEW)
+        self.assertIn("/api/screening/trash?profile_id=", VIEW)
+        self.assertIn("/api/screening/trash/${encodeURIComponent(id)}/restore", VIEW)
 
-    def test_frontend_uses_api_items_contract(self):
-        self.assertIn("matchData.items", self.html)
-        self.assertIn("pendingData.items", self.html)
-        self.assertIn("data.items", self.html)
+    def test_cleanup_uses_a_real_confirmation_dialog(self):
+        self.assertIn("<BaseDialog", VIEW)
+        self.assertIn("/api/screening/cleanup/preview?days=30", VIEW)
+        self.assertIn('"/api/screening/cleanup"', VIEW)
 
-    def test_compact_rows_do_not_use_fixed_card_height(self):
-        rule = re.search(r"\.screening-card\s*\{([^}]+)\}", self.html, re.S)
-        self.assertIsNotNone(rule)
-        self.assertIn("grid-template-columns", rule.group(1))
-        self.assertNotIn("height: var(--card-h)", rule.group(1))
+    def test_results_share_the_batched_list_detail_component(self):
+        self.assertIn("<JobWorkspace", VIEW)
+        self.assertIn("visibleJobs", JOBS)
+        self.assertIn("job-detail-pane", JOBS)
 
-    def test_narrow_screen_prevents_page_horizontal_scroll(self):
-        self.assertIn("overflow-x: hidden", self.html)
-        self.assertIn("@media (max-width: 720px)", self.html)
-
-    def test_reduced_motion_is_supported(self):
-        self.assertIn("prefers-reduced-motion: reduce", self.html)
-
-    def test_uses_the_shared_decision_workbench_visual_system(self):
-        self.assertIn("--gold: #d9b663", self.html)
-        self.assertIn("--surface-raised: #1c2027", self.html)
-        self.assertIn(".settings-panel.collapsed", self.html)
-        self.assertIn(".screening-card:hover", self.html)
-        self.assertIn('id="screeningFilterDetails"', self.html)
-        self.assertIn("function toggleScreeningFilters()", self.html)
+    def test_responsive_styles_cover_controls_and_result_workspace(self):
+        self.assertIn("@media (max-width: 760px)", CSS)
+        self.assertIn(".screening-filter-grid", CSS)
+        self.assertIn(".screening-zone-tabs", CSS)
+        self.assertIn(".job-detail-pane", CSS)
 
 
 if __name__ == "__main__":

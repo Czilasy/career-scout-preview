@@ -1,379 +1,137 @@
-"""T047: Browser-level DOM contract tests for the workbench frontend.
+"""Static browser-safety and accessibility contracts for the Vue WebUI.
 
-Validates card structure, link safety, button non-navigation, JD
-truncation, not-interested exit animation and narrow-screen drawer —
-without a real browser, by parsing the served HTML and inline JS.
+Runtime behavior lives in Vitest and the real-browser acceptance pass.  This
+module intentionally reads source files rather than minified Vite output.
 """
 
+from pathlib import Path
 import re
-import sys
-import pathlib
 import tempfile
 import unittest
 
 from webui.app import create_app
 
 
-class WorkbenchBrowserContractTests(unittest.TestCase):
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "webui" / "src"
+APP = (SRC / "App.vue").read_text(encoding="utf-8")
+DIALOG = (SRC / "components" / "BaseDialog.vue").read_text(encoding="utf-8")
+JOBS = (SRC / "components" / "JobWorkspace.vue").read_text(encoding="utf-8")
+AI = (SRC / "components" / "AiSettingsDialog.vue").read_text(encoding="utf-8")
+NOTICE = (SRC / "components" / "NoticeBar.vue").read_text(encoding="utf-8")
+DISCOVERY = (SRC / "views" / "DiscoveryView.vue").read_text(encoding="utf-8")
+SCREENING = (SRC / "views" / "ScreeningView.vue").read_text(encoding="utf-8")
+CSS = (SRC / "styles.css").read_text(encoding="utf-8")
+ALL_VUE = "\n".join(path.read_text(encoding="utf-8") for path in SRC.rglob("*.vue"))
+
+
+class BuiltFrontendEntryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        root = pathlib.Path(self.temp.name)
+        root = Path(self.temp.name)
         self.app = create_app({
             "TESTING": True,
             "START_TASKS": False,
             "RESULT_DIR": str(root / "results"),
             "DB_PATH": str(root / "state" / "webui.db"),
-            "PYTHON_EXECUTABLE": sys.executable,
         })
         self.client = self.app.test_client()
-        resp = self.client.get("/")
-        self.html = resp.get_data(as_text=True)
-        resp.close()
 
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_card_links_are_https_zhipin_only(self):
-        """Card read-area links must only point to HTTPS zhipin domains."""
-        # Find the JS that builds canonical_url into href
-        # The template must not produce http: or non-zhipin links
-        self.assertNotIn("http://www.zhipin.com", self.html)
-        self.assertNotIn("javascript:void", self.html)
-        # Must validate URLs before opening
-        self.assertTrue(
-            "zhipin.com" in self.html,
-            "前端必须包含 zhipin.com 域名校验逻辑",
-        )
-
-    def test_homepage_declares_inline_favicon(self):
-        self.assertRegex(
-            self.html,
-            r'<link[^>]+rel="icon"[^>]+href="data:',
-            "首页应使用内联 favicon，避免浏览器产生无意义的 404 错误",
-        )
-
-    def test_feedback_buttons_prevent_navigation(self):
-        """Interested / not-interested buttons must not trigger card link navigation."""
-        # Buttons should be type="button" (not submit) and should call
-        # preventDefault / stopPropagation in the inline JS
-        self.assertTrue(
-            'type="button"' in self.html or '.type = "button"' in self.html,
-            "反馈按钮必须显式指定 button 类型",
-        )
-        # Must have event prevention in JS
-        has_prevention = (
-            "preventDefault" in self.html
-            or "stopPropagation" in self.html
-            or "event.stopPropagation" in self.html
-        )
-        self.assertTrue(has_prevention, "反馈按钮必须阻止事件冒泡或默认行为")
-
-    def test_jd_excerpt_is_truncated(self):
-        """JD text on cards must be visually truncated, not full-length."""
-        # CSS must limit card JD height or use line-clamp / max-height
-        has_truncation = (
-            "line-clamp" in self.html
-            or "max-height" in self.html
-            or "text-overflow" in self.html
-            or "-webkit-line-clamp" in self.html
-        )
-        self.assertTrue(has_truncation, "JD 摘要必须有截断样式")
-
-    def test_not_interested_has_exit_animation(self):
-        """Not-interested action must trigger a smooth exit animation."""
-        # CSS must define a transition or animation for card removal
-        has_animation = (
-            "transition" in self.html
-            or "@keyframes" in self.html
-            or "animation" in self.html
-        )
-        self.assertTrue(has_animation, "卡片必须有过渡或动画")
-        # JS must add a class for exit or set opacity
-        has_exit = (
-            "opacity" in self.html
-            or "fade-out" in self.html
-            or "slide-out" in self.html
-            or "exit" in self.html.lower()
-        )
-        self.assertTrue(has_exit, "不感兴趣必须有退场效果")
-
-    def test_undo_after_not_interested(self):
-        """Undo must be available after marking not-interested."""
-        self.assertIn("撤销", self.html)
-
-    def test_narrow_screen_drawer(self):
-        """Narrow screens must collapse settings into a drawer."""
-        self.assertIn("@media (max-width: 720px)", self.html)
-        # Settings panel must be hideable
-        self.assertIn("settingsPanel", self.html)
-
-    def test_empty_workbench_has_a_clear_next_step(self):
-        """An empty workbench must guide the user into the existing setup flow."""
-        self.assertIn("workbench-empty", self.html)
-        self.assertIn("打开设置并开始", self.html)
-        self.assertIn("onclick=\"toggleSettings()\"", self.html)
-
-    def test_settings_panel_has_a_clear_context_and_close_control(self):
-        """The settings panel is always expanded and organized into tabs."""
-        # Tab navigation replaces the old collapse/close controls
-        self.assertIn("panel-tab", self.html)
-        self.assertIn("data-pane=\"config\"", self.html)
-        self.assertIn("data-pane=\"search\"", self.html)
-        self.assertIn("data-pane=\"history\"", self.html)
-        # No collapse toggle or close button (user requested default-expanded)
-        self.assertNotIn("settingsToggle", self.html)
-        self.assertNotIn("关闭设置区", self.html)
-
-    def test_model_refresh_action_stays_compact_without_losing_its_meaning(self):
-        """The model refresh control keeps a short label and the existing action."""
-        self.assertIn('class="btn model-fetch-button"', self.html)
-        self.assertIn('id="aiModelFetchButton"', self.html)
-        self.assertIn('aria-label="拉取可用模型"', self.html)
-        self.assertIn('title="拉取可用模型"', self.html)
-        self.assertIn('onclick="fetchAiModels()"', self.html)
-
-    def test_narrow_workbench_reserves_space_for_the_settings_toggle(self):
-        """The collapsed settings toggle must not cover the workbench title on phones."""
-        self.assertIn('.search-bar { min-height: 68px; padding: 10px 12px 10px 42px; }', self.html)
-
-    def test_ai_settings_can_be_collapsed_without_removing_controls(self):
-        """AI configuration stays available behind an accordion disclosure."""
-        self.assertIn('id="aiSettingsSection"', self.html)
-        self.assertIn('id="aiSettingsContent"', self.html)
-        self.assertIn("function togglePanelAccordion", self.html)
-        self.assertIn("accordion-section", self.html)
-
-    def test_mobile_screening_tabs_fit_without_horizontal_scrolling(self):
-        """The five screening views remain directly reachable on narrow screens."""
-        self.assertIn('.zone-tabs { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); overflow-x: visible; gap: 4px; }', self.html)
-
-    def test_screening_errors_have_an_inline_notice_and_retry_action(self):
-        """Screening failures must be visible in-page and offer a retry affordance."""
-        self.assertIn('id="screeningNotice"', self.html)
-        self.assertIn('id="screeningNoticeRetry"', self.html)
-        self.assertIn("function setScreeningNotice", self.html)
-        self.assertIn("screeningNoticeRetry", self.html)
-
-    def test_global_actions_have_an_inline_notice_and_retry_action(self):
-        """Workbench and AI settings failures share a visible inline feedback surface."""
-        self.assertIn('id="appNotice"', self.html)
-        self.assertIn('id="appNoticeRetry"', self.html)
-        self.assertIn("function setAppNotice", self.html)
-
-    def test_resume_consent_checkbox_keeps_native_compact_dimensions(self):
-        """The consent checkbox must not inherit full-width text-input sizing."""
-        self.assertIn('.field input[type="checkbox"] { width: auto; min-height: 0;', self.html)
-
-    def test_workbench_primary_actions_do_not_use_blocking_alerts(self):
-        """Profile and resume actions use the shared inline feedback surface."""
-        self.assertNotIn("alert(", self.html)
-
-    def test_no_ai_scores_in_card_template(self):
-        """Card template must not expose raw AI scores, ranks or match reasons.
-
-        match_score is approved by spec 004 for program-validated discovery
-        result cards (FR-064); raw AI fields stay excluded.
-        """
-        self.assertNotIn("ai_rank", self.html)
-        self.assertNotIn("match_reason", self.html)
-        self.assertNotIn("ai_score", self.html)
-
-    def test_no_auto_application_ui(self):
-        """Frontend must not show auto-apply, auto-message or probability UI."""
-        self.assertNotIn("自动投递", self.html)
-        self.assertNotIn("联系招聘者", self.html)
-        self.assertNotIn("录用概率", self.html)
-        self.assertNotIn("/api/apply", self.html)
-
-    def test_fixed_height_cards(self):
-        """Cards must have fixed height — no variable-height expansion."""
-        # CSS must set a fixed or max height on job cards
-        has_fixed_height = (
-            "fixed-height" in self.html
-            or "max-height" in self.html
-            or re.search(r"height:\s*\d+px", self.html) is not None
-            or "height: calc(" in self.html
-        )
-        self.assertTrue(has_fixed_height, "岗位卡片必须有固定高度")
-
-    def test_untrusted_ai_and_url_values_are_not_interpolated_as_html(self):
-        """AI suggestions and validated URLs must be rendered with DOM APIs, not HTML strings."""
-        self.assertNotIn('el.innerHTML = `', self.html)
-        self.assertNotIn('href="${safeUrl}"', self.html)
-        self.assertIn("textContent", self.html)
-
-    def test_ai_model_options_use_dom_text_nodes(self):
-        """Configured and remotely listed model names must not be parsed as HTML."""
-        self.assertIn("function renderAiModelOptions", self.html)
-        self.assertIn("option.textContent = model", self.html)
-        self.assertNotIn('sel.innerHTML = `<option value="${savedModel}"', self.html)
-        self.assertNotIn('data.models.map(m => `<option value="${m}"', self.html)
-
-    def test_screening_execution_range_controls_are_sent_to_the_api(self):
-        """正式筛选页必须让用户限制页数和详情数，并发送给运行接口。"""
-        self.assertIn('id="screeningPages"', self.html)
-        self.assertIn('id="screeningMaxDetails"', self.html)
-        self.assertIn("body.pages", self.html)
-        self.assertIn("body.max_details", self.html)
-
-    def test_screening_run_restore_is_profile_scoped(self):
-        """A run saved for one profile must not be restored for another."""
-        self.assertIn("function saveScreeningRun", self.html)
-        self.assertIn("profile_id: currentProfileId", self.html)
-        self.assertIn("saved.profile_id !== currentProfileId", self.html)
+    def test_homepage_uses_local_hashed_assets_only(self):
+        response = self.client.get("/")
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertRegex(html, r'src="/static/assets/index-[^"]+\.js"')
+        self.assertRegex(html, r'href="/static/assets/index-[^"]+\.css"')
+        self.assertNotIn("cdn", html.lower())
+        self.assertNotRegex(html.lower(), r'(?:src|href)="http://')
 
 
-class ScreeningBrowserContractTests(unittest.TestCase):
-    """T053: 筛选页浏览器交互契约（卡片跳转、按钮阻止跳转、两区切换、垃圾桶查看、降级态展示）。
+class VueBrowserContractTests(unittest.TestCase):
+    def test_navigation_and_actions_use_native_semantics(self):
+        self.assertIn('role="tablist"', APP)
+        self.assertIn('role="tab"', APP)
+        self.assertNotIn("<div class=\"view-tab\"", APP)
+        for match in re.finditer(r"<button\b([^>]*)>", ALL_VUE):
+            self.assertIn("type=", match.group(1), match.group(0))
 
-    解析 GET / 返回的 HTML 与内联 JS，验证 US6 所需交互行为存在。
-    不使用真实浏览器，只做静态 HTML/JS 契约校验。真实浏览器交互在
-    T063 浏览器验收覆盖。
+    def test_dialog_has_modal_semantics_escape_and_focus_trap(self):
+        self.assertIn('role="dialog"', DIALOG)
+        self.assertIn('aria-modal="true"', DIALOG)
+        self.assertIn('event.key === "Escape"', DIALOG)
+        self.assertIn('event.key !== "Tab"', DIALOG)
+        self.assertIn("previousFocus", DIALOG)
 
-    覆盖五类交互：
-    1. 卡片跳转（FR-020）：感兴趣区卡片可点击跳转，仅允许 HTTPS+zhipin.com
-    2. 按钮阻止跳转（FR-017）：符合/不符合区卡片的感兴趣/不感兴趣按钮不触发跳转
-    3. 两区切换（FR-016）：符合/不符合按钮切换两个区域
-    4. 垃圾桶查看（FR-024）：垃圾桶入口展示曾标记不感兴趣的岗位列表
-    5. 降级态展示（FR-031, FR-033）：AI 不可用时提示、跳过简历、人工填筛
+    def test_ai_settings_is_reachable_on_narrow_screens(self):
+        self.assertIn('data-testid="ai-settings-trigger"', APP)
+        self.assertIn(".ai-settings-trigger", CSS)
+        mobile = CSS.split("@media (max-width: 760px)", 1)[1]
+        self.assertIn(".ai-settings-trigger", mobile)
+        self.assertNotRegex(mobile, r"\.ai-settings-trigger\s*\{[^}]*display:\s*none")
 
-    本类与 T052 的 DOM 契约测试互补：T052 校验 HTML 元素存在性（data-*
-    属性），本类校验 JS 行为契约（API 调用、事件处理、状态切换）。
-    """
+    def test_profile_switcher_is_reachable_on_narrow_screens(self):
+        mobile = CSS.split("@media (max-width: 760px)", 1)[1]
+        profile = mobile.split(".profile-picker", 1)[1].split("}", 1)[0]
+        self.assertNotIn("display: none", profile)
+        self.assertIn("grid-row: 3", profile)
+        self.assertIn("width: 100%", mobile.split(".profile-picker select", 1)[1].split("}", 1)[0])
 
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        root = pathlib.Path(self.temp.name)
-        self.app = create_app({
-            "TESTING": True,
-            "START_TASKS": False,
-            "RESULT_DIR": str(root / "results"),
-            "DB_PATH": str(root / "state" / "webui.db"),
-            "PYTHON_EXECUTABLE": sys.executable,
-        })
-        self.client = self.app.test_client()
-        resp = self.client.get("/")
-        self.html = resp.get_data(as_text=True)
-        resp.close()
+    def test_touch_targets_and_focus_states_are_explicit(self):
+        self.assertIn("min-height: 44px", CSS)
+        self.assertIn(":focus-visible", CSS)
+        self.assertIn("outline: 3px", CSS)
+        self.assertRegex(CSS, r"\.brand\s*\{[^}]*min-height:\s*44px")
+        self.assertRegex(CSS, r"\.view-tabs button\s*\{[^}]*min-height:\s*44px")
 
-    def tearDown(self):
-        self.temp.cleanup()
+    def test_mobile_detail_is_full_screen_and_page_does_not_gain_horizontal_scroll(self):
+        mobile = CSS.split("@media (max-width: 760px)", 1)[1]
+        detail = mobile.split(".job-detail-pane", 1)[1].split("}", 1)[0]
+        self.assertIn("position: fixed", detail)
+        self.assertIn("inset: 0", detail)
+        self.assertIn("min-width: 320px", CSS)
 
-    # -- 卡片跳转（FR-020）--
+    def test_mobile_navigation_uses_fitted_grids_without_scrollbars(self):
+        mobile = CSS.split("@media (max-width: 760px)", 1)[1]
+        self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", mobile)
+        self.assertIn("grid-template-columns: repeat(5, minmax(0, 1fr))", mobile)
+        self.assertNotIn("min-width: 390px", mobile)
 
-    def test_interested_zone_api_referenced(self):
-        """前端必须引用感兴趣区 API 端点用于回看。"""
-        self.assertIn("/api/screening/interested", self.html)
+    def test_mobile_header_actions_stay_exactly_44_pixels(self):
+        mobile = CSS.split("@media (max-width: 760px)", 1)[1]
+        stage_action = mobile.split(".stage-header .button", 1)[1].split("}", 1)[0]
+        self.assertIn("height: 44px", stage_action)
+        self.assertIn("font-size: 0", stage_action)
 
-    def test_card_navigation_validates_https(self):
-        """卡片跳转必须校验 HTTPS 协议，拒绝 http: 链接。"""
-        self.assertIn("https:", self.html)
+    def test_reduced_motion_is_supported(self):
+        self.assertIn("@media (prefers-reduced-motion: reduce)", CSS)
 
-    def test_card_navigation_validates_zhipin_domain(self):
-        """卡片跳转必须校验 zhipin.com 域名，拒绝非预期域名。"""
-        self.assertIn("zhipin.com", self.html)
+    def test_untrusted_content_is_not_rendered_with_v_html(self):
+        self.assertNotIn("v-html", ALL_VUE)
+        self.assertNotIn("innerHTML", ALL_VUE)
+        self.assertIn("{{ selectedJob.jd", JOBS)
 
-    def test_card_navigation_uses_window_open_noopener(self):
-        """卡片跳转必须用 window.open + noopener 打开新窗口。"""
-        self.assertIn("window.open", self.html)
-        self.assertIn("noopener", self.html)
+    def test_external_job_links_use_noopener(self):
+        self.assertIn('target="_blank"', JOBS)
+        self.assertIn('rel="noopener noreferrer"', JOBS)
 
-    # -- 按钮阻止跳转（FR-017）--
+    def test_global_notices_are_live_and_dismissible(self):
+        self.assertIn('role="status"', NOTICE)
+        self.assertIn('aria-live="polite"', NOTICE)
+        self.assertIn('aria-label="关闭提示"', NOTICE)
 
-    def test_screening_feedback_api_referenced(self):
-        """前端必须引用筛选反馈 API（感兴趣/不感兴趣）。"""
-        has_feedback_api = (
-            "/api/screening/jobs/" in self.html
-            and ("interest" in self.html or "reject" in self.html)
-        )
-        self.assertTrue(has_feedback_api, "前端必须引用筛选反馈 API")
+    def test_ai_model_refresh_keeps_full_accessible_meaning(self):
+        self.assertIn('aria-label="拉取可用模型"', AI)
+        self.assertIn('title="拉取可用模型"', AI)
+        self.assertIn("拉取模型", AI)
 
-    def test_screening_feedback_event_prevention(self):
-        """筛选反馈按钮必须阻止事件冒泡或默认行为，不触发跳转。"""
-        has_prevention = (
-            "stopPropagation" in self.html
-            or "preventDefault" in self.html
-        )
-        self.assertTrue(has_prevention, "筛选反馈按钮必须阻止事件冒泡或默认行为")
-
-    def test_screening_feedback_button_type(self):
-        """筛选反馈按钮必须是 type=button，不触发表单提交。"""
-        self.assertTrue(
-            'type="button"' in self.html or '.type = "button"' in self.html,
-            "筛选反馈按钮必须显式指定 button 类型",
-        )
-
-    # -- 两区切换（FR-016）--
-
-    def test_zone_switch_logic_exists(self):
-        """JS 必须存在两区切换逻辑（符合/不符合）。"""
-        has_zone_switch = (
-            "switchZone" in self.html
-            or "showMatch" in self.html
-            or "showMismatch" in self.html
-            or "data-zone" in self.html
-        )
-        self.assertTrue(has_zone_switch, "JS 必须有两区切换逻辑")
-
-    def test_zone_tab_click_handler_exists(self):
-        """两区切换按钮必须有点击处理。"""
-        has_tab_handler = (
-            "data-zone-tab" in self.html
-            or "zoneTab" in self.html
-            or "zone-tab" in self.html
-        )
-        self.assertTrue(has_tab_handler, "两区切换按钮必须有点击处理")
-
-    def test_matches_mismatches_api_referenced(self):
-        """前端必须引用符合区与不符合区 API 端点。"""
-        self.assertIn("/api/screening/runs/", self.html)
-        has_zone_api = "matches" in self.html and "mismatches" in self.html
-        self.assertTrue(has_zone_api, "前端必须引用符合/不符合区 API")
-
-    # -- 垃圾桶查看（FR-024）--
-
-    def test_trash_api_referenced(self):
-        """前端必须引用垃圾桶区 API 端点。"""
-        self.assertIn("/api/screening/trash", self.html)
-
-    def test_trash_display_function_exists(self):
-        """JS 必须有加载/显示垃圾桶岗位列表的函数。"""
-        has_trash_function = (
-            "loadTrash" in self.html
-            or "showTrash" in self.html
-            or "renderTrash" in self.html
-            or "/api/screening/trash" in self.html
-        )
-        self.assertTrue(has_trash_function, "JS 必须有显示垃圾桶列表的函数")
-
-    # -- 降级态展示（FR-031, FR-033）--
-
-    def test_ai_unavailable_state_handling(self):
-        """JS 必须有 AI 不可用状态处理逻辑。"""
-        has_ai_unavailable = (
-            "ai_unavailable" in self.html
-            or "aiUnavailable" in self.html
-            or "ai-unavailable" in self.html
-        )
-        self.assertTrue(has_ai_unavailable, "JS 必须能处理 AI 不可用状态")
-
-    def test_skip_resume_option_in_degradation(self):
-        """降级时必须提供跳过简历的选项。"""
-        has_skip = (
-            "skipResume" in self.html
-            or "skip-resume" in self.html
-            or "跳过简历" in self.html
-        )
-        self.assertTrue(has_skip, "前端必须提供跳过简历选项")
-
-    def test_manual_filter_hint_in_degradation(self):
-        """降级时必须提示用户人工填写筛选字段。"""
-        has_manual_hint = (
-            "人工填筛" in self.html
-            or "手动填写" in self.html
-            or "manualFilter" in self.html
-        )
-        self.assertTrue(has_manual_hint, "前端必须提示人工填筛")
+    def test_product_does_not_claim_automatic_application_or_contact(self):
+        combined = DISCOVERY + SCREENING
+        self.assertNotIn("自动投递", combined)
+        self.assertNotIn("联系招聘者", combined)
+        self.assertNotIn("录用概率", combined)
 
 
 if __name__ == "__main__":

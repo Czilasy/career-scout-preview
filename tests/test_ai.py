@@ -1696,5 +1696,35 @@ class JobAssessmentV2ProviderTests(unittest.TestCase):
         self.assertNotIn("RAW-V2-SECRET", rendered)
 
 
+class MatchJdsFailurePolicyTests(unittest.TestCase):
+    """Stage B failures must stay reviewable instead of becoming matches."""
+
+    def test_ai_transport_failure_marks_jobs_uncertain(self):
+        from webui.ai import AISecurityError, ERROR_NETWORK, match_jds
+
+        jobs = [{
+            "job_id": "job-001",
+            "title": "Python 后端工程师",
+            "salary": "20-30K",
+            "location": "上海",
+            "jd": "负责 Python 服务开发",
+        }]
+
+        with patch(
+            "webui.ai.call_ai",
+            side_effect=AISecurityError(ERROR_NETWORK),
+        ):
+            result = match_jds(
+                jobs,
+                "5 年 Python 后端经验",
+                "https://api.example.com/v1/chat/completions",
+                "secret-key",
+            )
+
+        verdict = result["verdicts"]["job-001"]
+        self.assertEqual(verdict["verdict"], "uncertain")
+        self.assertIn("待人工确认", verdict["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

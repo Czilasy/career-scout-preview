@@ -56,21 +56,30 @@ After installing dependencies, start the local workspace:
 python3 webui/app.py
 ```
 
-Open `http://127.0.0.1:5000`. The root path `/` is the only supported frontend entry point; the repository no longer keeps parallel version pages. The workspace is a dark-themed job-seeking workbench: a collapsible left settings panel for profiles, resumes, and AI settings, and a main area with a single-column stream of fixed-height job cards.
+Open `http://127.0.0.1:5000`. The root path `/` is the only supported frontend entry point. The frontend uses Vue 3 + TypeScript + Vite. Its shared header switches between the Job Discovery and Screening Workbench modes while reusing profile selection, browser status, AI settings, notices, and the job list/detail components. Desktop uses a compact list plus detail pane; narrow screens open a full-screen detail view, and the AI Settings action remains directly reachable on mobile.
+
+The repository includes the built `webui/dist/`, so regular users do not need Node.js. When changing frontend source, run:
+
+```bash
+cd webui
+npm install
+npm test
+npm run build
+```
 
 ### Core Capabilities
 
-1. **Resume parsing**: Upload a TXT / PDF / DOCX résumé and the AI extracts job direction, city, skills, and up to 3 search keyword groups. The upload button reports analyzing, success, or retryable failure in place; without AI consent the file is saved locally and clearly marked as not analyzed instead of creating a permanently queued task. Users can manually supplement or override — **manual conditions always take priority**. Manual entry provides separate direction and 1–3 search-term fields, while also accepting a comma-separated shorthand in the direction field and splitting it automatically.
-2. **Background search**: After clicking search, the backend runs automatically with up to 3 keyword groups, cross-query deduplication, and at most 60 full JDs per run. Each completed JD appears as a card streamed into the frontend.
-3. **Job cards**: Cards show title, company, salary, location, and a truncated JD; clicking the reading area opens only a validated BOSS link (HTTPS and expected BOSS domains only).
-4. **Feedback & learning**: The "Interested / Not interested" buttons on a card **do not trigger navigation**; "not interested" smoothly exits with undo support. After every 5 valid feedbacks the AI updates the current profile's preference, affecting only future results — already-shown cards are never re-ranked.
-5. **History & cleanup**: Normal results are retained for 30 days; interested and applied jobs are retained until manual deletion.
+1. **Four-step job discovery**: The workflow stays in this order: upload and analyze the résumé → confirm keywords/cities and scrape broadly → confirm six filter groups and run Stage A, fetch JDs, then run Stage B → review results. Scraping and AI screening remain two separate user actions.
+2. **Failures never masquerade as success**: A Stage B provider failure or missing verdict routes the job to Needs Review instead of defaulting to Match. Each AI screening request is bound to the exact completed scrape task ID to prevent cross-run result mix-ups.
+3. **Large-result workspace**: Match, Not Match, Needs Review, and Screened Out are separate views. The UI initially renders 30 rows, loads more on demand, and creates only one detail panel instead of hundreds of full-JD DOM trees.
+4. **Explicit feedback boundary**: In Job Discovery, Interested persists to the current profile; Not Interested stays in memory for the current run and is revocable. JD retry updates only the JD and never reruns AI or changes the existing verdict.
+5. **Screening Workbench**: Keeps seven filter fields, page/detail limits, résumé-based AI suggestions, run cancel/resume, temporary match/mismatch/pending zones, persistent interested/trash zones, and 30-day cleanup for temporary runs.
 
 ### AI URL & Key Configuration
 
 Users only configure two items: the AI service URL and the API Key.
 
-- Enter the AI service URL (an OpenAI-compatible `/v1/chat/completions` endpoint) and API Key in the left settings panel.
+- Open AI Settings from the shared header and enter the AI service URL (an OpenAI-compatible `/v1/chat/completions` endpoint) and API Key in a semantic dialog. The action remains reachable on mobile.
 - "Test connection" uses an embedded fictional résumé to verify transport, JSON generation, and the candidate-v3 extraction contract; it never reads or sends a saved real résumé.
 - The "Fetch" and "Test" buttons report in-progress, success, or retryable failure in place; supplemental top notices dismiss automatically according to severity.
 - **The Key must enter the system credential store** (Windows Credential Manager / macOS Keychain / Linux Secret Service, via the `keyring` library) and is **never written in plaintext to SQLite, logs, API responses, or exports**.
@@ -90,18 +99,13 @@ Users only configure two items: the AI service URL and the API Key.
 - Feedback is bound to the current profile; "not interested" only affects that profile's subsequent results.
 - Copying a profile copies only the manually confirmed fields — AI preferences do not migrate.
 
-### Card Interaction
+### Job Result Interaction
 
-- Cards have a fixed height; JDs are auto-truncated (3-line clamp) to keep the reading flow stable.
-- Clicking a card's reading area opens the validated BOSS job link in a **new tab**.
-- The "Interested / Not interested" buttons **do not navigate** — they only record feedback.
-- After "not interested", the card smoothly exits and an undo bar appears for 5 seconds.
-
-### Feedback Learning
-
-- After every 5 valid feedbacks (interested / not interested; revoked ones don't count), the AI updates the current profile's preference.
-- Preference updates only affect **future** search results and card ordering — already-shown cards are never re-ranked.
-- AI output is validated by the program; **the AI cannot decide task status or bypass manual filtering**.
+- Desktop keeps a compact job list on the left and only the selected job's full details on the right; mobile uses a closeable full-screen detail view.
+- "View original job" opens only a validated HTTPS BOSS link in a **new tab** with `noopener noreferrer`.
+- In Job Discovery, Interested / Not Interested never trigger job navigation. Interested is revocable; Not Interested is explicitly limited to the current run.
+- Missing JDs can be retried individually. A retry does not rerun AI and leaves the existing verdict unchanged.
+- AI output is program-validated; **the AI cannot decide task status or bypass manual filtering**.
 
 ### No-Auto-Application Boundary
 
@@ -408,7 +412,11 @@ career-scout/
 │   ├── workbench.py      # Keyword selection, dedup, budget, card projection
 │   ├── resume.py         # Résumé storage, extraction, path validation, atomic delete
 │   ├── ai.py             # AI connection test, credential-store ref, JSON contract validation
-│   └── index.html        # Dark job-workbench frontend
+│   ├── index.html        # Vite development entry
+│   ├── src/              # Vue 3 + TypeScript components, views, and tests
+│   ├── dist/             # Production build served by Flask
+│   ├── package.json
+│   └── vite.config.ts
 └── requirements.txt
 ```
 

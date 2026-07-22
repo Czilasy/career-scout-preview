@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
+FRONTEND_DIST = HERE / "dist"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -610,7 +611,9 @@ class ScreeningRunner:
 
 
 def create_app(config=None):
-    app = Flask(__name__)
+    # Vue/Vite owns the /static namespace. Disable Flask's implicit static
+    # route so hashed production assets are served from webui/dist only.
+    app = Flask(__name__, static_folder=None)
     # 关闭 jsonify 默认键排序：6 个筛选码表 dict 本身已是「不限在前、其余从低到高」
     # 的逻辑序，sort_keys=True 会按 Unicode 字母序打乱（实测薪资变 10-20K、20-50K、3-5K…），
     # 前端按 jsonify 返回的顺序渲染 chip 导致乱序。见 spec 007 ⑤。
@@ -729,13 +732,24 @@ def create_app(config=None):
 
     @app.route("/")
     def index():
-        # Read as text so the generated HTML uses stable LF line endings on
-        # every platform; DOM contract checks and embedded script snippets
-        # should not depend on the host filesystem newline convention.
-        html = (HERE / "index.html").read_text(encoding="utf-8")
+        index_path = FRONTEND_DIST / "index.html"
+        if not index_path.is_file():
+            return jsonify({
+                "error_code": "frontend_not_built",
+                "user_message": "前端构建产物不存在，请先在 webui 目录执行 npm run build",
+            }), 503
+        html = index_path.read_text(encoding="utf-8")
         resp = app.response_class(html, mimetype="text/html")
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         return resp
+
+    @app.route("/static/<path:filename>")
+    def frontend_static(filename):
+        response = send_from_directory(FRONTEND_DIST, filename)
+        # Vite filenames contain content hashes, so long-lived immutable cache
+        # is safe while index.html itself remains no-cache.
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
     @app.route("/screening-prototype")
     def screening_prototype():
@@ -2823,6 +2837,23 @@ def create_app(config=None):
     _pipeline_tasks = {}
     _pipeline_lock = _threading.Lock()
     _pipeline_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="boss-pipeline")
+    app.config["PIPELINE_TASKS"] = _pipeline_tasks
+    app.config["PIPELINE_EXECUTOR"] = _pipeline_executor
+
+    def _register_pipeline_task(task_id, kind, *, source_task_id=None):
+        task = {
+            "kind": kind,
+            "status": "queued",
+            "progress": {},
+            "logs": [],
+            "result": None,
+            "error": "",
+        }
+        if source_task_id:
+            task["source_task_id"] = source_task_id
+        with _pipeline_lock:
+            _pipeline_tasks[task_id] = task
+        return task
 
     def _save_latest_pipeline_result(result, script_params):
         """Persist the latest successful run so a page refresh can restore it.
@@ -2886,10 +2917,14 @@ def create_app(config=None):
     def _run_pipeline_task(task_id, script_params):
         from webui.pipeline_exec import run_search
         with _pipeline_lock:
-            _pipeline_tasks[task_id] = {
-                "status": "running", "progress": {}, "logs": [],
-                "result": None, "error": "",
-            }
+            task = _pipeline_tasks.get(task_id)
+            if task is None:
+                task = {
+                    "kind": "scrape", "status": "queued", "progress": {},
+                    "logs": [], "result": None, "error": "",
+                }
+                _pipeline_tasks[task_id] = task
+            task["status"] = "running"
 
         def on_progress(snapshot):
             with _pipeline_lock:
@@ -2926,7 +2961,8 @@ def create_app(config=None):
                     task["status"] = "failed"
                     task["error"] = f"执行异常：{type(exc).__name__}"
 
-    def _run_ai_screen_task(task_id, screening_fields, profile_summary):
+    def _run_ai_screen_task(task_id, screening_fields, profile_summary,
+                            scrape_task_id):
         """AI 筛选任务：StageA 字段粗筛 → 批量抓 JD → StageB JD 精筛。
 
         读取最近一次原始抓取结果，两段式 AI 筛选后把带 verdict 的最终结果
@@ -2936,10 +2972,15 @@ def create_app(config=None):
         from webui.ai import screen_jobs, match_jds
 
         with _pipeline_lock:
-            _pipeline_tasks[task_id] = {
-                "status": "running", "progress": {}, "logs": [],
-                "result": None, "error": "",
-            }
+            task = _pipeline_tasks.get(task_id)
+            if task is None:
+                task = {
+                    "kind": "ai_screen", "status": "queued", "progress": {},
+                    "logs": [], "result": None, "error": "",
+                    "source_task_id": scrape_task_id,
+                }
+                _pipeline_tasks[task_id] = task
+            task["status"] = "running"
 
         def emit(**kw):
             with _pipeline_lock:
@@ -2952,11 +2993,20 @@ def create_app(config=None):
                     task["logs"].append(msg)
 
         try:
-            # 1) 读取原始抓取结果（只抓不筛的全量岗位）
-            scrape_payload = _load_latest_scrape_result()
-            if scrape_payload is None:
-                raise RuntimeError("no_scrape_result")
-            raw_jobs = scrape_payload["result"].get("jobs", [])
+            # 1) 只读取请求明确绑定的抓取任务，避免另一标签页或另一轮抓取
+            # 覆盖全局 latest 文件后导致筛选对象串线。
+            with _pipeline_lock:
+                source_task = _pipeline_tasks.get(scrape_task_id)
+                source_result = (
+                    source_task.get("result")
+                    if isinstance(source_task, dict) else None
+                )
+            if not isinstance(source_result, dict) or not source_result.get("ok"):
+                raise RuntimeError("invalid_scrape_task")
+            raw_jobs = [
+                dict(job) for job in source_result.get("jobs", [])
+                if isinstance(job, dict)
+            ]
             if not raw_jobs:
                 raise RuntimeError("empty_scrape_result")
 
@@ -3204,6 +3254,7 @@ def create_app(config=None):
             return jsonify({"ok": False, "error": "缺少关键词或城市"}), 400
 
         task_id = uuid.uuid4().hex
+        _register_pipeline_task(task_id, "scrape")
         _pipeline_executor.submit(_run_pipeline_task, task_id, script_params)
         return jsonify({"ok": True, "task_id": task_id})
 
@@ -3217,10 +3268,33 @@ def create_app(config=None):
         body = request.get_json(silent=True) or {}
         screening_fields = body.get("screening_fields") or {}
         profile_summary = str(body.get("profile_summary") or "")
+        scrape_task_id = str(body.get("scrape_task_id") or "").strip()
         if not isinstance(screening_fields, dict):
             return jsonify({"ok": False, "error": "无效的筛选字段"}), 400
+        if not scrape_task_id:
+            return jsonify({"ok": False, "error": "缺少 scrape_task_id"}), 400
+        with _pipeline_lock:
+            source_task = _pipeline_tasks.get(scrape_task_id)
+            source_snapshot = dict(source_task) if source_task else None
+        if source_snapshot is None:
+            return jsonify({"ok": False, "error": "抓取任务不存在"}), 404
+        if source_snapshot.get("kind") != "scrape":
+            return jsonify({"ok": False, "error": "来源任务不是抓取任务"}), 409
+        source_result = source_snapshot.get("result")
+        if (
+            source_snapshot.get("status") != "done"
+            or not isinstance(source_result, dict)
+            or not source_result.get("ok")
+        ):
+            return jsonify({"ok": False, "error": "抓取任务尚未成功完成"}), 409
         task_id = uuid.uuid4().hex
-        _pipeline_executor.submit(_run_ai_screen_task, task_id, screening_fields, profile_summary)
+        _register_pipeline_task(
+            task_id, "ai_screen", source_task_id=scrape_task_id,
+        )
+        _pipeline_executor.submit(
+            _run_ai_screen_task, task_id, screening_fields,
+            profile_summary, scrape_task_id,
+        )
         return jsonify({"ok": True, "task_id": task_id})
 
     @app.route("/api/search-progress/<task_id>")
@@ -3237,6 +3311,7 @@ def create_app(config=None):
                 return jsonify({"ok": False, "error": "任务不存在"}), 404
             snapshot = {
                 "ok": True,
+                "kind": task.get("kind", ""),
                 "status": task["status"],
                 "progress": task["progress"],
                 "logs": list(task["logs"][-50:]),
@@ -3424,13 +3499,28 @@ def create_app(config=None):
         raw = request.get_json(silent=True) or {}
         profile_id = raw.get("profile_id")
         job = raw.get("job") or {}
-        job_id = job.get("job_id")
-        if not profile_id or not job_id:
-            return jsonify({"error": "missing profile_id or job_id"}), 400
+        if not profile_id or not isinstance(job, dict):
+            return jsonify({"error": "missing profile_id or job"}), 400
         try:
             store.get_profile(profile_id)
         except KeyError:
             return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
+
+        # Pipeline 列表里的 job_id 是 BOSS 外部 ID，而 profile_jobs 保存的是
+        # jobs 表内部 UUID。与标记接口使用同一条 canonical_url 落库/查找链，
+        # 才能撤销刚才实际写入的那条记录。
+        saved = _save_pipeline_job_to_store(job)
+        job_id = saved["id"] if saved else str(
+            job.get("stored_job_id") or job.get("job_id") or ""
+        )
+        if not saved:
+            try:
+                store.get_job(job_id)
+            except KeyError:
+                return jsonify({
+                    "error_code": "invalid_link",
+                    "user_message": "无法定位要撤销的岗位",
+                }), 400
         try:
             store.cancel_screening_interest(profile_id, job_id)
         except sqlite3.Error as exc:
