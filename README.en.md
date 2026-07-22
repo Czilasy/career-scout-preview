@@ -81,7 +81,7 @@ Users only configure two items: the AI service URL and the API Key.
 
 - Open AI Settings from the shared header and enter the AI service URL (an OpenAI-compatible `/v1/chat/completions` endpoint) and API Key in a semantic dialog. The action remains reachable on mobile.
 - "Test connection" uses an embedded fictional résumé to verify transport, JSON generation, and the candidate-v3 extraction contract; it never reads or sends a saved real résumé.
-- The "Fetch" and "Test" buttons report in-progress, success, or retryable failure in place; supplemental top notices dismiss automatically according to severity.
+- The Fetch and Test buttons show their in-progress state, while success or failure is reported in the top notice; notices can be dismissed manually and also time out according to severity.
 - **The Key must enter the system credential store** (Windows Credential Manager / macOS Keychain / Linux Secret Service, via the `keyring` library) and is **never written in plaintext to SQLite, logs, API responses, or exports**.
 - The AI settings endpoint returns only the URL, status, and last error code — never the Key or credential reference.
 

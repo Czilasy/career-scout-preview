@@ -26,4 +26,35 @@ describe("JobWorkspace", () => {
     expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(60);
     expect(wrapper.findAll('[data-testid="job-detail"]')).toHaveLength(1);
   });
+
+  it("only renders HTTPS links on BOSS-owned hosts", () => {
+    for (const unsafeUrl of [
+      "javascript:alert(1)",
+      "http://www.zhipin.com/job_detail/unsafe.html",
+      "https://zhipin.com.evil.example/job_detail/unsafe.html",
+      "not-a-url",
+    ]) {
+      const wrapper = mount(JobWorkspace, {
+        props: {
+          jobs: [{ ...jobs[0], canonical_url: unsafeUrl }],
+          emptyMessage: "暂无岗位",
+        },
+      });
+      expect(wrapper.find('[data-testid="job-detail"] a').exists()).toBe(false);
+      wrapper.unmount();
+    }
+
+    const wrapper = mount(JobWorkspace, {
+      props: {
+        jobs: [{
+          ...jobs[0],
+          canonical_url: "https://jobs.zhipin.com/job_detail/safe.html",
+        }],
+        emptyMessage: "暂无岗位",
+      },
+    });
+    const link = wrapper.get('[data-testid="job-detail"] a');
+    expect(link.attributes("href")).toBe("https://jobs.zhipin.com/job_detail/safe.html");
+    expect(link.attributes("rel")).toBe("noopener noreferrer");
+  });
 });

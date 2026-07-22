@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { Bot, BriefcaseBusiness, SlidersHorizontal, Wifi, WifiOff } from "@lucide/vue";
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
 import NoticeBar from "./components/NoticeBar.vue";
@@ -14,6 +14,7 @@ const connected = ref(false);
 const profiles = ref<CandidateProfile[]>([]);
 const currentProfileId = ref("");
 const notice = ref<Notice | null>(null);
+let noticeTimer: number | undefined;
 
 const currentProfile = computed(() => (
   profiles.value.find((profile) => profile.id === currentProfileId.value) || null
@@ -37,13 +38,29 @@ onMounted(async () => {
   }
 });
 
+onBeforeUnmount(() => {
+  if (noticeTimer) window.clearTimeout(noticeTimer);
+});
+
 function selectProfile(profileId: string) {
   currentProfileId.value = profileId;
   if (profileId) localStorage.setItem("boss-current-profile", profileId);
 }
 
 function showNotice(next: Notice) {
+  if (noticeTimer) window.clearTimeout(noticeTimer);
   notice.value = next;
+  const delay = next.tone === "error" ? 8000 : next.tone === "warning" ? 5000 : 3000;
+  noticeTimer = window.setTimeout(() => {
+    notice.value = null;
+    noticeTimer = undefined;
+  }, delay);
+}
+
+function dismissNotice() {
+  if (noticeTimer) window.clearTimeout(noticeTimer);
+  noticeTimer = undefined;
+  notice.value = null;
 }
 
 function acceptCreatedProfile(profile: CandidateProfile) {
@@ -109,7 +126,7 @@ function acceptCreatedProfile(profile: CandidateProfile) {
       </div>
     </header>
 
-    <NoticeBar :notice="notice" @dismiss="notice = null" />
+    <NoticeBar :notice="notice" @dismiss="dismissNotice" />
 
     <div class="app-content">
       <DiscoveryView

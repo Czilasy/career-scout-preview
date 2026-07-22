@@ -55,7 +55,18 @@ function company(job: JobItem): string {
 }
 
 function jobUrl(job: JobItem): string {
-  return String(job.canonical_url || job.job_link || job.source_url || "");
+  const raw = String(job.canonical_url || job.job_link || job.source_url || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    const isBossHost = host === "zhipin.com"
+      || host === "www.zhipin.com"
+      || host.endsWith(".zhipin.com");
+    return parsed.protocol === "https:" && isBossHost ? parsed.toString() : "";
+  } catch {
+    return "";
+  }
 }
 
 function verdictLabel(job: JobItem): string {

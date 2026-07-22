@@ -116,6 +116,8 @@ class VueBrowserContractTests(unittest.TestCase):
     def test_external_job_links_use_noopener(self):
         self.assertIn('target="_blank"', JOBS)
         self.assertIn('rel="noopener noreferrer"', JOBS)
+        self.assertIn('parsed.protocol === "https:"', JOBS)
+        self.assertIn('host.endsWith(".zhipin.com")', JOBS)
 
     def test_global_notices_are_live_and_dismissible(self):
         self.assertIn('role="status"', NOTICE)

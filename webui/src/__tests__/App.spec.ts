@@ -26,6 +26,7 @@ describe("App", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -45,5 +46,26 @@ describe("App", () => {
 
     await dialog.trigger("keydown", { key: "Escape" });
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+  });
+
+  it("auto-dismisses notices according to severity", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.get('[data-testid="ai-settings-trigger"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[aria-label="拉取可用模型"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get('.notice-bar').text()).toContain("服务未返回模型列表");
+    vi.advanceTimersByTime(4_999);
+    await flushPromises();
+    expect(wrapper.find('.notice-bar').exists()).toBe(true);
+
+    vi.advanceTimersByTime(1);
+    await flushPromises();
+    expect(wrapper.find('.notice-bar').exists()).toBe(false);
+    wrapper.unmount();
   });
 });
