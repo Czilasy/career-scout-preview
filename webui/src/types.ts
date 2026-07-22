@@ -1,5 +1,3 @@
-export type AppView = "discovery" | "screening";
-
 export interface CandidateProfile {
   id: string;
   name: string;

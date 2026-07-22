@@ -129,7 +129,6 @@ class VueWebUIBrowserTests(unittest.TestCase):
         self.latest_result: dict | None = None
         self.scrape_progress: list[dict] = []
         self.screen_progress: list[dict] = []
-        self.screening_run: dict | None = None
         self.page.route("**/api/**", self._handle_api)
         self.page.goto(self.server.url("/"), wait_until="networkidle")
 
@@ -174,10 +173,6 @@ class VueWebUIBrowserTests(unittest.TestCase):
                 "has_result": self.latest_result is not None,
                 "result": self.latest_result,
             })
-        if path == "/api/screening/filter-options":
-            return self._fulfill(route, {"options": {}})
-        if path in ("/api/screening/interested", "/api/screening/trash"):
-            return self._fulfill(route, {"items": []})
         if path == "/api/ai-settings":
             return self._fulfill(route, {
                 "endpoint_url": "https://example.invalid/v1/chat/completions",
@@ -211,31 +206,6 @@ class VueWebUIBrowserTests(unittest.TestCase):
             "/api/pipeline/jobs/interest/cancel",
         ):
             return self._fulfill(route, {"ok": True})
-        if path == "/api/screening/runs" and method == "POST":
-            self.screening_run = {
-                "run_id": "screening-run-1",
-                "status": "running",
-                "processed_count": 0,
-                "source_count": 10,
-                "parse_failure_count": 0,
-            }
-            return self._fulfill(route, self.screening_run)
-        if path == "/api/screening/runs/screening-run-1" and method == "GET":
-            return self._fulfill(route, self.screening_run or {
-                "run_id": "screening-run-1",
-                "status": "running",
-            })
-        if path == "/api/screening/runs/screening-run-1/cancel":
-            self.screening_run = {
-                "run_id": "screening-run-1",
-                "status": "cancelled",
-                "processed_count": 3,
-                "source_count": 10,
-                "parse_failure_count": 0,
-            }
-            return self._fulfill(route, self.screening_run)
-        if path.startswith("/api/screening/runs/screening-run-1/"):
-            return self._fulfill(route, {"items": []})
 
         return self._fulfill(route, {"ok": True, "items": []})
 
@@ -489,12 +459,6 @@ class VueWebUIBrowserTests(unittest.TestCase):
         self.assertGreaterEqual(trigger_box["height"], 44)
         self.assertTrue(self.page.get_by_label("当前画像").is_visible())
 
-        self.page.locator('[data-testid="screening-tab"]').click()
-        zone_tabs = self.page.locator(".screening-zone-tabs")
-        self.assertTrue(zone_tabs.is_visible())
-        self.assertFalse(zone_tabs.evaluate("el => el.scrollWidth > el.clientWidth"))
-        self.assertEqual(zone_tabs.locator('[role="tab"]').count(), 5)
-
     def test_mobile_job_detail_is_full_screen_and_can_reopen(self):
         self.page.set_viewport_size({"width": 375, "height": 812})
         self._show_latest_results([_job(1), _job(2)])
@@ -511,17 +475,3 @@ class VueWebUIBrowserTests(unittest.TestCase):
         self.page.locator('[data-testid="job-row"]').first.click()
         self.assertTrue(detail.is_visible())
 
-    def test_screening_run_can_be_cancelled_without_losing_the_page(self):
-        self.page.locator('[data-testid="screening-tab"]').click()
-        self.page.locator('[data-testid="screening-keyword"]').fill("Python 后端")
-        self.page.locator('[data-testid="start-screening"]').click()
-        cancel = self.page.get_by_role("button", name="取消", exact=True)
-        cancel.wait_for()
-        cancel.click()
-        self.page.get_by_text("筛选已取消，已完成结果已保留").wait_for()
-        self.assertIn("cancelled", self.page.locator(".run-status-strip").inner_text())
-        self.assertTrue(self.page.locator('[data-testid="screening-view"]').is_visible())
-
-
-if __name__ == "__main__":  # pragma: no cover
-    unittest.main()

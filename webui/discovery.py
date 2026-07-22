@@ -785,7 +785,7 @@ def assess_job_direction(
       - an entry-level job conflicting with substantial experience prevents
         ``high_match`` and ``adjacent_match``
     """
-    from webui.screening import verify_hard_rules_tri_state
+    from webui.hard_rules import verify_hard_rules_tri_state
     from webui.semantic import (
         DIMENSIONS,
         MIN_CONFIDENCE,

@@ -1521,8 +1521,6 @@ class LegacyInterestTrashCompatTests(_StoreTestCase):
         # Run B: should still see the trash state
         pj = self.store.get_profile_job(pid, "job-cross-1")
         self.assertEqual(pj["status"], "deleted")
-        rejected = self.store.list_screening_rejected_job_ids(pid)
-        self.assertIn("job-cross-1", rejected)
         # Mark interested in run B -> should flip state
         self.store.create_discovery_feedback(
             profile_id=pid, target_type="job", action="interested",

@@ -30,15 +30,9 @@ describe("App", () => {
     vi.unstubAllGlobals();
   });
 
-  it("uses semantic navigation and keeps AI settings reachable", async () => {
+  it("keeps AI settings reachable", async () => {
     const wrapper = mount(App);
     await flushPromises();
-
-    const tabs = wrapper.get('[role="tablist"]');
-    expect(tabs.get('[role="tab"][aria-selected="true"]').text()).toContain("岗位发现");
-
-    await tabs.get('[data-testid="screening-tab"]').trigger("click");
-    expect(wrapper.get('[data-testid="screening-view"]').isVisible()).toBe(true);
 
     await wrapper.get('[data-testid="ai-settings-trigger"]').trigger("click");
     const dialog = wrapper.get('[role="dialog"]');

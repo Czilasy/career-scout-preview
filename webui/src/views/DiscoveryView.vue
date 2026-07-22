@@ -388,6 +388,8 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
 
 function setPipelineResult(result: PipelineResult) {
   pipelineResult.value = result;
+  analysisReady.value = true;
+  scrapeCompleted.value = true;
   resultLoaded.value = true;
   activeCategory.value = groupsForResult(result).matched.length ? "matched"
     : groupsForResult(result).uncertain.length ? "uncertain"
@@ -477,9 +479,9 @@ async function toggleInterest(job: JobItem) {
       next.delete(id);
       rejectedIds.value = next;
     }
-    notify(marked ? "已撤销感兴趣" : "已加入感兴趣", marked ? "info" : "success");
+    notify(marked ? "已取消收藏" : "已收藏", marked ? "info" : "success");
   } catch (error) {
-    notify(errorMessage(error, "感兴趣状态更新失败"), "error");
+    notify(errorMessage(error, "收藏状态更新失败"), "error");
   } finally {
     withBusy(feedbackBusyIds, id, false);
   }
@@ -708,7 +710,7 @@ async function retryJd(job: JobItem) {
           <template #actions="{ job }">
             <template v-if="activeCategory !== 'dropped'">
               <button class="button primary" type="button" :disabled="feedbackBusyIds.has(jobId(job))" @click="toggleInterest(job)">
-                <Bookmark :size="17" aria-hidden="true" />{{ job._marked === "interested" ? "撤销感兴趣" : "感兴趣" }}
+                <Bookmark :size="17" aria-hidden="true" />{{ job._marked === "interested" ? "已收藏" : "收藏" }}
               </button>
               <button class="button danger" type="button" :disabled="feedbackBusyIds.has(jobId(job))" @click="toggleRejected(job)">
                 {{ rejectedIds.has(jobId(job)) ? "撤销不感兴趣" : "不感兴趣" }}
