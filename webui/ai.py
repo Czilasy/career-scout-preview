@@ -431,9 +431,18 @@ def _validate_unified_fields(data) -> dict:
 #           筛掉"明显"不符合的；学历按常理向下兼容（候选人本科则大专岗也符合）。
 # Stage B：JD 精筛。对粗筛留下的岗位批量抓 JD 后，AI 对比候选人画像判 match/not_match。
 
-SCREEN_BATCH_SIZE = 50   # Stage A 每批送 AI 的岗位数（spec 007 ⑥：12→50，配合 dropped-only 输出防截断）
-SCREEN_CONCURRENCY = 1   # Stage A 并发批次数（spec 007 ⑥⑦：免费端点实测并发=1，默认串行；换不限流端点可调大）
-MATCH_BATCH_SIZE = 4     # Stage B 每批送 AI 的岗位数（JD 较长，批次小）
+SCREEN_BATCH_SIZE = 50   # Stage A 每批送 AI 的岗位数（默认值，可被高级设置覆盖）
+SCREEN_CONCURRENCY = 1   # Stage A 并发批次数（默认值，可被高级设置覆盖）
+MATCH_BATCH_SIZE = 4     # Stage B 每批送 AI 的岗位数（默认值，可被高级设置覆盖）
+
+
+def _adv_setting(key, default):
+    """从 pipeline_exec 的高级设置读取值，读不到用默认。"""
+    try:
+        from webui.pipeline_exec import load_advanced_settings
+        return load_advanced_settings().get(key, default)
+    except Exception:
+        return default
 
 
 def _degree_code_label(code):
@@ -471,8 +480,8 @@ def _build_criteria_description(criteria):
 
 
 def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
-                batch_size=SCREEN_BATCH_SIZE, progress=None,
-                concurrency=SCREEN_CONCURRENCY):
+                batch_size=None, progress=None,
+                concurrency=None):
     """Stage A 粗筛：AI 逐条核对岗位列表字段，移除"明显"不符合的。
 
     ``jobs``: 脚本抓回的岗位列表（仅列表字段，无 JD）。
@@ -491,6 +500,10 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
     返回 {"kept": [job_id...], "dropped": [{"job_id","title","reason"}...],
     "verdicts": {job_id: {"verdict","reason"}}}。
     """
+    if batch_size is None:
+        batch_size = int(_adv_setting("screen_batch_size", SCREEN_BATCH_SIZE))
+    if concurrency is None:
+        concurrency = int(_adv_setting("screen_concurrency", SCREEN_CONCURRENCY))
     kept, dropped, verdicts = [], [], {}
     if not jobs:
         return {"kept": kept, "dropped": dropped, "verdicts": verdicts}
@@ -505,11 +518,22 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         "- 岗位标题含'实习'而候选人找全职（或反之），视为明显不符合\n"
         "- 工作城市与期望城市不一致，视为明显不符合\n"
         "- 薪资明显低于期望视为明显不符合；'元/天'的实习计价综合判断\n"
+        "- 经验要求：岗位经验段下界高于候选人经验段上界时排除（如岗位5-10年、候选人1-3年）；"
+        "岗位下界≤候选人上界时保留（如岗位3-5年、候选人1-3年，给边界机会）\n"
         "- 只排除【明显】不符合的；拿不准一律保留（宁可多留，不可错杀）\n\n"
         "输入格式：每行一个岗位，``序号. 标题 | 薪资 | 城市 | 学历 | 规模``。\n"
         "输出格式：只列出【要剔除】的岗位序号与理由，未列出的默认保留。严格输出JSON：\n"
-        '{"dropped":[{"i":3,"reason":"一句话理由"},...]}\n'
-        "i 为岗位序号；reason 简短（15字内）。若无任何剔除，输出 {\"dropped\":[]}。"
+        '{"dropped":[{"i":3,"reason":"经验5-10年>候选1-3年"},...]}\n'
+        "i 为岗位序号。\n"
+        "reason 必须具体，格式为「字段名+岗位值+比较符+候选人值」，禁止笼统表述。\n"
+        "示例：\n"
+        '  经验不符：reason="经验5-10年>候选1-3年"\n'
+        '  学历不符：reason="学历硕士>候选本科"\n'
+        '  城市不符：reason="城市深圳≠期望广州"\n'
+        '  实习不符：reason="实习岗≠全职"\n'
+        '  薪资不符：reason="薪资3-5K<期望8-10K"\n'
+        "禁止使用「经验过高」「不符合」「不匹配」等笼统词汇。\n"
+        "reason 限25字内。若无任何剔除，输出 {\"dropped\":[]}。"
     )
 
     # 切批
@@ -553,7 +577,12 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
             r = by_i.get(idx)
             if r:
                 reason = str(r.get("reason", "")).strip()
-                b_dropped.append({"job_id": jid, "title": job.get("title", ""), "reason": reason})
+                b_dropped.append({
+                    "job_id": jid,
+                    "title": job.get("title", ""),
+                    "reason": reason,
+                    "canonical_url": job.get("canonical_url", "") or job.get("source_url", "") or job.get("url", "") or "",
+                })
                 b_verdicts[jid] = {"verdict": "dropped", "reason": reason}
             else:
                 b_verdicts[jid] = {"verdict": "kept", "reason": ""}
@@ -605,13 +634,15 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
 
 
 def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
-              batch_size=MATCH_BATCH_SIZE, progress=None):
+              batch_size=None, progress=None):
     """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
 
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
     返回 {"verdicts": {job_id: {"verdict": "match"/"not_match", "reason"}}}。
     AI 调用失败的批次默认 match（宁可多留不可错杀）。
     """
+    if batch_size is None:
+        batch_size = int(_adv_setting("match_batch_size", MATCH_BATCH_SIZE))
     verdicts = {}
     if not jobs_with_jd:
         return {"verdicts": verdicts}

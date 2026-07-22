@@ -13,11 +13,50 @@ never back-to-back, absorbing the same "slow is safe" philosophy.
 
 from __future__ import annotations
 
+import json
+import os
 import random
 import re
 import time
+from pathlib import Path
 
 from scripts import boss_cdp_raw as boss
+
+# ---------------------------------------------------------------------------
+# 高级设置（用户可通过前端调整，持久化到 JSON）
+# ---------------------------------------------------------------------------
+ADVANCED_SETTINGS_PATH = Path(os.path.expanduser("~/.career-scout/webui/advanced_settings.json"))
+
+_ADVANCED_DEFAULTS = {
+    "pages": 3,
+    "inter_combo_delay": 30.0,
+    "detail_batch_size": 5,
+    "screen_batch_size": 50,
+    "screen_concurrency": 1,
+    "match_batch_size": 4,
+}
+
+
+def load_advanced_settings() -> dict:
+    """读取高级设置，缺字段用默认值补全。"""
+    settings = dict(_ADVANCED_DEFAULTS)
+    try:
+        if ADVANCED_SETTINGS_PATH.is_file():
+            with open(ADVANCED_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            if isinstance(saved, dict):
+                settings.update({k: v for k, v in saved.items() if k in _ADVANCED_DEFAULTS})
+    except (json.JSONDecodeError, OSError):
+        pass
+    return settings
+
+
+def save_advanced_settings(settings: dict) -> None:
+    """持久化高级设置到 JSON 文件。"""
+    ADVANCED_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    clean = {k: v for k, v in settings.items() if k in _ADVANCED_DEFAULTS}
+    with open(ADVANCED_SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(clean, f, ensure_ascii=False, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -227,10 +266,7 @@ def job_matches(job: dict, filters: dict) -> bool:
 # Orchestration
 # ---------------------------------------------------------------------------
 
-# Random delay range (seconds) inserted BETWEEN search combinations so
-# consecutive searches are never back-to-back. Mirrors the scraper's own
-# "slow is safe" rate-limit philosophy.
-INTER_COMBO_DELAY = (20.0, 40.0)
+# INTER_COMBO_DELAY 现从 advanced_settings 动态读取（默认 20~40s）。
 
 
 def run_search(params: dict, source, *, pages: int = 3,
@@ -248,6 +284,12 @@ def run_search(params: dict, source, *, pages: int = 3,
     """
     if sleeper is None:
         sleeper = time.sleep
+
+    _adv = load_advanced_settings()
+    if pages == 3:  # 调用方未显式指定时用用户配置
+        pages = int(_adv.get("pages") or 3)
+    _base_delay = float(_adv.get("inter_combo_delay") or 30.0)
+    _delay_range = (max(5, _base_delay - 5), _base_delay + 5)
 
     combos = expand_combinations(params)
 
@@ -326,7 +368,7 @@ def run_search(params: dict, source, *, pages: int = 3,
         if idx < len(combos) - 1:
             if stop_event is not None and stop_event.is_set():
                 break
-            delay = random.uniform(*INTER_COMBO_DELAY)
+            delay = random.uniform(*_delay_range)
             emit(stage="waiting", current=idx + 1, total=len(combos),
                  wait_seconds=int(delay),
                  message=f"防限流等待 {delay:.0f}s 后搜索下一个组合…")
@@ -361,7 +403,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None):
     total = len(jobs)
     if total == 0:
         return []
-    BATCH_SIZE = 5
+    BATCH_SIZE = int(load_advanced_settings().get("detail_batch_size") or 5)
     # 预先为每个 job 计算稳定 job_id（与 fetch_details_batch 内部 key 一致），
     # 缺 job_id 的 job 填充 idx{idx} 兜底，确保 batch 返回的 outcome 能映射回原 job。
     indexed_jobs = []

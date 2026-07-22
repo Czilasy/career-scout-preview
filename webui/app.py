@@ -3162,6 +3162,33 @@ def create_app(config=None):
 
         return jsonify({"ok": True, "confirmed_fields": fields, "script_params": script_params})
 
+    @app.route("/api/advanced-settings", methods=["GET"])
+    def get_advanced_settings():
+        from webui.pipeline_exec import load_advanced_settings, _ADVANCED_DEFAULTS
+        return jsonify({"ok": True, "settings": load_advanced_settings(),
+                        "defaults": _ADVANCED_DEFAULTS})
+
+    @app.route("/api/advanced-settings", methods=["POST"])
+    def save_advanced_settings_endpoint():
+        from webui.pipeline_exec import save_advanced_settings, _ADVANCED_DEFAULTS
+        body = request.get_json(silent=True) or {}
+        settings = body.get("settings")
+        if not isinstance(settings, dict):
+            return jsonify({"ok": False, "error": "缺少 settings 对象"}), 400
+        # 只保留合法 key，类型校验
+        clean = {}
+        for k, default in _ADVANCED_DEFAULTS.items():
+            if k in settings:
+                val = settings[k]
+                if isinstance(default, float):
+                    val = float(val)
+                elif isinstance(default, int):
+                    val = int(val)
+                clean[k] = val
+        save_advanced_settings(clean)
+        from webui.pipeline_exec import load_advanced_settings
+        return jsonify({"ok": True, "settings": load_advanced_settings()})
+
     @app.route("/api/execute-search", methods=["POST"])
     def execute_search():
         """Stage 3: Start the scraping run with confirmed script_params.

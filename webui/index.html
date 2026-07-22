@@ -511,6 +511,13 @@
     }
     .btn.link-btn:hover { color: var(--text); }
 
+    /* 高级设置 */
+    .adv-field { display:flex; flex-direction:column; gap:3px; font-size:12px; }
+    .adv-field .adv-label { color:var(--muted); font-weight:500; cursor:help; border-bottom:1px dotted var(--muted); }
+    .adv-field input { width:100%; padding:5px 8px; border:1px solid var(--line-strong); border-radius:4px; font-size:13px; background:var(--bg); color:var(--text); }
+    .adv-tip { display:inline-block; width:14px; height:14px; line-height:14px; text-align:center; border-radius:50%; background:var(--line-strong); color:var(--text); font-size:10px; margin-left:4px; cursor:help; position:relative; vertical-align:middle; }
+    .adv-tip:hover::after { content:attr(data-tip); position:absolute; left:50%; bottom:calc(100% + 6px); transform:translateX(-50%); background:#222; color:#eee; padding:6px 10px; border-radius:6px; font-size:11px; line-height:1.5; white-space:normal; width:220px; z-index:999; box-shadow:0 2px 8px rgba(0,0,0,.4); pointer-events:none; }
+
     /* 简历拖拽区 */
     .resume-drop-zone {
       border: 1.5px dashed var(--line-strong); border-radius: 6px; padding: 22px 12px;
@@ -941,12 +948,13 @@
       background: var(--code-bg); border-radius: 6px; padding: 8px;
     }
     .discovery-progress-log-line { font-size: 12px; color: var(--muted); line-height: 1.6; }
-    .discovery-results-stats {
-      grid-column: 1 / -1; display: flex; gap: 16px; padding: 10px 0;
-      border-bottom: 1px solid var(--line); margin-bottom: 12px; font-size: 13px;
+    .results-tabs {
+      display: flex; gap: 8px; margin: 0;
+      position: sticky; top: 0; z-index: 10;
+      background: var(--bg); padding: 10px 0;
+      border-bottom: 1px solid var(--line);
     }
-    .discovery-results-stats strong { color: var(--text); }
-
+    #discoveryStepResults { padding-top: 0; }
     /* 通用进度条 */
     .discovery-progress-bar {
       height: 6px; border-radius: 3px; background: var(--surface-2);
@@ -1054,7 +1062,6 @@
     #discoveryResultsList {
       display: block;
     }
-    .results-tabs { display: flex; gap: 8px; margin: 12px 0; }
     .results-tab {
       padding: 8px 16px; border: 1px solid var(--line); background: var(--surface-2);
       cursor: pointer; border-radius: 6px; font-size: 14px; color: var(--muted);
@@ -1077,6 +1084,8 @@
     .discovery-job-card.card-unmatched { border: 2px solid var(--danger); }
     .discovery-job-card.dropped-card { border: 1px solid var(--line); background: #1c2027; }
     .dropped-reason { color: var(--muted); font-size: 13px; padding: 8px; }
+    .dropped-card-link { color: var(--gold); text-decoration: none; cursor: pointer; }
+    .dropped-card-link:hover { color: var(--accent); text-decoration: underline; }
     .card-jd-refetch { color: var(--danger); }
     .discovery-job-card-header {
       display: flex; justify-content: space-between; gap: 12px; align-items: start;
@@ -1273,6 +1282,45 @@
         <h2>运行进度</h2>
         <p class="discovery-step-hint">确认搜索的关键词和城市（脚本只按这两项去 BOSS 广撒网抓取），点击开始后抓取。</p>
         <div id="discoverySearchFieldsContent"></div>
+
+        <!-- 高级设置 -->
+        <div class="adv-settings-wrap" style="margin-top:10px;">
+          <button class="btn link-btn" type="button" id="advSettingsToggle" onclick="toggleAdvSettings()">⚙ 高级设置</button>
+          <div id="advSettingsPanel" hidden style="margin-top:8px;padding:12px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-2);">
+            <div class="adv-settings-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;">
+              <div class="adv-field">
+                <span class="adv-label">每组合翻页数<span class="adv-tip" data-tip="每个「关键词×城市」组合翻多少页（每页30条）。调大抓得更多，但超过BOSS实际上限会返回空页。建议 3~10。">?</span></span>
+                <input type="number" id="advPages" min="1" max="30" step="1">
+              </div>
+              <div class="adv-field">
+                <span class="adv-label">组合间延迟（秒）<span class="adv-tip" data-tip="一个组合搜完后等待的基准秒数，实际会在 ±5 秒内随机浮动。调小更快但风控风险增大，建议 ≥15。">?</span></span>
+                <input type="number" id="advDelay" min="5" max="120" step="1">
+              </div>
+              <div class="adv-field">
+                <span class="adv-label">详情批次大小<span class="adv-tip" data-tip="抓JD详情时一次开几个标签页并行抓取。调大更快，但 Chrome 内存和 BOSS 反爬压力增大。建议 3~8。">?</span></span>
+                <input type="number" id="advDetailBatch" min="1" max="10" step="1">
+              </div>
+              <div class="adv-field">
+                <span class="adv-label">粗筛每批数量<span class="adv-tip" data-tip="AI 粗筛（StageA）每次送多少条岗位给模型判断。调大单次 token 多可能截断；调小请求次数多更易撞限流。建议 30~60。">?</span></span>
+                <input type="number" id="advScreenBatch" min="10" max="100" step="5">
+              </div>
+              <div class="adv-field">
+                <span class="adv-label">粗筛并发数<span class="adv-tip" data-tip="AI 粗筛同时并发几个批次。免费端点只能填 1（并发必 429）；换付费不限流端点可调 2~3。">?</span></span>
+                <input type="number" id="advScreenConc" min="1" max="5" step="1">
+              </div>
+              <div class="adv-field">
+                <span class="adv-label">精筛每批数量<span class="adv-tip" data-tip="AI 精筛（StageB）每次送多少条岗位（含完整 JD 文本）。JD 较长，批次不宜太大。建议 3~6。">?</span></span>
+                <input type="number" id="advMatchBatch" min="1" max="10" step="1">
+              </div>
+            </div>
+            <div class="btn-row" style="margin-top:12px;">
+              <button class="btn primary" type="button" onclick="saveAdvSettings()">保存设置</button>
+              <button class="btn" type="button" onclick="resetAdvSettings()">恢复默认</button>
+              <span id="advSettingsMsg" style="margin-left:8px;font-size:12px;color:#52c41a;"></span>
+            </div>
+          </div>
+        </div>
+
         <div class="btn-row" style="margin-top:12px;">
           <button class="btn primary btn-with-loading" id="discoveryStartScrapeBtn" type="button" aria-busy="false" onclick="startScrapeRun()">
             <span class="btn-label">开始抓取</span>
@@ -3414,6 +3462,65 @@
       }
     }
 
+    // ── 高级设置 ──
+    function toggleAdvSettings() {
+      const panel = document.getElementById("advSettingsPanel");
+      if (!panel) return;
+      panel.hidden = !panel.hidden;
+      if (!panel.hidden) loadAdvSettings();
+    }
+    async function loadAdvSettings() {
+      try {
+        const res = await fetch("/api/advanced-settings");
+        const data = await res.json();
+        if (!data.ok) return;
+        const s = data.settings;
+        document.getElementById("advPages").value = s.pages;
+        document.getElementById("advDelay").value = s.inter_combo_delay;
+        document.getElementById("advDetailBatch").value = s.detail_batch_size;
+        document.getElementById("advScreenBatch").value = s.screen_batch_size;
+        document.getElementById("advScreenConc").value = s.screen_concurrency;
+        document.getElementById("advMatchBatch").value = s.match_batch_size;
+      } catch(e) { console.warn("loadAdvSettings", e); }
+    }
+    async function saveAdvSettings() {
+      const settings = {
+        pages: parseInt(document.getElementById("advPages").value) || 3,
+        inter_combo_delay: parseFloat(document.getElementById("advDelay").value) || 30,
+        detail_batch_size: parseInt(document.getElementById("advDetailBatch").value) || 5,
+        screen_batch_size: parseInt(document.getElementById("advScreenBatch").value) || 50,
+        screen_concurrency: parseInt(document.getElementById("advScreenConc").value) || 1,
+        match_batch_size: parseInt(document.getElementById("advMatchBatch").value) || 4,
+      };
+      const msg = document.getElementById("advSettingsMsg");
+      try {
+        const res = await fetch("/api/advanced-settings", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({settings})
+        });
+        const data = await res.json();
+        if (data.ok) { msg.textContent = "已保存 ✓"; setTimeout(() => msg.textContent = "", 2000); }
+        else { msg.textContent = data.error || "保存失败"; msg.style.color = "#ff4d4f"; }
+      } catch(e) { msg.textContent = "网络错误"; msg.style.color = "#ff4d4f"; }
+    }
+    async function resetAdvSettings() {
+      try {
+        const res = await fetch("/api/advanced-settings");
+        const data = await res.json();
+        if (!data.ok) return;
+        const d = data.defaults;
+        document.getElementById("advPages").value = d.pages;
+        document.getElementById("advDelay").value = d.inter_combo_delay;
+        document.getElementById("advDetailBatch").value = d.detail_batch_size;
+        document.getElementById("advScreenBatch").value = d.screen_batch_size;
+        document.getElementById("advScreenConc").value = d.screen_concurrency;
+        document.getElementById("advMatchBatch").value = d.match_batch_size;
+        const msg = document.getElementById("advSettingsMsg");
+        msg.textContent = "已恢复默认（点保存生效）"; setTimeout(() => msg.textContent = "", 2500);
+      } catch(e) {}
+    }
+
     // 步骤②触发：确认 keyword+city → 启动抓取
     async function startScrapeRun() {
       const btn = document.getElementById("discoveryStartScrapeBtn");
@@ -3624,13 +3731,7 @@
       if (!list) return;
       list.innerHTML = "";
 
-      // 顶部统计行
-      const stats = document.createElement("div");
-      stats.className = "discovery-results-stats";
-      stats.textContent = `共抓取 ${totalScraped} 条 · 匹配 ${totalMatched} 条 · 不匹配 ${totalUnmatched} 条 · 已筛除 ${totalDropped} 条`;
-      list.appendChild(stats);
-
-      // 三 tab 按钮容器
+      // 三 tab 按钮容器（固定在页面顶部，不随滚动）
       const tabs = document.createElement("div");
       tabs.className = "results-tabs";
       tabs.setAttribute("role", "tablist");
@@ -3714,6 +3815,9 @@
         p.classList.toggle("active", p.dataset.pane === name);
         p.hidden = p.dataset.pane !== name;
       });
+      // 切 tab 后滚到顶部（滚动容器是 .discovery-step）
+      const step = container.closest(".discovery-step");
+      if (step) step.scrollTop = 0;
     }
 
     // 空面板提示（占满网格整行）
@@ -3729,10 +3833,13 @@
     function createDroppedCard(droppedJob) {
       const card = document.createElement("div");
       card.className = "discovery-job-card dropped-card";
-      card.innerHTML = `
-        <div class="discovery-job-card-title">${droppedJob.title || "未知岗位"}</div>
-        <div class="dropped-reason">${droppedJob.reason || "未提供理由"}</div>
-      `;
+      const title = droppedJob.title || "未知岗位";
+      const reason = droppedJob.reason || "未提供理由";
+      const url = droppedJob.canonical_url || droppedJob.source_url || "";
+      const titleHtml = url
+        ? `<a class="discovery-job-card-title dropped-card-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(title)}</a>`
+        : `<div class="discovery-job-card-title">${escapeHtml(title)}</div>`;
+      card.innerHTML = `${titleHtml}<div class="dropped-reason">${escapeHtml(reason)}</div>`;
       return card;
     }
 
