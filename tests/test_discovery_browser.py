@@ -410,6 +410,26 @@ class VueWebUIBrowserTests(unittest.TestCase):
         self.assertEqual(self.page.locator('[data-testid="job-row"]').count(), 60)
         self.assertEqual(self.page.locator('[data-testid="job-detail"]').count(), 1)
 
+    def test_sparse_result_rows_stay_compact_in_the_scrollable_list(self):
+        self._show_latest_results([
+            _job(1, "uncertain"),
+            _job(2, "uncertain"),
+        ])
+        self.page.get_by_role("tab", name="待确认 2").click()
+
+        rows = self.page.locator('[data-testid="job-row"]')
+        self.assertEqual(rows.count(), 2)
+        heights = rows.evaluate_all(
+            "elements => elements.map(element => element.getBoundingClientRect().height)"
+        )
+        self.assertTrue(
+            all(80 <= height <= 96 for height in heights),
+            f"稀疏结果的岗位卡片应保持紧凑高度，实际为 {heights}",
+        )
+        second_box = rows.nth(1).bounding_box()
+        list_box = self.page.locator(".job-list").bounding_box()
+        self.assertLessEqual(second_box["y"] + second_box["height"], list_box["y"] + 192)
+
     def test_untrusted_job_text_is_rendered_as_text_and_link_is_hardened(self):
         job = _job(1)
         job["title"] = "<img src=x onerror=window.__xss=1>"

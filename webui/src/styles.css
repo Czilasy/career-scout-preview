@@ -1148,6 +1148,8 @@ button:disabled {
 
 .job-list {
   display: grid;
+  align-content: start;
+  grid-auto-rows: minmax(82px, max-content);
 }
 
 .job-row {

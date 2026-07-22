@@ -56,7 +56,7 @@ After installing dependencies, start the local workspace:
 python3 webui/app.py
 ```
 
-Open `http://127.0.0.1:5000`. The root path `/` is the only supported frontend entry point. The frontend uses Vue 3 + TypeScript + Vite. Its shared header switches between the Job Discovery and Screening Workbench modes while reusing profile selection, browser status, AI settings, notices, and the job list/detail components. Desktop uses a compact list plus detail pane; narrow screens open a full-screen detail view, and the AI Settings action remains directly reachable on mobile.
+Open `http://127.0.0.1:5000`. The root path `/` is the only supported frontend entry point. The frontend uses Vue 3 + TypeScript + Vite. Its shared header switches between the Job Discovery and Screening Workbench modes while reusing profile selection, browser status, AI settings, notices, and the job list/detail components. Desktop uses a compact list plus detail pane; job rows in sparse categories keep their compact height and stay top-aligned instead of stretching into unused list space. Narrow screens open a full-screen detail view, and the AI Settings action remains directly reachable on mobile.
 
 The repository includes the built `webui/dist/`, so regular users do not need Node.js. When changing frontend source, run:
 
