@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from urllib.parse import urlparse
 
 import requests
@@ -37,6 +38,12 @@ ERROR_TIMEOUT = "timeout"
 ERROR_AUTH = "auth_failed"
 ERROR_NETWORK = "network_error"
 ERROR_INVALID = "invalid_response"
+ERROR_RATE_LIMIT = "rate_limited"
+
+# Free-tier endpoints throttle aggressively (HTTP 429).  Retry a few times
+# with increasing backoff so a transient limit doesn't fail the whole step.
+RATE_LIMIT_ATTEMPTS = 4
+RATE_LIMIT_BACKOFF_SECONDS = (5, 15, 30)
 
 
 class AISecurityError(Exception):
@@ -51,6 +58,21 @@ class AISecurityError(Exception):
     def __init__(self, error_code: str):
         self.error_code = error_code
         super().__init__(error_code)
+
+
+# 面向用户的错误文案（端点用它替代裸 error_code，给出可操作的提示）
+ERROR_USER_MESSAGES = {
+    ERROR_TIMEOUT: "AI 响应超时，请稍后重试",
+    ERROR_AUTH: "API 密钥无效或已过期，请检查 AI 设置",
+    ERROR_NETWORK: "无法连接 AI 服务，请检查网络与地址配置",
+    ERROR_INVALID: "AI 返回了无法解析的内容，请重试",
+    ERROR_RATE_LIMIT: "AI 服务限流（免费额度），请稍候再试",
+}
+
+
+def user_facing_error(error_code: str) -> str:
+    """Return a user-friendly Chinese message for a safe error code."""
+    return ERROR_USER_MESSAGES.get(error_code, f"AI 调用失败（{error_code}）")
 
 
 # ---------------------------------------------------------------------------
@@ -196,16 +218,25 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    try:
-        response = requests.post(
-            _chat_completions_url(endpoint_url), json=payload, headers=headers, timeout=timeout
-        )
-    except requests.Timeout:
-        raise AISecurityError(ERROR_TIMEOUT) from None
-    except requests.RequestException:
-        raise AISecurityError(ERROR_NETWORK) from None
-    except Exception:
-        raise AISecurityError(ERROR_INVALID) from None
+    response = None
+    for attempt in range(RATE_LIMIT_ATTEMPTS):
+        try:
+            response = requests.post(
+                _chat_completions_url(endpoint_url), json=payload, headers=headers, timeout=timeout
+            )
+        except requests.Timeout:
+            raise AISecurityError(ERROR_TIMEOUT) from None
+        except requests.RequestException:
+            raise AISecurityError(ERROR_NETWORK) from None
+        except Exception:
+            raise AISecurityError(ERROR_INVALID) from None
+        if response.status_code != 429:
+            break
+        # 429 限流是瞬时的：退避后重试，耗尽次数才报 rate_limited
+        if attempt < RATE_LIMIT_ATTEMPTS - 1:
+            time.sleep(RATE_LIMIT_BACKOFF_SECONDS[min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)])
+    if response is not None and response.status_code == 429:
+        raise AISecurityError(ERROR_RATE_LIMIT)
 
     if response.status_code in (401, 403):
         raise AISecurityError(ERROR_AUTH)

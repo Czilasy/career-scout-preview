@@ -3063,7 +3063,7 @@ def create_app(config=None):
         Returns JSON with the unified schema fields for user confirmation.
         """
         from webui.resume import validate_format, validate_size
-        from webui.ai import analyze_resume_to_fields, AISecurityError
+        from webui.ai import analyze_resume_to_fields, AISecurityError, user_facing_error
 
         file = request.files.get("file")
         if not file or not file.filename:
@@ -3099,7 +3099,7 @@ def create_app(config=None):
                 model=settings.get("model", ""),
             )
         except AISecurityError as exc:
-            return jsonify({"ok": False, "error": f"AI 分析失败: {exc.error_code}"}), 502
+            return jsonify({"ok": False, "error": user_facing_error(exc.error_code)}), 502
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
