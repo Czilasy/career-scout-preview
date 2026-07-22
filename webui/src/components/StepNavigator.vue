@@ -24,7 +24,7 @@ function select(step: string) {
 </script>
 
 <template>
-  <nav class="step-nav" aria-label="岗位发现进度">
+  <nav class="step-nav" aria-label="智能选岗进度">
     <ol>
       <li v-for="(step, index) in steps" :key="step.id">
         <button

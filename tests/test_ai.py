@@ -1725,6 +1725,54 @@ class MatchJdsFailurePolicyTests(unittest.TestCase):
         self.assertEqual(verdict["verdict"], "uncertain")
         self.assertIn("待人工确认", verdict["reason"])
 
+    def test_structured_assessments_split_priority_consider_and_not_match(self):
+        from webui.ai import match_jds
+
+        jobs = [
+            {"job_id": "priority", "title": "优先", "jd": "JD A"},
+            {"job_id": "consider", "title": "考虑", "jd": "JD B"},
+            {"job_id": "reject", "title": "不推荐", "jd": "JD C"},
+        ]
+
+        def dimensions(direction=80, skill=80, experience=80, industry=80):
+            return {
+                "direction_alignment": {"score": direction, "reason": "方向证据"},
+                "skill_coverage": {"score": skill, "reason": "技能证据"},
+                "experience_match": {"score": experience, "reason": "经验依据"},
+                "industry_relevance": {"score": industry, "reason": "行业依据"},
+            }
+
+        response = {
+            "results": [
+                {
+                    "i": 0, "verdict": "match", "match_score": 86,
+                    "confidence": 91, "dimensions": dimensions(),
+                },
+                {
+                    "i": 1, "verdict": "match", "match_score": 68,
+                    "confidence": 84, "dimensions": dimensions(experience=45),
+                },
+                {
+                    "i": 2, "verdict": "mismatch", "match_score": 42,
+                    "confidence": 88, "dimensions": dimensions(skill=35),
+                },
+            ],
+        }
+        with patch("webui.ai.call_ai", return_value=response):
+            result = match_jds(
+                jobs, "5 年 Python 后端经验",
+                "https://api.example.com/v1/chat/completions", "secret-key",
+            )
+
+        verdicts = result["verdicts"]
+        self.assertEqual(verdicts["priority"]["verdict"], "priority")
+        self.assertEqual(verdicts["consider"]["verdict"], "consider")
+        self.assertEqual(verdicts["reject"]["verdict"], "not_match")
+        self.assertEqual(verdicts["priority"]["match_score"], 86)
+        self.assertEqual(verdicts["priority"]["confidence"], 91)
+        self.assertIn("四维通过", verdicts["priority"]["reason"])
+        self.assertIn("经验", verdicts["consider"]["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

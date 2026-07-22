@@ -19,8 +19,11 @@ export interface JobItem {
   job_link?: string;
   source_url?: string;
   canonical_url?: string;
-  verdict?: "match" | "not_match" | "uncertain" | string;
+  verdict?: "priority" | "consider" | "match" | "not_match" | "uncertain" | string;
   verdict_reason?: string;
+  match_score?: number | null;
+  confidence?: number | null;
+  dimensions?: Record<string, { score?: number }>;
   reason?: string;
   interest_state?: string;
   reject_state?: string;

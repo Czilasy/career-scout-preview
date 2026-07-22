@@ -3075,21 +3075,28 @@ def create_app(config=None):
                 jid = str(job.get("job_id", ""))
                 v = verdicts.get(jid)
                 if v:
-                    job["verdict"] = v["verdict"]
+                    job.update(v)
                     job["verdict_reason"] = v["reason"]
                 else:
                     # 未抓到 JD 的岗位无法精筛，标记待定（不红不绿）
                     job["verdict"] = "uncertain"
                     job["verdict_reason"] = "未抓到 JD，无法精筛"
 
-            match_count = sum(1 for j in enriched if j.get("verdict") == "match")
+            priority_count = sum(1 for j in enriched if j.get("verdict") == "priority")
+            consider_count = sum(1 for j in enriched if j.get("verdict") == "consider")
+            not_recommended_count = sum(
+                1 for j in enriched if j.get("verdict") == "not_match"
+            )
             result = {
                 "ok": True,
                 "jobs": enriched,
                 "dropped": dropped,
                 "total_scraped": len(raw_jobs),
                 "total_kept": len(enriched),
-                "total_matched": match_count,
+                "total_priority": priority_count,
+                "total_considered": consider_count,
+                "total_not_recommended": not_recommended_count,
+                "total_matched": priority_count + consider_count,
                 "total_dropped": len(dropped),
                 "profile_summary": profile_summary,
                 "error": "",
@@ -3099,8 +3106,15 @@ def create_app(config=None):
                 if task is not None:
                     task["result"] = result
                     task["status"] = "done"
-            emit(stage="done", total_matched=match_count,
-                 message=f"筛选完成：匹配 {match_count} 条")
+            emit(
+                stage="done",
+                total_priority=priority_count,
+                total_considered=consider_count,
+                message=(
+                    f"筛选完成：优先投递 {priority_count} 条，"
+                    f"可以考虑 {consider_count} 条"
+                ),
+            )
             _save_latest_pipeline_result(result, {"screening": screening_fields})
         except Exception as exc:
             with _pipeline_lock:
@@ -3377,6 +3391,9 @@ def create_app(config=None):
             "result": {
                 "total_scraped": result.get("total_scraped", 0),
                 "total_matched": result.get("total_matched", 0),
+                "total_priority": result.get("total_priority", 0),
+                "total_considered": result.get("total_considered", 0),
+                "total_not_recommended": result.get("total_not_recommended", 0),
                 "total_kept": result.get("total_kept", 0),
                 "total_dropped": result.get("total_dropped", 0),
                 "combinations": result.get("combinations", 0),

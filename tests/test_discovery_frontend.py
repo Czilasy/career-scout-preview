@@ -16,6 +16,7 @@ STEPS = (WEBUI / "src" / "components" / "StepNavigator.vue").read_text(encoding=
 JOBS = (WEBUI / "src" / "components" / "JobWorkspace.vue").read_text(encoding="utf-8")
 HELPERS = (WEBUI / "src" / "discovery.ts").read_text(encoding="utf-8")
 INDEX = (WEBUI / "index.html").read_text(encoding="utf-8")
+APP_BACKEND = (WEBUI / "app.py").read_text(encoding="utf-8")
 
 
 class VueDiscoveryFrontendTests(unittest.TestCase):
@@ -58,9 +59,25 @@ class VueDiscoveryFrontendTests(unittest.TestCase):
     def test_stage_b_failures_have_a_visible_uncertain_zone(self):
         self.assertIn('id: "uncertain" as const', DISCOVERY)
         self.assertIn('label: "待确认"', DISCOVERY)
-        self.assertIn('job.verdict === "match"', HELPERS)
+        self.assertIn('job.verdict === "priority"', HELPERS)
+        self.assertIn('job.verdict === "consider"', HELPERS)
+        self.assertIn('groups.considered.push(job)', HELPERS)
         self.assertIn('job.verdict === "not_match"', HELPERS)
         self.assertIn("groups.uncertain.push(job)", HELPERS)
+
+    def test_decision_first_labels_replace_ambiguous_workbench_copy(self):
+        app_source = (WEBUI / "src" / "App.vue").read_text(encoding="utf-8")
+        self.assertIn("智能选岗", app_source)
+        self.assertIn("高级筛选", app_source)
+        self.assertIn('label: "优先投递"', DISCOVERY)
+        self.assertIn('label: "可以考虑"', DISCOVERY)
+        self.assertIn('label: "不推荐"', DISCOVERY)
+        self.assertNotIn("<strong>判断说明</strong>", JOBS)
+
+    def test_pipeline_preserves_program_validated_assessment_fields(self):
+        self.assertIn("job.update(v)", APP_BACKEND)
+        for field in ("match_score", "confidence", "dimensions"):
+            self.assertIn(field, JOBS)
 
     def test_large_results_render_in_batches_with_one_detail_panel(self):
         self.assertIn("props.jobs.slice(0, visibleCount.value)", JOBS)

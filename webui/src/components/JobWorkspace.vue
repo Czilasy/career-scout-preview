@@ -70,10 +70,27 @@ function jobUrl(job: JobItem): string {
 }
 
 function verdictLabel(job: JobItem): string {
-  if (job.verdict === "match") return "匹配";
-  if (job.verdict === "not_match") return "不匹配";
+  if (job.verdict === "priority") return "优先投递";
+  if (job.verdict === "consider" || job.verdict === "match") return "可以考虑";
+  if (job.verdict === "not_match") return "不推荐";
   if (job.verdict === "uncertain") return "待确认";
   return "";
+}
+
+function reasonTitle(job: JobItem): string {
+  if (job.verdict === "priority" || job.verdict === "consider" || job.verdict === "match") return "推荐依据";
+  if (job.verdict === "not_match") return "主要差距";
+  if (job.verdict === "uncertain") return "需要确认";
+  return "筛除原因";
+}
+
+function dimensionLabel(name: string): string {
+  return ({
+    direction_alignment: "方向",
+    skill_coverage: "技能",
+    experience_match: "经验",
+    industry_relevance: "行业",
+  } as Record<string, string>)[name] || name;
 }
 </script>
 
@@ -140,11 +157,16 @@ function verdictLabel(job: JobItem): string {
         <span><strong>{{ selectedJob.salary || "薪资面议" }}</strong></span>
         <span><MapPin :size="16" aria-hidden="true" />{{ selectedJob.location || "地点待确认" }}</span>
         <span><BriefcaseBusiness :size="16" aria-hidden="true" />{{ company(selectedJob) }}</span>
+        <span v-if="typeof selectedJob.match_score === 'number'"><strong>匹配 {{ selectedJob.match_score }}</strong></span>
+        <span v-if="typeof selectedJob.confidence === 'number'">置信 {{ selectedJob.confidence }}</span>
       </div>
 
       <div v-if="selectedJob.verdict_reason || selectedJob.reason" class="verdict-reason">
-        <strong>判断说明</strong>
+        <strong>{{ reasonTitle(selectedJob) }}</strong>
         <p>{{ selectedJob.verdict_reason || selectedJob.reason }}</p>
+        <div v-if="selectedJob.dimensions && Object.keys(selectedJob.dimensions).length" class="assessment-dimensions" aria-label="四维匹配分">
+          <span v-for="(item, name) in selectedJob.dimensions" :key="name">{{ dimensionLabel(String(name)) }} {{ item.score ?? "—" }}</span>
+        </div>
       </div>
 
       <section class="jd-content">
