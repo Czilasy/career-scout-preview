@@ -271,7 +271,7 @@ UNIFIED_SEARCH_FIELDS = ("keyword", "city", "salary", "experience", "degree", "i
 def _build_field_options_prompt() -> str:
     """Build a prompt fragment listing all valid values for each filter field."""
     lines = []
-    lines.append("keyword: 推荐搜索关键词(1-3个岗位方向词,如'Python后端','AI工程师'),用逗号分隔")
+    lines.append("keyword: 候选搜索关键词数组,约10个,覆盖不同岗位方向,格式 [{\"word\":\"Python后端\",\"recommended\":true},...],其中2-3个 recommended=true")
     lines.append(f"city: 城市名,必须是以下之一: {', '.join(list(boss.CITY_MAP.keys())[:50])}...等")
     lines.append(f"salary: 薪资段代码,可选值: {json.dumps(boss.SALARY_MAP, ensure_ascii=False)}")
     lines.append(f"experience: 经验要求代码,可选值: {json.dumps(boss.EXPERIENCE_MAP, ensure_ascii=False)}")
@@ -331,7 +331,8 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
         "严格按以下字段输出JSON，每个字段的值必须是对应可选值之一：\n"
         f"{field_options}\n\n"
         "规则：\n"
-        "- keyword: 根据简历中的技能、经历、求职意向，给出1-3个最匹配的搜索关键词，逗号分隔\n"
+        "- keyword: 根据简历中的技能、经历、求职意向，给出约10个候选搜索关键词（覆盖不同岗位方向），"
+        "格式 [{\"word\":\"...\",\"recommended\":true/false},...]，其中2-3个 recommended=true 标记最推荐\n"
         "- city: 从简历中的期望城市/工作地点/当前所在城市推断\n"
         "- salary: 从期望薪资推断，无法确定则留空字符串\n"
         "- experience: 从工作年限/毕业时间推断\n"
@@ -372,9 +373,26 @@ def _validate_unified_fields(data) -> dict:
 
     result = {}
 
-    # keyword: free text string
+    # keyword: spec 007 ③ 新结构 [{word, recommended}]，约 10 个；
+    # 旧字符串格式兜底（老数据/老端点传 "Java,Python" 时按逗号分割成 recommended:false）。
     keyword = data.get("keyword", "")
-    result["keyword"] = str(keyword).strip() if isinstance(keyword, str) else ""
+    if isinstance(keyword, list):
+        chips = []
+        for item in keyword:
+            if isinstance(item, dict):
+                word = str(item.get("word", "")).strip()
+                if not word:
+                    continue
+                rec = bool(item.get("recommended", False))
+                chips.append({"word": word, "recommended": rec})
+            elif isinstance(item, str) and item.strip():
+                chips.append({"word": item.strip(), "recommended": False})
+        result["keyword"] = chips
+    elif isinstance(keyword, str) and keyword.strip():
+        parts = [p.strip() for p in keyword.replace("，", ",").split(",") if p.strip()]
+        result["keyword"] = [{"word": p, "recommended": False} for p in parts]
+    else:
+        result["keyword"] = []
 
     # city: split on commas (Chinese ， and English ,), validate each city
     city = data.get("city", "")
@@ -413,7 +431,8 @@ def _validate_unified_fields(data) -> dict:
 #           筛掉"明显"不符合的；学历按常理向下兼容（候选人本科则大专岗也符合）。
 # Stage B：JD 精筛。对粗筛留下的岗位批量抓 JD 后，AI 对比候选人画像判 match/not_match。
 
-SCREEN_BATCH_SIZE = 12   # Stage A 每批送 AI 的岗位数
+SCREEN_BATCH_SIZE = 50   # Stage A 每批送 AI 的岗位数（spec 007 ⑥：12→50，配合 dropped-only 输出防截断）
+SCREEN_CONCURRENCY = 1   # Stage A 并发批次数（spec 007 ⑥⑦：免费端点实测并发=1，默认串行；换不限流端点可调大）
 MATCH_BATCH_SIZE = 4     # Stage B 每批送 AI 的岗位数（JD 较长，批次小）
 
 
@@ -452,14 +471,22 @@ def _build_criteria_description(criteria):
 
 
 def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
-                batch_size=SCREEN_BATCH_SIZE, progress=None):
+                batch_size=SCREEN_BATCH_SIZE, progress=None,
+                concurrency=SCREEN_CONCURRENCY):
     """Stage A 粗筛：AI 逐条核对岗位列表字段，移除"明显"不符合的。
 
     ``jobs``: 脚本抓回的岗位列表（仅列表字段，无 JD）。
     ``criteria``: {"profile_summary": str, "city": [...], "degree": [...], ...}。
+    ``concurrency``: 并发批次数，默认 1（串行）。spec 007 ⑥⑦：免费端点实测并发=1；
+        换不限流端点可调大。>1 时用线程池并发提交批次，结果按批次顺序合并。
 
     学历向下兼容、实习/全职不符、城市不符、薪资严重偏低视为明显不符；
     拿不准的一律保留（宁可多留不可错杀）。AI 调用失败的批次全部保留。
+
+    输入格式（spec 007 ⑥）：一行一个紧凑格式 ``i. 标题 | 薪资 | 城市 | 学历 | 规模``，
+    省 JSON 包装省 token。输出格式：只列剔除名单
+    ``{"dropped":[{"i":3,"reason":...}]}``，未列出的默认保留——防错杀、省输出 token、
+    避免 50 条输出截断。
 
     返回 {"kept": [job_id...], "dropped": [{"job_id","title","reason"}...],
     "verdicts": {job_id: {"verdict","reason"}}}。
@@ -479,55 +506,101 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         "- 工作城市与期望城市不一致，视为明显不符合\n"
         "- 薪资明显低于期望视为明显不符合；'元/天'的实习计价综合判断\n"
         "- 只排除【明显】不符合的；拿不准一律保留（宁可多留，不可错杀）\n\n"
-        "对输入的每个岗位输出一个判定。严格输出JSON：\n"
-        '{"results":[{"i":0,"keep":true,"reason":"一句话理由"},...]}\n'
-        "i 为岗位序号；keep=true 保留，false 移除；reason 简短（15字内）。"
+        "输入格式：每行一个岗位，``序号. 标题 | 薪资 | 城市 | 学历 | 规模``。\n"
+        "输出格式：只列出【要剔除】的岗位序号与理由，未列出的默认保留。严格输出JSON：\n"
+        '{"dropped":[{"i":3,"reason":"一句话理由"},...]}\n'
+        "i 为岗位序号；reason 简短（15字内）。若无任何剔除，输出 {\"dropped\":[]}。"
     )
 
+    # 切批
+    batches = []
     for start in range(0, len(jobs), batch_size):
-        batch = jobs[start:start + batch_size]
-        batch_desc = [
-            {
-                "i": idx,
-                "title": job.get("title", ""),
-                "salary": job.get("salary", ""),
-                "location": job.get("location", ""),
-                "company": job.get("company", "") or job.get("boss_name", ""),
-                "tags": job.get("tags", ""),
-                "job_labels": job.get("job_labels", ""),
-                "company_scale": job.get("company_scale", ""),
-                "company_stage": job.get("company_stage", ""),
-                "company_industry": job.get("company_industry", ""),
-            }
-            for idx, job in enumerate(batch)
-        ]
+        batches.append(jobs[start:start + batch_size])
+
+    def _process_batch(batch):
+        """处理单个批次，返回 (batch_dropped, batch_verdicts)。
+
+        batch_dropped: [{"job_id","title","reason"}...]
+        batch_verdicts: {job_id: {"verdict","reason"}}
+        默认全保留；AI 返回的 dropped 名单扣掉。
+        """
+        # 紧凑文本输入：i. 标题 | 薪资 | 城市 | 学历 | 规模
+        lines = []
+        for idx, job in enumerate(batch):
+            parts = [
+                job.get("title", ""),
+                job.get("salary", ""),
+                job.get("location", ""),
+                job.get("job_labels", "") or "",  # 学历/经验标签
+                job.get("company_scale", "") or "",
+            ]
+            lines.append(f"{idx}. " + " | ".join(str(p) for p in parts if p))
+        user_content = "\n".join(lines)
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(batch_desc, ensure_ascii=False)},
+            {"role": "user", "content": user_content},
         ]
         try:
             data = call_ai(endpoint_url, api_key, messages, model=model)
-            results = data.get("results", []) if isinstance(data, dict) else []
-            by_i = {r.get("i"): r for r in results if isinstance(r, dict)}
+            dropped_list = data.get("dropped", []) if isinstance(data, dict) else []
+            by_i = {r.get("i"): r for r in dropped_list if isinstance(r, dict)}
         except AISecurityError:
             by_i = {}  # 调用失败：该批全部保留，防错杀
 
+        b_dropped, b_verdicts = [], {}
         for idx, job in enumerate(batch):
             jid = str(job.get("job_id", ""))
-            r = by_i.get(idx) or {}
-            keep = bool(r.get("keep", True))
-            reason = str(r.get("reason", "")).strip()
-            if keep:
-                kept.append(jid)
-                verdicts[jid] = {"verdict": "kept", "reason": reason}
+            r = by_i.get(idx)
+            if r:
+                reason = str(r.get("reason", "")).strip()
+                b_dropped.append({"job_id": jid, "title": job.get("title", ""), "reason": reason})
+                b_verdicts[jid] = {"verdict": "dropped", "reason": reason}
             else:
-                dropped.append({"job_id": jid, "title": job.get("title", ""), "reason": reason})
-                verdicts[jid] = {"verdict": "dropped", "reason": reason}
-        if progress is not None:
+                b_verdicts[jid] = {"verdict": "kept", "reason": ""}
+        return b_dropped, b_verdicts
+
+    if concurrency <= 1:
+        # 串行（默认，免费端点并发=1）
+        processed = 0
+        for batch in batches:
+            b_dropped, b_verdicts = _process_batch(batch)
+            dropped.extend(b_dropped)
+            verdicts.update(b_verdicts)
+            processed += len(batch)
+            if progress is not None:
+                try:
+                    progress(min(processed, len(jobs)), len(jobs))
+                except Exception:
+                    pass
+    else:
+        # 并发（换不限流端点时启用）
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        lock = threading.Lock()
+        processed_counter = [0]
+
+        def _safe_progress(n_done):
+            if progress is None:
+                return
+            with lock:
+                processed_counter[0] += n_done
+                cur = min(processed_counter[0], len(jobs))
             try:
-                progress(min(start + batch_size, len(jobs)), len(jobs))
+                progress(cur, len(jobs))
             except Exception:
                 pass
+
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {pool.submit(_process_batch, batch): batch for batch in batches}
+            for fut in as_completed(futures):
+                b_dropped, b_verdicts = fut.result()
+                with lock:
+                    dropped.extend(b_dropped)
+                    verdicts.update(b_verdicts)
+                _safe_progress(len(futures[fut]))
+
+    kept = [str(j.get("job_id", "")) for j in jobs
+            if str(j.get("job_id", "")) not in {d["job_id"] for d in dropped}]
     return {"kept": kept, "dropped": dropped, "verdicts": verdicts}
 
 

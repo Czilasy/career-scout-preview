@@ -67,6 +67,16 @@ Every mutation requires `expected_state` and `input_hash`. A rejected compare-an
 - Output event contains run candidate id/job id, artifact identity, duration and safe code; never JD body.
 - The producer stops enqueueing when cancellation or circuit breaker is set.
 
+### Parallel detail fetching (spec 007 ⑧)
+
+- Opt-in via `--enable-parallel`; default off preserves the serial contract above.
+- When enabled, a resident tab pool (default 3 tabs, configurable via `--tab-pool-size`) reuses attached tabs across jobs to avoid per-job `Target.createTarget` / `Target.closeTarget` overhead.
+- Tabs start staggered (random delay within `--stagger-min..--stagger-max`, default 5-10s) to avoid simultaneous navigation spikes.
+- Job order within a batch is shuffled before enqueueing to decorrelate request patterns.
+- A `degrade_event` short-circuits remaining workers when any tab observes a login wall; workers stop claiming new jobs and the batch surfaces per-job outcomes (login_required / unavailable) without retry storm.
+- The producer contract is unchanged: each job still emits exactly one terminal safe event; event fields, validation rules, privacy boundaries and the 5-job batch cap all hold identically in parallel mode.
+- The circuit breaker feeds on per-job outcomes the same way regardless of mode; two login_required outcomes in the same parallel batch open the breaker as they would serially.
+
 ### Assessment consumer
 
 - One default AI consumer runs concurrently with detail production.

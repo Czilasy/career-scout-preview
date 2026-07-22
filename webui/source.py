@@ -910,6 +910,8 @@ class BossCdpSource:
         already ≤5 jobs, so this never truncates a valid batch.
         ``--events-output`` directs the scraper to write terminal safe
         events as JSONL so this adapter can parse/validate them.
+        ``--enable-parallel`` (spec 007 ⑧)：批量抓取启用常驻 tab 池并行，
+        3 tab 复用省开关开销，错峰+补位节奏防反爬。
         """
         return [
             self.python_executable,
@@ -919,6 +921,8 @@ class BossCdpSource:
             "--events-output", events_output_path,
             "--max-details", "5",
             "--detail",
+            "--enable-parallel",
+            "--tab-pool-size", "3",
         ]
 
     # ------------------------------------------------------------------

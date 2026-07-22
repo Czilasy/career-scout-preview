@@ -348,32 +348,65 @@ def run_search(params: dict, source, *, pages: int = 3,
 
 
 def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None):
-    """对一批岗位逐个抓 JD（调用方需先确保 Chrome 就绪）。返回带 jd 的岗位列表。
+    """对一批岗位批量抓 JD（调用方需先确保 Chrome 就绪）。返回带 jd 的岗位列表。
 
-    逐条抓取，单条失败不中断（该岗位 jd 留空，前端可保留按需加载兜底）。
-    ``progress(current, total)`` 用于回报进度。
+    Spec 007 ⑧：改用 fetch_details_batch（≤5 一批）走 --enable-parallel 常驻 tab 池，
+    替代旧的逐条 fetch_detail。单条失败不中断（该岗位 jd 留空，前端可保留按需加载兜底）。
+    ``progress(done, total)`` 按累计完成数回报。
     """
     import os
     if artifact_dir is None:
         artifact_dir = os.path.join(os.path.expanduser("~"), ".career-scout", "job-result")
-    results = []
+    os.makedirs(artifact_dir, exist_ok=True)
     total = len(jobs)
+    if total == 0:
+        return []
+    BATCH_SIZE = 5
+    # 预先为每个 job 计算稳定 job_id（与 fetch_details_batch 内部 key 一致），
+    # 缺 job_id 的 job 填充 idx{idx} 兜底，确保 batch 返回的 outcome 能映射回原 job。
+    indexed_jobs = []
     for idx, job in enumerate(jobs):
-        jid = str(job.get("job_id", "")) or f"idx{idx}"
-        detail_path = os.path.join(artifact_dir, f"pipeline_detail_{jid}.json")
-        outcome = source.fetch_detail(job, detail_output_path=detail_path)
-        jd = ""
-        if outcome.ok and isinstance(outcome.detail, dict):
-            jd = str(outcome.detail.get("jd", "")).strip()
-        enriched = dict(job)
-        enriched["jd"] = jd
-        results.append(enriched)
-        if progress is not None:
-            try:
-                progress(idx + 1, total)
-            except Exception:
-                pass
-    return results
+        if not isinstance(job, dict):
+            indexed_jobs.append((idx, f"idx{idx}", {}))
+            continue
+        jid = str(job.get("job_id") or job.get("id") or "").strip()
+        if not jid:
+            jid = f"idx{idx}"
+        indexed_jobs.append((idx, jid, dict(job, job_id=jid)))
+    jd_by_idx = {}
+    done = 0
+    for batch_start in range(0, len(indexed_jobs), BATCH_SIZE):
+        batch = indexed_jobs[batch_start:batch_start + BATCH_SIZE]
+        batch_jobs = [job for _, _, job in batch]
+        batch_path = os.path.join(
+            artifact_dir, f"pipeline_batch_{batch_start}_{time.time_ns()}.json"
+        )
+        try:
+            outcomes = source.fetch_details_batch(
+                batch_jobs,
+                detail_output_path=batch_path,
+                max_batch_size=BATCH_SIZE,
+            )
+        except Exception:
+            outcomes = {}
+        for idx, jid, _ in batch:
+            outcome = outcomes.get(jid)
+            jd = ""
+            if outcome is not None and outcome.ok and isinstance(outcome.detail, dict):
+                jd = str(outcome.detail.get("jd", "")).strip()
+            jd_by_idx[idx] = jd
+            done += 1
+            if progress is not None:
+                try:
+                    progress(done, total)
+                except Exception:
+                    pass
+    enriched = []
+    for idx, job in enumerate(jobs):
+        e = dict(job) if isinstance(job, dict) else {}
+        e["jd"] = jd_by_idx.get(idx, "")
+        enriched.append(e)
+    return enriched
 
 
 def _combo_hash(keyword: str, city: str, pages: int) -> str:

@@ -611,6 +611,10 @@ class ScreeningRunner:
 
 def create_app(config=None):
     app = Flask(__name__)
+    # 关闭 jsonify 默认键排序：6 个筛选码表 dict 本身已是「不限在前、其余从低到高」
+    # 的逻辑序，sort_keys=True 会按 Unicode 字母序打乱（实测薪资变 10-20K、20-50K、3-5K…），
+    # 前端按 jsonify 返回的顺序渲染 chip 导致乱序。见 spec 007 ⑤。
+    app.json.sort_keys = False
     app.config.update(
         RESULT_DIR=str(boss.DEFAULT_RESULT_DIR),
         DB_PATH=str(DEFAULT_STATE_DIR / "webui.db"),
@@ -3105,7 +3109,7 @@ def create_app(config=None):
 
         # Return fields with human-readable labels for confirmation UI
         field_labels = {
-            "keyword": ("搜索关键词", fields["keyword"], "text"),
+            "keyword": ("搜索关键词", fields["keyword"], "keyword_chips"),
             "city": ("城市", fields["city"], "city"),
             "salary": ("薪资范围", fields["salary"], boss.SALARY_MAP),
             "experience": ("经验要求", fields["experience"], boss.EXPERIENCE_MAP),
@@ -3138,9 +3142,17 @@ def create_app(config=None):
         if not fields.get("city"):
             return jsonify({"ok": False, "error": "城市无效，请选择支持的城市"}), 400
 
+        # spec 007 ③：keyword 现在是 [{word, recommended}]，脚本消费逗号拼接字符串。
+        # 该端点已废弃（前端走 /api/execute-search），此处转换仅保证不崩。
+        kw_chips = fields.get("keyword") or []
+        if isinstance(kw_chips, list) and kw_chips and isinstance(kw_chips[0], dict):
+            kw_str = ",".join(c.get("word", "") for c in kw_chips if c.get("word"))
+        else:
+            kw_str = str(kw_chips) if kw_chips else ""
+
         # Build the exact parameters the script consumes
         script_params = {
-            "keyword": fields["keyword"],
+            "keyword": kw_str,
             "city": fields["city"],
             "filters": {},
         }
@@ -3216,11 +3228,45 @@ def create_app(config=None):
         Only a successful run is persisted, so this always reflects the most
         recent good data.  ``has_result`` is false until the first successful
         run (or if the file is missing/unreadable).
+
+        传入 ``profile_id`` 时，给当前 profile 已标记 interested 的岗位补
+        ``_marked: "interested"``，使刷新后「已感兴趣」按钮状态能正确回显
+        （跨刷新持久化，见 spec）。匹配按 canonical_url——pipeline 结果的
+        ``job_id`` 是 BOSS 岗位 id，profile_jobs.job_id 是内部 UUID，二者
+        不能直接相等，统一用规范化链接对齐（同 _build_zone_canonical_urls）。
         """
         payload = _load_latest_pipeline_result()
         if payload is None:
             return jsonify({"ok": True, "has_result": False})
         result = payload["result"]
+        jobs = result.get("jobs", [])
+
+        profile_id = request.args.get("profile_id")
+        if profile_id and isinstance(jobs, list) and jobs:
+            try:
+                store.get_profile(profile_id)
+            except KeyError:
+                profile_id = None
+            if profile_id:
+                interested_urls = set()
+                for pj in store.list_screening_interested(profile_id):
+                    try:
+                        stored = store.get_job(pj["job_id"])
+                    except KeyError:
+                        continue
+                    url = normalize_job_link(stored.get("canonical_url", ""))
+                    if url:
+                        interested_urls.add(url)
+                if interested_urls:
+                    for item in jobs:
+                        if not isinstance(item, dict):
+                            continue
+                        url = normalize_job_link(
+                            item.get("source_url") or item.get("job_link") or ""
+                        )
+                        if url and url in interested_urls:
+                            item["_marked"] = "interested"
+
         return jsonify({
             "ok": True,
             "has_result": True,
@@ -3232,7 +3278,7 @@ def create_app(config=None):
                 "total_kept": result.get("total_kept", 0),
                 "total_dropped": result.get("total_dropped", 0),
                 "combinations": result.get("combinations", 0),
-                "jobs": result.get("jobs", []),
+                "jobs": jobs,
                 "dropped": result.get("dropped", []),
                 "profile_summary": result.get("profile_summary", ""),
             },
@@ -3340,6 +3386,98 @@ def create_app(config=None):
             return jsonify({"error_code": "invalid_link", "user_message": "岗位链接不安全"}), 400
         store.mark_screening_reject(profile_id, saved["id"], run_id=None)
         return jsonify({"reject_state": "rejected", "job_id": saved["id"]})
+
+    @app.route("/api/pipeline/jobs/interest/cancel", methods=["POST"])
+    def pipeline_cancel_interest():
+        """撤销 pipeline 结果岗位的感兴趣标记：profile_jobs.status 回退。
+
+        payload 结构与 /api/pipeline/jobs/interest 一致（profile_id + job）。
+        幂等——即便当前不是 interested 也不报错，使前端"感兴趣"按钮可再次点击取消。
+        """
+        raw = request.get_json(silent=True) or {}
+        profile_id = raw.get("profile_id")
+        job = raw.get("job") or {}
+        job_id = job.get("job_id")
+        if not profile_id or not job_id:
+            return jsonify({"error": "missing profile_id or job_id"}), 400
+        try:
+            store.get_profile(profile_id)
+        except KeyError:
+            return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
+        try:
+            store.cancel_screening_interest(profile_id, job_id)
+        except sqlite3.Error as exc:
+            return jsonify({"error": f"撤销感兴趣失败: {exc}"}), 500
+        return jsonify({"interest_state": "cancelled", "job_id": job_id})
+
+    @app.route("/api/pipeline/jobs/<job_id>/jd", methods=["POST"])
+    def pipeline_job_refetch_jd(job_id):
+        """为单个岗位补抓 JD 并回写 latest_pipeline_result.json 中对应 job 项。
+
+        用于 JD 抓取失败/缺失的岗位补抓；不重跑 AI、不跨 tab。与
+        /api/job-detail 共用 _job_detail_lock 串行化，避免并发争抢 CDP。
+        """
+        from webui.pipeline_exec import ensure_chrome_ready
+
+        raw = request.get_json(silent=True) or {}
+        source_url = normalize_job_link(
+            raw.get("source_url") or raw.get("job_link") or ""
+        )
+        if not source_url:
+            return jsonify({"ok": False, "error": "缺少 source_url 或 job_link",
+                            "job_id": job_id}), 400
+
+        if not ensure_chrome_ready():
+            return jsonify({"error": "CDP Chrome 未运行，请先启动",
+                            "error_code": "cdp_not_ready"}), 503
+
+        source = _make_discovery_source()
+        if source is None:
+            return jsonify({"ok": False, "error": "抓取源不可用", "job_id": job_id}), 500
+
+        job = {"job_id": job_id, "source_url": source_url, "job_link": source_url}
+        detail_path = str(
+            Path(app.config["RESULT_DIR"]) / f"job_detail_{job_id}.json"
+        )
+        try:
+            with _job_detail_lock:
+                outcome = source.fetch_detail(job, detail_output_path=detail_path)
+        except (OSError, ValueError, RuntimeError) as exc:
+            return jsonify({"ok": False, "error": str(exc), "job_id": job_id}), 500
+
+        if not outcome.ok:
+            return jsonify({"ok": False,
+                            "error": f"详情抓取失败（{outcome.failed_code}），请确认已登录 BOSS 后重试",
+                            "job_id": job_id}), 502
+        jd = str((outcome.detail or {}).get("jd", "")).strip()
+        if not jd:
+            return jsonify({"ok": False,
+                            "error": "详情页未提取到 JD 正文，岗位可能已下架",
+                            "job_id": job_id}), 502
+
+        # 抓到 JD 后回写 latest_pipeline_result.json 中匹配的 job 项；
+        # spec 要求补抓不重跑 AI、不跨 tab，故只更新 jd，verdict 等其它字段保持不变。
+        persisted = False
+        payload = _load_latest_pipeline_result()
+        if payload is not None:
+            result = payload.get("result") or {}
+            jobs = result.get("jobs") or []
+            matched = False
+            for item in jobs:
+                if isinstance(item, dict) and str(item.get("job_id")) == str(job_id):
+                    item["jd"] = jd
+                    matched = True
+                    break
+            if matched:
+                _save_latest_pipeline_result(result, payload.get("script_params") or {})
+                persisted = True
+            else:
+                app.logger.warning(
+                    "pipeline_job_refetch_jd: job_id=%s 在 latest_pipeline_result 中未找到匹配项，未回写",
+                    job_id,
+                )
+
+        return jsonify({"ok": True, "jd": jd, "job_id": job_id, "persisted": persisted})
 
     return app
 

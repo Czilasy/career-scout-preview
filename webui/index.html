@@ -709,6 +709,15 @@
     }
     .multi-chip:hover { border-color: var(--gold); color: var(--text); }
     .multi-chip.selected { background: var(--gold); border-color: var(--gold); color: #101216; font-weight: 600; }
+    .multi-chip.recommended::after { content: " ★"; color: var(--gold); font-weight: 700; }
+    .multi-chip.recommended.selected::after { color: #101216; }
+    .keyword-custom-row { margin-top: 4px; }
+    .keyword-custom-input { font-size: 13px; }
+    .keyword-estimate {
+      margin-top: 6px; font-size: 12px; color: var(--muted);
+      line-height: 1.5; padding: 6px 10px; background: var(--surface-2);
+      border-radius: 6px; border-left: 3px solid var(--gold);
+    }
     .confirmed-params-box {
       background: var(--surface-2); border: 1px solid var(--line);
       border-radius: var(--radius); padding: 16px; font-family: monospace;
@@ -928,7 +937,7 @@
     }
     .discovery-unified-input:focus { border-color: var(--gold); }
     .discovery-progress-logs {
-      margin-top: 12px; max-height: 200px; overflow-y: auto;
+      margin-top: 12px; max-height: 420px; overflow-y: auto;
       background: var(--code-bg); border-radius: 6px; padding: 8px;
     }
     .discovery-progress-log-line { font-size: 12px; color: var(--muted); line-height: 1.6; }
@@ -1043,10 +1052,20 @@
     .discovery-preference-change { display: flex; gap: 6px; align-items: center; }
 
     #discoveryResultsList {
+      display: block;
+    }
+    .results-tabs { display: flex; gap: 8px; margin: 12px 0; }
+    .results-tab {
+      padding: 8px 16px; border: 1px solid var(--line); background: var(--surface-2);
+      cursor: pointer; border-radius: 6px; font-size: 14px; color: var(--muted);
+    }
+    .results-tab.active { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+    .results-tab-pane { display: none; }
+    .results-tab-pane.active {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
       gap: 12px;
-      align-items: start;
+      align-items: stretch;
     }
     .discovery-job-card {
       background: var(--surface); border: 1px solid var(--line);
@@ -1054,6 +1073,11 @@
       display: flex; flex-direction: column; gap: 8px;
       animation: cardEnter .2s ease-out;
     }
+    .discovery-job-card.card-matched { border: 2px solid var(--success); }
+    .discovery-job-card.card-unmatched { border: 2px solid var(--danger); }
+    .discovery-job-card.dropped-card { border: 1px solid var(--line); background: #1c2027; }
+    .dropped-reason { color: var(--muted); font-size: 13px; padding: 8px; }
+    .card-jd-refetch { color: var(--danger); }
     .discovery-job-card-header {
       display: flex; justify-content: space-between; gap: 12px; align-items: start;
     }
@@ -1133,6 +1157,7 @@
       font-size: 12px; color: var(--muted); line-height: 1.6;
       background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
       padding: 10px 12px; word-break: break-word; white-space: pre-wrap;
+      flex: 1 1 auto; min-height: 40px;
     }
     .discovery-job-card-jd.loaded { max-height: 200px; overflow-y: auto; }
     .discovery-job-card-jd.placeholder {
@@ -1169,6 +1194,13 @@
       .discovery-job-card { padding: 12px; }
       .discovery-manual-header { display: block; }
       .discovery-manual-grid { grid-template-columns: 1fr; gap: 12px; }
+    }
+
+    /* spec：<768px 结果网格降为单列（minmax(300px,1fr) 在 612~768px 仍会出两列） */
+    @media (max-width: 768px) {
+      .results-tab-pane.active {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -3030,7 +3062,8 @@
     // 步骤④单卡片审阅状态
     let discoveryScreenedJobs = [];
     let discoveryDroppedJobs = [];
-    let discoveryReviewIndex = 0;
+    // 不感兴趣标记：本轮内存（刷新页面即清空，符合 spec「刷新清空」要求）
+    let discoveryRejectedJobIds = new Set();
     // T064: canonical projector filter state
     let directionFilter = "";
     let categoryFilter = "";
@@ -3129,17 +3162,114 @@
       setDiscoveryUploadState(isLoading ? "loading" : "idle");
     }
 
-    // 步骤②：渲染搜索条件（keyword + city 文本输入）到运行进度页顶部
+    // 步骤②：渲染搜索条件（keyword chip 多选 + city 文本输入）到运行进度页顶部
+    // spec 007 ③：keyword 从文本框改为 chip 多选，推荐项默认选中+置顶+星标，
+    // 支持自定义关键词输入，下方显示「已选 N × M = K 组，预计约 X 分钟」耗时提示。
+    const KEYWORD_SECONDS_PER_GROUP = 300; // 每组（1关键词×1城市）保守估计 5 分钟（抓取+粗筛+精筛）
     function renderSearchFields(fields, labels) {
       const container = document.getElementById("discoverySearchFieldsContent");
       if (!container) return;
       container.innerHTML = "";
-      const grid = document.createElement("div");
-      grid.className = "unified-text-fields";
-      for (const key of ["keyword", "city"]) {
-        const meta = labels[key];
-        if (!meta) continue;
-        const [displayName, currentVal] = meta;
+
+      // keyword 区：chip 多选 + 自定义输入 + 耗时提示
+      const kwMeta = labels["keyword"];
+      if (kwMeta) {
+        const [displayName, currentVal] = kwMeta;
+        const kwBlock = document.createElement("div");
+        kwBlock.className = "unified-field-block";
+
+        const lbl = document.createElement("label");
+        lbl.className = "unified-field-label";
+        lbl.textContent = displayName;
+        kwBlock.appendChild(lbl);
+
+        // chip 容器：推荐项置顶
+        const chipWrap = document.createElement("div");
+        chipWrap.className = "multi-select-wrap";
+        chipWrap.dataset.field = "keyword";
+        const chips = Array.isArray(currentVal) ? currentVal : [];
+        const sorted = chips.slice().sort((a, b) => (b.recommended ? 1 : 0) - (a.recommended ? 1 : 0));
+        for (const c of sorted) {
+          const chip = document.createElement("span");
+          const cls = ["multi-chip"];
+          if (c.recommended) { cls.push("recommended"); cls.push("selected"); }
+          chip.className = cls.join(" ");
+          chip.textContent = c.word;
+          chip.dataset.word = c.word;
+          chip.addEventListener("click", () => {
+            chip.classList.toggle("selected");
+            updateKeywordEstimate();
+          });
+          chipWrap.appendChild(chip);
+        }
+        kwBlock.appendChild(chipWrap);
+
+        // 自定义关键词输入：回车或逗号添加为额外 chip
+        const customRow = document.createElement("div");
+        customRow.className = "keyword-custom-row";
+        const customInput = document.createElement("input");
+        customInput.type = "text";
+        customInput.className = "discovery-unified-input keyword-custom-input";
+        customInput.placeholder = "自定义关键词，回车或逗号添加";
+        customInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === "," || e.key === "，") {
+            e.preventDefault();
+            const val = customInput.value.trim();
+            if (!val) return;
+            const existing = chipWrap.querySelector(`.multi-chip[data-word="${CSS.escape(val)}"]`);
+            if (existing) {
+              existing.classList.add("selected");
+            } else {
+              const chip = document.createElement("span");
+              chip.className = "multi-chip selected";
+              chip.textContent = val;
+              chip.dataset.word = val;
+              chip.addEventListener("click", () => {
+                chip.classList.toggle("selected");
+                updateKeywordEstimate();
+              });
+              chipWrap.appendChild(chip);
+            }
+            customInput.value = "";
+            updateKeywordEstimate();
+          }
+        });
+        customRow.appendChild(customInput);
+        kwBlock.appendChild(customRow);
+
+        // 耗时提示
+        const estimate = document.createElement("div");
+        estimate.className = "keyword-estimate";
+        estimate.id = "keywordEstimate";
+        kwBlock.appendChild(estimate);
+
+        const updateKeywordEstimate = () => {
+          const selectedWords = chipWrap.querySelectorAll(".multi-chip.selected").length;
+          const cityInput = container.querySelector('input[data-field="city"]');
+          const cityCount = cityInput
+            ? cityInput.value.split(/[,，]/).map(s => s.trim()).filter(Boolean).length
+            : 0;
+          const groups = selectedWords * cityCount;
+          const minutes = Math.max(1, Math.round(groups * KEYWORD_SECONDS_PER_GROUP / 60));
+          estimate.textContent = groups > 0
+            ? `已选 ${selectedWords} 关键词 × ${cityCount} 城市 = ${groups} 组，预计约 ${minutes} 分钟`
+            : "请选择关键词并填写城市";
+        };
+
+        container.appendChild(kwBlock);
+
+        // city 输入变化时也更新耗时提示（city input 在下面创建，需延迟绑定）
+        setTimeout(() => {
+          const cityInput = container.querySelector('input[data-field="city"]');
+          if (cityInput) cityInput.addEventListener("input", updateKeywordEstimate);
+          updateKeywordEstimate();
+        }, 0);
+      }
+
+      // city 区：文本框（保持不变）
+      const cityMeta = labels["city"];
+      if (cityMeta) {
+        const [displayName, currentVal] = cityMeta;
         const block = document.createElement("div");
         block.className = "unified-field-block";
         const lbl = document.createElement("label");
@@ -3148,16 +3278,13 @@
         const input = document.createElement("input");
         input.type = "text";
         input.className = "discovery-unified-input";
-        input.dataset.field = key;
+        input.dataset.field = "city";
         input.value = Array.isArray(currentVal) ? currentVal.join(",") : (currentVal || "");
-        input.placeholder = key === "city"
-          ? "如：上海，杭州（支持中英文逗号）"
-          : "如：Python 后端，FastAPI（支持中英文逗号）";
+        input.placeholder = "如：上海，杭州（支持中英文逗号）";
         block.appendChild(lbl);
         block.appendChild(input);
-        grid.appendChild(block);
+        container.appendChild(block);
       }
-      container.appendChild(grid);
     }
 
     // 步骤③：渲染 6 个筛选字段（chip 点选多选）到 AI 筛选页
@@ -3210,20 +3337,27 @@
       container.appendChild(chipGrid);
     }
 
-    // 步骤②：收集用户编辑后的搜索条件（keyword + city）
+    // 步骤②：收集用户编辑后的搜索条件（keyword 从选中 chip 收集逗号拼接 + city 文本框）
+    // spec 007 ③：keyword 改为 chip 多选，collectSearchFields 从选中 chip 收集 word 逗号拼接，
+    // 后端 split_keywords 已支持多关键词，零改动。
     function collectSearchFields() {
       const result = { keyword: "", city: [] };
       const container = document.getElementById("discoverySearchFieldsContent");
       if (!container) return result;
-      container.querySelectorAll("input.discovery-unified-input").forEach(inp => {
-        const key = inp.dataset.field;
-        const val = (inp.value || "").trim();
-        if (key === "keyword") {
-          result.keyword = val;
-        } else if (key === "city") {
-          result.city = val ? val.replace(/，/g, ",").split(",").map(s => s.trim()).filter(Boolean) : [];
-        }
-      });
+      // keyword: 从选中 chip 收集 word 逗号拼接
+      const chipWrap = container.querySelector('.multi-select-wrap[data-field="keyword"]');
+      if (chipWrap) {
+        const words = Array.from(chipWrap.querySelectorAll(".multi-chip.selected"))
+          .map(c => c.dataset.word || c.textContent || "")
+          .filter(Boolean);
+        result.keyword = words.join(",");
+      }
+      // city: 文本框
+      const cityInput = container.querySelector('input[data-field="city"]');
+      if (cityInput) {
+        const val = (cityInput.value || "").trim();
+        result.city = val ? val.replace(/，/g, ",").split(",").map(s => s.trim()).filter(Boolean) : [];
+      }
       return result;
     }
 
@@ -3362,6 +3496,8 @@
           if (label) label.textContent = "开始 AI 筛选";
           setAppNotice("AI 筛选完成，可查看结果", "success");
           renderReviewResults(result);
+          // 跳转 results 由「本会话 AI 筛选完成」触发，刷新恢复时不跳。见 spec 007 ①。
+          switchToDiscovery("results");
         }, () => {
           if (btn) { btn.disabled = false; btn.setAttribute("aria-busy", "false"); }
           if (label) label.textContent = "开始 AI 筛选";
@@ -3461,10 +3597,13 @@
       }
     }
 
-    // 步骤④：单卡片逐条审阅（绿=匹配在前，红=不符沉底，全量保留）
+    // 步骤④：三 tab 网格审阅（匹配/不匹配/已筛除）
     function renderReviewResults(result) {
       const jobs = result.jobs || [];
-      // 排序：match 在前，uncertain 居中，not_match 沉底
+      // 按 verdict 分组：match 单独一组；not_match + uncertain 合并为「不匹配」
+      const matchedJobs = jobs.filter(j => j.verdict === "match");
+      const unmatchedJobs = jobs.filter(j => j.verdict === "not_match" || j.verdict === "uncertain");
+      // 全量保留供后续逻辑使用（顺序：match 在前，uncertain 居中，not_match 沉底）
       const order = { match: 0, uncertain: 1, not_match: 2 };
       discoveryScreenedJobs = jobs.slice().sort((a, b) => {
         const oa = order[a.verdict] != null ? order[a.verdict] : 1;
@@ -3472,134 +3611,129 @@
         return oa - ob;
       });
       discoveryDroppedJobs = result.dropped || [];
-      discoveryReviewIndex = 0;
       discoveryResultsCache = discoveryScreenedJobs;
+
+      // 四个统计数字（不匹配 = AI 保留 - 匹配）
+      const totalMatched = result.total_matched || 0;
+      const totalKept = result.total_kept || 0;
+      const totalUnmatched = totalKept - totalMatched;
+      const totalDropped = result.total_dropped || 0;
+      const totalScraped = result.total_scraped || 0;
 
       const list = document.getElementById("discoveryResultsList");
       if (!list) return;
       list.innerHTML = "";
 
-      // 顶部统计
+      // 顶部统计行
       const stats = document.createElement("div");
       stats.className = "discovery-results-stats";
-      stats.textContent = `共抓取 ${result.total_scraped || 0} 条，AI 保留 ${result.total_kept || 0} 条（匹配 ${result.total_matched || 0} 条），粗筛移除 ${result.total_dropped || 0} 条`;
+      stats.textContent = `共抓取 ${totalScraped} 条 · 匹配 ${totalMatched} 条 · 不匹配 ${totalUnmatched} 条 · 已筛除 ${totalDropped} 条`;
       list.appendChild(stats);
 
-      // 审阅区容器
-      const viewer = document.createElement("div");
-      viewer.className = "review-viewer";
-      viewer.id = "reviewViewer";
-      list.appendChild(viewer);
+      // 三 tab 按钮容器
+      const tabs = document.createElement("div");
+      tabs.className = "results-tabs";
+      tabs.setAttribute("role", "tablist");
+      const matchedTab = document.createElement("button");
+      matchedTab.className = "results-tab active";
+      matchedTab.dataset.tab = "matched";
+      matchedTab.textContent = `匹配（${matchedJobs.length}）`;
+      matchedTab.onclick = () => switchResultsTab("matched");
+      const unmatchedTab = document.createElement("button");
+      unmatchedTab.className = "results-tab";
+      unmatchedTab.dataset.tab = "unmatched";
+      unmatchedTab.textContent = `不匹配（${unmatchedJobs.length}）`;
+      unmatchedTab.onclick = () => switchResultsTab("unmatched");
+      const droppedTab = document.createElement("button");
+      droppedTab.className = "results-tab";
+      droppedTab.dataset.tab = "dropped";
+      droppedTab.textContent = `已筛除（${discoveryDroppedJobs.length}）`;
+      droppedTab.onclick = () => switchResultsTab("dropped");
+      tabs.append(matchedTab, unmatchedTab, droppedTab);
+      list.appendChild(tabs);
 
-      // 折叠的"AI 粗筛移除"区
-      const dropped = document.createElement("div");
-      dropped.className = "review-dropped";
-      const toggle = document.createElement("button");
-      toggle.type = "button";
-      toggle.className = "review-dropped-toggle";
-      toggle.textContent = `AI 粗筛移除（${discoveryDroppedJobs.length} 条）▾`;
-      toggle.onclick = () => toggleReviewDropped(toggle);
-      const droppedList = document.createElement("div");
-      droppedList.className = "review-dropped-list";
-      droppedList.id = "reviewDroppedList";
-      droppedList.hidden = true;
-      for (const d of discoveryDroppedJobs) {
-        const item = document.createElement("div");
-        item.className = "review-dropped-item";
-        const t = document.createElement("span");
-        t.className = "review-dropped-title";
-        t.textContent = d.title || d.job_id || "未知岗位";
-        item.appendChild(t);
-        if (d.reason) {
-          const r = document.createElement("span");
-          r.className = "review-dropped-reason";
-          r.textContent = " — " + d.reason;
-          item.appendChild(r);
+      // 三个 tab 面板
+      const matchedPane = document.createElement("div");
+      matchedPane.className = "results-tab-pane active";
+      matchedPane.dataset.pane = "matched";
+      const unmatchedPane = document.createElement("div");
+      unmatchedPane.className = "results-tab-pane";
+      unmatchedPane.dataset.pane = "unmatched";
+      unmatchedPane.hidden = true;
+      const droppedPane = document.createElement("div");
+      droppedPane.className = "results-tab-pane";
+      droppedPane.dataset.pane = "dropped";
+      droppedPane.hidden = true;
+
+      // 匹配面板：渲染卡片（绿边框）
+      if (matchedJobs.length === 0) {
+        matchedPane.appendChild(buildEmptyHint("没有匹配岗位"));
+      } else {
+        for (const job of matchedJobs) {
+          const card = createDiscoveryCard(job);
+          card.classList.add("card-matched");
+          matchedPane.appendChild(card);
         }
-        droppedList.appendChild(item);
       }
-      dropped.append(toggle, droppedList);
-      list.appendChild(dropped);
 
-      renderReviewCard();
-      switchToDiscovery("results");
+      // 不匹配面板：渲染卡片（红边框）
+      if (unmatchedJobs.length === 0) {
+        unmatchedPane.appendChild(buildEmptyHint("没有不匹配岗位"));
+      } else {
+        for (const job of unmatchedJobs) {
+          const card = createDiscoveryCard(job);
+          card.classList.add("card-unmatched");
+          unmatchedPane.appendChild(card);
+        }
+      }
+
+      // 已筛除面板：简化卡片
+      if (discoveryDroppedJobs.length === 0) {
+        droppedPane.appendChild(buildEmptyHint("没有已筛除岗位"));
+      } else {
+        for (const d of discoveryDroppedJobs) {
+          droppedPane.appendChild(createDroppedCard(d));
+        }
+      }
+
+      list.append(matchedPane, unmatchedPane, droppedPane);
+
+      // 不在此处跳转 results：本函数既被「AI 筛选完成 onDone」调用，
+      // 也被「刷新恢复 restoreDiscoveryRun」调用。跳转由 onDone 显式触发，
+      // 恢复时只静默填数据、停在第一步。见 spec 007 ①。
     }
 
-    // 渲染当前审阅索引对应的单张卡片
-    function renderReviewCard() {
-      const viewer = document.getElementById("reviewViewer");
-      if (!viewer) return;
-      viewer.innerHTML = "";
-      const jobs = discoveryScreenedJobs;
-      if (!jobs.length) {
-        const empty = document.createElement("div");
-        empty.className = "discovery-step-hint";
-        empty.textContent = "没有可供审阅的岗位";
-        viewer.appendChild(empty);
-        return;
-      }
-      if (discoveryReviewIndex < 0) discoveryReviewIndex = 0;
-      if (discoveryReviewIndex >= jobs.length) discoveryReviewIndex = jobs.length - 1;
-      const job = jobs[discoveryReviewIndex];
-
-      // 顶部：进度 + AI 判定徽章
-      const top = document.createElement("div");
-      top.className = "review-nav-top";
-      const counter = document.createElement("span");
-      counter.className = "review-counter";
-      counter.textContent = `${discoveryReviewIndex + 1} / ${jobs.length}`;
-      top.appendChild(counter);
-      const badge = document.createElement("span");
-      const verdictMeta = {
-        match: { cls: "verdict-match", text: "AI 认为匹配" },
-        not_match: { cls: "verdict-not-match", text: "AI 认为不符" },
-        uncertain: { cls: "verdict-uncertain", text: "待定（未抓到 JD）" },
-      };
-      const vm = verdictMeta[job.verdict] || verdictMeta.uncertain;
-      badge.className = "review-verdict-badge " + vm.cls;
-      badge.textContent = vm.text;
-      top.appendChild(badge);
-      viewer.appendChild(top);
-
-      // AI 判定理由
-      if (job.verdict_reason) {
-        const reason = document.createElement("div");
-        reason.className = "review-verdict-reason " + vm.cls;
-        reason.textContent = "AI 理由：" + job.verdict_reason;
-        viewer.appendChild(reason);
-      }
-
-      // 岗位卡片（复用既有卡片，叠加判定边框）
-      const card = createDiscoveryCard(job);
-      card.classList.add(vm.cls);
-      viewer.appendChild(card);
-
-      // 底部导航：上一个 / 下一个
-      const nav = document.createElement("div");
-      nav.className = "review-nav";
-      const prevBtn = document.createElement("button");
-      prevBtn.type = "button";
-      prevBtn.className = "btn";
-      prevBtn.textContent = "上一个";
-      prevBtn.disabled = discoveryReviewIndex === 0;
-      prevBtn.onclick = () => { discoveryReviewIndex -= 1; renderReviewCard(); };
-      const nextBtn = document.createElement("button");
-      nextBtn.type = "button";
-      nextBtn.className = "btn primary";
-      nextBtn.textContent = "下一个";
-      nextBtn.disabled = discoveryReviewIndex >= jobs.length - 1;
-      nextBtn.onclick = () => { discoveryReviewIndex += 1; renderReviewCard(); };
-      nav.append(prevBtn, nextBtn);
-      viewer.appendChild(nav);
+    // 仅在 #discoveryResultsList 范围内切换 tab
+    function switchResultsTab(name) {
+      const container = document.getElementById("discoveryResultsList");
+      if (!container) return;
+      container.querySelectorAll(".results-tab").forEach(t => {
+        t.classList.toggle("active", t.dataset.tab === name);
+      });
+      container.querySelectorAll(".results-tab-pane").forEach(p => {
+        p.classList.toggle("active", p.dataset.pane === name);
+        p.hidden = p.dataset.pane !== name;
+      });
     }
 
-    // 展开/折叠"AI 粗筛移除"区
-    function toggleReviewDropped(toggleBtn) {
-      const listEl = document.getElementById("reviewDroppedList");
-      if (!listEl) return;
-      const willShow = listEl.hidden;
-      listEl.hidden = !willShow;
-      toggleBtn.textContent = toggleBtn.textContent.replace(/[▾▸]$/, willShow ? "▸" : "▾");
+    // 空面板提示（占满网格整行）
+    function buildEmptyHint(text) {
+      const empty = document.createElement("div");
+      empty.className = "discovery-step-hint";
+      empty.style.gridColumn = "1 / -1";
+      empty.textContent = text;
+      return empty;
+    }
+
+    // 已筛除岗位的简化卡片（无按钮、无绿/红边框）
+    function createDroppedCard(droppedJob) {
+      const card = document.createElement("div");
+      card.className = "discovery-job-card dropped-card";
+      card.innerHTML = `
+        <div class="discovery-job-card-title">${droppedJob.title || "未知岗位"}</div>
+        <div class="dropped-reason">${droppedJob.reason || "未提供理由"}</div>
+      `;
+      return card;
     }
 
     // ------------------------------------------------------------------
@@ -3610,42 +3744,6 @@
     const cardRegistry = new Map(); // job_id -> DOM element, stable card identity
     let progressivePollTimer = null;
 
-    function renderResults(items, counts) {
-      const list = document.getElementById("discoveryResultsList");
-      if (!list) return;
-      discoveryResultsCache = items.map(item => ({
-        job_id: item.job_id || item.id || "",
-        title: item.title || item.job_title || "",
-        salary: item.salary || "",
-        location: item.location || "",
-        experience: item.experience || "",
-        degree: item.degree || "",
-        jd: item.jd || item.jd_excerpt || "",
-        source_url: item.source_url || item.canonical_url || "",
-        // 卡片展示 + 感兴趣标记所需字段（列表 API 返回，JD 除外）
-        company: item.company || item.boss_name || "",
-        job_link: item.job_link || item.source_url || item.canonical_url || "",
-        company_scale: item.company_scale || "",
-        company_stage: item.company_stage || "",
-        company_industry: item.company_industry || "",
-        skills: item.skills || "",
-        welfare: item.welfare || "",
-        job_labels: item.job_labels || "",
-        tags: item.tags || "",
-      }));
-      // 顶部统计摘要（占满网格整行）
-      const c = counts || {};
-      let stats = list.querySelector(".discovery-results-stats");
-      if (!stats) {
-        stats = document.createElement("div");
-        stats.className = "discovery-results-stats";
-        stats.style.gridColumn = "1 / -1";
-        list.prepend(stats);
-      }
-      stats.textContent = `共抓取 ${c.total_scraped || 0} 条，匹配 ${c.total_matched || 0} 条，组合 ${c.combinations || 0} 个`;
-      filterDiscoveryResults();
-    }
-
     function discoveryFeedbackForJob(jobId) {
       for (let i = discoveryFeedbackItems.length - 1; i >= 0; i -= 1) {
         const item = discoveryFeedbackItems[i];
@@ -3654,25 +3752,10 @@
       return null;
     }
 
-    function filterDiscoveryResults() {
-      const list = document.getElementById("discoveryResultsList");
-      if (!list) return;
-      // 保留顶部统计摘要，清空其余内容
-      const stats = list.querySelector(".discovery-results-stats");
-      list.innerHTML = "";
-      if (stats) list.appendChild(stats);
-      if (!discoveryResultsCache.length) {
-        const empty = document.createElement("div");
-        empty.className = "empty-state";
-        empty.style.gridColumn = "1 / -1";
-        empty.textContent = "暂无岗位";
-        list.appendChild(empty);
-        return;
-      }
-      for (const item of discoveryResultsCache) {
-        list.appendChild(createDiscoveryCard(item));
-      }
-    }
+    // 新版结果页由 renderReviewResults 管理（stats + 三 tab + 三面板），
+    // 卡片标记状态由 createDiscoveryCard 内部通过 job._marked 回显。
+    // 此函数保留为 no-op，避免破坏 revokeFeedback 等历史调用点。
+    function filterDiscoveryResults() { /* no-op */ }
 
     function createDiscoveryCard(job) {
       const card = document.createElement("div");
@@ -3718,14 +3801,23 @@
         card.appendChild(tagline);
       }
 
-      // 区域 4：JD 展示区（列表不含 JD，按需抓取）
+      // 区域 4：JD 展示区（有内容则展示；空则显示抓取失败 + 刷新按钮占位）
       const jdBox = document.createElement("div");
       jdBox.className = "discovery-job-card-jd";
       if (job.jd) {
         jdBox.classList.add("loaded");
         jdBox.textContent = job.jd;
       } else {
-        buildJdPlaceholder(job, jdBox);
+        jdBox.classList.add("failed");
+        const hint = document.createElement("span");
+        hint.className = "card-jd-refetch";
+        hint.textContent = "JD 抓取失败";
+        const refetchBtn = document.createElement("button");
+        refetchBtn.type = "button";
+        refetchBtn.className = "card-jd-refetch";
+        refetchBtn.textContent = "刷新";
+        refetchBtn.onclick = () => refetchJobDetail(job, refetchBtn, card);
+        jdBox.append(hint, refetchBtn);
       }
       card.appendChild(jdBox);
 
@@ -3755,10 +3847,17 @@
 
       // 已标记状态回显（重渲染时保留）
       if (job._marked === "interested") {
-        interestBtn.textContent = "已标记感兴趣";
-        interestBtn.disabled = true;
+        interestBtn.textContent = "已感兴趣";
+        // 不再 disabled，允许再次点击撤销
       } else if (job._marked === "rejected") {
         card.classList.add("marked-rejected");
+        rejectBtn.textContent = "撤销不感兴趣";
+      }
+      // 从本轮 Set 恢复 rejected 状态（刷新页面后 Set 为空，自动恢复正常）
+      if (discoveryRejectedJobIds.has(job.job_id || job.id)) {
+        job._marked = "rejected";
+        card.classList.add("marked-rejected");
+        rejectBtn.textContent = "撤销不感兴趣";
       }
       return card;
     }
@@ -3803,6 +3902,56 @@
       }
     }
 
+    // JD 抓取失败卡片的「刷新」按钮：调 /api/pipeline/jobs/<job_id>/jd 补抓
+    async function refetchJobDetail(job, btn, card) {
+      const jobId = job.job_id || job.id;
+      const sourceUrl = job.job_link || job.source_url || "";
+      if (!jobId || !sourceUrl) {
+        setAppNotice("无法确定岗位信息，补抓失败", "error");
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = "抓取中...";
+      try {
+        const resp = await api(`/api/pipeline/jobs/${encodeURIComponent(jobId)}/jd`, {
+          method: "POST",
+          json: { source_url: sourceUrl },
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok && data.ok && data.jd) {
+          // 填充 JD 到卡片
+          job.jd = data.jd;
+          const jdArea = card.querySelector(".discovery-job-card-jd");
+          if (jdArea) {
+            jdArea.innerHTML = "";
+            jdArea.classList.remove("failed");
+            jdArea.classList.add("loaded");
+            const jdContent = document.createElement("div");
+            jdContent.className = "jd-content";
+            jdContent.textContent = data.jd;
+            jdArea.appendChild(jdContent);
+          }
+          btn.style.display = "none";
+          // 隐藏「JD 抓取失败」提示（hint span 与 btn 共享 class，需排除 btn 自身）
+          const failTip = card.querySelector(".card-jd-refetch");
+          if (failTip && failTip !== btn) failTip.style.display = "none";
+          setAppNotice(data.persisted ? "JD 补抓成功，已保存" : "JD 补抓成功", "success");
+        } else if (data.error_code === "cdp_not_ready") {
+          setAppNotice("CDP Chrome 未运行，请先启动 Chrome", "error");
+          btn.disabled = false;
+          btn.textContent = "刷新";
+        } else {
+          setAppNotice(data.error ? data.error : "JD 补抓失败", "error");
+          btn.disabled = false;
+          btn.textContent = "刷新";
+        }
+      } catch (e) {
+        setAppNotice("JD 补抓失败: " + (e.message || e), "error");
+        btn.disabled = false;
+        btn.textContent = "刷新";
+      }
+    }
+
     // 确保有可用画像：优先用已选中的，其次加载第一个，最后自动建默认画像
     async function ensureProfileForFeedback() {
       if (currentProfileId) return currentProfileId;
@@ -3844,6 +3993,27 @@
     async function markPipelineInterest(job, btn) {
       const profileId = await ensureProfileForFeedback();
       if (!profileId) { setAppNotice("无法确定画像，标记失败", "error"); return; }
+      const jobId = job.job_id || job.id;
+
+      // 如果已感兴趣，则撤销
+      if (job._marked === "interested") {
+        await cancelPipelineInterest(job, btn);
+        return;
+      }
+
+      // 互斥：如果已不感兴趣，先清不感兴趣
+      if (discoveryRejectedJobIds.has(jobId)) {
+        discoveryRejectedJobIds.delete(jobId);
+        job._marked = null;
+        const card = btn.closest(".discovery-job-card");
+        if (card) {
+          card.classList.remove("marked-rejected");
+          const rejectBtn = card.querySelector(".not_interested");
+          if (rejectBtn) rejectBtn.textContent = "不感兴趣";
+        }
+      }
+
+      // 标记感兴趣（持久化）
       btn.disabled = true;
       try {
         const resp = await api("/api/pipeline/jobs/interest", {
@@ -3851,36 +4021,67 @@
         });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
-          throw new Error(err.user_message || err.error || ("HTTP " + resp.status));
+          setAppNotice(err.user_message || err.error || "标记感兴趣失败", "error");
+          btn.disabled = false;
+          return;
         }
         job._marked = "interested";
-        btn.textContent = "已标记感兴趣";
-        setAppNotice("已标记感兴趣，可在筛选工作台查看", "success");
+        btn.textContent = "已感兴趣";
+        btn.disabled = false;  // 允许再次点击撤销
+        setAppNotice("已标记感兴趣", "success");
       } catch (e) {
+        setAppNotice("标记感兴趣失败: " + (e.message || e), "error");
         btn.disabled = false;
-        setAppNotice("标记失败：" + (e && e.message ? e.message : e), "error");
       }
     }
 
-    async function markPipelineReject(job, btn, card) {
+    async function cancelPipelineInterest(job, btn) {
       const profileId = await ensureProfileForFeedback();
-      if (!profileId) { setAppNotice("无法确定画像，标记失败", "error"); return; }
+      if (!profileId) { setAppNotice("无法确定画像，撤销失败", "error"); return; }
       btn.disabled = true;
       try {
-        const resp = await api("/api/pipeline/jobs/reject", {
+        const resp = await api("/api/pipeline/jobs/interest/cancel", {
           method: "POST", json: _pipelineFeedbackPayload(job, profileId),
         });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
-          throw new Error(err.user_message || err.error || ("HTTP " + resp.status));
+          setAppNotice(err.error || "撤销感兴趣失败", "error");
+          btn.disabled = false;
+          return;
         }
-        job._marked = "rejected";
-        card.classList.add("marked-rejected");
-        setAppNotice("已标记不感兴趣", "info");
-      } catch (e) {
+        job._marked = null;
+        btn.textContent = "感兴趣";
         btn.disabled = false;
-        setAppNotice("标记失败：" + (e && e.message ? e.message : e), "error");
+        setAppNotice("已撤销感兴趣", "info");
+      } catch (e) {
+        setAppNotice("撤销感兴趣失败: " + (e.message || e), "error");
+        btn.disabled = false;
       }
+    }
+
+    async function markPipelineReject(job, btn, card) {
+      const jobId = job.job_id || job.id;
+      if (!jobId) { setAppNotice("无法确定岗位 ID", "error"); return; }
+      // 如果已标记不感兴趣，则撤销
+      if (discoveryRejectedJobIds.has(jobId)) {
+        discoveryRejectedJobIds.delete(jobId);
+        job._marked = null;
+        card.classList.remove("marked-rejected");
+        btn.textContent = "不感兴趣";
+        setAppNotice("已撤销不感兴趣", "info");
+        return;
+      }
+      // 互斥：如果已感兴趣，先撤销感兴趣（需传感兴趣按钮，不是 rejectBtn）
+      if (job._marked === "interested") {
+        const interestBtn = card.querySelector(".interested");
+        if (interestBtn) await cancelPipelineInterest(job, interestBtn);
+      }
+      // 标记不感兴趣（纯内存，本轮有效）
+      discoveryRejectedJobIds.add(jobId);
+      job._marked = "rejected";
+      card.classList.add("marked-rejected");
+      btn.textContent = "撤销不感兴趣";
+      setAppNotice("已标记不感兴趣（本轮有效）", "info");
     }
 
     async function markDiscoveryInterest(jobId) {
@@ -4035,16 +4236,20 @@
 
     async function restoreDiscoveryRun() {
       // 新流程：从 /api/latest-pipeline-result 恢复上次成功运行的结果
+      // 恢复只静默填数据：不导航（停在第一步）、不点亮步骤指示器（绿色只由本会话真实成功点亮）。见 spec 007 ①②。
       try {
-        const resp = await api("/api/latest-pipeline-result");
+        // 带 profile_id 让后端按当前画像的 interested 记录补 _marked，
+        // 使刷新后「已感兴趣」按钮状态正确回显（跨刷新持久化）。
+        const url = currentProfileId
+          ? `/api/latest-pipeline-result?profile_id=${encodeURIComponent(currentProfileId)}`
+          : "/api/latest-pipeline-result";
+        const resp = await api(url);
         if (!resp.ok) return;
         const data = await resp.json();
         if (!data || !data.has_result || !data.result) return;
         // 持久化的是 AI 筛选后的最终结果，直接进单卡片审阅
         if (data.result.profile_summary) discoveryProfileSummary = data.result.profile_summary;
         renderReviewResults(data.result);
-        document.querySelector('.discovery-step-indicator[data-step="progress"]').classList.add("done");
-        document.querySelector('.discovery-step-indicator[data-step="aiscreen"]').classList.add("done");
       } catch (_e) {
         // 恢复失败静默处理，用户可重新上传
       }

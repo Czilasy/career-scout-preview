@@ -1764,6 +1764,24 @@ class TaskStore:
         self.update_profile_job(profile_id, job_id, status="deleted")
         return feedback
 
+    def cancel_screening_interest(self, profile_id, job_id):
+        """撤销感兴趣标记：把 profile_jobs.status 从 interested 回退到默认 'new'。
+
+        幂等——若当前不是 interested（或记录不存在）也不报错。schema 中
+        status 列为 NOT NULL DEFAULT 'new'，故回退到 'new' 而非 NULL。
+        仅清状态，不撤销历史 feedback_events。
+        """
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE profile_jobs SET status = 'new' "
+                "WHERE profile_id = ? AND job_id = ? AND status = 'interested'",
+                (str(profile_id), str(job_id)),
+            )
+        try:
+            return self.get_profile_job(profile_id, job_id)
+        except KeyError:
+            return None
+
     def list_screening_interested(self, profile_id) -> list:
         """返回持久感兴趣区的 profile_jobs 列表（status='interested'）。
 

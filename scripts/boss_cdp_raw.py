@@ -1542,17 +1542,162 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
             sleeper(gap, label="inter_job_gap")
 
 
+def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
+                          sleeper, event_callback, readiness_timeout_seconds,
+                          max_readiness_retries, results_lock, results,
+                          output_path, tab_label):
+    """在已 attach 的常驻 tab 上抓一个详情（复用 tab，不开/关 target）。
+
+    spec 007 ⑧：与 ``_scrape_one_detail`` 的区别——
+    - 不 createTarget/attach（tab 已由 ``_tab_worker`` 建池）
+    - 不 closeTarget（抓完留给下一个 job 复用）
+    - ``results.append`` + ``write_json_atomic`` + ``incr_request`` 在 ``results_lock`` 内
+    - 日志带 ``tab_label`` 前缀，多路汇总进进度框不混乱
+
+    返回 True=成功，False=isolated failure，"login_required"=登录墙（触发降级）。
+    """
+    title = job.get("title", "")
+    company = job.get("boss_name", "")
+    print(f"[{tab_label}] [{global_idx + 1}/{total}] {company} - {title}")
+
+    # incr_request 操作全局 _request_counter，非线程安全，加锁
+    with results_lock:
+        incr_request()
+
+    detail_url = build_detail_url(job)
+    ws.send("Page.navigate", {"url": detail_url}, sid)
+    print(f"[{tab_label}]   加载页面...")
+
+    started_at = time.time()
+    _wait_for_detail_readiness(
+        ws, sid,
+        sleeper=sleeper,
+        timeout_seconds=readiness_timeout_seconds,
+        max_retries=max_readiness_retries,
+    )
+
+    print(f"[{tab_label}]   提取 JD...")
+    val = ws.eval_js(EXTRACT_DETAIL_JS, sid)
+    try:
+        d = json.loads(val) if isinstance(val, str) else {"jd": "", "tags": []}
+    except (json.JSONDecodeError, ValueError, TypeError):
+        d = {"jd": "", "tags": []}
+
+    try:
+        d["jd"] = extract_job_description(d)
+    except DetailLoginRequiredError as exc:
+        _emit_detail_safe_event(
+            event_callback, job, "unavailable", "source_login_required", started_at,
+        )
+        print(f"[{tab_label}]   ⚠ 登录墙，触发降级")
+        return "login_required"
+    except DetailExtractionError as exc:
+        print(f"[{tab_label}]   跳过无效详情页: {exc}")
+        _emit_detail_safe_event(
+            event_callback, job, "failed", "source_invalid_output", started_at,
+        )
+        return False
+
+    detail = build_detail_record(job, d)
+    # results.append + write_json_atomic 必须在同一锁内，避免并发写盘竞态
+    with results_lock:
+        results.append(detail)
+        if output_path:
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+            write_json_atomic(output_path, results)
+
+    if d.get("tags"):
+        print(f"[{tab_label}]   技能: {', '.join(d['tags'])}")
+    print(f"[{tab_label}]   JD: {len(d.get('jd', ''))} 字 ({time.time() - started_at:.0f}s)")
+
+    _emit_detail_safe_event(event_callback, job, "completed", "ok", started_at)
+    return True
+
+
+def _tab_worker(cdp_port, session_factory, work_queue, total, *,
+                sleeper, event_callback, readiness_timeout_seconds,
+                max_readiness_retries, inter_job_gap_range, stagger_range,
+                tab_id, results_lock, results, output_path, degrade_event,
+                trailing_wait):
+    """常驻 tab 工作线程：建池 → 错峰启动 → 循环领任务抓详情 → 补位节奏 → 关池。
+
+    spec 007 ⑧：每个 tab 配一条独立工作线程 + 独立 CDP 会话（CDPSession 是
+    WebSocket 连接，不能多线程共享）。线程安全通过 ``results_lock`` 保护共享
+   状态（results/output_path/incr_request），``degrade_event`` 用于 login 墙降级。
+    """
+    tab_label = f"tab{tab_id + 1}"
+    ws = session_factory(cdp_port)
+    tid = None
+    try:
+        # 建池：createTarget + attach + visibility 注入（后台反爬）
+        r = ws.send("Target.createTarget", {"url": "about:blank", "background": True})
+        tid = r["result"]["targetId"]
+        r = ws.send("Target.attachToTarget", {"targetId": tid, "flatten": True})
+        sid = r["result"]["sessionId"]
+        ws.send("Page.addScriptToEvaluateOnNewDocument", {
+            "source": (
+                "Object.defineProperty(document, 'hidden', {get: () => false});"
+                "Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});"
+                "Object.defineProperty(document, 'webkitHidden', {get: () => false});"
+                "Object.defineProperty(document, 'webkitVisibilityState', {get: () => 'visible'});"
+            )
+        }, sid)
+
+        # 错峰启动：首批第 1 个立即导航，之后每个等随机 stagger_range 再开始
+        if tab_id > 0:
+            stagger = random.uniform(stagger_range[0], stagger_range[1])
+            print(f"[{tab_label}] 错峰等待 {stagger:.1f}s 后开始")
+            sleeper(stagger, label="stagger")
+
+        while not degrade_event.is_set():
+            try:
+                job, global_idx = work_queue.get_nowait()
+            except Exception:
+                break  # queue.Empty：队列空，退出
+            is_last = global_idx == total - 1
+            result = _scrape_detail_on_tab(
+                ws, sid, job, global_idx, total,
+                sleeper=sleeper, event_callback=event_callback,
+                readiness_timeout_seconds=readiness_timeout_seconds,
+                max_readiness_retries=max_readiness_retries,
+                results_lock=results_lock, results=results,
+                output_path=output_path, tab_label=tab_label,
+            )
+            if result == "login_required":
+                # 登录墙：设置降级事件，其他线程看到后停止领新任务
+                degrade_event.set()
+                print(f"[{tab_label}] 登录墙触发降级，停止领新任务")
+                break
+            # 补位节奏：宁慢求稳，抓完空出来也等随机 5-10s 再喂下一个
+            if not is_last or trailing_wait:
+                gap = random.uniform(inter_job_gap_range[0], inter_job_gap_range[1])
+                print(f"[{tab_label}]   等待 {gap:.1f}s 后抓下一个...")
+                sleeper(gap, label="inter_job_gap")
+    finally:
+        # 结束一次性关 tab + 关会话
+        if tid is not None:
+            try:
+                ws.send("Target.closeTarget", {"targetId": tid})
+            except Exception:
+                pass
+        ws.close()
+        print(f"[{tab_label}] 已关闭")
+
+
 def scrape_details(list_data, max_details=None, output_path=None,
                    cdp_port=DEFAULT_CDP_PORT, fmt="json", *,
                    batch_size=5, session_factory=None, sleeper=None,
                    event_callback=None, readiness_timeout_seconds=12,
                    max_readiness_retries=1, inter_job_gap_range=(3, 7),
-                   trailing_wait=False):
+                   trailing_wait=False,
+                   enable_parallel=False, tab_pool_size=3,
+                   stagger_range=(5, 10)):
     """抓取岗位详情页并返回结构化结果。
 
-    Policy v2 keyword-only parameters (feature 005):
+    Policy v2 keyword-only parameters (feature 005) +
+    spec 007 ⑧ 并行化（常驻 tab 池 + 工作线程 + 错峰/补位/降级）：
 
-    - ``batch_size``: 每批最多 5 个候选岗位（默认 5，上限 5）。
+    - ``batch_size``: 串行模式每批最多 5 个候选岗位（默认 5，上限 5）。
     - ``session_factory``: 返回 CDP 会话的可调用对象，默认 ``CDPSession``。
       测试可通过它注入 fake 会话；CLI 调用不传该参数时走真实 ``CDPSession``。
     - ``sleeper``: ``sleeper(seconds, label=None)`` 用于所有受控等待，
@@ -1566,9 +1711,15 @@ def scrape_details(list_data, max_details=None, output_path=None,
       默认 1。
     - ``inter_job_gap_range``: 同批次岗位间等待秒数范围，默认 (3, 7)。
     - ``trailing_wait``: 运行最后一项之后是否再等待一次 gap，默认 False。
+    - ``enable_parallel``: spec 007 ⑧，默认 False 走原串行路径（保持向后兼容
+      与 005 合约）；True 走常驻 tab 池并行（webui 调用处显式传 True）。
+    - ``tab_pool_size``: 常驻 tab 数，默认 3，上限 5。
+    - ``stagger_range``: 错峰启动间隔范围秒，默认 (5, 10)。
 
     实现要点（见 specs/005-fast-resume-discovery/contracts/state-machine.md）：
-    - 每批最多 5 个候选；每批复用一个 CDP 会话，逐岗位开 target。
+    - 串行：每批最多 5 个候选；每批复用一个 CDP 会话，逐岗位开 target。
+    - 并行（⑧）：N 个常驻 tab 各配一条工作线程 + 独立 CDP 会话；进队列前
+      打乱 JD 列表；错峰启动 + 补位节奏；登录墙触发降级事件。
     - readiness-driven 提取：先探针，未就绪仅一次受控滚动重试。
     - 每个岗位发出且仅发出一个 terminal safe event。
     - 运行最后一项之后不再等待 gap（除非 trailing_wait=True）。
@@ -1588,6 +1739,15 @@ def scrape_details(list_data, max_details=None, output_path=None,
         raise ValueError(
             f"inter_job_gap_range invalid: {inter_job_gap_range!r}"
         )
+    if not isinstance(tab_pool_size, int) or tab_pool_size < 1 or tab_pool_size > 5:
+        raise ValueError(
+            f"tab_pool_size must be an integer between 1 and 5, got {tab_pool_size!r}"
+        )
+    if not stagger_range or len(stagger_range) != 2:
+        raise ValueError("stagger_range must be a (min, max) pair")
+    stg_lo, stg_hi = stagger_range
+    if stg_lo < 0 or stg_hi < stg_lo:
+        raise ValueError(f"stagger_range invalid: {stagger_range!r}")
 
     raw_jobs = list_data.get("jobs", [])
     if max_details:
@@ -1606,31 +1766,75 @@ def scrape_details(list_data, max_details=None, output_path=None,
         unique_jobs.append(job)
 
     total = len(unique_jobs)
-    print(f"\n=== 抓取岗位详情 ({total} 个, 每批 {batch_size}) ===\n")
     results = []
 
-    for batch_start in range(0, total, batch_size):
-        batch = unique_jobs[batch_start:batch_start + batch_size]
-        batch_idx = batch_start // batch_size
-        print(f"--- 批次 {batch_idx + 1} ({len(batch)} 个岗位) ---")
+    if enable_parallel and total > 0:
+        # spec 007 ⑧：常驻 tab 池并行抓取
+        print(f"\n=== 抓取岗位详情 ({total} 个, {tab_pool_size} tab 并行) ===\n")
+        import threading
+        import queue as _queue_mod
+        results_lock = threading.Lock()
+        degrade_event = threading.Event()
+        work_queue = _queue_mod.Queue()
+        # 随机顺序：进队列前打乱 JD 列表，请求顺序不可预测
+        shuffled = unique_jobs[:]
+        random.shuffle(shuffled)
+        for idx, job in enumerate(shuffled):
+            work_queue.put((job, idx))
+        # 启动 N 个工作线程
+        threads = []
+        for tab_id in range(tab_pool_size):
+            t = threading.Thread(
+                target=_tab_worker,
+                args=(cdp_port, session_factory, work_queue, total),
+                kwargs={
+                    "sleeper": sleeper,
+                    "event_callback": event_callback,
+                    "readiness_timeout_seconds": readiness_timeout_seconds,
+                    "max_readiness_retries": max_readiness_retries,
+                    "inter_job_gap_range": inter_job_gap_range,
+                    "stagger_range": stagger_range,
+                    "tab_id": tab_id,
+                    "results_lock": results_lock,
+                    "results": results,
+                    "output_path": output_path,
+                    "degrade_event": degrade_event,
+                    "trailing_wait": trailing_wait,
+                },
+                name=f"detail-tab{tab_id + 1}",
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+        if degrade_event.is_set():
+            print("\n⚠ 检测到登录墙，已降级停止；已抓取结果保留。")
+    else:
+        # 串行路径（enable_parallel=False 或 total=0 时的降级/测试用）
+        print(f"\n=== 抓取岗位详情 ({total} 个, 每批 {batch_size}, 串行) ===\n")
+        for batch_start in range(0, total, batch_size):
+            batch = unique_jobs[batch_start:batch_start + batch_size]
+            batch_idx = batch_start // batch_size
+            print(f"--- 批次 {batch_idx + 1} ({len(batch)} 个岗位) ---")
 
-        ws = session_factory(cdp_port)
-        try:
-            for i, job in enumerate(batch):
-                global_idx = batch_start + i
-                is_last_in_run = global_idx == total - 1
-                _scrape_one_detail(
-                    ws, job, global_idx, total, results, output_path,
-                    sleeper=sleeper,
-                    event_callback=event_callback,
-                    readiness_timeout_seconds=readiness_timeout_seconds,
-                    max_readiness_retries=max_readiness_retries,
-                    inter_job_gap_range=inter_job_gap_range,
-                    is_last_in_run=is_last_in_run,
-                    trailing_wait=trailing_wait,
-                )
-        finally:
-            ws.close()
+            ws = session_factory(cdp_port)
+            try:
+                for i, job in enumerate(batch):
+                    global_idx = batch_start + i
+                    is_last_in_run = global_idx == total - 1
+                    _scrape_one_detail(
+                        ws, job, global_idx, total, results, output_path,
+                        sleeper=sleeper,
+                        event_callback=event_callback,
+                        readiness_timeout_seconds=readiness_timeout_seconds,
+                        max_readiness_retries=max_readiness_retries,
+                        inter_job_gap_range=inter_job_gap_range,
+                        is_last_in_run=is_last_in_run,
+                        trailing_wait=trailing_wait,
+                    )
+            finally:
+                ws.close()
 
     # 最终保存（dirname 为空时回退到当前目录，与循环内/其它写文件处保持一致）
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -2512,6 +2716,14 @@ def main():
     p.add_argument("--detail", action="store_true", default=True, help="抓取详情页 JD（默认开启）")
     p.add_argument("--no-detail", dest="detail", action="store_false", help="不抓取详情页")
     p.add_argument("--max-details", type=int, default=None, help="最多抓几个详情")
+    p.add_argument("--enable-parallel", action="store_true", default=False,
+                   help="详情抓取启用常驻 tab 池并行（spec 007 ⑧；默认串行）")
+    p.add_argument("--tab-pool-size", type=int, default=3,
+                   help="常驻 tab 数（1-5，默认 3；仅 --enable-parallel 时生效）")
+    p.add_argument("--stagger-min", type=float, default=5.0,
+                   help="错峰启动最小间隔秒（默认 5；仅 --enable-parallel 时生效）")
+    p.add_argument("--stagger-max", type=float, default=10.0,
+                   help="错峰启动最大间隔秒（默认 10；仅 --enable-parallel 时生效）")
     p.add_argument("--events-output", default=None,
                    help="详情 terminal safe event 输出路径 (JSONL；每行一个事件，"
                         "仅含 kind/status/job_id/duration_ms/safe_code，"
@@ -2674,6 +2886,9 @@ def main():
                 list_data, args.max_details, args.detail_output,
                 cdp_port=args.cdp_port, fmt=args.format,
                 event_callback=events_callback,
+                enable_parallel=args.enable_parallel,
+                tab_pool_size=args.tab_pool_size,
+                stagger_range=(args.stagger_min, args.stagger_max),
             )
         finally:
             if events_file_handle is not None:
