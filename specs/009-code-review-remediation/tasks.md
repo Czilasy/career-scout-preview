@@ -83,7 +83,14 @@
 
 - [x] T023 [W1] 第 1 波回归：`python -m unittest discover tests` + `python -m py_compile scripts/boss_cdp_raw.py webui/app.py webui/store.py` + `cd webui && npm run build`，全部通过。验证清单见 [quickstart.md](quickstart.md) 第 1 波章节
   - **回归结论（2026-07-23）**：语法检查 ✓、前端 `npm run build` ✓、`python -m unittest discover tests` 1142 项中 1136 通过、4 errors + 2 failures。**6 项失败全部为预先存在**（已用 `git stash` 隔离本次修改后复跑确认）：①`test_revoke_not_interested_restores_job_and_removes_active_trash`（`list_trash_with_origin` 方法不存在）；②`test_semantic` 模块 import 错误（`assess_semantic_similarity` 不存在）；③`test_webui_browser` 找不到已删除的 `ScreeningView.vue`（先前 91d984a 删除筛选工作台遗留）；④⑤`test_375px_layout_keeps_header_actions_and_tabs_reachable` / `test_desktop_navigation_and_four_gated_steps_render_without_overflow` 浏览器测试断言与已删除的"筛选工作台"标签页相关。本次修改未引入新的失败。
-- [ ] T024 [W1] 第 1 波 commit：拆多个 conventional commits（`chore: fix uv.lock` / `refactor: remove dead code` / `refactor: extract constants` / `ci: add workflow` / `fix: BaseDialog previousFocus ref` 等），不 push（本地运行）
+- [x] T024 [W1] 第 1 波 commit：拆多个 conventional commits（`chore: fix uv.lock` / `refactor: remove dead code` / `refactor: extract constants` / `ci: add workflow` / `fix: BaseDialog previousFocus ref` 等），不 push（本地运行）
+  - **执行结论（2026-07-23）**：拆为 6 个 commit，未 push：
+    - `c57c67b docs(spec): 009 代码审查整改 spec 与审查报告`
+    - `a693a5d chore(deps): 补全 uv.lock 缺失依赖`
+    - `77e8f41 refactor(webui): 第 1 波零风险清理`（含 BaseDialog ref / types 索引签名 / constants 提取 / _pipeline_tasks 清理机制 等多个子项）
+    - `b010322 ci: 添加 GitHub Actions 测试与构建工作流`
+    - `11de186 docs(agents): 删除 issue 强制要求，改为本地运行说明`
+    - `7397732 build(webui): 重新构建前端产物`
 
 ---
 
