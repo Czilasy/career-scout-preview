@@ -355,6 +355,14 @@ async function startAiScreen() {
   }
 }
 
+// 指数退避：7 次 / 64s 上限。前 5 次快速重试（4s→8s→16s→32s→64s），
+// 后 2 次保持 64s，总等待约 3 分钟。达上限后主动放弃并提示用户。
+const POLL_MAX_RETRIES = 7;
+const POLL_BASE_DELAY = 4000;
+const POLL_MAX_DELAY = 64000;
+
+let pollRetryCount = 0;
+
 async function pollTask(taskId: string, kind: "scrape" | "screen") {
   try {
     const data = await apiRequest<TaskSnapshot>(`/api/search-progress/${encodeURIComponent(taskId)}`);
@@ -362,6 +370,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
     else screenSnapshot.value = data;
 
     if (data.status === "done") {
+      pollRetryCount = 0;
       if (kind === "scrape") {
         scrapeBusy.value = false;
         scrapeCompleted.value = true;
@@ -375,6 +384,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       return;
     }
     if (data.status === "failed") {
+      pollRetryCount = 0;
       if (kind === "scrape") scrapeBusy.value = false;
       else screenBusy.value = false;
       notify(data.error || "任务执行失败", "error");
@@ -382,15 +392,33 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
     }
     pollTimer = window.setTimeout(() => void pollTask(taskId, kind), 1800);
   } catch (error) {
-    const failed: TaskSnapshot = {
+    pollRetryCount += 1;
+    if (pollRetryCount > POLL_MAX_RETRIES) {
+      // 达上限，主动放弃
+      pollRetryCount = 0;
+      if (kind === "scrape") scrapeBusy.value = false;
+      else screenBusy.value = false;
+      const failed: TaskSnapshot = {
+        status: "failed",
+        progress: { message: "任务执行失败" },
+        logs: [],
+        error: "状态刷新连续失败，请检查网络后重试",
+      };
+      if (kind === "scrape") scrapeSnapshot.value = failed;
+      else screenSnapshot.value = failed;
+      notify("状态刷新连续失败，请检查网络后重试", "error");
+      return;
+    }
+    const delay = Math.min(POLL_BASE_DELAY * 2 ** (pollRetryCount - 1), POLL_MAX_DELAY);
+    const retrying: TaskSnapshot = {
       status: "running",
-      progress: { message: "状态刷新失败，正在重试…" },
+      progress: { message: `状态刷新失败，正在重试（${pollRetryCount}/${POLL_MAX_RETRIES}）…` },
       logs: [],
       error: "",
     };
-    if (kind === "scrape") scrapeSnapshot.value = failed;
-    else screenSnapshot.value = failed;
-    pollTimer = window.setTimeout(() => void pollTask(taskId, kind), 4000);
+    if (kind === "scrape") scrapeSnapshot.value = retrying;
+    else screenSnapshot.value = retrying;
+    pollTimer = window.setTimeout(() => void pollTask(taskId, kind), delay);
   }
 }
 
