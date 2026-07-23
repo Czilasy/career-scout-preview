@@ -276,6 +276,15 @@ function addCustomKeyword() {
   customKeyword.value = "";
 }
 
+function confirmCities() {
+  const cities = cityList.value;
+  if (!cities.length) {
+    notify("请输入至少一个城市", "warning");
+    return;
+  }
+  notify(`已确认 ${cities.length} 个城市：${cities.join("、")}`, "success");
+}
+
 function toggleFilter(key: string, code: string) {
   const values = filterValues.value[key] || [];
   filterValues.value[key] = values.includes(code)
@@ -640,6 +649,7 @@ async function retryJd(job: JobItem) {
             <div><span class="card-kicker">搜索关键词</span><h2>哪些词用于广泛抓取？</h2></div>
             <span class="selection-summary">{{ selectedKeywords.length }} 项已选</span>
           </div>
+          <div class="estimate-line"><Search :size="17" aria-hidden="true" />{{ searchEstimate }}</div>
           <div class="chip-grid" aria-label="搜索关键词">
             <button
               v-for="keyword in keywords"
@@ -660,23 +670,27 @@ async function retryJd(job: JobItem) {
               <input v-model="customKeyword" type="text" placeholder="输入后按回车添加" @keydown.enter.prevent="addCustomKeyword">
             </label>
             <button class="button secondary align-end" type="button" @click="addCustomKeyword">添加</button>
+            <label class="field-label grow">
+              <span>城市（逗号分隔）</span>
+              <input v-model="cityText" type="text" placeholder="上海，杭州">
+            </label>
+            <button class="button secondary align-end" type="button" @click="confirmCities">添加</button>
           </div>
           <label class="field-label">
-            <span>城市（多个城市用逗号分隔）</span>
-            <input v-model="cityText" type="text" placeholder="上海，杭州">
+            <span>求职画像（用于 AI 精筛）<small v-if="!profileSummary">　未填写将跳过精筛</small></span>
+            <textarea v-model="profileSummary" rows="2" placeholder="上传简历后自动生成；也可手动填写，如：3年Python后端，熟悉FastAPI/Redis，期望AI应用开发方向"></textarea>
           </label>
-          <div class="estimate-line"><Search :size="17" aria-hidden="true" />{{ searchEstimate }}</div>
         </section>
 
         <details class="content-card advanced-panel">
           <summary><SlidersHorizontal :size="17" aria-hidden="true" />高级执行设置</summary>
           <div class="advanced-grid">
-            <label class="field-label"><span>每组合翻页数 <i class="tip" title="每个关键词×城市组合抓多少页，页数越多岗位越多但耗时更长">?</i></span><input v-model.number="advancedSettings.pages" type="number" min="1" max="30"></label>
-            <label class="field-label"><span>组合间延迟（秒） <i class="tip" title="两个搜索组合之间等待多久，太短容易触发反爬">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" min="5" max="120"></label>
-            <label class="field-label"><span>详情批次大小 <i class="tip" title="每批同时打开几个岗位详情页抓JD，越大越快但浏览器压力越大">?</i></span><input v-model.number="advancedSettings.detail_batch_size" type="number" min="1" max="10"></label>
-            <label class="field-label"><span>粗筛每批数量 <i class="tip" title="一次发给AI多少条岗位做粗筛，越大单次等待越久">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" min="10" max="100"></label>
-            <label class="field-label"><span>粗筛并发数 <i class="tip" title="同时发几个AI请求，免费端点建议保持1否则429限流">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" min="1" max="5"></label>
-            <label class="field-label"><span>精筛每批数量 <i class="tip" title="JD精筛时一次发几条给AI对比，越大单次等待越久">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" min="1" max="10"></label>
+            <label class="field-label"><span>每组合翻页数 <i class="tip" data-tip="每个关键词×城市组合抓多少页，页数越多岗位越多但耗时更长">?</i></span><input v-model.number="advancedSettings.pages" type="number" min="1" max="30"></label>
+            <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="两个搜索组合之间等待多久，太短容易触发反爬">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" min="5" max="120"></label>
+            <label class="field-label"><span>详情批次大小 <i class="tip" data-tip="每批同时打开几个岗位详情页抓JD，越大越快但浏览器压力越大">?</i></span><input v-model.number="advancedSettings.detail_batch_size" type="number" min="1" max="10"></label>
+            <label class="field-label"><span>粗筛每批数量 <i class="tip" data-tip="一次发给AI多少条岗位做粗筛，越大单次等待越久">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" min="10" max="100"></label>
+            <label class="field-label"><span>粗筛并发数 <i class="tip" data-tip="同时发几个AI请求，免费端点建议保持1否则429限流">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" min="1" max="5"></label>
+            <label class="field-label"><span>精筛每批数量 <i class="tip" data-tip="JD精筛时一次发几条给AI对比，越大单次等待越久">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" min="1" max="10"></label>
           </div>
           <button class="button secondary" type="button" :disabled="advancedBusy" @click="saveAdvancedSettings">
             {{ advancedBusy ? "保存中…" : "保存高级设置" }}

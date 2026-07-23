@@ -2134,28 +2134,37 @@ def create_app(config=None):
 
             # 5) Stage B：JD 精筛（对比候选人画像）
             jobs_with_jd = [j for j in enriched if str(j.get("jd", "")).strip()]
-            emit(stage="screen_b", current=0, total=len(jobs_with_jd),
-                 message="AI 精筛中（JD 对比简历画像）…")
-
-            def _b_progress(cur, tot):
-                emit(stage="screen_b", current=cur, total=tot,
-                     message=f"AI 精筛 {cur}/{tot}")
-
-            match_result = match_jds(jobs_with_jd, profile_summary, endpoint, api_key,
-                                     model=model, progress=_b_progress)
-            verdicts = match_result["verdicts"]
-            for job in enriched:
-                jid = str(job.get("job_id", ""))
-                v = verdicts.get(jid)
-                if v:
-                    job["verdict"] = v["verdict"]
-                    job["verdict_reason"] = v["reason"]
-                else:
-                    # 未抓到 JD 的岗位无法精筛，标记待定（不红不绿）
+            if not profile_summary.strip():
+                # 无画像时跳过精筛，全部标记待人工确认
+                for job in enriched:
                     job["verdict"] = "uncertain"
-                    job["verdict_reason"] = "未抓到 JD，无法精筛"
+                    job["verdict_reason"] = "未填写求职画像，跳过 AI 精筛"
+                match_count = 0
+                emit(stage="screen_b", current=len(jobs_with_jd), total=len(jobs_with_jd),
+                     message="未填写求职画像，已跳过 AI 精筛")
+            else:
+                emit(stage="screen_b", current=0, total=len(jobs_with_jd),
+                     message="AI 精筛中（JD 对比简历画像）…")
 
-            match_count = sum(1 for j in enriched if j.get("verdict") == "match")
+                def _b_progress(cur, tot):
+                    emit(stage="screen_b", current=cur, total=tot,
+                         message=f"AI 精筛 {cur}/{tot}")
+
+                match_result = match_jds(jobs_with_jd, profile_summary, endpoint, api_key,
+                                         model=model, progress=_b_progress)
+                verdicts = match_result["verdicts"]
+                for job in enriched:
+                    jid = str(job.get("job_id", ""))
+                    v = verdicts.get(jid)
+                    if v:
+                        job["verdict"] = v["verdict"]
+                        job["verdict_reason"] = v["reason"]
+                    else:
+                        # 未抓到 JD 的岗位无法精筛，标记待定（不红不绿）
+                        job["verdict"] = "uncertain"
+                        job["verdict_reason"] = "未抓到 JD，无法精筛"
+
+                match_count = sum(1 for j in enriched if j.get("verdict") == "match")
             result = {
                 "ok": True,
                 "jobs": enriched,
