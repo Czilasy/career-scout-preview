@@ -37,6 +37,9 @@ debug.log
 tests/regression_*.txt
 tests/fixtures/discovery/*_result.json
 
+# WebUI runtime state (sqlite DB, resumes, latest_*.json) - per-machine, sensitive
+.career-scout/
+
 # Local skill tooling config (baoyu-image-gen etc.)
 .baoyu-skills/
 

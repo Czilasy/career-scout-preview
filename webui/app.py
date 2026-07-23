@@ -58,7 +58,7 @@ from webui import ai as ai_service
 
 
 SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
-DEFAULT_STATE_DIR = Path(os.path.expanduser("~/.career-scout/webui"))
+DEFAULT_STATE_DIR = Path(os.environ.get("BOSS_WEBUI_STATE_DIR", os.path.expanduser("~/.career-scout/webui")))
 # 最新一轮流水线结果的持久化文件（刷新页面后据此恢复展示，新一轮运行覆盖它）
 LATEST_PIPELINE_RESULT_PATH = DEFAULT_STATE_DIR / "latest_pipeline_result.json"
 # 最新一轮"只抓不筛"的原始抓取结果，供 AI 筛选步骤读取（与最终筛选结果分开）
@@ -655,11 +655,8 @@ def create_app(config=None):
 
     @app.route("/api/favorites")
     def favorites_list():
-        """Return the user's favorited (interested) jobs for the current profile."""
-        profile_id = request.args.get("profile_id", "")
-        if not profile_id:
-            return jsonify({"items": []})
-        rows = store.list_screening_interested(profile_id)
+        """Return all favorited (interested) jobs across profiles."""
+        rows = store.list_all_interested()
         items = []
         for pj in rows:
             try:
@@ -668,6 +665,7 @@ def create_app(config=None):
                 continue
             items.append({
                 "job_id": job["id"],
+                "profile_id": pj.get("profile_id", ""),
                 "title": job.get("title", ""),
                 "company": job.get("company", ""),
                 "salary": job.get("salary", ""),
@@ -675,6 +673,18 @@ def create_app(config=None):
                 "job_link": job.get("source_url") or job.get("canonical_url", ""),
             })
         return jsonify({"items": items, "count": len(items)})
+
+    @app.route("/api/filter-labels")
+    def filter_labels():
+        """Return field label metadata for the 6 filter chip groups (no resume needed)."""
+        return jsonify({"labels": {
+            "salary": ("薪资范围", [], boss.SALARY_MAP),
+            "experience": ("经验要求", [], boss.EXPERIENCE_MAP),
+            "degree": ("学历", [], boss.DEGREE_MAP),
+            "industry": ("行业", [], boss.INDUSTRY_MAP),
+            "scale": ("公司规模", [], boss.SCALE_MAP),
+            "stage": ("融资阶段", [], boss.STAGE_MAP),
+        }})
 
     @app.route("/api/session")
     def session():

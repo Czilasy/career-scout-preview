@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { Bot, BriefcaseBusiness, Star, Wifi, WifiOff } from "@lucide/vue";
+import { Bot, BriefcaseBusiness, Star, X } from "@lucide/vue";
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
 import NoticeBar from "./components/NoticeBar.vue";
 import DiscoveryView from "./views/DiscoveryView.vue";
@@ -8,7 +8,6 @@ import { apiRequest, errorMessage, initializeSession } from "./api";
 import type { CandidateProfile, Notice } from "./types";
 
 const aiSettingsOpen = ref(false);
-const connected = ref(false);
 const profiles = ref<CandidateProfile[]>([]);
 const currentProfileId = ref("");
 const notice = ref<Notice | null>(null);
@@ -18,14 +17,37 @@ const favoritesOpen = ref(false);
 const favorites = ref<Record<string, unknown>[]>([]);
 
 async function loadFavorites() {
-  if (!currentProfileId.value) return;
   try {
-    const data = await apiRequest<{ items?: Record<string, unknown>[] }>(
-      `/api/favorites?profile_id=${encodeURIComponent(currentProfileId.value)}`,
-    );
+    const data = await apiRequest<{ items?: Record<string, unknown>[] }>("/api/favorites");
     favorites.value = data.items || [];
   } catch {
     favorites.value = [];
+  }
+}
+
+async function removeFavorite(job: Record<string, unknown>) {
+  const profileId = String(job.profile_id || "");
+  const jobId = String(job.job_id || "");
+  if (!profileId || !jobId) return;
+  try {
+    await apiRequest("/api/pipeline/jobs/interest/cancel", {
+      method: "POST",
+      json: {
+        profile_id: profileId,
+        job: {
+          job_id: jobId,
+          job_link: job.job_link,
+          title: job.title,
+          company: job.company,
+          salary: job.salary,
+          location: job.location,
+        },
+      },
+    });
+    favorites.value = favorites.value.filter((j) => j.job_id !== job.job_id);
+    showNotice({ message: "已取消收藏", tone: "info" });
+  } catch (error) {
+    showNotice({ message: errorMessage(error, "取消收藏失败"), tone: "error" });
   }
 }
 
@@ -36,11 +58,7 @@ const currentProfile = computed(() => (
 onMounted(async () => {
   try {
     await initializeSession();
-    const [check, profileData] = await Promise.all([
-      apiRequest<{ connected?: boolean }>("/api/check"),
-      apiRequest<{ profiles?: CandidateProfile[] }>("/api/profiles"),
-    ]);
-    connected.value = Boolean(check.connected);
+    const profileData = await apiRequest<{ profiles?: CandidateProfile[] }>("/api/profiles");
     profiles.value = profileData.profiles || [];
     const saved = localStorage.getItem("boss-current-profile") || "";
     currentProfileId.value = profiles.value.some((profile) => profile.id === saved)
@@ -94,18 +112,6 @@ function acceptCreatedProfile(profile: CandidateProfile) {
 
 
       <div class="header-actions">
-        <span class="connection-chip" :data-connected="connected">
-          <Wifi v-if="connected" :size="16" aria-hidden="true" />
-          <WifiOff v-else :size="16" aria-hidden="true" />
-          <span>{{ connected ? "浏览器已连接" : "浏览器未连接" }}</span>
-        </span>
-        <label class="profile-picker">
-          <span class="sr-only">当前画像</span>
-          <select :value="currentProfileId" aria-label="当前画像" @change="selectProfile(($event.target as HTMLSelectElement).value)">
-            <option value="">{{ profiles.length ? "选择求职画像" : "暂无画像" }}</option>
-            <option v-for="profile in profiles" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
-          </select>
-        </label>
         <button
           class="button secondary favorites-trigger"
           type="button"
@@ -134,18 +140,30 @@ function acceptCreatedProfile(profile: CandidateProfile) {
       </div>
       <p v-if="!favorites.length" class="fav-drawer-empty">暂无收藏，在结果页点「收藏」即可添加。</p>
       <div v-else class="fav-drawer-list">
-        <a
+        <div
           v-for="job in favorites"
           :key="String(job.job_id || job.id)"
           class="fav-card"
-          :href="String(job.job_link || '#')"
-          target="_blank"
-          rel="noopener"
         >
-          <strong class="fav-card-title">{{ job.title || "未知岗位" }}</strong>
-          <span class="fav-card-meta">{{ job.salary || "薪资面议" }} · {{ job.location || "" }}</span>
-          <span class="fav-card-company">{{ job.company || "" }}</span>
-        </a>
+          <a
+            class="fav-card-main"
+            :href="String(job.job_link || '#')"
+            target="_blank"
+            rel="noopener"
+          >
+            <strong class="fav-card-title">{{ job.title || "未知岗位" }}</strong>
+            <span class="fav-card-meta">{{ job.salary || "薪资面议" }} · {{ job.location || "" }}</span>
+            <span class="fav-card-company">{{ job.company || "" }}</span>
+          </a>
+          <button
+            type="button"
+            class="fav-card-remove"
+            aria-label="取消收藏"
+            @click.stop.prevent="removeFavorite(job)"
+          >
+            <X :size="16" aria-hidden="true" />
+          </button>
+        </div>
       </div>
     </aside>
 

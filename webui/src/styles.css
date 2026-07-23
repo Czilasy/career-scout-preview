@@ -229,8 +229,9 @@ input {
   gap: 10px;
   align-content: start;
 }.fav-card {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 14px 16px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -239,6 +240,13 @@ input {
 }.fav-card:hover {
   border-color: var(--accent);
   background: var(--surface-2);
+}.fav-card-main {
+  flex: 1 1 auto;
+  display: grid;
+  gap: 4px;
+  text-decoration: none;
+  color: inherit;
+  min-width: 0;
 }.fav-card-title {
   font-size: 14px;
   color: var(--text);
@@ -249,6 +257,23 @@ input {
 }.fav-card-company {
   font-size: 12px;
   color: var(--muted);
+}.fav-card-remove {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}.fav-card-remove:hover {
+  background: var(--danger-bg, rgba(239, 68, 68, 0.15));
+  color: var(--danger, #ef4444);
 }.button,
 button.button {
   display: inline-flex;
@@ -327,9 +352,10 @@ button:disabled {
   gap: clamp(20px, 3vw, 38px);
   width: min(1560px, 100%);
   margin: 0 auto;
-  padding: 28px clamp(16px, 3vw, 40px) 40px;
+  padding: 28px 0 40px clamp(16px, 3vw, 40px);
 }.view-stage {
   min-width: 0;
+  padding-right: clamp(16px, 3vw, 40px);
 }.view-stage.full-width {
   grid-column: 1 / -1;
 }.stage-header {
@@ -379,6 +405,9 @@ button:disabled {
 }.step-nav button:hover:not(:disabled) {
   color: var(--text);
   background: var(--surface-1);
+}.step-nav button:disabled {
+  opacity: .35;
+  cursor: not-allowed;
 }.step-nav button.active {
   border-color: var(--line-strong);
   color: var(--text);
@@ -542,6 +571,22 @@ button:disabled {
   border-color: var(--accent);
   color: var(--accent-strong);
   background: rgb(241 184 75 / 9%);
+}.choice-chip:disabled {
+  opacity: .38;
+  cursor: not-allowed;
+}.choice-chip.selected:disabled {
+  opacity: .75;
+}.tip {
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  font-size: 10px;
+  font-style: normal;
+  color: var(--muted);
+  cursor: help;
 }.choice-chip.recommended::before {
   content: "";
   width: 5px;

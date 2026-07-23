@@ -164,8 +164,16 @@ const currentEmptyMessage = computed(() => ({
 })[activeCategory.value]);
 
 onMounted(() => {
-  void Promise.allSettled([loadAdvancedSettings(), loadLatestResult()]);
+  void Promise.allSettled([loadAdvancedSettings(), loadLatestResult(), loadFilterLabels()]);
 });
+
+async function loadFilterLabels() {
+  if (Object.keys(fieldLabels.value).length) return;
+  try {
+    const data = await apiRequest<{ labels?: Record<string, unknown> }>("/api/filter-labels");
+    if (data.labels) fieldLabels.value = data.labels as typeof fieldLabels.value;
+  } catch { /* non-critical */ }
+}
 
 watch(() => props.profileId, () => {
   if (!scrapeBusy.value && !screenBusy.value) void loadLatestResult();
@@ -551,7 +559,7 @@ async function retryJd(job: JobItem) {
       <section v-if="activeStep === 'upload'" class="content-card workflow-card upload-layout">
         <div class="workflow-copy">
           <span class="card-kicker">简历只会发往你配置的 AI 服务</span>
-          <h2>上传后先生成建议，不替你做最终决定</h2>
+          <h2>上传后生成建议，不替你做最终决定</h2>
           <p>分析会得到关键词、城市和六类筛选条件。每一项都可以在后续步骤调整。</p>
           <ul class="feature-list">
             <li><Check :size="17" aria-hidden="true" />抓取前确认关键词和城市</li>
@@ -590,6 +598,13 @@ async function retryJd(job: JobItem) {
             @click="analyzeResume"
           >
             <Sparkles :size="18" aria-hidden="true" />{{ uploadBusy ? "分析中…" : "上传并分析" }}
+          </button>
+          <button
+            class="button ghost wide-button"
+            type="button"
+            @click="analysisReady = true; activeStep = 'search'"
+          >
+            跳过简历，直接手动搜索
           </button>
         </div>
       </section>
@@ -631,12 +646,12 @@ async function retryJd(job: JobItem) {
         <details class="content-card advanced-panel">
           <summary><SlidersHorizontal :size="17" aria-hidden="true" />高级执行设置</summary>
           <div class="advanced-grid">
-            <label class="field-label"><span>每组合翻页数</span><input v-model.number="advancedSettings.pages" type="number" min="1" max="30"></label>
-            <label class="field-label"><span>组合间延迟（秒）</span><input v-model.number="advancedSettings.inter_combo_delay" type="number" min="5" max="120"></label>
-            <label class="field-label"><span>详情批次大小</span><input v-model.number="advancedSettings.detail_batch_size" type="number" min="1" max="10"></label>
-            <label class="field-label"><span>粗筛每批数量</span><input v-model.number="advancedSettings.screen_batch_size" type="number" min="10" max="100"></label>
-            <label class="field-label"><span>粗筛并发数</span><input v-model.number="advancedSettings.screen_concurrency" type="number" min="1" max="5"></label>
-            <label class="field-label"><span>精筛每批数量</span><input v-model.number="advancedSettings.match_batch_size" type="number" min="1" max="10"></label>
+            <label class="field-label"><span>每组合翻页数 <i class="tip" title="每个关键词×城市组合抓多少页，页数越多岗位越多但耗时更长">?</i></span><input v-model.number="advancedSettings.pages" type="number" min="1" max="30"></label>
+            <label class="field-label"><span>组合间延迟（秒） <i class="tip" title="两个搜索组合之间等待多久，太短容易触发反爬">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" min="5" max="120"></label>
+            <label class="field-label"><span>详情批次大小 <i class="tip" title="每批同时打开几个岗位详情页抓JD，越大越快但浏览器压力越大">?</i></span><input v-model.number="advancedSettings.detail_batch_size" type="number" min="1" max="10"></label>
+            <label class="field-label"><span>粗筛每批数量 <i class="tip" title="一次发给AI多少条岗位做粗筛，越大单次等待越久">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" min="10" max="100"></label>
+            <label class="field-label"><span>粗筛并发数 <i class="tip" title="同时发几个AI请求，免费端点建议保持1否则429限流">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" min="1" max="5"></label>
+            <label class="field-label"><span>精筛每批数量 <i class="tip" title="JD精筛时一次发几条给AI对比，越大单次等待越久">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" min="1" max="10"></label>
           </div>
           <button class="button secondary" type="button" :disabled="advancedBusy" @click="saveAdvancedSettings">
             {{ advancedBusy ? "保存中…" : "保存高级设置" }}
@@ -656,9 +671,6 @@ async function retryJd(job: JobItem) {
 
       <section v-else-if="activeStep === 'screen'" class="workflow-stack">
         <section class="content-card workflow-card">
-          <div class="section-heading">
-            <div><span class="card-kicker">筛选边界</span><h2>六类条件可以多选，也可以不限</h2></div>
-          </div>
           <div class="filter-groups">
             <fieldset v-for="group in filterGroups" :key="group.key" class="filter-group">
               <legend>{{ group.label }}</legend>
@@ -667,6 +679,7 @@ async function retryJd(job: JobItem) {
                   class="choice-chip"
                   :class="{ selected: !(filterValues[group.key] || []).length }"
                   type="button"
+                  :disabled="screenBusy"
                   :aria-pressed="!(filterValues[group.key] || []).length"
                   @click="filterValues[group.key] = []"
                 >不限</button>
@@ -676,6 +689,7 @@ async function retryJd(job: JobItem) {
                   class="choice-chip"
                   :class="{ selected: (filterValues[group.key] || []).includes(code) }"
                   type="button"
+                  :disabled="screenBusy"
                   :aria-pressed="(filterValues[group.key] || []).includes(code)"
                   @click="toggleFilter(group.key, code)"
                 >{{ label }}</button>

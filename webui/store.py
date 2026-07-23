@@ -1618,6 +1618,14 @@ class TaskStore:
         """
         return self.list_profile_jobs(profile_id, status="interested")
 
+    def list_all_interested(self) -> list:
+        """返回所有 profile 的 interested 岗位列表，带 profile_id 用于取消收藏。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM profile_jobs WHERE status = 'interested' ORDER BY shown_at DESC",
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     # -- search runs -------------------------------------------------------
 
     def create_search_run(self, profile_id, profile_snapshot, mode, total_detail_budget=MAX_DETAIL_BUDGET):
