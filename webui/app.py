@@ -871,7 +871,9 @@ def create_app(config=None):
         try:
             models = ai_service.list_models(endpoint_url, api_key)
         except ai_service.AISecurityError as exc:
-            return jsonify({"ok": False, "error_code": exc.error_code, "models": []}), 200
+            # 语义修正：AISecurityError 是失败，不应返回 200。
+            # 前端 fetchModels 通过 response.ok 判断，502 不影响行为。
+            return jsonify({"ok": False, "error_code": exc.error_code, "models": []}), 502
         return jsonify({"ok": True, "models": models})
 
     @app.route("/api/profiles", methods=["GET", "POST"])
@@ -1038,13 +1040,19 @@ def create_app(config=None):
         requested_sort = request.args.get("sort", "relevance")
         if requested_sort not in {"relevance", "latest", "salary"}:
             raise ValueError("sort 必须为 relevance、latest 或 salary")
+        # 批量预取 jobs，避免后续 sort key 和 cards 循环 N+1 调用 store.get_job
+        jobs_by_id = store.list_jobs_by_ids([pj["job_id"] for pj in profile_jobs])
+
+        def _job_for(item):
+            return jobs_by_id.get(str(item["job_id"])) or {}
+
         if requested_sort == "relevance":
             profile_jobs.sort(key=lambda item: (item.get("ai_rank") is None, item.get("ai_rank") or 0, item.get("shown_at") or ""))
         elif requested_sort == "latest":
-            profile_jobs.sort(key=lambda item: store.get_job(item["job_id"]).get("last_seen_at") or "", reverse=True)
+            profile_jobs.sort(key=lambda item: _job_for(item).get("last_seen_at") or "", reverse=True)
         else:
             def salary_value(item):
-                match = re.search(r"\d+(?:\.\d+)?", store.get_job(item["job_id"]).get("salary") or "")
+                match = re.search(r"\d+(?:\.\d+)?", _job_for(item).get("salary") or "")
                 return float(match.group()) if match else 0
             profile_jobs.sort(key=salary_value, reverse=True)
         after_job_id = request.args.get("after_job_id")
@@ -1056,7 +1064,9 @@ def create_app(config=None):
         for pj in profile_jobs:
             if pj["status"] == "deleted":
                 continue
-            job = store.get_job(pj["job_id"])
+            job = jobs_by_id.get(str(pj["job_id"]))
+            if not job:
+                continue  # job 已被清理，跳过
             # job row already carries jd; pass it as detail so project_card
             # can emit the truncated excerpt.
             feedback_events = store.list_feedback(profile_id, job_id=pj["job_id"])
@@ -2415,12 +2425,14 @@ def create_app(config=None):
             except KeyError:
                 profile_id = None
             if profile_id:
+                interested_pjs = store.list_screening_interested(profile_id)
+                # 批量预取，避免逐条 store.get_job 的 N+1
+                interested_jobs = store.list_jobs_by_ids([pj["job_id"] for pj in interested_pjs])
                 interested_urls = set()
                 interested_slugs = set()
-                for pj in store.list_screening_interested(profile_id):
-                    try:
-                        stored = store.get_job(pj["job_id"])
-                    except KeyError:
+                for pj in interested_pjs:
+                    stored = interested_jobs.get(str(pj["job_id"]))
+                    if not stored:
                         continue
                     url = normalize_job_link(stored.get("canonical_url", ""))
                     if url:

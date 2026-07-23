@@ -82,7 +82,8 @@ class _StoreTestCase(unittest.TestCase):
 
 class Migration011Tests(_StoreTestCase):
     def test_schema_version_upgraded_to_15(self):
-        self.assertEqual(self._schema_version(), 15)
+        # migration_016+ 可能继续升版本号，这里只断言 ≥15（migration_011 已生效）
+        self.assertGreaterEqual(self._schema_version(), 15)
 
     def test_candidate_analyses_table_structure(self):
         self.assertTrue(self._table_exists("candidate_analyses"))
@@ -125,7 +126,7 @@ class Migration011Tests(_StoreTestCase):
     def test_idempotent_reopen(self):
         TaskStore(self._tmp.name)
         TaskStore(self._tmp.name)
-        self.assertEqual(self._schema_version(), 15)
+        self.assertGreaterEqual(self._schema_version(), 15)
 
     def test_connections_use_wal_and_busy_timeout(self):
         with self.store._connection() as conn:
@@ -322,9 +323,10 @@ class Migration015Tests(_StoreTestCase):
     def test_schema_14_upgrades_additively_and_preserves_v1_rows(self):
         legacy_path = self._tmp.name + ".v14"
         try:
-            # Build a real schema-14 database by suppressing only migration 015.
+            # Build a real schema-14 database by suppressing only migration 015+.
             # ``create=True`` keeps this RED test runnable before the method exists.
-            with mock.patch.object(TaskStore, "_migration_015", lambda _self: None, create=True):
+            with mock.patch.object(TaskStore, "_migration_015", lambda _self: None, create=True), \
+                 mock.patch.object(TaskStore, "_migration_016", lambda _self: None, create=True):
                 legacy = TaskStore(legacy_path)
             self.assertEqual(legacy.schema_version(), 14)
 
@@ -373,7 +375,8 @@ class Migration015Tests(_StoreTestCase):
                 }
 
             upgraded = TaskStore(legacy_path)
-            self.assertEqual(upgraded.schema_version(), 15)
+            # 升级后 migration_015 已应用，migration_016 也可能已应用
+            self.assertGreaterEqual(upgraded.schema_version(), 15)
             with upgraded._connection() as conn:
                 after = {
                     "confirmations": conn.execute("SELECT COUNT(*) FROM direction_confirmations").fetchone()[0],
@@ -432,7 +435,7 @@ class Migration015Tests(_StoreTestCase):
             applied = conn.execute(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version=15"
             ).fetchone()[0]
-        self.assertEqual(self._schema_version(), 15)
+        self.assertGreaterEqual(self._schema_version(), 15)
         self.assertEqual(applied, 1)
 
     def test_candidate_profile_tables_have_required_columns(self):
