@@ -427,9 +427,10 @@ function setPipelineResult(result: PipelineResult) {
   analysisReady.value = true;
   scrapeCompleted.value = true;
   resultLoaded.value = true;
-  activeCategory.value = partitionPipelineResult(result).matched.length ? "matched"
-    : partitionPipelineResult(result).uncertain.length ? "uncertain"
-      : partitionPipelineResult(result).unmatched.length ? "unmatched" : "dropped";
+  const groups = partitionPipelineResult(result);
+  activeCategory.value = groups.matched.length ? "matched"
+    : groups.uncertain.length ? "uncertain"
+      : groups.unmatched.length ? "unmatched" : "dropped";
 }
 
 async function loadLatestResult() {

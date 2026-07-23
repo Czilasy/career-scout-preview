@@ -2,6 +2,16 @@
 
 ## 未发布
 
+### 优化 — 第 2 波性能与并发修复
+- 前端 `pollTask` 轮询失败采用指数退避（4s→8s→16s→32s→64s，7 次后停止并标记 failed），避免网络异常时无限重试，提升异常场景下的用户体验。
+- `ai_settings_models` 接口在 `AISecurityError` 时返回 502 状态码（原误返回 200），修正 HTTP 语义，前端通过 `response.ok` 判断不受影响。
+- `append_log` / `create_analysis` / `create_confirmation` 三处并发写入点加 `BEGIN IMMEDIATE` 事务包裹，消除并发 `MAX(seq)+1` 竞态冲突。
+- `save_job` 改用 `INSERT ... ON CONFLICT(canonical_url) DO UPDATE ... RETURNING id` UPSERT，解决并发同 URL 写入冲突。
+- 新增 `list_jobs_by_ids` 批量查询方法，消除 `list_analyses` / `search_run_jobs` / `latest_pipeline_result` 的 N+1 查询。
+- 新增 migration 016 三个索引：`idx_jobs_expires_at`（partial）、`idx_jobs_last_seen_at`、`idx_discovery_job_snapshots_run_status`（复合），提升清理任务与发现查询性能。
+- `cleanup_expired_jobs` 从 Python 循环逐行 UPDATE 改为单条 SQL 批量更新，减少锁竞争与往返开销。
+- 新增 `tests/test_concurrency.py`（并发红测试）与 `tests/test_indexes.py`（`EXPLAIN QUERY PLAN` 索引命中验证），回归覆盖以上改动。
+
 ### 重构 — Vue 3 求职工作台
 - 将 200KB 级内联 `webui/index.html` 重构为 Vue 3 + TypeScript + Vite；Flask 根路径托管带哈希的 `webui/dist`，源码拆分为共享外壳、语义化对话框、四步岗位发现、筛选工作台和岗位列表/详情组件。
 - 保留现有业务顺序：上传简历并提取条件 → 用户确认关键词/城市 → 广泛抓取 → 用户确认六类筛选条件 → Stage A 粗筛 → 抓取 JD → Stage B 精筛 → 查看匹配/不匹配/待确认/已筛除结果；抓取与 AI 筛选仍是两个独立动作。

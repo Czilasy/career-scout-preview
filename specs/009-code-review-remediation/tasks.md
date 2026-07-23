@@ -98,47 +98,47 @@
 
 ### 3.1 测试先行（TDD）
 
-- [ ] T025 [W2] 新建 `tests/test_concurrency.py`，先写红测试：(a) `test_append_log_concurrent`：2 线程 × 100 条并发追加同一 task_id，断言无 `sqlite3.IntegrityError` 且 seq 1-200 全部存在；(b) `test_save_job_concurrent`：2 线程同时 save_job 同一 canonical_url 不同字段值，断言只 1 条记录且字段非空。跑测试确认 RED（当前实现会 fail）。文件：`tests/test_concurrency.py`（新增）
-- [ ] T026 [W2] 新建 `tests/test_indexes.py`，先写红测试：用 `EXPLAIN QUERY PLAN` 断言 `cleanup_expired_jobs` 的 SQL 与 `discovery_job_snapshots WHERE run_id=? AND fetch_status=?` 都使用索引（当前无索引会 fail）。文件：`tests/test_indexes.py`（新增）
+- [x] T025 [W2] 新建 `tests/test_concurrency.py`，先写红测试：(a) `test_append_log_concurrent`：2 线程 × 100 条并发追加同一 task_id，断言无 `sqlite3.IntegrityError` 且 seq 1-200 全部存在；(b) `test_save_job_concurrent`：2 线程同时 save_job 同一 canonical_url 不同字段值，断言只 1 条记录且字段非空。跑测试确认 RED（当前实现会 fail）。文件：`tests/test_concurrency.py`（新增）
+- [x] T026 [W2] 新建 `tests/test_indexes.py`，先写红测试：用 `EXPLAIN QUERY PLAN` 断言 `cleanup_expired_jobs` 的 SQL 与 `discovery_job_snapshots WHERE run_id=? AND fetch_status=?` 都使用索引（当前无索引会 fail）。文件：`tests/test_indexes.py`（新增）
 
 ### 3.2 A1 三处事务包裹
 
-- [ ] T027 [W2] `append_log`（store.py L1303）：`with self._connection() as conn:` 块内首行加 `conn.execute("BEGIN IMMEDIATE")`，保持 SELECT MAX(seq)+1 + INSERT 在同一事务。参照同文件 `create_confirmation_v2`（L2289）模式。跑 T025 的 `test_append_log_concurrent` 确认 GREEN。文件：`webui/store.py`
-- [ ] T028 [W2] `create_analysis`（store.py L2025）：同 T027 模式，`with` 块内加 `BEGIN IMMEDIATE` 包裹 SELECT MAX(version)+1 + INSERT。文件：`webui/store.py`
-- [ ] T029 [W2] `create_confirmation`（store.py L2251）：同 T027 模式。注意此为旧版，`create_confirmation_v2`（L2289）已用 BEGIN IMMEDIATE，本任务只改旧版。文件：`webui/store.py`
+- [x] T027 [W2] `append_log`（store.py L1303）：`with self._connection() as conn:` 块内首行加 `conn.execute("BEGIN IMMEDIATE")`，保持 SELECT MAX(seq)+1 + INSERT 在同一事务。参照同文件 `create_confirmation_v2`（L2289）模式。跑 T025 的 `test_append_log_concurrent` 确认 GREEN。文件：`webui/store.py`
+- [x] T028 [W2] `create_analysis`（store.py L2025）：同 T027 模式，`with` 块内加 `BEGIN IMMEDIATE` 包裹 SELECT MAX(version)+1 + INSERT。文件：`webui/store.py`
+- [x] T029 [W2] `create_confirmation`（store.py L2251）：同 T027 模式。注意此为旧版，`create_confirmation_v2`（L2289）已用 BEGIN IMMEDIATE，本任务只改旧版。文件：`webui/store.py`
 
 ### 3.3 A3 save_job UPSERT
 
-- [ ] T030 [W2] `save_job`（store.py L1787）：先 `python -c "import sqlite3; print(sqlite3.sqlite_version)"` 确认版本。≥ 3.35 改为单语句 `INSERT ... ON CONFLICT(canonical_url) DO UPDATE SET ... RETURNING id`；< 3.35 退化为 `BEGIN IMMEDIATE` 包裹现有 SELECT-then-INSERT/UPDATE。跑 T025 的 `test_save_job_concurrent` 确认 GREEN。文件：`webui/store.py`
+- [x] T030 [W2] `save_job`（store.py L1787）：先 `python -c "import sqlite3; print(sqlite3.sqlite_version)"` 确认版本。≥ 3.35 改为单语句 `INSERT ... ON CONFLICT(canonical_url) DO UPDATE SET ... RETURNING id`；< 3.35 退化为 `BEGIN IMMEDIATE` 包裹现有 SELECT-then-INSERT/UPDATE。跑 T025 的 `test_save_job_concurrent` 确认 GREEN。文件：`webui/store.py`
 
 ### 3.4 A5 N+1 批量化
 
-- [ ] T031 [W2] 新增 `TaskStore.list_jobs_by_ids(ids: list[str]) -> dict[str, dict]` 方法，一次 `SELECT * FROM jobs WHERE id IN (...)` 取回，返回 `{job_id: row_dict}`。文件：`webui/store.py`
-- [ ] T032 [W2] `list_analyses`（store.py L2114）：循环内 `with self._connection() as lookup` 单查 candidate_profile_version_id 改为一次 `WHERE analysis_id IN (...)` 批查，内存 dict 匹配。文件：`webui/store.py`
-- [ ] T033 [W2] `search_run_jobs` 排序 key（app.py L1037）：先 `list_jobs_by_ids([...])` 一次取回，排序 key 改为内存 dict 查找，消除 sort key 内调 DB。注意：Python `list.sort(key=...)` 用 Schwartzian 变换每元素只调一次，本任务把这一次也省掉。文件：`webui/app.py`
-- [ ] T034 [W2] `latest_pipeline_result`（app.py L2405）：逐条 `store.get_job(pj["job_id"])` 改为 `list_jobs_by_ids([pj["job_id"] for pj in ...])` 一次取回 + 内存 dict 匹配。文件：`webui/app.py`
+- [x] T031 [W2] 新增 `TaskStore.list_jobs_by_ids(ids: list[str]) -> dict[str, dict]` 方法，一次 `SELECT * FROM jobs WHERE id IN (...)` 取回，返回 `{job_id: row_dict}`。文件：`webui/store.py`
+- [x] T032 [W2] `list_analyses`（store.py L2114）：循环内 `with self._connection() as lookup` 单查 candidate_profile_version_id 改为一次 `WHERE analysis_id IN (...)` 批查，内存 dict 匹配。文件：`webui/store.py`
+- [x] T033 [W2] `search_run_jobs` 排序 key（app.py L1037）：先 `list_jobs_by_ids([...])` 一次取回，排序 key 改为内存 dict 查找，消除 sort key 内调 DB。注意：Python `list.sort(key=...)` 用 Schwartzian 变换每元素只调一次，本任务把这一次也省掉。文件：`webui/app.py`
+- [x] T034 [W2] `latest_pipeline_result`（app.py L2405）：逐条 `store.get_job(pj["job_id"])` 改为 `list_jobs_by_ids([pj["job_id"] for pj in ...])` 一次取回 + 内存 dict 匹配。文件：`webui/app.py`
 
 ### 3.5 A6 索引创建
 
-- [ ] T035 [W2] 新增 migration（编号接现有最大值 +1），创建 3 个索引：`idx_jobs_expires_at`（partial: `WHERE expires_at IS NOT NULL`）、`idx_jobs_last_seen_at`、`idx_discovery_job_snapshots_run_status`（复合: `run_id, fetch_status`）。用 `CREATE INDEX IF NOT EXISTS` 幂等。跑 T026 确认 GREEN。文件：`webui/store.py`
+- [x] T035 [W2] 新增 migration（编号接现有最大值 +1），创建 3 个索引：`idx_jobs_expires_at`（partial: `WHERE expires_at IS NOT NULL`）、`idx_jobs_last_seen_at`、`idx_discovery_job_snapshots_run_status`（复合: `run_id, fetch_status`）。用 `CREATE INDEX IF NOT EXISTS` 幂等。跑 T026 确认 GREEN。文件：`webui/store.py`
 
 ### 3.6 FR-X.5 cleanup 改单 SQL
 
-- [ ] T036 [W2] `cleanup_expired_jobs`（store.py L1981）：Python 循环逐行 `UPDATE profile_jobs SET status='deleted'` 改为单条 `UPDATE profile_jobs SET status='deleted' WHERE profile_id IN (SELECT pj.profile_id FROM profile_jobs pj JOIN jobs j ON pj.job_id=j.id WHERE pj.status='new' AND j.expires_at IS NOT NULL AND j.expires_at < ?)`，返回影响行数。文件：`webui/store.py`
+- [x] T036 [W2] `cleanup_expired_jobs`（store.py L1981）：Python 循环逐行 `UPDATE profile_jobs SET status='deleted'` 改为单条 `UPDATE profile_jobs SET status='deleted' WHERE profile_id IN (SELECT pj.profile_id FROM profile_jobs pj JOIN jobs j ON pj.job_id=j.id WHERE pj.status='new' AND j.expires_at IS NOT NULL AND j.expires_at < ?)`，返回影响行数。文件：`webui/store.py`
 
 ### 3.7 A8 HTTP 语义修正
 
-- [ ] T037 [W2] `ai_settings_models`（app.py L860）：`except ai_service.AISecurityError` 分支的 `return jsonify({...}), 200` 改为 `return jsonify({...}), 502`。确认前端 `fetchModels` 通过 `response.ok` 判断，状态码改 502 不影响前端。文件：`webui/app.py`
+- [x] T037 [W2] `ai_settings_models`（app.py L860）：`except ai_service.AISecurityError` 分支的 `return jsonify({...}), 200` 改为 `return jsonify({...}), 502`。确认前端 `fetchModels` 通过 `response.ok` 判断，状态码改 502 不影响前端。文件：`webui/app.py`
 
 ### 3.8 A9 pollTask 退避
 
-- [ ] T038 [W2] `pollTask`（DiscoveryView.vue L358）：引入 `retryCount` 参数（默认 0），catch 分支按指数退避 `4000 * 2**retryCount`（上限 64s，5 次后停）；达上限后 `scrapeSnapshot/screenSnapshot.value = { status: "failed", ... }` 而非 `status: "running"`；失败中态用 `status: "retrying"`。调用处 `pollTask(taskId, kind, retryCount+1)`。文件：`webui/src/views/DiscoveryView.vue`
+- [x] T038 [W2] `pollTask`（DiscoveryView.vue L358）：引入 `retryCount` 参数（默认 0），catch 分支按指数退避 `4000 * 2**retryCount`（上限 64s，5 次后停）；达上限后 `scrapeSnapshot/screenSnapshot.value = { status: "failed", ... }` 而非 `status: "running"`；失败中态用 `status: "retrying"`。调用处 `pollTask(taskId, kind, retryCount+1)`。文件：`webui/src/views/DiscoveryView.vue`
 
 ### 3.9 第 2 波验证
 
-- [ ] T039 [W2] 第 2 波回归：`python -m unittest discover tests` 全绿（含新增 test_concurrency / test_indexes）；`cd webui && npm run build` 通过；前端冒烟 pollTask 退避行为（断网模拟 5 次重试后 failed）。验证清单见 [quickstart.md](quickstart.md) 第 2 波章节
-- [ ] T040 [W2] 第 2 波 commit：拆多个 conventional commits（`perf: batch N+1 queries` / `fix: wrap MAX+1 in transaction` / `fix: save_job UPSERT` / `perf: add DB indexes` / `fix: ai_settings_models return 502` / `fix: pollTask exponential backoff` 等），不 push（本地运行）
-- [ ] T041 [W2] 第 2 波合并：本地 merge `feat/009-code-review-remediation` 到 master；合并后回到 plan.md 更新「后续波次」段，标注第 3 波激活时机
+- [x] T039 [W2] 第 2 波回归：`python -m unittest discover tests` 全绿（含新增 test_concurrency / test_indexes）；`cd webui && npm run build` 通过；前端冒烟 pollTask 退避行为（断网模拟 5 次重试后 failed）。验证清单见 [quickstart.md](quickstart.md) 第 2 波章节
+- [x] T040 [W2] 第 2 波 commit：拆多个 conventional commits（`perf: batch N+1 queries` / `fix: wrap MAX+1 in transaction` / `fix: save_job UPSERT` / `perf: add DB indexes` / `fix: ai_settings_models return 502` / `fix: pollTask exponential backoff` 等），不 push（本地运行）
+- [x] T041 [W2] 第 2 波合并：本地 merge `feat/009-code-review-remediation` 到 master；合并后回到 plan.md 更新「后续波次」段，标注第 3 波激活时机
 
 ---
 
