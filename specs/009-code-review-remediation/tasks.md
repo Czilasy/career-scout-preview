@@ -138,7 +138,8 @@
 
 - [x] T039 [W2] 第 2 波回归：`python -m unittest discover tests` 全绿（含新增 test_concurrency / test_indexes）；`cd webui && npm run build` 通过；前端冒烟 pollTask 退避行为（断网模拟 5 次重试后 failed）。验证清单见 [quickstart.md](quickstart.md) 第 2 波章节
 - [x] T040 [W2] 第 2 波 commit：拆多个 conventional commits（`perf: batch N+1 queries` / `fix: wrap MAX+1 in transaction` / `fix: save_job UPSERT` / `perf: add DB indexes` / `fix: ai_settings_models return 502` / `fix: pollTask exponential backoff` 等），不 push（本地运行）
-- [x] T041 [W2] 第 2 波合并：本地 merge `feat/009-code-review-remediation` 到 master；合并后回到 plan.md 更新「后续波次」段，标注第 3 波激活时机
+- [ ] T041 [W2] 第 2 波合并：本地 merge `feat/009-code-review-remediation` 到 master；合并后回到 plan.md 更新「后续波次」段，标注第 3 波激活时机
+  - **当前状态（2026-07-23）**：第 2 波代码 + 测试 + CHANGELOG + tasks 标记均已完成并 commit（3dc062f），分支 `feat/009-code-review-remediation` 工作区干净。**merge 到 master 与 plan.md 后续波次段更新尚未执行**，待用户确认是否合并。
 
 ---
 
