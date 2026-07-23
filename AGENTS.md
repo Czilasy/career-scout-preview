@@ -50,4 +50,4 @@ SKILL.md / README(.en).md / CHANGELOG.md / CONTRIBUTING.md
 
 默认分支 `master`，fork/分支工作流：从 `master` 拉新分支（`fix/...`、`feat/...`）→ 改代码补测试 → push → PR。一个 PR 只做一件事。
 
-**先开 issue 再动手**：非平凡的改动（bug 修复、新功能、文档补充）按仓库 `CONTRIBUTING.md` 的规范，先在 Issues 开一条说明「改什么 / 为什么 / 怎么改」，讨论清楚后再起新分支提交。issue 正文要结构化（问题 / 现状 / 根因 / 建议 / 影响），并标注改动范围（哪些逻辑受影响、哪些不动）。
+> 项目本地运行：不开 GitHub issue、不开 PR，仅本地分支 + 本地 commit。改动前直接在本会话说明「改什么 / 为什么 / 怎么改 / 影响范围」即可动手。
