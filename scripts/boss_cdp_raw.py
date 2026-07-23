@@ -859,30 +859,6 @@ def write_json_atomic(path, payload):
             os.remove(temp_path)
 
 
-def append_json(path, new_jobs):
-    """追加 jobs 到 JSON 文件，每条按 job_id 去重"""
-    existing = []
-    seen_ids = set()
-    data = {}
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            existing = data.get("jobs", [])
-            seen_ids = {j.get("job_id", "") for j in existing}
-        except (json.JSONDecodeError, OSError, ValueError):
-            data = {}
-    added = 0
-    for j in new_jobs:
-        if j.get("job_id") not in seen_ids:
-            existing.append(j)
-            seen_ids.add(j.get("job_id", ""))
-            added += 1
-    data["jobs"] = existing
-    write_json_atomic(path, data)
-    return added
-
-
 def flush_jobs(path, meta, jobs):
     """每次有新数据就全量刷写（jobs 去重后），保证异常退出也能保留"""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

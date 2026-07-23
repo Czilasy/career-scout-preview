@@ -47,7 +47,10 @@ export async function apiRequest<T>(path: string, options: ApiOptions = {}): Pro
     body,
     credentials: "same-origin",
   });
-  const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+  const payload = await response.json().catch((err: unknown) => {
+    console.warn("response.json parse failed", err);
+    return {};
+  }) as Record<string, unknown>;
   if (!response.ok) throw new ApiError(response.status, payload);
   return payload as T;
 }

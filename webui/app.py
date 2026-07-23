@@ -29,6 +29,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from scripts import boss_cdp_raw as boss
 from scripts import job_summary
+from webui.constants import CLEANUP_EXPIRED_DAYS, FEEDBACK_THRESHOLD, LIST_LIMIT, LOG_TAIL_LINES
 from webui.core import build_filter_options, match_jobs, normalize_profile, validate_search_params
 from webui.store import TaskStore
 from webui.workbench import (
@@ -486,7 +487,7 @@ class WorkbenchRunner(TaskRunner):
                     self._cancel_events.pop(run_id, None)
         if self.store.get_search_run(run_id)["status"] != "interrupted":
             self._finalize_run(run_id)
-        self.store.cleanup_expired_jobs(days=30)
+        self.store.cleanup_expired_jobs(days=CLEANUP_EXPIRED_DAYS)
 
     def _finalize_run(self, run_id):
         """Promote parent run to succeeded/partial/failed based on child states."""
@@ -548,7 +549,7 @@ def create_app(config=None):
         app.config["START_TASKS"] = False
 
     store = TaskStore(app.config["DB_PATH"])
-    store.cleanup_expired_jobs(days=30)
+    store.cleanup_expired_jobs(days=CLEANUP_EXPIRED_DAYS)
     runner = TaskRunner(
         store,
         app.config["RESULT_DIR"],
@@ -723,7 +724,7 @@ def create_app(config=None):
     @app.route("/api/tasks", methods=["GET", "POST"])
     def tasks():
         if request.method == "GET":
-            limit = min(100, max(1, request.args.get("limit", 30, type=int) or 30))
+            limit = min(LIST_LIMIT, max(1, request.args.get("limit", 30, type=int) or 30))
             return jsonify({"tasks": store.list_tasks(limit=limit)})
         raw = request.get_json(silent=True) or {}
         search = validate_search_params(raw)
@@ -1078,7 +1079,7 @@ def create_app(config=None):
         fb = store.create_feedback(profile_id, job_id, None, action, reason=reason)
         feedback_count = store.count_effective_feedback(profile_id)
         settings = store.get_ai_settings()
-        if feedback_count and feedback_count % 5 == 0 and settings.get("is_configured"):
+        if feedback_count and feedback_count % FEEDBACK_THRESHOLD == 0 and settings.get("is_configured"):
             credential_ref = store.get_credential_ref()
             api_key = ai_service.retrieve_api_key(credential_ref) if credential_ref else ""
             if api_key:
@@ -1122,7 +1123,7 @@ def create_app(config=None):
 
     @app.route("/api/cleanup-preview")
     def cleanup_preview():
-        would_remove = store.preview_cleanup_expired_jobs(days=30)
+        would_remove = store.preview_cleanup_expired_jobs(days=CLEANUP_EXPIRED_DAYS)
         return jsonify({"would_remove": len(would_remove), "items": would_remove})
 
     # ===================================================================
@@ -1416,7 +1417,7 @@ def create_app(config=None):
         decision = request.args.get("decision")
         state = request.args.get("state")
         direction_id = request.args.get("direction_id")
-        limit = min(100, max(1, request.args.get("limit", 100, type=int) or 100))
+        limit = min(LIST_LIMIT, max(1, request.args.get("limit", LIST_LIMIT, type=int) or LIST_LIMIT))
         candidates = store.list_run_candidates(
             run_id,
             state=state,
@@ -1491,7 +1492,7 @@ def create_app(config=None):
             raise _DiscoveryError("not_found", user_message="运行不存在。")
         category = request.args.get("category")
         direction_id = request.args.get("direction_id")
-        limit = min(100, max(1, request.args.get("limit", 20, type=int) or 20))
+        limit = min(LIST_LIMIT, max(1, request.args.get("limit", 20, type=int) or 20))
         after_revision = request.args.get("after_revision", type=int)
         policy_version = run.get("policy_version", "discovery_v1")
         server_revision = int(run.get("result_revision") or 0)
@@ -1883,9 +1884,8 @@ def create_app(config=None):
     # Each run is keyed by a task_id; progress snapshots and final results are
     # stored here and polled by the frontend. Local single-user app, so an
     # in-memory dict is sufficient.
-    import threading as _threading
     _pipeline_tasks = {}
-    _pipeline_lock = _threading.Lock()
+    _pipeline_lock = threading.Lock()
     _pipeline_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="boss-pipeline")
     app.config["PIPELINE_TASKS"] = _pipeline_tasks
     app.config["PIPELINE_EXECUTOR"] = _pipeline_executor
@@ -1904,6 +1904,17 @@ def create_app(config=None):
         with _pipeline_lock:
             _pipeline_tasks[task_id] = task
         return task
+
+    def _schedule_pipeline_task_cleanup(task_id):
+        """30 分钟后自动从 _pipeline_tasks 中移除已完成的任务，避免内存泄漏。"""
+        def _cleanup():
+            with _pipeline_lock:
+                _pipeline_tasks.pop(task_id, None)
+        timer = threading.Timer(30 * 60, _cleanup)
+        timer.daemon = True
+        timer.start()
+
+    app.config["SCHEDULE_PIPELINE_CLEANUP"] = _schedule_pipeline_task_cleanup
 
     def _save_latest_pipeline_result(result, script_params):
         """Persist the latest successful run so a page refresh can restore it.
@@ -2001,6 +2012,7 @@ def create_app(config=None):
                     task["result"] = result
                     task["error"] = result.get("error", "")
                     task["status"] = "done" if result.get("ok") else "failed"
+            _schedule_pipeline_task_cleanup(task_id)
             # 抓取成功：持久化原始结果供 AI 筛选步骤读取（最终筛选结果另存）
             if result.get("ok"):
                 _save_latest_scrape_result(result, script_params)
@@ -2010,6 +2022,7 @@ def create_app(config=None):
                 if task is not None:
                     task["status"] = "failed"
                     task["error"] = f"执行异常：{type(exc).__name__}"
+            _schedule_pipeline_task_cleanup(task_id)
 
     def _run_ai_screen_task(task_id, screening_fields, profile_summary,
                             scrape_task_id):
@@ -2149,6 +2162,7 @@ def create_app(config=None):
                 if task is not None:
                     task["result"] = result
                     task["status"] = "done"
+            _schedule_pipeline_task_cleanup(task_id)
             emit(stage="done", total_matched=match_count,
                  message=f"筛选完成：匹配 {match_count} 条")
             _save_latest_pipeline_result(result, {"screening": screening_fields})
@@ -2158,6 +2172,7 @@ def create_app(config=None):
                 if task is not None:
                     task["status"] = "failed"
                     task["error"] = f"AI 筛选异常：{type(exc).__name__}"
+            _schedule_pipeline_task_cleanup(task_id)
 
     @app.route("/api/analyze-resume", methods=["POST"])
     def analyze_resume():
@@ -2364,7 +2379,7 @@ def create_app(config=None):
                 "kind": task.get("kind", ""),
                 "status": task["status"],
                 "progress": task["progress"],
-                "logs": list(task["logs"][-50:]),
+                "logs": list(task["logs"][-LOG_TAIL_LINES:]),
                 "error": task["error"],
             }
             if task["status"] in ("done", "failed") and task["result"] is not None:

@@ -11,7 +11,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{ close: [] }>();
 const panel = ref<HTMLElement | null>(null);
-let previousFocus: HTMLElement | null = null;
+const previousFocus = ref<HTMLElement | null>(null);
 
 const focusableSelector = [
   "button:not([disabled])",
@@ -52,14 +52,14 @@ function handleKeydown(event: KeyboardEvent) {
 
 watch(() => props.open, async (open) => {
   if (open) {
-    previousFocus = document.activeElement as HTMLElement | null;
+    previousFocus.value = document.activeElement as HTMLElement | null;
     document.body.classList.add("dialog-open");
     await nextTick();
     const first = panel.value?.querySelector<HTMLElement>(focusableSelector);
     (first || panel.value)?.focus();
   } else {
     document.body.classList.remove("dialog-open");
-    previousFocus?.focus();
+    previousFocus.value?.focus();
   }
 });
 

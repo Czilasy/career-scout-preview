@@ -17,6 +17,8 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
+from webui.constants import CLEANUP_EXPIRED_DAYS, DETAIL_BUDGET
+
 
 class DiscoveryStoreConflictError(Exception):
     """Raised when a CAS-guarded store update detects a state conflict."""
@@ -1257,8 +1259,10 @@ class TaskStore:
     def _copy_legacy_default_profile(self):
         """Copy old default profile to candidate_profiles if not already present."""
         with self._connection() as conn:
+            if conn.execute("SELECT 1 FROM candidate_profiles WHERE name = 'default'").fetchone():
+                return  # 已存在，短路避免无谓查询
             old = conn.execute("SELECT value_json FROM profiles WHERE name = 'default'").fetchone()
-            if old and not conn.execute("SELECT 1 FROM candidate_profiles WHERE name = 'default'").fetchone():
+            if old:
                 conn.execute(
                     "INSERT INTO candidate_profiles (id, name, confirmed_fields_json, ai_preference_json, created_at, updated_at) "
                     "VALUES (?, 'default', ?, '{}', ?, ?)",
@@ -1785,8 +1789,6 @@ class TaskStore:
     # -- jobs --------------------------------------------------------------
 
     def save_job(self, canonical_url, source_url, title, company, salary, location, jd):
-        from datetime import timedelta
-
         ts = _now()
         expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
         jid = _uuid()
@@ -1843,6 +1845,7 @@ class TaskStore:
         return self.get_profile_job(profile_id, job_id)
 
     def update_profile_job(self, profile_id, job_id, status=None, note=None, applied_at=None):
+        # 字段名来自内部调用方（hardcoded），非用户输入，无需白名单
         sets = []
         params = []
         if status:
@@ -1978,10 +1981,8 @@ class TaskStore:
 
     # -- cleanup -----------------------------------------------------------
 
-    def cleanup_expired_jobs(self, days=30) -> int:
+    def cleanup_expired_jobs(self, days=CLEANUP_EXPIRED_DAYS) -> int:
         """Remove normal results older than *days*. Preserves interested/applied."""
-        from datetime import datetime, timedelta
-
         cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
         with self._connection() as conn:
             # Find profile_jobs that are 'new' and whose job expired before cutoff
@@ -2000,14 +2001,12 @@ class TaskStore:
                 count += 1
             return count
 
-    def preview_cleanup_expired_jobs(self, days=30) -> list:
+    def preview_cleanup_expired_jobs(self, days=CLEANUP_EXPIRED_DAYS) -> list:
         """Preview which profile_jobs would be cleaned up, without modifying data.
 
         Returns a list of ``{profile_id, job_id}`` dicts.  The real cleanup
         is performed by :meth:`cleanup_expired_jobs`.
         """
-        from datetime import datetime, timedelta
-
         cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
         with self._connection() as conn:
             rows = conn.execute(
@@ -2207,16 +2206,13 @@ class TaskStore:
     def link_direction_evidence(self, direction_id, evidence_id, role="primary"):
         # data-model.md:108 — direction and evidence must belong to the same analysis.
         with self._connection() as conn:
-            d_row = conn.execute(
-                "SELECT analysis_id FROM career_directions WHERE id = ?",
-                (str(direction_id),),
+            row = conn.execute(
+                "SELECT d.analysis_id AS d_analysis, e.analysis_id AS e_analysis "
+                "FROM career_directions d, resume_evidence e "
+                "WHERE d.id = ? AND e.id = ?",
+                (str(direction_id), str(evidence_id)),
             ).fetchone()
-            e_row = conn.execute(
-                "SELECT analysis_id FROM resume_evidence WHERE id = ?",
-                (str(evidence_id),),
-            ).fetchone()
-            if (d_row is None or e_row is None
-                    or d_row["analysis_id"] != e_row["analysis_id"]):
+            if row is None or row["d_analysis"] != row["e_analysis"]:
                 raise ValueError("cross_analysis_link")
             conn.execute(
                 "INSERT OR IGNORE INTO direction_evidence (direction_id, evidence_id, role) VALUES (?, ?, ?)",
@@ -2587,6 +2583,7 @@ class TaskStore:
     def update_discovery_run(self, run_id, *, status=None, stage=None, failure_code=None,
                              failure_stage=None, counters=None, cancel_requested=False,
                              started=False, completed=False):
+        # 字段名来自内部调用方（hardcoded），非用户输入；counters key 有白名单
         # Terminal-state immutability: succeeded/failed/cancelled may not move
         # back into an active stage. `interrupted` and `partial` remain
         # resumable per the state machine contract.
@@ -3021,7 +3018,7 @@ class TaskStore:
                 )
         return self.get_run_candidate(cid)
 
-    def create_search_plan(self, run_id, *, plan_version="v1", detail_budget=60,
+    def create_search_plan(self, run_id, *, plan_version="v1", detail_budget=DETAIL_BUDGET,
                            items=None) -> dict:
         pid = _uuid()
         ts = _now()
@@ -3301,7 +3298,6 @@ class TaskStore:
         ts = now_iso or _now()
         max_age = self._REUSE_FRESHNESS_HOURS if max_age_hours is None else int(max_age_hours)
         try:
-            from datetime import datetime, timedelta, timezone
             base = datetime.fromisoformat(ts)
         except (ValueError, TypeError):
             base = datetime.now(timezone.utc)

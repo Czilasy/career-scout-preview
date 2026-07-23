@@ -25,6 +25,15 @@ async function loadFavorites() {
   }
 }
 
+function toggleFavorites() {
+  if (favoritesOpen.value) {
+    favoritesOpen.value = false;
+  } else {
+    favoritesOpen.value = true;
+    void loadFavorites();
+  }
+}
+
 async function removeFavorite(job: Record<string, unknown>) {
   const profileId = String(job.profile_id || "");
   const jobId = String(job.job_id || "");
@@ -50,10 +59,6 @@ async function removeFavorite(job: Record<string, unknown>) {
     showNotice({ message: errorMessage(error, "取消收藏失败"), tone: "error" });
   }
 }
-
-const currentProfile = computed(() => (
-  profiles.value.find((profile) => profile.id === currentProfileId.value) || null
-));
 
 onMounted(async () => {
   try {
@@ -116,7 +121,7 @@ function acceptCreatedProfile(profile: CandidateProfile) {
           class="button secondary favorites-trigger"
           type="button"
           aria-label="查看收藏"
-          @click="favoritesOpen = !favoritesOpen; loadFavorites()"
+          @click="toggleFavorites"
         >
           <Star :size="18" aria-hidden="true" /><span>收藏</span>
           <em v-if="favorites.length" class="fav-badge">{{ favorites.length }}</em>

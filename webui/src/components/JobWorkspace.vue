@@ -7,18 +7,12 @@ const props = withDefaults(defineProps<{
   jobs: JobItem[];
   batchSize?: number;
   emptyMessage: string;
-  selectedId?: string;
 }>(), {
   batchSize: 30,
-  selectedId: "",
 });
 
-const emit = defineEmits<{
-  select: [job: JobItem];
-}>();
-
 const visibleCount = ref(props.batchSize);
-const localSelectedId = ref(props.selectedId || "");
+const localSelectedId = ref("");
 const detailOpen = ref(true);
 
 const visibleJobs = computed(() => props.jobs.slice(0, visibleCount.value));
@@ -36,10 +30,6 @@ watch(() => props.jobs, (jobs) => {
   detailOpen.value = Boolean(jobs.length);
 }, { deep: false, immediate: true });
 
-watch(() => props.selectedId, (id) => {
-  if (id) localSelectedId.value = id;
-});
-
 function jobKey(job: JobItem): string {
   return String(job.job_id || job.id || job.canonical_url || job.title || "unknown");
 }
@@ -47,7 +37,6 @@ function jobKey(job: JobItem): string {
 function selectJob(job: JobItem) {
   localSelectedId.value = jobKey(job);
   detailOpen.value = true;
-  emit("select", job);
 }
 
 function company(job: JobItem): string {
@@ -61,7 +50,6 @@ function jobUrl(job: JobItem): string {
     const parsed = new URL(raw);
     const host = parsed.hostname.toLowerCase();
     const isBossHost = host === "zhipin.com"
-      || host === "www.zhipin.com"
       || host.endsWith(".zhipin.com");
     return parsed.protocol === "https:" && isBossHost ? parsed.toString() : "";
   } catch {

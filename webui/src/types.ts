@@ -27,15 +27,10 @@ export interface JobItem {
   retryable?: boolean;
   attempts?: number;
   _marked?: "interested" | null;
-  [key: string]: unknown;
+  extra?: Record<string, unknown>;
 }
 
 export interface Notice {
   message: string;
   tone: "info" | "success" | "warning" | "error";
-}
-
-export interface SelectOption {
-  label: string;
-  value: string;
 }

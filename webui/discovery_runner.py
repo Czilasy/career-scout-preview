@@ -36,6 +36,7 @@ from webui.discovery import (
     EVALUATION_POLICY_VERSION,
 )
 from webui.ai import AISecurityError as AIProviderSecurityError
+from webui.constants import DETAIL_BUDGET
 from webui.source import (
     SAFE_FAILURE_CODES,
     BossCdpSource,
@@ -846,7 +847,7 @@ class DiscoveryRunner:
         self.store.append_discovery_event(run_id, "stage_entered", {"stage": STAGE_FETCHING_DETAILS})
 
         plan = self.store.get_search_plan(run_id)
-        detail_budget = int(plan.get("detail_budget", 60))
+        detail_budget = int(plan.get("detail_budget", DETAIL_BUDGET))
         # Collect all unique jobs across plan items, respecting budget.
         seen_job_ids: set[str] = set()
         jobs_to_fetch: list[dict] = []

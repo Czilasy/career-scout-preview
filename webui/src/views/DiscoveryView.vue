@@ -399,13 +399,9 @@ function setPipelineResult(result: PipelineResult) {
   analysisReady.value = true;
   scrapeCompleted.value = true;
   resultLoaded.value = true;
-  activeCategory.value = groupsForResult(result).matched.length ? "matched"
-    : groupsForResult(result).uncertain.length ? "uncertain"
-      : groupsForResult(result).unmatched.length ? "unmatched" : "dropped";
-}
-
-function groupsForResult(result: PipelineResult) {
-  return partitionPipelineResult(result);
+  activeCategory.value = partitionPipelineResult(result).matched.length ? "matched"
+    : partitionPipelineResult(result).uncertain.length ? "uncertain"
+      : partitionPipelineResult(result).unmatched.length ? "unmatched" : "dropped";
 }
 
 async function loadLatestResult() {
