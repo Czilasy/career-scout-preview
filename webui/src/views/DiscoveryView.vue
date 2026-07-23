@@ -356,7 +356,7 @@ async function startAiScreen() {
 }
 
 // 指数退避：7 次 / 64s 上限。前 5 次快速重试（4s→8s→16s→32s→64s），
-// 后 2 次保持 64s，总等待约 3 分钟。达上限后主动放弃并提示用户。
+// 后 2 次保持 64s，总等待约 4 分钟。达上限后主动放弃并提示用户。
 const POLL_MAX_RETRIES = 7;
 const POLL_BASE_DELAY = 4000;
 const POLL_MAX_DELAY = 64000;

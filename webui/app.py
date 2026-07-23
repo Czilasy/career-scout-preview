@@ -2176,6 +2176,13 @@ def create_app(config=None):
             emit(stage="done", total_matched=match_count,
                  message=f"筛选完成：匹配 {match_count} 条")
             _save_latest_pipeline_result(result, {"screening": screening_fields})
+        except ai_service.AISecurityError as exc:
+            with _pipeline_lock:
+                task = _pipeline_tasks.get(task_id)
+                if task is not None:
+                    task["status"] = "failed"
+                    task["error"] = ai_service.user_facing_error(exc.error_code)
+            _schedule_pipeline_task_cleanup(task_id)
         except Exception as exc:
             with _pipeline_lock:
                 task = _pipeline_tasks.get(task_id)

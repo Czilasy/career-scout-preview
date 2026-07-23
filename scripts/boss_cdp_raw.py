@@ -327,6 +327,8 @@ class CDPSession:
                 raw = self.ws.recv()
             except websocket.WebSocketTimeoutException:
                 raise TimeoutError(f"CDP WebSocket recv 超时, method={method}")
+            except websocket.WebSocketException as exc:
+                raise ConnectionError(f"CDP 连接异常：{exc}")
 
             try:
                 r = json.loads(raw)
