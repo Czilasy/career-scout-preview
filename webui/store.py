@@ -243,6 +243,8 @@ class TaskStore:
             self._migration_014()
         if current < 15:
             self._migration_015()
+        if current < 16:
+            self._migration_016()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -1256,6 +1258,30 @@ class TaskStore:
                 (_now(),),
             )
 
+    def _migration_016(self):
+        """009 code review: add performance indexes for cleanup and discovery queries."""
+        with self._connection() as conn:
+            # idx_jobs_expires_at: cleanup_expired_jobs JOIN jobs ON expires_at < cutoff
+            # WHERE expires_at IS NOT NULL 用 partial 索引节省空间
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_expires_at "
+                "ON jobs (expires_at) WHERE expires_at IS NOT NULL"
+            )
+            # idx_jobs_last_seen_at: 按 last_seen_at 排序的 latest 查询
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_last_seen_at ON jobs (last_seen_at)"
+            )
+            # idx_discovery_job_snapshots_run_status: discovery_runner 按 (run_id, fetch_status) 查询
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_discovery_job_snapshots_run_status "
+                "ON discovery_job_snapshots (run_id, fetch_status)"
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (16, ?, '009 performance indexes for cleanup and discovery')",
+                (_now(),),
+            )
+
     def _copy_legacy_default_profile(self):
         """Copy old default profile to candidate_profiles if not already present."""
         with self._connection() as conn:
@@ -1307,6 +1333,9 @@ class TaskStore:
     def append_log(self, task_id, line):
         self.get_task(task_id)
         with self._connection() as connection:
+            # BEGIN IMMEDIATE: 立即获取写锁，避免并发下两线程读到相同 MAX(seq)
+            # 后第二个 INSERT 撞 UNIQUE(task_id, seq)
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM task_logs WHERE task_id = ?",
                 (str(task_id),),
@@ -1793,19 +1822,20 @@ class TaskStore:
         expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
         jid = _uuid()
         with self._connection() as conn:
-            existing = conn.execute("SELECT id FROM jobs WHERE canonical_url = ?", (canonical_url,)).fetchone()
-            if existing:
-                conn.execute(
-                    "UPDATE jobs SET source_url = ?, title = ?, company = ?, salary = ?, location = ?, jd = ?, last_seen_at = ? WHERE id = ?",
-                    (source_url, title, company, salary, location, jd, ts, existing["id"]),
-                )
-                jid = existing["id"]
-            else:
-                conn.execute(
-                    "INSERT INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at, expires_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (jid, canonical_url, source_url, title, company, salary, location, jd, ts, ts, expires_at),
-                )
+            # ON CONFLICT(canonical_url) DO UPDATE: 单语句 UPSERT，避免并发下
+            # SELECT-then-INSERT 撞 UNIQUE(canonical_url)。
+            # RETURNING id 取回实际写入行的 id（新插入=jid，已存在=原 id）。
+            row = conn.execute(
+                "INSERT INTO jobs (id, canonical_url, source_url, title, company, salary, location, jd, first_seen_at, last_seen_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(canonical_url) DO UPDATE SET "
+                "source_url = excluded.source_url, title = excluded.title, company = excluded.company, "
+                "salary = excluded.salary, location = excluded.location, jd = excluded.jd, "
+                "last_seen_at = excluded.last_seen_at "
+                "RETURNING id",
+                (jid, canonical_url, source_url, title, company, salary, location, jd, ts, ts, expires_at),
+            ).fetchone()
+            jid = row["id"]
         return self.get_job(jid)
 
     def get_job(self, job_id) -> dict:
@@ -1814,6 +1844,29 @@ class TaskStore:
         if row is None:
             raise KeyError(job_id)
         return dict(row)
+
+    def list_jobs_by_ids(self, job_ids) -> dict:
+        """批量查询 jobs，一次 SELECT WHERE id IN (...)。
+
+        返回 {job_id: row_dict}。不存在的 job_id 不在结果中。
+        空列表返回 {}。单次连接，消除 N+1 模式。
+        """
+        ids = [str(jid) for jid in job_ids if jid]
+        if not ids:
+            return {}
+        # 分批避免 SQL IN 列表过长（SQLite 限制 SQLITE_MAX_VARIABLE_NUMBER，默认 999）
+        out: dict = {}
+        with self._connection() as conn:
+            for i in range(0, len(ids), 500):
+                batch = ids[i:i + 500]
+                placeholders = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    f"SELECT * FROM jobs WHERE id IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    out[str(row["id"])] = dict(row)
+        return out
 
     def update_job_expiry(self, job_id, expires_at):
         with self._connection() as conn:
@@ -1827,21 +1880,16 @@ class TaskStore:
             raise ValueError(f"未知岗位状态: {status}")
         ts = _now()
         with self._connection() as conn:
-            existing = conn.execute(
-                "SELECT * FROM profile_jobs WHERE profile_id = ? AND job_id = ?",
-                (str(profile_id), str(job_id)),
-            ).fetchone()
-            if existing:
-                conn.execute(
-                    "UPDATE profile_jobs SET last_run_id = ?, ai_rank = ?, shown_at = COALESCE(shown_at, ?) WHERE profile_id = ? AND job_id = ?",
-                    (last_run_id, ai_rank, ts, str(profile_id), str(job_id)),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO profile_jobs (profile_id, job_id, first_run_id, last_run_id, ai_rank, shown_at, status, note, applied_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
-                    (str(profile_id), str(job_id), first_run_id, last_run_id, ai_rank, ts, status),
-                )
+            # ON CONFLICT(profile_id, job_id) DO UPDATE: 单语句 UPSERT，避免并发下
+            # SELECT-then-INSERT 撞 PRIMARY KEY(profile_id, job_id)。
+            conn.execute(
+                "INSERT INTO profile_jobs (profile_id, job_id, first_run_id, last_run_id, ai_rank, shown_at, status, note, applied_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL) "
+                "ON CONFLICT(profile_id, job_id) DO UPDATE SET "
+                "last_run_id = excluded.last_run_id, ai_rank = excluded.ai_rank, "
+                "shown_at = COALESCE(shown_at, excluded.shown_at)",
+                (str(profile_id), str(job_id), first_run_id, last_run_id, ai_rank, ts, status),
+            )
         return self.get_profile_job(profile_id, job_id)
 
     def update_profile_job(self, profile_id, job_id, status=None, note=None, applied_at=None):
@@ -1985,21 +2033,21 @@ class TaskStore:
         """Remove normal results older than *days*. Preserves interested/applied."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
         with self._connection() as conn:
-            # Find profile_jobs that are 'new' and whose job expired before cutoff
-            rows = conn.execute(
-                """SELECT pj.profile_id, pj.job_id FROM profile_jobs pj
-                   JOIN jobs j ON pj.job_id = j.id
-                   WHERE pj.status = 'new' AND j.expires_at IS NOT NULL AND j.expires_at < ?""",
+            # 单条 UPDATE + 子查询，消除原来逐行 UPDATE 的 N 次 DB 往返。
+            # 命中 idx_jobs_expires_at 索引（partial: WHERE expires_at IS NOT NULL）。
+            cursor = conn.execute(
+                """UPDATE profile_jobs SET status = 'deleted'
+                   WHERE status = 'new'
+                     AND (profile_id, job_id) IN (
+                       SELECT pj.profile_id, pj.job_id FROM profile_jobs pj
+                       JOIN jobs j ON pj.job_id = j.id
+                       WHERE pj.status = 'new'
+                         AND j.expires_at IS NOT NULL
+                         AND j.expires_at < ?
+                     )""",
                 (cutoff,),
-            ).fetchall()
-            count = 0
-            for row in rows:
-                conn.execute(
-                    "UPDATE profile_jobs SET status = 'deleted' WHERE profile_id = ? AND job_id = ?",
-                    (row["profile_id"], row["job_id"]),
-                )
-                count += 1
-            return count
+            )
+            return cursor.rowcount
 
     def preview_cleanup_expired_jobs(self, days=CLEANUP_EXPIRED_DAYS) -> list:
         """Preview which profile_jobs would be cleaned up, without modifying data.
@@ -2024,6 +2072,9 @@ class TaskStore:
     def create_analysis(self, resume_id, profile_id, *, model_name="", contract_version="v1") -> dict:
         resume_id, profile_id = str(resume_id), str(profile_id)
         with self._connection() as conn:
+            # BEGIN IMMEDIATE: 立即获取写锁，避免并发下两线程读到相同 MAX(version)
+            # 后第二个 INSERT 撞 UNIQUE(resume_id, version)
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT COALESCE(MAX(version), 0) + 1 AS next_v FROM candidate_analyses WHERE resume_id = ?",
                 (resume_id,),
@@ -2112,9 +2163,15 @@ class TaskStore:
 
     def list_analyses(self, resume_id) -> list:
         with self._connection() as conn:
+            # LEFT JOIN + 子查询消除 N+1：原来循环内每条 analysis 都开一次连接
+            # 查 candidate_profile_versions。现在一次查询带出所有需要的 version_id。
             rows = conn.execute(
-                "SELECT * FROM candidate_analyses "
-                "WHERE resume_id = ? AND status <> 'deleted' ORDER BY version ASC",
+                "SELECT ca.*, ("
+                " SELECT cpv.id FROM candidate_profile_versions cpv "
+                " WHERE cpv.analysis_id = ca.id ORDER BY cpv.version DESC LIMIT 1"
+                ") AS candidate_profile_version_id "
+                "FROM candidate_analyses ca "
+                "WHERE ca.resume_id = ? AND ca.status <> 'deleted' ORDER BY ca.version ASC",
                 (str(resume_id),),
             ).fetchall()
         out = []
@@ -2124,12 +2181,6 @@ class TaskStore:
             d["unknowns"] = _decode_json(d.pop("unknowns_json"), [])
             d["quality_warnings"] = _safe_quality_warnings(_decode_json(d.pop("quality_warnings_json", "[]"), []))
             d["stage"] = d.pop("analysis_stage", "queued")
-            with self._connection() as lookup:
-                profile_version = lookup.execute(
-                    "SELECT id FROM candidate_profile_versions WHERE analysis_id=? "
-                    "ORDER BY version DESC LIMIT 1", (d["id"],),
-                ).fetchone()
-            d["candidate_profile_version_id"] = profile_version["id"] if profile_version else None
             out.append(d)
         return out
 
@@ -2249,6 +2300,9 @@ class TaskStore:
         cid = _uuid()
         ts = _now()
         with self._connection() as conn:
+            # BEGIN IMMEDIATE: 立即获取写锁，避免并发下两线程读到相同 MAX(version)
+            # 后第二个 INSERT 撞 UNIQUE(profile_id, version)
+            conn.execute("BEGIN IMMEDIATE")
             if version is None:
                 row = conn.execute(
                     "SELECT COALESCE(MAX(version), 0) + 1 AS next_v FROM direction_confirmations WHERE profile_id = ?",
