@@ -652,9 +652,14 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         "你是求职匹配度评估助手。根据候选人画像，判断每个岗位的JD工作内容是否适合候选人。\n"
         f"候选人画像：{summary}\n\n"
         "判断要点：岗位职责与候选人技能/方向的契合度；岗位性质(全职/实习)与候选人诉求是否一致。\n"
+        "match 只看核心能力匹配（岗位职责与技能/方向契合）；"
+        "JD 中'优先/加分/plus/熟悉'类软性要求（如行业经验、英语等级、证书）不得影响 match，"
+        "应写入 caveats 数组（每项一句话，如'优先英语六级，候选人未提供'）。"
+        "只有 JD 明确标注'必须/要求/need'的硬性项且候选人未满足时，才 match=false。\n"
+        "行业经验不足不得作为 match=false 的理由，除非 JD 明确'必须有X行业经验'。\n"
         "对每个岗位输出判定。严格输出JSON：\n"
-        '{"results":[{"i":0,"match":true,"reason":"一句话理由"},...]}\n'
-        "i 为岗位序号；match=true 适合，false 不适合；reason 简短（20字内）。"
+        '{"results":[{"i":0,"match":true,"reason":"一句话理由","caveats":["软性提醒"]},...]}\n'
+        "i 为岗位序号；match=true 适合，false 不适合；reason 简短（20字内）；caveats 可为空数组。"
     )
     for start in range(0, len(jobs_with_jd), batch_size):
         batch = jobs_with_jd[start:start + batch_size]
@@ -695,9 +700,11 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 continue
             match = r["match"]
             reason = str(r.get("reason", "")).strip()
+            caveats = [str(c).strip() for c in r.get("caveats") or [] if isinstance(c, str) and c.strip()]
             verdicts[jid] = {
                 "verdict": "match" if match else "not_match",
                 "reason": reason,
+                "caveats": caveats,
             }
         if progress is not None:
             try:
@@ -1372,6 +1379,11 @@ class DiscoveryAIProvider:
         if band not in cls._V2_BANDS:
             band = "uncertain"
 
+        caveats = []
+        for item in assessment.get("caveats") or []:
+            if isinstance(item, str) and item.strip():
+                caveats.append(item.strip())
+
         cleaned = {
             "direction_id": assessment.get("direction_id"),
             "dimensions": cleaned_dims,
@@ -1379,6 +1391,7 @@ class DiscoveryAIProvider:
             "confidence": int(assessment["confidence"]),
             "positive": positive,
             "gaps": gaps,
+            "caveats": caveats,
             "proposed_band": band,
         }
         return True, "", cleaned
@@ -1454,11 +1467,17 @@ class DiscoveryAIProvider:
                     "{score,candidate_fact_refs,candidate_evidence_refs,job_evidence_refs}, "
                     "match_score, confidence, positive[{text,candidate_fact_refs,"
                     "candidate_evidence_refs,job_evidence_refs}], "
-                    "gaps[{text,candidate_fact_refs,job_evidence_refs}], proposed_band}]。"
+                    "gaps[{text,candidate_fact_refs,job_evidence_refs}], "
+                    "caveats[string], proposed_band}]。"
                     "score/match_score/confidence 必须是 0-100 的整数。"
                     "candidate_fact_refs/candidate_evidence_refs 只能引用该方向 supplied 的 ID；"
                     "job_evidence_refs 只能命名岗位字段。positive 必须同时含候选侧与岗位侧证据。"
                     "proposed_band 只能是 high/adjacent/growth/unsuitable/uncertain，仅为建议。"
+                    "gaps 只能放 JD 中明确标注为'必须/要求/need'的硬性项且候选人未满足；"
+                    "JD 中'优先/加分/plus/熟悉'类软性要求不得放入 gaps，也不得因此降低 match_score 或 proposed_band，"
+                    "应写入 caveats 数组（每项一句话，如'优先英语六级，候选人未提供'）。"
+                    "行业经验不足不得作为降级理由，除非 JD 明确'必须有X行业经验'；'有X行业经验优先'类一律进 caveats。"
+                    "caveats 不影响 proposed_band。"
                     "禁止输出原始响应、凭据、locator 或完整简历文本。"
                 ),
             },
@@ -1517,11 +1536,16 @@ class DiscoveryAIProvider:
                     "experience_match,industry_relevance}"
                     "{score,candidate_evidence_refs,job_evidence_refs}，"
                     "match_score,confidence,gaps[{text,job_evidence_refs}],"
-                    "proposed_band。score、match_score、confidence 必须是 0-100 的整数。"
+                    "caveats[string],proposed_band。score、match_score、confidence 必须是 0-100 的整数。"
                     "proposed_band 只能是 high/adjacent/growth/unsuitable/uncertain。"
                     "证据引用必须使用输入中已有的 ID；没有证据时返回空数组[]，禁止创造 ID。"
                     "岗位级别必须与候选人经验匹配；实习/校招/应届岗位与多年全职经历明显冲突时，"
                     "不得给出 high 或 adjacent，应降低 experience_match 和 match_score。"
+                    "gaps 只能放 JD 中明确标注为'必须/要求/need'的硬性项且候选人未满足；"
+                    "JD 中'优先/加分/plus/熟悉'类软性要求不得放入 gaps，也不得因此降低 match_score 或 proposed_band，"
+                    "应写入 caveats 数组（每项一句话，如'优先英语六级，候选人未提供'）。"
+                    "行业经验不足不得作为降级理由，除非 JD 明确'必须有X行业经验'；'有X行业经验优先'类一律进 caveats。"
+                    "caveats 不影响 proposed_band。"
                 ),
             },
             {

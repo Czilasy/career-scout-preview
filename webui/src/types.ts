@@ -19,6 +19,7 @@ export interface JobItem {
   canonical_url?: string;
   verdict?: "match" | "not_match" | "uncertain" | string;
   verdict_reason?: string;
+  caveats?: string[];
   reason?: string;
   interest_state?: string;
   reject_state?: string;

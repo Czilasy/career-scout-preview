@@ -91,6 +91,9 @@ function verdictLabel(job: JobItem): string {
             <strong>{{ job.salary || "薪资面议" }}</strong>
             <span>{{ job.location || "地点待确认" }}</span>
           </span>
+          <span v-if="job.caveats && job.caveats.length" class="caveats-pill" :title="job.caveats.join('；')">
+            软性缺口 {{ job.caveats.length }}
+          </span>
           <ChevronRight :size="18" aria-hidden="true" />
         </button>
       </div>
@@ -133,6 +136,13 @@ function verdictLabel(job: JobItem): string {
       <div v-if="selectedJob.verdict_reason || selectedJob.reason" class="verdict-reason">
         <strong>判断说明</strong>
         <p>{{ selectedJob.verdict_reason || selectedJob.reason }}</p>
+      </div>
+
+      <div v-if="selectedJob.caveats && selectedJob.caveats.length" class="caveats-list">
+        <strong>软性要求提醒（不影响匹配，自己判断）</strong>
+        <ul>
+          <li v-for="(c, i) in selectedJob.caveats" :key="i">{{ c }}</li>
+        </ul>
       </div>
 
       <section class="jd-content">

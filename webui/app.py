@@ -2159,6 +2159,7 @@ def create_app(config=None):
                     if v:
                         job["verdict"] = v["verdict"]
                         job["verdict_reason"] = v["reason"]
+                        job["caveats"] = v.get("caveats", [])
                     else:
                         # 未抓到 JD 的岗位无法精筛，标记待定（不红不绿）
                         job["verdict"] = "uncertain"

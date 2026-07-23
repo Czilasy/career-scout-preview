@@ -1364,6 +1364,7 @@ class DiscoveryRunner:
             candidate_evidence_ids=candidate_evidence_ids,
             job_evidence=job_evidence,
             gaps=result.get("gaps", []),
+            caveats=result.get("caveats", []),
             policy_version=EVALUATION_POLICY_VERSION,
             failure_code=failure_code,
             status="completed",
@@ -1506,6 +1507,7 @@ class DiscoveryRunner:
                     candidate_evidence_ids=candidate_evidence_ids,
                     job_evidence=job_evidence,
                     gaps=assessment.get("gaps") or [],
+                    caveats=assessment.get("caveats") or [],
                     failure_code=None,
                     **common,
                 )
@@ -1520,6 +1522,7 @@ class DiscoveryRunner:
                     dimensions={}, match_score=None, confidence=None,
                     category="needs_review",
                     candidate_evidence_ids=[], job_evidence={}, gaps=[],
+                    caveats=[],
                     failure_code=failure_code,
                     **common,
                 )

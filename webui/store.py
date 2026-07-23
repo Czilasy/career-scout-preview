@@ -245,6 +245,8 @@ class TaskStore:
             self._migration_015()
         if current < 16:
             self._migration_016()
+        if current < 17:
+            self._migration_017()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -1279,6 +1281,20 @@ class TaskStore:
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
                 "VALUES (16, ?, '009 performance indexes for cleanup and discovery')",
+                (_now(),),
+            )
+
+    def _migration_017(self):
+        """Add caveats_json column to job_direction_assessments for soft-preference notes."""
+        with self._connection() as conn:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(job_direction_assessments)")}
+            if "caveats_json" not in cols:
+                conn.execute(
+                    "ALTER TABLE job_direction_assessments ADD COLUMN caveats_json TEXT"
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (17, ?, 'caveats_json column for soft-preference notes')",
                 (_now(),),
             )
 
@@ -3456,7 +3472,7 @@ class TaskStore:
     def create_assessment(self, run_id, snapshot_id, direction_id, *, hard_outcome="unknown",
                           hard_checks=None, dimensions=None, match_score=None, confidence=None,
                           category="needs_review", candidate_evidence_ids=None, job_evidence=None,
-                          gaps=None, policy_version="v1", contract_version="v1",
+                          gaps=None, caveats=None, policy_version="v1", contract_version="v1",
                           failure_code=None, status="queued",
                           evaluation_group_id=None, input_hash=None, ai_call_count=None) -> dict:
         asid = _uuid()
@@ -3476,14 +3492,15 @@ class TaskStore:
                 set_clause = (
                     "hard_outcome=?, hard_checks_json=?, dimensions_json=?, match_score=?, confidence=?, "
                     "category=?, candidate_evidence_ids_json=?, job_evidence_json=?, gaps_json=?, "
-                    "failure_code=?, status=?"
+                    "caveats_json=?, failure_code=?, status=?"
                 )
                 params = [
                     hard_outcome, json.dumps(hard_checks or {}, ensure_ascii=False),
                     json.dumps(dimensions or {}, ensure_ascii=False), match_score, confidence, category,
                     json.dumps(candidate_evidence_ids or [], ensure_ascii=False),
                     json.dumps(job_evidence or {}, ensure_ascii=False),
-                    json.dumps(gaps or [], ensure_ascii=False), failure_code, status,
+                    json.dumps(gaps or [], ensure_ascii=False),
+                    json.dumps(caveats or [], ensure_ascii=False), failure_code, status,
                 ]
                 if has_v2_cols:
                     set_clause += ", evaluation_group_id=?, input_hash=?, ai_call_count=?"
@@ -3497,8 +3514,8 @@ class TaskStore:
                 columns = [
                     "id", "run_id", "snapshot_id", "direction_id", "status", "hard_outcome",
                     "hard_checks_json", "dimensions_json", "match_score", "confidence", "category",
-                    "candidate_evidence_ids_json", "job_evidence_json", "gaps_json", "policy_version",
-                    "contract_version", "failure_code",
+                    "candidate_evidence_ids_json", "job_evidence_json", "gaps_json", "caveats_json",
+                    "policy_version", "contract_version", "failure_code",
                 ]
                 values = [
                     asid, str(run_id), str(snapshot_id), str(direction_id), status, hard_outcome,
@@ -3506,7 +3523,8 @@ class TaskStore:
                     json.dumps(dimensions or {}, ensure_ascii=False), match_score, confidence, category,
                     json.dumps(candidate_evidence_ids or [], ensure_ascii=False),
                     json.dumps(job_evidence or {}, ensure_ascii=False),
-                    json.dumps(gaps or [], ensure_ascii=False), policy_version, contract_version,
+                    json.dumps(gaps or [], ensure_ascii=False),
+                    json.dumps(caveats or [], ensure_ascii=False), policy_version, contract_version,
                     failure_code,
                 ]
                 if has_v2_cols:

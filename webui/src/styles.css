@@ -902,6 +902,35 @@ button:disabled {
   white-space: pre-wrap;
 }.jd-content p {
   max-width: 76ch;
+}.caveats-list {
+  margin-bottom: 22px;
+  padding: 14px 16px;
+  border-left: 3px solid var(--warning);
+  border-radius: 0 8px 8px 0;
+  background: rgb(244 199 107 / 6%);
+}.caveats-list strong {
+  font-size: 13px;
+  letter-spacing: .04em;
+  color: var(--warning);
+}.caveats-list ul {
+  margin: 7px 0 0;
+  padding-left: 18px;
+  color: var(--text-soft);
+  line-height: 1.75;
+}.caveats-list li {
+  margin: 3px 0;
+}.caveats-pill {
+  display: inline-flex;
+  min-height: 20px;
+  align-items: center;
+  padding: 0 6px;
+  border: 1px solid rgb(244 199 107 / 46%);
+  border-radius: 999px;
+  color: var(--warning);
+  background: rgb(244 199 107 / 8%);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
 }.job-detail-actions,
 .button-row {
   display: flex;
