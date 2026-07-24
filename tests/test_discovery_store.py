@@ -325,8 +325,10 @@ class Migration015Tests(_StoreTestCase):
         try:
             # Build a real schema-14 database by suppressing only migration 015+.
             # ``create=True`` keeps this RED test runnable before the method exists.
+            # 注意：新增 migration（018…）时需同步加入屏蔽清单，否则"旧库"版本会漂。
             with mock.patch.object(TaskStore, "_migration_015", lambda _self: None, create=True), \
-                 mock.patch.object(TaskStore, "_migration_016", lambda _self: None, create=True):
+                 mock.patch.object(TaskStore, "_migration_016", lambda _self: None, create=True), \
+                 mock.patch.object(TaskStore, "_migration_017", lambda _self: None, create=True):
                 legacy = TaskStore(legacy_path)
             self.assertEqual(legacy.schema_version(), 14)
 
@@ -351,12 +353,21 @@ class Migration015Tests(_StoreTestCase):
                     "WHERE confirmation_id=?",
                     (run["confirmation_id"],),
                 ).fetchone()["direction_id"]
-            assessment = legacy.create_assessment(
-                run["id"], snapshot["id"], direction_id,
-                hard_outcome="pass", match_score=88, confidence=81,
-                category="high_match", policy_version="v1", contract_version="v1",
-                status="completed",
-            )
+            # create_assessment 会写入 migration 017 新增的 caveats_json 列，
+            # schema-14 旧库没有该列；造"旧数据"必须用当时的表结构裸 INSERT。
+            assessment_id = "legacy-assessment-1"
+            with legacy._connection() as conn:
+                conn.execute(
+                    "INSERT INTO job_direction_assessments ("
+                    "id, run_id, snapshot_id, direction_id, status, hard_outcome, "
+                    "match_score, confidence, category, policy_version, contract_version, "
+                    "created_at, updated_at, completed_at"
+                    ") VALUES (?, ?, ?, ?, 'completed', 'pass', 88, 81, "
+                    "'high_match', 'v1', 'v1', ?, ?, ?)",
+                    (assessment_id, run["id"], snapshot["id"], direction_id,
+                     "2026-01-01T00:00:00", "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+                )
+            assessment = {"id": assessment_id}
 
             with legacy._connection() as conn:
                 before = {
