@@ -1750,6 +1750,159 @@ class TaskStore:
             "error_code": row["error_code"],
         }
 
+    # -- screening runs（AI 筛选任务持久化：进度落库 + 断点续筛） ----------
+
+    def create_screening_run(self, run_id, *, frozen_filters=None, source_count=0,
+                             profile_id=None, execution_params=None):
+        """登记一个 AI 筛选任务（网页两段式筛选）。
+
+        表是 migration_004/007/010 建好的（此前无写入方），本方法是启用入口。
+        run_id 直接用任务 id，便于与内存任务/前端轮询对齐。
+        """
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, frozen_filters_json, status, source_count, match_count, mismatch_count, "
+                "created_at, updated_at, error_code, resume_id, pending_count, processed_count, "
+                "source_cursor, parse_failure_count, parse_failures_json, profile_id, "
+                "execution_params_json) "
+                "VALUES (?, ?, 'queued', ?, 0, 0, ?, ?, NULL, NULL, 0, 0, 0, 0, '{}', ?, ?)",
+                (
+                    str(run_id),
+                    json.dumps(frozen_filters or {}, ensure_ascii=False),
+                    int(source_count), ts, ts,
+                    str(profile_id) if profile_id else None,
+                    json.dumps(execution_params or {}, ensure_ascii=False),
+                ),
+            )
+        return self.get_screening_run(run_id)
+
+    def get_screening_run(self, run_id):
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM screening_runs WHERE id = ?", (str(run_id),)
+            ).fetchone()
+        if row is None:
+            return None
+        return self._screening_run_row(row)
+
+    def update_screening_run(self, run_id, *, status=None, processed_count=None,
+                             source_cursor=None, match_count=None, mismatch_count=None,
+                             error_code=None, pending_count=None):
+        """宽松更新（不做状态机校验：终态来源多——完成/失败/取消/登录墙/中断）。"""
+        sets = []
+        params = []
+        if status is not None:
+            sets.append("status = ?")
+            params.append(str(status))
+        if processed_count is not None:
+            sets.append("processed_count = ?")
+            params.append(int(processed_count))
+        if source_cursor is not None:
+            sets.append("source_cursor = ?")
+            params.append(int(source_cursor))
+        if match_count is not None:
+            sets.append("match_count = ?")
+            params.append(int(match_count))
+        if mismatch_count is not None:
+            sets.append("mismatch_count = ?")
+            params.append(int(mismatch_count))
+        if error_code is not None:
+            sets.append("error_code = ?")
+            params.append(str(error_code))
+        if pending_count is not None:
+            sets.append("pending_count = ?")
+            params.append(int(pending_count))
+        if not sets:
+            return
+        sets.append("updated_at = ?")
+        params.append(_now())
+        params.append(str(run_id))
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE screening_runs SET {', '.join(sets)} WHERE id = ?", params
+            )
+
+    def latest_screening_run_for_source(self, source_task_id, *, statuses=None):
+        """找同一抓取任务最近一次 AI 筛选 run（供断点续筛）。
+
+        数据量小（本地单用户），直接取最近 50 条在 Python 侧按
+        execution_params.scrape_task_id 过滤。
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM screening_runs ORDER BY created_at DESC LIMIT 50"
+            ).fetchall()
+        for row in rows:
+            run = self._screening_run_row(row)
+            params = run.get("execution_params") or {}
+            if str(params.get("scrape_task_id", "")) != str(source_task_id):
+                continue
+            if statuses is None or run["status"] in statuses:
+                return run
+        return None
+
+    def latest_interrupted_screening_run(self):
+        """进程重启后被标记 interrupted 的最近一次筛选（供恢复提示）。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM screening_runs WHERE status = 'interrupted' "
+                "ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+        return self._screening_run_row(row) if row is not None else None
+
+    def save_screening_verdicts(self, run_id, verdicts):
+        """每批精筛判定落盘（upsert）：进程崩了也能从 screening_results 续。"""
+        if not verdicts:
+            return
+        ts = _now()
+        with self._connection() as conn:
+            for job_id, verdict in verdicts.items():
+                conn.execute(
+                    "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(run_id, job_id) DO UPDATE SET verdict = excluded.verdict",
+                    (
+                        _uuid(), str(run_id), str(job_id),
+                        json.dumps(verdict, ensure_ascii=False), ts,
+                    ),
+                )
+
+    def load_screening_verdicts(self, run_id):
+        """载入某次筛选已落盘的判定 {job_id: verdict}（断点续筛用）。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT job_id, verdict FROM screening_results WHERE run_id = ?",
+                (str(run_id),),
+            ).fetchall()
+        out = {}
+        for row in rows:
+            try:
+                value = json.loads(row["verdict"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(value, dict):
+                out[str(row["job_id"])] = value
+        return out
+
+    def _screening_run_row(self, row) -> dict:
+        return {
+            "id": row["id"],
+            "status": row["status"],
+            "frozen_filters": json.loads(row["frozen_filters_json"] or "{}"),
+            "source_count": row["source_count"],
+            "match_count": row["match_count"],
+            "mismatch_count": row["mismatch_count"],
+            "processed_count": row["processed_count"],
+            "source_cursor": row["source_cursor"],
+            "error_code": row["error_code"],
+            "profile_id": row["profile_id"],
+            "execution_params": json.loads(row["execution_params_json"] or "{}"),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
     def append_search_event(self, run_id, event_type, payload=None):
         self.get_search_run(run_id)
         with self._connection() as conn:

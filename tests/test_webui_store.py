@@ -273,3 +273,82 @@ class CleanupStoreTests(unittest.TestCase):
         self.assertIn("interested", statuses)
 
 
+class ScreeningRunStoreTests(unittest.TestCase):
+    """AI 筛选任务持久化：进度落库 + 判定断点（screening_runs / screening_results）。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db_path = pathlib.Path(self.temp.name) / "state" / "webui.db"
+        self.store = TaskStore(self.db_path)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_screening_run_lifecycle(self):
+        self.store.create_screening_run(
+            "sr-1", frozen_filters={"city": ["上海"]}, source_count=100,
+            execution_params={"scrape_task_id": "task-9", "profile_summary": "画像"})
+
+        run = self.store.get_screening_run("sr-1")
+        self.assertEqual(run["status"], "queued")
+        self.assertEqual(run["source_count"], 100)
+
+        self.store.update_screening_run("sr-1", status="running", source_cursor=30)
+        self.store.update_screening_run("sr-1", processed_count=60)
+        self.store.update_screening_run("sr-1", status="done", match_count=20,
+                                        mismatch_count=40)
+
+        run = self.store.get_screening_run("sr-1")
+        self.assertEqual(run["status"], "done")
+        self.assertEqual(run["source_cursor"], 30)
+        self.assertEqual(run["processed_count"], 60)
+        self.assertEqual(run["match_count"], 20)
+        self.assertEqual(run["frozen_filters"], {"city": ["上海"]})
+        self.assertEqual(run["execution_params"]["scrape_task_id"], "task-9")
+
+    def test_missing_screening_run_returns_none(self):
+        self.assertIsNone(self.store.get_screening_run("nope"))
+
+    def test_verdicts_round_trip_and_upsert(self):
+        self.store.create_screening_run("sr-2")
+        self.store.save_screening_verdicts("sr-2", {
+            "job-1": {"verdict": "match", "reason": "合适"},
+            "job-2": {"verdict": "not_match", "reason": "不合适"},
+        })
+        # upsert：同一 (run_id, job_id) 覆盖
+        self.store.save_screening_verdicts("sr-2", {
+            "job-2": {"verdict": "uncertain", "reason": "待确认"},
+        })
+
+        verdicts = self.store.load_screening_verdicts("sr-2")
+        self.assertEqual(verdicts["job-1"]["verdict"], "match")
+        self.assertEqual(verdicts["job-2"]["verdict"], "uncertain")
+
+    def test_latest_screening_run_for_source_matches_execution_params(self):
+        self.store.create_screening_run(
+            "sr-a", execution_params={"scrape_task_id": "t-1", "profile_summary": "画像A"})
+        self.store.update_screening_run("sr-a", status="failed",
+                                        error_code="quota_exhausted")
+        self.store.create_screening_run(
+            "sr-b", execution_params={"scrape_task_id": "t-2", "profile_summary": "画像B"})
+
+        found = self.store.latest_screening_run_for_source(
+            "t-1", statuses=("failed", "cancelled", "interrupted"))
+        self.assertIsNotNone(found)
+        self.assertEqual(found["id"], "sr-a")
+        # 状态不在筛选集合里则找不到
+        self.assertIsNone(self.store.latest_screening_run_for_source(
+            "t-2", statuses=("failed",)))
+
+    def test_restart_marks_running_screening_run_interrupted(self):
+        self.store.create_screening_run("sr-3")
+        self.store.update_screening_run("sr-3", status="running")
+
+        reopened = TaskStore(self.db_path)
+
+        run = reopened.get_screening_run("sr-3")
+        self.assertEqual(run["status"], "interrupted")
+        self.assertEqual(run["error_code"], "restart")
+        self.assertEqual(reopened.latest_interrupted_screening_run()["id"], "sr-3")
+
+

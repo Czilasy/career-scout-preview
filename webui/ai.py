@@ -39,11 +39,20 @@ ERROR_AUTH = "auth_failed"
 ERROR_NETWORK = "network_error"
 ERROR_INVALID = "invalid_response"
 ERROR_RATE_LIMIT = "rate_limited"
+ERROR_TRUNCATED = "truncated"
+ERROR_QUOTA_EXHAUSTED = "quota_exhausted"
+ERROR_SERVER = "server_error"
 
 # Free-tier endpoints throttle aggressively (HTTP 429).  Retry a few times
 # with increasing backoff so a transient limit doesn't fail the whole step.
 RATE_LIMIT_ATTEMPTS = 4
 RATE_LIMIT_BACKOFF_SECONDS = (5, 15, 30)
+
+# 可重试的传输层故障：429 限流 + 5xx 服务端临时故障；超时/连接错误也可重试。
+# 不同故障不同退避：429 用上面的长退避，5xx 短退避，超时/网络中等退避。
+RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+SERVER_ERROR_BACKOFF_SECONDS = (2, 5, 10)
+NETWORK_BACKOFF_SECONDS = (3, 8, 20)
 
 
 class AISecurityError(Exception):
@@ -67,6 +76,9 @@ ERROR_USER_MESSAGES = {
     ERROR_NETWORK: "无法连接 AI 服务，请检查网络与地址配置",
     ERROR_INVALID: "AI 返回了无法解析的内容，请重试",
     ERROR_RATE_LIMIT: "AI 服务限流（免费额度），请稍候再试",
+    ERROR_TRUNCATED: "AI 返回内容被截断，请重试（可减小单批数量）",
+    ERROR_QUOTA_EXHAUSTED: "AI 额度已用完，请明天再试或更换 API 密钥",
+    ERROR_SERVER: "AI 服务暂时不可用，请稍后重试",
 }
 
 
@@ -200,6 +212,45 @@ def test_connection(endpoint_url: str, api_key: str, model: str = "") -> dict:
 # AI call
 # ---------------------------------------------------------------------------
 
+def _is_quota_exhausted_response(response) -> bool:
+    """429 响应体里是否配额耗尽特征（只提取特征字段，不泄露响应体）。
+
+    额度耗尽与瞬时限流共用 429，但前者救不活：退避重试只是白白空撞，
+    必须立刻停。
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return False
+    error_type = str(error.get("type", ""))
+    error_code = str(error.get("code", ""))
+    return "insufficient_quota" in (error_type, error_code)
+
+
+def _looks_truncated(content) -> bool:
+    """JSON 文本尾部不闭合的启发式判断（传输层截断的典型表现）。
+
+    主判定是 finish_reason=="length"；本函数兜底那些不返回
+    finish_reason 的端点。误判代价低（错误码从 invalid 变 truncated，
+    文案更准确），无安全影响。
+    """
+    if not isinstance(content, str):
+        return False
+    tail = content.rstrip()
+    if not tail:
+        return False
+    if tail.endswith((",", ":")):
+        return True
+    opens = tail.count("{") + tail.count("[")
+    closes = tail.count("}") + tail.count("]")
+    return opens > closes
+
+
 def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFAULT_TIMEOUT,
             temperature: float = 0.3, model: str = "") -> dict:
     """Call an OpenAI-compatible chat completions endpoint and return parsed JSON.
@@ -207,6 +258,11 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
     Raises :class:`AISecurityError` with a safe error_code on any failure.
     The exception never contains the API key, request body or raw response,
     and the original exception is suppressed so tracebacks stay clean.
+
+    重试策略：429 限流 / 5xx 服务端故障 / 超时 / 连接错误都会退避重试；
+    退避等待累计不超过单次 timeout（避免总时长远超调用方预期）。
+    配额耗尽（insufficient_quota）救不活，立即抛 ERROR_QUOTA_EXHAUSTED。
+    401/403 密钥错与返回格式错不重试，行为与之前一致。
     """
     payload = {
         "model": model or "auto",
@@ -219,24 +275,56 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
         "Content-Type": "application/json",
     }
     response = None
+    last_error = None
+    started_at = time.monotonic()
+    budget = float(timeout) if timeout else float(DEFAULT_TIMEOUT)
+
     for attempt in range(RATE_LIMIT_ATTEMPTS):
         try:
             response = requests.post(
                 _chat_completions_url(endpoint_url), json=payload, headers=headers, timeout=timeout
             )
+            last_error = None
         except requests.Timeout:
-            raise AISecurityError(ERROR_TIMEOUT) from None
+            response = None
+            last_error = AISecurityError(ERROR_TIMEOUT)
+        except requests.ConnectionError:
+            response = None
+            last_error = AISecurityError(ERROR_NETWORK)
         except requests.RequestException:
             raise AISecurityError(ERROR_NETWORK) from None
         except Exception:
             raise AISecurityError(ERROR_INVALID) from None
-        if response.status_code != 429:
+
+        if response is not None and response.status_code not in RETRYABLE_STATUS:
+            break  # 成功或不可重试错误（401/403/其他 4xx），出循环走后续处理
+
+        if response is not None:
+            # 可重试状态码：429 先查配额耗尽（救不活，立即停）
+            if response.status_code == 429 and _is_quota_exhausted_response(response):
+                raise AISecurityError(ERROR_QUOTA_EXHAUSTED)
+            last_error = AISecurityError(
+                ERROR_RATE_LIMIT if response.status_code == 429 else ERROR_SERVER)
+
+        # 决定是否再试一次：还有剩余次数 && 退避等待累计不超预算
+        if attempt >= RATE_LIMIT_ATTEMPTS - 1:
             break
-        # 429 限流是瞬时的：退避后重试，耗尽次数才报 rate_limited
-        if attempt < RATE_LIMIT_ATTEMPTS - 1:
-            time.sleep(RATE_LIMIT_BACKOFF_SECONDS[min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)])
-    if response is not None and response.status_code == 429:
-        raise AISecurityError(ERROR_RATE_LIMIT)
+        if response is None:
+            delay = NETWORK_BACKOFF_SECONDS[min(attempt, len(NETWORK_BACKOFF_SECONDS) - 1)]
+        elif response.status_code == 429:
+            delay = RATE_LIMIT_BACKOFF_SECONDS[min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)]
+        else:
+            delay = SERVER_ERROR_BACKOFF_SECONDS[min(attempt, len(SERVER_ERROR_BACKOFF_SECONDS) - 1)]
+        if time.monotonic() - started_at + delay > budget:
+            break  # 等待累计已逼近单次 timeout，不再拖延
+        time.sleep(delay)
+
+    if response is None:
+        raise (last_error or AISecurityError(ERROR_NETWORK)) from None
+
+    if response.status_code in RETRYABLE_STATUS:
+        # 可重试故障重试耗尽：429→限流，5xx→服务端故障
+        raise (last_error or AISecurityError(ERROR_SERVER)) from None
 
     if response.status_code in (401, 403):
         raise AISecurityError(ERROR_AUTH)
@@ -249,13 +337,23 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
         raise AISecurityError(ERROR_INVALID) from None
 
     try:
-        content = data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        content = choice["message"]["content"]
     except (KeyError, IndexError, TypeError):
         raise AISecurityError(ERROR_INVALID) from None
+
+    # finish_reason 有的端点不返回或为 None，取不到就当空串（不因此报错）
+    finish_reason = ""
+    if isinstance(choice, dict):
+        finish_reason = str(choice.get("finish_reason") or "")
 
     try:
         return json.loads(content)
     except (json.JSONDecodeError, TypeError):
+        # 传输层截断单独识别（finish_reason==length 或 JSON 尾部不闭合），
+        # 与"返回无效"区分开：上层拿到 truncated 可缩小批次重跑。
+        if finish_reason == "length" or _looks_truncated(content):
+            raise AISecurityError(ERROR_TRUNCATED) from None
         raise AISecurityError(ERROR_INVALID) from None
 
 
@@ -568,7 +666,14 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
             data = call_ai(endpoint_url, api_key, messages, model=model)
             dropped_list = data.get("dropped", []) if isinstance(data, dict) else []
             by_i = {r.get("i"): r for r in dropped_list if isinstance(r, dict)}
-        except AISecurityError:
+        except AISecurityError as exc:
+            if exc.error_code == ERROR_TRUNCATED and len(batch) > 1:
+                # 返回被截断：拆半重跑这批，还截断就继续拆（到单条为止）
+                mid = len(batch) // 2
+                d1, v1 = _process_batch(batch[:mid])
+                d2, v2 = _process_batch(batch[mid:])
+                v1.update(v2)
+                return d1 + d2, v1
             by_i = {}  # 调用失败：该批全部保留，防错杀
 
         b_dropped, b_verdicts = [], {}
@@ -634,17 +739,25 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
 
 
 def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
-              batch_size=None, progress=None):
+              batch_size=None, progress=None, completed_verdicts=None):
     """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
 
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
     返回 {"verdicts": {job_id: {"verdict": "match"/"not_match", "reason"}}}。
     AI 调用失败或漏回结果的岗位标记为 uncertain，保留给用户人工确认，
     不能把未完成的判定伪装成已匹配。
+
+    ``completed_verdicts``: 可选，已完成的判定 {job_id: verdict}（断点续筛）。
+    这些岗位跳过不重复调用 AI，原样并入返回；默认 None 时行为与之前一致。
     """
     if batch_size is None:
         batch_size = int(_adv_setting("match_batch_size", MATCH_BATCH_SIZE))
     verdicts = {}
+    if completed_verdicts:
+        done_ids = {str(k) for k in completed_verdicts}
+        verdicts.update(completed_verdicts)
+        jobs_with_jd = [j for j in jobs_with_jd
+                        if str(j.get("job_id", "")) not in done_ids]
     if not jobs_with_jd:
         return {"verdicts": verdicts}
     summary = (profile_summary or "").strip() or "（无候选人画像）"
@@ -661,8 +774,12 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         '{"results":[{"i":0,"match":true,"reason":"一句话理由","caveats":["软性提醒"]},...]}\n'
         "i 为岗位序号；match=true 适合，false 不适合；reason 简短（20字内）；caveats 可为空数组。"
     )
-    for start in range(0, len(jobs_with_jd), batch_size):
-        batch = jobs_with_jd[start:start + batch_size]
+    def _match_one_batch(batch):
+        """单批精筛，返回 {jid: verdict}。
+
+        返回被截断（ERROR_TRUNCATED）时拆半重跑，还截断就继续拆到单条；
+        单条仍失败才标 uncertain（不伪装成已匹配）。
+        """
         batch_desc = [
             {
                 "i": idx,
@@ -681,19 +798,25 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             data = call_ai(endpoint_url, api_key, messages, model=model)
             results = data.get("results", []) if isinstance(data, dict) else []
             by_i = {r.get("i"): r for r in results if isinstance(r, dict)}
-        except AISecurityError:
+        except AISecurityError as exc:
+            if exc.error_code == ERROR_TRUNCATED and len(batch) > 1:
+                mid = len(batch) // 2
+                sub = _match_one_batch(batch[:mid])
+                sub.update(_match_one_batch(batch[mid:]))
+                return sub
             by_i = None
+        batch_verdicts = {}
         for idx, job in enumerate(batch):
             jid = str(job.get("job_id", ""))
             if by_i is None:
-                verdicts[jid] = {
+                batch_verdicts[jid] = {
                     "verdict": "uncertain",
                     "reason": "AI 精筛失败，待人工确认",
                 }
                 continue
             r = by_i.get(idx)
             if not isinstance(r, dict) or not isinstance(r.get("match"), bool):
-                verdicts[jid] = {
+                batch_verdicts[jid] = {
                     "verdict": "uncertain",
                     "reason": "AI 未返回判定，待人工确认",
                 }
@@ -701,11 +824,16 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             match = r["match"]
             reason = str(r.get("reason", "")).strip()
             caveats = [str(c).strip() for c in r.get("caveats") or [] if isinstance(c, str) and c.strip()]
-            verdicts[jid] = {
+            batch_verdicts[jid] = {
                 "verdict": "match" if match else "not_match",
                 "reason": reason,
                 "caveats": caveats,
             }
+        return batch_verdicts
+
+    for start in range(0, len(jobs_with_jd), batch_size):
+        batch = jobs_with_jd[start:start + batch_size]
+        verdicts.update(_match_one_batch(batch))
         if progress is not None:
             try:
                 progress(min(start + batch_size, len(jobs_with_jd)), len(jobs_with_jd))
@@ -977,6 +1105,9 @@ _PROVIDER_ERROR_MAP = {
     ERROR_AUTH: "ai_auth_failed",
     ERROR_NETWORK: "ai_network_error",
     ERROR_INVALID: "ai_invalid_output",
+    ERROR_TRUNCATED: "ai_truncated",
+    ERROR_QUOTA_EXHAUSTED: "ai_quota_exhausted",
+    ERROR_SERVER: "ai_unavailable",
 }
 
 

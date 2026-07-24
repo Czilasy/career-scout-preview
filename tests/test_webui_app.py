@@ -344,7 +344,9 @@ class PipelineFeedbackRegressionTests(unittest.TestCase):
 
         self.assertEqual(accepted.status_code, 200)
         submit.assert_called_once()
-        self.assertEqual(submit.call_args.args[-1], "scrape-finished")
+        # 任务函数签名末两位是 (scrape_task_id, resume_from_run_id)
+        self.assertEqual(submit.call_args.args[-2], "scrape-finished")
+        self.assertEqual(submit.call_args.args[-1], "")  # 无上次进度则不续跑
 
 
 if __name__ == "__main__":

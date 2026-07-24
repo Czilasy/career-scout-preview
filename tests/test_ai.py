@@ -258,8 +258,9 @@ class ValidatePreferenceResponseTests(unittest.TestCase):
 class CallAITests(unittest.TestCase):
     """Timeout handling, error sanitization and successful AI calls."""
 
+    @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_timeout_raises_safe_error(self, mock_post):
+    def test_timeout_raises_safe_error(self, mock_post, _mock_sleep):
         from webui.ai import call_ai, AISecurityError
 
         mock_post.side_effect = requests.Timeout("connection timed out")
@@ -270,8 +271,9 @@ class CallAITests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.error_code, "timeout")
 
+    @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_network_error_raises_safe_error(self, mock_post):
+    def test_network_error_raises_safe_error(self, mock_post, _mock_sleep):
         from webui.ai import call_ai, AISecurityError
 
         mock_post.side_effect = requests.ConnectionError("DNS resolution failed")
@@ -296,8 +298,9 @@ class CallAITests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.error_code, "auth_failed")
 
+    @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_server_error_raises_safe_error(self, mock_post):
+    def test_server_error_raises_safe_error(self, mock_post, _mock_sleep):
         from webui.ai import call_ai, AISecurityError
 
         response = MagicMock()
@@ -308,7 +311,9 @@ class CallAITests(unittest.TestCase):
             call_ai("https://api.example.com/v1/chat/completions", "secret-key",
                     [{"role": "user", "content": "hi"}])
 
-        self.assertEqual(ctx.exception.error_code, "invalid_response")
+        # 500 系先退避重试，耗尽后报 server_error（区别于"返回无效"）
+        self.assertEqual(ctx.exception.error_code, "server_error")
+        self.assertEqual(mock_post.call_count, 4)
 
     @patch("webui.ai.requests.post")
     def test_malformed_response_body_raises_invalid_response(self, mock_post):
@@ -424,8 +429,9 @@ class TestConnectionTests(unittest.TestCase):
         )
         self.assertEqual(result, {"ok": True, "transport": "ready", "generation": "ready", "candidate_contract": "complete", "warning_codes": []})
 
+    @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_timeout_returns_safe_code(self, mock_post):
+    def test_timeout_returns_safe_code(self, mock_post, _mock_sleep):
         from webui.ai import test_connection
 
         mock_post.side_effect = requests.Timeout("timed out")
@@ -450,8 +456,9 @@ class TestConnectionTests(unittest.TestCase):
 
         self.assertFalse(result["ok"]); self.assertEqual(result["warning_codes"], ["auth_failed"])
 
+    @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_network_error_returns_safe_code(self, mock_post):
+    def test_network_error_returns_safe_code(self, mock_post, _mock_sleep):
         from webui.ai import test_connection
 
         mock_post.side_effect = requests.ConnectionError("DNS failed")
@@ -462,8 +469,9 @@ class TestConnectionTests(unittest.TestCase):
 
         self.assertFalse(result["ok"]); self.assertEqual(result["warning_codes"], ["network_error"])
 
+    @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_server_error_returns_safe_code(self, mock_post):
+    def test_server_error_returns_safe_code(self, mock_post, _mock_sleep):
         from webui.ai import test_connection
 
         response = MagicMock()
@@ -474,10 +482,11 @@ class TestConnectionTests(unittest.TestCase):
             "https://api.example.com/v1/chat/completions", "secret-key"
         )
 
-        self.assertFalse(result["ok"]); self.assertEqual(result["generation"], "failed"); self.assertEqual(result["warning_codes"], ["invalid_response"])
+        self.assertFalse(result["ok"]); self.assertEqual(result["generation"], "failed"); self.assertEqual(result["warning_codes"], ["server_error"])
 
+    @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_connection_error_does_not_leak_api_key(self, mock_post):
+    def test_connection_error_does_not_leak_api_key(self, mock_post, _mock_sleep):
         from webui.ai import test_connection
 
         api_key = "sk-super-secret-key-12345"
@@ -1552,6 +1561,233 @@ class MatchJdsFailurePolicyTests(unittest.TestCase):
         verdict = result["verdicts"]["job-001"]
         self.assertEqual(verdict["verdict"], "uncertain")
         self.assertIn("待人工确认", verdict["reason"])
+
+
+class CallAIRetryTests(unittest.TestCase):
+    """call_ai 重试扩展：5xx/超时/网络可重试，配额撞墙立即停，截断单独识别。"""
+
+    @staticmethod
+    def _ok_response(payload, finish_reason="stop"):
+        response = MagicMock()
+        response.status_code = 200
+        choice = {"message": {"content": json.dumps(payload)}}
+        if finish_reason is not None:
+            choice["finish_reason"] = finish_reason
+        response.json.return_value = {"choices": [choice]}
+        return response
+
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai.requests.post")
+    def test_server_error_then_success_retries(self, mock_post, _mock_sleep):
+        from webui.ai import call_ai
+
+        err = MagicMock()
+        err.status_code = 500
+        mock_post.side_effect = [err, self._ok_response({"a": 1})]
+
+        result = call_ai("https://api.example.com/v1/chat/completions", "key",
+                         [{"role": "user", "content": "hi"}])
+
+        self.assertEqual(result, {"a": 1})
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai.requests.post")
+    def test_timeout_then_success_retries(self, mock_post, _mock_sleep):
+        from webui.ai import call_ai
+
+        mock_post.side_effect = [requests.Timeout("t"), self._ok_response({"ok": True})]
+
+        result = call_ai("https://api.example.com/v1/chat/completions", "key",
+                         [{"role": "user", "content": "hi"}])
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai.requests.post")
+    def test_quota_exhausted_stops_immediately_without_retry(self, mock_post, mock_sleep):
+        from webui.ai import AISecurityError, call_ai
+
+        response = MagicMock()
+        response.status_code = 429
+        response.json.return_value = {"error": {"type": "insufficient_quota"}}
+        mock_post.return_value = response
+
+        with self.assertRaises(AISecurityError) as ctx:
+            call_ai("https://api.example.com/v1/chat/completions", "key",
+                    [{"role": "user", "content": "hi"}])
+
+        self.assertEqual(ctx.exception.error_code, "quota_exhausted")
+        self.assertEqual(mock_post.call_count, 1)  # 配额撞墙不重试
+        mock_sleep.assert_not_called()
+
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai.requests.post")
+    def test_plain_429_retries_then_rate_limited(self, mock_post, _mock_sleep):
+        from webui.ai import AISecurityError, call_ai
+
+        response = MagicMock()
+        response.status_code = 429
+        response.json.return_value = {"error": {"type": "rate_limit"}}
+        mock_post.return_value = response
+
+        with self.assertRaises(AISecurityError) as ctx:
+            call_ai("https://api.example.com/v1/chat/completions", "key",
+                    [{"role": "user", "content": "hi"}])
+
+        self.assertEqual(ctx.exception.error_code, "rate_limited")
+        self.assertEqual(mock_post.call_count, 4)
+
+    @patch("webui.ai.requests.post")
+    def test_truncated_finish_reason_length(self, mock_post):
+        from webui.ai import AISecurityError, call_ai
+
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"choices": [{
+            "message": {"content": '{"results": [{"i":0,'},
+            "finish_reason": "length",
+        }]}
+        mock_post.return_value = response
+
+        with self.assertRaises(AISecurityError) as ctx:
+            call_ai("https://api.example.com/v1/chat/completions", "key",
+                    [{"role": "user", "content": "hi"}])
+        self.assertEqual(ctx.exception.error_code, "truncated")
+
+    @patch("webui.ai.requests.post")
+    def test_truncated_unbalanced_brackets_without_finish_reason(self, mock_post):
+        from webui.ai import AISecurityError, call_ai
+
+        response = MagicMock()
+        response.status_code = 200
+        # 无 finish_reason 字段（有的端点不返回），括号不闭合算截断
+        response.json.return_value = {"choices": [{
+            "message": {"content": '{"results": [{"i": 0}'},
+        }]}
+        mock_post.return_value = response
+
+        with self.assertRaises(AISecurityError) as ctx:
+            call_ai("https://api.example.com/v1/chat/completions", "key",
+                    [{"role": "user", "content": "hi"}])
+        self.assertEqual(ctx.exception.error_code, "truncated")
+
+    @patch("webui.ai.requests.post")
+    def test_plain_garbage_stays_invalid_response(self, mock_post):
+        from webui.ai import AISecurityError, call_ai
+
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"choices": [{
+            "message": {"content": "不好意思，我无法回答"},
+            "finish_reason": "stop",
+        }]}
+        mock_post.return_value = response
+
+        with self.assertRaises(AISecurityError) as ctx:
+            call_ai("https://api.example.com/v1/chat/completions", "key",
+                    [{"role": "user", "content": "hi"}])
+        self.assertEqual(ctx.exception.error_code, "invalid_response")
+
+    @patch("webui.ai.requests.post")
+    def test_missing_finish_reason_does_not_crash(self, mock_post):
+        from webui.ai import call_ai
+
+        mock_post.return_value = self._ok_response({"x": 2}, finish_reason=None)
+
+        self.assertEqual(
+            call_ai("https://api.example.com/v1/chat/completions", "key",
+                    [{"role": "user", "content": "hi"}]),
+            {"x": 2})
+
+
+class MatchJdsResumeAndTruncationTests(unittest.TestCase):
+    """match_jds 断点续筛（completed_verdicts）与截断拆半重跑。"""
+
+    def _jobs(self, n):
+        return [{
+            "job_id": f"job-{i:03d}",
+            "title": f"岗位{i}",
+            "salary": "20-30K",
+            "location": "上海",
+            "jd": "负责后端开发",
+        } for i in range(n)]
+
+    def test_completed_verdicts_are_skipped_and_merged(self):
+        from webui.ai import match_jds
+
+        done = {"job-000": {"verdict": "match", "reason": "已筛过"}}
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{"i": 0, "match": False, "reason": "不合适", "caveats": []}]
+        }) as call:
+            result = match_jds(
+                self._jobs(2), "画像", "https://x", "key",
+                batch_size=10, completed_verdicts=done)
+
+        self.assertEqual(call.call_count, 1)  # 只剩 job-001 要筛
+        self.assertEqual(result["verdicts"]["job-000"]["verdict"], "match")  # 原样并入
+        self.assertEqual(result["verdicts"]["job-001"]["verdict"], "not_match")
+
+    def test_completed_verdicts_none_keeps_legacy_behavior(self):
+        from webui.ai import match_jds
+
+        with patch("webui.ai.call_ai", return_value={
+            "results": [
+                {"i": 0, "match": True, "reason": "合适"},
+                {"i": 1, "match": True, "reason": "合适"},
+            ]
+        }) as call:
+            result = match_jds(self._jobs(2), "画像", "https://x", "key", batch_size=10)
+
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(len(result["verdicts"]), 2)
+
+    def test_truncated_batch_is_split_until_single(self):
+        from webui.ai import AISecurityError, ERROR_TRUNCATED, match_jds
+
+        calls = []
+
+        def fake_call_ai(endpoint, key, messages, **kw):
+            payload = json.loads(messages[-1]["content"])
+            calls.append(len(payload))
+            if len(payload) > 1:
+                raise AISecurityError(ERROR_TRUNCATED)
+            return {"results": [{"i": 0, "match": True, "reason": "合适", "caveats": []}]}
+
+        with patch("webui.ai.call_ai", side_effect=fake_call_ai):
+            result = match_jds(self._jobs(3), "画像", "https://x", "key", batch_size=3)
+
+        # 3 条一批被截断 → 拆 1+2 → 2 还截 → 再拆 1+1：全部单条成功
+        self.assertEqual(
+            [result["verdicts"][f"job-{i:03d}"]["verdict"] for i in range(3)],
+            ["match", "match", "match"])
+        self.assertEqual(sorted(calls), [1, 1, 1, 2, 3])
+
+
+class ScreenJobsTruncationTests(unittest.TestCase):
+    """screen_jobs 粗筛：截断拆半重跑，单条仍失败则该条保留（防错杀）。"""
+
+    def test_truncated_batch_is_split(self):
+        from webui.ai import AISecurityError, ERROR_TRUNCATED, screen_jobs
+
+        jobs = [{
+            "job_id": f"j{i}", "title": f"岗位{i}", "salary": "",
+            "location": "", "job_labels": "", "company_scale": "",
+        } for i in range(3)]
+
+        def fake_call_ai(endpoint, key, messages, **kw):
+            lines = messages[-1]["content"].strip().split("\n")
+            if len(lines) > 1:
+                raise AISecurityError(ERROR_TRUNCATED)
+            return {"dropped": []}
+
+        with patch("webui.ai.call_ai", side_effect=fake_call_ai):
+            result = screen_jobs(jobs, {"profile_summary": "画像"},
+                                 "https://x", "key", batch_size=3, concurrency=1)
+
+        self.assertEqual(sorted(result["kept"]), ["j0", "j1", "j2"])
+        self.assertEqual(result["dropped"], [])
 
 
 if __name__ == "__main__":

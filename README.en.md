@@ -1,11 +1,11 @@
-# BOSS Zhipin Scraper · Job Crawler v2.1 (Chrome CDP / Plaintext Salary)
+# BOSS Zhipin Scraper · Job Crawler v2.2 (Chrome CDP / Plaintext Salary)
 
 > 🌐 中文文档：[README.md](./README.md)
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
-![Version](https://img.shields.io/badge/version-2.1.0-orange.svg)
+![Version](https://img.shields.io/badge/version-2.2.0-orange.svg)
 
 A lightweight **BOSS Zhipin scraper / crawler** (a.k.a. spider) for job listings on [zhipin.com](https://www.zhipin.com). Instead of driving a heavy Selenium/Playwright browser, it connects to your **already-logged-in Chrome** via the Chrome DevTools Protocol (CDP), reuses the real session, and calls the in-page search API directly — bypassing the front-end font-based anti-scraping so you get the **plaintext salary** in every record. Output goes to JSON / CSV, plus an aggregated salary/skill analysis and a copy-paste prompt for polishing your job-application materials. Also ships as a Career Scout Agent Skill.
 
@@ -44,6 +44,8 @@ python3 scripts/job_summary.py
 
 Right after scraping you get salary ranges, experience requirements, top skill keywords, and an application-optimization prompt. The CLI prompt only uses scraped job data and never reads a local résumé. The optional AI Job Workbench parses your résumé, generates keywords, streams job cards, and learns from feedback — but it never auto-applies, contacts recruiters, or predicts hiring probability.
 
+**When scraping hits risk control or a captcha**: the script stops on the spot (no silent skipping, no fake success), keeps everything already scraped in the result file, and prints a prominent message explaining which page failed, why, and what to do next (solve the captcha manually / take a break / log in again). Resume from the checkpoint with `--start-page`. Exit codes tell the failure apart: `10` = risk control, `2` = debug browser unavailable (with a hint to run `--setup-chrome` first), `1` = other errors. Three consecutive empty pages also stop the run with an explanation (likely soft throttling, or the search truly has no results).
+
 ## AI Job Workbench
 
 Workbench scraper tasks run through one controlled executor: every task has a total timeout and traceable failure code, cancellation terminates the child process tree, logs and artifacts are size-bounded, and artifacts must stay inside the task result directory. Job discovery only sends jobs with a valid BOSS HTTPS detail URL into detail fetching, AI assessment, and formal results.
@@ -70,7 +72,7 @@ npm run build
 ### Core Capabilities
 
 1. **Four-step job discovery**: The workflow stays in this order: upload and analyze the résumé → confirm keywords/cities and scrape broadly → confirm six filter groups and run Stage A, fetch JDs, then run Stage B → review results. Scraping and AI screening remain two separate user actions.
-2. **Failures never masquerade as success**: A Stage B provider failure or missing verdict routes the job to Needs Review instead of defaulting to Match. When the job-seeker profile is empty, Stage B is skipped entirely — every job lands in Needs Review with a stated reason and no AI call is made. Each AI screening request is bound to the exact completed scrape task ID to prevent cross-run result mix-ups.
+2. **Failures never masquerade as success**: A Stage B provider failure or missing verdict routes the job to Needs Review instead of defaulting to Match. When the job-seeker profile is empty, Stage B is skipped entirely — every job lands in Needs Review with a stated reason and no AI call is made. Each AI screening request is bound to the exact completed scrape task ID to prevent cross-run result mix-ups. AI screening can be cancelled anytime via the Stop button; AI timeouts and server faults retry with backoff, quota exhaustion stops immediately with a clear message, and truncated replies are retried with smaller batches. If the BOSS login expires mid JD-fetching, the run stops and honestly reports how many were fetched. After a failed, cancelled, or restarted screening, rerunning with the same criteria automatically resumes where it left off — fetched JDs and finished verdicts are never redone.
 3. **Large-result workspace**: Match, Not Match, Needs Review, and Screened Out live directly in the category tabs without duplicate summary cards. On desktop, the result workspace fits one viewport and only the job list or an oversized detail pane scrolls. The UI initially renders 30 rows, loads more on demand, and creates only one detail panel.
 4. **Explicit feedback boundary**: In Job Discovery, Interested persists to the current profile; Not Interested stays in memory for the current run and is revocable. JD retry updates only the JD and never reruns AI or changes the existing verdict.
 5. **Screening Workbench**: Keeps seven filter fields, page/detail limits, résumé-based AI suggestions, run cancel/resume, temporary match/mismatch/pending zones, persistent interested/trash zones, and 30-day cleanup for temporary runs.

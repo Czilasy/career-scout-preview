@@ -376,25 +376,38 @@ def run_search(params: dict, source, *, pages: int = 3,
 
     # 广搜策略：不做本地硬筛选，全量返回，筛选交给后续 AI 步骤。
     all_jobs = list(merged.values())
-    emit(stage="done", total_scraped=total_scraped, total_matched=len(all_jobs),
-         message=f"完成：抓取 {total_scraped} 条，去重 {len(all_jobs)} 条")
 
     # 运行成功后主动关闭调试浏览器，不让它留在任务栏。
     # 失败路径（尤其未登录）不关，保留窗口给用户登录/重试。
+    # 顺序：先发"正在关闭"提示 → 关浏览器 → 关完再发"完成"，
+    # 保证前端看到的最后状态是"完成"，不会卡在"正在关闭调试浏览器…"。
     emit(stage="closing_chrome", message="正在关闭调试浏览器…")
     close_debug_chrome()
+    emit(stage="done", total_scraped=total_scraped, total_matched=len(all_jobs),
+         message=f"完成：抓取 {total_scraped} 条，去重 {len(all_jobs)} 条")
 
     return {"ok": True, "jobs": all_jobs, "total_scraped": total_scraped,
             "total_matched": len(all_jobs), "combinations": len(combos),
             "error": ""}
 
 
-def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None):
-    """对一批岗位批量抓 JD（调用方需先确保 Chrome 就绪）。返回带 jd 的岗位列表。
+def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
+                      stop_event=None, completed_job_ids=None):
+    """对一批岗位批量抓 JD（调用方需先确保 Chrome 就绪）。
 
     Spec 007 ⑧：改用 fetch_details_batch（≤5 一批）走 --enable-parallel 常驻 tab 池，
     替代旧的逐条 fetch_detail。单条失败不中断（该岗位 jd 留空，前端可保留按需加载兜底）。
     ``progress(done, total)`` 按累计完成数回报。
+
+    ``stop_event``: 可选取消信号，每批前检查，命中即停（剩余岗位 jd 留空）。
+    ``completed_job_ids``: 可选，已抓过 JD 的 job_id 集合（断点续抓），跳过不重复抓，
+    其 jd 保留原值。
+
+    返回 {"jobs": 带 jd 的岗位列表, "login_wall": bool, "stopped": bool, "fetched": int}：
+    - login_wall=True：批内出现 source_login_required（BOSS 登录失效），已停止
+      后续批次（继续抓只会抓空气还装完成），调用方应停并向用户上报。
+    - stopped=True：用户取消导致提前停止。
+    - fetched：本次实际抓到 JD 的条数。
     """
     import os
     if artifact_dir is None:
@@ -402,8 +415,9 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None):
     os.makedirs(artifact_dir, exist_ok=True)
     total = len(jobs)
     if total == 0:
-        return []
+        return {"jobs": [], "login_wall": False, "stopped": False, "fetched": 0}
     BATCH_SIZE = int(load_advanced_settings().get("detail_batch_size") or 5)
+    done_ids = {str(x) for x in completed_job_ids} if completed_job_ids else set()
     # 预先为每个 job 计算稳定 job_id（与 fetch_details_batch 内部 key 一致），
     # 缺 job_id 的 job 填充 idx{idx} 兜底，确保 batch 返回的 outcome 能映射回原 job。
     indexed_jobs = []
@@ -417,7 +431,13 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None):
         indexed_jobs.append((idx, jid, dict(job, job_id=jid)))
     jd_by_idx = {}
     done = 0
+    fetched = 0
+    login_wall = False
+    stopped = False
     for batch_start in range(0, len(indexed_jobs), BATCH_SIZE):
+        if stop_event is not None and stop_event.is_set():
+            stopped = True
+            break
         batch = indexed_jobs[batch_start:batch_start + BATCH_SIZE]
         batch_jobs = [job for _, _, job in batch]
         batch_path = os.path.join(
@@ -430,25 +450,40 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None):
                 max_batch_size=BATCH_SIZE,
             )
         except Exception:
+            # 子进程级意外失败（非登录墙）：该批抓空继续。登录墙信号不经此路
+            # （它体现在 outcome.failed_code，见下）。
             outcomes = {}
         for idx, jid, _ in batch:
             outcome = outcomes.get(jid)
             jd = ""
             if outcome is not None and outcome.ok and isinstance(outcome.detail, dict):
                 jd = str(outcome.detail.get("jd", "")).strip()
+            elif outcome is not None and outcome.failed_code == "source_login_required":
+                # BOSS 登录失效：停后续批次并上报（别继续抓空气还装完成）
+                login_wall = True
             jd_by_idx[idx] = jd
+            if jd:
+                fetched += 1
             done += 1
             if progress is not None:
                 try:
                     progress(done, total)
                 except Exception:
                     pass
+        if login_wall:
+            break
     enriched = []
     for idx, job in enumerate(jobs):
         e = dict(job) if isinstance(job, dict) else {}
+        jid = str(e.get("job_id") or e.get("id") or "")
+        if jid and jid in done_ids and str(e.get("jd", "")).strip():
+            # 断点续抓：已抓过的岗位保留原 JD，不重复抓也不覆盖
+            enriched.append(e)
+            continue
         e["jd"] = jd_by_idx.get(idx, "")
         enriched.append(e)
-    return enriched
+    return {"jobs": enriched, "login_wall": login_wall,
+            "stopped": stopped, "fetched": fetched}
 
 
 def _combo_hash(keyword: str, city: str, pages: int) -> str:

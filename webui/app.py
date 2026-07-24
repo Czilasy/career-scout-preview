@@ -1908,6 +1908,10 @@ def create_app(config=None):
             "logs": [],
             "result": None,
             "error": "",
+            # 停止信号：cancel 接口 set 它，run_search 循环检查到后退出。
+            # 不放进 task 的 JSON 序列化里（threading.Event 不可序列化），
+            # 只在服务进程内存中存活。
+            "stop_event": threading.Event(),
         }
         if source_task_id:
             task["source_task_id"] = source_task_id
@@ -2011,35 +2015,82 @@ def create_app(config=None):
             source = _make_discovery_source()
             if source is None:
                 raise RuntimeError("source_unavailable")
+            # 取出停止信号传给 run_search；cancel 接口 set 它后，
+            # run_search 会在下一个组合边界退出，或因浏览器被关而抛错。
+            with _pipeline_lock:
+                stop_event = _pipeline_tasks.get(task_id, {}).get("stop_event")
             result = run_search(
                 script_params, source,
                 pages=3, progress=on_progress,
                 artifact_dir=app.config["RESULT_DIR"],
+                stop_event=stop_event,
             )
             with _pipeline_lock:
                 task = _pipeline_tasks.get(task_id)
                 if task is not None:
                     task["result"] = result
                     task["error"] = result.get("error", "")
-                    task["status"] = "done" if result.get("ok") else "failed"
+                    # 用户点过停止：无论 run_search 返回 ok 与否，都标 cancelled，
+                    # 不标 failed（不是出错）也不标 done（不是正常完成）。
+                    if stop_event is not None and stop_event.is_set():
+                        task["status"] = "cancelled"
+                        task["error"] = "用户已停止抓取"
+                    else:
+                        task["status"] = "done" if result.get("ok") else "failed"
             _schedule_pipeline_task_cleanup(task_id)
-            # 抓取成功：持久化原始结果供 AI 筛选步骤读取（最终筛选结果另存）
-            if result.get("ok"):
+            # 只有正常完成才持久化；取消的不保存，避免半截结果污染 AI 筛选步骤。
+            if result.get("ok") and not (stop_event is not None and stop_event.is_set()):
                 _save_latest_scrape_result(result, script_params)
         except Exception as exc:
             with _pipeline_lock:
                 task = _pipeline_tasks.get(task_id)
                 if task is not None:
-                    task["status"] = "failed"
-                    task["error"] = f"执行异常：{type(exc).__name__}"
+                    # 异常时也要看 stop_event：用户主动取消导致的异常算 cancelled
+                    stop_event = task.get("stop_event")
+                    if stop_event is not None and stop_event.is_set():
+                        task["status"] = "cancelled"
+                        task["error"] = "用户已停止抓取"
+                    else:
+                        task["status"] = "failed"
+                        task["error"] = f"执行异常：{type(exc).__name__}"
             _schedule_pipeline_task_cleanup(task_id)
 
+    def _jd_checkpoint_path(result_dir, run_id):
+        return os.path.join(result_dir, f"ai_screen_jd_{run_id}.json")
+
+    def _load_jd_checkpoint(path):
+        """读取 JD 断点文件 {job_id: jd}；不存在/不可读返回空 dict。"""
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()
+                        if isinstance(v, str) and v.strip()}
+        except (OSError, json.JSONDecodeError):
+            pass
+        return {}
+
+    def _save_jd_checkpoint(path, jd_map):
+        """原子写 JD 断点文件（每批抓完落盘，进程崩了已抓的也不丢）。"""
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(jd_map, handle, ensure_ascii=False)
+            os.replace(tmp, path)
+        except OSError:
+            pass  # 落盘失败不阻断抓取（内存数据仍在）
+
     def _run_ai_screen_task(task_id, screening_fields, profile_summary,
-                            scrape_task_id):
+                            scrape_task_id, resume_from_run_id=""):
         """AI 筛选任务：StageA 字段粗筛 → 批量抓 JD → StageB JD 精筛。
 
         读取最近一次原始抓取结果，两段式 AI 筛选后把带 verdict 的最终结果
         持久化到 latest_pipeline_result.json（供结果页恢复）。
+
+        全程进度落库（screening_runs）+ 中间产物落盘（JD 断点文件 /
+        screening_results 判定）：进程重启或失败后，同一抓取任务再次发起
+        筛选且条件一致时自动接着上次进度（``resume_from_run_id``）。
         """
         from webui.pipeline_exec import ensure_chrome_ready, close_debug_chrome, fetch_job_details
         from webui.ai import screen_jobs, match_jds
@@ -2051,9 +2102,11 @@ def create_app(config=None):
                     "kind": "ai_screen", "status": "queued", "progress": {},
                     "logs": [], "result": None, "error": "",
                     "source_task_id": scrape_task_id,
+                    "stop_event": threading.Event(),
                 }
                 _pipeline_tasks[task_id] = task
             task["status"] = "running"
+            stop_event = task.get("stop_event")
 
         def emit(**kw):
             with _pipeline_lock:
@@ -2064,6 +2117,22 @@ def create_app(config=None):
                 msg = kw.get("message")
                 if msg:
                     task["logs"].append(msg)
+
+        def _stop_requested():
+            return stop_event is not None and stop_event.is_set()
+
+        def _mark_cancelled():
+            """用户取消：标 cancelled（不覆盖为 done/failed），落清理定时。"""
+            with _pipeline_lock:
+                t = _pipeline_tasks.get(task_id)
+                if t is not None:
+                    t["status"] = "cancelled"
+                    t["error"] = "用户已停止筛选"
+            try:
+                store.update_screening_run(task_id, status="cancelled")
+            except Exception:
+                pass
+            _schedule_pipeline_task_cleanup(task_id)
 
         try:
             # 1) 只读取请求明确绑定的抓取任务，避免另一标签页或另一轮抓取
@@ -2083,6 +2152,35 @@ def create_app(config=None):
             if not raw_jobs:
                 raise RuntimeError("empty_scrape_result")
 
+            # 登记任务（进度落库，进程重启可查）；落库失败不阻断筛选
+            try:
+                store.create_screening_run(
+                    task_id,
+                    frozen_filters=screening_fields,
+                    source_count=len(raw_jobs),
+                    execution_params={
+                        "scrape_task_id": scrape_task_id,
+                        "profile_summary": profile_summary,
+                    },
+                )
+            except Exception:
+                pass
+
+            # 载入断点（同一抓取任务、同一筛选条件下的上次进度）
+            resume_verdicts = {}
+            resume_jd = {}
+            if resume_from_run_id:
+                try:
+                    resume_verdicts = store.load_screening_verdicts(resume_from_run_id)
+                except Exception:
+                    resume_verdicts = {}
+                resume_jd = _load_jd_checkpoint(
+                    _jd_checkpoint_path(app.config["RESULT_DIR"], resume_from_run_id))
+                if resume_verdicts or resume_jd:
+                    emit(stage="resume",
+                         message=f"接着上次进度：已有 {len(resume_verdicts)} 条判定、"
+                                 f"{len(resume_jd)} 条 JD，跳过重复工作")
+
             # 2) AI 凭据
             settings = store.get_ai_settings()
             cred_ref = store.get_credential_ref()
@@ -2095,6 +2193,10 @@ def create_app(config=None):
             criteria = dict(screening_fields or {})
             criteria["profile_summary"] = profile_summary or ""
 
+            if _stop_requested():
+                _mark_cancelled()
+                return
+
             # 3) Stage A：字段粗筛（移除明显不符，学历向下兼容）
             emit(stage="screen_a", current=0, total=len(raw_jobs),
                  message="AI 粗筛中（对照筛选字段）…")
@@ -2105,14 +2207,26 @@ def create_app(config=None):
 
             screen_result = screen_jobs(raw_jobs, criteria, endpoint, api_key,
                                         model=model, progress=_a_progress)
+            if _stop_requested():
+                _mark_cancelled()
+                return
             kept_ids = set(screen_result["kept"])
             survivors = [j for j in raw_jobs if str(j.get("job_id", "")) in kept_ids]
             dropped = screen_result["dropped"]
             emit(stage="screen_a_done", kept=len(survivors), dropped=len(dropped),
                  message=f"粗筛完成：保留 {len(survivors)} 条，移除 {len(dropped)} 条")
+            try:
+                store.update_screening_run(task_id, status="running",
+                                           source_cursor=0)
+            except Exception:
+                pass
 
-            # 4) 对保留的岗位批量抓 JD（重开调试浏览器，抓完关闭）
-            enriched = survivors
+            # 4) 对保留的岗位分段抓 JD（重开调试浏览器，抓完关闭）。
+            # 每段落盘 JD 断点文件 + 更新 source_cursor：进程崩了已抓的也不丢，
+            # 重跑（含登录墙后重试）自动跳过已抓岗位。
+            enriched = [dict(job) for job in survivors]
+            jd_path = _jd_checkpoint_path(app.config["RESULT_DIR"], task_id)
+            jd_map = dict(resume_jd)
             if survivors:
                 emit(stage="ensure_chrome", message="启动调试浏览器，准备抓取 JD…")
                 if not ensure_chrome_ready():
@@ -2121,16 +2235,59 @@ def create_app(config=None):
                 if source is None:
                     raise RuntimeError("source_unavailable")
 
-                def _jd_progress(cur, tot):
-                    emit(stage="fetch_jd", current=cur, total=tot,
-                         message=f"抓取 JD {cur}/{tot}")
-
-                emit(stage="fetch_jd", current=0, total=len(survivors),
-                     message=f"抓取 JD（0/{len(survivors)}）…")
-                enriched = fetch_job_details(survivors, source,
-                                             artifact_dir=app.config["RESULT_DIR"],
-                                             progress=_jd_progress)
+                todo_jd = [j for j in survivors
+                           if str(j.get("job_id", "")) not in jd_map]
+                emit(stage="fetch_jd", current=len(jd_map), total=len(survivors),
+                     message=f"抓取 JD（{len(jd_map)}/{len(survivors)}）…")
+                DETAIL_CHUNK = 10
+                for chunk_start in range(0, len(todo_jd), DETAIL_CHUNK):
+                    if _stop_requested():
+                        close_debug_chrome()
+                        _mark_cancelled()
+                        return
+                    chunk = todo_jd[chunk_start:chunk_start + DETAIL_CHUNK]
+                    detail_result = fetch_job_details(
+                        chunk, source,
+                        artifact_dir=app.config["RESULT_DIR"],
+                        stop_event=stop_event)
+                    for j in detail_result["jobs"]:
+                        jd = str(j.get("jd", "")).strip()
+                        if jd:
+                            jd_map[str(j.get("job_id", ""))] = jd
+                    _save_jd_checkpoint(jd_path, jd_map)
+                    try:
+                        store.update_screening_run(task_id, source_cursor=len(jd_map))
+                    except Exception:
+                        pass
+                    emit(stage="fetch_jd",
+                         current=min(len(jd_map), len(survivors)), total=len(survivors),
+                         message=f"抓取 JD {min(len(jd_map), len(survivors))}/{len(survivors)}")
+                    if detail_result.get("login_wall"):
+                        close_debug_chrome()
+                        # BOSS 登录失效：停+说人话（已抓的已落盘，重试自动续抓）
+                        try:
+                            store.update_screening_run(
+                                task_id, status="failed", error_code="login_wall")
+                        except Exception:
+                            pass
+                        with _pipeline_lock:
+                            t = _pipeline_tasks.get(task_id)
+                            if t is not None:
+                                t["status"] = "failed"
+                                t["error"] = (
+                                    f"抓取 JD 时 BOSS 登录已失效：已抓 "
+                                    f"{len(jd_map)}/{len(survivors)} 条（已保存）。"
+                                    "请在 Chrome 重新登录 BOSS直聘后重试，会接着已抓的继续"
+                                )
+                        _schedule_pipeline_task_cleanup(task_id)
+                        return
+                    if detail_result.get("stopped"):
+                        close_debug_chrome()
+                        _mark_cancelled()
+                        return
                 close_debug_chrome()
+            for job in enriched:
+                job["jd"] = jd_map.get(str(job.get("job_id", "")), "")
 
             # 5) Stage B：JD 精筛（对比候选人画像）
             jobs_with_jd = [j for j in enriched if str(j.get("jd", "")).strip()]
@@ -2143,16 +2300,38 @@ def create_app(config=None):
                 emit(stage="screen_b", current=len(jobs_with_jd), total=len(jobs_with_jd),
                      message="未填写求职画像，已跳过 AI 精筛")
             else:
-                emit(stage="screen_b", current=0, total=len(jobs_with_jd),
+                if _stop_requested():
+                    _mark_cancelled()
+                    return
+                # 分段精筛，每段判定落库（screening_results）+ 更新 processed_count：
+                # 进程崩了已筛的判定不丢，重跑自动跳过。
+                done_verdicts = dict(resume_verdicts)
+                todo_match = [j for j in jobs_with_jd
+                              if str(j.get("job_id", "")) not in done_verdicts]
+                emit(stage="screen_b",
+                     current=min(len(done_verdicts), len(jobs_with_jd)),
+                     total=len(jobs_with_jd),
                      message="AI 精筛中（JD 对比简历画像）…")
-
-                def _b_progress(cur, tot):
-                    emit(stage="screen_b", current=cur, total=tot,
-                         message=f"AI 精筛 {cur}/{tot}")
-
-                match_result = match_jds(jobs_with_jd, profile_summary, endpoint, api_key,
-                                         model=model, progress=_b_progress)
-                verdicts = match_result["verdicts"]
+                MATCH_CHUNK = 20
+                for chunk_start in range(0, len(todo_match), MATCH_CHUNK):
+                    if _stop_requested():
+                        _mark_cancelled()
+                        return
+                    chunk = todo_match[chunk_start:chunk_start + MATCH_CHUNK]
+                    match_result = match_jds(chunk, profile_summary, endpoint, api_key,
+                                             model=model)
+                    done_verdicts.update(match_result["verdicts"])
+                    try:
+                        store.save_screening_verdicts(task_id, match_result["verdicts"])
+                        store.update_screening_run(
+                            task_id, processed_count=len(done_verdicts))
+                    except Exception:
+                        pass  # 落库失败不阻断筛选（内存结果仍在）
+                    emit(stage="screen_b",
+                         current=min(len(done_verdicts), len(jobs_with_jd)),
+                         total=len(jobs_with_jd),
+                         message=f"AI 精筛 {min(len(done_verdicts), len(jobs_with_jd))}/{len(jobs_with_jd)}")
+                verdicts = done_verdicts
                 for job in enriched:
                     jid = str(job.get("job_id", ""))
                     v = verdicts.get(jid)
@@ -2166,6 +2345,9 @@ def create_app(config=None):
                         job["verdict_reason"] = "未抓到 JD，无法精筛"
 
                 match_count = sum(1 for j in enriched if j.get("verdict") == "match")
+            if _stop_requested():
+                _mark_cancelled()
+                return
             result = {
                 "ok": True,
                 "jobs": enriched,
@@ -2182,6 +2364,14 @@ def create_app(config=None):
                 if task is not None:
                     task["result"] = result
                     task["status"] = "done"
+            try:
+                store.update_screening_run(
+                    task_id, status="done",
+                    match_count=match_count,
+                    mismatch_count=sum(1 for j in enriched if j.get("verdict") == "not_match"),
+                    processed_count=len(jobs_with_jd))
+            except Exception:
+                pass
             _schedule_pipeline_task_cleanup(task_id)
             emit(stage="done", total_matched=match_count,
                  message=f"筛选完成：匹配 {match_count} 条")
@@ -2192,6 +2382,11 @@ def create_app(config=None):
                 if task is not None:
                     task["status"] = "failed"
                     task["error"] = ai_service.user_facing_error(exc.error_code)
+            try:
+                store.update_screening_run(task_id, status="failed",
+                                           error_code=exc.error_code)
+            except Exception:
+                pass
             _schedule_pipeline_task_cleanup(task_id)
         except Exception as exc:
             with _pipeline_lock:
@@ -2199,6 +2394,11 @@ def create_app(config=None):
                 if task is not None:
                     task["status"] = "failed"
                     task["error"] = f"AI 筛选异常：{type(exc).__name__}"
+            try:
+                store.update_screening_run(task_id, status="failed",
+                                           error_code=type(exc).__name__)
+            except Exception:
+                pass
             _schedule_pipeline_task_cleanup(task_id)
 
     @app.route("/api/analyze-resume", methods=["POST"])
@@ -2350,6 +2550,67 @@ def create_app(config=None):
         _pipeline_executor.submit(_run_pipeline_task, task_id, script_params)
         return jsonify({"ok": True, "task_id": task_id})
 
+    @app.route("/api/execute-search/<task_id>/cancel", methods=["POST"])
+    def cancel_execute_search(task_id):
+        """停止正在运行的抓取任务。
+
+        做法：set stop_event → 立刻关调试 Chrome（不等当前组合抓完）→
+        task 标 cancelled。run_search 会因浏览器被关而退出，_run_pipeline_task
+        看到 stop_event.is_set() 后标 cancelled 而非 failed/done。
+        """
+        with _pipeline_lock:
+            task = _pipeline_tasks.get(task_id)
+            if task is None:
+                return jsonify({"ok": False, "error": "任务不存在"}), 404
+            if task["status"] not in ("queued", "running"):
+                return jsonify({"ok": False, "error": f"任务已结束，无法取消（当前状态：{task['status']}）"}), 400
+            stop_event = task.get("stop_event")
+            if stop_event is not None:
+                stop_event.set()
+            # 立刻标记 cancelled，让前端轮询马上看到状态变化
+            task["status"] = "cancelled"
+            task["error"] = "用户已停止抓取"
+            task["logs"].append("用户取消任务")
+        # 关浏览器放到锁外，避免持锁时间过长。best-effort，失败不阻塞取消。
+        try:
+            from webui.pipeline_exec import close_debug_chrome
+            close_debug_chrome()
+        except Exception:
+            pass
+        return jsonify({"ok": True, "task_id": task_id, "status": "cancelled"})
+
+    @app.route("/api/ai-screen/<task_id>/cancel", methods=["POST"])
+    def cancel_ai_screen(task_id):
+        """停止正在运行的 AI 筛选任务。
+
+        与抓取取消同套路但按 kind 区分：纯 AI 调用阶段（粗筛/精筛）没有
+        浏览器可关，close_debug_chrome 是 no-op；抓 JD 阶段关浏览器可让
+        子进程抓取立即中断。工作线程在阶段边界看到 stop_event 后标
+        cancelled，不会把结果覆盖成 done。
+        """
+        with _pipeline_lock:
+            task = _pipeline_tasks.get(task_id)
+            if task is None:
+                return jsonify({"ok": False, "error": "任务不存在"}), 404
+            if task.get("kind") != "ai_screen":
+                return jsonify({"ok": False, "error": "不是 AI 筛选任务"}), 409
+            if task["status"] not in ("queued", "running"):
+                return jsonify({"ok": False, "error": f"任务已结束，无法取消（当前状态：{task['status']}）"}), 400
+            stop_event = task.get("stop_event")
+            if stop_event is not None:
+                stop_event.set()
+            # 立刻标记 cancelled，让前端轮询马上看到状态变化
+            task["status"] = "cancelled"
+            task["error"] = "用户已停止筛选"
+            task["logs"].append("用户取消任务")
+        # 关浏览器放到锁外（仅抓 JD 阶段有意义），best-effort，失败不阻塞取消。
+        try:
+            from webui.pipeline_exec import close_debug_chrome
+            close_debug_chrome()
+        except Exception:
+            pass
+        return jsonify({"ok": True, "task_id": task_id, "status": "cancelled"})
+
     @app.route("/api/ai-screen", methods=["POST"])
     def ai_screen():
         """Stage 3b：对已抓取的原始岗位做两段式 AI 筛选。
@@ -2380,14 +2641,29 @@ def create_app(config=None):
         ):
             return jsonify({"ok": False, "error": "抓取任务尚未成功完成"}), 409
         task_id = uuid.uuid4().hex
+        # 断点续筛：同一抓取任务 + 同一筛选条件 + 同一画像，且上次
+        # failed/cancelled/interrupted → 接着上次进度（已抓 JD / 已筛判定不重复做）。
+        resume_from_run_id = ""
+        try:
+            prev = store.latest_screening_run_for_source(
+                scrape_task_id, statuses=("failed", "cancelled", "interrupted"))
+            if prev is not None:
+                prev_params = prev.get("execution_params") or {}
+                same_fields = prev.get("frozen_filters") == screening_fields
+                same_profile = str(prev_params.get("profile_summary", "")) == profile_summary
+                if same_fields and same_profile:
+                    resume_from_run_id = prev["id"]
+        except Exception:
+            resume_from_run_id = ""
         _register_pipeline_task(
             task_id, "ai_screen", source_task_id=scrape_task_id,
         )
         _pipeline_executor.submit(
             _run_ai_screen_task, task_id, screening_fields,
-            profile_summary, scrape_task_id,
+            profile_summary, scrape_task_id, resume_from_run_id,
         )
-        return jsonify({"ok": True, "task_id": task_id})
+        return jsonify({"ok": True, "task_id": task_id,
+                        "resuming": bool(resume_from_run_id)})
 
     @app.route("/api/search-progress/<task_id>")
     def search_progress(task_id):
@@ -2414,6 +2690,47 @@ def create_app(config=None):
                 # AI 筛选任务还含 dropped/verdict/profile_summary 等
                 snapshot["result"] = task["result"]
         return jsonify(snapshot)
+
+    @app.route("/api/latest-running-task")
+    def latest_running_task():
+        """返回最近一个仍在运行（running/queued）的 pipeline 任务。
+
+        用于页面刷新后接回任务：前端 onMounted 调这个接口，有在跑的任务
+        就恢复 task_id 和进度快照，重新开始轮询。dict 保序（Py3.7+），
+        最后注册的任务排在最后，倒序找第一个非终态的返回。
+        """
+        with _pipeline_lock:
+            for task_id, task in reversed(list(_pipeline_tasks.items())):
+                if task["status"] in ("running", "queued"):
+                    return jsonify({
+                        "ok": True,
+                        "has_task": True,
+                        "task_id": task_id,
+                        "kind": task.get("kind", ""),
+                        "status": task["status"],
+                        "progress": task["progress"],
+                        "logs": list(task["logs"][-LOG_TAIL_LINES:]),
+                        "error": task["error"],
+                    })
+        # 内存没有：查 DB 里被进程重启打断的筛选。重启后工作线程已死，
+        # 不能假装还在跑——如实告诉前端有个可续跑的中断任务。
+        try:
+            run = store.latest_interrupted_screening_run()
+        except Exception:
+            run = None
+        if run is not None:
+            return jsonify({
+                "ok": True,
+                "has_task": True,
+                "task_id": run["id"],
+                "kind": "ai_screen",
+                "status": "interrupted",
+                "progress": {"message": "上次 AI 筛选因服务重启被中断"},
+                "logs": [],
+                "error": "",
+                "resumable": True,
+            })
+        return jsonify({"ok": True, "has_task": False})
 
     @app.route("/api/latest-pipeline-result")
     def latest_pipeline_result():

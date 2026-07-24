@@ -19,7 +19,7 @@ BOSS直聘职位抓取 + 分析 — 纯 CDP raw protocol
   uv run python3 scripts/boss_cdp_raw.py --version
 """
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 import json
 import time
@@ -285,9 +285,26 @@ class CDPSession:
         if not require_runtime_dependencies("requests", "websocket"):
             raise RuntimeError("缺少 CDP 运行依赖")
         self.cdp_port = cdp_port
-        resp = requests.get(f"http://127.0.0.1:{cdp_port}/json/version", timeout=10)
-        ws_url = resp.json()["webSocketDebuggerUrl"]
-        self.ws = websocket.create_connection(ws_url, timeout=60)
+        try:
+            resp = requests.get(f"http://127.0.0.1:{cdp_port}/json/version", timeout=10)
+            ws_url = resp.json()["webSocketDebuggerUrl"]
+            self.ws = websocket.create_connection(ws_url, timeout=60)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise CDPUnavailableError(
+                f"连不上调试浏览器（127.0.0.1:{cdp_port}）。\n"
+                "请先运行 --setup-chrome 启动带调试端口的 Chrome，并登录 BOSS直聘；\n"
+                "Chrome 关了调试端口就没了，需要重新启动。"
+            ) from e
+        except (KeyError, ValueError, json.JSONDecodeError) as e:
+            raise CDPUnavailableError(
+                f"端口 {cdp_port} 上的服务不是 Chrome 调试端口（返回内容无法识别）。\n"
+                "请用 --setup-chrome 启动专用 Chrome，不要占用该端口。"
+            ) from e
+        except websocket.WebSocketException as e:
+            raise CDPUnavailableError(
+                f"调试浏览器（127.0.0.1:{cdp_port}）的 WebSocket 连接失败。\n"
+                "请关闭该 Chrome 后重新运行 --setup-chrome。"
+            ) from e
         self.mid = 0
 
     def send(self, method, params=None, sid=None, timeout=30):
@@ -360,37 +377,53 @@ class CDPSession:
 # ============================================================
 FETCH_API_JS_TEMPLATE = """
 (function(){
-    var xhr = new XMLHttpRequest();
-    xhr.open('GET', '__API_URL__', false);
-    xhr.send();
-    if (xhr.status !== 200) return JSON.stringify([{error: xhr.status}]);
-    var data = JSON.parse(xhr.responseText);
-    var jobs = (data.zpData || {}).jobList || [];
-    var results = jobs.map(function(j) {
-        return {
-            title: j.jobName || '',
-            salary: j.salaryDesc || '',
-            salary_source: j.salaryDesc ? 'api' : 'api_empty',
-            location: (j.cityName || '') + '\\u00b7' + (j.areaDistrict || '') + '\\u00b7' + (j.businessDistrict || ''),
-            tags: [j.jobExperience || '', j.jobDegree || ''].filter(function(t){return t && t !== '\\u4e0d\\u9650';}).join(' | '),
-            boss_name: j.brandName || '',
-            boss_title: j.bossTitle || '',
-            company_scale: j.brandScaleName || '',
-            company_stage: j.brandStageName || '',
-            company_industry: j.brandIndustry || '',
-            job_labels: (j.jobLabels || []).join(' | '),
-            skills: (j.skills || []).join(' | '),
-            security_id: j.securityId || '',
-            lid: j.lid || '',
-            encrypt_job_id: j.encryptJobId || '',
-            encrypt_boss_id: j.encryptBossId || '',
-            encrypt_brand_id: j.encryptBrandId || '',
-            job_link: j.encryptJobId ? 'https://www.zhipin.com/job_detail/' + j.encryptJobId + '.html' : '',
-            company_link: j.encryptBrandId ? 'https://www.zhipin.com/gongsi/' + j.encryptBrandId + '.html' : '',
-            welfare: (j.welfareList || []).join(' | ')
-        };
-    });
-    return JSON.stringify(results);
+    try {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', '__API_URL__', false);
+        xhr.send();
+        if (xhr.status !== 200) return JSON.stringify([{error: xhr.status}]);
+        var data;
+        try {
+            data = JSON.parse(xhr.responseText);
+        } catch (parseErr) {
+            // 状态 200 但 body 不是 JSON：大概率被风控/验证码页拦截，
+            // 带上响应头部片段供调用方识别（不执行、仅诊断）。
+            return JSON.stringify([{error: 'parse_failed', sample: (xhr.responseText || '').slice(0, 300)}]);
+        }
+        var jobs = (data.zpData || {}).jobList || [];
+        if (!jobs.length && !(data.zpData || {}).jobList) {
+            // 结构对不上：正常空页 jobList 是空数组；字段整个缺失说明
+            // 返回的不是职位列表（可能是风控 JSON/登录跳转）。
+            return JSON.stringify([{error: 'unexpected_shape', sample: JSON.stringify(data).slice(0, 300)}]);
+        }
+        var results = jobs.map(function(j) {
+            return {
+                title: j.jobName || '',
+                salary: j.salaryDesc || '',
+                salary_source: j.salaryDesc ? 'api' : 'api_empty',
+                location: (j.cityName || '') + '\\u00b7' + (j.areaDistrict || '') + '\\u00b7' + (j.businessDistrict || ''),
+                tags: [j.jobExperience || '', j.jobDegree || ''].filter(function(t){return t && t !== '\\u4e0d\\u9650';}).join(' | '),
+                boss_name: j.brandName || '',
+                boss_title: j.bossTitle || '',
+                company_scale: j.brandScaleName || '',
+                company_stage: j.brandStageName || '',
+                company_industry: j.brandIndustry || '',
+                job_labels: (j.jobLabels || []).join(' | '),
+                skills: (j.skills || []).join(' | '),
+                security_id: j.securityId || '',
+                lid: j.lid || '',
+                encrypt_job_id: j.encryptJobId || '',
+                encrypt_boss_id: j.encryptBossId || '',
+                encrypt_brand_id: j.encryptBrandId || '',
+                job_link: j.encryptJobId ? 'https://www.zhipin.com/job_detail/' + j.encryptJobId + '.html' : '',
+                company_link: j.encryptBrandId ? 'https://www.zhipin.com/gongsi/' + j.encryptBrandId + '.html' : '',
+                welfare: (j.welfareList || []).join(' | ')
+            };
+        });
+        return JSON.stringify(results);
+    } catch (e) {
+        return JSON.stringify([{error: 'js_exception', sample: String(e).slice(0, 200)}]);
+    }
 })()
 """
 
@@ -449,6 +482,27 @@ class DetailExtractionError(ValueError):
 
 class DetailLoginRequiredError(DetailExtractionError):
     """The detail page is truncated because the BOSS session is not logged in."""
+
+
+class RiskControlError(RuntimeError):
+    """抓取中途命中风控/验证码，立即停止（不静默跳过、不伪装完成）。
+
+    携带诊断信息，供终端醒目报错：第几页挂的、为什么、已抓多少条存哪了、
+    从哪页续抓。
+    """
+
+    def __init__(self, reason, *, page=None, scraped_count=0, output_path="",
+                 resume_page=None):
+        self.reason = reason
+        self.page = page
+        self.scraped_count = scraped_count
+        self.output_path = output_path
+        self.resume_page = resume_page
+        super().__init__(reason)
+
+
+class CDPUnavailableError(RuntimeError):
+    """连不上调试浏览器（Chrome 没开 / 端口不通 / 端口被占用）。"""
 
 
 EXTRACT_DETAIL_JS = """
@@ -1001,6 +1055,99 @@ def parse_api_jobs_eval_value(value):
     return jobs
 
 
+# 风控/验证码特征词：命中即实锤（在 API 返回的错误样本或页面文本里找）
+RISK_CONTROL_KEYWORDS = (
+    "安全验证", "滑动验证", "滑块", "访问受限", "异常流量", "操作频繁",
+    "captcha", "CAPTCHA", "verify-sliding", "waf",
+)
+
+# 列表抓取：连续多少页拿不到数据就判定异常并停止（正常搜索极少连续空页）
+MAX_CONSECUTIVE_EMPTY_PAGES = 3
+
+
+def diagnose_api_jobs_eval_value(value):
+    """解析列表 API 返回，同时给出诊断信息（parse_api_jobs_eval_value 的伴随函数）。
+
+    返回 (jobs, diagnosis)：
+    - jobs 与 parse_api_jobs_eval_value 一致（错误条目剔除后的职位列表）。
+    - diagnosis 为 None 表示正常；否则 dict(kind=..., ...)，kind 取值：
+      empty_response（JS 侧无返回，可能页面未就绪/CDP 异常）、
+      http_error（带 status）、parse_failed（200 但 body 非 JSON，带 sample）、
+      unexpected_shape（JSON 结构对不上，带 sample）、js_exception（带 sample）。
+    本函数不改变 parse_api_jobs_eval_value 的行为，调用方按需选用。
+    """
+    if not value:
+        return [], {"kind": "empty_response"}
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return [], {"kind": "empty_response"}
+    if not isinstance(parsed, list):
+        return [], {"kind": "empty_response"}
+
+    jobs = []
+    diagnosis = None
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        error = item.get("error")
+        if error:
+            if diagnosis is None:
+                if isinstance(error, (int, float)):
+                    diagnosis = {"kind": "http_error", "status": int(error)}
+                else:
+                    diagnosis = {
+                        "kind": str(error),
+                        "sample": str(item.get("sample", ""))[:300],
+                    }
+            continue
+        if item.get("title") or item.get("job_link"):
+            jobs.append(item)
+    return jobs, diagnosis
+
+
+def looks_like_risk_control(text):
+    """文本里是否含风控/验证码特征词。"""
+    if not text:
+        return False
+    return any(keyword in text for keyword in RISK_CONTROL_KEYWORDS)
+
+
+def check_list_risk(diagnosis, *, page, consecutive_empty, scraped_count,
+                    output_path, resume_page):
+    """组合式风控判定：已知特征命中=实锤；结构异常/连续空页=达阈值实锤。
+
+    返回 RiskControlError 实例（应停止）或 None（继续）。
+    """
+    if diagnosis:
+        kind = diagnosis.get("kind", "")
+        sample = diagnosis.get("sample", "")
+        if looks_like_risk_control(sample):
+            return RiskControlError(
+                f"返回内容里出现验证码/风控特征：{sample[:80]}",
+                page=page, scraped_count=scraped_count,
+                output_path=output_path, resume_page=resume_page)
+        if kind == "http_error":
+            status = diagnosis.get("status", 0)
+            if status in (401, 403, 412, 418, 429):
+                hint = "登录态失效" if status == 401 else "被风控拦截"
+                return RiskControlError(
+                    f"列表接口返回 HTTP {status}（{hint}）",
+                    page=page, scraped_count=scraped_count,
+                    output_path=output_path, resume_page=resume_page)
+        if kind in ("parse_failed", "unexpected_shape", "js_exception"):
+            # 结构对不上：可能是页面未就绪（可疑），连续出现才算实锤，
+            # 由调用方按连续空页阈值统一处置（本次先按空页计数）。
+            pass
+    if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES:
+        return RiskControlError(
+            f"连续 {consecutive_empty} 页拿不到职位数据，"
+            "大概率被风控限制（也可能是该搜索条件确实没有职位）",
+            page=page, scraped_count=scraped_count,
+            output_path=output_path, resume_page=resume_page)
+    return None
+
+
 def build_detail_url(job):
     """Build the URL used for detail navigation without mutating job_link."""
     link = job.get("job_link", "")
@@ -1172,6 +1319,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 "type": "mouseMoved", "x": x, "y": y
             }, sid)
 
+    consecutive_empty = 0
     try:
         for pg in range(start_page, max_pages + 1):
             print(f"--- [{pg}/{max_pages} 页, {len(all_jobs)} 条已抓] ---")
@@ -1200,7 +1348,25 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             api_js = FETCH_API_JS_TEMPLATE.replace("__API_URL__", api_url)
             val = cdp.eval_js(api_js, sid)
 
-            jobs = parse_api_jobs_eval_value(val)
+            jobs, api_diagnosis = diagnose_api_jobs_eval_value(val)
+
+            # 风控实锤（验证码特征/特定 HTTP 错误码）：存好已抓数据后立刻停止，
+            # 不做 DOM 降级（被风控时降级同样会被拦）。
+            risk = check_list_risk(
+                api_diagnosis, page=pg, consecutive_empty=0,
+                scraped_count=len(all_jobs), output_path=output_path,
+                resume_page=pg)
+            if risk is not None:
+                if output_path:
+                    flush_jobs(output_path, {
+                        "keyword": keyword,
+                        "city": city_name,
+                        "filters": filters,
+                        "filter_desc": filter_desc,
+                        "scraped_at": datetime.now().isoformat(),
+                        "last_completed_page": last_completed_page,
+                    }, all_jobs)
+                raise risk
 
             # DOM 提取的薪资可能是加密字体，默认禁用；只有显式允许时才降级。
             if should_use_dom_fallback(jobs, allow_dom_fallback):
@@ -1221,7 +1387,8 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 log.warning("⚠️ API 未返回职位数据，已跳过 DOM fallback；如需强制降级可加 --allow-dom-fallback")
 
             if not jobs:
-                print("  ⚠️ 无数据")
+                consecutive_empty += 1
+                print(f"  ⚠️ 无数据（连续 {consecutive_empty} 页）")
                 last_completed_page = pg
                 if output_path:
                     flush_jobs(output_path, {
@@ -1232,8 +1399,16 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                         "scraped_at": datetime.now().isoformat(),
                         "last_completed_page": last_completed_page,
                     }, all_jobs)
+                # 连续空页达阈值：可能是软风控，停止并说明（已抓数据已存盘）
+                risk = check_list_risk(
+                    api_diagnosis, page=pg, consecutive_empty=consecutive_empty,
+                    scraped_count=len(all_jobs), output_path=output_path,
+                    resume_page=pg + 1)
+                if risk is not None:
+                    raise risk
                 continue
 
+            consecutive_empty = 0
             new = 0
             for j in jobs:
                 key = j.get('job_link') or j['title']
@@ -1269,6 +1444,9 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
 
     except KeyboardInterrupt:
         print("\n中断")
+        raise
+    except RiskControlError:
+        # 醒目报错统一由程序入口输出，这里不重复打印
         raise
     except RuntimeError as e:
         print(f"\n⚠️ {e}")
@@ -2935,5 +3113,33 @@ def main():
             print(f"\nℹ️  --close-chrome 未发现运行中的 BOSS 专用 Chrome 进程")
 
 
+def print_risk_control_report(err):
+    """风控停止时的终端醒目报错：第几页挂的、为什么、已抓多少条、建议干啥。"""
+    print()
+    print("!" * 64)
+    print("  抓取已被风控拦截，提前停止（已抓数据没有丢）")
+    print("!" * 64)
+    print(f"  原因: {err.reason}")
+    if err.page is not None:
+        print(f"  停在: 第 {err.page} 页")
+    print(f"  已抓: {err.scraped_count} 条" +
+          (f"，已保存到 {err.output_path}" if err.output_path else ""))
+    print()
+    print("  建议（按顺序试）:")
+    print("    1. 打开 Chrome 里的 BOSS直聘，手动过一次验证码/安全校验")
+    print("    2. 歇 30 分钟以上再抓（频繁抓取容易再被拦）")
+    print("    3. 仍不行就退出登录后重新扫码登录")
+    if err.resume_page is not None:
+        print(f"  恢复后可用 --start-page {err.resume_page} 从断点续抓，已抓的不会重抓")
+    print("!" * 64)
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except CDPUnavailableError as e:
+        print(f"\n❌ {e}")
+        sys.exit(2)
+    except RiskControlError as e:
+        print_risk_control_report(e)
+        sys.exit(10)

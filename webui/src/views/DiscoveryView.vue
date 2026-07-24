@@ -4,10 +4,12 @@ import {
   Bookmark,
   Check,
   FileText,
+  LoaderCircle,
   RotateCcw,
   Search,
   SlidersHorizontal,
   Sparkles,
+  Square,
   UploadCloud,
 } from "@lucide/vue";
 import JobWorkspace from "../components/JobWorkspace.vue";
@@ -91,6 +93,9 @@ const scrapeBusy = ref(false);
 const scrapeSnapshot = ref<TaskSnapshot | null>(null);
 const screenBusy = ref(false);
 const screenSnapshot = ref<TaskSnapshot | null>(null);
+const screenTaskId = ref("");
+// 刷新后接回任务时显示的恢复提示条；任务结束后清空
+const restoredTaskHint = ref("");
 const pipelineResult = ref<PipelineResult | null>(null);
 const activeCategory = ref<ResultCategory>("matched");
 const rejectedIds = ref(new Set<string>());
@@ -164,8 +169,52 @@ const currentEmptyMessage = computed(() => ({
 })[activeCategory.value]);
 
 onMounted(() => {
-  void Promise.allSettled([loadAdvancedSettings(), loadLatestResult(), loadFilterLabels()]);
+  void Promise.allSettled([
+    loadAdvancedSettings(),
+    loadLatestResult(),
+    loadFilterLabels(),
+    restoreRunningTask(),
+  ]);
 });
+
+async function restoreRunningTask() {
+  try {
+    const data = await apiRequest<{
+      has_task?: boolean;
+      task_id?: string;
+      kind?: string;
+      status?: string;
+      progress?: Record<string, unknown>;
+      logs?: string[];
+      error?: string;
+    }>("/api/latest-running-task");
+    if (!data.has_task || !data.task_id) return;
+    const snapshot: TaskSnapshot = {
+      status: data.status || "running",
+      progress: data.progress || {},
+      logs: data.logs || [],
+      error: data.error || "",
+    };
+    const kind = data.kind === "scrape" ? "scrape" : "screen";
+    if (data.status === "interrupted") {
+      // 服务重启打断的任务：工作线程已死不能 poll；提示用户重开（后端会自动接着上次进度）
+      restoredTaskHint.value = "上次 AI 筛选因服务重启被中断；重新开始 AI 筛选会接着上次进度，不重复消耗";
+      return;
+    }
+    if (kind === "scrape") {
+      scrapeTaskId.value = data.task_id;
+      scrapeBusy.value = true;
+      scrapeSnapshot.value = snapshot;
+      restoredTaskHint.value = "检测到抓取任务仍在后台运行，已自动接回";
+    } else {
+      screenTaskId.value = data.task_id;
+      screenBusy.value = true;
+      screenSnapshot.value = snapshot;
+      restoredTaskHint.value = "检测到 AI 筛选任务仍在后台运行，已自动接回";
+    }
+    void pollTask(data.task_id, kind);
+  } catch { /* non-critical: 接不回就当没有 */ }
+}
 
 async function loadFilterLabels() {
   if (Object.keys(fieldLabels.value).length) return;
@@ -340,6 +389,26 @@ async function startScrape() {
   }
 }
 
+async function cancelScrape() {
+  if (!scrapeTaskId.value) return;
+  // 先停轮询，避免取消后还去拿旧状态
+  if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = undefined; }
+  try {
+    await apiRequest(`/api/execute-search/${encodeURIComponent(scrapeTaskId.value)}/cancel`, {
+      method: "POST",
+    });
+    // 后端会立刻关浏览器并标 cancelled；这里直接复位，不等下一次轮询
+    scrapeBusy.value = false;
+    restoredTaskHint.value = "";
+    scrapeSnapshot.value = { status: "cancelled", progress: { message: "已停止抓取" }, logs: [], error: "" };
+    notify("已停止抓取", "warning");
+  } catch (error) {
+    // 取消接口失败时不要卡死：恢复轮询让前端看真实状态
+    notify(errorMessage(error, "停止失败，请重试"), "error");
+    await pollTask(scrapeTaskId.value, "scrape");
+  }
+}
+
 async function startAiScreen() {
   if (!scrapeCompleted.value || !scrapeTaskId.value) {
     notify("请先完成本轮抓取，再开始 AI 筛选", "warning");
@@ -348,7 +417,7 @@ async function startAiScreen() {
   screenBusy.value = true;
   screenSnapshot.value = { status: "running", progress: { message: "正在创建 AI 筛选任务…" }, logs: [] };
   try {
-    const data = await apiRequest<{ task_id: string }>("/api/ai-screen", {
+    const data = await apiRequest<{ task_id: string; resuming?: boolean }>("/api/ai-screen", {
       method: "POST",
       json: {
         screening_fields: filterValues.value,
@@ -356,11 +425,35 @@ async function startAiScreen() {
         scrape_task_id: scrapeTaskId.value,
       },
     });
+    screenTaskId.value = data.task_id;
+    if (data.resuming) {
+      screenSnapshot.value = { status: "running", progress: { message: "检测到上次未完成的筛选，接着上次进度继续…" }, logs: [] };
+    }
     await pollTask(data.task_id, "screen");
   } catch (error) {
     screenBusy.value = false;
     screenSnapshot.value = { status: "failed", error: errorMessage(error, "AI 筛选启动失败") };
     notify(errorMessage(error, "AI 筛选启动失败"), "error");
+  }
+}
+
+async function cancelAiScreen() {
+  if (!screenTaskId.value) return;
+  // 先停轮询，避免取消后还去拿旧状态
+  if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = undefined; }
+  try {
+    await apiRequest(`/api/ai-screen/${encodeURIComponent(screenTaskId.value)}/cancel`, {
+      method: "POST",
+    });
+    // 后端会标 cancelled；这里直接复位，不等下一次轮询
+    screenBusy.value = false;
+    restoredTaskHint.value = "";
+    screenSnapshot.value = { status: "cancelled", progress: { message: "已停止筛选" }, logs: [], error: "" };
+    notify("已停止筛选", "warning");
+  } catch (error) {
+    // 取消接口失败时不要卡死：恢复轮询让前端看真实状态
+    notify(errorMessage(error, "停止失败，请重试"), "error");
+    await pollTask(screenTaskId.value, "screen");
   }
 }
 
@@ -380,6 +473,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
 
     if (data.status === "done") {
       pollRetryCount = 0;
+      restoredTaskHint.value = "";
       if (kind === "scrape") {
         scrapeBusy.value = false;
         scrapeCompleted.value = true;
@@ -392,8 +486,17 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       }
       return;
     }
+    if (data.status === "cancelled") {
+      pollRetryCount = 0;
+      restoredTaskHint.value = "";
+      if (kind === "scrape") scrapeBusy.value = false;
+      else screenBusy.value = false;
+      // 不弹 error 通知：cancelScrape 已经弹过了；这里是轮询兜底（如刷新后接回的取消态）
+      return;
+    }
     if (data.status === "failed") {
       pollRetryCount = 0;
+      restoredTaskHint.value = "";
       if (kind === "scrape") scrapeBusy.value = false;
       else screenBusy.value = false;
       notify(data.error || "任务执行失败", "error");
@@ -411,17 +514,18 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
         status: "failed",
         progress: { message: "任务执行失败" },
         logs: [],
-        error: "状态刷新连续失败，请检查网络后重试",
+        error: "进度获取连续失败，请检查网络后重试",
       };
       if (kind === "scrape") scrapeSnapshot.value = failed;
       else screenSnapshot.value = failed;
-      notify("状态刷新连续失败，请检查网络后重试", "error");
+      notify("进度获取连续失败，请检查网络后重试", "error");
       return;
     }
     const delay = Math.min(POLL_BASE_DELAY * 2 ** (pollRetryCount - 1), POLL_MAX_DELAY);
     const retrying: TaskSnapshot = {
       status: "running",
-      progress: { message: `状态刷新失败，正在重试（${pollRetryCount}/${POLL_MAX_RETRIES}）…` },
+      // 文案改温和：大多数情况是后端正忙没及时回，不是真失败
+      progress: { message: `正在获取进度（${pollRetryCount}/${POLL_MAX_RETRIES}）…` },
       logs: [],
       error: "",
     };
@@ -570,6 +674,11 @@ async function retryJd(job: JobItem) {
     :class="{ 'results-view': activeStep === 'results' }"
     data-testid="discovery-view"
   >
+    <div v-if="restoredTaskHint" class="restore-banner" role="status">
+      <LoaderCircle :size="16" class="spin" aria-hidden="true" />
+      <span>{{ restoredTaskHint }}</span>
+      <button type="button" class="restore-close" aria-label="关闭提示" @click="restoredTaskHint = ''">×</button>
+    </div>
     <StepNavigator
       :steps="steps"
       :active-step="activeStep"
@@ -699,8 +808,9 @@ async function retryJd(job: JobItem) {
 
         <TaskProgress :snapshot="scrapeSnapshot" />
         <div class="workflow-actions">
-          <button class="button primary" type="button" data-testid="start-scrape" :disabled="scrapeBusy" @click="startScrape">
-            <Search :size="18" aria-hidden="true" />{{ scrapeBusy ? "抓取中…" : "开始抓取" }}
+          <button class="button primary" type="button" data-testid="start-scrape" @click="scrapeBusy ? cancelScrape() : startScrape()">
+            <Search v-if="!scrapeBusy" :size="18" aria-hidden="true" />
+            <Square v-else :size="18" aria-hidden="true" />{{ scrapeBusy ? "停止抓取" : "开始抓取" }}
           </button>
           <button v-if="scrapeCompleted" class="button secondary" type="button" data-testid="continue-to-screen" @click="activeStep = 'screen'">
             继续确认筛选条件
@@ -739,8 +849,9 @@ async function retryJd(job: JobItem) {
 
         <TaskProgress :snapshot="screenSnapshot" />
         <div class="workflow-actions">
-          <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="screenBusy || !scrapeCompleted" @click="startAiScreen">
-            <Sparkles :size="18" aria-hidden="true" />{{ screenBusy ? "筛选中…" : "开始 AI 筛选" }}
+          <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="!screenBusy && !scrapeCompleted" @click="screenBusy ? cancelAiScreen() : startAiScreen()">
+            <Square v-if="screenBusy" :size="18" aria-hidden="true" />
+            <Sparkles v-else :size="18" aria-hidden="true" />{{ screenBusy ? "停止筛选" : "开始 AI 筛选" }}
           </button>
           <span class="action-hint">Stage A 粗筛 → 抓取 JD → Stage B 精筛</span>
         </div>

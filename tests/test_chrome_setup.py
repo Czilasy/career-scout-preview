@@ -1707,5 +1707,148 @@ class ScrapeDetailsReadinessContractTests(unittest.TestCase):
         self.assertLessEqual(seconds, 7)
 
 
+class RiskControlTests(unittest.TestCase):
+    """列表抓取风控哨兵：识别→停→报错说人话→能续抓。"""
+
+    def test_diagnose_normal_payload_returns_jobs_and_no_diagnosis(self):
+        module = load_module()
+        payload = json.dumps([{"title": "Java", "job_link": "https://example.com"}])
+
+        jobs, diagnosis = module.diagnose_api_jobs_eval_value(payload)
+
+        self.assertEqual(jobs, [{"title": "Java", "job_link": "https://example.com"}])
+        self.assertIsNone(diagnosis)
+
+    def test_diagnose_exposes_http_error_status_instead_of_swallowing(self):
+        module = load_module()
+
+        jobs, diagnosis = module.diagnose_api_jobs_eval_value(json.dumps([{"error": 403}]))
+
+        self.assertEqual(jobs, [])
+        self.assertEqual(diagnosis, {"kind": "http_error", "status": 403})
+        # 原解析函数行为不变（静默剔除错误条目），不破坏既有调用方
+        self.assertEqual(module.parse_api_jobs_eval_value(json.dumps([{"error": 403}])), [])
+
+    def test_diagnose_exposes_parse_failure_with_sample(self):
+        module = load_module()
+        payload = json.dumps([{"error": "parse_failed", "sample": "<html>安全验证</html>"}])
+
+        jobs, diagnosis = module.diagnose_api_jobs_eval_value(payload)
+
+        self.assertEqual(jobs, [])
+        self.assertEqual(diagnosis["kind"], "parse_failed")
+        self.assertIn("安全验证", diagnosis["sample"])
+
+    def test_diagnose_flags_empty_response(self):
+        module = load_module()
+
+        for value in (None, "", "not-json", json.dumps({"not": "a list"})):
+            jobs, diagnosis = module.diagnose_api_jobs_eval_value(value)
+            self.assertEqual(jobs, [])
+            self.assertEqual(diagnosis, {"kind": "empty_response"})
+
+    def test_fetch_api_template_reports_parse_failure_and_unexpected_shape(self):
+        module = load_module()
+
+        self.assertIn("parse_failed", module.FETCH_API_JS_TEMPLATE)
+        self.assertIn("unexpected_shape", module.FETCH_API_JS_TEMPLATE)
+        # 既有字段断言保持（防回归）
+        self.assertIn("security_id: j.securityId", module.FETCH_API_JS_TEMPLATE)
+
+    def test_looks_like_risk_control_keywords(self):
+        module = load_module()
+
+        self.assertTrue(module.looks_like_risk_control("<div>安全验证</div>"))
+        self.assertTrue(module.looks_like_risk_control("请完成滑动验证"))
+        self.assertTrue(module.looks_like_risk_control("captcha challenge"))
+        self.assertFalse(module.looks_like_risk_control('{"zpData":{"jobList":[]}}'))
+        self.assertFalse(module.looks_like_risk_control(""))
+        self.assertFalse(module.looks_like_risk_control(None))
+
+    def test_check_list_risk_http_error_hard_stop(self):
+        module = load_module()
+
+        err = module.check_list_risk(
+            {"kind": "http_error", "status": 403},
+            page=2, consecutive_empty=0, scraped_count=30,
+            output_path="out.json", resume_page=2)
+
+        self.assertIsInstance(err, module.RiskControlError)
+        self.assertEqual(err.page, 2)
+        self.assertEqual(err.scraped_count, 30)
+        self.assertEqual(err.resume_page, 2)
+        self.assertIn("403", err.reason)
+
+    def test_check_list_risk_ignores_benign_http_status(self):
+        module = load_module()
+
+        err = module.check_list_risk(
+            {"kind": "http_error", "status": 404},
+            page=1, consecutive_empty=0, scraped_count=0,
+            output_path="", resume_page=1)
+
+        self.assertIsNone(err)
+
+    def test_check_list_risk_captcha_sample_is_hard_stop(self):
+        module = load_module()
+
+        err = module.check_list_risk(
+            {"kind": "parse_failed", "sample": "<html>请完成滑动验证</html>"},
+            page=1, consecutive_empty=0, scraped_count=0,
+            output_path="", resume_page=1)
+
+        self.assertIsInstance(err, module.RiskControlError)
+
+    def test_check_list_risk_consecutive_empty_threshold(self):
+        module = load_module()
+
+        below = module.check_list_risk(
+            None, page=2, consecutive_empty=module.MAX_CONSECUTIVE_EMPTY_PAGES - 1,
+            scraped_count=10, output_path="o.json", resume_page=3)
+        self.assertIsNone(below)
+
+        at = module.check_list_risk(
+            None, page=3, consecutive_empty=module.MAX_CONSECUTIVE_EMPTY_PAGES,
+            scraped_count=10, output_path="o.json", resume_page=4)
+        self.assertIsInstance(at, module.RiskControlError)
+        self.assertIn("连续", at.reason)
+
+    def test_cdp_session_wraps_connection_failure_in_plain_language(self):
+        module = load_module()
+
+        class FakeConnError(Exception):
+            pass
+
+        # 脚本的 requests/websocket 是惰性导入的全局变量（初始 None），测试直接注入
+        module.requests = mock.Mock()
+        module.requests.ConnectionError = FakeConnError
+        module.requests.Timeout = TimeoutError
+        module.requests.get.side_effect = FakeConnError("refused")
+
+        with self.assertRaises(module.CDPUnavailableError) as ctx:
+            module.CDPSession(9222)
+        self.assertIn("--setup-chrome", str(ctx.exception))
+
+    def test_cdp_session_wraps_websocket_failure_in_plain_language(self):
+        module = load_module()
+
+        class FakeWsError(Exception):
+            pass
+
+        module.requests = mock.Mock()
+        # except 子句会求值 requests.ConnectionError/Timeout，必须是真异常类
+        module.requests.ConnectionError = ConnectionError
+        module.requests.Timeout = TimeoutError
+        module.requests.get.return_value.json.return_value = {
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/x"
+        }
+        module.websocket = mock.Mock()
+        module.websocket.WebSocketException = FakeWsError
+        module.websocket.create_connection.side_effect = FakeWsError("broken")
+
+        with self.assertRaises(module.CDPUnavailableError):
+            module.CDPSession(9222)
+
+
 if __name__ == "__main__":
     unittest.main()
