@@ -355,9 +355,10 @@ class BossCdpSource:
             return SourceOutcome.failure(failed_code="source_unreachable", safe_log=f"{safe_log} os_error_type={type(exc).__name__}")
         if returncode != 0:
             self.breaker.record_signal("source_blocked")
+            reason = _exit_reason(returncode, captured)
             return SourceOutcome.failure(
                 failed_code="source_blocked",
-                safe_log=f"{safe_log} returncode={returncode} stderr_tail_safe={_safe_tail(captured)}",
+                safe_log=f"{safe_log} returncode={returncode} reason={reason}",
             )
         jobs = self._read_jobs(str(output_path))
         if jobs is None:
@@ -1121,7 +1122,7 @@ def _normalize_job_fields(job: dict) -> dict:
     return normalized
 
 
-def _safe_tail(text: str, *, max_chars: int = 120) -> str:
+def _safe_tail(text: str, *, max_chars: int = 300) -> str:
     """Return last ``max_chars`` characters, stripped of newlines.
 
     Used only for safe log lines; the captured subprocess output never
@@ -1132,6 +1133,23 @@ def _safe_tail(text: str, *, max_chars: int = 120) -> str:
         return ""
     tail = text[-max_chars:].replace("\n", " ").replace("\r", " ").strip()
     return tail
+
+
+# scraper 退出码 → 用户可读原因
+_EXIT_REASONS = {
+    1: "登录态失效或环境异常",
+    2: "连不上调试浏览器（Chrome 未启动或端口不通）",
+    10: "触发风控/限流（验证码、连续空页或 HTTP 拦截）",
+}
+
+
+def _exit_reason(returncode: int, captured: str) -> str:
+    """从退出码和输出尾部提取一句用户可读的失败原因。"""
+    base = _EXIT_REASONS.get(returncode, f"scraper 异常退出（code={returncode}）")
+    tail = _safe_tail(captured, max_chars=150)
+    if tail:
+        return f"{base}｜{tail}"
+    return base
 
 
 def _safe_host(url: str) -> str:

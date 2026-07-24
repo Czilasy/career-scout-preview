@@ -395,6 +395,7 @@ def run_search(params: dict, source, *, pages: int = 3,
 
     merged: dict[str, dict] = {}
     total_scraped = 0
+    failed_combos = 0
 
     for idx, combo in enumerate(combos):
         if stop_event is not None and stop_event.is_set():
@@ -417,9 +418,15 @@ def run_search(params: dict, source, *, pages: int = 3,
         }
         outcome = source.fetch_list(plan_item)
         if not outcome.ok:
+            failed_combos += 1
+            # 从 safe_log 提取 reason= 后的可读原因
+            _reason = ""
+            if outcome.safe_log and "reason=" in outcome.safe_log:
+                _reason = outcome.safe_log.split("reason=", 1)[1]
+            detail = f"（{_reason}）" if _reason else ""
             emit(stage="combo_failed", current=idx + 1, total=len(combos),
                  keyword=kw, city=city, failed_code=outcome.failed_code,
-                 message=f"组合失败：{outcome.failed_code}")
+                 message=f"组合失败：{outcome.failed_code}{detail}")
         else:
             total_scraped += len(outcome.jobs)
             for job in outcome.jobs:
@@ -444,12 +451,15 @@ def run_search(params: dict, source, *, pages: int = 3,
     # 广搜策略：不做本地硬筛选，全量返回，筛选交给后续 AI 步骤。
     all_jobs = list(merged.values())
 
-    # 运行成功后主动关闭调试浏览器，不让它留在任务栏。
-    # 失败路径（尤其未登录）不关，保留窗口给用户登录/重试。
-    # 顺序：先发"正在关闭"提示 → 关浏览器 → 关完再发"完成"，
-    # 保证前端看到的最后状态是"完成"，不会卡在"正在关闭调试浏览器…"。
-    emit(stage="closing_chrome", message="正在关闭调试浏览器…")
-    close_debug_chrome()
+    # 哨兵第三层：所有组合全失败 → 大概率 IP 级风控，不是单个搜索的问题
+    if failed_combos == len(combos) and len(combos) > 0:
+        emit(stage="risk_warning",
+             message="所有组合均失败，大概率是 IP 级风控限制。建议：打开 Chrome 手动过一次验证码，或等 30 分钟后再试。")
+
+    # 有数据才关浏览器（任务完成）；全失败则保留窗口供用户排查/重试。
+    if total_scraped > 0:
+        emit(stage="closing_chrome", message="正在关闭调试浏览器…")
+        close_debug_chrome()
     emit(stage="done", total_scraped=total_scraped, total_matched=len(all_jobs),
          message=f"完成：抓取 {total_scraped} 条，去重 {len(all_jobs)} 条")
 

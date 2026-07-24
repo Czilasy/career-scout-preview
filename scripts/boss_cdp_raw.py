@@ -420,7 +420,7 @@ FETCH_API_JS_TEMPLATE = """
                 welfare: (j.welfareList || []).join(' | ')
             };
         });
-        return JSON.stringify(results);
+        return JSON.stringify({jobs: results, hasMore: !!(data.zpData||{}).hasMore, totalCount: (data.zpData||{}).totalCount || 0});
     } catch (e) {
         return JSON.stringify([{error: 'js_exception', sample: String(e).slice(0, 200)}]);
     }
@@ -1066,24 +1066,32 @@ MAX_CONSECUTIVE_EMPTY_PAGES = 3
 
 
 def diagnose_api_jobs_eval_value(value):
-    """解析列表 API 返回，同时给出诊断信息（parse_api_jobs_eval_value 的伴随函数）。
+    """解析列表 API 返回，同时给出诊断信息和翻页元数据。
 
-    返回 (jobs, diagnosis)：
-    - jobs 与 parse_api_jobs_eval_value 一致（错误条目剔除后的职位列表）。
-    - diagnosis 为 None 表示正常；否则 dict(kind=..., ...)，kind 取值：
-      empty_response（JS 侧无返回，可能页面未就绪/CDP 异常）、
-      http_error（带 status）、parse_failed（200 但 body 非 JSON，带 sample）、
-      unexpected_shape（JSON 结构对不上，带 sample）、js_exception（带 sample）。
-    本函数不改变 parse_api_jobs_eval_value 的行为，调用方按需选用。
+    返回 (jobs, diagnosis, meta)：
+    - jobs：错误条目剔除后的职位列表。
+    - diagnosis：None 表示正常；否则 dict(kind=..., ...)。
+    - meta：{"hasMore": bool, "totalCount": int} 或 None（旧格式/错误时无）。
     """
     if not value:
-        return [], {"kind": "empty_response"}
+        return [], {"kind": "empty_response"}, None
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
     except (json.JSONDecodeError, ValueError, TypeError):
-        return [], {"kind": "empty_response"}
+        return [], {"kind": "empty_response"}, None
+
+    # 新格式：{"jobs": [...], "hasMore": bool, "totalCount": int}
+    if isinstance(parsed, dict) and "jobs" in parsed:
+        meta = {"hasMore": bool(parsed.get("hasMore")), "totalCount": int(parsed.get("totalCount") or 0)}
+        raw_jobs = parsed["jobs"]
+        if not isinstance(raw_jobs, list):
+            return [], {"kind": "empty_response"}, meta
+        jobs = [j for j in raw_jobs if isinstance(j, dict) and (j.get("title") or j.get("job_link"))]
+        return jobs, None, meta
+
+    # 旧格式 / 错误格式：[...]
     if not isinstance(parsed, list):
-        return [], {"kind": "empty_response"}
+        return [], {"kind": "empty_response"}, None
 
     jobs = []
     diagnosis = None
@@ -1103,7 +1111,7 @@ def diagnose_api_jobs_eval_value(value):
             continue
         if item.get("title") or item.get("job_link"):
             jobs.append(item)
-    return jobs, diagnosis
+    return jobs, diagnosis, None
 
 
 def looks_like_risk_control(text):
@@ -1320,6 +1328,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             }, sid)
 
     consecutive_empty = 0
+    prev_has_more = None  # 上一页 API 返回的 hasMore（None=未知）
     try:
         for pg in range(start_page, max_pages + 1):
             print(f"--- [{pg}/{max_pages} 页, {len(all_jobs)} 条已抓] ---")
@@ -1348,7 +1357,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             api_js = FETCH_API_JS_TEMPLATE.replace("__API_URL__", api_url)
             val = cdp.eval_js(api_js, sid)
 
-            jobs, api_diagnosis = diagnose_api_jobs_eval_value(val)
+            jobs, api_diagnosis, api_meta = diagnose_api_jobs_eval_value(val)
 
             # 风控实锤（验证码特征/特定 HTTP 错误码）：存好已抓数据后立刻停止，
             # 不做 DOM 降级（被风控时降级同样会被拦）。
@@ -1399,16 +1408,28 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                         "scraped_at": datetime.now().isoformat(),
                         "last_completed_page": last_completed_page,
                     }, all_jobs)
-                # 连续空页达阈值：可能是软风控，停止并说明（已抓数据已存盘）
-                risk = check_list_risk(
-                    api_diagnosis, page=pg, consecutive_empty=consecutive_empty,
-                    scraped_count=len(all_jobs), output_path=output_path,
-                    resume_page=pg + 1)
-                if risk is not None:
-                    raise risk
+
+                # --- 哨兵第二层：用 hasMore 精确判断空页原因 ---
+                # 上一页 API 说"没有更多了" → 空页是正常的"翻完了"
+                if prev_has_more is False:
+                    print(f"  ℹ️ 上一页 hasMore=false，搜索结果已翻完，停止（已抓 {len(all_jobs)} 条）")
+                    break
+                # 有数据 + 连续空页达阈值 → 大概率翻完了（兜底，防 hasMore 不准）
+                if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES and len(all_jobs) > 0:
+                    print(f"  ℹ️ 连续 {consecutive_empty} 页无数据，搜索结果已翻完，停止翻页（已抓 {len(all_jobs)} 条）")
+                    break
+                # 从头就空 + 连续达阈值 → 实锤风控
+                if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES and len(all_jobs) == 0:
+                    risk = check_list_risk(
+                        api_diagnosis, page=pg, consecutive_empty=consecutive_empty,
+                        scraped_count=0, output_path=output_path,
+                        resume_page=pg + 1)
+                    if risk is not None:
+                        raise risk
                 continue
 
             consecutive_empty = 0
+            prev_has_more = api_meta.get("hasMore") if api_meta else None
             new = 0
             for j in jobs:
                 key = j.get('job_link') or j['title']
