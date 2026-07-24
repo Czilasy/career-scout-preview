@@ -1701,6 +1701,25 @@ class CallAIRetryTests(unittest.TestCase):
                     [{"role": "user", "content": "hi"}]),
             {"x": 2})
 
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai.requests.post")
+    def test_backoff_budget_only_counts_wait_time(self, mock_post, mock_sleep):
+        from webui.ai import AISecurityError, call_ai
+
+        response = MagicMock()
+        response.status_code = 429
+        response.json.return_value = {"error": {"type": "rate_limit"}}
+        mock_post.return_value = response
+
+        with self.assertRaises(AISecurityError) as ctx:
+            call_ai("https://api.example.com/v1/chat/completions", "key",
+                    [{"role": "user", "content": "hi"}], timeout=10)
+
+        self.assertEqual(ctx.exception.error_code, "rate_limited")
+        # 预算=10s 且只计退避等待：5s 可执行（5≤10），下一档 15s 被拒（5+15>10）
+        self.assertEqual(mock_post.call_count, 2)
+        mock_sleep.assert_called_once_with(5)
+
 
 class MatchJdsResumeAndTruncationTests(unittest.TestCase):
     """match_jds 断点续筛（completed_verdicts）与截断拆半重跑。"""

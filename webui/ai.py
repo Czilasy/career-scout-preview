@@ -260,7 +260,8 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
     and the original exception is suppressed so tracebacks stay clean.
 
     重试策略：429 限流 / 5xx 服务端故障 / 超时 / 连接错误都会退避重试；
-    退避等待累计不超过单次 timeout（避免总时长远超调用方预期）。
+    退避等待累计不超过单次 timeout（只计 sleep 等待、不计请求耗时——
+    请求耗时有单次 timeout 兜底，否则慢超时一次就占满预算永远重试不了）。
     配额耗尽（insufficient_quota）救不活，立即抛 ERROR_QUOTA_EXHAUSTED。
     401/403 密钥错与返回格式错不重试，行为与之前一致。
     """
@@ -276,7 +277,7 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
     }
     response = None
     last_error = None
-    started_at = time.monotonic()
+    waited = 0.0
     budget = float(timeout) if timeout else float(DEFAULT_TIMEOUT)
 
     for attempt in range(RATE_LIMIT_ATTEMPTS):
@@ -315,9 +316,10 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
             delay = RATE_LIMIT_BACKOFF_SECONDS[min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)]
         else:
             delay = SERVER_ERROR_BACKOFF_SECONDS[min(attempt, len(SERVER_ERROR_BACKOFF_SECONDS) - 1)]
-        if time.monotonic() - started_at + delay > budget:
-            break  # 等待累计已逼近单次 timeout，不再拖延
+        if waited + delay > budget:
+            break  # 退避等待累计已逼近单次 timeout，不再拖延
         time.sleep(delay)
+        waited += delay
 
     if response is None:
         raise (last_error or AISecurityError(ERROR_NETWORK)) from None

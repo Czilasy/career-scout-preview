@@ -2105,6 +2105,9 @@ def create_app(config=None):
                     "stop_event": threading.Event(),
                 }
                 _pipeline_tasks[task_id] = task
+            if task.get("status") == "cancelled":
+                # 排队期间已被用户取消：直接退出，别把 cancelled 覆盖成 running
+                return
             task["status"] = "running"
             stop_event = task.get("stop_event")
 
@@ -2655,6 +2658,12 @@ def create_app(config=None):
                     resume_from_run_id = prev["id"]
         except Exception:
             resume_from_run_id = ""
+        if resume_from_run_id:
+            # 旧 run 标记为已续跑：进度由新 run 接管落库，首页中断提示不再捞到它
+            try:
+                store.update_screening_run(resume_from_run_id, status="resumed")
+            except Exception:
+                pass
         _register_pipeline_task(
             task_id, "ai_screen", source_task_id=scrape_task_id,
         )
