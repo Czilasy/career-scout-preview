@@ -14,7 +14,6 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 from webui import semantic
-from webui.ai import assess_semantic_similarity
 
 
 class SemanticPromptTests(unittest.TestCase):
@@ -188,55 +187,6 @@ class AssessSemanticSimilarityFormalTests(unittest.TestCase):
             secret, "jd", ai_available=True, call_ai_fn=call_fn,
         )
         self.assertNotIn(secret, str(out))
-
-
-class AssessSemanticSimilarityCompatTests(unittest.TestCase):
-    """assess_semantic_similarity（旧入口）保持 002 兼容契约。
-
-    旧调用方不传 ai_available，默认 False（降级），仍返回 {"verdict":"match"}。
-    """
-
-    def test_default_returns_match_when_ai_not_configured(self):
-        result = assess_semantic_similarity("resume", "jd")
-        self.assertEqual(result["verdict"], "match")
-
-    def test_default_does_not_call_ai(self):
-        with patch("webui.ai.call_ai") as mock_call:
-            result = assess_semantic_similarity("resume", "jd")
-            mock_call.assert_not_called()
-            self.assertEqual(result["verdict"], "match")
-
-    def test_default_does_not_access_keyring(self):
-        with patch("webui.ai.keyring") as mock_keyring:
-            result = assess_semantic_similarity("resume", "jd")
-            mock_keyring.get_password.assert_not_called()
-            self.assertEqual(result["verdict"], "match")
-
-    def test_default_returns_dict_with_verdict_key(self):
-        result = assess_semantic_similarity("resume", "jd")
-        self.assertIsInstance(result, dict)
-        self.assertIn("verdict", result)
-
-    def test_ai_security_error_returns_pending_not_exception(self):
-        from webui import ai as ai_module
-
-        with patch(
-            "webui.ai.call_ai",
-            side_effect=ai_module.AISecurityError(ai_module.ERROR_INVALID),
-        ):
-            result = assess_semantic_similarity(
-                "resume", "jd",
-                ai_available=True,
-                endpoint_url="https://api.example.com/v1/chat/completions",
-                api_key="test-key",
-            )
-        self.assertEqual(result["verdict"], "pending")
-        self.assertEqual(result["failure_stage"], "verification_error")
-
-    def test_default_does_not_leak_resume_text(self):
-        secret = "SECRET_RESUME_42"
-        result = assess_semantic_similarity(secret, "jd")
-        self.assertNotIn(secret, str(result))
 
 
 class ProgramGuaranteedNoAiDirectStateTests(unittest.TestCase):

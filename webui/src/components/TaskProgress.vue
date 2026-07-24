@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { CircleCheck, CircleX, LoaderCircle } from "@lucide/vue";
+import { CircleCheck, CircleX, LoaderCircle, Octagon } from "@lucide/vue";
 
 interface TaskSnapshot {
   status?: string;
@@ -21,6 +21,7 @@ const message = computed(() => String(progress.value.message || "正在准备任
 const statusLabel = computed(() => {
   if (props.snapshot?.status === "done") return "已完成";
   if (props.snapshot?.status === "failed") return "执行失败";
+  if (props.snapshot?.status === "cancelled") return "已停止";
   return "运行中";
 });
 </script>
@@ -31,6 +32,7 @@ const statusLabel = computed(() => {
       <span class="task-status" :data-status="snapshot.status || 'running'">
         <CircleCheck v-if="snapshot.status === 'done'" :size="17" aria-hidden="true" />
         <CircleX v-else-if="snapshot.status === 'failed'" :size="17" aria-hidden="true" />
+        <Octagon v-else-if="snapshot.status === 'cancelled'" :size="17" aria-hidden="true" />
         <LoaderCircle v-else class="spin" :size="17" aria-hidden="true" />
         {{ statusLabel }}
       </span>

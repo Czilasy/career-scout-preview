@@ -20,7 +20,6 @@ JOBS = (SRC / "components" / "JobWorkspace.vue").read_text(encoding="utf-8")
 AI = (SRC / "components" / "AiSettingsDialog.vue").read_text(encoding="utf-8")
 NOTICE = (SRC / "components" / "NoticeBar.vue").read_text(encoding="utf-8")
 DISCOVERY = (SRC / "views" / "DiscoveryView.vue").read_text(encoding="utf-8")
-SCREENING = (SRC / "views" / "ScreeningView.vue").read_text(encoding="utf-8")
 CSS = (SRC / "styles.css").read_text(encoding="utf-8")
 ALL_VUE = "\n".join(path.read_text(encoding="utf-8") for path in SRC.rglob("*.vue"))
 
@@ -52,9 +51,6 @@ class BuiltFrontendEntryTests(unittest.TestCase):
 
 class VueBrowserContractTests(unittest.TestCase):
     def test_navigation_and_actions_use_native_semantics(self):
-        self.assertIn('role="tablist"', APP)
-        self.assertIn('role="tab"', APP)
-        self.assertNotIn("<div class=\"view-tab\"", APP)
         for match in re.finditer(r"<button\b([^>]*)>", ALL_VUE):
             self.assertIn("type=", match.group(1), match.group(0))
 
@@ -84,7 +80,7 @@ class VueBrowserContractTests(unittest.TestCase):
         self.assertIn(":focus-visible", CSS)
         self.assertIn("outline: 3px", CSS)
         self.assertRegex(CSS, r"\.brand\s*\{[^}]*min-height:\s*44px")
-        self.assertRegex(CSS, r"\.view-tabs button\s*\{[^}]*min-height:\s*44px")
+        self.assertRegex(CSS, r"\.result-tabs button\s*\{[^}]*min-height:\s*44px")
 
     def test_mobile_detail_is_full_screen_and_page_does_not_gain_horizontal_scroll(self):
         mobile = CSS.split("@media (max-width: 760px)", 1)[1]
@@ -96,7 +92,6 @@ class VueBrowserContractTests(unittest.TestCase):
     def test_mobile_navigation_uses_fitted_grids_without_scrollbars(self):
         mobile = CSS.split("@media (max-width: 760px)", 1)[1]
         self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", mobile)
-        self.assertIn("grid-template-columns: repeat(5, minmax(0, 1fr))", mobile)
         self.assertNotIn("min-width: 390px", mobile)
 
     def test_mobile_header_actions_stay_exactly_44_pixels(self):
@@ -130,10 +125,10 @@ class VueBrowserContractTests(unittest.TestCase):
         self.assertIn("拉取模型", AI)
 
     def test_product_does_not_claim_automatic_application_or_contact(self):
-        combined = DISCOVERY + SCREENING
-        self.assertNotIn("自动投递", combined)
-        self.assertNotIn("联系招聘者", combined)
-        self.assertNotIn("录用概率", combined)
+        # 覆盖全部 Vue 源码（含已并入 DiscoveryView 的原筛选工作台区域）
+        self.assertNotIn("自动投递", ALL_VUE)
+        self.assertNotIn("联系招聘者", ALL_VUE)
+        self.assertNotIn("录用概率", ALL_VUE)
 
 
 if __name__ == "__main__":

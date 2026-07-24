@@ -1043,7 +1043,14 @@ class FeedbackHttpContractTests(unittest.TestCase):
         self.assertEqual(revoked.status_code, 200)
         self.assertTrue(revoked.get_json()["revoked"])
         self.assertEqual(self.store.get_profile_job(self.profile["id"], "job-restore")["status"], "new")
-        self.assertEqual(self.store.list_trash_with_origin(self.profile["id"]), [])
+        # 垃圾桶无未恢复记录（原 list_trash_with_origin 断言，该方法已随重构移除）
+        with self.store._connection() as conn:
+            active_trash = conn.execute(
+                "SELECT COUNT(*) FROM screening_trash_records "
+                "WHERE profile_id=? AND restored_at IS NULL",
+                (self.profile["id"],),
+            ).fetchone()[0]
+        self.assertEqual(active_trash, 0)
 
         listed = self.client.get(
             f"/api/discovery/feedback?profile_id={self.profile['id']}"

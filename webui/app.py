@@ -2081,6 +2081,29 @@ def create_app(config=None):
         except OSError:
             pass  # 落盘失败不阻断抓取（内存数据仍在）
 
+    def _remove_jd_checkpoint(path):
+        """断点文件完成使命后删除（任务成功/被续跑接管），best-effort。"""
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    def _cleanup_stale_jd_checkpoints(result_dir, *, max_age_days=30):
+        """兜底清理超龄 JD 断点文件（任务异常残留/文件漏删），启动时跑一次。"""
+        try:
+            cutoff = time.time() - max_age_days * 86400
+            for name in os.listdir(result_dir):
+                if not (name.startswith("ai_screen_jd_") and name.endswith(".json")):
+                    continue
+                full = os.path.join(result_dir, name)
+                try:
+                    if os.path.getmtime(full) < cutoff:
+                        os.unlink(full)
+                except OSError:
+                    continue
+        except OSError:
+            pass
+
     def _run_ai_screen_task(task_id, screening_fields, profile_summary,
                             scrape_task_id, resume_from_run_id=""):
         """AI 筛选任务：StageA 字段粗筛 → 批量抓 JD → StageB JD 精筛。
@@ -2177,8 +2200,11 @@ def create_app(config=None):
                     resume_verdicts = store.load_screening_verdicts(resume_from_run_id)
                 except Exception:
                     resume_verdicts = {}
-                resume_jd = _load_jd_checkpoint(
-                    _jd_checkpoint_path(app.config["RESULT_DIR"], resume_from_run_id))
+                old_jd_path = _jd_checkpoint_path(
+                    app.config["RESULT_DIR"], resume_from_run_id)
+                resume_jd = _load_jd_checkpoint(old_jd_path)
+                # 旧断点已被本任务继承：删除旧文件（本任务会写自己的断点）
+                _remove_jd_checkpoint(old_jd_path)
                 if resume_verdicts or resume_jd:
                     emit(stage="resume",
                          message=f"接着上次进度：已有 {len(resume_verdicts)} 条判定、"
@@ -2379,6 +2405,8 @@ def create_app(config=None):
             emit(stage="done", total_matched=match_count,
                  message=f"筛选完成：匹配 {match_count} 条")
             _save_latest_pipeline_result(result, {"screening": screening_fields})
+            # 任务成功：断点文件使命完成（续跑只服务失败/取消/中断）
+            _remove_jd_checkpoint(jd_path)
         except ai_service.AISecurityError as exc:
             with _pipeline_lock:
                 task = _pipeline_tasks.get(task_id)

@@ -565,11 +565,13 @@ button:disabled {
 }.tip:hover::after {
   content: attr(data-tip);
   position: absolute;
-  bottom: calc(100% + 6px);
+  top: calc(100% + 6px);
   left: 50%;
   transform: translateX(-50%);
   white-space: pre-wrap;
+  width: max-content;
   max-width: 280px;
+  z-index: 999;
   padding: 6px 10px;
   border-radius: 6px;
   background: var(--bg-elevated, #1c2027);
@@ -609,7 +611,7 @@ button:disabled {
   background: var(--surface-2);
 }.advanced-panel {
   padding: 0;
-  overflow: hidden;
+  overflow: visible;
 }.advanced-panel summary {
   display: flex;
   align-items: center;
@@ -1120,6 +1122,8 @@ body,
     padding: 7px 6px;
     text-align: center;
     font-size: 11px;
+  }.step-nav button span:last-child {
+    white-space: nowrap;
   }.stage-header {
     min-height: 48px;
     margin-bottom: 12px;
@@ -1205,4 +1209,40 @@ body,
     animation-duration: .01ms !important;
     animation-iteration-count: 1 !important;
   }
+}
+
+/* 刷新后接回任务的恢复提示条：页面最顶部，accent 色调 */
+.restore-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: rgb(99 102 241 / 12%);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--accent-strong);
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+.restore-banner .spin {
+  animation: spin 1.2s linear infinite;
+  flex-shrink: 0;
+}
+.restore-banner span {
+  flex: 1;
+}
+.restore-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.restore-close:hover {
+  color: var(--text);
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
