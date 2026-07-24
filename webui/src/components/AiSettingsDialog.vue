@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { ChevronDown } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
 import { apiRequest, errorMessage } from "../api";
 import type { Notice } from "../types";
 
 const props = defineProps<{ open: boolean }>();
-const emit = defineEmits<{ close: []; notify: [notice: Notice] }>();
+const emit = defineEmits<{ close: [] }>();
 
 const endpointUrl = ref("");
 const apiKey = ref("");
@@ -13,9 +14,48 @@ const maskedKey = ref("");
 const model = ref("");
 const models = ref<string[]>([]);
 const busy = ref<"load" | "save" | "test" | "models" | "">("");
+// 就地提示：所有操作的反馈都显示在按钮上方一行，不冒泡到主页 NoticeBar，
+// 也不自动消失（下次操作覆盖或关对话框时清空）。
+const localNotice = ref<Notice | null>(null);
+
+// 模型字段自定义下拉：原生 <input list="datalist"> 在 Chrome 上单击 input
+// 不会展开下拉，必须按方向键或点浏览器画的右侧小箭头。换成自定义下拉面板，
+// 点 input 主体或右侧 chevron 都能展开。
+const modelDropdownOpen = ref(false);
+const modelFieldRef = ref<HTMLElement | null>(null);
+
+const filteredModels = computed(() => {
+  const kw = model.value.trim().toLowerCase();
+  if (!kw) return models.value;
+  return models.value.filter((m) => m.toLowerCase().includes(kw));
+});
+
+function setLocalNotice(notice: Notice) {
+  localNotice.value = notice;
+}
+
+function clearLocalNotice() {
+  localNotice.value = null;
+}
+
+function handleOutsideClick(event: MouseEvent) {
+  if (!modelDropdownOpen.value) return;
+  if (modelFieldRef.value && !modelFieldRef.value.contains(event.target as Node)) {
+    modelDropdownOpen.value = false;
+  }
+}
+
+onMounted(() => document.addEventListener("mousedown", handleOutsideClick));
+onBeforeUnmount(() => document.removeEventListener("mousedown", handleOutsideClick));
 
 watch(() => props.open, (open) => {
-  if (open) void loadSettings();
+  if (open) {
+    void loadSettings();
+    clearLocalNotice();
+  } else {
+    modelDropdownOpen.value = false;
+    clearLocalNotice();
+  }
 });
 
 async function loadSettings() {
@@ -27,7 +67,7 @@ async function loadSettings() {
     maskedKey.value = String(data.masked_key || "");
     apiKey.value = "";
   } catch (error) {
-    emit("notify", { message: errorMessage(error, "AI 设置加载失败"), tone: "error" });
+    setLocalNotice({ message: errorMessage(error, "AI 设置加载失败"), tone: "error" });
   } finally {
     busy.value = "";
   }
@@ -40,10 +80,10 @@ async function saveSettings() {
       method: "PUT",
       json: { endpoint_url: endpointUrl.value, api_key: apiKey.value, model: model.value },
     });
-    emit("notify", { message: "AI 设置已保存", tone: "success" });
+    setLocalNotice({ message: "AI 设置已保存", tone: "success" });
     await loadSettings();
   } catch (error) {
-    emit("notify", { message: errorMessage(error, "AI 设置保存失败"), tone: "error" });
+    setLocalNotice({ message: errorMessage(error, "AI 设置保存失败"), tone: "error" });
   } finally {
     busy.value = "";
   }
@@ -51,15 +91,30 @@ async function saveSettings() {
 
 async function fetchModels() {
   busy.value = "models";
+  clearLocalNotice();
   try {
-    const data = await apiRequest<{ ok?: boolean; models?: string[] }>("/api/ai-settings/models");
+    // 用当前对话框里填的值测，不必先保存。apiKey 为空时后端用已保存 key 兜底。
+    const data = await apiRequest<{ ok?: boolean; models?: string[]; error_code?: string }>(
+      "/api/ai-settings/models",
+      {
+        method: "POST",
+        json: {
+          endpoint_url: endpointUrl.value,
+          api_key: apiKey.value,
+          model: model.value,
+        },
+      },
+    );
     models.value = data.models || [];
-    emit("notify", {
-      message: models.value.length ? `已拉取 ${models.value.length} 个模型` : "服务未返回模型列表",
-      tone: models.value.length ? "success" : "warning",
-    });
+    if (models.value.length) {
+      setLocalNotice({ message: `已拉取 ${models.value.length} 个模型`, tone: "success" });
+    } else if (data.error_code) {
+      setLocalNotice({ message: `模型列表拉取失败（${data.error_code}）`, tone: "error" });
+    } else {
+      setLocalNotice({ message: "服务未返回模型列表", tone: "warning" });
+    }
   } catch (error) {
-    emit("notify", { message: errorMessage(error, "模型列表拉取失败"), tone: "error" });
+    setLocalNotice({ message: errorMessage(error, "模型列表拉取失败"), tone: "error" });
   } finally {
     busy.value = "";
   }
@@ -67,17 +122,39 @@ async function fetchModels() {
 
 async function testConnection() {
   busy.value = "test";
+  clearLocalNotice();
   try {
-    const data = await apiRequest<{ ok?: boolean }>("/api/ai-settings/test", { method: "POST", json: {} });
-    emit("notify", {
-      message: data.ok ? "AI 服务连接成功" : "AI 服务连接失败，请检查设置",
-      tone: data.ok ? "success" : "error",
-    });
+    // 用当前对话框里填的值测，不必先保存。
+    const data = await apiRequest<{ ok?: boolean; warning_codes?: string[] }>(
+      "/api/ai-settings/test",
+      {
+        method: "POST",
+        json: {
+          endpoint_url: endpointUrl.value,
+          api_key: apiKey.value,
+          model: model.value,
+        },
+      },
+    );
+    if (data.ok) {
+      const warnings = data.warning_codes && data.warning_codes.length
+        ? `（${data.warning_codes.join(", ")}）`
+        : "";
+      setLocalNotice({ message: `AI 服务连接成功${warnings}`, tone: "success" });
+    } else {
+      const code = data.warning_codes && data.warning_codes[0] ? data.warning_codes[0] : "未知错误";
+      setLocalNotice({ message: `AI 服务连接失败（${code}）`, tone: "error" });
+    }
   } catch (error) {
-    emit("notify", { message: errorMessage(error, "AI 服务连接失败"), tone: "error" });
+    setLocalNotice({ message: errorMessage(error, "AI 服务连接失败"), tone: "error" });
   } finally {
     busy.value = "";
   }
+}
+
+function selectModel(item: string) {
+  model.value = item;
+  modelDropdownOpen.value = false;
 }
 </script>
 
@@ -100,13 +177,46 @@ async function testConnection() {
         <input v-model="apiKey" type="password" autocomplete="off" :placeholder="maskedKey || '输入 API Key'">
         <small v-if="maskedKey">已保存：{{ maskedKey }}；留空将继续使用原密钥。</small>
       </label>
-      <label class="field-label">
+      <div ref="modelFieldRef" class="field-label model-field">
         <span>模型</span>
-        <input v-model.trim="model" list="ai-model-list" placeholder="输入或选择模型">
-        <datalist id="ai-model-list">
-          <option v-for="item in models" :key="item" :value="item" />
-        </datalist>
-      </label>
+        <div class="model-input-wrap">
+          <input
+            v-model.trim="model"
+            type="text"
+            placeholder="输入或选择模型"
+            autocomplete="off"
+            @click="modelDropdownOpen = true"
+          >
+          <button
+            type="button"
+            class="model-chevron"
+            :aria-expanded="modelDropdownOpen"
+            aria-label="展开模型列表"
+            @click="modelDropdownOpen = !modelDropdownOpen"
+          >
+            <ChevronDown :size="16" />
+          </button>
+          <ul v-if="modelDropdownOpen && filteredModels.length" class="model-dropdown">
+            <li
+              v-for="item in filteredModels"
+              :key="item"
+              :class="{ active: item === model }"
+              @mousedown.prevent="selectModel(item)"
+            >
+              {{ item }}
+            </li>
+          </ul>
+        </div>
+      </div>
+      <div
+        v-if="localNotice"
+        class="ai-local-notice"
+        :data-tone="localNotice.tone"
+        role="status"
+        aria-live="polite"
+      >
+        {{ localNotice.message }}
+      </div>
       <div class="button-row">
         <button class="button primary" type="submit" :disabled="Boolean(busy)">
           {{ busy === "save" ? "保存中…" : "保存设置" }}
@@ -121,3 +231,105 @@ async function testConnection() {
     </form>
   </BaseDialog>
 </template>
+
+<style scoped>
+.model-field {
+  position: relative;
+}
+
+.model-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.model-input-wrap input {
+  width: 100%;
+  padding-right: 2rem;
+}
+
+.model-chevron {
+  position: absolute;
+  right: 0.4rem;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0.2rem;
+  display: inline-flex;
+  align-items: center;
+  color: inherit;
+  opacity: 0.6;
+}
+
+.model-chevron:hover {
+  opacity: 1;
+}
+
+.model-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 0.25rem;
+  max-height: 14rem;
+  overflow-y: auto;
+  background: var(--bg, #fff);
+  border: 1px solid var(--border, #ddd);
+  border-radius: 0.4rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  list-style: none;
+  padding: 0.25rem 0;
+  z-index: 10;
+}
+
+.model-dropdown li {
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.875rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-dropdown li:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.model-dropdown li.active {
+  background: var(--primary-bg, rgba(0, 120, 212, 0.12));
+  font-weight: 600;
+}
+
+.ai-local-notice {
+  font-size: 0.85rem;
+  line-height: 1.3;
+  padding: 0.45rem 0.65rem;
+  border-radius: 0.35rem;
+  border: 1px solid transparent;
+  word-break: break-all;
+}
+
+.ai-local-notice[data-tone="success"] {
+  color: #1a7f37;
+  background: #e8f5ec;
+  border-color: #b7dec3;
+}
+
+.ai-local-notice[data-tone="error"] {
+  color: #b42318;
+  background: #fdecea;
+  border-color: #f5c6c0;
+}
+
+.ai-local-notice[data-tone="warning"] {
+  color: #946300;
+  background: #fff8e0;
+  border-color: #f3d97e;
+}
+
+.ai-local-notice[data-tone="info"] {
+  color: #2c5282;
+  background: #eef4fb;
+  border-color: #c5d8ee;
+}
+</style>

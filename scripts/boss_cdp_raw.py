@@ -2519,9 +2519,13 @@ def prepare_cdp_profile(copy_login_state=False, reset=False):
 
 
 def is_cdp_ready(cdp_port):
+    # 用标准库 urllib 而不是模块级 requests —— requests 默认是 None，
+    # 只有 require_runtime_dependencies 被调用后才会 import。
+    # ensure_chrome_ready 在 preflight 之前调用 is_cdp_ready，此时 requests
+    # 可能尚未初始化，用 requests 会导致永远返回 False（90s 超时）。
     try:
-        resp = requests.get(f"http://127.0.0.1:{cdp_port}/json/version", timeout=2)
-        return resp.status_code == 200
+        resp = urlopen(f"http://127.0.0.1:{cdp_port}/json/version", timeout=2)
+        return resp.status == 200
     except Exception:
         return False
 
@@ -2719,14 +2723,32 @@ def wait_for_cdp(cdp_port, timeout=30):
 
 
 def launch_chrome(cmd):
+    """Launch Chrome detached, with stderr captured to a log file for diagnostics.
+
+    Returns the ``subprocess.Popen`` handle so callers can check ``poll()``
+    to detect early exit instead of waiting the full CDP timeout.
+    """
+    # 把 Chrome 的 stderr 写到日志文件，启动失败时能直接看到原因
+    # （Chrome 是 GUI 程序，但启动失败信息会进 stderr）
+    log_dir = os.path.dirname(DEFAULT_CDP_DATA_DIR)
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except Exception:
+        pass
+    log_path = os.path.join(DEFAULT_CDP_DATA_DIR, "chrome_stderr.log")
+    try:
+        stderr_fh = open(log_path, "ab", buffering=0)
+    except Exception:
+        stderr_fh = subprocess.DEVNULL
     kwargs = {
         "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stderr": stderr_fh,
     }
     if platform.system() == "Windows":
-        creationflags = 0
-        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+        # 注意：不要加 DETACHED_PROCESS —— 实测在 Windows 上会导致 Chrome 启动后
+        # 立即退出（exit code=21），9222 端口从未开放。只保留 CREATE_NEW_PROCESS_GROUP
+        # 让 Chrome 在独立进程组里运行即可，Flask 退出也不会立即带走它。
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         if creationflags:
             kwargs["creationflags"] = creationflags
     else:

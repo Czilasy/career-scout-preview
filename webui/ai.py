@@ -184,28 +184,65 @@ def delete_api_key(credential_ref: str) -> None:
 # ---------------------------------------------------------------------------
 
 def test_connection(endpoint_url: str, api_key: str, model: str = "") -> dict:
-    """Probe the real candidate-v3 extraction capability with fictional data."""
-    fictional_resume = "虚构候选人：具备 Python 后端经验，负责演示订单系统。"
-    messages = DiscoveryAIProvider._build_analyze_messages(fictional_resume)
+    """Ping the chat completions endpoint to verify connectivity and auth.
+
+    Sends a minimal request and only checks that the endpoint responds with a
+    non-empty assistant reply.  This intentionally avoids the heavy candidate-v3
+    contract validation and the retry/backoff logic in ``call_ai`` so that the
+    "测试连接" button returns in seconds rather than tens of seconds.
+    """
+    url = _chat_completions_url(endpoint_url)
+    if not url:
+        return {"ok": False, "transport": "failed", "generation": "failed",
+                "candidate_contract": "manual_required", "warning_codes": [ERROR_NETWORK]}
+
+    payload = {
+        "model": model or "auto",
+        "messages": [{"role": "user", "content": "reply with exactly: pong"}],
+        "temperature": 0.3,
+        "max_tokens": 24,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
     try:
-        response = call_ai(
-            endpoint_url, api_key, messages, model=model or "auto",
-            timeout=CONNECTION_TIMEOUT,
-        )
-    except AISecurityError as exc:
-        transport = "failed" if exc.error_code in {ERROR_TIMEOUT, ERROR_AUTH, ERROR_NETWORK} else "ready"
-        return {"ok": False, "transport": transport, "generation": "failed",
-                "candidate_contract": "manual_required", "warning_codes": [exc.error_code]}
+        response = requests.post(url, json=payload, headers=headers, timeout=CONNECTION_TIMEOUT)
+    except requests.Timeout:
+        return {"ok": False, "transport": "failed", "generation": "failed",
+                "candidate_contract": "manual_required", "warning_codes": [ERROR_TIMEOUT]}
+    except requests.RequestException:
+        return {"ok": False, "transport": "failed", "generation": "failed",
+                "candidate_contract": "manual_required", "warning_codes": [ERROR_NETWORK]}
+    except Exception:
+        return {"ok": False, "transport": "failed", "generation": "failed",
+                "candidate_contract": "manual_required", "warning_codes": [ERROR_INVALID]}
+
+    if response.status_code in (401, 403):
+        return {"ok": False, "transport": "failed", "generation": "failed",
+                "candidate_contract": "manual_required", "warning_codes": [ERROR_AUTH]}
+    if response.status_code >= 500:
+        return {"ok": False, "transport": "failed", "generation": "failed",
+                "candidate_contract": "manual_required", "warning_codes": [ERROR_SERVER]}
+    if response.status_code >= 400:
+        return {"ok": False, "transport": "failed", "generation": "failed",
+                "candidate_contract": "manual_required", "warning_codes": [ERROR_INVALID]}
+
     try:
-        parsed = cleanup_candidate_analysis_response(response)
-        normalized = normalize_candidate_analysis(parsed, fictional_resume)
-    except (ValueError, TypeError, json.JSONDecodeError):
+        data = response.json()
+        choice = data["choices"][0]
+        message = choice["message"]
+        # Reasoning models (DeepSeek, GLM-5.2, etc.) may put tokens into
+        # reasoning_content while leaving content empty when max_tokens is tight.
+        # We accept either field as proof the chat completions pipeline works.
+        content = str(message.get("content") or "").strip()
+        reasoning = str(message.get("reasoning_content") or "").strip()
+        if not content and not reasoning:
+            raise ValueError("empty reply")
+    except Exception:
         return {"ok": False, "transport": "ready", "generation": "failed",
                 "candidate_contract": "manual_required", "warning_codes": [ERROR_INVALID]}
-    quality = normalized["quality"]
-    warning_codes = list(dict.fromkeys(item["code"] for item in quality["warnings"]))
+
     return {"ok": True, "transport": "ready", "generation": "ready",
-            "candidate_contract": quality["status"], "warning_codes": warning_codes}
+            "candidate_contract": "manual_required", "warning_codes": []}
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +571,7 @@ def _validate_unified_fields(data) -> dict:
 SCREEN_BATCH_SIZE = 50   # Stage A 每批送 AI 的岗位数（默认值，可被高级设置覆盖）
 SCREEN_CONCURRENCY = 1   # Stage A 并发批次数（默认值，可被高级设置覆盖）
 MATCH_BATCH_SIZE = 4     # Stage B 每批送 AI 的岗位数（默认值，可被高级设置覆盖）
+MATCH_CONCURRENCY = 1    # Stage B 并发批次数（默认值，可被高级设置覆盖）
 
 
 def _adv_setting(key, default):
@@ -741,7 +779,8 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
 
 
 def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
-              batch_size=None, progress=None, completed_verdicts=None):
+              batch_size=None, progress=None, completed_verdicts=None,
+              concurrency=None):
     """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
 
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
@@ -751,9 +790,14 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
 
     ``completed_verdicts``: 可选，已完成的判定 {job_id: verdict}（断点续筛）。
     这些岗位跳过不重复调用 AI，原样并入返回；默认 None 时行为与之前一致。
+
+    ``concurrency``: 并发批次数，默认 1（串行）。spec 007 ⑥⑦：免费端点实测并发=1；
+        换不限流端点可调大。>1 时用线程池并发提交批次，结果按完成顺序合并。
     """
     if batch_size is None:
         batch_size = int(_adv_setting("match_batch_size", MATCH_BATCH_SIZE))
+    if concurrency is None:
+        concurrency = int(_adv_setting("match_concurrency", MATCH_CONCURRENCY))
     verdicts = {}
     if completed_verdicts:
         done_ids = {str(k) for k in completed_verdicts}
@@ -833,14 +877,46 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             }
         return batch_verdicts
 
+    batches = []
     for start in range(0, len(jobs_with_jd), batch_size):
-        batch = jobs_with_jd[start:start + batch_size]
-        verdicts.update(_match_one_batch(batch))
-        if progress is not None:
+        batches.append(jobs_with_jd[start:start + batch_size])
+
+    if concurrency <= 1 or len(batches) <= 1:
+        # 串行（默认，免费端点并发=1）
+        processed = 0
+        for batch in batches:
+            verdicts.update(_match_one_batch(batch))
+            processed += len(batch)
+            if progress is not None:
+                try:
+                    progress(min(processed, len(jobs_with_jd)), len(jobs_with_jd))
+                except Exception:
+                    pass
+    else:
+        # 并发（换不限流端点时启用）
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        lock = threading.Lock()
+        processed_counter = [0]
+
+        def _safe_progress(n_done):
+            if progress is None:
+                return
+            with lock:
+                processed_counter[0] += n_done
+                cur = min(processed_counter[0], len(jobs_with_jd))
             try:
-                progress(min(start + batch_size, len(jobs_with_jd)), len(jobs_with_jd))
+                progress(cur, len(jobs_with_jd))
             except Exception:
                 pass
+
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {pool.submit(_match_one_batch, batch): batch for batch in batches}
+            for fut in as_completed(futures):
+                batch_verdicts = fut.result()
+                with lock:
+                    verdicts.update(batch_verdicts)
+                _safe_progress(len(futures[fut]))
     return {"verdicts": verdicts}
 
 

@@ -85,6 +85,7 @@ const keywords = ref<Array<{ word: string; recommended: boolean }>>([]);
 const selectedKeywords = ref<string[]>([]);
 const customKeyword = ref("");
 const cityText = ref("");
+const customCity = ref("");
 const fieldLabels = ref<Record<string, FieldLabel>>({});
 const filterValues = ref<Record<string, string[]>>({});
 const profileSummary = ref("");
@@ -109,6 +110,7 @@ const advancedSettings = ref<Record<string, number>>({
   screen_batch_size: 50,
   screen_concurrency: 1,
   match_batch_size: 4,
+  match_concurrency: 1,
 });
 let pollTimer: number | undefined;
 
@@ -332,6 +334,22 @@ function confirmCities() {
     return;
   }
   notify(`已确认 ${cities.length} 个城市：${cities.join("、")}`, "success");
+}
+
+function addCustomCity() {
+  const city = customCity.value.trim().replace(/[，,]+$/, "");
+  if (!city) return;
+  if (cityList.value.includes(city)) {
+    customCity.value = "";
+    return;
+  }
+  const current = cityText.value.trim().replace(/[，,]+$/, "");
+  cityText.value = current ? `${current},${city}` : city;
+  customCity.value = "";
+}
+
+function removeCity(city: string) {
+  cityText.value = cityList.value.filter((c) => c !== city).join(",");
 }
 
 function toggleFilter(key: string, code: string) {
@@ -780,10 +798,17 @@ async function retryJd(job: JobItem) {
             </label>
             <button class="button secondary align-end" type="button" @click="addCustomKeyword">添加</button>
             <label class="field-label grow">
-              <span>城市（逗号分隔）</span>
-              <input v-model="cityText" type="text" placeholder="上海，杭州">
+              <span>城市</span>
+              <input v-model="customCity" type="text" placeholder="输入后按回车添加" @keydown.enter.prevent="addCustomCity">
             </label>
-            <button class="button secondary align-end" type="button" @click="confirmCities">添加</button>
+            <button class="button secondary align-end" type="button" @click="addCustomCity">添加</button>
+          </div>
+          <div v-if="cityList.length" class="city-chips-row">
+            <span class="city-chips-label">已添加：</span>
+            <span v-for="city in cityList" :key="city" class="city-chip">
+              {{ city }}
+              <button type="button" class="city-chip-remove" aria-label="删除城市" @click="removeCity(city)">×</button>
+            </span>
           </div>
           <label class="field-label">
             <span>求职画像（用于 AI 精筛）<small v-if="!profileSummary">　未填写将跳过精筛</small></span>
@@ -795,11 +820,12 @@ async function retryJd(job: JobItem) {
           <summary><SlidersHorizontal :size="17" aria-hidden="true" />高级执行设置</summary>
           <div class="advanced-grid">
             <label class="field-label"><span>每组合翻页数 <i class="tip" data-tip="每个关键词×城市组合抓多少页，页数越多岗位越多但耗时更长">?</i></span><input v-model.number="advancedSettings.pages" type="number" min="1" max="30"></label>
-            <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="两个搜索组合之间等待多久，太短容易触发反爬">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" min="5" max="120"></label>
-            <label class="field-label"><span>详情批次大小 <i class="tip" data-tip="每批同时打开几个岗位详情页抓JD，越大越快但浏览器压力越大">?</i></span><input v-model.number="advancedSettings.detail_batch_size" type="number" min="1" max="10"></label>
-            <label class="field-label"><span>粗筛每批数量 <i class="tip" data-tip="一次发给AI多少条岗位做粗筛，越大单次等待越久">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" min="10" max="100"></label>
-            <label class="field-label"><span>粗筛并发数 <i class="tip" data-tip="同时发几个AI请求，免费端点建议保持1否则429限流">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" min="1" max="5"></label>
-            <label class="field-label"><span>精筛每批数量 <i class="tip" data-tip="JD精筛时一次发几条给AI对比，越大单次等待越久">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" min="1" max="10"></label>
+            <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="两个搜索组合之间等待多久，实际会±5秒随机抖动；太短容易触发反爬">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" min="5" max="120"></label>
+            <label class="field-label"><span>详情批次大小 <i class="tip" data-tip="每批交给浏览器子进程抓JD的岗位数；子进程内部固定3个tab轮询，调大总体略快但浏览器压力更大">?</i></span><input v-model.number="advancedSettings.detail_batch_size" type="number" min="1" max="10"></label>
+            <label class="field-label"><span>粗筛每批数量 <i class="tip" data-tip="粗筛时每次发多少条岗位摘要给AI判断；并发数由粗筛并发数控制">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" min="10" max="100"></label>
+            <label class="field-label"><span>粗筛并发数 <i class="tip" data-tip="粗筛同时发几个AI请求，每个请求带粗筛每批数量条岗位；免费端点建议保持1否则429限流">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" min="1" max="5"></label>
+            <label class="field-label"><span>精筛每批数量 <i class="tip" data-tip="精筛时每次发多少条带JD的岗位给AI判断；并发数由精筛并发数控制">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" min="1" max="10"></label>
+            <label class="field-label"><span>精筛并发数 <i class="tip" data-tip="精筛同时发几个AI请求，每个请求带精筛每批数量条岗位；免费端点建议保持1否则429限流">?</i></span><input v-model.number="advancedSettings.match_concurrency" type="number" min="1" max="5"></label>
           </div>
           <button class="button secondary" type="button" :disabled="advancedBusy" @click="saveAdvancedSettings">
             {{ advancedBusy ? "保存中…" : "保存高级设置" }}

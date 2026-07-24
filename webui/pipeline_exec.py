@@ -25,7 +25,12 @@ from scripts import boss_cdp_raw as boss
 # ---------------------------------------------------------------------------
 # 高级设置（用户可通过前端调整，持久化到 JSON）
 # ---------------------------------------------------------------------------
-ADVANCED_SETTINGS_PATH = Path(os.path.expanduser("~/.career-scout/webui/advanced_settings.json"))
+# 与 app.py 的 DEFAULT_STATE_DIR 保持一致：允许通过环境变量把状态目录改到
+# 项目内，避免在沙箱环境中因无法写用户 home 目录而保存失败。
+_ADVANCED_SETTINGS_DIR = Path(
+    os.environ.get("BOSS_WEBUI_STATE_DIR", os.path.expanduser("~/.career-scout/webui"))
+)
+ADVANCED_SETTINGS_PATH = _ADVANCED_SETTINGS_DIR / "advanced_settings.json"
 
 _ADVANCED_DEFAULTS = {
     "pages": 3,
@@ -34,6 +39,7 @@ _ADVANCED_DEFAULTS = {
     "screen_batch_size": 50,
     "screen_concurrency": 1,
     "match_batch_size": 4,
+    "match_concurrency": 1,
 }
 
 
@@ -63,17 +69,21 @@ def save_advanced_settings(settings: dict) -> None:
 # Auto-launch the debug Chrome (self-contained execution)
 # ---------------------------------------------------------------------------
 
-def ensure_chrome_ready(cdp_port: int | None = None) -> bool:
+def ensure_chrome_ready(cdp_port: int | None = None) -> tuple[bool, str]:
     """Ensure the dedicated debug Chrome is running; launch it if not.
 
-    Returns True when CDP is reachable (already running or just launched).
+    Returns ``(True, "")`` when CDP is reachable (already running or just
+    launched).  Returns ``(False, msg)`` when the browser fails to come up,
+    where ``msg`` carries the cause (early exit / stderr tail / timeout) so
+    the caller can surface it to the user instead of a generic "not ready".
+
     This makes execution self-contained: confirming the params auto-opens the
     browser in front of the user instead of surfacing a raw "CDP unavailable"
     infrastructure error.  Login is checked separately afterwards.
     """
     port = cdp_port or boss.DEFAULT_CDP_PORT
     if boss.is_cdp_ready(port):
-        return True
+        return True, ""
     # Not running: prepare the isolated profile, stop stale processes, launch.
     profile = boss.prepare_cdp_profile()
     cdp_data_dir = profile["path"]
@@ -89,10 +99,66 @@ def ensure_chrome_ready(cdp_port: int | None = None) -> bool:
         "--no-default-browser-check",
         "--remote-allow-origins=*",
     ]
-    boss.launch_chrome(cmd)
-    # A cold Chrome start can take well over 30s to open the debug port, so
-    # wait generously (90s) rather than giving up right before it comes up.
-    return boss.wait_for_cdp(port, timeout=90)
+    proc = boss.launch_chrome(cmd)
+    # 轮询 CDP，同时检查 Chrome 进程是否还活着
+    # 死等 90 秒会让用户莫名其妙，Chrome 早退时立即返回失败原因
+    deadline = time.time() + 90
+    attempt = 0
+    # Windows handoff 机制：当已有相同 user-data-dir 的 Chrome 实例在跑时，
+    # 新启动的 chrome.exe 主进程会把命令行转发给已运行实例并立即退出
+    # （exit code 通常是 0 或 21），但子进程仍在运行并会监听调试端口。
+    # 此时 Popen.poll() 立即返回非 None，但 is_cdp_ready 不久后会变 True。
+    # 所以主进程退出后不能立即认为失败，要继续等 CDP 就绪一段时间。
+    parent_exited_at = None
+    PARENT_EXIT_GRACE = 10  # 主进程退出后给 CDP 10s 宽限期
+    while time.time() < deadline:
+        if boss.is_cdp_ready(port):
+            return True, ""
+        try:
+            rc = proc.poll()
+        except Exception:
+            rc = None
+        if rc is not None:
+            # Chrome 主进程已退出
+            if parent_exited_at is None:
+                parent_exited_at = time.time()
+            # 主进程退出超过宽限期，CDP 还没就绪，才认为真的失败
+            if time.time() - parent_exited_at > PARENT_EXIT_GRACE:
+                attempt += 1
+                if attempt <= 3:
+                    # 重试前清理可能残留的 Chrome 子进程
+                    # （否则新 Chrome 又会 handoff 给旧子进程，无限循环）
+                    try:
+                        boss.stop_cdp_chrome(cdp_data_dir)
+                    except Exception:
+                        pass
+                    time.sleep(2)
+                    proc = boss.launch_chrome(cmd)
+                    parent_exited_at = None
+                    continue
+                # 重试 3 次都失败，返回错误
+                tail = _read_chrome_stderr_tail(cdp_data_dir)
+                if tail:
+                    return False, f"调试浏览器启动后立即退出（exit code={rc}，已重试 {attempt-1} 次）。stderr 末尾：\n{tail}"
+                return False, f"调试浏览器启动后立即退出（exit code={rc}，已重试 {attempt-1} 次），无 stderr 输出。"
+        time.sleep(1)
+    return False, "等待 CDP 就绪超时（90s）。Chrome 进程仍在运行但未开放调试端口。"
+
+
+def _read_chrome_stderr_tail(cdp_data_dir: str, max_chars: int = 800) -> str:
+    """读取 chrome_stderr.log 的末尾内容，用于诊断启动失败。"""
+    log_path = os.path.join(cdp_data_dir, "chrome_stderr.log")
+    try:
+        with open(log_path, "rb") as f:
+            data = f.read()
+        if not data:
+            return ""
+        text = data.decode("utf-8", errors="replace")
+        if len(text) > max_chars:
+            text = "..." + text[-max_chars:]
+        return text.strip()
+    except Exception:
+        return ""
 
 
 def close_debug_chrome(cdp_port: int | None = None) -> bool:
@@ -308,10 +374,11 @@ def run_search(params: dict, source, *, pages: int = 3,
     # Auto-launch the debug Chrome if it isn't running, so the user is shown
     # the browser instead of a raw infrastructure error.
     emit(stage="ensure_chrome", message="检查并启动调试浏览器…")
-    if not ensure_chrome_ready():
+    chrome_ok, chrome_err = ensure_chrome_ready()
+    if not chrome_ok:
         return {"ok": False, "jobs": [], "total_scraped": 0,
                 "total_matched": 0, "combinations": len(combos),
-                "error": "调试浏览器未能在预期时间内就绪。如果已弹出 Chrome 窗口，请等它完全加载后再次点击确认参数；"
+                "error": f"调试浏览器未就绪：{chrome_err}。"
                          "若始终无法启动，请手动运行 scripts/boss_cdp_raw.py --setup-chrome 后重试。"}
 
     # Preflight: CDP connection + BOSS login.

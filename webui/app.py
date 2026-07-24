@@ -22,6 +22,29 @@ from urllib.parse import urlparse
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 FRONTEND_DIST = HERE / "dist"
+
+
+def _resolve_python_executable() -> str:
+    """Find the project venv's Python interpreter.
+
+    uv-created venvs report sys.executable as the *global* uv Python
+    (e.g. ~/.local/share/uv/python/cpython-3.11-.../python.exe) which
+    does NOT carry the venv's site-packages.  Scraper subprocesses spawned
+    with that interpreter fail on ``import requests``.  Prefer the venv's
+    own python[.exe] sitting next to the project so child processes inherit
+    the correct dependency set.
+    """
+    explicit = os.environ.get("BOSS_PYTHON")
+    if explicit:
+        return explicit
+    # .venv lives at PROJECT_ROOT/.venv
+    if os.name == "nt":
+        candidate = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
+    else:
+        candidate = PROJECT_ROOT / ".venv" / "bin" / "python"
+    if candidate.is_file():
+        return str(candidate)
+    return sys.executable
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -536,7 +559,7 @@ def create_app(config=None):
     app.config.update(
         RESULT_DIR=str(boss.DEFAULT_RESULT_DIR),
         DB_PATH=str(DEFAULT_STATE_DIR / "webui.db"),
-        PYTHON_EXECUTABLE=os.environ.get("BOSS_PYTHON", sys.executable),
+        PYTHON_EXECUTABLE=_resolve_python_executable(),
         START_TASKS=True,
         API_TOKEN=secrets.token_urlsafe(24),
         SESSION_COOKIE_NAME="boss_local_session",
@@ -816,6 +839,34 @@ def create_app(config=None):
 
     # == US1: AI settings, profiles, resumes =============================
 
+    def _resolve_credentials_from_request():
+        """从请求 body 读取 endpoint_url/api_key/model，缺的用已保存设置兜底。
+
+        供 /api/ai-settings/test 和 /api/ai-settings/models 使用：让用户
+        不点"保存设置"也能用当前对话框里填的值直接测试/拉取。返回
+        (endpoint_url, api_key, model)；endpoint_url 或 api_key 既不在请求
+        里也没有已保存值时抛 ValueError。
+        """
+        raw = request.get_json(silent=True) or {}
+        endpoint_url = str(raw.get("endpoint_url") or "").strip()
+        api_key = str(raw.get("api_key") or "").strip()
+        model = str(raw.get("model") or "").strip()
+
+        settings = store.get_ai_settings()
+        if not endpoint_url:
+            endpoint_url = settings.get("endpoint_url") or ""
+        if not api_key:
+            cred_ref = store.get_credential_ref()
+            api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
+        if not model:
+            model = settings.get("model", "")
+
+        if not endpoint_url:
+            raise ValueError("请先填写 AI 服务 URL")
+        if not api_key:
+            raise ValueError("API Key 未配置")
+        return endpoint_url, api_key, model
+
     @app.route("/api/ai-settings", methods=["GET", "PUT"])
     def ai_settings():
         if request.method == "GET":
@@ -845,29 +896,23 @@ def create_app(config=None):
 
     @app.route("/api/ai-settings/test", methods=["POST"])
     def ai_settings_test():
-        settings = store.get_ai_settings()
-        endpoint_url = settings.get("endpoint_url") or ""
-        if not endpoint_url:
-            raise ValueError("请先保存 AI 服务 URL")
-        cred_ref = store.get_credential_ref()
-        api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
-        capability = ai_service.test_connection(endpoint_url, api_key, model=settings.get("model", ""))
+        # 优先用请求 body 里当前对话框填的值；缺的再用已保存设置兜底
+        endpoint_url, api_key, model = _resolve_credentials_from_request()
+        capability = ai_service.test_connection(endpoint_url, api_key, model=model)
         new_status = "ready" if capability["ok"] else "failed"
         error_code = capability["warning_codes"][0] if not capability["ok"] and capability["warning_codes"] else None
         store.update_ai_status(new_status, last_error_code=error_code)
         return jsonify(capability)
 
-    @app.route("/api/ai-settings/models", methods=["GET"])
+    @app.route("/api/ai-settings/models", methods=["POST"])
     def ai_settings_models():
-        """拉取可用模型列表。前端持 key 不安全，由后端代理 GET /models。"""
-        settings = store.get_ai_settings()
-        endpoint_url = settings.get("endpoint_url") or ""
-        if not endpoint_url:
-            raise ValueError("请先保存 AI 服务 URL")
-        cred_ref = store.get_credential_ref()
-        api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
-        if not api_key:
-            raise ValueError("API Key 未配置")
+        """拉取可用模型列表。前端持 key 不安全，由后端代理 GET /models。
+
+        改成 POST：前端可把当前对话框里填的 endpoint_url/api_key/model
+        放进 body，不必先点"保存设置"就能拉取。body 里缺的字段回退到
+        已保存设置（与 /test 路由一致）。
+        """
+        endpoint_url, api_key, _model = _resolve_credentials_from_request()
         try:
             models = ai_service.list_models(endpoint_url, api_key)
         except ai_service.AISecurityError as exc:
@@ -2258,8 +2303,9 @@ def create_app(config=None):
             jd_map = dict(resume_jd)
             if survivors:
                 emit(stage="ensure_chrome", message="启动调试浏览器，准备抓取 JD…")
-                if not ensure_chrome_ready():
-                    raise RuntimeError("chrome_not_ready")
+                chrome_ok, chrome_err = ensure_chrome_ready()
+                if not chrome_ok:
+                    raise RuntimeError(f"chrome_not_ready: {chrome_err}")
                 source = _make_discovery_source()
                 if source is None:
                     raise RuntimeError("source_unavailable")
@@ -2864,9 +2910,10 @@ def create_app(config=None):
         if not job_id or not source_url:
             return jsonify({"ok": False, "error": "缺少 job_id 或 source_url"}), 400
 
-        if not ensure_chrome_ready():
+        chrome_ok, chrome_err = ensure_chrome_ready()
+        if not chrome_ok:
             return jsonify({"ok": False,
-                            "error": "调试浏览器未能就绪，无法抓取详情"}), 503
+                            "error": f"调试浏览器未能就绪：{chrome_err}"}), 503
 
         source = _make_discovery_source()
         if source is None:
@@ -2999,8 +3046,9 @@ def create_app(config=None):
             return jsonify({"ok": False, "error": "缺少 source_url 或 job_link",
                             "job_id": job_id}), 400
 
-        if not ensure_chrome_ready():
-            return jsonify({"error": "CDP Chrome 未运行，请先启动",
+        chrome_ok, chrome_err = ensure_chrome_ready()
+        if not chrome_ok:
+            return jsonify({"error": f"CDP Chrome 未运行：{chrome_err}",
                             "error_code": "cdp_not_ready"}), 503
 
         source = _make_discovery_source()

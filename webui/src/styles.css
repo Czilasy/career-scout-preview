@@ -417,7 +417,7 @@ button:disabled {
   padding: clamp(22px, 3vw, 34px);
 }.upload-layout {
   display: grid;
-  grid-template-columns: minmax(0, .92fr) minmax(360px, 1.08fr);
+  grid-template-columns: minmax(220px, .92fr) minmax(360px, 1.08fr);
   gap: clamp(28px, 5vw, 72px);
   align-items: center;
   min-height: 480px;
@@ -437,6 +437,7 @@ button:disabled {
   font-weight: 800;
   letter-spacing: .09em;
   text-transform: uppercase;
+  white-space: nowrap;
 }.feature-list {
   display: grid;
   gap: 12px;
@@ -590,6 +591,35 @@ button:disabled {
 }.choice-chip small {
   color: var(--muted);
   font-size: 10px;
+}.city-chips-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: -6px 0 18px;
+  font-size: 13px;
+}.city-chips-label {
+  color: var(--muted);
+}.city-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  background: var(--surface-2, #eef2f7);
+  color: var(--text, #1f2937);
+  font-size: 12px;
+  line-height: 1.4;
+}.city-chip-remove {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+}.city-chip-remove:hover {
+  color: var(--danger, #dc2626);
 }.inline-input-row {
   display: flex;
   align-items: stretch;
@@ -625,9 +655,15 @@ button:disabled {
   border-bottom: 1px solid var(--line);
 }.advanced-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
   padding: 20px 20px 14px;
+}
+.advanced-grid .field-label input[type="number"] {
+  width: 100%;
+  max-width: 110px;
+  padding: 6px 8px;
+  font-size: 13px;
 }.advanced-panel > .button {
   margin: 0 20px 20px;
 }.workflow-actions {
@@ -1068,6 +1104,10 @@ body,
     grid-template-columns: minmax(300px, .9fr) minmax(360px, 1.1fr);
   }.advanced-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }.upload-layout {
+    grid-template-columns: 1fr;
+    gap: 28px;
+    min-height: 0;
   }
 }
 
@@ -1213,6 +1253,7 @@ body,
 
 /* 刷新后接回任务的恢复提示条：页面最顶部，accent 色调 */
 .restore-banner {
+  grid-column: 1 / -1; /* 横跨 view-shell 的两列布局，避免只推挤左侧窄栏 */
   display: flex;
   align-items: center;
   gap: 8px;

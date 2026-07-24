@@ -25,6 +25,7 @@ describe("DiscoveryView", () => {
             screen_batch_size: 50,
             screen_concurrency: 1,
             match_batch_size: 4,
+            match_concurrency: 1,
           },
           defaults: {},
         });

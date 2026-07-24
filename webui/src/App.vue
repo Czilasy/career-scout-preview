@@ -185,7 +185,6 @@ function acceptCreatedProfile(profile: CandidateProfile) {
     <AiSettingsDialog
       :open="aiSettingsOpen"
       @close="aiSettingsOpen = false"
-      @notify="showNotice"
     />
   </div>
 </template>
