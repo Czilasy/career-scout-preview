@@ -1371,7 +1371,7 @@ def create_app(config=None):
         screening_results 判定）：进程重启或失败后，同一抓取任务再次发起
         筛选且条件一致时自动接着上次进度（``resume_from_run_id``）。
         """
-        from webui.pipeline_exec import ensure_chrome_ready, close_debug_chrome, fetch_job_details
+        from webui.pipeline_exec import ensure_chrome_ready, close_debug_chrome, fetch_job_details, _FAILED_CODE_LABELS
         from webui.ai import screen_jobs, match_jds
 
         with _pipeline_lock:
@@ -1644,7 +1644,12 @@ def create_app(config=None):
                     else:
                         # 未抓到 JD 的岗位无法精筛，标记待定（不红不绿）
                         job["verdict"] = "uncertain"
-                        job["verdict_reason"] = "未抓到 JD，无法精筛"
+                        code = job.get("jd_failed_code", "")
+                        label = _FAILED_CODE_LABELS.get(code, "")
+                        if label:
+                            job["verdict_reason"] = f"未抓到 JD（{label}），无法精筛"
+                        else:
+                            job["verdict_reason"] = "未抓到 JD，无法精筛"
 
                 match_count = sum(1 for j in enriched if j.get("verdict") == "match")
             if _stop_requested():

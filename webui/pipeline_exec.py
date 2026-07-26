@@ -592,6 +592,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             jid = f"idx{idx}"
         indexed_jobs.append((idx, jid, dict(job, job_id=jid)))
     jd_by_idx = {}
+    jd_fail_by_idx: dict[int, str] = {}
     done = 0
     fetched = 0
     login_wall = False
@@ -631,6 +632,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             elif outcome is not None and outcome.failed_code == "source_login_required":
                 # BOSS 登录失效：停后续批次并上报（别继续抓空气还装完成）
                 login_wall = True
+            if not jd and outcome is not None and outcome.failed_code:
+                jd_fail_by_idx[idx] = outcome.failed_code
             jd_by_idx[idx] = jd
             if jd:
                 fetched += 1
@@ -651,6 +654,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             enriched.append(e)
             continue
         e["jd"] = jd_by_idx.get(idx, "")
+        if not e["jd"] and idx in jd_fail_by_idx:
+            e["jd_failed_code"] = jd_fail_by_idx[idx]
         enriched.append(e)
     return {"jobs": enriched, "login_wall": login_wall,
             "stopped": stopped, "fetched": fetched}
