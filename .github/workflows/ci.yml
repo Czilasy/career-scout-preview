@@ -15,7 +15,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Install uv
         run: pip install uv
@@ -24,10 +24,10 @@ jobs:
         run: uv sync
 
       - name: Run tests
-        run: python -m unittest discover tests
+        run: uv run python -m unittest discover -s tests -p "test_*.py"
 
       - name: Syntax check
-        run: python -m py_compile scripts/boss_cdp_raw.py
+        run: uv run python -m py_compile scripts/boss_cdp_raw.py
 
   frontend-build:
     runs-on: ubuntu-latest
@@ -40,7 +40,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: "20"
           cache: npm
           cache-dependency-path: webui/package-lock.json
 
