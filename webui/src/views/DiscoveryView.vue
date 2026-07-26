@@ -481,6 +481,8 @@ async function startScrape() {
   advancedPanelOpen.value = false;
   scrapeBusy.value = true;
   scrapeCompleted.value = false;
+  resultLoaded.value = false;
+  pipelineResult.value = null;
   scrapeSnapshot.value = { status: "running", progress: { message: "正在创建抓取任务…" }, logs: [] };
   try {
     const data = await apiRequest<{ task_id: string }>("/api/execute-search", {
@@ -786,12 +788,20 @@ async function retryJd(job: JobItem) {
   if (!id || jdBusyIds.value.has(id)) return;
   withBusy(jdBusyIds, id, true);
   try {
-    const data = await apiRequest<{ jd: string }>(`/api/pipeline/jobs/${encodeURIComponent(id)}/jd`, {
+    const data = await apiRequest<{ jd: string; verdict?: string; verdict_reason?: string; caveats?: string[] }>(
+      `/api/pipeline/jobs/${encodeURIComponent(id)}/jd`, {
       method: "POST",
       json: { source_url: job.source_url || job.job_link || job.canonical_url },
     });
     job.jd = data.jd;
-    notify("JD 已补抓；原 AI 判定保持不变", "success");
+    if (data.verdict) {
+      job.verdict = data.verdict as JobItem["verdict"];
+      job.verdict_reason = data.verdict_reason || "";
+      job.caveats = data.caveats || [];
+      notify(`JD 已补抓，AI 判定：${data.verdict === "match" ? "匹配" : "不匹配"}`, "success");
+    } else {
+      notify("JD 已补抓（AI 未判定，可点全部重抓触发精筛）", "success");
+    }
   } catch (error) {
     notify(errorMessage(error, "JD 补抓失败"), "error");
   } finally {

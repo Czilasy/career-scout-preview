@@ -2346,9 +2346,9 @@ def create_app(config=None):
                             "error": "详情页未提取到 JD 正文，岗位可能已下架",
                             "job_id": job_id}), 502
 
-        # 抓到 JD 后回写数据库中匹配的 job 项；
-        # spec 要求补抓不重跑 AI、不跨 tab，故只更新 jd，verdict 等其它字段保持不变。
+        # 抓到 JD 后回写数据库中匹配的 job 项，并尝试单条 AI 精筛
         persisted = False
+        verdict_info: dict = {}
         payload = store.load_latest_pipeline_result()
         if payload is not None:
             result = payload.get("result") or {}
@@ -2363,13 +2363,40 @@ def create_app(config=None):
                 if run_id:
                     store.update_pipeline_job_jd(run_id, str(job_id), jd)
                     persisted = True
-            else:
-                app.logger.warning(
-                    "pipeline_job_refetch_jd: job_id=%s 在最近一次运行结果中未找到匹配项，未回写",
-                    job_id,
-                )
 
-        return jsonify({"ok": True, "jd": jd, "job_id": job_id, "persisted": persisted})
+                # 单条 AI 精筛：有画像 + AI 已配置 → 判定后回写
+                profile_summary = str(result.get("profile_summary", "")).strip()
+                settings = store.get_ai_settings()
+                cred_ref = store.get_credential_ref()
+                api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
+                endpoint_url = settings.get("endpoint_url", "")
+                if profile_summary and api_key and endpoint_url:
+                    from webui.ai import match_jds
+                    job_for_ai = {"job_id": job_id, "jd": jd, "source_url": source_url}
+                    # 把原始岗位信息也带上（标题、薪资等供 AI 参考）
+                    for item in jobs:
+                        if isinstance(item, dict) and str(item.get("job_id")) == str(job_id):
+                            job_for_ai.update({k: v for k, v in item.items()
+                                              if k in ("title", "salary", "company", "location")})
+                            break
+                    try:
+                        res = match_jds(
+                            [job_for_ai], profile_summary, endpoint_url, api_key,
+                            model=settings.get("model", ""))
+                        v = (res.get("verdicts") or {}).get(job_id)
+                        if v:
+                            verdict_info = {
+                                "verdict": v.get("verdict"),
+                                "verdict_reason": v.get("reason"),
+                                "caveats": v.get("caveats", []),
+                            }
+                            if run_id:
+                                store.save_screening_verdicts(run_id, {job_id: v})
+                    except Exception:
+                        pass  # AI 失败不阻断 JD 补抓
+
+        return jsonify({"ok": True, "jd": jd, "job_id": job_id,
+                        "persisted": persisted, **verdict_info})
 
     @app.route("/api/pipeline/recrawl", methods=["POST"])
     def pipeline_recrawl():
@@ -2427,7 +2454,11 @@ def create_app(config=None):
             stage = str(kw.get("stage", ""))
             current = int(kw.get("current") or 0)
             total = int(kw.get("total") or 0)
-            kw["overall_percent"] = _screen_overall_percent(stage, current, total)
+            # 重抓只有两阶段，不复用主筛选的权重（那个 0-40% 留给粗筛了）
+            _RECRRAWL_WEIGHTS = {"fetch_jd": (0, 60), "screen_b": (60, 100), "done": (100, 100)}
+            start, end = _RECRRAWL_WEIGHTS.get(stage, (0, 100))
+            ratio = min(1.0, max(0.0, current / total)) if total > 0 else 0.0
+            kw["overall_percent"] = min(100, round(start + (end - start) * ratio))
             if not kw.get("message"):
                 kw["message"] = _SCREEN_STAGE_MESSAGES.get(stage, "")
             with _pipeline_lock:
