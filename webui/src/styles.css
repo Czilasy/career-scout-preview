@@ -647,6 +647,10 @@ button:disabled {
 }.search-col {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+}.search-col .inline-input-row {
+  margin-top: auto;
 }.search-col-title {
   margin: 0 0 8px;
   font-size: 12px;
