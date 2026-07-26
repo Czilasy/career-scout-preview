@@ -2396,6 +2396,7 @@ def create_app(config=None):
         """批量重抓后台任务：补 JD + 重判，进度与结果通过 _pipeline_tasks 暴露。"""
         from webui.pipeline_exec import (
             ensure_chrome_ready, close_debug_chrome, fetch_job_details, load_advanced_settings,
+            _FAILED_CODE_LABELS,
         )
         from webui.ai import match_jds
 
@@ -2469,6 +2470,7 @@ def create_app(config=None):
                     no_jd.append({"job_id": str(j.get("job_id", "")),
                                   "source_url": url, "job_link": url})
             fetched_jd: dict = {}
+            detail_jobs: list = []
             if no_jd:
                 chrome_ok, chrome_err = ensure_chrome_ready()
                 if chrome_ok:
@@ -2481,7 +2483,8 @@ def create_app(config=None):
                             no_jd, source, artifact_dir=app.config["RESULT_DIR"],
                             stop_event=stop_event, progress=_jd_progress,
                         )
-                        for j in detail.get("jobs", []):
+                        detail_jobs = detail.get("jobs", [])
+                        for j in detail_jobs:
                             jid = str(j.get("job_id", ""))
                             jd = str(j.get("jd", "")).strip()
                             if jid and jd:
@@ -2520,6 +2523,14 @@ def create_app(config=None):
                         store.update_pipeline_job_jd(run_id, jid, jd)
                     except Exception:
                         pass
+            # 补抓仍失败的岗位：把具体原因回写前端（验证码/限流等）
+            for j in detail_jobs:
+                jid = str(j.get("job_id", ""))
+                code = j.get("jd_failed_code", "")
+                if jid and code and jid not in fetched_jd:
+                    label = _FAILED_CODE_LABELS.get(code, "")
+                    reason = f"未抓到 JD（{label}），无法精筛" if label else "未抓到 JD，无法精筛"
+                    updates.setdefault(jid, {})["verdict_reason"] = reason
 
             # 2) 有 JD 且有画像的，重跑 AI 精筛
             if not has_ai:
