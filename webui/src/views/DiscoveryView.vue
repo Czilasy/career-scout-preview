@@ -851,18 +851,21 @@ async function pollRecrawl(taskId: string) {
       const updates = (data.result as unknown as { updates?: Record<string, unknown> } | undefined)?.updates;
       if (updates) mergeRecrawlUpdates(updates as Record<string, unknown>);
       notify("待确认岗位已重抓完成", "success");
+      window.setTimeout(() => { recrawlSnapshot.value = null; }, 3000);
       return;
     }
     if (data.status === "cancelled") {
       recrawlRetryCount = 0;
       recrawlBusy.value = false;
       notify("已停止重抓", "warning");
+      window.setTimeout(() => { recrawlSnapshot.value = null; }, 3000);
       return;
     }
     if (data.status === "failed") {
       recrawlRetryCount = 0;
       recrawlBusy.value = false;
       notify(data.error || "重抓失败", "error");
+      window.setTimeout(() => { recrawlSnapshot.value = null; }, 5000);
       return;
     }
     pollTimer = window.setTimeout(() => void pollRecrawl(taskId), 1800);
