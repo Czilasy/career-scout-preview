@@ -678,7 +678,11 @@ async function loadLatestResult() {
   try {
     const query = props.profileId ? `?profile_id=${encodeURIComponent(props.profileId)}` : "";
     const data = await apiRequest<{ has_result?: boolean; result?: PipelineResult }>(`/api/latest-pipeline-result${query}`);
-    if (data.has_result && data.result) setPipelineResult(data.result);
+    if (data.has_result && data.result) {
+      setPipelineResult(data.result);
+      const ps = (data.result as Record<string, unknown>).profile_summary;
+      if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
+    }
   } catch (error) {
     notify(errorMessage(error, "上次结果暂时无法恢复"), "warning");
   }

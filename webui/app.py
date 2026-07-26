@@ -2400,6 +2400,14 @@ def create_app(config=None):
         )
         from webui.ai import match_jds
 
+        # 画像兜底：前端刷新后传空，从落盘结果里恢复（跟本轮抓取绑定，下轮覆盖）
+        if not profile_summary.strip():
+            payload = store.load_latest_pipeline_result()
+            if payload:
+                profile_summary = str(
+                    (payload.get("result") or {}).get("profile_summary", "")
+                )
+
         with _pipeline_lock:
             task = _pipeline_tasks.get(task_id)
             if task is None:
