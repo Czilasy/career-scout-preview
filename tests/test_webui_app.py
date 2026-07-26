@@ -349,5 +349,133 @@ class PipelineFeedbackRegressionTests(unittest.TestCase):
         self.assertEqual(submit.call_args.args[-1], "")  # 无上次进度则不续跑
 
 
+class SourceErrorClassificationTests(unittest.TestCase):
+    """退出码 + 关键词 → 具体 failed_code 分类。"""
+
+    def test_exit_10_with_captcha_keyword_returns_verification(self):
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(10, "触发风控：验证码拦截"),
+            "source_verification_required",
+        )
+
+    def test_exit_10_with_slider_keyword_returns_verification(self):
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(10, "slider detected"),
+            "source_verification_required",
+        )
+
+    def test_exit_10_with_429_keyword_returns_rate_limited(self):
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(10, "HTTP 429 Too Many Requests"),
+            "source_rate_limited",
+        )
+
+    def test_exit_10_with_rate_limit_chinese_returns_rate_limited(self):
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(10, "被限流了"),
+            "source_rate_limited",
+        )
+
+    def test_exit_10_generic_returns_blocked(self):
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(10, "连续空页"),
+            "source_blocked",
+        )
+
+    def test_exit_1_with_login_keyword_returns_login_required(self):
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(1, "请先登录 BOSS 直聘"),
+            "source_login_required",
+        )
+
+    def test_exit_1_generic_returns_blocked(self):
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(1, "环境异常"),
+            "source_blocked",
+        )
+
+    def test_exit_2_returns_cdp_unavailable(self):
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(2, "connect ECONNREFUSED 127.0.0.1:9222"),
+            "source_cdp_unavailable",
+        )
+
+    def test_unknown_exit_code_returns_blocked(self):
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(99, "unknown"),
+            "source_blocked",
+        )
+
+
+class RunSearchAllFailTests(unittest.TestCase):
+    """所有组合全失败时 run_search 返回 ok:False。"""
+
+    @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
+    def test_all_combos_fail_returns_ok_false(self, _mock_chrome):
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        # 构造一个 source，fetch_list 永远失败
+        class _FailSource:
+            def preflight(self):
+                return SourceOutcome.success(jobs=[], safe_log="ok", input_hash="")
+            def fetch_list(self, plan_item):
+                return SourceOutcome.failure(
+                    failed_code="source_verification_required",
+                    safe_log="list returncode=10 reason=验证码",
+                )
+
+        result = run_search(
+            {"keyword": "Python", "city": ["上海"]},
+            _FailSource(),
+            pages=1,
+            artifact_dir=self._tmp_dir(),
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("风控", result["error"])
+
+    @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
+    def test_partial_fail_still_returns_ok_true(self, _mock_chrome):
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        call_count = [0]
+
+        class _MixedSource:
+            def preflight(self):
+                return SourceOutcome.success(jobs=[], safe_log="ok", input_hash="")
+            def fetch_list(self, plan_item):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    return SourceOutcome.failure(
+                        failed_code="source_blocked", safe_log="x")
+                return SourceOutcome.success(
+                    jobs=[{"job_id": "j1", "source_url": "u1"}],
+                    safe_log="ok", input_hash=plan_item.get("input_hash", ""))
+
+        result = run_search(
+            {"keyword": "A,B", "city": ["X"]},
+            _MixedSource(),
+            pages=1,
+            artifact_dir=self._tmp_dir(),
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["total_scraped"], 1)
+
+    @staticmethod
+    def _tmp_dir():
+        import tempfile
+        return tempfile.mkdtemp(prefix="boss_test_")
+
+
 if __name__ == "__main__":
     unittest.main()

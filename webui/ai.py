@@ -31,6 +31,7 @@ KEYRING_SERVICE = "boss-workbench"
 DEFAULT_TIMEOUT = 60
 CONNECTION_TIMEOUT = 15
 STREAM_IDLE_TIMEOUT = 20  # 流式模式下，连续 N 秒没收到任何数据即判定连接已死
+STREAM_TOTAL_TIMEOUT = 60  # 流式模式下，从请求发出算起的总时长上限（防慢吐丝卡死）
 RANK_BATCH_SIZE = 10
 
 # Safe error classifications returned to callers.  Never include raw
@@ -292,14 +293,24 @@ def _looks_truncated(content) -> bool:
 def _read_stream(response) -> tuple[str, str]:
     """从流式响应中逐块读取，拼接完整 content 并提取 finish_reason。
 
-    利用 requests 的 read timeout（STREAM_IDLE_TIMEOUT）：如果连续 20 秒
-    没有收到任何字节，底层 socket 自动抛 Timeout，无需手动计时。
+    双重超时保护：
+    1. 空闲超时（STREAM_IDLE_TIMEOUT）：由 requests 的 read timeout 驱动，
+       连续 20 秒没收到任何字节 → 底层 socket 抛 Timeout。
+    2. 总时长超时（STREAM_TOTAL_TIMEOUT）：首字到了但后续出字极慢，
+       从请求发出算起超过 60 秒仍未收完 → 主动抛 Timeout。
+
+    两种超时都由外层 call_ai 的重试逻辑接住（ERROR_TIMEOUT，最多重试 2 次）。
 
     返回 (content, finish_reason)。
     """
+    t0 = time.time()
     content_parts: list[str] = []
     finish_reason = ""
     for line in response.iter_lines(decode_unicode=True):
+        if time.time() - t0 > STREAM_TOTAL_TIMEOUT:
+            raise requests.Timeout(
+                f"流式响应总时长超过 {STREAM_TOTAL_TIMEOUT}s 上限"
+            )
         if not line or not line.startswith("data: "):
             continue
         data_str = line[6:].strip()
@@ -391,7 +402,7 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
                     # 流式读取中途 20s 无数据：连接已死，重试
                     last_error = AISecurityError(ERROR_TIMEOUT)
                     response = None
-                except (requests.ConnectionError, requests.ChunkedEncodingError):
+                except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError):
                     last_error = AISecurityError(ERROR_NETWORK)
                     response = None
                 except Exception:

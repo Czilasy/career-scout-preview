@@ -96,6 +96,17 @@ _SCRAPE_STAGE_MESSAGES: dict[str, str] = {
     "cancelled": "运行已取消",
 }
 
+# failed_code → 用户可读中文（进度条状态文案用）
+_FAILED_CODE_LABELS: dict[str, str] = {
+    "source_cdp_unavailable": "连不上调试浏览器",
+    "source_login_required": "BOSS 登录已失效",
+    "source_verification_required": "触发验证码/滑块",
+    "source_rate_limited": "请求过于频繁被限流",
+    "source_blocked": "IP 级风控拦截",
+    "source_timeout": "抓取超时",
+    "source_unreachable": "抓取脚本不可用",
+}
+
 
 def _scrape_overall_percent(stage: str, current: int, total: int) -> int:
     """把抓取 pipeline 的当前阶段映射到整体百分比（0-100）。"""
@@ -378,7 +389,8 @@ def job_matches(job: dict, filters: dict) -> bool:
 
 def run_search(params: dict, source, *, pages: int = 3,
                progress=None, stop_event=None,
-               artifact_dir=None, sleeper=None) -> dict:
+               artifact_dir=None, sleeper=None,
+               skip_combos: set[str] | None = None) -> dict:
     """Execute the multi-search pipeline and return merged, filtered jobs.
 
     ``source`` is a ``BossCdpSource`` (or compatible) providing ``preflight``
@@ -386,8 +398,12 @@ def run_search(params: dict, source, *, pages: int = 3,
     dict snapshot after each step.  ``stop_event`` (threading.Event-like)
     aborts the run when set.
 
+    ``skip_combos``: 可选，已完成的组合键集合（格式 "keyword|city"），
+    断点续抓时跳过这些组合不重复抓。
+
     Returns ``{"ok": bool, "jobs": [...], "total_scraped": int,
-    "total_matched": int, "combinations": int, "error": str}``.
+    "total_matched": int, "combinations": int, "error": str,
+    "completed_combos": [...]}``.
     """
     if sleeper is None:
         sleeper = time.sleep
@@ -444,6 +460,8 @@ def run_search(params: dict, source, *, pages: int = 3,
     merged: dict[str, dict] = {}
     total_scraped = 0
     failed_combos = 0
+    completed_combos: list[str] = []
+    _skip = skip_combos or set()
 
     for idx, combo in enumerate(combos):
         if stop_event is not None and stop_event.is_set():
@@ -452,6 +470,13 @@ def run_search(params: dict, source, *, pages: int = 3,
 
         kw = combo["keyword"]
         city = combo["city"]
+        combo_key = f"{kw}|{city}"
+
+        # 断点续抓：跳过已完成的组合
+        if combo_key in _skip:
+            completed_combos.append(combo_key)
+            continue
+
         emit(stage="searching", current=idx + 1, total=len(combos),
              keyword=kw, city=city,
              message=f"正在搜索 [{idx + 1}/{len(combos)}] {kw} · {city}")
@@ -472,11 +497,13 @@ def run_search(params: dict, source, *, pages: int = 3,
             if outcome.safe_log and "reason=" in outcome.safe_log:
                 _reason = outcome.safe_log.split("reason=", 1)[1]
             detail = f"（{_reason}）" if _reason else ""
+            label = _FAILED_CODE_LABELS.get(outcome.failed_code, outcome.failed_code)
             emit(stage="combo_failed", current=idx + 1, total=len(combos),
                  keyword=kw, city=city, failed_code=outcome.failed_code,
-                 message=f"组合失败：{outcome.failed_code}{detail}")
+                 message=f"组合失败：{label}{detail}")
         else:
             total_scraped += len(outcome.jobs)
+            completed_combos.append(combo_key)
             for job in outcome.jobs:
                 jid = job.get("job_id") or job.get("source_url") or ""
                 if jid and jid not in merged:
@@ -499,10 +526,15 @@ def run_search(params: dict, source, *, pages: int = 3,
     # 广搜策略：不做本地硬筛选，全量返回，筛选交给后续 AI 步骤。
     all_jobs = list(merged.values())
 
-    # 哨兵第三层：所有组合全失败 → 大概率 IP 级风控，不是单个搜索的问题
-    if failed_combos == len(combos) and len(combos) > 0:
+    # 哨兵第三层：所有非跳过组合全失败 → 大概率 IP 级风控
+    ran_combos = len(combos) - len(_skip)
+    if failed_combos > 0 and total_scraped == 0 and ran_combos > 0:
         emit(stage="risk_warning",
              message="所有组合均失败，大概率是 IP 级风控限制。建议：打开 Chrome 手动过一次验证码，或等 30 分钟后再试。")
+        return {"ok": False, "jobs": [], "total_scraped": 0,
+                "total_matched": 0, "combinations": len(combos),
+                "completed_combos": completed_combos,
+                "error": "所有搜索组合均失败，大概率 IP 级风控。建议手动过一次验证码或等 30 分钟后重试"}
 
     # 有数据才关浏览器（任务完成）；全失败则保留窗口供用户排查/重试。
     if total_scraped > 0:
@@ -513,6 +545,7 @@ def run_search(params: dict, source, *, pages: int = 3,
 
     return {"ok": True, "jobs": all_jobs, "total_scraped": total_scraped,
             "total_matched": len(all_jobs), "combinations": len(combos),
+            "completed_combos": completed_combos,
             "error": ""}
 
 

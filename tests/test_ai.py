@@ -316,6 +316,36 @@ class CallAITests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.error_code, "network_error")
 
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai.requests.post")
+    def test_stream_total_timeout_raises_safe_error(self, mock_post, _mock_sleep):
+        """首字正常到达，但总时长超过 STREAM_TOTAL_TIMEOUT → ERROR_TIMEOUT。"""
+        from webui.ai import call_ai, AISecurityError, STREAM_TOTAL_TIMEOUT
+
+        # 构造一个流式响应：多个 chunk，第一个正常到达，后续触发总超时
+        response = MagicMock()
+        response.status_code = 200
+        chunk1 = json.dumps({"choices": [{"delta": {"content": "hello"}, "finish_reason": None}]})
+        chunk2 = json.dumps({"choices": [{"delta": {"content": " world"}, "finish_reason": None}]})
+        response.iter_lines.return_value = iter([
+            f"data: {chunk1}", f"data: {chunk2}", "data: [DONE]", "",
+        ])
+        mock_post.return_value = response
+
+        # 模拟时间流逝：首次调用返回 0（t0），之后全部返回 61（超过 60s 上限）
+        call_count = [0]
+        def fake_time():
+            call_count[0] += 1
+            return 0.0 if call_count[0] == 1 else float(STREAM_TOTAL_TIMEOUT + 1)
+
+        with patch("webui.ai.time.time", side_effect=fake_time), \
+             patch("webui.ai.RATE_LIMIT_ATTEMPTS", 1):
+            with self.assertRaises(AISecurityError) as ctx:
+                call_ai("https://api.example.com/v1/chat/completions", "secret-key",
+                        [{"role": "user", "content": "hi"}])
+
+        self.assertEqual(ctx.exception.error_code, "timeout")
+
     @patch("webui.ai.requests.post")
     def test_auth_failure_raises_safe_error(self, mock_post):
         from webui.ai import call_ai, AISecurityError

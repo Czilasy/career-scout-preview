@@ -356,10 +356,11 @@ class BossCdpSource:
         except OSError as exc:
             return SourceOutcome.failure(failed_code="source_unreachable", safe_log=f"{safe_log} os_error_type={type(exc).__name__}")
         if returncode != 0:
-            self.breaker.record_signal("source_blocked")
+            failed_code = _classify_failed_code(returncode, captured)
+            self.breaker.record_signal(failed_code)
             reason = _exit_reason(returncode, captured)
             return SourceOutcome.failure(
-                failed_code="source_blocked",
+                failed_code=failed_code,
                 safe_log=f"{safe_log} returncode={returncode} reason={reason}",
             )
         jobs = self._read_jobs(str(output_path))
@@ -461,9 +462,10 @@ class BossCdpSource:
             except OSError:
                 pass
         if returncode != 0:
-            self.breaker.record_signal("source_blocked")
+            failed_code = _classify_failed_code(returncode, captured)
+            self.breaker.record_signal(failed_code)
             return SourceOutcome.failure(
-                failed_code="source_blocked",
+                failed_code=failed_code,
                 safe_log=f"{safe_log} returncode={returncode} stderr_tail_safe={_safe_tail(captured)}",
             )
         detail = self._read_detail(str(detail_path))
@@ -672,14 +674,15 @@ class BossCdpSource:
 
         # 5. Subprocess non-zero exit: no partial results from a failed batch.
         if returncode != 0:
+            failed_code = _classify_failed_code(returncode, captured)
             for job_id in expected_urls_by_job_id:
                 results[job_id] = SourceOutcome.failure(
-                    failed_code="source_blocked",
+                    failed_code=failed_code,
                     safe_log=f"{safe_log} returncode={returncode} "
                              f"stderr_tail_safe={_safe_tail(captured)}",
                 )
-            # One batch-level source_blocked signal (the whole batch was blocked).
-            self.breaker.record_signal("source_blocked")
+            # One batch-level signal (the whole batch was blocked).
+            self.breaker.record_signal(failed_code)
             return results
 
         # 6. Parse events JSONL; validate each event; dispatch valid events.
@@ -1155,6 +1158,34 @@ _EXIT_REASONS = {
     2: "连不上调试浏览器（Chrome 未启动或端口不通）",
     10: "触发风控/限流（验证码、连续空页或 HTTP 拦截）",
 }
+
+# 退出码 + 输出关键词 → 具体 failed_code（不再一律 source_blocked）
+_VERIFICATION_KEYWORDS = ("验证码", "滑块", "captcha", "slider", "verify")
+_RATE_LIMIT_KEYWORDS = ("429", "限流", "rate limit", "too many requests")
+
+
+def _classify_failed_code(returncode: int, captured: str) -> str:
+    """根据退出码和输出文本分类出具体 failed_code。
+
+    退出码含义（boss_cdp_raw.py）：
+      1  — 登录态失效或环境异常
+      2  — 连不上调试浏览器（CDPUnavailableError）
+      10 — 触发风控/限流（RiskControlError：验证码、连续空页、HTTP 拦截）
+    """
+    if returncode == 2:
+        return "source_cdp_unavailable"
+    text = (captured or "").lower()
+    if returncode == 1:
+        if any(kw in text for kw in ("登录", "login", "cookie")):
+            return "source_login_required"
+        return "source_blocked"
+    if returncode == 10:
+        if any(kw in text for kw in _VERIFICATION_KEYWORDS):
+            return "source_verification_required"
+        if any(kw in text for kw in _RATE_LIMIT_KEYWORDS):
+            return "source_rate_limited"
+        return "source_blocked"
+    return "source_blocked"
 
 
 def _exit_reason(returncode: int, captured: str) -> str:

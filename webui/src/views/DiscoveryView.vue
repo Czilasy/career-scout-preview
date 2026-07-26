@@ -495,6 +495,25 @@ async function cancelScrape() {
   }
 }
 
+async function continueScrape() {
+  if (!scrapeTaskId.value || scrapeBusy.value) return;
+  scrapeBusy.value = true;
+  scrapeCompleted.value = false;
+  scrapeSnapshot.value = { status: "running", progress: { message: "正在从断点继续…" }, logs: [] };
+  try {
+    const data = await apiRequest<{ task_id: string; skipped: number; old_jobs: number }>(
+      `/api/execute-search/continue/${encodeURIComponent(scrapeTaskId.value)}`,
+      { method: "POST" },
+    );
+    scrapeTaskId.value = data.task_id;
+    pollRetryCount = 0;
+    await pollTask(data.task_id, "scrape");
+  } catch (error) {
+    scrapeBusy.value = false;
+    scrapeSnapshot.value = { status: "failed", progress: {}, logs: [], error: errorMessage(error, "断点续抓启动失败") };
+  }
+}
+
 async function startAiScreen() {
   if (!scrapeCompleted.value || !scrapeTaskId.value) {
     notify("请先完成本轮抓取，再开始 AI 筛选", "warning");
@@ -1034,6 +1053,11 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
           <button class="button primary" type="button" data-testid="start-scrape" @click="scrapeBusy ? cancelScrape() : startScrape()">
             <Search v-if="!scrapeBusy" :size="18" aria-hidden="true" />
             <Square v-else :size="18" aria-hidden="true" />{{ scrapeBusy ? "停止抓取" : "开始抓取" }}
+          </button>
+          <button v-if="scrapeSnapshot && scrapeSnapshot.status === 'failed' && scrapeTaskId"
+                  class="button secondary" type="button" data-testid="continue-scrape"
+                  :disabled="scrapeBusy" @click="continueScrape()">
+            从断点继续
           </button>
           <button v-if="scrapeCompleted" class="button secondary" type="button" data-testid="continue-to-screen" @click="activeStep = 'screen'">
             继续确认筛选条件

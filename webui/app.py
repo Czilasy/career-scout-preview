@@ -1244,6 +1244,7 @@ def create_app(config=None):
                 }
                 _pipeline_tasks[task_id] = task
             task["status"] = "running"
+            task["script_params"] = script_params  # 断点续抓需要原始参数
 
         def on_progress(snapshot):
             with _pipeline_lock:
@@ -1262,13 +1263,27 @@ def create_app(config=None):
             # 取出停止信号传给 run_search；cancel 接口 set 它后，
             # run_search 会在下一个组合边界退出，或因浏览器被关而抛错。
             with _pipeline_lock:
-                stop_event = _pipeline_tasks.get(task_id, {}).get("stop_event")
+                task_ref = _pipeline_tasks.get(task_id, {})
+                stop_event = task_ref.get("stop_event")
+                skip_combos = task_ref.get("skip_combos") or None
+                old_jobs = task_ref.get("old_jobs") or []
             result = run_search(
                 script_params, source,
                 pages=3, progress=on_progress,
                 artifact_dir=app.config["RESULT_DIR"],
                 stop_event=stop_event,
+                skip_combos=skip_combos,
             )
+            # 断点续抓：合并旧结果（按 job_id 去重）
+            if old_jobs and result.get("ok"):
+                existing_ids = {j.get("job_id") or j.get("source_url") or ""
+                                for j in result["jobs"]}
+                for job in old_jobs:
+                    jid = job.get("job_id") or job.get("source_url") or ""
+                    if jid and jid not in existing_ids:
+                        result["jobs"].append(job)
+                        existing_ids.add(jid)
+                result["total_matched"] = len(result["jobs"])
             with _pipeline_lock:
                 task = _pipeline_tasks.get(task_id)
                 if task is not None:
@@ -1838,6 +1853,37 @@ def create_app(config=None):
         _register_pipeline_task(task_id, "scrape")
         _pipeline_executor.submit(_run_pipeline_task, task_id, script_params)
         return jsonify({"ok": True, "task_id": task_id})
+
+    @app.route("/api/execute-search/continue/<old_task_id>", methods=["POST"])
+    def continue_execute_search(old_task_id):
+        """断点续抓：从上次失败的组合接着跑，跳过已完成的组合。
+
+        读取旧任务的 script_params + result.completed_combos，
+        新任务自动跳过已完成组合，合并旧结果。
+        """
+        with _pipeline_lock:
+            old_task = _pipeline_tasks.get(old_task_id)
+        if old_task is None:
+            return jsonify({"ok": False, "error": "原任务不存在或已过期"}), 404
+        if old_task.get("status") not in ("failed", "cancelled"):
+            return jsonify({"ok": False, "error": "只能继续失败或已取消的任务"}), 400
+        script_params = old_task.get("script_params")
+        if not script_params:
+            return jsonify({"ok": False, "error": "原任务参数丢失，无法继续"}), 400
+        old_result = old_task.get("result") or {}
+        completed = set(old_result.get("completed_combos") or [])
+        old_jobs = old_result.get("jobs") or []
+
+        task_id = uuid.uuid4().hex
+        _register_pipeline_task(task_id, "scrape")
+        # 把续抓信息存进 task，_run_pipeline_task 会读取
+        with _pipeline_lock:
+            task = _pipeline_tasks[task_id]
+            task["skip_combos"] = completed
+            task["old_jobs"] = old_jobs
+        _pipeline_executor.submit(_run_pipeline_task, task_id, script_params)
+        return jsonify({"ok": True, "task_id": task_id,
+                        "skipped": len(completed), "old_jobs": len(old_jobs)})
 
     @app.route("/api/execute-search/<task_id>/cancel", methods=["POST"])
     def cancel_execute_search(task_id):
