@@ -608,7 +608,6 @@ button:disabled {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin: -6px 0 18px;
   font-size: 13px;
 }.city-chips-label {
   color: var(--muted);
@@ -636,21 +635,27 @@ button:disabled {
   display: flex;
   align-items: stretch;
   gap: 8px;
-  margin: 22px 0 18px;
+  margin: 10px 0 0;
 }.grow {
   flex: 1;
 }.align-end {
   align-self: end;
-}.estimate-line {
+}.search-columns {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 16px;
-  padding: 11px 13px;
-  border-radius: var(--radius-sm);
-  color: var(--text-soft);
-  font-size: 13px;
-  background: var(--surface-2);
+  gap: 24px;
+  margin-top: 14px;
+}.search-col {
+  flex: 1;
+  min-width: 0;
+}.search-col-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}.search-col .city-chips-row {
+  margin: 0 0 4px;
 }.advanced-panel.collapsible-card {
   padding: 0;
   overflow: visible;

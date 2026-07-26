@@ -175,12 +175,6 @@ const cityList = computed(() => cityText.value
   .split(",")
   .map((city) => city.trim())
   .filter(Boolean));
-const searchEstimate = computed(() => {
-  const groups = selectedKeywords.value.length * cityList.value.length;
-  return groups
-    ? `${selectedKeywords.value.length} 个关键词 × ${cityList.value.length} 个城市 = ${groups} 组搜索`
-    : "请选择至少一个关键词和一个城市";
-});
 const filterGroups = computed(() => {
   return ["salary", "experience", "degree", "industry", "scale", "stage"]
     .map((key) => {
@@ -197,9 +191,10 @@ const filterGroups = computed(() => {
     .filter((group) => group.options.length);
 });
 const searchSummary = computed(() => {
+  const kw = selectedKeywords.value.length;
+  const ct = cityList.value.length;
   const parts: string[] = [];
-  if (selectedKeywords.value.length) parts.push(`${selectedKeywords.value.length} 关键词`);
-  if (cityList.value.length) parts.push(`${cityList.value.length} 城市`);
+  parts.push(kw && ct ? `${kw}×${ct}=${kw * ct}组` : "未配置");
   parts.push(profileSummary.value.trim() ? "画像已填" : "画像未填");
   return parts.join(" · ");
 });
@@ -998,39 +993,47 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
           <template #summary>
             <span class="selection-summary">{{ searchSummary }}</span>
           </template>
-          <div class="estimate-line"><Search :size="17" aria-hidden="true" />{{ searchEstimate }}</div>
-          <div class="chip-grid" aria-label="搜索关键词">
-            <button
-              v-for="keyword in keywords"
-              :key="keyword.word"
-              class="choice-chip"
-              :class="{ selected: selectedKeywords.includes(keyword.word), recommended: keyword.recommended }"
-              type="button"
-              data-testid="keyword-chip"
-              :aria-pressed="selectedKeywords.includes(keyword.word)"
-              @click="toggleKeyword(keyword.word)"
-            >
-              {{ keyword.word }}<small v-if="keyword.recommended">推荐</small>
-            </button>
-          </div>
-          <div class="inline-input-row">
-            <label class="field-label grow">
-              <span>自定义关键词</span>
-              <input v-model="customKeyword" type="text" placeholder="输入后按回车添加" @keydown.enter.prevent="addCustomKeyword">
-            </label>
-            <button class="button secondary align-end" type="button" @click="addCustomKeyword">添加</button>
-            <label class="field-label grow">
-              <span>城市</span>
-              <input v-model="customCity" type="text" placeholder="输入后按回车添加" @keydown.enter.prevent="addCustomCity">
-            </label>
-            <button class="button secondary align-end" type="button" @click="addCustomCity">添加</button>
-          </div>
-          <div v-if="cityList.length" class="city-chips-row">
-            <span class="city-chips-label">已添加：</span>
-            <span v-for="city in cityList" :key="city" class="city-chip">
-              {{ city }}
-              <button type="button" class="city-chip-remove" aria-label="删除城市" @click="removeCity(city)">×</button>
-            </span>
+          <div class="search-columns">
+            <div class="search-col">
+              <p class="search-col-title">关键词</p>
+              <div class="chip-grid" aria-label="搜索关键词">
+                <button
+                  v-for="keyword in keywords"
+                  :key="keyword.word"
+                  class="choice-chip"
+                  :class="{ selected: selectedKeywords.includes(keyword.word), recommended: keyword.recommended }"
+                  type="button"
+                  data-testid="keyword-chip"
+                  :aria-pressed="selectedKeywords.includes(keyword.word)"
+                  @click="toggleKeyword(keyword.word)"
+                >
+                  {{ keyword.word }}<small v-if="keyword.recommended">推荐</small>
+                </button>
+              </div>
+              <div class="inline-input-row">
+                <label class="field-label grow">
+                  <span>自定义</span>
+                  <input v-model="customKeyword" type="text" placeholder="回车添加" @keydown.enter.prevent="addCustomKeyword">
+                </label>
+                <button class="button secondary align-end" type="button" @click="addCustomKeyword">添加</button>
+              </div>
+            </div>
+            <div class="search-col">
+              <p class="search-col-title">城市</p>
+              <div v-if="cityList.length" class="city-chips-row">
+                <span v-for="city in cityList" :key="city" class="city-chip">
+                  {{ city }}
+                  <button type="button" class="city-chip-remove" aria-label="删除城市" @click="removeCity(city)">×</button>
+                </span>
+              </div>
+              <div class="inline-input-row">
+                <label class="field-label grow">
+                  <span>自定义</span>
+                  <input v-model="customCity" type="text" placeholder="回车添加" @keydown.enter.prevent="addCustomCity">
+                </label>
+                <button class="button secondary align-end" type="button" @click="addCustomCity">添加</button>
+              </div>
+            </div>
           </div>
           <label class="field-label">
             <span>求职画像（用于 AI 精筛）<small v-if="!profileSummary">　未填写将跳过精筛</small></span>
