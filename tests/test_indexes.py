@@ -50,21 +50,6 @@ class IndexExistenceTests(unittest.TestCase):
             "当前缺失，cleanup_expired_jobs JOIN jobs ON expires_at < cutoff 会全表扫",
         )
 
-    def test_discovery_job_snapshots_run_status_uses_composite_index(self):
-        # discovery_runner.py 常按 (run_id, fetch_status) 查 snapshots
-        # 当前只有 UNIQUE(run_id, job_id) 自动索引，run_id 命中后还要 filter fetch_status
-        # 期望 T035 新增复合索引 idx_discovery_job_snapshots_run_status (run_id, fetch_status)
-        # 让查询直接两列定位
-        with self.store._connection() as conn:
-            rows = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' "
-                "AND tbl_name='discovery_job_snapshots' AND name='idx_discovery_job_snapshots_run_status'",
-            ).fetchall()
-        self.assertEqual(
-            len(rows), 1,
-            "应存在复合索引 idx_discovery_job_snapshots_run_status(run_id, fetch_status)，"
-            "当前缺失，discovery_runner 按 (run_id, fetch_status) 查询时需在 run_id 命中后逐行 filter",
-        )
 
 
 if __name__ == "__main__":

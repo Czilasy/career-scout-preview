@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { ArrowUpRight, BriefcaseBusiness, ChevronRight, MapPin, X } from "@lucide/vue";
+import { ArrowUpRight, BriefcaseBusiness, MapPin, X } from "@lucide/vue";
 import type { JobItem } from "../types";
 
 const props = withDefaults(defineProps<{
@@ -91,10 +91,7 @@ function verdictLabel(job: JobItem): string {
             <strong>{{ job.salary || "薪资面议" }}</strong>
             <span>{{ job.location || "地点待确认" }}</span>
           </span>
-          <span v-if="job.caveats && job.caveats.length" class="caveats-pill" :title="job.caveats.join('；')">
-            软性缺口 {{ job.caveats.length }}
-          </span>
-          <ChevronRight :size="18" aria-hidden="true" />
+
         </button>
       </div>
       <button

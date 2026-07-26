@@ -9,7 +9,6 @@ import json
 import os
 import secrets
 import sqlite3
-import subprocess
 import sys
 import threading
 import uuid
@@ -64,17 +63,6 @@ from webui.workbench import (
     aggregate_feedback_state,
     merge_profile_fields,
 )
-from webui.discovery import (
-    DiscoveryError as _DiscoveryError,
-    ERROR_CODE_MAP as _ERROR_CODE_MAP,
-    analyze_resume as _discovery_analyze_resume,
-    confirm_directions as _discovery_confirm_directions,
-    compile_search_plan as _discovery_compile_plan,
-    compute_discovery_input_hash as _compute_discovery_input_hash,
-    normalize_portfolio_assessment as _normalize_discovery_assessment,
-    project_recommendations as _project_recommendations,
-)
-from webui.discovery_runner import DiscoveryTaskRuntime as _DiscoveryTaskRuntime
 from webui.source import BossCdpSource as _BossCdpSource
 from webui.process_executor import ArtifactSpec, ScraperExecutor
 from webui import resume as resume_service
@@ -83,10 +71,6 @@ from webui import ai as ai_service
 
 SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
 DEFAULT_STATE_DIR = Path(os.environ.get("BOSS_WEBUI_STATE_DIR", os.path.expanduser("~/.career-scout/webui")))
-# 最新一轮流水线结果的持久化文件（刷新页面后据此恢复展示，新一轮运行覆盖它）
-LATEST_PIPELINE_RESULT_PATH = DEFAULT_STATE_DIR / "latest_pipeline_result.json"
-# 最新一轮"只抓不筛"的原始抓取结果，供 AI 筛选步骤读取（与最终筛选结果分开）
-LATEST_SCRAPE_RESULT_PATH = DEFAULT_STATE_DIR / "latest_scrape_result.json"
 
 
 def _optional_positive_int(value, field, *, maximum=None):
@@ -586,10 +570,7 @@ def create_app(config=None):
         start_tasks=app.config["START_TASKS"],
     )
 
-    # T101: 应用持有的唯一 DiscoveryTaskRuntime。
-    # provider/source factory 让 runtime 在每次 submit_run 时获取最新 AI 设置
-    # 和 CDP source 状态，而不是被钉死在 create_app 构造时刻的实例上。
-    def _make_discovery_source():
+    def _make_cdp_source():
         try:
             return _BossCdpSource(
                 python_executable=app.config["PYTHON_EXECUTABLE"],
@@ -598,18 +579,10 @@ def create_app(config=None):
         except Exception:
             return None
 
-    discovery_runtime = _DiscoveryTaskRuntime(
-        store,
-        source_factory=_make_discovery_source,
-        ai_provider_factory=lambda: _build_ai_provider(store),
-        result_dir=app.config["RESULT_DIR"],
-        max_workers=1,
-    )
     Path(app.config["RESUME_DIR"]).mkdir(parents=True, exist_ok=True)
     app.config["TASK_STORE"] = store
     app.config["TASK_RUNNER"] = runner
     app.config["WORKBENCH_RUNNER"] = workbench_runner
-    app.config["DISCOVERY_RUNTIME"] = discovery_runtime
 
     @app.before_request
     def protect_local_api():
@@ -990,16 +963,12 @@ def create_app(config=None):
             resume_service.validate_format(filename),
             app.config["RESUME_DIR"], store,
         )
-        discovery_flow = (
-            request.form.get("flow") == "discovery"
-            or request.args.get("flow") == "discovery"
-        )
         # AI parse occurs only after the user has seen and accepted the
         # pre-upload notice in the UI.  The raw text never leaves this scope.
         ai_suggestion = {}
         settings = store.get_ai_settings()
         consent = request.form.get("ai_consent") == "true"
-        if not discovery_flow and settings.get("is_configured") and consent:
+        if settings.get("is_configured") and consent:
             cred_ref = store.get_credential_ref()
             api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
             if api_key:
@@ -1027,7 +996,7 @@ def create_app(config=None):
             "merged_fields": merged,
             "privacy_notice": "如勾选 AI 解析，简历文本会发送至你配置的 AI 服务；不会写入日志或接口响应。",
         })
-        return (response, 201) if discovery_flow else response
+        return response
 
     @app.route("/api/profiles/<profile_id>/resumes")
     def profile_resume_list(profile_id):
@@ -1181,756 +1150,6 @@ def create_app(config=None):
         would_remove = store.preview_cleanup_expired_jobs(days=CLEANUP_EXPIRED_DAYS)
         return jsonify({"would_remove": len(would_remove), "items": would_remove})
 
-    # ===================================================================
-    # 004 discovery: analyses, confirmations, runs, results, feedback
-    # ===================================================================
-
-    @app.errorhandler(_DiscoveryError)
-    def handle_discovery_error(error):
-        return jsonify(error.to_envelope()), _discovery_status_code(error)
-
-    def _discovery_status_code(error):
-        code = error.error_code
-        if code == "not_found":
-            return 404
-        if code in {"state_conflict", "candidate_version_conflict"}:
-            return 409
-        return 400
-
-    @app.route("/api/discovery/analyses", methods=["POST"])
-    def discovery_create_analysis():
-        """Create a queued candidate analysis attempt and submit it (US1).
-
-        T109: 接受 application/json {resume_id, ai_consent}，创建 queued
-        analysis 后提交 DiscoveryTaskRuntime 异步执行。不再同步调用 AI
-        直接返回 ready/failed。
-        """
-        raw = request.get_json(silent=True) or {}
-        resume_id = raw.get("resume_id")
-        if not resume_id:
-            raise ValueError("resume_id 不能为空")
-        if "ai_consent" not in raw:
-            raise ValueError("ai_consent 不能为空")
-        if raw.get("ai_consent") is not True:
-            raise ValueError("ai_consent 必须明确为 true")
-        try:
-            resume = store.get_resume(resume_id)
-        except KeyError:
-            raise _DiscoveryError("not_found", user_message="简历不存在。")
-        profile_id = resume.get("profile_id")
-        if not profile_id:
-            raise _DiscoveryError(
-                "input_incomplete", user_message="简历未关联候选人档案。",
-            )
-        # T109: 创建 queued attempt，提交 runtime 异步执行
-        # Persist the canonical candidate v3 contract marker.
-        ai_settings = store.get_ai_settings()
-        analysis = store.create_analysis(
-            resume_id, profile_id,
-            model_name=ai_settings.get("model", ""),
-            contract_version=(raw.get("contract_version") or "v3"),
-        )
-        discovery_runtime = app.config["DISCOVERY_RUNTIME"]
-        discovery_runtime.submit_analysis(analysis["id"], ai_consent=True)
-        return jsonify(_analysis_summary(analysis, store)), 202
-
-    @app.route("/api/discovery/analyses/<analysis_id>")
-    def discovery_get_analysis(analysis_id):
-        analysis = store.get_analysis(analysis_id)
-        evidence = store.list_evidence(analysis_id)
-        directions = store.list_directions(analysis_id)
-        return jsonify({
-            "analysis_id": analysis["id"],
-            "resume_id": analysis["resume_id"],
-            "profile_id": analysis["profile_id"],
-            "status": analysis["status"],
-            "version": analysis.get("version"),
-            "contract_version": analysis.get("contract_version", "v3"),
-            "stage": analysis.get("stage", analysis.get("analysis_stage", "queued")),
-            "quality_status": analysis.get("quality_status", "manual_required"),
-            "quality_warnings": analysis.get("quality_warnings", []),
-            "quality": {
-                "status": analysis.get("quality_status", "complete"),
-                "warnings": analysis.get("quality_warnings", []),
-            },
-            "summary": analysis.get("summary", {}),
-            "evidence": [
-                {
-                    "id": e["id"],
-                    "type": e["evidence_type"],
-                    "normalized_value": e["normalized_value"],
-                    "safe_excerpt": e.get("safe_excerpt", ""),
-                    "assertion_type": e.get("assertion_type", "explicit"),
-                    "confidence": e.get("confidence", 0),
-                }
-                for e in evidence
-            ],
-            "unknowns": analysis.get("unknowns", []),
-            "directions": [
-                {
-                    "id": d["id"],
-                    "name": d["name"],
-                    "type": d["direction_type"],
-                    "rationale": d.get("rationale", ""),
-                    "evidence_ids": [r["evidence_id"] for r in store.list_direction_evidence(d["id"])],
-                    "gaps": d.get("gaps", []),
-                    "confidence": d.get("confidence", 0),
-                    "default_enabled": d.get("default_enabled", False),
-                    "search_terms": d.get("search_terms", []),
-                }
-                for d in directions
-            ],
-            "failure": _analysis_failure(analysis),
-            "candidate_profile_version_id": analysis.get("candidate_profile_version_id"),
-        }), 200
-
-    @app.route("/api/discovery/candidate-versions/<version_id>", methods=["GET", "PATCH"])
-    def discovery_candidate_version(version_id):
-        try:
-            if request.method == "GET":
-                return jsonify(store.get_candidate_profile_version(version_id)), 200
-            raw = request.get_json(silent=True) or {}
-            expected_hash = raw.get("expected_content_hash")
-            if not expected_hash:
-                raise _DiscoveryError("candidate_version_conflict")
-            try:
-                updated = store.update_candidate_profile_draft(
-                    version_id, expected_content_hash=expected_hash,
-                    operations=raw.get("operations", []),
-                    unknown_resolutions=raw.get("unknown_resolutions"),
-                )
-            except ValueError as exc:
-                code = str(exc)
-                if code == "candidate_version_conflict":
-                    raise _DiscoveryError("candidate_version_conflict") from None
-                if code == "candidate_version_not_draft":
-                    raise _DiscoveryError("state_conflict") from None
-                raise _DiscoveryError("candidate_fact_invalid") from None
-            return jsonify(updated), 200
-        except KeyError:
-            raise _DiscoveryError("not_found", user_message="候选人画像版本不存在。") from None
-
-    @app.route("/api/discovery/analyses/<analysis_id>/retry", methods=["POST"])
-    def discovery_retry_analysis(analysis_id):
-        """Create a new analysis attempt for the same resume (T109).
-
-        仅在请求体显式给出 ai_consent=true 时创建新版本并提交。
-        """
-        try:
-            analysis = store.get_analysis(analysis_id)
-        except KeyError:
-            raise _DiscoveryError("not_found", user_message="分析不存在。")
-        raw = request.get_json(silent=True) or {}
-        if raw.get("ai_consent") is not True:
-            raise ValueError("ai_consent 必须明确为 true")
-        resume_id = analysis["resume_id"]
-        profile_id = analysis["profile_id"]
-        # T109: 创建新版本 queued attempt，提交 runtime 异步执行
-        new_analysis = store.create_analysis(
-            resume_id, profile_id, contract_version="v3",
-        )
-        discovery_runtime = app.config["DISCOVERY_RUNTIME"]
-        discovery_runtime.submit_analysis(new_analysis["id"], ai_consent=True)
-        return jsonify(_analysis_summary(new_analysis, store)), 202
-
-    @app.route("/api/discovery/confirmations", methods=["POST"])
-    def discovery_create_confirmation():
-        raw = request.get_json(silent=True) or {}
-        analysis_id = raw.get("analysis_id")
-        enabled_direction_ids = raw.get("enabled_direction_ids", [])
-        hard_constraints = raw.get("hard_constraints", {})
-        soft_preferences = raw.get("soft_preferences", {})
-        safe_limits = raw.get("safe_limits", {})
-        user_directions = raw.get("user_directions", [])
-        candidate_profile_version_id = raw.get("candidate_profile_version_id")
-        if candidate_profile_version_id:
-            analysis = store.get_analysis(analysis_id)
-            valid_direction_ids = {item["id"] for item in store.list_directions(analysis_id)}
-            if not enabled_direction_ids or any(
-                direction_id not in valid_direction_ids for direction_id in enabled_direction_ids
-            ):
-                raise _DiscoveryError("intent_invalid")
-            expected_hash = raw.get("expected_content_hash")
-            intent_hash = _compute_discovery_input_hash({
-                "candidate_profile_version_id": candidate_profile_version_id,
-                "profile_content_hash": expected_hash,
-                "enabled_direction_ids": sorted(enabled_direction_ids),
-                "hard_constraints": hard_constraints,
-                "soft_preferences": soft_preferences,
-                "safe_limits": safe_limits,
-            }, policy_version="discovery_v2")
-            try:
-                confirmation = store.create_confirmation_v2(
-                    candidate_profile_version_id=candidate_profile_version_id,
-                    expected_content_hash=expected_hash,
-                    hard_constraints=hard_constraints,
-                    soft_preferences=soft_preferences,
-                    safe_limits=safe_limits,
-                    directions=[{
-                        "direction_id": direction_id, "enabled": True,
-                        "user_added": False, "user_label": None,
-                    } for direction_id in enabled_direction_ids],
-                    intent_hash=intent_hash,
-                )
-            except ValueError as exc:
-                if str(exc) == "candidate_version_conflict":
-                    raise _DiscoveryError("candidate_version_conflict") from None
-                raise _DiscoveryError("state_conflict") from None
-            return jsonify({
-                "confirmation_id": confirmation["id"],
-                "analysis_id": confirmation["analysis_id"],
-                "candidate_profile_version_id": candidate_profile_version_id,
-                "intent_contract_version": "intent_v2",
-                "intent_hash": intent_hash,
-                "version": confirmation["version"],
-                "enabled_direction_ids": enabled_direction_ids,
-                "confirmed_at": confirmation["confirmed_at"],
-            }), 201
-        confirmation = _discovery_confirm_directions(
-            store, analysis_id, enabled_direction_ids,
-            hard_constraints=hard_constraints,
-            soft_preferences=soft_preferences,
-            safe_limits=safe_limits,
-            user_directions=user_directions,
-        )
-        return jsonify({
-            "confirmation_id": confirmation["id"],
-            "analysis_id": confirmation["analysis_id"],
-            "version": confirmation["version"],
-            "enabled_direction_ids": [d["direction_id"] for d in store.get_confirmation(confirmation["id"])["directions"]],
-            "confirmed_at": confirmation["confirmed_at"],
-        }), 201
-
-    @app.route("/api/discovery/runs", methods=["POST"])
-    def discovery_create_run():
-        raw = request.get_json(silent=True) or {}
-        confirmation_id = raw.get("confirmation_id")
-        if not confirmation_id:
-            raise ValueError("confirmation_id 不能为空")
-        policy_version = raw.get("policy_version", "discovery_v1")
-        if policy_version not in ("discovery_v1", "discovery_v2"):
-            raise _DiscoveryError("state_conflict", user_message="不支持的 policy_version。")
-        try:
-            confirmation = store.get_confirmation(confirmation_id)
-        except KeyError:
-            raise _DiscoveryError("not_found", user_message="确认信息不存在。")
-        # Build confirmation view for plan compilation
-        directions = store.list_directions(confirmation["analysis_id"])
-        enabled_dirs = []
-        for d in directions:
-            for cd in confirmation["directions"]:
-                if cd["direction_id"] == d["id"] and cd["enabled"]:
-                    enabled_dirs.append({
-                        "id": d["id"],
-                        "name": d["name"],
-                        "search_terms": d.get("search_terms", []),
-                    })
-        confirmation_view = {
-            "enabled_directions": enabled_dirs,
-            "hard_constraints": confirmation.get("hard_constraints", {}),
-            "safe_limits": confirmation.get("safe_limits", {}),
-        }
-        plan = _discovery_compile_plan(confirmation_view)
-        run = store.create_discovery_run(
-            profile_id=confirmation["profile_id"],
-            resume_id=confirmation["resume_id"],
-            analysis_id=confirmation["analysis_id"],
-            confirmation_id=confirmation_id,
-            input_hash=plan["input_hash"],
-            policy_version=policy_version,
-        )
-        # T101/T133: 不在路由预创建 search_plan_items。
-        # 1. 旧实现给所有 items 设置同一个 plan 级 input_hash，违反
-        #    search_plan_items 的 UNIQUE (plan_id, input_hash) 约束；
-        # 2. 旧 input_hash 与 _source_input_hash 计算结果不一致，导致
-        #    runtime resume 校验时全部触发 input_hash_mismatch。
-        # 改由 DiscoveryRuntime._stage_planning 用 _materialize_plan_items
-        # 生成 per-item 唯一且与 source adapter 一致的 input_hash。
-        discovery_runtime = app.config["DISCOVERY_RUNTIME"]
-        discovery_runtime.submit_run(run["id"])
-        return jsonify(_run_summary(run, store)), 202
-
-    @app.route("/api/discovery/runs/<run_id>")
-    def discovery_get_run(run_id):
-        try:
-            run = store.get_discovery_run(run_id)
-        except KeyError:
-            raise _DiscoveryError("not_found", user_message="运行不存在。")
-        return jsonify(_run_summary(run, store)), 200
-
-    @app.route("/api/discovery/runs/<run_id>/candidates")
-    def discovery_run_candidates(run_id):
-        """T048: Candidate diagnostic endpoint (http-api.md).
-
-        Returns safe list fields, precheck, selection rank/reason and work
-        state.  Never returns resume text or raw prompt.
-        """
-        try:
-            store.get_discovery_run(run_id)
-        except KeyError:
-            raise _DiscoveryError("not_found", user_message="运行不存在。")
-        decision = request.args.get("decision")
-        state = request.args.get("state")
-        direction_id = request.args.get("direction_id")
-        limit = min(LIST_LIMIT, max(1, request.args.get("limit", LIST_LIMIT, type=int) or LIST_LIMIT))
-        candidates = store.list_run_candidates(
-            run_id,
-            state=state,
-            selection_decision=decision,
-        )
-        if direction_id:
-            candidates = [
-                c for c in candidates
-                if direction_id in (c.get("direction_ids") or [])
-            ]
-        items = []
-        for c in candidates[:limit]:
-            items.append({
-                "candidate_id": c["id"],
-                "job_id": c["job_id"],
-                "source_url": c.get("source_url", ""),
-                "state": c.get("state", "discovered"),
-                "selection_decision": c.get("selection_decision", "pending"),
-                "selection_rank": c.get("selection_rank"),
-                "selection_reason": c.get("selection_reason"),
-                "precheck_outcome": c.get("precheck_outcome"),
-                "direction_ids": c.get("direction_ids") or [],
-                "list_fields": c.get("list_fields") or {},
-            })
-        return jsonify({"items": items, "next": None}), 200
-
-    @app.route("/api/discovery/runs/<run_id>/cancel", methods=["POST"])
-    def discovery_cancel_run(run_id):
-        try:
-            run = store.get_discovery_run(run_id)
-        except KeyError:
-            raise _DiscoveryError("not_found", user_message="运行不存在。")
-        terminal = {"succeeded", "failed", "cancelled"}
-        if run["status"] in terminal:
-            raise _DiscoveryError("state_conflict", user_message=f"运行已终态 ({run['status']})。")
-        # T101: 委托给应用持有的 runtime，先持久化取消请求再阻止后续工作。
-        discovery_runtime = app.config["DISCOVERY_RUNTIME"]
-        try:
-            updated = discovery_runtime.cancel_run(run_id)
-        except _DiscoveryError:
-            raise
-        return jsonify(_run_summary(updated, store)), 202
-
-    @app.route("/api/discovery/runs/<run_id>/resume", methods=["POST"])
-    def discovery_resume_run(run_id):
-        try:
-            run = store.get_discovery_run(run_id)
-        except KeyError:
-            raise _DiscoveryError("not_found", user_message="运行不存在。")
-        resumable = {"interrupted", "partial"}
-        if run["status"] not in resumable:
-            raise _DiscoveryError("state_conflict", user_message=f"运行状态 {run['status']} 不可恢复。")
-        # T083: Synchronous hash drift check (http-api.md L319).
-        # Reject profile/confirmation/policy/input hash drift with 409 before
-        # re-submitting work, so clients can immediately detect drift instead
-        # of waiting for the background thread to fail asynchronously.
-        from webui.discovery_runner import check_v2_resume_hash_drift
-        try:
-            check_v2_resume_hash_drift(store, run)
-        except _DiscoveryError:
-            raise
-        # T101: 真实重新提交未完成工作，不得仅修改显示状态。
-        discovery_runtime = app.config["DISCOVERY_RUNTIME"]
-        discovery_runtime.resume_run(run_id)
-        return jsonify(_run_summary(store.get_discovery_run(run_id), store)), 202
-
-    @app.route("/api/discovery/runs/<run_id>/results")
-    def discovery_run_results(run_id):
-        try:
-            run = store.get_discovery_run(run_id)
-        except KeyError:
-            raise _DiscoveryError("not_found", user_message="运行不存在。")
-        category = request.args.get("category")
-        direction_id = request.args.get("direction_id")
-        limit = min(LIST_LIMIT, max(1, request.args.get("limit", 20, type=int) or 20))
-        after_revision = request.args.get("after_revision", type=int)
-        policy_version = run.get("policy_version", "discovery_v1")
-        server_revision = int(run.get("result_revision") or 0)
-        # T048: v2 after_revision short-circuit — if client is up-to-date,
-        # return changed=false with empty items (http-api.md).
-        if policy_version == "discovery_v2" and after_revision is not None:
-            if after_revision >= server_revision:
-                return jsonify({
-                    "run_id": run_id,
-                    "run_status": run["status"],
-                    "revision": server_revision,
-                    "changed": False,
-                    "complete": run["status"] in ("succeeded", "partial", "failed", "cancelled"),
-                    "items": [],
-                    "counts": {},
-                    "next": None,
-                }), 200
-
-        snapshots = store.list_snapshots(run_id) if hasattr(store, "list_snapshots") else []
-        assessments = store.list_assessments(run_id) if hasattr(store, "list_assessments") else []
-        directions_by_id = {}
-        try:
-            dirs = store.list_directions(run.get("analysis_id", ""))
-            directions_by_id = {d["id"]: d for d in dirs}
-        except Exception:
-            pass
-
-        # T064: v2 runs use the canonical recommendation projector.
-        if policy_version == "discovery_v2":
-            # Normalize assessments: attach snapshot_completeness from snapshot.
-            snap_by_id = {s["id"]: s for s in snapshots}
-            normalized_assessments = []
-            for a in assessments:
-                snap = snap_by_id.get(a.get("snapshot_id", ""), {})
-                normalized_assessments.append({
-                    **a,
-                    "job_id": snap.get("job_id", a.get("job_id", "")),
-                    "snapshot_completeness": snap.get("completeness", "unavailable"),
-                })
-            # Build snapshot dicts for the projector.
-            snap_dicts = [
-                {
-                    "id": s["id"],
-                    "job_id": s.get("job_id", ""),
-                    "fields": {
-                        "title": s.get("title", ""),
-                        "company": s.get("company", ""),
-                        "salary": s.get("salary", ""),
-                        "location": s.get("location", ""),
-                        "jd": s.get("jd", ""),
-                        "tags": s.get("tags") or [],
-                    },
-                    "source_url": normalize_job_link(s.get("source_url", "")),
-                    "source_status": s.get("source_status", "unknown"),
-                    "fetched_at": s.get("fetched_at", ""),
-                    "completeness": s.get("completeness", "unavailable"),
-                    "reused": bool(s.get("reused")),
-                }
-                for s in snapshots
-            ]
-            # Only include snapshots with valid BOSS HTTPS links (FR-042).
-            snap_dicts = [s for s in snap_dicts if s["source_url"]]
-            direction_list = list(directions_by_id.values())
-            items = _project_recommendations(
-                run_id, snap_dicts, normalized_assessments, direction_list,
-                direction_filter=direction_id,
-                category_filter=category,
-            )
-            # Enrich assessments with direction_name.
-            for item in items:
-                for a in item.get("assessments", []):
-                    did = a.get("direction_id", "")
-                    a["direction_name"] = (directions_by_id.get(did) or {}).get("name", "")
-                pa = item.get("primary_assessment", {})
-                pa["direction_name"] = (
-                    directions_by_id.get(pa.get("direction_id", ""), {}).get("name", "")
-                )
-            counts: dict[str, int] = {}
-            for item in items:
-                cat = item.get("category", "needs_review")
-                counts[cat] = counts.get(cat, 0) + 1
-            items = items[:limit]
-            return jsonify({
-                "run_id": run_id,
-                "run_status": run["status"],
-                "revision": server_revision,
-                "changed": True,
-                "complete": run["status"] in ("succeeded", "partial", "failed", "cancelled"),
-                "items": items,
-                "counts": counts,
-                "next": None,
-            }), 200
-
-        # v1 fallback: legacy per-snapshot assembly.
-        assessments_by_snapshot: dict[str, list[dict]] = {}
-        for a in assessments:
-            sid = a.get("snapshot_id", "")
-            assessments_by_snapshot.setdefault(sid, []).append(a)
-        category_priority = {"high_match": 0, "adjacent_match": 1, "growth_match": 2,
-                             "needs_review": 3, "not_suitable": 4}
-        items = []
-        for snap in snapshots:
-            source_url = normalize_job_link(snap.get("source_url", ""))
-            if not source_url:
-                continue
-            snap_id = snap["id"]
-            snap_assessments = [
-                _normalize_discovery_assessment({
-                    **assessment,
-                    "snapshot_completeness": snap.get("completeness", "unavailable"),
-                })
-                for assessment in assessments_by_snapshot.get(snap_id, [])
-            ]
-            if not snap_assessments:
-                continue
-            if direction_id:
-                snap_assessments = [a for a in snap_assessments if a.get("direction_id") == direction_id]
-                if not snap_assessments:
-                    continue
-            primary_idx = min(range(len(snap_assessments)),
-                              key=lambda i: category_priority.get(
-                                  snap_assessments[i].get("category", "needs_review"), 99))
-            primary = snap_assessments[primary_idx]
-            primary_category = primary.get("category", "needs_review")
-            if category and primary_category != category:
-                continue
-            def _to_summary(a):
-                did = a.get("direction_id", "")
-                return {
-                    "direction_id": did,
-                    "direction_name": (directions_by_id.get(did) or {}).get("name", ""),
-                    "category": a.get("category", "needs_review"),
-                    "hard_outcome": a.get("hard_outcome", "unknown"),
-                    "match_score": a.get("match_score"),
-                    "confidence": a.get("confidence"),
-                    "evidence": [{"client_ref": eid} for eid in (a.get("candidate_evidence_ids") or [])],
-                    "gaps": a.get("gaps") or [],
-                    "failure_code": a.get("failure_code"),
-                }
-            assessment_summaries = [_to_summary(a) for a in snap_assessments]
-            items.append({
-                "job_id": snap.get("job_id", ""),
-                "title": snap.get("title", ""),
-                "company": snap.get("company", ""),
-                "salary": snap.get("salary", ""),
-                "location": snap.get("location", ""),
-                "source_url": source_url,
-                "source_status": snap.get("source_status", "unknown"),
-                "completeness": snap.get("completeness", "unavailable"),
-                "missing_fields": snap.get("missing_fields") or [],
-                "primary_assessment": assessment_summaries[primary_idx],
-                "assessments": assessment_summaries,
-            })
-        counts = {}
-        for item in items:
-            cat = item["primary_assessment"]["category"]
-            counts[cat] = counts.get(cat, 0) + 1
-        items = items[:limit]
-        return jsonify({"items": items, "counts": counts, "next": None}), 200
-
-    @app.route("/api/discovery/runs/<run_id>/jobs/<job_id>/retry", methods=["POST"])
-    def discovery_retry_job(run_id, job_id):
-        try:
-            run = store.get_discovery_run(run_id)
-        except KeyError:
-            raise _DiscoveryError("not_found", user_message="运行不存在。")
-        if run["status"] in {"succeeded", "failed", "cancelled"}:
-            raise _DiscoveryError("state_conflict", user_message="运行已终态。")
-        # T119: 真实提交到 runtime，重置 snapshot 并重新提交 run
-        discovery_runtime = app.config["DISCOVERY_RUNTIME"]
-        try:
-            updated = discovery_runtime.retry_job(run_id, job_id)
-        except _DiscoveryError:
-            raise
-        return jsonify({"accepted": True, "run_id": run_id, "job_id": job_id}), 202
-
-    def _discovery_preference_changes(feedback_items):
-        changes = []
-        for item in feedback_items:
-            base = {
-                "feedback_id": item["id"],
-                "reason_code": item.get("reason_code"),
-                "created_at": item.get("created_at"),
-            }
-            if item.get("target_type") == "direction" and item.get("action") == "direction_disable":
-                changes.append({**base, "kind": "direction_disabled", "direction_id": item.get("direction_id")})
-            elif item.get("target_type") == "job" and item.get("action") == "not_interested":
-                changes.append({**base, "kind": "job_excluded", "job_id": item.get("job_id"), "scope": item.get("scope")})
-            elif item.get("target_type") == "job" and item.get("action") == "interested":
-                changes.append({**base, "kind": "job_interested", "job_id": item.get("job_id"), "scope": item.get("scope")})
-        return changes
-
-    def _discovery_feedback_payload(items):
-        safe_items = [{
-            "id": item["id"],
-            "run_id": item.get("run_id"),
-            "job_id": item.get("job_id"),
-            "direction_id": item.get("direction_id"),
-            "target_type": item.get("target_type"),
-            "action": item.get("action"),
-            "reason_code": item.get("reason_code"),
-            "scope": item.get("scope"),
-            "created_at": item.get("created_at"),
-        } for item in items]
-        return {
-            "items": safe_items,
-            "preference_changes": _discovery_preference_changes(safe_items),
-        }
-
-    @app.route("/api/discovery/feedback", methods=["GET", "POST"])
-    def discovery_create_feedback():
-        if request.method == "GET":
-            profile_id = request.args.get("profile_id")
-            if not profile_id:
-                raise ValueError("profile_id 不能为空")
-            try:
-                store.get_profile(profile_id)
-            except KeyError:
-                raise _DiscoveryError("not_found", user_message="画像不存在。")
-            feedback_items = store.list_discovery_feedback(profile_id, effective_only=True)
-            run_id = request.args.get("run_id")
-            if run_id:
-                feedback_items = [item for item in feedback_items if item.get("run_id") == run_id]
-            return jsonify(_discovery_feedback_payload(feedback_items)), 200
-
-        raw = request.get_json(silent=True) or {}
-        required = ("profile_id", "target_type", "action")
-        for field in required:
-            if not raw.get(field):
-                raise ValueError(f"{field} 不能为空")
-        if raw["target_type"] == "job" and not (raw.get("target_id") or raw.get("job_id")):
-            raise ValueError("job_id 不能为空")
-        if raw["target_type"] == "direction" and not raw.get("direction_id"):
-            raise ValueError("direction_id 不能为空")
-        feedback = store.create_discovery_feedback(
-            profile_id=raw["profile_id"],
-            target_type=raw["target_type"],
-            action=raw["action"],
-            scope=raw.get("scope", "exact_job"),
-            safe_note=raw.get("note", ""),
-            run_id=raw.get("run_id"),
-            job_id=raw.get("target_id") or raw.get("job_id"),
-            direction_id=raw.get("direction_id"),
-            assessment_id=raw.get("assessment_id"),
-            reason_code=raw.get("reason_code"),
-        )
-        visible = _discovery_feedback_payload(store.list_discovery_feedback(raw["profile_id"], effective_only=True))
-        return jsonify({
-            "feedback_id": feedback["id"],
-            "effective_scope": feedback.get("scope", "exact_job"),
-            "preference_changes": visible["preference_changes"],
-        }), 201
-
-    @app.route("/api/discovery/feedback/<feedback_id>/revoke", methods=["POST"])
-    def discovery_revoke_feedback(feedback_id):
-        try:
-            feedback = store.revoke_discovery_feedback(feedback_id)
-        except KeyError:
-            raise _DiscoveryError("not_found", user_message="反馈不存在。")
-        remaining = store.list_discovery_feedback(feedback["profile_id"], effective_only=True)
-        return jsonify({
-            "revoked": True,
-            "preference_changes": _discovery_preference_changes(remaining),
-        }), 200
-
-    # Helper functions for discovery routes
-    def _analysis_summary(analysis, store):
-        return {
-            "analysis_id": analysis["id"],
-            "resume_id": analysis["resume_id"],
-            "profile_id": analysis["profile_id"],
-            "status": analysis["status"],
-            "version": analysis.get("version"),
-            "stage": analysis.get("stage", "queued"),
-            "quality_status": analysis.get("quality_status", "complete"),
-            "quality_warnings": analysis.get("quality_warnings", []),
-            "contract_version": analysis.get("contract_version", "v3"),
-            "candidate_profile_version_id": analysis.get("candidate_profile_version_id"),
-        }
-
-    def _analysis_failure(analysis):
-        if analysis.get("status") != "failed":
-            return None
-        code = analysis.get("failure_code") or "verification_error"
-        return {
-            "error_code": code,
-            "user_message": _DiscoveryError(code).user_message if code in _ERROR_CODE_MAP else "分析失败。",
-            "stage": "analyzing",
-            "retryable": _ERROR_CODE_MAP.get(code, {}).get("retryable", False),
-        }
-
-    def _run_summary(run, store):
-        # T133: openapi.yaml Run schema 要求 progress + counts 两个对象，
-        # 都是 additionalProperties: integer。旧实现返回空数据，导致
-        # E2E 和 HTTP 客户端无法读取真实进度。
-        # get_discovery_run 返回的 run 字典包含直接列名（source_count 等）
-        # 和 progress/counts 包装字段；这里统一从直接列名构建，避免双重包装。
-        failure = None
-        if run.get("failure_code"):
-            failure = {
-                "code": run["failure_code"],
-                "stage": run.get("failure_stage", ""),
-            }
-        policy_version = run.get("policy_version", "discovery_v1")
-        # T083: v2 authoritative progress names (http-api.md L203-208).
-        # v1 aliases (source_count/detail_count/evaluated_count) kept as
-        # compatibility aliases; v2 names are authoritative.
-        source_count = int(run.get("source_count", 0))
-        detail_count = int(run.get("detail_count", 0))
-        evaluated_count = int(run.get("evaluated_count", 0))
-        # recommendations = high_match + adjacent_match + growth_match
-        # (categorized recommendation count, not the raw recommendation_count
-        # column which is never written by the runner).
-        recommendations = (
-            int(run.get("high_count", 0))
-            + int(run.get("adjacent_count", 0))
-            + int(run.get("growth_count", 0))
-        )
-        progress = {
-            "source_count": source_count,
-            "detail_count": detail_count,
-            "evaluated_count": evaluated_count,
-            # v2 authoritative names (http-api.md L203-208)
-            "search_queries_completed": source_count,
-            "list_candidates": int(run.get("list_candidate_count") or 0),
-            "details_selected": int(run.get("detail_selected_count") or 0),
-            "details_completed": int(run.get("detail_completed_count") or 0),
-            "assessments_completed": int(run.get("assessment_completed_count") or 0),
-            "recommendations": recommendations,
-        }
-        # T083: complete flag distinguishes terminal (true) from recoverable
-        # (false). Terminal statuses: succeeded/failed/cancelled/partial.
-        # interrupted and active statuses are not complete.
-        status = run["status"]
-        complete = status in {"succeeded", "failed", "cancelled", "partial"}
-        summary = {
-            "run_id": run["id"],
-            "confirmation_id": run.get("confirmation_id", ""),
-            "policy_version": policy_version,
-            "status": status,
-            "stage": run.get("stage", status),
-            "progress": progress,
-            "counts": {
-                "high": int(run.get("high_count", 0)),
-                "adjacent": int(run.get("adjacent_count", 0)),
-                "growth": int(run.get("growth_count", 0)),
-                "review": int(run.get("review_count", 0)),
-                "unsuitable": int(run.get("unsuitable_count", 0)),
-            },
-            "failure": failure,
-            "updated_at": run.get("updated_at", run.get("created_at", "")),
-            "complete": complete,
-        }
-        # T083: cancel_requested_at present only when cancel has been requested
-        # (http-api.md L318). Avoids null fields in non-cancelled runs.
-        cancel_requested_at = run.get("cancel_requested_at")
-        if cancel_requested_at:
-            summary["cancel_requested_at"] = cancel_requested_at
-        if policy_version == "discovery_v2":
-            summary["result_revision"] = int(run.get("result_revision") or 0)
-        return summary
-
-    def _build_ai_provider(store):
-        """Construct a DiscoveryAIProvider from current AI settings.
-
-        T101/T099: 返回真实 DiscoveryAIProvider（仅持 endpoint/model/api_key），
-        不再返回未定义的 _AIProviderAdapter。不读写 TaskStore，不泄漏凭据。
-        """
-        settings = store.get_ai_settings()
-        if not settings.get("is_configured"):
-            return None
-        cred_ref = store.get_credential_ref()
-        if not cred_ref:
-            return None
-        api_key = ai_service.retrieve_api_key(cred_ref)
-        if not api_key:
-            return None
-        return ai_service.DiscoveryAIProvider(
-            endpoint=settings.get("endpoint_url", ""),
-            model=settings.get("model", ""),
-            api_key=api_key,
-        )
-
     # ------------------------------------------------------------------
     # Three-stage pipeline: resume → AI fields → user confirm → script
     # ------------------------------------------------------------------
@@ -1975,64 +1194,39 @@ def create_app(config=None):
 
     app.config["SCHEDULE_PIPELINE_CLEANUP"] = _schedule_pipeline_task_cleanup
 
-    def _save_latest_pipeline_result(result, script_params):
-        """Persist the latest successful run so a page refresh can restore it.
+    app.config["SCHEDULE_PIPELINE_TASK_CLEANUP"] = _schedule_pipeline_task_cleanup
 
-        Writes atomically (temp file + os.replace) so an interrupted write
-        never leaves a corrupt latest-result file.  Each new successful run
-        overwrites the previous one.
-        """
-        payload = {
-            "saved_at": time.time(),
-            "script_params": script_params,
-            "result": result,
-        }
-        try:
-            LATEST_PIPELINE_RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            tmp = LATEST_PIPELINE_RESULT_PATH.with_suffix(".json.tmp")
-            with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False)
-            os.replace(tmp, LATEST_PIPELINE_RESULT_PATH)
-        except OSError:
-            pass  # persistence is best-effort; the in-memory result still works
+    # -----------------------------------------------------------------------
+    # AI 筛选阶段百分比与文案
+    # -----------------------------------------------------------------------
+    _SCREEN_STAGE_WEIGHTS: dict[str, tuple[int, int]] = {
+        "resume": (0, 0),
+        "screen_a": (0, 35),
+        "screen_a_done": (35, 35),
+        "ensure_chrome": (35, 40),
+        "fetch_jd": (40, 75),
+        "screen_b": (75, 100),
+        "done": (100, 100),
+    }
 
-    def _load_latest_pipeline_result():
-        """Return the persisted latest run payload, or None if absent/unreadable."""
-        try:
-            with open(LATEST_PIPELINE_RESULT_PATH, encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(payload, dict) or not isinstance(payload.get("result"), dict):
-            return None
-        return payload
+    _SCREEN_STAGE_MESSAGES: dict[str, str] = {
+        "resume": "正在恢复上次进度…",
+        "screen_a": "AI 粗筛中…",
+        "screen_a_done": "粗筛完成，准备抓取 JD…",
+        "ensure_chrome": "启动浏览器，准备抓取 JD…",
+        "fetch_jd": "抓取 JD 中…",
+        "screen_b": "AI 精筛中…",
+        "done": "筛选完成",
+        "cancelled": "运行已取消",
+    }
 
-    def _save_latest_scrape_result(result, script_params):
-        """持久化"只抓不筛"的原始抓取结果，供 AI 筛选步骤读取（原子写入）。"""
-        payload = {
-            "saved_at": time.time(),
-            "script_params": script_params,
-            "result": result,
-        }
-        try:
-            LATEST_SCRAPE_RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            tmp = LATEST_SCRAPE_RESULT_PATH.with_suffix(".json.tmp")
-            with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False)
-            os.replace(tmp, LATEST_SCRAPE_RESULT_PATH)
-        except OSError:
-            pass
-
-    def _load_latest_scrape_result():
-        """读取最近一次原始抓取结果；不存在/不可读返回 None。"""
-        try:
-            with open(LATEST_SCRAPE_RESULT_PATH, encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(payload, dict) or not isinstance(payload.get("result"), dict):
-            return None
-        return payload
+    def _screen_overall_percent(stage: str, current: int, total: int) -> int:
+        """把 AI 筛选 pipeline 的当前阶段映射到整体百分比（0-100）。"""
+        start, end = _SCREEN_STAGE_WEIGHTS.get(stage, (0, 100))
+        if total <= 0:
+            return start
+        ratio = min(1.0, max(0.0, current / total))
+        return min(100, round(start + (end - start) * ratio))
 
     def _run_pipeline_task(task_id, script_params):
         from webui.pipeline_exec import run_search
@@ -2057,7 +1251,7 @@ def create_app(config=None):
                     task["logs"].append(msg)
 
         try:
-            source = _make_discovery_source()
+            source = _make_cdp_source()
             if source is None:
                 raise RuntimeError("source_unavailable")
             # 取出停止信号传给 run_search；cancel 接口 set 它后，
@@ -2083,9 +1277,6 @@ def create_app(config=None):
                     else:
                         task["status"] = "done" if result.get("ok") else "failed"
             _schedule_pipeline_task_cleanup(task_id)
-            # 只有正常完成才持久化；取消的不保存，避免半截结果污染 AI 筛选步骤。
-            if result.get("ok") and not (stop_event is not None and stop_event.is_set()):
-                _save_latest_scrape_result(result, script_params)
         except Exception as exc:
             with _pipeline_lock:
                 task = _pipeline_tasks.get(task_id)
@@ -2154,7 +1345,7 @@ def create_app(config=None):
         """AI 筛选任务：StageA 字段粗筛 → 批量抓 JD → StageB JD 精筛。
 
         读取最近一次原始抓取结果，两段式 AI 筛选后把带 verdict 的最终结果
-        持久化到 latest_pipeline_result.json（供结果页恢复）。
+        持久化到数据库（供结果页恢复）。
 
         全程进度落库（screening_runs）+ 中间产物落盘（JD 断点文件 /
         screening_results 判定）：进程重启或失败后，同一抓取任务再次发起
@@ -2180,6 +1371,13 @@ def create_app(config=None):
             stop_event = task.get("stop_event")
 
         def emit(**kw):
+            stage = str(kw.get("stage", ""))
+            current = int(kw.get("current") or 0)
+            total = int(kw.get("total") or 0)
+            kw["overall_percent"] = _screen_overall_percent(stage, current, total)
+            # 调用方传了具体 message（如"筛选完成：匹配 X 条"）就优先用；没传才回退默认文案
+            if not kw.get("message"):
+                kw["message"] = _SCREEN_STAGE_MESSAGES.get(stage, "")
             with _pipeline_lock:
                 task = _pipeline_tasks.get(task_id)
                 if task is None:
@@ -2306,7 +1504,7 @@ def create_app(config=None):
                 chrome_ok, chrome_err = ensure_chrome_ready()
                 if not chrome_ok:
                     raise RuntimeError(f"chrome_not_ready: {chrome_err}")
-                source = _make_discovery_source()
+                source = _make_cdp_source()
                 if source is None:
                     raise RuntimeError("source_unavailable")
 
@@ -2321,10 +1519,18 @@ def create_app(config=None):
                         _mark_cancelled()
                         return
                     chunk = todo_jd[chunk_start:chunk_start + DETAIL_CHUNK]
+                    _jd_base = len(jd_map)
+
+                    def _jd_progress(done, total, _base=_jd_base):
+                        cur = min(_base + done, len(survivors))
+                        emit(stage="fetch_jd", current=cur, total=len(survivors),
+                             message=f"抓取 JD {cur}/{len(survivors)}")
+
                     detail_result = fetch_job_details(
                         chunk, source,
                         artifact_dir=app.config["RESULT_DIR"],
-                        stop_event=stop_event)
+                        stop_event=stop_event,
+                        progress=_jd_progress)
                     for j in detail_result["jobs"]:
                         jd = str(j.get("jd", "")).strip()
                         if jd:
@@ -2450,7 +1656,7 @@ def create_app(config=None):
             _schedule_pipeline_task_cleanup(task_id)
             emit(stage="done", total_matched=match_count,
                  message=f"筛选完成：匹配 {match_count} 条")
-            _save_latest_pipeline_result(result, {"screening": screening_fields})
+            store.save_pipeline_result(result, {"screening": screening_fields})
             # 任务成功：断点文件使命完成（续跑只服务失败/取消/中断）
             _remove_jd_checkpoint(jd_path)
         except ai_service.AISecurityError as exc:
@@ -2829,7 +2035,7 @@ def create_app(config=None):
         ``job_id`` 是 BOSS 岗位 id，profile_jobs.job_id 是内部 UUID，二者
         不能直接相等，统一用规范化链接对齐（同 _build_zone_canonical_urls）。
         """
-        payload = _load_latest_pipeline_result()
+        payload = store.load_latest_pipeline_result()
         if payload is None:
             return jsonify({"ok": True, "has_result": False})
         result = payload["result"]
@@ -2915,7 +2121,7 @@ def create_app(config=None):
             return jsonify({"ok": False,
                             "error": f"调试浏览器未能就绪：{chrome_err}"}), 503
 
-        source = _make_discovery_source()
+        source = _make_cdp_source()
         if source is None:
             return jsonify({"ok": False, "error": "抓取源不可用"}), 500
 
@@ -3031,7 +2237,7 @@ def create_app(config=None):
 
     @app.route("/api/pipeline/jobs/<job_id>/jd", methods=["POST"])
     def pipeline_job_refetch_jd(job_id):
-        """为单个岗位补抓 JD 并回写 latest_pipeline_result.json 中对应 job 项。
+        """为单个岗位补抓 JD 并回写数据库中对应 job 项。
 
         用于 JD 抓取失败/缺失的岗位补抓；不重跑 AI、不跨 tab。与
         /api/job-detail 共用 _job_detail_lock 串行化，避免并发争抢 CDP。
@@ -3051,7 +2257,7 @@ def create_app(config=None):
             return jsonify({"error": f"CDP Chrome 未运行：{chrome_err}",
                             "error_code": "cdp_not_ready"}), 503
 
-        source = _make_discovery_source()
+        source = _make_cdp_source()
         if source is None:
             return jsonify({"ok": False, "error": "抓取源不可用", "job_id": job_id}), 500
 
@@ -3075,25 +2281,26 @@ def create_app(config=None):
                             "error": "详情页未提取到 JD 正文，岗位可能已下架",
                             "job_id": job_id}), 502
 
-        # 抓到 JD 后回写 latest_pipeline_result.json 中匹配的 job 项；
+        # 抓到 JD 后回写数据库中匹配的 job 项；
         # spec 要求补抓不重跑 AI、不跨 tab，故只更新 jd，verdict 等其它字段保持不变。
         persisted = False
-        payload = _load_latest_pipeline_result()
+        payload = store.load_latest_pipeline_result()
         if payload is not None:
             result = payload.get("result") or {}
             jobs = result.get("jobs") or []
             matched = False
             for item in jobs:
                 if isinstance(item, dict) and str(item.get("job_id")) == str(job_id):
-                    item["jd"] = jd
                     matched = True
                     break
             if matched:
-                _save_latest_pipeline_result(result, payload.get("script_params") or {})
-                persisted = True
+                run_id = store.get_latest_done_run_id()
+                if run_id:
+                    store.update_pipeline_job_jd(run_id, str(job_id), jd)
+                    persisted = True
             else:
                 app.logger.warning(
-                    "pipeline_job_refetch_jd: job_id=%s 在 latest_pipeline_result 中未找到匹配项，未回写",
+                    "pipeline_job_refetch_jd: job_id=%s 在最近一次运行结果中未找到匹配项，未回写",
                     job_id,
                 )
 

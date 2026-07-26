@@ -48,6 +48,42 @@ SKILL.md / README(.en).md / CHANGELOG.md / CONTRIBUTING.md
 
 ## 提交流程
 
-默认分支 `master`，fork/分支工作流：从 `master` 拉新分支（`fix/...`、`feat/...`）→ 改代码补测试 → push → PR。一个 PR 只做一件事。
+默认分支 `master`，**单主线提交，不创建 feature 分支**。改动前直接在本会话说明「改什么 / 为什么 / 怎么改 / 影响范围」即可动手。commit message 用 Conventional Commits。
 
-> 项目本地运行：不开 GitHub issue、不开 PR，仅本地分支 + 本地 commit。改动前直接在本会话说明「改什么 / 为什么 / 怎么改 / 影响范围」即可动手。
+### Push 配置（重要）
+
+- **SSH 密钥**：`~/.ssh/id_ed25519_github`，认证身份 `czyooutzilas-sketch`
+- **公钥**：`ssh-ed25519 <your-public-key>`
+- **SSH config**：走 `ssh.github.com:443`（HTTPS 端口隧道）
+- **Push 目标**：`git@github.com:czyooutzilas-sketch/career-scout-preview.git`（私有仓库，已绑定，`git push` 默认推这里）
+
+## 难点记录（.devlog/）
+
+解决有难度的 bug 或技术难点后（不是改个 CSS 这种小事），**主动提议**将过程记录到项目 `.devlog/` 目录。用户确认后按以下格式写入：
+
+- 文件命名：`YYYY-MM-DD-<简短英文标识>.md`（如 `2026-07-25-source-blocked.md`）
+- 固定结构（面试导向）：
+
+```markdown
+# 一句话概括
+
+## 现象
+用户/产品视角看到了什么（不带技术术语）
+
+## 排查过程
+关键步骤、转折点、走过的弯路（体现思考能力）
+
+## 根因
+最终定位到的具体原因
+
+## 修复
+改了什么、为什么这么改
+
+## 面试话术
+一段可以直接对面试官说的完整叙述（2-3 分钟，口语化）
+
+## 延伸知识点
+涉及的技术概念，供深入准备
+```
+
+判断标准：这个问题是否值得在面试中花 2 分钟讲？如果答案是"是"，就记录。

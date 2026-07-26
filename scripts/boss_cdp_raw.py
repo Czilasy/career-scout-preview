@@ -1334,8 +1334,10 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             print(f"--- [{pg}/{max_pages} 页, {len(all_jobs)} 条已抓] ---")
             incr_request()
 
-            # 本次执行的起始页：先导航到 BOSS 搜索域建立页面 origin/session。
-            if pg == start_page:
+            # 每 4 页重新导航一次：BOSS 对同一页面上下文连续 API 调用约 4-5 次后
+            # 返回 code:37（环境异常）。重新导航 + 滚动可重置 session 计数器，
+            # 使 10 页 300 条全量抓取成为可能。
+            if (pg - start_page) % 4 == 0:
                 url = build_search_url(keyword, city_code, pg, filters)
                 cdp.send("Page.navigate", {"url": url}, sid)
                 time.sleep(random.uniform(6, 10))
@@ -1459,7 +1461,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 }, all_jobs)
 
             if pg < max_pages:
-                d = random.uniform(12, 22)
+                d = random.uniform(30, 38)
                 print(f"  翻页等待 {d:.0f}s...\n")
                 time.sleep(d)
 
@@ -1791,11 +1793,28 @@ def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
     return True
 
 
+def _reset_detail_session(ws, sid, sleeper, tab_label):
+    """重置详情抓取的 session 计数器（防 code:37 环境异常）。
+
+    与列表翻页相同的策略：导航回 BOSS 首页 + 等待 + 滚动，
+    让 BOSS 的 session 级请求计数归零，避免连续自动化访问触发拦截。
+    """
+    print(f"[{tab_label}] ⟳ session 重置：导航回首页...")
+    ws.send("Page.navigate", {"url": "https://www.zhipin.com/"}, sid)
+    sleeper(random.uniform(5, 8), label="session_reset_wait")
+    # 模拟真人滚动
+    ws.eval_js("window.scrollBy(0, 300); void(0);", sid)
+    sleeper(random.uniform(2, 4), label="session_reset_scroll")
+    ws.eval_js("window.scrollBy(0, -200); void(0);", sid)
+    sleeper(random.uniform(1, 2), label="session_reset_scroll2")
+    print(f"[{tab_label}] ⟳ session 重置完成")
+
+
 def _tab_worker(cdp_port, session_factory, work_queue, total, *,
                 sleeper, event_callback, readiness_timeout_seconds,
                 max_readiness_retries, inter_job_gap_range, stagger_range,
                 tab_id, results_lock, results, output_path, degrade_event,
-                trailing_wait):
+                trailing_wait, reset_every=3):
     """常驻 tab 工作线程：建池 → 错峰启动 → 循环领任务抓详情 → 补位节奏 → 关池。
 
     spec 007 ⑧：每个 tab 配一条独立工作线程 + 独立 CDP 会话（CDPSession 是
@@ -1826,6 +1845,7 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
             print(f"[{tab_label}] 错峰等待 {stagger:.1f}s 后开始")
             sleeper(stagger, label="stagger")
 
+        jobs_done_on_tab = 0  # 本 tab 累计抓取数，用于触发 session 重置
         while not degrade_event.is_set():
             try:
                 job, global_idx = work_queue.get_nowait()
@@ -1845,7 +1865,12 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
                 degrade_event.set()
                 print(f"[{tab_label}] 登录墙触发降级，停止领新任务")
                 break
-            # 补位节奏：宁慢求稳，抓完空出来也等随机 5-10s 再喂下一个
+            jobs_done_on_tab += 1
+            # 每抓 reset_every 个详情重置一次 session（同列表翻页防 code:37 策略）：
+            # 导航回 BOSS 首页 + 滚动，重置 BOSS 的 session 级请求计数器。
+            if jobs_done_on_tab % reset_every == 0 and not is_last:
+                _reset_detail_session(ws, sid, sleeper, tab_label)
+            # 补位节奏：宁慢求稳，抓完空出来也等随机间隔再喂下一个
             if not is_last or trailing_wait:
                 gap = random.uniform(inter_job_gap_range[0], inter_job_gap_range[1])
                 print(f"[{tab_label}]   等待 {gap:.1f}s 后抓下一个...")
@@ -1865,10 +1890,10 @@ def scrape_details(list_data, max_details=None, output_path=None,
                    cdp_port=DEFAULT_CDP_PORT, fmt="json", *,
                    batch_size=5, session_factory=None, sleeper=None,
                    event_callback=None, readiness_timeout_seconds=12,
-                   max_readiness_retries=1, inter_job_gap_range=(3, 7),
+                   max_readiness_retries=1, inter_job_gap_range=(8, 15),
                    trailing_wait=False,
                    enable_parallel=False, tab_pool_size=3,
-                   stagger_range=(5, 10)):
+                   stagger_range=(5, 10), reset_every=3):
     """抓取岗位详情页并返回结构化结果。
 
     Policy v2 keyword-only parameters (feature 005) +
@@ -1886,7 +1911,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
     - ``readiness_timeout_seconds``: readiness 总等待预算，默认 12 秒。
     - ``max_readiness_retries``: 首次未就绪时最多进行 N 次受控滚动重试，
       默认 1。
-    - ``inter_job_gap_range``: 同批次岗位间等待秒数范围，默认 (3, 7)。
+    - ``inter_job_gap_range``: 同批次岗位间等待秒数范围，默认 (8, 15)。
     - ``trailing_wait``: 运行最后一项之后是否再等待一次 gap，默认 False。
     - ``enable_parallel``: spec 007 ⑧，默认 False 走原串行路径（保持向后兼容
       与 005 合约）；True 走常驻 tab 池并行（webui 调用处显式传 True）。
@@ -1977,6 +2002,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
                     "output_path": output_path,
                     "degrade_event": degrade_event,
                     "trailing_wait": trailing_wait,
+                    "reset_every": reset_every,
                 },
                 name=f"detail-tab{tab_id + 1}",
                 daemon=True,
@@ -2949,6 +2975,12 @@ def main():
                    help="错峰启动最小间隔秒（默认 5；仅 --enable-parallel 时生效）")
     p.add_argument("--stagger-max", type=float, default=10.0,
                    help="错峰启动最大间隔秒（默认 10；仅 --enable-parallel 时生效）")
+    p.add_argument("--gap-min", type=float, default=8.0,
+                   help="详情间隔最小秒数（默认 8；防 code:37）")
+    p.add_argument("--gap-max", type=float, default=15.0,
+                   help="详情间隔最大秒数（默认 15；防 code:37）")
+    p.add_argument("--reset-every", type=int, default=3,
+                   help="每抓 N 个详情重置一次 session（默认 3；防 code:37）")
     p.add_argument("--events-output", default=None,
                    help="详情 terminal safe event 输出路径 (JSONL；每行一个事件，"
                         "仅含 kind/status/job_id/duration_ms/safe_code，"
@@ -3122,6 +3154,8 @@ def main():
                 enable_parallel=args.enable_parallel,
                 tab_pool_size=args.tab_pool_size,
                 stagger_range=(args.stagger_min, args.stagger_max),
+                inter_job_gap_range=(args.gap_min, args.gap_max),
+                reset_every=args.reset_every,
             )
         finally:
             if events_file_handle is not None:

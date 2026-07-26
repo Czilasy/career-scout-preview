@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from scripts import boss_cdp_raw as boss
-from webui.discovery import DiscoveryError, SCRAPER_FILTER_FIELDS, build_snapshot
 from webui.process_executor import ScraperExecutor
 from webui.workbench import normalize_job_link
 
@@ -26,6 +25,9 @@ from webui.workbench import normalize_job_link
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
+
+# Valid filter fields passable to the scraper CLI (excludes city which is positional).
+SCRAPER_FILTER_FIELDS = ("salary", "experience", "degree", "industry", "scale", "stage")
 
 # The scraper loads optional dependencies lazily for its CLI.  The web adapter
 # needs requests available before tests and preflight can patch/use it.
@@ -500,6 +502,9 @@ class BossCdpSource:
         detail_output_path: str,
         event_callback: Callable[[dict], None] | None = None,
         max_batch_size: int = 5,
+        gap_min: float = 8,
+        gap_max: float = 15,
+        reset_every: int = 3,
     ) -> dict[str, SourceOutcome]:
         """Fetch details for a batch of jobs (≤5) using one scraper subprocess.
 
@@ -622,6 +627,7 @@ class BossCdpSource:
         command = self._build_detail_batch_command(
             batch_input_path, detail_output_path, events_output_path,
             batch_size=len(valid_jobs),
+            gap_min=gap_min, gap_max=gap_max, reset_every=reset_every,
         )
         safe_log = f"batch_detail job_count={len(valid_jobs)}"
         if self.breaker.is_open():
@@ -903,6 +909,9 @@ class BossCdpSource:
         detail_output_path: str,
         events_output_path: str,
         batch_size: int,
+        gap_min: float = 8,
+        gap_max: float = 15,
+        reset_every: int = 3,
     ) -> list[str]:
         """Build the scraper CLI command for a batched detail fetch.
 
@@ -913,6 +922,8 @@ class BossCdpSource:
         events as JSONL so this adapter can parse/validate them.
         ``--enable-parallel`` (spec 007 ⑧)：批量抓取启用常驻 tab 池并行，
         3 tab 复用省开关开销，错峰+补位节奏防反爬。
+        ``--gap-min/--gap-max``：详情间隔秒数范围（防 code:37）。
+        ``--reset-every``：每抓 N 个详情重置一次 session。
         """
         return [
             self.python_executable,
@@ -920,10 +931,13 @@ class BossCdpSource:
             "--input", batch_input_path,
             "--detail-output", detail_output_path,
             "--events-output", events_output_path,
-            "--max-details", "5",
+            "--max-details", str(batch_size),
             "--detail",
             "--enable-parallel",
             "--tab-pool-size", "3",
+            "--gap-min", str(gap_min),
+            "--gap-max", str(gap_max),
+            "--reset-every", str(reset_every),
         ]
 
     # ------------------------------------------------------------------

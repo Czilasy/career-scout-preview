@@ -4,6 +4,7 @@ import {
   Bookmark,
   Check,
   FileText,
+  Filter,
   LoaderCircle,
   RotateCcw,
   Search,
@@ -12,6 +13,7 @@ import {
   Square,
   UploadCloud,
 } from "@lucide/vue";
+import CollapsibleCard from "../components/CollapsibleCard.vue";
 import JobWorkspace from "../components/JobWorkspace.vue";
 import StepNavigator from "../components/StepNavigator.vue";
 import TaskProgress from "../components/TaskProgress.vue";
@@ -75,8 +77,7 @@ const stepCopy: Record<StepId, { eyebrow: string; title: string; description: st
 
 const activeStep = ref<StepId>("upload");
 const analysisReady = ref(false);
-const scrapeCompleted = ref(false);
-const resultLoaded = ref(false);
+
 const selectedFile = ref<File | null>(null);
 const aiConsent = ref(false);
 const dragActive = ref(false);
@@ -95,6 +96,8 @@ const scrapeSnapshot = ref<TaskSnapshot | null>(null);
 const screenBusy = ref(false);
 const screenSnapshot = ref<TaskSnapshot | null>(null);
 const screenTaskId = ref("");
+const scrapeCompleted = ref(false);
+const resultLoaded = ref(false);
 // 刷新后接回任务时显示的恢复提示条；任务结束后清空
 const restoredTaskHint = ref("");
 const pipelineResult = ref<PipelineResult | null>(null);
@@ -107,11 +110,42 @@ const advancedSettings = ref<Record<string, number>>({
   pages: 3,
   inter_combo_delay: 30,
   detail_batch_size: 5,
+  detail_interval: 8,
+  detail_reset_every: 3,
+  detail_batch_cooldown: 30,
   screen_batch_size: 50,
   screen_concurrency: 1,
   match_batch_size: 4,
   match_concurrency: 1,
 });
+// 字段合法范围（与 input 的 min/max 保持一致）。失焦/回车时才钳到边界，
+// 输入过程中不干预，让用户自由编辑。
+const ADVANCED_RANGES: Record<string, [number, number]> = {
+  pages: [1, 9999],
+  inter_combo_delay: [5, 120],
+  detail_batch_size: [1, 15],
+  detail_interval: [2, 15],
+  detail_reset_every: [2, 10],
+  detail_batch_cooldown: [5, 60],
+  screen_batch_size: [1, 100],
+  screen_concurrency: [1, 10],
+  match_batch_size: [1, 20],
+  match_concurrency: [1, 10],
+};
+function clampAdvanced(field: string) {
+  const raw = advancedSettings.value[field];
+  if (typeof raw !== "number" || Number.isNaN(raw)) return;
+  const range = ADVANCED_RANGES[field];
+  if (!range) return;
+  const [min, max] = range;
+  let next = raw;
+  if (next < min) next = min;
+  else if (next > max) next = max;
+  if (next !== raw) advancedSettings.value[field] = next;
+}
+const searchPanelOpen = ref(true);
+const screenPanelOpen = ref(true);
+const advancedPanelOpen = ref(false);
 let pollTimer: number | undefined;
 
 const enabledSteps = computed<StepId[]>(() => {
@@ -154,6 +188,29 @@ const filterGroups = computed(() => {
       };
     })
     .filter((group) => group.options.length);
+});
+const searchSummary = computed(() => {
+  const parts: string[] = [];
+  if (selectedKeywords.value.length) parts.push(`${selectedKeywords.value.length} 关键词`);
+  if (cityList.value.length) parts.push(`${cityList.value.length} 城市`);
+  parts.push(profileSummary.value.trim() ? "画像已填" : "画像未填");
+  return parts.join(" · ");
+});
+const screenSummaryChips = computed(() => {
+  const chips: { label: string; value: string }[] = [];
+  filterGroups.value.forEach((group) => {
+    const values = filterValues.value[group.key] || [];
+    if (!values.length) return;
+    const labels = values.map((code) => {
+      const option = group.options.find(([, optCode]) => optCode === code);
+      return option ? option[0] : code;
+    });
+    chips.push({ label: group.label, value: labels.join(" / ") });
+  });
+  return chips;
+});
+watch(advancedPanelOpen, (open) => {
+  if (open) searchPanelOpen.value = false;
 });
 const groups = computed(() => partitionPipelineResult(pipelineResult.value || {}));
 const resultTabs = computed(() => [
@@ -390,6 +447,8 @@ async function startScrape() {
     notify("请确认至少一个关键词和一个城市", "warning");
     return;
   }
+  searchPanelOpen.value = false;
+  advancedPanelOpen.value = false;
   scrapeBusy.value = true;
   scrapeCompleted.value = false;
   scrapeSnapshot.value = { status: "running", progress: { message: "正在创建抓取任务…" }, logs: [] };
@@ -432,6 +491,7 @@ async function startAiScreen() {
     notify("请先完成本轮抓取，再开始 AI 筛选", "warning");
     return;
   }
+  screenPanelOpen.value = false;
   screenBusy.value = true;
   screenSnapshot.value = { status: "running", progress: { message: "正在创建 AI 筛选任务…" }, logs: [] };
   try {
@@ -771,11 +831,13 @@ async function retryJd(job: JobItem) {
       </section>
 
       <section v-else-if="activeStep === 'search'" class="workflow-stack">
-        <section class="content-card workflow-card">
-          <div class="section-heading">
-            <div><span class="card-kicker">搜索关键词</span><h2>哪些词用于广泛抓取？</h2></div>
-            <span class="selection-summary">{{ selectedKeywords.length }} 项已选</span>
-          </div>
+        <CollapsibleCard title="哪些词用于广泛抓取？" v-model="searchPanelOpen">
+          <template #prefix>
+            <Search :size="17" aria-hidden="true" />
+          </template>
+          <template #summary>
+            <span class="selection-summary">{{ searchSummary }}</span>
+          </template>
           <div class="estimate-line"><Search :size="17" aria-hidden="true" />{{ searchEstimate }}</div>
           <div class="chip-grid" aria-label="搜索关键词">
             <button
@@ -814,25 +876,40 @@ async function retryJd(job: JobItem) {
             <span>求职画像（用于 AI 精筛）<small v-if="!profileSummary">　未填写将跳过精筛</small></span>
             <textarea v-model="profileSummary" rows="2" placeholder="上传简历后自动生成；也可手动填写，如：3年Python后端，熟悉FastAPI/Redis，期望AI应用开发方向"></textarea>
           </label>
-        </section>
+        </CollapsibleCard>
 
-        <details class="content-card advanced-panel">
-          <summary><SlidersHorizontal :size="17" aria-hidden="true" />高级执行设置</summary>
+        <CollapsibleCard class="advanced-panel" title="高级执行设置" v-model="advancedPanelOpen">
+          <template #prefix>
+            <SlidersHorizontal :size="17" aria-hidden="true" />
+          </template>
+          <!-- 列表抓取 -->
+          <p class="adv-group-title">列表抓取</p>
           <div class="advanced-grid">
-            <label class="field-label"><span>每组合翻页数 <i class="tip" data-tip="每个关键词×城市组合抓多少页，页数越多岗位越多但耗时更长">?</i></span><input v-model.number="advancedSettings.pages" type="number" min="1" max="30"></label>
-            <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="两个搜索组合之间等待多久，实际会±5秒随机抖动；太短容易触发反爬">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" min="5" max="120"></label>
-            <label class="field-label"><span>详情批次大小 <i class="tip" data-tip="每批交给浏览器子进程抓JD的岗位数；子进程内部固定3个tab轮询，调大总体略快但浏览器压力更大">?</i></span><input v-model.number="advancedSettings.detail_batch_size" type="number" min="1" max="10"></label>
-            <label class="field-label"><span>粗筛每批数量 <i class="tip" data-tip="粗筛时每次发多少条岗位摘要给AI判断；并发数由粗筛并发数控制">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" min="10" max="100"></label>
-            <label class="field-label"><span>粗筛并发数 <i class="tip" data-tip="粗筛同时发几个AI请求，每个请求带粗筛每批数量条岗位；免费端点建议保持1否则429限流">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" min="1" max="5"></label>
-            <label class="field-label"><span>精筛每批数量 <i class="tip" data-tip="精筛时每次发多少条带JD的岗位给AI判断；并发数由精筛并发数控制">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" min="1" max="10"></label>
-            <label class="field-label"><span>精筛并发数 <i class="tip" data-tip="精筛同时发几个AI请求，每个请求带精筛每批数量条岗位；免费端点建议保持1否则429限流">?</i></span><input v-model.number="advancedSettings.match_concurrency" type="number" min="1" max="5"></label>
+            <label class="field-label"><span>每组合翻页数 <i class="tip" data-tip="范围 1~10。每个关键词×城市组合抓多少页，BOSS最多返回10页（300条），超出无新数据">?</i></span><input v-model.number="advancedSettings.pages" type="number" min="1" @change="clampAdvanced('pages')"><small v-if="advancedSettings.pages > 10" class="hint-warn">BOSS 最多返回 10 页，超出可能无新数据</small></label>
+            <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="范围 5~120。两个搜索组合之间等待多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" min="5" max="120" @change="clampAdvanced('inter_combo_delay')"></label>
+          </div>
+          <!-- 详情抓取 -->
+          <p class="adv-group-title">详情抓取（JD）</p>
+          <div class="advanced-grid">
+            <label class="field-label"><span>每批抓取数量 <i class="tip" data-tip="范围 1~15。每批交给浏览器抓JD的岗位数，越大越快但连续请求越密集">?</i></span><input v-model.number="advancedSettings.detail_batch_size" type="number" min="1" max="15" @change="clampAdvanced('detail_batch_size')"></label>
+            <label class="field-label"><span>岗位间隔（秒） <i class="tip" data-tip="范围 2~15。抓完一个岗位详情后等多久再抓下一个，实际会+0~7秒随机抖动">?</i></span><input v-model.number="advancedSettings.detail_interval" type="number" min="2" max="15" @change="clampAdvanced('detail_interval')"></label>
+            <label class="field-label"><span>重置频率 <i class="tip" data-tip="范围 2~10。每抓多少个详情后回BOSS首页逛一圈，重置会话计数器防拦截">?</i></span><input v-model.number="advancedSettings.detail_reset_every" type="number" min="2" max="10" @change="clampAdvanced('detail_reset_every')"></label>
+            <label class="field-label"><span>批次冷却（秒） <i class="tip" data-tip="范围 5~60。两批详情抓取之间休息多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.detail_batch_cooldown" type="number" min="5" max="60" @change="clampAdvanced('detail_batch_cooldown')"></label>
+          </div>
+          <!-- AI 筛选 -->
+          <p class="adv-group-title">AI 筛选</p>
+          <div class="advanced-grid">
+            <label class="field-label"><span>粗筛每批数量 <i class="tip" data-tip="范围 1~100。粗筛（海选）时每次发多少条岗位摘要给AI判断">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" min="1" max="100" @change="clampAdvanced('screen_batch_size')"></label>
+            <label class="field-label"><span>粗筛并发数 <i class="tip" data-tip="范围 1~10。粗筛同时发几个AI请求，并发越高越快但注意端点限流">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" min="1" max="10" @change="clampAdvanced('screen_concurrency')"></label>
+            <label class="field-label"><span>精筛每批数量 <i class="tip" data-tip="范围 1~20。精筛时每次发多少条带完整JD的岗位给AI，太多模型易丢信息">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" min="1" max="20" @change="clampAdvanced('match_batch_size')"></label>
+            <label class="field-label"><span>精筛并发数 <i class="tip" data-tip="范围 1~10。精筛同时发几个AI请求，精筛请求体大并发不宜过高">?</i></span><input v-model.number="advancedSettings.match_concurrency" type="number" min="1" max="10" @change="clampAdvanced('match_concurrency')"></label>
           </div>
           <button class="button secondary" type="button" :disabled="advancedBusy" @click="saveAdvancedSettings">
             {{ advancedBusy ? "保存中…" : "保存高级设置" }}
           </button>
-        </details>
+        </CollapsibleCard>
 
-        <TaskProgress :snapshot="scrapeSnapshot" />
+        <TaskProgress :snapshot="scrapeSnapshot" kind="scrape" />
         <div class="workflow-actions">
           <button class="button primary" type="button" data-testid="start-scrape" @click="scrapeBusy ? cancelScrape() : startScrape()">
             <Search v-if="!scrapeBusy" :size="18" aria-hidden="true" />
@@ -845,7 +922,16 @@ async function retryJd(job: JobItem) {
       </section>
 
       <section v-else-if="activeStep === 'screen'" class="workflow-stack">
-        <section class="content-card workflow-card">
+        <CollapsibleCard title="确认 6 类筛选条件" v-model="screenPanelOpen">
+          <template #prefix>
+            <Filter :size="17" aria-hidden="true" />
+          </template>
+          <template #summary>
+            <span v-if="screenSummaryChips.length" class="summary-chips">
+              <span v-for="chip in screenSummaryChips" :key="chip.label" class="summary-chip">{{ chip.label }}: {{ chip.value }}</span>
+            </span>
+            <span v-else class="selection-summary">未设置筛选条件</span>
+          </template>
           <div class="filter-groups">
             <fieldset v-for="group in filterGroups" :key="group.key" class="filter-group">
               <legend>{{ group.label }}</legend>
@@ -871,15 +957,14 @@ async function retryJd(job: JobItem) {
               </div>
             </fieldset>
           </div>
-        </section>
+        </CollapsibleCard>
 
-        <TaskProgress :snapshot="screenSnapshot" />
+        <TaskProgress :snapshot="screenSnapshot" kind="screen" />
         <div class="workflow-actions">
           <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="!screenBusy && !scrapeCompleted" @click="screenBusy ? cancelAiScreen() : startAiScreen()">
             <Square v-if="screenBusy" :size="18" aria-hidden="true" />
             <Sparkles v-else :size="18" aria-hidden="true" />{{ screenBusy ? "停止筛选" : "开始 AI 筛选" }}
           </button>
-          <span class="action-hint">Stage A 粗筛 → 抓取 JD → Stage B 精筛</span>
         </div>
       </section>
 

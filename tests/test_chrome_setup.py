@@ -873,7 +873,8 @@ class ChromeSetupTests(unittest.TestCase):
                     mock.patch.object(module.subprocess, "run", side_effect=lambda *args, **kwargs: fake_run(calls, *args, **kwargs)), \
                     mock.patch.object(module.subprocess, "Popen", side_effect=lambda cmd, **kwargs: calls["popen"].append(cmd)), \
                     mock.patch.object(module.time, "sleep", return_value=None), \
-                    mock.patch.object(module, "wait_for_login", return_value=True) as wait_login:
+                    mock.patch.object(module, "wait_for_login", return_value=True) as wait_login, \
+                    mock.patch.object(module, "wait_for_cdp", return_value=True):
                 fake_requests.get.side_effect = fake_get
                 self.assertEqual(module.run_setup_chrome(cdp_port=9333), 0)
 
@@ -918,8 +919,6 @@ class ChromeSetupTests(unittest.TestCase):
 
     def test_setup_rejects_ready_cdp_port_owned_by_other_profile(self):
         module = load_module()
-        fake_requests = mock.Mock()
-        fake_requests.get.return_value = type("Resp", (), {"status_code": 200})()
 
         with tempfile_profile() as paths:
             ps_output = (
@@ -928,17 +927,16 @@ class ChromeSetupTests(unittest.TestCase):
             )
             with mock.patch.object(module.platform, "system", return_value="Darwin"), \
                     mock.patch.object(module, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
-                    mock.patch.object(module, "requests", fake_requests), \
+                    mock.patch.object(module, "is_cdp_ready", return_value=True), \
                     mock.patch.object(module.subprocess, "run", return_value=type("Completed", (), {"stdout": ps_output, "returncode": 0})()), \
-                    mock.patch.object(module.subprocess, "Popen") as popen:
+                    mock.patch.object(module.subprocess, "Popen") as popen, \
+                    mock.patch.object(module, "terminate_process"):
                 self.assertEqual(module.run_setup_chrome(cdp_port=9333), 1)
 
         popen.assert_not_called()
 
     def test_setup_reuses_ready_cdp_port_owned_by_dedicated_profile(self):
         module = load_module()
-        fake_requests = mock.Mock()
-        fake_requests.get.return_value = type("Resp", (), {"status_code": 200})()
 
         with tempfile_profile() as paths:
             ps_output = (
@@ -947,10 +945,11 @@ class ChromeSetupTests(unittest.TestCase):
             )
             with mock.patch.object(module.platform, "system", return_value="Darwin"), \
                     mock.patch.object(module, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
-                    mock.patch.object(module, "requests", fake_requests), \
+                    mock.patch.object(module, "is_cdp_ready", return_value=True), \
                     mock.patch.object(module.subprocess, "run", return_value=type("Completed", (), {"stdout": ps_output, "returncode": 0})()), \
                     mock.patch.object(module.subprocess, "Popen") as popen, \
-                    mock.patch.object(module, "wait_for_login", return_value=True) as wait_login:
+                    mock.patch.object(module, "wait_for_login", return_value=True) as wait_login, \
+                    mock.patch.object(module, "terminate_process"):
                 self.assertEqual(module.run_setup_chrome(cdp_port=9333), 0)
 
         popen.assert_not_called()
@@ -958,8 +957,6 @@ class ChromeSetupTests(unittest.TestCase):
 
     def test_setup_can_skip_waiting_for_login(self):
         module = load_module()
-        fake_requests = mock.Mock()
-        fake_requests.get.return_value = type("Resp", (), {"status_code": 200})()
 
         with tempfile_profile() as paths:
             ps_output = (
@@ -968,9 +965,10 @@ class ChromeSetupTests(unittest.TestCase):
             )
             with mock.patch.object(module.platform, "system", return_value="Darwin"), \
                     mock.patch.object(module, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
-                    mock.patch.object(module, "requests", fake_requests), \
+                    mock.patch.object(module, "is_cdp_ready", return_value=True), \
                     mock.patch.object(module.subprocess, "run", return_value=type("Completed", (), {"stdout": ps_output, "returncode": 0})()), \
-                    mock.patch.object(module, "wait_for_login") as wait_login:
+                    mock.patch.object(module, "wait_for_login") as wait_login, \
+                    mock.patch.object(module, "terminate_process"):
                 self.assertEqual(module.run_setup_chrome(cdp_port=9333, wait_login=False), 0)
 
         wait_login.assert_not_called()
@@ -1150,7 +1148,10 @@ class tempfile_profile:
         return self.paths
 
     def __exit__(self, exc_type, exc, tb):
-        self.tmp.cleanup()
+        # Windows 上 Chrome 子进程可能还占着 chrome_stderr.log，cleanup 会抛
+        # PermissionError；用 ignore_errors 静默清理（CI 上本来也不该因临时文件失败）
+        import shutil
+        shutil.rmtree(self.tmp.name, ignore_errors=True)
 
 
 def fake_run(calls, *args, **kwargs):
@@ -1686,7 +1687,7 @@ class ScrapeDetailsReadinessContractTests(unittest.TestCase):
             self.assertGreaterEqual(seconds, 3)
             self.assertLessEqual(seconds, 7)
 
-    def test_scrape_details_default_inter_job_gap_range_is_three_to_seven(self):
+    def test_scrape_details_default_inter_job_gap_range_is_eight_to_fifteen(self):
         module = load_module()
         list_data = _make_scrape_details_list_data(n=2)
         sleeper, calls = _make_recording_sleeper()
@@ -1703,8 +1704,8 @@ class ScrapeDetailsReadinessContractTests(unittest.TestCase):
         gap_calls = [entry for entry in calls if entry[1] == "inter_job_gap"]
         self.assertEqual(len(gap_calls), 1)
         seconds = gap_calls[0][0]
-        self.assertGreaterEqual(seconds, 3)
-        self.assertLessEqual(seconds, 7)
+        self.assertGreaterEqual(seconds, 8)
+        self.assertLessEqual(seconds, 15)
 
 
 class RiskControlTests(unittest.TestCase):
@@ -1714,15 +1715,17 @@ class RiskControlTests(unittest.TestCase):
         module = load_module()
         payload = json.dumps([{"title": "Java", "job_link": "https://example.com"}])
 
-        jobs, diagnosis = module.diagnose_api_jobs_eval_value(payload)
+        jobs, diagnosis, meta = module.diagnose_api_jobs_eval_value(payload)
 
         self.assertEqual(jobs, [{"title": "Java", "job_link": "https://example.com"}])
         self.assertIsNone(diagnosis)
+        # 旧格式列表没有翻页元数据
+        self.assertIsNone(meta)
 
     def test_diagnose_exposes_http_error_status_instead_of_swallowing(self):
         module = load_module()
 
-        jobs, diagnosis = module.diagnose_api_jobs_eval_value(json.dumps([{"error": 403}]))
+        jobs, diagnosis, _ = module.diagnose_api_jobs_eval_value(json.dumps([{"error": 403}]))
 
         self.assertEqual(jobs, [])
         self.assertEqual(diagnosis, {"kind": "http_error", "status": 403})
@@ -1733,7 +1736,7 @@ class RiskControlTests(unittest.TestCase):
         module = load_module()
         payload = json.dumps([{"error": "parse_failed", "sample": "<html>安全验证</html>"}])
 
-        jobs, diagnosis = module.diagnose_api_jobs_eval_value(payload)
+        jobs, diagnosis, _ = module.diagnose_api_jobs_eval_value(payload)
 
         self.assertEqual(jobs, [])
         self.assertEqual(diagnosis["kind"], "parse_failed")
@@ -1743,7 +1746,7 @@ class RiskControlTests(unittest.TestCase):
         module = load_module()
 
         for value in (None, "", "not-json", json.dumps({"not": "a list"})):
-            jobs, diagnosis = module.diagnose_api_jobs_eval_value(value)
+            jobs, diagnosis, _ = module.diagnose_api_jobs_eval_value(value)
             self.assertEqual(jobs, [])
             self.assertEqual(diagnosis, {"kind": "empty_response"})
 

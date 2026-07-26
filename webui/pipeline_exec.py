@@ -35,11 +35,14 @@ ADVANCED_SETTINGS_PATH = _ADVANCED_SETTINGS_DIR / "advanced_settings.json"
 _ADVANCED_DEFAULTS = {
     "pages": 3,
     "inter_combo_delay": 30.0,
-    "detail_batch_size": 5,
+    "detail_batch_size": 6,
+    "detail_interval": 4,
+    "detail_reset_every": 4,
+    "detail_batch_cooldown": 15,
     "screen_batch_size": 50,
-    "screen_concurrency": 1,
+    "screen_concurrency": 3,
     "match_batch_size": 4,
-    "match_concurrency": 1,
+    "match_concurrency": 2,
 }
 
 
@@ -63,6 +66,44 @@ def save_advanced_settings(settings: dict) -> None:
     clean = {k: v for k, v in settings.items() if k in _ADVANCED_DEFAULTS}
     with open(ADVANCED_SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(clean, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# 进度百分比与阶段文案
+# ---------------------------------------------------------------------------
+_SCRAPE_STAGE_WEIGHTS: dict[str, tuple[int, int]] = {
+    "ensure_chrome": (0, 5),
+    "preflight": (5, 10),
+    "searching": (10, 90),
+    "combo_done": (10, 90),
+    "combo_failed": (10, 90),
+    "waiting": (10, 90),
+    "risk_warning": (90, 95),
+    "closing_chrome": (95, 100),
+    "done": (100, 100),
+}
+
+_SCRAPE_STAGE_MESSAGES: dict[str, str] = {
+    "ensure_chrome": "检查并启动调试浏览器…",
+    "preflight": "检查 BOSS 登录状态…",
+    "searching": "列表页抓取中…",
+    "combo_done": "列表页抓取中…",
+    "combo_failed": "部分组合抓取失败，继续中…",
+    "waiting": "防限流等待中…",
+    "risk_warning": "所有组合均失败，建议手动过验证码…",
+    "closing_chrome": "正在关闭调试浏览器…",
+    "done": "抓取完成",
+    "cancelled": "运行已取消",
+}
+
+
+def _scrape_overall_percent(stage: str, current: int, total: int) -> int:
+    """把抓取 pipeline 的当前阶段映射到整体百分比（0-100）。"""
+    start, end = _SCRAPE_STAGE_WEIGHTS.get(stage, (0, 100))
+    if total <= 0:
+        return start
+    ratio = min(1.0, max(0.0, current / total))
+    return min(100, round(start + (end - start) * ratio))
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +401,13 @@ def run_search(params: dict, source, *, pages: int = 3,
     combos = expand_combinations(params)
 
     def emit(**kw):
+        stage = str(kw.get("stage", ""))
+        current = int(kw.get("current") or 0)
+        total = int(kw.get("total") or 0)
+        kw["overall_percent"] = _scrape_overall_percent(stage, current, total)
+        # 调用方传了具体 message（如"完成：抓取 X 条"）就优先用；没传才回退默认文案
+        if not kw.get("message"):
+            kw["message"] = _SCRAPE_STAGE_MESSAGES.get(stage, "")
         if progress is not None:
             try:
                 progress(kw)
@@ -494,6 +542,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     if total == 0:
         return {"jobs": [], "login_wall": False, "stopped": False, "fetched": 0}
     BATCH_SIZE = int(load_advanced_settings().get("detail_batch_size") or 5)
+    _adv = load_advanced_settings()
+    _detail_interval = float(_adv.get("detail_interval") or 8)
+    _detail_reset_every = int(_adv.get("detail_reset_every") or 3)
+    _detail_batch_cooldown = float(_adv.get("detail_batch_cooldown") or 30)
     done_ids = {str(x) for x in completed_job_ids} if completed_job_ids else set()
     # 预先为每个 job 计算稳定 job_id（与 fetch_details_batch 内部 key 一致），
     # 缺 job_id 的 job 填充 idx{idx} 兜底，确保 batch 返回的 outcome 能映射回原 job。
@@ -515,6 +567,11 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         if stop_event is not None and stop_event.is_set():
             stopped = True
             break
+        # 批次间冷却：防 BOSS session 级反爬（code:37），首批不等
+        if batch_start > 0:
+            cooldown = _detail_batch_cooldown + random.uniform(-5, 5)
+            print(f"[fetch_jd] 批次间冷却 {cooldown:.0f}s（防 code:37）...")
+            time.sleep(max(cooldown, 5))
         batch = indexed_jobs[batch_start:batch_start + BATCH_SIZE]
         batch_jobs = [job for _, _, job in batch]
         batch_path = os.path.join(
@@ -525,6 +582,9 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 batch_jobs,
                 detail_output_path=batch_path,
                 max_batch_size=BATCH_SIZE,
+                gap_min=_detail_interval,
+                gap_max=_detail_interval + 7,
+                reset_every=_detail_reset_every,
             )
         except Exception:
             # 子进程级意外失败（非登录墙）：该批抓空继续。登录墙信号不经此路
