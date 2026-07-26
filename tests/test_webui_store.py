@@ -1,4 +1,4 @@
-﻿import json
+import json
 import pathlib
 import sqlite3
 import tempfile
@@ -350,5 +350,52 @@ class ScreeningRunStoreTests(unittest.TestCase):
         self.assertEqual(run["status"], "interrupted")
         self.assertEqual(run["error_code"], "restart")
         self.assertEqual(reopened.latest_interrupted_screening_run()["id"], "sr-3")
+
+    def test_create_screening_run_marks_process_log(self):
+        """工作日记（process_log）：create_screening_run 写入的 run 必须标 process_log。"""
+        self.store.create_screening_run("sr-pl", source_count=10)
+        run = self.store.get_screening_run("sr-pl")
+        self.assertEqual(run["record_kind"], "process_log")
+
+    def test_save_pipeline_result_marks_result_snapshot(self):
+        """结果存档（result_snapshot）：save_pipeline_result 写入的 run 必须标 result_snapshot。"""
+        result = {
+            "ok": True,
+            "jobs": [{"job_id": "j1", "verdict": "match", "title": "AI工程师"}],
+            "dropped": [],
+            "total_scraped": 1,
+            "total_kept": 1,
+            "total_matched": 1,
+            "total_dropped": 0,
+            "profile_summary": "画像",
+        }
+        run_id = self.store.save_pipeline_result(result, {"screening": {}})
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["record_kind"], "result_snapshot")
+
+    def test_load_latest_pipeline_result_skips_process_log(self):
+        """load_latest_pipeline_result 只能返回 result_snapshot，跳过 process_log。"""
+        # 先写一条 process_log（create_screening_run）
+        self.store.create_screening_run("sr-pl2", source_count=5)
+        self.store.update_screening_run("sr-pl2", status="done", match_count=0,
+                                        mismatch_count=5)
+        # 再写一条 result_snapshot（save_pipeline_result，时间戳更晚）
+        result = {
+            "ok": True,
+            "jobs": [{"job_id": "j2", "verdict": "match", "title": "AI工程师"}],
+            "dropped": [],
+            "total_scraped": 1,
+            "total_kept": 1,
+            "total_matched": 1,
+            "total_dropped": 0,
+            "profile_summary": "画像",
+        }
+        self.store.save_pipeline_result(result, {"screening": {}})
+
+        loaded = self.store.load_latest_pipeline_result()
+        self.assertIsNotNone(loaded)
+        # 加载到的必须是 result_snapshot（有 jobs 字段且非空），不是 process_log
+        self.assertEqual(len(loaded["result"]["jobs"]), 1)
+        self.assertEqual(loaded["result"]["jobs"][0]["job_id"], "j2")
 
 

@@ -27,12 +27,44 @@ from tests.test_workbench_fixtures import (
 # ---------------------------------------------------------------------------
 
 def _mock_chat_response(payload: dict, status_code: int = 200) -> MagicMock:
-    """Build a mock requests.Response whose body is a chat completions JSON."""
+    """Build a mock requests.Response simulating a streaming chat completions reply.
+
+    call_ai now uses stream=True and reads SSE lines via iter_lines().
+    The mock produces ``data: {...}`` chunks followed by ``data: [DONE]``.
+    """
     response = MagicMock()
     response.status_code = status_code
-    response.json.return_value = {
-        "choices": [{"message": {"content": json.dumps(payload, ensure_ascii=False)}}]
-    }
+    content_str = json.dumps(payload, ensure_ascii=False)
+    # 模拟流式：把完整 content 拆成若干 chunk（每 chunk 最多 40 字符）
+    chunk_size = 40
+    lines = []
+    for i in range(0, len(content_str), chunk_size):
+        chunk_text = content_str[i:i + chunk_size]
+        sse_data = json.dumps(
+            {"choices": [{"delta": {"content": chunk_text}, "finish_reason": None}]},
+            ensure_ascii=False,
+        )
+        lines.append(f"data: {sse_data}")
+    # 最后一个 chunk 带 finish_reason
+    lines.append(f'data: {json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}]})}')
+    lines.append("data: [DONE]")
+    lines.append("")  # 尾部空行
+    response.iter_lines.return_value = iter(lines)
+    return response
+
+
+def _mock_stream_raw(content_str: str, status_code: int = 200,
+                     finish_reason: str | None = "stop") -> MagicMock:
+    """Build a streaming mock from a raw content string (may be invalid JSON)."""
+    response = MagicMock()
+    response.status_code = status_code
+    sse_data = json.dumps(
+        {"choices": [{"delta": {"content": content_str},
+                      "finish_reason": finish_reason}]},
+        ensure_ascii=False,
+    )
+    lines = [f"data: {sse_data}", "data: [DONE]", ""]
+    response.iter_lines.return_value = iter(lines)
     return response
 
 
@@ -313,15 +345,16 @@ class CallAITests(unittest.TestCase):
 
         # 500 系先退避重试，耗尽后报 server_error（区别于"返回无效"）
         self.assertEqual(ctx.exception.error_code, "server_error")
-        self.assertEqual(mock_post.call_count, 4)
+        self.assertEqual(mock_post.call_count, 2)
 
     @patch("webui.ai.requests.post")
     def test_malformed_response_body_raises_invalid_response(self, mock_post):
         from webui.ai import call_ai, AISecurityError
 
+        # 流式返回空内容（端点 200 但没出字）
         response = MagicMock()
         response.status_code = 200
-        response.json.return_value = {"unexpected": "shape"}
+        response.iter_lines.return_value = iter(["data: [DONE]", ""])
         mock_post.return_value = response
 
         with self.assertRaises(AISecurityError) as ctx:
@@ -334,12 +367,7 @@ class CallAITests(unittest.TestCase):
     def test_non_json_content_raises_invalid_response(self, mock_post):
         from webui.ai import call_ai, AISecurityError
 
-        response = MagicMock()
-        response.status_code = 200
-        response.json.return_value = {
-            "choices": [{"message": {"content": "not json at all"}}]
-        }
-        mock_post.return_value = response
+        mock_post.return_value = _mock_stream_raw("not json at all")
 
         with self.assertRaises(AISecurityError) as ctx:
             call_ai("https://api.example.com/v1/chat/completions", "secret-key",
@@ -850,13 +878,8 @@ class CallAIRetryTests(unittest.TestCase):
 
     @staticmethod
     def _ok_response(payload, finish_reason="stop"):
-        response = MagicMock()
-        response.status_code = 200
-        choice = {"message": {"content": json.dumps(payload)}}
-        if finish_reason is not None:
-            choice["finish_reason"] = finish_reason
-        response.json.return_value = {"choices": [choice]}
-        return response
+        return _mock_chat_response(payload) if finish_reason == "stop" else \
+            _mock_stream_raw(json.dumps(payload), finish_reason=finish_reason)
 
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
@@ -919,19 +942,14 @@ class CallAIRetryTests(unittest.TestCase):
                     [{"role": "user", "content": "hi"}])
 
         self.assertEqual(ctx.exception.error_code, "rate_limited")
-        self.assertEqual(mock_post.call_count, 4)
+        self.assertEqual(mock_post.call_count, 2)
 
     @patch("webui.ai.requests.post")
     def test_truncated_finish_reason_length(self, mock_post):
         from webui.ai import AISecurityError, call_ai
 
-        response = MagicMock()
-        response.status_code = 200
-        response.json.return_value = {"choices": [{
-            "message": {"content": '{"results": [{"i":0,'},
-            "finish_reason": "length",
-        }]}
-        mock_post.return_value = response
+        mock_post.return_value = _mock_stream_raw(
+            '{"results": [{"i":0,', finish_reason="length")
 
         with self.assertRaises(AISecurityError) as ctx:
             call_ai("https://api.example.com/v1/chat/completions", "key",
@@ -942,13 +960,9 @@ class CallAIRetryTests(unittest.TestCase):
     def test_truncated_unbalanced_brackets_without_finish_reason(self, mock_post):
         from webui.ai import AISecurityError, call_ai
 
-        response = MagicMock()
-        response.status_code = 200
-        # 无 finish_reason 字段（有的端点不返回），括号不闭合算截断
-        response.json.return_value = {"choices": [{
-            "message": {"content": '{"results": [{"i": 0}'},
-        }]}
-        mock_post.return_value = response
+        # 无 finish_reason（有的端点不返回），括号不闭合算截断
+        mock_post.return_value = _mock_stream_raw(
+            '{"results": [{"i": 0}', finish_reason=None)
 
         with self.assertRaises(AISecurityError) as ctx:
             call_ai("https://api.example.com/v1/chat/completions", "key",
@@ -959,13 +973,8 @@ class CallAIRetryTests(unittest.TestCase):
     def test_plain_garbage_stays_invalid_response(self, mock_post):
         from webui.ai import AISecurityError, call_ai
 
-        response = MagicMock()
-        response.status_code = 200
-        response.json.return_value = {"choices": [{
-            "message": {"content": "不好意思，我无法回答"},
-            "finish_reason": "stop",
-        }]}
-        mock_post.return_value = response
+        mock_post.return_value = _mock_stream_raw(
+            "不好意思，我无法回答", finish_reason="stop")
 
         with self.assertRaises(AISecurityError) as ctx:
             call_ai("https://api.example.com/v1/chat/completions", "key",

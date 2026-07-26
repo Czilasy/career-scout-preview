@@ -17,19 +17,22 @@ function toggle() {
 
 <template>
   <div class="collapsible-card content-card" :class="{ open: modelValue }">
-    <button
-      type="button"
-      class="collapsible-header"
-      :aria-expanded="modelValue"
-      @click="toggle"
-    >
-      <span class="collapsible-prefix"><slot name="prefix" /></span>
-      <span class="collapsible-title">{{ title }}</span>
-      <span class="collapsible-header-extra">
-        <slot name="summary" />
-        <ChevronDown :size="18" class="collapsible-chevron" aria-hidden="true" />
-      </span>
-    </button>
+    <div class="collapsible-header-row">
+      <button
+        type="button"
+        class="collapsible-header"
+        :aria-expanded="modelValue"
+        @click="toggle"
+      >
+        <span class="collapsible-prefix"><slot name="prefix" /></span>
+        <span class="collapsible-title">{{ title }}</span>
+        <span class="collapsible-header-extra">
+          <slot name="summary" />
+          <ChevronDown :size="18" class="collapsible-chevron" aria-hidden="true" />
+        </span>
+      </button>
+      <slot name="actions" />
+    </div>
     <div class="collapsible-body" :class="{ open: modelValue }">
       <div class="collapsible-inner">
         <div class="collapsible-content">

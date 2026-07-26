@@ -7,6 +7,9 @@ interface TaskSnapshot {
   progress?: Record<string, unknown>;
   logs?: string[];
   error?: string;
+  // 后端记录的真实起止时间戳（epoch 毫秒）；缺省时前端退化成本地时钟
+  started_at?: number;
+  finished_at?: number;
 }
 
 const props = defineProps<{
@@ -32,8 +35,9 @@ watch(
   (next, prev) => {
     // 任务出现（null→非null，或 immediate 首触发时已有值）
     if (next && !prev) {
-      startedAt.value = Date.now();
-      finishedAt.value = null;
+      // 优先用后端真实时间戳；老后端没带则退化成本地时钟（组件重建后不再归零）
+      startedAt.value = typeof next.started_at === "number" ? next.started_at : Date.now();
+      finishedAt.value = typeof next.finished_at === "number" ? next.finished_at : null;
     }
     // 任务消失（非null→null）：重置
     if (!next && prev) {
@@ -46,7 +50,9 @@ watch(
     }
     // 终态：定格用时，停止刷新
     if (next && next.status && ["done", "failed", "cancelled"].includes(next.status)) {
-      if (finishedAt.value === null) finishedAt.value = Date.now();
+      if (finishedAt.value === null) {
+        finishedAt.value = typeof next.finished_at === "number" ? next.finished_at : Date.now();
+      }
       if (intervalId !== undefined) {
         clearInterval(intervalId);
         intervalId = undefined;

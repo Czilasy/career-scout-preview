@@ -660,20 +660,45 @@ button:disabled {
   color: var(--text-soft);
 }.advanced-panel.open .collapsible-header {
   border-bottom: 1px solid var(--line);
-}.adv-group-title {
-  margin: 10px 0 0;
+}.adv-groups {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: stretch;
+}.adv-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  min-width: 0;
+}.adv-group {
   padding: 0;
+  margin: 0;
+  min-width: 0;
+}.adv-group-title {
+  margin: 0 0 4px;
+  padding: 0 0 0 7px;
   font-size: 11px;
   font-weight: 600;
   color: var(--muted);
-  letter-spacing: 0.5px;
-}.adv-group-title:first-child {
-  margin-top: 0;
+  letter-spacing: 0.3px;
+  border-left: 3px solid var(--accent);
 }.advanced-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 14px;
-  padding: 6px 0 6px;
+  grid-template-columns: repeat(2, minmax(min-content, 1fr));
+  gap: 4px 10px;
+  padding: 0;
+}.adv-presets {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex-shrink: 0;
+  align-self: stretch;
+}.preset-btn {
+  flex: 1;
+  padding: 0 14px;
+  font-size: 11px;
+  border-radius: 4px;
+  white-space: nowrap;
 }.hint-warn {
   display: block;
   margin-top: 4px;
@@ -684,12 +709,22 @@ button:disabled {
 }.advanced-panel .field-label {
   gap: 3px;
 }.advanced-grid .field-label input[type="number"] {
-  width: 100%;
-  max-width: 110px;
-  padding: 6px 8px;
+  width: 64px;
+  padding: 4px 6px;
   font-size: 13px;
 }.advanced-panel .button.secondary {
-  margin-top: 4px;
+  margin-top: 0;
+}.collapsible-header-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}.collapsible-header-row .collapsible-header {
+  flex: 1;
+}.adv-save-btn {
+  margin-right: 10px;
+  padding: 4px 10px;
+  font-size: 12px;
+  white-space: nowrap;
 }.collapsible-card {
   padding: 0;
   overflow: hidden;
@@ -881,6 +916,18 @@ button:disabled {
   color: var(--muted);
   font-size: 11px;
   background: var(--surface-1);
+}
+/* 待确认 tab 顶部工具栏：全部重抓按钮 + 实时进度 */
+.recrawl-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin: 4px 0 14px;
+}
+.recrawl-toolbar .task-progress {
+  flex: 1 1 320px;
+  min-width: 280px;
 }.empty-panel {
   display: grid;
   min-height: 320px;
@@ -918,6 +965,26 @@ button:disabled {
   border-bottom: 1px solid var(--line);
   color: var(--muted);
   font-size: 12px;
+}
+.job-list-heading-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.recrawl-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.recrawl-inline .button {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  gap: 5px;
+}
+.recrawl-inline .task-progress {
+  min-width: 200px;
 }.job-list {
   display: grid;
   align-content: start;
@@ -967,6 +1034,33 @@ button:disabled {
 }.load-more {
   width: calc(100% - 24px);
   margin: 12px;
+}
+/* 无限滚动哨兵：占位即可，无需可见，靠 IntersectionObserver 触发加载下一批 */
+.load-sentinel {
+  height: 1px;
+  margin: 12px 0 0;
+  pointer-events: none;
+}
+/* 回到顶部悬浮按钮：滑过一屏后出现在右下角 */
+.back-to-top {
+  position: fixed;
+  right: 28px;
+  bottom: 28px;
+  z-index: 30;
+  padding: 10px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 36%);
+  transition: transform .12s ease, background .12s ease;
+}
+.back-to-top:hover {
+  background: #1e2430;
+  transform: translateY(-2px);
 }.job-detail-pane {
   min-width: 0;
   padding: clamp(22px, 3vw, 36px);
@@ -1192,8 +1286,6 @@ body,
     width: 148px;
   }.job-workspace {
     grid-template-columns: minmax(300px, .9fr) minmax(360px, 1.1fr);
-  }.advanced-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }.upload-layout {
     grid-template-columns: 1fr;
     gap: 28px;

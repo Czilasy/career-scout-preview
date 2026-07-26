@@ -11,8 +11,14 @@ const jobs = Array.from({ length: 75 }, (_, index) => ({
   verdict: index % 2 === 0 ? "match" : "not_match",
 }));
 
+function lastObserver(): { trigger: (v: boolean) => void } {
+  const list = (globalThis as unknown as { __mockIntersectionObservers: any[] })
+    .__mockIntersectionObservers;
+  return list[list.length - 1];
+}
+
 describe("JobWorkspace", () => {
-  it("renders large result sets in batches with a single detail panel", async () => {
+  it("renders large result sets in batches and expands via sentinel", async () => {
     const wrapper = mount(JobWorkspace, {
       props: { jobs, batchSize: 30, emptyMessage: "暂无岗位" },
     });
@@ -20,8 +26,12 @@ describe("JobWorkspace", () => {
     expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(30);
     expect(wrapper.findAll('[data-testid="job-detail"]')).toHaveLength(1);
     expect(wrapper.get('[data-testid="job-detail"]').text()).toContain("岗位 1");
+    // 无限滚动哨兵存在
+    expect(wrapper.find(".load-sentinel").exists()).toBe(true);
 
-    await wrapper.get('[data-testid="load-more"]').trigger("click");
+    // 哨兵进入视口 → 自动加载下一批
+    lastObserver().trigger(true);
+    await wrapper.vm.$nextTick();
 
     expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(60);
     expect(wrapper.findAll('[data-testid="job-detail"]')).toHaveLength(1);

@@ -96,6 +96,11 @@ const scrapeSnapshot = ref<TaskSnapshot | null>(null);
 const screenBusy = ref(false);
 const screenSnapshot = ref<TaskSnapshot | null>(null);
 const screenTaskId = ref("");
+// 待确认项「全部重抓」状态
+const recrawlBusy = ref(false);
+const recrawlTaskId = ref("");
+const recrawlSnapshot = ref<TaskSnapshot | null>(null);
+let recrawlRetryCount = 0;
 const scrapeCompleted = ref(false);
 const resultLoaded = ref(false);
 // 刷新后接回任务时显示的恢复提示条；任务结束后清空
@@ -108,15 +113,15 @@ const jdBusyIds = ref(new Set<string>());
 const advancedBusy = ref(false);
 const advancedSettings = ref<Record<string, number>>({
   pages: 3,
-  inter_combo_delay: 30,
-  detail_batch_size: 5,
-  detail_interval: 8,
-  detail_reset_every: 3,
-  detail_batch_cooldown: 30,
+  inter_combo_delay: 10,
+  detail_batch_size: 15,
+  detail_interval: 2,
+  detail_reset_every: 4,
+  detail_batch_cooldown: 5,
   screen_batch_size: 50,
-  screen_concurrency: 1,
+  screen_concurrency: 5,
   match_batch_size: 4,
-  match_concurrency: 1,
+  match_concurrency: 10,
 });
 // 字段合法范围（与 input 的 min/max 保持一致）。失焦/回车时才钳到边界，
 // 输入过程中不干预，让用户自由编辑。
@@ -423,6 +428,10 @@ async function loadAdvancedSettings() {
   } catch (error) {
     notify(errorMessage(error, "高级设置加载失败"), "warning");
   }
+}
+
+function applyPreset(_level: "conservative" | "normal" | "aggressive") {
+  // TODO: 预设方案逻辑
 }
 
 async function saveAdvancedSettings() {
@@ -744,6 +753,99 @@ async function retryJd(job: JobItem) {
     withBusy(jdBusyIds, id, false);
   }
 }
+
+// 待确认项「全部重抓」：缺 JD 的补 CDP 抓取，有 JD 的用画像重跑 AI 精筛。
+// 复用现有轮询机制显示进度（已完成 X / 共 N），结果原地合并进当前结果，保留当前 tab。
+async function recrawlUncertain() {
+  const ids = groups.value.uncertain.map((job) => jobId(job)).filter(Boolean);
+  if (!ids.length) {
+    notify("没有待确认的岗位", "info");
+    return;
+  }
+  if (recrawlBusy.value) return;
+  recrawlBusy.value = true;
+  recrawlSnapshot.value = {
+    status: "running",
+    progress: { message: `准备重抓 ${ids.length} 个待确认岗位…` },
+    logs: [],
+    error: "",
+  };
+  try {
+    const data = await apiRequest<{ task_id: string }>("/api/pipeline/recrawl", {
+      method: "POST",
+      json: { job_ids: ids, profile_summary: profileSummary.value },
+    });
+    recrawlTaskId.value = data.task_id;
+    await pollRecrawl(data.task_id);
+  } catch (error) {
+    recrawlBusy.value = false;
+    recrawlSnapshot.value = {
+      status: "failed", progress: {}, logs: [], error: errorMessage(error, "重抓启动失败"),
+    };
+    notify(errorMessage(error, "重抓启动失败"), "error");
+  }
+}
+
+async function pollRecrawl(taskId: string) {
+  try {
+    const data = await apiRequest<TaskSnapshot>(`/api/search-progress/${encodeURIComponent(taskId)}`);
+    recrawlSnapshot.value = data;
+    if (data.status === "done") {
+      recrawlRetryCount = 0;
+      recrawlBusy.value = false;
+      const updates = (data.result as unknown as { updates?: Record<string, unknown> } | undefined)?.updates;
+      if (updates) mergeRecrawlUpdates(updates as Record<string, unknown>);
+      notify("待确认岗位已重抓完成", "success");
+      return;
+    }
+    if (data.status === "cancelled") {
+      recrawlRetryCount = 0;
+      recrawlBusy.value = false;
+      notify("已停止重抓", "warning");
+      return;
+    }
+    if (data.status === "failed") {
+      recrawlRetryCount = 0;
+      recrawlBusy.value = false;
+      notify(data.error || "重抓失败", "error");
+      return;
+    }
+    pollTimer = window.setTimeout(() => void pollRecrawl(taskId), 1800);
+  } catch (error) {
+    recrawlRetryCount += 1;
+    if (recrawlRetryCount > POLL_MAX_RETRIES) {
+      recrawlRetryCount = 0;
+      recrawlBusy.value = false;
+      recrawlSnapshot.value = {
+        status: "failed",
+        progress: { message: "重抓进度获取连续失败" },
+        logs: [],
+        error: "重抓进度获取连续失败，请检查后重试",
+      };
+      notify("重抓进度获取连续失败，请检查后重试", "error");
+      return;
+    }
+    const delay = Math.min(POLL_BASE_DELAY * 2 ** (recrawlRetryCount - 1), POLL_MAX_DELAY);
+    pollTimer = window.setTimeout(() => void pollRecrawl(taskId), delay);
+  }
+}
+
+// 把后端回写的 {jd/verdict/verdict_reason/caveats} 原地合并到当前结果，
+// 已解决的项会随 groups 重算自动离开待确认 tab，未解决项原地保留。
+function mergeRecrawlUpdates(updates: Record<string, unknown>) {
+  const result = pipelineResult.value as (PipelineResult & { jobs?: JobItem[] }) | null;
+  if (!result || !Array.isArray(result.jobs)) return;
+  for (const job of result.jobs) {
+    const id = jobId(job);
+    const upd = updates[id];
+    if (!upd || typeof upd !== "object") continue;
+    const map = upd as Record<string, unknown>;
+    if (typeof map.jd !== "undefined") job.jd = String(map.jd ?? "");
+    if (typeof map.verdict !== "undefined") job.verdict = map.verdict as JobItem["verdict"];
+    if (typeof map.verdict_reason !== "undefined") job.verdict_reason = String(map.verdict_reason ?? "");
+    if (Array.isArray(map.caveats)) job.caveats = map.caveats as string[];
+  }
+}
 </script>
 
 <template>
@@ -882,31 +984,49 @@ async function retryJd(job: JobItem) {
           <template #prefix>
             <SlidersHorizontal :size="17" aria-hidden="true" />
           </template>
+          <template #actions>
+            <button class="button secondary adv-save-btn" type="button" :disabled="advancedBusy" @click="saveAdvancedSettings">
+              {{ advancedBusy ? "保存中…" : "保存高级设置" }}
+            </button>
+          </template>
+          <div class="adv-groups">
+          <div class="adv-fields">
           <!-- 列表抓取 -->
-          <p class="adv-group-title">列表抓取</p>
-          <div class="advanced-grid">
-            <label class="field-label"><span>每组合翻页数 <i class="tip" data-tip="范围 1~10。每个关键词×城市组合抓多少页，BOSS最多返回10页（300条），超出无新数据">?</i></span><input v-model.number="advancedSettings.pages" type="number" min="1" @change="clampAdvanced('pages')"><small v-if="advancedSettings.pages > 10" class="hint-warn">BOSS 最多返回 10 页，超出可能无新数据</small></label>
-            <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="范围 5~120。两个搜索组合之间等待多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" min="5" max="120" @change="clampAdvanced('inter_combo_delay')"></label>
+          <div class="adv-group">
+            <p class="adv-group-title">列表抓取</p>
+            <div class="advanced-grid">
+              <label class="field-label"><span>每组合翻页数 <i class="tip" data-tip="范围 1~10。每个关键词×城市组合抓多少页，BOSS最多返回10页（300条），超出无新数据">?</i></span><input v-model.number="advancedSettings.pages" type="number" min="1" @change="clampAdvanced('pages')"><small v-if="advancedSettings.pages > 10" class="hint-warn">BOSS 最多返回 10 页，超出可能无新数据</small></label>
+              <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="范围 5~120。两个搜索组合之间等待多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" min="5" max="120" @change="clampAdvanced('inter_combo_delay')"></label>
+            </div>
           </div>
           <!-- 详情抓取 -->
-          <p class="adv-group-title">详情抓取（JD）</p>
-          <div class="advanced-grid">
-            <label class="field-label"><span>每批抓取数量 <i class="tip" data-tip="范围 1~15。每批交给浏览器抓JD的岗位数，越大越快但连续请求越密集">?</i></span><input v-model.number="advancedSettings.detail_batch_size" type="number" min="1" max="15" @change="clampAdvanced('detail_batch_size')"></label>
-            <label class="field-label"><span>岗位间隔（秒） <i class="tip" data-tip="范围 2~15。抓完一个岗位详情后等多久再抓下一个，实际会+0~7秒随机抖动">?</i></span><input v-model.number="advancedSettings.detail_interval" type="number" min="2" max="15" @change="clampAdvanced('detail_interval')"></label>
-            <label class="field-label"><span>重置频率 <i class="tip" data-tip="范围 2~10。每抓多少个详情后回BOSS首页逛一圈，重置会话计数器防拦截">?</i></span><input v-model.number="advancedSettings.detail_reset_every" type="number" min="2" max="10" @change="clampAdvanced('detail_reset_every')"></label>
-            <label class="field-label"><span>批次冷却（秒） <i class="tip" data-tip="范围 5~60。两批详情抓取之间休息多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.detail_batch_cooldown" type="number" min="5" max="60" @change="clampAdvanced('detail_batch_cooldown')"></label>
+          <div class="adv-group">
+            <p class="adv-group-title">详情抓取（JD）</p>
+            <div class="advanced-grid">
+              <label class="field-label"><span>每批抓取数量 <i class="tip" data-tip="范围 1~15。每批交给浏览器抓JD的岗位数，越大越快但连续请求越密集">?</i></span><input v-model.number="advancedSettings.detail_batch_size" type="number" min="1" max="15" @change="clampAdvanced('detail_batch_size')"></label>
+              <label class="field-label"><span>岗位间隔（秒） <i class="tip" data-tip="范围 2~15。抓完一个岗位详情后等多久再抓下一个，实际会+0~7秒随机抖动">?</i></span><input v-model.number="advancedSettings.detail_interval" type="number" min="2" max="15" @change="clampAdvanced('detail_interval')"></label>
+              <label class="field-label"><span>重置频率 <i class="tip" data-tip="范围 2~10。每抓多少个详情后回BOSS首页逛一圈，重置会话计数器防拦截">?</i></span><input v-model.number="advancedSettings.detail_reset_every" type="number" min="2" max="10" @change="clampAdvanced('detail_reset_every')"></label>
+              <label class="field-label"><span>批次冷却（秒） <i class="tip" data-tip="范围 5~60。两批详情抓取之间休息多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.detail_batch_cooldown" type="number" min="5" max="60" @change="clampAdvanced('detail_batch_cooldown')"></label>
+            </div>
           </div>
           <!-- AI 筛选 -->
-          <p class="adv-group-title">AI 筛选</p>
-          <div class="advanced-grid">
-            <label class="field-label"><span>粗筛每批数量 <i class="tip" data-tip="范围 1~100。粗筛（海选）时每次发多少条岗位摘要给AI判断">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" min="1" max="100" @change="clampAdvanced('screen_batch_size')"></label>
-            <label class="field-label"><span>粗筛并发数 <i class="tip" data-tip="范围 1~10。粗筛同时发几个AI请求，并发越高越快但注意端点限流">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" min="1" max="10" @change="clampAdvanced('screen_concurrency')"></label>
-            <label class="field-label"><span>精筛每批数量 <i class="tip" data-tip="范围 1~20。精筛时每次发多少条带完整JD的岗位给AI，太多模型易丢信息">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" min="1" max="20" @change="clampAdvanced('match_batch_size')"></label>
-            <label class="field-label"><span>精筛并发数 <i class="tip" data-tip="范围 1~10。精筛同时发几个AI请求，精筛请求体大并发不宜过高">?</i></span><input v-model.number="advancedSettings.match_concurrency" type="number" min="1" max="10" @change="clampAdvanced('match_concurrency')"></label>
+          <div class="adv-group">
+            <p class="adv-group-title">AI 筛选</p>
+            <div class="advanced-grid">
+              <label class="field-label"><span>粗筛每批数量 <i class="tip" data-tip="范围 1~100。粗筛（海选）时每次发多少条岗位摘要给AI判断">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" min="1" max="100" @change="clampAdvanced('screen_batch_size')"></label>
+              <label class="field-label"><span>粗筛并发数 <i class="tip" data-tip="范围 1~10。粗筛同时发几个AI请求，并发越高越快但注意端点限流">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" min="1" max="10" @change="clampAdvanced('screen_concurrency')"></label>
+              <label class="field-label"><span>精筛每批数量 <i class="tip" data-tip="范围 1~20。精筛时每次发多少条带完整JD的岗位给AI，太多模型易丢信息">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" min="1" max="20" @change="clampAdvanced('match_batch_size')"></label>
+              <label class="field-label"><span>精筛并发数 <i class="tip" data-tip="范围 1~10。精筛同时发几个AI请求，精筛请求体大并发不宜过高">?</i></span><input v-model.number="advancedSettings.match_concurrency" type="number" min="1" max="10" @change="clampAdvanced('match_concurrency')"></label>
+            </div>
           </div>
-          <button class="button secondary" type="button" :disabled="advancedBusy" @click="saveAdvancedSettings">
-            {{ advancedBusy ? "保存中…" : "保存高级设置" }}
-          </button>
+          </div>
+          <!-- 预设方案 -->
+          <div class="adv-presets">
+            <button class="button preset-btn" type="button" @click="applyPreset('conservative')">保守</button>
+            <button class="button preset-btn" type="button" @click="applyPreset('normal')">普通</button>
+            <button class="button preset-btn" type="button" @click="applyPreset('aggressive')">激进</button>
+          </div>
+          </div>
         </CollapsibleCard>
 
         <TaskProgress :snapshot="scrapeSnapshot" kind="scrape" />
@@ -982,6 +1102,22 @@ async function retryJd(job: JobItem) {
         </div>
 
         <JobWorkspace :jobs="currentJobs" :empty-message="currentEmptyMessage">
+          <template #heading-actions>
+            <div v-if="activeCategory === 'uncertain'" class="recrawl-inline">
+              <button
+                class="button secondary small"
+                type="button"
+                data-testid="recrawl-uncertain"
+                :disabled="recrawlBusy || !groups.uncertain.length"
+                @click="recrawlUncertain"
+              >
+                <RotateCcw v-if="!recrawlBusy" :size="14" aria-hidden="true" />
+                <LoaderCircle v-else class="spin" :size="14" aria-hidden="true" />
+                {{ recrawlBusy ? "重抓中…" : `全部重抓（${groups.uncertain.length}）` }}
+              </button>
+              <TaskProgress v-if="recrawlSnapshot" :snapshot="recrawlSnapshot" kind="screen" />
+            </div>
+          </template>
           <template #actions="{ job }">
             <template v-if="activeCategory !== 'dropped'">
               <button class="button primary" type="button" :disabled="feedbackBusyIds.has(jobId(job))" @click="toggleInterest(job)">

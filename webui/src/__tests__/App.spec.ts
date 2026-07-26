@@ -42,7 +42,7 @@ describe("App", () => {
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
   });
 
-  it("auto-dismisses notices according to severity", async () => {
+  it("shows a persistent inline notice when the model list is empty", async () => {
     vi.useFakeTimers();
     const wrapper = mount(App);
     await flushPromises();
@@ -52,14 +52,19 @@ describe("App", () => {
     await wrapper.get('[aria-label="拉取可用模型"]').trigger("click");
     await flushPromises();
 
-    expect(wrapper.get('.notice-bar').text()).toContain("服务未返回模型列表");
-    vi.advanceTimersByTime(4_999);
-    await flushPromises();
-    expect(wrapper.find('.notice-bar').exists()).toBe(true);
+    // 模型列表为空时，提示以内联 .ai-local-notice 就地展示（非全局 .notice-bar）
+    const notice = wrapper.get('.ai-local-notice');
+    expect(notice.text()).toContain("服务未返回模型列表");
 
-    vi.advanceTimersByTime(1);
+    // 内联提示不自动消失：推进 5s 仍在
+    vi.advanceTimersByTime(5_000);
     await flushPromises();
-    expect(wrapper.find('.notice-bar').exists()).toBe(false);
+    expect(wrapper.find('.ai-local-notice').exists()).toBe(true);
+
+    // 关闭对话框后清空
+    await wrapper.get('[role="dialog"]').trigger("keydown", { key: "Escape" });
+    await flushPromises();
+    expect(wrapper.find('.ai-local-notice').exists()).toBe(false);
     wrapper.unmount();
   });
 });

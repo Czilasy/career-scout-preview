@@ -249,6 +249,8 @@ class TaskStore:
             self._migration_017()
         if current < 18:
             self._migration_018()
+        if current < 19:
+            self._migration_019()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -1331,6 +1333,40 @@ class TaskStore:
                 (_now(),),
             )
 
+    def _migration_019(self):
+        """Add record_kind column to screening_runs.
+
+        区分两种语义的行：
+        - process_log（工作日记）：create_screening_run 写入，筛选过程中持续更新，
+          含 status/processed_count/source_cursor 等过程字段。查"筛选跑到哪了"看这里。
+        - result_snapshot（结果存档）：save_pipeline_result 写入，筛选完成时一次性
+          写入全部结果，created=updated。查"最终判定结果"看这里。
+
+        默认值 process_log 保持向后兼容（旧数据全是 process_log 语义）。
+        历史数据回填：用启发式把已有的 result_snapshot 行标出来——
+        created_at == updated_at 且 total_kept > 0 的行视为 result_snapshot。
+        """
+        with self._connection() as conn:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(screening_runs)")}
+            if "record_kind" not in cols:
+                conn.execute(
+                    "ALTER TABLE screening_runs ADD COLUMN record_kind TEXT NOT NULL DEFAULT 'process_log'"
+                )
+            # 历史数据回填：result_snapshot 的特征是 created_at == updated_at 且 total_kept > 0
+            # （process_log 在筛选过程中 updated_at 会持续更新，绝不会与 created_at 相等；
+            # result_snapshot 是一次性写入，两个时间戳必然相等）
+            conn.execute(
+                "UPDATE screening_runs SET record_kind = 'result_snapshot' "
+                "WHERE record_kind = 'process_log' "
+                "AND created_at = updated_at "
+                "AND total_kept > 0"
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (19, ?, 'record_kind column to distinguish process_log vs result_snapshot')",
+                (_now(),),
+            )
+
     # ===================================================================
     # Pipeline result persistence (replaces latest_pipeline_result.json)
     # ===================================================================
@@ -1350,8 +1386,8 @@ class TaskStore:
                 "INSERT INTO screening_runs "
                 "(id, frozen_filters_json, status, source_count, match_count, mismatch_count, "
                 " created_at, updated_at, search_params_json, profile_summary, "
-                " total_scraped, total_kept, total_dropped) "
-                "VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " total_scraped, total_kept, total_dropped, record_kind) "
+                "VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'result_snapshot')",
                 (
                     run_id,
                     json.dumps(script_params, ensure_ascii=False),
@@ -1421,6 +1457,7 @@ class TaskStore:
         with self._connection() as conn:
             run = conn.execute(
                 "SELECT * FROM screening_runs WHERE status = 'done' "
+                "AND record_kind = 'result_snapshot' "
                 "ORDER BY created_at DESC LIMIT 1",
             ).fetchone()
             if run is None:
@@ -1490,6 +1527,7 @@ class TaskStore:
         with self._connection() as conn:
             row = conn.execute(
                 "SELECT id FROM screening_runs WHERE status = 'done' "
+                "AND record_kind = 'result_snapshot' "
                 "ORDER BY created_at DESC LIMIT 1",
             ).fetchone()
         return row["id"] if row else None
@@ -1970,8 +2008,8 @@ class TaskStore:
                 "(id, frozen_filters_json, status, source_count, match_count, mismatch_count, "
                 "created_at, updated_at, error_code, resume_id, pending_count, processed_count, "
                 "source_cursor, parse_failure_count, parse_failures_json, profile_id, "
-                "execution_params_json) "
-                "VALUES (?, ?, 'queued', ?, 0, 0, ?, ?, NULL, NULL, 0, 0, 0, 0, '{}', ?, ?)",
+                "execution_params_json, record_kind) "
+                "VALUES (?, ?, 'queued', ?, 0, 0, ?, ?, NULL, NULL, 0, 0, 0, 0, '{}', ?, ?, 'process_log')",
                 (
                     str(run_id),
                     json.dumps(frozen_filters or {}, ensure_ascii=False),
@@ -2105,6 +2143,7 @@ class TaskStore:
             "execution_params": json.loads(row["execution_params_json"] or "{}"),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "record_kind": row["record_kind"],
         }
 
     def append_search_event(self, run_id, event_type, payload=None):

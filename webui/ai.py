@@ -30,6 +30,7 @@ from webui.candidate import (
 KEYRING_SERVICE = "boss-workbench"
 DEFAULT_TIMEOUT = 60
 CONNECTION_TIMEOUT = 15
+STREAM_IDLE_TIMEOUT = 20  # 流式模式下，连续 N 秒没收到任何数据即判定连接已死
 RANK_BATCH_SIZE = 10
 
 # Safe error classifications returned to callers.  Never include raw
@@ -45,14 +46,14 @@ ERROR_SERVER = "server_error"
 
 # Free-tier endpoints throttle aggressively (HTTP 429).  Retry a few times
 # with increasing backoff so a transient limit doesn't fail the whole step.
-RATE_LIMIT_ATTEMPTS = 4
-RATE_LIMIT_BACKOFF_SECONDS = (5, 15, 30)
+RATE_LIMIT_ATTEMPTS = 2
+RATE_LIMIT_BACKOFF_SECONDS = (5,)
 
 # 可重试的传输层故障：429 限流 + 5xx 服务端临时故障；超时/连接错误也可重试。
 # 不同故障不同退避：429 用上面的长退避，5xx 短退避，超时/网络中等退避。
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
-SERVER_ERROR_BACKOFF_SECONDS = (2, 5, 10)
-NETWORK_BACKOFF_SECONDS = (3, 8, 20)
+SERVER_ERROR_BACKOFF_SECONDS = (3,)
+NETWORK_BACKOFF_SECONDS = (3,)
 
 
 class AISecurityError(Exception):
@@ -288,9 +289,49 @@ def _looks_truncated(content) -> bool:
     return opens > closes
 
 
+def _read_stream(response) -> tuple[str, str]:
+    """从流式响应中逐块读取，拼接完整 content 并提取 finish_reason。
+
+    利用 requests 的 read timeout（STREAM_IDLE_TIMEOUT）：如果连续 20 秒
+    没有收到任何字节，底层 socket 自动抛 Timeout，无需手动计时。
+
+    返回 (content, finish_reason)。
+    """
+    content_parts: list[str] = []
+    finish_reason = ""
+    for line in response.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data: "):
+            continue
+        data_str = line[6:].strip()
+        if data_str == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data_str)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        choices = chunk.get("choices")
+        if not choices or not isinstance(choices, list):
+            continue
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta") or {}
+        text = delta.get("content") or ""
+        if text:
+            content_parts.append(text)
+        fr = choice.get("finish_reason")
+        if fr:
+            finish_reason = str(fr)
+    return "".join(content_parts), finish_reason
+
+
 def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFAULT_TIMEOUT,
             temperature: float = 0.3, model: str = "") -> dict:
     """Call an OpenAI-compatible chat completions endpoint and return parsed JSON.
+
+    使用流式（stream=True）模式：AI 每生成几个字就推送一小段，本地实时接收。
+    如果连续 STREAM_IDLE_TIMEOUT（20）秒没收到任何数据，判定连接已死，
+    立即超时重试——不再傻等 60 秒。
 
     Raises :class:`AISecurityError` with a safe error_code on any failure.
     The exception never contains the API key, request body or raw response,
@@ -307,35 +348,58 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
         "messages": messages,
         "temperature": temperature,
         "response_format": {"type": "json_object"},
+        "stream": True,
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    response = None
+    # (连接超时, 读取超时)：连接 15s 内必须建立；建立后每 20s 内必须收到数据
+    stream_timeout = (CONNECTION_TIMEOUT, STREAM_IDLE_TIMEOUT)
+
+    content = ""
+    finish_reason = ""
     last_error = None
     waited = 0.0
     budget = float(timeout) if timeout else float(DEFAULT_TIMEOUT)
 
     for attempt in range(RATE_LIMIT_ATTEMPTS):
+        response = None
         try:
             response = requests.post(
-                _chat_completions_url(endpoint_url), json=payload, headers=headers, timeout=timeout
+                _chat_completions_url(endpoint_url), json=payload, headers=headers,
+                timeout=stream_timeout, stream=True,
             )
-            last_error = None
         except requests.Timeout:
-            response = None
             last_error = AISecurityError(ERROR_TIMEOUT)
         except requests.ConnectionError:
-            response = None
             last_error = AISecurityError(ERROR_NETWORK)
         except requests.RequestException:
             raise AISecurityError(ERROR_NETWORK) from None
         except Exception:
             raise AISecurityError(ERROR_INVALID) from None
 
+        # HTTP 状态码在流式 body 之前就到达，429/5xx 检测逻辑不变
         if response is not None and response.status_code not in RETRYABLE_STATUS:
-            break  # 成功或不可重试错误（401/403/其他 4xx），出循环走后续处理
+            # 200 或不可重试 4xx：读取流式内容
+            if response.status_code == 200:
+                try:
+                    content, finish_reason = _read_stream(response)
+                    last_error = None
+                    break  # 成功拿到内容，退出重试循环
+                except requests.Timeout:
+                    # 流式读取中途 20s 无数据：连接已死，重试
+                    last_error = AISecurityError(ERROR_TIMEOUT)
+                    response = None
+                except (requests.ConnectionError, requests.ChunkedEncodingError):
+                    last_error = AISecurityError(ERROR_NETWORK)
+                    response = None
+                except Exception:
+                    raise AISecurityError(ERROR_INVALID) from None
+            else:
+                # 不可重试 4xx（401/403 等），出循环走后续错误处理
+                last_error = None
+                break
 
         if response is not None:
             # 可重试状态码：429 先查配额耗尽（救不活，立即停）
@@ -358,33 +422,24 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
         time.sleep(delay)
         waited += delay
 
-    if response is None:
-        raise (last_error or AISecurityError(ERROR_NETWORK)) from None
+    # 重试耗尽仍未拿到内容
+    if not content and last_error is not None:
+        raise last_error from None
+    if not content and response is None:
+        raise AISecurityError(ERROR_NETWORK) from None
 
-    if response.status_code in RETRYABLE_STATUS:
-        # 可重试故障重试耗尽：429→限流，5xx→服务端故障
-        raise (last_error or AISecurityError(ERROR_SERVER)) from None
+    # 不可重试 4xx 错误处理（与之前一致）
+    if response is not None and response.status_code != 200:
+        if response.status_code in RETRYABLE_STATUS:
+            raise (last_error or AISecurityError(ERROR_SERVER)) from None
+        if response.status_code in (401, 403):
+            raise AISecurityError(ERROR_AUTH)
+        if response.status_code >= 400:
+            raise AISecurityError(ERROR_INVALID)
 
-    if response.status_code in (401, 403):
-        raise AISecurityError(ERROR_AUTH)
-    if response.status_code >= 400:
-        raise AISecurityError(ERROR_INVALID)
-
-    try:
-        data = response.json()
-    except ValueError:
+    # 流式拿到的 content 为空（端点返回了 200 但没出字）
+    if not content.strip():
         raise AISecurityError(ERROR_INVALID) from None
-
-    try:
-        choice = data["choices"][0]
-        content = choice["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        raise AISecurityError(ERROR_INVALID) from None
-
-    # finish_reason 有的端点不返回或为 None，取不到就当空串（不因此报错）
-    finish_reason = ""
-    if isinstance(choice, dict):
-        finish_reason = str(choice.get("finish_reason") or "")
 
     try:
         return json.loads(content)
@@ -825,6 +880,9 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
 
         返回被截断（ERROR_TRUNCATED）时拆半重跑，还截断就继续拆到单条；
         单条仍失败才标 uncertain（不伪装成已匹配）。
+
+        返回 (verdicts_dict, transport_failed)：transport_failed=True 表示
+        整批因网络/超时/限流失败（可末尾补一轮），区别于 AI 返回了但漏了某条。
         """
         batch_desc = [
             {
@@ -840,6 +898,8 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(batch_desc, ensure_ascii=False)},
         ]
+        transport_failed = False
+        fail_reason = ""
         try:
             data = call_ai(endpoint_url, api_key, messages, model=model)
             results = data.get("results", []) if isinstance(data, dict) else []
@@ -847,24 +907,27 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         except AISecurityError as exc:
             if exc.error_code == ERROR_TRUNCATED and len(batch) > 1:
                 mid = len(batch) // 2
-                sub = _match_one_batch(batch[:mid])
-                sub.update(_match_one_batch(batch[mid:]))
-                return sub
+                sub, f1 = _match_one_batch(batch[:mid])
+                sub2, f2 = _match_one_batch(batch[mid:])
+                sub.update(sub2)
+                return sub, f1 or f2
             by_i = None
+            transport_failed = True
+            fail_reason = user_facing_error(exc.error_code)
         batch_verdicts = {}
         for idx, job in enumerate(batch):
             jid = str(job.get("job_id", ""))
             if by_i is None:
                 batch_verdicts[jid] = {
                     "verdict": "uncertain",
-                    "reason": "AI 精筛失败，待人工确认",
+                    "reason": f"{fail_reason}，待人工确认" if fail_reason else "AI 精筛失败，待人工确认",
                 }
                 continue
             r = by_i.get(idx)
             if not isinstance(r, dict) or not isinstance(r.get("match"), bool):
                 batch_verdicts[jid] = {
                     "verdict": "uncertain",
-                    "reason": "AI 未返回判定，待人工确认",
+                    "reason": "AI 未返回该岗位判定，待人工确认",
                 }
                 continue
             match = r["match"]
@@ -875,17 +938,22 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 "reason": reason,
                 "caveats": caveats,
             }
-        return batch_verdicts
+        return batch_verdicts, transport_failed
 
     batches = []
     for start in range(0, len(jobs_with_jd), batch_size):
         batches.append(jobs_with_jd[start:start + batch_size])
 
+    failed_batches = []  # 传输层失败的批次，末尾补一轮
+
     if concurrency <= 1 or len(batches) <= 1:
         # 串行（默认，免费端点并发=1）
         processed = 0
         for batch in batches:
-            verdicts.update(_match_one_batch(batch))
+            batch_verdicts, transport_failed = _match_one_batch(batch)
+            verdicts.update(batch_verdicts)
+            if transport_failed:
+                failed_batches.append(batch)
             processed += len(batch)
             if progress is not None:
                 try:
@@ -913,10 +981,21 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = {pool.submit(_match_one_batch, batch): batch for batch in batches}
             for fut in as_completed(futures):
-                batch_verdicts = fut.result()
+                batch_verdicts, transport_failed = fut.result()
                 with lock:
                     verdicts.update(batch_verdicts)
+                    if transport_failed:
+                        failed_batches.append(futures[fut])
                 _safe_progress(len(futures[fut]))
+
+    # 末尾补一轮：传输层失败的批次统一重试一次（网络抖动恢复后大概率成功）
+    if failed_batches:
+        for batch in failed_batches:
+            batch_verdicts, still_failed = _match_one_batch(batch)
+            if not still_failed:
+                # 重试成功：用新判定覆盖之前的 uncertain
+                verdicts.update(batch_verdicts)
+
     return {"verdicts": verdicts}
 
 
