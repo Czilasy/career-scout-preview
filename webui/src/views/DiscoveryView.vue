@@ -111,6 +111,7 @@ const rejectedIds = ref(new Set<string>());
 const feedbackBusyIds = ref(new Set<string>());
 const jdBusyIds = ref(new Set<string>());
 const advancedBusy = ref(false);
+const activePreset = ref<"conservative" | "normal" | "aggressive" | null>(null);
 const advancedSettings = ref<Record<string, number>>({
   pages: 3,
   inter_combo_delay: 10,
@@ -430,8 +431,9 @@ async function loadAdvancedSettings() {
   }
 }
 
-function applyPreset(_level: "conservative" | "normal" | "aggressive") {
-  // TODO: 预设方案逻辑
+function applyPreset(level: "conservative" | "normal" | "aggressive") {
+  activePreset.value = level;
+  // TODO: 预设方案参数逻辑
 }
 
 async function saveAdvancedSettings() {
@@ -1009,6 +1011,11 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
             </button>
           </template>
           <div class="adv-groups">
+          <div class="adv-presets-bar">
+            <button class="preset-tab" type="button" :class="{active: activePreset==='conservative'}" @click="applyPreset('conservative')">保守</button>
+            <button class="preset-tab" type="button" :class="{active: activePreset==='normal'}" @click="applyPreset('normal')">普通</button>
+            <button class="preset-tab" type="button" :class="{active: activePreset==='aggressive'}" @click="applyPreset('aggressive')">激进</button>
+          </div>
           <div class="adv-fields">
           <!-- 列表抓取 -->
           <div class="adv-group">
@@ -1038,12 +1045,6 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
               <label class="field-label"><span>精筛并发数 <i class="tip" data-tip="范围 1~10。精筛同时发几个AI请求，精筛请求体大并发不宜过高">?</i></span><input v-model.number="advancedSettings.match_concurrency" type="number" min="1" max="10" @change="clampAdvanced('match_concurrency')"></label>
             </div>
           </div>
-          </div>
-          <!-- 预设方案 -->
-          <div class="adv-presets">
-            <button class="button preset-btn" type="button" @click="applyPreset('conservative')">保守</button>
-            <button class="button preset-btn" type="button" @click="applyPreset('normal')">普通</button>
-            <button class="button preset-btn" type="button" @click="applyPreset('aggressive')">激进</button>
           </div>
           </div>
         </CollapsibleCard>
