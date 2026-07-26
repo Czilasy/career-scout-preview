@@ -306,6 +306,9 @@ def _read_stream(response) -> tuple[str, str]:
     t0 = time.time()
     content_parts: list[str] = []
     finish_reason = ""
+    # 强制 UTF-8 解码：AI 端点返回 text/event-stream 时通常不带 charset，
+    # requests 默认回退 Latin-1 导致中文乱码。
+    response.encoding = "utf-8"
     for line in response.iter_lines(decode_unicode=True):
         if time.time() - t0 > STREAM_TOTAL_TIMEOUT:
             raise requests.Timeout(

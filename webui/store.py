@@ -59,8 +59,11 @@ MAX_DETAIL_BUDGET = 60
 _INITIALIZE_LOCK = threading.RLock()
 
 
+_CST = timezone(timedelta(hours=8))  # 东八区
+
+
 def _now():
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(_CST).isoformat()
 
 
 def _uuid():
@@ -74,7 +77,7 @@ def _opt_str(value):
 
 def _now_minus_days(days):
     """返回 N 天前的 ISO 时间字符串（用于清理阈值）。"""
-    return (datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat()
+    return (datetime.now(_CST) - timedelta(days=int(days))).isoformat()
 
 
 def _safe_quality_warnings(value):

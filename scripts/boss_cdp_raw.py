@@ -484,6 +484,10 @@ class DetailLoginRequiredError(DetailExtractionError):
     """The detail page is truncated because the BOSS session is not logged in."""
 
 
+class DetailVerificationRequiredError(DetailExtractionError):
+    """The detail page shows a captcha/slider verification instead of JD content."""
+
+
 class RiskControlError(RuntimeError):
     """抓取中途命中风控/验证码，立即停止（不静默跳过、不伪装完成）。
 
@@ -612,6 +616,10 @@ def extract_job_description(extracted, min_length=MIN_DETAIL_TEXT_LENGTH):
         )
     if _looks_like_navigation_page(diagnostic_text):
         raise DetailExtractionError("detail page rendered navigation chrome without a JD")
+    if looks_like_risk_control(diagnostic_text):
+        raise DetailVerificationRequiredError(
+            "detail page shows captcha/verification instead of JD content"
+        )
 
     text = raw_jd
     if not text and DETAIL_DESCRIPTION_MARKER in page_text:
@@ -1770,6 +1778,12 @@ def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
         )
         print(f"[{tab_label}]   ⚠ 登录墙，触发降级")
         return "login_required"
+    except DetailVerificationRequiredError as exc:
+        _emit_detail_safe_event(
+            event_callback, job, "failed", "source_verification_required", started_at,
+        )
+        print(f"[{tab_label}]   ⚠ 详情页验证码/滑块拦截")
+        return False
     except DetailExtractionError as exc:
         print(f"[{tab_label}]   跳过无效详情页: {exc}")
         _emit_detail_safe_event(
