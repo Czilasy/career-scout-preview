@@ -473,7 +473,9 @@ DETAIL_LOGIN_MARKER = "登录查看完整内容"
 DETAIL_DESCRIPTION_MARKER = "职位描述"
 DETAIL_COMPETITIVENESS_MARKER = "竞争力分析"
 DETAIL_SAFETY_MARKER = "BOSS 安全提示"
-MIN_DETAIL_TEXT_LENGTH = 120
+# FR-032：不再用固定字数硬截断。
+# 保留 MIN_DETAIL_TEXT_LENGTH 仅向后兼容（默认不再传入 extract_job_description）。
+MIN_DETAIL_TEXT_LENGTH = 0
 
 
 class DetailExtractionError(ValueError):
@@ -597,11 +599,34 @@ def _recruiter_footer_start(lines):
     return card_start(end)
 
 
-def extract_job_description(extracted, min_length=MIN_DETAIL_TEXT_LENGTH):
+def _looks_like_detail_shell(jd: str) -> bool:
+    """Reject known navigation/placeholder content without a length gate."""
+    normalized = _normalize_detail_whitespace(jd)
+    if not normalized:
+        return True
+    if normalized in {
+        "暂无职位描述", "暂无岗位描述", "暂无", "只有一句话", "--", "-",
+    }:
+        return True
+    tokens = [token for token in re.split(r"[\s,，。|/·]+", normalized) if token]
+    shell_tokens = {
+        "首页", "消息", "求职", "招聘", "职位", "公司", "我的",
+        "推荐", "沟通", "发现", "登录", "注册",
+    }
+    return bool(tokens) and all(token in shell_tokens for token in tokens)
+
+
+def extract_job_description(extracted, min_length=0):
     """Return validated JD text without BOSS page chrome.
 
     `page_text` is diagnostic input only. It is never persisted unless it has
     an explicit job-description section that passes all checks.
+
+    FR-032：不再用固定 120 字硬截断。改为内容真实性判断：
+    - 登录墙/导航壳/风控页 → 拒绝（保留原检查）
+    - 空内容 → 拒绝
+    - 明确从 JD 字段或职位描述区提取、且不是空壳/导航内容 → 通过
+    - 语义标记只作为内容信号，不再作为短文本的必选词表
     """
     if not isinstance(extracted, dict):
         raise DetailExtractionError("detail extractor returned non-dict")
@@ -638,9 +663,13 @@ def extract_job_description(extracted, min_length=MIN_DETAIL_TEXT_LENGTH):
                 break
 
     jd = _normalize_detail_whitespace("\n".join(lines))
-    if len(jd) < min_length:
+    # FR-032：内容真实性判断替代固定字数硬截断
+    if not jd.strip():
+        raise DetailExtractionError("job description is empty after validation")
+    if _looks_like_detail_shell(jd):
         raise DetailExtractionError(
-            f"job description too short after validation: {len(jd)} < {min_length}"
+            "detail page contains navigation or placeholder text that is too short "
+            "to contain a real JD"
         )
     return jd
 
@@ -2814,7 +2843,11 @@ def launch_chrome(cmd):
             kwargs["creationflags"] = creationflags
     else:
         kwargs["start_new_session"] = True
-    return subprocess.Popen(cmd, **kwargs)
+    try:
+        return subprocess.Popen(cmd, **kwargs)
+    finally:
+        if stderr_fh != subprocess.DEVNULL:
+            stderr_fh.close()
 
 
 def run_setup_chrome(cdp_port=DEFAULT_CDP_PORT, copy_login_state=False,

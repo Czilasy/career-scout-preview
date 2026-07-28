@@ -1,5 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import App from "../App.vue";
+import { expectedBackendBuildHash } from "../api";
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -12,7 +13,16 @@ describe("App", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/api/session")) return response({ status: "ok" });
+      if (url.endsWith("/api/session")) {
+        return response({ status: "ok", build_hash: expectedBackendBuildHash });
+      }
+      if (url.endsWith("/api/version")) {
+        return response({
+          backend_version: "010",
+          build_hash: expectedBackendBuildHash,
+          build_time: "now",
+        });
+      }
       if (url.endsWith("/api/check")) return response({ connected: true });
       if (url.endsWith("/api/profiles")) return response({ profiles: [] });
       if (url.endsWith("/api/latest-pipeline-result")) {

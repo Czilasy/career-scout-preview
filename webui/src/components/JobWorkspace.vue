@@ -7,13 +7,16 @@ const props = withDefaults(defineProps<{
   jobs: JobItem[];
   batchSize?: number;
   emptyMessage: string;
+  deferMobileDetail?: boolean;
 }>(), {
   batchSize: 30,
+  deferMobileDetail: false,
 });
 
 const visibleCount = ref(props.batchSize);
 const localSelectedId = ref("");
 const detailOpen = ref(true);
+const userSelectedDetail = ref(false);
 
 const visibleJobs = computed(() => props.jobs.slice(0, visibleCount.value));
 const selectedJob = computed(() => {
@@ -114,10 +117,13 @@ function jobKey(job: JobItem): string {
 function selectJob(job: JobItem) {
   localSelectedId.value = jobKey(job);
   detailOpen.value = true;
+  userSelectedDetail.value = true;
   // 切换岗位后把右侧详情面板滚回顶部，避免停留在上一个岗位的滚动位置
   // （如已滚到底部收藏/不感兴趣按钮区）。容器元素不变，nextTick 后归零即可。
   nextTick(() => {
-    detailEl.value?.scrollTo({ top: 0 });
+    if (typeof detailEl.value?.scrollTo === "function") {
+      detailEl.value.scrollTo({ top: 0 });
+    }
   });
 }
 
@@ -148,7 +154,14 @@ function verdictLabel(job: JobItem): string {
 </script>
 
 <template>
-  <div v-if="jobs.length" class="job-workspace">
+  <div
+    v-if="jobs.length"
+    class="job-workspace"
+    :class="{
+      'defer-mobile-detail': deferMobileDetail,
+      'detail-selected': userSelectedDetail,
+    }"
+  >
     <section class="job-list-pane" aria-label="岗位列表">
       <div class="job-list-heading">
         <div class="job-list-heading-left">

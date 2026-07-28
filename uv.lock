@@ -22,7 +22,7 @@ wheels = [
 
 [[package]]
 name = "career-scout"
-version = "2.0.0"
+version = "2.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "flask" },

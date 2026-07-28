@@ -13,6 +13,7 @@ import hashlib
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -39,14 +40,53 @@ ALLOWED_TRANSITIONS = {
     "partial": set(),
 }
 
-RUN_STATUSES = {"queued", "running", "succeeded", "partial", "failed", "interrupted"}
+RUN_STATUSES = {"queued", "running", "succeeded", "partial", "failed", "interrupted", "paused"}
 RUN_TRANSITIONS = {
-    "queued": {"running", "failed", "interrupted"},
-    "running": {"succeeded", "partial", "failed", "interrupted"},
+    # 未开始的任务不能伪造暂停现场；必须先进入 running 再因真实阻断暂停。
+    "queued": {"running", "succeeded", "partial", "failed", "interrupted"},
+    "running": {"succeeded", "partial", "failed", "interrupted", "paused"},
+    "paused": {"running", "failed", "interrupted"},
     "succeeded": set(),
     "partial": set(),
     "failed": set(),
     "interrupted": set(),
+}
+
+# 统一任务状态机（FR-005）：语义清晰的状态名，与 RUN_STATUSES 映射
+TASK_STATUSES = {
+    "waiting",              # = queued
+    "running",              # = running
+    "paused",               # = paused（系统性阻断）
+    "completed",            # = succeeded（无待确认）
+    "completed_with_pending",  # = partial（有待确认）
+    "failed",               # = failed
+    "cancelled",            # = interrupted（用户取消）
+}
+
+# 统一状态名 → DB 状态名映射
+TASK_TO_RUN_STATUS = {
+    "waiting": "queued",
+    "running": "running",
+    "paused": "paused",
+    "completed": "succeeded",
+    "completed_with_pending": "partial",
+    "failed": "failed",
+    "cancelled": "interrupted",
+}
+RUN_TO_TASK_STATUS = {v: k for k, v in TASK_TO_RUN_STATUS.items()}
+
+# 系统性阻断码集合（命中即暂停整个任务）
+SYSTEMIC_BLOCK_CODES = {
+    "captcha_required", "login_expired", "ai_rate_limited",
+    "ai_quota_exhausted", "ai_key_invalid", "ai_network_error",
+    "ip_risk_control", "cdp_unavailable", "internal_error",
+    "source_verification_required", "source_login_required",
+    "source_rate_limited", "source_blocked", "source_cdp_unavailable",
+}
+
+# 独立失败码集合（仅该岗位进待确认，不阻断）
+INDEPENDENT_FAILURE_CODES = {
+    "job_offline", "detail_timeout", "detail_invalid", "ai_missing_job",
 }
 
 QUERY_STATUSES = {"queued", "running", "succeeded", "failed", "interrupted"}
@@ -254,6 +294,12 @@ class TaskStore:
             self._migration_018()
         if current < 19:
             self._migration_019()
+        if current < 20:
+            self._migration_020()
+        if current < 21:
+            self._migration_021()
+        if current < 22:
+            self._migration_022()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -1370,6 +1416,197 @@ class TaskStore:
                 (_now(),),
             )
 
+    def _migration_020(self):
+        """010 healthy-pipeline-recovery: 暂停状态持久化 + 断点 + 失败码分类。
+
+        - screening_runs 加 current_stage / error_reason / backend_version（FR-005/FR-037/FR-039）
+        - screening_results 加 failed_code / failed_stage / retryable / attempts（FR-040）
+        - 新增 pipeline_checkpoints 表保存断点（FR-023）
+        - screening_pending_results 已在 migration_005 建，本处不重建
+        """
+        with self._connection() as conn:
+            run_cols = {row["name"] for row in conn.execute("PRAGMA table_info(screening_runs)")}
+            for name, definition in {
+                "current_stage": "TEXT",
+                "error_reason": "TEXT",
+                "backend_version": "TEXT",
+            }.items():
+                if name not in run_cols:
+                    conn.execute(f"ALTER TABLE screening_runs ADD COLUMN {name} {definition}")
+
+            res_cols = {row["name"] for row in conn.execute("PRAGMA table_info(screening_results)")}
+            for name, definition in {
+                "failed_code": "TEXT",
+                "failed_stage": "TEXT",
+                "retryable": "INTEGER NOT NULL DEFAULT 0",
+                "attempts": "INTEGER NOT NULL DEFAULT 0",
+            }.items():
+                if name not in res_cols:
+                    conn.execute(f"ALTER TABLE screening_results ADD COLUMN {name} {definition}")
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pipeline_checkpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    completed_keys_json TEXT NOT NULL DEFAULT '[]',
+                    saved_at TEXT NOT NULL,
+                    UNIQUE(run_id, stage),
+                    FOREIGN KEY (run_id) REFERENCES screening_runs(id) ON DELETE CASCADE
+                )
+                """
+            )
+            # screening_pending_results 也补 failed_code 字段（migration_005 没有这列）
+            pend_cols = {row["name"] for row in conn.execute(
+                "PRAGMA table_info(screening_pending_results)"
+            )}
+            if "failed_code" not in pend_cols:
+                conn.execute(
+                    "ALTER TABLE screening_pending_results ADD COLUMN failed_code TEXT"
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (20, ?, 'healthy pipeline: stage/error_reason/backend_version + checkpoints + failed_code')"
+                ,
+                (_now(),),
+            )
+
+    def _migration_021(self):
+        """Persist each completed scrape combination with its checkpoint."""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scrape_run_jobs (
+                    run_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    combo_key TEXT NOT NULL,
+                    job_payload_json TEXT NOT NULL,
+                    scraped_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, job_id),
+                    FOREIGN KEY (run_id) REFERENCES screening_runs(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (21, ?, 'persist scrape jobs and combo checkpoints atomically')",
+                (_now(),),
+            )
+
+    def _migration_022(self):
+        """Recovery audit state machine and global maintenance lock."""
+        with self._connection() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS recovery_audit (
+                    id TEXT PRIMARY KEY,
+                    recovery_key TEXT NOT NULL UNIQUE,
+                    backup_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    tx_committed INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    stats_json TEXT NOT NULL DEFAULT '{}',
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS recovery_lock (
+                    lock_id INTEGER PRIMARY KEY CHECK (lock_id = 1),
+                    owner_token TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    maintenance INTEGER NOT NULL DEFAULT 1
+                );
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (22, ?, 'recovery audit state machine and maintenance lock')",
+                (_now(),),
+            )
+
+    # -- recovery maintenance lock ---------------------------------------
+
+    def _active_worker_count(self, conn=None) -> int:
+        if conn is None:
+            with self._connection() as owned_conn:
+                return self._active_worker_count(owned_conn)
+        counts = [
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM tasks WHERE status IN ('queued', 'running')"
+            ).fetchone()["n"],
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM search_runs WHERE status IN ('queued', 'running')"
+            ).fetchone()["n"],
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM screening_runs WHERE status IN ('queued', 'running')"
+            ).fetchone()["n"],
+        ]
+        return sum(int(value or 0) for value in counts)
+
+    def acquire_recovery_lock(self, *, owner_token, maintenance=True,
+                              ttl_seconds=300, wait_timeout=30):
+        deadline = time.monotonic() + max(0, float(wait_timeout))
+        while True:
+            now = datetime.now(_CST)
+            expires_at = (now + timedelta(seconds=max(1, int(ttl_seconds)))).isoformat()
+            active_workers = 0
+            with self._connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "DELETE FROM recovery_lock WHERE expires_at <= ?", (now.isoformat(),)
+                )
+                row = conn.execute(
+                    "SELECT owner_token FROM recovery_lock WHERE lock_id = 1"
+                ).fetchone()
+                if row is not None and row["owner_token"] != str(owner_token):
+                    raise RuntimeError("recovery maintenance lock is already held")
+                active_workers = self._active_worker_count(conn)
+                if active_workers == 0:
+                    conn.execute(
+                        "INSERT INTO recovery_lock "
+                        "(lock_id, owner_token, acquired_at, expires_at, maintenance) "
+                        "VALUES (1, ?, ?, ?, ?) "
+                        "ON CONFLICT(lock_id) DO UPDATE SET "
+                        " owner_token = excluded.owner_token, acquired_at = excluded.acquired_at, "
+                        " expires_at = excluded.expires_at, maintenance = excluded.maintenance",
+                        (str(owner_token), now.isoformat(), expires_at, int(bool(maintenance))),
+                    )
+            if active_workers == 0:
+                return True
+            if time.monotonic() >= deadline:
+                raise TimeoutError("recovery maintenance waiting for active workers")
+            time.sleep(0.05)
+
+    def release_recovery_lock(self, *, owner_token):
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM recovery_lock WHERE lock_id = 1 AND owner_token = ?",
+                (str(owner_token),),
+            )
+        return cursor.rowcount > 0
+
+    def is_recovery_locked(self) -> bool:
+        now = _now()
+        with self._connection() as conn:
+            conn.execute("DELETE FROM recovery_lock WHERE expires_at <= ?", (now,))
+            row = conn.execute(
+                "SELECT maintenance FROM recovery_lock WHERE lock_id = 1"
+            ).fetchone()
+        return bool(row is not None and row["maintenance"])
+
+    def _assert_recovery_writes_allowed(self, conn=None):
+        if conn is None:
+            with self._connection() as owned_conn:
+                return self._assert_recovery_writes_allowed(owned_conn)
+        now = _now()
+        conn.execute("DELETE FROM recovery_lock WHERE expires_at <= ?", (now,))
+        row = conn.execute(
+            "SELECT maintenance FROM recovery_lock WHERE lock_id = 1"
+        ).fetchone()
+        if row is not None and row["maintenance"]:
+            raise RuntimeError("recovery maintenance is active; new tasks are blocked")
+
     # ===================================================================
     # Pipeline result persistence (replaces latest_pipeline_result.json)
     # ===================================================================
@@ -1384,19 +1621,30 @@ class TaskStore:
         now = _now()
         jobs = result.get("jobs") or []
         dropped = result.get("dropped") or []
+        match_count = sum(1 for job in jobs if job.get("verdict") == "match")
+        mismatch_count = sum(
+            1 for job in jobs if job.get("verdict") in ("not_match", "mismatch")
+        )
+        pending_jobs = [
+            job for job in jobs
+            if job.get("verdict") not in ("match", "not_match", "mismatch")
+        ]
         with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
             conn.execute(
                 "INSERT INTO screening_runs "
                 "(id, frozen_filters_json, status, source_count, match_count, mismatch_count, "
-                " created_at, updated_at, search_params_json, profile_summary, "
-                " total_scraped, total_kept, total_dropped, record_kind) "
-                "VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'result_snapshot')",
+                " pending_count, processed_count, created_at, updated_at, search_params_json, "
+                " profile_summary, total_scraped, total_kept, total_dropped, record_kind) "
+                "VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'result_snapshot')",
                 (
                     run_id,
                     json.dumps(script_params, ensure_ascii=False),
                     result.get("total_scraped", 0),
-                    result.get("total_matched", 0),
-                    result.get("total_kept", 0) - result.get("total_matched", 0),
+                    match_count,
+                    mismatch_count,
+                    len(pending_jobs),
+                    match_count + mismatch_count,
                     now, now,
                     json.dumps(script_params, ensure_ascii=False),
                     result.get("profile_summary", ""),
@@ -1448,9 +1696,33 @@ class TaskStore:
                         job.get("reason", ""),
                     ),
                 )
+            for job in pending_jobs:
+                failed_code = str(
+                    job.get("failed_code") or job.get("jd_failed_code")
+                    or ("ai_missing_job" if job.get("jd") else "detail_invalid")
+                )
+                failure_stage = str(
+                    job.get("failed_stage")
+                    or ("ai_fine" if job.get("jd") else "jd_detail")
+                )
+                conn.execute(
+                    "INSERT INTO screening_pending_results "
+                    "(id, run_id, job_id, failure_stage, retryable, attempts, "
+                    " last_failed_at, origin_zone, ai_payload_json, created_at, failed_code) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(uuid.uuid4()), run_id, str(job.get("job_id", "")),
+                        failure_stage,
+                        0 if failed_code == "job_offline" else 1,
+                        int(job.get("attempts") or 1), now,
+                        str(job.get("origin_zone") or "kept"),
+                        json.dumps(job.get("ai_payload") or {}, ensure_ascii=False),
+                        now, failed_code,
+                    ),
+                )
         return run_id
 
-    def load_latest_pipeline_result(self) -> dict | None:
+    def load_latest_pipeline_result(self, run_id: str | None = None) -> dict | None:
         """Load the most recent successful pipeline run from the database.
 
         Returns a payload matching the old JSON file format:
@@ -1458,11 +1730,18 @@ class TaskStore:
         or None if no successful run exists.
         """
         with self._connection() as conn:
-            run = conn.execute(
-                "SELECT * FROM screening_runs WHERE status = 'done' "
-                "AND record_kind = 'result_snapshot' "
-                "ORDER BY created_at DESC LIMIT 1",
-            ).fetchone()
+            if run_id:
+                run = conn.execute(
+                    "SELECT * FROM screening_runs WHERE id = ? "
+                    "AND record_kind = 'result_snapshot' LIMIT 1",
+                    (str(run_id),),
+                ).fetchone()
+            else:
+                run = conn.execute(
+                    "SELECT * FROM screening_runs WHERE status = 'done' "
+                    "AND record_kind = 'result_snapshot' "
+                    "ORDER BY created_at DESC LIMIT 1",
+                ).fetchone()
             if run is None:
                 return None
             run = dict(run)
@@ -1520,6 +1799,7 @@ class TaskStore:
             "error": "",
         }
         return {
+            "run_id": run["id"],
             "saved_at": run["created_at"],
             "script_params": script_params,
             "result": result,
@@ -1538,6 +1818,7 @@ class TaskStore:
     def update_pipeline_job_jd(self, run_id: str, job_id: str, jd: str):
         """Update the JD text for a specific job in a pipeline run (补抓 JD)."""
         with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
             conn.execute(
                 "UPDATE screening_results SET jd = ? WHERE run_id = ? AND job_id = ?",
                 (jd, str(run_id), str(job_id)),
@@ -1566,6 +1847,7 @@ class TaskStore:
     def create_task(self, task_id, kind, params, output_path=None, detail_output_path=None):
         timestamp = _now()
         with self._connection() as connection:
+            self._assert_recovery_writes_allowed(connection)
             connection.execute(
                 """INSERT INTO tasks
                    (id, kind, status, params_json, output_path, detail_output_path,
@@ -1926,6 +2208,7 @@ class TaskStore:
         rid = _uuid()
         ts = _now()
         with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
             conn.execute(
                 "INSERT INTO search_runs (id, profile_id, profile_snapshot_json, mode, status, total_detail_budget, discovered_count, completed_jd_count, created_at, updated_at, error_code) "
                 "VALUES (?, ?, ?, ?, 'queued', ?, 0, 0, ?, ?, NULL)",
@@ -1998,7 +2281,8 @@ class TaskStore:
     # -- screening runs（AI 筛选任务持久化：进度落库 + 断点续筛） ----------
 
     def create_screening_run(self, run_id, *, frozen_filters=None, source_count=0,
-                             profile_id=None, execution_params=None):
+                             profile_id=None, execution_params=None,
+                             backend_version=None):
         """登记一个 AI 筛选任务（网页两段式筛选）。
 
         表是 migration_004/007/010 建好的（此前无写入方），本方法是启用入口。
@@ -2006,19 +2290,21 @@ class TaskStore:
         """
         ts = _now()
         with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO screening_runs "
                 "(id, frozen_filters_json, status, source_count, match_count, mismatch_count, "
                 "created_at, updated_at, error_code, resume_id, pending_count, processed_count, "
                 "source_cursor, parse_failure_count, parse_failures_json, profile_id, "
-                "execution_params_json, record_kind) "
-                "VALUES (?, ?, 'queued', ?, 0, 0, ?, ?, NULL, NULL, 0, 0, 0, 0, '{}', ?, ?, 'process_log')",
+                "execution_params_json, record_kind, backend_version) "
+                "VALUES (?, ?, 'queued', ?, 0, 0, ?, ?, NULL, NULL, 0, 0, 0, 0, '{}', ?, ?, 'process_log', ?)",
                 (
                     str(run_id),
                     json.dumps(frozen_filters or {}, ensure_ascii=False),
                     int(source_count), ts, ts,
                     str(profile_id) if profile_id else None,
                     json.dumps(execution_params or {}, ensure_ascii=False),
+                    str(backend_version) if backend_version else None,
                 ),
             )
         return self.get_screening_run(run_id)
@@ -2034,8 +2320,23 @@ class TaskStore:
 
     def update_screening_run(self, run_id, *, status=None, processed_count=None,
                              source_cursor=None, match_count=None, mismatch_count=None,
-                             error_code=None, pending_count=None):
-        """宽松更新（不做状态机校验：终态来源多——完成/失败/取消/登录墙/中断）。"""
+                             error_code=None, pending_count=None,
+                             current_stage=None, error_reason=None,
+                             backend_version=None, total_dropped=None,
+                             total_kept=None, total_scraped=None,
+                             source_count=None):
+        """更新 screening_run，含状态机校验（FR-005）。
+
+        状态必须按 RUN_TRANSITIONS 合法路径迁移。非法迁移抛 ValueError。
+        新增字段（migration_020）：current_stage / error_reason / backend_version。
+        守恒字段（migration_018）：total_dropped / total_kept / total_scraped。
+        """
+        if status is not None:
+            # 向后兼容映射（app.py 历史用 done/cancelled，统一到 RUN_STATUSES）
+            _status_aliases = {"done": "succeeded", "cancelled": "interrupted"}
+            status = _status_aliases.get(status, status)
+            if status not in RUN_STATUSES:
+                raise ValueError(f"未知运行状态: {status}")
         sets = []
         params = []
         if status is not None:
@@ -2059,15 +2360,439 @@ class TaskStore:
         if pending_count is not None:
             sets.append("pending_count = ?")
             params.append(int(pending_count))
+        if current_stage is not None:
+            sets.append("current_stage = ?")
+            params.append(str(current_stage))
+        if error_reason is not None:
+            sets.append("error_reason = ?")
+            params.append(str(error_reason))
+        if backend_version is not None:
+            sets.append("backend_version = ?")
+            params.append(str(backend_version))
+        if total_dropped is not None:
+            sets.append("total_dropped = ?")
+            params.append(int(total_dropped))
+        if total_kept is not None:
+            sets.append("total_kept = ?")
+            params.append(int(total_kept))
+        if total_scraped is not None:
+            sets.append("total_scraped = ?")
+            params.append(int(total_scraped))
+        if source_count is not None:
+            sets.append("source_count = ?")
+            params.append(int(source_count))
         if not sets:
             return
         sets.append("updated_at = ?")
         params.append(_now())
         params.append(str(run_id))
         with self._connection() as conn:
+            # 状态校验和写入必须共享同一个立即事务。否则两个线程可同时读到
+            # running，并分别把取消/成功两个互斥终态写入，后写者覆盖先写者。
+            conn.execute("BEGIN IMMEDIATE")
+            self._assert_recovery_writes_allowed(conn)
+            if status is not None:
+                current = conn.execute(
+                    "SELECT status FROM screening_runs WHERE id = ?", (str(run_id),)
+                ).fetchone()
+                if current is None:
+                    raise KeyError(run_id)
+                cur_status = current["status"]
+                if (
+                    status != cur_status
+                    and status not in RUN_TRANSITIONS.get(cur_status, set())
+                ):
+                    raise ValueError(f"运行不能从 {cur_status} 转换到 {status}")
             conn.execute(
                 f"UPDATE screening_runs SET {', '.join(sets)} WHERE id = ?", params
             )
+
+    def claim_paused_screening_run(self, run_id) -> bool:
+        """Atomically claim one paused run for in-place continuation.
+
+        Unlike the general status updater, this operation is deliberately not
+        idempotent: exactly one caller may change ``paused`` to ``running``.
+        """
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._assert_recovery_writes_allowed(conn)
+            cursor = conn.execute(
+                "UPDATE screening_runs SET status = 'running', updated_at = ? "
+                "WHERE id = ? AND status = 'paused'",
+                (_now(), str(run_id)),
+            )
+            return cursor.rowcount == 1
+
+    def finalize_run_status(self, run_id):
+        """根据当前进度判定最终状态（FR-016, FR-036）。
+
+        - 存在未开始岗位 OR 系统性阻断 → paused
+        - 存在待确认岗位（独立失败）但无阻断 → partial（completed_with_pending）
+        - 全部处理且无待确认 → succeeded（completed）
+        """
+        run = self.get_screening_run(run_id)
+        if run is None:
+            raise KeyError(run_id)
+        cur_status = run["status"]
+        # 终态不再重新判定
+        if cur_status in ("succeeded", "partial", "failed", "interrupted"):
+            return cur_status
+        source_count = run.get("source_count", 0) or 0
+        processed = run.get("processed_count", 0) or 0
+        match = run.get("match_count", 0) or 0
+        mismatch = run.get("mismatch_count", 0) or 0
+        pending = run.get("pending_count", 0) or 0
+        error_code = run.get("error_code")
+        # 系统性阻断 → paused
+        if error_code and error_code in SYSTEMIC_BLOCK_CODES:
+            if cur_status != "paused":
+                self.update_screening_run(run_id, status="paused")
+            return "paused"
+        # 存在未开始岗位 → paused（不得伪装完成）
+        dropped = run.get("total_dropped", 0) or 0
+        total_accounted = processed + pending + dropped
+        if total_accounted < source_count:
+            if cur_status != "paused":
+                self.update_screening_run(run_id, status="paused")
+            return "paused"
+        # 有待确认但无阻断 → partial（completed_with_pending）
+        if pending > 0:
+            if cur_status != "partial":
+                self.update_screening_run(run_id, status="partial")
+            return "partial"
+        # 全部处理且无待确认 → succeeded（completed）
+        if cur_status != "succeeded":
+            self.update_screening_run(run_id, status="succeeded")
+        return "succeeded"
+
+    # -- pending results（待确认岗位，FR-011~016/FR-040） -------------------
+
+    def insert_pending_result(self, run_id, job_id, *, failure_stage, retryable=True,
+                              attempts=1, origin_zone="match", ai_payload_json=None,
+                              failed_code=None):
+        """登记一条待确认岗位（独立失败）。同一 (run_id, job_id) 重复写则更新。
+
+        FR-040：必须带具体 failed_code，禁止仅用"未抓到 JD"等模糊描述。
+        """
+        if not failed_code and failure_stage:
+            # 兜底：failure_stage 推默认 code（仍要求调用方尽量传 failed_code）
+            failed_code = failed_code or failure_stage
+        ts = _now()
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            conn.execute(
+                "INSERT INTO screening_pending_results "
+                "(id, run_id, job_id, failure_stage, retryable, attempts, last_failed_at, "
+                " origin_zone, ai_payload_json, created_at, failed_code) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(run_id, job_id) DO UPDATE SET "
+                " failure_stage = excluded.failure_stage, "
+                " retryable = excluded.retryable, "
+                " attempts = excluded.attempts, "
+                " last_failed_at = excluded.last_failed_at, "
+                " origin_zone = excluded.origin_zone, "
+                " ai_payload_json = excluded.ai_payload_json, "
+                " failed_code = excluded.failed_code",
+                (
+                    _uuid(), str(run_id), str(job_id), str(failure_stage),
+                    1 if retryable else 0, int(attempts), ts,
+                    str(origin_zone),
+                    json.dumps(ai_payload_json or {}, ensure_ascii=False),
+                    ts, str(failed_code) if failed_code else None,
+                ),
+            )
+        self.update_pending_count(run_id)
+        return self.get_pending_result(run_id, job_id)
+
+    def update_pending_count(self, run_id):
+        """从 screening_pending_results 实时计数并写回 screening_runs.pending_count。
+
+        FR-016/SC-018：pending_count 必须反映真实待确认数，不得恒为 0。
+        """
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM screening_pending_results WHERE run_id = ?",
+                (str(run_id),),
+            ).fetchone()
+        count = int(row["n"] or 0)
+        # 直接写库，绕过状态机（pending_count 是数据字段，不是状态）
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            conn.execute(
+                "UPDATE screening_runs SET pending_count = ?, updated_at = ? WHERE id = ?",
+                (count, _now(), str(run_id)),
+            )
+        return count
+
+    def get_pending_result(self, run_id, job_id):
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM screening_pending_results WHERE run_id = ? AND job_id = ?",
+                (str(run_id), str(job_id)),
+            ).fetchone()
+        return self._pending_result_row(row) if row is not None else None
+
+    def list_pending_results(self, run_id):
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM screening_pending_results WHERE run_id = ? "
+                "ORDER BY last_failed_at ASC",
+                (str(run_id),),
+            ).fetchall()
+        return [self._pending_result_row(r) for r in rows]
+
+    def delete_pending_result(self, run_id, job_id):
+        """补救成功后从待确认表移除。返回是否实际删除。"""
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            cur = conn.execute(
+                "DELETE FROM screening_pending_results WHERE run_id = ? AND job_id = ?",
+                (str(run_id), str(job_id)),
+            )
+            deleted = cur.rowcount > 0
+        if deleted:
+            self.update_pending_count(run_id)
+        return deleted
+
+    def _pending_result_row(self, row) -> dict:
+        return {
+            "id": row["id"],
+            "run_id": row["run_id"],
+            "job_id": row["job_id"],
+            "failure_stage": row["failure_stage"],
+            "retryable": bool(row["retryable"]),
+            "attempts": int(row["attempts"]),
+            "last_failed_at": row["last_failed_at"],
+            "origin_zone": row["origin_zone"],
+            "ai_payload": json.loads(row["ai_payload_json"] or "{}"),
+            "created_at": row["created_at"],
+            "failed_code": row["failed_code"] if "failed_code" in row.keys() else None,
+        }
+
+    # -- checkpoints（断点续抓，FR-023） -----------------------------------
+
+    def save_scrape_combo_result(self, run_id, combo_key, jobs, completed_combos):
+        """Atomically persist one completed combination and its checkpoint."""
+        ts = _now()
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            for job in jobs or []:
+                if not isinstance(job, dict):
+                    continue
+                job_id = str(job.get("job_id") or job.get("source_url") or "").strip()
+                if not job_id:
+                    continue
+                conn.execute(
+                    "INSERT INTO scrape_run_jobs "
+                    "(run_id, job_id, combo_key, job_payload_json, scraped_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(run_id, job_id) DO UPDATE SET "
+                    " combo_key = excluded.combo_key, "
+                    " job_payload_json = excluded.job_payload_json, "
+                    " scraped_at = excluded.scraped_at",
+                    (
+                        str(run_id), job_id, str(combo_key),
+                        json.dumps(job, ensure_ascii=False), ts,
+                    ),
+                )
+            conn.execute(
+                "INSERT INTO pipeline_checkpoints "
+                "(run_id, stage, completed_keys_json, saved_at) VALUES (?, 'scrape', ?, ?) "
+                "ON CONFLICT(run_id, stage) DO UPDATE SET "
+                " completed_keys_json = excluded.completed_keys_json, "
+                " saved_at = excluded.saved_at",
+                (
+                    str(run_id),
+                    json.dumps(list(completed_combos or []), ensure_ascii=False),
+                    ts,
+                ),
+            )
+
+    def save_recrawl_jd_and_checkpoint(
+            self, source_run_id, recrawl_run_id, jd_by_job, completed_job_ids):
+        """Atomically persist partial recrawl JDs and their resume checkpoint."""
+        ts = _now()
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            for job_id, jd in (jd_by_job or {}).items():
+                conn.execute(
+                    "UPDATE screening_results SET jd = ? "
+                    "WHERE run_id = ? AND job_id = ?",
+                    (str(jd), str(source_run_id), str(job_id)),
+                )
+            conn.execute(
+                "INSERT INTO pipeline_checkpoints "
+                "(run_id, stage, completed_keys_json, saved_at) "
+                "VALUES (?, 'recrawl_jd', ?, ?) "
+                "ON CONFLICT(run_id, stage) DO UPDATE SET "
+                " completed_keys_json = excluded.completed_keys_json, "
+                " saved_at = excluded.saved_at",
+                (
+                    str(recrawl_run_id),
+                    json.dumps(sorted(set(completed_job_ids or [])), ensure_ascii=False),
+                    ts,
+                ),
+            )
+
+    def load_scrape_run_jobs(self, run_id):
+        """Load the complete persisted job payload for a scrape run."""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT job_payload_json FROM scrape_run_jobs "
+                "WHERE run_id = ? ORDER BY scraped_at ASC, job_id ASC",
+                (str(run_id),),
+            ).fetchall()
+        jobs = []
+        for row in rows:
+            try:
+                payload = json.loads(row["job_payload_json"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(payload, dict):
+                jobs.append(payload)
+        return jobs
+
+    def save_checkpoint(self, run_id, stage, keys):
+        """保存某阶段的已完成 key 列表。同 (run_id, stage) 覆盖。"""
+        ts = _now()
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            conn.execute(
+                "INSERT INTO pipeline_checkpoints (run_id, stage, completed_keys_json, saved_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(run_id, stage) DO UPDATE SET "
+                " completed_keys_json = excluded.completed_keys_json, "
+                " saved_at = excluded.saved_at",
+                (
+                    str(run_id), str(stage),
+                    json.dumps(list(keys or []), ensure_ascii=False),
+                    ts,
+                ),
+            )
+
+    def load_checkpoint(self, run_id, stage):
+        """加载某阶段的已完成 key 列表；无记录返回空集合。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT completed_keys_json FROM pipeline_checkpoints "
+                "WHERE run_id = ? AND stage = ?",
+                (str(run_id), str(stage)),
+            ).fetchone()
+        if row is None:
+            return set()
+        try:
+            return set(json.loads(row["completed_keys_json"] or "[]"))
+        except (json.JSONDecodeError, TypeError):
+            return set()
+
+    def list_checkpoints(self, run_id):
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT stage, completed_keys_json, saved_at FROM pipeline_checkpoints "
+                "WHERE run_id = ? ORDER BY saved_at ASC",
+                (str(run_id),),
+            ).fetchall()
+        return [
+            {
+                "stage": r["stage"],
+                "completed_keys": json.loads(r["completed_keys_json"] or "[]"),
+                "saved_at": r["saved_at"],
+            }
+            for r in rows
+        ]
+
+    def delete_checkpoint(self, run_id, stage=None):
+        """删除断点。stage=None 删除该 run 全部断点（任务成功收尾时用）。"""
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            if stage is None:
+                conn.execute(
+                    "DELETE FROM pipeline_checkpoints WHERE run_id = ?",
+                    (str(run_id),),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM pipeline_checkpoints WHERE run_id = ? AND stage = ?",
+                    (str(run_id), str(stage)),
+                )
+
+    # -- task events（FR-038） ---------------------------------------------
+
+    def append_task_event(self, run_id, event_type, payload=None):
+        """追加一条流程事件到 task_logs（FR-038）。
+
+        事件类型：stage_start / stage_complete / job_success / job_fail /
+        pause / resume / cancel / block_check。
+        line 字段存 JSON：{"type":..., "payload":..., "at":...}。
+
+        task_logs 有 FOREIGN KEY (task_id) REFERENCES tasks(id)，但 screening
+        任务的 run_id 不在 tasks 表中。先 INSERT OR IGNORE 一个占位 tasks 行
+        满足外键约束（status='logging' 表示仅用于事件日志锚点）。
+        """
+        return self.append_task_events(
+            run_id, [(event_type, payload or {})]
+        )[0]
+
+    def append_task_events(self, run_id, events):
+        """Append multiple structured events with consecutive sequence numbers."""
+        normalized = [
+            (str(event_type), payload if isinstance(payload, dict) else {})
+            for event_type, payload in events
+        ]
+        if not normalized:
+            return []
+        ts = _now()
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            # 占位 tasks 行（已存在则忽略）
+            conn.execute(
+                "INSERT OR IGNORE INTO tasks (id, kind, status, params_json, created_at, updated_at) "
+                "VALUES (?, 'screening_event_log', 'logging', '{}', ?, ?)",
+                (str(run_id), ts, ts),
+            )
+            cur = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM task_logs WHERE task_id = ?",
+                (str(run_id),),
+            )
+            first_seq = int(cur.fetchone()["next_seq"])
+            rows = []
+            result = []
+            for offset, (event_type, payload) in enumerate(normalized):
+                seq = first_seq + offset
+                at = _now()
+                line = json.dumps(
+                    {"type": event_type, "payload": payload, "at": at},
+                    ensure_ascii=False,
+                )
+                rows.append((str(run_id), seq, at, line))
+                result.append({
+                    "task_id": str(run_id), "seq": seq, "type": event_type,
+                    "payload": payload, "at": at,
+                })
+            conn.executemany(
+                "INSERT INTO task_logs (task_id, seq, created_at, line) VALUES (?, ?, ?, ?)",
+                rows,
+            )
+            return result
+
+    def list_task_events(self, run_id, after_seq=0):
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT task_id, seq, created_at, line FROM task_logs "
+                "WHERE task_id = ? AND seq > ? ORDER BY seq ASC",
+                (str(run_id), int(after_seq)),
+            ).fetchall()
+        events = []
+        for r in rows:
+            try:
+                data = json.loads(r["line"])
+            except (json.JSONDecodeError, TypeError):
+                data = {"type": "raw", "payload": {"text": r["line"]}, "at": r["created_at"]}
+            events.append({
+                "seq": int(r["seq"]), "type": data.get("type", "raw"),
+                "payload": data.get("payload", {}), "at": data.get("at", r["created_at"]),
+            })
+        return events
 
     def latest_screening_run_for_source(self, source_task_id, *, statuses=None):
         """找同一抓取任务最近一次 AI 筛选 run（供断点续筛）。
@@ -2103,6 +2828,7 @@ class TaskStore:
             return
         ts = _now()
         with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
             for job_id, verdict in verdicts.items():
                 conn.execute(
                     "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
@@ -2114,8 +2840,41 @@ class TaskStore:
                     ),
                 )
 
+    def save_verdict_and_checkpoint_atomic(
+            self, run_id, stage, verdicts, completed_job_ids):
+        """Persist one AI batch and advance its checkpoint in one transaction."""
+        ts = _now()
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            for job_id, verdict in (verdicts or {}).items():
+                conn.execute(
+                    "INSERT INTO screening_results "
+                    "(id, run_id, job_id, verdict, created_at) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(run_id, job_id) DO UPDATE SET verdict = excluded.verdict",
+                    (
+                        _uuid(), str(run_id), str(job_id),
+                        json.dumps(verdict, ensure_ascii=False), ts,
+                    ),
+                )
+            conn.execute(
+                "INSERT INTO pipeline_checkpoints "
+                "(run_id, stage, completed_keys_json, saved_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(run_id, stage) DO UPDATE SET "
+                " completed_keys_json = excluded.completed_keys_json, "
+                " saved_at = excluded.saved_at",
+                (
+                    str(run_id), str(stage),
+                    json.dumps(list(completed_job_ids or []), ensure_ascii=False), ts,
+                ),
+            )
+
     def load_screening_verdicts(self, run_id):
-        """载入某次筛选已落盘的判定 {job_id: verdict}（断点续筛用）。"""
+        """载入某次筛选已落盘的判定 {job_id: verdict}（断点续筛用）。
+
+        同时支持 JSON verdict（精筛）和纯字符串 verdict（粗筛）。
+        - JSON verdict：返回完整 dict
+        - 纯字符串 verdict：返回 {"verdict": "match"/"not_match"/...}
+        """
         with self._connection() as conn:
             rows = conn.execute(
                 "SELECT job_id, verdict FROM screening_results WHERE run_id = ?",
@@ -2123,12 +2882,17 @@ class TaskStore:
             ).fetchall()
         out = {}
         for row in rows:
+            v = row["verdict"] or ""
             try:
-                value = json.loads(row["verdict"])
+                value = json.loads(v)
+                if isinstance(value, dict):
+                    out[str(row["job_id"])] = value
+                else:
+                    out[str(row["job_id"])] = {"verdict": str(value)}
             except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(value, dict):
-                out[str(row["job_id"])] = value
+                # 纯字符串 verdict（如 match/not_match/uncertain/dropped）
+                if v:
+                    out[str(row["job_id"])] = {"verdict": v}
         return out
 
     def _screening_run_row(self, row) -> dict:
@@ -2147,6 +2911,20 @@ class TaskStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "record_kind": row["record_kind"],
+            # FR-016/SC-018 守恒字段（migration_007/018 加的列，必须读出来）
+            "pending_count": row["pending_count"],
+            "parse_failure_count": row["parse_failure_count"],
+            "parse_failures": json.loads(row["parse_failures_json"] or "{}"),
+            "resume_id": row["resume_id"],
+            "total_scraped": row["total_scraped"],
+            "total_kept": row["total_kept"],
+            "total_dropped": row["total_dropped"],
+            "search_params": json.loads(row["search_params_json"] or "{}"),
+            "profile_summary": row["profile_summary"],
+            # FR-005/FR-037 新增字段（migration_020 加的列）
+            "current_stage": row["current_stage"] if "current_stage" in row.keys() else None,
+            "error_reason": row["error_reason"] if "error_reason" in row.keys() else None,
+            "backend_version": row["backend_version"] if "backend_version" in row.keys() else None,
         }
 
     def append_search_event(self, run_id, event_type, payload=None):

@@ -299,7 +299,7 @@ class ScreeningRunStoreTests(unittest.TestCase):
                                         mismatch_count=40)
 
         run = self.store.get_screening_run("sr-1")
-        self.assertEqual(run["status"], "done")
+        self.assertEqual(run["status"], "succeeded")
         self.assertEqual(run["source_cursor"], 30)
         self.assertEqual(run["processed_count"], 60)
         self.assertEqual(run["match_count"], 20)

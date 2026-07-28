@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { CircleCheck, CircleX, LoaderCircle, Octagon } from "@lucide/vue";
+import { CircleCheck, CircleX, LoaderCircle, Octagon, PauseCircle } from "@lucide/vue";
+
+interface PauseInfo {
+  error_code?: string;
+  error_reason?: string;
+}
 
 interface TaskSnapshot {
   status?: string;
@@ -10,12 +15,35 @@ interface TaskSnapshot {
   // 后端记录的真实起止时间戳（epoch 毫秒）；缺省时前端退化成本地时钟
   started_at?: number;
   finished_at?: number;
+  // 切片7：统一状态接口字段（FR-037/SC-006）
+  stage?: string;
+  success_count?: number;
+  fail_count?: number;
+  unstarted_count?: number;
+  total?: number;
+  pause_info?: PauseInfo | null;
 }
 
 const props = defineProps<{
   snapshot: TaskSnapshot | null;
   kind?: "scrape" | "screen" | "";
 }>();
+
+const COMPLETED_STATUSES = new Set(["done", "completed", "completed_with_pending"]);
+const TERMINAL_STATUSES = new Set([
+  ...COMPLETED_STATUSES,
+  "failed",
+  "cancelled",
+  "paused",
+]);
+
+function isCompletedStatus(status?: string) {
+  return Boolean(status && COMPLETED_STATUSES.has(status));
+}
+
+function isTerminalStatus(status?: string) {
+  return Boolean(status && TERMINAL_STATUSES.has(status));
+}
 
 // ---- 用时计时 ----
 // snapshot 从 null→非 null 时记开始时间；status 进入终态（done/failed/cancelled）时定格。
@@ -49,7 +77,7 @@ watch(
       return;
     }
     // 终态：定格用时，停止刷新
-    if (next && next.status && ["done", "failed", "cancelled"].includes(next.status)) {
+    if (next && isTerminalStatus(next.status)) {
       if (finishedAt.value === null) {
         finishedAt.value = typeof next.finished_at === "number" ? next.finished_at : Date.now();
       }
@@ -116,7 +144,7 @@ const total = computed(() => Number(progress.value.total || 0));
 const stage = computed(() => String(progress.value.stage || ""));
 
 const rawPercentage = computed(() => {
-  if (props.snapshot?.status === "done") return 100;
+  if (isCompletedStatus(props.snapshot?.status)) return 100;
   // 后端直接给出整体百分比时优先使用。
   const overall = Number(progress.value.overall_percent);
   if (!Number.isNaN(overall)) {
@@ -163,7 +191,13 @@ function tick() {
   rafId = requestAnimationFrame(tick);
 }
 
-watch(rawPercentage, () => {
+watch(rawPercentage, (target) => {
+  if (props.snapshot?.status === "paused") {
+    if (rafId !== undefined) cancelAnimationFrame(rafId);
+    rafId = undefined;
+    displayPercent.value = target;
+    return;
+  }
   if (rafId === undefined) {
     rafId = requestAnimationFrame(tick);
   }
@@ -177,16 +211,57 @@ const percentage = computed(() => Math.round(displayPercent.value));
 
 const message = computed(() => String(progress.value.message || "正在准备任务…"));
 const statusLabel = computed(() => {
-  if (props.snapshot?.status === "done") return "已完成";
+  if (props.snapshot?.status === "completed_with_pending") return "完成，但有待确认";
+  if (isCompletedStatus(props.snapshot?.status)) return "已完成";
   if (props.snapshot?.status === "failed") return "执行失败";
   if (props.snapshot?.status === "cancelled") return "已停止";
+  if (props.snapshot?.status === "paused") return "已暂停";
   return "运行中";
 });
+
+// 切片7：阶段中文标签（FR-037/SC-006）
+const STAGE_LABELS: Record<string, string> = {
+  scrape: "列表抓取",
+  ensure_chrome: "启动浏览器",
+  preflight: "登录检查",
+  searching: "列表抓取",
+  jd_detail: "JD 详情抓取",
+  fetch_jd: "JD 详情抓取",
+  ai_rough: "AI 粗筛",
+  screen_a: "AI 粗筛",
+  ai_fine: "AI 精筛",
+  screen_b: "AI 精筛",
+  done: "已完成",
+};
+
+const stageLabel = computed(() => {
+  const stage = props.snapshot?.stage || String(progress.value.stage || "");
+  if (!stage) return "";
+  return STAGE_LABELS[stage] || stage;
+});
+
+// 切片7：具体暂停原因（SC-006）。优先 pause_info.error_reason，其次 error 字段
+const pauseReason = computed(() => {
+  if (props.snapshot?.status !== "paused") return "";
+  const pi = props.snapshot?.pause_info;
+  if (pi?.error_reason) return pi.error_reason;
+  return props.snapshot?.error || "任务已暂停，请处理后点继续";
+});
+
+// 切片7：完整计数画面（FR-037）。total>0 时才显示
+const showCounts = computed(() => {
+  const t = Number(props.snapshot?.total || 0);
+  return t > 0 && !["done", "completed"].includes(props.snapshot?.status || "");
+});
+const successCount = computed(() => Number(props.snapshot?.success_count || 0));
+const failCount = computed(() => Number(props.snapshot?.fail_count || 0));
+const unstartedCount = computed(() => Number(props.snapshot?.unstarted_count || 0));
+const totalCount = computed(() => Number(props.snapshot?.total || 0));
 
 // 终态显示绝对用时；运行中显示"已用 X 秒"
 const timeLabel = computed(() => {
   if (startedAt.value === null) return "";
-  const terminal = props.snapshot?.status && ["done", "failed", "cancelled"].includes(props.snapshot.status);
+  const terminal = isTerminalStatus(props.snapshot?.status);
   return terminal ? `用时 ${elapsedLabel.value}` : `已用 ${elapsedLabel.value}`;
 });
 </script>
@@ -195,18 +270,31 @@ const timeLabel = computed(() => {
   <section v-if="snapshot" class="task-progress" aria-live="polite">
     <header>
       <span class="task-status" :data-status="snapshot.status || 'running'">
-        <CircleCheck v-if="snapshot.status === 'done'" :size="17" aria-hidden="true" />
+        <CircleCheck v-if="isCompletedStatus(snapshot.status)" :size="17" aria-hidden="true" />
         <CircleX v-else-if="snapshot.status === 'failed'" :size="17" aria-hidden="true" />
+        <PauseCircle v-else-if="snapshot.status === 'paused'" :size="17" aria-hidden="true" />
         <Octagon v-else-if="snapshot.status === 'cancelled'" :size="17" aria-hidden="true" />
         <LoaderCircle v-else class="spin" :size="17" aria-hidden="true" />
         {{ statusLabel }}
       </span>
+      <span v-if="stageLabel" class="task-stage">· {{ stageLabel }}</span>
       <span v-if="timeLabel" class="task-elapsed">· {{ timeLabel }}</span>
       <span class="task-percentage">{{ percentage }}%</span>
     </header>
     <div class="progress-track" aria-hidden="true">
       <span :style="{ width: `${percentage}%` }" />
     </div>
-    <p class="task-message">{{ snapshot.error || message }}</p>
+    <!-- 切片7：暂停时显示具体原因（SC-006）；其他状态显示 message/error -->
+    <p v-if="snapshot.status === 'paused'" class="task-message task-pause-reason" data-testid="pause-reason">
+      <PauseCircle :size="14" aria-hidden="true" />{{ pauseReason }}
+    </p>
+    <p v-else class="task-message">{{ snapshot.error || message }}</p>
+    <!-- 切片7：完整计数画面（FR-037） -->
+    <div v-if="showCounts" class="task-counts" data-testid="task-counts">
+      <span class="count-chip success">成功 {{ successCount }}</span>
+      <span class="count-chip fail">失败 {{ failCount }}</span>
+      <span class="count-chip unstarted">未开始 {{ unstartedCount }}</span>
+      <span class="count-chip total">共 {{ totalCount }}</span>
+    </div>
   </section>
 </template>

@@ -71,12 +71,16 @@ class WebUIAppTests(unittest.TestCase):
 
         session = client.get("/api/session")
 
-        self.assertEqual(session.get_json(), {"status": "ok"})
+        payload = session.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertNotIn("token", payload)
+        self.assertRegex(payload["build_hash"], r"^[0-9a-f]{12}$")
         cookie = session.headers.get("Set-Cookie", "")
         self.assertIn("HttpOnly", cookie)
         self.assertIn("SameSite=Strict", cookie)
         authenticated = client.post(
             "/api/profiles", json={"name": "cookie-session", "confirmed_fields": {}},
+            headers={"X-Boss-Build": payload["build_hash"]},
         )
         self.assertNotEqual(authenticated.status_code, 403)
 
@@ -441,7 +445,9 @@ class RunSearchAllFailTests(unittest.TestCase):
             artifact_dir=self._tmp_dir(),
         )
         self.assertFalse(result["ok"])
-        self.assertIn("风控", result["error"])
+        self.assertTrue(result.get("hard_stop"), result)
+        self.assertEqual(result.get("hard_stop_code"), "source_verification_required")
+        self.assertIn("验证码", result["error"])
 
     @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
     def test_partial_fail_still_returns_ok_true(self, _mock_chrome):
@@ -457,7 +463,7 @@ class RunSearchAllFailTests(unittest.TestCase):
                 call_count[0] += 1
                 if call_count[0] == 1:
                     return SourceOutcome.failure(
-                        failed_code="source_blocked", safe_log="x")
+                        failed_code="source_timeout", safe_log="reason=单组合超时")
                 return SourceOutcome.success(
                     jobs=[{"job_id": "j1", "source_url": "u1"}],
                     safe_log="ok", input_hash=plan_item.get("input_hash", ""))

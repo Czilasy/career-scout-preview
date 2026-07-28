@@ -92,7 +92,7 @@ class FetchJobDetailsTests(unittest.TestCase):
         jobs = [{"job_id": "j1", "title": "A"}, {"job_id": "j2", "title": "B"}]
         source = self._source({
             "j1": self._make_outcome(ok=True, jd="做后端"),
-            "j2": self._make_outcome(ok=False),
+            "j2": self._make_outcome(ok=False, failed_code="source_invalid_output"),
         })
 
         result = fetch_job_details(jobs, source, artifact_dir=str(self.temp.name))
@@ -100,12 +100,12 @@ class FetchJobDetailsTests(unittest.TestCase):
         self.assertEqual(result["jobs"][0]["jd"], "做后端")
         self.assertEqual(result["jobs"][1]["jd"], "")
         self.assertEqual(result["fetched"], 1)
-        self.assertFalse(result["login_wall"])
+        self.assertFalse(result["hard_stop"])
         self.assertFalse(result["stopped"])
 
     @mock.patch("webui.pipeline_exec.load_advanced_settings",
                 return_value={"detail_batch_size": 5})
-    def test_login_wall_stops_remaining_batches(self, _settings):
+    def test_hard_stop_login_wall_stops_remaining_batches(self, _settings):
         from webui.pipeline_exec import fetch_job_details
 
         jobs = [{"job_id": f"j{i}"} for i in range(8)]  # 5+3 两批
@@ -115,8 +115,25 @@ class FetchJobDetailsTests(unittest.TestCase):
 
         result = fetch_job_details(jobs, source, artifact_dir=str(self.temp.name))
 
-        self.assertTrue(result["login_wall"])
-        # 命中登录墙后第二批不再抓（不继续打空气）
+        self.assertTrue(result["hard_stop"])
+        self.assertEqual(result["hard_stop_code"], "source_login_required")
+        # 命中硬信号后第二批不再抓（不继续打空气）
+        self.assertEqual(source.fetch_details_batch.call_count, 1)
+
+    @mock.patch("webui.pipeline_exec.load_advanced_settings",
+                return_value={"detail_batch_size": 5})
+    def test_hard_stop_verification_stops_remaining_batches(self, _settings):
+        from webui.pipeline_exec import fetch_job_details
+
+        jobs = [{"job_id": f"j{i}"} for i in range(8)]  # 5+3 两批
+        outcomes = {f"j{i}": self._make_outcome(ok=True, jd="x") for i in range(5)}
+        outcomes["j3"] = self._make_outcome(ok=False, failed_code="source_verification_required")
+        source = self._source(outcomes)
+
+        result = fetch_job_details(jobs, source, artifact_dir=str(self.temp.name))
+
+        self.assertTrue(result["hard_stop"])
+        self.assertEqual(result["hard_stop_code"], "source_verification_required")
         self.assertEqual(source.fetch_details_batch.call_count, 1)
 
     @mock.patch("webui.pipeline_exec.load_advanced_settings",

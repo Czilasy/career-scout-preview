@@ -1,3 +1,4 @@
+import gc
 import importlib.util
 import csv
 import json
@@ -7,6 +8,7 @@ import re
 import subprocess
 import sys
 import unittest
+import warnings
 from unittest import mock
 
 
@@ -24,6 +26,23 @@ def load_module():
 
 
 class ChromeSetupTests(unittest.TestCase):
+    def test_launch_chrome_closes_parent_stderr_handle_after_spawn(self):
+        module = load_module()
+        spawned = object()
+
+        with tempfile_profile() as paths:
+            paths["cdp_profile"].mkdir(parents=True, exist_ok=True)
+            with mock.patch.object(module, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
+                    mock.patch.object(module.subprocess, "Popen", return_value=spawned) as popen:
+                result = module.launch_chrome(["chrome", "--headless"])
+                stderr_handle = popen.call_args.kwargs["stderr"]
+                was_closed = stderr_handle.closed
+                if not was_closed:
+                    stderr_handle.close()
+
+        self.assertIs(result, spawned)
+        self.assertTrue(was_closed)
+
     def test_session_import_requires_explicit_authorization(self):
         module = load_module()
         factory = mock.Mock()
@@ -1130,8 +1149,8 @@ class tempfile_profile:
     def __enter__(self):
         import tempfile
 
-        self.tmp = tempfile.TemporaryDirectory()
-        root = pathlib.Path(self.tmp.name)
+        self.tmp_path = pathlib.Path(tempfile.mkdtemp())
+        root = self.tmp_path
         source_profile = root / "Google" / "Chrome"
         default = source_profile / "Default"
         default.mkdir(parents=True)
@@ -1151,7 +1170,19 @@ class tempfile_profile:
         # Windows 上 Chrome 子进程可能还占着 chrome_stderr.log，cleanup 会抛
         # PermissionError；用 ignore_errors 静默清理（CI 上本来也不该因临时文件失败）
         import shutil
-        shutil.rmtree(self.tmp.name, ignore_errors=True)
+        shutil.rmtree(self.tmp_path, ignore_errors=True)
+
+
+class TempfileProfileLifecycleTests(unittest.TestCase):
+    def test_context_exit_does_not_leave_temporary_directory_finalizer(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            with tempfile_profile():
+                pass
+            gc.collect()
+
+        resource_warnings = [w for w in caught if issubclass(w.category, ResourceWarning)]
+        self.assertEqual(resource_warnings, [])
 
 
 def fake_run(calls, *args, **kwargs):
@@ -1437,6 +1468,20 @@ def _make_recording_sleeper():
 class ScrapeDetailsBatchingContractTests(unittest.TestCase):
     """T066 RED: scrape_details controlled batching & safe terminal events."""
 
+    def test_batching_contracts_never_use_persistent_default_output(self):
+        """批处理契约测试必须显式隔离详情产物，不能写用户默认目录。"""
+        class_source = pathlib.Path(__file__).read_text(encoding="utf-8")
+        forbidden = "output_path" + "=None"
+        self.assertNotIn(forbidden, class_source)
+
+    def setUp(self):
+        self._profile = tempfile_profile()
+        paths = self._profile.__enter__()
+        self.addCleanup(self._profile.__exit__, None, None, None)
+        self.output_path = str(
+            paths["cdp_profile"] / f"{self._testMethodName}-details.json"
+        )
+
     def test_scrape_details_accepts_batch_size_keyword(self):
         module = load_module()
         list_data = _make_scrape_details_list_data(n=3)
@@ -1451,7 +1496,7 @@ class ScrapeDetailsBatchingContractTests(unittest.TestCase):
             sleeper=lambda seconds, label=None: None,
             event_callback=lambda _event: None,
             trailing_wait=False,
-            output_path=None,
+            output_path=self.output_path,
         )
         self.assertEqual(len(result), 3)
 
@@ -1465,7 +1510,7 @@ class ScrapeDetailsBatchingContractTests(unittest.TestCase):
                 batch_size=6,
                 session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
                 sleeper=lambda seconds, label=None: None,
-                output_path=None,
+                output_path=self.output_path,
             )
 
     def test_scrape_details_creates_one_session_per_batch(self):
@@ -1485,7 +1530,7 @@ class ScrapeDetailsBatchingContractTests(unittest.TestCase):
             session_factory=factory,
             sleeper=lambda seconds, label=None: None,
             trailing_wait=False,
-            output_path=None,
+            output_path=self.output_path,
         )
         # 10 jobs / batch_size 5 = 2 batches → 2 CDP sessions.
         self.assertEqual(len(sessions), 2)
@@ -1501,7 +1546,7 @@ class ScrapeDetailsBatchingContractTests(unittest.TestCase):
             session_factory=lambda cdp_port=None: session,
             sleeper=lambda seconds, label=None: None,
             trailing_wait=False,
-            output_path=None,
+            output_path=self.output_path,
         )
 
         create_target_calls = [
@@ -1522,7 +1567,7 @@ class ScrapeDetailsBatchingContractTests(unittest.TestCase):
             sleeper=lambda seconds, label=None: None,
             event_callback=events.append,
             trailing_wait=False,
-            output_path=None,
+            output_path=self.output_path,
         )
 
         self.assertEqual(len(events), 4)
@@ -1549,7 +1594,7 @@ class ScrapeDetailsBatchingContractTests(unittest.TestCase):
             sleeper=lambda seconds, label=None: None,
             event_callback=events.append,
             trailing_wait=False,
-            output_path=None,
+            output_path=self.output_path,
         )
 
         self.assertEqual(len(events), 1)
@@ -1578,7 +1623,7 @@ class ScrapeDetailsBatchingContractTests(unittest.TestCase):
             session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
             sleeper=sleeper,
             trailing_wait=False,
-            output_path=None,
+            output_path=self.output_path,
         )
 
         gap_calls = [entry for entry in calls if entry[1] == "inter_job_gap"]
@@ -1590,6 +1635,14 @@ class ScrapeDetailsReadinessContractTests(unittest.TestCase):
     """T067 RED: readiness-driven detail extraction, conditional scroll,
     bounded gap, and zero trailing wait.
     """
+
+    def setUp(self):
+        self._profile = tempfile_profile()
+        paths = self._profile.__enter__()
+        self.addCleanup(self._profile.__exit__, None, None, None)
+        self.output_path = str(
+            paths["cdp_profile"] / f"{self._testMethodName}-details.json"
+        )
 
     def test_scrape_details_readiness_wait_does_not_exceed_twelve_seconds(self):
         module = load_module()
@@ -1607,7 +1660,7 @@ class ScrapeDetailsReadinessContractTests(unittest.TestCase):
             readiness_timeout_seconds=12,
             max_readiness_retries=1,
             trailing_wait=False,
-            output_path=None,
+            output_path=self.output_path,
         )
 
         readiness_waits = [
@@ -1630,7 +1683,7 @@ class ScrapeDetailsReadinessContractTests(unittest.TestCase):
             readiness_timeout_seconds=12,
             max_readiness_retries=1,
             trailing_wait=False,
-            output_path=None,
+            output_path=self.output_path,
         )
 
         scroll_calls = [
@@ -1656,7 +1709,7 @@ class ScrapeDetailsReadinessContractTests(unittest.TestCase):
             readiness_timeout_seconds=12,
             max_readiness_retries=1,
             trailing_wait=False,
-            output_path=None,
+            output_path=self.output_path,
         )
 
         scroll_calls = [
@@ -1678,7 +1731,7 @@ class ScrapeDetailsReadinessContractTests(unittest.TestCase):
             sleeper=sleeper,
             inter_job_gap_range=(3, 7),
             trailing_wait=False,
-            output_path=None,
+            output_path=self.output_path,
         )
 
         gap_calls = [entry for entry in calls if entry[1] == "inter_job_gap"]
@@ -1698,7 +1751,7 @@ class ScrapeDetailsReadinessContractTests(unittest.TestCase):
             session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
             sleeper=sleeper,
             trailing_wait=False,
-            output_path=None,
+            output_path=self.output_path,
         )
 
         gap_calls = [entry for entry in calls if entry[1] == "inter_job_gap"]

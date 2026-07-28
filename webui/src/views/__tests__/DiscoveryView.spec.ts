@@ -1,5 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import DiscoveryView from "../DiscoveryView.vue";
+import { expectedBackendBuildHash } from "../../api";
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -9,11 +10,18 @@ function response(body: unknown, status = 200): Response {
 }
 
 describe("DiscoveryView", () => {
-  it("keeps resume analysis, broad scraping and AI screening as separate gated actions", async () => {
+  it("keeps gated actions separate and stops on the canonical completed state", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) {
         return response({ ok: true, has_result: false });
+      }
+      if (url.endsWith("/api/version")) {
+        return response({
+          backend_version: "010",
+          build_hash: expectedBackendBuildHash,
+          build_time: "now",
+        });
       }
       if (url.endsWith("/api/advanced-settings")) {
         return response({
@@ -62,8 +70,8 @@ describe("DiscoveryView", () => {
         });
         return response({ ok: true, task_id: "scrape-1" });
       }
-      if (url.endsWith("/api/search-progress/scrape-1")) {
-        return response({ status: "done", progress: {}, logs: [], result: { jobs: [] } });
+      if (url.endsWith("/api/task-state/scrape-1")) {
+        return response({ status: "completed", progress: {}, logs: [], result: { jobs: [] } });
       }
       return response({});
     });
@@ -94,6 +102,8 @@ describe("DiscoveryView", () => {
       "/api/execute-search",
       expect.objectContaining({ method: "POST" }),
     );
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/search-progress")))
+      .toBe(false);
 
     vi.unstubAllGlobals();
   });

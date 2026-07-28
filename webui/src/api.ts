@@ -1,4 +1,16 @@
 let sessionToken = "";
+let buildIdentityVerified = false;
+
+export const expectedBackendBuildHash = __EXPECTED_BACKEND_BUILD_HASH__;
+
+export function setBuildIdentity(hash: string): boolean {
+  buildIdentityVerified = Boolean(
+    expectedBackendBuildHash
+    && hash.trim()
+    && hash.trim() === expectedBackendBuildHash,
+  );
+  return buildIdentityVerified;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -26,14 +38,25 @@ export async function initializeSession(): Promise<void> {
     headers: { Accept: "application/json" },
   });
   if (!response.ok) throw new ApiError(response.status, {});
-  const payload = await response.json() as { token?: string };
+  const payload = await response.json() as { token?: string; build_hash?: string };
   sessionToken = payload.token || "";
+  if (payload.build_hash) setBuildIdentity(payload.build_hash);
 }
 
 export async function apiRequest<T>(path: string, options: ApiOptions = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
   headers.set("Accept", "application/json");
   if (sessionToken) headers.set("X-Boss-Token", sessionToken);
+  const method = (options.method || "GET").toUpperCase();
+  if (!["GET", "HEAD"].includes(method)) {
+    if (!buildIdentityVerified) {
+      throw new ApiError(409, {
+        error_code: "build_identity_mismatch",
+        user_message: "页面版本与当前后端不一致，请刷新页面后重试",
+      });
+    }
+    headers.set("X-Boss-Build", expectedBackendBuildHash);
+  }
 
   let body = options.body;
   if (options.json !== undefined) {

@@ -1,3 +1,7 @@
+import { expectedBackendBuildHash, setBuildIdentity } from "../api";
+
+setBuildIdentity(expectedBackendBuildHash);
+
 const values = new Map<string, string>();
 const storage: Storage = {
   get length() { return values.size; },

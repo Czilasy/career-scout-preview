@@ -17,7 +17,7 @@ import CollapsibleCard from "../components/CollapsibleCard.vue";
 import JobWorkspace from "../components/JobWorkspace.vue";
 import StepNavigator from "../components/StepNavigator.vue";
 import TaskProgress from "../components/TaskProgress.vue";
-import { apiRequest, errorMessage } from "../api";
+import { apiRequest, errorMessage, setBuildIdentity } from "../api";
 import { buildSearchScriptParams, partitionPipelineResult } from "../discovery";
 import type { PipelineResult } from "../discovery";
 import type { CandidateProfile, JobItem, Notice } from "../types";
@@ -33,11 +33,24 @@ interface AnalyzeResponse {
 }
 
 interface TaskSnapshot {
-  status: "running" | "done" | "failed" | string;
+  status: "running" | "done" | "failed" | "paused" | "cancelled" | string;
   progress?: Record<string, unknown>;
   logs?: string[];
   error?: string;
   result?: PipelineResult;
+  // 切片7：统一状态接口字段（FR-037/SC-006）
+  stage?: string;
+  success_count?: number;
+  fail_count?: number;
+  unstarted_count?: number;
+  total?: number;
+  pause_info?: { error_code?: string; error_reason?: string } | null;
+}
+
+interface VersionInfo {
+  backend_version: string;
+  build_hash: string;
+  build_time: string;
 }
 
 const props = defineProps<{ profileId: string }>();
@@ -105,7 +118,13 @@ const scrapeCompleted = ref(false);
 const resultLoaded = ref(false);
 // 刷新后接回任务时显示的恢复提示条；任务结束后清空
 const restoredTaskHint = ref("");
+// 切片7/9：版本信息（FR-039/SC-014）
+const backendVersion = ref<VersionInfo | null>(null);
+const versionMismatch = ref(false);
+// 切片7：从 DB 恢复的 paused 任务 run_id（无内存工作线程，不能 poll）
+const pausedRunId = ref("");
 const pipelineResult = ref<PipelineResult | null>(null);
+const pipelineResultRunId = ref("");
 const activeCategory = ref<ResultCategory>("matched");
 const rejectedIds = ref(new Set<string>());
 const feedbackBusyIds = ref(new Set<string>());
@@ -235,8 +254,26 @@ onMounted(() => {
     loadLatestResult(),
     loadFilterLabels(),
     restoreRunningTask(),
+    fetchVersion(),
   ]);
 });
+
+// 切片9：拉取后端版本，校验是否匹配（FR-039/SC-014）
+async function fetchVersion() {
+  try {
+    const data = await apiRequest<VersionInfo>("/api/version");
+    backendVersion.value = data;
+    if (!setBuildIdentity(data.build_hash || "")) {
+      versionMismatch.value = true;
+    }
+    // 与 localStorage 中上次记录的版本对比；不一致提示刷新
+    const lastSeen = localStorage.getItem("boss_backend_version");
+    if (lastSeen && lastSeen !== data.backend_version) {
+      versionMismatch.value = true;
+    }
+    localStorage.setItem("boss_backend_version", data.backend_version);
+  } catch { /* non-critical */ }
+}
 
 async function restoreRunningTask() {
   try {
@@ -248,6 +285,14 @@ async function restoreRunningTask() {
       progress?: Record<string, unknown>;
       logs?: string[];
       error?: string;
+      stage?: string;
+      pause_info?: { error_code?: string; error_reason?: string } | null;
+      backend_version?: string;
+      current_version?: string;
+      version_match?: boolean;
+      scrape_task_id?: string;
+      scrape_completed?: boolean;
+      source_run_id?: string;
     }>("/api/latest-running-task");
     if (!data.has_task || !data.task_id) return;
     const snapshot: TaskSnapshot = {
@@ -255,11 +300,45 @@ async function restoreRunningTask() {
       progress: data.progress || {},
       logs: data.logs || [],
       error: data.error || "",
+      stage: data.stage,
+      pause_info: data.pause_info,
     };
-    const kind = data.kind === "scrape" ? "scrape" : "screen";
+    const kind: "scrape" | "screen" | "recrawl" = data.kind === "scrape"
+      ? "scrape"
+      : data.kind === "recrawl" ? "recrawl" : "screen";
     if (data.status === "interrupted") {
       // 服务重启打断的任务：工作线程已死不能 poll；提示用户重开（后端会自动接着上次进度）
       restoredTaskHint.value = "上次 AI 筛选因服务重启被中断；重新开始 AI 筛选会接着上次进度，不重复消耗";
+      return;
+    }
+    // 切片7：paused 状态从 DB 恢复（无内存工作线程，不能 poll）
+    if (data.status === "paused") {
+      pausedRunId.value = data.task_id;
+      analysisReady.value = true;
+      if (kind === "scrape") {
+        activeStep.value = "search";
+      } else if (kind === "screen") {
+        scrapeTaskId.value = data.scrape_task_id || "";
+        scrapeCompleted.value = Boolean(data.scrape_completed);
+        screenTaskId.value = data.task_id;
+        screenPanelOpen.value = false;
+        activeStep.value = "screen";
+      } else {
+        recrawlTaskId.value = data.task_id;
+        resultLoaded.value = true;
+        activeCategory.value = "uncertain";
+        activeStep.value = "results";
+      }
+      // 拉 /api/task-state 拿完整计数画面（success/fail/unstarted/total）
+      await enrichPausedSnapshot(data.task_id, snapshot, kind);
+      // 版本不匹配提示
+      if (data.version_match === false) {
+        versionMismatch.value = true;
+        restoredTaskHint.value = "后端版本已变更，请刷新页面后重试继续";
+      } else {
+        const reason = data.pause_info?.error_reason || "任务已暂停";
+        restoredTaskHint.value = `检测到暂停中的任务（${reason}），处理后点继续`;
+      }
       return;
     }
     if (kind === "scrape") {
@@ -267,14 +346,78 @@ async function restoreRunningTask() {
       scrapeBusy.value = true;
       scrapeSnapshot.value = snapshot;
       restoredTaskHint.value = "检测到抓取任务仍在后台运行，已自动接回";
-    } else {
+      void pollTask(data.task_id, "scrape");
+    } else if (kind === "screen") {
       screenTaskId.value = data.task_id;
       screenBusy.value = true;
       screenSnapshot.value = snapshot;
       restoredTaskHint.value = "检测到 AI 筛选任务仍在后台运行，已自动接回";
+      void pollTask(data.task_id, "screen");
+    } else {
+      recrawlTaskId.value = data.task_id;
+      recrawlBusy.value = true;
+      recrawlSnapshot.value = snapshot;
+      resultLoaded.value = true;
+      activeCategory.value = "uncertain";
+      activeStep.value = "results";
+      restoredTaskHint.value = "检测到重抓任务仍在后台运行，已自动接回";
+      void pollRecrawl(data.task_id);
     }
-    void pollTask(data.task_id, kind);
   } catch { /* non-critical: 接不回就当没有 */ }
+}
+
+const COMPLETED_TASK_STATUSES = new Set([
+  "done",
+  "completed",
+  "completed_with_pending",
+]);
+
+function isCompletedTaskStatus(status?: string) {
+  return Boolean(status && COMPLETED_TASK_STATUSES.has(status));
+}
+
+// 切片7：paused 任务从 /api/task-state 拉完整计数（FR-037）
+async function enrichPausedSnapshot(
+  runId: string,
+  snapshot: TaskSnapshot,
+  kind: "scrape" | "screen" | "recrawl",
+) {
+  try {
+    const data = await apiRequest<{
+      status?: string;
+      stage?: string;
+      progress?: number | Record<string, unknown>;
+      success_count?: number;
+      fail_count?: number;
+      unstarted_count?: number;
+      total?: number;
+      pause_info?: { error_code?: string; error_reason?: string } | null;
+    }>(`/api/task-state/${encodeURIComponent(runId)}`);
+    snapshot.success_count = data.success_count;
+    snapshot.fail_count = data.fail_count;
+    snapshot.unstarted_count = data.unstarted_count;
+    snapshot.total = data.total;
+    snapshot.stage = data.stage || snapshot.stage;
+    if (typeof data.progress === "number") {
+      snapshot.progress = {
+        ...(snapshot.progress || {}),
+        overall_percent: data.progress,
+      };
+    } else if (data.progress) {
+      snapshot.progress = { ...data.progress };
+    }
+    if (data.pause_info) snapshot.pause_info = data.pause_info;
+  } catch { /* 退化到 progress 字段 */ }
+  if (kind === "scrape") {
+    scrapeTaskId.value = runId;
+    scrapeSnapshot.value = { ...snapshot };
+  } else if (kind === "screen") {
+    screenTaskId.value = runId;
+    screenSnapshot.value = { ...snapshot };
+  } else {
+    recrawlTaskId.value = runId;
+    recrawlSnapshot.value = { ...snapshot };
+  }
 }
 
 async function loadFilterLabels() {
@@ -498,7 +641,7 @@ async function cancelScrape() {
   // 先停轮询，避免取消后还去拿旧状态
   if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = undefined; }
   try {
-    await apiRequest(`/api/execute-search/${encodeURIComponent(scrapeTaskId.value)}/cancel`, {
+    await apiRequest(`/api/task/cancel/${encodeURIComponent(scrapeTaskId.value)}`, {
       method: "POST",
     });
     // 后端会立刻关浏览器并标 cancelled；这里直接复位，不等下一次轮询
@@ -517,10 +660,12 @@ async function continueScrape() {
   if (!scrapeTaskId.value || scrapeBusy.value) return;
   scrapeBusy.value = true;
   scrapeCompleted.value = false;
+  pausedRunId.value = ""; // 切片7：清掉 DB paused 标记，进入内存工作模式
+  restoredTaskHint.value = "";
   scrapeSnapshot.value = { status: "running", progress: { message: "正在从断点继续…" }, logs: [] };
   try {
     const data = await apiRequest<{ task_id: string; skipped: number; old_jobs: number }>(
-      `/api/execute-search/continue/${encodeURIComponent(scrapeTaskId.value)}`,
+      `/api/task/continue/${encodeURIComponent(scrapeTaskId.value)}`,
       { method: "POST" },
     );
     scrapeTaskId.value = data.task_id;
@@ -539,6 +684,8 @@ async function startAiScreen() {
   }
   screenPanelOpen.value = false;
   screenBusy.value = true;
+  pausedRunId.value = ""; // 切片7：清掉 DB paused 标记，进入内存工作模式
+  restoredTaskHint.value = "";
   screenSnapshot.value = { status: "running", progress: { message: "正在创建 AI 筛选任务…" }, logs: [] };
   try {
     const data = await apiRequest<{ task_id: string; resuming?: boolean }>("/api/ai-screen", {
@@ -562,12 +709,38 @@ async function startAiScreen() {
   }
 }
 
+async function continueAiScreen() {
+  const runId = pausedRunId.value || screenTaskId.value;
+  if (!runId || screenBusy.value) return;
+  screenBusy.value = true;
+  restoredTaskHint.value = "";
+  screenSnapshot.value = {
+    status: "running", progress: { message: "正在从 AI 断点继续…" }, logs: [],
+  };
+  try {
+    const data = await apiRequest<{ task_id: string }>(
+      `/api/task/continue/${encodeURIComponent(runId)}`,
+      { method: "POST" },
+    );
+    pausedRunId.value = "";
+    screenTaskId.value = data.task_id;
+    pollRetryCount = 0;
+    await pollTask(data.task_id, "screen");
+  } catch (error) {
+    screenBusy.value = false;
+    screenSnapshot.value = {
+      status: "paused", progress: {}, logs: [],
+      error: errorMessage(error, "AI 断点继续失败"),
+    };
+  }
+}
+
 async function cancelAiScreen() {
   if (!screenTaskId.value) return;
   // 先停轮询，避免取消后还去拿旧状态
   if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = undefined; }
   try {
-    await apiRequest(`/api/ai-screen/${encodeURIComponent(screenTaskId.value)}/cancel`, {
+    await apiRequest(`/api/task/cancel/${encodeURIComponent(screenTaskId.value)}`, {
       method: "POST",
     });
     // 后端会标 cancelled；这里直接复位，不等下一次轮询
@@ -582,6 +755,25 @@ async function cancelAiScreen() {
   }
 }
 
+// 切片7：统一取消 paused 任务（FR-024）。
+async function cancelPausedTask(runId: string) {
+  if (!runId) return;
+  try {
+    await apiRequest(`/api/task/cancel/${encodeURIComponent(runId)}`, {
+      method: "POST",
+    });
+    scrapeBusy.value = false;
+    screenBusy.value = false;
+    restoredTaskHint.value = "";
+    pausedRunId.value = "";
+    if (scrapeSnapshot.value) scrapeSnapshot.value = { status: "cancelled", progress: { message: "已取消任务" }, logs: [], error: "" };
+    if (screenSnapshot.value) screenSnapshot.value = { status: "cancelled", progress: { message: "已取消任务" }, logs: [], error: "" };
+    notify("已取消任务，已有结果保留", "warning");
+  } catch (error) {
+    notify(errorMessage(error, "取消失败，请重试"), "error");
+  }
+}
+
 // 指数退避：7 次 / 64s 上限。前 5 次快速重试（4s→8s→16s→32s→64s），
 // 后 2 次保持 64s，总等待约 4 分钟。达上限后主动放弃并提示用户。
 const POLL_MAX_RETRIES = 7;
@@ -592,22 +784,32 @@ let pollRetryCount = 0;
 
 async function pollTask(taskId: string, kind: "scrape" | "screen") {
   try {
-    const data = await apiRequest<TaskSnapshot>(`/api/search-progress/${encodeURIComponent(taskId)}`);
+    const data = await apiRequest<TaskSnapshot>(`/api/task-state/${encodeURIComponent(taskId)}`);
     if (kind === "scrape") scrapeSnapshot.value = data;
     else screenSnapshot.value = data;
 
-    if (data.status === "done") {
+    if (isCompletedTaskStatus(data.status)) {
       pollRetryCount = 0;
       restoredTaskHint.value = "";
       if (kind === "scrape") {
         scrapeBusy.value = false;
         scrapeCompleted.value = true;
-        notify("抓取完成，请继续确认 AI 筛选条件", "success");
+        notify(
+          data.status === "completed_with_pending"
+            ? "抓取完成，但有待确认，请继续检查筛选条件"
+            : "抓取完成，请继续确认 AI 筛选条件",
+          data.status === "completed_with_pending" ? "warning" : "success",
+        );
       } else {
         screenBusy.value = false;
         setPipelineResult(data.result || {});
         activeStep.value = "results";
-        notify("AI 筛选完成", "success");
+        notify(
+          data.status === "completed_with_pending"
+            ? "AI 筛选完成，但有岗位待确认"
+            : "AI 筛选完成",
+          data.status === "completed_with_pending" ? "warning" : "success",
+        );
       }
       return;
     }
@@ -617,6 +819,13 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       if (kind === "scrape") scrapeBusy.value = false;
       else screenBusy.value = false;
       // 不弹 error 通知：cancelScrape 已经弹过了；这里是轮询兜底（如刷新后接回的取消态）
+      return;
+    }
+    if (data.status === "paused") {
+      pollRetryCount = 0;
+      if (kind === "scrape") scrapeBusy.value = false;
+      else screenBusy.value = false;
+      notify(data.error || "任务已暂停，请处理后点继续", "warning");
       return;
     }
     if (data.status === "failed") {
@@ -662,6 +871,8 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
 
 function setPipelineResult(result: PipelineResult) {
   pipelineResult.value = result;
+  const sourceRunId = (result as Record<string, unknown>).source_run_id;
+  if (typeof sourceRunId === "string") pipelineResultRunId.value = sourceRunId;
   analysisReady.value = true;
   scrapeCompleted.value = true;
   resultLoaded.value = true;
@@ -674,8 +885,13 @@ function setPipelineResult(result: PipelineResult) {
 async function loadLatestResult() {
   try {
     const query = props.profileId ? `?profile_id=${encodeURIComponent(props.profileId)}` : "";
-    const data = await apiRequest<{ has_result?: boolean; result?: PipelineResult }>(`/api/latest-pipeline-result${query}`);
+    const data = await apiRequest<{
+      has_result?: boolean;
+      source_run_id?: string;
+      result?: PipelineResult;
+    }>(`/api/latest-pipeline-result${query}`);
     if (data.has_result && data.result) {
+      pipelineResultRunId.value = data.source_run_id || "";
       setPipelineResult(data.result);
       const ps = (data.result as Record<string, unknown>).profile_summary;
       if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
@@ -697,7 +913,10 @@ function resetWorkflow() {
   scrapeSnapshot.value = null;
   screenSnapshot.value = null;
   pipelineResult.value = null;
+  pipelineResultRunId.value = "";
   rejectedIds.value = new Set();
+  pausedRunId.value = "";
+  restoredTaskHint.value = "";
 }
 
 function jobId(job: JobItem): string {
@@ -783,12 +1002,34 @@ async function retryJd(job: JobItem) {
   if (!id || jdBusyIds.value.has(id)) return;
   withBusy(jdBusyIds, id, true);
   try {
-    const data = await apiRequest<{ jd: string; verdict?: string; verdict_reason?: string; caveats?: string[] }>(
+    const data = await apiRequest<{
+      task_id?: string;
+      jd?: string;
+      verdict?: string;
+      verdict_reason?: string;
+      caveats?: string[];
+    }>(
       `/api/pipeline/jobs/${encodeURIComponent(id)}/jd`, {
       method: "POST",
-      json: { source_url: job.source_url || job.job_link || job.canonical_url },
+      json: {
+        source_run_id: pipelineResultRunId.value,
+        source_url: job.source_url || job.job_link || job.canonical_url,
+        profile_summary: profileSummary.value,
+      },
     });
-    job.jd = data.jd;
+    if (data.task_id) {
+      recrawlBusy.value = true;
+      recrawlTaskId.value = data.task_id;
+      recrawlSnapshot.value = {
+        status: "running",
+        progress: { message: "正在补抓这条岗位…" },
+        logs: [],
+        error: "",
+      };
+      await pollRecrawl(data.task_id);
+      return;
+    }
+    job.jd = data.jd || "";
     if (data.verdict) {
       job.verdict = data.verdict as JobItem["verdict"];
       job.verdict_reason = data.verdict_reason || "";
@@ -823,7 +1064,11 @@ async function recrawlUncertain() {
   try {
     const data = await apiRequest<{ task_id: string }>("/api/pipeline/recrawl", {
       method: "POST",
-      json: { job_ids: ids, profile_summary: profileSummary.value },
+      json: {
+        source_run_id: pipelineResultRunId.value,
+        job_ids: ids,
+        profile_summary: profileSummary.value,
+      },
     });
     recrawlTaskId.value = data.task_id;
     await pollRecrawl(data.task_id);
@@ -836,16 +1081,47 @@ async function recrawlUncertain() {
   }
 }
 
+async function continueRecrawl() {
+  if (!recrawlTaskId.value || recrawlBusy.value) return;
+  const taskId = recrawlTaskId.value;
+  recrawlBusy.value = true;
+  restoredTaskHint.value = "";
+  recrawlSnapshot.value = {
+    status: "running", progress: { message: "正在从重抓断点继续…" }, logs: [],
+  };
+  try {
+    const data = await apiRequest<{ task_id?: string }>(
+      `/api/task/continue/${encodeURIComponent(taskId)}`,
+      { method: "POST" },
+    );
+    pausedRunId.value = "";
+    recrawlTaskId.value = data.task_id || taskId;
+    recrawlRetryCount = 0;
+    await pollRecrawl(recrawlTaskId.value);
+  } catch (error) {
+    recrawlBusy.value = false;
+    recrawlSnapshot.value = {
+      status: "paused", progress: {}, logs: [],
+      error: errorMessage(error, "重抓断点继续失败"),
+    };
+  }
+}
+
 async function pollRecrawl(taskId: string) {
   try {
-    const data = await apiRequest<TaskSnapshot>(`/api/search-progress/${encodeURIComponent(taskId)}`);
+    const data = await apiRequest<TaskSnapshot>(`/api/task-state/${encodeURIComponent(taskId)}`);
     recrawlSnapshot.value = data;
-    if (data.status === "done") {
+    if (isCompletedTaskStatus(data.status)) {
       recrawlRetryCount = 0;
       recrawlBusy.value = false;
       const updates = (data.result as unknown as { updates?: Record<string, unknown> } | undefined)?.updates;
       if (updates) mergeRecrawlUpdates(updates as Record<string, unknown>);
-      notify("待确认岗位已重抓完成", "success");
+      notify(
+        data.status === "completed_with_pending"
+          ? "重抓完成，但仍有岗位待确认"
+          : "待确认岗位已重抓完成",
+        data.status === "completed_with_pending" ? "warning" : "success",
+      );
       window.setTimeout(() => { recrawlSnapshot.value = null; }, 3000);
       return;
     }
@@ -854,6 +1130,12 @@ async function pollRecrawl(taskId: string) {
       recrawlBusy.value = false;
       notify("已停止重抓", "warning");
       window.setTimeout(() => { recrawlSnapshot.value = null; }, 3000);
+      return;
+    }
+    if (data.status === "paused") {
+      recrawlRetryCount = 0;
+      recrawlBusy.value = false;
+      notify(data.error || "重抓已暂停，请处理后点继续", "warning");
       return;
     }
     if (data.status === "failed") {
@@ -1095,10 +1377,15 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
             <Search v-if="!scrapeBusy" :size="18" aria-hidden="true" />
             <Square v-else :size="18" aria-hidden="true" />{{ scrapeBusy ? "停止抓取" : "开始抓取" }}
           </button>
-          <button v-if="scrapeSnapshot && scrapeSnapshot.status === 'failed' && scrapeTaskId"
+          <button v-if="scrapeSnapshot && (scrapeSnapshot.status === 'failed' || scrapeSnapshot.status === 'paused') && scrapeTaskId"
                   class="button secondary" type="button" data-testid="continue-scrape"
                   :disabled="scrapeBusy" @click="continueScrape()">
             从断点继续
+          </button>
+          <button v-if="scrapeSnapshot && scrapeSnapshot.status === 'paused' && pausedRunId"
+                  class="button danger" type="button" data-testid="cancel-paused-scrape"
+                  @click="cancelPausedTask(pausedRunId)">
+            取消任务
           </button>
           <button v-if="scrapeCompleted" class="button secondary" type="button" data-testid="continue-to-screen" @click="activeStep = 'screen'">
             继续确认筛选条件
@@ -1150,10 +1437,26 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
             <Square v-if="screenBusy" :size="18" aria-hidden="true" />
             <Sparkles v-else :size="18" aria-hidden="true" />{{ screenBusy ? "停止筛选" : "开始 AI 筛选" }}
           </button>
+          <button v-if="screenSnapshot && screenSnapshot.status === 'paused'"
+                  class="button secondary" type="button" data-testid="resume-ai-screen"
+                  :disabled="screenBusy" @click="continueAiScreen()">
+            继续
+          </button>
+          <button v-if="screenSnapshot && screenSnapshot.status === 'paused' && pausedRunId"
+                  class="button danger" type="button" data-testid="cancel-paused-screen"
+                  @click="cancelPausedTask(pausedRunId)">
+            取消任务
+          </button>
         </div>
       </section>
 
-      <section v-else class="results-stage">
+      <section
+        v-else
+        class="results-stage"
+        :class="{
+          'has-recrawl-banner': activeCategory === 'uncertain' && recrawlSnapshot,
+        }"
+      >
         <div class="result-tabs" role="tablist" aria-label="AI 筛选结果分类">
           <button
             v-for="tab in resultTabs"
@@ -1166,7 +1469,20 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
           >{{ tab.label }}<span>{{ tab.count }}</span></button>
         </div>
 
-        <JobWorkspace :jobs="currentJobs" :empty-message="currentEmptyMessage">
+        <div v-if="activeCategory === 'uncertain' && recrawlSnapshot" class="recrawl-banner">
+          <TaskProgress :snapshot="recrawlSnapshot" kind="screen" />
+          <button v-if="recrawlSnapshot.status === 'paused'"
+                  class="button primary" type="button" data-testid="resume-recrawl"
+                  :disabled="recrawlBusy" @click="continueRecrawl()">
+            继续
+          </button>
+        </div>
+
+        <JobWorkspace
+          :jobs="currentJobs"
+          :empty-message="currentEmptyMessage"
+          :defer-mobile-detail="Boolean(recrawlSnapshot && recrawlSnapshot.status === 'paused')"
+        >
           <template #heading-actions>
             <div v-if="activeCategory === 'uncertain'" class="recrawl-inline">
               <button
@@ -1180,7 +1496,6 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
                 <LoaderCircle v-else class="spin" :size="14" aria-hidden="true" />
                 {{ recrawlBusy ? "重抓中…" : `全部重抓（${groups.uncertain.length}）` }}
               </button>
-              <TaskProgress v-if="recrawlSnapshot" :snapshot="recrawlSnapshot" kind="screen" />
             </div>
           </template>
           <template #actions="{ job }">
@@ -1199,5 +1514,14 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
         </JobWorkspace>
       </section>
     </section>
+    <!-- 切片9：版本页脚（FR-039/SC-014） -->
+    <footer v-if="backendVersion" class="version-footer" data-testid="version-footer">
+      <span v-if="versionMismatch" class="version-mismatch" data-testid="version-mismatch-warning">
+        后端版本已更新（{{ backendVersion.backend_version }}），建议刷新页面
+      </span>
+      <span class="version-label" data-testid="version-label">
+        后端 {{ backendVersion.backend_version }} · 构建 {{ backendVersion.build_hash?.slice(0, 8) || "unknown" }}
+      </span>
+    </footer>
   </main>
 </template>

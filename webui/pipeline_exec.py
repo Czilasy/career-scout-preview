@@ -17,10 +17,23 @@ import json
 import os
 import random
 import re
+import sqlite3
 import time
 from pathlib import Path
 
 from scripts import boss_cdp_raw as boss
+
+
+_PIPELINE_OPERATION_ERRORS = (
+    OSError,
+    sqlite3.Error,
+    RuntimeError,
+    ValueError,
+    KeyError,
+    TypeError,
+    ConnectionError,
+    TimeoutError,
+)
 
 # ---------------------------------------------------------------------------
 # 高级设置（用户可通过前端调整，持久化到 JSON）
@@ -105,7 +118,142 @@ _FAILED_CODE_LABELS: dict[str, str] = {
     "source_blocked": "IP 级风控拦截",
     "source_timeout": "抓取超时",
     "source_unreachable": "抓取脚本不可用",
+    # 010 healthy-pipeline 新增（与 ERROR_TAXONOMY 对齐）
+    "captcha_required": "触发验证码/滑块，需手动完成",
+    "login_expired": "BOSS 登录已失效，需重新登录",
+    "ai_rate_limited": "AI 服务限流，请求过于频繁",
+    "ai_quota_exhausted": "AI 额度已耗尽",
+    "ai_key_invalid": "AI 密钥失效或鉴权失败",
+    "ai_network_error": "AI 网络或服务故障",
+    "ip_risk_control": "IP 级风控拦截",
+    "cdp_unavailable": "连不上调试浏览器",
+    "job_offline": "岗位已下架",
+    "detail_timeout": "单岗位详情抓取超时",
+    "detail_invalid": "详情结构无效（登录墙/导航壳/空壳）",
+    "ai_missing_job": "AI 漏回单个岗位判定",
+    "internal_error": "内部状态或持久化错误",
 }
+
+
+# 统一错误分类码表（FR-040/SC-006）—— 13 类错误
+# 每条含：impact（影响范围）/ blocking（是否阻断整任务）/ retryable（是否可重试）/
+# reason（用户可读原因）/ resume_condition（继续条件）
+ERROR_TAXONOMY: dict[str, dict] = {
+    "captcha_required": {
+        "impact": "systemic",
+        "blocking": True,
+        "retryable": True,
+        "reason": "触发验证码/滑块，需手动完成",
+        "resume_condition": "用户完成验证码后点继续",
+    },
+    "login_expired": {
+        "impact": "systemic",
+        "blocking": True,
+        "retryable": True,
+        "reason": "BOSS 登录已失效，需重新登录",
+        "resume_condition": "用户重新登录后点继续",
+    },
+    "ai_rate_limited": {
+        "impact": "systemic",
+        "blocking": True,
+        "retryable": True,
+        "reason": "AI 服务限流，请求过于频繁",
+        "resume_condition": "等待限流解除后点继续",
+    },
+    "ai_quota_exhausted": {
+        "impact": "systemic",
+        "blocking": True,
+        "retryable": False,
+        "reason": "AI 额度已耗尽",
+        "resume_condition": "充值或更换密钥后点继续",
+    },
+    "ai_key_invalid": {
+        "impact": "systemic",
+        "blocking": True,
+        "retryable": False,
+        "reason": "AI 密钥失效或鉴权失败",
+        "resume_condition": "更换有效密钥后点继续",
+    },
+    "ai_network_error": {
+        "impact": "systemic",
+        "blocking": True,
+        "retryable": True,
+        "reason": "AI 网络或服务故障",
+        "resume_condition": "网络恢复后点继续",
+    },
+    "ip_risk_control": {
+        "impact": "systemic",
+        "blocking": True,
+        "retryable": True,
+        "reason": "IP 级风控拦截",
+        "resume_condition": "更换网络或等待后点继续",
+    },
+    "cdp_unavailable": {
+        "impact": "systemic",
+        "blocking": True,
+        "retryable": True,
+        "reason": "连不上调试浏览器",
+        "resume_condition": "启动 Chrome 调试端口后点继续",
+    },
+    "job_offline": {
+        "impact": "independent",
+        "blocking": False,
+        "retryable": False,
+        "reason": "岗位已下架",
+        "resume_condition": "无需继续，该岗位进入待确认",
+    },
+    "detail_timeout": {
+        "impact": "independent",
+        "blocking": False,
+        "retryable": True,
+        "reason": "单岗位详情抓取超时",
+        "resume_condition": "可单条补抓重试",
+    },
+    "detail_invalid": {
+        "impact": "independent",
+        "blocking": False,
+        "retryable": False,
+        "reason": "详情结构无效（登录墙/导航壳/空壳）",
+        "resume_condition": "可单条补抓",
+    },
+    "ai_missing_job": {
+        "impact": "independent",
+        "blocking": False,
+        "retryable": True,
+        "reason": "AI 漏回单个岗位判定",
+        "resume_condition": "可单条补抓重试",
+    },
+    "internal_error": {
+        "impact": "systemic",
+        "blocking": True,
+        "retryable": False,
+        "reason": "内部状态或持久化错误",
+        "resume_condition": "需人工排查日志",
+    },
+}
+
+
+# 硬停止码（命中即暂停整个任务）—— 与 store.SYSTEMIC_BLOCK_CODES 对齐
+_HARD_STOP_CODES: set[str] = {
+    "captcha_required", "login_expired",
+    "ai_rate_limited", "ai_quota_exhausted", "ai_key_invalid", "ai_network_error",
+    "ip_risk_control", "cdp_unavailable", "internal_error",
+    "source_verification_required", "source_login_required",
+    "source_rate_limited", "source_blocked", "source_cdp_unavailable",
+}
+
+
+def _classify_detail_batch_exception(exc: Exception) -> str:
+    """Map a batch-level detail failure to a systemic, user-visible code."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    cdp_markers = (
+        "cdp", "websocket", "chrome", "browser", "session",
+        "connection", "disconnected", "target closed",
+    )
+    if isinstance(exc, (ConnectionError, TimeoutError)) or any(
+            marker in text for marker in cdp_markers):
+        return "cdp_unavailable"
+    return "internal_error"
 
 
 def _scrape_overall_percent(stage: str, current: int, total: int) -> int:
@@ -390,7 +538,8 @@ def job_matches(job: dict, filters: dict) -> bool:
 def run_search(params: dict, source, *, pages: int = 3,
                progress=None, stop_event=None,
                artifact_dir=None, sleeper=None,
-               skip_combos: set[str] | None = None) -> dict:
+               skip_combos: set[str] | None = None,
+               on_combo_done=None) -> dict:
     """Execute the multi-search pipeline and return merged, filtered jobs.
 
     ``source`` is a ``BossCdpSource`` (or compatible) providing ``preflight``
@@ -400,6 +549,8 @@ def run_search(params: dict, source, *, pages: int = 3,
 
     ``skip_combos``: 可选，已完成的组合键集合（格式 "keyword|city"），
     断点续抓时跳过这些组合不重复抓。
+    ``on_combo_done``: 可选持久化回调，收到 ``(combo_key, jobs,
+    completed_combos)``。回调失败表示进度无法安全保存，流程立即硬停止。
 
     Returns ``{"ok": bool, "jobs": [...], "total_scraped": int,
     "total_matched": int, "combinations": int, "error": str,
@@ -491,6 +642,17 @@ def run_search(params: dict, source, *, pages: int = 3,
         }
         outcome = source.fetch_list(plan_item)
         if not outcome.ok:
+            # 系统性阻断（验证码/登录失效/IP风控/CDP不可用）：立即停止，不继续跑其他组合
+            if outcome.failed_code in _HARD_STOP_CODES:
+                label = _FAILED_CODE_LABELS.get(outcome.failed_code, outcome.failed_code)
+                emit(stage="hard_stop", current=idx + 1, total=len(combos),
+                     keyword=kw, city=city, failed_code=outcome.failed_code,
+                     message=f"系统性阻断：{label}，任务暂停")
+                return {"ok": False, "jobs": list(merged.values()),
+                        "total_scraped": total_scraped, "total_matched": len(merged),
+                        "combinations": len(combos), "completed_combos": completed_combos,
+                        "hard_stop": True, "hard_stop_code": outcome.failed_code,
+                        "error": f"系统性阻断：{label}"}
             failed_combos += 1
             # 从 safe_log 提取 reason= 后的可读原因
             _reason = ""
@@ -508,6 +670,26 @@ def run_search(params: dict, source, *, pages: int = 3,
                 jid = job.get("job_id") or job.get("source_url") or ""
                 if jid and jid not in merged:
                     merged[jid] = job
+            if on_combo_done is not None:
+                try:
+                    on_combo_done(combo_key, list(outcome.jobs), list(completed_combos))
+                except _PIPELINE_OPERATION_ERRORS as exc:
+                    emit(
+                        stage="hard_stop", current=idx + 1, total=len(combos),
+                        keyword=kw, city=city, failed_code="internal_error",
+                        message="组合结果持久化失败，任务暂停",
+                    )
+                    return {
+                        "ok": False,
+                        "jobs": list(merged.values()),
+                        "total_scraped": total_scraped,
+                        "total_matched": len(merged),
+                        "combinations": len(combos),
+                        "completed_combos": completed_combos,
+                        "hard_stop": True,
+                        "hard_stop_code": "internal_error",
+                        "error": f"组合结果持久化失败（{type(exc).__name__}），任务已暂停",
+                    }
             emit(stage="combo_done", current=idx + 1, total=len(combos),
                  keyword=kw, city=city, scraped=len(outcome.jobs),
                  merged=len(merged),
@@ -561,9 +743,11 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     ``completed_job_ids``: 可选，已抓过 JD 的 job_id 集合（断点续抓），跳过不重复抓，
     其 jd 保留原值。
 
-    返回 {"jobs": 带 jd 的岗位列表, "login_wall": bool, "stopped": bool, "fetched": int}：
-    - login_wall=True：批内出现 source_login_required（BOSS 登录失效），已停止
+    返回 {"jobs": 带 jd 的岗位列表, "hard_stop": bool, "hard_stop_code": str|None,
+           "stopped": bool, "fetched": int}：
+    - hard_stop=True：批内出现源级硬信号（登录失效/验证码/限流/IP 风控），已停止
       后续批次（继续抓只会抓空气还装完成），调用方应停并向用户上报。
+      hard_stop_code 为具体触发的 failed_code（对应 _FAILED_CODE_LABELS）。
     - stopped=True：用户取消导致提前停止。
     - fetched：本次实际抓到 JD 的条数。
     """
@@ -573,7 +757,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     os.makedirs(artifact_dir, exist_ok=True)
     total = len(jobs)
     if total == 0:
-        return {"jobs": [], "login_wall": False, "stopped": False, "fetched": 0}
+        return {"jobs": [], "hard_stop": False, "hard_stop_code": None,
+                "stopped": False, "fetched": 0}
     BATCH_SIZE = int(load_advanced_settings().get("detail_batch_size") or 5)
     _adv = load_advanced_settings()
     _detail_interval = float(_adv.get("detail_interval") or 8)
@@ -593,10 +778,21 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         indexed_jobs.append((idx, jid, dict(job, job_id=jid)))
     jd_by_idx = {}
     jd_fail_by_idx: dict[int, str] = {}
+    jd_fail_reason_by_idx: dict[int, str] = {}
     done = 0
     fetched = 0
-    login_wall = False
+    hard_stop = False
+    hard_stop_code: str | None = None
     stopped = False
+    # 源级硬信号集合：命中任何一个都意味着继续抓只会抓空气，必须截停并上报用户。
+    # JD 抓取阶段只关心 source_* 码（不调 AI，不会产生 ai_* 码）。
+    _jd_hard_stop_codes = frozenset({
+        "source_login_required",
+        "source_verification_required",
+        "source_rate_limited",
+        "source_blocked",
+        "source_cdp_unavailable",
+    })
     for batch_start in range(0, len(indexed_jobs), BATCH_SIZE):
         if stop_event is not None and stop_event.is_set():
             stopped = True
@@ -611,6 +807,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         batch_path = os.path.join(
             artifact_dir, f"pipeline_batch_{batch_start}_{time.time_ns()}.json"
         )
+        batch_exception_code: str | None = None
         try:
             outcomes = source.fetch_details_batch(
                 batch_jobs,
@@ -620,20 +817,35 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 gap_max=_detail_interval + 7,
                 reset_every=_detail_reset_every,
             )
-        except Exception:
-            # 子进程级意外失败（非登录墙）：该批抓空继续。登录墙信号不经此路
-            # （它体现在 outcome.failed_code，见下）。
+        except _PIPELINE_OPERATION_ERRORS as exc:
+            # 批调用本身抛错时没有逐岗位 outcome 可供后续分类；这属于源/编排
+            # 级故障，不能伪装成一批空结果继续推进。
+            batch_exception_code = _classify_detail_batch_exception(exc)
+            hard_stop = True
+            hard_stop_code = batch_exception_code
             outcomes = {}
         for idx, jid, _ in batch:
             outcome = outcomes.get(jid)
             jd = ""
             if outcome is not None and outcome.ok and isinstance(outcome.detail, dict):
                 jd = str(outcome.detail.get("jd", "")).strip()
-            elif outcome is not None and outcome.failed_code == "source_login_required":
-                # BOSS 登录失效：停后续批次并上报（别继续抓空气还装完成）
-                login_wall = True
-            if not jd and outcome is not None and outcome.failed_code:
+            elif outcome is not None and outcome.failed_code in _jd_hard_stop_codes:
+                # 源级硬信号：停后续批次并上报（别继续抓空气还装完成）
+                hard_stop = True
+                hard_stop_code = outcome.failed_code
+            if not jd and batch_exception_code:
+                jd_fail_by_idx[idx] = batch_exception_code
+                jd_fail_reason_by_idx[idx] = ERROR_TAXONOMY.get(
+                    batch_exception_code, {}
+                ).get(
+                    "reason",
+                    _FAILED_CODE_LABELS.get(batch_exception_code, "抓取失败"),
+                )
+            elif not jd and outcome is not None and outcome.failed_code:
                 jd_fail_by_idx[idx] = outcome.failed_code
+                jd_fail_reason_by_idx[idx] = _FAILED_CODE_LABELS.get(
+                    outcome.failed_code, "岗位详情抓取失败"
+                )
             jd_by_idx[idx] = jd
             if jd:
                 fetched += 1
@@ -643,7 +855,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                     progress(done, total)
                 except Exception:
                     pass
-        if login_wall:
+        if hard_stop:
             break
     enriched = []
     for idx, job in enumerate(jobs):
@@ -656,8 +868,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         e["jd"] = jd_by_idx.get(idx, "")
         if not e["jd"] and idx in jd_fail_by_idx:
             e["jd_failed_code"] = jd_fail_by_idx[idx]
+            e["jd_failed_reason"] = jd_fail_reason_by_idx[idx]
         enriched.append(e)
-    return {"jobs": enriched, "login_wall": login_wall,
+    return {"jobs": enriched, "hard_stop": hard_stop,
+            "hard_stop_code": hard_stop_code,
             "stopped": stopped, "fetched": fetched}
 
 

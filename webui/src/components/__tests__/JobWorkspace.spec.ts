@@ -67,4 +67,19 @@ describe("JobWorkspace", () => {
     expect(link.attributes("href")).toBe("https://jobs.zhipin.com/job_detail/safe.html");
     expect(link.attributes("rel")).toBe("noopener noreferrer");
   });
+
+  it("defers the mobile detail overlay until the user selects a paused job", async () => {
+    const wrapper = mount(JobWorkspace, {
+      props: {
+        jobs: jobs.slice(0, 2),
+        emptyMessage: "暂无岗位",
+        deferMobileDetail: true,
+      },
+    });
+    expect(wrapper.get(".job-workspace").classes()).toContain("defer-mobile-detail");
+    expect(wrapper.get(".job-workspace").classes()).not.toContain("detail-selected");
+
+    await wrapper.get('[data-testid="job-row"]').trigger("click");
+    expect(wrapper.get(".job-workspace").classes()).toContain("detail-selected");
+  });
 });

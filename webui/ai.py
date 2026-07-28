@@ -71,6 +71,10 @@ class AISecurityError(Exception):
         super().__init__(error_code)
 
 
+class AICheckpointError(RuntimeError):
+    """Raised when a completed AI batch cannot be durably checkpointed."""
+
+
 # 面向用户的错误文案（端点用它替代裸 error_code，给出可操作的提示）
 ERROR_USER_MESSAGES = {
     ERROR_TIMEOUT: "AI 响应超时，请稍后重试",
@@ -87,6 +91,35 @@ ERROR_USER_MESSAGES = {
 def user_facing_error(error_code: str) -> str:
     """Return a user-friendly Chinese message for a safe error code."""
     return ERROR_USER_MESSAGES.get(error_code, f"AI 调用失败（{error_code}）")
+
+
+# 切片6：systemic 错误码集合（命中即应暂停整任务，FR-020/SC-006/SC-007）
+# 与 pipeline_exec.ERROR_TAXONOMY 中 impact=systemic 的 AI 类码对齐
+SYSTEMIC_AI_ERROR_CODES = frozenset({
+    ERROR_RATE_LIMIT,        # ai_rate_limited
+    ERROR_QUOTA_EXHAUSTED,   # ai_quota_exhausted
+    ERROR_AUTH,              # ai_key_invalid
+    ERROR_NETWORK,           # ai_network_error
+    ERROR_TIMEOUT,           # ai_network_error（归一）
+    ERROR_SERVER,            # ai_network_error（归一）
+})
+
+
+def map_ai_error_to_block_code(error_code: str) -> str:
+    """把 ai.py 的内部错误码映射到 pipeline_exec.ERROR_TAXONOMY 的阻断码。
+
+    用于 _run_ai_screen_task 暂停时写入 screening_runs.error_code。
+    非 systemic 错误返回空串。
+    """
+    if error_code == ERROR_RATE_LIMIT:
+        return "ai_rate_limited"
+    if error_code == ERROR_QUOTA_EXHAUSTED:
+        return "ai_quota_exhausted"
+    if error_code == ERROR_AUTH:
+        return "ai_key_invalid"
+    if error_code in (ERROR_NETWORK, ERROR_TIMEOUT, ERROR_SERVER):
+        return "ai_network_error"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -688,7 +721,8 @@ def _build_criteria_description(criteria):
 
 def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 batch_size=None, progress=None,
-                concurrency=None):
+                concurrency=None, raise_on_systemic=False,
+                completed_verdicts=None, on_batch_done=None):
     """Stage A 粗筛：AI 逐条核对岗位列表字段，移除"明显"不符合的。
 
     ``jobs``: 脚本抓回的岗位列表（仅列表字段，无 JD）。
@@ -704,6 +738,10 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
     ``{"dropped":[{"i":3,"reason":...}]}``，未列出的默认保留——防错杀、省输出 token、
     避免 50 条输出截断。
 
+    切片6（FR-020/SC-006）：``raise_on_systemic=True`` 时，AI 命中限流/额度/密钥/
+    网络等 systemic 错误立即抛 ``AISecurityError``，调用方应捕获并暂停整任务，
+    而不是默认全部保留并继续。默认 False 保持向后兼容。
+
     返回 {"kept": [job_id...], "dropped": [{"job_id","title","reason"}...],
     "verdicts": {job_id: {"verdict","reason"}}}。
     """
@@ -712,6 +750,24 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
     if concurrency is None:
         concurrency = int(_adv_setting("screen_concurrency", SCREEN_CONCURRENCY))
     kept, dropped, verdicts = [], [], {}
+    completed_verdicts = completed_verdicts or {}
+    completed_ids = {str(job_id) for job_id in completed_verdicts}
+    verdicts.update(completed_verdicts)
+    for job in jobs:
+        job_id = str(job.get("job_id", ""))
+        verdict = completed_verdicts.get(job_id) or {}
+        if verdict.get("verdict") == "dropped":
+            dropped.append({
+                "job_id": job_id,
+                "title": job.get("title", ""),
+                "reason": verdict.get("reason", ""),
+                "canonical_url": job.get("canonical_url", "")
+                or job.get("source_url", "") or job.get("url", ""),
+            })
+    jobs_to_process = [
+        job for job in jobs
+        if str(job.get("job_id", "")) not in completed_ids
+    ]
     if not jobs:
         return {"kept": kept, "dropped": dropped, "verdicts": verdicts}
 
@@ -745,8 +801,8 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
 
     # 切批
     batches = []
-    for start in range(0, len(jobs), batch_size):
-        batches.append(jobs[start:start + batch_size])
+    for start in range(0, len(jobs_to_process), batch_size):
+        batches.append(jobs_to_process[start:start + batch_size])
 
     def _process_batch(batch):
         """处理单个批次，返回 (batch_dropped, batch_verdicts)。
@@ -776,6 +832,9 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
             dropped_list = data.get("dropped", []) if isinstance(data, dict) else []
             by_i = {r.get("i"): r for r in dropped_list if isinstance(r, dict)}
         except AISecurityError as exc:
+            # 切片6：systemic 错误（限流/额度/密钥/网络）立即抛，让调用方暂停
+            if raise_on_systemic and exc.error_code in SYSTEMIC_AI_ERROR_CODES:
+                raise
             if exc.error_code == ERROR_TRUNCATED and len(batch) > 1:
                 # 返回被截断：拆半重跑这批，还截断就继续拆（到单条为止）
                 mid = len(batch) // 2
@@ -809,6 +868,12 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
             b_dropped, b_verdicts = _process_batch(batch)
             dropped.extend(b_dropped)
             verdicts.update(b_verdicts)
+            completed_ids.update(b_verdicts)
+            if on_batch_done is not None:
+                try:
+                    on_batch_done(dict(b_verdicts), list(completed_ids))
+                except Exception as exc:
+                    raise AICheckpointError("AI batch checkpoint failed") from exc
             processed += len(batch)
             if progress is not None:
                 try:
@@ -840,6 +905,13 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 with lock:
                     dropped.extend(b_dropped)
                     verdicts.update(b_verdicts)
+                    completed_ids.update(b_verdicts)
+                    completed_snapshot = list(completed_ids)
+                if on_batch_done is not None:
+                    try:
+                        on_batch_done(dict(b_verdicts), completed_snapshot)
+                    except Exception as exc:
+                        raise AICheckpointError("AI batch checkpoint failed") from exc
                 _safe_progress(len(futures[fut]))
 
     kept = [str(j.get("job_id", "")) for j in jobs
@@ -849,7 +921,7 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
 
 def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
               batch_size=None, progress=None, completed_verdicts=None,
-              concurrency=None):
+              concurrency=None, raise_on_systemic=False):
     """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
 
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
@@ -862,6 +934,10 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
 
     ``concurrency``: 并发批次数，默认 1（串行）。spec 007 ⑥⑦：免费端点实测并发=1；
         换不限流端点可调大。>1 时用线程池并发提交批次，结果按完成顺序合并。
+
+    切片6（FR-020/SC-008）：``raise_on_systemic=True`` 时，AI 命中限流/额度/密钥/
+    网络等 systemic 错误立即抛 ``AISecurityError``，调用方应捕获并暂停整任务，
+    而不是批量变 uncertain 后完成。默认 False 保持向后兼容。
     """
     if batch_size is None:
         batch_size = int(_adv_setting("match_batch_size", MATCH_BATCH_SIZE))
@@ -919,6 +995,9 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             results = data.get("results", []) if isinstance(data, dict) else []
             by_i = {r.get("i"): r for r in results if isinstance(r, dict)}
         except AISecurityError as exc:
+            # 切片6：systemic 错误立即抛，让调用方暂停（不批量变 uncertain 后完成）
+            if raise_on_systemic and exc.error_code in SYSTEMIC_AI_ERROR_CODES:
+                raise
             if exc.error_code == ERROR_TRUNCATED and len(batch) > 1:
                 mid = len(batch) // 2
                 sub, f1 = _match_one_batch(batch[:mid])

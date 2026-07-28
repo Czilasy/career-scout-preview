@@ -1,3 +1,4 @@
+import gc
 import os
 import pathlib
 import sys
@@ -5,11 +6,24 @@ import tempfile
 import threading
 import time
 import unittest
+import warnings
 
 from webui.process_executor import ArtifactSpec, ScraperExecutor
 
 
 class ScraperExecutorTests(unittest.TestCase):
+    def test_execute_closes_subprocess_output_pipe(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            result = ScraperExecutor().execute(
+                [sys.executable, "-c", "print('done')"], timeout_seconds=5,
+            )
+            gc.collect()
+
+        self.assertTrue(result.ok)
+        resource_warnings = [w for w in caught if issubclass(w.category, ResourceWarning)]
+        self.assertEqual(resource_warnings, [])
+
     def test_success_returns_bounded_output_and_valid_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

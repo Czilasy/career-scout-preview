@@ -83,19 +83,22 @@ class ScraperExecutor:
             stream = process.stdout
             if stream is None:
                 return
-            while True:
-                chunk = stream.read(4096)
-                if not chunk:
-                    return
-                remaining = self.max_output_bytes - len(output)
-                accepted = chunk[:max(0, remaining)]
-                if on_output and accepted:
-                    on_output(accepted.decode("utf-8", errors="replace"))
-                if remaining > 0:
-                    output.extend(accepted)
-                if len(chunk) > remaining:
-                    output_limit.set()
-                    return
+            try:
+                while True:
+                    chunk = stream.read(4096)
+                    if not chunk:
+                        return
+                    remaining = self.max_output_bytes - len(output)
+                    accepted = chunk[:max(0, remaining)]
+                    if on_output and accepted:
+                        on_output(accepted.decode("utf-8", errors="replace"))
+                    if remaining > 0:
+                        output.extend(accepted)
+                    if len(chunk) > remaining:
+                        output_limit.set()
+                        return
+            finally:
+                stream.close()
 
         reader = threading.Thread(target=drain, name="scraper-output", daemon=True)
         reader.start()
