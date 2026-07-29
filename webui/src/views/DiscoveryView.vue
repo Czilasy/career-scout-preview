@@ -12,15 +12,29 @@ import {
   Sparkles,
   Square,
   UploadCloud,
+  X,
 } from "@lucide/vue";
 import CollapsibleCard from "../components/CollapsibleCard.vue";
+import ExecutionModeSelector from "../components/ExecutionModeSelector.vue";
 import JobWorkspace from "../components/JobWorkspace.vue";
 import StepNavigator from "../components/StepNavigator.vue";
 import TaskProgress from "../components/TaskProgress.vue";
-import { apiRequest, errorMessage, setBuildIdentity } from "../api";
-import { buildSearchScriptParams, partitionPipelineResult } from "../discovery";
+import TuningWorkspace from "../components/TuningWorkspace.vue";
+import { apiRequest, errorMessage, setBuildIdentity, tuningApi } from "../api";
+import { buildSearchScriptParams, normalizeScopePreview, partitionPipelineResult } from "../discovery";
 import type { PipelineResult } from "../discovery";
-import type { CandidateProfile, JobItem, Notice } from "../types";
+import type {
+  AdvancedSettingsState,
+  CandidateProfile,
+  ExecutionSelection,
+  ExecutionSettings,
+  FrozenSearchScope,
+  JobItem,
+  Notice,
+  TaskSize,
+  TuningExperiment,
+  TuningExperimentCreateRequest,
+} from "../types";
 
 type StepId = "upload" | "search" | "screen" | "results";
 type ResultCategory = "matched" | "unmatched" | "uncertain" | "dropped";
@@ -99,6 +113,7 @@ const keywords = ref<Array<{ word: string; recommended: boolean }>>([]);
 const selectedKeywords = ref<string[]>([]);
 const customKeyword = ref("");
 const cityText = ref("");
+const nationwide = ref(false);
 const customCity = ref("");
 const fieldLabels = ref<Record<string, FieldLabel>>({});
 const filterValues = ref<Record<string, string[]>>({});
@@ -130,7 +145,25 @@ const rejectedIds = ref(new Set<string>());
 const feedbackBusyIds = ref(new Set<string>());
 const jdBusyIds = ref(new Set<string>());
 const advancedBusy = ref(false);
-const activePreset = ref<"conservative" | "normal" | "aggressive" | null>(null);
+const executionSelection = ref<ExecutionSelection>("custom");
+const advancedState = ref<AdvancedSettingsState | null>(null);
+const scopePreview = ref<FrozenSearchScope | null>(null);
+const scopePreviewBusy = ref(false);
+const tuningExperiment = ref<TuningExperiment | null>(null);
+const tuningLoading = ref(false);
+const tuningBusy = ref(false);
+const tuningResultDigest = ref("");
+const previousModeVersionId = ref("");
+const tuningCreateOpen = ref(false);
+interface WorkloadDraft {
+  taskSize: TaskSize;
+  structureIndex: number;
+  keywords: string;
+  scopeKind: "cities" | "nationwide";
+  cities: string;
+  pages: number;
+}
+const tuningDraftWorkloads = ref<WorkloadDraft[]>([]);
 const advancedSettings = ref<Record<string, number>>({
   pages: 3,
   inter_combo_delay: 10,
@@ -145,7 +178,7 @@ const advancedSettings = ref<Record<string, number>>({
 });
 // 字段合法范围（与 input 的 min/max 保持一致）。失焦/回车时才钳到边界，
 // 输入过程中不干预，让用户自由编辑。
-const ADVANCED_RANGES: Record<string, [number, number]> = {
+const advancedRanges = ref<Record<string, [number, number]>>({
   pages: [1, 9999],
   inter_combo_delay: [5, 120],
   detail_batch_size: [1, 15],
@@ -156,12 +189,24 @@ const ADVANCED_RANGES: Record<string, [number, number]> = {
   screen_concurrency: [1, 10],
   match_batch_size: [1, 20],
   match_concurrency: [1, 10],
-};
+});
+function mergeManualRanges(raw: AdvancedSettingsState["manual_ranges"] | undefined) {
+  if (!raw) return;
+  for (const [field, value] of Object.entries(raw)) {
+    const range = Array.isArray(value) ? value : [value.min, value.max];
+    if (range.length === 2 && range.every((item) => Number.isFinite(item)) && range[0] <= range[1]) {
+      advancedRanges.value[field] = [Number(range[0]), Number(range[1])];
+    }
+  }
+}
+function advancedRange(field: string): [number, number] {
+  return advancedRanges.value[field] || [0, Number.MAX_SAFE_INTEGER];
+}
 function clampAdvanced(field: string) {
-  activePreset.value = null;
+  if (field !== "pages") executionSelection.value = "custom";
   const raw = advancedSettings.value[field];
   if (typeof raw !== "number" || Number.isNaN(raw)) return;
-  const range = ADVANCED_RANGES[field];
+  const range = advancedRanges.value[field];
   if (!range) return;
   const [min, max] = range;
   let next = raw;
@@ -173,6 +218,10 @@ const searchPanelOpen = ref(true);
 const screenPanelOpen = ref(true);
 const advancedPanelOpen = ref(false);
 let pollTimer: number | undefined;
+
+const scopeLocked = computed(() => Boolean(
+  scrapeBusy.value || scrapeTaskId.value || screenBusy.value || screenTaskId.value || resultLoaded.value,
+));
 
 const enabledSteps = computed<StepId[]>(() => {
   const enabled: StepId[] = ["upload"];
@@ -194,6 +243,7 @@ const cityList = computed(() => cityText.value
   .split(",")
   .map((city) => city.trim())
   .filter(Boolean));
+const effectiveSearchCities = computed(() => nationwide.value ? ["全国"] : cityList.value);
 const filterGroups = computed(() => {
   return ["salary", "experience", "degree", "industry", "scale", "stage"]
     .map((key) => {
@@ -211,7 +261,7 @@ const filterGroups = computed(() => {
 });
 const searchSummary = computed(() => {
   const kw = selectedKeywords.value.length;
-  const ct = cityList.value.length;
+  const ct = nationwide.value ? 1 : cityList.value.length;
   const parts: string[] = [];
   parts.push(kw && ct ? `${kw}×${ct}=${kw * ct}组` : "未配置");
   parts.push(profileSummary.value.trim() ? "画像已填" : "画像未填");
@@ -233,6 +283,11 @@ const screenSummaryChips = computed(() => {
 watch(advancedPanelOpen, (open) => {
   if (open) searchPanelOpen.value = false;
 });
+watch(
+  [selectedKeywords, cityText, nationwide, () => advancedSettings.value.pages],
+  () => { if (!scopeLocked.value) void refreshScopePreview(); },
+  { deep: true },
+);
 const groups = computed(() => partitionPipelineResult(pipelineResult.value || {}));
 const resultTabs = computed(() => [
   { id: "matched" as const, label: "匹配", count: groups.value.matched.length },
@@ -255,6 +310,7 @@ onMounted(() => {
     loadFilterLabels(),
     restoreRunningTask(),
     fetchVersion(),
+    loadPersistedTuningExperiment(),
   ]);
 });
 
@@ -563,44 +619,77 @@ function toggleFilter(key: string, code: string) {
 
 async function loadAdvancedSettings() {
   try {
-    const data = await apiRequest<{ settings?: Record<string, number> }>("/api/advanced-settings");
+    const data = await apiRequest<Partial<AdvancedSettingsState> & { settings?: Record<string, number> }>("/api/advanced-settings");
     advancedSettings.value = { ...advancedSettings.value, ...(data.settings || {}) };
+    if (data.selection) executionSelection.value = data.selection;
+    if (data.mode_version && data.last_custom !== undefined) {
+      advancedState.value = data as AdvancedSettingsState;
+      previousModeVersionId.value = data.mode_version.previous_version_id || "";
+    }
+    mergeManualRanges(data.manual_ranges);
   } catch (error) {
     notify(errorMessage(error, "高级设置加载失败"), "warning");
   }
 }
 
-const PRESETS: Record<"conservative" | "normal" | "aggressive", Record<string, number>> = {
-  conservative: {
-    pages: 3, inter_combo_delay: 30,
-    detail_batch_size: 5, detail_interval: 8, detail_reset_every: 3, detail_batch_cooldown: 30,
-    screen_batch_size: 30, screen_concurrency: 2, match_batch_size: 3, match_concurrency: 3,
-  },
-  normal: {
-    pages: 3, inter_combo_delay: 15,
-    detail_batch_size: 10, detail_interval: 4, detail_reset_every: 5, detail_batch_cooldown: 15,
-    screen_batch_size: 50, screen_concurrency: 4, match_batch_size: 4, match_concurrency: 6,
-  },
-  aggressive: {
-    pages: 3, inter_combo_delay: 10,
-    detail_batch_size: 15, detail_interval: 2, detail_reset_every: 4, detail_batch_cooldown: 5,
-    screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
-  },
-};
+const SPEED_FIELDS = [
+  "inter_combo_delay", "detail_batch_size", "detail_interval",
+  "detail_reset_every", "detail_batch_cooldown", "screen_batch_size",
+  "screen_concurrency", "match_batch_size", "match_concurrency",
+] as const;
 
-function applyPreset(level: "conservative" | "normal" | "aggressive") {
-  activePreset.value = level;
-  advancedSettings.value = { ...PRESETS[level] };
+function currentExecutionSettings(): ExecutionSettings {
+  return Object.fromEntries(SPEED_FIELDS.map((field) => [field, advancedSettings.value[field]])) as unknown as ExecutionSettings;
+}
+
+async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
+  if (!selectedKeywords.value.length || (!nationwide.value && !cityList.value.length)) {
+    scopePreview.value = null;
+    return null;
+  }
+  scopePreviewBusy.value = true;
+  try {
+    const data = await tuningApi.previewScope({
+      keywords: selectedKeywords.value,
+      scope_kind: nationwide.value ? "nationwide" : "cities",
+      cities: nationwide.value ? [] : cityList.value,
+      pages_per_combination: advancedSettings.value.pages,
+    });
+    scopePreview.value = normalizeScopePreview(data);
+    return scopePreview.value;
+  } catch (error) {
+    scopePreview.value = null;
+    notify(errorMessage(error, "搜索范围校验失败"), "warning");
+    return null;
+  } finally {
+    scopePreviewBusy.value = false;
+  }
+}
+
+async function selectExecutionMode(selection: ExecutionSelection) {
+  const preview = scopePreview.value || await refreshScopePreview();
+  if (!preview) return;
+  advancedBusy.value = true;
+  try {
+    const data = await tuningApi.selectMode(selection, preview.scope_digest);
+    const returned = (data as unknown as { settings?: ExecutionSettings; config?: ExecutionSettings }).settings
+      || (data as unknown as { config?: ExecutionSettings }).config;
+    if (!returned) throw new Error("模式响应缺少完整九字段配置");
+    advancedSettings.value = { ...advancedSettings.value, ...returned };
+    executionSelection.value = selection;
+  } catch (error) {
+    notify(errorMessage(error, "执行模式切换失败"), "error");
+  } finally {
+    advancedBusy.value = false;
+  }
 }
 
 async function saveAdvancedSettings() {
   advancedBusy.value = true;
   try {
-    const data = await apiRequest<{ settings?: Record<string, number> }>("/api/advanced-settings", {
-      method: "POST",
-      json: { settings: advancedSettings.value },
-    });
+    const data = await tuningApi.saveCustom(currentExecutionSettings());
     advancedSettings.value = { ...advancedSettings.value, ...(data.settings || {}) };
+    executionSelection.value = "custom";
     notify("高级设置已保存", "success");
   } catch (error) {
     notify(errorMessage(error, "高级设置保存失败"), "error");
@@ -610,11 +699,13 @@ async function saveAdvancedSettings() {
 }
 
 async function startScrape() {
-  const scriptParams = buildSearchScriptParams(selectedKeywords.value, cityList.value);
+  const scriptParams = buildSearchScriptParams(selectedKeywords.value, effectiveSearchCities.value);
   if (!scriptParams.keyword || !scriptParams.city.length) {
     notify("请确认至少一个关键词和一个城市", "warning");
     return;
   }
+  const preview = scopePreview.value || await refreshScopePreview();
+  if (!preview) return;
   searchPanelOpen.value = false;
   advancedPanelOpen.value = false;
   scrapeBusy.value = true;
@@ -625,7 +716,7 @@ async function startScrape() {
   try {
     const data = await apiRequest<{ task_id: string }>("/api/execute-search", {
       method: "POST",
-      json: { script_params: scriptParams },
+      json: { script_params: scriptParams, scope_digest: preview.scope_digest },
     });
     scrapeTaskId.value = data.task_id;
     await pollTask(data.task_id, "scrape");
@@ -706,6 +797,160 @@ async function startAiScreen() {
     screenBusy.value = false;
     screenSnapshot.value = { status: "failed", error: errorMessage(error, "AI 筛选启动失败") };
     notify(errorMessage(error, "AI 筛选启动失败"), "error");
+  }
+}
+
+async function loadPersistedTuningExperiment() {
+  const experimentId = localStorage.getItem("boss-tuning-experiment-id") || "";
+  if (!experimentId) return;
+  tuningLoading.value = true;
+  try {
+    const [picture, result] = await Promise.all([
+      tuningApi.getExperiment(experimentId),
+      tuningApi.getResult(experimentId),
+    ]);
+    const evidence = result.evidence || [];
+    tuningExperiment.value = {
+      ...picture.experiment,
+      current_round_id: picture.experiment.current_round_id
+        || String(evidence.at(-1)?.id || ""),
+      candidate_summary: result.candidate_summary || [],
+      evidence,
+      can_apply: Boolean(result.can_apply && picture.experiment.status === "completed"),
+    };
+    tuningResultDigest.value = result.candidate_mode_version_digest || "";
+  } catch (error) {
+    localStorage.removeItem("boss-tuning-experiment-id");
+    tuningExperiment.value = null;
+    notify(errorMessage(error, "实验状态恢复失败"), "warning");
+  } finally {
+    tuningLoading.value = false;
+  }
+}
+
+async function refreshTuningExperiment() {
+  await loadPersistedTuningExperiment();
+}
+
+async function applyTuningResult() {
+  if (!tuningExperiment.value?.can_apply || !tuningResultDigest.value) return;
+  tuningBusy.value = true;
+  try {
+    await tuningApi.applyResult(tuningExperiment.value.id, tuningResultDigest.value);
+    notify("完整模式版本已应用", "success");
+    await loadAdvancedSettings();
+  } catch (error) {
+    notify(errorMessage(error, "模式版本应用失败"), "error");
+  } finally {
+    tuningBusy.value = false;
+  }
+}
+
+async function rollbackTuningVersion() {
+  if (!previousModeVersionId.value) return;
+  tuningBusy.value = true;
+  try {
+    await tuningApi.rollbackModeVersion(previousModeVersionId.value);
+    notify("已回退上一完整模式版本", "success");
+    await loadAdvancedSettings();
+  } catch (error) {
+    notify(errorMessage(error, "模式版本回退失败"), "error");
+  } finally {
+    tuningBusy.value = false;
+  }
+}
+
+async function cancelTuningExperiment() {
+  if (!tuningExperiment.value?.can_cancel) return;
+  tuningBusy.value = true;
+  try {
+    await tuningApi.cancelExperiment(tuningExperiment.value.id);
+    await loadPersistedTuningExperiment();
+  } catch (error) {
+    notify(errorMessage(error, "实验取消失败"), "error");
+  } finally {
+    tuningBusy.value = false;
+  }
+}
+
+async function resumeTuningExperiment() {
+  if (!tuningExperiment.value?.can_resume) return;
+  tuningBusy.value = true;
+  try {
+    await tuningApi.resumeExperiment(tuningExperiment.value.id);
+    await loadPersistedTuningExperiment();
+  } catch (error) {
+    notify(errorMessage(error, "实验恢复失败"), "error");
+  } finally {
+    tuningBusy.value = false;
+  }
+}
+
+function openTuningCreate() {
+  tuningDraftWorkloads.value = (["small", "medium", "large"] as TaskSize[])
+    .flatMap((taskSize) => [1, 2].map((structureIndex) => ({
+      taskSize,
+      structureIndex,
+      keywords: "",
+      scopeKind: "cities" as const,
+      cities: "",
+      pages: 1,
+    })));
+  tuningCreateOpen.value = true;
+}
+
+function splitDraftValues(value: string): string[] {
+  return value.replaceAll("，", ",").split(",")
+    .map((item) => item.trim()).filter(Boolean);
+}
+
+async function submitTuningCreate() {
+  const preview = scopePreview.value || await refreshScopePreview();
+  if (!preview) return;
+  const payload: TuningExperimentCreateRequest = {
+    spec_version: "011-deep-configuration-probing",
+    source_scope: {
+      keywords: [...preview.keywords],
+      scope_kind: preview.scope_kind,
+      cities: [...preview.cities],
+      pages_per_combination: preview.pages_per_combination,
+    },
+    workloads: tuningDraftWorkloads.value.map((draft) => ({
+      task_size: draft.taskSize,
+      structure_index: draft.structureIndex,
+      scope: {
+        keywords: splitDraftValues(draft.keywords),
+        scope_kind: draft.scopeKind,
+        cities: draft.scopeKind === "nationwide"
+          ? [] : splitDraftValues(draft.cities),
+        pages_per_combination: Number(draft.pages),
+      },
+    })),
+  };
+  tuningBusy.value = true;
+  try {
+    const created = await tuningApi.createExperiment(payload);
+    localStorage.setItem("boss-tuning-experiment-id", created.experiment_id);
+    tuningCreateOpen.value = false;
+    await loadPersistedTuningExperiment();
+    notify("深度实验草稿已创建，请核对后确认输入", "success");
+  } catch (error) {
+    notify(errorMessage(error, "深度实验创建失败"), "error");
+  } finally {
+    tuningBusy.value = false;
+  }
+}
+
+async function confirmTuningInput() {
+  if (tuningExperiment.value?.status !== "draft") return;
+  tuningBusy.value = true;
+  try {
+    await tuningApi.confirmInput(tuningExperiment.value.id);
+    await loadPersistedTuningExperiment();
+  } catch (error) {
+    notify(errorMessage(error, "代表性输入确认失败"), "error");
+  } finally {
+    tuningBusy.value = false;
   }
 }
 
@@ -917,6 +1162,7 @@ function resetWorkflow() {
   rejectedIds.value = new Set();
   pausedRunId.value = "";
   restoredTaskHint.value = "";
+  scopePreview.value = null;
 }
 
 function jobId(job: JobItem): string {
@@ -1286,6 +1532,7 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
                   :class="{ selected: selectedKeywords.includes(keyword.word), recommended: keyword.recommended }"
                   type="button"
                   data-testid="keyword-chip"
+                  :disabled="scopeLocked"
                   :aria-pressed="selectedKeywords.includes(keyword.word)"
                   @click="toggleKeyword(keyword.word)"
                 >
@@ -1295,32 +1542,42 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
               <div class="inline-input-row">
                 <label class="field-label grow">
                   <span>自定义</span>
-                  <input v-model="customKeyword" type="text" placeholder="回车添加" @keydown.enter.prevent="addCustomKeyword">
+                  <input v-model="customKeyword" data-testid="custom-keyword" type="text" placeholder="回车添加" :disabled="scopeLocked" @keydown.enter.prevent="addCustomKeyword">
                 </label>
-                <button class="button secondary align-end" type="button" @click="addCustomKeyword">添加</button>
+                <button class="button secondary align-end" data-testid="add-keyword" type="button" :disabled="scopeLocked" @click="addCustomKeyword">添加</button>
               </div>
             </div>
             <div class="search-col">
               <p class="search-col-title">城市</p>
+              <label class="nationwide-toggle">
+                <input v-model="nationwide" data-testid="nationwide-scope" type="checkbox" :disabled="scopeLocked">
+                <span>全国（与具体城市互斥）</span>
+              </label>
               <div v-if="cityList.length" class="city-chips-row">
                 <span v-for="city in cityList" :key="city" class="city-chip">
                   {{ city }}
-                  <button type="button" class="city-chip-remove" aria-label="删除城市" @click="removeCity(city)">×</button>
+                  <button type="button" class="city-chip-remove" aria-label="删除城市" :disabled="scopeLocked" @click="removeCity(city)">×</button>
                 </span>
               </div>
               <div class="inline-input-row">
                 <label class="field-label grow">
                   <span>自定义</span>
-                  <input v-model="customCity" type="text" placeholder="回车添加" @keydown.enter.prevent="addCustomCity">
+                  <input v-model="customCity" data-testid="custom-city" type="text" placeholder="回车添加" :disabled="scopeLocked || nationwide" @keydown.enter.prevent="addCustomCity">
                 </label>
-                <button class="button secondary align-end" type="button" @click="addCustomCity">添加</button>
+                <button class="button secondary align-end" data-testid="add-city" type="button" :disabled="scopeLocked || nationwide" @click="addCustomCity">添加</button>
               </div>
             </div>
           </div>
           <label class="field-label">
             <span>求职画像（用于 AI 精筛）<small v-if="!profileSummary">　未填写将跳过精筛</small></span>
-            <textarea v-model="profileSummary" rows="2" placeholder="上传简历后自动生成；也可手动填写，如：3年Python后端，熟悉FastAPI/Redis，期望AI应用开发方向"></textarea>
+            <textarea v-model="profileSummary" rows="2" :disabled="scopeLocked" placeholder="上传简历后自动生成；也可手动填写，如：3年Python后端，熟悉FastAPI/Redis，期望AI应用开发方向"></textarea>
           </label>
+          <div v-if="scopePreview" class="scope-preview" data-testid="scope-preview">
+            <span>{{ scopePreview.keywords.join("、") }}</span>
+            <span>{{ scopePreview.scope_kind === "nationwide" ? "全国" : scopePreview.cities.join("、") }}</span>
+            <strong>{{ scopePreview.planned_pages }} 页 · {{ { small: "小任务", medium: "中任务", large: "大任务" }[scopePreview.task_size] }}</strong>
+          </div>
+          <p v-else-if="scopePreviewBusy" class="scope-preview-pending">正在校验搜索范围</p>
         </CollapsibleCard>
 
         <CollapsibleCard class="advanced-panel" title="高级执行设置" v-model="advancedPanelOpen">
@@ -1333,40 +1590,57 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
             </button>
           </template>
           <div class="adv-groups">
-          <div class="adv-presets-bar">
-            <button class="preset-tab" type="button" :class="{active: activePreset==='conservative'}" @click="applyPreset('conservative')">保守</button>
-            <button class="preset-tab" type="button" :class="{active: activePreset==='normal'}" @click="applyPreset('normal')">普通</button>
-            <button class="preset-tab" type="button" :class="{active: activePreset==='aggressive'}" @click="applyPreset('aggressive')">激进</button>
-          </div>
+          <ExecutionModeSelector
+            :model-value="executionSelection"
+            :task-size="scopePreview?.task_size || 'small'"
+            :busy="advancedBusy"
+            :disabled="!scopePreview"
+            @update:model-value="selectExecutionMode"
+          />
           <div class="adv-fields">
           <!-- 列表抓取 -->
           <div class="adv-group">
             <p class="adv-group-title">列表抓取</p>
             <div class="advanced-grid">
-              <label class="field-label"><span>每组合翻页数 <i class="tip" data-tip="范围 1~10。每个关键词×城市组合抓多少页，BOSS最多返回10页（300条），超出无新数据">?</i></span><input v-model.number="advancedSettings.pages" type="number" min="1" @change="clampAdvanced('pages')"><small v-if="advancedSettings.pages > 10" class="hint-warn">BOSS 最多返回 10 页，超出可能无新数据</small></label>
-              <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="范围 5~120。两个搜索组合之间等待多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" min="5" max="120" @change="clampAdvanced('inter_combo_delay')"></label>
+              <label class="field-label"><span>每组合翻页数 <i class="tip" data-tip="范围由任务总页数 1~30 的后端校验决定">?</i></span><input v-model.number="advancedSettings.pages" data-testid="pages-per-combination" type="number" min="1" :disabled="scopeLocked" @change="clampAdvanced('pages')"><small v-if="advancedSettings.pages > 10" class="hint-warn">BOSS 最多返回 10 页，超出可能无新数据</small></label>
+              <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="范围由当前模式版本提供。两个搜索组合之间等待多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" :min="advancedRange('inter_combo_delay')[0]" :max="advancedRange('inter_combo_delay')[1]" @change="clampAdvanced('inter_combo_delay')"></label>
             </div>
           </div>
           <!-- 详情抓取 -->
           <div class="adv-group">
             <p class="adv-group-title">详情抓取（JD）</p>
             <div class="advanced-grid">
-              <label class="field-label"><span>每批抓取数量 <i class="tip" data-tip="范围 1~15。每批交给浏览器抓JD的岗位数，越大越快但连续请求越密集">?</i></span><input v-model.number="advancedSettings.detail_batch_size" type="number" min="1" max="15" @change="clampAdvanced('detail_batch_size')"></label>
-              <label class="field-label"><span>岗位间隔（秒） <i class="tip" data-tip="范围 2~15。抓完一个岗位详情后等多久再抓下一个，实际会+0~7秒随机抖动">?</i></span><input v-model.number="advancedSettings.detail_interval" type="number" min="2" max="15" @change="clampAdvanced('detail_interval')"></label>
-              <label class="field-label"><span>重置频率 <i class="tip" data-tip="范围 2~10。每抓多少个详情后回BOSS首页逛一圈，重置会话计数器防拦截">?</i></span><input v-model.number="advancedSettings.detail_reset_every" type="number" min="2" max="10" @change="clampAdvanced('detail_reset_every')"></label>
-              <label class="field-label"><span>批次冷却（秒） <i class="tip" data-tip="范围 5~60。两批详情抓取之间休息多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.detail_batch_cooldown" type="number" min="5" max="60" @change="clampAdvanced('detail_batch_cooldown')"></label>
+              <label class="field-label"><span>每批抓取数量 <i class="tip" data-tip="范围由当前模式版本提供。每批交给浏览器抓JD的岗位数">?</i></span><input v-model.number="advancedSettings.detail_batch_size" data-testid="detail-batch-size" type="number" :min="advancedRange('detail_batch_size')[0]" :max="advancedRange('detail_batch_size')[1]" @change="clampAdvanced('detail_batch_size')"></label>
+              <label class="field-label"><span>岗位间隔（秒） <i class="tip" data-tip="范围由当前模式版本提供。抓完一个岗位详情后等待再抓下一个">?</i></span><input v-model.number="advancedSettings.detail_interval" type="number" :min="advancedRange('detail_interval')[0]" :max="advancedRange('detail_interval')[1]" @change="clampAdvanced('detail_interval')"></label>
+              <label class="field-label"><span>重置频率 <i class="tip" data-tip="范围由当前模式版本提供。每抓多少个详情后重置会话计数器">?</i></span><input v-model.number="advancedSettings.detail_reset_every" type="number" :min="advancedRange('detail_reset_every')[0]" :max="advancedRange('detail_reset_every')[1]" @change="clampAdvanced('detail_reset_every')"></label>
+              <label class="field-label"><span>批次冷却（秒） <i class="tip" data-tip="范围由当前模式版本提供。两批详情抓取之间的休息时间">?</i></span><input v-model.number="advancedSettings.detail_batch_cooldown" type="number" :min="advancedRange('detail_batch_cooldown')[0]" :max="advancedRange('detail_batch_cooldown')[1]" @change="clampAdvanced('detail_batch_cooldown')"></label>
             </div>
           </div>
           <!-- AI 筛选 -->
           <div class="adv-group">
             <p class="adv-group-title">AI 筛选</p>
             <div class="advanced-grid">
-              <label class="field-label"><span>粗筛每批数量 <i class="tip" data-tip="范围 1~100。粗筛（海选）时每次发多少条岗位摘要给AI判断">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" min="1" max="100" @change="clampAdvanced('screen_batch_size')"></label>
-              <label class="field-label"><span>粗筛并发数 <i class="tip" data-tip="范围 1~10。粗筛同时发几个AI请求，并发越高越快但注意端点限流">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" min="1" max="10" @change="clampAdvanced('screen_concurrency')"></label>
-              <label class="field-label"><span>精筛每批数量 <i class="tip" data-tip="范围 1~20。精筛时每次发多少条带完整JD的岗位给AI，太多模型易丢信息">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" min="1" max="20" @change="clampAdvanced('match_batch_size')"></label>
-              <label class="field-label"><span>精筛并发数 <i class="tip" data-tip="范围 1~10。精筛同时发几个AI请求，精筛请求体大并发不宜过高">?</i></span><input v-model.number="advancedSettings.match_concurrency" type="number" min="1" max="10" @change="clampAdvanced('match_concurrency')"></label>
+              <label class="field-label"><span>粗筛每批数量 <i class="tip" data-tip="范围由当前模式版本提供。粗筛每次发送的岗位摘要数">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" :min="advancedRange('screen_batch_size')[0]" :max="advancedRange('screen_batch_size')[1]" @change="clampAdvanced('screen_batch_size')"></label>
+              <label class="field-label"><span>粗筛并发数 <i class="tip" data-tip="范围由当前模式版本提供。粗筛同时发送的 AI 请求数">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" :min="advancedRange('screen_concurrency')[0]" :max="advancedRange('screen_concurrency')[1]" @change="clampAdvanced('screen_concurrency')"></label>
+              <label class="field-label"><span>精筛每批数量 <i class="tip" data-tip="范围由当前模式版本提供。精筛每次发送的完整 JD 数">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" :min="advancedRange('match_batch_size')[0]" :max="advancedRange('match_batch_size')[1]" @change="clampAdvanced('match_batch_size')"></label>
+              <label class="field-label"><span>精筛并发数 <i class="tip" data-tip="范围由当前模式版本提供。精筛同时发送的 AI 请求数">?</i></span><input v-model.number="advancedSettings.match_concurrency" type="number" :min="advancedRange('match_concurrency')[0]" :max="advancedRange('match_concurrency')[1]" @change="clampAdvanced('match_concurrency')"></label>
             </div>
           </div>
+          </div>
+          <div class="tuning-workspace-wrap" data-testid="tuning-workspace">
+            <TuningWorkspace
+              :experiment="tuningExperiment"
+              :loading="tuningLoading"
+              :busy="tuningBusy"
+              :can-rollback="Boolean(previousModeVersionId)"
+              @create="openTuningCreate"
+              @confirm="confirmTuningInput"
+              @cancel="cancelTuningExperiment"
+              @resume="resumeTuningExperiment"
+              @refresh="refreshTuningExperiment"
+              @apply="applyTuningResult"
+              @rollback="rollbackTuningVersion"
+            />
           </div>
           </div>
         </CollapsibleCard>
@@ -1514,6 +1788,49 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
         </JobWorkspace>
       </section>
     </section>
+    <div v-if="tuningCreateOpen" class="dialog-backdrop" role="presentation">
+      <section class="dialog-panel tuning-create-dialog" role="dialog" aria-modal="true" aria-labelledby="tuning-create-title">
+        <header class="dialog-header">
+          <div>
+            <h2 id="tuning-create-title">确认六个代表性任务</h2>
+            <p>小、中、大任务各两种结构。关键词、范围和页数由后端重新规范化与分类。</p>
+          </div>
+          <button class="icon-button" type="button" aria-label="关闭实验创建" @click="tuningCreateOpen = false">
+            <X :size="18" aria-hidden="true" />
+          </button>
+        </header>
+        <div class="dialog-body tuning-workload-list">
+          <fieldset v-for="(draft, index) in tuningDraftWorkloads" :key="`${draft.taskSize}-${draft.structureIndex}`" class="tuning-workload-row">
+            <legend>{{ { small: "小任务", medium: "中任务", large: "大任务" }[draft.taskSize] }} · 结构 {{ draft.structureIndex }}</legend>
+            <label class="field-label">
+              <span>关键词（逗号分隔）</span>
+              <input v-model="draft.keywords" :data-testid="`workload-keywords-${index}`" type="text" required>
+            </label>
+            <label class="field-label">
+              <span>范围</span>
+              <select v-model="draft.scopeKind">
+                <option value="cities">指定城市</option>
+                <option value="nationwide">全国</option>
+              </select>
+            </label>
+            <label class="field-label">
+              <span>城市（逗号分隔）</span>
+              <input v-model="draft.cities" :data-testid="`workload-cities-${index}`" type="text" :disabled="draft.scopeKind === 'nationwide'" :required="draft.scopeKind === 'cities'">
+            </label>
+            <label class="field-label">
+              <span>每组合页数</span>
+              <input v-model.number="draft.pages" :data-testid="`workload-pages-${index}`" type="number" min="1" required>
+            </label>
+          </fieldset>
+        </div>
+        <footer class="dialog-footer">
+          <button class="button ghost" type="button" @click="tuningCreateOpen = false">取消</button>
+          <button class="button primary" data-testid="submit-tuning-create" type="button" :disabled="tuningBusy" @click="submitTuningCreate">
+            {{ tuningBusy ? "创建中…" : "创建实验草稿" }}
+          </button>
+        </footer>
+      </section>
+    </div>
     <!-- 切片9：版本页脚（FR-039/SC-014） -->
     <footer v-if="backendVersion" class="version-footer" data-testid="version-footer">
       <span v-if="versionMismatch" class="version-mismatch" data-testid="version-mismatch-warning">

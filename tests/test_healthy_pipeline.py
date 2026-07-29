@@ -890,7 +890,10 @@ class Slice7And9ApiTests(unittest.TestCase):
         resp = self.client.get("/api/version")
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
-        self.assertEqual(data.get("backend_version"), "010-healthy-pipeline-recovery")
+        self.assertEqual(
+            data.get("backend_version"),
+            "011-deep-configuration-probing-phase1",
+        )
         self.assertRegex(data.get("build_hash", ""), r"^[0-9a-f]{12}$")
         self.assertRegex(
             data.get("build_time", ""), r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$"
@@ -1113,6 +1116,13 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         }, {})
 
     def _install_scrape_source(self, scrape_task_id, jobs):
+        from webui.execution_config import ExecutionConfigSnapshot, normalize_scope
+        state = self.store.get_advanced_config_state()
+        config = ExecutionConfigSnapshot.create(state["last_custom_config"])
+        scope = normalize_scope(
+            keywords=["后端"], scope_kind="cities", cities=["上海"],
+            pages_per_combination=1,
+        )
         self.app.config["PIPELINE_TASKS"][scrape_task_id] = {
             "kind": "scrape", "status": "done", "progress": {}, "logs": [],
             "result": {
@@ -1122,7 +1132,22 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
             },
             "error": "", "stop_event": threading.Event(),
             "started_at": 1, "finished_at": 2,
+            "config_digest": config.config_digest,
+            "scope_digest": scope.scope_digest,
         }
+        self.store.create_screening_run(
+            scrape_task_id,
+            frozen_filters={"keyword": "后端"},
+            source_count=len(jobs),
+            execution_params={
+                "script_params": {"keyword": "后端", "city": ["上海"], "pages": 1},
+                "execution_config": config.to_dict(),
+                "frozen_scope": scope.to_dict(),
+            },
+            backend_version="test",
+        )
+        self.store.update_screening_run(scrape_task_id, status="running")
+        self.store.update_screening_run(scrape_task_id, status="succeeded")
         self.store.save_ai_settings(
             "http://example.invalid", "test-ref", status="ready"
         )
@@ -1168,6 +1193,26 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(run["match_count"], 0)
         self.assertEqual(run["mismatch_count"], 0)
         self.assertEqual(run["pending_count"], 1)
+
+    def test_main_ai_uses_source_frozen_execution_config(self):
+        scrape_task_id = "frozen-config-source"
+        jobs = [{"job_id": "job-1", "title": "后端工程师"}]
+        self._install_scrape_source(scrape_task_id, jobs)
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.screen_jobs", return_value={
+                    "kept": [], "dropped": ["job-1"],
+                }) as screen_jobs:
+            response = self._post_ai_screen(scrape_task_id)
+            task_id = response.get_json()["task_id"]
+            _wait_for_pipeline_task(self.client, task_id)
+
+        used = screen_jobs.call_args.kwargs.get("execution_config")
+        source = self.store.get_screening_run(scrape_task_id)
+        self.assertIsNotNone(used)
+        self.assertEqual(
+            used.config_digest,
+            source["execution_params"]["execution_config"]["config_digest"],
+        )
 
     def test_main_ai_chrome_not_ready_pauses_with_cdp_reason(self):
         """主 AI 的 JD 阶段遇到 Chrome 阻断必须可继续暂停。"""
@@ -1350,21 +1395,10 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
 
     def test_main_jd_hard_stop_persists_each_job_reason_before_return(self):
         scrape_task_id = "main-jd-hard-stop-source"
-        self.app.config["PIPELINE_TASKS"][scrape_task_id] = {
-            "kind": "scrape", "status": "done", "progress": {}, "logs": [],
-            "result": {
-                "ok": True,
-                "jobs": [{
-                    "job_id": "job-1", "title": "后端工程师",
-                    "source_url": "https://www.zhipin.com/job_detail/job-1.html",
-                }],
-                "dropped": [], "total_scraped": 1, "total_matched": 1,
-                "completed_combos": ["后端|上海"], "error": "",
-            },
-            "error": "", "stop_event": threading.Event(),
-            "started_at": 1, "finished_at": 2,
-        }
-        self.store.save_ai_settings("http://example.invalid", "test-ref", status="ready")
+        self._install_scrape_source(scrape_task_id, [{
+            "job_id": "job-1", "title": "后端工程师",
+            "source_url": "https://www.zhipin.com/job_detail/job-1.html",
+        }])
         detail_failure = {
             "jobs": [{
                 "job_id": "job-1", "jd": "",
@@ -2301,7 +2335,7 @@ class ConvergenceTaskEventSequenceTests(unittest.TestCase):
         self.assertEqual(events[1]["payload"]["job_id"], "job-1")
         self.assertEqual(
             self.store.get_screening_run(task_id)["backend_version"],
-            "010-healthy-pipeline-recovery",
+            "011-deep-configuration-probing-phase1",
         )
 
 
@@ -3711,6 +3745,370 @@ class Slice13ComboDoneHardStopTests(unittest.TestCase):
                         f"on_combo_done 失败必须 hard_stop，实际 {result}")
         self.assertEqual(result.get("hard_stop_code"), "internal_error",
                          f"hard_stop_code 必须 internal_error，实际 {result.get('hard_stop_code')}")
+
+
+# ===========================================================================
+# SPEC011 T005 — 冻结配置摘要一致性 RED 测试
+# ===========================================================================
+class FrozenConfigDigestTests(unittest.TestCase):
+    """SPEC011 T005: 证明 list/detail/rough/fine/recrawl 阶段使用同一冻结配置摘要。
+
+    这些测试在 T006 完成前应失败（RED），因为当前流水线在运行时从 JSON 文件
+    晚绑定读取配置，而非使用任务创建时冻结的快照。
+    """
+
+    def setUp(self):
+        self.app, self.temp = _make_app()
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_run_search_accepts_execution_config_snapshot(self):
+        """run_search 必须接受 execution_config 参数，而非运行时读 JSON。"""
+        from webui.execution_config import ExecutionConfigSnapshot
+        from webui import pipeline_exec
+
+        config = ExecutionConfigSnapshot.create({
+            "inter_combo_delay": 10.0,
+            "detail_batch_size": 15,
+            "detail_interval": 2.0,
+            "detail_reset_every": 4,
+            "detail_batch_cooldown": 5.0,
+            "screen_batch_size": 50,
+            "screen_concurrency": 5,
+            "match_batch_size": 4,
+            "match_concurrency": 10,
+        })
+        # run_search 应接受 execution_config 参数
+        import inspect
+        sig = inspect.signature(pipeline_exec.run_search)
+        self.assertIn("execution_config", sig.parameters,
+                        "run_search 必须接受 execution_config 参数")
+
+    def test_fetch_job_details_accepts_execution_config_snapshot(self):
+        """fetch_job_details 必须接受 execution_config 参数。"""
+        import inspect
+        from webui import pipeline_exec
+
+        sig = inspect.signature(pipeline_exec.fetch_job_details)
+        self.assertIn("execution_config", sig.parameters,
+                        "fetch_job_details 必须接受 execution_config 参数")
+
+    def test_screen_jobs_accepts_execution_config_snapshot(self):
+        """screen_jobs 必须接受 execution_config 参数。"""
+        import inspect
+        from webui import ai as ai_module
+
+        sig = inspect.signature(ai_module.screen_jobs)
+        self.assertIn("execution_config", sig.parameters,
+                        "screen_jobs 必须接受 execution_config 参数")
+
+    def test_match_jds_accepts_execution_config_snapshot(self):
+        """match_jds 必须接受 execution_config 参数。"""
+        import inspect
+        from webui import ai as ai_module
+
+        sig = inspect.signature(ai_module.match_jds)
+        self.assertIn("execution_config", sig.parameters,
+                        "match_jds 必须接受 execution_config 参数")
+
+    def test_run_search_uses_frozen_config_not_json(self):
+        """提供 execution_config 时，run_search 不应读取 advanced_settings.json。"""
+        from webui.execution_config import ExecutionConfigSnapshot
+        from webui import pipeline_exec
+
+        config = ExecutionConfigSnapshot.create({
+            "inter_combo_delay": 42.0,
+            "detail_batch_size": 7,
+            "detail_interval": 3.0,
+            "detail_reset_every": 2,
+            "detail_batch_cooldown": 8.0,
+            "screen_batch_size": 25,
+            "screen_concurrency": 3,
+            "match_batch_size": 2,
+            "match_concurrency": 4,
+        })
+
+        captured_config = {}
+
+        def fake_scrape(params, source, **kwargs):
+            # 捕获实际使用的配置摘要
+            ec = kwargs.get("execution_config")
+            if ec is not None:
+                captured_config["digest"] = ec.config_digest
+            return {"jobs": [], "details_path": None, "events_path": None}
+
+        source = mock.MagicMock()
+
+        with mock.patch.object(pipeline_exec, "load_advanced_settings") as mock_load, \
+             mock.patch.object(pipeline_exec, "boss") as mock_boss:
+            mock_load.return_value = {"inter_combo_delay": 999}  # 不同的值
+            mock_boss.scrape_jobs = fake_scrape
+            mock_boss.ensure_chrome_running = mock.Mock(return_value=True)
+
+            try:
+                pipeline_exec.run_search(
+                    {"keyword": "test", "city": ["北京"], "pages": 3},
+                    source,
+                    pages=3,
+                    execution_config=config,
+                )
+            except TypeError:
+                # 如果 execution_config 参数不存在，会抛 TypeError — 这是 RED 预期
+                self.fail("run_search 不接受 execution_config 参数 (T006 未完成)")
+
+            # 如果执行成功，验证使用了冻结的配置
+            if "digest" in captured_config:
+                self.assertEqual(captured_config["digest"], config.config_digest)
+            # load_advanced_settings 不应被调用
+            mock_load.assert_not_called()
+
+    def test_pipeline_task_stores_config_digest(self):
+        """真实启动从后端 scope/selection 冻结并存储两个摘要。"""
+        from webui.execution_config import ExecutionConfigSnapshot
+
+        config = ExecutionConfigSnapshot.create({
+            "inter_combo_delay": 10.0,
+            "detail_batch_size": 15,
+            "detail_interval": 2.0,
+            "detail_reset_every": 4,
+            "detail_batch_cooldown": 5.0,
+            "screen_batch_size": 50,
+            "screen_concurrency": 5,
+            "match_batch_size": 4,
+            "match_concurrency": 10,
+        })
+
+        self.app.config["TASK_STORE"].save_custom_config(config.to_dict())
+        preview = self.client.post("/api/search-scope/preview", json={
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit") as submit:
+            resp = self.client.post("/api/execute-search", json={
+                "script_params": {
+                    "keyword": "Python",
+                    "city": ["上海"],
+                    "pages": 1,
+                },
+                "scope_digest": preview["scope_digest"],
+            })
+        submit.assert_called_once()
+
+        # 任务应被接受并存储配置摘要
+        self.assertEqual(resp.status_code, 200)
+        task_id = resp.get_json()["task_id"]
+
+        # 查询任务进度时应返回配置摘要
+        progress = self.client.get(f"/api/search-progress/{task_id}").get_json()
+        self.assertIn("config_digest", progress,
+                        "任务进度必须包含 config_digest")
+        self.assertEqual(progress["config_digest"], config.config_digest)
+        self.assertEqual(progress["scope_digest"], preview["scope_digest"])
+        submitted = submit.call_args.args
+        self.assertEqual(submitted[3].config_digest, config.config_digest)
+        self.assertEqual(submitted[4].scope_digest, preview["scope_digest"])
+        persisted = self.app.config["TASK_STORE"].get_screening_run(task_id)
+        self.assertEqual(
+            persisted["execution_params"]["execution_config"]["config_digest"],
+            config.config_digest,
+        )
+        self.assertEqual(
+            persisted["execution_params"]["frozen_scope"]["scope_digest"],
+            preview["scope_digest"],
+        )
+
+    def test_changing_settings_after_task_start_does_not_affect_stages(self):
+        """Scenario B: 任务启动后修改正式设置不影响任何阶段。"""
+        from webui.execution_config import ExecutionConfigSnapshot
+
+        config_a = ExecutionConfigSnapshot.create({
+            "inter_combo_delay": 10.0,
+            "detail_batch_size": 15,
+            "detail_interval": 2.0,
+            "detail_reset_every": 4,
+            "detail_batch_cooldown": 5.0,
+            "screen_batch_size": 50,
+            "screen_concurrency": 5,
+            "match_batch_size": 4,
+            "match_concurrency": 10,
+        })
+
+        self.app.config["TASK_STORE"].save_custom_config(config_a.to_dict())
+        preview = self.client.post("/api/search-scope/preview", json={
+            "keywords": ["Python"], "scope_kind": "cities",
+            "cities": ["上海"], "pages_per_combination": 1,
+        }).get_json()["scope"]
+        # 创建任务使用后端当前选择解析出的 config_a
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit") as submit:
+            resp = self.client.post("/api/execute-search", json={
+                "script_params": {
+                    "keyword": "Python",
+                    "city": ["上海"],
+                    "pages": 1,
+                },
+                "scope_digest": preview["scope_digest"],
+            })
+        submit.assert_called_once()
+        task_id = resp.get_json()["task_id"]
+
+        # 保存不同的设置（config_b）
+        self.client.post("/api/advanced-settings", json={
+            "settings": {
+                "pages": 1,
+                "inter_combo_delay": 99.0,
+                "detail_batch_size": 99,
+                "detail_interval": 99,
+                "detail_reset_every": 99,
+                "detail_batch_cooldown": 99,
+                "screen_batch_size": 99,
+                "screen_concurrency": 99,
+                "match_batch_size": 99,
+                "match_concurrency": 99,
+            }
+        })
+
+        # 任务仍应使用 config_a 的摘要
+        progress = self.client.get(f"/api/search-progress/{task_id}").get_json()
+        self.assertEqual(progress.get("config_digest"), config_a.config_digest,
+                         "任务启动后修改设置不应改变已冻结的配置摘要")
+
+
+class TuningLeaseOrdinaryTaskConflictTests(unittest.TestCase):
+    """SPEC011 T015 RED: 实验租约与普通任务启动路径冲突。
+
+    覆盖 FR-035、SC-004、state-machine.md 第 4 节。
+    租约被持有时所有普通任务启动路径（execute-search、ai-screen、
+    recrawl/continue、task/continue）必须返回 409。
+    """
+
+    def setUp(self):
+        self.app, self.temp = _make_app()
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _hold_lease(self):
+        """通过 store 直接 claim 租约，模拟实验持有。"""
+        self.store.claim_tuning_lease(
+            experiment_id="exp-conflict-1",
+            round_id="round-conflict-1",
+            owner_token="test-owner-token",
+        )
+
+    def _release_lease(self):
+        self.store.release_tuning_lease(owner_token="test-owner-token")
+
+    # -- execute-search ------------------------------------------------
+
+    def test_execute_search_blocked_when_lease_held(self):
+        """FR-035: 租约持有时 /api/execute-search 必须返回 409。"""
+        self._hold_lease()
+        resp = self.client.post("/api/execute-search", json={
+            "script_params": {"keyword": "Python", "city": ["上海"], "pages": 1},
+        })
+        self.assertEqual(resp.status_code, 409, "租约持有时必须返回 409")
+        body = resp.get_json()
+        self.assertFalse(body.get("ok"), "响应 ok 必须为 false")
+        self.assertIn("lease", body.get("error", "").lower() + body.get("error_code", "").lower(),
+                      "错误必须表明是租约冲突")
+
+    def test_execute_search_allowed_when_lease_free(self):
+        """FR-035: 无租约时 /api/execute-search 可启动。"""
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit") as submit:
+            resp = self.client.post("/api/execute-search", json={
+                "script_params": {"keyword": "Python", "city": ["上海"], "pages": 1},
+            })
+        self.assertEqual(resp.status_code, 200, "无租约时 execute-search 应被接受")
+        submit.assert_called_once()
+
+    def test_execute_search_allowed_after_lease_released(self):
+        """FR-035: 租约释放后 execute-search 可启动。"""
+        self._hold_lease()
+        self._release_lease()
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit") as submit:
+            resp = self.client.post("/api/execute-search", json={
+                "script_params": {"keyword": "Python", "city": ["上海"], "pages": 1},
+            })
+        self.assertEqual(resp.status_code, 200, "租约释放后 execute-search 应被接受")
+        submit.assert_called_once()
+
+    # -- ai-screen -----------------------------------------------------
+
+    def test_ai_screen_blocked_when_lease_held(self):
+        """FR-035: 租约持有时 /api/ai-screen 必须返回 409。"""
+        # 预置一个已完成的抓取任务
+        scrape_task_id = self._seed_done_scrape_task()
+        self._hold_lease()
+        resp = self.client.post("/api/ai-screen", json={
+            "screening_fields": {"city": ["上海"]},
+            "profile_summary": "测试",
+            "scrape_task_id": scrape_task_id,
+        })
+        self.assertEqual(resp.status_code, 409, "租约持有时 ai-screen 必须返回 409")
+
+    # -- recrawl/continue ---------------------------------------------
+
+    def test_recrawl_continue_blocked_when_lease_held(self):
+        """FR-035: 租约持有时 /api/recrawl/continue 必须返回 409。"""
+        run_id = self._seed_paused_recrawl_run()
+        self._hold_lease()
+        resp = self.client.post(f"/api/recrawl/continue/{run_id}", json={})
+        self.assertEqual(resp.status_code, 409, "租约持有时 recrawl/continue 必须返回 409")
+
+    # -- task/continue (统一入口) ------------------------------------
+
+    def test_task_continue_blocked_when_lease_held(self):
+        """FR-035: 租约持有时 /api/task/continue 必须返回 409。"""
+        run_id = self._seed_paused_recrawl_run()
+        self._hold_lease()
+        resp = self.client.post(f"/api/task/continue/{run_id}", json={})
+        self.assertEqual(resp.status_code, 409, "租约持有时 task/continue 必须返回 409")
+
+    # -- 辅助方法 ------------------------------------------------------
+
+    def _seed_done_scrape_task(self) -> str:
+        """预置一个已完成的抓取任务，供 ai-screen 启动。"""
+        task_id = "scrape-done-1"
+        self.app.config["PIPELINE_TASKS"][task_id] = {
+            "id": task_id, "kind": "scrape", "status": "done",
+            "progress": 100, "logs": [], "error": "",
+            "result": {"ok": True, "jobs": [], "total_scraped": 0,
+                       "total_matched": 0, "completed_combos": [],
+                       "error": ""},
+            "started_at": None, "finished_at": None,
+        }
+        return task_id
+
+    def _seed_paused_recrawl_run(self) -> str:
+        """预置一个 paused 状态的 recrawl run，供 continue 端点使用。"""
+        run_id = "recrawl-paused-1"
+        self.store.create_screening_run(
+            run_id, source_count=10,
+            execution_params={
+                "source_run_id": "src-1",
+                "job_ids": ["j1", "j2"],
+                "profile_summary": "测试",
+            },
+        )
+        self.store.update_screening_run(run_id, status="running")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="recrawl_jd",
+        )
+        return run_id
 
 
 if __name__ == "__main__":

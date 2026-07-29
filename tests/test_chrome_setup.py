@@ -385,6 +385,69 @@ class ChromeSetupTests(unittest.TestCase):
             self.assertEqual(name_to_code.get(name), code,
                              f"原内置城市 {name}={code} 在新码表中缺失或码值不一致")
 
+    def test_city_codes_json_has_structured_format(self):
+        """SPEC011 T003: city_codes.json 升级为结构化格式，包含 aliases/enabled/nationwide。"""
+        module = load_module()
+        import json as _json
+        path = module._city_data_path()
+        with open(path, "r", encoding="utf-8") as f:
+            raw = _json.load(f)
+
+        self.assertIsInstance(raw, dict)
+        self.assertIn("cities", raw)
+        self.assertIn("nationwide", raw)
+        self.assertIn("schema_version", raw)
+        self.assertGreaterEqual(raw["schema_version"], 2)
+
+        # nationwide 元数据
+        nw = raw["nationwide"]
+        self.assertEqual(nw["name"], "全国")
+        self.assertEqual(nw["code"], "100010000")
+        self.assertTrue(nw.get("enabled", True))
+
+        # 城市条目结构
+        cities = raw["cities"]
+        self.assertGreater(len(cities), 100)
+        for entry in cities:
+            self.assertIn("name", entry)
+            self.assertIn("code", entry)
+            self.assertIn("aliases", entry)
+            self.assertIsInstance(entry["aliases"], list)
+            if "enabled" in entry:
+                self.assertIsInstance(entry["enabled"], bool)
+
+    def test_city_codes_json_contains_explicit_aliases(self):
+        """SPEC011 T003: 主要城市有显式注册的别名。"""
+        import json as _json
+        path = load_module()._city_data_path()
+        with open(path, "r", encoding="utf-8") as f:
+            raw = _json.load(f)
+
+        city_by_name = {c["name"]: c for c in raw["cities"]}
+        # 东莞市 应注册为 东莞 的别名
+        self.assertIn("东莞", city_by_name)
+        self.assertIn("东莞市", city_by_name["东莞"]["aliases"])
+        # 北京 应有 北京市 别名
+        self.assertIn("北京市", city_by_name["北京"]["aliases"])
+
+    def test_load_local_city_map_handles_structured_format(self):
+        """SPEC011 T003: load_local_city_map 正确解析新结构化格式。"""
+        module = load_module()
+        # 重置缓存
+        module._local_city_map_cache = None
+        name_to_code, code_to_name = module.load_local_city_map()
+
+        # 全国仍包含在 name_to_code 中（向后兼容）
+        self.assertIn("全国", name_to_code)
+        self.assertEqual(name_to_code["全国"], "100010000")
+        # 已知城市
+        for city in ("北京", "上海", "深圳", "东莞"):
+            self.assertIn(city, name_to_code)
+        # 码值类型
+        for name, code in name_to_code.items():
+            self.assertIsInstance(name, str)
+            self.assertIsInstance(code, str)
+
     # ----- resolve_city 三级查询链 -----
 
     def test_resolve_city_hit_local_map(self):
@@ -1904,6 +1967,86 @@ class RiskControlTests(unittest.TestCase):
 
         with self.assertRaises(module.CDPUnavailableError):
             module.CDPSession(9222)
+
+
+class CdpMeasurementEventTests(unittest.TestCase):
+    """T016 RED: CDP 抓取阶段测量事件 — 终态守恒与敏感字段拒绝。
+
+    覆盖 FR-030、SC-007、data-model.md 2.9。
+    boss_cdp_raw 的事件回调必须产出 stage/batch/item_terminal 事件，
+    且不得包含凭据、原始简历或 JD 正文。
+    """
+
+    def setUp(self):
+        self.module = load_module()
+        self._profile = tempfile_profile()
+        paths = self._profile.__enter__()
+        self.addCleanup(self._profile.__exit__, None, None, None)
+        self.output_path = str(
+            paths["cdp_profile"] / f"{self._testMethodName}-details.json"
+        )
+
+    def test_scrape_details_events_have_duration_ms(self):
+        """scrape_details 的 terminal 事件必须包含 duration_ms。"""
+        events = []
+        list_data = _make_scrape_details_list_data(n=3)
+
+        self.module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
+            sleeper=lambda seconds, label=None: None,
+            event_callback=events.append,
+            trailing_wait=False,
+            output_path=self.output_path,
+        )
+        for ev in events:
+            self.assertIn("duration_ms", ev, "事件必须包含 duration_ms")
+            self.assertGreaterEqual(ev["duration_ms"], 0, "duration_ms 必须非负")
+
+    def test_scrape_details_events_exclude_jd_body_and_credentials(self):
+        """SC-007: 事件 payload 不得包含 JD 正文、凭据或原始简历。"""
+        events = []
+        list_data = _make_scrape_details_list_data(n=1)
+
+        self.module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
+            sleeper=lambda seconds, label=None: None,
+            event_callback=events.append,
+            trailing_wait=False,
+            output_path=self.output_path,
+        )
+        for ev in events:
+            payload_str = json.dumps(ev, ensure_ascii=False)
+            self.assertNotIn("SECRET-ENC-JOB", payload_str,
+                              "事件不得包含加密 ID 等敏感凭据")
+            self.assertNotIn("api_key", payload_str.lower(),
+                              "事件不得包含 api_key")
+            self.assertNotIn("resume_text", payload_str.lower(),
+                              "事件不得包含 resume_text")
+
+    def test_terminal_status_conservation(self):
+        """SC-007: 每个 item 必须有明确终态（completed/failed/unavailable/cancelled）。"""
+        events = []
+        list_data = _make_scrape_details_list_data(n=5)
+
+        self.module.scrape_details(
+            list_data,
+            batch_size=5,
+            session_factory=lambda cdp_port=None: _FakeScrapeDetailsCDPSession(),
+            sleeper=lambda seconds, label=None: None,
+            event_callback=events.append,
+            trailing_wait=False,
+            output_path=self.output_path,
+        )
+        terminal_statuses = {"completed", "unavailable", "failed", "cancelled"}
+        self.assertEqual(len(events), len(list_data["jobs"]),
+                         "每个 item 必须产生一个 terminal 事件")
+        for ev in events:
+            self.assertIn(ev.get("status"), terminal_statuses,
+                          "每个 item 必须有明确终态")
 
 
 if __name__ == "__main__":

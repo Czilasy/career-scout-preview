@@ -1,0 +1,148 @@
+- generic [ref=e3] [box=0,0,1440,900]:
+  - banner [ref=e4] [box=0,0,1440,72]:
+    - link "AI 求职工作台首页" [ref=e5] [cursor=pointer] [box=40,14,120,44]:
+      - /url: /
+      - generic [ref=e11] [box=91,17,69,37]:
+        - strong [ref=e12] [box=91,17,69,20]: 求职雷达
+        - generic [ref=e13] [box=91,39,69,15]: BOSS 工作台
+    - generic [ref=e14] [box=1193,14,207,44]:
+      - button "查看收藏" [ref=e15] [cursor=pointer] [box=1193,14,89,44]:
+        - generic [ref=e18] [box=1234,25,32,21]: 收藏
+      - button "打开 AI 设置" [ref=e19] [cursor=pointer] [box=1290,14,110,44]:
+        - generic [ref=e23] [box=1331,25,53,21]: AI 设置
+  - main [ref=e25] [box=0,72,1440,828]:
+    - navigation "岗位发现进度" [ref=e31] [box=40,100,224,234]:
+      - list [ref=e32] [box=40,100,224,234]:
+        - listitem [ref=e33] [box=40,100,224,54]:
+          - button "上传简历" [ref=e34] [cursor=pointer] [box=40,100,224,54]
+        - listitem [ref=e37] [box=40,160,224,54]:
+          - button "广泛抓取" [active] [ref=e38] [cursor=pointer] [box=40,160,224,54]
+        - listitem [ref=e41] [box=40,220,224,54]:
+          - button "AI 筛选" [ref=e42] [cursor=pointer] [box=40,220,224,54]
+        - listitem [ref=e45] [box=40,280,224,54]:
+          - button "查看结果" [ref=e46] [cursor=pointer] [box=40,280,224,54]:
+            - generic [ref=e47] [box=51,292,30,30]: "4"
+    - generic [ref=e49] [box=302,100,1138,563]:
+      - generic [ref=e51] [box=302,100,368,101]:
+        - text: 02 · 广泛发现
+        - heading "确认关键词与城市" [level=1] [ref=e92] [box=302,125,368,42]
+        - paragraph [ref=e53] [box=302,176,368,25]: 这一步只按关键词和城市抓取，不提前缩窄岗位池。
+      - generic [ref=e93] [box=302,219,1098,444]:
+        - generic [ref=e94] [box=302,219,1098,310]:
+          - button "哪些词用于广泛抓取？ 未配置 · 画像已填" [expanded] [ref=e96] [cursor=pointer] [box=303,220,1096,58]:
+            - generic [ref=e101] [box=362,234,217,29]: 哪些词用于广泛抓取？
+            - generic [ref=e102] [box=595,234,778,30]: 未配置 · 画像已填
+          - generic [ref=e108] [box=303,292,1096,236]:
+            - generic [ref=e109] [box=329,292,1044,128]:
+              - generic [ref=e110] [box=329,292,510,128]:
+                - paragraph [ref=e111] [box=329,292,510,16]: 关键词
+                - generic "搜索关键词" [box=329,316,510,0]
+                - generic [ref=e112] [box=329,352,510,68]:
+                  - generic [ref=e113] [box=329,352,438,68]:
+                    - generic [ref=e114] [box=329,352,438,17]: 自定义
+                    - textbox "自定义" [disabled] [ref=e115] [box=329,376,438,44]:
+                      - /placeholder: 回车添加
+                  - button "添加" [disabled] [ref=e116] [box=775,376,64,44]
+              - generic [ref=e117] [box=863,292,510,128]:
+                - paragraph [ref=e118] [box=863,292,510,16]: 城市
+                - generic [ref=e119] [cursor=pointer] [box=863,316,510,36]:
+                  - checkbox "全国（与具体城市互斥）" [disabled] [ref=e120] [box=867,325,18,18]
+                  - generic [ref=e121] [box=896,326,132,16]: 全国（与具体城市互斥）
+                - generic [ref=e122] [box=863,352,510,68]:
+                  - generic [ref=e123] [box=863,352,438,68]:
+                    - generic [ref=e124] [box=863,352,438,17]: 自定义
+                    - textbox "自定义" [disabled] [ref=e125] [box=863,376,438,44]:
+                      - /placeholder: 回车添加
+                  - button "添加" [disabled] [ref=e126] [box=1309,376,64,44]
+            - generic [ref=e127] [box=329,420,1044,78]:
+              - generic [ref=e128] [box=329,420,1044,17]: 求职画像（用于 AI 精筛）
+              - textbox "求职画像（用于 AI 精筛）" [disabled] [ref=e129] [box=329,444,1044,54]:
+                - /placeholder: 上传简历后自动生成；也可手动填写，如：3年Python后端，熟悉FastAPI/Redis，期望AI应用开发方向
+                - text: 专升本毕业，约1年AI应用开发经验，目标AI应用/智能体开发全职岗位。核心技能包括Python、FastAPI、LangGraph、RAG系统构建，能独立完成全栈AI系统设计与开发。
+        - generic [ref=e130] [box=302,543,1098,60]:
+          - generic [ref=e131] [box=303,544,1096,58]:
+            - button "高级执行设置" [ref=e132] [cursor=pointer] [box=303,544,982,58]
+            - button "保存高级设置" [ref=e139] [cursor=pointer] [box=1285,551,104,44]
+          - generic [ref=e141] [box=323,610,1056,397]:
+            - generic [ref=e142] [box=323,610,1056,73]:
+              - generic [ref=e143] [box=323,610,1056,17]:
+                - generic [ref=e144] [box=323,610,52,17]: 执行模式
+                - strong [ref=e145] [box=1340,610,39,17]: 小任务
+              - radiogroup "执行模式" [ref=e146] [box=323,635,1056,48]:
+                - radio "稳定" [disabled] [ref=e147] [box=328,640,259,38]
+                - radio "平衡" [disabled] [ref=e148] [box=591,640,259,38]
+                - radio "极限" [disabled] [ref=e149] [box=853,640,259,38]
+                - radio "自定义" [checked] [disabled] [ref=e150] [box=1116,640,259,38]
+            - generic [ref=e151] [box=323,689,1056,151]:
+              - generic [ref=e152] [box=323,689,228,151]:
+                - paragraph [ref=e153] [box=323,689,228,15]: 列表抓取
+                - generic [ref=e154] [box=323,708,228,132]:
+                  - generic [ref=e155] [box=323,708,97,64]:
+                    - generic [ref=e156] [box=323,708,97,17]:
+                      - text: 每组合翻页数
+                      - generic [ref=e157] [cursor=pointer] [box=405,710,15,15]: "?"
+                    - spinbutton "每组合翻页数 ?" [disabled] [ref=e158] [box=323,728,64,44]: "5"
+                  - generic [ref=e159] [box=323,776,123,64]:
+                    - generic [ref=e160] [box=323,776,123,17]:
+                      - text: 组合间延迟（秒）
+                      - generic [ref=e161] [cursor=pointer] [box=431,778,15,15]: "?"
+                    - spinbutton "组合间延迟（秒） ?" [ref=e162] [box=323,796,64,44]: "10"
+              - generic [ref=e163] [box=563,689,415,151]:
+                - paragraph [ref=e164] [box=563,689,415,15]: 详情抓取（JD）
+                - generic [ref=e165] [box=563,708,415,132]:
+                  - generic [ref=e166] [box=563,708,97,64]:
+                    - generic [ref=e167] [box=563,708,97,17]:
+                      - text: 每批抓取数量
+                      - generic [ref=e168] [cursor=pointer] [box=645,710,15,15]: "?"
+                    - spinbutton "每批抓取数量 ?" [ref=e169] [box=563,728,64,44]: "15"
+                  - generic [ref=e170] [box=670,708,110,64]:
+                    - generic [ref=e171] [box=670,708,110,17]:
+                      - text: 岗位间隔（秒）
+                      - generic [ref=e172] [cursor=pointer] [box=765,710,15,15]: "?"
+                    - spinbutton "岗位间隔（秒） ?" [ref=e173] [box=670,728,64,44]: "2"
+                  - generic [ref=e174] [box=790,708,71,64]:
+                    - generic [ref=e175] [box=790,708,71,17]:
+                      - text: 重置频率
+                      - generic [ref=e176] [cursor=pointer] [box=845,710,15,15]: "?"
+                    - spinbutton "重置频率 ?" [ref=e177] [box=790,728,64,44]: "4"
+                  - generic [ref=e178] [box=563,776,110,64]:
+                    - generic [ref=e179] [box=563,776,110,17]:
+                      - text: 批次冷却（秒）
+                      - generic [ref=e180] [cursor=pointer] [box=658,778,15,15]: "?"
+                    - spinbutton "批次冷却（秒） ?" [ref=e181] [box=563,796,64,44]: "5"
+              - generic [ref=e182] [box=990,689,389,151]:
+                - paragraph [ref=e183] [box=990,689,389,15]: AI 筛选
+                - generic [ref=e184] [box=990,708,389,132]:
+                  - generic [ref=e185] [box=990,708,97,64]:
+                    - generic [ref=e186] [box=990,708,97,17]:
+                      - text: 粗筛每批数量
+                      - generic [ref=e187] [cursor=pointer] [box=1072,710,15,15]: "?"
+                    - spinbutton "粗筛每批数量 ?" [ref=e188] [box=990,728,64,44]: "50"
+                  - generic [ref=e189] [box=1097,708,84,64]:
+                    - generic [ref=e190] [box=1097,708,84,17]:
+                      - text: 粗筛并发数
+                      - generic [ref=e191] [cursor=pointer] [box=1165,710,15,15]: "?"
+                    - spinbutton "粗筛并发数 ?" [ref=e192] [box=1097,728,64,44]: "5"
+                  - generic [ref=e193] [box=1190,708,97,64]:
+                    - generic [ref=e194] [box=1190,708,97,17]:
+                      - text: 精筛每批数量
+                      - generic [ref=e195] [cursor=pointer] [box=1272,710,15,15]: "?"
+                    - spinbutton "精筛每批数量 ?" [ref=e196] [box=1190,728,64,44]: "4"
+                  - generic [ref=e197] [box=990,776,84,64]:
+                    - generic [ref=e198] [box=990,776,84,17]:
+                      - text: 精筛并发数
+                      - generic [ref=e199] [cursor=pointer] [box=1059,778,15,15]: "?"
+                    - spinbutton "精筛并发数 ?" [ref=e200] [box=990,796,64,44]: "10"
+            - region [ref=e202] [box=323,869,1056,138]:
+              - generic [ref=e204] [box=323,869,108,48]:
+                - text: 深度实验
+                - heading "高级设置调优" [level=3] [ref=e205] [box=323,893,108,24]
+              - generic [ref=e206] [box=323,931,1056,76]:
+                - generic [ref=e212] [box=355,949,895,40]:
+                  - strong [ref=e213] [box=355,949,895,21]: 尚未创建深度实验
+                  - generic [ref=e214] [box=355,973,895,16]: 固定输入确认后才会进入串行执行。
+                - button "创建实验" [ref=e215] [cursor=pointer] [box=1260,947,119,44]
+        - generic [ref=e217] [box=302,617,1098,46]:
+          - button "开始抓取" [ref=e218] [cursor=pointer] [box=302,619,121,44]
+          - button "继续确认筛选条件" [ref=e222] [cursor=pointer] [box=432,619,160,44]
+    - generic [ref=e84] [box=40,719,224,51]: 后端 010-healthy-pipeline-recovery · 构建 acb3edc6

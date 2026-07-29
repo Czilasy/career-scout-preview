@@ -28,7 +28,9 @@ describe("API build identity", () => {
 
     await expect(apiRequest("/api/task/cancel/run-1", { method: "POST" }))
       .rejects.toMatchObject({ status: 409 });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "/api/session",
+    ]);
   });
 
   it("sends the embedded build identity after the backend matches", async () => {

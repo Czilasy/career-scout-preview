@@ -14,6 +14,7 @@ never back-to-back, absorbing the same "slow is safe" philosophy.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import random
 import re
@@ -59,12 +60,13 @@ _ADVANCED_DEFAULTS = {
 }
 
 
-def load_advanced_settings() -> dict:
+def load_advanced_settings(path: str | os.PathLike[str] | None = None) -> dict:
     """读取高级设置，缺字段用默认值补全。"""
+    settings_path = Path(path) if path is not None else ADVANCED_SETTINGS_PATH
     settings = dict(_ADVANCED_DEFAULTS)
     try:
-        if ADVANCED_SETTINGS_PATH.is_file():
-            with open(ADVANCED_SETTINGS_PATH, "r", encoding="utf-8") as f:
+        if settings_path.is_file():
+            with open(settings_path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             if isinstance(saved, dict):
                 settings.update({k: v for k, v in saved.items() if k in _ADVANCED_DEFAULTS})
@@ -73,11 +75,15 @@ def load_advanced_settings() -> dict:
     return settings
 
 
-def save_advanced_settings(settings: dict) -> None:
+def save_advanced_settings(
+    settings: dict,
+    path: str | os.PathLike[str] | None = None,
+) -> None:
     """持久化高级设置到 JSON 文件。"""
-    ADVANCED_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    settings_path = Path(path) if path is not None else ADVANCED_SETTINGS_PATH
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
     clean = {k: v for k, v in settings.items() if k in _ADVANCED_DEFAULTS}
-    with open(ADVANCED_SETTINGS_PATH, "w", encoding="utf-8") as f:
+    with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(clean, f, ensure_ascii=False, indent=2)
 
 
@@ -539,7 +545,10 @@ def run_search(params: dict, source, *, pages: int = 3,
                progress=None, stop_event=None,
                artifact_dir=None, sleeper=None,
                skip_combos: set[str] | None = None,
-               on_combo_done=None) -> dict:
+               on_combo_done=None,
+               execution_config=None,
+               measurement_callback=None,
+               close_chrome_on_success: bool = True) -> dict:
     """Execute the multi-search pipeline and return merged, filtered jobs.
 
     ``source`` is a ``BossCdpSource`` (or compatible) providing ``preflight``
@@ -552,6 +561,10 @@ def run_search(params: dict, source, *, pages: int = 3,
     ``on_combo_done``: 可选持久化回调，收到 ``(combo_key, jobs,
     completed_combos)``。回调失败表示进度无法安全保存，流程立即硬停止。
 
+    ``execution_config``: SPEC011 T006 — 可选的不可变 ExecutionConfigSnapshot。
+    提供时使用冻结的 ``inter_combo_delay``，不读取 advanced_settings.json。
+    未提供时回退到运行时读取（向后兼容）。pages 不属于 execution_config。
+
     Returns ``{"ok": bool, "jobs": [...], "total_scraped": int,
     "total_matched": int, "combinations": int, "error": str,
     "completed_combos": [...]}``.
@@ -559,10 +572,14 @@ def run_search(params: dict, source, *, pages: int = 3,
     if sleeper is None:
         sleeper = time.sleep
 
-    _adv = load_advanced_settings()
-    if pages == 3:  # 调用方未显式指定时用用户配置
-        pages = int(_adv.get("pages") or 3)
-    _base_delay = float(_adv.get("inter_combo_delay") or 30.0)
+    if execution_config is not None:
+        # SPEC011 T006: 使用任务创建时冻结的配置快照，不读 JSON
+        _base_delay = float(execution_config.inter_combo_delay)
+    else:
+        _adv = load_advanced_settings()
+        if pages == 3:  # 调用方未显式指定时用用户配置
+            pages = int(_adv.get("pages") or 3)
+        _base_delay = float(_adv.get("inter_combo_delay") or 30.0)
     _delay_range = (max(5, _base_delay - 5), _base_delay + 5)
 
     combos = expand_combinations(params)
@@ -694,6 +711,15 @@ def run_search(params: dict, source, *, pages: int = 3,
                  keyword=kw, city=city, scraped=len(outcome.jobs),
                  merged=len(merged),
                  message=f"完成 {kw} · {city}：本页 {len(outcome.jobs)} 条，累计去重 {len(merged)} 条")
+            # T018: 记录 batch 事件（combo 输入输出数量）
+            if measurement_callback is not None:
+                try:
+                    measurement_callback("batch", "list", 0,
+                                         counts={"input_count": pages,
+                                                 "output_count": len(outcome.jobs),
+                                                 "batch_index": idx + 1})
+                except Exception:
+                    pass
 
         # Delay between combinations (not after the last one).
         if idx < len(combos) - 1:
@@ -703,7 +729,16 @@ def run_search(params: dict, source, *, pages: int = 3,
             emit(stage="waiting", current=idx + 1, total=len(combos),
                  wait_seconds=int(delay),
                  message=f"防限流等待 {delay:.0f}s 后搜索下一个组合…")
+            _t0_wait = time.time()
             sleeper(delay)
+            # T018: 记录 wait 事件（防限流冷却时间计入总耗时）
+            if measurement_callback is not None:
+                try:
+                    measurement_callback("wait", "list",
+                                         int((time.time() - _t0_wait) * 1000),
+                                         counts={"combo_index": idx + 1})
+                except Exception:
+                    pass
 
     # 广搜策略：不做本地硬筛选，全量返回，筛选交给后续 AI 步骤。
     all_jobs = list(merged.values())
@@ -719,7 +754,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                 "error": "所有搜索组合均失败，大概率 IP 级风控。建议手动过一次验证码或等 30 分钟后重试"}
 
     # 有数据才关浏览器（任务完成）；全失败则保留窗口供用户排查/重试。
-    if total_scraped > 0:
+    if total_scraped > 0 and close_chrome_on_success:
         emit(stage="closing_chrome", message="正在关闭调试浏览器…")
         close_debug_chrome()
     emit(stage="done", total_scraped=total_scraped, total_matched=len(all_jobs),
@@ -732,7 +767,9 @@ def run_search(params: dict, source, *, pages: int = 3,
 
 
 def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
-                      stop_event=None, completed_job_ids=None):
+                      stop_event=None, completed_job_ids=None,
+                      execution_config=None,
+                      measurement_callback=None):
     """对一批岗位批量抓 JD（调用方需先确保 Chrome 就绪）。
 
     Spec 007 ⑧：改用 fetch_details_batch（≤5 一批）走 --enable-parallel 常驻 tab 池，
@@ -742,6 +779,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     ``stop_event``: 可选取消信号，每批前检查，命中即停（剩余岗位 jd 留空）。
     ``completed_job_ids``: 可选，已抓过 JD 的 job_id 集合（断点续抓），跳过不重复抓，
     其 jd 保留原值。
+
+    ``execution_config``: SPEC011 T006 — 可选的不可变 ExecutionConfigSnapshot。
+    提供时使用冻结的 detail_* 字段，不读取 advanced_settings.json。
+    未提供时回退到运行时读取（向后兼容）。
 
     返回 {"jobs": 带 jd 的岗位列表, "hard_stop": bool, "hard_stop_code": str|None,
            "stopped": bool, "fetched": int}：
@@ -759,11 +800,18 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     if total == 0:
         return {"jobs": [], "hard_stop": False, "hard_stop_code": None,
                 "stopped": False, "fetched": 0}
-    BATCH_SIZE = int(load_advanced_settings().get("detail_batch_size") or 5)
-    _adv = load_advanced_settings()
-    _detail_interval = float(_adv.get("detail_interval") or 8)
-    _detail_reset_every = int(_adv.get("detail_reset_every") or 3)
-    _detail_batch_cooldown = float(_adv.get("detail_batch_cooldown") or 30)
+    if execution_config is not None:
+        # SPEC011 T006: 使用冻结配置快照，不读 JSON
+        BATCH_SIZE = int(execution_config.detail_batch_size)
+        _detail_interval = float(execution_config.detail_interval)
+        _detail_reset_every = int(execution_config.detail_reset_every)
+        _detail_batch_cooldown = float(execution_config.detail_batch_cooldown)
+    else:
+        BATCH_SIZE = int(load_advanced_settings().get("detail_batch_size") or 5)
+        _adv = load_advanced_settings()
+        _detail_interval = float(_adv.get("detail_interval") or 8)
+        _detail_reset_every = int(_adv.get("detail_reset_every") or 3)
+        _detail_batch_cooldown = float(_adv.get("detail_batch_cooldown") or 30)
     done_ids = {str(x) for x in completed_job_ids} if completed_job_ids else set()
     # 预先为每个 job 计算稳定 job_id（与 fetch_details_batch 内部 key 一致），
     # 缺 job_id 的 job 填充 idx{idx} 兜底，确保 batch 返回的 outcome 能映射回原 job。
@@ -801,13 +849,23 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         if batch_start > 0:
             cooldown = _detail_batch_cooldown + random.uniform(-5, 5)
             print(f"[fetch_jd] 批次间冷却 {cooldown:.0f}s（防 code:37）...")
+            _t0_cooldown = time.time()
             time.sleep(max(cooldown, 5))
+            # T018: 记录 wait 事件（冷却时间计入总耗时）
+            if measurement_callback is not None:
+                try:
+                    measurement_callback("wait", "detail",
+                                         int((time.time() - _t0_cooldown) * 1000),
+                                         counts={"batch_index": batch_start // BATCH_SIZE})
+                except Exception:
+                    pass
         batch = indexed_jobs[batch_start:batch_start + BATCH_SIZE]
         batch_jobs = [job for _, _, job in batch]
         batch_path = os.path.join(
             artifact_dir, f"pipeline_batch_{batch_start}_{time.time_ns()}.json"
         )
         batch_exception_code: str | None = None
+        _t0_batch = time.time()
         try:
             outcomes = source.fetch_details_batch(
                 batch_jobs,
@@ -824,6 +882,15 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             hard_stop = True
             hard_stop_code = batch_exception_code
             outcomes = {}
+        # T018: 记录 request 事件（批次请求时长）
+        if measurement_callback is not None:
+            try:
+                measurement_callback("request", "detail",
+                                     int((time.time() - _t0_batch) * 1000),
+                                     counts={"batch_size": len(batch)},
+                                     error_code=batch_exception_code)
+            except Exception:
+                pass
         for idx, jid, _ in batch:
             outcome = outcomes.get(jid)
             jd = ""
@@ -849,12 +916,31 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             jd_by_idx[idx] = jd
             if jd:
                 fetched += 1
+            # T018: 记录 item_terminal 事件（SC-007 终态守恒）
+            if measurement_callback is not None:
+                try:
+                    _status = "success" if jd else "failed"
+                    measurement_callback("item_terminal", "detail", 0,
+                                         counts={"item_index": idx, "status": _status,
+                                                 "input_count": total})
+                except Exception:
+                    pass
             done += 1
             if progress is not None:
                 try:
                     progress(done, total)
                 except Exception:
                     pass
+        # T018: 记录 batch 事件
+        if measurement_callback is not None:
+            try:
+                _batch_fetched = sum(1 for _, jid, _ in batch if outcomes.get(jid) and outcomes[jid].ok)
+                measurement_callback("batch", "detail", 0,
+                                     counts={"input_count": len(batch),
+                                             "output_count": _batch_fetched,
+                                             "batch_index": batch_start // BATCH_SIZE})
+            except Exception:
+                pass
         if hard_stop:
             break
     enriched = []
@@ -894,3 +980,177 @@ def _combo_output_path(artifact_dir, keyword: str, city: str) -> str:
     safe_kw = _re.sub(r"[^\w\u4e00-\u9fff]", "", keyword)[:20] or "kw"
     safe_city = _re.sub(r"[^\w\u4e00-\u9fff]", "", city)[:10] or "city"
     return os.path.join(base, f"pipeline_{safe_kw}_{safe_city}_{time.time_ns()}.json")
+
+
+def get_frozen_artifact_manifest(
+    artifact_manifest: dict | None, stage: str,
+) -> dict | None:
+    """从工作负载的产物清单中返回指定阶段的冻结产物引用（T026）。
+
+    支持分阶段复用规则（research.md Decision 7）：
+    - stage="list" → 返回 list 阶段产物（供 detail/rough 复用）
+    - stage="detail" → 返回 detail 阶段产物（供 fine 复用 JD）
+    - stage="end_to_end" → 始终返回 None（端到端不复用中间结果）
+
+    artifact_manifest 格式示例::
+
+        {"stages": {"list": {"path": "...", "digest": "..."},
+                     "detail": {"path": "...", "digest": "..."}}}
+
+    返回 ``None`` 表示该阶段无可用冻结产物。
+    """
+    if not artifact_manifest or not isinstance(artifact_manifest, dict):
+        return None
+    if stage == "end_to_end":
+        # FR-025: end_to_end 不复用中间结果
+        return None
+    stages = artifact_manifest.get("stages", {})
+    if not isinstance(stages, dict):
+        return None
+    return stages.get(stage)
+
+
+class TuningRoundRunner:
+    """用冻结 manifest 机械分派五种真实阶段，不作候选或参数决策。"""
+
+    ROUND_KINDS = frozenset({"list", "detail", "rough", "fine", "end_to_end"})
+
+    def __init__(self, *, workspace_root, source_factory, ai_settings_provider):
+        self.workspace_root = Path(workspace_root).resolve()
+        self.source_factory = source_factory
+        self.ai_settings_provider = ai_settings_provider
+
+    def _read_artifact(
+        self, manifest: dict, *, path_field: str, digest_field: str,
+        required: bool,
+    ) -> dict:
+        frozen = manifest.get("frozen_input", {})
+        path = frozen.get(path_field)
+        if not path:
+            if required:
+                raise ValueError(f"轮次缺少冻结输入 {path_field}")
+            return {}
+        absolute = (self.workspace_root / str(path)).resolve()
+        experiment_root = (
+            self.workspace_root / "tuning" / manifest["experiment_id"]
+        ).resolve()
+        if experiment_root not in absolute.parents:
+            raise ValueError("冻结输入产物越过实验根目录")
+        if not absolute.is_file():
+            if required:
+                raise ValueError("冻结输入产物不存在")
+            return {}
+        try:
+            artifact_bytes = absolute.read_bytes()
+            payload = json.loads(artifact_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("冻结输入产物不可读") from exc
+        expected_digest = frozen.get(digest_field)
+        if not isinstance(expected_digest, str) or not expected_digest:
+            raise ValueError(f"轮次缺少冻结输入 {digest_field}")
+        actual_digest = "sha256:" + hashlib.sha256(artifact_bytes).hexdigest()
+        if actual_digest != expected_digest:
+            raise ValueError("冻结输入产物摘要不匹配")
+        if not isinstance(payload, dict):
+            raise ValueError("冻结输入产物必须是 JSON 对象")
+        return payload
+
+    def _ai_settings(self) -> tuple[str, str, str]:
+        settings = self.ai_settings_provider()
+        endpoint = str(settings.get("endpoint_url") or "")
+        api_key = str(settings.get("api_key") or "")
+        model = str(settings.get("model") or "")
+        if not endpoint or not api_key:
+            raise ValueError("AI 阶段缺少已配置的端点或凭据")
+        return endpoint, api_key, model
+
+    def execute(self, manifest: dict, *, measurement_callback=None) -> dict:
+        from webui.ai import match_jds, screen_jobs
+        from webui.execution_config import ExecutionConfigSnapshot
+
+        kind = manifest.get("round_kind")
+        if kind not in self.ROUND_KINDS:
+            raise ValueError(f"未知轮次类型: {kind}")
+        config = ExecutionConfigSnapshot.from_dict(manifest["execution_config"])
+        fixed = manifest["fixed_fields"]
+        params = {
+            "keyword": ",".join(fixed["keywords"]),
+            "city": (["全国"] if fixed["scope_kind"] == "nationwide"
+                     else list(fixed["cities"])),
+            "pages": fixed["pages_per_combination"], "filters": {},
+        }
+        artifact_dir = (
+            self.workspace_root / "tuning" / manifest["experiment_id"]
+            / "artifacts" / manifest["round_id"]
+        )
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        base_context = self._read_artifact(
+            manifest, path_field="artifact_manifest_path",
+            digest_field="artifact_digest", required=True,
+        )
+        source_context = self._read_artifact(
+            manifest, path_field="source_artifact_path",
+            digest_field="source_artifact_digest",
+            required=kind in {"detail", "rough", "fine"},
+        )
+        quality_context = base_context.get("quality_context")
+        if not isinstance(quality_context, dict):
+            raise ValueError("冻结输入产物缺少 quality_context")
+        source = (
+            self.source_factory(artifact_root=artifact_dir)
+            if kind in {"list", "detail", "end_to_end"}
+            else None
+        )
+        if kind in {"list", "end_to_end"}:
+            listed = run_search(
+                params, source, pages=fixed["pages_per_combination"],
+                artifact_dir=str(artifact_dir), execution_config=config,
+                measurement_callback=measurement_callback,
+                close_chrome_on_success=(kind == "list"),
+            )
+            if not listed.get("ok"):
+                raise RuntimeError(listed.get("error") or "list 阶段失败")
+            jobs = listed["jobs"]
+            if kind == "list":
+                return {"round_kind": kind, "jobs": jobs, "list_result": listed}
+        else:
+            jobs = source_context.get("jobs")
+            if not isinstance(jobs, list):
+                raise ValueError("阶段输入产物缺少 jobs 列表")
+        if kind in {"detail", "end_to_end"}:
+            detailed = fetch_job_details(
+                jobs, source, artifact_dir=str(artifact_dir),
+                execution_config=config, measurement_callback=measurement_callback,
+            )
+            if detailed.get("hard_stop"):
+                raise RuntimeError(detailed.get("hard_stop_code") or "detail 阶段硬阻断")
+            jobs = detailed["jobs"]
+            if kind == "detail":
+                return {"round_kind": kind, **detailed}
+            close_debug_chrome()
+        if kind in {"rough", "end_to_end"}:
+            criteria = quality_context.get("screening_fields")
+            if not isinstance(criteria, dict):
+                raise ValueError("AI 粗筛缺少冻结 criteria")
+            endpoint, api_key, model = self._ai_settings()
+            rough = screen_jobs(
+                jobs, criteria, endpoint, api_key, model=model,
+                raise_on_systemic=True, execution_config=config,
+                measurement_callback=measurement_callback,
+            )
+            kept = set(rough["kept"])
+            jobs = [job for job in jobs if str(job.get("job_id", "")) in kept]
+            if kind == "rough":
+                return {"round_kind": kind, **rough}
+        if kind in {"fine", "end_to_end"}:
+            profile_summary = quality_context.get("profile_summary")
+            if not isinstance(profile_summary, str) or not profile_summary.strip():
+                raise ValueError("AI 精筛缺少冻结 profile_summary")
+            endpoint, api_key, model = self._ai_settings()
+            fine = match_jds(
+                jobs, profile_summary, endpoint, api_key, model=model,
+                raise_on_systemic=True, execution_config=config,
+                measurement_callback=measurement_callback,
+            )
+            return {"round_kind": kind, "jobs": jobs, **fine}
+        raise ValueError(f"轮次 {kind} 未产生结果")

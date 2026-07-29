@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import os
@@ -568,6 +569,7 @@ def create_app(config=None):
     app.config.update(
         RESULT_DIR=str(boss.DEFAULT_RESULT_DIR),
         DB_PATH=str(DEFAULT_STATE_DIR / "webui.db"),
+        ADVANCED_SETTINGS_PATH=str(DEFAULT_STATE_DIR / "advanced_settings.json"),
         PYTHON_EXECUTABLE=_resolve_python_executable(),
         START_TASKS=True,
         API_TOKEN=secrets.token_urlsafe(24),
@@ -578,12 +580,25 @@ def create_app(config=None):
     )
     if config:
         app.config.update(config)
+    if app.config.get("TESTING") and "ADVANCED_SETTINGS_PATH" not in (config or {}):
+        app.config["ADVANCED_SETTINGS_PATH"] = str(
+            Path(app.config["DB_PATH"]).parent / "advanced_settings.json"
+        )
     if app.config.get("TESTING") and "START_TASKS" not in (config or {}):
         app.config["START_TASKS"] = False
     if app.config.get("TESTING") and "REQUIRE_BUILD_IDENTITY" not in (config or {}):
         app.config["REQUIRE_BUILD_IDENTITY"] = False
 
     store = TaskStore(app.config["DB_PATH"])
+    from webui.tuning import TuningController
+    TuningController(store).recover_after_restart()
+    store.import_legacy_advanced_settings(app.config["ADVANCED_SETTINGS_PATH"])
+    if store.get_advanced_config_state()["last_custom_config"] is None:
+        from webui.pipeline_exec import load_advanced_settings
+        store.save_custom_config(load_advanced_settings(
+            app.config["ADVANCED_SETTINGS_PATH"]
+        ))
+    scope_previews: dict[str, dict] = {}
     store.cleanup_expired_jobs(days=CLEANUP_EXPIRED_DAYS)
     runner = TaskRunner(
         store,
@@ -598,11 +613,11 @@ def create_app(config=None):
         start_tasks=app.config["START_TASKS"],
     )
 
-    def _make_cdp_source():
+    def _make_cdp_source(*, artifact_root=None):
         try:
             return _BossCdpSource(
                 python_executable=app.config["PYTHON_EXECUTABLE"],
-                artifact_root=app.config["RESULT_DIR"],
+                artifact_root=artifact_root or app.config["RESULT_DIR"],
             )
         except Exception:
             return None
@@ -611,6 +626,14 @@ def create_app(config=None):
     app.config["TASK_STORE"] = store
     app.config["TASK_RUNNER"] = runner
     app.config["WORKBENCH_RUNNER"] = workbench_runner
+
+    def _load_legacy_advanced_settings():
+        from webui.pipeline_exec import load_advanced_settings
+        return load_advanced_settings(app.config["ADVANCED_SETTINGS_PATH"])
+
+    def _save_legacy_advanced_settings(settings):
+        from webui.pipeline_exec import save_advanced_settings
+        save_advanced_settings(settings, app.config["ADVANCED_SETTINGS_PATH"])
 
     @app.before_request
     def protect_local_api():
@@ -623,6 +646,8 @@ def create_app(config=None):
         sensitive_get = (
             path.startswith("/api/resumes")
             or path.startswith("/api/ai-settings")
+            or path.startswith("/api/advanced-settings")
+            or path.startswith("/api/tuning/")
             or path.startswith("/api/profiles/") and "/resumes" in path
         )
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} or (request.method == "GET" and sensitive_get):
@@ -1212,6 +1237,105 @@ def create_app(config=None):
     _pipeline_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="boss-pipeline")
     app.config["PIPELINE_TASKS"] = _pipeline_tasks
     app.config["PIPELINE_EXECUTOR"] = _pipeline_executor
+    from webui.pipeline_exec import TuningRoundRunner
+
+    def _tuning_ai_settings():
+        settings = store.get_ai_settings()
+        credential_ref = store.get_credential_ref()
+        api_key = (
+            ai_service.retrieve_api_key(credential_ref) if credential_ref else ""
+        )
+        return {**settings, "api_key": api_key}
+
+    _tuning_round_runner = TuningRoundRunner(
+        workspace_root=Path(store.db_path).resolve().parent.parent,
+        source_factory=_make_cdp_source,
+        ai_settings_provider=_tuning_ai_settings,
+    )
+    app.config["TUNING_ROUND_RUNNER"] = _tuning_round_runner
+
+    def _run_tuning_manifest_child(manifest_id: str):
+        from webui.tuning import TuningController
+
+        controller = TuningController(store)
+        record = store.get_task_manifest(manifest_id)
+        manifest = record["manifest"]
+        round_id = record["round_id"]
+        sink = controller.build_measurement_sink(round_id)
+
+        def measured(*args, **kwargs):
+            controller.heartbeat_lease()
+            return sink(*args, **kwargs)
+
+        error_code = None
+        try:
+            result = _tuning_round_runner.execute(
+                manifest, measurement_callback=measured,
+            )
+        except (
+            OSError, RuntimeError, ValueError, KeyError, TypeError,
+            ai_service.AISecurityError,
+        ) as exc:
+            result = None
+            error_code = (
+                exc.error_code
+                if isinstance(exc, ai_service.AISecurityError)
+                else type(exc).__name__.lower()
+            )
+        if isinstance(result, dict):
+            controller.persist_stage_artifact(
+                round_id=round_id,
+                stage=manifest["round_kind"],
+                payload=result,
+                source_artifact_id=manifest["frozen_input"].get(
+                    "source_artifact_id"
+                ),
+            )
+        summary = controller.aggregate_measurements(round_id)
+        if not summary.get("input_count") and isinstance(result, dict):
+            jobs = result.get("jobs")
+            verdicts = result.get("verdicts")
+            if isinstance(jobs, list):
+                summary["input_count"] = len(jobs)
+                summary["terminal_count"] = len(jobs)
+                summary["success_count"] = len(jobs)
+            elif isinstance(verdicts, dict):
+                summary["input_count"] = len(verdicts)
+                summary["terminal_count"] = len(verdicts)
+                summary["success_count"] = len(verdicts)
+        summary["work_duration_ms"] = (
+            summary["total_duration_ms"] - summary["wait_duration_ms"]
+            - summary["retry_duration_ms"]
+        )
+        evidence_path = manifest["monitoring"]["final_artifact_path"]
+        evidence = {
+            "program_report_path": evidence_path,
+            "config_digest": manifest["execution_config"]["config_digest"],
+            "scope_digest": manifest["frozen_input"]["scope_digest"],
+            "input_artifact_digest": manifest["frozen_input"].get("artifact_digest"),
+            **summary,
+        }
+        if error_code:
+            evidence["error_counts"] = {
+                **evidence.get("error_counts", {}), error_code: 1,
+            }
+        absolute = (Path(store.db_path).resolve().parent.parent / evidence_path).resolve()
+        expected_root = (
+            Path(store.db_path).resolve().parent.parent / "tuning"
+            / manifest["experiment_id"]
+        ).resolve()
+        if expected_root not in absolute.parents:
+            raise ValueError("程序证据输出路径越过实验根目录")
+        absolute.parent.mkdir(parents=True, exist_ok=True)
+        absolute.write_text(json.dumps(
+            evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ), encoding="utf-8")
+        controller._save_round_metrics(round_id, evidence)
+        store.update_tuning_round_status(
+            round_id, status="reported", failure_code=error_code,
+        )
+
+    app.config["RUN_TUNING_MANIFEST_CHILD"] = _run_tuning_manifest_child
 
     def _new_pipeline_task(task_id, kind, *, source_task_id=None):
         task = {
@@ -1256,6 +1380,31 @@ def create_app(config=None):
             task["source_run_id"] = source_run_id
             _pipeline_tasks[task_id] = task
             return task, None
+
+    def _check_tuning_lease_conflict():
+        """SPEC011 T015/FR-035: 检查实验租约是否被持有。
+
+        租约被持有时返回 (False, error_response)，调用方应直接 return 该响应。
+        无租约时返回 (True, None)。
+
+        普通任务和实验任务共用此门禁，确保任意时刻只有一个压力任务运行。
+        """
+        try:
+            lease = store.get_tuning_lease()
+        except _OPERATIONAL_ERRORS:
+            # 数据库异常时不阻断普通任务（租约检查是安全网，不是硬门禁）
+            return True, None
+        if lease.get("owner_experiment_id") is None:
+            return True, None
+        return False, (jsonify({
+            "ok": False,
+            "error": "tuning_lease_held",
+            "error_code": "tuning_lease_held",
+            "message": "深度实验正在独占执行环境，请等待实验结束后再启动普通任务",
+            "owner_experiment_id": lease.get("owner_experiment_id"),
+            "retryable": False,
+            "required_action": "等待实验结束或取消实验后再启动普通任务",
+        }), 409)
 
     def _claim_pipeline_task_id(task_id, kind):
         """Atomically reserve a concrete task id for continuation."""
@@ -1501,7 +1650,9 @@ def create_app(config=None):
         if events:
             store.append_task_events(task_run_id, events)
 
-    def _run_pipeline_task(task_id, script_params):
+    def _run_pipeline_task(
+        task_id, script_params, execution_config=None, frozen_scope=None,
+    ):
         from webui.pipeline_exec import expand_combinations, run_search
         with _pipeline_lock:
             task = _pipeline_tasks.get(task_id)
@@ -1514,6 +1665,10 @@ def create_app(config=None):
                 _pipeline_tasks[task_id] = task
             task["status"] = "running"
             task["script_params"] = script_params  # 断点续抓需要原始参数
+            if execution_config is not None:
+                task["config_digest"] = execution_config.config_digest
+            if frozen_scope is not None:
+                task["scope_digest"] = frozen_scope.scope_digest
 
         def on_progress(snapshot):
             with _pipeline_lock:
@@ -1537,7 +1692,16 @@ def create_app(config=None):
                 store.create_screening_run(
                     task_id,
                     source_count=len(expand_combinations(script_params)),
-                    execution_params={"script_params": script_params},
+                    execution_params={
+                        "script_params": script_params,
+                        "execution_config": (
+                            execution_config.to_dict()
+                            if execution_config is not None else None
+                        ),
+                        "frozen_scope": (
+                            frozen_scope.to_dict() if frozen_scope is not None else None
+                        ),
+                    },
                     backend_version=_backend_version,
                 )
             store.update_screening_run(
@@ -1583,11 +1747,15 @@ def create_app(config=None):
 
             result = run_search(
                 script_params, source,
-                pages=3, progress=on_progress,
+                pages=(
+                    frozen_scope.pages_per_combination
+                    if frozen_scope is not None else int(script_params.get("pages") or 3)
+                ), progress=on_progress,
                 artifact_dir=app.config["RESULT_DIR"],
                 stop_event=stop_event,
                 skip_combos=skip_combos,
                 on_combo_done=on_combo_done,
+                execution_config=execution_config,
             )
             # 断点续抓：合并旧结果（按 job_id 去重）
             if old_jobs and result.get("ok"):
@@ -1846,6 +2014,26 @@ def create_app(config=None):
                 )
             if not isinstance(source_result, dict):
                 raise RuntimeError("invalid_scrape_task")
+            source_run = store.get_screening_run(scrape_task_id)
+            source_params = (
+                source_run.get("execution_params")
+                if isinstance(source_run, dict) else None
+            ) or {}
+            from webui.execution_config import (
+                ExecutionConfigSnapshot, FrozenTaskScope,
+            )
+            try:
+                execution_config = ExecutionConfigSnapshot.from_dict(
+                    source_params["execution_config"]
+                )
+                frozen_scope = FrozenTaskScope.from_dict(
+                    source_params["frozen_scope"]
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError("frozen_snapshot_missing") from exc
+            with _pipeline_lock:
+                task["config_digest"] = execution_config.config_digest
+                task["scope_digest"] = frozen_scope.scope_digest
             # 列表抓取遇到系统性阻断（验证码/登录失效/IP风控）：暂停，不标 failed
             if source_result.get("hard_stop"):
                 _hs_code = source_result.get("hard_stop_code") or "source_blocked"
@@ -1855,7 +2043,9 @@ def create_app(config=None):
                     frozen_filters=screening_fields,
                     source_count=len(source_result.get("jobs") or []),
                     execution_params={"scrape_task_id": scrape_task_id,
-                                      "profile_summary": profile_summary or ""},
+                                      "profile_summary": profile_summary or "",
+                                      "execution_config": execution_config.to_dict(),
+                                      "frozen_scope": frozen_scope.to_dict()},
                     backend_version=_backend_version)
                 store.update_screening_run(
                     task_id, status="running", current_stage="scrape"
@@ -1900,6 +2090,8 @@ def create_app(config=None):
                     execution_params={
                         "scrape_task_id": scrape_task_id,
                         "profile_summary": profile_summary,
+                        "execution_config": execution_config.to_dict(),
+                        "frozen_scope": frozen_scope.to_dict(),
                     },
                     backend_version=_backend_version,
                 )
@@ -1988,7 +2180,8 @@ def create_app(config=None):
                 screen_result = screen_jobs(_rough_todo, criteria, endpoint, api_key,
                                             model=model, progress=_a_progress,
                                             raise_on_systemic=True,
-                                            on_batch_done=_rough_batch_done)
+                                            on_batch_done=_rough_batch_done,
+                                            execution_config=execution_config)
             except (ai_service.AISecurityError, ai_service.AICheckpointError) as _ai_exc:
                 # AISecurityError（systemic）：暂停整任务，保存 checkpoint
                 from webui.ai import (
@@ -2116,7 +2309,8 @@ def create_app(config=None):
                         chunk, source,
                         artifact_dir=app.config["RESULT_DIR"],
                         stop_event=stop_event,
-                        progress=_jd_progress)
+                        progress=_jd_progress,
+                        execution_config=execution_config)
                     for j in detail_result["jobs"]:
                         jid = str(j.get("job_id", ""))
                         jd = str(j.get("jd", "")).strip()
@@ -2219,7 +2413,8 @@ def create_app(config=None):
                     chunk = todo_match[chunk_start:chunk_start + MATCH_CHUNK]
                     try:
                         match_result = match_jds(chunk, profile_summary, endpoint, api_key,
-                                                 model=model, raise_on_systemic=True)
+                                                 model=model, raise_on_systemic=True,
+                                                 execution_config=execution_config)
                     except ai_service.AISecurityError as _ai_exc:
                         # 切片6：systemic 错误暂停整任务（不批量变 uncertain 后完成）
                         from webui.ai import map_ai_error_to_block_code, AISecurityError
@@ -2507,13 +2702,57 @@ def create_app(config=None):
 
     @app.route("/api/advanced-settings", methods=["GET"])
     def get_advanced_settings():
-        from webui.pipeline_exec import load_advanced_settings, _ADVANCED_DEFAULTS
-        return jsonify({"ok": True, "settings": load_advanced_settings(),
-                        "defaults": _ADVANCED_DEFAULTS})
+        """SPEC011 T009: 返回版本化配置状态。
+
+        保留 ``settings`` 字段用于迁移兼容，同时返回 selection、last_custom、
+        mode_version 等版本化状态。
+        """
+        from webui.pipeline_exec import _ADVANCED_DEFAULTS
+        from webui.execution_config import CONFIG_SCHEMA_VERSION
+        state = store.get_advanced_config_state()
+        active_version = None
+        previous_version = None
+        if state["active_mode_version_id"]:
+            try:
+                active_version = store.get_mode_version(
+                    state["active_mode_version_id"]
+                )
+                previous_version = store.get_previous_mode_version(
+                    state["active_mode_version_id"]
+                )
+            except KeyError:
+                active_version = None
+                previous_version = None
+        # 兼容旧前端：settings 仍返回当前活跃设置
+        legacy_settings = _load_legacy_advanced_settings()
+        return jsonify({
+            "ok": True,
+            "selection": state["active_selection"],
+            "settings": legacy_settings,
+            "defaults": _ADVANCED_DEFAULTS,
+            "last_custom": {
+                "config_digest": state["last_custom_digest"],
+                "settings": state["last_custom_config"] or {},
+            } if state["last_custom_config"] else None,
+            "mode_version": {
+                "id": state["active_mode_version_id"],
+                "version_digest": active_version["version_digest"],
+                "previous_version_id": (
+                    previous_version["id"] if previous_version else None
+                ),
+                "available_modes": ["stable", "balanced", "extreme"],
+            } if active_version else None,
+            "manual_ranges": (
+                active_version["manual_ranges"] if active_version else {}
+            ),
+            "config_schema_version": CONFIG_SCHEMA_VERSION,
+        })
 
     @app.route("/api/advanced-settings", methods=["POST"])
     def save_advanced_settings_endpoint():
-        from webui.pipeline_exec import save_advanced_settings, _ADVANCED_DEFAULTS
+        """SPEC011 T009: 兼容旧 POST 保存，同时写入 store 的自定义配置。"""
+        from webui.pipeline_exec import _ADVANCED_DEFAULTS
+        from webui.execution_config import NINE_SPEED_FIELDS
         body = request.get_json(silent=True) or {}
         settings = body.get("settings")
         if not isinstance(settings, dict):
@@ -2528,9 +2767,169 @@ def create_app(config=None):
                 elif isinstance(default, int):
                     val = int(val)
                 clean[k] = val
-        save_advanced_settings(clean)
-        from webui.pipeline_exec import load_advanced_settings
-        return jsonify({"ok": True, "settings": load_advanced_settings()})
+        _save_legacy_advanced_settings(clean)
+        # SPEC011: 如果九个速度字段都存在，也写入 store 自定义配置
+        speed_fields = {k: v for k, v in clean.items() if k in NINE_SPEED_FIELDS}
+        if len(speed_fields) == len(NINE_SPEED_FIELDS):
+            try:
+                store.save_custom_config(speed_fields)
+            except (ValueError, TypeError):
+                pass  # store 保存失败不阻塞旧路径
+        return jsonify({"ok": True, "settings": _load_legacy_advanced_settings()})
+
+    @app.route("/api/advanced-settings/custom", methods=["PUT"])
+    def save_custom_config():
+        """SPEC011 T009: 保存完整自定义配置。
+
+        对应 HTTP API PUT /api/advanced-settings/custom。
+        """
+        from webui.execution_config import NINE_SPEED_FIELDS
+        body = request.get_json(silent=True) or {}
+        settings = body.get("settings")
+        if not isinstance(settings, dict):
+            return jsonify({"ok": False, "error": "缺少 settings 对象"}), 400
+        # 验证九字段完整
+        missing = [f for f in NINE_SPEED_FIELDS if f not in settings]
+        if missing:
+            return jsonify({
+                "ok": False,
+                "error_code": "invalid_request",
+                "error": f"缺少必填字段: {missing}",
+            }), 400
+        try:
+            digest = store.save_custom_config(settings)
+        except (ValueError, TypeError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 422
+        # 同时保存到旧 JSON 文件以保持兼容
+        _save_legacy_advanced_settings(settings)
+        state = store.get_advanced_config_state()
+        return jsonify({
+            "ok": True,
+            "selection": "custom",
+            "config_digest": digest,
+            "settings": state["last_custom_config"],
+        })
+
+    @app.route("/api/advanced-settings/select-mode", methods=["POST"])
+    def select_mode():
+        """SPEC011 T009: 选择系统参考模式。
+
+        对应 HTTP API POST /api/advanced-settings/select-mode。
+        服务端根据 scope_digest 重新计算任务规模，不信任客户端传入的 size。
+        """
+        body = request.get_json(silent=True) or {}
+        mode = body.get("mode")
+        scope_digest = body.get("scope_digest")
+        if mode not in ("stable", "balanced", "extreme", "custom"):
+            return jsonify({
+                "ok": False,
+                "error_code": "invalid_request",
+                "error": "mode 必须是 stable/balanced/extreme/custom",
+            }), 400
+        scope = scope_previews.get(str(scope_digest or ""))
+        if scope is None:
+            return jsonify({
+                "ok": False,
+                "error_code": "scope_preview_required",
+                "error": "搜索范围摘要未知，请重新校验搜索范围",
+            }), 409
+        task_size = scope["task_size"]
+        try:
+            result = store.select_mode(mode, task_size=task_size)
+        except (ValueError, TypeError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 422
+        # 同时保存到旧 JSON 文件以保持兼容；切回 custom 也必须恢复
+        # 最近自定义值，避免 SQLite 权威状态与旧执行入口分叉。
+        if result.get("config"):
+            _save_legacy_advanced_settings(result["config"])
+        from webui.execution_config import NINE_SPEED_FIELDS
+        settings = {
+            field: result["config"][field] for field in NINE_SPEED_FIELDS
+        }
+        state = store.get_advanced_config_state()
+        return jsonify({
+            "ok": True,
+            "selection": result["selection"],
+            "settings": settings,
+            "task_size": task_size,
+            "mode_version_id": state["active_mode_version_id"],
+            "config_digest": result["config"].get("config_digest"),
+        })
+
+    @app.route("/api/advanced-settings/mode-versions/rollback", methods=["POST"])
+    def rollback_mode_version():
+        """SPEC011 T009: 回退到指定模式版本。
+
+        对应 HTTP API POST /api/advanced-settings/mode-versions/rollback。
+        """
+        body = request.get_json(silent=True) or {}
+        target_version_id = body.get("target_version_id")
+        if not target_version_id:
+            return jsonify({
+                "ok": False,
+                "error_code": "invalid_request",
+                "error": "缺少 target_version_id",
+            }), 400
+        try:
+            store.rollback_mode_version(target_version_id)
+        except (ValueError, TypeError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 422
+        state = store.get_advanced_config_state()
+        return jsonify({
+            "ok": True,
+            "active_mode_version_id": state["active_mode_version_id"],
+        })
+
+    @app.route("/api/search-scope/preview", methods=["POST"])
+    def search_scope_preview():
+        """SPEC011 T004: 后端权威范围预览与校验。
+
+        不改变任务工作量字段；仅返回规范化后的 scope 和去重信息。
+        对应 HTTP API POST /api/search-scope/preview。
+        """
+        from webui.execution_config import preview_scope, CityValidationError
+
+        body = request.get_json(silent=True) or {}
+        keywords = body.get("keywords")
+        scope_kind = body.get("scope_kind", "cities")
+        cities = body.get("cities", [])
+        pages_per_combination = body.get("pages_per_combination", 1)
+
+        if not isinstance(keywords, list):
+            return jsonify({"ok": False, "error": "keywords 必须是数组"}), 400
+        if scope_kind not in ("cities", "nationwide"):
+            return jsonify({"ok": False, "error": "scope_kind 必须是 cities 或 nationwide"}), 400
+        if not isinstance(cities, list):
+            return jsonify({"ok": False, "error": "cities 必须是数组"}), 400
+
+        if isinstance(pages_per_combination, bool) or not isinstance(
+            pages_per_combination, int
+        ):
+            return jsonify({"ok": False, "error": "pages_per_combination 必须是整数"}), 400
+        pages_int = pages_per_combination
+
+        try:
+            result = preview_scope(
+                keywords=keywords,
+                scope_kind=scope_kind,
+                cities=cities,
+                pages_per_combination=pages_int,
+            )
+            scope_previews[result["scope"]["scope_digest"]] = dict(result["scope"])
+            return jsonify({"ok": True, **result})
+        except CityValidationError as e:
+            return jsonify({
+                "ok": False,
+                "error_code": "city_validation_failed",
+                "error": str(e),
+                "details": e.details,
+            }), 422
+        except ValueError as e:
+            return jsonify({
+                "ok": False,
+                "error_code": "scope_validation_failed",
+                "error": str(e),
+            }), 422
 
     @app.route("/api/execute-search", methods=["POST"])
     def execute_search():
@@ -2538,6 +2937,10 @@ def create_app(config=None):
 
         Accepts JSON ``{"script_params": {...}}`` (or the params directly).
         Launches a background task and returns a ``task_id`` for polling.
+
+        SPEC011 T006: 后端从权威 scope 和当前配置选择创建不可变快照；
+        客户端不能提供或覆盖任务规模与执行配置。
+        SPEC011 T015: 实验租约持有时拒绝启动（FR-035）。
         """
         body = request.get_json(silent=True) or {}
         script_params = body.get("script_params") or body
@@ -2545,11 +2948,104 @@ def create_app(config=None):
             return jsonify({"ok": False, "error": "无效的请求体"}), 400
         if not script_params.get("keyword") or not script_params.get("city"):
             return jsonify({"ok": False, "error": "缺少关键词或城市"}), 400
+        # SPEC011 T015/FR-035: 实验租约门禁
+        ok, err_resp = _check_tuning_lease_conflict()
+        if not ok:
+            return err_resp
+
+        from webui.execution_config import (
+            ExecutionConfigSnapshot, FrozenTaskScope, preview_scope,
+        )
+        requested_digest = str(body.get("scope_digest") or "")
+        scope_payload = scope_previews.get(requested_digest) if requested_digest else None
+        if requested_digest and scope_payload is None:
+            return jsonify({
+                "ok": False,
+                "error_code": "scope_preview_required",
+                "error": "搜索范围摘要未知，请重新校验搜索范围",
+            }), 409
+        if scope_payload is None:
+            raw_keyword = script_params.get("keyword")
+            keywords = (
+                [item.strip() for item in str(raw_keyword).replace("，", ",").split(",")]
+                if not isinstance(raw_keyword, list) else raw_keyword
+            )
+            raw_cities = script_params.get("city") or []
+            if isinstance(raw_cities, str):
+                raw_cities = [
+                    item.strip() for item in raw_cities.replace("，", ",").split(",")
+                    if item.strip()
+                ]
+            nationwide = raw_cities == ["全国"]
+            try:
+                preview = preview_scope(
+                    keywords=keywords,
+                    scope_kind="nationwide" if nationwide else "cities",
+                    cities=[] if nationwide else raw_cities,
+                    pages_per_combination=script_params.get("pages", 3),
+                )
+            except (TypeError, ValueError) as exc:
+                return jsonify({
+                    "ok": False, "error_code": "scope_validation_failed",
+                    "error": str(exc),
+                }), 422
+            scope_payload = preview["scope"]
+            scope_previews[scope_payload["scope_digest"]] = dict(scope_payload)
+        try:
+            frozen_scope = FrozenTaskScope.from_dict(scope_payload)
+            state = store.get_advanced_config_state()
+            selected = store.select_mode(
+                state["active_selection"], task_size=frozen_scope.task_size,
+            )
+            execution_config = ExecutionConfigSnapshot.from_dict(selected["config"])
+        except (KeyError, TypeError, ValueError) as exc:
+            return jsonify({
+                "ok": False, "error_code": "config_resolution_failed",
+                "error": str(exc),
+            }), 422
+        script_params = dict(script_params)
+        script_params["keyword"] = ",".join(frozen_scope.keywords)
+        script_params["city"] = (
+            ["全国"] if frozen_scope.scope_kind == "nationwide"
+            else list(frozen_scope.cities)
+        )
+        script_params["pages"] = frozen_scope.pages_per_combination
 
         task_id = uuid.uuid4().hex
-        _register_pipeline_task(task_id, "scrape")
-        _pipeline_executor.submit(_run_pipeline_task, task_id, script_params)
-        return jsonify({"ok": True, "task_id": task_id})
+        task = _register_pipeline_task(task_id, "scrape")
+        # 把冻结配置摘要存入任务记录，供进度查询返回
+        with _pipeline_lock:
+            task["config_digest"] = execution_config.config_digest
+            task["scope_digest"] = frozen_scope.scope_digest
+        store.create_screening_run(
+            task_id,
+            frozen_filters=script_params.get("filters") or {},
+            source_count=frozen_scope.combination_count,
+            execution_params={
+                "script_params": script_params,
+                "execution_config": execution_config.to_dict(),
+                "frozen_scope": frozen_scope.to_dict(),
+            },
+            backend_version=_backend_version,
+        )
+        try:
+            _pipeline_executor.submit(
+                _run_pipeline_task, task_id, script_params,
+                execution_config, frozen_scope,
+            )
+        except RuntimeError:
+            store.update_screening_run(
+                task_id, status="failed", error_code="submit_failed",
+                error_reason="任务执行器未接受任务",
+            )
+            raise
+        return jsonify({
+            "ok": True,
+            "task_id": task_id,
+            "config_digest": execution_config.config_digest,
+            "scope_digest": frozen_scope.scope_digest,
+            "task_size": frozen_scope.task_size,
+        })
 
     @app.route("/api/execute-search/continue/<old_task_id>", methods=["POST"])
     def continue_execute_search(old_task_id, _block_checked=False):
@@ -2558,7 +3054,13 @@ def create_app(config=None):
         切片4：支持 paused 状态继续（FR-020）。优先从 DB checkpoint 恢复
         completed_combos（服务重启后内存丢失也能恢复），回退到内存 task.result。
         同时检查阻断是否解除（如登录已恢复、验证码已过）。
+
+        SPEC011 T015: 实验租约持有时拒绝继续（FR-035）。
         """
+        # SPEC011 T015/FR-035: 实验租约门禁
+        ok, err_resp = _check_tuning_lease_conflict()
+        if not ok:
+            return err_resp
         # 1) 优先从内存读 old_task
         with _pipeline_lock:
             old_task = _pipeline_tasks.get(old_task_id)
@@ -2737,6 +3239,8 @@ def create_app(config=None):
 
         接收 ``{"screening_fields": {...}, "profile_summary": "..."}``，
         启动后台任务（StageA 粗筛→抓JD→StageB 精筛）并返回 ``task_id`` 供轮询。
+
+        SPEC011 T015: 实验租约持有时拒绝启动（FR-035）。
         """
         body = request.get_json(silent=True) or {}
         screening_fields = body.get("screening_fields") or {}
@@ -2746,6 +3250,10 @@ def create_app(config=None):
             return jsonify({"ok": False, "error": "无效的筛选字段"}), 400
         if not scrape_task_id:
             return jsonify({"ok": False, "error": "缺少 scrape_task_id"}), 400
+        # SPEC011 T015/FR-035: 实验租约门禁
+        ok, err_resp = _check_tuning_lease_conflict()
+        if not ok:
+            return err_resp
         with _pipeline_lock:
             source_task = _pipeline_tasks.get(scrape_task_id)
             source_snapshot = dict(source_task) if source_task else None
@@ -2840,6 +3348,8 @@ def create_app(config=None):
                 "error": task["error"],
                 "started_at": task.get("started_at"),
                 "finished_at": task.get("finished_at"),
+                "config_digest": task.get("config_digest"),
+                "scope_digest": task.get("scope_digest"),
             }
             if task["status"] in ("done", "failed") and task["result"] is not None:
                 # 原样返回整个 result：抓取任务含 jobs/计数；
@@ -3427,7 +3937,14 @@ def create_app(config=None):
 
     @app.route("/api/recrawl/continue/<task_id>", methods=["POST"])
     def continue_recrawl(task_id, _block_checked=False):
-        """Resume a paused recrawl in place using its persisted checkpoint."""
+        """Resume a paused recrawl in place using its persisted checkpoint.
+
+        SPEC011 T015: 实验租约持有时拒绝继续（FR-035）。
+        """
+        # SPEC011 T015/FR-035: 实验租约门禁
+        ok, err_resp = _check_tuning_lease_conflict()
+        if not ok:
+            return err_resp
         run = store.get_screening_run(task_id)
         if run is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
@@ -3777,7 +4294,7 @@ def create_app(config=None):
                     if jd:
                         to_judge.append(j)
                 if to_judge:
-                    _adv = load_advanced_settings()
+                    _adv = _load_legacy_advanced_settings()
                     match_batch = int(_adv.get("match_batch_size") or 4)
                     recrawl_completed_ids = set(completed_job_ids or set())
                     verdicts: dict = store.load_screening_verdicts(task_id)
@@ -3905,7 +4422,7 @@ def create_app(config=None):
 
     # FR-039：后端版本标识（启动时计算，继续任务时校验）
     try:
-        _backend_version = "010-healthy-pipeline-recovery"
+        _backend_version = "011-deep-configuration-probing-phase1"
         _backend_files = sorted(
             [*Path(__file__).resolve().parent.glob("*.py"), SCRAPER.resolve()],
             key=lambda path: path.relative_to(PROJECT_ROOT).as_posix(),
@@ -4060,7 +4577,13 @@ def create_app(config=None):
 
         允许 paused 状态调用；running 状态拒绝（防止重复继续）。
         继续前检查阻断条件是否解除（由各阶段 handler 自行实现）。
+
+        SPEC011 T015: 实验租约持有时拒绝继续（FR-035）。
         """
+        # SPEC011 T015/FR-035: 实验租约门禁
+        ok, err_resp = _check_tuning_lease_conflict()
+        if not ok:
+            return err_resp
         run = store.get_screening_run(run_id)
         if run is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
@@ -4347,6 +4870,554 @@ def create_app(config=None):
     # 注：/api/latest-running-task 的 paused 恢复逻辑已合并到上面的
     # latest_running_task() 中（查找顺序：内存 running → DB paused → DB interrupted）。
     # 此处原 api_latest_running_task_extended 已删除，避免重复路由注册。
+
+    # ==================================================================
+    # SPEC011 T023: 控制者 manifest/decision 路由与执行者路由
+    # 对应 contracts/http-api.md 第 4-6 节
+    # ==================================================================
+
+    # ------------------------------------------------------------------
+    # SPEC011 T030: 实验生命周期路由
+    # 对应 contracts/http-api.md 第 3 节
+    # ------------------------------------------------------------------
+
+    @app.route("/api/tuning/experiments", methods=["POST"])
+    def tuning_create_experiment():
+        """POST /api/tuning/experiments
+
+        创建 draft 状态的实验。不启动压力工作。
+        """
+        body = request.get_json(silent=True) or {}
+        spec_version = body.get("spec_version")
+        source_scope = body.get("source_scope")
+        quality_context = body.get("quality_context")
+        if not spec_version or not source_scope or not quality_context:
+            return jsonify({
+                "ok": False, "error_code": "invalid_request",
+                "error": (
+                    "缺少 spec_version、source_scope 或 quality_context"
+                ),
+            }), 400
+        if not isinstance(source_scope, dict):
+            return jsonify({
+                "ok": False, "error_code": "invalid_request",
+                "error": "source_scope 必须是对象",
+            }), 400
+        from webui.tuning import TuningController
+        controller = TuningController(store)
+        try:
+            experiment = controller.create_experiment_with_input(
+                spec_version=spec_version,
+                source_scope=source_scope,
+                workloads=body.get("workloads") or [],
+                quality_context=quality_context,
+            )
+        except (ValueError, TypeError) as exc:
+            return jsonify({
+                "ok": False, "error_code": "invalid_request",
+                "error": str(exc),
+            }), 400
+        return jsonify({
+            "ok": True,
+            "experiment_id": experiment["id"],
+            "status": experiment["status"],
+        }), 201
+
+    @app.route("/api/tuning/experiments/<experiment_id>",
+               methods=["GET"])
+    def tuning_get_experiment(experiment_id: str):
+        """GET /api/tuning/experiments/{id}
+
+        返回实验持久化快照。
+        """
+        try:
+            exp = store.get_tuning_experiment(experiment_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "experiment_not_found",
+                "error": "实验不存在",
+            }), 404
+        from webui.tuning import TuningController
+        controller = TuningController(store)
+        # 计算进度和剩余时间
+        progress = controller.project_remaining_time(experiment_id)
+        if progress is None:
+            progress = {
+                "confirmed_rounds": 0,
+                "remaining_required_rounds": 0,
+                "estimated_remaining_seconds": 0,
+            }
+        # 计算可执行操作
+        status = exp["status"]
+        can_cancel = status not in ("cancelled", "failed", "completed")
+        can_resume = status == "blocked"
+        can_apply = status == "completed"
+        return jsonify({
+            "ok": True,
+            "experiment": {
+                "id": exp["id"],
+                "status": status,
+                "spec_version": exp["spec_version"],
+                "current_stage": exp.get("current_stage"),
+                "current_candidate_id": exp.get("current_candidate_id"),
+                "input_version_id": exp.get("input_version_id"),
+                "quality_reference_id": exp.get("quality_reference_id"),
+                "blocked_code": exp.get("blocked_code"),
+                "blocked_reason": exp.get("blocked_reason"),
+                "source_scope": exp.get("source_scope", {}),
+                "created_at": exp.get("created_at"),
+                "progress": progress,
+                "can_cancel": can_cancel,
+                "can_resume": can_resume,
+                "can_apply": can_apply,
+            },
+        }), 200
+
+    @app.route("/api/tuning/experiments/<experiment_id>/cancel",
+               methods=["POST"])
+    def tuning_cancel_experiment(experiment_id: str):
+        """POST /api/tuning/experiments/{id}/cancel
+
+        取消实验，保留已确认证据，释放租约。
+        """
+        try:
+            store.get_tuning_experiment(experiment_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "experiment_not_found",
+                "error": "实验不存在",
+            }), 404
+        from webui.tuning import TuningController
+        controller = TuningController(store)
+        try:
+            controller.cancel_experiment(experiment_id)
+        except ValueError as exc:
+            return jsonify({
+                "ok": False, "error_code": "invalid_state",
+                "error": str(exc),
+            }), 409
+        return jsonify({
+            "ok": True,
+            "experiment_id": experiment_id,
+            "status": "cancelled",
+        }), 200
+
+    @app.route("/api/tuning/experiments/<experiment_id>/confirm-input",
+               methods=["POST"])
+    def tuning_confirm_input(experiment_id: str):
+        """POST /api/tuning/experiments/{id}/confirm-input
+
+        冻结输入版本，推进实验到 preflight。
+        """
+        try:
+            exp = store.get_tuning_experiment(experiment_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "experiment_not_found",
+                "error": "实验不存在",
+            }), 404
+        if exp["status"] != "draft":
+            return jsonify({
+                "ok": False, "error_code": "invalid_state",
+                "error": f"实验状态不是 draft: {exp['status']}",
+            }), 409
+        from webui.tuning import TuningController
+        controller = TuningController(store)
+        try:
+            result = controller.confirm_input(experiment_id)
+        except ValueError as exc:
+            return jsonify({
+                "ok": False, "error_code": "input_incomplete",
+                "error": str(exc),
+            }), 409
+        return jsonify({
+            "ok": True,
+            "experiment_id": experiment_id,
+            **result,
+        }), 200
+
+    @app.route("/api/tuning/experiments/<experiment_id>/resume",
+               methods=["POST"])
+    def tuning_resume_experiment(experiment_id: str):
+        """POST /api/tuning/experiments/{id}/resume
+
+        从 blocked 状态恢复到 awaiting_instruction。
+        只允许 blocked 状态恢复，不自动选择新候选。
+        """
+        try:
+            exp = store.get_tuning_experiment(experiment_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "experiment_not_found",
+                "error": "实验不存在",
+            }), 404
+        if exp["status"] != "blocked":
+            return jsonify({
+                "ok": False, "error_code": "invalid_state",
+                "error": f"只有 blocked 状态才能恢复，当前: {exp['status']}",
+            }), 409
+        try:
+            store.update_tuning_experiment_status(
+                experiment_id, status="awaiting_instruction",
+            )
+        except ValueError as exc:
+            return jsonify({
+                "ok": False, "error_code": "invalid_state",
+                "error": str(exc),
+            }), 409
+        return jsonify({
+            "ok": True,
+            "experiment_id": experiment_id,
+            "status": "awaiting_instruction",
+        }), 200
+
+    @app.route("/api/tuning/experiments/<experiment_id>/result",
+               methods=["GET"])
+    def tuning_get_experiment_result(experiment_id: str):
+        """Return safe candidate/evidence summary with an objective apply gate."""
+        from webui.tuning import TuningController
+        controller = TuningController(store)
+        try:
+            result = controller.get_experiment_result(experiment_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "experiment_not_found",
+                "error": "实验不存在",
+            }), 404
+        return jsonify({"ok": True, **result}), 200
+
+    @app.route("/api/tuning/experiments/<experiment_id>/apply",
+               methods=["POST"])
+    def tuning_apply_experiment_result(experiment_id: str):
+        """Apply one exact complete nine-slot candidate after explicit request."""
+        body = request.get_json(silent=True) or {}
+        digest = body.get("candidate_mode_version_digest")
+        if not digest:
+            return jsonify({
+                "ok": False, "error_code": "invalid_request",
+                "error": "缺少 candidate_mode_version_digest",
+            }), 400
+        from webui.tuning import TuningController
+        controller = TuningController(store)
+        try:
+            version = controller.apply_candidate_mode_version(
+                experiment_id=experiment_id, version_digest=str(digest),
+            )
+        except KeyError:
+            return jsonify({
+                "ok": False, "error_code": "experiment_not_found",
+                "error": "实验不存在",
+            }), 404
+        except ValueError as exc:
+            return jsonify({
+                "ok": False, "error_code": "result_not_applicable",
+                "error": str(exc),
+            }), 409
+        return jsonify({
+            "ok": True, "mode_version_id": version["id"],
+            "version_digest": version["version_digest"],
+        }), 200
+
+    @app.route("/api/tuning/experiments/<experiment_id>/manifests",
+               methods=["POST"])
+    def tuning_issue_manifest(experiment_id: str):
+        """POST /api/tuning/experiments/{id}/manifests
+
+        控制者签发一份不可变任务单。
+        """
+        from webui.tuning import TuningController
+
+        body = request.get_json(silent=True) or {}
+        # 确保路径参数与 body 一致
+        body["experiment_id"] = experiment_id
+        controller = TuningController(store)
+        # 校验实验存在且处于 awaiting_instruction
+        try:
+            exp = store.get_tuning_experiment(experiment_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "experiment_not_found",
+                "error": "实验不存在",
+            }), 404
+        if exp["status"] != "awaiting_instruction":
+            return jsonify({
+                "ok": False, "error_code": "invalid_experiment_status",
+                "error": f"实验状态不是 awaiting_instruction: {exp['status']}",
+            }), 409
+        try:
+            result = controller.issue_manifest(body)
+        except ValueError as exc:
+            return jsonify({
+                "ok": False, "error_code": "manifest_validation_failed",
+                "error": str(exc),
+            }), 422
+        return jsonify({"ok": True, **result}), 201
+
+    @app.route("/api/tuning/manifests/<manifest_id>", methods=["GET"])
+    def tuning_get_manifest(manifest_id: str):
+        """GET /api/tuning/manifests/{id}
+
+        返回安全结构化 manifest，不含凭据。
+        """
+        try:
+            record = store.get_task_manifest(manifest_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "manifest_not_found",
+                "error": "任务单不存在",
+            }), 404
+        # 不返回凭据/敏感字段
+        safe_manifest = dict(record["manifest"])
+        # 移除可能的敏感字段
+        for sensitive in ("api_key", "credentials", "password", "token"):
+            safe_manifest.pop(sensitive, None)
+        return jsonify({
+            "ok": True,
+            "manifest_id": record["id"],
+            "manifest": safe_manifest,
+            "manifest_digest": record["manifest_digest"],
+            "rendered_task_path": record["rendered_task_path"],
+            "status": record["status"],
+        }), 200
+
+    @app.route("/api/tuning/manifests/<manifest_id>/execute",
+               methods=["POST"])
+    def tuning_execute_manifest(manifest_id: str):
+        """POST /api/tuning/manifests/{id}/execute
+
+        启动 manifest 对应的轮次。重新校验摘要、产物、租约。
+        """
+        from webui.tuning import TuningController
+
+        try:
+            record = store.get_task_manifest(manifest_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "manifest_not_found",
+                "error": "任务单不存在",
+            }), 404
+        controller = TuningController(store)
+        try:
+            started = controller.execute_manifest(manifest_id)
+        except ValueError as exc:
+            return jsonify({
+                "ok": False, "error_code": "round_state_conflict",
+                "error": str(exc),
+            }), 409
+        round_id = started["round_id"]
+        child_task_id = record["manifest"].get("task_id") or round_id
+        if app.config.get("START_TASKS"):
+            try:
+                _pipeline_executor.submit(_run_tuning_manifest_child, manifest_id)
+            except RuntimeError as exc:
+                return jsonify({
+                    "ok": False, "error_code": "submit_failed", "error": str(exc),
+                }), 503
+        return jsonify({
+            "ok": True,
+            "child_task_id": child_task_id,
+            "round_id": round_id,
+            "status": "running",
+            "status_url": f"/api/tuning/rounds/{round_id}",
+        }), 202
+
+    @app.route("/api/tuning/rounds/<round_id>", methods=["GET"])
+    def tuning_get_round(round_id: str):
+        """GET /api/tuning/rounds/{id}
+
+        返回轮次的程序状态。
+        """
+        try:
+            round_rec = store.get_tuning_round(round_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "round_not_found",
+                "error": "轮次不存在",
+            }), 404
+        return jsonify({
+            "ok": True,
+            "round": {
+                "id": round_rec["id"],
+                "status": round_rec["status"],
+                "experiment_id": round_rec["experiment_id"],
+                "candidate_id": round_rec["candidate_id"],
+                "round_kind": round_rec["round_kind"],
+                "repetition_index": round_rec["repetition_index"],
+                "manifest_id": round_rec.get("manifest_id"),
+                "started_at": round_rec.get("started_at"),
+                "finished_at": round_rec.get("finished_at"),
+                "confirmed_at": round_rec.get("confirmed_at"),
+                "failure_code": round_rec.get("failure_code"),
+            },
+        }), 200
+
+    @app.route("/api/tuning/manifests/<manifest_id>/report",
+               methods=["POST"])
+    def tuning_submit_report(manifest_id: str):
+        """POST /api/tuning/manifests/{id}/report
+
+        接受一份执行者报告，校验并更新轮次状态。
+        """
+        from webui.tuning import TuningController
+
+        body = request.get_json(silent=True) or {}
+        try:
+            record = store.get_task_manifest(manifest_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "manifest_not_found",
+                "error": "任务单不存在",
+            }), 404
+        try:
+            saved = TuningController(store).accept_report(
+                manifest_id=manifest_id, report=body)
+        except ValueError as exc:
+            return jsonify({
+                "ok": False, "error_code": "report_validation_failed",
+                "error": str(exc),
+                "validation_status": "rejected",
+            }), 422
+        return jsonify({
+            "ok": True,
+            "report_id": saved["report_id"],
+            "validation_status": "accepted",
+            "round_status": saved["round_status"],
+            "experiment_status": saved["experiment_status"],
+        }), 201
+
+    @app.route("/api/tuning/rounds/<round_id>/evidence", methods=["GET"])
+    def tuning_get_evidence(round_id: str):
+        """GET /api/tuning/rounds/{id}/evidence
+
+        返回安全聚合证据，不含凭据/原始简历/原始模型响应。
+        """
+        from webui.tuning import TuningController
+
+        try:
+            round_rec = store.get_tuning_round(round_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "round_not_found",
+                "error": "轮次不存在",
+            }), 404
+        controller = TuningController(store)
+        try:
+            summary = controller.aggregate_measurements(round_id)
+        except (KeyError, ValueError):
+            summary = {}
+        # 不返回敏感字段
+        safe_summary = {
+            "total_duration_ms": summary.get("total_duration_ms", 0),
+            "stage_durations_ms": summary.get("stage_durations_ms", {}),
+            "wait_duration_ms": summary.get("wait_duration_ms", 0),
+            "retry_duration_ms": summary.get("retry_duration_ms", 0),
+            "attempt_count": summary.get("attempt_count", 0),
+            "retry_count": summary.get("retry_count", 0),
+            "input_count": summary.get("input_count", 0),
+            "terminal_count": summary.get("terminal_count", 0),
+            "success_count": summary.get("success_count", 0),
+            "failed_count": summary.get("failed_count", 0),
+            "missing_count": summary.get("missing_count", 0),
+            "duplicate_count": summary.get("duplicate_count", 0),
+            "error_counts": summary.get("error_counts", {}),
+        }
+        return jsonify({
+            "ok": True,
+            "evidence": safe_summary,
+            "round_id": round_id,
+        }), 200
+
+    @app.route("/api/tuning/experiments/<experiment_id>/decisions",
+               methods=["POST"])
+    def tuning_post_decision(experiment_id: str):
+        """POST /api/tuning/experiments/{id}/decisions
+
+        控制者对候选做出 promote/reject/refine 决策。
+        执行者 AI 不能调用此路由。
+        """
+        body = request.get_json(silent=True) or {}
+        candidate_id = body.get("candidate_id")
+        decision = body.get("decision")
+        if not candidate_id or not decision:
+            return jsonify({
+                "ok": False, "error_code": "invalid_request",
+                "error": "缺少 candidate_id 或 decision",
+            }), 400
+        if decision not in ("promote", "reject", "refine"):
+            return jsonify({
+                "ok": False, "error_code": "invalid_decision",
+                "error": f"未知决策类型: {decision}",
+            }), 422
+        # 校验实验存在
+        try:
+            exp = store.get_tuning_experiment(experiment_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "experiment_not_found",
+                "error": "实验不存在",
+            }), 404
+        # 校验候选存在且属于该实验
+        try:
+            candidate = store.get_tuning_candidate(candidate_id)
+        except (KeyError, ValueError):
+            return jsonify({
+                "ok": False, "error_code": "candidate_not_found",
+                "error": "候选不存在",
+            }), 404
+        if candidate["experiment_id"] != experiment_id:
+            return jsonify({
+                "ok": False, "error_code": "candidate_mismatch",
+                "error": "候选不属于该实验",
+            }), 422
+        # 校验 evidence ownership
+        reason_evidence = body.get("reason_evidence", [])
+        if not isinstance(reason_evidence, list):
+            reason_evidence = []
+        now = datetime.now().isoformat()
+        # 应用决策
+        if decision == "promote":
+            with store._connection() as conn:
+                conn.execute(
+                    "UPDATE tuning_candidates "
+                    "SET status = 'promoted', promotion_reason = ?, "
+                    "    updated_at = ? WHERE id = ?",
+                    (json.dumps(reason_evidence, ensure_ascii=False),
+                     now, candidate_id),
+                )
+        elif decision == "reject":
+            code = body.get("code", "rejected")
+            with store._connection() as conn:
+                conn.execute(
+                    "UPDATE tuning_candidates "
+                    "SET status = 'rejected', rejection_code = ?, "
+                    "    updated_at = ? WHERE id = ?",
+                    (code, now, candidate_id),
+                )
+        elif decision == "refine":
+            next_config = body.get("next_config")
+            if not next_config:
+                return jsonify({
+                    "ok": False, "error_code": "missing_next_config",
+                    "error": "refine 决策必须提供 next_config",
+                }), 422
+            # 创建新的候选
+            new_candidate = store.save_tuning_candidate(
+                experiment_id=experiment_id,
+                stage=candidate["stage"],
+                strategy_step=candidate["strategy_step"],
+                config=next_config,
+                parent_candidate_id=candidate_id,
+            )
+            return jsonify({
+                "ok": True,
+                "decision": "refine",
+                "new_candidate_id": new_candidate["id"],
+            }), 200
+        return jsonify({
+            "ok": True,
+            "decision": decision,
+            "candidate_id": candidate_id,
+        }), 200
 
     return app
 

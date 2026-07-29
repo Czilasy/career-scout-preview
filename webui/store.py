@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+from pathlib import Path
 import sqlite3
 import threading
 import time
@@ -300,6 +301,12 @@ class TaskStore:
             self._migration_021()
         if current < 22:
             self._migration_022()
+        if current < 23:
+            self._migration_023()
+        if current < 24:
+            self._migration_024()
+        if current < 25:
+            self._migration_025()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -1522,6 +1529,535 @@ class TaskStore:
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
                 "VALUES (22, ?, 'recovery audit state machine and maintenance lock')",
+                (_now(),),
+            )
+
+    def _migration_023(self):
+        """SPEC011: advanced_config_state + mode_config_versions tables."""
+        with self._connection() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS advanced_config_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    active_selection TEXT NOT NULL DEFAULT 'custom',
+                    active_mode_version_id TEXT,
+                    last_custom_config_json TEXT,
+                    last_custom_digest TEXT,
+                    legacy_imported_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS mode_config_versions (
+                    id TEXT PRIMARY KEY,
+                    source_experiment_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'candidate',
+                    matrix_json TEXT NOT NULL,
+                    manual_ranges_json TEXT NOT NULL DEFAULT '{}',
+                    version_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    applied_at TEXT
+                );
+                INSERT OR IGNORE INTO advanced_config_state (id, active_selection, updated_at)
+                VALUES (1, 'custom', 'epoch');
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (23, ?, 'SPEC011 advanced config state and mode versions')",
+                (_now(),),
+            )
+
+    def _migration_024(self):
+        """SPEC011: tuning experiment entity tables (data-model.md section 2)."""
+        with self._connection() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS tuning_experiments (
+                    id TEXT PRIMARY KEY,
+                    spec_version TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    input_version_id TEXT,
+                    quality_reference_id TEXT,
+                    baseline_config_json TEXT,
+                    baseline_config_digest TEXT,
+                    current_stage TEXT,
+                    current_candidate_id TEXT,
+                    estimated_remaining_seconds INTEGER,
+                    blocked_code TEXT,
+                    blocked_reason TEXT,
+                    source_scope_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS tuning_input_versions (
+                    id TEXT PRIMARY KEY,
+                    experiment_id TEXT NOT NULL,
+                    scope_json TEXT NOT NULL,
+                    scope_digest TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    confirmed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (experiment_id) REFERENCES tuning_experiments(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tuning_workloads (
+                    id TEXT PRIMARY KEY,
+                    input_version_id TEXT NOT NULL,
+                    task_size TEXT NOT NULL,
+                    structure_index INTEGER NOT NULL,
+                    frozen_scope_json TEXT NOT NULL,
+                    planned_pages INTEGER NOT NULL,
+                    expected_raw_jobs INTEGER,
+                    artifact_manifest_json TEXT,
+                    artifact_digest TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    FOREIGN KEY (input_version_id) REFERENCES tuning_input_versions(id),
+                    UNIQUE (input_version_id, task_size, structure_index)
+                );
+
+                CREATE TABLE IF NOT EXISTS tuning_quality_references (
+                    id TEXT PRIMARY KEY,
+                    experiment_id TEXT NOT NULL,
+                    input_version_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'building',
+                    item_results_json TEXT,
+                    variation_summary_json TEXT,
+                    reviewed_item_ids_json TEXT,
+                    reference_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    confirmed_at TEXT,
+                    FOREIGN KEY (experiment_id) REFERENCES tuning_experiments(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tuning_candidates (
+                    id TEXT PRIMARY KEY,
+                    experiment_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    strategy_step TEXT NOT NULL,
+                    parent_candidate_id TEXT,
+                    config_json TEXT NOT NULL,
+                    config_digest TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'proposed',
+                    pressure_rank INTEGER NOT NULL DEFAULT 0,
+                    promotion_reason TEXT,
+                    rejection_code TEXT,
+                    aggregate_metrics_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (experiment_id) REFERENCES tuning_experiments(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tuning_rounds (
+                    id TEXT PRIMARY KEY,
+                    experiment_id TEXT NOT NULL,
+                    candidate_id TEXT NOT NULL,
+                    workload_id TEXT NOT NULL,
+                    quality_reference_id TEXT,
+                    round_kind TEXT NOT NULL,
+                    repetition_index INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'planned',
+                    manifest_id TEXT,
+                    source_run_id TEXT,
+                    metrics_json TEXT,
+                    evidence_manifest_json TEXT,
+                    failure_code TEXT,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    confirmed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (experiment_id) REFERENCES tuning_experiments(id),
+                    FOREIGN KEY (candidate_id) REFERENCES tuning_candidates(id),
+                    UNIQUE (candidate_id, workload_id, round_kind, repetition_index)
+                );
+
+                CREATE TABLE IF NOT EXISTS tuning_task_manifests (
+                    id TEXT PRIMARY KEY,
+                    experiment_id TEXT NOT NULL,
+                    candidate_id TEXT NOT NULL,
+                    round_id TEXT NOT NULL,
+                    manifest_version INTEGER NOT NULL,
+                    manifest_json TEXT NOT NULL,
+                    manifest_digest TEXT NOT NULL,
+                    rendered_task_path TEXT,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    issued_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (experiment_id) REFERENCES tuning_experiments(id),
+                    FOREIGN KEY (round_id) REFERENCES tuning_rounds(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tuning_executor_reports (
+                    id TEXT PRIMARY KEY,
+                    manifest_id TEXT NOT NULL UNIQUE,
+                    report_version INTEGER NOT NULL,
+                    report_json TEXT NOT NULL,
+                    reported_manifest_digest TEXT NOT NULL,
+                    evidence_digest TEXT NOT NULL,
+                    validation_status TEXT NOT NULL DEFAULT 'pending',
+                    validation_errors_json TEXT,
+                    created_at TEXT NOT NULL,
+                    validated_at TEXT,
+                    FOREIGN KEY (manifest_id) REFERENCES tuning_task_manifests(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tuning_measurement_events (
+                    round_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    stage TEXT,
+                    started_monotonic_ms INTEGER,
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    counts_json TEXT,
+                    error_code TEXT,
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (round_id, seq),
+                    FOREIGN KEY (round_id) REFERENCES tuning_rounds(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tuning_execution_lease (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    owner_experiment_id TEXT,
+                    owner_round_id TEXT,
+                    owner_token_digest TEXT,
+                    lease_until TEXT,
+                    heartbeat_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT OR IGNORE INTO tuning_execution_lease (id, updated_at)
+                VALUES (1, 'epoch');
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (24, ?, 'SPEC011 tuning experiment entity tables')",
+                (_now(),),
+            )
+
+    def _migration_025(self):
+        """SPEC011 real-chain: frozen quality context and append-only stage artifacts."""
+        with self._connection() as conn:
+            columns = {
+                row["name"] for row in conn.execute(
+                    "PRAGMA table_info(tuning_input_versions)"
+                ).fetchall()
+            }
+            if "quality_context_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE tuning_input_versions "
+                    "ADD COLUMN quality_context_json TEXT"
+                )
+            if "quality_context_digest" not in columns:
+                conn.execute(
+                    "ALTER TABLE tuning_input_versions "
+                    "ADD COLUMN quality_context_digest TEXT"
+                )
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS tuning_stage_artifacts (
+                    id TEXT PRIMARY KEY,
+                    experiment_id TEXT NOT NULL,
+                    input_version_id TEXT NOT NULL,
+                    workload_id TEXT NOT NULL,
+                    producer_round_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    source_artifact_id TEXT,
+                    artifact_path TEXT NOT NULL,
+                    artifact_digest TEXT NOT NULL,
+                    item_count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'ready',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (experiment_id) REFERENCES tuning_experiments(id),
+                    FOREIGN KEY (input_version_id) REFERENCES tuning_input_versions(id),
+                    FOREIGN KEY (workload_id) REFERENCES tuning_workloads(id),
+                    FOREIGN KEY (producer_round_id) REFERENCES tuning_rounds(id),
+                    FOREIGN KEY (source_artifact_id) REFERENCES tuning_stage_artifacts(id),
+                    UNIQUE (producer_round_id, stage)
+                );
+                CREATE INDEX IF NOT EXISTS idx_tuning_stage_artifacts_workload
+                    ON tuning_stage_artifacts(workload_id, stage, created_at);
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations "
+                "(version, applied_at, description) VALUES "
+                "(25, ?, 'SPEC011 quality context and stage artifacts')",
+                (_now(),),
+            )
+
+    # -- SPEC011 advanced config state -----------------------------------
+
+    def get_advanced_config_state(self) -> dict:
+        """返回当前高级配置状态：selection、custom config、mode version。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM advanced_config_state WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return {
+                "active_selection": "custom",
+                "active_mode_version_id": None,
+                "last_custom_config": None,
+                "last_custom_digest": None,
+                "legacy_imported_at": None,
+            }
+        custom_config = _decode_json(row["last_custom_config_json"], None)
+        return {
+            "active_selection": row["active_selection"],
+            "active_mode_version_id": row["active_mode_version_id"],
+            "last_custom_config": custom_config,
+            "last_custom_digest": row["last_custom_digest"],
+            "legacy_imported_at": row["legacy_imported_at"],
+        }
+
+    def save_custom_config(self, config: dict) -> str:
+        """原子保存完整自定义配置（九字段），返回 digest。
+
+        部分字段保存被拒绝；pages 不属于配置快照。
+        """
+        from webui.execution_config import ExecutionConfigSnapshot, NINE_SPEED_FIELDS
+        missing = [f for f in NINE_SPEED_FIELDS if f not in config]
+        if missing:
+            raise ValueError(f"缺少必填字段: {missing}")
+        # 验证配置快照有效性（含物理边界校验）
+        snapshot = ExecutionConfigSnapshot.create(config)
+        config_json = json.dumps(snapshot.to_dict(), ensure_ascii=False)
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE advanced_config_state "
+                "SET active_selection = 'custom', "
+                "    last_custom_config_json = ?, "
+                "    last_custom_digest = ?, "
+                "    updated_at = ? "
+                "WHERE id = 1",
+                (config_json, snapshot.config_digest, _now()),
+            )
+        return snapshot.config_digest
+
+    def select_mode(self, mode: str, *, task_size: str) -> dict:
+        """选择系统参考模式，返回对应规模的配置快照。
+
+        FR-009: pages 不出现在返回结果中。
+        FR-056: 根据任务规模载入内部配置。
+        """
+        from webui.execution_config import ExecutionConfigSnapshot, get_mode_config
+        if mode not in ("stable", "balanced", "extreme", "custom"):
+            raise ValueError(f"未知模式: {mode}")
+        if task_size not in ("small", "medium", "large"):
+            raise ValueError(f"未知任务规模: {task_size}")
+        if mode == "custom":
+            state = self.get_advanced_config_state()
+            if state["last_custom_config"] is None:
+                raise ValueError("无最近自定义配置可恢复")
+            with self._connection() as conn:
+                conn.execute(
+                    "UPDATE advanced_config_state "
+                    "SET active_selection = 'custom', updated_at = ? WHERE id = 1",
+                    (_now(),),
+                )
+            return {
+                "selection": "custom",
+                "config": state["last_custom_config"],
+                "mode_version_id": state["active_mode_version_id"],
+            }
+        state = self.get_advanced_config_state()
+        active_version_id = state["active_mode_version_id"]
+        version_digest = None
+        if active_version_id:
+            version = self.get_mode_version(active_version_id)
+            try:
+                slot = version["matrix"][mode][task_size]
+            except (KeyError, TypeError) as exc:
+                raise ValueError("活动模式版本缺少所需配置槽位") from exc
+            snapshot = ExecutionConfigSnapshot.create(slot)
+            version_digest = version["version_digest"]
+        else:
+            snapshot = get_mode_config(mode, task_size=task_size)
+        # 更新活跃选择
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE advanced_config_state SET active_selection = ?, updated_at = ? WHERE id = 1",
+                (mode, _now()),
+            )
+        return {
+            "selection": mode,
+            "config": snapshot.to_dict(),
+            "mode_version_id": active_version_id,
+            "mode_version_digest": version_digest,
+        }
+
+    def create_mode_version(
+        self, *, matrix: dict, manual_ranges: dict,
+        source_experiment_id: str | None = None,
+    ) -> str:
+        """创建一个候选模式版本（3 模式 × 3 规模）。
+
+        不完整矩阵被拒绝（data-model.md 不变量：No partial mode matrix）。
+        """
+        required_modes = {"stable", "balanced", "extreme"}
+        required_sizes = {"small", "medium", "large"}
+        if not isinstance(matrix, dict):
+            raise ValueError("matrix 必须是字典")
+        extra_modes = set(matrix.keys()) - required_modes
+        missing_modes = required_modes - set(matrix.keys())
+        if missing_modes:
+            raise ValueError(f"matrix 缺少模式: {missing_modes}")
+        if extra_modes:
+            raise ValueError(f"matrix 包含未知模式: {extra_modes}")
+        from webui.execution_config import ExecutionConfigSnapshot
+        for mode, sizes in matrix.items():
+            if not isinstance(sizes, dict):
+                raise ValueError(f"模式 {mode} 的规模配置必须是字典")
+            missing_sizes = required_sizes - set(sizes.keys())
+            if missing_sizes:
+                raise ValueError(f"模式 {mode} 缺少规模: {missing_sizes}")
+            extra_sizes = set(sizes.keys()) - required_sizes
+            if extra_sizes:
+                raise ValueError(f"模式 {mode} 包含未知规模: {extra_sizes}")
+            for size, config in sizes.items():
+                ExecutionConfigSnapshot.create(config)
+        version_id = _uuid()
+        matrix_json = json.dumps(matrix, ensure_ascii=False, sort_keys=True)
+        ranges_json = json.dumps(manual_ranges, ensure_ascii=False, sort_keys=True)
+        version_digest = "sha256:" + hashlib.sha256(
+            (matrix_json + ranges_json).encode("utf-8")
+        ).hexdigest()
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO mode_config_versions "
+                "(id, source_experiment_id, status, matrix_json, "
+                " manual_ranges_json, version_digest, created_at) "
+                "VALUES (?, ?, 'candidate', ?, ?, ?, ?)",
+                (version_id, source_experiment_id, matrix_json, ranges_json,
+                 version_digest, _now()),
+            )
+        return version_id
+
+    def get_mode_version(self, version_id: str) -> dict:
+        """Return one complete mode version without mutating active state."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM mode_config_versions WHERE id = ?", (version_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"模式版本不存在: {version_id}")
+        return {
+            "id": row["id"],
+            "source_experiment_id": row["source_experiment_id"],
+            "status": row["status"],
+            "matrix": _decode_json(row["matrix_json"], {}),
+            "manual_ranges": _decode_json(row["manual_ranges_json"], {}),
+            "version_digest": row["version_digest"],
+            "created_at": row["created_at"],
+            "applied_at": row["applied_at"],
+        }
+
+    def get_experiment_mode_version(self, experiment_id: str) -> dict | None:
+        """Return the newest complete candidate/active version for an experiment."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM mode_config_versions "
+                "WHERE source_experiment_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (experiment_id,),
+            ).fetchone()
+        return self.get_mode_version(row["id"]) if row is not None else None
+
+    def get_previous_mode_version(self, active_version_id: str) -> dict | None:
+        """Return the newest complete superseded version available for rollback."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM mode_config_versions "
+                "WHERE id != ? AND status = 'superseded' "
+                "ORDER BY COALESCE(applied_at, created_at) DESC LIMIT 1",
+                (active_version_id,),
+            ).fetchone()
+        return self.get_mode_version(row["id"]) if row is not None else None
+
+    def apply_mode_version(self, version_id: str) -> None:
+        """原子应用模式版本：旧的被 superseded，新的变 active。"""
+        version = self.get_mode_version(version_id)
+        source_experiment_id = version.get("source_experiment_id")
+        if source_experiment_id:
+            experiment = self.get_tuning_experiment(source_experiment_id)
+            issues = self.get_tuning_completion_issues(source_experiment_id)
+            if experiment["status"] != "completed" or issues:
+                raise ValueError("实验候选版本尚未通过全部最终轮次门禁")
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM mode_config_versions WHERE id = ?", (version_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"模式版本不存在: {version_id}")
+            # 旧 active 版本标记为 superseded
+            conn.execute(
+                "UPDATE mode_config_versions SET status = 'superseded' WHERE status = 'active'"
+            )
+            # 新版本标记为 active
+            conn.execute(
+                "UPDATE mode_config_versions SET status = 'active', applied_at = ? WHERE id = ?",
+                (_now(), version_id),
+            )
+            # 更新活跃选择
+            conn.execute(
+                "UPDATE advanced_config_state "
+                "SET active_mode_version_id = ?, updated_at = ? WHERE id = 1",
+                (version_id, _now()),
+            )
+
+    def rollback_mode_version(self, version_id: str) -> None:
+        """回退到指定版本：整体恢复。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM mode_config_versions WHERE id = ?", (version_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"模式版本不存在: {version_id}")
+            conn.execute(
+                "UPDATE mode_config_versions SET status = 'superseded' WHERE status = 'active'"
+            )
+            conn.execute(
+                "UPDATE mode_config_versions SET status = 'active', applied_at = ? WHERE id = ?",
+                (_now(), version_id),
+            )
+            conn.execute(
+                "UPDATE advanced_config_state "
+                "SET active_mode_version_id = ?, updated_at = ? WHERE id = 1",
+                (version_id, _now()),
+            )
+
+    def import_legacy_advanced_settings(self, legacy_path) -> None:
+        """一次性导入旧 advanced_settings.json。
+
+        已导入过时不覆盖；pages 不导入到配置快照。
+        """
+        from pathlib import Path
+        legacy_path = Path(legacy_path)
+        # 检查是否已导入
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT legacy_imported_at FROM advanced_config_state WHERE id = 1"
+            ).fetchone()
+            if row is not None and row["legacy_imported_at"] is not None:
+                return  # 已导入，不覆盖
+        if not legacy_path.is_file():
+            return
+        try:
+            raw = json.loads(legacy_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+        if not isinstance(raw, dict):
+            return
+        # 只取九个速度字段，排除 pages
+        from webui.execution_config import NINE_SPEED_FIELDS
+        config = {k: v for k, v in raw.items() if k in NINE_SPEED_FIELDS}
+        if len(config) != len(NINE_SPEED_FIELDS):
+            return  # 字段不完整，不导入
+        self.save_custom_config(config)
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE advanced_config_state SET legacy_imported_at = ? WHERE id = 1",
                 (_now(),),
             )
 
@@ -3257,3 +3793,1540 @@ class TaskStore:
                 (cutoff,),
             ).fetchall()
         return [{"profile_id": row["profile_id"], "job_id": row["job_id"]} for row in rows]
+
+    # -- SPEC011 tuning experiment persistence ---------------------------
+
+    # Experiment state machine legal transitions (state-machine.md section 1)
+    _EXPERIMENT_TERMINAL_STATES = frozenset({"cancelled", "failed", "completed"})
+    _EXPERIMENT_LEGAL_TRANSITIONS = {
+        "draft": {"preflight", "cancelled"},
+        "preflight": {"awaiting_instruction", "blocked", "cancelled"},
+        "awaiting_instruction": {"queued", "blocked", "cancelled"},
+        "queued": {"running", "blocked", "cancelled"},
+        "running": {"evaluating", "blocked", "failed", "cancelled"},
+        "evaluating": {"awaiting_instruction", "blocked", "failed", "cancelled", "completed"},
+        "blocked": {"awaiting_instruction", "cancelled"},
+    }
+
+    def create_tuning_experiment(self, *, spec_version: str, source_scope: dict) -> dict:
+        """创建 draft 状态的实验记录。不启动压力工作。"""
+        exp_id = _uuid()
+        now = _now()
+        scope_json = json.dumps(source_scope, ensure_ascii=False, sort_keys=True)
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO tuning_experiments "
+                "(id, spec_version, status, source_scope_json, created_at, updated_at) "
+                "VALUES (?, ?, 'draft', ?, ?, ?)",
+                (exp_id, spec_version, scope_json, now, now),
+            )
+        return {"id": exp_id, "status": "draft"}
+
+    def create_tuning_experiment_with_input(
+        self, *, spec_version: str, source_scope: dict,
+        workloads: list[dict], quality_context: dict,
+        workspace_root: str | os.PathLike,
+    ) -> dict:
+        """Atomically create a draft experiment and its proposed input bundle."""
+        from webui.execution_config import preview_scope
+
+        if not isinstance(quality_context, dict):
+            raise ValueError("quality_context 必须是对象")
+        profile_summary = quality_context.get("profile_summary")
+        screening_fields = quality_context.get("screening_fields")
+        profile_ref = quality_context.get("profile_ref")
+        if not isinstance(profile_summary, str) or not profile_summary.strip():
+            raise ValueError("quality_context.profile_summary 不能为空")
+        if not isinstance(screening_fields, dict):
+            raise ValueError("quality_context.screening_fields 必须是对象")
+        if not isinstance(profile_ref, str) or not profile_ref.strip():
+            raise ValueError("quality_context.profile_ref 不能为空")
+        normalized_quality_context = {
+            "profile_summary": profile_summary.strip(),
+            "screening_fields": json.loads(json.dumps(
+                screening_fields, ensure_ascii=False, sort_keys=True,
+            )),
+            "profile_ref": profile_ref.strip(),
+        }
+        quality_context_bytes = json.dumps(
+            normalized_quality_context, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        quality_context_digest = (
+            "sha256:" + hashlib.sha256(quality_context_bytes).hexdigest()
+        )
+
+        source_result = preview_scope(
+            keywords=source_scope.get("keywords"),
+            scope_kind=source_scope.get("scope_kind", "cities"),
+            cities=source_scope.get("cities", []),
+            pages_per_combination=int(source_scope.get("pages_per_combination", 0)),
+        )
+        normalized_source = source_result["scope"]
+        normalized_workloads = []
+        for raw in workloads:
+            if not isinstance(raw, dict):
+                raise ValueError("workload 必须是对象")
+            claimed_size = raw.get("task_size")
+            structure_index = raw.get("structure_index")
+            if claimed_size not in ("small", "medium", "large"):
+                raise ValueError("workload task_size 无效")
+            if not isinstance(structure_index, int) or structure_index < 1:
+                raise ValueError("workload structure_index 必须是正整数")
+            workload_scope = raw.get("scope") or source_scope
+            scope_result = preview_scope(
+                keywords=workload_scope.get("keywords"),
+                scope_kind=workload_scope.get("scope_kind", "cities"),
+                cities=workload_scope.get("cities", []),
+                pages_per_combination=int(
+                    workload_scope.get("pages_per_combination", 0)
+                ),
+            )
+            frozen_scope = scope_result["scope"]
+            if frozen_scope["task_size"] != claimed_size:
+                raise ValueError(
+                    "workload task_size 与后端计算结果不一致: "
+                    f"{claimed_size} != {frozen_scope['task_size']}"
+                )
+            normalized_workloads.append((
+                claimed_size, structure_index, frozen_scope,
+            ))
+
+        exp_id = _uuid()
+        input_version_id = _uuid()
+        artifact_records = []
+        for task_size, structure_index, frozen_scope in normalized_workloads:
+            workload_id = _uuid()
+            artifact_path = f"tuning/{exp_id}/input/{workload_id}.json"
+            artifact_manifest = {
+                "schema_version": 1,
+                "artifact_manifest_path": artifact_path,
+                "experiment_id": exp_id,
+                "input_version_id": input_version_id,
+                "workload_id": workload_id,
+                "task_size": task_size,
+                "structure_index": structure_index,
+                "scope": frozen_scope,
+                "scope_digest": frozen_scope["scope_digest"],
+                "planned_pages": frozen_scope["planned_pages"],
+                "expected_raw_jobs": frozen_scope["planned_pages"] * 40,
+                "quality_context": normalized_quality_context,
+                "quality_context_digest": quality_context_digest,
+            }
+            artifact_bytes = json.dumps(
+                artifact_manifest, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            artifact_records.append({
+                "id": workload_id,
+                "task_size": task_size,
+                "structure_index": structure_index,
+                "scope": frozen_scope,
+                "path": artifact_path,
+                "manifest": artifact_manifest,
+                "bytes": artifact_bytes,
+                "digest": "sha256:" + hashlib.sha256(artifact_bytes).hexdigest(),
+            })
+
+        root = Path(workspace_root).resolve()
+        tuning_root = (root / "tuning").resolve()
+        if root not in tuning_root.parents:
+            raise ValueError("tuning artifact 根目录越过 workspace")
+        experiment_root = (tuning_root / exp_id).resolve()
+        if tuning_root not in experiment_root.parents:
+            raise ValueError("实验 artifact 目录越过 tuning 根目录")
+        expected_parent = (experiment_root / "input").resolve()
+        if experiment_root.exists():
+            raise ValueError("实验 artifact 目录已存在")
+        written_paths: list[Path] = []
+        temporary_paths: list[Path] = []
+        created_artifact_tree = False
+        try:
+            expected_parent.mkdir(parents=True, exist_ok=False)
+            created_artifact_tree = True
+            for record in artifact_records:
+                artifact_path = (root / record["path"]).resolve()
+                if artifact_path.parent != expected_parent:
+                    raise ValueError("artifact manifest 路径越过实验 input 目录")
+                temporary_path = artifact_path.with_name(
+                    artifact_path.name + f".{_uuid()}.tmp"
+                )
+                temporary_paths.append(temporary_path)
+                with temporary_path.open("xb") as handle:
+                    handle.write(record["bytes"])
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary_path, artifact_path)
+                temporary_paths.remove(temporary_path)
+                written_paths.append(artifact_path)
+                persisted = artifact_path.read_bytes()
+                if persisted != record["bytes"] or (
+                    "sha256:" + hashlib.sha256(persisted).hexdigest()
+                    != record["digest"]
+                ):
+                    raise OSError("artifact manifest 原子写入后校验失败")
+
+            now = _now()
+            with self._connection() as conn:
+                conn.execute(
+                    "INSERT INTO tuning_experiments "
+                    "(id, spec_version, status, input_version_id, source_scope_json, "
+                    " created_at, updated_at) VALUES (?, ?, 'draft', ?, ?, ?, ?)",
+                    (exp_id, spec_version, input_version_id,
+                     json.dumps(normalized_source, ensure_ascii=False, sort_keys=True),
+                     now, now),
+                )
+                conn.execute(
+                    "INSERT INTO tuning_input_versions "
+                    "(id, experiment_id, scope_json, scope_digest, "
+                    " quality_context_json, quality_context_digest, status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'draft', ?)",
+                    (input_version_id, exp_id,
+                     json.dumps(normalized_source, ensure_ascii=False, sort_keys=True),
+                     normalized_source["scope_digest"],
+                     quality_context_bytes.decode("utf-8"),
+                     quality_context_digest, now),
+                )
+                for record in artifact_records:
+                    frozen_scope = record["scope"]
+                    conn.execute(
+                        "INSERT INTO tuning_workloads "
+                        "(id, input_version_id, task_size, structure_index, "
+                        " frozen_scope_json, planned_pages, expected_raw_jobs, "
+                        " artifact_manifest_json, artifact_digest, status) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+                        (record["id"], input_version_id, record["task_size"],
+                         record["structure_index"],
+                         json.dumps(frozen_scope, ensure_ascii=False, sort_keys=True),
+                         frozen_scope["planned_pages"],
+                         frozen_scope["planned_pages"] * 40,
+                         record["bytes"].decode("utf-8"), record["digest"]),
+                    )
+        except Exception:
+            for temporary_path in temporary_paths:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            for artifact_path in written_paths:
+                try:
+                    artifact_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if created_artifact_tree:
+                for directory in (expected_parent, experiment_root):
+                    try:
+                        directory.rmdir()
+                    except OSError:
+                        pass
+            raise
+        return {
+            "id": exp_id, "status": "draft",
+            "input_version_id": input_version_id,
+        }
+
+    def get_tuning_input_bundle(self, experiment_id: str) -> dict:
+        """Return the persisted input version and ordered workload structures."""
+        with self._connection() as conn:
+            input_row = conn.execute(
+                "SELECT * FROM tuning_input_versions WHERE experiment_id = ?",
+                (experiment_id,),
+            ).fetchone()
+            if input_row is None:
+                raise KeyError(f"实验没有输入版本: {experiment_id}")
+            workload_rows = conn.execute(
+                "SELECT * FROM tuning_workloads WHERE input_version_id = ? "
+                "ORDER BY CASE task_size WHEN 'small' THEN 1 WHEN 'medium' THEN 2 "
+                "ELSE 3 END, structure_index",
+                (input_row["id"],),
+            ).fetchall()
+        workloads = []
+        for row in workload_rows:
+            artifact_manifest = _decode_json(row["artifact_manifest_json"], {})
+            workloads.append({
+                "id": row["id"], "task_size": row["task_size"],
+                "structure_index": row["structure_index"],
+                "scope": _decode_json(row["frozen_scope_json"], {}),
+                "planned_pages": row["planned_pages"],
+                "artifact_manifest": artifact_manifest,
+                "artifact_manifest_path": artifact_manifest.get(
+                    "artifact_manifest_path"
+                ),
+                "artifact_digest": row["artifact_digest"],
+                "status": row["status"],
+            })
+        return {
+            "input_version": {
+                "id": input_row["id"],
+                "experiment_id": input_row["experiment_id"],
+                "scope": _decode_json(input_row["scope_json"], {}),
+                "scope_digest": input_row["scope_digest"],
+                "quality_context": _decode_json(
+                    input_row["quality_context_json"], None
+                ),
+                "quality_context_digest": input_row["quality_context_digest"],
+                "status": input_row["status"],
+                "confirmed_at": input_row["confirmed_at"],
+            },
+            "workloads": workloads,
+        }
+
+    def confirm_tuning_input(
+        self, experiment_id: str, *, workspace_root: str | os.PathLike,
+    ) -> dict:
+        """Freeze a complete two-structures-per-size input bundle atomically."""
+        now = _now()
+        with self._connection() as conn:
+            experiment = conn.execute(
+                "SELECT status, input_version_id FROM tuning_experiments WHERE id = ?",
+                (experiment_id,),
+            ).fetchone()
+            if experiment is None:
+                raise KeyError(f"实验不存在: {experiment_id}")
+            if experiment["status"] != "draft":
+                raise ValueError("只有 draft 实验可以确认输入")
+            input_version_id = experiment["input_version_id"]
+            if not input_version_id:
+                raise ValueError("实验缺少输入版本")
+            rows = conn.execute(
+                "SELECT id, task_size, structure_index, frozen_scope_json, "
+                "planned_pages, expected_raw_jobs, artifact_manifest_json, "
+                "artifact_digest "
+                "FROM tuning_workloads WHERE input_version_id = ?",
+                (input_version_id,),
+            ).fetchall()
+            input_row = conn.execute(
+                "SELECT scope_digest, quality_context_json, "
+                "quality_context_digest FROM tuning_input_versions WHERE id = ?",
+                (input_version_id,),
+            ).fetchone()
+            quality_context = _decode_json(
+                input_row["quality_context_json"], None
+            )
+            quality_context_digest = input_row["quality_context_digest"]
+            if not isinstance(quality_context, dict) or not quality_context:
+                raise ValueError("冻结质量上下文缺失")
+            if not isinstance(quality_context_digest, str) or not quality_context_digest:
+                raise ValueError("冻结质量上下文摘要缺失")
+            quality_bytes = json.dumps(
+                quality_context, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if "sha256:" + hashlib.sha256(quality_bytes).hexdigest() != quality_context_digest:
+                raise ValueError("冻结质量上下文摘要不匹配")
+            structures = {size: set() for size in ("small", "medium", "large")}
+            structure_digests = {
+                size: set() for size in ("small", "medium", "large")
+            }
+            workload_digests = []
+            workspace = Path(workspace_root).resolve()
+            tuning_root = (workspace / "tuning").resolve()
+            if workspace not in tuning_root.parents:
+                raise ValueError("tuning artifact 根目录越过 workspace")
+            expected_input_root = (
+                tuning_root / experiment_id / "input"
+            ).resolve()
+            if tuning_root not in expected_input_root.parents:
+                raise ValueError("workload artifact input 目录越界")
+            for row in rows:
+                structures[row["task_size"]].add(row["structure_index"])
+                scope = _decode_json(row["frozen_scope_json"], {})
+                digest = scope.get("scope_digest")
+                workload_digests.append(digest)
+                if digest:
+                    structure_digests[row["task_size"]].add(digest)
+                artifact_manifest = _decode_json(
+                    row["artifact_manifest_json"], None
+                )
+                artifact_digest = row["artifact_digest"]
+                if not isinstance(artifact_manifest, dict) or not artifact_manifest:
+                    raise ValueError("workload artifact manifest 缺失")
+                artifact_path = artifact_manifest.get("artifact_manifest_path")
+                expected_relative = (
+                    f"tuning/{experiment_id}/input/{row['id']}.json"
+                )
+                if artifact_path != expected_relative:
+                    raise ValueError("workload artifact manifest 路径不匹配或越界")
+                absolute_path = (workspace / artifact_path).resolve()
+                if absolute_path.parent != expected_input_root:
+                    raise ValueError("workload artifact manifest 路径越界")
+                expected_manifest = {
+                    "schema_version": 1,
+                    "artifact_manifest_path": expected_relative,
+                    "experiment_id": experiment_id,
+                    "input_version_id": input_version_id,
+                    "workload_id": row["id"],
+                    "task_size": row["task_size"],
+                    "structure_index": row["structure_index"],
+                    "scope": scope,
+                    "scope_digest": digest,
+                    "planned_pages": row["planned_pages"],
+                    "expected_raw_jobs": row["expected_raw_jobs"],
+                    "quality_context": quality_context,
+                    "quality_context_digest": quality_context_digest,
+                }
+                if artifact_manifest != expected_manifest:
+                    raise ValueError("workload artifact manifest 身份或内容不匹配")
+                if not isinstance(artifact_digest, str) or not artifact_digest:
+                    raise ValueError("workload artifact digest 缺失")
+                if not absolute_path.is_file():
+                    raise ValueError("workload artifact 产物不存在")
+                try:
+                    artifact_bytes = absolute_path.read_bytes()
+                    persisted_manifest = json.loads(artifact_bytes.decode("utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("workload artifact 产物不可读或非 JSON") from exc
+                actual_digest = (
+                    "sha256:" + hashlib.sha256(artifact_bytes).hexdigest()
+                )
+                if actual_digest != artifact_digest:
+                    raise ValueError("workload artifact digest 摘要不匹配")
+                if persisted_manifest != artifact_manifest:
+                    raise ValueError("workload artifact manifest 内容与数据库不一致")
+            incomplete = [
+                size for size, indexes in structures.items() if len(indexes) < 2
+            ]
+            if incomplete:
+                raise ValueError(
+                    "每个任务规模至少需要两种结构，缺少: " + ", ".join(incomplete)
+                )
+            duplicate_sizes = [
+                size for size, digests in structure_digests.items()
+                if len(digests) < 2
+            ]
+            if duplicate_sizes:
+                raise ValueError(
+                    "每个任务规模需要两种内容不同的结构，重复: "
+                    + ", ".join(duplicate_sizes)
+                )
+            conn.execute(
+                "UPDATE tuning_input_versions SET status = 'confirmed', "
+                "confirmed_at = ? WHERE id = ?",
+                (now, input_version_id),
+            )
+            conn.execute(
+                "UPDATE tuning_experiments SET status = 'preflight', updated_at = ? "
+                "WHERE id = ?",
+                (now, experiment_id),
+            )
+        return {
+            "input_version_id": input_version_id,
+            "scope_digest": input_row["scope_digest"],
+            "workload_digests": workload_digests,
+            "status": "preflight",
+        }
+
+    def get_tuning_experiment(self, experiment_id: str) -> dict:
+        """返回实验记录。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tuning_experiments WHERE id = ?", (experiment_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"实验不存在: {experiment_id}")
+        return {
+            "id": row["id"],
+            "spec_version": row["spec_version"],
+            "status": row["status"],
+            "input_version_id": row["input_version_id"],
+            "quality_reference_id": row["quality_reference_id"],
+            "baseline_config": _decode_json(row["baseline_config_json"], None),
+            "baseline_config_digest": row["baseline_config_digest"],
+            "current_stage": row["current_stage"],
+            "current_candidate_id": row["current_candidate_id"],
+            "estimated_remaining_seconds": row["estimated_remaining_seconds"],
+            "blocked_code": row["blocked_code"],
+            "blocked_reason": row["blocked_reason"],
+            "source_scope": _decode_json(row["source_scope_json"], {}),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "completed_at": row["completed_at"],
+        }
+
+    def update_tuning_experiment_status(
+        self, experiment_id: str, *, status: str,
+        blocked_code: str | None = None,
+        blocked_reason: str | None = None,
+    ) -> None:
+        """更新实验状态，强制合法转换。"""
+        current = self.get_tuning_experiment(experiment_id)
+        current_status = current["status"]
+        if current_status in self._EXPERIMENT_TERMINAL_STATES:
+            raise ValueError(
+                f"实验已处于终态 {current_status}，不能转为 {status}"
+            )
+        legal = self._EXPERIMENT_LEGAL_TRANSITIONS.get(current_status, set())
+        if status not in legal and status != current_status:
+            raise ValueError(
+                f"非法状态转换: {current_status} → {status}"
+            )
+        if status == "completed":
+            issues = self.get_tuning_completion_issues(experiment_id)
+            if issues:
+                raise ValueError("实验最终门禁未通过: " + "; ".join(issues))
+        now = _now()
+        completed_at = now if status == "completed" else None
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE tuning_experiments "
+                "SET status = ?, blocked_code = ?, blocked_reason = ?, "
+                "    completed_at = COALESCE(?, completed_at), updated_at = ? "
+                "WHERE id = ?",
+                (status, blocked_code, blocked_reason, completed_at, now, experiment_id),
+            )
+
+    def get_tuning_completion_issues(self, experiment_id: str) -> list[str]:
+        """客观核验九槽版本和 2 结构 × 3 次端到端最终证据。"""
+        import math
+        from webui.execution_config import ExecutionConfigSnapshot
+
+        issues: list[str] = []
+        with self._connection() as conn:
+            version_row = conn.execute(
+                "SELECT matrix_json FROM mode_config_versions "
+                "WHERE source_experiment_id = ? ORDER BY created_at DESC LIMIT 1",
+                (experiment_id,),
+            ).fetchone()
+            input_row = conn.execute(
+                "SELECT id, status FROM tuning_input_versions "
+                "WHERE experiment_id = ? ORDER BY created_at DESC LIMIT 1",
+                (experiment_id,),
+            ).fetchone()
+            candidate_rows = conn.execute(
+                "SELECT id, config_digest FROM tuning_candidates WHERE experiment_id = ?",
+                (experiment_id,),
+            ).fetchall()
+            round_rows = conn.execute(
+                "SELECT r.*, q.status AS reference_status "
+                "FROM tuning_rounds r LEFT JOIN tuning_quality_references q "
+                "ON q.id = r.quality_reference_id "
+                "WHERE r.experiment_id = ? AND r.round_kind = 'end_to_end'",
+                (experiment_id,),
+            ).fetchall()
+            workloads = [] if input_row is None else conn.execute(
+                "SELECT id, task_size, frozen_scope_json FROM tuning_workloads "
+                "WHERE input_version_id = ? ORDER BY task_size, structure_index",
+                (input_row["id"],),
+            ).fetchall()
+
+        if version_row is None:
+            issues.append("missing_candidate_mode_version")
+            return issues
+        try:
+            matrix = _decode_json(version_row["matrix_json"], {})
+            required_modes = ("stable", "balanced", "extreme")
+            required_sizes = ("small", "medium", "large")
+            slot_keys: set[tuple[str, str]] = set()
+            for mode in required_modes:
+                for size in required_sizes:
+                    config = matrix[mode][size]
+                    snapshot = ExecutionConfigSnapshot.create(config)
+                    slot_keys.add((snapshot.config_digest, size))
+        except (KeyError, TypeError, ValueError) as exc:
+            issues.append(f"invalid_candidate_mode_version:{exc}")
+            return issues
+
+        if input_row is None or input_row["status"] != "confirmed":
+            issues.append("input_version_not_confirmed")
+        workload_by_size: dict[str, list[Any]] = {
+            size: [] for size in ("small", "medium", "large")
+        }
+        for workload in workloads:
+            workload_by_size.setdefault(workload["task_size"], []).append(workload)
+        for size, size_workloads in workload_by_size.items():
+            digests = {
+                _decode_json(row["frozen_scope_json"], {}).get("scope_digest")
+                for row in size_workloads
+            }
+            digests.discard(None)
+            if len(size_workloads) < 2 or len(digests) < 2:
+                issues.append(f"insufficient_workload_structures:{size}")
+
+        candidate_ids_by_digest: dict[str, set[str]] = {}
+        for candidate in candidate_rows:
+            candidate_ids_by_digest.setdefault(
+                candidate["config_digest"], set(),
+            ).add(candidate["id"])
+
+        required_metrics = {
+            "total_duration_ms", "work_duration_ms", "wait_duration_ms",
+            "retry_duration_ms", "input_count", "terminal_count",
+            "missing_count", "duplicate_count", "quality_diff_count",
+        }
+        for config_digest, size in sorted(slot_keys):
+            candidate_ids = candidate_ids_by_digest.get(config_digest, set())
+            if not candidate_ids:
+                issues.append(f"missing_candidate_for_slot:{size}:{config_digest}")
+                continue
+            for workload in workload_by_size.get(size, []):
+                matching = [
+                    row for row in round_rows
+                    if row["candidate_id"] in candidate_ids
+                    and row["workload_id"] == workload["id"]
+                    and row["status"] == "confirmed"
+                ]
+                repetitions = {row["repetition_index"] for row in matching}
+                if len(repetitions) < 3:
+                    issues.append(
+                        f"insufficient_confirmed_repetitions:{size}:{workload['id']}"
+                    )
+                    continue
+                for row in matching:
+                    metrics = _decode_json(row["metrics_json"], {})
+                    if not required_metrics.issubset(metrics):
+                        issues.append(f"missing_round_metrics:{row['id']}")
+                        continue
+                    numeric = [metrics[key] for key in required_metrics]
+                    if any(
+                        isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value < 0
+                        for value in numeric
+                    ):
+                        issues.append(f"invalid_round_metrics:{row['id']}")
+                        continue
+                    if (
+                        metrics["terminal_count"] != metrics["input_count"]
+                        or metrics["missing_count"] != 0
+                        or metrics["duplicate_count"] != 0
+                    ):
+                        issues.append(f"terminal_conservation_failed:{row['id']}")
+                    accounted = (
+                        metrics["work_duration_ms"] + metrics["wait_duration_ms"]
+                        + metrics["retry_duration_ms"]
+                    )
+                    if metrics["total_duration_ms"] != accounted:
+                        issues.append(f"duration_not_accounted:{row['id']}")
+                    if metrics["quality_diff_count"] != 0:
+                        issues.append(f"quality_gate_failed:{row['id']}")
+                    if row["quality_reference_id"] is None or row["reference_status"] != "confirmed":
+                        issues.append(f"quality_reference_not_confirmed:{row['id']}")
+        return issues
+
+    def save_tuning_candidate(
+        self, *, experiment_id: str, stage: str, strategy_step: str,
+        config: dict, parent_candidate_id: str | None = None,
+        pressure_rank: int = 0,
+    ) -> dict:
+        """保存候选配置到实验表（不写入 advanced_config_state）。"""
+        from webui.execution_config import ExecutionConfigSnapshot
+        snapshot = ExecutionConfigSnapshot.create(config)
+        candidate_id = _uuid()
+        now = _now()
+        config_json = json.dumps(snapshot.to_dict(), ensure_ascii=False, sort_keys=True)
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO tuning_candidates "
+                "(id, experiment_id, stage, strategy_step, parent_candidate_id, "
+                " config_json, config_digest, status, pressure_rank, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?)",
+                (candidate_id, experiment_id, stage, strategy_step,
+                 parent_candidate_id, config_json, snapshot.config_digest,
+                 pressure_rank, now, now),
+            )
+        return {"id": candidate_id, "config_digest": snapshot.config_digest}
+
+    def get_tuning_candidate(self, candidate_id: str) -> dict:
+        """返回候选记录。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tuning_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"候选不存在: {candidate_id}")
+        return {
+            "id": row["id"],
+            "experiment_id": row["experiment_id"],
+            "stage": row["stage"],
+            "strategy_step": row["strategy_step"],
+            "parent_candidate_id": row["parent_candidate_id"],
+            "config": _decode_json(row["config_json"], {}),
+            "config_digest": row["config_digest"],
+            "status": row["status"],
+            "pressure_rank": row["pressure_rank"],
+            "promotion_reason": _decode_json(row["promotion_reason"], None),
+            "rejection_code": row["rejection_code"],
+        }
+
+    def create_tuning_round(
+        self, *, experiment_id: str, candidate_id: str, workload_id: str,
+        round_kind: str, repetition_index: int,
+        quality_reference_id: str | None = None,
+    ) -> dict:
+        """创建 planned 状态的轮次。"""
+        round_id = _uuid()
+        now = _now()
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO tuning_rounds "
+                "(id, experiment_id, candidate_id, workload_id, quality_reference_id, "
+                " round_kind, repetition_index, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?)",
+                (round_id, experiment_id, candidate_id, workload_id,
+                 quality_reference_id, round_kind, repetition_index, now),
+            )
+        return {"id": round_id, "status": "planned"}
+
+    def get_tuning_round(self, round_id: str) -> dict:
+        """返回轮次记录。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tuning_rounds WHERE id = ?", (round_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"轮次不存在: {round_id}")
+        return {
+            "id": row["id"],
+            "experiment_id": row["experiment_id"],
+            "candidate_id": row["candidate_id"],
+            "workload_id": row["workload_id"],
+            "round_kind": row["round_kind"],
+            "repetition_index": row["repetition_index"],
+            "status": row["status"],
+            "manifest_id": row["manifest_id"],
+            "metrics": _decode_json(row["metrics_json"], None),
+            "failure_code": row["failure_code"],
+        }
+
+    def update_tuning_round_status(
+        self, round_id: str, *, status: str,
+        failure_code: str | None = None,
+    ) -> None:
+        """更新轮次状态，强制 state-machine.md 的合法转换。"""
+        current = self.get_tuning_round(round_id)
+        current_status = current["status"]
+        legal_transitions = {
+            "planned": {"issued", "cancelled"},
+            "issued": {"running", "uncertain", "blocked", "cancelled"},
+            "running": {"reported", "uncertain", "blocked", "cancelled"},
+            "reported": {"confirmed", "invalid", "blocked"},
+        }
+        if status != current_status and status not in legal_transitions.get(
+            current_status, set()
+        ):
+            raise ValueError(
+                f"非法轮次状态转换: {current_status} → {status}"
+            )
+        if status == "running":
+            lease = self.get_tuning_lease()
+            if (
+                lease.get("owner_experiment_id") != current["experiment_id"]
+                or lease.get("owner_round_id") != round_id
+            ):
+                raise ValueError("轮次未持有独占租约，不能进入 running")
+        now = _now()
+        finished_at = now if status in ("confirmed", "invalid", "blocked", "cancelled") else None
+        confirmed_at = now if status == "confirmed" else None
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE tuning_rounds "
+                "SET status = ?, failure_code = COALESCE(?, failure_code), "
+                "    finished_at = COALESCE(?, finished_at), "
+                "    confirmed_at = COALESCE(?, confirmed_at) "
+                "WHERE id = ?",
+                (status, failure_code, finished_at, confirmed_at, round_id),
+            )
+
+    def save_tuning_stage_artifact(
+        self, *, round_id: str, stage: str, payload: dict,
+        workspace_root: str | os.PathLike,
+        source_artifact_id: str | None = None,
+    ) -> dict:
+        """Append one immutable, digest-verified stage result for a round."""
+        if not isinstance(payload, dict):
+            raise ValueError("阶段产物 payload 必须是对象")
+        round_record = self.get_tuning_round(round_id)
+        if round_record["status"] not in ("running", "reported"):
+            raise ValueError("只有 running/reported 轮次可以保存阶段产物")
+        if stage != round_record["round_kind"]:
+            raise ValueError("阶段产物类型与轮次类型不一致")
+        if stage not in ("list", "detail", "rough", "fine", "end_to_end"):
+            raise ValueError("阶段产物类型无效")
+
+        with self._connection() as conn:
+            workload = conn.execute(
+                "SELECT input_version_id FROM tuning_workloads WHERE id = ?",
+                (round_record["workload_id"],),
+            ).fetchone()
+            if workload is None:
+                raise KeyError("轮次 workload 不存在")
+            if source_artifact_id is not None:
+                source = conn.execute(
+                    "SELECT experiment_id, input_version_id, workload_id, status "
+                    "FROM tuning_stage_artifacts WHERE id = ?",
+                    (source_artifact_id,),
+                ).fetchone()
+                if source is None:
+                    raise ValueError("上游阶段产物不存在")
+                if (
+                    source["experiment_id"] != round_record["experiment_id"]
+                    or source["input_version_id"] != workload["input_version_id"]
+                    or source["workload_id"] != round_record["workload_id"]
+                    or source["status"] != "ready"
+                ):
+                    raise ValueError("上游阶段产物身份不匹配")
+
+        artifact_id = _uuid()
+        relative_path = (
+            f"tuning/{round_record['experiment_id']}/artifacts/"
+            f"{round_id}/{stage}-{artifact_id}.json"
+        )
+        artifact_bytes = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        artifact_digest = (
+            "sha256:" + hashlib.sha256(artifact_bytes).hexdigest()
+        )
+        workspace = Path(workspace_root).resolve()
+        experiment_root = (
+            workspace / "tuning" / round_record["experiment_id"]
+        ).resolve()
+        absolute_path = (workspace / relative_path).resolve()
+        if experiment_root not in absolute_path.parents:
+            raise ValueError("阶段产物路径越过实验根目录")
+        absolute_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = absolute_path.with_name(
+            absolute_path.name + f".{_uuid()}.tmp"
+        )
+        try:
+            with temporary_path.open("xb") as handle:
+                handle.write(artifact_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, absolute_path)
+            persisted = absolute_path.read_bytes()
+            if persisted != artifact_bytes:
+                raise OSError("阶段产物原子写入后内容不一致")
+            jobs = payload.get("jobs")
+            verdicts = payload.get("verdicts")
+            item_count = (
+                len(jobs) if isinstance(jobs, list)
+                else len(verdicts) if isinstance(verdicts, dict)
+                else 0
+            )
+            with self._connection() as conn:
+                conn.execute(
+                    "INSERT INTO tuning_stage_artifacts "
+                    "(id, experiment_id, input_version_id, workload_id, "
+                    " producer_round_id, stage, source_artifact_id, artifact_path, "
+                    " artifact_digest, item_count, status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)",
+                    (artifact_id, round_record["experiment_id"],
+                     workload["input_version_id"], round_record["workload_id"],
+                     round_id, stage, source_artifact_id, relative_path,
+                     artifact_digest, item_count, _now()),
+                )
+        except sqlite3.IntegrityError as exc:
+            temporary_path.unlink(missing_ok=True)
+            absolute_path.unlink(missing_ok=True)
+            raise ValueError("同一轮次的阶段产物已经存在") from exc
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            absolute_path.unlink(missing_ok=True)
+            raise
+        return self.get_tuning_stage_artifact(artifact_id)
+
+    def get_tuning_stage_artifact(self, artifact_id: str) -> dict:
+        """Return one immutable stage artifact record."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tuning_stage_artifacts WHERE id = ?",
+                (artifact_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"阶段产物不存在: {artifact_id}")
+        return {
+            "id": row["id"],
+            "experiment_id": row["experiment_id"],
+            "input_version_id": row["input_version_id"],
+            "workload_id": row["workload_id"],
+            "producer_round_id": row["producer_round_id"],
+            "stage": row["stage"],
+            "source_artifact_id": row["source_artifact_id"],
+            "artifact_path": row["artifact_path"],
+            "artifact_digest": row["artifact_digest"],
+            "item_count": row["item_count"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+        }
+
+    # -- SPEC011 tuning execution lease ----------------------------------
+
+    _LEASE_TTL_SECONDS = 300  # 5 分钟心跳超时
+
+    def claim_tuning_lease(
+        self, *, experiment_id: str, round_id: str, owner_token: str,
+        allow_stale_takeover: bool = False,
+    ) -> dict:
+        """原子 claim 独占租约。"""
+        import hashlib as _hashlib
+        from datetime import datetime, timezone, timedelta
+        token_digest = _hashlib.sha256(owner_token.encode("utf-8")).hexdigest()
+        now = datetime.now(timezone.utc)
+        lease_until = (now + timedelta(seconds=self._LEASE_TTL_SECONDS)).isoformat()
+        now_iso = now.isoformat()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT owner_token_digest, lease_until FROM tuning_execution_lease WHERE id = 1"
+            ).fetchone()
+            is_free = row["owner_token_digest"] is None
+            is_stale = False
+            if not is_free and row["lease_until"]:
+                try:
+                    lease_time = datetime.fromisoformat(
+                        row["lease_until"].replace("Z", "+00:00")
+                    )
+                    is_stale = lease_time < now
+                except (ValueError, TypeError):
+                    is_stale = True
+            if is_free or (is_stale and allow_stale_takeover):
+                conn.execute(
+                    "UPDATE tuning_execution_lease "
+                    "SET owner_experiment_id = ?, owner_round_id = ?, "
+                    "    owner_token_digest = ?, lease_until = ?, "
+                    "    heartbeat_at = ?, updated_at = ? "
+                    "WHERE id = 1",
+                    (experiment_id, round_id, token_digest,
+                     lease_until, now_iso, now_iso),
+                )
+                return {"ok": True, "experiment_id": experiment_id, "round_id": round_id}
+            return {"ok": False, "reason": "lease_held"}
+
+    def release_tuning_lease(self, *, owner_token: str) -> None:
+        """释放租约（仅持有者可释放）。"""
+        import hashlib as _hashlib
+        token_digest = _hashlib.sha256(owner_token.encode("utf-8")).hexdigest()
+        now = _now()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT owner_token_digest FROM tuning_execution_lease WHERE id = 1"
+            ).fetchone()
+            if row and row["owner_token_digest"] == token_digest:
+                conn.execute(
+                    "UPDATE tuning_execution_lease "
+                    "SET owner_experiment_id = NULL, owner_round_id = NULL, "
+                    "    owner_token_digest = NULL, lease_until = NULL, "
+                    "    heartbeat_at = NULL, updated_at = ? "
+                    "WHERE id = 1",
+                    (now,),
+                )
+
+    def heartbeat_tuning_lease(self, *, owner_token: str) -> None:
+        """延长租约心跳。"""
+        import hashlib as _hashlib
+        from datetime import datetime, timezone, timedelta
+        token_digest = _hashlib.sha256(owner_token.encode("utf-8")).hexdigest()
+        now = datetime.now(timezone.utc)
+        lease_until = (now + timedelta(seconds=self._LEASE_TTL_SECONDS)).isoformat()
+        now_iso = now.isoformat()
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE tuning_execution_lease "
+                "SET heartbeat_at = ?, lease_until = ?, updated_at = ? "
+                "WHERE id = 1 AND owner_token_digest = ?",
+                (now_iso, lease_until, now_iso, token_digest),
+            )
+
+    def get_tuning_lease(self) -> dict:
+        """返回当前租约状态。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tuning_execution_lease WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return {"owner_experiment_id": None, "owner_round_id": None}
+        return {
+            "owner_experiment_id": row["owner_experiment_id"],
+            "owner_round_id": row["owner_round_id"],
+            "lease_until": row["lease_until"],
+            "heartbeat_at": row["heartbeat_at"],
+        }
+
+    def reconcile_tuning_after_restart(self) -> None:
+        """原子恢复中断轮次、阻断所属实验，然后释放旧进程租约。
+
+        不修改 advanced_config_state（FR-042/SC-014）。
+        """
+        now = _now()
+        with self._connection() as conn:
+            interrupted = conn.execute(
+                "SELECT id, experiment_id FROM tuning_rounds "
+                "WHERE status IN ('running', 'issued', 'reported') "
+                "ORDER BY created_at, id"
+            ).fetchall()
+            by_experiment: dict[str, list[str]] = {}
+            for row in interrupted:
+                by_experiment.setdefault(row["experiment_id"], []).append(row["id"])
+            conn.execute(
+                "UPDATE tuning_rounds SET status = 'uncertain', "
+                "failure_code = COALESCE(failure_code, 'restart_interrupted_round'), "
+                "finished_at = COALESCE(finished_at, ?) "
+                "WHERE status IN ('running', 'issued', 'reported')",
+                (now,),
+            )
+            for experiment_id, round_ids in by_experiment.items():
+                reason = "重启中断了未原子确认的轮次: " + ", ".join(round_ids)
+                conn.execute(
+                    "UPDATE tuning_experiments SET status = 'blocked', "
+                    "blocked_code = 'restart_interrupted_round', "
+                    "blocked_reason = ?, updated_at = ? "
+                    "WHERE id = ? AND status IN ('queued', 'running')",
+                    (reason, now, experiment_id),
+                )
+            # 状态对账完成后才释放租约；新进程必须重新签发轮次。
+            conn.execute(
+                "UPDATE tuning_execution_lease "
+                "SET owner_experiment_id = NULL, owner_round_id = NULL, "
+                "    owner_token_digest = NULL, lease_until = NULL, "
+                "    heartbeat_at = NULL, updated_at = ? "
+                "WHERE id = 1",
+                (now,),
+            )
+
+    # -- 测量事件持久化 (data-model.md 2.9) ---------------------------
+
+    # 敏感字段黑名单：这些键名或值内容不得进入测量事件
+    _MEASUREMENT_FORBIDDEN_KEYS = frozenset({
+        "api_key", "apikey", "secret", "token", "password", "credential",
+        "resume_text", "resume", "jd_body", "jd", "model_response",
+        "raw_response", "authorization",
+    })
+
+    def _validate_measurement_payload(self, payload: dict) -> None:
+        """校验测量事件 payload 不包含敏感字段。"""
+        if not isinstance(payload, dict):
+            return
+        for key in payload:
+            key_lower = str(key).lower()
+            if key_lower in self._MEASUREMENT_FORBIDDEN_KEYS:
+                raise ValueError(f"测量事件禁止包含敏感字段: {key}")
+
+    def save_tuning_measurement_event(
+        self, *, round_id: str, event_type: str, stage: str,
+        duration_ms: int, started_monotonic_ms: int | None = None,
+        counts: dict | None = None, error_code: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        """持久化一条测量事件。
+
+        data-model.md 2.9: 禁止凭据、原始简历、原始模型响应和 JD 正文。
+        """
+        # 校验敏感字段
+        if counts:
+            self._validate_measurement_payload(counts)
+        if metadata:
+            self._validate_measurement_payload(metadata)
+        if duration_ms < 0:
+            raise ValueError("duration_ms 必须非负")
+        if started_monotonic_ms is not None and started_monotonic_ms < 0:
+            raise ValueError("started_monotonic_ms 必须非负")
+
+        now = _now()
+        counts_json = json.dumps(counts, ensure_ascii=False, sort_keys=True) if counts else None
+        metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True) if metadata else None
+
+        with self._connection() as conn:
+            # 先取得 SQLite 写锁，使 MAX(seq)+INSERT 成为一个不可交错的分配事务。
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq "
+                "FROM tuning_measurement_events WHERE round_id = ?",
+                (round_id,),
+            ).fetchone()
+            next_seq = row["next_seq"]
+            if started_monotonic_ms is None:
+                started_monotonic_ms = 0
+            conn.execute(
+                "INSERT INTO tuning_measurement_events "
+                "(round_id, seq, event_type, stage, started_monotonic_ms, "
+                " duration_ms, counts_json, error_code, metadata_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (round_id, next_seq, event_type, stage, started_monotonic_ms,
+                 duration_ms, counts_json, error_code, metadata_json, now),
+            )
+        return {
+            "round_id": round_id, "seq": next_seq, "event_type": event_type,
+            "stage": stage, "started_monotonic_ms": started_monotonic_ms,
+            "duration_ms": duration_ms, "counts": counts,
+            "error_code": error_code, "metadata": metadata,
+        }
+
+    def list_tuning_measurement_events(self, round_id: str) -> list[dict]:
+        """列出某轮次的全部测量事件，按 seq 升序。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tuning_measurement_events "
+                "WHERE round_id = ? ORDER BY seq ASC",
+                (round_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            counts = json.loads(row["counts_json"]) if row["counts_json"] else None
+            metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else None
+            result.append({
+                "round_id": row["round_id"], "seq": row["seq"],
+                "event_type": row["event_type"], "stage": row["stage"],
+                "started_monotonic_ms": row["started_monotonic_ms"],
+                "duration_ms": row["duration_ms"],
+                "counts": counts, "error_code": row["error_code"],
+                "metadata": metadata, "created_at": row["created_at"],
+            })
+        return result
+
+    # -- T020: 质量参考 CRUD (data-model.md 2.4) ------------------------
+
+    def save_quality_reference(
+        self, *, experiment_id: str, input_version_id: str,
+        item_results: dict, variation_summary: dict,
+        reference_digest: str,
+    ) -> dict:
+        """创建一条 building 状态的质量参考记录。"""
+        ref_id = _uuid()
+        now = _now()
+        item_results_json = json.dumps(item_results, ensure_ascii=False, sort_keys=True)
+        variation_json = json.dumps(variation_summary, ensure_ascii=False, sort_keys=True)
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO tuning_quality_references "
+                "(id, experiment_id, input_version_id, status, "
+                " item_results_json, variation_summary_json, reviewed_item_ids_json, "
+                " reference_digest, created_at, confirmed_at) "
+                "VALUES (?, ?, ?, 'building', ?, ?, NULL, ?, ?, NULL)",
+                (ref_id, experiment_id, input_version_id,
+                 item_results_json, variation_json,
+                 reference_digest, now),
+            )
+        return {
+            "id": ref_id, "experiment_id": experiment_id,
+            "input_version_id": input_version_id, "status": "building",
+            "item_results": item_results,
+            "variation_summary": variation_summary,
+            "reviewed_item_ids": [],
+            "reference_digest": reference_digest,
+            "created_at": now, "confirmed_at": None,
+        }
+
+    def get_quality_reference(self, reference_id: str) -> dict:
+        """返回质量参考记录。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tuning_quality_references WHERE id = ?",
+                (reference_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"质量参考不存在: {reference_id}")
+        return {
+            "id": row["id"],
+            "experiment_id": row["experiment_id"],
+            "input_version_id": row["input_version_id"],
+            "status": row["status"],
+            "item_results": _decode_json(row["item_results_json"], {"items": []}),
+            "variation_summary": _decode_json(row["variation_summary_json"], {}),
+            "reviewed_item_ids": _decode_json(row["reviewed_item_ids_json"], []),
+            "reference_digest": row["reference_digest"],
+            "created_at": row["created_at"],
+            "confirmed_at": row["confirmed_at"],
+        }
+
+    def list_quality_references(self, experiment_id: str) -> list[dict]:
+        """列出实验的全部质量参考，按创建时间降序。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tuning_quality_references "
+                "WHERE experiment_id = ? ORDER BY created_at DESC",
+                (experiment_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "id": row["id"],
+                "experiment_id": row["experiment_id"],
+                "input_version_id": row["input_version_id"],
+                "status": row["status"],
+                "item_results": _decode_json(row["item_results_json"], {"items": []}),
+                "variation_summary": _decode_json(row["variation_summary_json"], {}),
+                "reviewed_item_ids": _decode_json(row["reviewed_item_ids_json"], []),
+                "reference_digest": row["reference_digest"],
+                "created_at": row["created_at"],
+                "confirmed_at": row["confirmed_at"],
+            })
+        return result
+
+    def update_quality_reference_status(
+        self, reference_id: str, *, status: str,
+        reviewed_item_ids: list | None = None,
+    ) -> dict:
+        """更新质量参考状态。
+
+        合法状态：building → confirmed → review_required → confirmed
+                         或 confirmed → superseded
+        """
+        valid_statuses = {"building", "confirmed", "review_required", "superseded"}
+        if status not in valid_statuses:
+            raise ValueError(f"非法质量参考状态: {status}")
+        now = _now()
+        confirmed_at = now if status == "confirmed" else None
+        reviewed_json = None
+        if reviewed_item_ids is not None:
+            reviewed_json = json.dumps(reviewed_item_ids, ensure_ascii=False, sort_keys=True)
+        with self._connection() as conn:
+            if reviewed_json is not None:
+                conn.execute(
+                    "UPDATE tuning_quality_references "
+                    "SET status = ?, reviewed_item_ids_json = ?, "
+                    "    confirmed_at = COALESCE(?, confirmed_at) "
+                    "WHERE id = ?",
+                    (status, reviewed_json, confirmed_at, reference_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE tuning_quality_references "
+                    "SET status = ?, confirmed_at = COALESCE(?, confirmed_at) "
+                    "WHERE id = ?",
+                    (status, confirmed_at, reference_id),
+                )
+        return self.get_quality_reference(reference_id)
+
+    def supersede_quality_references(
+        self, experiment_id: str, except_id: str,
+    ) -> None:
+        """将实验的全部 confirmed/review_required 参考标记为 superseded，
+        保留 except_id 不变。"""
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE tuning_quality_references "
+                "SET status = 'superseded' "
+                "WHERE experiment_id = ? AND id != ? "
+                "  AND status IN ('confirmed', 'review_required', 'building')",
+                (experiment_id, except_id),
+            )
+
+    def set_experiment_quality_reference(
+        self, experiment_id: str, reference_id: str,
+    ) -> None:
+        """设置实验的活动质量参考。"""
+        now = _now()
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE tuning_experiments "
+                "SET quality_reference_id = ?, updated_at = ? WHERE id = ?",
+                (reference_id, now, experiment_id),
+            )
+
+    # -- T022: 任务单与报告持久化 (data-model.md 2.7/2.8) ----------------
+
+    def save_task_manifest(
+        self, *, experiment_id: str, candidate_id: str, round_id: str,
+        manifest_version: int, manifest_json: str, manifest_digest: str,
+        rendered_task_path: str,
+    ) -> dict:
+        """持久化一份已签发的任务单。"""
+        manifest_id = _uuid()
+        now = _now()
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO tuning_task_manifests "
+                "(id, experiment_id, candidate_id, round_id, manifest_version, "
+                " manifest_json, manifest_digest, rendered_task_path, "
+                " status, issued_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?)",
+                (manifest_id, experiment_id, candidate_id, round_id,
+                 manifest_version, manifest_json, manifest_digest,
+                 rendered_task_path, now, now),
+            )
+        return {
+            "manifest_id": manifest_id,
+            "manifest_digest": manifest_digest,
+            "rendered_task_path": rendered_task_path,
+            "status": "issued",
+        }
+
+    def issue_task_manifest_atomic(
+        self, *, experiment_id: str, candidate_id: str, round_id: str,
+        manifest_version: int, manifest_json: str, manifest_digest: str,
+        rendered_task_path: str, owner_token: str,
+    ) -> dict:
+        """在一个 IMMEDIATE 事务中 claim 租约并签发唯一任务单。"""
+        token_digest = hashlib.sha256(owner_token.encode("utf-8")).hexdigest()
+        manifest_id = _uuid()
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_until = (now_dt + timedelta(seconds=self._LEASE_TTL_SECONDS)).isoformat()
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            experiment = conn.execute(
+                "SELECT status FROM tuning_experiments WHERE id = ?", (experiment_id,),
+            ).fetchone()
+            round_row = conn.execute(
+                "SELECT status, experiment_id, candidate_id FROM tuning_rounds WHERE id = ?",
+                (round_id,),
+            ).fetchone()
+            lease = conn.execute(
+                "SELECT owner_token_digest FROM tuning_execution_lease WHERE id = 1"
+            ).fetchone()
+            if experiment is None or experiment["status"] != "awaiting_instruction":
+                raise ValueError("实验状态已变化，任务单签发中止")
+            if (
+                round_row is None or round_row["status"] != "planned"
+                or round_row["experiment_id"] != experiment_id
+                or round_row["candidate_id"] != candidate_id
+            ):
+                raise ValueError("轮次状态或归属已变化，任务单签发中止")
+            if lease is None or lease["owner_token_digest"] is not None:
+                raise ValueError("独占执行租约被占用，不能签发任务单")
+            conn.execute(
+                "UPDATE tuning_execution_lease SET owner_experiment_id = ?, "
+                "owner_round_id = ?, owner_token_digest = ?, lease_until = ?, "
+                "heartbeat_at = ?, updated_at = ? WHERE id = 1",
+                (experiment_id, round_id, token_digest, lease_until, now, now),
+            )
+            conn.execute(
+                "INSERT INTO tuning_task_manifests "
+                "(id, experiment_id, candidate_id, round_id, manifest_version, "
+                "manifest_json, manifest_digest, rendered_task_path, status, "
+                "issued_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?)",
+                (manifest_id, experiment_id, candidate_id, round_id,
+                 manifest_version, manifest_json, manifest_digest,
+                 rendered_task_path, now, now),
+            )
+            conn.execute(
+                "UPDATE tuning_rounds SET status = 'issued', manifest_id = ? WHERE id = ?",
+                (manifest_id, round_id),
+            )
+            conn.execute(
+                "UPDATE tuning_experiments SET status = 'queued', updated_at = ? WHERE id = ?",
+                (now, experiment_id),
+            )
+        return {
+            "manifest_id": manifest_id, "manifest_digest": manifest_digest,
+            "rendered_task_path": rendered_task_path, "status": "issued",
+        }
+
+    def get_task_manifest(self, manifest_id: str) -> dict:
+        """返回任务单记录。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM tuning_task_manifests WHERE id = ?",
+                (manifest_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"任务单不存在: {manifest_id}")
+        return {
+            "id": row["id"],
+            "experiment_id": row["experiment_id"],
+            "candidate_id": row["candidate_id"],
+            "round_id": row["round_id"],
+            "manifest_version": row["manifest_version"],
+            "manifest": _decode_json(row["manifest_json"], {}),
+            "manifest_digest": row["manifest_digest"],
+            "rendered_task_path": row["rendered_task_path"],
+            "status": row["status"],
+            "issued_at": row["issued_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def update_task_manifest_status(
+        self, manifest_id: str, *, status: str,
+    ) -> None:
+        """更新任务单状态。"""
+        now = _now()
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE tuning_task_manifests "
+                "SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, manifest_id),
+            )
+
+    def start_task_manifest_atomic(self, manifest_id: str, *, owner_token: str) -> dict:
+        """核对签发租约并原子推进 queued/issued → running。"""
+        token_digest = hashlib.sha256(owner_token.encode("utf-8")).hexdigest()
+        now = _now()
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            manifest = conn.execute(
+                "SELECT * FROM tuning_task_manifests WHERE id = ?", (manifest_id,),
+            ).fetchone()
+            if manifest is None:
+                raise KeyError(f"任务单不存在: {manifest_id}")
+            round_row = conn.execute(
+                "SELECT status FROM tuning_rounds WHERE id = ?", (manifest["round_id"],),
+            ).fetchone()
+            experiment = conn.execute(
+                "SELECT status FROM tuning_experiments WHERE id = ?",
+                (manifest["experiment_id"],),
+            ).fetchone()
+            lease = conn.execute(
+                "SELECT owner_token_digest, owner_experiment_id, owner_round_id "
+                "FROM tuning_execution_lease WHERE id = 1"
+            ).fetchone()
+            if manifest["status"] != "issued":
+                raise ValueError("任务单不是 issued 状态")
+            if round_row is None or round_row["status"] != "issued":
+                raise ValueError("轮次不是 issued 状态")
+            if experiment is None or experiment["status"] != "queued":
+                raise ValueError("实验不是 queued 状态")
+            if (
+                lease is None or lease["owner_token_digest"] != token_digest
+                or lease["owner_experiment_id"] != manifest["experiment_id"]
+                or lease["owner_round_id"] != manifest["round_id"]
+            ):
+                raise ValueError("任务单未持有匹配的应用租约")
+            conn.execute(
+                "UPDATE tuning_rounds SET status = 'running', started_at = ? WHERE id = ?",
+                (now, manifest["round_id"]),
+            )
+            conn.execute(
+                "UPDATE tuning_experiments SET status = 'running', updated_at = ? WHERE id = ?",
+                (now, manifest["experiment_id"]),
+            )
+            conn.execute(
+                "UPDATE tuning_task_manifests SET status = 'running', updated_at = ? WHERE id = ?",
+                (now, manifest_id),
+            )
+        return {
+            "manifest_id": manifest_id, "round_id": manifest["round_id"],
+            "experiment_id": manifest["experiment_id"], "status": "running",
+        }
+
+    def save_executor_report(
+        self, *, manifest_id: str, report_version: int,
+        report_json: str, reported_manifest_digest: str,
+        evidence_digest: str, validation_status: str,
+        validation_errors: list | None = None,
+    ) -> dict:
+        """持久化一份执行者报告。"""
+        report_id = _uuid()
+        now = _now()
+        errors_json = json.dumps(
+            validation_errors or [], ensure_ascii=False, sort_keys=True,
+        )
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO tuning_executor_reports "
+                "(id, manifest_id, report_version, report_json, "
+                " reported_manifest_digest, evidence_digest, "
+                " validation_status, validation_errors_json, "
+                " created_at, validated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (report_id, manifest_id, report_version, report_json,
+                 reported_manifest_digest, evidence_digest,
+                 validation_status, errors_json, now, now),
+            )
+        return {
+            "report_id": report_id,
+            "manifest_id": manifest_id,
+            "validation_status": validation_status,
+        }
+
+    def save_executor_report_atomic(
+        self, *, manifest_id: str, report_version: int, report_json: str,
+        reported_manifest_digest: str, evidence_digest: str,
+        validation_status: str, validation_errors: list | None,
+        report_status: str | None, owner_token: str,
+    ) -> dict:
+        """原子保存报告、推进轮次/实验并释放应用持有的租约。"""
+        report_id = _uuid()
+        now = _now()
+        token_digest = hashlib.sha256(owner_token.encode("utf-8")).hexdigest()
+        errors_json = json.dumps(
+            validation_errors or [], ensure_ascii=False, sort_keys=True,
+        )
+        parsed = _decode_json(report_json, {})
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            manifest = conn.execute(
+                "SELECT * FROM tuning_task_manifests WHERE id = ?", (manifest_id,),
+            ).fetchone()
+            if manifest is None:
+                raise KeyError(f"任务单不存在: {manifest_id}")
+            round_row = conn.execute(
+                "SELECT status FROM tuning_rounds WHERE id = ?", (manifest["round_id"],),
+            ).fetchone()
+            experiment = conn.execute(
+                "SELECT status FROM tuning_experiments WHERE id = ?",
+                (manifest["experiment_id"],),
+            ).fetchone()
+            lease = conn.execute(
+                "SELECT owner_token_digest, owner_round_id FROM tuning_execution_lease WHERE id = 1"
+            ).fetchone()
+            if (
+                round_row is None or experiment is None or lease is None
+                or lease["owner_token_digest"] != token_digest
+                or lease["owner_round_id"] != manifest["round_id"]
+            ):
+                raise ValueError("报告接收时租约或状态归属不一致")
+            if round_row["status"] not in ("running", "reported"):
+                raise ValueError(f"轮次状态 {round_row['status']} 不能接收报告")
+            conn.execute(
+                "INSERT INTO tuning_executor_reports "
+                "(id, manifest_id, report_version, report_json, "
+                "reported_manifest_digest, evidence_digest, validation_status, "
+                "validation_errors_json, created_at, validated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (report_id, manifest_id, report_version, report_json,
+                 reported_manifest_digest, evidence_digest, validation_status,
+                 errors_json, now, now),
+            )
+            if validation_status == "accepted" and report_status == "completed":
+                if experiment["status"] != "running":
+                    raise ValueError("实验不在 running，不能确认完成报告")
+                conn.execute(
+                    "UPDATE tuning_rounds SET status = 'confirmed', metrics_json = ?, "
+                    "evidence_manifest_json = ?, finished_at = ?, confirmed_at = ? WHERE id = ?",
+                    (json.dumps(parsed.get("program_evidence", {}), ensure_ascii=False,
+                                sort_keys=True),
+                     json.dumps({"artifacts": parsed.get("artifacts", [])},
+                                ensure_ascii=False, sort_keys=True),
+                     now, now, manifest["round_id"]),
+                )
+                conn.execute(
+                    "UPDATE tuning_experiments SET status = 'evaluating', updated_at = ? WHERE id = ?",
+                    (now, manifest["experiment_id"]),
+                )
+                final_round_status, final_experiment_status = "confirmed", "evaluating"
+            elif validation_status == "accepted" and report_status == "blocked":
+                conn.execute(
+                    "UPDATE tuning_rounds SET status = 'blocked', failure_code = ?, "
+                    "metrics_json = ?, evidence_manifest_json = ?, finished_at = ? WHERE id = ?",
+                    (parsed.get("stop_reason") or "executor_blocked",
+                     json.dumps(parsed.get("program_evidence", {}), ensure_ascii=False,
+                                sort_keys=True),
+                     json.dumps({"artifacts": parsed.get("artifacts", [])},
+                                ensure_ascii=False, sort_keys=True),
+                     now, manifest["round_id"]),
+                )
+                conn.execute(
+                    "UPDATE tuning_experiments SET status = 'blocked', blocked_code = ?, "
+                    "blocked_reason = ?, updated_at = ? WHERE id = ?",
+                    (parsed.get("stop_reason") or "executor_blocked",
+                     "执行者按任务单停止条件阻断", now, manifest["experiment_id"]),
+                )
+                final_round_status, final_experiment_status = "blocked", "blocked"
+            else:
+                conn.execute(
+                    "UPDATE tuning_rounds SET status = 'invalid', "
+                    "failure_code = 'report_validation_failed', finished_at = ? WHERE id = ?",
+                    (now, manifest["round_id"]),
+                )
+                conn.execute(
+                    "UPDATE tuning_experiments SET status = 'blocked', "
+                    "blocked_code = 'report_validation_failed', blocked_reason = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    ("; ".join(validation_errors or []), now, manifest["experiment_id"]),
+                )
+                final_round_status, final_experiment_status = "invalid", "blocked"
+            conn.execute(
+                "UPDATE tuning_task_manifests SET status = ?, updated_at = ? WHERE id = ?",
+                ("reported" if validation_status == "accepted" else "rejected", now, manifest_id),
+            )
+            conn.execute(
+                "UPDATE tuning_execution_lease SET owner_experiment_id = NULL, "
+                "owner_round_id = NULL, owner_token_digest = NULL, lease_until = NULL, "
+                "heartbeat_at = NULL, updated_at = ? WHERE id = 1",
+                (now,),
+            )
+        return {
+            "report_id": report_id, "manifest_id": manifest_id,
+            "validation_status": validation_status,
+            "round_status": final_round_status,
+            "experiment_status": final_experiment_status,
+        }

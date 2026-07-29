@@ -1,4 +1,12 @@
-import type { JobItem } from "./types";
+import type {
+  AdvancedSettingsState,
+  ExecutionSelection,
+  ExecutionSettings,
+  FrozenSearchScope,
+  JobItem,
+  ScopePreviewResponse,
+  TaskSize,
+} from "./types";
 
 export interface PipelineResult {
   ok?: boolean;
@@ -44,4 +52,35 @@ export function partitionPipelineResult(result: PipelineResult): PipelineGroups 
     else groups.uncertain.push(job);
   }
   return groups;
+}
+
+export function classifyTaskSize(plannedPages: number): TaskSize {
+  if (!Number.isInteger(plannedPages) || plannedPages < 1 || plannedPages > 30) {
+    throw new RangeError("planned pages must be an integer from 1 to 30");
+  }
+  if (plannedPages <= 9) return "small";
+  if (plannedPages <= 19) return "medium";
+  return "large";
+}
+
+export function normalizeScopePreview(response: ScopePreviewResponse): FrozenSearchScope {
+  if (!response.ok || !response.scope?.scope_digest) {
+    throw new TypeError("backend scope preview is incomplete");
+  }
+  return {
+    ...response.scope,
+    keywords: [...response.scope.keywords],
+    cities: [...response.scope.cities],
+  };
+}
+
+export function recoverSelectionSettings(
+  state: AdvancedSettingsState,
+  selection: ExecutionSelection,
+): ExecutionSettings {
+  if (selection === "custom") {
+    if (!state.last_custom) throw new Error("recent custom settings are unavailable");
+    return { ...state.last_custom.settings };
+  }
+  return { ...state.settings };
 }

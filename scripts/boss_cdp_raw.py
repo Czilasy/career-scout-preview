@@ -19,7 +19,7 @@ BOSS直聘职位抓取 + 分析 — 纯 CDP raw protocol
   uv run python3 scripts/boss_cdp_raw.py --version
 """
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 import json
 import time
@@ -205,6 +205,10 @@ def _city_data_path():
 def load_local_city_map():
     """读取本地 data/city_codes.json 静态全量城市码表。
 
+    兼容两种格式：
+    - 旧扁平格式: {name: code}
+    - 新结构化格式: {schema_version, nationwide, cities: [{name, code, aliases, enabled}]}
+
     返回 (name_to_code, code_to_name) 两个字典；读取失败返回 ({}, {})。
     结果缓存，重复调用零开销。
     """
@@ -216,7 +220,23 @@ def load_local_city_map():
         path = _city_data_path()
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        if isinstance(raw, dict):
+        if isinstance(raw, dict) and "cities" in raw:
+            # 新结构化格式 (schema_version >= 2)
+            nationwide = raw.get("nationwide")
+            if isinstance(nationwide, dict) and nationwide.get("enabled", True):
+                nw_name = nationwide.get("name")
+                nw_code = nationwide.get("code")
+                if nw_name and nw_code:
+                    name_to_code[str(nw_name)] = str(nw_code)
+            for entry in raw.get("cities", []):
+                if not entry.get("enabled", True):
+                    continue
+                cname = entry.get("name")
+                ccode = entry.get("code")
+                if cname and ccode:
+                    name_to_code[str(cname)] = str(ccode)
+        elif isinstance(raw, dict):
+            # 旧扁平格式 {name: code}
             for name, code in raw.items():
                 if name and code is not None:
                     name_to_code[str(name)] = str(code)

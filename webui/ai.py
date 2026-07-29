@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 import time
 from urllib.parse import urlparse
 
@@ -123,6 +124,69 @@ def map_ai_error_to_block_code(error_code: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# T019: Measurement event emission helpers (FR-030/SC-006/SC-007)
+# ---------------------------------------------------------------------------
+
+def _emit_request_event(callback, stage: str, t0: float, *,
+                        error_code: str | None = None,
+                        counts: dict | None = None):
+    """Emit a ``request`` measurement event if a callback is attached.
+
+    The callback receives only safe fields — never the API key, request
+    body, or raw response (data-model.md 2.9).
+    """
+    if callback is None:
+        return
+    duration_ms = max(0, int((time.time() - t0) * 1000))
+    try:
+        callback("request", stage=stage, duration_ms=duration_ms,
+                 counts=counts, error_code=error_code)
+    except Exception:
+        pass  # measurement must never break the pipeline
+
+
+def _emit_batch_event(callback, stage: str, *,
+                      input_count: int, output_count: int,
+                      error_code: str | None = None,
+                      extra_counts: dict | None = None):
+    """Emit a ``batch`` measurement event if a callback is attached."""
+    if callback is None:
+        return
+    counts = {"input_count": input_count, "output_count": output_count}
+    if extra_counts:
+        counts.update(extra_counts)
+    try:
+        callback("batch", stage=stage, duration_ms=0,
+                 counts=counts, error_code=error_code)
+    except Exception:
+        pass
+
+
+def _emit_retry_event(callback, stage: str, backoff_ms: int):
+    """Emit a ``retry`` measurement event for backoff / re-attempt."""
+    if callback is None:
+        return
+    try:
+        callback("retry", stage=stage, duration_ms=max(0, int(backoff_ms)))
+    except Exception:
+        pass
+
+
+def _emit_item_terminal_event(callback, stage: str, *,
+                              item_index: int, status: str,
+                              input_count: int):
+    """Emit an ``item_terminal`` event for SC-007 terminal conservation."""
+    if callback is None:
+        return
+    try:
+        callback("item_terminal", stage=stage, duration_ms=0,
+                 counts={"item_index": item_index, "status": status,
+                         "input_count": input_count})
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Credential management
 # ---------------------------------------------------------------------------
 
@@ -144,6 +208,99 @@ def _chat_completions_url(endpoint_url: str) -> str:
     if url.endswith("/chat/completions"):
         return url
     return url + "/chat/completions"
+
+
+_SCHANNEL_POST_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+try {
+    $inputData = [Console]::In.ReadToEnd() | ConvertFrom-Json
+    $headers = @{ Authorization = ('Bearer ' + $inputData.api_key) }
+    $body = $inputData.payload | ConvertTo-Json -Depth 30 -Compress
+    $response = Invoke-WebRequest -UseBasicParsing `
+        -Uri $inputData.url -Method Post -Headers $headers `
+        -ContentType 'application/json' `
+        -Body ([Text.Encoding]::UTF8.GetBytes($body)) `
+        -TimeoutSec ([int]$inputData.timeout_seconds)
+    @{ ok = $true; status = [int]$response.StatusCode; body = $response.Content } |
+        ConvertTo-Json -Compress -Depth 5
+} catch {
+    $webResponse = $_.Exception.Response
+    if ($null -ne $webResponse) {
+        $reader = [IO.StreamReader]::new($webResponse.GetResponseStream())
+        $responseBody = $reader.ReadToEnd()
+        $reader.Dispose()
+        @{ ok = $true; status = [int]$webResponse.StatusCode; body = $responseBody } |
+            ConvertTo-Json -Compress -Depth 5
+    } else {
+        @{ ok = $false } | ConvertTo-Json -Compress
+    }
+}
+"""
+
+
+def _windows_schannel_post(
+    url: str, api_key: str, payload: dict, *, timeout_seconds: int,
+) -> requests.Response:
+    """POST through Windows Schannel without exposing credentials in argv."""
+    request_input = json.dumps({
+        "url": url,
+        "api_key": api_key,
+        "payload": payload,
+        "timeout_seconds": max(1, int(timeout_seconds)),
+    }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive",
+                "-Command", _SCHANNEL_POST_SCRIPT,
+            ],
+            input=request_input,
+            capture_output=True,
+            timeout=max(1, int(timeout_seconds)) + 10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise requests.Timeout("Schannel fallback timed out") from None
+    except (FileNotFoundError, OSError):
+        raise requests.ConnectionError("Schannel fallback unavailable") from None
+    if completed.returncode != 0:
+        raise requests.ConnectionError("Schannel fallback failed")
+    try:
+        envelope = json.loads(completed.stdout.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        raise requests.ConnectionError("Schannel fallback returned invalid data") from None
+    if not isinstance(envelope, dict) or not envelope.get("ok"):
+        raise requests.ConnectionError("Schannel fallback failed")
+    body = envelope.get("body")
+    if not isinstance(body, str):
+        body = ""
+    response = requests.Response()
+    response.status_code = int(envelope.get("status") or 0)
+    response._content = body.encode("utf-8")
+    response.encoding = "utf-8"
+    response.url = url
+    return response
+
+
+def _post_ai_json(
+    url: str, api_key: str, payload: dict, *, timeout,
+    stream: bool, fallback_timeout_seconds: int,
+) -> requests.Response:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        return requests.post(
+            url, json=payload, headers=headers, timeout=timeout, stream=stream,
+        )
+    except requests.exceptions.SSLError:
+        return _windows_schannel_post(
+            url, api_key, payload,
+            timeout_seconds=fallback_timeout_seconds,
+        )
 
 
 def list_models(endpoint_url: str, api_key: str) -> list[str]:
@@ -237,10 +394,11 @@ def test_connection(endpoint_url: str, api_key: str, model: str = "") -> dict:
         "temperature": 0.3,
         "max_tokens": 24,
     }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=CONNECTION_TIMEOUT)
+        response = _post_ai_json(
+            url, api_key, payload, timeout=CONNECTION_TIMEOUT, stream=False,
+            fallback_timeout_seconds=CONNECTION_TIMEOUT,
+        )
     except requests.Timeout:
         return {"ok": False, "transport": "failed", "generation": "failed",
                 "candidate_contract": "manual_required", "warning_codes": [ERROR_TIMEOUT]}
@@ -397,10 +555,6 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
         "response_format": {"type": "json_object"},
         "stream": True,
     }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
     # (连接超时, 读取超时)：连接 15s 内必须建立；建立后每 20s 内必须收到数据
     stream_timeout = (CONNECTION_TIMEOUT, STREAM_IDLE_TIMEOUT)
 
@@ -413,9 +567,10 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
     for attempt in range(RATE_LIMIT_ATTEMPTS):
         response = None
         try:
-            response = requests.post(
-                _chat_completions_url(endpoint_url), json=payload, headers=headers,
+            response = _post_ai_json(
+                _chat_completions_url(endpoint_url), api_key, payload,
                 timeout=stream_timeout, stream=True,
+                fallback_timeout_seconds=STREAM_TOTAL_TIMEOUT,
             )
         except requests.Timeout:
             last_error = AISecurityError(ERROR_TIMEOUT)
@@ -722,13 +877,18 @@ def _build_criteria_description(criteria):
 def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 batch_size=None, progress=None,
                 concurrency=None, raise_on_systemic=False,
-                completed_verdicts=None, on_batch_done=None):
+                completed_verdicts=None, on_batch_done=None,
+                execution_config=None,
+                measurement_callback=None):
     """Stage A 粗筛：AI 逐条核对岗位列表字段，移除"明显"不符合的。
 
     ``jobs``: 脚本抓回的岗位列表（仅列表字段，无 JD）。
     ``criteria``: {"profile_summary": str, "city": [...], "degree": [...], ...}。
     ``concurrency``: 并发批次数，默认 1（串行）。spec 007 ⑥⑦：免费端点实测并发=1；
         换不限流端点可调大。>1 时用线程池并发提交批次，结果按批次顺序合并。
+
+    ``execution_config``: SPEC011 T006 — 可选的不可变 ExecutionConfigSnapshot。
+    提供时使用冻结的 ``screen_batch_size``/``screen_concurrency``，不读 JSON。
 
     学历向下兼容、实习/全职不符、城市不符、薪资严重偏低视为明显不符；
     拿不准的一律保留（宁可多留不可错杀）。AI 调用失败的批次全部保留。
@@ -746,9 +906,15 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
     "verdicts": {job_id: {"verdict","reason"}}}。
     """
     if batch_size is None:
-        batch_size = int(_adv_setting("screen_batch_size", SCREEN_BATCH_SIZE))
+        if execution_config is not None:
+            batch_size = int(execution_config.screen_batch_size)
+        else:
+            batch_size = int(_adv_setting("screen_batch_size", SCREEN_BATCH_SIZE))
     if concurrency is None:
-        concurrency = int(_adv_setting("screen_concurrency", SCREEN_CONCURRENCY))
+        if execution_config is not None:
+            concurrency = int(execution_config.screen_concurrency)
+        else:
+            concurrency = int(_adv_setting("screen_concurrency", SCREEN_CONCURRENCY))
     kept, dropped, verdicts = [], [], {}
     completed_verdicts = completed_verdicts or {}
     completed_ids = {str(job_id) for job_id in completed_verdicts}
@@ -827,6 +993,8 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
+        _t0 = time.time()
+        _req_error_code = None
         try:
             data = call_ai(endpoint_url, api_key, messages, model=model)
             dropped_list = data.get("dropped", []) if isinstance(data, dict) else []
@@ -834,15 +1002,28 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         except AISecurityError as exc:
             # 切片6：systemic 错误（限流/额度/密钥/网络）立即抛，让调用方暂停
             if raise_on_systemic and exc.error_code in SYSTEMIC_AI_ERROR_CODES:
+                _req_error_code = exc.error_code
+                _emit_request_event(measurement_callback, "rough", _t0,
+                                    error_code=exc.error_code,
+                                    counts={"batch_size": len(batch)})
                 raise
             if exc.error_code == ERROR_TRUNCATED and len(batch) > 1:
                 # 返回被截断：拆半重跑这批，还截断就继续拆（到单条为止）
+                _req_error_code = exc.error_code
+                _emit_request_event(measurement_callback, "rough", _t0,
+                                    error_code=exc.error_code,
+                                    counts={"batch_size": len(batch),
+                                            "truncated_split": 1})
                 mid = len(batch) // 2
                 d1, v1 = _process_batch(batch[:mid])
                 d2, v2 = _process_batch(batch[mid:])
                 v1.update(v2)
                 return d1 + d2, v1
+            _req_error_code = exc.error_code
             by_i = {}  # 调用失败：该批全部保留，防错杀
+        else:
+            _emit_request_event(measurement_callback, "rough", _t0,
+                                counts={"batch_size": len(batch)})
 
         b_dropped, b_verdicts = [], {}
         for idx, job in enumerate(batch):
@@ -859,6 +1040,11 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 b_verdicts[jid] = {"verdict": "dropped", "reason": reason}
             else:
                 b_verdicts[jid] = {"verdict": "kept", "reason": ""}
+        # 批次事件：记录输入/输出数量
+        _emit_batch_event(measurement_callback, "rough",
+                          input_count=len(batch),
+                          output_count=len(b_dropped),
+                          error_code=_req_error_code)
         return b_dropped, b_verdicts
 
     if concurrency <= 1:
@@ -921,7 +1107,9 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
 
 def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
               batch_size=None, progress=None, completed_verdicts=None,
-              concurrency=None, raise_on_systemic=False):
+              concurrency=None, raise_on_systemic=False,
+              execution_config=None,
+              measurement_callback=None):
     """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
 
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
@@ -935,14 +1123,23 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     ``concurrency``: 并发批次数，默认 1（串行）。spec 007 ⑥⑦：免费端点实测并发=1；
         换不限流端点可调大。>1 时用线程池并发提交批次，结果按完成顺序合并。
 
+    ``execution_config``: SPEC011 T006 — 可选的不可变 ExecutionConfigSnapshot。
+    提供时使用冻结的 ``match_batch_size``/``match_concurrency``，不读 JSON。
+
     切片6（FR-020/SC-008）：``raise_on_systemic=True`` 时，AI 命中限流/额度/密钥/
     网络等 systemic 错误立即抛 ``AISecurityError``，调用方应捕获并暂停整任务，
     而不是批量变 uncertain 后完成。默认 False 保持向后兼容。
     """
     if batch_size is None:
-        batch_size = int(_adv_setting("match_batch_size", MATCH_BATCH_SIZE))
+        if execution_config is not None:
+            batch_size = int(execution_config.match_batch_size)
+        else:
+            batch_size = int(_adv_setting("match_batch_size", MATCH_BATCH_SIZE))
     if concurrency is None:
-        concurrency = int(_adv_setting("match_concurrency", MATCH_CONCURRENCY))
+        if execution_config is not None:
+            concurrency = int(execution_config.match_concurrency)
+        else:
+            concurrency = int(_adv_setting("match_concurrency", MATCH_CONCURRENCY))
     verdicts = {}
     if completed_verdicts:
         done_ids = {str(k) for k in completed_verdicts}
@@ -990,6 +1187,8 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         ]
         transport_failed = False
         fail_reason = ""
+        _t0 = time.time()
+        _req_error_code = None
         try:
             data = call_ai(endpoint_url, api_key, messages, model=model)
             results = data.get("results", []) if isinstance(data, dict) else []
@@ -997,16 +1196,29 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         except AISecurityError as exc:
             # 切片6：systemic 错误立即抛，让调用方暂停（不批量变 uncertain 后完成）
             if raise_on_systemic and exc.error_code in SYSTEMIC_AI_ERROR_CODES:
+                _req_error_code = exc.error_code
+                _emit_request_event(measurement_callback, "fine", _t0,
+                                    error_code=exc.error_code,
+                                    counts={"batch_size": len(batch)})
                 raise
             if exc.error_code == ERROR_TRUNCATED and len(batch) > 1:
+                _req_error_code = exc.error_code
+                _emit_request_event(measurement_callback, "fine", _t0,
+                                    error_code=exc.error_code,
+                                    counts={"batch_size": len(batch),
+                                            "truncated_split": 1})
                 mid = len(batch) // 2
                 sub, f1 = _match_one_batch(batch[:mid])
                 sub2, f2 = _match_one_batch(batch[mid:])
                 sub.update(sub2)
                 return sub, f1 or f2
+            _req_error_code = exc.error_code
             by_i = None
             transport_failed = True
             fail_reason = user_facing_error(exc.error_code)
+        else:
+            _emit_request_event(measurement_callback, "fine", _t0,
+                                counts={"batch_size": len(batch)})
         batch_verdicts = {}
         for idx, job in enumerate(batch):
             jid = str(job.get("job_id", ""))
@@ -1015,6 +1227,9 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                     "verdict": "uncertain",
                     "reason": f"{fail_reason}，待人工确认" if fail_reason else "AI 精筛失败，待人工确认",
                 }
+                _emit_item_terminal_event(measurement_callback, "fine",
+                                          item_index=idx, status="uncertain",
+                                          input_count=len(batch))
                 continue
             r = by_i.get(idx)
             if not isinstance(r, dict) or not isinstance(r.get("match"), bool):
@@ -1022,6 +1237,9 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                     "verdict": "uncertain",
                     "reason": "AI 未返回该岗位判定，待人工确认",
                 }
+                _emit_item_terminal_event(measurement_callback, "fine",
+                                          item_index=idx, status="uncertain",
+                                          input_count=len(batch))
                 continue
             match = r["match"]
             reason = str(r.get("reason", "")).strip()
@@ -1031,6 +1249,14 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 "reason": reason,
                 "caveats": caveats,
             }
+            _emit_item_terminal_event(measurement_callback, "fine",
+                                      item_index=idx,
+                                      status="match" if match else "not_match",
+                                      input_count=len(batch))
+        _emit_batch_event(measurement_callback, "fine",
+                          input_count=len(batch),
+                          output_count=len(batch_verdicts),
+                          error_code=_req_error_code)
         return batch_verdicts, transport_failed
 
     batches = []

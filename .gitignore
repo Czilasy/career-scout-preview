@@ -39,6 +39,16 @@ tests/fixtures/discovery/*_result.json
 
 # WebUI runtime state (sqlite DB, resumes, latest_*.json) - per-machine, sensitive
 .career-scout/
+.webui-state/
+
+# Playwright CLI test artifacts
+.playwright-cli/
+
+# IDE/tool config
+.trae/
+
+# Tuning experiment runtime data (machine-specific, contains DB evidence)
+tuning/
 
 # Local skill tooling config (baoyu-image-gen etc.)
 .baoyu-skills/

@@ -418,6 +418,25 @@ class CallAITests(unittest.TestCase):
         self.assertEqual(result["profile_name"], expected["profile_name"])
         self.assertEqual(result["roles"], expected["roles"])
 
+    @patch("webui.ai._windows_schannel_post")
+    @patch("webui.ai.requests.post")
+    def test_ssl_error_uses_windows_schannel_fallback(
+        self, mock_post, mock_fallback,
+    ):
+        from webui.ai import call_ai
+
+        expected = sample_ai_resume_response()
+        mock_post.side_effect = requests.exceptions.SSLError("tls eof")
+        mock_fallback.return_value = _mock_chat_response(expected)
+
+        result = call_ai(
+            "https://api.example.com/v1/chat/completions", "secret-key",
+            [{"role": "user", "content": "hi"}],
+        )
+
+        self.assertEqual(result["profile_name"], expected["profile_name"])
+        mock_fallback.assert_called_once()
+
     @patch("webui.ai.requests.post")
     def test_error_does_not_leak_api_key(self, mock_post):
         from webui.ai import call_ai, AISecurityError
@@ -489,6 +508,28 @@ class TestConnectionTests(unittest.TestCase):
         # （合约验证留给真实业务路径里的 call_ai + provider adapter）
         self.assertEqual(result, {"ok": True, "transport": "ready", "generation": "ready",
                                   "candidate_contract": "manual_required", "warning_codes": []})
+
+    @patch("webui.ai._windows_schannel_post")
+    @patch("webui.ai.requests.post")
+    def test_ssl_error_uses_windows_schannel_fallback(
+        self, mock_post, mock_fallback,
+    ):
+        from webui.ai import test_connection
+
+        mock_post.side_effect = requests.exceptions.SSLError("tls eof")
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "choices": [{"message": {"content": "pong"}}]
+        }
+        mock_fallback.return_value = response
+
+        result = test_connection(
+            "https://api.example.com/v1", "secret-key", model="test-model"
+        )
+
+        self.assertTrue(result["ok"])
+        mock_fallback.assert_called_once()
 
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
@@ -572,6 +613,37 @@ class TestConnectionTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["transport"], "ready")
         self.assertEqual(result["generation"], "failed")
+
+
+class WindowsSchannelFallbackTests(unittest.TestCase):
+    @patch("webui.ai.subprocess.run")
+    def test_secret_is_sent_over_stdin_not_process_arguments(self, mock_run):
+        from webui.ai import _windows_schannel_post
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "ok": True, "status": 200,
+                "body": json.dumps({"choices": []}),
+            }).encode("utf-8"),
+            stderr=b"",
+        )
+        secret = "sk-never-in-process-arguments"
+
+        response = _windows_schannel_post(
+            "https://api.example.com/v1/chat/completions",
+            secret,
+            {"model": "test", "messages": []},
+            timeout_seconds=30,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        command = " ".join(mock_run.call_args.args[0])
+        self.assertNotIn(secret, command)
+        stdin_payload = json.loads(
+            mock_run.call_args.kwargs["input"].decode("utf-8")
+        )
+        self.assertEqual(stdin_payload["api_key"], secret)
 
 
 # ---------------------------------------------------------------------------
@@ -1128,6 +1200,129 @@ class ScreenJobsTruncationTests(unittest.TestCase):
 
         self.assertEqual(sorted(result["kept"]), ["j0", "j1", "j2"])
         self.assertEqual(result["dropped"], [])
+
+
+class AIMeasurementEventTests(unittest.TestCase):
+    """T016 RED: AI 阶段测量事件 — 请求时长、重试、批次计数、敏感字段拒绝。
+
+    覆盖 FR-030、SC-006、SC-007、data-model.md 2.9。
+    screen_jobs/match_jds 必须通过 measurement sink 记录：
+    - 每次请求的 attempt、duration、error_code；
+    - 退避和截断拆分；
+    - 批次输入输出数量；
+    - 不保存密钥、原始简历或敏感响应。
+    """
+
+    def test_screen_jobs_emits_measurement_events(self):
+        """screen_jobs 必须通过 measurement_callback 发射事件。"""
+        from webui import ai
+        events = []
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        jobs = [{"job_id": f"j{i}", "title": "T", "company": "C",
+                 "salary": "10K", "city": "上海", "jd": "safe"}
+                for i in range(3)]
+
+        def fake_call_ai(messages, url, api_key, **kw):
+            return {"kept": ["j0", "j1", "j2"], "dropped": []}
+
+        with patch("webui.ai.call_ai", side_effect=fake_call_ai):
+            ai.screen_jobs(
+                jobs, {"profile_summary": "画像"}, "https://x", "key",
+                batch_size=3, concurrency=1,
+                measurement_callback=capture,
+            )
+
+        event_types = [e["event_type"] for e in events]
+        # 必须至少有 request 事件和 batch 事件
+        self.assertTrue(any(et in event_types for et in ("request", "batch", "item_terminal")),
+                        f"必须发射测量事件，实际: {event_types}")
+
+    def test_screen_jobs_measurement_excludes_api_key(self):
+        """SC-006: 测量事件不得包含 api_key。"""
+        from webui import ai
+        events = []
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        jobs = [{"job_id": "j0", "title": "T", "company": "C",
+                 "salary": "10K", "city": "上海", "jd": "safe"}]
+
+        def fake_call_ai(messages, url, api_key, **kw):
+            return {"kept": ["j0"], "dropped": []}
+
+        with patch("webui.ai.call_ai", side_effect=fake_call_ai):
+            ai.screen_jobs(
+                jobs, {"profile_summary": "画像"}, "https://x",
+                "sk-secret-key-12345",
+                batch_size=1, concurrency=1,
+                measurement_callback=capture,
+            )
+
+        for ev in events:
+            payload = json.dumps(ev, ensure_ascii=False)
+            self.assertNotIn("sk-secret-key-12345", payload,
+                              "测量事件不得包含 API key")
+            self.assertNotIn("api_key", payload.lower(),
+                              "测量事件不得出现 api_key 字段名")
+
+    def test_screen_jobs_measurement_excludes_resume_text(self):
+        """SC-006: 测量事件不得包含原始简历文本。"""
+        from webui import ai
+        events = []
+        sensitive_resume = "张三 13800001111 身份证110xxx"
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        jobs = [{"job_id": "j0", "title": "T", "company": "C",
+                 "salary": "10K", "city": "上海",
+                 "jd": "safe", "resume": sensitive_resume}]
+
+        def fake_call_ai(messages, url, api_key, **kw):
+            return {"kept": ["j0"], "dropped": []}
+
+        with patch("webui.ai.call_ai", side_effect=fake_call_ai):
+            ai.screen_jobs(
+                jobs, {"profile_summary": "画像"}, "https://x", "key",
+                batch_size=1, concurrency=1,
+                measurement_callback=capture,
+            )
+
+        for ev in events:
+            payload = json.dumps(ev, ensure_ascii=False)
+            self.assertNotIn(sensitive_resume, payload,
+                              "测量事件不得包含原始简历文本")
+
+    def test_match_jds_emits_measurement_events(self):
+        """match_jds 必须通过 measurement_callback 发射事件。"""
+        from webui import ai
+        events = []
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        jds = [{"job_id": f"j{i}", "title": "T", "jd": "safe"} for i in range(3)]
+
+        def fake_call_ai(messages, url, api_key, **kw):
+            return {"results": [
+                {"i": 0, "match": True, "reason": "匹配"},
+                {"i": 1, "match": False, "reason": "不匹配"},
+                {"i": 2, "match": True, "reason": "匹配"},
+            ]}
+
+        with patch("webui.ai.call_ai", side_effect=fake_call_ai):
+            ai.match_jds(
+                jds, "候选人画像", "https://x", "key",
+                batch_size=3, concurrency=1,
+                measurement_callback=capture,
+            )
+
+        event_types = [e["event_type"] for e in events]
+        self.assertTrue(len(events) > 0, "match_jds 必须发射测量事件")
 
 
 if __name__ == "__main__":

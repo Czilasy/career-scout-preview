@@ -1,11 +1,11 @@
-# BOSS Zhipin Scraper · Job Crawler v2.2 (Chrome CDP / Plaintext Salary)
+# BOSS Zhipin Scraper · Job Crawler v2.3 (Chrome CDP / Plaintext Salary)
 
 > 🌐 中文文档：[README.md](./README.md)
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
-![Version](https://img.shields.io/badge/version-2.2.0-orange.svg)
+![Version](https://img.shields.io/badge/version-2.3.0-orange.svg)
 
 A lightweight **BOSS Zhipin scraper / crawler** (a.k.a. spider) for job listings on [zhipin.com](https://www.zhipin.com). Instead of driving a heavy Selenium/Playwright browser, it connects to your **already-logged-in Chrome** via the Chrome DevTools Protocol (CDP), reuses the real session, and calls the in-page search API directly — bypassing the front-end font-based anti-scraping so you get the **plaintext salary** in every record. Output goes to JSON / CSV, plus an aggregated salary/skill analysis and a copy-paste prompt for polishing your job-application materials. Also ships as a Career Scout Agent Skill.
 
@@ -77,6 +77,7 @@ npm run build
 4. **Explicit feedback boundary**: In Job Discovery, Interested persists to the current profile; Not Interested stays in memory for the current run and is revocable. JD retry updates only the JD and never reruns AI or changes the existing verdict.
 5. **Screening Workbench**: Keeps seven filter fields, page/detail limits, résumé-based AI suggestions, run cancel/resume, temporary match/mismatch/pending zones, persistent interested/trash zones, and 30-day cleanup for temporary runs.
 6. **A pause-and-resume healthy pipeline**: List scraping, JD fetching, and AI screening pause immediately on CAPTCHA, expired login, source blocking, or AI rate limits. The UI keeps the browser open and shows the current stage, exact reason, and success/failure/unstarted/total counts. A refresh or service restart can resume from the persisted checkpoint without repeating scraped jobs, JDs, or AI verdicts. A batch-level CDP, WebSocket, or session failure persists a specific code and readable reason for every affected job before pausing instead of swallowing the batch as empty. Resume first rechecks whether the blocker is actually gone; AI rate-limit and network pauses perform a minimal connection check, and unresolved blockers remain paused. Concurrent duplicate clicks allow only one background worker to claim the run. Jobs without a result go to Needs Review, where users can retry all or fetch one JD; a second blocker follows the same pause-and-resume behavior. Genuine short JDs are judged by extraction provenance and content rather than a fixed character threshold or a finite keyword list. When historical data lacks evidence for a specific failure category, the UI states that the old flow did not preserve the reason and shows the next recrawl action instead of inventing a classification. Every mutating request is rejected with a refresh prompt when the page build and running backend do not match, preventing an old service from silently executing a new workflow.
+7. **Advanced settings and deep-tuning lab**: Advanced settings expose Stable, Balanced, Extreme, and Custom. The backend selects the small/medium/large internal slot from the canonical planned-page count, while mode changes never alter keywords, cities, or pages. A deep experiment requires two explicitly entered workload structures for each size and uses immutable input/config digests, an exclusive lease, staged rounds, program-owned measurements, and restart recovery. Incomplete or blocked results cannot be applied; a complete candidate requires explicit user action to apply the whole version and can roll back to the previous complete version. Version 2.3.0 delivers the experiment and verification framework only: no formal deep experiment was run, and no final Stable/Balanced/Extreme parameters are claimed as validated.
 
 ### AI URL & Key Configuration
 
