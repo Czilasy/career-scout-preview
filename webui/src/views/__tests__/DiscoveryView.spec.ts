@@ -313,4 +313,50 @@ describe("DiscoveryView", () => {
     expect(JSON.parse(String(previewCall?.[1]?.body))).toMatchObject({ scope_kind: "nationwide", cities: [] });
     vi.unstubAllGlobals();
   });
+
+  it("keeps the >10 pages warning inside the ? tooltip instead of inline layout", async () => {
+    const settings = {
+      inter_combo_delay: 10,
+      detail_batch_size: 15,
+      detail_interval: 2,
+      detail_reset_every: 4,
+      detail_batch_cooldown: 5,
+      detail_tab_pool_size: 5,
+      screen_batch_size: 50,
+      screen_concurrency: 5,
+      match_batch_size: 4,
+      match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.endsWith("/api/latest-running-task")) return response({ task: null });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text().includes("跳过简历"))!.trigger("click");
+
+    const pages = wrapper.get('[data-testid="pages-per-combination"]');
+    await pages.setValue(11);
+    await pages.trigger("change");
+    await flushPromises();
+
+    const pagesLabel = pages.element.parentElement as HTMLElement;
+    expect(pagesLabel.querySelector(".hint-warn")).toBeNull();
+    expect(pagesLabel.querySelector("i.tip")?.getAttribute("data-tip")).toContain("BOSS 最多返回 10 页，超出可能无新数据");
+
+    await pages.setValue(3);
+    await pages.trigger("change");
+    await flushPromises();
+    expect(pagesLabel.querySelector("i.tip")?.getAttribute("data-tip")).not.toContain("BOSS 最多返回 10 页");
+
+    vi.unstubAllGlobals();
+  });
 });

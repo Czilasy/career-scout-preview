@@ -1456,7 +1456,7 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
           <div class="adv-group">
             <p class="adv-group-title">列表抓取</p>
             <div class="advanced-grid">
-              <label class="field-label"><span>每组合翻页数 <i class="tip" data-tip="范围由任务总页数 1~200 的后端校验决定">?</i></span><input v-model.number="advancedSettings.pages" data-testid="pages-per-combination" type="number" min="1" :disabled="scopeLocked" @change="clampAdvanced('pages')"><small v-if="advancedSettings.pages > 10" class="hint-warn">BOSS 最多返回 10 页，超出可能无新数据</small></label>
+              <label class="field-label"><span>每组合翻页数 <i class="tip" :data-tip="advancedSettings.pages > 10 ? '范围由任务总页数 1~200 的后端校验决定。BOSS 最多返回 10 页，超出可能无新数据' : '范围由任务总页数 1~200 的后端校验决定'">?</i></span><input v-model.number="advancedSettings.pages" data-testid="pages-per-combination" type="number" min="1" :disabled="scopeLocked" @change="clampAdvanced('pages')"></label>
               <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="范围由当前模式版本提供。两个搜索组合之间等待多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" :min="advancedRange('inter_combo_delay')[0]" :max="advancedRange('inter_combo_delay')[1]" @change="clampAdvanced('inter_combo_delay')"></label>
             </div>
           </div>
