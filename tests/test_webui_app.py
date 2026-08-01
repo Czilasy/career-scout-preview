@@ -405,6 +405,10 @@ class SearchScopePreviewTests(unittest.TestCase):
             "pages_per_combination": 1,
         })
         self.assertEqual(resp.status_code, 422)
+        data = resp.get_json()
+        self.assertEqual(data["error_code"], "scope_validation_failed")
+        self.assertIn("201", data["error"])
+        self.assertIn("200", data["error"])
 
     def test_preview_rejects_empty_keywords(self):
         resp = self.client.post("/api/search-scope/preview", json={

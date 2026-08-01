@@ -313,7 +313,7 @@ If any item is missing, do not dispatch the task.
 This quickstart does not execute or validate:
 
 - single-combination page depth from 20 to 50;
-- multi-combination cumulative safe page ceiling;
+- performance safety margin for multi-combination cumulative pages;
 - automatic retuning after API/environment changes;
 - concurrent experiment execution;
 - recommendations for tasks over 200 planned pages.

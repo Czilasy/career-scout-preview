@@ -62,7 +62,6 @@ _MIN_PLANNED_PAGES = 1
 _MAX_PLANNED_PAGES = 200
 _SMALL_MAX = 9
 _MEDIUM_MAX = 49
-_LARGE_MAX = 200
 
 
 # ---------------------------------------------------------------------------

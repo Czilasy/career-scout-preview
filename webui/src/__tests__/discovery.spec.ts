@@ -46,6 +46,10 @@ describe("discovery helpers", () => {
     expect(classifyTaskSize(pages)).toBe(expected);
   });
 
+  it.each([0, 201])("rejects %i planned pages outside the valid range", (pages) => {
+    expect(() => classifyTaskSize(pages)).toThrow(RangeError);
+  });
+
   it("normalizes the backend-authoritative scope preview", () => {
     const response: ScopePreviewResponse = {
       ok: true,
