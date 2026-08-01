@@ -52,7 +52,10 @@ class SourceOutcome:
         safe_log: safe log line (counts/ids only, no PII/JD body)
     """
 
-    __slots__ = ("ok", "jobs", "detail", "failed_code", "safe_log", "input_hash")
+    __slots__ = (
+        "ok", "jobs", "detail", "failed_code", "safe_log", "input_hash",
+        "failed_reason",
+    )
 
     def __init__(
         self,
@@ -63,6 +66,7 @@ class SourceOutcome:
         failed_code: str | None = None,
         safe_log: str = "",
         input_hash: str | None = None,
+        failed_reason: str = "",
     ):
         self.ok = bool(ok)
         self.jobs = jobs or []
@@ -70,14 +74,16 @@ class SourceOutcome:
         self.failed_code = failed_code
         self.safe_log = safe_log
         self.input_hash = input_hash
+        self.failed_reason = failed_reason
 
     @classmethod
     def success(cls, *, jobs: list[dict] | None = None, detail: dict | None = None, safe_log: str = "", input_hash: str | None = None) -> "SourceOutcome":
         return cls(ok=True, jobs=jobs, detail=detail, safe_log=safe_log, input_hash=input_hash)
 
     @classmethod
-    def failure(cls, *, failed_code: str, safe_log: str = "") -> "SourceOutcome":
-        return cls(ok=False, failed_code=failed_code, safe_log=safe_log)
+    def failure(cls, *, failed_code: str, safe_log: str = "", failed_reason: str = "") -> "SourceOutcome":
+        return cls(ok=False, failed_code=failed_code, safe_log=safe_log,
+                    failed_reason=failed_reason)
 
     def to_dict(self) -> dict:
         return {
@@ -86,6 +92,7 @@ class SourceOutcome:
             "has_detail": bool(self.detail),
             "failed_code": self.failed_code,
             "safe_log": self.safe_log,
+            "failed_reason": self.failed_reason,
         }
 
 
@@ -745,6 +752,7 @@ class BossCdpSource:
                 results[job_id] = SourceOutcome.failure(
                     failed_code=safe_code,
                     safe_log=f"{safe_log} status={status} safe_code={safe_code}",
+                    failed_reason=str(event.get("safe_hint") or ""),
                 )
             elif status == "cancelled":
                 # cancelled events surface a recognizable code; if the
@@ -1168,7 +1176,10 @@ _EXIT_REASONS = {
 
 # 退出码 + 输出关键词 → 具体 failed_code（不再一律 source_blocked）
 _VERIFICATION_KEYWORDS = ("验证码", "滑块", "captcha", "slider", "verify")
-_RATE_LIMIT_KEYWORDS = ("429", "限流", "rate limit", "too many requests")
+_RATE_LIMIT_KEYWORDS = (
+    "429", "限流", "rate limit", "too many", "频繁", "稍后再试",
+    "解锁", "冻结", "访问受限", "异常流量", "账号受限",
+)
 
 
 def _classify_failed_code(returncode: int, captured: str) -> str:
@@ -1187,10 +1198,10 @@ def _classify_failed_code(returncode: int, captured: str) -> str:
             return "source_login_required"
         return "source_blocked"
     if returncode == 10:
-        if any(kw in text for kw in _VERIFICATION_KEYWORDS):
-            return "source_verification_required"
         if any(kw in text for kw in _RATE_LIMIT_KEYWORDS):
             return "source_rate_limited"
+        if any(kw in text for kw in _VERIFICATION_KEYWORDS):
+            return "source_verification_required"
         return "source_blocked"
     return "source_blocked"
 

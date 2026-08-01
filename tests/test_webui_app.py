@@ -616,6 +616,147 @@ class SourceErrorClassificationTests(unittest.TestCase):
             "source_blocked",
         )
 
+    def test_rate_limit_text_wins_over_verification_keywords(self):
+        """账号限流文本命中时不再显示成验证码/滑块（用户反馈回归）。"""
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(10, "账号操作频繁，触发滑块验证，请稍后再试"),
+            "source_rate_limited",
+        )
+        from webui.pipeline_exec import _FAILED_CODE_LABELS
+        self.assertEqual(_FAILED_CODE_LABELS["source_rate_limited"], "账号/操作频繁被限流")
+        self.assertNotIn("验证码", _FAILED_CODE_LABELS["source_rate_limited"])
+
+
+class TaskFinishAndCountRegressionTests(unittest.TestCase):
+    """结束并保存 + JD 阶段计数回归（用户反馈 606/24/37/930）。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.result_dir = root / "results"
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(self.result_dir),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _seed_paused_ai_screen(self):
+        scrape_id = "finish-scrape-src"
+        jobs = [
+            {"job_id": f"j{i:03d}", "title": f"岗位{i}",
+             "source_url": f"https://zhipin.example/j{i:03d}.html"}
+            for i in range(930)
+        ]
+        self.store.create_screening_run(scrape_id, source_count=930)
+        self.store.save_scrape_combo_result(scrape_id, "kw|city", jobs, ["kw|city"])
+        run_id = "finish-ai-screen-run"
+        self.store.create_screening_run(
+            run_id, source_count=930,
+            execution_params={"scrape_task_id": scrape_id, "profile_summary": "测试画像"},
+        )
+        self.store.update_screening_run(run_id, status="running")
+        self.store.save_screening_verdicts(run_id, {
+            f"j{i:03d}": {"verdict": "dropped", "reason": "粗筛移除"}
+            for i in range(667, 930)
+        })
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="jd_detail",
+            processed_count=606, pending_count=24,
+            total_kept=667, total_dropped=263,
+            error_code="source_rate_limited",
+            error_reason="账号/操作频繁被限流",
+        )
+        self.result_dir.mkdir(parents=True, exist_ok=True)
+        jd_map = {f"j{i:03d}": f"JD {i}" for i in range(606)}
+        (self.result_dir / f"ai_screen_jd_{run_id}.json").write_text(
+            json.dumps(jd_map), encoding="utf-8"
+        )
+        for i in range(606, 630):
+            self.store.insert_pending_result(
+                run_id, f"j{i:03d}", failure_stage="jd_detail",
+                failed_code="source_rate_limited",
+                ai_payload_json={"reason": "账号/操作频繁被限流"},
+            )
+        return run_id
+
+    def test_task_state_jd_stage_uses_kept_total(self):
+        run_id = "count-jd-kept"
+        self.store.create_screening_run(run_id, source_count=930)
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="jd_detail",
+            processed_count=606, pending_count=24,
+            total_kept=667, total_dropped=263,
+        )
+        self.store.update_screening_run(
+            run_id, status="paused", error_code="source_rate_limited",
+            error_reason="账号/操作频繁被限流",
+        )
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+        self.assertEqual(data["success_count"], 606)
+        self.assertEqual(data["fail_count"], 24)
+        self.assertEqual(data["unstarted_count"], 37)
+        self.assertEqual(data["total"], 667)
+        self.assertEqual(data["source_total"], 930)
+
+    def test_finish_paused_task_saves_partial_snapshot_and_latest(self):
+        run_id = self._seed_paused_ai_screen()
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        data = resp.get_json()
+        self.assertEqual(data["status"], "completed_with_pending")
+        self.assertEqual(len(data["result"]["jobs"]), 667)
+        self.assertEqual(len(data["result"]["dropped"]), 263)
+        self.assertEqual(data["result"]["total_scraped"], 930)
+        self.assertEqual(data["result"]["total_kept"], 667)
+        latest = self.client.get("/api/latest-pipeline-result").get_json()
+        self.assertEqual(latest["status"], "completed_with_pending")
+        self.assertEqual(latest["source_run_id"], data["snapshot_run_id"])
+        self.assertEqual(self.store.get_screening_run(run_id)["status"], "interrupted")
+
+    def test_finish_rejects_non_paused_run(self):
+        run_id = "finish-not-paused"
+        self.store.create_screening_run(run_id, source_count=1)
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "not_paused")
+
+
+class ChromeAccountProfileSwitchTests(unittest.TestCase):
+    """账号切换时，端口上旧账号的 Chrome 必须被替换而不是复用。"""
+
+    def test_ensure_chrome_ready_replaces_wrong_profile(self):
+        from webui import pipeline_exec
+        launched = mock.Mock()
+        launched.poll.return_value = None
+        with mock.patch.object(
+            pipeline_exec.boss, "is_cdp_ready", side_effect=[True, True],
+        ), mock.patch.object(
+            pipeline_exec.boss, "cdp_port_uses_profile", return_value=False,
+        ) as uses, mock.patch.object(
+            pipeline_exec.boss, "close_cdp_chrome",
+        ) as close, mock.patch.object(
+            pipeline_exec.boss, "prepare_cdp_profile",
+            return_value={"path": "C:/profiles/account-b"},
+        ), mock.patch.object(
+            pipeline_exec.boss, "stop_cdp_chrome",
+        ), mock.patch.object(
+            pipeline_exec.boss, "launch_chrome", return_value=launched,
+        ):
+            ok, _msg = pipeline_exec.ensure_chrome_ready(9333)
+        self.assertTrue(ok)
+        uses.assert_called_once()
+        close.assert_called_once()
+
 
 class RunSearchAllFailTests(unittest.TestCase):
     """所有组合全失败时 run_search 返回 ok:False。"""
@@ -719,6 +860,20 @@ class AdvancedSettingsContractTests(unittest.TestCase):
         self.assertIn("selection", data)
         self.assertIn("settings", data)
         self.assertIn("config_schema_version", data)
+
+    def test_advanced_settings_round_trip_browser_account(self):
+        resp = self.client.post("/api/advanced-settings", json={
+            "settings": {"browser_account": "b", "pages": 4},
+        })
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        data = self.client.get("/api/advanced-settings").get_json()
+        self.assertEqual(data["settings"]["browser_account"], "b")
+        bad = self.client.post("/api/advanced-settings", json={
+            "settings": {"browser_account": "z"},
+        })
+        self.assertEqual(bad.status_code, 200)
+        data = self.client.get("/api/advanced-settings").get_json()
+        self.assertEqual(data["settings"]["browser_account"], "a")
 
     def test_create_app_imports_legacy_settings_once(self):
         root = pathlib.Path(self.temp.name) / "legacy-app"

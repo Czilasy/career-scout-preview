@@ -57,6 +57,8 @@ interface TaskSnapshot {
   total?: number;
   kept_count?: number;
   dropped_count?: number;
+  pending_count?: number;
+  source_total?: number;
   pause_info?: { error_code?: string; error_reason?: string } | null;
   execution_config?: Record<string, unknown> | null;
 }
@@ -139,8 +141,9 @@ const advancedBusy = ref(false);
 const executionSelection = ref<ExecutionSelection>("custom");
 const scopePreview = ref<FrozenSearchScope | null>(null);
 const scopePreviewBusy = ref(false);
-const advancedSettings = ref<Record<string, number>>({
+const advancedSettings = ref<Record<string, number | string>>({
   pages: 3,
+  browser_account: "a",
   inter_combo_delay: 10,
   detail_batch_size: 15,
   detail_interval: 2,
@@ -167,6 +170,7 @@ const advancedRanges = ref<Record<string, [number, number]>>({
   match_batch_size: [1, 20],
   match_concurrency: [1, 10],
 });
+const pagesValue = computed(() => Number(advancedSettings.value.pages || 3));
 function mergeManualRanges(raw: AdvancedSettingsState["manual_ranges"] | undefined) {
   if (!raw) return;
   for (const [field, value] of Object.entries(raw)) {
@@ -197,7 +201,7 @@ const advancedPanelOpen = ref(false);
 let pollTimer: number | undefined;
 
 const scopeLocked = computed(() => Boolean(
-  scrapeBusy.value || screenBusy.value || pausedRunId.value,
+  scrapeBusy.value || screenBusy.value || recrawlBusy.value || pausedRunId.value,
 ));
 
 const enabledSteps = computed<StepId[]>(() => {
@@ -281,12 +285,13 @@ const currentEmptyMessage = computed(() => ({
 })[activeCategory.value]);
 
 onMounted(() => {
-  void Promise.allSettled([
-    loadAdvancedSettings(),
-    loadLatestResult(),
-    loadFilterLabels(),
-    restoreRunningTask(),
-  ]);
+  void loadAdvancedSettings();
+  void loadFilterLabels();
+  void restoreRunningTask().finally(() => {
+    if (!pausedRunId.value && !scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
+      void loadLatestResult();
+    }
+  });
 });
 
 async function restoreRunningTask() {
@@ -406,6 +411,8 @@ async function enrichPausedSnapshot(
       total?: number;
       kept_count?: number;
       dropped_count?: number;
+      pending_count?: number;
+      source_total?: number;
       pause_info?: { error_code?: string; error_reason?: string } | null;
       execution_config?: Record<string, unknown> | null;
     }>(`/api/task-state/${encodeURIComponent(runId)}`);
@@ -415,6 +422,8 @@ async function enrichPausedSnapshot(
     snapshot.total = data.total;
     snapshot.kept_count = data.kept_count;
     snapshot.dropped_count = data.dropped_count;
+    snapshot.pending_count = data.pending_count;
+    snapshot.source_total = data.source_total;
     snapshot.stage = data.stage || snapshot.stage;
     if (typeof data.progress === "number") {
       snapshot.progress = {
@@ -448,7 +457,9 @@ async function loadFilterLabels() {
 }
 
 watch(() => props.profileId, () => {
-  if (!scrapeBusy.value && !screenBusy.value) void loadLatestResult();
+  if (!pausedRunId.value && !scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
+    void loadLatestResult();
+  }
 });
 
 onBeforeUnmount(() => {
@@ -595,7 +606,7 @@ function toggleFilter(key: string, code: string) {
 
 async function loadAdvancedSettings() {
   try {
-    const data = await apiRequest<Partial<AdvancedSettingsState> & { settings?: Record<string, number> }>("/api/advanced-settings");
+    const data = await apiRequest<Partial<AdvancedSettingsState> & { settings?: Record<string, number | string> }>("/api/advanced-settings");
     advancedSettings.value = { ...advancedSettings.value, ...(data.settings || {}) };
     if (data.selection) executionSelection.value = data.selection;
     mergeManualRanges(data.manual_ranges);
@@ -612,7 +623,9 @@ const SPEED_FIELDS = [
 ] as const;
 
 function currentExecutionSettings(): ExecutionSettings {
-  return Object.fromEntries(SPEED_FIELDS.map((field) => [field, advancedSettings.value[field]])) as unknown as ExecutionSettings;
+  const settings = Object.fromEntries(SPEED_FIELDS.map((field) => [field, Number(advancedSettings.value[field])])) as unknown as ExecutionSettings;
+  const account = String(advancedSettings.value.browser_account || "a");
+  return { ...settings, browser_account: account === "b" ? "b" : "a" };
 }
 
 async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
@@ -626,7 +639,7 @@ async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
       keywords: selectedKeywords.value,
       scope_kind: cityList.value.length ? "cities" : "nationwide",
       cities: cityList.value.length ? cityList.value : [],
-      pages_per_combination: advancedSettings.value.pages,
+      pages_per_combination: pagesValue.value,
     });
     scopePreview.value = normalizeScopePreview(data);
     return scopePreview.value;
@@ -838,6 +851,35 @@ async function cancelPausedTask(runId: string) {
   }
 }
 
+async function finishPausedTask(runId: string) {
+  if (!runId) return;
+  try {
+    const data = await apiRequest<{
+      result?: PipelineResult;
+      snapshot_run_id?: string;
+    }>(`/api/task/finish/${encodeURIComponent(runId)}`, { method: "POST" });
+    scrapeBusy.value = false;
+    screenBusy.value = false;
+    recrawlBusy.value = false;
+    restoredTaskHint.value = "";
+    pausedRunId.value = "";
+    const finished: TaskSnapshot = {
+      status: "completed_with_pending", stage: "done",
+      progress: { message: "已结束并保存部分结果" }, logs: [], error: "",
+    };
+    if (scrapeSnapshot.value) scrapeSnapshot.value = finished;
+    if (screenSnapshot.value) screenSnapshot.value = finished;
+    if (recrawlSnapshot.value) recrawlSnapshot.value = null;
+    if (data.result) {
+      setPipelineResult(data.result);
+      activeStep.value = "results";
+    }
+    notify("任务已结束，已完成结果已保存", "success");
+  } catch (error) {
+    notify(errorMessage(error, "结束任务失败"), "error");
+  }
+}
+
 // 指数退避：7 次 / 64s 上限。前 5 次快速重试（4s→8s→16s→32s→64s），
 // 后 2 次保持 64s，总等待约 4 分钟。达上限后主动放弃并提示用户。
 const POLL_MAX_RETRIES = 7;
@@ -947,28 +989,32 @@ function setPipelineResult(result: PipelineResult) {
 }
 
 async function loadLatestResult() {
+  if (pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
   try {
     const query = props.profileId ? `?profile_id=${encodeURIComponent(props.profileId)}` : "";
     const data = await apiRequest<{
       has_result?: boolean;
       source_run_id?: string;
       result?: PipelineResult;
+      status?: string;
       started_at?: number;
       finished_at?: number;
       execution_config?: Record<string, unknown> | null;
     }>(`/api/latest-pipeline-result${query}`);
+    if (pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
     if (data.has_result && data.result) {
       pipelineResultRunId.value = data.source_run_id || "";
       setPipelineResult(data.result);
       const ps = (data.result as Record<string, unknown>).profile_summary;
       if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
+      const snapshotStatus = data.status === "completed_with_pending" ? "completed_with_pending" : "completed";
       scrapeSnapshot.value = {
-        status: "completed", stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
+        status: snapshotStatus, stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
         started_at: data.started_at,
         finished_at: data.finished_at,
       };
       screenSnapshot.value = {
-        status: "completed", stage: "done", progress: { message: "上次 AI 筛选已完成" }, logs: [],
+        status: snapshotStatus, stage: "done", progress: { message: "上次 AI 筛选已完成" }, logs: [],
         started_at: data.started_at,
         finished_at: data.finished_at,
       };
@@ -978,8 +1024,16 @@ async function loadLatestResult() {
       screenSnapshot.value.kept_count = Number(data.result.total_kept || 0);
       screenSnapshot.value.dropped_count = Number(data.result.total_dropped || 0);
       const resultTotals = data.result as { total_scraped?: number };
-      scrapeSnapshot.value.total = Number(resultTotals.total_scraped || 0);
-      screenSnapshot.value.total = Number(resultTotals.total_scraped || 0);
+      const sourceTotal = Number(resultTotals.total_scraped || 0);
+      const stageTotal = snapshotStatus === "completed_with_pending"
+        ? Number(data.result.total_kept || 0)
+        : sourceTotal;
+      scrapeSnapshot.value.total = stageTotal || sourceTotal;
+      scrapeSnapshot.value.source_total = sourceTotal;
+      screenSnapshot.value.total = stageTotal || sourceTotal;
+      screenSnapshot.value.source_total = sourceTotal;
+      const uncertainCount = (data.result.jobs || []).filter((job) => job.verdict !== "match" && job.verdict !== "not_match").length;
+      screenSnapshot.value.pending_count = snapshotStatus === "completed_with_pending" ? uncertainCount : 0;
     }
   } catch (error) {
     notify(errorMessage(error, "上次结果暂时无法恢复"), "warning");
@@ -1452,11 +1506,26 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
             @update:model-value="selectExecutionMode"
           />
           <div class="adv-fields">
-          <!-- 列表抓取 -->
+          <!-- 浏览器账号 -->
+          <div class="adv-group account-group">
+            <p class="adv-group-title">浏览器账号</p>
+            <div class="account-segments" role="radiogroup" aria-label="浏览器账号">
+              <button type="button" role="radio" data-account="a"
+                      :aria-checked="advancedSettings.browser_account === 'a'"
+                      :class="{ active: advancedSettings.browser_account === 'a' }"
+                      :disabled="scopeLocked || advancedBusy"
+                      @click="advancedSettings.browser_account = 'a'">账号 A</button>
+              <button type="button" role="radio" data-account="b"
+                      :aria-checked="advancedSettings.browser_account === 'b'"
+                      :class="{ active: advancedSettings.browser_account === 'b' }"
+                      :disabled="scopeLocked || advancedBusy"
+                      @click="advancedSettings.browser_account = 'b'">账号 B</button>
+            </div>
+          </div>
           <div class="adv-group">
             <p class="adv-group-title">列表抓取</p>
             <div class="advanced-grid">
-              <label class="field-label"><span>每组合翻页数 <i class="tip" :data-tip="advancedSettings.pages > 10 ? '范围由任务总页数 1~200 的后端校验决定。BOSS 最多返回 10 页，超出可能无新数据' : '范围由任务总页数 1~200 的后端校验决定'">?</i></span><input v-model.number="advancedSettings.pages" data-testid="pages-per-combination" type="number" min="1" :disabled="scopeLocked" @change="clampAdvanced('pages')"></label>
+              <label class="field-label"><span>每组合翻页数 <i class="tip" :data-tip="pagesValue > 10 ? '范围由任务总页数 1~200 的后端校验决定。BOSS 最多返回 10 页，超出可能无新数据' : '范围由任务总页数 1~200 的后端校验决定'">?</i></span><input v-model.number="advancedSettings.pages" data-testid="pages-per-combination" type="number" min="1" :disabled="scopeLocked" @change="clampAdvanced('pages')"></label>
               <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="范围由当前模式版本提供。两个搜索组合之间等待多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" :min="advancedRange('inter_combo_delay')[0]" :max="advancedRange('inter_combo_delay')[1]" @change="clampAdvanced('inter_combo_delay')"></label>
             </div>
           </div>
@@ -1500,6 +1569,11 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
                   class="button danger" type="button" data-testid="cancel-paused-scrape"
                   @click="cancelPausedTask(pausedRunId)">
             取消任务
+          </button>
+          <button v-if="scrapeSnapshot && scrapeSnapshot.status === 'paused' && (pausedRunId || scrapeTaskId)"
+                  class="button danger" type="button" data-testid="finish-paused-scrape"
+                  @click="finishPausedTask(pausedRunId || scrapeTaskId)">
+            结束并保存结果
           </button>
           <button v-if="scrapeCompleted" class="button secondary" type="button" data-testid="continue-to-screen" @click="activeStep = 'screen'">
             继续确认筛选条件
@@ -1561,6 +1635,11 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
                   @click="cancelPausedTask(pausedRunId)">
             取消任务
           </button>
+          <button v-if="screenSnapshot && screenSnapshot.status === 'paused' && (pausedRunId || screenTaskId)"
+                  class="button danger" type="button" data-testid="finish-paused-screen"
+                  @click="finishPausedTask(pausedRunId || screenTaskId)">
+            结束并保存结果
+          </button>
         </div>
       </section>
 
@@ -1589,6 +1668,11 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
                   class="button primary" type="button" data-testid="resume-recrawl"
                   :disabled="recrawlBusy" @click="continueRecrawl()">
             继续
+          </button>
+          <button v-if="recrawlSnapshot.status === 'paused'"
+                  class="button danger" type="button" data-testid="finish-paused-recrawl"
+                  :disabled="recrawlBusy" @click="finishPausedTask(recrawlTaskId || pausedRunId)">
+            结束并保存结果
           </button>
         </div>
 

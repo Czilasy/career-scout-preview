@@ -761,6 +761,33 @@ button:disabled {
   font-size: 13px;
 }.advanced-panel .button.secondary {
   margin-top: 0;
+}.account-segments {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+}.account-segments button {
+  min-width: 72px;
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}.account-segments button.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}.account-segments button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}.account-segments button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }.collapsible-header-row {
   display: flex;
   align-items: center;
@@ -892,55 +919,29 @@ button:disabled {
   gap: 7px;
   color: var(--info);
   font-weight: 700;
-}.task-status[data-status="done"] { color: var(--success); }.task-status[data-status="failed"] { color: var(--danger); }.task-elapsed {
-  color: var(--muted);
-  font-weight: 500;
-  margin-right: auto;
-}.task-percentage {
-  color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 700;
-}.progress-track {
-  height: 6px;
-  margin: 13px 0;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--surface-3);
-}.progress-track span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--accent);
-  transition: none;
-}.task-progress > p {
-  margin: 10px 0 0;
-  color: var(--text-soft);
-  font-size: 13px;
-  line-height: 1.5;
-}.task-pause-reason {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--warning, #d97706);
-  font-weight: 600;
-}.task-stage {
-  color: var(--muted);
-  font-weight: 500;
-}.task-counts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 10px;
-  font-size: 12px;
-}.count-chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: var(--surface-3);
-  color: var(--text-soft);
-  font-weight: 600;
-}.count-chip.success { color: var(--success); }.count-chip.fail { color: var(--danger); }.count-chip.unstarted { color: var(--warning, #d97706); }.count-chip.total { color: var(--muted); }.version-footer {
+}.task-status[data-status="done"] { color: var(--success); }
+.task-status[data-status="failed"] { color: var(--danger); }
+.task-progress[data-blocked="true"] .task-status { color: var(--danger); }
+.task-progress[data-blocked="true"] > p { color: var(--danger); }
+.task-progress[data-blocked="true"] .task-pause-reason { color: var(--danger); }
+.task-elapsed { color: var(--muted); font-weight: 500; margin-right: auto; }
+.task-percentage { color: var(--text-soft); font-size: 12px; font-weight: 700; }
+.progress-track { height: 6px; margin: 13px 0; overflow: hidden; border-radius: 999px; background: var(--surface-3); }
+.progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: none; }
+.task-progress[data-blocked="true"] .progress-track span { background: var(--danger); }
+.task-progress > p { margin: 10px 0 0; color: var(--text-soft); font-size: 13px; line-height: 1.5; }
+.task-pause-reason { display: flex; align-items: center; gap: 6px; color: var(--warning, #d97706); font-weight: 600; }
+.task-stage { color: var(--muted); font-weight: 500; }
+.task-counts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 12px; }
+.count-chip { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px; background: var(--surface-3); color: var(--text-soft); font-weight: 600; }
+.count-chip.success { color: var(--success); }
+.count-chip.fail { color: var(--danger); }
+.count-chip.unstarted { color: var(--warning, #d97706); }
+.count-chip.total { color: var(--muted); }
+.count-chip.kept { color: var(--success); }
+.count-chip.dropped { color: var(--muted); }
+.count-chip.source { color: var(--info); }
+.version-footer {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;

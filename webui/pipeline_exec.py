@@ -49,6 +49,7 @@ ADVANCED_SETTINGS_PATH = _ADVANCED_SETTINGS_DIR / "advanced_settings.json"
 
 _ADVANCED_DEFAULTS = {
     "pages": 3,
+    "browser_account": "a",
     "inter_combo_delay": 10.0,
     "detail_batch_size": 15,
     "detail_interval": 2,
@@ -88,6 +89,39 @@ def save_advanced_settings(
     with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(clean, f, ensure_ascii=False, indent=2)
 
+BROWSER_ACCOUNTS: dict[str, dict[str, str]] = {
+    "a": {
+        "name": "账号A",
+        "profile_dir": os.path.expanduser("~/.career-scout/chrome-profile"),
+    },
+    "b": {
+        "name": "账号B",
+        "profile_dir": os.path.normpath(
+            os.path.join(str(Path(__file__).resolve().parents[1]), ".chrome-profiles", "account_b")
+        ),
+    },
+}
+
+_ACTIVE_CDP_DATA_DIR: str | None = None
+
+def set_active_cdp_data_dir(account_or_dir: str) -> None:
+    """Set the browser profile directory used by Chrome helpers."""
+    global _ACTIVE_CDP_DATA_DIR
+    account = str(account_or_dir or "")
+    if account in BROWSER_ACCOUNTS:
+        _ACTIVE_CDP_DATA_DIR = BROWSER_ACCOUNTS[account]["profile_dir"]
+    elif account:
+        _ACTIVE_CDP_DATA_DIR = os.path.abspath(os.path.expanduser(account))
+    else:
+        _ACTIVE_CDP_DATA_DIR = None
+
+def _cdp_data_dir() -> str:
+    """Resolve the active browser profile directory."""
+    if _ACTIVE_CDP_DATA_DIR:
+        return _ACTIVE_CDP_DATA_DIR
+    account = str(load_advanced_settings().get("browser_account") or "a")
+    return BROWSER_ACCOUNTS.get(account, BROWSER_ACCOUNTS["a"])["profile_dir"]
+
 
 # ---------------------------------------------------------------------------
 # 进度百分比与阶段文案
@@ -122,7 +156,7 @@ _FAILED_CODE_LABELS: dict[str, str] = {
     "source_cdp_unavailable": "连不上调试浏览器",
     "source_login_required": "BOSS 登录已失效",
     "source_verification_required": "触发验证码/滑块",
-    "source_rate_limited": "请求过于频繁被限流",
+    "source_rate_limited": "账号/操作频繁被限流",
     "source_blocked": "IP 级风控拦截",
     "source_timeout": "抓取超时",
     "source_unreachable": "抓取脚本不可用",
@@ -291,9 +325,15 @@ def ensure_chrome_ready(cdp_port: int | None = None) -> tuple[bool, str]:
     """
     port = cdp_port or boss.DEFAULT_CDP_PORT
     if boss.is_cdp_ready(port):
-        return True, ""
+        cdp_data_dir = _cdp_data_dir()
+        if boss.cdp_port_uses_profile(port, cdp_data_dir):
+            return True, ""
+        try:
+            boss.close_cdp_chrome(port, cdp_data_dir, profile_checker=lambda *_: True)
+        except Exception:
+            pass
     # Not running: prepare the isolated profile, stop stale processes, launch.
-    profile = boss.prepare_cdp_profile()
+    profile = boss.prepare_cdp_profile(data_dir=_cdp_data_dir())
     cdp_data_dir = profile["path"]
     try:
         boss.stop_cdp_chrome(cdp_data_dir)
@@ -380,7 +420,7 @@ def close_debug_chrome(cdp_port: int | None = None) -> bool:
     """
     port = cdp_port or boss.DEFAULT_CDP_PORT
     try:
-        profile = boss.prepare_cdp_profile()
+        profile = boss.prepare_cdp_profile(data_dir=_cdp_data_dir())
         return bool(boss.close_cdp_chrome(port, profile["path"]))
     except Exception:
         return False
@@ -917,8 +957,9 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 )
             elif not jd and outcome is not None and outcome.failed_code:
                 jd_fail_by_idx[idx] = outcome.failed_code
-                jd_fail_reason_by_idx[idx] = _FAILED_CODE_LABELS.get(
-                    outcome.failed_code, "岗位详情抓取失败"
+                jd_fail_reason_by_idx[idx] = (
+                    outcome.failed_reason
+                    or _FAILED_CODE_LABELS.get(outcome.failed_code, "岗位详情抓取失败")
                 )
             jd_by_idx[idx] = jd
             if jd:

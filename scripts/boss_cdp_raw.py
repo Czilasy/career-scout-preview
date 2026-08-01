@@ -509,6 +509,9 @@ class DetailLoginRequiredError(DetailExtractionError):
 class DetailVerificationRequiredError(DetailExtractionError):
     """The detail page shows a captcha/slider verification instead of JD content."""
 
+class DetailRateLimitedError(DetailExtractionError):
+    """The detail page shows an account/IP rate-limit message instead of JD."""
+
 
 class RiskControlError(RuntimeError):
     """抓取中途命中风控/验证码，立即停止（不静默跳过、不伪装完成）。
@@ -661,6 +664,11 @@ def extract_job_description(extracted, min_length=0):
         )
     if _looks_like_navigation_page(diagnostic_text):
         raise DetailExtractionError("detail page rendered navigation chrome without a JD")
+    if looks_like_rate_limited(diagnostic_text):
+        raise DetailRateLimitedError(
+            extract_block_hint(diagnostic_text)
+            or "BOSS 账号/操作频繁被限流"
+        )
     if looks_like_risk_control(diagnostic_text):
         raise DetailVerificationRequiredError(
             "detail page shows captcha/verification instead of JD content"
@@ -1117,6 +1125,10 @@ RISK_CONTROL_KEYWORDS = (
     "安全验证", "滑动验证", "滑块", "访问受限", "异常流量", "操作频繁",
     "captcha", "CAPTCHA", "verify-sliding", "waf",
 )
+RATE_LIMIT_KEYWORDS = (
+    "操作频繁", "访问受限", "异常流量", "频繁", "限流", "rate limit",
+    "too many", "429", "稍后再试", "账号受限", "解锁", "冻结",
+)
 
 # 列表抓取：连续多少页拿不到数据就判定异常并停止（正常搜索极少连续空页）
 MAX_CONSECUTIVE_EMPTY_PAGES = 3
@@ -1176,6 +1188,25 @@ def looks_like_risk_control(text):
     if not text:
         return False
     return any(keyword in text for keyword in RISK_CONTROL_KEYWORDS)
+
+def looks_like_rate_limited(text):
+    """文本里是否含账号/操作频率限流特征词。"""
+    if not text:
+        return False
+    return any(keyword in text for keyword in RATE_LIMIT_KEYWORDS)
+
+def extract_block_hint(text, max_chars=160):
+    """从风控/限流页文本里取一句最相关提示，避免整页落入错误信息。"""
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.replace("\r\n", "\n").splitlines() if line.strip()]
+    keywords = RATE_LIMIT_KEYWORDS + RISK_CONTROL_KEYWORDS + (
+        "分钟后", "小时", "重试", "解锁", "时间",
+    )
+    for line in lines:
+        if any(keyword in line for keyword in keywords):
+            return line[:max_chars]
+    return text.replace("\r\n", " ").replace("\n", " ")[:max_chars]
 
 
 def check_list_risk(diagnosis, *, page, consecutive_empty, scraped_count,
@@ -1644,7 +1675,8 @@ def _wait_for_detail_readiness(ws, sid, *, sleeper, timeout_seconds, max_retries
             remaining_budget -= wait
 
 
-def _emit_detail_safe_event(event_callback, job, status, safe_code, started_at):
+def _emit_detail_safe_event(event_callback, job, status, safe_code, started_at,
+                             safe_hint=""):
     """Emit one terminal safe event for a detail job.
 
     The payload deliberately excludes JD body, prompts, outputs and
@@ -1662,6 +1694,8 @@ def _emit_detail_safe_event(event_callback, job, status, safe_code, started_at):
         "duration_ms": duration_ms,
         "safe_code": safe_code,
     }
+    if safe_hint:
+        event["safe_hint"] = str(safe_hint)[:160]
     event_callback(event)
 
 
@@ -1741,6 +1775,14 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
             raise RuntimeError(
                 "BOSS detail login expired; stopped before writing truncated JD data"
             ) from exc
+        except DetailRateLimitedError as exc:
+            print(f"  ⚠ 账号/操作频繁被限流: {exc}")
+            ws.send("Target.closeTarget", {"targetId": tid})
+            _emit_detail_safe_event(
+                event_callback, job, "failed",
+                "source_rate_limited", started_at, safe_hint=str(exc),
+            )
+            return False
         except DetailExtractionError as exc:
             print(f"  跳过无效详情页: {exc}")
             ws.send("Target.closeTarget", {"targetId": tid})
@@ -1832,6 +1874,13 @@ def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
             event_callback, job, "failed", "source_verification_required", started_at,
         )
         print(f"[{tab_label}]   ⚠ 详情页验证码/滑块拦截")
+        return False
+    except DetailRateLimitedError as exc:
+        _emit_detail_safe_event(
+            event_callback, job, "failed", "source_rate_limited", started_at,
+            safe_hint=str(exc),
+        )
+        print(f"[{tab_label}]   ⚠ 账号/操作频繁被限流")
         return False
     except DetailExtractionError as exc:
         print(f"[{tab_label}]   跳过无效详情页: {exc}")
@@ -2608,11 +2657,13 @@ def run_import_boss_session(source_cdp_port, target_cdp_port, authorized=False):
     return 0 if result["status"] == "completed" else 1
 
 
-def prepare_cdp_profile(copy_login_state=False, reset=False):
+def prepare_cdp_profile(copy_login_state=False, reset=False, data_dir=None):
     """Prepare an isolated persistent Chrome profile for CDP."""
     if copy_login_state:
         raise ValueError("copy_login_state_deprecated")
-    cdp_data_dir = DEFAULT_CDP_DATA_DIR
+    cdp_data_dir = os.path.abspath(os.path.expanduser(
+        str(data_dir or DEFAULT_CDP_DATA_DIR)
+    ))
     cdp_default = os.path.join(cdp_data_dir, "Default")
 
     if reset and os.path.exists(cdp_data_dir):

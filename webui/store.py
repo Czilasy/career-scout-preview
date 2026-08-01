@@ -2242,11 +2242,14 @@ class TaskStore:
     # ===================================================================
 
     def save_pipeline_result(self, result: dict, script_params: dict, *,
-                             started_at=None, finished_at=None, execution_config=None) -> str:
-        """Persist a complete pipeline run result to the database.
+                             started_at=None, finished_at=None, execution_config=None,
+                             status: str = "done") -> str:
+        """Persist a complete or partial pipeline run result to the database.
 
         Creates a screening_runs row and one screening_results row per job
-        (both kept and dropped). Returns the run_id.
+        (both kept and dropped). ``status`` is the raw snapshot status:
+        ``done`` for completed runs, ``partial`` for user-finished partial runs.
+        Returns the run_id.
         """
         run_id = str(uuid.uuid4())
         now = _now()
@@ -2270,11 +2273,12 @@ class TaskStore:
                 " pending_count, processed_count, created_at, updated_at, started_at, "
                 " finished_at, search_params_json, execution_params_json, "
                 " profile_summary, total_scraped, total_kept, total_dropped, record_kind) "
-                "VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
                 "'result_snapshot')",
                 (
                     run_id,
                     json.dumps(script_params, ensure_ascii=False),
+                    str(status),
                     result.get("total_scraped", 0),
                     match_count,
                     mismatch_count,
@@ -2376,7 +2380,7 @@ class TaskStore:
                 ).fetchone()
             else:
                 run = conn.execute(
-                    "SELECT * FROM screening_runs WHERE status = 'done' "
+                    "SELECT * FROM screening_runs WHERE status IN ('done', 'partial') "
                     "AND record_kind = 'result_snapshot' "
                     "ORDER BY created_at DESC LIMIT 1",
                 ).fetchone()
@@ -2448,6 +2452,7 @@ class TaskStore:
             "started_at": run.get("started_at"),
             "finished_at": run.get("finished_at"),
             "script_params": script_params,
+            "status": "completed_with_pending" if run.get("status") == "partial" else "completed",
             "execution_config": execution_params.get("execution_config") or {},
             "result": result,
         }
@@ -3081,6 +3086,16 @@ class TaskStore:
                 f"UPDATE screening_runs SET {', '.join(sets)} WHERE id = ?", params
             )
 
+    def update_screening_execution_params(self, run_id, params: dict) -> None:
+        """Replace the JSON execution params for a screening run."""
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET execution_params_json = ?, updated_at = ? "
+                "WHERE id = ?", (
+                    json.dumps(params or {}, ensure_ascii=False), _now(), str(run_id),
+                ),
+            )
+
     def claim_paused_screening_run(self, run_id) -> bool:
         """Atomically claim one paused run for in-place continuation.
 
@@ -3567,6 +3582,25 @@ class TaskStore:
                 # 纯字符串 verdict（如 match/not_match/uncertain/dropped）
                 if v:
                     out[str(row["job_id"])] = {"verdict": v}
+        return out
+
+    def load_screening_pending(self, run_id):
+        """Return per-job pending failures for a screening run."""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT job_id, failure_stage, retryable, attempts, failed_code, "
+                " ai_payload_json, last_failed_at FROM screening_pending_results "
+                "WHERE run_id = ?", (str(run_id),),
+            ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["ai_payload"] = json.loads(item.get("ai_payload_json") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                item["ai_payload"] = {}
+            item.pop("ai_payload_json", None)
+            out.append(item)
         return out
 
     def _screening_run_row(self, row) -> dict:

@@ -24,6 +24,8 @@ interface TaskSnapshot {
   kept_count?: number;
   dropped_count?: number;
   pause_info?: PauseInfo | null;
+  pending_count?: number;
+  source_total?: number;
   execution_config?: Record<string, unknown> | null;
 }
 
@@ -39,6 +41,22 @@ const TERMINAL_STATUSES = new Set([
   "cancelled",
   "paused",
 ]);
+
+const BLOCK_CODES = new Set([
+  "captcha_required", "login_expired", "ai_rate_limited",
+  "ai_quota_exhausted", "ai_key_invalid", "ai_network_error",
+  "ip_risk_control", "cdp_unavailable", "internal_error",
+  "source_verification_required", "source_login_required",
+  "source_rate_limited", "source_blocked", "source_cdp_unavailable",
+]);
+
+const blocked = computed(() => {
+  const status = props.snapshot?.status;
+  if (status === "failed") return true;
+  if (status !== "paused") return false;
+  const code = props.snapshot?.pause_info?.error_code || "";
+  return BLOCK_CODES.has(code);
+});
 
 function isCompletedStatus(status?: string) {
   return Boolean(status && COMPLETED_STATUSES.has(status));
@@ -268,6 +286,10 @@ const successCount = computed(() => Number(props.snapshot?.success_count || 0));
 const failCount = computed(() => Number(props.snapshot?.fail_count || 0));
 const unstartedCount = computed(() => Number(props.snapshot?.unstarted_count || 0));
 const totalCount = computed(() => Number(props.snapshot?.total || 0));
+const sourceTotal = computed(() => Number(props.snapshot?.source_total || 0));
+const pendingCount = computed(() => Number(props.snapshot?.pending_count || 0));
+const failLabel = computed(() => pendingCount.value > 0 ? "待确认" : "失败");
+const showSourceCounts = computed(() => sourceTotal.value > 0 && sourceTotal.value !== totalCount.value);
 
 
 // 终态显示绝对用时；运行中显示"已用 X 秒"
@@ -280,7 +302,7 @@ const timeLabel = computed(() => {
 </script>
 
 <template>
-  <section v-if="snapshot" class="task-progress" aria-live="polite">
+  <section v-if="snapshot" class="task-progress" aria-live="polite" :data-blocked="blocked || undefined">
     <header>
       <span class="task-status" :data-status="snapshot.status || 'running'">
         <CircleCheck v-if="isCompletedStatus(snapshot.status)" :size="17" aria-hidden="true" />
@@ -305,7 +327,12 @@ const timeLabel = computed(() => {
     <!-- 切片7：完整计数画面（FR-037） -->
     <div v-if="showCounts" class="task-counts" data-testid="task-counts">
       <span class="count-chip success">成功 {{ successCount }}</span>
-      <span class="count-chip fail">失败 {{ failCount }}</span>
+      <span class="count-chip fail">{{ failLabel }} {{ failCount }}</span>
+      <template v-if="showSourceCounts">
+        <span class="count-chip kept">保留 {{ Number(snapshot.kept_count || 0) }}</span>
+        <span class="count-chip dropped">淘汰 {{ Number(snapshot.dropped_count || 0) }}</span>
+        <span class="count-chip source">列表共 {{ sourceTotal }}</span>
+      </template>
       <span class="count-chip unstarted">未开始 {{ unstartedCount }}</span>
       <span class="count-chip total">共 {{ totalCount }}</span>
     </div>

@@ -51,6 +51,7 @@ export interface ExecutionSettings {
   screen_concurrency: number;
   match_batch_size: number;
   match_concurrency: number;
+  browser_account?: "a" | "b";
 }
 
 export interface FrozenSearchScope {

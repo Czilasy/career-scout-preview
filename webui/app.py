@@ -1530,8 +1530,36 @@ def create_app(config=None):
                     return code
         return ""
 
+    def _account_for_run(run=None) -> str:
+        """Resolve the browser account for a run or the current advanced setting."""
+        if isinstance(run, dict):
+            params = run.get("execution_params") or {}
+            if isinstance(params, dict):
+                account = str(params.get("browser_account") or "")
+                if account in ("a", "b"):
+                    return account
+        account = str((_load_legacy_advanced_settings() or {}).get("browser_account") or "a")
+        return account if account in ("a", "b") else "a"
+
+    def _activate_run_browser(run=None) -> None:
+        """Point the shared CDP helper at the selected profile."""
+        from webui.pipeline_exec import set_active_cdp_data_dir
+        set_active_cdp_data_dir(_account_for_run(run))
+
+    def _activate_task_browser(task_id: str) -> None:
+        """Use the account captured when the task was submitted, if present."""
+        with _pipeline_lock:
+            task = _pipeline_tasks.get(task_id) or {}
+            account = str(task.get("browser_account") or "")
+        if account in ("a", "b"):
+            from webui.pipeline_exec import set_active_cdp_data_dir
+            set_active_cdp_data_dir(account)
+        else:
+            _activate_run_browser()
+
     def _check_resume_block(run: dict) -> tuple[bool, str, str]:
         """Verify the paused dependency before submitting resumed work."""
+        _activate_run_browser(run)
         checker = app.config.get("RESUME_BLOCK_CHECKER")
         if callable(checker):
             passed, code, reason = checker(run)
@@ -1684,6 +1712,7 @@ def create_app(config=None):
                 task["config_digest"] = execution_config.config_digest
             if frozen_scope is not None:
                 task["scope_digest"] = frozen_scope.scope_digest
+        _activate_task_browser(task_id)
 
         def on_progress(snapshot):
             with _pipeline_lock:
@@ -1709,6 +1738,7 @@ def create_app(config=None):
                     source_count=len(expand_combinations(script_params)),
                     execution_params={
                         "script_params": script_params,
+                        "browser_account": _account_for_run(),
                         "execution_config": (
                             execution_config.to_dict()
                             if execution_config is not None else None
@@ -1902,6 +1932,76 @@ def create_app(config=None):
         return {str(k): str(v) for k, v in data.items()
                 if isinstance(v, str) and v.strip()}
 
+    def _build_partial_pipeline_result(
+            source_jobs, verdicts, pending_rows, jd_map, profile_summary):
+        """Build a displayable result snapshot from persisted partial work."""
+        pending_reasons = {}
+        pending_codes = {}
+        for item in pending_rows or []:
+            jid = str(item.get("job_id") or "")
+            if not jid:
+                continue
+            payload = item.get("ai_payload") or {}
+            pending_reasons[jid] = str(
+                payload.get("reason") or item.get("failed_code") or "")
+            pending_codes[jid] = str(item.get("failed_code") or "")
+        jobs = []
+        dropped = []
+        for job in source_jobs or []:
+            if not isinstance(job, dict):
+                continue
+            jid = str(job.get("job_id") or job.get("source_url") or "")
+            vobj = verdicts.get(jid) or {}
+            verdict = str(vobj.get("verdict") or "")
+            reason = str(vobj.get("reason") or "")
+            if verdict == "dropped":
+                dropped.append({
+                    "job_id": jid,
+                    "title": job.get("title") or "", "reason": reason or "粗筛移除",
+                    "canonical_url": job.get("source_url") or job.get("job_link") or "",
+                })
+                continue
+            jd = str(jd_map.get(jid) or job.get("jd") or "").strip()
+            caveats = vobj.get("caveats") if isinstance(vobj.get("caveats"), list) else []
+            if verdict in ("match", "not_match", "mismatch"):
+                final_verdict = verdict
+                final_reason = reason
+            elif jd:
+                final_verdict = "uncertain"
+                final_reason = reason or "已抓取 JD，精筛未完成（提前结束）"
+            else:
+                final_verdict = "uncertain"
+                final_reason = (
+                    pending_reasons.get(jid)
+                    or reason
+                    or "未开始抓取 JD（提前结束）"
+                )
+            jobs.append({
+                "job_id": jid,
+                "title": job.get("title") or "",
+                "company": job.get("company") or job.get("boss_name") or "",
+                "salary": job.get("salary") or "",
+                "location": job.get("location") or "",
+                "tags": job.get("tags") or "",
+                "jd": jd,
+                "source_url": job.get("source_url") or job.get("job_link") or "",
+                "verdict": final_verdict,
+                "verdict_reason": final_reason,
+                "caveats": caveats,
+                "failed_code": pending_codes.get(jid) or "",
+            })
+        return {
+            "ok": True,
+            "jobs": jobs,
+            "dropped": dropped,
+            "total_scraped": len(source_jobs or []),
+            "total_kept": len(jobs),
+            "total_matched": sum(1 for j in jobs if j.get("verdict") == "match"),
+            "total_dropped": len(dropped),
+            "profile_summary": profile_summary or "",
+            "error": "",
+        }
+
     def _save_jd_checkpoint(path, jd_map):
         """原子写 JD 断点文件（每批抓完落盘，进程崩了已抓的也不丢）。"""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -1970,6 +2070,8 @@ def create_app(config=None):
                 return
             task["status"] = "running"
             stop_event = task.get("stop_event")
+
+        _activate_task_browser(task_id)
 
         last_event_stage = None
 
@@ -2059,6 +2161,7 @@ def create_app(config=None):
                     source_count=len(source_result.get("jobs") or []),
                     execution_params={"scrape_task_id": scrape_task_id,
                                       "profile_summary": profile_summary or "",
+                                      "browser_account": _account_for_run(),
                                       "execution_config": execution_config.to_dict(),
                                       "frozen_scope": frozen_scope.to_dict()},
                     backend_version=_backend_version)
@@ -2105,6 +2208,7 @@ def create_app(config=None):
                     execution_params={
                         "scrape_task_id": scrape_task_id,
                         "profile_summary": profile_summary,
+                        "browser_account": _account_for_run(),
                         "execution_config": execution_config.to_dict(),
                         "frozen_scope": frozen_scope.to_dict(),
                     },
@@ -2350,6 +2454,12 @@ def create_app(config=None):
                         # 源级硬信号：暂停，不关浏览器（用户需要它处理验证码/登录）
                         _hs_code = detail_result.get("hard_stop_code") or "source_blocked"
                         _hs_label = _FAILED_CODE_LABELS.get(_hs_code, "抓取被拦截")
+                        _hs_hint = next((
+                            str(job.get("jd_failed_reason") or "").strip()
+                            for job in detail_result.get("jobs") or []
+                            if job.get("jd_failed_reason")
+                        ), "")
+                        _hs_reason = _hs_hint if _hs_hint and _hs_hint != _hs_label else _hs_label
                         _persist_jd_job_failures(
                             task_id,
                             detail_result.get("jobs") or [],
@@ -2358,14 +2468,14 @@ def create_app(config=None):
                         store.update_screening_run(
                             task_id, status="paused", error_code=_hs_code,
                             current_stage="jd_detail",
-                            processed_count=len(jd_map), error_reason=_hs_label,
+                            processed_count=len(jd_map), error_reason=_hs_reason,
                         )
                         with _pipeline_lock:
                             t = _pipeline_tasks.get(task_id)
                             if t is not None:
                                 t["status"] = "paused"
                                 t["error"] = (
-                                    f"抓取 JD 时{_hs_label}：已抓 "
+                                    f"抓取 JD 时{_hs_reason}：已抓 "
                                     f"{len(jd_map)}/{len(survivors)} 条（已保存）。"
                                     "请在自动化浏览器中处理，完成后点「继续」"
                                 )
@@ -2792,6 +2902,9 @@ def create_app(config=None):
         for k, default in _ADVANCED_DEFAULTS.items():
             if k in settings:
                 val = settings[k]
+                if k == "browser_account":
+                    clean[k] = str(val) if str(val) in ("a", "b") else "a"
+                    continue
                 if isinstance(default, float):
                     val = float(val)
                 elif isinstance(default, int):
@@ -3051,17 +3164,20 @@ def create_app(config=None):
         with _pipeline_lock:
             task["config_digest"] = execution_config.config_digest
             task["scope_digest"] = frozen_scope.scope_digest
+            task["browser_account"] = _account_for_run()
         store.create_screening_run(
             task_id,
             frozen_filters=script_params.get("filters") or {},
             source_count=frozen_scope.combination_count,
             execution_params={
                 "script_params": script_params,
+                "browser_account": _account_for_run(),
                 "execution_config": execution_config.to_dict(),
                 "frozen_scope": frozen_scope.to_dict(),
             },
             backend_version=_backend_version,
         )
+        _activate_run_browser()
         try:
             _pipeline_executor.submit(
                 _run_pipeline_task, task_id, script_params,
@@ -3126,6 +3242,11 @@ def create_app(config=None):
                     "error_code": code, "error_reason": reason,
                     "status": "paused",
                 }), 409
+        if db_run is not None:
+            resume_params = dict(db_run.get("execution_params") or {})
+            if not str(resume_params.get("browser_account") or ""):
+                resume_params["browser_account"] = _account_for_run(db_run)
+                store.update_screening_execution_params(old_task_id, resume_params)
         # 3) 收集 script_params（内存优先，DB 兜底）
         script_params = (old_snapshot or {}).get("script_params")
         if not script_params and db_run:
@@ -3171,6 +3292,7 @@ def create_app(config=None):
             task["skip_combos"] = completed
             task["old_jobs"] = old_jobs
             task["resuming_from"] = old_task_id
+            task["browser_account"] = _account_for_run(db_run)
         start_gate = threading.Event()
         abort_start = threading.Event()
 
@@ -3345,6 +3467,14 @@ def create_app(config=None):
                 "ok": False, "error": "already_running",
             }), 409
         claimed_task["source_task_id"] = scrape_task_id
+        account_source = prev if resume_from_run_id else None
+        claimed_task["browser_account"] = _account_for_run(account_source)
+        if resume_from_run_id and prev is not None:
+            resume_params = dict(prev.get("execution_params") or {})
+            if not str(resume_params.get("browser_account") or ""):
+                resume_params["browser_account"] = _account_for_run(prev)
+                store.update_screening_execution_params(resume_from_run_id, resume_params)
+        _activate_run_browser(account_source)
         try:
             _pipeline_executor.submit(
                 _run_ai_screen_task, task_id, screening_fields,
@@ -3559,6 +3689,7 @@ def create_app(config=None):
             "ok": True,
             "has_result": True,
             "source_run_id": payload.get("run_id"),
+            "status": payload.get("status", "completed"),
             "saved_at": payload.get("saved_at"),
             "started_at": _iso_epoch_ms(payload.get("started_at")),
             "finished_at": _iso_epoch_ms(payload.get("finished_at")),
@@ -3762,12 +3893,16 @@ def create_app(config=None):
                     "job_ids": [str(job_id)],
                     "profile_summary": profile_summary,
                     "single_retry": True,
+                    "browser_account": _account_for_run(),
                 },
                 backend_version=_backend_version,
             )
             store.update_screening_run(
                 task_id, status="running", current_stage="recrawl_fetch_jd"
             )
+            with _pipeline_lock:
+                _pipeline_tasks[task_id]["browser_account"] = _account_for_run()
+            _activate_run_browser()
             try:
                 _pipeline_executor.submit(
                     _run_recrawl_task, task_id, [str(job_id)], profile_summary,
@@ -3798,6 +3933,7 @@ def create_app(config=None):
                 "single_retry": True,
             }), 202
 
+        _activate_run_browser()
         from webui.pipeline_exec import ensure_chrome_ready
 
         source_url = normalize_job_link(
@@ -3943,6 +4079,8 @@ def create_app(config=None):
                 "error": "已有重抓任务在运行，请等待完成或取消后再试",
                 "existing_task_id": existing_task_id,
             }), 409
+        claimed_task["browser_account"] = _account_for_run()
+        _activate_run_browser()
         try:
             store.create_screening_run(
                 task_id,
@@ -3951,6 +4089,7 @@ def create_app(config=None):
                     "source_run_id": source_run_id,
                     "job_ids": [str(x) for x in job_ids],
                     "profile_summary": profile_summary,
+                    "browser_account": _account_for_run(),
                 },
                 backend_version=_backend_version,
             )
@@ -4000,6 +4139,7 @@ def create_app(config=None):
                 "ok": False, "error": "not_paused_recrawl",
                 "status": run.get("status"), "stage": stage,
             }), 409
+        _activate_run_browser(run)
         if not _block_checked:
             passed, code, reason = _check_resume_block(run)
             if not passed:
@@ -4028,6 +4168,11 @@ def create_app(config=None):
         if claimed_task is None:
             return jsonify({"ok": False, "error": "already_running"}), 409
         claimed_task["source_run_id"] = source_run_id
+        claimed_task["browser_account"] = _account_for_run(run)
+        resume_params = dict(run.get("execution_params") or {})
+        if not str(resume_params.get("browser_account") or ""):
+            resume_params["browser_account"] = _account_for_run(run)
+            store.update_screening_execution_params(task_id, resume_params)
         try:
             store.update_screening_run(task_id, status="running")
             store.append_task_event(task_id, "resume", {
@@ -4100,6 +4245,8 @@ def create_app(config=None):
                 return
             task["status"] = "running"
             stop_event = task.get("stop_event")
+
+        _activate_task_browser(task_id)
 
         last_event_stage = None
 
@@ -4250,6 +4397,12 @@ def create_app(config=None):
                             # 暂停，不关浏览器（用户需要它处理验证码/登录）
                             _hs_code = detail.get("hard_stop_code") or "source_blocked"
                             _hs_label = _FAILED_CODE_LABELS.get(_hs_code, "抓取被拦截")
+                            _hs_hint = next((
+                                str(job.get("jd_failed_reason") or "").strip()
+                                for job in detail_jobs or []
+                                if job.get("jd_failed_reason")
+                            ), "")
+                            _hs_reason = _hs_hint if _hs_hint and _hs_hint != _hs_label else _hs_label
                             _persist_jd_job_failures(
                                 task_id,
                                 detail_jobs,
@@ -4261,7 +4414,7 @@ def create_app(config=None):
                                 task_id, status="paused", error_code=_hs_code,
                                 current_stage="recrawl_fetch_jd",
                                 processed_count=len(completed_jd_ids),
-                                error_reason=_hs_label)
+                                error_reason=_hs_reason)
                             store.append_task_event(
                                 task_id, "pause",
                                 {"stage": "recrawl_fetch_jd", "code": _hs_code,
@@ -4270,7 +4423,7 @@ def create_app(config=None):
                                 t = _pipeline_tasks.get(task_id)
                                 if t is not None:
                                     t["status"] = "paused"
-                                    t["error"] = (f"重抓 JD 时{_hs_label}，已抓部分已保存；"
+                                    t["error"] = (f"重抓 JD 时{_hs_reason}，已抓部分已保存；"
                                                   "请在自动化浏览器中处理，完成后点「继续」")
                             return
                         if detail.get("stopped"):
@@ -4562,17 +4715,24 @@ def create_app(config=None):
         )
         # processed_count 只记录已成功完成的当前阶段工作单元；pending
         # 是已失败并进入待确认的独立工作单元，两者不能互相扣减。
+        # JD 详情/精筛阶段只处理粗筛保留的岗位；原始列表里的 dropped
+        # 已经作为独立结果展示，不能继续混进当前阶段的成功/失败/未开始。
+        jd_stage = stage in ("jd_detail", "fetch_jd", "ai_fine", "screen_b")
+        stage_total = kept if jd_stage and kept > 0 else source
+        # processed_count 只记录已成功完成的当前阶段工作单元；pending
+        # 是已失败并进入待确认的独立工作单元，两者不能互相扣减。
         fail_count = pending
         success_count = max(match + mismatch, processed)
-        completed_count = min(source, success_count + fail_count + dropped)
-        unstarted = max(0, source - completed_count)
+        completed_count = min(stage_total, success_count + fail_count)
+        unstarted = max(0, stage_total - completed_count)
         overall_percent = (
-            round(completed_count / source * 100, 1) if source > 0 else 0
+            round(completed_count / stage_total * 100, 1)
+            if stage_total > 0 else 0
         )
         progress = dict(live_progress)
         progress.setdefault("overall_percent", overall_percent)
-        progress.setdefault("current", completed_count)
-        progress.setdefault("total", source)
+        progress.setdefault("current", success_count if jd_stage else completed_count)
+        progress.setdefault("total", stage_total)
         pause_info = None
         effective_status = (
             str(live.get("status")) if live is not None
@@ -4605,7 +4765,8 @@ def create_app(config=None):
             "fail_count": fail_count,
             "unstarted_count": unstarted,
             "pending_count": pending,
-            "total": source,
+            "total": stage_total,
+            "source_total": source,
             "processed": processed,
             "match_count": match,
             "mismatch_count": mismatch,
@@ -4654,6 +4815,7 @@ def create_app(config=None):
                 "message": "只有 paused 状态的任务才能继续",
             }), 409
         # FR-022：检查内存中是否已有该 run 的工作
+        _activate_run_browser(run)
         with _pipeline_lock:
             existing = _pipeline_tasks.get(run_id)
             if existing is not None and existing.get("status") == "running":
@@ -4744,6 +4906,11 @@ def create_app(config=None):
                 "message": "该任务正在继续，请勿重复点击",
             }), 409
         claimed_task["source_task_id"] = scrape_task_id
+        claimed_task["browser_account"] = _account_for_run(run)
+        resume_params = dict(run.get("execution_params") or {})
+        if not str(resume_params.get("browser_account") or ""):
+            resume_params["browser_account"] = _account_for_run(run)
+            store.update_screening_execution_params(run_id, resume_params)
         start_gate = threading.Event()
         abort_start = threading.Event()
 
@@ -4863,6 +5030,8 @@ def create_app(config=None):
         if task is not None:
             try:
                 from webui.pipeline_exec import close_debug_chrome
+                if run is not None:
+                    _activate_run_browser(run)
                 close_debug_chrome()
             except (OSError, RuntimeError):
                 pass  # best-effort 关闭浏览器；取消状态已经可靠提交。
@@ -4874,6 +5043,104 @@ def create_app(config=None):
             ),
             "processed_count": int((run or {}).get("processed_count") or 0),
             "message": "任务已取消，已有结果保留",
+        })
+
+    @app.route("/api/task/finish/<run_id>", methods=["POST"])
+    def api_task_finish(run_id: str):
+        """结束暂停任务并生成可展示的部分结果快照。"""
+        run = store.get_screening_run(run_id)
+        if run is None:
+            return jsonify({"ok": False, "error": "run_not_found"}), 404
+        if run["status"] != "paused":
+            return jsonify({
+                "ok": False, "error": "not_paused",
+                "status": _run_to_task_status(run["status"]),
+                "message": "只有 paused 状态的任务才能结束并保存",
+            }), 409
+        with _pipeline_lock:
+            task = _pipeline_tasks.get(run_id)
+            if task is not None and task.get("status") == "running":
+                return jsonify({
+                    "ok": False, "error": "already_running",
+                    "message": "任务正在运行，请先停止再结束",
+                }), 409
+            if task is not None and task.get("stop_event") is not None:
+                task["stop_event"].set()
+        params = run.get("execution_params") or {}
+        scrape_task_id = str(params.get("scrape_task_id") or "")
+        source_run_id = str(params.get("source_run_id") or "")
+        source_jobs = []
+        verdicts = {}
+        pending_rows = []
+        jd_map = {}
+        if scrape_task_id:
+            try:
+                source_jobs = store.load_scrape_run_jobs(scrape_task_id)
+            except _OPERATIONAL_ERRORS:
+                source_jobs = []
+            verdicts = store.load_screening_verdicts(run_id)
+            pending_rows = store.load_screening_pending(run_id)
+            try:
+                jd_map = _load_jd_checkpoint(
+                    _jd_checkpoint_path(app.config["RESULT_DIR"], run_id))
+            except RuntimeError as exc:
+                return jsonify({
+                    "ok": False, "error": str(exc),
+                    "message": "JD 断点文件损坏，无法生成部分结果",
+                }), 503
+        elif source_run_id:
+            payload = store.load_latest_pipeline_result(source_run_id)
+            source_jobs = ((payload or {}).get("result") or {}).get("jobs") or []
+            verdicts = store.load_screening_verdicts(source_run_id)
+            pending_rows = store.load_screening_pending(run_id)
+            if not pending_rows:
+                pending_rows = store.load_screening_pending(source_run_id)
+        if not source_jobs:
+            return jsonify({
+                "ok": False, "error": "missing_scrape_snapshot",
+                "message": "抓取岗位快照缺失，无法生成部分结果",
+            }), 409
+        profile_summary = str(params.get("profile_summary") or "")
+        if not profile_summary and source_run_id:
+            source_payload = store.load_latest_pipeline_result(source_run_id)
+            profile_summary = str(((source_payload or {}).get("result") or {}).get("profile_summary") or "")
+        result = _build_partial_pipeline_result(
+            source_jobs, verdicts, pending_rows, jd_map,
+            profile_summary,
+        )
+        snapshot_run_id = store.save_pipeline_result(
+            result, {"screening": run.get("frozen_filters") or {}},
+            started_at=run.get("started_at"),
+            finished_at=int(time.time() * 1000),
+            execution_config=params.get("execution_config") or {},
+            status="partial",
+        )
+        store.update_screening_run(
+            run_id, status="cancelled", current_stage="done",
+            error_reason="用户提前结束，已保存部分结果",
+        )
+        store.append_task_event(run_id, "finish", {
+            "snapshot_run_id": snapshot_run_id,
+            "stage": run.get("current_stage") or "", "jobs": len(result["jobs"]),
+            "dropped": len(result["dropped"]),
+        })
+        with _pipeline_lock:
+            current = _pipeline_tasks.get(run_id)
+            if current is not None:
+                current["status"] = "cancelled"
+                current["error"] = "用户提前结束，已保存部分结果"
+                current["result"] = result
+                current["finished_at"] = int(time.time() * 1000)
+        try:
+            from webui.pipeline_exec import close_debug_chrome
+            _activate_run_browser(run)
+            close_debug_chrome()
+        except (OSError, RuntimeError):
+            pass
+        return jsonify({
+            "ok": True, "run_id": run_id, "snapshot_run_id": snapshot_run_id,
+            "status": "completed_with_pending", "result": result,
+            "message": "任务已结束，已完成结果已保存",
         })
 
     @app.route("/api/recovery/preview/<run_id>", methods=["GET"])
