@@ -1,10 +1,8 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import type { ExecutionSelection, TaskSize } from "../types";
+import type { ExecutionSelection } from "../types";
 
 const props = withDefaults(defineProps<{
   modelValue: ExecutionSelection;
-  taskSize: TaskSize;
   disabled?: boolean;
   busy?: boolean;
 }>(), {
@@ -22,11 +20,6 @@ const options: Array<{ value: ExecutionSelection; label: string }> = [
   { value: "extreme", label: "极限" },
   { value: "custom", label: "自定义" },
 ];
-const sizeLabel = computed(() => ({
-  small: "小任务",
-  medium: "中任务",
-  large: "大任务",
-})[props.taskSize]);
 
 function select(value: ExecutionSelection) {
   if (props.disabled || props.busy || value === props.modelValue) return;
@@ -36,10 +29,6 @@ function select(value: ExecutionSelection) {
 
 <template>
   <div class="execution-mode-control">
-    <div class="mode-context">
-      <span>执行模式</span>
-      <strong data-testid="mode-task-size">{{ sizeLabel }}</strong>
-    </div>
     <div class="mode-segments" role="radiogroup" aria-label="执行模式">
       <button
         v-for="option in options"
@@ -63,28 +52,16 @@ function select(value: ExecutionSelection) {
   min-width: 0;
 }
 
-.mode-context {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--muted, #64748b);
-  font-size: 13px;
-}
 
-.mode-context strong {
-  color: var(--text, #172033);
-  font-size: 13px;
-}
 
 .mode-segments {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 4px;
   padding: 4px;
-  border: 1px solid var(--line, #d9e0e8);
+  border: 1px solid var(--line);
   border-radius: 7px;
-  background: #f4f7f9;
+  background: var(--surface-2);
 }
 
 .mode-segments button {
@@ -94,22 +71,25 @@ function select(value: ExecutionSelection) {
   border: 1px solid transparent;
   border-radius: 5px;
   background: transparent;
-  color: #526071;
+  color: var(--muted);
   font: inherit;
   font-weight: 650;
   cursor: pointer;
 }
 
 .mode-segments button.active {
-  border-color: #bcc8d5;
-  background: #fff;
-  color: #172033;
-  box-shadow: 0 1px 2px rgb(15 23 42 / 8%);
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
 }
 
 .mode-segments button:focus-visible {
   outline: 3px solid rgb(14 116 144 / 28%);
   outline-offset: 1px;
+}
+
+.mode-segments button:hover:not(:disabled) {
+  background: rgb(14 116 144 / 10%);
 }
 
 .mode-segments button:disabled {

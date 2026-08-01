@@ -5,9 +5,6 @@ import type {
   ModeSelectionResponse,
   ScopePreviewRequest,
   ScopePreviewResponse,
-  TuningExperimentCreateRequest,
-  TuningExperimentResponse,
-  TuningExperimentResult,
 } from "./types";
 
 let sessionToken = "";
@@ -103,7 +100,7 @@ export function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-export const tuningApi = {
+export const settingsApi = {
   previewScope(payload: ScopePreviewRequest) {
     return apiRequest<ScopePreviewResponse>("/api/search-scope/preview", {
       method: "POST", json: payload,
@@ -120,45 +117,6 @@ export const tuningApi = {
   selectMode(mode: ExecutionSelection, scopeDigest: string) {
     return apiRequest<ModeSelectionResponse>("/api/advanced-settings/select-mode", {
       method: "POST", json: { mode, scope_digest: scopeDigest },
-    });
-  },
-  createExperiment(payload: TuningExperimentCreateRequest) {
-    return apiRequest<{ ok: true; experiment_id: string; status: "draft" }>(
-      "/api/tuning/experiments", { method: "POST", json: payload },
-    );
-  },
-  getExperiment(experimentId: string) {
-    return apiRequest<TuningExperimentResponse>(`/api/tuning/experiments/${experimentId}`);
-  },
-  confirmInput(experimentId: string) {
-    return apiRequest<{ ok: true; experiment_id: string; status: "preflight" }>(
-      `/api/tuning/experiments/${experimentId}/confirm-input`, { method: "POST" },
-    );
-  },
-  cancelExperiment(experimentId: string) {
-    return apiRequest<{ ok: true; experiment_id: string; status: "cancelled" }>(
-      `/api/tuning/experiments/${experimentId}/cancel`, { method: "POST" },
-    );
-  },
-  resumeExperiment(experimentId: string) {
-    return apiRequest<{ ok: true; experiment_id: string; status: "awaiting_instruction" }>(
-      `/api/tuning/experiments/${experimentId}/resume`, { method: "POST" },
-    );
-  },
-  getResult(experimentId: string) {
-    return apiRequest<TuningExperimentResult>(`/api/tuning/experiments/${experimentId}/result`);
-  },
-  applyResult(experimentId: string, candidateModeVersionDigest: string) {
-    return apiRequest<{ ok: true; mode_version_id: string }>(
-      `/api/tuning/experiments/${experimentId}/apply`, {
-        method: "POST",
-        json: { candidate_mode_version_digest: candidateModeVersionDigest },
-      },
-    );
-  },
-  rollbackModeVersion(targetVersionId: string) {
-    return apiRequest<AdvancedSettingsState>("/api/advanced-settings/mode-versions/rollback", {
-      method: "POST", json: { target_version_id: targetVersionId },
     });
   },
 };

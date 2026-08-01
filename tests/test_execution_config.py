@@ -15,7 +15,7 @@ from webui import execution_config
 
 
 # ---------------------------------------------------------------------------
-# 辅助：合法九字段配置
+# 辅助：合法速度字段配置
 # ---------------------------------------------------------------------------
 def _valid_config_values():
     return {
@@ -24,6 +24,7 @@ def _valid_config_values():
         "detail_interval": 2.0,
         "detail_reset_every": 4,
         "detail_batch_cooldown": 5.0,
+        "detail_tab_pool_size": 5,
         "screen_batch_size": 50,
         "screen_concurrency": 5,
         "match_batch_size": 4,
@@ -32,27 +33,28 @@ def _valid_config_values():
 
 
 # ===========================================================================
-# ExecutionConfigSnapshot — 九字段、物理校验、规范序列化、摘要
+# ExecutionConfigSnapshot — 速度字段、物理校验、规范序列化、摘要
 # ===========================================================================
 class ExecutionConfigFieldsTests(unittest.TestCase):
-    """FR-010: 仅调优九个速度字段；data-model 1.1 物理边界。"""
+    """FR-010: 仅调优速度字段；data-model 1.1 物理边界。"""
 
-    NINE_FIELDS = (
+    SPEED_FIELDS = (
         "inter_combo_delay",
         "detail_batch_size",
         "detail_interval",
         "detail_reset_every",
         "detail_batch_cooldown",
+        "detail_tab_pool_size",
         "screen_batch_size",
         "screen_concurrency",
         "match_batch_size",
         "match_concurrency",
     )
 
-    def test_snapshot_contains_exactly_nine_speed_fields_plus_meta(self):
+    def test_snapshot_contains_all_speed_fields_plus_meta(self):
         snap = execution_config.ExecutionConfigSnapshot.create(_valid_config_values())
         data = snap.to_dict()
-        for field in self.NINE_FIELDS:
+        for field in self.SPEED_FIELDS:
             self.assertIn(field, data, f"缺字段 {field}")
         # pages 不属于配置快照
         self.assertNotIn("pages", data)
@@ -114,9 +116,24 @@ class ExecutionConfigFieldsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             execution_config.ExecutionConfigSnapshot.create(values)
 
+    def test_detail_tab_pool_size_must_be_between_one_and_ten(self):
+        for value in (0, 11):
+            with self.subTest(value=value):
+                values = _valid_config_values()
+                values["detail_tab_pool_size"] = value
+                with self.assertRaises(ValueError):
+                    execution_config.ExecutionConfigSnapshot.create(values)
+
+
+    def test_detail_tab_pool_size_accepts_ten(self):
+        values = _valid_config_values()
+        values["detail_tab_pool_size"] = 10
+        snapshot = execution_config.ExecutionConfigSnapshot.create(values)
+        self.assertEqual(snapshot.detail_tab_pool_size, 10)
+
     def test_integer_fields_reject_fractional_and_boolean_values(self):
         integer_fields = (
-            "detail_batch_size", "detail_reset_every", "screen_batch_size",
+            "detail_batch_size", "detail_reset_every", "detail_tab_pool_size",
             "screen_concurrency", "match_batch_size", "match_concurrency",
         )
         for field in integer_fields:

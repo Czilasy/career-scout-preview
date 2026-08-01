@@ -4,7 +4,7 @@ import ExecutionModeSelector from "../ExecutionModeSelector.vue";
 describe("ExecutionModeSelector", () => {
   it("renders exactly the three system modes and recent custom", () => {
     const wrapper = mount(ExecutionModeSelector, {
-      props: { modelValue: "balanced", taskSize: "medium" },
+      props: { modelValue: "balanced" },
     });
 
     const controls = wrapper.findAll('[role="radio"]');
@@ -12,12 +12,11 @@ describe("ExecutionModeSelector", () => {
       "稳定", "平衡", "极限", "自定义",
     ]);
     expect(wrapper.get('[data-mode="balanced"]').attributes("aria-checked")).toBe("true");
-    expect(wrapper.get('[data-testid="mode-task-size"]').text()).toContain("中任务");
   });
 
   it("emits only the selected mode and never a pages field", async () => {
     const wrapper = mount(ExecutionModeSelector, {
-      props: { modelValue: "custom", taskSize: "small" },
+      props: { modelValue: "custom" },
     });
 
     await wrapper.get('[data-mode="stable"]').trigger("click");
@@ -27,7 +26,7 @@ describe("ExecutionModeSelector", () => {
 
   it("disables every selection while scope is locked", () => {
     const wrapper = mount(ExecutionModeSelector, {
-      props: { modelValue: "stable", taskSize: "large", disabled: true },
+      props: { modelValue: "stable", disabled: true },
     });
 
     for (const control of wrapper.findAll("button")) {

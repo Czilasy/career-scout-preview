@@ -116,6 +116,18 @@ class SchemaMigrationTests(unittest.TestCase):
         # Reopening should not error or duplicate migrations
         self.assertGreaterEqual(store.schema_version(), store2.schema_version())
 
+    def test_migration_026_adds_start_finish_columns(self):
+        store = TaskStore(self.db_path)
+        with store._connection() as conn:
+            columns = {
+                row["name"] for row in conn.execute(
+                    "PRAGMA table_info(screening_runs)"
+                ).fetchall()
+            }
+        self.assertIn("started_at", columns)
+        self.assertIn("finished_at", columns)
+        self.assertGreaterEqual(store.schema_version(), 26)
+
 
 class CandidateProfileStoreTests(unittest.TestCase):
     """T012: multi-profile create, copy manual fields, isolate feedback."""
@@ -369,9 +381,21 @@ class ScreeningRunStoreTests(unittest.TestCase):
             "total_dropped": 0,
             "profile_summary": "画像",
         }
-        run_id = self.store.save_pipeline_result(result, {"screening": {}})
+        run_id = self.store.save_pipeline_result(
+            result, {"screening": {}},
+            started_at=1_700_000_000_000,
+            finished_at=1_700_000_100_000,
+            execution_config={
+                "screen_batch_size": 50, "match_batch_size": 10,
+            },
+        )
         run = self.store.get_screening_run(run_id)
         self.assertEqual(run["record_kind"], "result_snapshot")
+        self.assertEqual(run["started_at"], "2023-11-15T06:13:20+08:00")
+        self.assertEqual(run["finished_at"], "2023-11-15T06:15:00+08:00")
+        loaded = self.store.load_latest_pipeline_result(run_id)
+        self.assertEqual(loaded["execution_config"]["screen_batch_size"], 50)
+        self.assertEqual(loaded["execution_config"]["match_batch_size"], 10)
 
     def test_load_latest_pipeline_result_skips_process_log(self):
         """load_latest_pipeline_result 只能返回 result_snapshot，跳过 process_log。"""
@@ -397,6 +421,56 @@ class ScreeningRunStoreTests(unittest.TestCase):
         # 加载到的必须是 result_snapshot（有 jobs 字段且非空），不是 process_log
         self.assertEqual(len(loaded["result"]["jobs"]), 1)
         self.assertEqual(loaded["result"]["jobs"][0]["job_id"], "j2")
+
+
+    def test_clear_latest_pipeline_result_removes_only_latest_snapshot(self):
+        """重新上传简历时只清理最新结果存档，保留更早的 result_snapshot。"""
+        older = {
+            "ok": True,
+            "jobs": [{"job_id": "old", "verdict": "match", "title": "旧结果"}],
+            "dropped": [],
+            "total_scraped": 1,
+            "total_kept": 1,
+            "total_matched": 1,
+            "total_dropped": 0,
+            "profile_summary": "画像1",
+        }
+        newer = {
+            "ok": True,
+            "jobs": [{"job_id": "new", "verdict": "match", "title": "新结果"}],
+            "dropped": [],
+            "total_scraped": 1,
+            "total_kept": 1,
+            "total_matched": 1,
+            "total_dropped": 0,
+            "profile_summary": "画像2",
+        }
+        older_id = self.store.save_pipeline_result(older, {"screening": {}})
+        newer_id = self.store.save_pipeline_result(newer, {"screening": {}})
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET created_at = ? WHERE id = ?",
+                ("2026-01-01T00:00:00+08:00", older_id),
+            )
+            conn.execute(
+                "UPDATE screening_runs SET created_at = ? WHERE id = ?",
+                ("2026-01-02T00:00:00+08:00", newer_id),
+            )
+
+        self.assertTrue(self.store.clear_latest_pipeline_result())
+        loaded = self.store.load_latest_pipeline_result()
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded["run_id"], older_id)
+        self.assertEqual(loaded["result"]["jobs"][0]["job_id"], "old")
+        with self.store._connection() as conn:
+            rows = conn.execute(
+                "SELECT COUNT(*) AS n FROM screening_results WHERE run_id = ?", (newer_id,),
+            ).fetchone()
+            self.assertEqual(rows["n"], 0)
+
+        self.assertTrue(self.store.clear_latest_pipeline_result())
+        self.assertIsNone(self.store.load_latest_pipeline_result())
+        self.assertFalse(self.store.clear_latest_pipeline_result())
 
 
 class AdvancedConfigStateStoreTests(unittest.TestCase):
@@ -451,13 +525,14 @@ class AdvancedConfigStateStoreTests(unittest.TestCase):
         self.assertIn("active_mode_version_id", state)
 
     def test_save_custom_config_stores_complete_config(self):
-        """保存自定义配置：完整九字段 + digest，原子替换。"""
+        """保存自定义配置：完整速度字段 + digest，原子替换。"""
         config = {
             "inter_combo_delay": 10.0,
             "detail_batch_size": 15,
             "detail_interval": 2.0,
             "detail_reset_every": 4,
             "detail_batch_cooldown": 5.0,
+            "detail_tab_pool_size": 5,
             "screen_batch_size": 50,
             "screen_concurrency": 5,
             "match_batch_size": 4,
@@ -468,6 +543,7 @@ class AdvancedConfigStateStoreTests(unittest.TestCase):
         self.assertEqual(state["active_selection"], "custom")
         self.assertIsNotNone(state["last_custom_config"])
         self.assertEqual(state["last_custom_config"]["detail_batch_size"], 15)
+        self.assertEqual(state["last_custom_config"]["detail_tab_pool_size"], 5)
         self.assertIsNotNone(state["last_custom_digest"])
 
     def test_save_custom_config_rejects_partial_patch(self):
@@ -1154,4 +1230,3 @@ class TuningInvariantTests(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             self.store.create_mode_version(matrix=partial_matrix, manual_ranges={})
-

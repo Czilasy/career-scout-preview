@@ -3,7 +3,7 @@
 提供所有调用方唯一的配置语义，消除全局 JSON 晚绑定读取。
 
 核心值对象:
-- ExecutionConfigSnapshot: 9 个速度字段 + schema_version + config_digest，不可变
+- ExecutionConfigSnapshot: 10 个速度字段（含 JD 并发 Tab 数）+ schema_version + config_digest，不可变
 - FrozenTaskScope: 关键词/城市/页数/规模 + scope_digest，不可变
 
 规范化函数:
@@ -36,24 +36,27 @@ __all__ = [
     "preview_scope",
     "get_mode_config",
     "classify_task_size",
-    "NINE_SPEED_FIELDS",
+    "SPEED_FIELDS",
+    "DEFAULT_DETAIL_TAB_POOL_SIZE",
 ]
 
 
 CONFIG_SCHEMA_VERSION = 1
 SCOPE_SCHEMA_VERSION = 1
-
-NINE_SPEED_FIELDS: tuple[str, ...] = (
+SPEED_FIELDS: tuple[str, ...] = (
     "inter_combo_delay",
     "detail_batch_size",
     "detail_interval",
     "detail_reset_every",
     "detail_batch_cooldown",
+    "detail_tab_pool_size",
     "screen_batch_size",
     "screen_concurrency",
     "match_batch_size",
     "match_concurrency",
 )
+
+DEFAULT_DETAIL_TAB_POOL_SIZE = 5
 
 _MIN_PLANNED_PAGES = 1
 _MAX_PLANNED_PAGES = 30
@@ -177,7 +180,7 @@ def _validate_int(value: Any, *, min_value: int) -> int:
 # ExecutionConfigSnapshot — 不可变执行配置快照
 # ---------------------------------------------------------------------------
 class ExecutionConfigSnapshot:
-    """9 个速度字段的不可变快照，带规范 JSON 和 SHA-256 摘要。
+    """10 个速度字段的不可变快照，带规范 JSON 和 SHA-256 摘要。
 
     pages 不属于此对象。
     """
@@ -188,6 +191,7 @@ class ExecutionConfigSnapshot:
         "detail_interval",
         "detail_reset_every",
         "detail_batch_cooldown",
+        "detail_tab_pool_size",
         "screen_batch_size",
         "screen_concurrency",
         "match_batch_size",
@@ -206,9 +210,12 @@ class ExecutionConfigSnapshot:
 
     @staticmethod
     def _validate_fields(fields: dict[str, Any]) -> dict[str, Any]:
+        values = dict(fields)
+        # 兼容旧 9 字段配置：JD 并发 Tab 数缺省时使用默认值。
+        values.setdefault("detail_tab_pool_size", DEFAULT_DETAIL_TAB_POOL_SIZE)
         validated: dict[str, Any] = {}
-        for field_name in NINE_SPEED_FIELDS:
-            if field_name not in fields:
+        for field_name in SPEED_FIELDS:
+            if field_name not in values:
                 raise ValueError(f"缺少必填字段: {field_name}")
         validators = {
             "inter_combo_delay": lambda v: _validate_decimal(v, min_value=0),
@@ -216,13 +223,16 @@ class ExecutionConfigSnapshot:
             "detail_interval": lambda v: _validate_decimal(v, min_value=0),
             "detail_reset_every": lambda v: _validate_int(v, min_value=1),
             "detail_batch_cooldown": lambda v: _validate_decimal(v, min_value=0),
+            "detail_tab_pool_size": lambda v: _validate_int(v, min_value=1),
             "screen_batch_size": lambda v: _validate_int(v, min_value=1),
             "screen_concurrency": lambda v: _validate_int(v, min_value=1),
             "match_batch_size": lambda v: _validate_int(v, min_value=1),
             "match_concurrency": lambda v: _validate_int(v, min_value=1),
         }
         for field_name, validator in validators.items():
-            validated[field_name] = validator(fields[field_name])
+            validated[field_name] = validator(values[field_name])
+        if validated["detail_tab_pool_size"] > 10:
+            raise ValueError("detail_tab_pool_size 必须介于 1 和 10 之间")
         return validated
 
     def _compute_digest(self) -> str:
@@ -240,13 +250,13 @@ class ExecutionConfigSnapshot:
     def canonical_json(self) -> str:
         """规范 JSON，不含 config_digest 字段，键按固定顺序排列。"""
         payload: dict[str, Any] = {"schema_version": CONFIG_SCHEMA_VERSION}
-        for field_name in NINE_SPEED_FIELDS:
+        for field_name in SPEED_FIELDS:
             payload[field_name] = getattr(self, field_name)
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {"schema_version": self.schema_version}
-        for field_name in NINE_SPEED_FIELDS:
+        for field_name in SPEED_FIELDS:
             result[field_name] = getattr(self, field_name)
         result["config_digest"] = self._config_digest
         return result
@@ -255,8 +265,11 @@ class ExecutionConfigSnapshot:
     def from_dict(cls, data: dict[str, Any]) -> "ExecutionConfigSnapshot":
         """从字典恢复快照，校验摘要一致性。"""
         fields: dict[str, Any] = {}
-        for field_name in NINE_SPEED_FIELDS:
+        for field_name in SPEED_FIELDS:
             if field_name not in data:
+                if field_name == "detail_tab_pool_size":
+                    fields[field_name] = DEFAULT_DETAIL_TAB_POOL_SIZE
+                    continue
                 raise ValueError(f"缺少必填字段: {field_name}")
             fields[field_name] = data[field_name]
         expected_digest = data.get("config_digest")
@@ -615,6 +628,7 @@ _MODE_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
             "detail_interval": 5.0,
             "detail_reset_every": 2,
             "detail_batch_cooldown": 10.0,
+            "detail_tab_pool_size": 5,
             "screen_batch_size": 20,
             "screen_concurrency": 2,
             "match_batch_size": 2,
@@ -626,6 +640,7 @@ _MODE_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
             "detail_interval": 4.0,
             "detail_reset_every": 3,
             "detail_batch_cooldown": 8.0,
+            "detail_tab_pool_size": 5,
             "screen_batch_size": 30,
             "screen_concurrency": 3,
             "match_batch_size": 3,
@@ -637,6 +652,7 @@ _MODE_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
             "detail_interval": 3.0,
             "detail_reset_every": 4,
             "detail_batch_cooldown": 6.0,
+            "detail_tab_pool_size": 5,
             "screen_batch_size": 40,
             "screen_concurrency": 3,
             "match_batch_size": 4,
@@ -650,6 +666,7 @@ _MODE_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
             "detail_interval": 3.0,
             "detail_reset_every": 3,
             "detail_batch_cooldown": 5.0,
+            "detail_tab_pool_size": 5,
             "screen_batch_size": 40,
             "screen_concurrency": 4,
             "match_batch_size": 3,
@@ -661,6 +678,7 @@ _MODE_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
             "detail_interval": 2.5,
             "detail_reset_every": 4,
             "detail_batch_cooldown": 4.0,
+            "detail_tab_pool_size": 5,
             "screen_batch_size": 50,
             "screen_concurrency": 5,
             "match_batch_size": 4,
@@ -672,6 +690,7 @@ _MODE_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
             "detail_interval": 2.0,
             "detail_reset_every": 5,
             "detail_batch_cooldown": 3.0,
+            "detail_tab_pool_size": 5,
             "screen_batch_size": 60,
             "screen_concurrency": 5,
             "match_batch_size": 5,
@@ -685,6 +704,7 @@ _MODE_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
             "detail_interval": 1.5,
             "detail_reset_every": 5,
             "detail_batch_cooldown": 2.0,
+            "detail_tab_pool_size": 5,
             "screen_batch_size": 60,
             "screen_concurrency": 6,
             "match_batch_size": 5,
@@ -696,6 +716,7 @@ _MODE_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
             "detail_interval": 1.0,
             "detail_reset_every": 6,
             "detail_batch_cooldown": 1.5,
+            "detail_tab_pool_size": 5,
             "screen_batch_size": 80,
             "screen_concurrency": 8,
             "match_batch_size": 6,
@@ -707,6 +728,7 @@ _MODE_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
             "detail_interval": 0.8,
             "detail_reset_every": 8,
             "detail_batch_cooldown": 1.0,
+            "detail_tab_pool_size": 5,
             "screen_batch_size": 100,
             "screen_concurrency": 10,
             "match_batch_size": 8,

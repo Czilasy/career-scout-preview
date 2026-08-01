@@ -12,6 +12,8 @@ import copy
 import json
 import subprocess
 import time
+import uuid
+from collections.abc import Mapping
 from urllib.parse import urlparse
 
 import requests
@@ -29,10 +31,10 @@ from webui.candidate import (
 
 
 KEYRING_SERVICE = "boss-workbench"
-DEFAULT_TIMEOUT = 60
+DEFAULT_TIMEOUT = 300
 CONNECTION_TIMEOUT = 15
-STREAM_IDLE_TIMEOUT = 20  # 流式模式下，连续 N 秒没收到任何数据即判定连接已死
-STREAM_TOTAL_TIMEOUT = 60  # 流式模式下，从请求发出算起的总时长上限（防慢吐丝卡死）
+STREAM_IDLE_TIMEOUT = 30  # 流式模式下，连续 N 秒没收到任何数据即判定连接已死
+STREAM_TOTAL_TIMEOUT = 180  # 流式模式下，从请求发出算起的总时长上限（防慢吐丝卡死）
 RANK_BATCH_SIZE = 10
 
 # Safe error classifications returned to callers.  Never include raw
@@ -67,8 +69,9 @@ class AISecurityError(Exception):
     so tracebacks do not leak sensitive details either.
     """
 
-    def __init__(self, error_code: str):
+    def __init__(self, error_code: str, diagnostics: dict | None = None):
         self.error_code = error_code
+        self.diagnostics = dict(diagnostics or {})
         super().__init__(error_code)
 
 
@@ -129,7 +132,8 @@ def map_ai_error_to_block_code(error_code: str) -> str:
 
 def _emit_request_event(callback, stage: str, t0: float, *,
                         error_code: str | None = None,
-                        counts: dict | None = None):
+                        counts: dict | None = None,
+                        metadata: dict | None = None):
     """Emit a ``request`` measurement event if a callback is attached.
 
     The callback receives only safe fields — never the API key, request
@@ -140,7 +144,7 @@ def _emit_request_event(callback, stage: str, t0: float, *,
     duration_ms = max(0, int((time.time() - t0) * 1000))
     try:
         callback("request", stage=stage, duration_ms=duration_ms,
-                 counts=counts, error_code=error_code)
+                 counts=counts, error_code=error_code, metadata=metadata)
     except Exception:
         pass  # measurement must never break the pipeline
 
@@ -162,12 +166,14 @@ def _emit_batch_event(callback, stage: str, *,
         pass
 
 
-def _emit_retry_event(callback, stage: str, backoff_ms: int):
+def _emit_retry_event(callback, stage: str, backoff_ms: int, *,
+                      metadata: dict | None = None):
     """Emit a ``retry`` measurement event for backoff / re-attempt."""
     if callback is None:
         return
     try:
-        callback("retry", stage=stage, duration_ms=max(0, int(backoff_ms)))
+        callback("retry", stage=stage, duration_ms=max(0, int(backoff_ms)),
+                 metadata=metadata)
     except Exception:
         pass
 
@@ -184,6 +190,15 @@ def _emit_item_terminal_event(callback, stage: str, *,
                          "input_count": input_count})
     except Exception:
         pass
+
+
+def _measurement_item_index(job: dict, fallback: int,
+                            measurement_indices: dict[int, int]) -> int:
+    """Return the runner-assigned original index when one is available."""
+    assigned = job.get("_tuning_measurement_index")
+    if isinstance(assigned, int) and assigned >= 0:
+        return assigned
+    return measurement_indices.get(id(job), fallback)
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +457,31 @@ def test_connection(endpoint_url: str, api_key: str, model: str = "") -> dict:
 # AI call
 # ---------------------------------------------------------------------------
 
+def _extract_provider_error(response) -> dict:
+    """从非 200 响应体安全提取供应商错误类型/代码（不泄露完整响应体）。
+
+    返回 {"provider_error_type": ..., "provider_error_code": ...} 的子集，
+    解析失败或字段不存在时返回空 dict。
+    """
+    try:
+        body = response.json()
+    except (ValueError, Exception):
+        return {}
+    if not isinstance(body, dict):
+        return {}
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return {}
+    result = {}
+    err_type = error.get("type")
+    err_code = error.get("code")
+    if err_type and isinstance(err_type, str):
+        result["provider_error_type"] = err_type
+    if err_code and isinstance(err_code, str):
+        result["provider_error_code"] = err_code
+    return result
+
+
 def _is_quota_exhausted_response(response) -> bool:
     """429 响应体里是否配额耗尽特征（只提取特征字段，不泄露响应体）。
 
@@ -531,7 +571,9 @@ def _read_stream(response) -> tuple[str, str]:
 
 
 def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFAULT_TIMEOUT,
-            temperature: float = 0.3, model: str = "") -> dict:
+            temperature: float = 0.3, model: str = "", *,
+            measurement_callback=None, measurement_stage: str = "ai",
+            retry_limits: Mapping[str, int] | None = None) -> dict:
     """Call an OpenAI-compatible chat completions endpoint and return parsed JSON.
 
     使用流式（stream=True）模式：AI 每生成几个字就推送一小段，本地实时接收。
@@ -557,6 +599,34 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
     }
     # (连接超时, 读取超时)：连接 15s 内必须建立；建立后每 20s 内必须收到数据
     stream_timeout = (CONNECTION_TIMEOUT, STREAM_IDLE_TIMEOUT)
+    correlation_id = uuid.uuid4().hex
+
+    def emit_attempt(attempt_index: int, started_at: float, *,
+                     error_code: str | None = None,
+                     metadata: dict | None = None):
+        if measurement_callback is None:
+            if metadata is not None:
+                metadata.setdefault("correlation_id", correlation_id)
+                metadata.setdefault("attempt_index", attempt_index)
+            return
+        if metadata is not None:
+            metadata.setdefault("correlation_id", correlation_id)
+            metadata.setdefault("attempt_index", attempt_index)
+        details = {
+            "correlation_id": correlation_id,
+            "attempt_index": attempt_index,
+            "outcome": "failed" if error_code else "success",
+            **(metadata or {}),
+        }
+        try:
+            measurement_callback(
+                "request", stage=measurement_stage,
+                duration_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+                counts={"attempt": attempt_index}, error_code=error_code,
+                metadata=details,
+            )
+        except Exception:
+            pass
 
     content = ""
     finish_reason = ""
@@ -564,7 +634,11 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
     waited = 0.0
     budget = float(timeout) if timeout else float(DEFAULT_TIMEOUT)
 
-    for attempt in range(RATE_LIMIT_ATTEMPTS):
+    retry_counts: dict[str, int] = {}
+    attempt = 0
+    while True:
+        attempt_index = attempt + 1
+        attempt_started_at = time.monotonic()
         response = None
         try:
             response = _post_ai_json(
@@ -572,14 +646,48 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
                 timeout=stream_timeout, stream=True,
                 fallback_timeout_seconds=STREAM_TOTAL_TIMEOUT,
             )
+        except requests.exceptions.SSLError:
+            last_error = AISecurityError(
+                ERROR_NETWORK,
+                {"failure_phase": "tls", "exception_type": "SSLError"},
+            )
+            emit_attempt(attempt_index, attempt_started_at,
+                         error_code=last_error.error_code,
+                         metadata=last_error.diagnostics)
         except requests.Timeout:
-            last_error = AISecurityError(ERROR_TIMEOUT)
+            last_error = AISecurityError(
+                ERROR_TIMEOUT,
+                {"failure_phase": "connect", "exception_type": "Timeout"},
+            )
+            emit_attempt(attempt_index, attempt_started_at,
+                         error_code=last_error.error_code,
+                         metadata=last_error.diagnostics)
         except requests.ConnectionError:
-            last_error = AISecurityError(ERROR_NETWORK)
+            last_error = AISecurityError(
+                ERROR_NETWORK,
+                {"failure_phase": "connect", "exception_type": "ConnectionError"},
+            )
+            emit_attempt(attempt_index, attempt_started_at,
+                         error_code=last_error.error_code,
+                         metadata=last_error.diagnostics)
         except requests.RequestException:
-            raise AISecurityError(ERROR_NETWORK) from None
+            error = AISecurityError(
+                ERROR_NETWORK,
+                {"failure_phase": "request", "exception_type": "RequestException"},
+            )
+            emit_attempt(attempt_index, attempt_started_at,
+                         error_code=error.error_code, metadata=error.diagnostics)
+            if retry_limits is None:
+                raise error from None
+            last_error = error
         except Exception:
-            raise AISecurityError(ERROR_INVALID) from None
+            error = AISecurityError(
+                ERROR_INVALID,
+                {"failure_phase": "request", "exception_type": "UnexpectedError"},
+            )
+            emit_attempt(attempt_index, attempt_started_at,
+                         error_code=error.error_code, metadata=error.diagnostics)
+            raise error from None
 
         # HTTP 状态码在流式 body 之前就到达，429/5xx 检测逻辑不变
         if response is not None and response.status_code not in RETRYABLE_STATUS:
@@ -591,13 +699,32 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
                     break  # 成功拿到内容，退出重试循环
                 except requests.Timeout:
                     # 流式读取中途 20s 无数据：连接已死，重试
-                    last_error = AISecurityError(ERROR_TIMEOUT)
+                    last_error = AISecurityError(
+                        ERROR_TIMEOUT,
+                        {"failure_phase": "stream", "exception_type": "Timeout"},
+                    )
                     response = None
+                    emit_attempt(attempt_index, attempt_started_at,
+                                 error_code=last_error.error_code,
+                                 metadata=last_error.diagnostics)
                 except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError):
-                    last_error = AISecurityError(ERROR_NETWORK)
+                    last_error = AISecurityError(
+                        ERROR_NETWORK,
+                        {"failure_phase": "stream", "exception_type": "ConnectionError"},
+                    )
                     response = None
+                    emit_attempt(attempt_index, attempt_started_at,
+                                 error_code=last_error.error_code,
+                                 metadata=last_error.diagnostics)
                 except Exception:
-                    raise AISecurityError(ERROR_INVALID) from None
+                    error = AISecurityError(
+                        ERROR_INVALID,
+                        {"failure_phase": "stream", "exception_type": "UnexpectedError"},
+                    )
+                    emit_attempt(attempt_index, attempt_started_at,
+                                 error_code=error.error_code,
+                                 metadata=error.diagnostics)
+                    raise error from None
             else:
                 # 不可重试 4xx（401/403 等），出循环走后续错误处理
                 last_error = None
@@ -606,13 +733,48 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
         if response is not None:
             # 可重试状态码：429 先查配额耗尽（救不活，立即停）
             if response.status_code == 429 and _is_quota_exhausted_response(response):
-                raise AISecurityError(ERROR_QUOTA_EXHAUSTED)
+                error = AISecurityError(
+                    ERROR_QUOTA_EXHAUSTED,
+                    {"failure_phase": "http", "http_status": 429,
+                     "provider_error_type": "insufficient_quota",
+                     "provider_error_code": "insufficient_quota"},
+                )
+                emit_attempt(attempt_index, attempt_started_at,
+                             error_code=error.error_code,
+                             metadata=error.diagnostics)
+                raise error
+            provider_info = _extract_provider_error(response)
             last_error = AISecurityError(
                 ERROR_RATE_LIMIT if response.status_code == 429 else ERROR_SERVER)
+            emit_attempt(
+                attempt_index, attempt_started_at,
+                error_code=last_error.error_code,
+                metadata={
+                    "failure_phase": "http",
+                    "http_status": response.status_code,
+                    **provider_info,
+                },
+            )
 
-        # 决定是否再试一次：还有剩余次数 && 退避等待累计不超预算
-        if attempt >= RATE_LIMIT_ATTEMPTS - 1:
-            break
+        # Tuning manifest 明确授权时按规范化 error_code 单独计预算；
+        # 普通调用保持原有固定 RATE_LIMIT_ATTEMPTS 行为。
+        if retry_limits is None:
+            if attempt >= RATE_LIMIT_ATTEMPTS - 1:
+                break
+        else:
+            retry_error_code = (
+                last_error.error_code if last_error is not None else ERROR_NETWORK
+            )
+            try:
+                allowed_retries = max(
+                    0, int(retry_limits.get(retry_error_code, 0))
+                )
+            except (TypeError, ValueError):
+                allowed_retries = 0
+            used_retries = retry_counts.get(retry_error_code, 0)
+            if used_retries >= allowed_retries:
+                break
+            retry_counts[retry_error_code] = used_retries + 1
         if response is None:
             delay = NETWORK_BACKOFF_SECONDS[min(attempt, len(NETWORK_BACKOFF_SECONDS) - 1)]
         elif response.status_code == 429:
@@ -623,6 +785,15 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
             break  # 退避等待累计已逼近单次 timeout，不再拖延
         time.sleep(delay)
         waited += delay
+        _emit_retry_event(
+            measurement_callback, measurement_stage, int(delay * 1000),
+            metadata={
+                "correlation_id": correlation_id,
+                "attempt_index": attempt_index,
+                "retry_decision": "retry",
+            },
+        )
+        attempt += 1
 
     # 重试耗尽仍未拿到内容
     if not content and last_error is not None:
@@ -635,22 +806,82 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
         if response.status_code in RETRYABLE_STATUS:
             raise (last_error or AISecurityError(ERROR_SERVER)) from None
         if response.status_code in (401, 403):
-            raise AISecurityError(ERROR_AUTH)
+            provider_info = _extract_provider_error(response)
+            error = AISecurityError(
+                ERROR_AUTH,
+                {"failure_phase": "http", "http_status": response.status_code,
+                 **provider_info},
+            )
+            emit_attempt(attempt_index, attempt_started_at,
+                         error_code=error.error_code, metadata=error.diagnostics)
+            raise error
         if response.status_code >= 400:
-            raise AISecurityError(ERROR_INVALID)
+            provider_info = _extract_provider_error(response)
+            error = AISecurityError(
+                ERROR_INVALID,
+                {"failure_phase": "http", "http_status": response.status_code,
+                 **provider_info},
+            )
+            emit_attempt(attempt_index, attempt_started_at,
+                         error_code=error.error_code, metadata=error.diagnostics)
+            raise error
 
     # 流式拿到的 content 为空（端点返回了 200 但没出字）
     if not content.strip():
-        raise AISecurityError(ERROR_INVALID) from None
+        error = AISecurityError(
+            ERROR_INVALID,
+            {
+                "failure_phase": "empty_response",
+                "response_empty": True,
+                "response_length": 0,
+                "finish_reason": finish_reason or None,
+            },
+        )
+        emit_attempt(attempt_index, attempt_started_at,
+                     error_code=error.error_code, metadata=error.diagnostics)
+        raise error from None
 
     try:
-        return json.loads(content)
-    except (json.JSONDecodeError, TypeError):
+        parsed = json.loads(content)
+        emit_attempt(
+            attempt_index, attempt_started_at,
+            metadata={
+                "response_empty": False,
+                "response_length": len(content),
+                "finish_reason": finish_reason or None,
+            },
+        )
+        return parsed
+    except (json.JSONDecodeError, TypeError) as exc:
         # 传输层截断单独识别（finish_reason==length 或 JSON 尾部不闭合），
         # 与"返回无效"区分开：上层拿到 truncated 可缩小批次重跑。
         if finish_reason == "length" or _looks_truncated(content):
-            raise AISecurityError(ERROR_TRUNCATED) from None
-        raise AISecurityError(ERROR_INVALID) from None
+            error = AISecurityError(
+                ERROR_TRUNCATED,
+                {
+                    "failure_phase": "truncated",
+                    "response_empty": False,
+                    "response_length": len(content),
+                    "finish_reason": finish_reason or None,
+                },
+            )
+            emit_attempt(attempt_index, attempt_started_at,
+                         error_code=error.error_code, metadata=error.diagnostics)
+            raise error from None
+        error = AISecurityError(
+            ERROR_INVALID,
+            {
+                "failure_phase": "json_decode",
+                "response_empty": False,
+                "response_length": len(content),
+                "finish_reason": finish_reason or None,
+                "parse_error": type(exc).__name__,
+                "parse_position": getattr(exc, "pos", None),
+            },
+        )
+        emit_attempt(attempt_index, attempt_started_at,
+                     error_code=error.error_code, metadata=error.diagnostics)
+        raise error from None
 
 
 # ---------------------------------------------------------------------------
@@ -879,7 +1110,8 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 concurrency=None, raise_on_systemic=False,
                 completed_verdicts=None, on_batch_done=None,
                 execution_config=None,
-                measurement_callback=None):
+                measurement_callback=None, emit_kept_terminal=True,
+                measurement_input_count=None, retry_limits=None):
     """Stage A 粗筛：AI 逐条核对岗位列表字段，移除"明显"不符合的。
 
     ``jobs``: 脚本抓回的岗位列表（仅列表字段，无 JD）。
@@ -916,6 +1148,11 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         else:
             concurrency = int(_adv_setting("screen_concurrency", SCREEN_CONCURRENCY))
     kept, dropped, verdicts = [], [], {}
+    measurement_indices = {id(job): index for index, job in enumerate(jobs)}
+    terminal_input_count = (
+        int(measurement_input_count)
+        if measurement_input_count is not None else len(jobs)
+    )
     completed_verdicts = completed_verdicts or {}
     completed_ids = {str(job_id) for job_id in completed_verdicts}
     verdicts.update(completed_verdicts)
@@ -949,6 +1186,8 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         "- 薪资明显低于期望视为明显不符合；'元/天'的实习计价综合判断\n"
         "- 经验要求：岗位经验段下界高于候选人经验段上界时排除（如岗位5-10年、候选人1-3年）；"
         "岗位下界≤候选人上界时保留（如岗位3-5年、候选人1-3年，给边界机会）\n"
+        "- 岗位名称或类别（如客服、讲师、销售、内容制作、运营等）不得单独作为剔除理由；"
+        "粗筛只依据硬性字段（学历、经验、城市、薪资、全职/实习）\n"
         "- 只排除【明显】不符合的；拿不准一律保留（宁可多留，不可错杀）\n\n"
         "输入格式：每行一个岗位，``序号. 标题 | 薪资 | 城市 | 学历 | 规模``。\n"
         "输出格式：只列出【要剔除】的岗位序号与理由，未列出的默认保留。严格输出JSON：\n"
@@ -996,24 +1235,26 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         _t0 = time.time()
         _req_error_code = None
         try:
-            data = call_ai(endpoint_url, api_key, messages, model=model)
+            data = call_ai(
+                endpoint_url, api_key, messages, model=model,
+                measurement_callback=measurement_callback,
+                measurement_stage="rough",
+                retry_limits=retry_limits,
+            )
             dropped_list = data.get("dropped", []) if isinstance(data, dict) else []
             by_i = {r.get("i"): r for r in dropped_list if isinstance(r, dict)}
         except AISecurityError as exc:
             # 切片6：systemic 错误（限流/额度/密钥/网络）立即抛，让调用方暂停
             if raise_on_systemic and exc.error_code in SYSTEMIC_AI_ERROR_CODES:
                 _req_error_code = exc.error_code
-                _emit_request_event(measurement_callback, "rough", _t0,
-                                    error_code=exc.error_code,
-                                    counts={"batch_size": len(batch)})
                 raise
             if exc.error_code == ERROR_TRUNCATED and len(batch) > 1:
                 # 返回被截断：拆半重跑这批，还截断就继续拆（到单条为止）
                 _req_error_code = exc.error_code
-                _emit_request_event(measurement_callback, "rough", _t0,
-                                    error_code=exc.error_code,
-                                    counts={"batch_size": len(batch),
-                                            "truncated_split": 1})
+                _emit_retry_event(
+                    measurement_callback, "rough", 0,
+                    metadata={"truncated_split": 1},
+                )
                 mid = len(batch) // 2
                 d1, v1 = _process_batch(batch[:mid])
                 d2, v2 = _process_batch(batch[mid:])
@@ -1021,9 +1262,6 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 return d1 + d2, v1
             _req_error_code = exc.error_code
             by_i = {}  # 调用失败：该批全部保留，防错杀
-        else:
-            _emit_request_event(measurement_callback, "rough", _t0,
-                                counts={"batch_size": len(batch)})
 
         b_dropped, b_verdicts = [], {}
         for idx, job in enumerate(batch):
@@ -1040,6 +1278,14 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 b_verdicts[jid] = {"verdict": "dropped", "reason": reason}
             else:
                 b_verdicts[jid] = {"verdict": "kept", "reason": ""}
+            if r or emit_kept_terminal:
+                _emit_item_terminal_event(
+                    measurement_callback, "rough",
+                    item_index=_measurement_item_index(
+                        job, idx, measurement_indices),
+                    status="dropped" if r else "kept",
+                    input_count=terminal_input_count,
+                )
         # 批次事件：记录输入/输出数量
         _emit_batch_event(measurement_callback, "rough",
                           input_count=len(batch),
@@ -1109,7 +1355,9 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
               batch_size=None, progress=None, completed_verdicts=None,
               concurrency=None, raise_on_systemic=False,
               execution_config=None,
-              measurement_callback=None):
+              on_batch_done=None,
+              measurement_callback=None, measurement_input_count=None,
+              missing_result_retry_budget=0, retry_limits=None):
     """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
 
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
@@ -1126,6 +1374,9 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     ``execution_config``: SPEC011 T006 — 可选的不可变 ExecutionConfigSnapshot。
     提供时使用冻结的 ``match_batch_size``/``match_concurrency``，不读 JSON。
 
+    ``on_batch_done``: 可选回调 (batch_verdicts, completed_job_ids)，每批判定落库后
+    调用；回调抛异常会转成 AICheckpointError，防止内存进度领先于可恢复进度。
+
     切片6（FR-020/SC-008）：``raise_on_systemic=True`` 时，AI 命中限流/额度/密钥/
     网络等 systemic 错误立即抛 ``AISecurityError``，调用方应捕获并暂停整任务，
     而不是批量变 uncertain 后完成。默认 False 保持向后兼容。
@@ -1141,6 +1392,27 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         else:
             concurrency = int(_adv_setting("match_concurrency", MATCH_CONCURRENCY))
     verdicts = {}
+    measurement_indices = {
+        id(job): index for index, job in enumerate(jobs_with_jd)
+    }
+    import threading
+    terminal_lock = threading.Lock()
+    emitted_terminal_indices: set[int] = set()
+    failed_batch_metadata: dict[tuple[str, ...], dict] = {}
+
+    def _batch_key(batch: list[dict]) -> tuple[str, ...]:
+        return tuple(str(job.get("job_id", "")) for job in batch)
+
+    def _emit_final_terminal(job: dict, fallback: int, status: str) -> None:
+        item_index = _measurement_item_index(job, fallback, measurement_indices)
+        with terminal_lock:
+            if item_index in emitted_terminal_indices:
+                return
+            emitted_terminal_indices.add(item_index)
+        _emit_item_terminal_event(
+            measurement_callback, "fine", item_index=item_index,
+            status=status, input_count=terminal_input_count,
+        )
     if completed_verdicts:
         done_ids = {str(k) for k in completed_verdicts}
         verdicts.update(completed_verdicts)
@@ -1148,6 +1420,11 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                         if str(j.get("job_id", "")) not in done_ids]
     if not jobs_with_jd:
         return {"verdicts": verdicts}
+    terminal_input_count = (
+        int(measurement_input_count)
+        if measurement_input_count is not None else len(jobs_with_jd)
+    )
+    missing_retry_budget = [max(0, int(missing_result_retry_budget))]
     summary = (profile_summary or "").strip() or "（无候选人画像）"
     system_prompt = (
         "你是求职匹配度评估助手。根据候选人画像，判断每个岗位的JD工作内容是否适合候选人。\n"
@@ -1158,11 +1435,22 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         "应写入 caveats 数组（每项一句话，如'优先英语六级，候选人未提供'）。"
         "只有 JD 明确标注'必须/要求/need'的硬性项且候选人未满足时，才 match=false。\n"
         "行业经验不足不得作为 match=false 的理由，除非 JD 明确'必须有X行业经验'。\n"
+        "总体原则：判定从宽，宁可保留给用户人工确认，也不要因为岗位类别不完全一致就排除。\n"
+        "- 岗位职责与候选人技能/方向契合 → match=true。\n"
+        "- 匹配度一般的岗位也判 match=true：即使岗位是客服、讲师、销售、运营、内容/漫剧制作等非开发岗，"
+        "只要候选人的技能/经验可迁移或能支撑岗位，也保留为候选，并把差异写入 caveats（如'岗位为客服性质，与开发方向有偏差'）。\n"
+        "- 这里的'岗位性质'只指全职/实习/兼职，不指岗位类别；非开发类别本身不得作为 match=false 的理由。\n"
+        "- match=false 仅限硬性不满足：JD 明确要求学历、经验年限、技术栈或证书且候选人明确不满足；"
+        "经验年限、学历这类硬性条件不满足时仍然排除。\n"
+        "- JD 中'优先/加分/plus/熟悉'类软性要求（如行业经验、英语等级、证书）不得影响 match，"
+        "应写入 caveats 数组（每项一句话，如'优先英语六级，候选人未提供'）。"
+        "- 行业经验不足不得作为 match=false 的理由，除非 JD 明确'必须有X行业经验'。\n"
+        "- 拿不准时判 match=true 并写入 caveats，交给用户看详情。\n"
         "对每个岗位输出判定。严格输出JSON：\n"
         '{"results":[{"i":0,"match":true,"reason":"一句话理由","caveats":["软性提醒"]},...]}\n'
         "i 为岗位序号；match=true 适合，false 不适合；reason 简短（20字内）；caveats 可为空数组。"
     )
-    def _match_one_batch(batch):
+    def _match_one_batch(batch, *, allow_transport_terminal=False):
         """单批精筛，返回 {jid: verdict}。
 
         返回被截断（ERROR_TRUNCATED）时拆半重跑，还截断就继续拆到单条；
@@ -1190,35 +1478,40 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         _t0 = time.time()
         _req_error_code = None
         try:
-            data = call_ai(endpoint_url, api_key, messages, model=model)
+            data = call_ai(
+                endpoint_url, api_key, messages, model=model,
+                measurement_callback=measurement_callback,
+                measurement_stage="fine",
+                retry_limits=retry_limits,
+            )
             results = data.get("results", []) if isinstance(data, dict) else []
             by_i = {r.get("i"): r for r in results if isinstance(r, dict)}
         except AISecurityError as exc:
             # 切片6：systemic 错误立即抛，让调用方暂停（不批量变 uncertain 后完成）
             if raise_on_systemic and exc.error_code in SYSTEMIC_AI_ERROR_CODES:
                 _req_error_code = exc.error_code
-                _emit_request_event(measurement_callback, "fine", _t0,
-                                    error_code=exc.error_code,
-                                    counts={"batch_size": len(batch)})
+                for fallback, pending_job in enumerate(jobs_with_jd):
+                    _emit_final_terminal(pending_job, fallback, "uncertain")
                 raise
             if exc.error_code == ERROR_TRUNCATED and len(batch) > 1:
                 _req_error_code = exc.error_code
-                _emit_request_event(measurement_callback, "fine", _t0,
-                                    error_code=exc.error_code,
-                                    counts={"batch_size": len(batch),
-                                            "truncated_split": 1})
+                _emit_retry_event(
+                    measurement_callback, "fine", 0,
+                    metadata={"truncated_split": 1},
+                )
                 mid = len(batch) // 2
-                sub, f1 = _match_one_batch(batch[:mid])
-                sub2, f2 = _match_one_batch(batch[mid:])
+                sub, f1 = _match_one_batch(
+                    batch[:mid], allow_transport_terminal=allow_transport_terminal)
+                sub2, f2 = _match_one_batch(
+                    batch[mid:], allow_transport_terminal=allow_transport_terminal)
                 sub.update(sub2)
                 return sub, f1 or f2
             _req_error_code = exc.error_code
             by_i = None
             transport_failed = True
             fail_reason = user_facing_error(exc.error_code)
-        else:
-            _emit_request_event(measurement_callback, "fine", _t0,
-                                counts={"batch_size": len(batch)})
+            with terminal_lock:
+                failed_batch_metadata[_batch_key(batch)] = dict(exc.diagnostics)
         batch_verdicts = {}
         for idx, job in enumerate(batch):
             jid = str(job.get("job_id", ""))
@@ -1227,19 +1520,26 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                     "verdict": "uncertain",
                     "reason": f"{fail_reason}，待人工确认" if fail_reason else "AI 精筛失败，待人工确认",
                 }
-                _emit_item_terminal_event(measurement_callback, "fine",
-                                          item_index=idx, status="uncertain",
-                                          input_count=len(batch))
+                if allow_transport_terminal:
+                    _emit_final_terminal(job, idx, "uncertain")
                 continue
             r = by_i.get(idx)
             if not isinstance(r, dict) or not isinstance(r.get("match"), bool):
+                if missing_retry_budget[0] > 0:
+                    missing_retry_budget[0] -= 1
+                    _emit_retry_event(measurement_callback, "fine", 0)
+                    retried, retry_failed = _match_one_batch(
+                        [job],
+                        allow_transport_terminal=allow_transport_terminal,
+                    )
+                    batch_verdicts.update(retried)
+                    transport_failed = transport_failed or retry_failed
+                    continue
                 batch_verdicts[jid] = {
                     "verdict": "uncertain",
                     "reason": "AI 未返回该岗位判定，待人工确认",
                 }
-                _emit_item_terminal_event(measurement_callback, "fine",
-                                          item_index=idx, status="uncertain",
-                                          input_count=len(batch))
+                _emit_final_terminal(job, idx, "uncertain")
                 continue
             match = r["match"]
             reason = str(r.get("reason", "")).strip()
@@ -1249,10 +1549,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 "reason": reason,
                 "caveats": caveats,
             }
-            _emit_item_terminal_event(measurement_callback, "fine",
-                                      item_index=idx,
-                                      status="match" if match else "not_match",
-                                      input_count=len(batch))
+            _emit_final_terminal(job, idx, "match" if match else "not_match")
         _emit_batch_event(measurement_callback, "fine",
                           input_count=len(batch),
                           output_count=len(batch_verdicts),
@@ -1273,6 +1570,11 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             verdicts.update(batch_verdicts)
             if transport_failed:
                 failed_batches.append(batch)
+            if on_batch_done is not None:
+                try:
+                    on_batch_done(dict(batch_verdicts), list(verdicts.keys()))
+                except Exception as exc:
+                    raise AICheckpointError("AI batch checkpoint failed") from exc
             processed += len(batch)
             if progress is not None:
                 try:
@@ -1305,15 +1607,38 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                     verdicts.update(batch_verdicts)
                     if transport_failed:
                         failed_batches.append(futures[fut])
+                    completed_snapshot = list(verdicts.keys())
+                if on_batch_done is not None:
+                    try:
+                        on_batch_done(dict(batch_verdicts), completed_snapshot)
+                    except Exception as exc:
+                        raise AICheckpointError("AI batch checkpoint failed") from exc
                 _safe_progress(len(futures[fut]))
 
     # 末尾补一轮：传输层失败的批次统一重试一次（网络抖动恢复后大概率成功）
     if failed_batches:
         for batch in failed_batches:
-            batch_verdicts, still_failed = _match_one_batch(batch)
-            if not still_failed:
-                # 重试成功：用新判定覆盖之前的 uncertain
-                verdicts.update(batch_verdicts)
+            with terminal_lock:
+                failure_metadata = dict(
+                    failed_batch_metadata.get(_batch_key(batch), {})
+                )
+            retry_metadata = {"retry_decision": "batch_final_retry"}
+            if failure_metadata.get("correlation_id"):
+                retry_metadata["correlation_id"] = failure_metadata[
+                    "correlation_id"
+                ]
+            _emit_retry_event(
+                measurement_callback, "fine", 0, metadata=retry_metadata,
+            )
+            batch_verdicts, still_failed = _match_one_batch(
+                batch, allow_transport_terminal=True)
+            # 无论完全恢复还是部分恢复，都以最终尝试的逐项结果为准。
+            verdicts.update(batch_verdicts)
+            if on_batch_done is not None:
+                try:
+                    on_batch_done(dict(batch_verdicts), list(verdicts.keys()))
+                except Exception as exc:
+                    raise AICheckpointError("AI batch checkpoint failed") from exc
 
     return {"verdicts": verdicts}
 

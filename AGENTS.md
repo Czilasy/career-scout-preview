@@ -36,7 +36,7 @@ SKILL.md / README(.en).md / CHANGELOG.md / CONTRIBUTING.md
 3. **改了用户可见行为 → 更新 `README.md`；有意义变更 → `CHANGELOG.md` 顶部加一条。**
 4. **README 双语同步**：`README.md`（中文）和 `README.en.md`（英文）必须保持一致，改了其中一个就要同步另一个。
 5. **commit message 用 Conventional Commits**（`feat:` / `fix:` / `docs:` / `optimize:` / `refactor:` 等，见 `CONTRIBUTING.md`）。
-6. **改完 webui 前端（`webui/index.html`）或后端（`webui/*.py`）代码，必须重启 webui 服务并验证旧服务被替换**。Flask debug 模式默认关闭，不会热重载；端口 5000 常被你之前自己启动的旧进程占着，新进程会因端口冲突静默失败。正确流程：①`Get-NetTCPConnection -LocalPort 5000` 查旧 PID → ②`Stop-Process -Id <旧PID> -Force` → ③启动新服务 → ④再 `Get-NetTCPConnection -LocalPort 5000` 确认新 PID 在听 → ⑤浏览器访问确认新代码生效。**只启动不杀旧 = 等于没改**。
+6. **启动或重启 webui 前，先运行 `.venv\Scripts\python.exe webui\ensure_frontend_sync.py` 检查构建状态；后端代码或前端源码与 `webui/dist` 不一致时由脚本自动执行 `npm run build`。改完 webui 前端或后端代码，必须重启 webui 服务并验证旧服务被替换**。Flask debug 模式默认关闭，不会热重载；端口 5000 常被你之前自己启动的旧进程占着，新进程会因端口冲突静默失败。正确流程：①`Get-NetTCPConnection -LocalPort 5000` 查旧 PID → ②`Stop-Process -Id <旧PID> -Force` → ③启动新服务 → ④再 `Get-NetTCPConnection -LocalPort 5000` 确认新 PID 在听 → ⑤浏览器访问确认新代码生效。**只启动不杀旧 = 等于没改**。
 
 ## 架构关键点（容易踩坑）
 

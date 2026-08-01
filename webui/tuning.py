@@ -34,9 +34,50 @@ ALLOWED_COUNT_KEYS = frozenset({
 ALLOWED_METADATA_KEYS = frozenset({
     "stage", "step", "batch_index", "truncated_split", "backoff_ms",
     "error_code", "transport_failed", "recovered",
+    "correlation_id", "attempt_id", "attempt_index", "failure_phase",
+    "exception_type", "safe_message", "http_status",
+    "provider_error_type", "provider_error_code", "response_empty",
+    "response_length", "finish_reason", "parse_error", "parse_position",
+    "retry_decision", "outcome", "artifact_path", "artifact_digest",
+    "artifact_redacted",
 })
 
 _PROCESS_OWNER_TOKENS: dict[str, str] = {}
+
+
+def sha256_path(path: str | Path) -> str:
+    """Return a stable SHA-256 digest for one file or directory.
+
+    Directory digests hash sorted ``relative path + file-content digest``
+    records, so filesystem enumeration order and absolute workspace paths do
+    not affect the result.
+    """
+    target = Path(path)
+
+    def file_digest(file_path: Path) -> str:
+        digest = hashlib.sha256()
+        with file_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    if target.is_file():
+        return "sha256:" + file_digest(target)
+    if not target.is_dir():
+        raise FileNotFoundError(target)
+
+    digest = hashlib.sha256()
+    files = sorted(
+        (item for item in target.rglob("*") if item.is_file()),
+        key=lambda item: item.relative_to(target).as_posix(),
+    )
+    for file_path in files:
+        relative_path = file_path.relative_to(target).as_posix()
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(file_digest(file_path).encode("ascii"))
+        digest.update(b"\n")
+    return "sha256:" + digest.hexdigest()
 
 
 class MeasurementSink:
@@ -539,6 +580,14 @@ class TuningController:
         SC-007: terminal_count == input_count, missing=0, duplicate=0。
         """
         events = self.list_measurements(round_id)
+        round_kind = self._store.get_tuning_round(round_id)["round_kind"]
+        terminal_stages = {
+            "list": {"list"},
+            "detail": {"detail"},
+            "rough": {"rough"},
+            "fine": {"fine"},
+            "end_to_end": {"rough", "fine"},
+        }.get(round_kind, {round_kind})
         total_duration_ms = 0
         stage_durations_ms: dict[str, int] = {}
         wait_duration_ms = 0
@@ -546,6 +595,7 @@ class TuningController:
         attempt_count = 0
         retry_count = 0
         error_counts: dict[str, int] = {}
+        error_correlation_id = None
         input_count = 0
         terminal_count = 0
         success_count = 0
@@ -574,7 +624,15 @@ class TuningController:
                 attempt_count += 1
                 if error_code:
                     error_counts[error_code] = error_counts.get(error_code, 0) + 1
+                    if error_correlation_id is None:
+                        error_correlation_id = (ev.get("metadata") or {}).get(
+                            "correlation_id"
+                        )
             elif ev_type == "item_terminal":
+                if "input_count" in counts:
+                    input_count = max(input_count, int(counts["input_count"]))
+                if stage not in terminal_stages:
+                    continue
                 terminal_count += 1
                 item_idx = counts.get("item_index")
                 if item_idx is not None:
@@ -583,12 +641,10 @@ class TuningController:
                     else:
                         seen_item_indices.add(item_idx)
                 status = counts.get("status", "")
-                if status == "success":
+                if status in ("success", "dropped", "kept", "match", "not_match"):
                     success_count += 1
-                elif status in ("failed", "unavailable"):
+                elif status in ("failed", "unavailable", "uncertain"):
                     failed_count += 1
-                if "input_count" in counts:
-                    input_count = max(input_count, int(counts["input_count"]))
             elif ev_type == "stage":
                 if "input_count" in counts:
                     input_count = max(input_count, int(counts["input_count"]))
@@ -607,6 +663,7 @@ class TuningController:
             "attempt_count": attempt_count,
             "retry_count": retry_count,
             "error_counts": error_counts,
+            "error_correlation_id": error_correlation_id,
             "input_count": input_count,
             "terminal_count": terminal_count,
             "success_count": success_count,
@@ -614,6 +671,48 @@ class TuningController:
             "missing_count": missing_count,
             "duplicate_count": duplicate_count,
             "quality_diff_count": 0,
+        }
+
+    def aggregate_hard_error(
+        self, round_id: str, *, fallback_code: str | None = None,
+    ) -> dict:
+        """Reduce the persisted attempt-error chain to one blocker."""
+        priority = {
+            "auth_failed": 100,
+            "quota_exhausted": 95,
+            "rate_limited": 90,
+            "network_error": 80,
+            "timeout": 75,
+            "server_error": 70,
+            "truncated": 60,
+            "invalid_response": 50,
+        }
+        failures = []
+        for event in self.list_measurements(round_id):
+            code = event.get("error_code")
+            if event.get("event_type") != "request" or not code:
+                continue
+            metadata = event.get("metadata") or {}
+            failures.append({
+                "code": code,
+                "correlation_id": metadata.get("correlation_id"),
+                "seq": int(event.get("seq") or 0),
+            })
+        if failures:
+            selected = max(
+                failures,
+                key=lambda item: (priority.get(item["code"], 40), item["seq"]),
+            )
+        else:
+            selected = {
+                "code": fallback_code or "unknown_hard_error",
+                "correlation_id": None,
+                "seq": 0,
+            }
+        return {
+            "code": selected["code"],
+            "correlation_id": selected["correlation_id"],
+            "attempt_error_count": len(failures),
         }
 
     def build_measurement_sink(self, round_id: str) -> MeasurementSink:
@@ -890,10 +989,11 @@ class TuningController:
         "forbidden_actions", "report_contract",
     })
 
-    # execution_config 必填的九字段
+    # execution_config 必填的速度字段（含 JD 并发 Tab 数）
     _EXEC_CONFIG_REQUIRED_FIELDS = frozenset({
         "schema_version", "inter_combo_delay", "detail_batch_size",
         "detail_interval", "detail_reset_every", "detail_batch_cooldown",
+        "detail_tab_pool_size",
         "screen_batch_size", "screen_concurrency",
         "match_batch_size", "match_concurrency",
     })
@@ -956,7 +1056,7 @@ class TuningController:
         missing = self._MANIFEST_REQUIRED_FIELDS - set(manifest.keys())
         if missing:
             raise ValueError(f"manifest 缺少必填字段: {sorted(missing)}")
-        # 2. execution_config 九字段
+        # 2. execution_config 必填速度字段
         config = manifest.get("execution_config", {})
         config_missing = self._EXEC_CONFIG_REQUIRED_FIELDS - set(config.keys())
         if config_missing:
@@ -1348,7 +1448,7 @@ class TuningController:
             persisted_evidence = json.loads(raw_evidence.decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("程序证据文件不可读或不是有效 JSON") from exc
-        actual_digest = "sha256:" + hashlib.sha256(raw_evidence).hexdigest()
+        actual_digest = sha256_path(report_path)
         if actual_digest != program_report_digest:
             raise ValueError("程序证据实际文件摘要不一致")
         report_evidence_without_digest = {
@@ -1359,7 +1459,10 @@ class TuningController:
             raise ValueError("程序证据文件内容与报告 evidence 不一致")
         required_artifacts = {
             item["path"]: item for item in manifest["required_artifacts"]
-            if item.get("existence_required")
+            if (
+                item.get("existence_requirement") == "required"
+                or item.get("existence_required")
+            )
         }
         reported_artifacts = {item.get("path"): item for item in artifacts}
         for path, required in required_artifacts.items():
@@ -1367,9 +1470,12 @@ class TuningController:
             if artifact is None:
                 raise ValueError(f"缺少必需产物: {path}")
             absolute = (self._workspace_root / path).resolve()
-            if expected_root not in absolute.parents or not absolute.is_file():
+            if (
+                expected_root not in absolute.parents
+                or not (absolute.is_file() or absolute.is_dir())
+            ):
                 raise ValueError(f"必需产物不存在或越界: {path}")
-            digest = "sha256:" + hashlib.sha256(absolute.read_bytes()).hexdigest()
+            digest = sha256_path(absolute)
             if artifact.get("digest") != digest:
                 raise ValueError(f"必需产物摘要不匹配: {path}")
             signed_digest = required.get("digest")
@@ -1387,19 +1493,18 @@ class TuningController:
         ):
             raise ValueError("程序证据计数或时长缺失/无效")
         if report["status"] == "completed":
+            if evidence["input_count"] <= 0:
+                raise ValueError("completed 报告的 input_count 必须大于 0")
             conserved = (
                 evidence["terminal_count"] == evidence["input_count"]
                 and evidence["missing_count"] == 0
                 and evidence["duplicate_count"] == 0
             )
-        else:
-            conserved = (
-                evidence["terminal_count"] + evidence["missing_count"]
-                == evidence["input_count"]
-                and evidence["duplicate_count"] == 0
-            )
-        if not conserved:
-            raise ValueError("程序证据终态守恒失败")
+            if not conserved:
+                raise ValueError("程序证据终态守恒失败")
+        # blocked 报告必须保留现场证据，即使阻断原因本身就是终态
+        # 不守恒、重复或失败。它不会进入候选比较；强制 duplicate=0
+        # 会让真实的危险边界无法通过状态机收口。
         if evidence["total_duration_ms"] != (
             evidence["work_duration_ms"] + evidence["wait_duration_ms"]
             + evidence["retry_duration_ms"]
@@ -1435,6 +1540,7 @@ class TuningController:
         for field in [
             "inter_combo_delay", "detail_batch_size", "detail_interval",
             "detail_reset_every", "detail_batch_cooldown",
+            "detail_tab_pool_size",
             "screen_batch_size", "screen_concurrency",
             "match_batch_size", "match_concurrency",
         ]:
@@ -1816,8 +1922,23 @@ class TuningController:
         - 保留已采集的证据（不删除已 confirmed 轮次）。
         """
         round_rec = self._store.get_tuning_round(round_id)
+        requested_code = str(error_code or "").strip()
+        if requested_code and requested_code not in {
+            "hard_error", "unknown_hard_error",
+        }:
+            canonical_code = requested_code
+            correlation_id = None
+        else:
+            hard_error = self.aggregate_hard_error(
+                round_id, fallback_code=requested_code or None,
+            )
+            canonical_code = hard_error["code"]
+            correlation_id = hard_error.get("correlation_id")
+        blocked_reason = f"硬错误: {canonical_code}"
+        if correlation_id:
+            blocked_reason += f"（事件 {correlation_id}）"
         self._store.update_tuning_round_status(
-            round_id, status="blocked", failure_code=error_code,
+            round_id, status="blocked", failure_code=canonical_code,
         )
         # 推进实验到 blocked 可达的状态（draft 不能直接 blocked）
         exp = self._store.get_tuning_experiment(round_rec["experiment_id"])
@@ -1827,8 +1948,8 @@ class TuningController:
         try:
             self._store.update_tuning_experiment_status(
                 round_rec["experiment_id"], status="blocked",
-                blocked_code=error_code,
-                blocked_reason=f"硬错误: {error_code}",
+                blocked_code=canonical_code,
+                blocked_reason=blocked_reason,
             )
         except ValueError:
             pass  # 实验已处于终态时忽略
@@ -1836,7 +1957,8 @@ class TuningController:
         return {
             "stopped": True,
             "round_id": round_id,
-            "error_code": error_code,
+            "error_code": canonical_code,
+            "correlation_id": correlation_id,
             "experiment_id": round_rec["experiment_id"],
         }
 

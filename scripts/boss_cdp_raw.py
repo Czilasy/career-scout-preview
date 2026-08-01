@@ -1955,7 +1955,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
                    event_callback=None, readiness_timeout_seconds=12,
                    max_readiness_retries=1, inter_job_gap_range=(8, 15),
                    trailing_wait=False,
-                   enable_parallel=False, tab_pool_size=3,
+                   enable_parallel=False, tab_pool_size=5,
                    stagger_range=(5, 10), reset_every=3):
     """抓取岗位详情页并返回结构化结果。
 
@@ -1978,7 +1978,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
     - ``trailing_wait``: 运行最后一项之后是否再等待一次 gap，默认 False。
     - ``enable_parallel``: spec 007 ⑧，默认 False 走原串行路径（保持向后兼容
       与 005 合约）；True 走常驻 tab 池并行（webui 调用处显式传 True）。
-    - ``tab_pool_size``: 常驻 tab 数，默认 3，上限 5。
+    - ``tab_pool_size``: 常驻 tab 数，默认 5，上限 10。
     - ``stagger_range``: 错峰启动间隔范围秒，默认 (5, 10)。
 
     实现要点（见 specs/005-fast-resume-discovery/contracts/state-machine.md）：
@@ -2004,9 +2004,9 @@ def scrape_details(list_data, max_details=None, output_path=None,
         raise ValueError(
             f"inter_job_gap_range invalid: {inter_job_gap_range!r}"
         )
-    if not isinstance(tab_pool_size, int) or tab_pool_size < 1 or tab_pool_size > 5:
+    if not isinstance(tab_pool_size, int) or tab_pool_size < 1 or tab_pool_size > 10:
         raise ValueError(
-            f"tab_pool_size must be an integer between 1 and 5, got {tab_pool_size!r}"
+            f"tab_pool_size must be an integer between 1 and 10, got {tab_pool_size!r}"
         )
     if not stagger_range or len(stagger_range) != 2:
         raise ValueError("stagger_range must be a (min, max) pair")
@@ -3036,8 +3036,8 @@ def main():
     p.add_argument("--max-details", type=int, default=None, help="最多抓几个详情")
     p.add_argument("--enable-parallel", action="store_true", default=False,
                    help="详情抓取启用常驻 tab 池并行（spec 007 ⑧；默认串行）")
-    p.add_argument("--tab-pool-size", type=int, default=3,
-                   help="常驻 tab 数（1-5，默认 3；仅 --enable-parallel 时生效）")
+    p.add_argument("--tab-pool-size", type=int, default=5,
+                   help="常驻 tab 数（1-10，默认 5；仅 --enable-parallel 时生效）")
     p.add_argument("--stagger-min", type=float, default=5.0,
                    help="错峰启动最小间隔秒（默认 5；仅 --enable-parallel 时生效）")
     p.add_argument("--stagger-max", type=float, default=10.0,

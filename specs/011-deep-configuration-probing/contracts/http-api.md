@@ -85,7 +85,7 @@ Replaces the current response with versioned configuration state while keeping t
 
 Saves a complete recent custom configuration. Partial patches are rejected.
 
-**Request**: `{ "config_schema_version": 1, "settings": {all nine fields} }`
+**Request**: `{ "config_schema_version": 1, "settings": {all speed fields} }`
 
 **Response 200**: normalized complete config + digest + `selection: custom`.
 

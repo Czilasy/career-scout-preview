@@ -651,7 +651,17 @@ button:disabled {
   margin: 10px 0 0;
 }.grow {
   flex: 1;
-}.align-end {
+}.search-input-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 10px 0 14px;
+}
+.search-input-grid .inline-input-row {
+  min-width: 0;
+  margin: 0;
+}
+.align-end {
   align-self: end;
 }.search-columns {
   display: flex;

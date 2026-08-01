@@ -21,7 +21,10 @@ interface TaskSnapshot {
   fail_count?: number;
   unstarted_count?: number;
   total?: number;
+  kept_count?: number;
+  dropped_count?: number;
   pause_info?: PauseInfo | null;
+  execution_config?: Record<string, unknown> | null;
 }
 
 const props = defineProps<{
@@ -61,10 +64,17 @@ function resetTimer() {
 watch(
   () => props.snapshot,
   (next, prev) => {
-    // 任务出现（null→非null，或 immediate 首触发时已有值）
-    if (next && !prev) {
+    const nextStarted = typeof next?.started_at === "number" ? next.started_at : null;
+    const prevStarted = typeof prev?.started_at === "number" ? prev.started_at : null;
+    // 新任务：首次出现、后端时间戳变化，或终态后重新开始运行时，重置计时
+    const isNewRun = Boolean(next && (
+      !prev
+      || (nextStarted !== null && nextStarted !== prevStarted)
+      || (prev && isTerminalStatus(prev.status) && !isTerminalStatus(next.status))
+    ));
+    if (next && isNewRun) {
       // 优先用后端真实时间戳；老后端没带则退化成本地时钟（组件重建后不再归零）
-      startedAt.value = typeof next.started_at === "number" ? next.started_at : Date.now();
+      startedAt.value = nextStarted ?? Date.now();
       finishedAt.value = typeof next.finished_at === "number" ? next.finished_at : null;
     }
     // 任务消失（非null→null）：重置
@@ -79,7 +89,8 @@ watch(
     // 终态：定格用时，停止刷新
     if (next && isTerminalStatus(next.status)) {
       if (finishedAt.value === null) {
-        finishedAt.value = typeof next.finished_at === "number" ? next.finished_at : Date.now();
+        // 没有真实结束时间的历史数据不伪造，避免出现“用时 0秒”
+        finishedAt.value = typeof next.finished_at === "number" ? next.finished_at : null;
       }
       if (intervalId !== undefined) {
         clearInterval(intervalId);
@@ -258,10 +269,12 @@ const failCount = computed(() => Number(props.snapshot?.fail_count || 0));
 const unstartedCount = computed(() => Number(props.snapshot?.unstarted_count || 0));
 const totalCount = computed(() => Number(props.snapshot?.total || 0));
 
+
 // 终态显示绝对用时；运行中显示"已用 X 秒"
 const timeLabel = computed(() => {
   if (startedAt.value === null) return "";
   const terminal = isTerminalStatus(props.snapshot?.status);
+  if (terminal && finishedAt.value === null) return "";
   return terminal ? `用时 ${elapsedLabel.value}` : `已用 ${elapsedLabel.value}`;
 });
 </script>

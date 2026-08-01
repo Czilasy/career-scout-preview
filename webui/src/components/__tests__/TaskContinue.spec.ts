@@ -133,4 +133,70 @@ describe("TaskProgress canonical terminal states", () => {
     expect(wrapper.find(".spin").exists()).toBe(false);
     expect(wrapper.get(".task-elapsed").text()).toContain("用时");
   });
+
+  it("hides elapsed time for terminal snapshots without real timestamps", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: {
+          status: "completed",
+          progress: { stage: "done", overall_percent: 100 },
+        },
+      },
+    });
+
+    expect(wrapper.get(".task-status").text()).toContain("已完成");
+    expect(wrapper.find(".task-elapsed").exists()).toBe(false);
+  });
+
+  it("resets elapsed time when a new running snapshot replaces a terminal snapshot", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T00:00:00.000Z"));
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: {
+          status: "completed",
+          progress: { stage: "done", overall_percent: 100 },
+          started_at: 1_000,
+          finished_at: 2_000,
+        },
+      },
+    });
+    expect(wrapper.get(".task-elapsed").text()).toContain("用时 1秒");
+
+    await wrapper.setProps({
+      snapshot: {
+        status: "running",
+        progress: { stage: "searching" },
+        started_at: Date.now(),
+      },
+    });
+    expect(wrapper.get(".task-elapsed").text()).toContain("已用 0秒");
+    vi.useRealTimers();
+  });
+
+  it("does not render execution batch summary", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: {
+          status: "running",
+          total: 50,
+          success_count: 0,
+          kept_count: 4,
+          dropped_count: 0,
+          execution_config: {
+            screen_batch_size: 50,
+            screen_concurrency: 10,
+            match_batch_size: 10,
+            match_concurrency: 10,
+          },
+        },
+      },
+    });
+    expect(wrapper.find('[data-testid="task-config"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("粗筛每批");
+    expect(wrapper.text()).not.toContain("精筛每批");
+  });
 });

@@ -129,7 +129,7 @@ and source artifact bytes are SHA-256 verified before stage execution.
 
 ### 2.3 Exact Execution Config
 
-Every manifest contains all nine fields, even when only one field changes:
+Every manifest contains all speed fields, even when only one field changes:
 
 ```json
 {
@@ -139,6 +139,7 @@ Every manifest contains all nine fields, even when only one field changes:
   "detail_interval": 0.0,
   "detail_reset_every": 1,
   "detail_batch_cooldown": 0.0,
+  "detail_tab_pool_size": 1,
   "screen_batch_size": 1,
   "screen_concurrency": 1,
   "match_batch_size": 1,

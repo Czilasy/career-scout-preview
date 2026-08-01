@@ -13,11 +13,11 @@ SPEC011 分为两个大阶段：
 
 ### Phase 1 - 配置与输入基础
 
-**Goal**: 建立九字段配置、城市/关键词规范化、任务规模和不可变快照的唯一语义。
+**Goal**: 建立速度字段配置（含 JD 并发 Tab 数）、城市/关键词规范化、任务规模和不可变快照的唯一语义。
 
 **Independent Test**: Quickstart Scenario A/B；9/10/19/20/30 页边界正确，未知城市阻断，任务启动后修改正式设置不影响任何阶段。
 
-- [X] T001 Create RED tests for all nine execution fields, canonical serialization, physical validation, keyword normalization, city aliases, nationwide exclusivity, planned-page boundaries, and immutable digests in `tests/test_execution_config.py`
+- [X] T001 Create RED tests for all speed fields, canonical serialization, physical validation, keyword normalization, city aliases, nationwide exclusivity, planned-page boundaries, and immutable digests in `tests/test_execution_config.py`
 - [X] T002 Implement the shared execution configuration schema, canonical JSON/digest, task-scope normalization, size classification, and snapshot value objects in `webui/execution_config.py`
 - [X] T003 Upgrade `data/city_codes.json` to carry canonical names, codes, explicit aliases, enabled status, and nationwide metadata while preserving packaging compatibility; update loader regression tests in `tests/test_chrome_setup.py`
 - [X] T004 Implement backend-authoritative scope preview and validation without changing task workload fields in `webui/app.py`, with endpoint tests in `tests/test_webui_app.py`
@@ -126,15 +126,23 @@ SPEC011 分为两个大阶段：
 ### Phase 9 - 新基线与质量参考
 
 - [X] T044 Create and user-confirm the frozen small/medium/large multi-structure workload version, with exact keywords, cities/nationwide, pages, artifact paths, digests, and controller-issued manifests under `tuning/<experiment-id>/`
-- [ ] T045 Execute the newly issued low-pressure baseline manifests, repeat until speed and item-level quality variation converge, and confirm the quality reference version from program evidence
+- [X] T045 Execute the newly issued low-pressure baseline manifests, repeat until speed and item-level quality variation converge, and confirm the quality reference version from program evidence
 
 ### Phase 10 - 分阶段探测与边界细测
 
-- [ ] T046 Execute controller-issued list-stage single-field probes, promising combinations, and boundary refinements serially; return after every manifest for controller review
-- [ ] T047 Execute controller-issued detail-stage single-field probes, promising combinations, and boundary refinements serially using only the permitted frozen list input
-- [ ] T048 Execute controller-issued AI rough-stage probes serially using the frozen list-field input and confirmed reference rules
-- [ ] T049 Execute controller-issued AI fine-stage probes serially using the frozen JD input and confirmed reference rules
-- [ ] T050 Execute controller-issued combined candidates and record the first unacceptable configurations as non-applicable dangerous boundaries
+- [X] T046 Execute controller-issued list-stage single-field probes, promising combinations, and boundary refinements serially; return after every manifest for controller review
+- [X] T047 Execute controller-issued detail-stage single-field probes, promising combinations, and boundary refinements serially using only the permitted frozen list input
+- [X] T048 Execute controller-issued AI rough-stage probes serially using the frozen list-field input and confirmed reference rules
+- [X] T049 Execute controller-issued AI fine-stage probes serially using the frozen JD input and confirmed reference rules
+- [X] T050 Execute controller-issued combined candidates and record the first unacceptable configurations as non-applicable dangerous boundaries
+
+### Phase 10A - 真实实验诊断与终态纠偏
+
+**Goal**: 不重做第一阶段；只修复 T051 真实运行暴露的诊断证据、唯一硬错误、终态重试和零输入门禁缺陷。
+
+- [X] T050A Add RED regression tests for attempt-level safe diagnostics, first-failure-then-success terminal uniqueness, retry-exhausted single hard-error aggregation, and zero-input rejection
+- [X] T050B Implement complete backend diagnostic persistence, deterministic single hard-error aggregation/front-end projection, final-only item terminals, and zero-input validation without changing experiment search parameters
+- [X] T050C Run focused and full regression, replace and verify the WebUI process, perform one independent complete review plus any bounded focused re-review, then execute exactly one real `match_concurrency=2` confirmation before resuming T051
 
 ### Phase 11 - 三档最终验证、报告与应用
 
@@ -159,6 +167,7 @@ Part II（锁定）:
 T001-T043 全部通过
   → T044-T045 新基线
   → T046-T050 分阶段边界
+  → T050A-T050C 真实实验纠偏
   → T051-T053 最终验证与应用
 ```
 

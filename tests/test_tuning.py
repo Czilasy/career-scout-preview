@@ -16,13 +16,14 @@ from webui.store import TaskStore
 
 
 def _sample_nine_fields(**overrides) -> dict:
-    """返回一份完整的九字段速度配置。"""
+    """返回一份完整的速度字段配置（含 JD 并发 Tab 数）。"""
     base = {
         "inter_combo_delay": 10.0,
         "detail_batch_size": 15,
         "detail_interval": 2.0,
         "detail_reset_every": 4,
         "detail_batch_cooldown": 5.0,
+        "detail_tab_pool_size": 5,
         "screen_batch_size": 50,
         "screen_concurrency": 5,
         "match_batch_size": 4,
@@ -30,6 +31,22 @@ def _sample_nine_fields(**overrides) -> dict:
     }
     base.update(overrides)
     return base
+
+
+def _expected_path_digest(path: pathlib.Path) -> str:
+    if path.is_file():
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    files = sorted(
+        (item for item in path.rglob("*") if item.is_file()),
+        key=lambda item: item.relative_to(path).as_posix(),
+    )
+    for item in files:
+        digest.update(item.relative_to(path).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(item.read_bytes()).hexdigest().encode("ascii"))
+        digest.update(b"\n")
+    return "sha256:" + digest.hexdigest()
 
 
 class ExperimentConfigIsolationTests(unittest.TestCase):
@@ -909,6 +926,47 @@ class MeasurementEventTests(unittest.TestCase):
                     **payload,
                 )
 
+    def test_measurement_sink_persists_safe_ai_diagnostics(self):
+        """FR-069/070: 根因字段保留，密钥和原始内容仍被过滤。"""
+        sink = self.controller.build_measurement_sink(self.round["id"])
+        sink(
+            "request", "fine", 12, error_code="invalid_response",
+            metadata={
+                "failure_phase": "json_decode",
+                "exception_type": "JSONDecodeError",
+                "http_status": 200,
+                "response_length": 18,
+                "finish_reason": "stop",
+                "parse_position": 7,
+                "api_key": "sk-secret",
+                "model_response": "raw-private-content",
+            },
+        )
+        event = self.controller.list_measurements(self.round["id"])[0]
+        self.assertEqual(event["metadata"]["failure_phase"], "json_decode")
+        self.assertEqual(event["metadata"]["parse_position"], 7)
+        serialized = json.dumps(event, ensure_ascii=False)
+        self.assertNotIn("sk-secret", serialized)
+        self.assertNotIn("raw-private-content", serialized)
+
+    def test_hard_error_is_aggregated_once_with_trace_id(self):
+        """FR-071/072: 完整失败链归并为一个规范硬错误和关联 ID。"""
+        sink = self.controller.build_measurement_sink(self.round["id"])
+        sink(
+            "request", "fine", 5, error_code="network_error",
+            metadata={"correlation_id": "trace-network", "attempt_index": 1},
+        )
+        sink(
+            "request", "fine", 4, error_code="auth_failed",
+            metadata={"correlation_id": "trace-auth", "attempt_index": 2},
+        )
+
+        hard_error = self.controller.aggregate_hard_error(self.round["id"])
+
+        self.assertEqual(hard_error["code"], "auth_failed")
+        self.assertEqual(hard_error["correlation_id"], "trace-auth")
+        self.assertEqual(hard_error["attempt_error_count"], 2)
+
     def test_aggregate_measurement_summary(self):
         """FR-030: 聚合摘要包含总耗时、阶段耗时、等待、重试等。"""
         # 记录一组事件：list 阶段 1000ms + batch 500ms + wait 200ms + retry 100ms
@@ -968,6 +1026,77 @@ class MeasurementEventTests(unittest.TestCase):
         # 当 input_count 已知为 30 时，missing = 30 - 25 = 5
         # 这里 input_count 未单独设置，只验证 success_count == 25
         self.assertEqual(summary["success_count"], 25)
+
+    def test_terminal_conservation_accepts_final_screening_verdicts(self):
+        """端到端最终的 dropped/match/not_match 都是成功终态。"""
+        end_to_end_round = self.controller.create_round(
+            experiment_id=self.experiment["id"],
+            candidate_id=self.candidate["id"],
+            workload_id="wl-1",
+            round_kind="end_to_end",
+            repetition_index=1,
+        )
+        for item_index in range(3):
+            self.controller.record_measurement(
+                round_id=end_to_end_round["id"],
+                event_type="item_terminal",
+                stage="detail",
+                duration_ms=0,
+                counts={
+                    "item_index": item_index,
+                    "status": "success",
+                    "input_count": 3,
+                },
+            )
+        final_verdicts = [(0, "dropped"), (1, "match"), (2, "not_match")]
+        for item_index, status in final_verdicts:
+            self.controller.record_measurement(
+                round_id=end_to_end_round["id"],
+                event_type="item_terminal",
+                stage="rough" if status == "dropped" else "fine",
+                duration_ms=0,
+                counts={
+                    "item_index": item_index,
+                    "status": status,
+                    "input_count": 3,
+                },
+            )
+
+        summary = self.controller.aggregate_measurements(end_to_end_round["id"])
+
+        self.assertEqual(summary["terminal_count"], 3)
+        self.assertEqual(summary["success_count"], 3)
+        self.assertEqual(summary["failed_count"], 0)
+        self.assertEqual(summary["missing_count"], 0)
+        self.assertEqual(summary["duplicate_count"], 0)
+
+    def test_end_to_end_intermediate_terminal_preserves_input_and_missing(self):
+        """端到端被 detail 阻断时保留输入数，detail 不计入最终终态。"""
+        end_to_end_round = self.controller.create_round(
+            experiment_id=self.experiment["id"],
+            candidate_id=self.candidate["id"],
+            workload_id="wl-1",
+            round_kind="end_to_end",
+            repetition_index=1,
+        )
+        for item_index in range(3):
+            self.controller.record_measurement(
+                round_id=end_to_end_round["id"],
+                event_type="item_terminal",
+                stage="detail",
+                duration_ms=0,
+                counts={
+                    "item_index": item_index,
+                    "status": "success",
+                    "input_count": 3,
+                },
+            )
+
+        summary = self.controller.aggregate_measurements(end_to_end_round["id"])
+
+        self.assertEqual(summary["input_count"], 3)
+        self.assertEqual(summary["terminal_count"], 0)
+        self.assertEqual(summary["missing_count"], 3)
 
     def test_error_counts_recorded(self):
         """error_counts 字段记录结构化错误。"""
@@ -1458,6 +1587,7 @@ def _make_valid_manifest_payload(
             "detail_interval": 2.0,
             "detail_reset_every": 4,
             "detail_batch_cooldown": 5.0,
+            "detail_tab_pool_size": 5,
             "screen_batch_size": 50,
             "screen_concurrency": 5,
             "match_batch_size": 4,
@@ -1740,6 +1870,92 @@ class ManifestReportValidationTests(unittest.TestCase):
         )
         return manifest
 
+    def _make_canonical_artifact_manifest(self) -> tuple[dict, pathlib.Path, str]:
+        manifest = self._make_manifest()
+        program_artifact = manifest["required_artifacts"][0]
+        program_artifact.pop("existence_required", None)
+        program_artifact.pop("digest_required", None)
+        program_artifact["existence_requirement"] = "required"
+        program_artifact["digest_requirement"] = "sha256"
+
+        stage_relative_path = (
+            f"tuning/{self.experiment['id']}/artifacts/{self.round['id']}/"
+        )
+        stage_path = self.controller._workspace_root / stage_relative_path
+        stage_path.mkdir(parents=True, exist_ok=True)
+        (stage_path / "stage.json").write_text(
+            '{"round_kind":"list"}', encoding="utf-8",
+        )
+        manifest["required_artifacts"].append({
+            "artifact_type": "stage_result",
+            "path": stage_relative_path,
+            "producer": "application",
+            "existence_requirement": "required",
+            "digest_requirement": "sha256",
+            "minimum_fields": ["round_kind"],
+            "absence_makes": "invalid",
+        })
+        return manifest, stage_path, stage_relative_path
+
+    def test_canonical_required_file_and_directory_digests_are_verified(self):
+        """canonical required artifacts accept actual file and directory digests."""
+        manifest, stage_path, stage_relative_path = (
+            self._make_canonical_artifact_manifest()
+        )
+        issued = self.controller.issue_manifest(manifest)
+        report = _make_valid_report_payload(
+            manifest=manifest, manifest_digest=issued["manifest_digest"],
+        )
+        report["artifacts"].append({
+            "artifact_type": "stage_result",
+            "path": stage_relative_path,
+            "digest": _expected_path_digest(stage_path),
+            "exists": True,
+        })
+
+        result = self.controller.validate_report(
+            manifest_id=issued["manifest_id"], report=report,
+        )
+
+        self.assertTrue(result["valid"])
+
+    def test_canonical_required_artifacts_reject_nonmatching_digests(self):
+        """canonical required files and directories reject forged digests."""
+        manifest, stage_path, stage_relative_path = (
+            self._make_canonical_artifact_manifest()
+        )
+        issued = self.controller.issue_manifest(manifest)
+        report = _make_valid_report_payload(
+            manifest=manifest, manifest_digest=issued["manifest_digest"],
+        )
+        report["artifacts"].append({
+            "artifact_type": "stage_result",
+            "path": stage_relative_path,
+            "digest": "sha256:directory-artifact",
+            "exists": True,
+        })
+
+        with self.assertRaisesRegex(ValueError, "摘要"):
+            self.controller.validate_report(
+                manifest_id=issued["manifest_id"], report=report,
+            )
+
+        report = _make_valid_report_payload(
+            manifest=manifest, manifest_digest=issued["manifest_digest"],
+        )
+        report["artifacts"].append({
+            "artifact_type": "stage_result",
+            "path": stage_relative_path,
+            "digest": _expected_path_digest(stage_path),
+            "exists": True,
+        })
+        report["artifacts"][0]["digest"] = "sha256:forged-file"
+
+        with self.assertRaisesRegex(ValueError, "摘要"):
+            self.controller.validate_report(
+                manifest_id=issued["manifest_id"], report=report,
+            )
+
     def test_manifest_rejects_forged_config_digest(self):
         manifest = self._make_manifest()
         manifest["execution_config"]["config_digest"] = "sha256:forged"
@@ -1831,10 +2047,11 @@ class ManifestReportValidationTests(unittest.TestCase):
                     self.controller.issue_manifest(manifest)
 
     def test_manifest_missing_execution_config_field_rejected(self):
-        """FR-044: execution_config 缺少九字段之一被拒绝。"""
+        """FR-044: execution_config 缺少速度字段之一被拒绝。"""
         config_fields = [
             "inter_combo_delay", "detail_batch_size", "detail_interval",
             "detail_reset_every", "detail_batch_cooldown",
+            "detail_tab_pool_size",
             "screen_batch_size", "screen_concurrency",
             "match_batch_size", "match_concurrency",
         ]
@@ -1935,6 +2152,74 @@ class ManifestReportValidationTests(unittest.TestCase):
                     self.controller.validate_report(
                         manifest_id=issued["manifest_id"], report=report,
                     )
+
+    def test_completed_zero_input_report_is_rejected(self):
+        """SC-021: completed 轮次不能用 0 输入/0 终态伪装成守恒。"""
+        manifest = self._make_manifest()
+        path = pathlib.Path(self.temp.name) / manifest["required_artifacts"][0]["path"]
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        for key in ("input_count", "terminal_count", "success_count"):
+            persisted[key] = 0
+        encoded = json.dumps(
+            persisted, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        path.write_bytes(encoded)
+        digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        manifest["required_artifacts"][0]["digest"] = digest
+        issued = self.controller.issue_manifest(manifest)
+        report = _make_valid_report_payload(
+            manifest=manifest, manifest_digest=issued["manifest_digest"],
+        )
+        report["program_evidence"] = {**persisted, "program_report_digest": digest}
+        report["artifacts"][0]["digest"] = digest
+        with self.assertRaisesRegex(ValueError, "input_count 必须大于 0"):
+            self.controller.validate_report(
+                manifest_id=issued["manifest_id"], report=report,
+            )
+
+    def test_zero_input_rejected_report_transitions_round_to_invalid(self):
+        """AXIS-4: accept_report 拒绝 zero-input completed 报告后，
+        round 必须进入 invalid（非停留 reported），experiment 进入 blocked。
+        状态机契约：reported → invalid（contract/evidence mismatch）。
+        """
+        manifest = self._make_manifest()
+        path = pathlib.Path(self.temp.name) / manifest["required_artifacts"][0]["path"]
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        for key in ("input_count", "terminal_count", "success_count"):
+            persisted[key] = 0
+        encoded = json.dumps(
+            persisted, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        path.write_bytes(encoded)
+        digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        manifest["required_artifacts"][0]["digest"] = digest
+        issued = self.controller.issue_manifest(manifest)
+        # 推进到 running（模拟执行器启动）
+        self.controller.execute_manifest(issued["manifest_id"])
+        round_before = self.store.get_tuning_round(self.round["id"])
+        self.assertEqual(round_before["status"], "running")
+        # 构造 zero-input completed 报告
+        report = _make_valid_report_payload(
+            manifest=manifest, manifest_digest=issued["manifest_digest"],
+        )
+        report["program_evidence"] = {**persisted, "program_report_digest": digest}
+        report["artifacts"][0]["digest"] = digest
+        # accept_report 应抛 ValueError 且原子更新状态
+        with self.assertRaisesRegex(ValueError, "input_count 必须大于 0"):
+            self.controller.accept_report(
+                manifest_id=issued["manifest_id"], report=report,
+            )
+        # 验证 round → invalid
+        round_after = self.store.get_tuning_round(self.round["id"])
+        self.assertEqual(round_after["status"], "invalid")
+        self.assertEqual(round_after["failure_code"], "report_validation_failed")
+        # 验证 experiment → blocked
+        exp_after = self.store.get_tuning_experiment(self.experiment["id"])
+        self.assertEqual(exp_after["status"], "blocked")
+        self.assertEqual(exp_after["blocked_code"], "report_validation_failed")
+        # 验证租约已释放
+        lease = self.store.get_tuning_lease()
+        self.assertIsNone(lease["owner_round_id"])
 
     def test_report_wrong_manifest_digest_rejected(self):
         """FR-049: 报告中的 manifest_digest 与签发的不一致被拒绝。"""
@@ -2707,6 +2992,55 @@ class TuningRoundRunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.execute(self._manifest("unknown"))
 
+    def test_list_stage_failure_preserves_safe_hard_stop_code(self):
+        from unittest import mock
+        from webui.pipeline_exec import TuningRoundRunner
+
+        runner = TuningRoundRunner(
+            workspace_root=self.root, source_factory=lambda **_: object(),
+            ai_settings_provider=lambda: {},
+        )
+        with mock.patch("webui.pipeline_exec.run_search", return_value={
+            "ok": False,
+            "hard_stop_code": "source_cdp_unavailable",
+            "error": "系统性阻断：调试浏览器不可用",
+        }):
+            with self.assertRaisesRegex(RuntimeError, "调试浏览器") as raised:
+                runner.execute(self._manifest("list"))
+
+        self.assertEqual(raised.exception.error_code, "source_cdp_unavailable")
+
+    def test_manifest_retry_policy_is_passed_to_tuning_ai_stages(self):
+        from unittest import mock
+        from webui.pipeline_exec import TuningRoundRunner
+
+        runner = TuningRoundRunner(
+            workspace_root=self.root, source_factory=lambda **_: object(),
+            ai_settings_provider=lambda: {
+                "endpoint_url": "https://example.invalid",
+                "api_key": "test-key",
+                "model": "test-model",
+            },
+        )
+        with mock.patch("webui.ai.screen_jobs", return_value={
+            "kept": ["j1"], "dropped": [],
+            "verdicts": {"j1": {"verdict": "kept"}},
+        }) as rough_stage, mock.patch(
+            "webui.ai.match_jds",
+            return_value={"verdicts": {"j1": {"verdict": "match"}}},
+        ) as fine_stage:
+            for kind, stage in (("rough", rough_stage), ("fine", fine_stage)):
+                manifest = self._manifest(kind)
+                manifest["retry_policy"] = {
+                    "recoverable_codes": ["network_error"],
+                    "max_retries": 2,
+                }
+                runner.execute(manifest)
+                self.assertEqual(
+                    dict(stage.call_args.kwargs["retry_limits"]),
+                    {"network_error": 2},
+                )
+
     def test_source_factory_is_scoped_to_exact_round_artifact_directory(self):
         from unittest import mock
         from webui.pipeline_exec import TuningRoundRunner
@@ -3390,6 +3724,24 @@ class HardStopAndRetryTests(unittest.TestCase):
         exp = self.store.get_tuning_experiment(self.experiment["id"])
         self.assertEqual(exp["status"], "blocked")
         self.assertEqual(exp["blocked_code"], "captcha_required")
+
+    def test_explicit_hard_stop_code_overrides_historical_request_error(self):
+        """显式 source 阻断码不得被历史 AI request 错误覆盖。"""
+        self._start_main_round()
+        self.controller.record_measurement(
+            round_id=self.round["id"], event_type="request", stage="fine",
+            duration_ms=0, error_code="auth_failed",
+        )
+
+        result = self.controller.handle_hard_stop(
+            round_id=self.round["id"], error_code="source_blocked",
+        )
+
+        self.assertEqual(result["error_code"], "source_blocked")
+        round_rec = self.store.get_tuning_round(self.round["id"])
+        self.assertEqual(round_rec["failure_code"], "source_blocked")
+        exp = self.store.get_tuning_experiment(self.experiment["id"])
+        self.assertEqual(exp["blocked_code"], "source_blocked")
 
     def test_hard_error_releases_lease(self):
         """FR-033: 硬停止后释放租约，阻止新工作启动。"""

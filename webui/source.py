@@ -507,6 +507,7 @@ class BossCdpSource:
         gap_min: float = 8,
         gap_max: float = 15,
         reset_every: int = 3,
+        tab_pool_size: int = 5,
     ) -> dict[str, SourceOutcome]:
         """Fetch details for a batch of jobs (≤5) using one scraper subprocess.
 
@@ -557,6 +558,10 @@ class BossCdpSource:
                     )
                 for i, job in enumerate(jobs)
             }
+        if not isinstance(tab_pool_size, int) or not 1 <= tab_pool_size <= 10:
+            raise ValueError(
+                f"tab_pool_size must be an integer between 1 and 10, got {tab_pool_size!r}"
+            )
 
         results: dict[str, SourceOutcome] = {}
         valid_jobs: list[dict] = []
@@ -630,6 +635,7 @@ class BossCdpSource:
             batch_input_path, detail_output_path, events_output_path,
             batch_size=len(valid_jobs),
             gap_min=gap_min, gap_max=gap_max, reset_every=reset_every,
+            tab_pool_size=tab_pool_size,
         )
         safe_log = f"batch_detail job_count={len(valid_jobs)}"
         if self.breaker.is_open():
@@ -915,6 +921,7 @@ class BossCdpSource:
         gap_min: float = 8,
         gap_max: float = 15,
         reset_every: int = 3,
+        tab_pool_size: int = 5,
     ) -> list[str]:
         """Build the scraper CLI command for a batched detail fetch.
 
@@ -924,7 +931,7 @@ class BossCdpSource:
         ``--events-output`` directs the scraper to write terminal safe
         events as JSONL so this adapter can parse/validate them.
         ``--enable-parallel`` (spec 007 ⑧)：批量抓取启用常驻 tab 池并行，
-        3 tab 复用省开关开销，错峰+补位节奏防反爬。
+        常驻 tab 池复用省开关开销，错峰+补位节奏防反爬；tab 数默认 5，由调用方传入。
         ``--gap-min/--gap-max``：详情间隔秒数范围（防 code:37）。
         ``--reset-every``：每抓 N 个详情重置一次 session。
         """
@@ -937,7 +944,7 @@ class BossCdpSource:
             "--max-details", str(batch_size),
             "--detail",
             "--enable-parallel",
-            "--tab-pool-size", "3",
+            "--tab-pool-size", str(tab_pool_size),
             "--gap-min", str(gap_min),
             "--gap-max", str(gap_max),
             "--reset-every", str(reset_every),

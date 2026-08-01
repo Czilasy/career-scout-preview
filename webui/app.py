@@ -86,6 +86,21 @@ SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
 DEFAULT_STATE_DIR = Path(os.environ.get("BOSS_WEBUI_STATE_DIR", os.path.expanduser("~/.career-scout/webui")))
 
 
+def _iso_epoch_ms(value):
+    """Convert an ISO timestamp string (or epoch ms int) to epoch milliseconds."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return int(parsed.timestamp() * 1000)
+
+
 def _optional_positive_int(value, field, *, maximum=None):
     """Parse a user-controlled optional execution limit without coercion surprises."""
     if value is None:
@@ -1280,7 +1295,7 @@ def create_app(config=None):
             error_code = (
                 exc.error_code
                 if isinstance(exc, ai_service.AISecurityError)
-                else type(exc).__name__.lower()
+                else getattr(exc, "error_code", type(exc).__name__.lower())
             )
         if isinstance(result, dict):
             controller.persist_stage_artifact(
@@ -2232,7 +2247,8 @@ def create_app(config=None):
             emit(stage="screen_a_done", kept=len(survivors), dropped=len(dropped),
                  message=f"粗筛完成：保留 {len(survivors)} 条，移除 {len(dropped)} 条")
             store.update_screening_run(
-                task_id, status="running", source_cursor=0
+                task_id, status="running", source_cursor=0,
+                total_kept=len(survivors), total_dropped=len(dropped),
             )
 
             # 4) 对保留的岗位分段抓 JD（重开调试浏览器，抓完关闭）。
@@ -2291,7 +2307,7 @@ def create_app(config=None):
                            if str(j.get("job_id", "")) not in jd_map]
                 emit(stage="fetch_jd", current=len(jd_map), total=len(survivors),
                      message=f"抓取 JD（{len(jd_map)}/{len(survivors)}）…")
-                DETAIL_CHUNK = 10
+                DETAIL_CHUNK = max(1, int(execution_config.detail_batch_size))
                 for chunk_start in range(0, len(todo_jd), DETAIL_CHUNK):
                     if _stop_requested():
                         close_debug_chrome()
@@ -2404,52 +2420,20 @@ def create_app(config=None):
                      current=min(len(done_verdicts), len(jobs_with_jd)),
                      total=len(jobs_with_jd),
                      message="AI 精筛中（JD 对比简历画像）…")
-                MATCH_CHUNK = 20
-                _fine_pause = False
-                for chunk_start in range(0, len(todo_match), MATCH_CHUNK):
-                    if _stop_requested():
-                        _mark_cancelled()
-                        return
-                    chunk = todo_match[chunk_start:chunk_start + MATCH_CHUNK]
-                    try:
-                        match_result = match_jds(chunk, profile_summary, endpoint, api_key,
-                                                 model=model, raise_on_systemic=True,
-                                                 execution_config=execution_config)
-                    except ai_service.AISecurityError as _ai_exc:
-                        # 切片6：systemic 错误暂停整任务（不批量变 uncertain 后完成）
-                        from webui.ai import map_ai_error_to_block_code, AISecurityError
-                        if isinstance(_ai_exc, AISecurityError):
-                            _block_code = map_ai_error_to_block_code(_ai_exc.error_code)
-                            if _block_code:
-                                store.update_screening_run(
-                                    task_id, status="paused", error_code=_block_code,
-                                    current_stage="ai_fine",
-                                    processed_count=len(done_verdicts))
-                                store.save_checkpoint(
-                                    task_id, "ai_fine", list(done_verdicts.keys()))
-                                store.append_task_event(
-                                    task_id, "pause",
-                                    {"stage": "ai_fine", "code": _block_code,
-                                     "processed": len(done_verdicts),
-                                     "total": len(jobs_with_jd)})
-                                with _pipeline_lock:
-                                    t = _pipeline_tasks.get(task_id)
-                                    if t is not None:
-                                        t["status"] = "paused"
-                                        t["error"] = (
-                                            f"AI 精筛被阻断（{_block_code}）："
-                                            f"已判定 {len(done_verdicts)}/{len(jobs_with_jd)} 条。"
-                                            "处理完成后点「继续」"
-                                        )
-                                _fine_pause = True
-                                break
-                        raise  # 非 systemic，往上抛
+                def _fine_progress(cur, tot):
+                    emit(stage="screen_b",
+                         current=min(len(done_verdicts) + cur, len(jobs_with_jd)),
+                         total=len(jobs_with_jd),
+                         message=f"AI 精筛 {min(len(done_verdicts) + cur, len(jobs_with_jd))}/{len(jobs_with_jd)}")
+
+                def _fine_batch_done(batch_verdicts, completed_job_ids):
+                    nonlocal done_verdicts
                     next_verdicts = dict(done_verdicts)
-                    next_verdicts.update(match_result["verdicts"])
+                    next_verdicts.update(batch_verdicts)
                     # verdict 与 checkpoint 同事务提交。任一步失败都必须停止，
                     # 不能继续下一批 AI 后再把内存结果伪装成可恢复进度。
                     store.save_verdict_and_checkpoint_atomic(
-                        task_id, "ai_fine", match_result["verdicts"],
+                        task_id, "ai_fine", batch_verdicts,
                         list(next_verdicts.keys()),
                     )
                     store.update_screening_run(
@@ -2459,8 +2443,51 @@ def create_app(config=None):
                          current=min(len(done_verdicts), len(jobs_with_jd)),
                          total=len(jobs_with_jd),
                          message=f"AI 精筛 {min(len(done_verdicts), len(jobs_with_jd))}/{len(jobs_with_jd)}")
-                if _fine_pause:
-                    return
+
+                try:
+                    match_result = match_jds(
+                        todo_match, profile_summary, endpoint, api_key,
+                        model=model, raise_on_systemic=True,
+                        progress=_fine_progress,
+                        on_batch_done=_fine_batch_done,
+                        execution_config=execution_config)
+                except ai_service.AISecurityError as _ai_exc:
+                    # 切片6：systemic 错误暂停整任务（不批量变 uncertain 后完成）
+                    from webui.ai import map_ai_error_to_block_code, AISecurityError
+                    if isinstance(_ai_exc, AISecurityError):
+                        _block_code = map_ai_error_to_block_code(_ai_exc.error_code)
+                        if _block_code:
+                            store.update_screening_run(
+                                task_id, status="paused", error_code=_block_code,
+                                current_stage="ai_fine",
+                                processed_count=len(done_verdicts))
+                            store.save_checkpoint(
+                                task_id, "ai_fine", list(done_verdicts.keys()))
+                            store.append_task_event(
+                                task_id, "pause",
+                                {"stage": "ai_fine", "code": _block_code,
+                                 "processed": len(done_verdicts),
+                                 "total": len(jobs_with_jd)})
+                            with _pipeline_lock:
+                                t = _pipeline_tasks.get(task_id)
+                                if t is not None:
+                                    t["status"] = "paused"
+                                    t["error"] = (
+                                        f"AI 精筛被阻断（{_block_code}）："
+                                        f"已判定 {len(done_verdicts)}/{len(jobs_with_jd)} 条。"
+                                        "处理完成后点「继续」"
+                                    )
+                            return
+                    raise  # 非 systemic，往上抛
+                # 兜底：末轮重试等未触发 on_batch_done 的新判定仍须落库。
+                _pending_fine_verdicts = {
+                    jid: verdict for jid, verdict in (match_result.get("verdicts") or {}).items()
+                    if jid not in done_verdicts
+                }
+                if _pending_fine_verdicts:
+                    _fine_batch_done(
+                        _pending_fine_verdicts,
+                        list(done_verdicts) + list(_pending_fine_verdicts))
                 verdicts = done_verdicts
                 for job in enriched:
                     jid = str(job.get("job_id", ""))
@@ -2515,7 +2542,10 @@ def create_app(config=None):
                 ))
             store.append_task_events(task_id, job_events)
             source_run_id = store.save_pipeline_result(
-                result, {"screening": screening_fields}
+                result, {"screening": screening_fields},
+                started_at=task.get("started_at"),
+                finished_at=int(time.time() * 1000),
+                execution_config=execution_config.to_dict(),
             )
             result["source_run_id"] = source_run_id
             mismatch_count = sum(
@@ -2752,7 +2782,7 @@ def create_app(config=None):
     def save_advanced_settings_endpoint():
         """SPEC011 T009: 兼容旧 POST 保存，同时写入 store 的自定义配置。"""
         from webui.pipeline_exec import _ADVANCED_DEFAULTS
-        from webui.execution_config import NINE_SPEED_FIELDS
+        from webui.execution_config import DEFAULT_DETAIL_TAB_POOL_SIZE, SPEED_FIELDS
         body = request.get_json(silent=True) or {}
         settings = body.get("settings")
         if not isinstance(settings, dict):
@@ -2768,9 +2798,10 @@ def create_app(config=None):
                     val = int(val)
                 clean[k] = val
         _save_legacy_advanced_settings(clean)
-        # SPEC011: 如果九个速度字段都存在，也写入 store 自定义配置
-        speed_fields = {k: v for k, v in clean.items() if k in NINE_SPEED_FIELDS}
-        if len(speed_fields) == len(NINE_SPEED_FIELDS):
+        # SPEC011: 如果速度字段都存在，也写入 store 自定义配置
+        speed_fields = {k: v for k, v in clean.items() if k in SPEED_FIELDS}
+        speed_fields.setdefault("detail_tab_pool_size", DEFAULT_DETAIL_TAB_POOL_SIZE)
+        if len(speed_fields) == len(SPEED_FIELDS):
             try:
                 store.save_custom_config(speed_fields)
             except (ValueError, TypeError):
@@ -2783,13 +2814,16 @@ def create_app(config=None):
 
         对应 HTTP API PUT /api/advanced-settings/custom。
         """
-        from webui.execution_config import NINE_SPEED_FIELDS
+        from webui.execution_config import SPEED_FIELDS
         body = request.get_json(silent=True) or {}
         settings = body.get("settings")
         if not isinstance(settings, dict):
             return jsonify({"ok": False, "error": "缺少 settings 对象"}), 400
-        # 验证九字段完整
-        missing = [f for f in NINE_SPEED_FIELDS if f not in settings]
+        # 验证速度字段完整；旧 9 字段请求由 store 补默认 JD Tab 数
+        missing = [
+            f for f in SPEED_FIELDS
+            if f not in settings and f != "detail_tab_pool_size"
+        ]
         if missing:
             return jsonify({
                 "ok": False,
@@ -2842,9 +2876,9 @@ def create_app(config=None):
         # 最近自定义值，避免 SQLite 权威状态与旧执行入口分叉。
         if result.get("config"):
             _save_legacy_advanced_settings(result["config"])
-        from webui.execution_config import NINE_SPEED_FIELDS
+        from webui.execution_config import SPEED_FIELDS
         settings = {
-            field: result["config"][field] for field in NINE_SPEED_FIELDS
+            field: result["config"][field] for field in SPEED_FIELDS
         }
         state = store.get_advanced_config_state()
         return jsonify({
@@ -3431,7 +3465,8 @@ def create_app(config=None):
                 "backend_version": prow["backend_version"],
                 "current_version": _backend_version,
                 "version_match": (prow["backend_version"] == _backend_version),
-                "started_at": None,
+                "started_at": _iso_epoch_ms(paused_run.get("started_at")),
+                "finished_at": _iso_epoch_ms(paused_run.get("finished_at")),
                 "resumable": True,
                 "source": "database",
                 "scrape_task_id": execution_params.get("scrape_task_id"),
@@ -3459,7 +3494,8 @@ def create_app(config=None):
                 "progress": {"message": "上次 AI 筛选因服务重启被中断"},
                 "logs": [],
                 "error": "",
-                "started_at": run.get("started_at"),
+                "started_at": _iso_epoch_ms(run.get("started_at")),
+                "finished_at": _iso_epoch_ms(run.get("finished_at")),
                 "resumable": False,
             })
         return jsonify({"ok": True, "has_task": False})
@@ -3524,7 +3560,10 @@ def create_app(config=None):
             "has_result": True,
             "source_run_id": payload.get("run_id"),
             "saved_at": payload.get("saved_at"),
+            "started_at": _iso_epoch_ms(payload.get("started_at")),
+            "finished_at": _iso_epoch_ms(payload.get("finished_at")),
             "script_params": payload.get("script_params", {}),
+            "execution_config": payload.get("execution_config", {}),
             "result": {
                 "total_scraped": result.get("total_scraped", 0),
                 "total_matched": result.get("total_matched", 0),
@@ -3540,6 +3579,13 @@ def create_app(config=None):
     # ------------------------------------------------------------------
     # Pipeline 结果增强：按需抓 JD 详情 + 感兴趣/不感兴趣（接入筛选工作台）
     # ------------------------------------------------------------------
+
+    @app.route("/api/reset-latest-result", methods=["POST"])
+    def reset_latest_result():
+        """重新上传简历时删除上一轮持久化结果，避免刷新后旧结果复活。"""
+        cleared = store.clear_latest_pipeline_result()
+        return jsonify({"ok": True, "cleared": cleared})
+
     _job_detail_lock = threading.Lock()
 
     @app.route("/api/job-detail", methods=["POST"])
@@ -4422,7 +4468,7 @@ def create_app(config=None):
 
     # FR-039：后端版本标识（启动时计算，继续任务时校验）
     try:
-        _backend_version = "011-deep-configuration-probing-phase1"
+        _backend_version = "011-ui-fixes"
         _backend_files = sorted(
             [*Path(__file__).resolve().parent.glob("*.py"), SCRAPER.resolve()],
             key=lambda path: path.relative_to(PROJECT_ROOT).as_posix(),
@@ -4504,6 +4550,9 @@ def create_app(config=None):
         mismatch = int((run or {}).get("mismatch_count") or 0)
         pending = int((run or {}).get("pending_count") or 0)
         dropped = int((run or {}).get("total_dropped") or 0)
+        kept = int((run or {}).get("total_kept") or 0)
+        if kept <= 0:
+            kept = max(0, source - dropped)
         error_code = (run or {}).get("error_code")
         error_reason = (run or {}).get("error_reason")
         stage = (
@@ -4536,6 +4585,12 @@ def create_app(config=None):
                 "error_reason": error_reason or failed_code_labels.get(
                     error_code, error_code or ""),
             }
+        started_at = _iso_epoch_ms((live or {}).get("started_at"))
+        if started_at is None:
+            started_at = _iso_epoch_ms((run or {}).get("started_at"))
+        finished_at = _iso_epoch_ms((live or {}).get("finished_at"))
+        if finished_at is None:
+            finished_at = _iso_epoch_ms((run or {}).get("finished_at"))
         return jsonify({
             "ok": True,
             "run_id": run_id,
@@ -4555,7 +4610,11 @@ def create_app(config=None):
             "match_count": match,
             "mismatch_count": mismatch,
             "dropped_count": dropped,
+            "kept_count": kept,
             "pause_info": pause_info,
+            "execution_config": (
+                (run or {}).get("execution_params") or {}
+            ).get("execution_config") or {},
             "backend_version": (run or {}).get("backend_version"),
             "current_version": _backend_version,
             "version_match": (
@@ -4563,8 +4622,8 @@ def create_app(config=None):
                 or (run or {}).get("backend_version") == _backend_version
             ),
             "updated_at": (run or {}).get("updated_at"),
-            "started_at": (live or {}).get("started_at"),
-            "finished_at": (live or {}).get("finished_at"),
+            "started_at": started_at,
+            "finished_at": finished_at,
             **(
                 {"result": live["result"]}
                 if live is not None and live.get("result") is not None else {}
@@ -5320,6 +5379,7 @@ def create_app(config=None):
             "missing_count": summary.get("missing_count", 0),
             "duplicate_count": summary.get("duplicate_count", 0),
             "error_counts": summary.get("error_counts", {}),
+            "error_correlation_id": summary.get("error_correlation_id"),
         }
         return jsonify({
             "ok": True,

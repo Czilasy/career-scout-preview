@@ -429,6 +429,41 @@ class JDBatchExceptionClassificationTests(unittest.TestCase):
         self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
         self.assertEqual(source.calls, 1, "CDP 断开后不得启动下一批 JD")
 
+    def test_captcha_required_outcome_stops_before_next_batch(self):
+        from webui.pipeline_exec import fetch_job_details
+        from webui.source import SourceOutcome
+
+        class CaptchaSource:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch_details_batch(self, jobs, **_kwargs):
+                self.calls += 1
+                return {
+                    job["job_id"]: SourceOutcome.failure(
+                        failed_code="captcha_required",
+                        safe_log="验证码仍存在",
+                    )
+                    for job in jobs
+                }
+
+        source = CaptchaSource()
+        jobs = [{"job_id": f"j{i}", "jd": ""} for i in range(6)]
+        settings = {
+            "detail_batch_size": 5,
+            "detail_interval": 0,
+            "detail_reset_every": 3,
+            "detail_batch_cooldown": 0,
+        }
+        with tempfile.TemporaryDirectory() as artifact_dir, mock.patch(
+            "webui.pipeline_exec.load_advanced_settings", return_value=settings
+        ), mock.patch("webui.pipeline_exec.time.sleep"):
+            result = fetch_job_details(jobs, source, artifact_dir=artifact_dir)
+
+        self.assertTrue(result["hard_stop"], result)
+        self.assertEqual(result["hard_stop_code"], "captcha_required")
+        self.assertEqual(source.calls, 1, "验证码后不得启动下一批 JD")
+
 
 class Slice5ShortJDTests(unittest.TestCase):
     """切片 5：短 JD 内容真实性判断（FR-032）。"""
@@ -892,7 +927,7 @@ class Slice7And9ApiTests(unittest.TestCase):
         data = resp.get_json()
         self.assertEqual(
             data.get("backend_version"),
-            "011-deep-configuration-probing-phase1",
+            "011-ui-fixes",
         )
         self.assertRegex(data.get("build_hash", ""), r"^[0-9a-f]{12}$")
         self.assertRegex(
@@ -1310,6 +1345,56 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
 
         self.assertEqual(finished["status"], "failed", finished)
         self.assertEqual(match_jds.call_count, 1)
+
+    def test_main_ai_screen_splits_by_frozen_batch_settings(self):
+        """主链路按冻结设置切分：JD 每批 15、精筛 4/并发 10，不再固定 10/20。"""
+        scrape_task_id = "frozen-split-source"
+        jobs = [
+            {"job_id": f"job-{index:03d}", "title": "后端工程师"}
+            for index in range(21)
+        ]
+        self._install_scrape_source(scrape_task_id, jobs)
+        detail_chunks = []
+
+        def details(chunk, *_args, **_kwargs):
+            detail_chunks.append(len(chunk))
+            return {
+                "jobs": [{**job, "jd": "负责后端开发"} for job in chunk],
+                "hard_stop": False, "hard_stop_code": None,
+                "stopped": False, "fetched": len(chunk),
+            }
+
+        match_calls = []
+
+        def matched(chunk, *_args, **_kwargs):
+            match_calls.append((len(chunk), _kwargs.get("execution_config")))
+            return {"verdicts": {
+                str(job["job_id"]): {
+                    "verdict": "match", "reason": "匹配", "caveats": [],
+                }
+                for job in chunk
+            }}
+
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.screen_jobs", return_value={
+                    "kept": [job["job_id"] for job in jobs], "dropped": [],
+                }), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
+                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch("webui.pipeline_exec.fetch_job_details", side_effect=details), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"), \
+                mock.patch("webui.ai.match_jds", side_effect=matched):
+            response = self._post_ai_screen(scrape_task_id)
+            task_id = response.get_json()["task_id"]
+            finished = _wait_for_pipeline_task(self.client, task_id)
+
+        self.assertEqual(finished["status"], "done", finished)
+        self.assertEqual(detail_chunks, [15, 6])
+        self.assertEqual(len(match_calls), 1)
+        self.assertEqual(match_calls[0][0], 21)
+        config = match_calls[0][1]
+        self.assertEqual(int(config.match_batch_size), 4)
+        self.assertEqual(int(config.match_concurrency), 10)
 
     def test_main_ai_terminal_persistence_failure_is_not_reported_done(self):
         """终态写库失败时内存任务也不得宣称完成。"""
@@ -1765,7 +1850,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                 ):
             response = self._post_ai_screen(scrape_task_id)
             task_id = response.get_json()["task_id"]
-            finished = _wait_for_pipeline_task(self.client, task_id)
+            finished = _wait_for_pipeline_task(self.client, task_id, timeout=10.0)
 
         self.assertEqual(finished["status"], "failed", finished)
         self.assertEqual(self.store.get_screening_run(task_id)["status"], "failed")
@@ -2335,7 +2420,7 @@ class ConvergenceTaskEventSequenceTests(unittest.TestCase):
         self.assertEqual(events[1]["payload"]["job_id"], "job-1")
         self.assertEqual(
             self.store.get_screening_run(task_id)["backend_version"],
-            "011-deep-configuration-probing-phase1",
+            "011-ui-fixes",
         )
 
 

@@ -948,6 +948,42 @@ class AIAvailabilityTests(unittest.TestCase):
 class MatchJdsFailurePolicyTests(unittest.TestCase):
     """Stage B failures must stay reviewable instead of becoming matches."""
 
+    def test_missing_batch_result_uses_manifest_bounded_single_item_retry(self):
+        from webui.ai import match_jds
+
+        jobs = [
+            {"job_id": "job-001", "title": "Python", "jd": "Python"},
+            {"job_id": "job-002", "title": "Agent", "jd": "Agent"},
+        ]
+        responses = [
+            {"results": [{"i": 0, "match": True, "reason": "匹配"}]},
+            {"results": [{"i": 0, "match": False, "reason": "不匹配"}]},
+        ]
+        events = []
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        with patch("webui.ai.call_ai", side_effect=responses) as call:
+            result = match_jds(
+                jobs, "画像", "https://x", "key", batch_size=2,
+                concurrency=1, measurement_callback=capture,
+                missing_result_retry_budget=1,
+            )
+
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(result["verdicts"]["job-001"]["verdict"], "match")
+        self.assertEqual(
+            result["verdicts"]["job-002"]["verdict"], "not_match"
+        )
+        terminals = [event for event in events
+                     if event["event_type"] == "item_terminal"]
+        self.assertEqual(len(terminals), 2)
+        self.assertEqual(
+            sorted(event["counts"]["item_index"] for event in terminals),
+            [0, 1],
+        )
+
     def test_ai_transport_failure_marks_jobs_uncertain(self):
         from webui.ai import AISecurityError, ERROR_NETWORK, match_jds
 
@@ -973,6 +1009,102 @@ class MatchJdsFailurePolicyTests(unittest.TestCase):
         verdict = result["verdicts"]["job-001"]
         self.assertEqual(verdict["verdict"], "uncertain")
         self.assertIn("待人工确认", verdict["reason"])
+
+    def test_transport_failure_retry_emits_only_final_terminals(self):
+        """失败批次只记录 attempt，终态必须等补重试结束后各发一次。"""
+        from webui.ai import AISecurityError, ERROR_NETWORK, match_jds
+
+        jobs = [
+            {"job_id": f"job-{i}", "title": "岗位", "jd": "JD"}
+            for i in range(4)
+        ]
+        events = []
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        with patch(
+            "webui.ai.call_ai",
+            side_effect=[
+                AISecurityError(ERROR_NETWORK),
+                {"results": [
+                    {"i": i, "match": False, "reason": "不匹配"}
+                    for i in range(4)
+                ]},
+            ],
+        ):
+            match_jds(
+                jobs, "画像", "https://x", "key", batch_size=4,
+                concurrency=1, measurement_callback=capture,
+            )
+
+        terminals = [e for e in events if e["event_type"] == "item_terminal"]
+        retries = [e for e in events if e["event_type"] == "retry"]
+        self.assertEqual(len(terminals), 4)
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(
+            retries[0]["metadata"]["retry_decision"], "batch_final_retry"
+        )
+        self.assertEqual(
+            sorted(e["counts"]["item_index"] for e in terminals),
+            [0, 1, 2, 3],
+        )
+
+    def test_systemic_failure_emits_one_terminal_per_remaining_item(self):
+        from webui.ai import AISecurityError, ERROR_NETWORK, match_jds
+
+        jobs = [
+            {"job_id": f"job-{i}", "title": "岗位", "jd": "JD"}
+            for i in range(3)
+        ]
+        events = []
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        with patch("webui.ai.call_ai", side_effect=AISecurityError(ERROR_NETWORK)):
+            with self.assertRaises(AISecurityError):
+                match_jds(
+                    jobs, "画像", "https://x", "key", batch_size=2,
+                    concurrency=1, measurement_callback=capture,
+                    raise_on_systemic=True,
+                )
+
+        terminals = [e for e in events if e["event_type"] == "item_terminal"]
+        self.assertEqual(
+            sorted(e["counts"]["item_index"] for e in terminals), [0, 1, 2]
+        )
+
+    def test_partial_final_retry_keeps_verdicts_and_terminals_consistent(self):
+        from webui.ai import AISecurityError, ERROR_NETWORK, match_jds
+
+        jobs = [
+            {"job_id": "j0", "title": "岗位0", "jd": "JD0"},
+            {"job_id": "j1", "title": "岗位1", "jd": "JD1"},
+        ]
+        events = []
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        responses = [
+            AISecurityError(ERROR_NETWORK),
+            {"results": [{"i": 0, "match": True, "reason": "匹配"}]},
+            AISecurityError(ERROR_NETWORK),
+        ]
+        with patch("webui.ai.call_ai", side_effect=responses):
+            result = match_jds(
+                jobs, "画像", "https://x", "key", batch_size=2,
+                concurrency=1, measurement_callback=capture,
+                missing_result_retry_budget=1,
+            )
+
+        self.assertEqual(result["verdicts"]["j0"]["verdict"], "match")
+        self.assertEqual(result["verdicts"]["j1"]["verdict"], "uncertain")
+        terminals = [e for e in events if e["event_type"] == "item_terminal"]
+        self.assertEqual(
+            sorted(e["counts"]["item_index"] for e in terminals), [0, 1]
+        )
 
 
 class CallAIRetryTests(unittest.TestCase):
@@ -1010,6 +1142,119 @@ class CallAIRetryTests(unittest.TestCase):
 
         self.assertEqual(result, {"ok": True})
         self.assertEqual(mock_post.call_count, 2)
+
+    def _call_with_retry_limits(self, call_ai, retry_limits):
+        try:
+            return call_ai(
+                "https://api.example.com/v1/chat/completions", "key",
+                [{"role": "user", "content": "hi"}],
+                retry_limits=retry_limits,
+            )
+        except TypeError as exc:
+            self.fail(f"call_ai 必须接受显式 retry_limits: {exc}")
+
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai.requests.post")
+    def test_explicit_network_retry_budget_zero_allows_one_attempt(
+        self, mock_post, _mock_sleep,
+    ):
+        from webui.ai import AISecurityError, call_ai
+
+        mock_post.side_effect = requests.ConnectionError("offline")
+        with self.assertRaises(AISecurityError):
+            self._call_with_retry_limits(call_ai, {"network_error": 0})
+
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai.requests.post")
+    def test_explicit_network_retry_budget_two_allows_at_most_three_attempts(
+        self, mock_post, _mock_sleep,
+    ):
+        from webui.ai import AISecurityError, call_ai
+
+        mock_post.side_effect = requests.ConnectionError("offline")
+        with self.assertRaises(AISecurityError):
+            self._call_with_retry_limits(call_ai, {"network_error": 2})
+
+        self.assertEqual(mock_post.call_count, 3)
+
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai.requests.post")
+    def test_explicit_network_budget_does_not_retry_unauthorized_transport_codes(
+        self, mock_post, mock_sleep,
+    ):
+        from webui.ai import AISecurityError, call_ai
+
+        cases = [
+            ("timeout", requests.Timeout("timeout")),
+            ("rate_limited", MagicMock(status_code=429)),
+        ]
+        cases[1][1].json.return_value = {"error": {"type": "rate_limit"}}
+        for code, failure in cases:
+            with self.subTest(code=code):
+                mock_post.reset_mock()
+                mock_sleep.reset_mock()
+                mock_post.side_effect = None
+                if isinstance(failure, BaseException):
+                    mock_post.side_effect = failure
+                else:
+                    mock_post.return_value = failure
+                with self.assertRaises(AISecurityError) as raised:
+                    self._call_with_retry_limits(call_ai, {"network_error": 2})
+                self.assertEqual(raised.exception.error_code, code)
+                self.assertEqual(mock_post.call_count, 1)
+                mock_sleep.assert_not_called()
+
+    @patch("webui.ai.call_ai")
+    def test_strict_tuning_transport_failure_does_not_enter_batch_final_retry(
+        self, mock_call_ai,
+    ):
+        from webui.ai import AISecurityError, ERROR_NETWORK, match_jds
+
+        mock_call_ai.side_effect = AISecurityError(ERROR_NETWORK)
+        with self.assertRaises(AISecurityError):
+            match_jds(
+                [{"job_id": "job-1", "title": "岗位", "jd": "JD"}],
+                "画像", "https://x", "key", batch_size=1, concurrency=1,
+                raise_on_systemic=True, retry_limits={"network_error": 0},
+            )
+
+        self.assertEqual(mock_call_ai.call_count, 1)
+
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai.requests.post")
+    def test_attempts_retries_and_recovery_are_all_measured(
+        self, mock_post, _mock_sleep,
+    ):
+        from webui.ai import call_ai
+
+        mock_post.side_effect = [
+            requests.Timeout("t"), self._ok_response({"ok": True}),
+        ]
+        events = []
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        result = call_ai(
+            "https://api.example.com/v1/chat/completions", "key",
+            [{"role": "user", "content": "hi"}],
+            measurement_callback=capture, measurement_stage="fine",
+        )
+
+        self.assertEqual(result, {"ok": True})
+        requests_seen = [e for e in events if e["event_type"] == "request"]
+        retries = [e for e in events if e["event_type"] == "retry"]
+        self.assertEqual(len(requests_seen), 2)
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(requests_seen[0]["error_code"], "timeout")
+        self.assertEqual(requests_seen[0]["metadata"]["failure_phase"], "connect")
+        self.assertEqual(requests_seen[1]["metadata"]["outcome"], "success")
+        correlation_ids = {
+            e["metadata"]["correlation_id"] for e in requests_seen
+        }
+        self.assertEqual(len(correlation_ids), 1)
 
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
@@ -1082,6 +1327,52 @@ class CallAIRetryTests(unittest.TestCase):
             call_ai("https://api.example.com/v1/chat/completions", "key",
                     [{"role": "user", "content": "hi"}])
         self.assertEqual(ctx.exception.error_code, "invalid_response")
+
+    @patch("webui.ai.requests.post")
+    def test_invalid_response_keeps_safe_parse_diagnostics(self, mock_post):
+        from webui.ai import AISecurityError, call_ai
+
+        mock_post.return_value = _mock_stream_raw(
+            "不是 JSON", finish_reason="stop"
+        )
+
+        with self.assertRaises(AISecurityError) as ctx:
+            call_ai(
+                "https://api.example.com/v1/chat/completions", "secret-key",
+                [{"role": "user", "content": "hi"}],
+            )
+
+        diagnostics = ctx.exception.diagnostics
+        self.assertEqual(diagnostics["failure_phase"], "json_decode")
+        self.assertEqual(diagnostics["finish_reason"], "stop")
+        self.assertEqual(diagnostics["response_length"], len("不是 JSON"))
+        self.assertIn("parse_error", diagnostics)
+        self.assertNotIn("secret-key", json.dumps(diagnostics, ensure_ascii=False))
+
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai._post_ai_json")
+    def test_tls_failure_is_distinct_from_connection_failure(
+        self, mock_post, _mock_sleep,
+    ):
+        from webui.ai import AISecurityError, call_ai
+
+        mock_post.side_effect = requests.exceptions.SSLError("tls eof")
+        events = []
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        with self.assertRaises(AISecurityError) as ctx:
+            call_ai(
+                "https://api.example.com/v1/chat/completions", "secret-key",
+                [{"role": "user", "content": "hi"}],
+                measurement_callback=capture,
+            )
+
+        self.assertEqual(ctx.exception.diagnostics["failure_phase"], "tls")
+        self.assertEqual(ctx.exception.diagnostics["exception_type"], "SSLError")
+        self.assertTrue(all(e.get("metadata", {}).get("failure_phase") == "tls"
+                            for e in events if e["event_type"] == "request"))
 
     @patch("webui.ai.requests.post")
     def test_missing_finish_reason_does_not_crash(self, mock_post):
@@ -1176,6 +1467,66 @@ class MatchJdsResumeAndTruncationTests(unittest.TestCase):
             ["match", "match", "match"])
         self.assertEqual(sorted(calls), [1, 1, 1, 2, 3])
 
+    def test_on_batch_done_serial_reports_each_batch(self):
+        from webui.ai import match_jds
+
+        snapshots = []
+        with patch("webui.ai.call_ai", return_value={
+            "results": [
+                {"i": 0, "match": True, "reason": "合适", "caveats": []},
+                {"i": 1, "match": False, "reason": "不合适", "caveats": []},
+            ]
+        }):
+            result = match_jds(
+                self._jobs(4), "画像", "https://x", "key",
+                batch_size=2, concurrency=1,
+                on_batch_done=lambda verdicts, done: snapshots.append(
+                    (dict(verdicts), sorted(done))
+                ),
+            )
+
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(snapshots[0][1], ["job-000", "job-001"])
+        self.assertEqual(snapshots[1][1], ["job-000", "job-001", "job-002", "job-003"])
+        self.assertEqual(len(result["verdicts"]), 4)
+
+    def test_on_batch_done_concurrent_reports_cumulative_snapshot(self):
+        from webui.ai import match_jds
+
+        snapshots = []
+        with patch("webui.ai.call_ai", return_value={
+            "results": [
+                {"i": 0, "match": True, "reason": "合适", "caveats": []},
+                {"i": 1, "match": True, "reason": "合适", "caveats": []},
+            ]
+        }):
+            result = match_jds(
+                self._jobs(4), "画像", "https://x", "key",
+                batch_size=2, concurrency=2,
+                on_batch_done=lambda verdicts, done: snapshots.append(
+                    (dict(verdicts), set(done))
+                ),
+            )
+
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(snapshots[-1][1], {"job-000", "job-001", "job-002", "job-003"})
+        self.assertEqual(len(result["verdicts"]), 4)
+
+    def test_on_batch_done_failure_raises_checkpoint_error(self):
+        from webui.ai import AICheckpointError, match_jds
+
+        def boom(_verdicts, _done):
+            raise RuntimeError("checkpoint rejected")
+
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{"i": 0, "match": True, "reason": "合适", "caveats": []}]
+        }):
+            with self.assertRaises(AICheckpointError):
+                match_jds(
+                    self._jobs(1), "画像", "https://x", "key",
+                    batch_size=1, on_batch_done=boom,
+                )
+
 
 class ScreenJobsTruncationTests(unittest.TestCase):
     """screen_jobs 粗筛：截断拆半重跑，单条仍失败则该条保留（防错杀）。"""
@@ -1200,6 +1551,37 @@ class ScreenJobsTruncationTests(unittest.TestCase):
 
         self.assertEqual(sorted(result["kept"]), ["j0", "j1", "j2"])
         self.assertEqual(result["dropped"], [])
+
+
+class AIScreeningPromptPolicyTests(unittest.TestCase):
+    """粗筛/精筛提示词必须保持“从宽保留、硬性条件才排除”的策略。"""
+
+    def test_match_jds_system_prompt_keeps_near_match_job_categories(self):
+        from webui.ai import match_jds
+
+        jobs = [{"job_id": "job-001", "title": "AI产品客户成功", "jd": "服务AI客户"}]
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{"i": 0, "match": True, "reason": "技能可迁移", "caveats": []}]
+        }) as call:
+            match_jds(jobs, "AI应用开发", "https://x", "key", batch_size=1)
+
+        prompt = call.call_args.args[2][0]["content"]
+        self.assertIn("判定从宽", prompt)
+        self.assertIn("客服、讲师、销售、运营、内容/漫剧制作", prompt)
+        self.assertIn("非开发类别本身不得作为 match=false 的理由", prompt)
+        self.assertIn("经验年限、学历这类硬性条件不满足时仍然排除", prompt)
+        self.assertIn("拿不准时判 match=true", prompt)
+
+    def test_screen_jobs_system_prompt_ignores_job_category_for_dropping(self):
+        from webui.ai import screen_jobs
+
+        jobs = [{"job_id": "job-001", "title": "教学讲师", "salary": "10-15K", "location": "东莞"}]
+        with patch("webui.ai.call_ai", return_value={"dropped": []}) as call:
+            screen_jobs(jobs, {"profile_summary": "AI应用开发"}, "https://x", "key", batch_size=1)
+
+        prompt = call.call_args.args[2][0]["content"]
+        self.assertIn("岗位名称或类别（如客服、讲师、销售、内容制作、运营等）不得单独作为剔除理由", prompt)
+        self.assertIn("粗筛只依据硬性字段", prompt)
 
 
 class AIMeasurementEventTests(unittest.TestCase):
@@ -1323,6 +1705,103 @@ class AIMeasurementEventTests(unittest.TestCase):
 
         event_types = [e["event_type"] for e in events]
         self.assertTrue(len(events) > 0, "match_jds 必须发射测量事件")
+
+    def test_match_jds_terminal_events_use_global_indices_across_batches(self):
+        """精筛分批后终态索引仍对应原始输入，不能在每批从零开始。"""
+        from webui import ai
+        events = []
+        jobs = [{"job_id": f"j{i}", "title": "T", "jd": "safe"}
+                for i in range(5)]
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        def fake_call_ai(messages, url, api_key, **kw):
+            return {"results": [
+                {"i": 0, "match": True, "reason": "匹配"},
+                {"i": 1, "match": False, "reason": "不匹配"},
+            ]}
+
+        with patch("webui.ai.call_ai", side_effect=fake_call_ai):
+            ai.match_jds(
+                jobs, "画像", "https://x", "key", batch_size=2,
+                concurrency=1, measurement_callback=capture,
+            )
+
+        terminals = [event for event in events
+                     if event["event_type"] == "item_terminal"]
+        self.assertEqual(
+            [event["counts"]["item_index"] for event in terminals],
+            [0, 1, 2, 3, 4],
+        )
+        self.assertTrue(
+            all(event["counts"]["input_count"] == 5 for event in terminals)
+        )
+
+    def test_match_jds_preserves_runner_assigned_indices_after_rough_filter(self):
+        """精筛必须保留粗筛前的原始索引，避免与 dropped 项碰撞。"""
+        from webui import ai
+        events = []
+        jobs = [
+            {"job_id": "j1", "title": "T", "jd": "safe",
+             "_tuning_measurement_index": 1},
+            {"job_id": "j4", "title": "T", "jd": "safe",
+             "_tuning_measurement_index": 4},
+        ]
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "匹配"},
+            {"i": 1, "match": False, "reason": "不匹配"},
+        ]}):
+            ai.match_jds(
+                jobs, "画像", "https://x", "key", batch_size=2,
+                measurement_callback=capture, measurement_input_count=5,
+            )
+
+        terminals = [event for event in events
+                     if event["event_type"] == "item_terminal"]
+        self.assertEqual(
+            [event["counts"]["item_index"] for event in terminals], [1, 4]
+        )
+        self.assertTrue(
+            all(event["counts"]["input_count"] == 5 for event in terminals)
+        )
+
+    def test_screen_jobs_can_emit_only_final_dropped_terminals(self):
+        """端到端粗筛保留项仍会进入精筛，只有 dropped 才是最终终态。"""
+        from webui import ai
+        events = []
+        jobs = [{"job_id": f"j{i}", "title": "T", "salary": "10K",
+                 "location": "上海"} for i in range(5)]
+
+        def capture(event_type, **fields):
+            events.append({"event_type": event_type, **fields})
+
+        def fake_call_ai(messages, url, api_key, **kw):
+            return {"dropped": [{"i": 0, "reason": "城市不符"}]}
+
+        with patch("webui.ai.call_ai", side_effect=fake_call_ai):
+            ai.screen_jobs(
+                jobs, {"profile_summary": "画像"}, "https://x", "key",
+                batch_size=2, concurrency=1, measurement_callback=capture,
+                emit_kept_terminal=False,
+            )
+
+        terminals = [event for event in events
+                     if event["event_type"] == "item_terminal"]
+        self.assertEqual(
+            [event["counts"]["item_index"] for event in terminals],
+            [0, 2, 4],
+        )
+        self.assertTrue(
+            all(event["counts"]["status"] == "dropped" for event in terminals)
+        )
+        self.assertTrue(
+            all(event["counts"]["input_count"] == 5 for event in terminals)
+        )
 
 
 if __name__ == "__main__":

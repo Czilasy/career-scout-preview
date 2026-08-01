@@ -46,6 +46,7 @@ export interface ExecutionSettings {
   detail_interval: number;
   detail_reset_every: number;
   detail_batch_cooldown: number;
+  detail_tab_pool_size: number;
   screen_batch_size: number;
   screen_concurrency: number;
   match_batch_size: number;
@@ -98,62 +99,4 @@ export interface ModeSelectionResponse {
   task_size: TaskSize;
   mode_version_id: string | null;
   config_digest: string;
-}
-
-export type TuningExperimentStatus =
-  | "draft" | "preflight" | "awaiting_instruction" | "queued"
-  | "running" | "evaluating" | "blocked" | "completed"
-  | "failed" | "cancelled";
-
-export interface TuningProgress {
-  confirmed_rounds: number;
-  invalid_rounds?: number;
-  remaining_required_rounds: number;
-  estimated_remaining_seconds: number;
-}
-
-export interface TuningExperiment {
-  id: string;
-  status: TuningExperimentStatus;
-  spec_version: string;
-  current_stage?: string | null;
-  current_candidate_id?: string | null;
-  current_round_id?: string | null;
-  input_version_id?: string | null;
-  quality_reference_id?: string | null;
-  blocked_code?: string | null;
-  blocked_reason?: string | null;
-  source_scope?: Partial<FrozenSearchScope>;
-  progress: TuningProgress;
-  candidate_summary?: Array<Record<string, unknown>>;
-  evidence?: Array<Record<string, unknown>>;
-  can_cancel: boolean;
-  can_resume: boolean;
-  can_apply: boolean;
-}
-
-export interface TuningExperimentResponse {
-  ok: true;
-  experiment: TuningExperiment;
-}
-
-export interface TuningExperimentCreateRequest {
-  spec_version: "011-deep-configuration-probing";
-  source_scope: ScopePreviewRequest;
-  workloads: Array<{
-    task_size: TaskSize;
-    structure_index: number;
-    scope: Record<string, unknown>;
-  }>;
-}
-
-export interface TuningExperimentResult {
-  ok: true;
-  experiment_id: string;
-  status: TuningExperimentStatus;
-  can_apply: boolean;
-  candidate_mode_version_digest?: string | null;
-  summary?: Record<string, unknown>;
-  candidate_summary?: Array<Record<string, unknown>>;
-  evidence?: Array<Record<string, unknown>>;
 }

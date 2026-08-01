@@ -12,15 +12,13 @@ import {
   Sparkles,
   Square,
   UploadCloud,
-  X,
 } from "@lucide/vue";
 import CollapsibleCard from "../components/CollapsibleCard.vue";
 import ExecutionModeSelector from "../components/ExecutionModeSelector.vue";
 import JobWorkspace from "../components/JobWorkspace.vue";
 import StepNavigator from "../components/StepNavigator.vue";
 import TaskProgress from "../components/TaskProgress.vue";
-import TuningWorkspace from "../components/TuningWorkspace.vue";
-import { apiRequest, errorMessage, setBuildIdentity, tuningApi } from "../api";
+import { apiRequest, errorMessage, settingsApi } from "../api";
 import { buildSearchScriptParams, normalizeScopePreview, partitionPipelineResult } from "../discovery";
 import type { PipelineResult } from "../discovery";
 import type {
@@ -31,9 +29,6 @@ import type {
   FrozenSearchScope,
   JobItem,
   Notice,
-  TaskSize,
-  TuningExperiment,
-  TuningExperimentCreateRequest,
 } from "../types";
 
 type StepId = "upload" | "search" | "screen" | "results";
@@ -52,20 +47,20 @@ interface TaskSnapshot {
   logs?: string[];
   error?: string;
   result?: PipelineResult;
+  started_at?: number;
+  finished_at?: number;
   // 切片7：统一状态接口字段（FR-037/SC-006）
   stage?: string;
   success_count?: number;
   fail_count?: number;
   unstarted_count?: number;
   total?: number;
+  kept_count?: number;
+  dropped_count?: number;
   pause_info?: { error_code?: string; error_reason?: string } | null;
+  execution_config?: Record<string, unknown> | null;
 }
 
-interface VersionInfo {
-  backend_version: string;
-  build_hash: string;
-  build_time: string;
-}
 
 const props = defineProps<{ profileId: string }>();
 const emit = defineEmits<{
@@ -113,7 +108,6 @@ const keywords = ref<Array<{ word: string; recommended: boolean }>>([]);
 const selectedKeywords = ref<string[]>([]);
 const customKeyword = ref("");
 const cityText = ref("");
-const nationwide = ref(false);
 const customCity = ref("");
 const fieldLabels = ref<Record<string, FieldLabel>>({});
 const filterValues = ref<Record<string, string[]>>({});
@@ -133,9 +127,6 @@ const scrapeCompleted = ref(false);
 const resultLoaded = ref(false);
 // 刷新后接回任务时显示的恢复提示条；任务结束后清空
 const restoredTaskHint = ref("");
-// 切片7/9：版本信息（FR-039/SC-014）
-const backendVersion = ref<VersionInfo | null>(null);
-const versionMismatch = ref(false);
 // 切片7：从 DB 恢复的 paused 任务 run_id（无内存工作线程，不能 poll）
 const pausedRunId = ref("");
 const pipelineResult = ref<PipelineResult | null>(null);
@@ -146,24 +137,8 @@ const feedbackBusyIds = ref(new Set<string>());
 const jdBusyIds = ref(new Set<string>());
 const advancedBusy = ref(false);
 const executionSelection = ref<ExecutionSelection>("custom");
-const advancedState = ref<AdvancedSettingsState | null>(null);
 const scopePreview = ref<FrozenSearchScope | null>(null);
 const scopePreviewBusy = ref(false);
-const tuningExperiment = ref<TuningExperiment | null>(null);
-const tuningLoading = ref(false);
-const tuningBusy = ref(false);
-const tuningResultDigest = ref("");
-const previousModeVersionId = ref("");
-const tuningCreateOpen = ref(false);
-interface WorkloadDraft {
-  taskSize: TaskSize;
-  structureIndex: number;
-  keywords: string;
-  scopeKind: "cities" | "nationwide";
-  cities: string;
-  pages: number;
-}
-const tuningDraftWorkloads = ref<WorkloadDraft[]>([]);
 const advancedSettings = ref<Record<string, number>>({
   pages: 3,
   inter_combo_delay: 10,
@@ -171,6 +146,7 @@ const advancedSettings = ref<Record<string, number>>({
   detail_interval: 2,
   detail_reset_every: 4,
   detail_batch_cooldown: 5,
+  detail_tab_pool_size: 5,
   screen_batch_size: 50,
   screen_concurrency: 5,
   match_batch_size: 4,
@@ -181,10 +157,11 @@ const advancedSettings = ref<Record<string, number>>({
 const advancedRanges = ref<Record<string, [number, number]>>({
   pages: [1, 9999],
   inter_combo_delay: [5, 120],
-  detail_batch_size: [1, 15],
+  detail_batch_size: [1, Number.MAX_SAFE_INTEGER],
   detail_interval: [2, 15],
   detail_reset_every: [2, 10],
   detail_batch_cooldown: [5, 60],
+  detail_tab_pool_size: [1, 10],
   screen_batch_size: [1, 100],
   screen_concurrency: [1, 10],
   match_batch_size: [1, 20],
@@ -220,7 +197,7 @@ const advancedPanelOpen = ref(false);
 let pollTimer: number | undefined;
 
 const scopeLocked = computed(() => Boolean(
-  scrapeBusy.value || scrapeTaskId.value || screenBusy.value || screenTaskId.value || resultLoaded.value,
+  scrapeBusy.value || screenBusy.value || pausedRunId.value,
 ));
 
 const enabledSteps = computed<StepId[]>(() => {
@@ -243,7 +220,7 @@ const cityList = computed(() => cityText.value
   .split(",")
   .map((city) => city.trim())
   .filter(Boolean));
-const effectiveSearchCities = computed(() => nationwide.value ? ["全国"] : cityList.value);
+const effectiveSearchCities = computed(() => cityList.value.length ? cityList.value : ["全国"]);
 const filterGroups = computed(() => {
   return ["salary", "experience", "degree", "industry", "scale", "stage"]
     .map((key) => {
@@ -261,7 +238,7 @@ const filterGroups = computed(() => {
 });
 const searchSummary = computed(() => {
   const kw = selectedKeywords.value.length;
-  const ct = nationwide.value ? 1 : cityList.value.length;
+  const ct = cityList.value.length ? cityList.value.length : 1;
   const parts: string[] = [];
   parts.push(kw && ct ? `${kw}×${ct}=${kw * ct}组` : "未配置");
   parts.push(profileSummary.value.trim() ? "画像已填" : "画像未填");
@@ -284,7 +261,7 @@ watch(advancedPanelOpen, (open) => {
   if (open) searchPanelOpen.value = false;
 });
 watch(
-  [selectedKeywords, cityText, nationwide, () => advancedSettings.value.pages],
+  [selectedKeywords, cityText, () => advancedSettings.value.pages],
   () => { if (!scopeLocked.value) void refreshScopePreview(); },
   { deep: true },
 );
@@ -309,27 +286,8 @@ onMounted(() => {
     loadLatestResult(),
     loadFilterLabels(),
     restoreRunningTask(),
-    fetchVersion(),
-    loadPersistedTuningExperiment(),
   ]);
 });
-
-// 切片9：拉取后端版本，校验是否匹配（FR-039/SC-014）
-async function fetchVersion() {
-  try {
-    const data = await apiRequest<VersionInfo>("/api/version");
-    backendVersion.value = data;
-    if (!setBuildIdentity(data.build_hash || "")) {
-      versionMismatch.value = true;
-    }
-    // 与 localStorage 中上次记录的版本对比；不一致提示刷新
-    const lastSeen = localStorage.getItem("boss_backend_version");
-    if (lastSeen && lastSeen !== data.backend_version) {
-      versionMismatch.value = true;
-    }
-    localStorage.setItem("boss_backend_version", data.backend_version);
-  } catch { /* non-critical */ }
-}
 
 async function restoreRunningTask() {
   try {
@@ -343,12 +301,15 @@ async function restoreRunningTask() {
       error?: string;
       stage?: string;
       pause_info?: { error_code?: string; error_reason?: string } | null;
+      execution_config?: Record<string, unknown> | null;
       backend_version?: string;
       current_version?: string;
       version_match?: boolean;
       scrape_task_id?: string;
       scrape_completed?: boolean;
       source_run_id?: string;
+      started_at?: number;
+      finished_at?: number;
     }>("/api/latest-running-task");
     if (!data.has_task || !data.task_id) return;
     const snapshot: TaskSnapshot = {
@@ -358,6 +319,8 @@ async function restoreRunningTask() {
       error: data.error || "",
       stage: data.stage,
       pause_info: data.pause_info,
+      started_at: data.started_at,
+      finished_at: data.finished_at,
     };
     const kind: "scrape" | "screen" | "recrawl" = data.kind === "scrape"
       ? "scrape"
@@ -387,14 +350,8 @@ async function restoreRunningTask() {
       }
       // 拉 /api/task-state 拿完整计数画面（success/fail/unstarted/total）
       await enrichPausedSnapshot(data.task_id, snapshot, kind);
-      // 版本不匹配提示
-      if (data.version_match === false) {
-        versionMismatch.value = true;
-        restoredTaskHint.value = "后端版本已变更，请刷新页面后重试继续";
-      } else {
-        const reason = data.pause_info?.error_reason || "任务已暂停";
-        restoredTaskHint.value = `检测到暂停中的任务（${reason}），处理后点继续`;
-      }
+      const reason = data.pause_info?.error_reason || "任务已暂停";
+      restoredTaskHint.value = `检测到暂停中的任务（${reason}），处理后点继续`;
       return;
     }
     if (kind === "scrape") {
@@ -447,12 +404,17 @@ async function enrichPausedSnapshot(
       fail_count?: number;
       unstarted_count?: number;
       total?: number;
+      kept_count?: number;
+      dropped_count?: number;
       pause_info?: { error_code?: string; error_reason?: string } | null;
+      execution_config?: Record<string, unknown> | null;
     }>(`/api/task-state/${encodeURIComponent(runId)}`);
     snapshot.success_count = data.success_count;
     snapshot.fail_count = data.fail_count;
     snapshot.unstarted_count = data.unstarted_count;
     snapshot.total = data.total;
+    snapshot.kept_count = data.kept_count;
+    snapshot.dropped_count = data.dropped_count;
     snapshot.stage = data.stage || snapshot.stage;
     if (typeof data.progress === "number") {
       snapshot.progress = {
@@ -463,6 +425,7 @@ async function enrichPausedSnapshot(
       snapshot.progress = { ...data.progress };
     }
     if (data.pause_info) snapshot.pause_info = data.pause_info;
+    if (data.execution_config) snapshot.execution_config = data.execution_config;
   } catch { /* 退化到 progress 字段 */ }
   if (kind === "scrape") {
     scrapeTaskId.value = runId;
@@ -554,6 +517,19 @@ async function analyzeResume() {
       method: "POST",
       body: form,
     });
+    await clearLatestResult();
+    scrapeTaskId.value = "";
+    screenTaskId.value = "";
+    recrawlTaskId.value = "";
+    scrapeSnapshot.value = null;
+    screenSnapshot.value = null;
+    recrawlSnapshot.value = null;
+    pipelineResultRunId.value = "";
+    pausedRunId.value = "";
+    restoredTaskHint.value = "";
+    scopePreview.value = null;
+    scopePreviewBusy.value = false;
+    activeCategory.value = "matched";
     initializeFromAnalysis(data);
     analysisReady.value = true;
     scrapeCompleted.value = false;
@@ -622,10 +598,6 @@ async function loadAdvancedSettings() {
     const data = await apiRequest<Partial<AdvancedSettingsState> & { settings?: Record<string, number> }>("/api/advanced-settings");
     advancedSettings.value = { ...advancedSettings.value, ...(data.settings || {}) };
     if (data.selection) executionSelection.value = data.selection;
-    if (data.mode_version && data.last_custom !== undefined) {
-      advancedState.value = data as AdvancedSettingsState;
-      previousModeVersionId.value = data.mode_version.previous_version_id || "";
-    }
     mergeManualRanges(data.manual_ranges);
   } catch (error) {
     notify(errorMessage(error, "高级设置加载失败"), "warning");
@@ -634,7 +606,8 @@ async function loadAdvancedSettings() {
 
 const SPEED_FIELDS = [
   "inter_combo_delay", "detail_batch_size", "detail_interval",
-  "detail_reset_every", "detail_batch_cooldown", "screen_batch_size",
+  "detail_reset_every", "detail_batch_cooldown",
+  "detail_tab_pool_size", "screen_batch_size",
   "screen_concurrency", "match_batch_size", "match_concurrency",
 ] as const;
 
@@ -643,16 +616,16 @@ function currentExecutionSettings(): ExecutionSettings {
 }
 
 async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
-  if (!selectedKeywords.value.length || (!nationwide.value && !cityList.value.length)) {
+  if (!selectedKeywords.value.length) {
     scopePreview.value = null;
     return null;
   }
   scopePreviewBusy.value = true;
   try {
-    const data = await tuningApi.previewScope({
+    const data = await settingsApi.previewScope({
       keywords: selectedKeywords.value,
-      scope_kind: nationwide.value ? "nationwide" : "cities",
-      cities: nationwide.value ? [] : cityList.value,
+      scope_kind: cityList.value.length ? "cities" : "nationwide",
+      cities: cityList.value.length ? cityList.value : [],
       pages_per_combination: advancedSettings.value.pages,
     });
     scopePreview.value = normalizeScopePreview(data);
@@ -671,10 +644,10 @@ async function selectExecutionMode(selection: ExecutionSelection) {
   if (!preview) return;
   advancedBusy.value = true;
   try {
-    const data = await tuningApi.selectMode(selection, preview.scope_digest);
+    const data = await settingsApi.selectMode(selection, preview.scope_digest);
     const returned = (data as unknown as { settings?: ExecutionSettings; config?: ExecutionSettings }).settings
       || (data as unknown as { config?: ExecutionSettings }).config;
-    if (!returned) throw new Error("模式响应缺少完整九字段配置");
+    if (!returned) throw new Error("模式响应缺少完整执行配置");
     advancedSettings.value = { ...advancedSettings.value, ...returned };
     executionSelection.value = selection;
   } catch (error) {
@@ -687,7 +660,7 @@ async function selectExecutionMode(selection: ExecutionSelection) {
 async function saveAdvancedSettings() {
   advancedBusy.value = true;
   try {
-    const data = await tuningApi.saveCustom(currentExecutionSettings());
+    const data = await settingsApi.saveCustom(currentExecutionSettings());
     advancedSettings.value = { ...advancedSettings.value, ...(data.settings || {}) };
     executionSelection.value = "custom";
     notify("高级设置已保存", "success");
@@ -797,160 +770,6 @@ async function startAiScreen() {
     screenBusy.value = false;
     screenSnapshot.value = { status: "failed", error: errorMessage(error, "AI 筛选启动失败") };
     notify(errorMessage(error, "AI 筛选启动失败"), "error");
-  }
-}
-
-async function loadPersistedTuningExperiment() {
-  const experimentId = localStorage.getItem("boss-tuning-experiment-id") || "";
-  if (!experimentId) return;
-  tuningLoading.value = true;
-  try {
-    const [picture, result] = await Promise.all([
-      tuningApi.getExperiment(experimentId),
-      tuningApi.getResult(experimentId),
-    ]);
-    const evidence = result.evidence || [];
-    tuningExperiment.value = {
-      ...picture.experiment,
-      current_round_id: picture.experiment.current_round_id
-        || String(evidence.at(-1)?.id || ""),
-      candidate_summary: result.candidate_summary || [],
-      evidence,
-      can_apply: Boolean(result.can_apply && picture.experiment.status === "completed"),
-    };
-    tuningResultDigest.value = result.candidate_mode_version_digest || "";
-  } catch (error) {
-    localStorage.removeItem("boss-tuning-experiment-id");
-    tuningExperiment.value = null;
-    notify(errorMessage(error, "实验状态恢复失败"), "warning");
-  } finally {
-    tuningLoading.value = false;
-  }
-}
-
-async function refreshTuningExperiment() {
-  await loadPersistedTuningExperiment();
-}
-
-async function applyTuningResult() {
-  if (!tuningExperiment.value?.can_apply || !tuningResultDigest.value) return;
-  tuningBusy.value = true;
-  try {
-    await tuningApi.applyResult(tuningExperiment.value.id, tuningResultDigest.value);
-    notify("完整模式版本已应用", "success");
-    await loadAdvancedSettings();
-  } catch (error) {
-    notify(errorMessage(error, "模式版本应用失败"), "error");
-  } finally {
-    tuningBusy.value = false;
-  }
-}
-
-async function rollbackTuningVersion() {
-  if (!previousModeVersionId.value) return;
-  tuningBusy.value = true;
-  try {
-    await tuningApi.rollbackModeVersion(previousModeVersionId.value);
-    notify("已回退上一完整模式版本", "success");
-    await loadAdvancedSettings();
-  } catch (error) {
-    notify(errorMessage(error, "模式版本回退失败"), "error");
-  } finally {
-    tuningBusy.value = false;
-  }
-}
-
-async function cancelTuningExperiment() {
-  if (!tuningExperiment.value?.can_cancel) return;
-  tuningBusy.value = true;
-  try {
-    await tuningApi.cancelExperiment(tuningExperiment.value.id);
-    await loadPersistedTuningExperiment();
-  } catch (error) {
-    notify(errorMessage(error, "实验取消失败"), "error");
-  } finally {
-    tuningBusy.value = false;
-  }
-}
-
-async function resumeTuningExperiment() {
-  if (!tuningExperiment.value?.can_resume) return;
-  tuningBusy.value = true;
-  try {
-    await tuningApi.resumeExperiment(tuningExperiment.value.id);
-    await loadPersistedTuningExperiment();
-  } catch (error) {
-    notify(errorMessage(error, "实验恢复失败"), "error");
-  } finally {
-    tuningBusy.value = false;
-  }
-}
-
-function openTuningCreate() {
-  tuningDraftWorkloads.value = (["small", "medium", "large"] as TaskSize[])
-    .flatMap((taskSize) => [1, 2].map((structureIndex) => ({
-      taskSize,
-      structureIndex,
-      keywords: "",
-      scopeKind: "cities" as const,
-      cities: "",
-      pages: 1,
-    })));
-  tuningCreateOpen.value = true;
-}
-
-function splitDraftValues(value: string): string[] {
-  return value.replaceAll("，", ",").split(",")
-    .map((item) => item.trim()).filter(Boolean);
-}
-
-async function submitTuningCreate() {
-  const preview = scopePreview.value || await refreshScopePreview();
-  if (!preview) return;
-  const payload: TuningExperimentCreateRequest = {
-    spec_version: "011-deep-configuration-probing",
-    source_scope: {
-      keywords: [...preview.keywords],
-      scope_kind: preview.scope_kind,
-      cities: [...preview.cities],
-      pages_per_combination: preview.pages_per_combination,
-    },
-    workloads: tuningDraftWorkloads.value.map((draft) => ({
-      task_size: draft.taskSize,
-      structure_index: draft.structureIndex,
-      scope: {
-        keywords: splitDraftValues(draft.keywords),
-        scope_kind: draft.scopeKind,
-        cities: draft.scopeKind === "nationwide"
-          ? [] : splitDraftValues(draft.cities),
-        pages_per_combination: Number(draft.pages),
-      },
-    })),
-  };
-  tuningBusy.value = true;
-  try {
-    const created = await tuningApi.createExperiment(payload);
-    localStorage.setItem("boss-tuning-experiment-id", created.experiment_id);
-    tuningCreateOpen.value = false;
-    await loadPersistedTuningExperiment();
-    notify("深度实验草稿已创建，请核对后确认输入", "success");
-  } catch (error) {
-    notify(errorMessage(error, "深度实验创建失败"), "error");
-  } finally {
-    tuningBusy.value = false;
-  }
-}
-
-async function confirmTuningInput() {
-  if (tuningExperiment.value?.status !== "draft") return;
-  tuningBusy.value = true;
-  try {
-    await tuningApi.confirmInput(tuningExperiment.value.id);
-    await loadPersistedTuningExperiment();
-  } catch (error) {
-    notify(errorMessage(error, "代表性输入确认失败"), "error");
-  } finally {
-    tuningBusy.value = false;
   }
 }
 
@@ -1134,15 +953,46 @@ async function loadLatestResult() {
       has_result?: boolean;
       source_run_id?: string;
       result?: PipelineResult;
+      started_at?: number;
+      finished_at?: number;
+      execution_config?: Record<string, unknown> | null;
     }>(`/api/latest-pipeline-result${query}`);
     if (data.has_result && data.result) {
       pipelineResultRunId.value = data.source_run_id || "";
       setPipelineResult(data.result);
       const ps = (data.result as Record<string, unknown>).profile_summary;
       if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
+      scrapeSnapshot.value = {
+        status: "completed", stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
+        started_at: data.started_at,
+        finished_at: data.finished_at,
+      };
+      screenSnapshot.value = {
+        status: "completed", stage: "done", progress: { message: "上次 AI 筛选已完成" }, logs: [],
+        started_at: data.started_at,
+        finished_at: data.finished_at,
+      };
+      const execConfig = data.execution_config || {};
+      scrapeSnapshot.value.execution_config = execConfig;
+      screenSnapshot.value.execution_config = execConfig;
+      screenSnapshot.value.kept_count = Number(data.result.total_kept || 0);
+      screenSnapshot.value.dropped_count = Number(data.result.total_dropped || 0);
+      const resultTotals = data.result as { total_scraped?: number };
+      scrapeSnapshot.value.total = Number(resultTotals.total_scraped || 0);
+      screenSnapshot.value.total = Number(resultTotals.total_scraped || 0);
     }
   } catch (error) {
     notify(errorMessage(error, "上次结果暂时无法恢复"), "warning");
+  }
+}
+
+async function clearLatestResult() {
+  try {
+    await apiRequest<{ ok?: boolean; cleared?: boolean }>("/api/reset-latest-result", {
+      method: "POST",
+    });
+  } catch {
+    // 清理失败不阻断新流程；前端状态已经先清空
   }
 }
 
@@ -1156,13 +1006,31 @@ function resetWorkflow() {
   aiConsent.value = false;
   scrapeTaskId.value = "";
   scrapeSnapshot.value = null;
+  screenTaskId.value = "";
   screenSnapshot.value = null;
+  recrawlTaskId.value = "";
+  recrawlSnapshot.value = null;
   pipelineResult.value = null;
   pipelineResultRunId.value = "";
+  activeCategory.value = "matched";
   rejectedIds.value = new Set();
   pausedRunId.value = "";
   restoredTaskHint.value = "";
   scopePreview.value = null;
+  scopePreviewBusy.value = false;
+  keywords.value = [];
+  selectedKeywords.value = [];
+  customKeyword.value = "";
+  cityText.value = "";
+  customCity.value = "";
+  filterValues.value = {};
+  profileSummary.value = "";
+  scrapeBusy.value = false;
+  screenBusy.value = false;
+  recrawlBusy.value = false;
+  recrawlRetryCount = 0;
+  screenPanelOpen.value = true;
+  void clearLatestResult();
 }
 
 function jobId(job: JobItem): string {
@@ -1523,8 +1391,8 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
           </template>
           <div class="search-columns">
             <div class="search-col">
-              <p class="search-col-title">关键词</p>
-              <div class="chip-grid" aria-label="搜索关键词">
+              <p class="search-col-title">关键词 × 城市</p>
+              <div class="chip-grid" aria-label="搜索关键词和城市">
                 <button
                   v-for="keyword in keywords"
                   :key="keyword.word"
@@ -1538,33 +1406,26 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
                 >
                   {{ keyword.word }}<small v-if="keyword.recommended">推荐</small>
                 </button>
-              </div>
-              <div class="inline-input-row">
-                <label class="field-label grow">
-                  <span>自定义</span>
-                  <input v-model="customKeyword" data-testid="custom-keyword" type="text" placeholder="回车添加" :disabled="scopeLocked" @keydown.enter.prevent="addCustomKeyword">
-                </label>
-                <button class="button secondary align-end" data-testid="add-keyword" type="button" :disabled="scopeLocked" @click="addCustomKeyword">添加</button>
-              </div>
-            </div>
-            <div class="search-col">
-              <p class="search-col-title">城市</p>
-              <label class="nationwide-toggle">
-                <input v-model="nationwide" data-testid="nationwide-scope" type="checkbox" :disabled="scopeLocked">
-                <span>全国（与具体城市互斥）</span>
-              </label>
-              <div v-if="cityList.length" class="city-chips-row">
                 <span v-for="city in cityList" :key="city" class="city-chip">
                   {{ city }}
                   <button type="button" class="city-chip-remove" aria-label="删除城市" :disabled="scopeLocked" @click="removeCity(city)">×</button>
                 </span>
               </div>
+              <div class="search-input-grid">
               <div class="inline-input-row">
                 <label class="field-label grow">
-                  <span>自定义</span>
-                  <input v-model="customCity" data-testid="custom-city" type="text" placeholder="回车添加" :disabled="scopeLocked || nationwide" @keydown.enter.prevent="addCustomCity">
+                  <span>关键词</span>
+                  <input v-model="customKeyword" data-testid="custom-keyword" type="text" placeholder="回车添加" :disabled="scopeLocked" @keydown.enter.prevent="addCustomKeyword">
                 </label>
-                <button class="button secondary align-end" data-testid="add-city" type="button" :disabled="scopeLocked || nationwide" @click="addCustomCity">添加</button>
+                <button class="button secondary align-end" data-testid="add-keyword" type="button" :disabled="scopeLocked" @click="addCustomKeyword">添加</button>
+              </div>
+              <div class="inline-input-row">
+                <label class="field-label grow">
+                  <span>城市</span>
+                  <input v-model="customCity" data-testid="custom-city" type="text" placeholder="不输入则不指定城市" :disabled="scopeLocked" @keydown.enter.prevent="addCustomCity">
+                </label>
+                <button class="button secondary align-end" data-testid="add-city" type="button" :disabled="scopeLocked" @click="addCustomCity">添加</button>
+              </div>
               </div>
             </div>
           </div>
@@ -1572,12 +1433,6 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
             <span>求职画像（用于 AI 精筛）<small v-if="!profileSummary">　未填写将跳过精筛</small></span>
             <textarea v-model="profileSummary" rows="2" :disabled="scopeLocked" placeholder="上传简历后自动生成；也可手动填写，如：3年Python后端，熟悉FastAPI/Redis，期望AI应用开发方向"></textarea>
           </label>
-          <div v-if="scopePreview" class="scope-preview" data-testid="scope-preview">
-            <span>{{ scopePreview.keywords.join("、") }}</span>
-            <span>{{ scopePreview.scope_kind === "nationwide" ? "全国" : scopePreview.cities.join("、") }}</span>
-            <strong>{{ scopePreview.planned_pages }} 页 · {{ { small: "小任务", medium: "中任务", large: "大任务" }[scopePreview.task_size] }}</strong>
-          </div>
-          <p v-else-if="scopePreviewBusy" class="scope-preview-pending">正在校验搜索范围</p>
         </CollapsibleCard>
 
         <CollapsibleCard class="advanced-panel" title="高级执行设置" v-model="advancedPanelOpen">
@@ -1592,7 +1447,6 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
           <div class="adv-groups">
           <ExecutionModeSelector
             :model-value="executionSelection"
-            :task-size="scopePreview?.task_size || 'small'"
             :busy="advancedBusy"
             :disabled="!scopePreview"
             @update:model-value="selectExecutionMode"
@@ -1614,6 +1468,7 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
               <label class="field-label"><span>岗位间隔（秒） <i class="tip" data-tip="范围由当前模式版本提供。抓完一个岗位详情后等待再抓下一个">?</i></span><input v-model.number="advancedSettings.detail_interval" type="number" :min="advancedRange('detail_interval')[0]" :max="advancedRange('detail_interval')[1]" @change="clampAdvanced('detail_interval')"></label>
               <label class="field-label"><span>重置频率 <i class="tip" data-tip="范围由当前模式版本提供。每抓多少个详情后重置会话计数器">?</i></span><input v-model.number="advancedSettings.detail_reset_every" type="number" :min="advancedRange('detail_reset_every')[0]" :max="advancedRange('detail_reset_every')[1]" @change="clampAdvanced('detail_reset_every')"></label>
               <label class="field-label"><span>批次冷却（秒） <i class="tip" data-tip="范围由当前模式版本提供。两批详情抓取之间的休息时间">?</i></span><input v-model.number="advancedSettings.detail_batch_cooldown" type="number" :min="advancedRange('detail_batch_cooldown')[0]" :max="advancedRange('detail_batch_cooldown')[1]" @change="clampAdvanced('detail_batch_cooldown')"></label>
+              <label class="field-label"><span>并发 Tab 数 <i class="tip" data-tip="范围由当前模式版本提供。同时常驻多少个浏览器 tab 抓 JD（1-10）">?</i></span><input v-model.number="advancedSettings.detail_tab_pool_size" data-testid="detail-tab-pool-size" type="number" :min="advancedRange('detail_tab_pool_size')[0]" :max="advancedRange('detail_tab_pool_size')[1]" @change="clampAdvanced('detail_tab_pool_size')"></label>
             </div>
           </div>
           <!-- AI 筛选 -->
@@ -1626,21 +1481,6 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
               <label class="field-label"><span>精筛并发数 <i class="tip" data-tip="范围由当前模式版本提供。精筛同时发送的 AI 请求数">?</i></span><input v-model.number="advancedSettings.match_concurrency" type="number" :min="advancedRange('match_concurrency')[0]" :max="advancedRange('match_concurrency')[1]" @change="clampAdvanced('match_concurrency')"></label>
             </div>
           </div>
-          </div>
-          <div class="tuning-workspace-wrap" data-testid="tuning-workspace">
-            <TuningWorkspace
-              :experiment="tuningExperiment"
-              :loading="tuningLoading"
-              :busy="tuningBusy"
-              :can-rollback="Boolean(previousModeVersionId)"
-              @create="openTuningCreate"
-              @confirm="confirmTuningInput"
-              @cancel="cancelTuningExperiment"
-              @resume="resumeTuningExperiment"
-              @refresh="refreshTuningExperiment"
-              @apply="applyTuningResult"
-              @rollback="rollbackTuningVersion"
-            />
           </div>
           </div>
         </CollapsibleCard>
@@ -1788,57 +1628,5 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
         </JobWorkspace>
       </section>
     </section>
-    <div v-if="tuningCreateOpen" class="dialog-backdrop" role="presentation">
-      <section class="dialog-panel tuning-create-dialog" role="dialog" aria-modal="true" aria-labelledby="tuning-create-title">
-        <header class="dialog-header">
-          <div>
-            <h2 id="tuning-create-title">确认六个代表性任务</h2>
-            <p>小、中、大任务各两种结构。关键词、范围和页数由后端重新规范化与分类。</p>
-          </div>
-          <button class="icon-button" type="button" aria-label="关闭实验创建" @click="tuningCreateOpen = false">
-            <X :size="18" aria-hidden="true" />
-          </button>
-        </header>
-        <div class="dialog-body tuning-workload-list">
-          <fieldset v-for="(draft, index) in tuningDraftWorkloads" :key="`${draft.taskSize}-${draft.structureIndex}`" class="tuning-workload-row">
-            <legend>{{ { small: "小任务", medium: "中任务", large: "大任务" }[draft.taskSize] }} · 结构 {{ draft.structureIndex }}</legend>
-            <label class="field-label">
-              <span>关键词（逗号分隔）</span>
-              <input v-model="draft.keywords" :data-testid="`workload-keywords-${index}`" type="text" required>
-            </label>
-            <label class="field-label">
-              <span>范围</span>
-              <select v-model="draft.scopeKind">
-                <option value="cities">指定城市</option>
-                <option value="nationwide">全国</option>
-              </select>
-            </label>
-            <label class="field-label">
-              <span>城市（逗号分隔）</span>
-              <input v-model="draft.cities" :data-testid="`workload-cities-${index}`" type="text" :disabled="draft.scopeKind === 'nationwide'" :required="draft.scopeKind === 'cities'">
-            </label>
-            <label class="field-label">
-              <span>每组合页数</span>
-              <input v-model.number="draft.pages" :data-testid="`workload-pages-${index}`" type="number" min="1" required>
-            </label>
-          </fieldset>
-        </div>
-        <footer class="dialog-footer">
-          <button class="button ghost" type="button" @click="tuningCreateOpen = false">取消</button>
-          <button class="button primary" data-testid="submit-tuning-create" type="button" :disabled="tuningBusy" @click="submitTuningCreate">
-            {{ tuningBusy ? "创建中…" : "创建实验草稿" }}
-          </button>
-        </footer>
-      </section>
-    </div>
-    <!-- 切片9：版本页脚（FR-039/SC-014） -->
-    <footer v-if="backendVersion" class="version-footer" data-testid="version-footer">
-      <span v-if="versionMismatch" class="version-mismatch" data-testid="version-mismatch-warning">
-        后端版本已更新（{{ backendVersion.backend_version }}），建议刷新页面
-      </span>
-      <span class="version-label" data-testid="version-label">
-        后端 {{ backendVersion.backend_version }} · 构建 {{ backendVersion.build_hash?.slice(0, 8) || "unknown" }}
-      </span>
-    </footer>
   </main>
 </template>

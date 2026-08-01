@@ -15,6 +15,7 @@
 | `detail_interval` | decimal seconds | `>= 0`; actual randomized range is recorded separately |
 | `detail_reset_every` | integer | `>= 1`; applies per detail worker/session |
 | `detail_batch_cooldown` | decimal seconds | `>= 0` |
+| `detail_tab_pool_size` | integer | `1..5`; concurrent resident browser tabs for JD fetching |
 | `screen_batch_size` | integer | `>= 1`; cannot exceed actual rough-screen input without normalization |
 | `screen_concurrency` | integer | `>= 1`; effective concurrency cannot exceed batch count |
 | `match_batch_size` | integer | `>= 1`; cannot exceed actual fine-screen input without normalization |
@@ -22,7 +23,7 @@
 | `schema_version` | integer | positive, required |
 | `config_digest` | string | digest of canonical field/value JSON |
 
-`pages` is not part of this value object. Hidden tab-pool size, randomization policy, retry policy and source safety rules are also excluded.
+`pages` is not part of this value object. Randomization policy, retry policy and source safety rules are also excluded.
 
 ### 1.2 FrozenTaskScope
 

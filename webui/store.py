@@ -107,6 +107,21 @@ def _now():
     return datetime.now(_CST).isoformat()
 
 
+def _to_iso_timestamp(value):
+    """Normalize epoch milliseconds or ISO text to local ISO text."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000.0, _CST).isoformat()
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_CST)
+    return parsed.astimezone(_CST).isoformat()
+
+
 def _uuid():
     return uuid.uuid4().hex[:16]
 
@@ -307,6 +322,8 @@ class TaskStore:
             self._migration_024()
         if current < 25:
             self._migration_025()
+        if current < 26:
+            self._migration_026()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -1786,6 +1803,78 @@ class TaskStore:
                 (_now(),),
             )
 
+    def _migration_026(self):
+        """Persist real screening start/finish timestamps and backfill history."""
+        with self._connection() as conn:
+            columns = {
+                row["name"] for row in conn.execute(
+                    "PRAGMA table_info(screening_runs)"
+                ).fetchall()
+            }
+            if "started_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE screening_runs ADD COLUMN started_at TEXT"
+                )
+            if "finished_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE screening_runs ADD COLUMN finished_at TEXT"
+                )
+            conn.execute(
+                "UPDATE screening_runs SET started_at = created_at, finished_at = updated_at "
+                "WHERE record_kind = 'process_log' AND started_at IS NULL"
+            )
+            process_logs = [
+                dict(row) for row in conn.execute(
+                    "SELECT id, created_at, updated_at FROM screening_runs "
+                    "WHERE record_kind = 'process_log'"
+                ).fetchall()
+            ]
+            snapshots = [
+                dict(row) for row in conn.execute(
+                    "SELECT id, created_at, updated_at FROM screening_runs "
+                    "WHERE record_kind = 'result_snapshot' AND started_at IS NULL"
+                ).fetchall()
+            ]
+            candidates = []
+            for row in process_logs:
+                try:
+                    started = datetime.fromisoformat(str(row["created_at"]))
+                    finished = datetime.fromisoformat(
+                        str(row["updated_at"] or row["created_at"])
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=_CST)
+                if finished.tzinfo is None:
+                    finished = finished.replace(tzinfo=_CST)
+                candidates.append((row["id"], started, finished))
+            for row in snapshots:
+                try:
+                    snapshot_at = datetime.fromisoformat(str(row["created_at"]))
+                except (TypeError, ValueError):
+                    continue
+                if snapshot_at.tzinfo is None:
+                    snapshot_at = snapshot_at.replace(tzinfo=_CST)
+                best = None
+                for _run_id, started, _finished in candidates:
+                    if started <= snapshot_at and (
+                        best is None or started > best[1]
+                    ):
+                        best = (_run_id, started, _finished)
+                if best is not None:
+                    conn.execute(
+                        "UPDATE screening_runs SET started_at = ?, finished_at = ? "
+                        "WHERE id = ?",
+                        (best[1].isoformat(), snapshot_at.isoformat(), row["id"]),
+                    )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations "
+                "(version, applied_at, description) VALUES "
+                "(26, ?, 'screening run start/finish timestamps')",
+                (_now(),),
+            )
+
     # -- SPEC011 advanced config state -----------------------------------
 
     def get_advanced_config_state(self) -> dict:
@@ -1812,12 +1901,16 @@ class TaskStore:
         }
 
     def save_custom_config(self, config: dict) -> str:
-        """原子保存完整自定义配置（九字段），返回 digest。
+        """原子保存完整自定义配置（含 JD 并发 Tab 数），返回 digest。
 
         部分字段保存被拒绝；pages 不属于配置快照。
         """
-        from webui.execution_config import ExecutionConfigSnapshot, NINE_SPEED_FIELDS
-        missing = [f for f in NINE_SPEED_FIELDS if f not in config]
+        from webui.execution_config import (
+            DEFAULT_DETAIL_TAB_POOL_SIZE, ExecutionConfigSnapshot, SPEED_FIELDS,
+        )
+        config = dict(config)
+        config.setdefault("detail_tab_pool_size", DEFAULT_DETAIL_TAB_POOL_SIZE)
+        missing = [f for f in SPEED_FIELDS if f not in config]
         if missing:
             raise ValueError(f"缺少必填字段: {missing}")
         # 验证配置快照有效性（含物理边界校验）
@@ -2049,10 +2142,11 @@ class TaskStore:
             return
         if not isinstance(raw, dict):
             return
-        # 只取九个速度字段，排除 pages
-        from webui.execution_config import NINE_SPEED_FIELDS
-        config = {k: v for k, v in raw.items() if k in NINE_SPEED_FIELDS}
-        if len(config) != len(NINE_SPEED_FIELDS):
+        # 只取速度字段，排除 pages；旧 9 字段配置补默认 JD Tab 数
+        from webui.execution_config import DEFAULT_DETAIL_TAB_POOL_SIZE, SPEED_FIELDS
+        config = {k: v for k, v in raw.items() if k in SPEED_FIELDS}
+        config.setdefault("detail_tab_pool_size", DEFAULT_DETAIL_TAB_POOL_SIZE)
+        if len(config) != len(SPEED_FIELDS):
             return  # 字段不完整，不导入
         self.save_custom_config(config)
         with self._connection() as conn:
@@ -2147,7 +2241,8 @@ class TaskStore:
     # Pipeline result persistence (replaces latest_pipeline_result.json)
     # ===================================================================
 
-    def save_pipeline_result(self, result: dict, script_params: dict) -> str:
+    def save_pipeline_result(self, result: dict, script_params: dict, *,
+                             started_at=None, finished_at=None, execution_config=None) -> str:
         """Persist a complete pipeline run result to the database.
 
         Creates a screening_runs row and one screening_results row per job
@@ -2155,6 +2250,8 @@ class TaskStore:
         """
         run_id = str(uuid.uuid4())
         now = _now()
+        started_at = _to_iso_timestamp(started_at)
+        finished_at = _to_iso_timestamp(finished_at) or now
         jobs = result.get("jobs") or []
         dropped = result.get("dropped") or []
         match_count = sum(1 for job in jobs if job.get("verdict") == "match")
@@ -2170,9 +2267,11 @@ class TaskStore:
             conn.execute(
                 "INSERT INTO screening_runs "
                 "(id, frozen_filters_json, status, source_count, match_count, mismatch_count, "
-                " pending_count, processed_count, created_at, updated_at, search_params_json, "
+                " pending_count, processed_count, created_at, updated_at, started_at, "
+                " finished_at, search_params_json, execution_params_json, "
                 " profile_summary, total_scraped, total_kept, total_dropped, record_kind) "
-                "VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'result_snapshot')",
+                "VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "'result_snapshot')",
                 (
                     run_id,
                     json.dumps(script_params, ensure_ascii=False),
@@ -2181,8 +2280,11 @@ class TaskStore:
                     mismatch_count,
                     len(pending_jobs),
                     match_count + mismatch_count,
-                    now, now,
+                    now, now, started_at, finished_at,
                     json.dumps(script_params, ensure_ascii=False),
+                    json.dumps(
+                        {"execution_config": execution_config or {}}, ensure_ascii=False
+                    ),
                     result.get("profile_summary", ""),
                     result.get("total_scraped", 0),
                     result.get("total_kept", 0),
@@ -2323,6 +2425,12 @@ class TaskStore:
         except (json.JSONDecodeError, TypeError):
             pass
 
+        execution_params = {}
+        try:
+            execution_params = json.loads(run.get("execution_params_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
         result = {
             "ok": True,
             "jobs": jobs,
@@ -2337,7 +2445,10 @@ class TaskStore:
         return {
             "run_id": run["id"],
             "saved_at": run["created_at"],
+            "started_at": run.get("started_at"),
+            "finished_at": run.get("finished_at"),
             "script_params": script_params,
+            "execution_config": execution_params.get("execution_config") or {},
             "result": result,
         }
 
@@ -2359,6 +2470,33 @@ class TaskStore:
                 "UPDATE screening_results SET jd = ? WHERE run_id = ? AND job_id = ?",
                 (jd, str(run_id), str(job_id)),
             )
+
+    def clear_latest_pipeline_result(self) -> bool:
+        """Delete the most recent result_snapshot and its cascade data.
+
+        重新上传简历时调用：只清结果存档，不动 process_log 和进行中的任务。
+        """
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            run = conn.execute(
+                "SELECT id FROM screening_runs WHERE status = 'done' "
+                "AND record_kind = 'result_snapshot' "
+                "ORDER BY created_at DESC LIMIT 1",
+            ).fetchone()
+            if run is None:
+                return False
+            run_id = str(run["id"])
+            # 先删 tasks 占位行，让 task_logs 经外键级联一起清掉
+            conn.execute("DELETE FROM tasks WHERE id = ?", (run_id,))
+            for table in (
+                "screening_results",
+                "screening_pending_results",
+                "pipeline_checkpoints",
+                "scrape_run_jobs",
+            ):
+                conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM screening_runs WHERE id = ?", (run_id,))
+            return True
 
     def _copy_legacy_default_profile(self):
         """Copy old default profile to candidate_profiles if not already present."""
@@ -2830,14 +2968,14 @@ class TaskStore:
             conn.execute(
                 "INSERT OR REPLACE INTO screening_runs "
                 "(id, frozen_filters_json, status, source_count, match_count, mismatch_count, "
-                "created_at, updated_at, error_code, resume_id, pending_count, processed_count, "
-                "source_cursor, parse_failure_count, parse_failures_json, profile_id, "
-                "execution_params_json, record_kind, backend_version) "
-                "VALUES (?, ?, 'queued', ?, 0, 0, ?, ?, NULL, NULL, 0, 0, 0, 0, '{}', ?, ?, 'process_log', ?)",
+                "created_at, updated_at, started_at, error_code, resume_id, pending_count, "
+                "processed_count, source_cursor, parse_failure_count, parse_failures_json, "
+                "profile_id, execution_params_json, record_kind, backend_version) "
+                "VALUES (?, ?, 'queued', ?, 0, 0, ?, ?, ?, NULL, NULL, 0, 0, 0, 0, '{}', ?, ?, 'process_log', ?)",
                 (
                     str(run_id),
                     json.dumps(frozen_filters or {}, ensure_ascii=False),
-                    int(source_count), ts, ts,
+                    int(source_count), ts, ts, ts,
                     str(profile_id) if profile_id else None,
                     json.dumps(execution_params or {}, ensure_ascii=False),
                     str(backend_version) if backend_version else None,
@@ -3446,6 +3584,8 @@ class TaskStore:
             "execution_params": json.loads(row["execution_params_json"] or "{}"),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "started_at": row["started_at"] if "started_at" in row.keys() else None,
+            "finished_at": row["finished_at"] if "finished_at" in row.keys() else None,
             "record_kind": row["record_kind"],
             # FR-016/SC-018 守恒字段（migration_007/018 加的列，必须读出来）
             "pending_count": row["pending_count"],

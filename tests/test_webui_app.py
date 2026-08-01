@@ -746,7 +746,7 @@ class AdvancedSettingsContractTests(unittest.TestCase):
         self.assertNotIn("pages", state["last_custom_config"])
 
     def test_put_custom_saves_complete_config(self):
-        """PUT /custom 保存完整九字段，返回 digest。"""
+        """PUT /custom 保存完整速度字段（含 JD 并发 Tab 数），返回 digest。"""
         resp = self.client.put("/api/advanced-settings/custom", json={
             "settings": {
                 "inter_combo_delay": 10.0,
@@ -754,6 +754,7 @@ class AdvancedSettingsContractTests(unittest.TestCase):
                 "detail_interval": 2.0,
                 "detail_reset_every": 4,
                 "detail_batch_cooldown": 5.0,
+                "detail_tab_pool_size": 5,
                 "screen_batch_size": 50,
                 "screen_concurrency": 5,
                 "match_batch_size": 4,
@@ -765,6 +766,7 @@ class AdvancedSettingsContractTests(unittest.TestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["selection"], "custom")
         self.assertIn("config_digest", data)
+        self.assertEqual(data["settings"]["detail_tab_pool_size"], 5)
 
     def test_put_custom_rejects_partial(self):
         """PUT /custom 缺字段返回 400。"""
@@ -860,6 +862,7 @@ def _make_valid_manifest_payload_web(
         "detail_interval": 2.0,
         "detail_reset_every": 3,
         "detail_batch_cooldown": 4.0,
+        "detail_tab_pool_size": 5,
         "screen_batch_size": 30,
         "screen_concurrency": 3,
         "match_batch_size": 2,
@@ -1301,6 +1304,21 @@ class TuningManifestRouteTests(unittest.TestCase):
         )
         evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
         self.assertEqual(evidence["error_counts"], {"network_error": 1})
+
+    def test_manifest_child_preserves_safe_stage_failure_code(self):
+        manifest = self._make_manifest()
+        issued = self.controller.issue_manifest(manifest)
+        self.controller.execute_manifest(issued["manifest_id"])
+        error = RuntimeError("list stage stopped")
+        error.error_code = "source_cdp_unavailable"
+        self.app.config["TUNING_ROUND_RUNNER"].execute = mock.Mock(
+            side_effect=error,
+        )
+
+        self.app.config["RUN_TUNING_MANIFEST_CHILD"](issued["manifest_id"])
+
+        round_record = self.store.get_tuning_round(self.round["id"])
+        self.assertEqual(round_record["failure_code"], "source_cdp_unavailable")
 
     def test_create_app_reconciles_issued_manifest_after_restart(self):
         manifest = self._make_manifest()
@@ -1937,6 +1955,39 @@ class TuningExperimentRouteTests(unittest.TestCase):
         self.assertEqual(
             store.get_advanced_config_state()["last_custom_digest"], custom_digest)
 
+
+class SourceDetailBatchCommandTests(unittest.TestCase):
+    """JD 批量详情命令必须透传并发 tab 数，默认值为 5。"""
+
+    def test_batch_command_forwards_tab_pool_size(self):
+        from webui.source import BossCdpSource
+
+        source = BossCdpSource(
+            python_executable="python",
+            scraper_path="scripts/boss_cdp_raw.py",
+        )
+        command = source._build_detail_batch_command(
+            "batch.input.json", "batch.out.json", "batch.events.jsonl",
+            batch_size=2, gap_min=1, gap_max=2, reset_every=3,
+            tab_pool_size=5,
+        )
+        self.assertIn("--tab-pool-size", command)
+        self.assertEqual(command[command.index("--tab-pool-size") + 1], "5")
+
+    def test_batch_detail_default_tab_pool_is_five(self):
+        import inspect
+        from webui.source import BossCdpSource
+
+        self.assertEqual(
+            inspect.signature(BossCdpSource.fetch_details_batch)
+            .parameters["tab_pool_size"].default,
+            5,
+        )
+        self.assertEqual(
+            inspect.signature(BossCdpSource._build_detail_batch_command)
+            .parameters["tab_pool_size"].default,
+            5,
+        )
 
 if __name__ == "__main__":
     unittest.main()

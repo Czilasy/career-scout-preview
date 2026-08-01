@@ -21,6 +21,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
+from types import MappingProxyType
 
 from scripts import boss_cdp_raw as boss
 
@@ -53,6 +54,7 @@ _ADVANCED_DEFAULTS = {
     "detail_interval": 2,
     "detail_reset_every": 4,
     "detail_batch_cooldown": 5,
+    "detail_tab_pool_size": 5,
     "screen_batch_size": 50,
     "screen_concurrency": 5,
     "match_batch_size": 4,
@@ -769,7 +771,8 @@ def run_search(params: dict, source, *, pages: int = 3,
 def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                       stop_event=None, completed_job_ids=None,
                       execution_config=None,
-                      measurement_callback=None):
+                      measurement_callback=None,
+                      emit_terminal_events=True):
     """对一批岗位批量抓 JD（调用方需先确保 Chrome 就绪）。
 
     Spec 007 ⑧：改用 fetch_details_batch（≤5 一批）走 --enable-parallel 常驻 tab 池，
@@ -806,12 +809,14 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         _detail_interval = float(execution_config.detail_interval)
         _detail_reset_every = int(execution_config.detail_reset_every)
         _detail_batch_cooldown = float(execution_config.detail_batch_cooldown)
+        _detail_tab_pool_size = int(execution_config.detail_tab_pool_size)
     else:
         BATCH_SIZE = int(load_advanced_settings().get("detail_batch_size") or 5)
         _adv = load_advanced_settings()
         _detail_interval = float(_adv.get("detail_interval") or 8)
         _detail_reset_every = int(_adv.get("detail_reset_every") or 3)
         _detail_batch_cooldown = float(_adv.get("detail_batch_cooldown") or 30)
+        _detail_tab_pool_size = int(_adv.get("detail_tab_pool_size") or 5)
     done_ids = {str(x) for x in completed_job_ids} if completed_job_ids else set()
     # 预先为每个 job 计算稳定 job_id（与 fetch_details_batch 内部 key 一致），
     # 缺 job_id 的 job 填充 idx{idx} 兜底，确保 batch 返回的 outcome 能映射回原 job。
@@ -835,6 +840,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     # 源级硬信号集合：命中任何一个都意味着继续抓只会抓空气，必须截停并上报用户。
     # JD 抓取阶段只关心 source_* 码（不调 AI，不会产生 ai_* 码）。
     _jd_hard_stop_codes = frozenset({
+        "captcha_required",
         "source_login_required",
         "source_verification_required",
         "source_rate_limited",
@@ -852,7 +858,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             _t0_cooldown = time.time()
             time.sleep(max(cooldown, 5))
             # T018: 记录 wait 事件（冷却时间计入总耗时）
-            if measurement_callback is not None:
+            if measurement_callback is not None and emit_terminal_events:
                 try:
                     measurement_callback("wait", "detail",
                                          int((time.time() - _t0_cooldown) * 1000),
@@ -874,6 +880,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 gap_min=_detail_interval,
                 gap_max=_detail_interval + 7,
                 reset_every=_detail_reset_every,
+                tab_pool_size=_detail_tab_pool_size,
             )
         except _PIPELINE_OPERATION_ERRORS as exc:
             # 批调用本身抛错时没有逐岗位 outcome 可供后续分类；这属于源/编排
@@ -1010,6 +1017,14 @@ def get_frozen_artifact_manifest(
     return stages.get(stage)
 
 
+class TuningStageError(RuntimeError):
+    """A stage failure with a safe, controller-visible error code."""
+
+    def __init__(self, error_code: str, message: str):
+        self.error_code = str(error_code)
+        super().__init__(message)
+
+
 class TuningRoundRunner:
     """用冻结 manifest 机械分派五种真实阶段，不作候选或参数决策。"""
 
@@ -1064,6 +1079,21 @@ class TuningRoundRunner:
             raise ValueError("AI 阶段缺少已配置的端点或凭据")
         return endpoint, api_key, model
 
+    @staticmethod
+    def _retry_limits_from_manifest(manifest: dict):
+        """Build the immutable AI transport retry budget authorized by a manifest."""
+        policy = manifest.get("retry_policy") or {}
+        recoverable_codes = policy.get("recoverable_codes") or []
+        try:
+            max_retries = max(0, int(policy.get("max_retries", 0)))
+        except (TypeError, ValueError):
+            max_retries = 0
+        return MappingProxyType({
+            str(code): max_retries
+            for code in recoverable_codes
+            if isinstance(code, str) and code
+        })
+
     def execute(self, manifest: dict, *, measurement_callback=None) -> dict:
         from webui.ai import match_jds, screen_jobs
         from webui.execution_config import ExecutionConfigSnapshot
@@ -1109,7 +1139,10 @@ class TuningRoundRunner:
                 close_chrome_on_success=(kind == "list"),
             )
             if not listed.get("ok"):
-                raise RuntimeError(listed.get("error") or "list 阶段失败")
+                raise TuningStageError(
+                    listed.get("hard_stop_code") or "list_stage_failed",
+                    listed.get("error") or "list 阶段失败",
+                )
             jobs = listed["jobs"]
             if kind == "list":
                 return {"round_kind": kind, "jobs": jobs, "list_result": listed}
@@ -1117,13 +1150,21 @@ class TuningRoundRunner:
             jobs = source_context.get("jobs")
             if not isinstance(jobs, list):
                 raise ValueError("阶段输入产物缺少 jobs 列表")
+        for index, job in enumerate(jobs):
+            if isinstance(job, dict):
+                job.setdefault("_tuning_measurement_index", index)
+        base_input_count = len(jobs)
         if kind in {"detail", "end_to_end"}:
             detailed = fetch_job_details(
                 jobs, source, artifact_dir=str(artifact_dir),
                 execution_config=config, measurement_callback=measurement_callback,
+                emit_terminal_events=(kind == "detail"),
             )
             if detailed.get("hard_stop"):
-                raise RuntimeError(detailed.get("hard_stop_code") or "detail 阶段硬阻断")
+                raise TuningStageError(
+                    detailed.get("hard_stop_code") or "detail_stage_failed",
+                    detailed.get("hard_stop_code") or "detail 阶段硬阻断",
+                )
             jobs = detailed["jobs"]
             if kind == "detail":
                 return {"round_kind": kind, **detailed}
@@ -1133,10 +1174,14 @@ class TuningRoundRunner:
             if not isinstance(criteria, dict):
                 raise ValueError("AI 粗筛缺少冻结 criteria")
             endpoint, api_key, model = self._ai_settings()
+            retry_limits = self._retry_limits_from_manifest(manifest)
             rough = screen_jobs(
                 jobs, criteria, endpoint, api_key, model=model,
                 raise_on_systemic=True, execution_config=config,
                 measurement_callback=measurement_callback,
+                emit_kept_terminal=(kind == "rough"),
+                measurement_input_count=base_input_count,
+                retry_limits=retry_limits,
             )
             kept = set(rough["kept"])
             jobs = [job for job in jobs if str(job.get("job_id", "")) in kept]
@@ -1147,10 +1192,19 @@ class TuningRoundRunner:
             if not isinstance(profile_summary, str) or not profile_summary.strip():
                 raise ValueError("AI 精筛缺少冻结 profile_summary")
             endpoint, api_key, model = self._ai_settings()
+            retry_policy = manifest.get("retry_policy") or {}
+            recoverable_codes = set(retry_policy.get("recoverable_codes") or [])
+            missing_retry_budget = (
+                int(retry_policy.get("max_retries", 0))
+                if "ai_missing_job" in recoverable_codes else 0
+            )
             fine = match_jds(
                 jobs, profile_summary, endpoint, api_key, model=model,
                 raise_on_systemic=True, execution_config=config,
                 measurement_callback=measurement_callback,
+                measurement_input_count=base_input_count,
+                missing_result_retry_budget=missing_retry_budget,
+                retry_limits=self._retry_limits_from_manifest(manifest),
             )
             return {"round_kind": kind, "jobs": jobs, **fine}
         raise ValueError(f"轮次 {kind} 未产生结果")
