@@ -844,6 +844,73 @@ class ChromeAccountProfileSwitchTests(unittest.TestCase):
         close.assert_not_called()
 
 
+class BrowserAccountApiTests(unittest.TestCase):
+    """顶部栏浏览器账号管理接口。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_list_add_activate_custom_account(self):
+        data = self.client.get("/api/browser-accounts").get_json()
+        self.assertEqual(len(data["accounts"]), 2)
+        self.assertEqual(data["active_account"], "a")
+        resp = self.client.post("/api/browser-accounts", json={"name": "账号 C"})
+        self.assertEqual(resp.status_code, 201, resp.get_json())
+        account = resp.get_json()["account"]
+        self.assertFalse(account["builtin"])
+        self.assertIn(".chrome-profiles", account["profile_dir"])
+        activated = self.client.post(
+            f"/api/browser-accounts/{account['id']}/activate"
+        ).get_json()
+        self.assertEqual(activated["active_account"], account["id"])
+        settings = self.client.get("/api/advanced-settings").get_json()
+        self.assertEqual(settings["settings"]["browser_account"], account["id"])
+
+    def test_duplicate_name_rejected_and_delete_custom(self):
+        self.client.post("/api/browser-accounts", json={"name": "账号 C"})
+        dup = self.client.post("/api/browser-accounts", json={"name": "账号 C"})
+        self.assertEqual(dup.status_code, 422)
+        builtin = self.client.delete("/api/browser-accounts/a")
+        self.assertEqual(builtin.status_code, 409)
+        data = self.client.get("/api/browser-accounts").get_json()
+        custom = next(a for a in data["accounts"] if not a["builtin"])
+        self.client.post(f"/api/browser-accounts/{custom['id']}/activate")
+        deleted = self.client.delete(f"/api/browser-accounts/{custom['id']}")
+        self.assertEqual(deleted.status_code, 200, deleted.get_json())
+        data = self.client.get("/api/browser-accounts").get_json()
+        self.assertEqual(data["active_account"], "a")
+        self.assertNotIn(custom["id"], [a["id"] for a in data["accounts"]])
+
+    def test_open_browser_refuses_when_task_paused(self):
+        self.store.create_screening_run("busy-account-run", source_count=1)
+        self.store.update_screening_run("busy-account-run", status="running")
+        self.store.update_screening_run("busy-account-run", status="paused")
+        resp = self.client.post("/api/browser-accounts/a/open")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "browser_busy")
+
+    @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
+    def test_open_browser_succeeds_when_idle(self, _ready):
+        resp = self.client.post("/api/browser-accounts/a/open")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertTrue(resp.get_json()["ok"])
+
+
 class RunSearchAllFailTests(unittest.TestCase):
     """所有组合全失败时 run_search 返回 ok:False。"""
 

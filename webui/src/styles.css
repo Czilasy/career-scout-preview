@@ -1451,6 +1451,11 @@ body,
     padding: 0;
   }.ai-settings-trigger span {
     display: none;
+  }.browser-accounts-trigger {
+    width: 44px;
+    padding: 0;
+  }.browser-accounts-trigger span {
+    display: none;
   }.notice-bar {
     top: 164px;
   }.app-content {

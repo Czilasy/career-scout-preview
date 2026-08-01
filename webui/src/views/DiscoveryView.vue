@@ -143,7 +143,6 @@ const scopePreview = ref<FrozenSearchScope | null>(null);
 const scopePreviewBusy = ref(false);
 const advancedSettings = ref<Record<string, number | string>>({
   pages: 3,
-  browser_account: "a",
   inter_combo_delay: 10,
   detail_batch_size: 15,
   detail_interval: 2,
@@ -623,9 +622,7 @@ const SPEED_FIELDS = [
 ] as const;
 
 function currentExecutionSettings(): ExecutionSettings {
-  const settings = Object.fromEntries(SPEED_FIELDS.map((field) => [field, Number(advancedSettings.value[field])])) as unknown as ExecutionSettings;
-  const account = String(advancedSettings.value.browser_account || "a");
-  return { ...settings, browser_account: account === "b" ? "b" : "a" };
+  return Object.fromEntries(SPEED_FIELDS.map((field) => [field, Number(advancedSettings.value[field])])) as unknown as ExecutionSettings;
 }
 
 async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
@@ -1506,22 +1503,6 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
             @update:model-value="selectExecutionMode"
           />
           <div class="adv-fields">
-          <!-- 浏览器账号 -->
-          <div class="adv-group account-group">
-            <p class="adv-group-title">浏览器账号</p>
-            <div class="account-segments" role="radiogroup" aria-label="浏览器账号">
-              <button type="button" role="radio" data-account="a"
-                      :aria-checked="advancedSettings.browser_account === 'a'"
-                      :class="{ active: advancedSettings.browser_account === 'a' }"
-                      :disabled="scopeLocked || advancedBusy"
-                      @click="advancedSettings.browser_account = 'a'">账号 A</button>
-              <button type="button" role="radio" data-account="b"
-                      :aria-checked="advancedSettings.browser_account === 'b'"
-                      :class="{ active: advancedSettings.browser_account === 'b' }"
-                      :disabled="scopeLocked || advancedBusy"
-                      @click="advancedSettings.browser_account = 'b'">账号 B</button>
-            </div>
-          </div>
           <div class="adv-group">
             <p class="adv-group-title">列表抓取</p>
             <div class="advanced-grid">

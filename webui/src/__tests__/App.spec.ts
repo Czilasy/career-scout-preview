@@ -52,6 +52,18 @@ describe("App", () => {
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
   });
 
+  it("keeps browser account manager reachable", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.get('[data-testid="browser-accounts-trigger"]').trigger("click");
+    const dialog = wrapper.get('[role="dialog"]');
+    expect(dialog.text()).toContain("自动化浏览器账号");
+
+    await dialog.trigger("keydown", { key: "Escape" });
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+  });
+
   it("shows a persistent inline notice when the model list is empty", async () => {
     vi.useFakeTimers();
     const wrapper = mount(App);

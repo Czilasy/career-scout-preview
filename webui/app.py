@@ -632,6 +632,12 @@ def create_app(config=None):
     if app.config.get("TESTING") and "REQUIRE_BUILD_IDENTITY" not in (config or {}):
         app.config["REQUIRE_BUILD_IDENTITY"] = False
 
+    from webui.pipeline_exec import set_browser_accounts_path
+    app.config["BROWSER_ACCOUNTS_PATH"] = str(
+        Path(app.config["ADVANCED_SETTINGS_PATH"]).parent / "browser_accounts.json"
+    )
+    set_browser_accounts_path(app.config["BROWSER_ACCOUNTS_PATH"])
+
     store = TaskStore(app.config["DB_PATH"])
     from webui.tuning import TuningController
     TuningController(store).recover_after_restart()
@@ -1536,14 +1542,16 @@ def create_app(config=None):
 
     def _account_for_run(run=None) -> str:
         """Resolve the browser account for a run or the current advanced setting."""
+        from webui.pipeline_exec import load_browser_accounts
+        accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
         if isinstance(run, dict):
             params = run.get("execution_params") or {}
             if isinstance(params, dict):
                 account = str(params.get("browser_account") or "")
-                if account in ("a", "b"):
+                if account in accounts:
                     return account
         account = str((_load_legacy_advanced_settings() or {}).get("browser_account") or "a")
-        return account if account in ("a", "b") else "a"
+        return account if account in accounts else "a"
 
     def _activate_run_browser(run=None) -> None:
         """Point the shared CDP helper at the selected profile."""
@@ -2907,7 +2915,9 @@ def create_app(config=None):
             if k in settings:
                 val = settings[k]
                 if k == "browser_account":
-                    clean[k] = str(val) if str(val) in ("a", "b") else "a"
+                    from webui.pipeline_exec import load_browser_accounts
+                    accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
+                    clean[k] = str(val) if str(val) in accounts else "a"
                     continue
                 if isinstance(default, float):
                     val = float(val)
@@ -2924,6 +2934,111 @@ def create_app(config=None):
             except (ValueError, TypeError):
                 pass  # store 保存失败不阻塞旧路径
         return jsonify({"ok": True, "settings": _load_legacy_advanced_settings()})
+
+    def _browser_busy() -> bool:
+        with _pipeline_lock:
+            if any(
+                task.get("status") in ("running", "queued")
+                for task in _pipeline_tasks.values()
+            ):
+                return True
+        try:
+            with store._connection() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM screening_runs WHERE status = 'paused' LIMIT 1"
+                ).fetchone()
+            return row is not None
+        except (sqlite3.Error, RuntimeError):
+            return False
+
+    @app.route("/api/browser-accounts", methods=["GET"])
+    def list_browser_accounts():
+        from webui.pipeline_exec import load_browser_accounts
+        accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
+        active = str((_load_legacy_advanced_settings() or {}).get("browser_account") or "a")
+        if active not in accounts:
+            active = "a"
+        return jsonify({
+            "ok": True,
+            "accounts": list(accounts.values()),
+            "active_account": active,
+            "busy": _browser_busy(),
+        })
+
+    @app.route("/api/browser-accounts", methods=["POST"])
+    def add_browser_account_endpoint():
+        from webui.pipeline_exec import add_browser_account
+        body = request.get_json(silent=True) or {}
+        name = str(body.get("name") or "").strip()
+        profile_dir = str(body.get("profile_dir") or "").strip()
+        try:
+            account = add_browser_account(
+                name, profile_dir=profile_dir,
+                path=app.config["BROWSER_ACCOUNTS_PATH"],
+            )
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 422
+        except (OSError, RuntimeError):
+            return jsonify({"ok": False, "error": "账号保存失败，请检查磁盘后重试"}), 503
+        return jsonify({"ok": True, "account": account}), 201
+
+    @app.route("/api/browser-accounts/<account_id>/activate", methods=["POST"])
+    def activate_browser_account(account_id):
+        from webui.pipeline_exec import load_browser_accounts
+        accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
+        if str(account_id) not in accounts:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        settings = _load_legacy_advanced_settings()
+        settings["browser_account"] = str(account_id)
+        _save_legacy_advanced_settings(settings)
+        return jsonify({"ok": True, "active_account": str(account_id)})
+
+    @app.route("/api/browser-accounts/<account_id>/open", methods=["POST"])
+    def open_browser_account(account_id):
+        from webui.pipeline_exec import (
+            ensure_chrome_ready, load_browser_accounts, set_active_cdp_data_dir,
+        )
+        accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
+        account = accounts.get(str(account_id))
+        if account is None:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        if _browser_busy():
+            return jsonify({
+                "ok": False, "error": "browser_busy",
+                "message": "当前有任务运行或暂停，无法打开其他账号浏览器；请先结束或取消任务",
+            }), 409
+        set_active_cdp_data_dir(str(account_id))
+        ok, msg = ensure_chrome_ready()
+        if not ok:
+            return jsonify({"ok": False, "error": "chrome_not_ready", "message": msg}), 409
+        return jsonify({
+            "ok": True,
+            "message": f"已打开「{account['name']}」的自动化浏览器，请登录 BOSS直聘",
+        })
+
+    @app.route("/api/browser-accounts/<account_id>", methods=["DELETE"])
+    def delete_browser_account_endpoint(account_id):
+        from webui.pipeline_exec import delete_browser_account
+        if _browser_busy():
+            return jsonify({
+                "ok": False, "error": "browser_busy",
+                "message": "任务运行或暂停中不能删除账号",
+            }), 409
+        try:
+            delete_browser_account(
+                str(account_id), path=app.config["BROWSER_ACCOUNTS_PATH"],
+            )
+        except KeyError:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+        except (OSError, RuntimeError):
+            return jsonify({"ok": False, "error": "账号删除失败，请检查磁盘后重试"}), 503
+        settings = _load_legacy_advanced_settings()
+        if str(settings.get("browser_account") or "") == str(account_id):
+            settings["browser_account"] = "a"
+            _save_legacy_advanced_settings(settings)
+        return jsonify({"ok": True})
 
     @app.route("/api/advanced-settings/custom", methods=["PUT"])
     def save_custom_config():

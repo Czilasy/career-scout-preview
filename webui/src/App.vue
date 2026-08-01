@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { Bot, BriefcaseBusiness, Star, X } from "@lucide/vue";
+import { Bot, BriefcaseBusiness, Star, UserRound, X } from "@lucide/vue";
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
+import BrowserAccountsDialog from "./components/BrowserAccountsDialog.vue";
 import NoticeBar from "./components/NoticeBar.vue";
 import DiscoveryView from "./views/DiscoveryView.vue";
 import { apiRequest, errorMessage, initializeSession } from "./api";
 import type { CandidateProfile, Notice } from "./types";
 
 const aiSettingsOpen = ref(false);
+const browserAccountsOpen = ref(false);
 const profiles = ref<CandidateProfile[]>([]);
 const currentProfileId = ref("");
 const notice = ref<Notice | null>(null);
@@ -127,6 +129,15 @@ function acceptCreatedProfile(profile: CandidateProfile) {
           <em v-if="favorites.length" class="fav-badge">{{ favorites.length }}</em>
         </button>
         <button
+          class="button secondary browser-accounts-trigger"
+          type="button"
+          data-testid="browser-accounts-trigger"
+          aria-label="管理自动化浏览器账号"
+          @click="browserAccountsOpen = true"
+        >
+          <UserRound :size="18" aria-hidden="true" /><span>浏览器账号</span>
+        </button>
+        <button
           class="button secondary ai-settings-trigger"
           type="button"
           data-testid="ai-settings-trigger"
@@ -185,6 +196,10 @@ function acceptCreatedProfile(profile: CandidateProfile) {
     <AiSettingsDialog
       :open="aiSettingsOpen"
       @close="aiSettingsOpen = false"
+    />
+    <BrowserAccountsDialog
+      :open="browserAccountsOpen"
+      @close="browserAccountsOpen = false"
     />
   </div>
 </template>
