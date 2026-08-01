@@ -504,8 +504,8 @@ class FrozenInputArtifactTests(unittest.TestCase):
             ("small", self._scope(2, 3)),
             ("medium", self._scope(2, 5)),
             ("medium", self._scope(3, 5)),
-            ("large", self._scope(4, 5)),
-            ("large", self._scope(5, 5)),
+            ("large", self._scope(10, 5)),
+            ("large", self._scope(11, 5)),
         ]
         return self.controller.create_experiment_with_input(
             spec_version="011-deep-configuration-probing",
@@ -645,7 +645,7 @@ class TuningStageArtifactTests(unittest.TestCase):
         scopes = [
             ("small", 1, 3), ("small", 2, 3),
             ("medium", 2, 5), ("medium", 3, 5),
-            ("large", 4, 5), ("large", 5, 5),
+            ("large", 10, 5), ("large", 11, 5),
         ]
         self.experiment = self.controller.create_experiment_with_input(
             spec_version="011-deep-configuration-probing",
@@ -726,7 +726,7 @@ class CompletionGateTests(unittest.TestCase):
         scopes = [
             ("small", self._scope(1, 3)), ("small", self._scope(2, 3)),
             ("medium", self._scope(2, 5)), ("medium", self._scope(3, 5)),
-            ("large", self._scope(4, 5)), ("large", self._scope(5, 5)),
+            ("large", self._scope(10, 5)), ("large", self._scope(11, 5)),
         ]
         experiment = self.controller.create_experiment_with_input(
             spec_version="011-deep-configuration-probing",
@@ -1767,8 +1767,8 @@ class ManifestReportValidationTests(unittest.TestCase):
             ("small", CompletionGateTests._scope(2, 3)),
             ("medium", CompletionGateTests._scope(2, 5)),
             ("medium", CompletionGateTests._scope(3, 5)),
-            ("large", CompletionGateTests._scope(4, 5)),
-            ("large", CompletionGateTests._scope(5, 5)),
+            ("large", CompletionGateTests._scope(10, 5)),
+            ("large", CompletionGateTests._scope(11, 5)),
         ]
         self.experiment = self.controller.create_experiment_with_input(
             spec_version="011-deep-configuration-probing",

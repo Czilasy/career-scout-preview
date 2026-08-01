@@ -55,11 +55,11 @@ export function partitionPipelineResult(result: PipelineResult): PipelineGroups 
 }
 
 export function classifyTaskSize(plannedPages: number): TaskSize {
-  if (!Number.isInteger(plannedPages) || plannedPages < 1 || plannedPages > 30) {
-    throw new RangeError("planned pages must be an integer from 1 to 30");
+  if (!Number.isInteger(plannedPages) || plannedPages < 1 || plannedPages > 200) {
+    throw new RangeError("planned pages must be an integer from 1 to 200");
   }
   if (plannedPages <= 9) return "small";
-  if (plannedPages <= 19) return "medium";
+  if (plannedPages <= 49) return "medium";
   return "large";
 }
 

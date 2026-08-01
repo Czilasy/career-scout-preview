@@ -91,8 +91,8 @@ Validate through pure tests and `POST /api/search-scope/preview`:
 | unknown city | 422 + suggestions, no auto-replacement |
 | nationwide + a city | 422 |
 | planned pages 1, 9 | small |
-| planned pages 10, 19 | medium |
-| planned pages 20, 30 | large |
+| planned pages 10, 49 | medium |
+| planned pages 50, 200 | large |
 
 Expected: backend and frontend preview agree; backend remains authoritative.
 
@@ -113,7 +113,7 @@ Expected:
 ### Scenario C - Three modes and recent custom
 
 1. Seed a complete mode version with distinct small/medium/large fixtures.
-2. Preview tasks at 9, 10, 19, 20 and 30 pages.
+2. Preview tasks at 9, 10, 49, 50 and 200 pages.
 3. Select stable, balanced and extreme.
 4. Modify one speed field and save custom.
 5. Move between a system mode and custom.
@@ -316,4 +316,4 @@ This quickstart does not execute or validate:
 - multi-combination cumulative safe page ceiling;
 - automatic retuning after API/environment changes;
 - concurrent experiment execution;
-- recommendations for tasks over 30 planned pages.
+- recommendations for tasks over 200 planned pages.

@@ -35,7 +35,7 @@
 | `pages_per_combination` | integer | positive; frozen after task start |
 | `combination_count` | integer | keyword count × effective search-scope count |
 | `planned_pages` | integer | combination count × pages per combination |
-| `task_size` | enum | `small` 1-9, `medium` 10-19, `large` 20-30 |
+| `task_size` | enum | `small` 1-9, `medium` 10-49, `large` 50-200 |
 | `scope_digest` | string | digest of canonical scope JSON |
 
 `nationwide` has an effective search-scope count of 1 and cannot coexist with cities.
@@ -113,7 +113,7 @@ One small/medium/large representative structure.
 | `task_size` | TEXT | small/medium/large |
 | `structure_index` | INTEGER | at least 1 and 2 per size |
 | `frozen_scope_json` | TEXT | FrozenTaskScope |
-| `planned_pages` | INTEGER | 1-30 |
+| `planned_pages` | INTEGER | 1-200 |
 | `expected_raw_jobs` | INTEGER | estimate only; not used to reclassify |
 | `artifact_manifest_json` | TEXT | reusable frozen stage inputs |
 | `artifact_digest` | TEXT | digest of artifacts |

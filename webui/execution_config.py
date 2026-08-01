@@ -59,10 +59,10 @@ SPEED_FIELDS: tuple[str, ...] = (
 DEFAULT_DETAIL_TAB_POOL_SIZE = 5
 
 _MIN_PLANNED_PAGES = 1
-_MAX_PLANNED_PAGES = 30
+_MAX_PLANNED_PAGES = 200
 _SMALL_MAX = 9
-_MEDIUM_MAX = 19
-_LARGE_MAX = 30
+_MEDIUM_MAX = 49
+_LARGE_MAX = 200
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +391,7 @@ def _suggest_cities(input_city: str, registry: dict[str, Any]) -> list[str]:
 # 任务规模分类 (FR-006, FR-007)
 # ---------------------------------------------------------------------------
 def classify_task_size(planned_pages: int) -> str:
-    """FR-007: 1-9=small, 10-19=medium, 20-30=large。"""
+    """FR-007: 1-9=small, 10-49=medium, 50-200=large。"""
     if planned_pages < _MIN_PLANNED_PAGES:
         raise ValueError(f"计划页数 {planned_pages} 低于最小值 {_MIN_PLANNED_PAGES}")
     if planned_pages > _MAX_PLANNED_PAGES:
@@ -524,7 +524,7 @@ def normalize_scope(
 
     FR-005: nationwide 与 cities 互斥。
     FR-006: planned_pages = keyword_count × scope_count × pages_per_combination。
-    FR-007: 1-9=small, 10-19=medium, 20-30=large。
+    FR-007: 1-9=small, 10-49=medium, 50-200=large。
     FR-008: 任务开始前完成分类。
     """
     if scope_kind not in ("cities", "nationwide"):

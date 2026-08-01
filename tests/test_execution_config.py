@@ -304,7 +304,7 @@ class CityValidationTests(unittest.TestCase):
 # ===========================================================================
 class TaskSizeClassificationTests(unittest.TestCase):
 
-    # 使用真实城市名（足够覆盖 30 页边界测试）
+    # 使用真实城市名（足够覆盖 200 页边界测试）
     _REAL_CITIES = [
         "北京", "上海", "广州", "深圳", "杭州", "天津", "西安", "苏州", "武汉", "厦门",
         "长沙", "成都", "郑州", "重庆", "南京", "青岛", "大连", "沈阳", "哈尔滨", "济南",
@@ -336,24 +336,24 @@ class TaskSizeClassificationTests(unittest.TestCase):
         self.assertEqual(scope.planned_pages, 10)
         self.assertEqual(scope.task_size, "medium")
 
-    def test_nineteen_pages_is_medium(self):
-        scope = self._scope(19, 1, 1)  # 19×1×1=19
-        self.assertEqual(scope.planned_pages, 19)
+    def test_forty_nine_pages_is_medium(self):
+        scope = self._scope(49, 1, 1)  # 49×1×1=49
+        self.assertEqual(scope.planned_pages, 49)
         self.assertEqual(scope.task_size, "medium")
 
-    def test_twenty_pages_is_large(self):
-        scope = self._scope(4, 5, 1)  # 4×5×1=20
-        self.assertEqual(scope.planned_pages, 20)
+    def test_fifty_pages_is_large(self):
+        scope = self._scope(50, 1, 1)  # 50×1×1=50
+        self.assertEqual(scope.planned_pages, 50)
         self.assertEqual(scope.task_size, "large")
 
-    def test_thirty_pages_is_large(self):
-        scope = self._scope(10, 3, 1)  # 10×3×1=30
-        self.assertEqual(scope.planned_pages, 30)
+    def test_two_hundred_pages_is_large(self):
+        scope = self._scope(200, 1, 1)  # 200×1×1=200
+        self.assertEqual(scope.planned_pages, 200)
         self.assertEqual(scope.task_size, "large")
 
-    def test_over_thirty_pages_rejected(self):
+    def test_over_two_hundred_pages_rejected(self):
         with self.assertRaises(ValueError):
-            self._scope(31, 1, 1)
+            self._scope(201, 1, 1)
 
     def test_zero_pages_rejected(self):
         with self.assertRaises(ValueError):

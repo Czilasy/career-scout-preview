@@ -15,7 +15,7 @@ SPEC011 分为两个大阶段：
 
 **Goal**: 建立速度字段配置（含 JD 并发 Tab 数）、城市/关键词规范化、任务规模和不可变快照的唯一语义。
 
-**Independent Test**: Quickstart Scenario A/B；9/10/19/20/30 页边界正确，未知城市阻断，任务启动后修改正式设置不影响任何阶段。
+**Independent Test**: Quickstart Scenario A/B；9/10/49/50/200 页边界正确，未知城市阻断，任务启动后修改正式设置不影响任何阶段。
 
 - [X] T001 Create RED tests for all speed fields, canonical serialization, physical validation, keyword normalization, city aliases, nationwide exclusivity, planned-page boundaries, and immutable digests in `tests/test_execution_config.py`
 - [X] T002 Implement the shared execution configuration schema, canonical JSON/digest, task-scope normalization, size classification, and snapshot value objects in `webui/execution_config.py`

@@ -372,14 +372,14 @@ class SearchScopePreviewTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 422)
 
     def test_preview_page_boundaries(self):
-        """Scenario A: 1/9=small, 10/19=medium, 20/30=large。"""
+        """Scenario A: 1/9=small, 10/49=medium, 50/200=large。"""
         cases = [
             (1, 1, 1, "small"),
             (3, 3, 1, "small"),    # 9
             (2, 5, 1, "medium"),   # 10
-            (19, 1, 1, "medium"),  # 19
-            (4, 5, 1, "large"),    # 20
-            (10, 3, 1, "large"),   # 30
+            (49, 1, 1, "medium"),  # 49
+            (5, 10, 1, "large"),   # 50
+            (200, 1, 1, "large"),  # 200
         ]
         cities = ["北京", "上海", "广州", "深圳", "杭州",
                   "天津", "西安", "苏州", "武汉", "厦门",
@@ -397,9 +397,9 @@ class SearchScopePreviewTests(unittest.TestCase):
             self.assertEqual(data["scope"]["task_size"], expected_size,
                              f"kw={kw_count} city={city_count} pages={pages}")
 
-    def test_preview_rejects_over_thirty_pages(self):
+    def test_preview_rejects_over_two_hundred_pages(self):
         resp = self.client.post("/api/search-scope/preview", json={
-            "keywords": [f"kw{i}" for i in range(31)],
+            "keywords": [f"kw{i}" for i in range(201)],
             "scope_kind": "cities",
             "cities": ["北京"],
             "pages_per_combination": 1,
@@ -1063,7 +1063,7 @@ class TuningManifestRouteTests(unittest.TestCase):
         scopes = [
             ("small", scope(1, 3)), ("small", scope(2, 3)),
             ("medium", scope(2, 5)), ("medium", scope(3, 5)),
-            ("large", scope(4, 5)), ("large", scope(5, 5)),
+            ("large", scope(10, 5)), ("large", scope(11, 5)),
         ]
         self.experiment = self.controller.create_experiment_with_input(
             spec_version="011-deep-configuration-probing",
@@ -1607,11 +1607,11 @@ class TuningExperimentRouteTests(unittest.TestCase):
                 "keywords": ["AI应用开发", "智能体开发"], "scope_kind": "cities",
                 "cities": ["东莞"], "pages_per_combination": 5}},
             {"task_size": "large", "structure_index": 1, "scope": {
-                "keywords": ["AI应用开发"], "scope_kind": "cities",
-                "cities": ["东莞", "深圳"], "pages_per_combination": 10}},
+                "keywords": ["AI应用开发", "智能体开发", "Python后端", "Java后端", "前端开发"], "scope_kind": "cities",
+                "cities": ["东莞", "深圳"], "pages_per_combination": 5}},
             {"task_size": "large", "structure_index": 2, "scope": {
-                "keywords": ["AI应用开发", "智能体开发"], "scope_kind": "cities",
-                "cities": ["东莞"], "pages_per_combination": 10}},
+                "keywords": ["AI应用开发", "智能体开发", "Python后端", "Java后端", "前端开发", "Go后端", "测试开发", "运维开发", "数据分析", "产品经理"], "scope_kind": "cities",
+                "cities": ["东莞"], "pages_per_combination": 5}},
         ]
 
     @staticmethod

@@ -43,7 +43,7 @@ Normalizes and validates the task scope before start.
 }
 ```
 
-**Response 422**: unknown/disabled city, nationwide mixed with cities, empty keyword, non-positive pages, or planned pages outside the feature's 1-30 validated range. The response includes structured field errors and suggestions; it never auto-selects a fuzzy city.
+**Response 422**: unknown/disabled city, nationwide mixed with cities, empty keyword, non-positive pages, or planned pages outside the feature's 1-200 validated range. The response includes structured field errors and suggestions; it never auto-selects a fuzzy city.
 
 ## 2. Advanced Configuration State
 

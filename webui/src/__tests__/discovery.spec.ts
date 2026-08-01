@@ -39,9 +39,9 @@ describe("discovery helpers", () => {
     [1, "small"],
     [9, "small"],
     [10, "medium"],
-    [19, "medium"],
-    [20, "large"],
-    [30, "large"],
+    [49, "medium"],
+    [50, "large"],
+    [200, "large"],
   ] as const)("classifies %i planned pages as %s", (pages, expected) => {
     expect(classifyTaskSize(pages)).toBe(expected);
   });
