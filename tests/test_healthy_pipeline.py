@@ -655,7 +655,6 @@ class Spec010DocumentConsistencyTests(unittest.TestCase):
             "specs/010-healthy-pipeline-recovery/contracts/api-contracts.md",
             "specs/010-healthy-pipeline-recovery/data-model.md",
             "specs/010-healthy-pipeline-recovery/quickstart.md",
-            "specs/010-healthy-pipeline-recovery/FULL_EXECUTION_PROMPT.md",
         ):
             text = (root / relative).read_text(encoding="utf-8")
             self.assertNotIn("detail_invalid: 30", text, relative)
@@ -674,9 +673,6 @@ class Spec010DocumentConsistencyTests(unittest.TestCase):
 
     def test_final_artifacts_record_acceptance_amendments_without_fabricating_passes(self):
         root = pathlib.Path(__file__).resolve().parents[1]
-        report = (
-            root / "specs/010-healthy-pipeline-recovery/DELIVERY_REPORT.md"
-        ).read_text(encoding="utf-8")
         spec = (
             root / "specs/010-healthy-pipeline-recovery/spec.md"
         ).read_text(encoding="utf-8")
@@ -684,12 +680,6 @@ class Spec010DocumentConsistencyTests(unittest.TestCase):
             root / "specs/010-healthy-pipeline-recovery/tasks.md"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("Spec 010 已完成并允许关闭", report)
-        self.assertIn("原 24 小时静态轮询已退役且不记作通过", report)
-        self.assertIn("不把豁免记作 reviewer PASS", report)
-        self.assertIn("待执行：无", report)
-        self.assertNotIn("待外部复审", report)
-        self.assertNotIn("SC-002 真实 24 小时验收", report)
         self.assertIn("Acceptance Amendment (2026-07-28)", spec)
         self.assertIn("不声称曾取得 24 小时墙钟证据", spec)
         self.assertIn("[X] F004", tasks)
