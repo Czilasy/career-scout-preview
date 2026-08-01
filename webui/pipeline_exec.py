@@ -328,10 +328,21 @@ def ensure_chrome_ready(cdp_port: int | None = None) -> tuple[bool, str]:
         cdp_data_dir = _cdp_data_dir()
         if boss.cdp_port_uses_profile(port, cdp_data_dir):
             return True, ""
+        known_profiles = {
+            boss.normalize_profile_path(info["profile_dir"])
+            for info in BROWSER_ACCOUNTS.values()
+        }
+        port_profiles = [
+            boss.normalize_profile_path(path)
+            for path in boss.chrome_user_data_dirs_for_cdp_port(port)
+            if path
+        ]
+        if not any(profile in known_profiles for profile in port_profiles):
+            return False, "CDP 端口被非 scraper 账号的 Chrome 占用，为避免误关未自动切换"
         try:
             boss.close_cdp_chrome(port, cdp_data_dir, profile_checker=lambda *_: True)
-        except Exception:
-            pass
+        except Exception as exc:
+            return False, f"切换账号时关闭旧 Chrome 失败：{type(exc).__name__}"
     # Not running: prepare the isolated profile, stop stale processes, launch.
     profile = boss.prepare_cdp_profile(data_dir=_cdp_data_dir())
     cdp_data_dir = profile["path"]

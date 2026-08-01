@@ -1,7 +1,7 @@
 # Python bytecode
 # local account profiles and restart logs
 .chrome-profiles/
-webui-restart.*.log
+webui-restart*.log
 webui-check-*.png
 __pycache__/
 *.py[cod]

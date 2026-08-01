@@ -1032,7 +1032,7 @@ async function loadLatestResult() {
       scrapeSnapshot.value.source_total = sourceTotal;
       screenSnapshot.value.total = stageTotal || sourceTotal;
       screenSnapshot.value.source_total = sourceTotal;
-      const uncertainCount = (data.result.jobs || []).filter((job) => job.verdict !== "match" && job.verdict !== "not_match").length;
+      const uncertainCount = (data.result.jobs || []).filter((job) => job.verdict !== "match" && job.verdict !== "not_match" && job.verdict !== "mismatch").length;
       screenSnapshot.value.pending_count = snapshotStatus === "completed_with_pending" ? uncertainCount : 0;
     }
   } catch (error) {

@@ -363,6 +363,14 @@ class ScreeningRunStoreTests(unittest.TestCase):
         self.assertEqual(run["error_code"], "restart")
         self.assertEqual(reopened.latest_interrupted_screening_run()["id"], "sr-3")
 
+    def test_latest_interrupted_excludes_user_finished(self):
+        self.store.create_screening_run("sr-user-finished")
+        self.store.update_screening_run("sr-user-finished", status="running")
+        self.store.update_screening_run(
+            "sr-user-finished", status="cancelled", error_code="user_finished",
+        )
+        self.assertIsNone(self.store.latest_interrupted_screening_run())
+
     def test_create_screening_run_marks_process_log(self):
         """工作日记（process_log）：create_screening_run 写入的 run 必须标 process_log。"""
         self.store.create_screening_run("sr-pl", source_count=10)

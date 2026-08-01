@@ -3507,6 +3507,7 @@ class TaskStore:
         with self._connection() as conn:
             row = conn.execute(
                 "SELECT * FROM screening_runs WHERE status = 'interrupted' "
+                "AND (error_code IS NULL OR error_code != 'user_finished') "
                 "ORDER BY updated_at DESC LIMIT 1"
             ).fetchone()
         return self._screening_run_row(row) if row is not None else None

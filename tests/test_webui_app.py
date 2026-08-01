@@ -627,6 +627,18 @@ class SourceErrorClassificationTests(unittest.TestCase):
         self.assertEqual(_FAILED_CODE_LABELS["source_rate_limited"], "账号/操作频繁被限流")
         self.assertNotIn("验证码", _FAILED_CODE_LABELS["source_rate_limited"])
 
+    def test_scrape_block_rate_limit_wins_over_verification_keywords(self):
+        """列表抓取同样优先识别账号限流，而不是先命中滑块关键字。"""
+        from webui.app import _classify_scrape_block
+        self.assertEqual(
+            _classify_scrape_block("账号操作频繁，触发滑块验证，请稍后再试"),
+            "source_rate_limited",
+        )
+        self.assertEqual(
+            _classify_scrape_block("请完成滑块验证后再继续"),
+            "captcha_required",
+        )
+
 
 class TaskFinishAndCountRegressionTests(unittest.TestCase):
     """结束并保存 + JD 阶段计数回归（用户反馈 606/24/37/930）。"""
@@ -721,7 +733,60 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         latest = self.client.get("/api/latest-pipeline-result").get_json()
         self.assertEqual(latest["status"], "completed_with_pending")
         self.assertEqual(latest["source_run_id"], data["snapshot_run_id"])
-        self.assertEqual(self.store.get_screening_run(run_id)["status"], "interrupted")
+        finished = self.store.get_screening_run(run_id)
+        self.assertEqual(finished["status"], "interrupted")
+        self.assertEqual(finished["error_code"], "user_finished")
+        latest_running = self.client.get("/api/latest-running-task").get_json()
+        self.assertFalse(latest_running["has_task"])
+
+    def test_finish_paused_scrape_run_saves_partial_snapshot(self):
+        """列表抓取阶段暂停的任务也能结束并保存已抓岗位。"""
+        run_id = "finish-scrape-run"
+        jobs = [
+            {"job_id": "s1", "title": "岗位1", "source_url": "https://zhipin.example/s1.html"},
+            {"job_id": "s2", "title": "岗位2", "source_url": "https://zhipin.example/s2.html"},
+        ]
+        self.store.create_screening_run(run_id, source_count=len(jobs))
+        self.store.save_scrape_combo_result(run_id, "kw|city", jobs, ["kw|city"])
+        self.store.update_screening_run(run_id, status="running", current_stage="scrape")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="账号/操作频繁被限流",
+        )
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        data = resp.get_json()
+        self.assertEqual(data["status"], "completed_with_pending")
+        self.assertEqual(data["result"]["total_scraped"], 2)
+        self.assertEqual(data["result"]["total_kept"], 2)
+        latest = self.client.get("/api/latest-pipeline-result").get_json()
+        self.assertEqual(latest["status"], "completed_with_pending")
+
+    def test_finish_normalizes_mismatch_verdict(self):
+        """partial 快照把历史 mismatch 归一为 not_match，避免待确认计数膨胀。"""
+        run_id = "finish-mismatch"
+        jobs = [
+            {"job_id": "m1", "title": "岗位", "source_url": "https://zhipin.example/m1.html"},
+        ]
+        scrape_id = "finish-mismatch-src"
+        self.store.create_screening_run(scrape_id, source_count=1)
+        self.store.save_scrape_combo_result(scrape_id, "kw|city", jobs, ["kw|city"])
+        self.store.create_screening_run(
+            run_id, source_count=1, execution_params={"scrape_task_id": scrape_id},
+        )
+        self.store.update_screening_run(run_id, status="running", current_stage="jd_detail")
+        self.store.save_screening_verdicts(run_id, {
+            "m1": {"verdict": "mismatch", "reason": "不符合"},
+        })
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="jd_detail",
+            processed_count=0, total_kept=1, total_dropped=0,
+        )
+        self.result_dir.mkdir(parents=True, exist_ok=True)
+        (self.result_dir / f"ai_screen_jd_{run_id}.json").write_text("{}", encoding="utf-8")
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["result"]["jobs"][0]["verdict"], "not_match")
 
     def test_finish_rejects_non_paused_run(self):
         run_id = "finish-not-paused"
@@ -743,6 +808,9 @@ class ChromeAccountProfileSwitchTests(unittest.TestCase):
         ), mock.patch.object(
             pipeline_exec.boss, "cdp_port_uses_profile", return_value=False,
         ) as uses, mock.patch.object(
+            pipeline_exec.boss, "chrome_user_data_dirs_for_cdp_port",
+            return_value=[pipeline_exec.BROWSER_ACCOUNTS["b"]["profile_dir"]],
+        ), mock.patch.object(
             pipeline_exec.boss, "close_cdp_chrome",
         ) as close, mock.patch.object(
             pipeline_exec.boss, "prepare_cdp_profile",
@@ -756,6 +824,24 @@ class ChromeAccountProfileSwitchTests(unittest.TestCase):
         self.assertTrue(ok)
         uses.assert_called_once()
         close.assert_called_once()
+
+    def test_ensure_chrome_ready_refuses_unknown_profile(self):
+        """端口被非 A/B 的 Chrome 占用时禁止自动关闭，避免误伤主 Chrome。"""
+        from webui import pipeline_exec
+        with mock.patch.object(
+            pipeline_exec.boss, "is_cdp_ready", return_value=True,
+        ), mock.patch.object(
+            pipeline_exec.boss, "cdp_port_uses_profile", return_value=False,
+        ), mock.patch.object(
+            pipeline_exec.boss, "chrome_user_data_dirs_for_cdp_port",
+            return_value=["C:/unknown/profile"],
+        ), mock.patch.object(
+            pipeline_exec.boss, "close_cdp_chrome",
+        ) as close:
+            ok, msg = pipeline_exec.ensure_chrome_ready(9333)
+        self.assertFalse(ok)
+        self.assertIn("避免误关", msg)
+        close.assert_not_called()
 
 
 class RunSearchAllFailTests(unittest.TestCase):

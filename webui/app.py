@@ -82,6 +82,34 @@ _OPERATIONAL_ERRORS = (
 )
 
 
+_SCRAPE_BLOCK_PATTERNS = (
+    ("login_expired", ("登录", "未登录", "wt2", "登 录", "BOSS 登录")),
+    ("source_rate_limited", (
+        "限流", "频繁", "rate limit", "too many", "稍后再试",
+        "解锁", "冻结", "账号受限",
+    )),
+    ("captcha_required", ("验证码", "滑块", "gtm", "geetest")),
+    ("ip_risk_control", ("IP 级风控", "风控", "ip risk", "blocked")),
+    ("cdp_unavailable", ("CDP", "调试浏览器", "chrome not ready")),
+)
+
+
+def _classify_scrape_block(err_msg: str) -> str:
+    """把 run_search 返回的 error 字符串映射到 SYSTEMIC_BLOCK_CODES。
+
+    命中返回对应码（如 'source_rate_limited'），未命中返回空串（表示真失败，
+    不应暂停）。限流优先于验证码，避免“频繁 + 滑块”文案被误显示为验证码。
+    """
+    if not err_msg:
+        return ""
+    text = err_msg.lower()
+    for code, keywords in _SCRAPE_BLOCK_PATTERNS:
+        for kw in keywords:
+            if kw.lower() in text:
+                return code
+    return ""
+
+
 SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
 DEFAULT_STATE_DIR = Path(os.environ.get("BOSS_WEBUI_STATE_DIR", os.path.expanduser("~/.career-scout/webui")))
 
@@ -1505,30 +1533,6 @@ def create_app(config=None):
         ratio = min(1.0, max(0.0, current / total))
         return min(100, round(start + (end - start) * ratio))
 
-    # 切片4：列表抓取错误 → 系统性阻断码映射
-    # 命中关键字即返回对应阻断码；非阻断返回空串
-    _SCRAPE_BLOCK_PATTERNS = (
-        ("login_expired", ("登录", "未登录", "wt2", "登 录", "BOSS 登录")),
-        ("captcha_required", ("验证码", "滑块", "gtm", "geetest")),
-        ("ip_risk_control", ("IP 级风控", "风控", "ip risk", "blocked")),
-        ("source_rate_limited", ("限流", "频繁", "rate limit", "too many")),
-        ("cdp_unavailable", ("CDP", "调试浏览器", "chrome not ready")),
-    )
-
-    def _classify_scrape_block(err_msg: str) -> str:
-        """把 run_search 返回的 error 字符串映射到 SYSTEMIC_BLOCK_CODES。
-
-        命中返回对应码（如 'captcha_required'），未命中返回空串（表示真失败，
-        不应暂停）。
-        """
-        if not err_msg:
-            return ""
-        text = err_msg.lower()
-        for code, keywords in _SCRAPE_BLOCK_PATTERNS:
-            for kw in keywords:
-                if kw.lower() in text:
-                    return code
-        return ""
 
     def _account_for_run(run=None) -> str:
         """Resolve the browser account for a run or the current advanced setting."""
@@ -1964,7 +1968,7 @@ def create_app(config=None):
             jd = str(jd_map.get(jid) or job.get("jd") or "").strip()
             caveats = vobj.get("caveats") if isinstance(vobj.get("caveats"), list) else []
             if verdict in ("match", "not_match", "mismatch"):
-                final_verdict = verdict
+                final_verdict = "not_match" if verdict == "mismatch" else verdict
                 final_reason = reason
             elif jd:
                 final_verdict = "uncertain"
@@ -5095,6 +5099,13 @@ def create_app(config=None):
             pending_rows = store.load_screening_pending(run_id)
             if not pending_rows:
                 pending_rows = store.load_screening_pending(source_run_id)
+        elif not scrape_task_id and not source_run_id and str(run.get("current_stage") or "") == "scrape":
+            try:
+                source_jobs = store.load_scrape_run_jobs(run_id)
+            except _OPERATIONAL_ERRORS:
+                source_jobs = []
+            verdicts = store.load_screening_verdicts(run_id)
+            pending_rows = store.load_screening_pending(run_id)
         if not source_jobs:
             return jsonify({
                 "ok": False, "error": "missing_scrape_snapshot",
@@ -5117,6 +5128,7 @@ def create_app(config=None):
         )
         store.update_screening_run(
             run_id, status="cancelled", current_stage="done",
+            error_code="user_finished",
             error_reason="用户提前结束，已保存部分结果",
         )
         store.append_task_event(run_id, "finish", {
