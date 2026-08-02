@@ -1603,6 +1603,43 @@ def create_app(config=None):
         else:
             _activate_run_browser()
 
+    def _ensure_scrape_source(scrape_task_id: str) -> dict | None:
+        """Return a scrape source snapshot, rebuilding it from DB after a restart."""
+        with _pipeline_lock:
+            source_task = _pipeline_tasks.get(scrape_task_id)
+            if source_task is not None:
+                return dict(source_task)
+        source_jobs = store.load_scrape_run_jobs(scrape_task_id)
+        if not source_jobs:
+            return None
+        snapshot = {
+            "kind": "scrape", "status": "done", "progress": {}, "logs": [],
+            "result": {
+                "ok": True, "jobs": source_jobs,
+                "total_scraped": len(source_jobs), "total_matched": len(source_jobs),
+                "completed_combos": sorted(store.load_checkpoint(scrape_task_id, "scrape")),
+                "error": "",
+            },
+            "error": "", "started_at": None, "finished_at": None,
+            "stop_event": threading.Event(),
+        }
+        with _pipeline_lock:
+            _pipeline_tasks[scrape_task_id] = snapshot
+        return dict(snapshot)
+
+    def _scrape_completed_for_run(execution_params: dict) -> bool:
+        """Infer whether the source scrape run finished after a service restart."""
+        if bool(execution_params.get("scrape_completed")):
+            return True
+        scrape_task_id = str(execution_params.get("scrape_task_id") or "")
+        if not scrape_task_id:
+            return False
+        try:
+            source_run = store.get_screening_run(scrape_task_id)
+        except _OPERATIONAL_ERRORS:
+            return False
+        return bool(source_run and source_run.get("status") == "succeeded")
+
     def _check_resume_block(run: dict) -> tuple[bool, str, str]:
         """Verify the paused dependency before submitting resumed work."""
         _activate_run_browser(run)
@@ -3583,9 +3620,7 @@ def create_app(config=None):
         ok, err_resp = _check_tuning_lease_conflict()
         if not ok:
             return err_resp
-        with _pipeline_lock:
-            source_task = _pipeline_tasks.get(scrape_task_id)
-            source_snapshot = dict(source_task) if source_task else None
+        source_snapshot = _ensure_scrape_source(scrape_task_id)
         if source_snapshot is None:
             return jsonify({"ok": False, "error": "抓取任务不存在"}), 404
         if source_snapshot.get("kind") != "scrape":
@@ -3784,7 +3819,7 @@ def create_app(config=None):
                 "resumable": True,
                 "source": "database",
                 "scrape_task_id": execution_params.get("scrape_task_id"),
-                "scrape_completed": bool(execution_params.get("scrape_completed")),
+                "scrape_completed": _scrape_completed_for_run(execution_params),
                 "source_run_id": execution_params.get("source_run_id"),
                 "checkpoint_stage": prow["current_stage"],
             })
@@ -3814,7 +3849,9 @@ def create_app(config=None):
                 "error_code": run.get("error_code"),
                 "source_run_id": (run.get("execution_params") or {}).get("source_run_id"),
                 "scrape_task_id": (run.get("execution_params") or {}).get("scrape_task_id"),
-                "scrape_completed": bool((run.get("execution_params") or {}).get("scrape_completed")),
+                "scrape_completed": _scrape_completed_for_run(run.get("execution_params") or {}),
+                "frozen_filters": run.get("frozen_filters") or {},
+                "profile_summary": str((run.get("execution_params") or {}).get("profile_summary") or ""),
             })
         return jsonify({"ok": True, "has_task": False})
 
@@ -5239,11 +5276,15 @@ def create_app(config=None):
         run = store.get_screening_run(run_id)
         if run is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
-        if run["status"] != "paused":
+        restart_interrupted = (
+            run["status"] == "interrupted"
+            and str(run.get("error_code") or "") == "restart"
+        )
+        if run["status"] != "paused" and not restart_interrupted:
             return jsonify({
                 "ok": False, "error": "not_paused",
                 "status": _run_to_task_status(run["status"]),
-                "message": "只有 paused 状态的任务才能结束并保存",
+                "message": "只有 paused 或服务重启中断的任务才能结束并保存",
             }), 409
         with _pipeline_lock:
             task = _pipeline_tasks.get(run_id)

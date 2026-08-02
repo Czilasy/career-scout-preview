@@ -2486,7 +2486,7 @@ class TaskStore:
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
             run = conn.execute(
-                "SELECT id FROM screening_runs WHERE status = 'done' "
+                "SELECT id FROM screening_runs WHERE status IN ('done', 'partial') "
                 "AND record_kind = 'result_snapshot' "
                 "ORDER BY created_at DESC LIMIT 1",
             ).fetchone()

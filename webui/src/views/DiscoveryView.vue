@@ -131,6 +131,8 @@ const resultLoaded = ref(false);
 const restoredTaskHint = ref("");
 // 切片7：从 DB 恢复的 paused 任务 run_id（无内存工作线程，不能 poll）
 const pausedRunId = ref("");
+// 服务重启打断的 AI 筛选任务：恢复后优先展示续跑入口，不被旧历史结果覆盖
+const interruptedRunId = ref("");
 const pipelineResult = ref<PipelineResult | null>(null);
 const pipelineResultRunId = ref("");
 const activeCategory = ref<ResultCategory>("matched");
@@ -314,6 +316,8 @@ async function restoreRunningTask() {
       source_run_id?: string;
       started_at?: number;
       finished_at?: number;
+      frozen_filters?: Record<string, unknown>;
+      profile_summary?: string;
     }>("/api/latest-running-task");
     if (!data.has_task || !data.task_id) return;
     const snapshot: TaskSnapshot = {
@@ -332,6 +336,20 @@ async function restoreRunningTask() {
     if (data.status === "interrupted") {
       // 服务重启打断的任务：工作线程已死不能 poll；提示用户重开（后端会自动接着上次进度）
       restoredTaskHint.value = "上次 AI 筛选因服务重启被中断；重新开始 AI 筛选会接着上次进度，不重复消耗";
+      scrapeTaskId.value = data.scrape_task_id || "";
+      scrapeCompleted.value = Boolean(data.scrape_completed || data.scrape_task_id);
+      screenTaskId.value = data.task_id;
+      analysisReady.value = true;
+      screenPanelOpen.value = false;
+      activeStep.value = "screen";
+      interruptedRunId.value = data.task_id;
+      const savedFilters = data.frozen_filters || {};
+      filterValues.value = Object.fromEntries(
+        Object.entries(savedFilters)
+          .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
+          .map(([key, value]) => [key, value as string[]]),
+      );
+      profileSummary.value = data.profile_summary || "";
       return;
     }
     // 切片7：paused 状态从 DB 恢复（无内存工作线程，不能 poll）
@@ -536,6 +554,7 @@ async function analyzeResume() {
     recrawlSnapshot.value = null;
     pipelineResultRunId.value = "";
     pausedRunId.value = "";
+    interruptedRunId.value = "";
     restoredTaskHint.value = "";
     scopePreview.value = null;
     scopePreviewBusy.value = false;
@@ -759,6 +778,7 @@ async function startAiScreen() {
   screenPanelOpen.value = false;
   screenBusy.value = true;
   pausedRunId.value = ""; // 切片7：清掉 DB paused 标记，进入内存工作模式
+  interruptedRunId.value = "";
   restoredTaskHint.value = "";
   screenSnapshot.value = { status: "running", progress: { message: "正在创建 AI 筛选任务…" }, logs: [] };
   try {
@@ -788,6 +808,7 @@ async function continueAiScreen() {
   if (!runId || screenBusy.value) return;
   screenBusy.value = true;
   restoredTaskHint.value = "";
+  interruptedRunId.value = "";
   screenSnapshot.value = {
     status: "running", progress: { message: "正在从 AI 断点继续…" }, logs: [],
   };
@@ -820,6 +841,7 @@ async function cancelAiScreen() {
     // 后端会标 cancelled；这里直接复位，不等下一次轮询
     screenBusy.value = false;
     restoredTaskHint.value = "";
+    interruptedRunId.value = "";
     screenSnapshot.value = { status: "cancelled", progress: { message: "已停止筛选" }, logs: [], error: "" };
     notify("已停止筛选", "warning");
   } catch (error) {
@@ -840,6 +862,7 @@ async function cancelPausedTask(runId: string) {
     screenBusy.value = false;
     restoredTaskHint.value = "";
     pausedRunId.value = "";
+    interruptedRunId.value = "";
     if (scrapeSnapshot.value) scrapeSnapshot.value = { status: "cancelled", progress: { message: "已取消任务" }, logs: [], error: "" };
     if (screenSnapshot.value) screenSnapshot.value = { status: "cancelled", progress: { message: "已取消任务" }, logs: [], error: "" };
     notify("已取消任务，已有结果保留", "warning");
@@ -860,6 +883,7 @@ async function finishPausedTask(runId: string) {
     recrawlBusy.value = false;
     restoredTaskHint.value = "";
     pausedRunId.value = "";
+    interruptedRunId.value = "";
     const finished: TaskSnapshot = {
       status: "completed_with_pending", stage: "done",
       progress: { message: "已结束并保存部分结果" }, logs: [], error: "",
@@ -986,7 +1010,7 @@ function setPipelineResult(result: PipelineResult) {
 }
 
 async function loadLatestResult() {
-  if (pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
+  if (pausedRunId.value || interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
   try {
     const query = props.profileId ? `?profile_id=${encodeURIComponent(props.profileId)}` : "";
     const data = await apiRequest<{
@@ -998,7 +1022,7 @@ async function loadLatestResult() {
       finished_at?: number;
       execution_config?: Record<string, unknown> | null;
     }>(`/api/latest-pipeline-result${query}`);
-    if (pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
+    if (pausedRunId.value || interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
     if (data.has_result && data.result) {
       pipelineResultRunId.value = data.source_run_id || "";
       setPipelineResult(data.result);
@@ -1066,6 +1090,7 @@ function resetWorkflow() {
   activeCategory.value = "matched";
   rejectedIds.value = new Set();
   pausedRunId.value = "";
+  interruptedRunId.value = "";
   restoredTaskHint.value = "";
   scopePreview.value = null;
   scopePreviewBusy.value = false;
@@ -1605,6 +1630,9 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
           <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="!screenBusy && !scrapeCompleted" @click="screenBusy ? cancelAiScreen() : startAiScreen()">
             <Square v-if="screenBusy" :size="18" aria-hidden="true" />
             <Sparkles v-else :size="18" aria-hidden="true" />{{ screenBusy ? "停止筛选" : "开始 AI 筛选" }}
+          </button>
+          <button v-if="interruptedRunId" class="button danger" type="button" data-testid="finish-interrupted-screen" @click="finishPausedTask(interruptedRunId)">
+            结束并保存结果
           </button>
           <button v-if="screenSnapshot && screenSnapshot.status === 'paused'"
                   class="button secondary" type="button" data-testid="resume-ai-screen"

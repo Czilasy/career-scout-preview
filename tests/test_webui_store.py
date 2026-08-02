@@ -433,6 +433,20 @@ class ScreeningRunStoreTests(unittest.TestCase):
         self.assertEqual(loaded["status"], "completed_with_pending")
         self.assertEqual(self.store.get_latest_done_run_id(), run_id)
 
+    def test_clear_latest_pipeline_result_clears_partial_snapshot(self):
+        result = {
+            "jobs": [
+                {"job_id": "p1", "verdict": "uncertain", "verdict_reason": "待确认"},
+            ],
+            "dropped": [], "total_scraped": 1, "total_kept": 1,
+            "total_matched": 0, "total_dropped": 0,
+        }
+        run_id = self.store.save_pipeline_result(result, {})
+        self.assertEqual(self.store.get_screening_run(run_id)["status"], "partial")
+        self.assertTrue(self.store.clear_latest_pipeline_result())
+        self.assertIsNone(self.store.load_latest_pipeline_result())
+        self.assertIsNone(self.store.get_latest_done_run_id())
+
     def test_load_latest_pipeline_result_skips_process_log(self):
         """load_latest_pipeline_result 只能返回 result_snapshot，跳过 process_log。"""
         # 先写一条 process_log（create_screening_run）

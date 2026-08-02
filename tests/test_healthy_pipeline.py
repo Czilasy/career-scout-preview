@@ -2336,10 +2336,50 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
         self.assertEqual(
             self.store.get_screening_run(interrupted_run_id)["status"], "interrupted")
 
+    def test_new_ai_screen_inherits_restart_interrupted_checkpoint_from_db(self):
+        """服务重启后内存来源丢失，仍能从 DB 重建抓取快照并继承 interrupted 断点。"""
+        scrape_task_id = "restart-db-source"
+        interrupted_run_id = "restart-db-ai-run"
+        screening_fields = {"keyword": "后端"}
+        jobs = [{"job_id": "job-1", "title": "后端工程师"}]
+        self.store.create_screening_run(scrape_task_id, source_count=len(jobs))
+        self.store.save_scrape_combo_result(
+            scrape_task_id, "后端|上海", jobs, ["后端|上海"])
+        self.store.create_screening_run(
+            interrupted_run_id, source_count=1,
+            frozen_filters=screening_fields,
+            execution_params={
+                "scrape_task_id": scrape_task_id,
+                "profile_summary": "后端工程师",
+            },
+        )
+        self.store.update_screening_run(interrupted_run_id, status="running")
+        self.store.update_screening_run(
+            interrupted_run_id, status="interrupted", error_code="restart")
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit") as submit:
+            response = self.client.post(
+                "/api/ai-screen",
+                json={
+                    "screening_fields": screening_fields,
+                    "profile_summary": "后端工程师",
+                    "scrape_task_id": scrape_task_id,
+                },
+                headers=self.headers,
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["resuming"])
+        self.assertEqual(submit.call_args.args[-1], interrupted_run_id)
+        self.assertIn(scrape_task_id, self.app.config["PIPELINE_TASKS"])
+        self.assertEqual(
+            self.store.get_screening_run(interrupted_run_id)["status"], "interrupted")
+
     def test_latest_running_task_reports_restart_interrupted(self):
         self.store.create_screening_run(
             "latest-restart-interrupted", source_count=1,
-            execution_params={"scrape_task_id": "src-1"},
+            execution_params={"scrape_task_id": "src-1", "profile_summary": "后端工程师"},
+            frozen_filters={"keyword": "后端"},
         )
         self.store.update_screening_run("latest-restart-interrupted", status="running")
         self.store.update_screening_run(
@@ -2350,6 +2390,8 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
         self.assertTrue(data["has_task"])
         self.assertEqual(data["status"], "interrupted")
         self.assertTrue(data["resumable"])
+        self.assertEqual(data["frozen_filters"], {"keyword": "后端"})
+        self.assertEqual(data["profile_summary"], "后端工程师")
 
     def test_concurrent_new_ai_screen_claims_paused_run_once(self):
         """自动继承 paused 断点也必须原子 claim，只能提交一次。"""

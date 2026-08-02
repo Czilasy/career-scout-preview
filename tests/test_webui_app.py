@@ -739,6 +739,33 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         latest_running = self.client.get("/api/latest-running-task").get_json()
         self.assertFalse(latest_running["has_task"])
 
+    def test_finish_restart_interrupted_ai_screen_saves_partial_snapshot(self):
+        """服务重启中断的任务也能直接结束并保存部分结果，无需先重新开始。"""
+        run_id = self._seed_paused_ai_screen()
+        self.store.update_screening_run(
+            run_id, status="interrupted", error_code="restart",
+            error_reason="服务重启中断",
+        )
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        data = resp.get_json()
+        self.assertEqual(data["status"], "completed_with_pending")
+        self.assertEqual(len(data["result"]["jobs"]), 667)
+        latest = self.client.get("/api/latest-pipeline-result").get_json()
+        self.assertEqual(latest["source_run_id"], data["snapshot_run_id"])
+        finished = self.store.get_screening_run(run_id)
+        self.assertEqual(finished["error_code"], "user_finished")
+
+    def test_finish_rejects_user_cancelled_interrupted_run(self):
+        run_id = "finish-cancelled-run"
+        self.store.create_screening_run(run_id, source_count=1)
+        self.store.update_screening_run(run_id, status="running")
+        self.store.update_screening_run(
+            run_id, status="cancelled", error_reason="用户已停止筛选")
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "not_paused")
+
     def test_finish_paused_scrape_run_saves_partial_snapshot(self):
         """列表抓取阶段暂停的任务也能结束并保存已抓岗位。"""
         run_id = "finish-scrape-run"
