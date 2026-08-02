@@ -336,6 +336,79 @@ class ScreeningRunStoreTests(unittest.TestCase):
         self.assertEqual(verdicts["job-1"]["verdict"], "match")
         self.assertEqual(verdicts["job-2"]["verdict"], "uncertain")
 
+    def test_result_snapshot_verdict_writeback_keeps_reason_and_caveats(self):
+        run_id = self.store.save_pipeline_result({
+            "jobs": [
+                {"job_id": "j1", "title": "岗位", "verdict": "uncertain",
+                 "verdict_reason": "旧原因", "caveats": ["旧提示"]},
+            ],
+            "dropped": [{"job_id": "d1", "title": "淘汰", "reason": "经验不符"}],
+            "total_scraped": 2, "total_kept": 1, "total_matched": 0,
+            "total_dropped": 1, "profile_summary": "",
+        }, {})
+        self.store.save_screening_verdicts(run_id, {
+            "j1": {"verdict": "not_match", "reason": "新原因", "caveats": ["新提示"]},
+        })
+        verdicts = self.store.load_screening_verdicts(run_id)
+        self.assertEqual(verdicts["j1"]["verdict"], "not_match")
+        self.assertEqual(verdicts["j1"]["reason"], "新原因")
+        self.assertEqual(verdicts["j1"]["caveats"], ["新提示"])
+        loaded = self.store.load_latest_pipeline_result(run_id)
+        job = loaded["result"]["jobs"][0]
+        self.assertEqual(job["verdict"], "not_match")
+        self.assertEqual(job["verdict_reason"], "新原因")
+        self.assertEqual(job["caveats"], ["新提示"])
+
+    def test_load_latest_pipeline_result_parses_legacy_json_verdict_cell(self):
+        run_id = self.store.save_pipeline_result({
+            "jobs": [{"job_id": "j1", "title": "岗位", "verdict": "uncertain"}],
+            "dropped": [], "total_scraped": 1, "total_kept": 1,
+            "total_matched": 0, "total_dropped": 0, "profile_summary": "",
+        }, {})
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_results SET verdict = ?, verdict_reason = '' "
+                "WHERE run_id = ? AND job_id = ?",
+                (json.dumps({"verdict": "match", "reason": "JSON原因",
+                            "caveats": ["JSON提示"]}, ensure_ascii=False),
+                 run_id, "j1"),
+            )
+        loaded = self.store.load_latest_pipeline_result(run_id)
+        job = loaded["result"]["jobs"][0]
+        self.assertEqual(job["verdict"], "match")
+        self.assertEqual(job["verdict_reason"], "JSON原因")
+        self.assertEqual(job["caveats"], ["JSON提示"])
+
+    def test_recount_pipeline_result_updates_counts_and_status(self):
+        run_id = self.store.save_pipeline_result({
+            "jobs": [
+                {"job_id": "m", "title": "A", "verdict": "match", "verdict_reason": "合适"},
+                {"job_id": "n", "title": "B", "verdict": "not_match", "verdict_reason": "不符"},
+                {"job_id": "u", "title": "C", "verdict": "uncertain", "verdict_reason": "待确认"},
+            ],
+            "dropped": [{"job_id": "d", "title": "D", "reason": "粗筛移除"}],
+            "total_scraped": 4, "total_kept": 3, "total_matched": 1,
+            "total_dropped": 1, "profile_summary": "",
+        }, {})
+        self.store.insert_pending_result(
+            run_id, "u", failure_stage="ai_fine", failed_code="ai_missing_job",
+        )
+        counts = self.store.recount_pipeline_result(run_id)
+        self.assertEqual(counts["status"], "partial")
+        self.assertEqual(counts["pending_count"], 1)
+        self.assertEqual(counts["total_dropped"], 1)
+        self.store.save_screening_verdicts(run_id, {
+            "u": {"verdict": "match", "reason": "重判匹配", "caveats": []},
+        })
+        self.store.delete_pending_result(run_id, "u")
+        counts = self.store.recount_pipeline_result(run_id)
+        self.assertEqual(counts["status"], "done")
+        self.assertEqual(counts["pending_count"], 0)
+        self.assertEqual(counts["match_count"], 2)
+        self.assertEqual(counts["mismatch_count"], 1)
+        self.assertEqual(counts["total_kept"], 3)
+        self.assertEqual(counts["total_dropped"], 1)
+
     def test_latest_screening_run_for_source_matches_execution_params(self):
         self.store.create_screening_run(
             "sr-a", execution_params={"scrape_task_id": "t-1", "profile_summary": "画像A"})

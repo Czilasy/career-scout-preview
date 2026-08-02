@@ -320,6 +320,9 @@ async function restoreRunningTask() {
       profile_summary?: string;
     }>("/api/latest-running-task");
     if (!data.has_task || !data.task_id) return;
+    if (data.kind === "recrawl") {
+      await loadLatestResult();
+    }
     const snapshot: TaskSnapshot = {
       status: data.status || "running",
       progress: data.progress || {},
@@ -447,6 +450,7 @@ async function enrichPausedSnapshot(
       source_total?: number;
       pause_info?: { error_code?: string; error_reason?: string } | null;
       execution_config?: Record<string, unknown> | null;
+      result?: { updates?: Record<string, unknown> } | null;
     }>(`/api/task-state/${encodeURIComponent(runId)}`);
     snapshot.success_count = data.success_count;
     snapshot.fail_count = data.fail_count;
@@ -467,6 +471,7 @@ async function enrichPausedSnapshot(
     }
     if (data.pause_info) snapshot.pause_info = data.pause_info;
     if (data.execution_config) snapshot.execution_config = data.execution_config;
+    if (data.result?.updates) mergeRecrawlUpdates(data.result.updates);
   } catch { /* 退化到 progress 字段 */ }
   if (kind === "scrape") {
     scrapeTaskId.value = runId;
@@ -1321,6 +1326,8 @@ async function pollRecrawl(taskId: string) {
   try {
     const data = await apiRequest<TaskSnapshot>(`/api/task-state/${encodeURIComponent(taskId)}`);
     recrawlSnapshot.value = data;
+    const liveUpdates = (data.result as unknown as { updates?: Record<string, unknown> } | undefined)?.updates;
+    if (liveUpdates) mergeRecrawlUpdates(liveUpdates as Record<string, unknown>);
     if (isCompletedTaskStatus(data.status)) {
       recrawlRetryCount = 0;
       recrawlBusy.value = false;

@@ -2399,16 +2399,36 @@ class TaskStore:
         for row in rows:
             row = dict(row)
             if row.get("is_dropped"):
+                raw_verdict = row.get("verdict") or ""
+                reason = row.get("verdict_reason") or ""
+                try:
+                    parsed = json.loads(raw_verdict)
+                    if isinstance(parsed, dict):
+                        reason = str(parsed.get("reason") or reason)
+                except (json.JSONDecodeError, TypeError):
+                    pass
                 dropped.append({
                     "job_id": row["job_id"],
                     "title": row["title"],
-                    "reason": row["verdict_reason"],
+                    "reason": reason,
                     "canonical_url": row["source_url"],
                 })
             else:
+                raw_verdict = row.get("verdict") or ""
+                verdict = raw_verdict
+                verdict_reason = row.get("verdict_reason") or ""
                 caveats = []
                 try:
                     caveats = json.loads(row.get("caveats_json") or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                try:
+                    parsed = json.loads(raw_verdict)
+                    if isinstance(parsed, dict):
+                        verdict = str(parsed.get("verdict") or raw_verdict)
+                        verdict_reason = str(parsed.get("reason") or verdict_reason)
+                        if isinstance(parsed.get("caveats"), list):
+                            caveats = parsed["caveats"]
                 except (json.JSONDecodeError, TypeError):
                     pass
                 jobs.append({
@@ -2420,8 +2440,8 @@ class TaskStore:
                     "tags": row["tags"],
                     "jd": row["jd"],
                     "source_url": row["source_url"],
-                    "verdict": row["verdict"],
-                    "verdict_reason": row["verdict_reason"],
+                    "verdict": verdict,
+                    "verdict_reason": verdict_reason,
                     "caveats": caveats,
                 })
 
@@ -2457,6 +2477,58 @@ class TaskStore:
             "status": "completed_with_pending" if run.get("status") == "partial" else "completed",
             "execution_config": execution_params.get("execution_config") or {},
             "result": result,
+        }
+
+    def recount_pipeline_result(self, run_id):
+        """Recompute result_snapshot counts after recrawl write-back."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT record_kind FROM screening_runs WHERE id = ?",
+                (str(run_id),),
+            ).fetchone()
+            if row is None or row["record_kind"] != "result_snapshot":
+                return None
+            rows = conn.execute(
+                "SELECT verdict, is_dropped FROM screening_results WHERE run_id = ?",
+                (str(run_id),),
+            ).fetchall()
+            pending = conn.execute(
+                "SELECT COUNT(*) AS n FROM screening_pending_results WHERE run_id = ?",
+                (str(run_id),),
+            ).fetchone()["n"]
+        match = mismatch = kept = dropped = 0
+        for row in rows:
+            if row["is_dropped"]:
+                dropped += 1
+                continue
+            kept += 1
+            verdict = row["verdict"] or ""
+            try:
+                parsed = json.loads(verdict)
+                if isinstance(parsed, dict):
+                    verdict = str(parsed.get("verdict") or "")
+            except (json.JSONDecodeError, TypeError):
+                pass
+            if verdict == "match":
+                match += 1
+            elif verdict in ("not_match", "mismatch"):
+                mismatch += 1
+        status = "done" if pending == 0 else "partial"
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            conn.execute(
+                "UPDATE screening_runs SET status = ?, match_count = ?, mismatch_count = ?, "
+                " pending_count = ?, processed_count = ?, total_kept = ?, "
+                " total_dropped = ?, source_count = ?, updated_at = ? WHERE id = ?",
+                (
+                    status, match, mismatch, pending, match + mismatch,
+                    kept, dropped, kept + dropped, _now(), str(run_id),
+                ),
+            )
+        return {
+            "status": status, "match_count": match, "mismatch_count": mismatch,
+            "pending_count": pending, "processed_count": match + mismatch,
+            "total_kept": kept, "total_dropped": dropped,
         }
 
     def get_latest_done_run_id(self) -> str | None:
@@ -3533,13 +3605,27 @@ class TaskStore:
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
             for job_id, verdict in verdicts.items():
+                if isinstance(verdict, dict):
+                    verdict_value = str(verdict.get("verdict") or "")
+                    reason = str(verdict.get("reason") or "")
+                    caveats = verdict.get("caveats") if isinstance(verdict.get("caveats"), list) else []
+                else:
+                    verdict_value = str(verdict or "")
+                    reason = ""
+                    caveats = []
                 conn.execute(
-                    "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
-                    "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(run_id, job_id) DO UPDATE SET verdict = excluded.verdict",
+                    "INSERT INTO screening_results "
+                    "(id, run_id, job_id, verdict, verdict_reason, caveats_json, is_dropped, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(run_id, job_id) DO UPDATE SET "
+                    " verdict = excluded.verdict, "
+                    " verdict_reason = excluded.verdict_reason, "
+                    " caveats_json = excluded.caveats_json, "
+                    " is_dropped = excluded.is_dropped",
                     (
-                        _uuid(), str(run_id), str(job_id),
-                        json.dumps(verdict, ensure_ascii=False), ts,
+                        _uuid(), str(run_id), str(job_id), verdict_value, reason,
+                        json.dumps(caveats, ensure_ascii=False),
+                        1 if verdict_value == "dropped" else 0, ts,
                     ),
                 )
 
@@ -3580,22 +3666,32 @@ class TaskStore:
         """
         with self._connection() as conn:
             rows = conn.execute(
-                "SELECT job_id, verdict FROM screening_results WHERE run_id = ?",
+                "SELECT job_id, verdict, verdict_reason, caveats_json "
+                "FROM screening_results WHERE run_id = ?",
                 (str(run_id),),
             ).fetchall()
         out = {}
         for row in rows:
             v = row["verdict"] or ""
+            reason = row["verdict_reason"] or ""
+            try:
+                caveats = json.loads(row["caveats_json"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                caveats = []
             try:
                 value = json.loads(v)
                 if isinstance(value, dict):
+                    if not value.get("reason"):
+                        value["reason"] = reason
+                    if "caveats" not in value:
+                        value["caveats"] = caveats
                     out[str(row["job_id"])] = value
                 else:
-                    out[str(row["job_id"])] = {"verdict": str(value)}
+                    out[str(row["job_id"])] = {"verdict": str(value), "reason": reason, "caveats": caveats}
             except (json.JSONDecodeError, TypeError):
                 # 纯字符串 verdict（如 match/not_match/uncertain/dropped）
                 if v:
-                    out[str(row["job_id"])] = {"verdict": v}
+                    out[str(row["job_id"])] = {"verdict": v, "reason": reason, "caveats": caveats}
         return out
 
     def load_screening_pending(self, run_id):

@@ -855,6 +855,80 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.get_json())
         self.assertEqual(resp.get_json()["result"]["jobs"][0]["verdict"], "not_match")
 
+    def test_finish_recrawl_partial_preserves_reason_caveats_and_dropped(self):
+        """重抓中途结束：partial 快照必须保留来源 reason/caveats，淘汰不能归零。"""
+        source_result = {
+            "jobs": [
+                {"job_id": "j1", "title": "岗位A", "company": "公司A",
+                 "salary": "10K", "location": "东莞", "tags": "1-3年", "jd": "JD A",
+                 "source_url": "https://zhipin.example/j1.html",
+                 "verdict": "match", "verdict_reason": "技能匹配", "caveats": ["注意学历"]},
+                {"job_id": "j2", "title": "岗位B", "company": "公司B",
+                 "salary": "8K", "location": "东莞", "tags": "1-3年", "jd": "JD B",
+                 "source_url": "https://zhipin.example/j2.html",
+                 "verdict": "uncertain", "verdict_reason": "AI 漏判，待确认", "caveats": []},
+            ],
+            "dropped": [
+                {"job_id": "d1", "title": "淘汰岗", "reason": "经验不符",
+                 "canonical_url": "https://zhipin.example/d1.html"},
+            ],
+            "total_scraped": 3, "total_kept": 2, "total_matched": 1,
+            "total_dropped": 1, "profile_summary": "画像", "error": "",
+        }
+        source_id = self.store.save_pipeline_result(source_result, {})
+        recrawl_id = "finish-recrawl-partial"
+        self.store.create_screening_run(
+            recrawl_id, source_count=2,
+            execution_params={"source_run_id": source_id, "profile_summary": "画像"},
+        )
+        self.store.update_screening_run(
+            recrawl_id, status="running", current_stage="recrawl_fetch_jd",
+        )
+        self.store.update_screening_run(
+            recrawl_id, status="paused", current_stage="recrawl_ai",
+            error_code="ai_network_error", error_reason="AI 网络故障",
+        )
+        resp = self.client.post(f"/api/task/finish/{recrawl_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        result = resp.get_json()["result"]
+        self.assertEqual(result["total_scraped"], 3)
+        self.assertEqual(result["total_kept"], 2)
+        self.assertEqual(result["total_dropped"], 1)
+        self.assertEqual(len(result["dropped"]), 1)
+        self.assertEqual(result["dropped"][0]["job_id"], "d1")
+        self.assertEqual(result["dropped"][0]["reason"], "经验不符")
+        jobs = {job["job_id"]: job for job in result["jobs"]}
+        self.assertEqual(jobs["j1"]["verdict_reason"], "技能匹配")
+        self.assertEqual(jobs["j1"]["caveats"], ["注意学历"])
+        self.assertEqual(jobs["j2"]["verdict_reason"], "AI 漏判，待确认")
+
+    def test_recrawl_writeback_reflects_in_latest_result_without_new_snapshot(self):
+        """重抓写回来源 run 后，latest-pipeline-result 应实时反映新判定和淘汰。"""
+        source_id = self.store.save_pipeline_result({
+            "jobs": [
+                {"job_id": "j1", "title": "岗位", "verdict": "uncertain",
+                 "verdict_reason": "待确认", "caveats": []},
+            ],
+            "dropped": [{"job_id": "d1", "title": "淘汰", "reason": "粗筛移除"}],
+            "total_scraped": 2, "total_kept": 1, "total_matched": 0,
+            "total_dropped": 1, "profile_summary": "画像", "error": "",
+        }, {})
+        self.store.insert_pending_result(
+            source_id, "j1", failure_stage="ai_fine", failed_code="ai_missing_job",
+        )
+        self.store.save_screening_verdicts(source_id, {
+            "j1": {"verdict": "not_match", "reason": "重判不匹配", "caveats": ["新提示"]},
+        })
+        self.store.delete_pending_result(source_id, "j1")
+        self.store.recount_pipeline_result(source_id)
+        latest = self.client.get("/api/latest-pipeline-result").get_json()
+        self.assertEqual(latest["status"], "completed")
+        job = latest["result"]["jobs"][0]
+        self.assertEqual(job["verdict"], "not_match")
+        self.assertEqual(job["verdict_reason"], "重判不匹配")
+        self.assertEqual(job["caveats"], ["新提示"])
+        self.assertEqual(latest["result"]["total_dropped"], 1)
+
     def test_finish_rejects_non_paused_run(self):
         run_id = "finish-not-paused"
         self.store.create_screening_run(run_id, source_count=1)

@@ -2022,7 +2022,8 @@ def create_app(config=None):
                 if isinstance(v, str) and v.strip()}
 
     def _build_partial_pipeline_result(
-            source_jobs, verdicts, pending_rows, jd_map, profile_summary):
+            source_jobs, verdicts, pending_rows, jd_map, profile_summary,
+            source_dropped=None, total_scraped=None):
         """Build a displayable result snapshot from persisted partial work."""
         pending_reasons = {}
         pending_codes = {}
@@ -2042,7 +2043,7 @@ def create_app(config=None):
             jid = str(job.get("job_id") or job.get("source_url") or "")
             vobj = verdicts.get(jid) or {}
             verdict = str(vobj.get("verdict") or "")
-            reason = str(vobj.get("reason") or "")
+            reason = str(vobj.get("reason") or job.get("verdict_reason") or "")
             if verdict == "dropped":
                 dropped.append({
                     "job_id": jid,
@@ -2051,7 +2052,10 @@ def create_app(config=None):
                 })
                 continue
             jd = str(jd_map.get(jid) or job.get("jd") or "").strip()
-            caveats = vobj.get("caveats") if isinstance(vobj.get("caveats"), list) else []
+            caveats = (
+                vobj.get("caveats") if isinstance(vobj.get("caveats"), list)
+                else (job.get("caveats") if isinstance(job.get("caveats"), list) else [])
+            )
             if verdict in ("match", "not_match", "mismatch"):
                 final_verdict = "not_match" if verdict == "mismatch" else verdict
                 final_reason = reason
@@ -2079,11 +2083,27 @@ def create_app(config=None):
                 "caveats": caveats,
                 "failed_code": pending_codes.get(jid) or "",
             })
+        dropped_ids = {str(item.get("job_id") or "") for item in dropped}
+        for item in source_dropped or []:
+            if not isinstance(item, dict):
+                continue
+            jid = str(item.get("job_id") or item.get("source_url") or "")
+            if jid and jid in dropped_ids:
+                continue
+            dropped.append({
+                "job_id": jid,
+                "title": item.get("title") or "",
+                "reason": item.get("reason") or item.get("verdict_reason") or "粗筛移除",
+                "canonical_url": item.get("canonical_url") or item.get("source_url") or "",
+            })
         return {
             "ok": True,
             "jobs": jobs,
             "dropped": dropped,
-            "total_scraped": len(source_jobs or []),
+            "total_scraped": (
+                total_scraped if total_scraped is not None
+                else len(source_jobs or []) + len(source_dropped or [])
+            ),
             "total_kept": len(jobs),
             "total_matched": sum(1 for j in jobs if j.get("verdict") == "match"),
             "total_dropped": len(dropped),
@@ -4661,6 +4681,7 @@ def create_app(config=None):
                     "total": len(no_jd),
                 },
             )
+            publish_recrawl_updates()
             with _pipeline_lock:
                 current = _pipeline_tasks.get(task_id)
                 if current is not None:
@@ -4668,6 +4689,12 @@ def create_app(config=None):
                     current["error"] = reason
 
         updates: dict = {}
+
+        def publish_recrawl_updates():
+            with _pipeline_lock:
+                task = _pipeline_tasks.get(task_id)
+                if task is not None:
+                    task["result"] = {"updates": dict(updates)}
         try:
             payload = store.load_latest_pipeline_result(source_run_id or None)
             run_id = source_run_id or store.get_latest_done_run_id()
@@ -4732,6 +4759,7 @@ def create_app(config=None):
                         )
                         for jid, jd in fetched_jd.items():
                             updates.setdefault(jid, {})["jd"] = jd
+                        publish_recrawl_updates()
                         if detail.get("hard_stop"):
                             # 暂停，不关浏览器（用户需要它处理验证码/登录）
                             _hs_code = detail.get("hard_stop_code") or "source_blocked"
@@ -4800,6 +4828,7 @@ def create_app(config=None):
                          "未抓到 JD，无法精筛")
                     )
                     updates.setdefault(jid, {})["verdict_reason"] = reason
+            publish_recrawl_updates()
 
             # 2) 有 JD 且有画像的，重跑 AI 精筛
             if not has_ai:
@@ -4876,6 +4905,7 @@ def create_app(config=None):
                                                 f"已判 {len(recrawl_completed_ids)}/{len(targets)} 条。"
                                                 "处理完成后点「继续」"
                                             )
+                                    publish_recrawl_updates()
                                     _recrawl_ai_pause = True
                                     break
                             raise
@@ -4903,6 +4933,9 @@ def create_app(config=None):
                             v = verdicts[jid].get("verdict")
                             if v in ("match", "not_match"):
                                 store.delete_pending_result(source_run_id, jid)
+                    publish_recrawl_updates()
+                    if run_id:
+                        store.recount_pipeline_result(run_id)
 
             emit(stage="done", current=total, total=total, message="重抓完成")
             store.append_task_events(task_id, [
@@ -5421,6 +5454,9 @@ def create_app(config=None):
         verdicts = {}
         pending_rows = []
         jd_map = {}
+        source_payload = None
+        source_dropped = []
+        source_total_scraped = None
         if scrape_task_id:
             try:
                 source_jobs = store.load_scrape_run_jobs(scrape_task_id)
@@ -5438,7 +5474,10 @@ def create_app(config=None):
                 }), 503
         elif source_run_id:
             payload = store.load_latest_pipeline_result(source_run_id)
+            source_payload = payload
             source_jobs = ((payload or {}).get("result") or {}).get("jobs") or []
+            source_dropped = ((payload or {}).get("result") or {}).get("dropped") or []
+            source_total_scraped = ((payload or {}).get("result") or {}).get("total_scraped") or None
             verdicts = store.load_screening_verdicts(source_run_id)
             pending_rows = store.load_screening_pending(run_id)
             if not pending_rows:
@@ -5457,11 +5496,14 @@ def create_app(config=None):
             }), 409
         profile_summary = str(params.get("profile_summary") or "")
         if not profile_summary and source_run_id:
-            source_payload = store.load_latest_pipeline_result(source_run_id)
+            if source_payload is None:
+                source_payload = store.load_latest_pipeline_result(source_run_id)
             profile_summary = str(((source_payload or {}).get("result") or {}).get("profile_summary") or "")
         result = _build_partial_pipeline_result(
             source_jobs, verdicts, pending_rows, jd_map,
             profile_summary,
+            source_dropped=source_dropped,
+            total_scraped=source_total_scraped,
         )
         snapshot_run_id = store.save_pipeline_result(
             result, {"screening": run.get("frozen_filters") or {}},
