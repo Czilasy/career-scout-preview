@@ -223,7 +223,6 @@ async function removeAccount(id: string) {
           required
           placeholder="例如：账号 C / 备用号"
         >
-        <small>名称 1-30 个字符，不能与已有账号重名；浏览器资料会自动创建在项目 `.chrome-profiles` 下。</small>
       </label>
       <button class="button primary" type="submit" :disabled="busy">
         <Plus :size="16" aria-hidden="true" />添加浏览器
@@ -313,12 +312,20 @@ async function removeAccount(id: string) {
   text-align: center;
 }
 .browser-account-add {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
+  display: flex;
   align-items: end;
+  gap: 10px;
   padding-top: 16px;
   border-top: 1px solid var(--line);
+}
+.browser-account-add .field-label {
+  flex: 1 1 200px;
+  min-width: 0;
+  max-width: 320px;
+}
+.browser-account-add .button {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 .browser-account-notice {
   margin-top: 14px;
@@ -339,13 +346,5 @@ async function removeAccount(id: string) {
 .browser-account-notice[data-tone="warning"] {
   color: var(--warning, #d97706);
   background: color-mix(in srgb, var(--warning, #d97706) 12%, transparent);
-}
-@media (max-width: 640px) {
-  .browser-account-add {
-    grid-template-columns: 1fr;
-  }
-  .browser-account-add .button {
-    width: 100%;
-  }
 }
 </style>
