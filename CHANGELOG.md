@@ -2,6 +2,12 @@
 
 ## 未发布
 
+### 变更 — 公开版身份与状态目录迁移
+- 项目更名为 Career Scout，公开仓库地址改为 `https://github.com/czyooutzilas-sketch/career-scout-preview`，作者统一为 `czyooutzilas-sketch <czyooutzilas-sketch@users.noreply.github.com>`。
+- Python 包名改为 `career-scout`，CLI 入口改为 `career-scout` / `career-summary`；WebUI 包名改为 `career-scout-webui`。
+- 本地状态目录从 `~/.career-scout` 迁移到 `~/.career-scout`；WebUI 状态目录支持 `CAREER_SCOUT_STATE_DIR`，旧的 `BOSS_WEBUI_STATE_DIR` 仍兼容。
+- README / SKILL / CONTRIBUTING / start.bat 同步为 Career Scout 身份与路径。
+
 ### 修复 — 重抓/部分快照保留原因与淘汰，前端实时同步
 - 重抓写回来源 run 时规范判定字段，同时保存 verdict_reason/caveats，不再把 JSON 字符串塞进 verdict 列导致最新结果解析异常。
 - 重抓中途“结束并保存”会保留不匹配原因、caveats 和已筛除岗位，不再出现原因空白或“已筛除 0”。

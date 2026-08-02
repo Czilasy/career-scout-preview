@@ -1,13 +1,13 @@
-# BOSS Zhipin Scraper · Job Crawler v2.3 (Chrome CDP / Plaintext Salary)
+# Career Scout · BOSS Zhipin Job Assistant v2.3 (Chrome CDP / Plaintext Salary)
 
 > 🌐 中文文档：[README.md](./README.md)
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
 ![Version](https://img.shields.io/badge/version-2.3.0-orange.svg)
 
-A lightweight **BOSS Zhipin scraper / crawler** (a.k.a. spider) for job listings on [zhipin.com](https://www.zhipin.com). Instead of driving a heavy Selenium/Playwright browser, it connects to your **already-logged-in Chrome** via the Chrome DevTools Protocol (CDP), reuses the real session, and calls the in-page search API directly — bypassing the front-end font-based anti-scraping so you get the **plaintext salary** in every record. Output goes to JSON / CSV, plus an aggregated salary/skill analysis and a copy-paste prompt for polishing your job-application materials. Also ships as a Career Scout Agent Skill.
+Career Scout is a lightweight **BOSS Zhipin job search and analysis tool** for job listings on [zhipin.com](https://www.zhipin.com). Instead of driving a heavy Selenium/Playwright browser, it connects to your **already-logged-in Chrome** via the Chrome DevTools Protocol (CDP), reuses the real session, and calls the in-page search API directly — bypassing the front-end font-based anti-scraping so you get the **plaintext salary** in every record. Output goes to JSON / CSV, plus an aggregated salary/skill analysis and a copy-paste prompt for polishing your job-application materials. Also ships as a Career Scout Agent Skill.
 
 > 📌 **In one sentence**: no Selenium/Playwright — connect to your logged-in Chrome over CDP, hit the search API with the real session, get JSON/CSV with plaintext salaries, plus salary-distribution, skill-frequency stats and a résumé-optimization prompt.
 
@@ -48,7 +48,7 @@ Right after scraping you get salary ranges, experience requirements, top skill k
 
 ## AI Job Workbench
 
-Workbench scraper tasks run through one controlled executor: every task has a total timeout and traceable failure code, cancellation terminates the child process tree, logs and artifacts are size-bounded, and artifacts must stay inside the task result directory. Job discovery only sends jobs with a valid BOSS HTTPS detail URL into detail fetching, AI assessment, and formal results.
+Workbench scraping tasks run through one controlled executor: every task has a total timeout and traceable failure code, cancellation terminates the child process tree, logs and artifacts are size-bounded, and artifacts must stay inside the task result directory. Job discovery only sends jobs with a valid BOSS HTTPS detail URL into detail fetching, AI assessment, and formal results.
 
 Before fetching begins, job discovery checks the dedicated BOSS browser once. It reports that the dedicated browser is disconnected when Chrome/CDP is unavailable, and reports that BOSS login is required when the browser is connected without an active session. A failed preflight stops the run immediately instead of retrying every search term and ending with an unknown error.
 
@@ -90,7 +90,7 @@ Completed runs use the same kept-job counts, so rough-screen removals no longer 
 The stage label switches to AI fine-screening as soon as that phase starts, instead of staying on JD details.
 Once fine screening starts, success/pending/unstarted counts follow the fine-screening progress itself instead of reusing the JD-stage count.
 7. **Advanced settings and deep-tuning lab**: Advanced settings expose Stable, Balanced, Extreme, and Custom. The backend selects the small/medium/large internal slot from the canonical planned-page count (1-9 small, 10-49 medium, 50-200 large), while mode changes never alter keywords, cities, or pages. A deep experiment requires two explicitly entered workload structures for each size and uses immutable input and speed-field config digests (including the JD concurrency tab count), an exclusive lease, staged rounds, program-owned measurements, and restart recovery. Incomplete or blocked results cannot be applied; a complete candidate requires explicit user action to apply the whole version and can roll back to the previous complete version. Version 2.3.0 delivers the experiment and verification framework only: no formal deep experiment was run, and no final Stable/Balanced/Extreme parameters are claimed as validated.
-8. **Top-bar browser account manager**: The “Browser Accounts” button in the header opens a manager with built-in A/B accounts and supports adding custom accounts (names 1-30 characters, no duplicates). Each account has an isolated profile, can be opened for a manual BOSS login, and can be set as the next task account. The account is frozen when a task is created; start, resume, recrawl, cancel, and finish all activate the matching profile and replace another scraper account's Chrome on the CDP port. Unknown Chrome is never closed automatically. While a task is paused, you can still open the browser for the account frozen into that task to finish login or verification; other accounts stay locked until the paused task is finished or cancelled. Switching while a task is running or paused only affects the next task.
+8. **Top-bar browser account manager**: The “Browser Accounts” button in the header opens a manager with built-in A/B accounts and supports adding custom accounts (names 1-30 characters, no duplicates). Each account has an isolated profile, can be opened for a manual BOSS login, and can be set as the next task account. The account is frozen when a task is created; start, resume, recrawl, cancel, and finish all activate the matching profile and replace another dedicated account's Chrome on the CDP port. Unknown Chrome is never closed automatically. While a task is paused, you can still open the browser for the account frozen into that task to finish login or verification; other accounts stay locked until the paused task is finished or cancelled. Switching while a task is running or paused only affects the next task.
 
 Restored historical results show the real elapsed time, and old snapshots without timestamps no longer show a fake “0 seconds”. Partial snapshots saved by “Finish and Save Results” also appear in history as “Completed with Needs Review”.
 Deleting a custom account is refused while that account's automation browser is running; reusing the same profile directory is also refused.
@@ -153,6 +153,7 @@ Cleanup never touches the résumé directory or uncontrolled paths, and never de
 - Résumé files: `~/.career-scout/webui/resumes/`
 
 Set `BOSS_PYTHON` before launch to select a specific Python executable.
+The WebUI state directory defaults to `~/.career-scout/webui` and can be overridden with `CAREER_SCOUT_STATE_DIR`; the legacy `BOSS_WEBUI_STATE_DIR` is still accepted.
 
 ### Resume-Driven Two-Layer Filtering (002)
 
@@ -304,18 +305,18 @@ No need to clone the whole repo — download just the files you need:
 
 ```bash
 mkdir -p ~/.hermes/skills/data-science/career-scout/scripts && \
-curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout-preview/master/SKILL.md \
+curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/SKILL.md \
   -o ~/.hermes/skills/data-science/career-scout/SKILL.md && \
-curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout-preview/master/scripts/boss_cdp_raw.py \
+curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/scripts/boss_cdp_raw.py \
   -o ~/.hermes/skills/data-science/career-scout/scripts/boss_cdp_raw.py && \
-curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout-preview/master/scripts/job_summary.py \
+curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/scripts/job_summary.py \
   -o ~/.hermes/skills/data-science/career-scout/scripts/job_summary.py
 ```
 
 ### Option 3: `hermes skills install` (requires direct GitHub access)
 
 ```bash
-hermes skills install https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout-preview/master/SKILL.md --category data-science
+hermes skills install https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/SKILL.md --category data-science
 ```
 
 > Note: this depends on the hermes process being able to reach GitHub directly. If you hit a timeout or connection failure, use Option 1 or 2.
@@ -423,6 +424,12 @@ career-scout/
 ├── CHANGELOG.md
 ├── LICENSE
 ├── pyproject.toml
+├── data/
+│   └── city_codes.json   # City codes
+├── assets/
+│   └── cover.png
+├── tools/
+│   └── start.bat         # Windows one-click WebUI launcher
 ├── scripts/
 │   ├── boss_cdp_raw.py   # Main scraping script
 │   └── job_summary.py    # Post-scrape summary + prompt
@@ -443,7 +450,7 @@ career-scout/
 
 ## How It Works
 
-This is a Chrome-CDP-based BOSS Zhipin crawler. Core flow:
+Career Scout's core scraping flow uses Chrome CDP:
 
 1. Connect to an already-open Chrome via the Chrome DevTools Protocol (CDP)
 2. Inject JS inside the BOSS Zhipin page that calls the search API via synchronous XHR
@@ -491,7 +498,7 @@ After a scrape/analysis finishes, the dedicated Chrome is **not** closed automat
 python3 scripts/boss_cdp_raw.py --stop-chrome
 ```
 
-`--stop-chrome` only closes the Chrome process(es) that belong to the scraper's isolated profile (`--user-data-dir`). It **never** kills by port or process name, so it cannot accidentally take down your main Chrome, Gmail, GitHub, or other signed-in sessions.
+`--stop-chrome` only closes the Chrome process(es) that belong to the dedicated isolated profile (`--user-data-dir`). It **never** kills by port or process name, so it cannot accidentally take down your main Chrome, Gmail, GitHub, or other signed-in sessions.
 
 If you'd rather have a particular scrape close the dedicated Chrome once it finishes normally, add `--close-chrome`:
 
@@ -515,4 +522,4 @@ MIT
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=czyooutzilas-sketch/career-scout-preview&type=Date)](https://star-history.com/#czyooutzilas-sketch/career-scout-preview&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=czyooutzilas-sketch/career-scout&type=Date)](https://star-history.com/#czyooutzilas-sketch/career-scout&Date)

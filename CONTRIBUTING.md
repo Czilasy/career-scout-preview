@@ -17,10 +17,10 @@
 git clone https://github.com/czyooutzilas-sketch/career-scout-preview.git
 cd career-scout
 pip install -r requirements.txt          # 或 uv sync
-python3 -m unittest tests.test_chrome_setup   # 跑测试，确保全绿
+python3 -m unittest discover -s tests   # 跑测试，确保全绿
 ```
 
-要求 Python 3.10+，依赖只有 `requests` 和 `websocket-client`。
+要求 Python 3.10+。Python 依赖包括 `flask`、`keyring`、`pypdf`、`python-docx`、`requests`、`websocket-client`；前端使用 Vue 3 + Vite，仓库已包含 `webui/dist` 构建产物，普通用户无需 Node.js。
 
 ## 代码规范
 
@@ -31,14 +31,15 @@ python3 -m unittest tests.test_chrome_setup   # 跑测试，确保全绿
 
 ## 测试要求
 
-- 修了 Bug 或加功能，**必须补测试**。测试在 `tests/test_chrome_setup.py`，用标准库 `unittest`，通过 mock 掉 `requests`/`websocket`，**不需要真实 Chrome 或网络**。
+- 修了 Bug 或加功能，**必须补测试**。测试在 `tests/` 下，用标准库 `unittest`，通过 mock 掉 `requests`/`websocket` 等外部依赖，**不需要真实 Chrome 或网络**。
 - 提 PR 前本地先跑通：
 
   ```bash
-  python3 -m unittest tests.test_chrome_setup
+  python3 -m unittest discover -s tests
   ```
 
 - 涉及版本号改动，会触发 `VersionConsistencyTests`，确保 `scripts/boss_cdp_raw.py`、`pyproject.toml`、`SKILL.md`、`README.md` 四处版本一致。
+- 改了 `webui/src` 前端源码后，运行 `cd webui && npm test && npm run build`，并把 `webui/dist` 构建产物一起提交，保证普通用户 clone 后开箱即用。
 
 ## 提交信息（Commit Message）
 

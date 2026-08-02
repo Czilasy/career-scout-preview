@@ -1,16 +1,16 @@
 ---
 name: career-scout
-description: "Scrape BOSS直聘 (job listing site) via Chrome CDP. Searches jobs by keyword/city/filters, fetches JD details, outputs structured JSON/CSV with plaintext salary, and can summarize scraped results into a job-market prompt. Use when user wants to search/analyze jobs on BOSS直聘 or zhipin.com."
+description: "Career Scout: search and analyze BOSS直聘 (job listing site) via Chrome CDP. Searches jobs by keyword/city/filters, fetches JD details, outputs structured JSON/CSV with plaintext salary, and can summarize scraped results into a job-market prompt. Use when user wants to search/analyze jobs on BOSS直聘 or zhipin.com."
 version: 2.3.0
-author: czyooutzilas-sketch
+author: czyooutzilas-sketch <czyooutzilas-sketch@users.noreply.github.com>
 license: MIT
-platforms: [macos, linux]
+platforms: [macos, linux, windows]
 metadata:
   hermes:
     tags: [scraper, jobs, career, cdp, chrome, zhipin, boss直聘]
 ---
 
-# BOSS直聘职位抓取工具 v2.3
+# Career Scout · BOSS直聘职位抓取工具 v2.3
 
 通过 Chrome CDP 协议抓取 BOSS直聘 (zhipin.com) 职位数据，输出结构化 JSON/CSV（含明文薪资），并可对已抓取结果生成聚合摘要和求职材料优化提示词。
 
@@ -263,11 +263,11 @@ python3 "$SCRIPT_PATH" --setup-chrome --reset-chrome-profile --cdp-port 9222
 ```bash
 # 推荐：curl 一键安装
 mkdir -p ~/.hermes/skills/data-science/career-scout/scripts && \
-curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout-preview/master/SKILL.md \
+curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/SKILL.md \
   -o ~/.hermes/skills/data-science/career-scout/SKILL.md && \
-curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout-preview/master/scripts/boss_cdp_raw.py \
+curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/scripts/boss_cdp_raw.py \
   -o ~/.hermes/skills/data-science/career-scout/scripts/boss_cdp_raw.py && \
-curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout-preview/master/scripts/job_summary.py \
+curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/scripts/job_summary.py \
   -o ~/.hermes/skills/data-science/career-scout/scripts/job_summary.py
 ```
 

@@ -1,13 +1,13 @@
-# BOSS直聘爬虫 · 职位抓取工具 v2.3（Chrome CDP / 明文薪资）
+# Career Scout · BOSS直聘职位助手 v2.3（Chrome CDP / 明文薪资）
 
 > 🌐 English documentation: [README.en.md](./README.en.md)
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
 ![Version](https://img.shields.io/badge/version-2.3.0-orange.svg)
 
-一个轻量的 **BOSS直聘爬虫（spider / crawler / scraper）**：通过 Chrome DevTools Protocol 连接本地已登录的 Chrome，复用真实登录态调用 zhipin.com 搜索 API，绕过前端字体反爬，输出含**明文薪资**的职位数据（JSON / CSV），并生成薪资分布、技能词频和求职材料优化提示词。同时作为 Career Scout Agent Skill 提供。
+Career Scout 是一个轻量的 **BOSS直聘职位搜索与求职分析工具**：通过 Chrome DevTools Protocol 连接本地已登录的 Chrome，复用真实登录态调用 zhipin.com 搜索 API，绕过前端字体反爬，输出含**明文薪资**的职位数据（JSON / CSV），并生成薪资分布、技能词频和求职材料优化提示词。同时作为 Career Scout Agent Skill 提供。
 
 > 📌 **一句话介绍**：不用 Selenium/Playwright，直接通过 Chrome DevTools Protocol 连接本地已登录的 Chrome，复用真实登录态调搜索 API，输出含明文薪资的 JSON/CSV，并生成薪资分布、技能词频和求职材料优化提示词。
 
@@ -92,7 +92,7 @@ JD 正文本身包含“限流/解锁”等岗位职责词时不会被误判成�
 AI 精筛开始后会立即切换阶段文案，不会继续显示“JD 详情”。
 AI 精筛开始后的成功/待确认/未开始按精筛自身进度统计，不再沿用 JD 阶段计数。
 7. **高级设置与深度调优实验室**：高级设置使用稳定、平衡、极限、自定义四个入口，覆盖列表抓取、JD 抓取（每批数量、岗位间隔、并发 Tab 数，默认 5）和 AI 筛选速度参数；后端按规范化后的计划页数选择小/中/大内部配置（1-9 小、10-49 中、50-200 大），模式切换不会改变关键词、城市或页数。深度实验要求用户明确填写每个规模的两种代表性结构，使用不可变输入与速度字段配置摘要、独占租约、分阶段轮次、程序测量证据和跨重启恢复；不完整或阻断结果没有应用入口，完整候选只能在用户确认后整体应用，并可整体回退上一版本。当前 2.3.0 交付的是实验与验证框架，未运行正式深度实验，也不预置或宣称最终稳定/平衡/极限参数已经验证。
-8. **顶部栏浏览器账号管理**：顶部“浏览器账号”按钮打开管理弹窗，内置 A/B，并可添加自定义账号（名称 1-30 字符且不可重名）。每个账号有独立 profile，可“打开浏览器登录”预存登录态，也可设为下一次任务账号。任务创建时冻结账号，开始、继续、补抓、取消和结束都会激活对应 profile；端口上跑着其他 scraper 账号的 Chrome 时会被替换，未知 Chrome 不会自动关闭。任务暂停时可打开该任务绑定的账号浏览器处理登录或验证，其他账号需先结束或取消暂停任务；任务运行或暂停期间切换只影响下一次任务。
+8. **顶部栏浏览器账号管理**：顶部“浏览器账号”按钮打开管理弹窗，内置 A/B，并可添加自定义账号（名称 1-30 字符且不可重名）。每个账号有独立 profile，可“打开浏览器登录”预存登录态，也可设为下一次任务账号。任务创建时冻结账号，开始、继续、补抓、取消和结束都会激活对应 profile；端口上跑着其他专用账号的 Chrome 时会被替换，未知 Chrome 不会自动关闭。任务暂停时可打开该任务绑定的账号浏览器处理登录或验证，其他账号需先结束或取消暂停任务；任务运行或暂停期间切换只影响下一次任务。
 
 历史结果恢复时显示真实起止耗时，缺少起止时间的旧数据不再显示伪“用时 0秒”。暂停任务“结束并保存”生成的 partial 快照也会出现在历史结果中，状态显示“完成，但有待确认”。
 删除自定义账号时，若该账号的自动化浏览器正在运行会被拒绝；重复使用同一资料目录也会被拒绝。
@@ -153,6 +153,7 @@ AI 只负责 JSON 结构化的简历解析、JD 排序和偏好更新，所有�
 - 状态数据库：`~/.career-scout/webui/webui.db`
 - 岗位结果：`~/.career-scout/job-result/`
 - 简历文件：`~/.career-scout/webui/resumes/`
+- WebUI 状态目录默认 `~/.career-scout/webui`，可用 `CAREER_SCOUT_STATE_DIR` 覆盖；旧的 `BOSS_WEBUI_STATE_DIR` 仍兼容。
 
 如需让 WebUI 使用指定 Python，可在启动前设置 `BOSS_PYTHON` 环境变量。
 
@@ -314,18 +315,18 @@ cp scripts/job_summary.py ~/.hermes/skills/data-science/career-scout/scripts/
 
 ```bash
 mkdir -p ~/.hermes/skills/data-science/career-scout/scripts && \
-curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout-preview/master/SKILL.md \
+curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/SKILL.md \
   -o ~/.hermes/skills/data-science/career-scout/SKILL.md && \
-curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout-preview/master/scripts/boss_cdp_raw.py \
+curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/scripts/boss_cdp_raw.py \
   -o ~/.hermes/skills/data-science/career-scout/scripts/boss_cdp_raw.py && \
-curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout-preview/master/scripts/job_summary.py \
+curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/scripts/job_summary.py \
   -o ~/.hermes/skills/data-science/career-scout/scripts/job_summary.py
 ```
 
 ### 方式 3：hermes skills install（需网络直连 GitHub）
 
 ```bash
-hermes skills install https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout-preview/master/SKILL.md --category data-science
+hermes skills install https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/SKILL.md --category data-science
 ```
 
 > 注意：此方式依赖 hermes 进程能直接访问 GitHub，如果遇到超时或连接失败，请使用方式 1 或 2。
@@ -432,6 +433,12 @@ career-scout/
 ├── CHANGELOG.md
 ├── LICENSE
 ├── pyproject.toml
+├── data/
+│   └── city_codes.json   # 城市码表
+├── assets/
+│   └── cover.png
+├── tools/
+│   └── start.bat         # Windows 一键启动 WebUI
 ├── scripts/
 │   ├── boss_cdp_raw.py   # 抓取主脚本
 │   └── job_summary.py    # 抓取后摘要 + 提示词
@@ -452,7 +459,7 @@ career-scout/
 
 ## 工作原理
 
-这是一个基于 Chrome CDP 的 BOSS直聘爬虫，核心流程：
+Career Scout 的核心抓取流程基于 Chrome CDP：
 
 1. 通过 Chrome DevTools Protocol (CDP) 连接到已打开的 Chrome
 2. 在 BOSS直聘页面内注入 JS，用同步 XHR 调用搜索 API
@@ -500,7 +507,7 @@ python3 scripts/boss_cdp_raw.py --setup-chrome --reset-chrome-profile
 python3 scripts/boss_cdp_raw.py --stop-chrome
 ```
 
-`--stop-chrome` 只关闭 scraper 隔离 profile（`--user-data-dir`）对应的 Chrome 进程，**绝不**按端口或进程名去 kill，因此不会误伤你正在用的主 Chrome、Gmail、GitHub 等账号。
+`--stop-chrome` 只关闭 专用隔离 profile（`--user-data-dir`）对应的 Chrome 进程，**绝不**按端口或进程名去 kill，因此不会误伤你正在用的主 Chrome、Gmail、GitHub 等账号。
 
 如果你希望某次抓取正常结束后就顺手关掉 Chrome，可以加 `--close-chrome`：
 
@@ -524,4 +531,4 @@ MIT
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=czyooutzilas-sketch/career-scout-preview&type=Date)](https://star-history.com/#czyooutzilas-sketch/career-scout-preview&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=czyooutzilas-sketch/career-scout&type=Date)](https://star-history.com/#czyooutzilas-sketch/career-scout&Date)

@@ -46,6 +46,7 @@ tests/fixtures/discovery/*_result.json
 
 # WebUI runtime state (sqlite DB, resumes, latest_*.json) - per-machine, sensitive
 .career-scout/
+.career-scout/
 .webui-state/
 
 # Playwright CLI test artifacts
