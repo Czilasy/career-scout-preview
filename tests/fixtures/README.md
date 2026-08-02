@@ -4,7 +4,7 @@
 
 ## 样本清单
 
-### 001 工作台
+### 基础 CLI 工作台
 
 - `sample_jobs.json` — 虚构 BOSS 岗位列表（5 条），用于搜索、去重和卡片投影测试。
 - `sample_details.json` — 虚构岗位 JD 详情（5 条），与 `sample_jobs.json` 一一对应。
@@ -12,7 +12,7 @@
 - `sample_ai_rank.json` — AI JD 排序的模拟 JSON 响应，用于分批排序与 job_id 校验测试。
 - `sample_ai_preference.json` — AI 偏好更新的模拟 JSON 响应，用于五条反馈触发偏好更新测试。
 
-### 002 简历驱动的两层筛选
+### 简历驱动的两层筛选
 
 - `sample_ai_suggest.json` — AI 读简历给筛选项建议的模拟 JSON 响应，字段结构与筛选条件一致（city/salary/experience/degree/scale/stage/industry），空字符串表示 AI 无法从简历提取。
 - `sample_screening_jobs.json` — 虚构 BOSS 岗位列表（5 条），字段结构与 `scripts/boss_cdp_raw.py` 输出一致，含硬规则核验所需字段（location/tags/company_scale/company_stage/company_industry），全部符合 `sample_screening_filters.json` 的 full 条件。
@@ -20,11 +20,11 @@
 
 ## 简历样本
 
-简历样本由 `tests/test_workbench_fixtures.py` 中的 `sample_resume_text()`、`sample_pdf_bytes()`、`sample_docx_bytes()` 和 `tests/test_screening_fixtures.py` 中的 `sample_resume_text()` 在运行时动态生成，不落盘真实简历文件。动态生成的简历内容为虚构的"张三 / Python 后端 / 上海"文本，不含任何真实个人信息。
+简历文本与 PDF/DOCX 字节由 `tests/test_workbench_fixtures.py` 中的 `sample_resume_text()`、`sample_pdf_bytes()`、`sample_docx_bytes()` 在运行时动态生成，不落盘真实简历文件。动态生成的简历内容为虚构的"张三 / Python 后端 / 上海"文本，不含任何真实个人信息。
 
-## 002 动态夹具
+## 动态夹具说明
 
-`tests/test_screening_fixtures.py` 提供筛选功能专用的动态夹具函数：`sample_filters_full/partial/empty`、`sample_ai_suggest_response`、`sample_screening_job/jobs`、`sample_mismatch_job`（按字段生成不匹配岗位）、`sample_jd_text`、`temp_screening_layout`（临时状态目录）。JSON 文件作为稳定快照，动态函数作为参数化生成，两者并存。
+筛选 JSON 样本作为稳定快照供测试直接加载；旧测试切片中的参数化筛选函数已归档，不在公开仓库中。简历文本与 PDF/DOCX 字节仍由 `tests/test_workbench_fixtures.py` 动态生成。
 
 ## 安全约束
 

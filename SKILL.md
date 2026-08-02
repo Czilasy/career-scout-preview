@@ -20,6 +20,8 @@ metadata:
 - Python 3.10+
 - 用户已登录 zhipin.com（或愿意手动登录）
 
+> Windows 用户：本文示例命令使用 `python3`，Windows 上请改用 `python`；启动 WebUI 可直接运行 `tools/start.bat`。
+
 ## 脚本位置
 
 本 skill 的脚本在 skill 目录下：

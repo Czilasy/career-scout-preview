@@ -44,6 +44,8 @@ python3 scripts/boss_cdp_raw.py --list-cities 江
 python3 scripts/job_summary.py
 ```
 
+Windows 用户：把示例中的 `python3` 换成 `python`；启动 Web 工作台可直接双击 `tools/start.bat`。
+
 抓完直接拿到：薪资分布、经验要求、高频技能词、求职材料优化提示词。CLI 提示词只基于岗位数据，不读取本地简历文件。可选的 AI 求职工作台会解析简历、生成关键词、流式展示岗位卡片并学习反馈偏好，但不会自动投递、联系招聘者或预测录用概率。
 
 **抓取被风控/验证码拦截时**：脚本会当场停止（不跳过、不伪装完成），已抓数据保留在结果文件里，终端醒目提示停在第几页、为什么、建议怎么处理（手动过验证码/歇会儿/重新登录），恢复后可用 `--start-page` 从断点续抓。退出码区分原因：`10`=被风控，`2`=调试浏览器未就绪（会提示先跑 `--setup-chrome`），`1`=其他错误。连续 3 页无数据也会停止并说明（可能是软风控，也可能是搜索条件确实没职位）。
@@ -157,9 +159,9 @@ AI 只负责 JSON 结构化的简历解析、JD 排序和偏好更新，所有�
 
 如需让 WebUI 使用指定 Python，可在启动前设置 `BOSS_PYTHON` 环境变量。
 
-### 简历驱动的两层筛选（002）
+### 简历驱动的两层筛选
 
-在 001 工作台基础上叠加的筛选功能，通过两层核验提升结果匹配度。整体流程：
+在职位工作台基础上叠加的筛选功能，通过两层核验提升结果匹配度。整体流程：
 
 1. **上传简历**：用户上传 TXT / PDF / DOCX 简历（AI 不可用时可跳过）。
 2. **AI 读取并给出建议值**：AI 读取简历内容，同时程序获取 BOSS 筛选选项枚举（薪资段、经验、学历、公司规模、融资阶段、行业、城市），AI 判断哪些选项可从简历填入，返回建议值。
@@ -214,8 +216,8 @@ AI 只负责读简历给筛选项建议（未来负责语义相似度结构化�
 
 #### 状态目录与测试
 
-- 状态目录：复用 001 的 `~/.career-scout/webui/`（筛选运行 `screening_runs`/`screening_results` 写入同一 `webui.db`，第一层抓取产物写入 `~/.career-scout/job-result/`）。
-- 依赖：复用 001 既有依赖，无新增第三方库。
+- 状态目录：筛选工作台与岗位发现共用 `~/.career-scout/webui/`（筛选运行 `screening_runs`/`screening_results` 写入同一 `webui.db`，第一层抓取产物写入 `~/.career-scout/job-result/`）。
+- 依赖：与 CLI/WebUI 现有依赖一致，无新增第三方库。
 - 自动化测试：`python -m unittest discover -s tests -v`
 
 Windows PowerShell 若希望终端完整显示 emoji，可选设置：
@@ -226,26 +228,23 @@ $env:PYTHONIOENCODING = "utf-8"
 python webui/app.py
 ```
 
-### 岗位发现 v2 收口（005）
+### 岗位发现 v2 收口
 
-在 004 工作台基础上叠加的确定性收口：通过独立 `discovery_v2` policy、四类进度、渐进结果、取消/恢复、12h 详情复用、来源断路器和分级反馈，把"快速简历驱动岗位推荐"约束在可验证的性能与安全边界内。004 历史运行继续使用 `policy v1`，005 新运行使用 `discovery_v2`，迁移 015 是 additive，不重写 001–014。
+在既有岗位发现流程基础上叠加的确定性收口：通过独立 `discovery_v2` policy、四类进度、渐进结果、取消/恢复、12h 详情复用、来源断路器和分级反馈，把"快速简历驱动岗位推荐"约束在可验证的性能与安全边界内。历史运行继续使用 `policy v1`，新运行使用 `discovery_v2`，迁移 015 是 additive，不重写旧迁移。
 
 #### 默认用户流程
 
 1. **上传简历** → 2. **AI 分析（候选人 v4）+ 方向确认** → 3. **运行进度（四类计数 + 取消/恢复）** → 4. **渐进结果（3 秒轮询，revision-based 不重绘）** → 5. **岗位/方向/判断错误反馈（声明 scope + 可撤销）**。前端根路径 `/` 是唯一正式入口，扫描上传→纠正→确认→首批结果→取消/恢复→反馈全链路。
 
-#### 性能与安全边界（自动化门 SC-001–SC-011）
+#### 性能与安全边界
 
-| 门 | 边界 | 自动化验证位置 |
-|---|---|---|
-| SC-003 | 15 详情 + 所需评估 ≤ 600 模拟秒 | `tests/test_discovery_performance.py::Sc003DeterministicOrchestrationGateTests` |
-| SC-004 | 工作单元完成后 ≤ 10 模拟秒内进度可见；刷新保留计数 | `tests/test_discovery_performance.py::Sc004Sc010Sc011PerformanceGateTests` |
-| SC-010 | cancel 后 ≤ 30 wall-clock 秒进入 `cancelled` 终态；已完成 snapshots/assessments/candidates 100% 保留 | 同上 |
-| SC-011 | 输入身份一致的 resume 不重复抓 detail、不重复调 AI | 同上 |
-| 默认详情并发 | 保持 1（policy 上限 2 需真实小样本稳定性证据后才允许提升） | `webui/source.py` 默认值 |
-| 12h 详情复用 | 同一 job 在 12h 内的运行命中复用，不重复抓 | `webui/store.py` 复用守卫 |
-| 来源断路器 | 连续失败超阈值时 `source_rate_limited`/`source_verification_required`，阻止后续抓取 | `webui/source.py` breaker |
-| 反馈作用域 | `exact_job` / `exact_direction` / `exact_assessment`；可撤销；仅影响后续运行或当前可见性，不改写历史 | `webui/store.py` + `webui/discovery.py::apply_feedback_to_next_run` |
+
+- 编排性能目标：15 详情 + 所需评估 ≤ 600 模拟秒；工作单元完成后进度 ≤ 10 模拟秒可见，刷新保留计数。
+- 取消/恢复：cancel 后 ≤ 30 秒进入 `cancelled` 终态；已完成 snapshots/assessments/candidates 100% 保留；输入身份一致的 resume 不重复抓 detail、不重复调 AI（`tests/test_process_executor.py` / `tests/test_healthy_pipeline.py` 回归）。
+- 默认详情并发保持 1，policy 上限 2 需真实小样本稳定性证据后才允许提升（`webui/source.py`）。
+- 12h 详情复用：同一 job 在 12h 内的运行命中复用，不重复抓（`webui/store.py`）。
+- 来源断路器：连续失败超阈值时 `source_rate_limited`/`source_verification_required`，阻止后续抓取（`webui/source.py`）。
+- 反馈作用域：`exact_job` / `exact_direction` / `exact_assessment`；可撤销；仅影响后续运行或当前可见性，不改写历史（`webui/store.py` + `webui/workbench.py`）。
 
 #### 运行命令与兼容说明
 
@@ -259,16 +258,13 @@ python3 webui/app.py
 
 # 自动化测试（无需真实 Chrome/网络，全 mock）
 python3 -m unittest discover -s tests -v
-
-# 黄金样本评估（SC-003–SC-009 标注一致性，不调真实 AI）
-python3 tests/fixtures/discovery/evaluate.py
 ```
 
 兼容说明：
 
-- 004 历史运行继续使用 `policy v1`；005 新运行使用 `discovery_v2`；两套策略共存，不互相改写历史。
-- Migration 015 additive：只新增列与表，不重写 001–014；老库可直接升级。
-- 默认详情并发为 1；只有真实小样本稳定性证据通过后才允许 policy 上限 2（不在 feature 005 范围内）。
+- 历史运行继续使用 `policy v1`；新运行使用 `discovery_v2`；两套策略共存，不互相改写历史。
+- Migration 015 additive：只新增列与表，不重写旧迁移；老库可直接升级。
+- 默认详情并发为 1；只有真实小样本稳定性证据通过后才允许 policy 上限 2。
 - 反馈只作用于声明 scope 和后续运行；历史 profile/confirmation/assessment 事实永不改写。
 
 ## ✨ 特性
@@ -280,7 +276,7 @@ python3 tests/fixtures/discovery/evaluate.py
 - 增量写入（异常退出不丢数据）
 - 一键环境检查 + 持久隔离 Chrome CDP profile
 - 多维筛选（规模、融资、薪资、经验、学历、行业）
-- macOS + Linux 支持；Windows 路径、进程解析和 WebUI 已有自动化测试，真实抓取仍需在本机 Chrome 登录态下验证
+- Windows / macOS / Linux；WebUI、Windows 路径与进程解析已有自动化覆盖，真实抓取仍需在本机 Chrome 登录态下验证
 
 <details>
 <summary>🔍 为什么不选 Selenium / Playwright 类爬虫？</summary>

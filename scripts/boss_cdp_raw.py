@@ -2040,7 +2040,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
     - ``tab_pool_size``: 常驻 tab 数，默认 5，上限 10。
     - ``stagger_range``: 错峰启动间隔范围秒，默认 (5, 10)。
 
-    实现要点（见 specs/005-fast-resume-discovery/contracts/state-machine.md）：
+    实现要点：
     - 串行：每批最多 5 个候选；每批复用一个 CDP 会话，逐岗位开 target。
     - 并行（⑧）：N 个常驻 tab 各配一条工作线程 + 独立 CDP 会话；进队列前
       打乱 JD 列表；错峰启动 + 补位节奏；登录墙触发降级事件。

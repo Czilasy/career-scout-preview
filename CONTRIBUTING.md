@@ -20,13 +20,15 @@ pip install -r requirements.txt          # 或 uv sync
 python3 -m unittest discover -s tests   # 跑测试，确保全绿
 ```
 
+Windows 用户把 `python3` 换成 `python`；启动 WebUI 可直接双击 `tools/start.bat`。
+
 要求 Python 3.10+。Python 依赖包括 `flask`、`keyring`、`pypdf`、`python-docx`、`requests`、`websocket-client`；前端使用 Vue 3 + Vite，仓库已包含 `webui/dist` 构建产物，普通用户无需 Node.js。
 
 ## 代码规范
 
 - **风格**：遵循 [PEP 8](https://peps.python.org/pep-0008/)，用 4 空格缩进、UTF-8、LF 换行。
 - **异常处理**：不要用 bare `except:`，必须捕获具体异常类型（`requests.ConnectionError`、`json.JSONDecodeError` 等），项目现有的代码就是这么做的，请保持一致。
-- **单文件原则**：核心逻辑都在 `scripts/boss_cdp_raw.py`，新增小工具函数也放这里，不要随手建新文件。
+- **单文件原则**：核心 CLI 抓取逻辑都在 `scripts/boss_cdp_raw.py`，新增 CLI 小工具函数也放这里；WebUI 业务按模块组织在 `webui/` 下，不要随手在根目录新建文件。
 - **注释**：复杂逻辑要写注释（参考 `human_scroll` 的做法）；公开函数补 docstring。
 
 ## 测试要求

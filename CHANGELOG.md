@@ -5,8 +5,13 @@
 ### 变更 — 公开版身份与状态目录迁移
 - 项目更名为 Career Scout，公开仓库地址改为 `https://github.com/czyooutzilas-sketch/career-scout-preview`，作者统一为 `czyooutzilas-sketch <czyooutzilas-sketch@users.noreply.github.com>`。
 - Python 包名改为 `career-scout`，CLI 入口改为 `career-scout` / `career-summary`；WebUI 包名改为 `career-scout-webui`。
-- 本地状态目录从 `~/.career-scout` 迁移到 `~/.career-scout`；WebUI 状态目录支持 `CAREER_SCOUT_STATE_DIR`，旧的 `BOSS_WEBUI_STATE_DIR` 仍兼容。
+- 本地状态目录统一为 `~/.career-scout`；WebUI 状态目录支持 `CAREER_SCOUT_STATE_DIR`，旧的 `BOSS_WEBUI_STATE_DIR` 仍兼容。
 - README / SKILL / CONTRIBUTING / start.bat 同步为 Career Scout 身份与路径。
+
+### 变更 — 开源发布准备
+- 新增 `tools/prepare_public_release.py`，按白名单生成公开发布树（`.release/career-scout`），移除内部 specs/docs、本地状态、敏感测试与私有 `agents.md` 内容。
+- README / SKILL / CONTRIBUTING / CHANGELOG 清理内部 spec 编号、失效文件引用与旧包名，补充 Windows 启动说明。
+- 平台支持说明更新为 Windows / macOS / Linux；WebUI 与 Windows 路径/进程逻辑有自动化覆盖，真实抓取仍需本机 Chrome 登录态验证。
 
 ### 修复 — 重抓/部分快照保留原因与淘汰，前端实时同步
 - 重抓写回来源 run 时规范判定字段，同时保存 verdict_reason/caveats，不再把 JSON 字符串塞进 verdict 列导致最新结果解析异常。
@@ -65,6 +70,7 @@
 - 修复刷新页面时旧历史结果覆盖暂停任务的问题：页面挂载先恢复运行/暂停任务，再读取历史结果。
 
 ### 新增 — 双浏览器账号 A/B
+- 高级执行设置新增浏览器账号 A/B：A 使用默认 `~/.career-scout/chrome-profile`，B 使用项目 `.chrome-profiles/account_b`。
 - 高级执行设置新增浏览器账号 A/B：A 使用默认 `~/.career-scout/chrome-profile`，B 使用项目 `.chrome-profiles/account_b`。
 - 任务创建时冻结账号，开始、继续、补抓、取消和结束都会激活对应 profile；CDP 端口上跑错账号的 Chrome 会被替换。任务运行或暂停期间锁定切换。
 

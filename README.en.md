@@ -42,6 +42,8 @@ python3 scripts/boss_cdp_raw.py --list-cities 江
 python3 scripts/job_summary.py
 ```
 
+Windows users: replace `python3` with `python` in the examples; to launch the web workbench, double-click `tools/start.bat`.
+
 Right after scraping you get salary ranges, experience requirements, top skill keywords, and an application-optimization prompt. The CLI prompt only uses scraped job data and never reads a local résumé. The optional AI Job Workbench parses your résumé, generates keywords, streams job cards, and learns from feedback — but it never auto-applies, contacts recruiters, or predicts hiring probability.
 
 **When scraping hits risk control or a captcha**: the script stops on the spot (no silent skipping, no fake success), keeps everything already scraped in the result file, and prints a prominent message explaining which page failed, why, and what to do next (solve the captcha manually / take a break / log in again). Resume from the checkpoint with `--start-page`. Exit codes tell the failure apart: `10` = risk control, `2` = debug browser unavailable (with a hint to run `--setup-chrome` first), `1` = other errors. Three consecutive empty pages also stop the run with an explanation (likely soft throttling, or the search truly has no results).
@@ -155,9 +157,9 @@ Cleanup never touches the résumé directory or uncontrolled paths, and never de
 Set `BOSS_PYTHON` before launch to select a specific Python executable.
 The WebUI state directory defaults to `~/.career-scout/webui` and can be overridden with `CAREER_SCOUT_STATE_DIR`; the legacy `BOSS_WEBUI_STATE_DIR` is still accepted.
 
-### Resume-Driven Two-Layer Filtering (002)
+### Resume-Driven Two-Layer Filtering
 
-A filtering capability layered on top of the 001 workbench, improving match quality via two-layer verification. Overall flow:
+A filtering capability layered on top of the job workbench, improving match quality via two-layer verification. Overall flow:
 
 1. **Upload résumé**: The user uploads a TXT / PDF / DOCX résumé (skippable when AI is unavailable).
 2. **AI reads and suggests values**: The AI reads the résumé while the program fetches the BOSS filter option enumerations (salary range, experience, degree, company scale, funding stage, industry, city). The AI judges which options can be filled from the résumé and returns suggested values.
@@ -212,30 +214,27 @@ The AI is only responsible for reading the résumé to suggest filter values (an
 
 #### State Directories and Testing
 
-- State directories: reuses 001's `~/.career-scout/webui/` (screening runs `screening_runs`/`screening_results` are written to the same `webui.db`; layer-1 scrape output goes to `~/.career-scout/job-result/`).
-- Dependencies: reuses 001's existing dependencies; no new third-party libraries.
+- State directories: the screening workbench and job discovery share `~/.career-scout/webui/` (screening runs `screening_runs`/`screening_results` are written to the same `webui.db`; layer-1 scrape output goes to `~/.career-scout/job-result/`).
+- Dependencies: the same dependencies as the rest of the CLI/WebUI; no new third-party libraries.
 - Automated tests: `python -m unittest discover -s tests -v`
 
-### Fast Resume-Driven Discovery Closure (005)
+### Fast Resume-Driven Discovery Closure
 
-Deterministic closure layered on the 004 workbench: an independent `discovery_v2` policy, four-class progress, progressive results, cancel/resume, 12-hour detail reuse, a source circuit breaker and scoped feedback confine "fast resume-driven job recommendation" within verifiable performance and security boundaries. 004 historical runs keep `policy v1`; new 005 runs use `discovery_v2`; migration 015 is additive and never rewrites 001–014.
+Deterministic closure layered on the existing discovery flow: an independent `discovery_v2` policy, four-class progress, progressive results, cancel/resume, 12-hour detail reuse, a source circuit breaker and scoped feedback confine "fast resume-driven job recommendation" within verifiable performance and security boundaries. Historical runs keep `policy v1`; new runs use `discovery_v2`; migration 015 is additive and never rewrites older migrations.
 
 #### Default user flow
 
 1. **Upload résumé** → 2. **AI analysis (candidate v4) + direction confirmation** → 3. **Run progress (four-class counters + cancel/resume)** → 4. **Progressive results (3-second polling, revision-based no-redraw)** → 5. **Job/direction/judgment-error feedback (declared scope + revocable)**. The root path `/` is the only official frontend entry, covering upload → correction → confirmation → first batch → cancel/resume → feedback end-to-end.
 
-#### Performance and security boundaries (automated gates SC-001–SC-011)
+#### Performance and security boundaries
 
-| Gate | Boundary | Automated verification |
-|---|---|---|
-| SC-003 | 15 details + required assessments ≤ 600 simulated seconds | `tests/test_discovery_performance.py::Sc003DeterministicOrchestrationGateTests` |
-| SC-004 | Progress visible within 10 simulated seconds of work-unit completion; refresh preserves counts | `tests/test_discovery_performance.py::Sc004Sc010Sc011PerformanceGateTests` |
-| SC-010 | After cancel, reaches `cancelled` terminal state within 30 wall-clock seconds; completed snapshots/assessments/candidates preserved 100% | same as above |
-| SC-011 | Resume with identical input identity does not re-fetch details or re-invoke AI | same as above |
-| Default detail concurrency | Stays at 1 (policy ceiling 2 only after real small-sample stability evidence) | `webui/source.py` default |
-| 12-hour detail reuse | Same job reused within 12h across runs, not re-fetched | `webui/store.py` reuse guard |
-| Source circuit breaker | Trips to `source_rate_limited`/`source_verification_required` after consecutive failures, blocks further fetches | `webui/source.py` breaker |
-| Feedback scope | `exact_job` / `exact_direction` / `exact_assessment`; revocable; affects only subsequent runs or current visibility, never rewrites history | `webui/store.py` + `webui/discovery.py::apply_feedback_to_next_run` |
+
+- Orchestration performance target: 15 details + required assessments ≤ 600 simulated seconds; progress is visible within 10 simulated seconds of work-unit completion and survives refresh.
+- Cancel/resume: cancel reaches the `cancelled` terminal state within 30 seconds; completed snapshots/assessments/candidates are preserved 100%; resuming with identical input identity does not re-fetch details or re-invoke AI (regression-covered by `tests/test_process_executor.py` / `tests/test_healthy_pipeline.py`).
+- Default detail concurrency stays at 1; the policy ceiling of 2 is allowed only after real small-sample stability evidence (`webui/source.py`).
+- 12-hour detail reuse: the same job is reused within 12h across runs and is not re-fetched (`webui/store.py`).
+- Source circuit breaker: trips to `source_rate_limited`/`source_verification_required` after consecutive failures and blocks further fetches (`webui/source.py`).
+- Feedback scope: `exact_job` / `exact_direction` / `exact_assessment`; revocable; affects only subsequent runs or current visibility, never rewrites history (`webui/store.py` + `webui/workbench.py`).
 
 #### Run commands and compatibility notes
 
@@ -249,16 +248,13 @@ python3 webui/app.py
 
 # Automated tests (no real Chrome/network, fully mocked)
 python3 -m unittest discover -s tests -v
-
-# Golden-sample evaluation (SC-003–SC-009 annotation consistency, no real AI)
-python3 tests/fixtures/discovery/evaluate.py
 ```
 
 Compatibility notes:
 
-- 004 historical runs keep `policy v1`; new 005 runs use `discovery_v2`; both policies coexist, neither rewrites the other's history.
-- Migration 015 is additive: only new columns and tables, never rewrites 001–014; existing databases can upgrade in place.
-- Default detail concurrency is 1; the policy ceiling of 2 is only enabled after real small-sample stability evidence (out of scope for feature 005).
+- Historical runs keep `policy v1`; new runs use `discovery_v2`; both policies coexist, neither rewrites the other's history.
+- Migration 015 is additive: only new columns and tables, never rewrites older migrations; existing databases can upgrade in place.
+- Default detail concurrency is 1; the policy ceiling of 2 is only enabled after real small-sample stability evidence.
 - Feedback affects only the declared scope and subsequent runs; historical profile/confirmation/assessment facts are never rewritten.
 
 ## ✨ Features
@@ -270,7 +266,7 @@ Compatibility notes:
 - Incremental writes (no data loss on crash)
 - One-shot environment check + persistent isolated Chrome CDP profile
 - Multi-dimension filters (scale, funding, salary, experience, degree, industry)
-- macOS + Linux support; Windows paths, process parsing, and the Web UI have automated coverage, while real scraping still requires validation against a logged-in local Chrome session
+- Windows / macOS / Linux; the Web UI, Windows paths, and process parsing have automated coverage, while real scraping still requires validation against a logged-in local Chrome session
 
 <details>
 <summary>🔍 Why not a Selenium / Playwright crawler?</summary>

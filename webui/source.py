@@ -119,8 +119,7 @@ SAFE_FAILURE_CODES = frozenset({
 class SourceCircuitBreaker:
     """Stateful circuit breaker for source-blocking signals.
 
-    Contract (specs/005-fast-resume-discovery/contracts/state-machine.md
-    L92-107):
+    Contract (state machine, L92-107):
 
     - Opens after two consecutive source signals from: login wall,
       verification page, explicit rate-limit response, or repeated
@@ -523,8 +522,7 @@ class BossCdpSource:
         output by ``job_link``) and the corresponding terminal safe event
         parsed from the events JSONL file.
 
-        Contract (see specs/005-fast-resume-discovery/contracts/state-machine.md
-        §Producer / Consumer Boundaries):
+        Contract (state machine §Producer / Consumer Boundaries):
 
         - Each batch contains at most 5 selected candidates.
         - Each job emits exactly one terminal safe event:

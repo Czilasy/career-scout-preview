@@ -20,6 +20,7 @@ ENV/
 # Build and package artifacts
 build/
 dist/
+.release/
 webui/node_modules/
 !webui/dist/
 !webui/dist/**

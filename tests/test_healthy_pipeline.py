@@ -649,7 +649,26 @@ class Sc015AcceptanceHarnessTests(unittest.TestCase):
 class Spec010DocumentConsistencyTests(unittest.TestCase):
     """FR-045：规格工件不得把无法核验的 30/8/608 写成事实。"""
 
+    def _skip_if_internal_specs_missing(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        missing = [
+            relative
+            for relative in (
+                "specs/010-healthy-pipeline-recovery/contracts/api-contracts.md",
+                "specs/010-healthy-pipeline-recovery/data-model.md",
+                "specs/010-healthy-pipeline-recovery/quickstart.md",
+                "specs/010-healthy-pipeline-recovery/spec.md",
+                "specs/010-healthy-pipeline-recovery/tasks.md",
+            )
+            if not (root / relative).exists()
+        ]
+        if missing:
+            self.skipTest(
+                "internal spec artifacts are not shipped in public releases: " + missing[0]
+            )
+
     def test_contract_and_quickstart_do_not_guess_historical_subclasses(self):
+        self._skip_if_internal_specs_missing()
         root = pathlib.Path(__file__).resolve().parents[1]
         for relative in (
             "specs/010-healthy-pipeline-recovery/contracts/api-contracts.md",
@@ -672,6 +691,7 @@ class Spec010DocumentConsistencyTests(unittest.TestCase):
             self.assertIn("historical_reason_unavailable", text, relative)
 
     def test_final_artifacts_record_acceptance_amendments_without_fabricating_passes(self):
+        self._skip_if_internal_specs_missing()
         root = pathlib.Path(__file__).resolve().parents[1]
         spec = (
             root / "specs/010-healthy-pipeline-recovery/spec.md"
