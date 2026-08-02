@@ -39,6 +39,11 @@ htmlcov/
 .tox/
 .nox/
 
+# Local-only tests, not part of the public release
+tests/run_isolated_webui.py
+tests/sc002_24h_monitor.py
+tests/test_historical_recovery_realdb.py
+
 # Project-generated local files
 docs/
 debug.log
@@ -46,7 +51,6 @@ tests/regression_*.txt
 tests/fixtures/discovery/*_result.json
 
 # WebUI runtime state (sqlite DB, resumes, latest_*.json) - per-machine, sensitive
-.career-scout/
 .career-scout/
 .webui-state/
 

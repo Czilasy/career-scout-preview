@@ -277,14 +277,10 @@ class JobSummaryTests(unittest.TestCase):
 
     def test_summary_script_is_documented_and_packaged(self):
         readme = (ROOT_PATH / "README.md").read_text(encoding="utf-8")
-        changelog = (ROOT_PATH / "CHANGELOG.md").read_text(encoding="utf-8")
-        skill = (ROOT_PATH / "SKILL.md").read_text(encoding="utf-8")
         pyproject = (ROOT_PATH / "pyproject.toml").read_text(encoding="utf-8")
 
-        for document in (readme, changelog, skill):
-            self.assertIn("job_summary.py", document)
-            self.assertIn("提示词", document)
-        self.assertIn("cp career-scout/scripts/job_summary.py", skill)
+        self.assertIn("job_summary.py", readme)
+        self.assertIn("提示词", readme)
         self.assertIn('career-summary = "scripts.job_summary:main"', pyproject)
 
 

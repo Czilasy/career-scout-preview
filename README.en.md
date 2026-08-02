@@ -1,521 +1,129 @@
-# Career Scout · BOSS Zhipin Job Assistant v2.3 (Chrome CDP / Plaintext Salary)
+# Career Scout · BOSS Zhipin Job Assistant v2.3
 
-> 🌐 中文文档：[README.md](./README.md)
+Career Scout is a job-search and career-analysis tool for BOSS直聘 (zhipin.com), built on the Chrome DevTools Protocol (CDP). It connects to your already-logged-in Chrome, reuses the real session to scrape job listings and JD details, and writes JSON / CSV results with plaintext salaries. It also generates salary distributions, skill-frequency stats, and copy-paste prompts for polishing your job-application materials.
 
-![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)
-![Version](https://img.shields.io/badge/version-2.3.0-orange.svg)
+The project ships with a local web workbench for resume-driven screening, AI semantic evaluation, interested/trash management, and resumable tasks. Data is stored locally under `~/.career-scout`, and AI keys are saved through the system credential store rather than project files or logs.
 
-Career Scout is a lightweight **BOSS Zhipin job search and analysis tool** for job listings on [zhipin.com](https://www.zhipin.com). Instead of driving a heavy Selenium/Playwright browser, it connects to your **already-logged-in Chrome** via the Chrome DevTools Protocol (CDP), reuses the real session, and calls the in-page search API directly — bypassing the front-end font-based anti-scraping so you get the **plaintext salary** in every record. Output goes to JSON / CSV, plus an aggregated salary/skill analysis and a copy-paste prompt for polishing your job-application materials. Also ships as a Career Scout Agent Skill.
+> Positioning: a personal job-analysis tool for learning and research. It is not a large-scale crawler, and it never auto-applies, contacts recruiters, or predicts hiring probability.
 
-> 📌 **In one sentence**: no Selenium/Playwright — connect to your logged-in Chrome over CDP, hit the search API with the real session, get JSON/CSV with plaintext salaries, plus salary-distribution, skill-frequency stats and a résumé-optimization prompt.
+## Disclaimer
 
----
+This project is provided for learning and technical research only. Please read the [BOSS直聘 user agreement](https://www.zhipin.com/about/protocol.html) and applicable laws before using it. Do not use it for commercial resale, malicious scraping, or to put load on the target website. You are responsible for how you use this software.
 
-## ⚠️ Disclaimer
+## Quick Start
 
-This project is for **learning and technical research purposes only**. It is intended to explore Chrome DevTools Protocol, front-end anti-scraping mechanisms, and data-collection techniques. Do **not** use it for any purpose that violates the [BOSS Zhipin Terms of Service](https://www.zhipin.com/about/protocol.html) or applicable laws and regulations, including commercial resale, malicious scraping, or any activity that imposes undue load on the target site. Users are solely responsible for the consequences of using this project; the author is not liable for any misuse.
+### Requirements
 
----
+- Python 3.10+
+- Chrome browser
+- Optional: Node.js 18+ (only needed when modifying the WebUI frontend)
 
-## 🚀 30-Second Quick Start
+### Install
 
 ```bash
-# 1. Clone + install deps
 git clone https://github.com/czyooutzilas-sketch/career-scout-preview.git
 cd career-scout
-pip install -r requirements.txt          # or: uv sync
-
-# 2. Launch an isolated Chrome and log in (only once; session persists)
-python3 scripts/boss_cdp_raw.py --setup-chrome
-
-# 3. Scrape + analyze
-python3 scripts/boss_cdp_raw.py --keyword "AI Agent" --city 上海 --pages 3 --analysis
-
-# Cities nationwide are supported (incl. tier-3/4/5), e.g.:
-python3 scripts/boss_cdp_raw.py --keyword "前端" --city 赣州 --pages 3
-# List supported cities: --list-cities [keyword]
-python3 scripts/boss_cdp_raw.py --list-cities 江
-
-# 4. Generate an aggregated summary + prompt after scraping (reads the latest result)
-python3 scripts/job_summary.py
+pip install -r requirements.txt
+# or with uv
+uv sync
 ```
 
-Windows users: replace `python3` with `python` in the examples; to launch the web workbench, double-click `tools/start.bat`.
-
-Right after scraping you get salary ranges, experience requirements, top skill keywords, and an application-optimization prompt. The CLI prompt only uses scraped job data and never reads a local résumé. The optional AI Job Workbench parses your résumé, generates keywords, streams job cards, and learns from feedback — but it never auto-applies, contacts recruiters, or predicts hiring probability.
-
-**When scraping hits risk control or a captcha**: the script stops on the spot (no silent skipping, no fake success), keeps everything already scraped in the result file, and prints a prominent message explaining which page failed, why, and what to do next (solve the captcha manually / take a break / log in again). Resume from the checkpoint with `--start-page`. Exit codes tell the failure apart: `10` = risk control, `2` = debug browser unavailable (with a hint to run `--setup-chrome` first), `1` = other errors. Three consecutive empty pages also stop the run with an explanation (likely soft throttling, or the search truly has no results).
-
-## AI Job Workbench
-
-Workbench scraping tasks run through one controlled executor: every task has a total timeout and traceable failure code, cancellation terminates the child process tree, logs and artifacts are size-bounded, and artifacts must stay inside the task result directory. Job discovery only sends jobs with a valid BOSS HTTPS detail URL into detail fetching, AI assessment, and formal results.
-
-Before fetching begins, job discovery checks the dedicated BOSS browser once. It reports that the dedicated browser is disconnected when Chrome/CDP is unavailable, and reports that BOSS login is required when the browser is connected without an active session. A failed preflight stops the run immediately instead of retrying every search term and ending with an unknown error.
-
-After installing dependencies, start the local workspace:
+### Start the Dedicated Chrome and Log In
 
 ```bash
-python3 webui/app.py
+python scripts/boss_cdp_raw.py --setup-chrome
 ```
 
-Open `http://127.0.0.1:5000`. The root path `/` is the only supported frontend entry point. The frontend uses Vue 3 + TypeScript + Vite. Its shared header switches between the Job Discovery and Screening Workbench modes while reusing profile selection, browser status, AI settings, notices, and the job list/detail components. Desktop uses a compact list plus detail pane; job rows in sparse categories keep their compact height and stay top-aligned instead of stretching into unused list space. Narrow screens open a full-screen detail view, and the AI Settings action remains directly reachable on mobile.
+The script starts a dedicated BOSS Chrome window. Log in to zhipin.com in that window; the session is stored under `~/.career-scout/chrome-profile` and only needs to be created once.
 
-The repository includes the built `webui/dist/`, so regular users do not need Node.js. When changing frontend source, run:
+### Scrape Jobs
 
 ```bash
+python scripts/boss_cdp_raw.py --keyword "AI Agent" --city 上海 --pages 3
+```
+
+Results are written to `~/.career-scout/job-result/boss_jobs_*.json` by default. Use `--format csv` for CSV output.
+
+Common options:
+
+| Option | Description |
+| --- | --- |
+| `--keyword` | Search keyword, default `AI Agent` |
+| `--city` | City name or city code, default 上海 |
+| `--pages` | Number of pages to scrape |
+| `--start-page` | Resume from a specific page |
+| `--detail` / `--no-detail` | Scrape JD details, enabled by default |
+| `--max-details` | Maximum number of details to scrape |
+| `--format` | Output format: `json` or `csv` |
+| `--analysis` | Print an analysis report after scraping |
+| `--input` | Read from an existing JSON file, skipping scraping |
+| `--check` | Run environment diagnostics |
+| `--smoke-test` | Real browser/API smoke test without writing result files |
+| `--setup-chrome` / `--stop-chrome` | Start / stop the dedicated Chrome |
+| `--list-cities` | List supported cities |
+
+If the scraper is blocked by risk control or a captcha, it stops immediately, keeps already-scraped data, and tells you which page and why. Once the issue is resolved, use `--start-page` to resume.
+
+### Generate a Summary and Prompt
+
+```bash
+python scripts/job_summary.py
+```
+
+It reads the newest `boss_jobs_*.json` from `~/.career-scout/job-result` and prints a market summary plus a copyable prompt. Use `--prompt-only` to print only the prompt.
+
+### Start the Web Workbench
+
+```bash
+python webui/app.py
+```
+
+Open `http://127.0.0.1:5000`. On Windows you can also double-click `tools/start.bat`; the script checks the frontend build state and cleans up stale server processes automatically.
+
+## Web Workbench Features
+
+- **Job discovery**: a four-step flow of resume analysis, search confirmation, coarse/AI screening with JD scraping, and result review. Scraping and AI screening are separate actions, never merged into one uncontrolled run.
+- **Resume-driven two-layer screening**: layer one comes from BOSS search results; layer two combines hard rules with AI semantic assessment. When AI is unavailable, the flow can degrade to manual filtering, skipping the resume, or hard rules only.
+- **Result zones**: match/mismatch are temporary zones, while interested/trash are persistent zones. Results are shown as matched, mismatched, pending review, or filtered out.
+- **Resumable tasks**: captcha, login expiry, source blocking, and AI rate limits pause the task with a clear reason. Tasks can resume from persisted checkpoints after a service restart without redoing scraped listings, JDs, or AI decisions.
+- **Browser accounts**: built-in A/B accounts plus custom accounts, each with its own persistent Chrome profile.
+- **Advanced settings and tuning experiments**: control list scraping, JD scraping, and AI screening parameters. The current release provides the experiment framework, not unverified final parameters.
+- **Historical recovery**: preview, prepare, and execute recovery of historical runs. Old data without concrete failure evidence is labeled clearly instead of guessed.
+
+## Privacy and Safety Boundaries
+
+- Job data, resumes, and AI keys are processed locally. AI keys are stored via the system credential store (Windows Credential Manager / macOS Keychain / Linux Secret Service), never in SQLite, logs, or export files.
+- Resume reads and AI-setting endpoints are protected by a local session token.
+- The frontend only opens HTTPS job links on the expected BOSS domain (`zhipin.com`).
+- The project never auto-applies, contacts recruiters, or predicts hiring probability.
+- Failures are reported honestly: risk control, captchas, login expiry, and rate limits are distinguished rather than masked as success.
+
+## Project Layout
+
+```text
+scripts/boss_cdp_raw.py   # CLI scraper entry point
+scripts/job_summary.py    # results → summary and prompt
+data/city_codes.json      # city code table
+webui/                    # Flask backend + Vue 3 frontend source
+webui/dist/               # prebuilt frontend; no Node.js needed for normal use
+tests/                    # unittest, fully mocked, no real Chrome/network
+tools/start.bat           # Windows one-click WebUI launcher
+pyproject.toml            # packaging; entry points career-scout / career-summary
+requirements.txt          # Python dependencies
+```
+
+## Development and Testing
+
+```bash
+python -m unittest discover -s tests
 cd webui
 npm install
 npm test
 npm run build
 ```
 
-The desktop `tools/start.bat` checks the build state of `webui/dist` against the current backend code and frontend source before starting. If either changed, it runs `npm run build` automatically, so normal startup does not require a manual build.
-
-### Core Capabilities
-
-1. **Four-step job discovery**: The workflow stays in this order: upload and analyze the résumé → confirm keywords/cities and scrape broadly → confirm six filter groups and run Stage A, fetch JDs, then run Stage B → review results. Scraping and AI screening remain two separate user actions.
-2. **Failures never masquerade as success**: A Stage B provider failure or missing verdict routes the job to Needs Review instead of defaulting to Match. When the job-seeker profile is empty, Stage B is skipped entirely — every job lands in Needs Review with a stated reason and no AI call is made. Each AI screening request is bound to the exact completed scrape task ID to prevent cross-run result mix-ups. AI screening can be cancelled anytime via the Stop button; AI timeouts and server faults retry with backoff, quota exhaustion stops immediately with a clear message, and truncated replies are retried with smaller batches. If the BOSS login expires mid JD-fetching, the run stops and honestly reports how many were fetched. A systemically blocked or service-restarted run can resume from its persisted checkpoint without redoing fetched JDs or finished verdicts; user cancellation is terminal, and a new task never inherits a cancelled task's checkpoint. Concurrent clicks or automatic inheritance of the same paused checkpoint are claimed exactly once. Each fine-screening batch persists its verdicts and checkpoint atomically; failure to create the run, save a batch, or commit the terminal state stops the task instead of reporting in-memory success. Independent job failures persist as `completed_with_pending`, which the UI still recognizes after a service restart.
-3. **Large-result workspace**: Match, Not Match, Needs Review, and Screened Out live directly in the category tabs without duplicate summary cards. On desktop, the result workspace fits one viewport and only the job list or an oversized detail pane scrolls. The UI initially renders 30 rows, loads more on demand, and creates only one detail panel.
-A service-restart interrupted task can inherit its saved checkpoint through “Start AI Screening Again”; user-cancelled or user-finished tasks remain terminal.
-Refresh recovery restores the saved screening fields and profile summary; a restart-interrupted task can also be finished and saved directly.
-After a successful resume, the old interrupted record no longer reappears; duplicate resumes for the same source are rejected.
-4. **Explicit feedback boundary**: In Job Discovery, Interested persists to the current profile; Not Interested stays in memory for the current run and is revocable. JD retry updates only the JD and never reruns AI or changes the existing verdict.
-5. **Screening Workbench**: Keeps seven filter fields, page/detail limits, résumé-based AI suggestions, run cancel/resume, temporary match/mismatch/pending zones, persistent interested/trash zones, and 30-day cleanup for temporary runs.
-6. **A pause-and-resume healthy pipeline**: List scraping, JD fetching, and AI screening pause immediately on CAPTCHA, expired login, source blocking, or AI rate limits. The UI keeps the browser open and shows the current stage, exact reason, and success/failure/unstarted/total counts. A refresh or service restart can resume from the persisted checkpoint without repeating scraped jobs, JDs, or AI verdicts. A batch-level CDP, WebSocket, or session failure persists a specific code and readable reason for every affected job before pausing instead of swallowing the batch as empty. Resume first rechecks whether the blocker is actually gone; AI rate-limit and network pauses perform a minimal connection check, and unresolved blockers remain paused. Concurrent duplicate clicks allow only one background worker to claim the run. Jobs without a result go to Needs Review, where users can retry all or fetch one JD; a second blocker follows the same pause-and-resume behavior. Genuine short JDs are judged by extraction provenance and content rather than a fixed character threshold or a finite keyword list. When historical data lacks evidence for a specific failure category, the UI states that the old flow did not preserve the reason and shows the next recrawl action instead of inventing a classification. Every mutating request is rejected with a refresh prompt when the page build and running backend do not match, preventing an old service from silently executing a new workflow.
-A real JD that happens to contain words such as “rate limit” or “unlock” is no longer misclassified as an account rate-limit page; risk classification only applies when no real JD is available.
-Paused tasks now offer Finish and Save Results from any paused stage: without waiting for a rate-limit window to unlock, the task rebuilds completed list/JD/AI work into a partial snapshot, ends the paused run, and closes the dedicated browser; after a refresh the partial snapshot is shown directly instead of an older history result. Account-level rate limiting is classified separately from CAPTCHA/slider verification, so an account throttling message no longer appears as a generic verification error. During JD detail and fine-screening stages, success/failure/unstarted/total counts use the stage's kept job count, while the original list total is returned separately, so stage counters are not mixed with list totals.
-During recrawl, the page merges completed verdicts and JDs as batches finish; after a pause or refresh it shows the source run's latest result instead of a stale snapshot. When a recrawl is finished and saved partway, not-match reasons, caveats, and dropped jobs are preserved instead of disappearing or showing zero dropped.
-A service-restart interrupted AI screen can also be finished and saved directly; after a refresh, the interrupted state keeps its screening fields and is not overridden by an older history result.
-Completed runs use the same kept-job counts, so rough-screen removals no longer appear as “unstarted”; when a newer completed result exists, a stale paused task no longer takes over the refresh restore prompt.
-The stage label switches to AI fine-screening as soon as that phase starts, instead of staying on JD details.
-Once fine screening starts, success/pending/unstarted counts follow the fine-screening progress itself instead of reusing the JD-stage count.
-7. **Advanced settings and deep-tuning lab**: Advanced settings expose Stable, Balanced, Extreme, and Custom. The backend selects the small/medium/large internal slot from the canonical planned-page count (1-9 small, 10-49 medium, 50-200 large), while mode changes never alter keywords, cities, or pages. A deep experiment requires two explicitly entered workload structures for each size and uses immutable input and speed-field config digests (including the JD concurrency tab count), an exclusive lease, staged rounds, program-owned measurements, and restart recovery. Incomplete or blocked results cannot be applied; a complete candidate requires explicit user action to apply the whole version and can roll back to the previous complete version. Version 2.3.0 delivers the experiment and verification framework only: no formal deep experiment was run, and no final Stable/Balanced/Extreme parameters are claimed as validated.
-8. **Top-bar browser account manager**: The “Browser Accounts” button in the header opens a manager with built-in A/B accounts and supports adding custom accounts (names 1-30 characters, no duplicates). Each account has an isolated profile, can be opened for a manual BOSS login, and can be set as the next task account. The account is frozen when a task is created; start, resume, recrawl, cancel, and finish all activate the matching profile and replace another dedicated account's Chrome on the CDP port. Unknown Chrome is never closed automatically. While a task is paused, you can still open the browser for the account frozen into that task to finish login or verification; other accounts stay locked until the paused task is finished or cancelled. Switching while a task is running or paused only affects the next task.
-
-Restored historical results show the real elapsed time, and old snapshots without timestamps no longer show a fake “0 seconds”. Partial snapshots saved by “Finish and Save Results” also appear in history as “Completed with Needs Review”.
-Deleting a custom account is refused while that account's automation browser is running; reusing the same profile directory is also refused.
-### AI URL & Key Configuration
-
-Users only configure two items: the AI service URL and the API Key.
-
-- Open AI Settings from the shared header and enter the AI service URL (an OpenAI-compatible `/v1/chat/completions` endpoint) and API Key in a semantic dialog. The action remains reachable on mobile.
-- "Test connection" uses an embedded fictional résumé to verify transport, JSON generation, and the candidate-v3 extraction contract; it never reads or sends a saved real résumé.
-- The Fetch and Test buttons show their in-progress state, while success or failure is reported in the top notice; notices can be dismissed manually and also time out according to severity.
-- **The Key must enter the system credential store** (Windows Credential Manager / macOS Keychain / Linux Secret Service, via the `keyring` library) and is **never written in plaintext to SQLite, logs, API responses, or exports**.
-- The AI settings endpoint returns only the URL, status, and last error code — never the Key or credential reference.
-
-### Privacy Notice
-
-- Résumé text and AI Key are processed locally and never uploaded to any third party (other than the AI service you configure).
-- All résumé reads, AI settings reads, and write operations require a local session token (`X-Boss-Token`).
-- Résumé deletion atomically removes the original file, extracted text, content hash, filename, and unconfirmed suggestions.
-- No Key or résumé text ever appears in logs, history, exports, or error messages.
-- Only HTTPS links on the expected BOSS domain (`zhipin.com`) are opened by the frontend.
-
-### Profile Isolation
-
-- Each new résumé defaults to a new job-seeking profile and **does not inherit the old profile's AI negative preferences**.
-- Feedback is bound to the current profile; "not interested" only affects that profile's subsequent results.
-- Copying a profile copies only the manually confirmed fields — AI preferences do not migrate.
-
-### Job Result Interaction
-
-- Desktop keeps a compact job list on the left and only the selected job's full details on the right; mobile uses a closeable full-screen detail view.
-- "View original job" opens only a validated HTTPS BOSS link in a **new tab** with `noopener noreferrer`.
-- In Job Discovery, Interested / Not Interested never trigger job navigation. Interested is revocable; Not Interested is explicitly limited to the current run.
-- Missing JDs can be retried individually. A retry does not rerun AI and leaves the existing verdict unchanged.
-- AI output is program-validated; **the AI cannot decide task status or bypass manual filtering**.
-
-### No-Auto-Application Boundary
-
-This project **does not** implement:
-
-- Automatic résumé submission
-- Automatically contacting recruiters or sending messages
-- Hiring probability prediction
-
-The AI is only responsible for JSON-structured résumé parsing, JD ranking, and preference updates. All task status and application actions are decided by the user.
-
-### Data Retention
-
-| Type | Retention |
-|------|-----------|
-| Normal results | Auto-cleaned after 30 days |
-| Interested jobs | Retained until manual deletion |
-| Applied jobs | Retained until manual deletion |
-
-Cleanup never touches the résumé directory or uncontrolled paths, and never deletes saved or applied jobs.
-
-### State Directories
-
-- State database: `~/.career-scout/webui/webui.db`
-- Job results: `~/.career-scout/job-result/`
-- Résumé files: `~/.career-scout/webui/resumes/`
-
-Set `BOSS_PYTHON` before launch to select a specific Python executable.
-The WebUI state directory defaults to `~/.career-scout/webui` and can be overridden with `CAREER_SCOUT_STATE_DIR`; the legacy `BOSS_WEBUI_STATE_DIR` is still accepted.
-
-### Resume-Driven Two-Layer Filtering
-
-A filtering capability layered on top of the job workbench, improving match quality via two-layer verification. Overall flow:
-
-1. **Upload résumé**: The user uploads a TXT / PDF / DOCX résumé (skippable when AI is unavailable).
-2. **AI reads and suggests values**: The AI reads the résumé while the program fetches the BOSS filter option enumerations (salary range, experience, degree, company scale, funding stage, industry, city). The AI judges which options can be filled from the résumé and returns suggested values.
-3. **User confirmation**: The frontend shows the suggested values; the user may edit or leave them. **User-confirmed values take priority — the AI cannot override.** Any field the AI did not provide and the user did not fill stays empty.
-4. **Layer-1 search**: Uses the confirmed conditions to call the BOSS search API and scrape back a batch of jobs, all of which proceed to layer 2. An empty city searches nationwide.
-5. **Layer-2 verification**: Each job goes through two checks — hard-rule field verification + AI semantic-similarity judgment. Job discovery uses a fixed four-dimension structured assessment; invalid contracts, invalid evidence references, low confidence, or provider failures route the job to review without inventing default scores.
-6. **Partition into temporary match/mismatch zones**: Jobs passing both checks go to the match zone; jobs failing either go to the mismatch zone. The match zone is ordered by scrape order — no similarity sorting. The mismatch zone is shown mixed together, without annotating which field excluded a job.
-7. **Mark interested / not-interested**: Any job in the match or mismatch zone can be marked and routed to a persistent zone.
-
-No field is mandatory (including city): fields the user did not select do not participate in layer-1 search or layer-2 hard-rule verification.
-
-#### Two-Layer Verification
-
-- **Layer 1**: Calls the BOSS search API with the confirmed conditions to scrape back jobs.
-- **Layer 2**: Each scraped job is checked by hard-rule verification (deterministic program logic) + AI semantic-similarity judgment (a fixed four-dimension structured contract). A job can enter high-match only when hard rules pass, the detail is complete, the AI contract is valid, confidence and dimension gates pass, and evidence is traceable. Contract/reference/provider failures route to review with a safe failure code and never use default scores.
-
-Job discovery preserves `match_score`, `confidence`, evidence counts, and safe failure codes (for example `ai_invalid_output`, `evidence_reference_invalid`, `ai_uncertain`, `ai_network_error`, `snapshot_unavailable`, `hard_rule_unknown`, and `experience_level_conflict`) so a genuinely weak match can be distinguished from an assessment failure. A clear conflict between an entry-level job and substantial candidate experience is programmatically blocked from high or adjacent match.
-
-#### Zone Lifecycle
-
-| Zone | Type | Lifecycle |
-|------|------|-----------|
-| Match zone | Temporary zone for this run | Cleared when the next run starts |
-| Mismatch zone | Temporary zone for this run | Cleared when the next run starts |
-| Interested zone | Persistent zone | Unaffected by zone clearing; retained long-term |
-| Trash zone | Persistent zone | Unaffected by zone clearing; retained long-term |
-
-#### Interested Zone and Trash Zone
-
-- **Interested zone**: Clicking "Interested" routes a job to the persistent interested zone for long-term review. Cards in the interested zone are clickable and open the corresponding BOSS original job page in the browser — only HTTPS links on the expected BOSS domain (`zhipin.com`) are allowed.
-- **Trash zone**: Clicking "Not interested" routes a job to the persistent trash zone, where the list of previously not-interested jobs can be viewed.
-- **Display exclusion**: When subsequent search results are displayed, specific jobs previously marked not-interested are excluded and no longer shown. Exclusion **happens only at display time** and does not modify the scraped results; exclusion **identifies specific jobs only** and is not extended to jobs at the same company or with similar characteristics.
-
-#### AI-Unavailable Degradation
-
-When the AI service is unavailable, the system prompts the user and degrades to:
-
-- **Skip résumé**: The résumé upload step can be skipped.
-- **Manual filtering**: The filter bar degrades to manual entry; no field is mandatory — leave blank to mean "no limit".
-- **Hard-rule-only verification**: Layer 2 performs only hard-rule verification and skips AI semantic-similarity judgment.
-- Layer 1 still scrapes normally using the confirmed conditions via the BOSS search API.
-
-#### No-Auto-Application Boundary
-
-This project **does not** implement:
-
-- No automatic résumé submission
-- No automatically contacting recruiters or sending messages
-- No hiring probability prediction
-
-The AI is only responsible for reading the résumé to suggest filter values (and in the future, structured semantic-similarity output). All task status, partition verdicts, and application actions are decided by program logic and the user. The AI cannot decide task status or bypass program verdicts.
-
-#### State Directories and Testing
-
-- State directories: the screening workbench and job discovery share `~/.career-scout/webui/` (screening runs `screening_runs`/`screening_results` are written to the same `webui.db`; layer-1 scrape output goes to `~/.career-scout/job-result/`).
-- Dependencies: the same dependencies as the rest of the CLI/WebUI; no new third-party libraries.
-- Automated tests: `python -m unittest discover -s tests -v`
-
-### Fast Resume-Driven Discovery Closure
-
-Deterministic closure layered on the existing discovery flow: an independent `discovery_v2` policy, four-class progress, progressive results, cancel/resume, 12-hour detail reuse, a source circuit breaker and scoped feedback confine "fast resume-driven job recommendation" within verifiable performance and security boundaries. Historical runs keep `policy v1`; new runs use `discovery_v2`; migration 015 is additive and never rewrites older migrations.
-
-#### Default user flow
-
-1. **Upload résumé** → 2. **AI analysis (candidate v4) + direction confirmation** → 3. **Run progress (four-class counters + cancel/resume)** → 4. **Progressive results (3-second polling, revision-based no-redraw)** → 5. **Job/direction/judgment-error feedback (declared scope + revocable)**. The root path `/` is the only official frontend entry, covering upload → correction → confirmation → first batch → cancel/resume → feedback end-to-end.
-
-#### Performance and security boundaries
-
-
-- Orchestration performance target: 15 details + required assessments ≤ 600 simulated seconds; progress is visible within 10 simulated seconds of work-unit completion and survives refresh.
-- Cancel/resume: cancel reaches the `cancelled` terminal state within 30 seconds; completed snapshots/assessments/candidates are preserved 100%; resuming with identical input identity does not re-fetch details or re-invoke AI (regression-covered by `tests/test_process_executor.py` / `tests/test_healthy_pipeline.py`).
-- Default detail concurrency stays at 1; the policy ceiling of 2 is allowed only after real small-sample stability evidence (`webui/source.py`).
-- 12-hour detail reuse: the same job is reused within 12h across runs and is not re-fetched (`webui/store.py`).
-- Source circuit breaker: trips to `source_rate_limited`/`source_verification_required` after consecutive failures and blocks further fetches (`webui/source.py`).
-- Feedback scope: `exact_job` / `exact_direction` / `exact_assessment`; revocable; affects only subsequent runs or current visibility, never rewrites history (`webui/store.py` + `webui/workbench.py`).
-
-#### Run commands and compatibility notes
-
-```bash
-# Launch the dedicated BOSS Chrome (first time)
-python3 scripts/boss_cdp_raw.py --setup-chrome
-
-# Launch the web workbench
-python3 webui/app.py
-# Open http://127.0.0.1:5000 in the browser
-
-# Automated tests (no real Chrome/network, fully mocked)
-python3 -m unittest discover -s tests -v
-```
-
-Compatibility notes:
-
-- Historical runs keep `policy v1`; new runs use `discovery_v2`; both policies coexist, neither rewrites the other's history.
-- Migration 015 is additive: only new columns and tables, never rewrites older migrations; existing databases can upgrade in place.
-- Default detail concurrency is 1; the policy ceiling of 2 is only enabled after real small-sample stability evidence.
-- Feedback affects only the declared scope and subsequent runs; historical profile/confirmation/assessment facts are never rewritten.
-
-## ✨ Features
-
-- Plaintext salary (API mode, bypasses font-based obfuscation)
-- Dual JSON / CSV output
-- Detail-page JD scraping + skill analysis
-- Aggregated summary + copy-paste prompt after scraping
-- Incremental writes (no data loss on crash)
-- One-shot environment check + persistent isolated Chrome CDP profile
-- Multi-dimension filters (scale, funding, salary, experience, degree, industry)
-- Windows / macOS / Linux; the Web UI, Windows paths, and process parsing have automated coverage, while real scraping still requires validation against a logged-in local Chrome session
-
-<details>
-<summary>🔍 Why not a Selenium / Playwright crawler?</summary>
-
-- Selenium/Playwright spins up a full instrumented browser — it's heavy, has an obvious fingerprint, and is easily flagged by BOSS Zhipin's risk-control / CAPTCHA.
-- This tool connects to your own already-logged-in Chrome (via CDP), reusing a real fingerprint and session, and calls the same legitimate search API the page uses. The `salaryDesc` it returns is already plaintext — no need to parse font-obfuscated DOM salaries.
-- The result is more stable than traditional DOM-scraping crawlers and harder to flag as automated traffic.
-
-</details>
-
-## Installation
-
-### Option 1: Clone then install locally (recommended)
-
-Because `hermes skills install` may not reach GitHub directly in some environments, clone the repo first and install locally:
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/czyooutzilas-sketch/career-scout-preview.git
-cd career-scout
-
-# 2. Copy into the Career Scout skills directory
-mkdir -p ~/.hermes/skills/data-science/career-scout/scripts
-cp SKILL.md ~/.hermes/skills/data-science/career-scout/
-cp scripts/boss_cdp_raw.py ~/.hermes/skills/data-science/career-scout/scripts/
-cp scripts/job_summary.py ~/.hermes/skills/data-science/career-scout/scripts/
-```
-
-### Option 2: One-line curl install
-
-No need to clone the whole repo — download just the files you need:
-
-```bash
-mkdir -p ~/.hermes/skills/data-science/career-scout/scripts && \
-curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/SKILL.md \
-  -o ~/.hermes/skills/data-science/career-scout/SKILL.md && \
-curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/scripts/boss_cdp_raw.py \
-  -o ~/.hermes/skills/data-science/career-scout/scripts/boss_cdp_raw.py && \
-curl -sL https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/scripts/job_summary.py \
-  -o ~/.hermes/skills/data-science/career-scout/scripts/job_summary.py
-```
-
-### Option 3: `hermes skills install` (requires direct GitHub access)
-
-```bash
-hermes skills install https://raw.githubusercontent.com/czyooutzilas-sketch/career-scout/master/SKILL.md --category data-science
-```
-
-> Note: this depends on the hermes process being able to reach GitHub directly. If you hit a timeout or connection failure, use Option 1 or 2.
-
-### Verify the installation
-
-```bash
-# Check that the files exist
-ls ~/.hermes/skills/data-science/career-scout/SKILL.md
-ls ~/.hermes/skills/data-science/career-scout/scripts/boss_cdp_raw.py
-ls ~/.hermes/skills/data-science/career-scout/scripts/job_summary.py
-```
-
-After installing, just say in a Career Scout conversation: "Search BOSS Zhipin for AI Agent jobs in Shanghai."
-
-## Use as a CLI tool
-
-You don't have to install it as a Skill — use it as a plain CLI:
-
-```bash
-# 1. Clone + install deps
-git clone https://github.com/czyooutzilas-sketch/career-scout-preview.git
-cd career-scout
-pip install -r requirements.txt
-
-# 2. Start Chrome CDP
-python3 scripts/boss_cdp_raw.py --setup-chrome
-# First run won't copy your main Chrome session; log in to zhipin.com in the dedicated BOSS browser that pops up
-# setup waits for login to finish and confirms the API returns plaintext salaries
-
-# 3. Check the environment
-python3 scripts/boss_cdp_raw.py --check
-
-# Optional: real browser/API smoke test (writes no result files)
-python3 scripts/boss_cdp_raw.py --smoke-test
-
-# 4. Scrape
-python3 scripts/boss_cdp_raw.py --keyword "AI Agent" --city 上海 --pages 3 --format csv --analysis
-
-# 5. Summary + prompt after scraping
-python3 scripts/job_summary.py --top 15
-```
-
-## Parameters
-
-| Parameter | Description |
-|-----------|-------------|
-| `--keyword` | Search keyword (default "AI Agent") |
-| `--city` | City (Chinese name or code, default Shanghai). **Supports cities nationwide** (300+, incl. tier-3/4/5); city codes auto-sync from BOSS at runtime. See [`data/city_codes.json`](data/city_codes.json), or run `--list-cities` |
-| `--list-cities [keyword]` | Print the supported city list, optional keyword filter, e.g. `--list-cities 江` |
-| `--pages` | Number of pages (max 10) |
-| `--format` | json / csv; csv also exports list and detail CSVs |
-| `--detail` | Scrape detail-page JD (on by default) |
-| `--no-detail` | Do not scrape detail pages |
-| `--analysis` | Analysis report |
-| `--merge FILE` | Merge existing data (deduped by job_id) |
-| `--allow-dom-fallback` | Allow DOM extraction fallback when the API has no data; off by default, salaries may be unreliable |
-| `--check` | Environment check (CDP + deps + login state) |
-| `--smoke-test` | Run one real Chrome/CDP BOSS search API smoke test, writes no result files |
-| `--setup-chrome` | One-shot launch of Chrome CDP (persistent isolated profile) |
-| `--copy-login-state` | Manually import the main Chrome's Local State + cookie-related files into the isolated profile (never copied by default, on first run, or on repeated runs) |
-| `--reset-chrome-profile` | Rebuild the dedicated BOSS Chrome profile; clears the login state inside this dedicated browser |
-| `--no-wait-login` | With `--setup-chrome`, do not wait for login to finish |
-| `--login-timeout` | Seconds to wait for login under `--setup-chrome` (default 300) |
-| `--stop-chrome` | Close the dedicated BOSS CDP Chrome (matched precisely by the isolated profile; never touches your main Chrome) |
-| `--close-chrome` | Auto-close the dedicated Chrome after a scrape finishes normally (off by default; not triggered on errors, so the login state is kept) |
-| `--output` | List output path (default `~/.career-scout/job-result/`) |
-| `--detail-output` | Detail output path (default `~/.career-scout/job-result/`) |
-| `--cdp-port` | CDP port (default 9222) |
-| `--scale/--salary/--experience/--degree` | Filters |
-
-## Post-Scrape Summary & Prompt
-
-`scripts/job_summary.py` only reads the already-scraped `boss_jobs_*.json` and `boss_details_*.json`, does simple aggregation, and produces a copy-paste prompt. It never reads your local résumé file, pulls in no PDF dependency, and never scores a person against a job.
-
-```bash
-# Read the newest boss_jobs_*.json under the default result dir and auto-match the same-timestamp or newest detail file
-python3 scripts/job_summary.py
-
-# Specify list and detail files
-python3 scripts/job_summary.py \
-  --input ~/.career-scout/job-result/boss_jobs_20260625_1200.json \
-  --details ~/.career-scout/job-result/boss_details_20260625_1200.json \
-  --top 15
-
-# Only emit the prompt
-python3 scripts/job_summary.py --prompt-only
-```
-
-After installing the package you can also use the entry command:
-
-```bash
-uv run career-summary --top 15
-```
-
-The summary covers: salary ranges, experience requirements, degree requirements, regional distribution, top companies, skill tags, frequent JD terms. The prompt asks the model to use these stats to fill in résumé keywords, suggest project-story rewrite directions, and produce an interview-prep checklist — while explicitly instructing it not to fabricate experience.
-
-## File Structure
-
-```
-career-scout/
-├── SKILL.md              # Career Scout Skill definition
-├── README.md             # Chinese docs
-├── README.en.md          # English docs
-├── CHANGELOG.md
-├── LICENSE
-├── pyproject.toml
-├── data/
-│   └── city_codes.json   # City codes
-├── assets/
-│   └── cover.png
-├── tools/
-│   └── start.bat         # Windows one-click WebUI launcher
-├── scripts/
-│   ├── boss_cdp_raw.py   # Main scraping script
-│   └── job_summary.py    # Post-scrape summary + prompt
-├── webui/
-│   ├── app.py            # Flask API + background task orchestration
-│   ├── core.py           # Validation + explainable ranking
-│   ├── store.py          # SQLite tasks, logs, profiles, search runs, feedback
-│   ├── workbench.py      # Keyword selection, dedup, budget, card projection
-│   ├── resume.py         # Résumé storage, extraction, path validation, atomic delete
-│   ├── ai.py             # AI connection test, credential-store ref, JSON contract validation
-│   ├── index.html        # Vite development entry
-│   ├── src/              # Vue 3 + TypeScript components, views, and tests
-│   ├── dist/             # Production build served by Flask
-│   ├── package.json
-│   └── vite.config.ts
-└── requirements.txt
-```
-
-## How It Works
-
-Career Scout's core scraping flow uses Chrome CDP:
-
-1. Connect to an already-open Chrome via the Chrome DevTools Protocol (CDP)
-2. Inject JS inside the BOSS Zhipin page that calls the search API via synchronous XHR
-3. The API returns plaintext `salaryDesc`, bypassing the front-end font obfuscation
-4. The list API preserves `securityId` / `lid` context, carried into the detail page
-5. Each page is written to disk immediately, deduped by `job_id`
-
-DOM extraction is not used for the list by default, since DOM salaries may be hit by font-based obfuscation. Only when `--allow-dom-fallback` is explicitly passed will it fall back to DOM when the API returns no data.
-
-For detail pages, the scraper only extracts a section containing the job-description heading. Full-page `body` text is diagnostic input for detecting login walls and navigation shells and is never written directly as a JD. If the page contains the login-to-view-full-content marker, the crawl fails explicitly and stops before truncated text, recruiter metadata, company sections, or recommended jobs can be saved as a complete JD.
-
-`--input ... --analysis --no-detail` first loads `--detail-output`, then the `boss_details_*.json` with the same timestamp in the same dir as the input list, and finally the newest detail file under `~/.career-scout/job-result`.
-
-## Chrome Profile Security Policy
-
-`--setup-chrome` uses a persistent isolated profile by default — it neither symlinks nor copies your main Chrome data. First launch and subsequent launches only create or reuse this dedicated profile:
-
-- `~/.career-scout/chrome-profile`
-
-Without an explicit `--output` or `--detail-output`, scraping results are saved under:
-
-- `~/.career-scout/job-result`
-
-On first use you must log in to BOSS Zhipin manually inside this dedicated Chrome. `--setup-chrome` waits for the login to finish and uses the search API to confirm it can get plaintext `salaryDesc` before returning. The session is stored inside the dedicated profile and survives reboots; re-running `--setup-chrome` does not wipe it and does not affect your main Chrome, Gmail, GitHub, or other accounts.
-
-The WebUI “Browser Accounts” manager includes built-in A/B accounts; custom account profiles are created under the project-local `.chrome-profiles/account_<id>` directory. Each account is a completely separate isolated profile that requires its own manual BOSS login on first use; the CLI `--setup-chrome` still manages Account A's default profile. Account switching only closes Chrome using a registered profile; an unknown Chrome owning the CDP port is never closed automatically.
-
-If you really need to import the BOSS session from your main Chrome, run explicitly:
-
-```bash
-python3 scripts/boss_cdp_raw.py --setup-chrome --copy-login-state
-```
-
-`--copy-login-state` overwrites the corresponding cookie-related files inside the isolated profile on every run; do not pass this for daily launches. It only copies `Local State` and `Default/Cookies*`, `Default/Network/Cookies*`-style cookie database files — not password stores, history, extensions, or a full profile. To wipe the dedicated browser's login state:
-
-```bash
-python3 scripts/boss_cdp_raw.py --setup-chrome --reset-chrome-profile
-```
-
-### Tearing down when you're done
-
-After a scrape/analysis finishes, the dedicated Chrome is **not** closed automatically (the login state is kept by default so you can run the next scrape right away). When you're sure you no longer need it, tear it down manually:
-
-```bash
-python3 scripts/boss_cdp_raw.py --stop-chrome
-```
-
-`--stop-chrome` only closes the Chrome process(es) that belong to the dedicated isolated profile (`--user-data-dir`). It **never** kills by port or process name, so it cannot accidentally take down your main Chrome, Gmail, GitHub, or other signed-in sessions.
-
-If you'd rather have a particular scrape close the dedicated Chrome once it finishes normally, add `--close-chrome`:
-
-```bash
-python3 scripts/boss_cdp_raw.py --keyword "AI Agent" --city 上海 --pages 3 --close-chrome
-```
-
-`--close-chrome` is off by default, and it only fires on the **success path** of a completed scrape — login failures, crashes, and other early exits leave the Chrome running so the login state is preserved.
-
-## 📌 TODO
-
-- [ ] Strengthen the detail-page `Referer` and request fingerprinting to further reduce risk-control triggers
+After changing frontend source, rebuild and commit `webui/dist`; otherwise the workbench may serve stale assets.
 
 ## License
 
-MIT
-
-## Friends
-
-- [LINUX DO](https://linux.do/) — A sincere, friendly, and vibrant tech community. This project endorses and recommends it.
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=czyooutzilas-sketch/career-scout&type=Date)](https://star-history.com/#czyooutzilas-sketch/career-scout&Date)
+MIT License, see [LICENSE](./LICENSE).
