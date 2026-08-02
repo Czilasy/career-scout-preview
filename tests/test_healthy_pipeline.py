@@ -1401,6 +1401,85 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(run["total_dropped"], 1)
         self.assertEqual(run["pending_count"], 0)
 
+    def test_resume_fine_completed_keeps_not_match_and_uncertain_as_survivors(self):
+        """精筛已全部落库时续跑，not_match/uncertain 仍属于粗筛保留，不能缩水成只留 match。"""
+        scrape_task_id = "resume-fine-complete-source"
+        jobs = [
+            {"job_id": "job-match", "title": "后端工程师"},
+            {"job_id": "job-notmatch", "title": "Java工程师"},
+            {"job_id": "job-uncertain", "title": "客服"},
+            {"job_id": "job-drop", "title": "测试岗位"},
+        ]
+        self._install_scrape_source(scrape_task_id, jobs)
+        self.store.save_scrape_combo_result(
+            scrape_task_id, "后端|上海", jobs, ["后端|上海"],
+        )
+        run_id = "resume-fine-complete-run"
+        self.store.create_screening_run(
+            run_id, source_count=len(jobs),
+            frozen_filters={"keyword": "后端"},
+            execution_params={
+                "scrape_task_id": scrape_task_id,
+                "profile_summary": "后端工程师",
+            },
+        )
+        _pause_run(
+            self.store, run_id,
+            error_code="ai_network_error",
+            current_stage="ai_fine",
+            total_kept=3, total_dropped=1,
+        )
+        self.store.save_checkpoint(
+            run_id, "ai_rough",
+            ["job-match", "job-notmatch", "job-uncertain", "job-drop"],
+        )
+        self.store.save_checkpoint(
+            run_id, "ai_fine",
+            ["job-match", "job-notmatch", "job-uncertain"],
+        )
+        self.store.save_screening_verdicts(run_id, {
+            "job-match": {"verdict": "match", "reason": "匹配"},
+            "job-notmatch": {"verdict": "not_match", "reason": "不匹配"},
+            "job-uncertain": {"verdict": "uncertain", "reason": "AI 失败，待人工确认"},
+            "job-drop": {"verdict": "dropped", "reason": "粗筛移除"},
+        })
+        detail_result = {
+            "jobs": [
+                {"job_id": "job-match", "title": "后端工程师", "jd": "负责后端开发"},
+                {"job_id": "job-notmatch", "title": "Java工程师", "jd": "要求 Java"},
+                {"job_id": "job-uncertain", "title": "客服", "jd": "负责客服"},
+            ],
+            "hard_stop": False, "hard_stop_code": None,
+            "stopped": False, "fetched": 3,
+        }
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.test_connection", return_value={
+                    "ok": True, "warning_codes": [],
+                }), \
+                mock.patch("webui.ai.screen_jobs", return_value={
+                    "kept": [], "dropped": [],
+                }), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
+                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_result), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"), \
+                mock.patch("webui.ai.match_jds", return_value={"verdicts": {}}) as match_jds:
+            response = self.client.post(
+                f"/api/task/continue/{run_id}", headers=self.headers,
+            )
+            self.assertEqual(response.status_code, 200, response.get_json())
+            finished = _wait_for_pipeline_task(self.client, run_id)
+        self.assertEqual(finished["status"], "done", finished)
+        self.assertEqual(match_jds.call_count, 1)
+        self.assertEqual(match_jds.call_args.args[0], [])
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["status"], "partial", run)
+        self.assertEqual(run["total_kept"], 3)
+        self.assertEqual(run["total_dropped"], 1)
+        self.assertEqual(run["match_count"], 1)
+        self.assertEqual(run["mismatch_count"], 1)
+        self.assertEqual(run["pending_count"], 1)
+
     def test_main_ai_fine_persistence_failure_stops_before_next_batch(self):
         """精筛 verdict/checkpoint 原子落库失败后不得调用下一批 AI。"""
         scrape_task_id = "fine-persistence-failure-source"

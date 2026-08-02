@@ -2374,7 +2374,8 @@ def create_app(config=None):
             _rough_kept_from_resume = [
                 j for j in raw_jobs
                 if str(j.get("job_id", "")) in _rough_done_ids
-                and _resume_verdicts.get(str(j.get("job_id", "")), "") in ("kept", "match")
+                and _resume_verdicts.get(str(j.get("job_id", "")), "")
+                in (_FINE_VERDICTS | {"kept"})
             ] if _rough_done_ids else []
             _rough_completed_ids = set(_rough_done_ids)
 
