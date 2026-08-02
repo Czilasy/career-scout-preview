@@ -11,7 +11,7 @@
 
 > 📌 **一句话介绍**：不用 Selenium/Playwright，直接通过 Chrome DevTools Protocol 连接本地已登录的 Chrome，复用真实登录态调搜索 API，输出含明文薪资的 JSON/CSV，并生成薪资分布、技能词频和求职材料优化提示词。
 
-![cover](cover.png)
+![cover](assets/cover.png)
 
 ---
 
@@ -71,7 +71,7 @@ npm test
 npm run build
 ```
 
-桌面 `start.bat` 启动前会检查 `webui/dist` 与当前后端代码、前端源码的构建状态，任一发生变化就自动执行 `npm run build`，日常启动无需手动构建。
+桌面 `tools/start.bat` 启动前会检查 `webui/dist` 与当前后端代码、前端源码的构建状态，任一发生变化就自动执行 `npm run build`，日常启动无需手动构建。
 
 ### 核心能力
 

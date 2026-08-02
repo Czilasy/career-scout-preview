@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 title BOSS 直聘工作台
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 echo 正在检查端口 5000...
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5000" ^| findstr "LISTENING"') do (

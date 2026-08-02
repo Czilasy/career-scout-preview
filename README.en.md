@@ -69,7 +69,7 @@ npm test
 npm run build
 ```
 
-The desktop `start.bat` checks the build state of `webui/dist` against the current backend code and frontend source before starting. If either changed, it runs `npm run build` automatically, so normal startup does not require a manual build.
+The desktop `tools/start.bat` checks the build state of `webui/dist` against the current backend code and frontend source before starting. If either changed, it runs `npm run build` automatically, so normal startup does not require a manual build.
 
 ### Core Capabilities
 

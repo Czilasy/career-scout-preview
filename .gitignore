@@ -4,6 +4,8 @@
 webui-restart*.log
 webui-server-*.log
 webui-check-*.png
+logs/
+*.log
 __pycache__/
 *.py[cod]
 *$py.class
@@ -70,6 +72,13 @@ _tmp_*.py
 .DS_Store
 ._*
 Thumbs.db
+
+# Local agent/tool state and archived internal docs
+.agents/
+.uploads/
+.worktrees/
+CODE_REVIEW.md
+spec011-*.yaml
 
 # 覆盖全局 gitignore 对 AGENTS.md 的忽略，本项目需要提交
 !AGENTS.md
