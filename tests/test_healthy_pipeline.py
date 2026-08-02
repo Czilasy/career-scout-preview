@@ -1285,6 +1285,70 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(finished["status"], "failed", finished)
         screen_jobs.assert_not_called()
 
+    def test_resume_ai_fine_does_not_treat_rough_kept_as_fine(self):
+        """续跑时必须只继承精筛判定，粗筛 kept 仍要进入精筛。"""
+        scrape_task_id = "resume-fine-split-source"
+        jobs = [
+            {"job_id": "job-kept", "title": "后端工程师"},
+            {"job_id": "job-drop", "title": "测试岗位"},
+        ]
+        self._install_scrape_source(scrape_task_id, jobs)
+        self.store.save_scrape_combo_result(
+            scrape_task_id, "后端|上海", jobs, ["后端|上海"],
+        )
+        run_id = "resume-fine-split-run"
+        self.store.create_screening_run(
+            run_id, source_count=2,
+            frozen_filters={"keyword": "后端"},
+            execution_params={
+                "scrape_task_id": scrape_task_id,
+                "profile_summary": "后端工程师",
+            },
+        )
+        _pause_run(
+            self.store, run_id,
+            error_code="ai_rate_limited",
+            current_stage="ai_fine",
+        )
+        self.store.save_checkpoint(run_id, "ai_rough", ["job-kept", "job-drop"])
+        self.store.save_screening_verdicts(run_id, {
+            "job-kept": {"verdict": "kept", "reason": ""},
+            "job-drop": {"verdict": "dropped", "reason": "粗筛移除"},
+        })
+        detail_result = {
+            "jobs": [{"job_id": "job-kept", "title": "后端工程师", "jd": "负责后端开发"}],
+            "hard_stop": False, "hard_stop_code": None,
+            "stopped": False, "fetched": 1,
+        }
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.test_connection", return_value={
+                    "ok": True, "warning_codes": [],
+                }), \
+                mock.patch("webui.ai.screen_jobs", return_value={
+                    "kept": [], "dropped": [],
+                }), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
+                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_result), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"), \
+                mock.patch("webui.ai.match_jds", return_value={
+                    "verdicts": {"job-kept": {"verdict": "match", "reason": "匹配", "caveats": []}},
+                }) as match_jds:
+            response = self.client.post(
+                f"/api/task/continue/{run_id}", headers=self.headers,
+            )
+            self.assertEqual(response.status_code, 200, response.get_json())
+            finished = _wait_for_pipeline_task(self.client, run_id)
+        self.assertEqual(finished["status"], "done", finished)
+        self.assertEqual(match_jds.call_count, 1)
+        called_jobs = match_jds.call_args.args[0]
+        self.assertEqual([j["job_id"] for j in called_jobs], ["job-kept"])
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["status"], "succeeded")
+        self.assertEqual(run["match_count"], 1)
+        self.assertEqual(run["total_dropped"], 1)
+        self.assertEqual(run["pending_count"], 0)
+
     def test_main_ai_fine_persistence_failure_stops_before_next_batch(self):
         """精筛 verdict/checkpoint 原子落库失败后不得调用下一批 AI。"""
         scrape_task_id = "fine-persistence-failure-source"
@@ -2231,6 +2295,61 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertFalse(response.get_json()["resuming"])
         self.assertEqual(submit.call_args.args[-1], "")
+
+    def test_new_ai_screen_inherits_restart_interrupted_checkpoint(self):
+        """服务重启打断的 interrupted（error_code=restart）可被重新开始继承断点。"""
+        scrape_task_id = "restart-interrupted-source"
+        interrupted_run_id = "restart-interrupted-ai-run"
+        screening_fields = {"keyword": "后端"}
+        self.app.config["PIPELINE_TASKS"][scrape_task_id] = {
+            "kind": "scrape", "status": "done",
+            "result": {"ok": True, "jobs": [{"job_id": "job-1"}]},
+            "progress": {}, "logs": [], "error": "",
+        }
+        self.store.create_screening_run(
+            interrupted_run_id, source_count=1,
+            frozen_filters=screening_fields,
+            execution_params={
+                "scrape_task_id": scrape_task_id,
+                "profile_summary": "后端工程师",
+            },
+        )
+        self.store.update_screening_run(interrupted_run_id, status="running")
+        self.store.update_screening_run(
+            interrupted_run_id, status="interrupted", error_code="restart")
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit") as submit:
+            response = self.client.post(
+                "/api/ai-screen",
+                json={
+                    "screening_fields": screening_fields,
+                    "profile_summary": "后端工程师",
+                    "scrape_task_id": scrape_task_id,
+                },
+                headers=self.headers,
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["resuming"])
+        self.assertNotEqual(response.get_json()["task_id"], interrupted_run_id)
+        self.assertEqual(submit.call_args.args[-1], interrupted_run_id)
+        self.assertEqual(
+            self.store.get_screening_run(interrupted_run_id)["status"], "interrupted")
+
+    def test_latest_running_task_reports_restart_interrupted(self):
+        self.store.create_screening_run(
+            "latest-restart-interrupted", source_count=1,
+            execution_params={"scrape_task_id": "src-1"},
+        )
+        self.store.update_screening_run("latest-restart-interrupted", status="running")
+        self.store.update_screening_run(
+            "latest-restart-interrupted", status="interrupted", error_code="restart")
+        response = self.client.get("/api/latest-running-task")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        data = response.get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["status"], "interrupted")
+        self.assertTrue(data["resumable"])
 
     def test_concurrent_new_ai_screen_claims_paused_run_once(self):
         """自动继承 paused 断点也必须原子 claim，只能提交一次。"""

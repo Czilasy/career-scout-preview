@@ -2265,6 +2265,8 @@ class TaskStore:
             job for job in jobs
             if job.get("verdict") not in ("match", "not_match", "mismatch")
         ]
+        if status == "done" and pending_jobs:
+            status = "partial"
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
             conn.execute(
@@ -2461,7 +2463,7 @@ class TaskStore:
         """Return the run_id of the most recent successful pipeline run, or None."""
         with self._connection() as conn:
             row = conn.execute(
-                "SELECT id FROM screening_runs WHERE status = 'done' "
+                "SELECT id FROM screening_runs WHERE status IN ('done', 'partial') "
                 "AND record_kind = 'result_snapshot' "
                 "ORDER BY created_at DESC LIMIT 1",
             ).fetchone()
@@ -3106,7 +3108,8 @@ class TaskStore:
             conn.execute("BEGIN IMMEDIATE")
             self._assert_recovery_writes_allowed(conn)
             cursor = conn.execute(
-                "UPDATE screening_runs SET status = 'running', updated_at = ? "
+                "UPDATE screening_runs SET status = 'running', error_code = NULL, "
+                "error_reason = NULL, updated_at = ? "
                 "WHERE id = ? AND status = 'paused'",
                 (_now(), str(run_id)),
             )

@@ -114,6 +114,38 @@ SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
 DEFAULT_STATE_DIR = Path(os.environ.get("BOSS_WEBUI_STATE_DIR", os.path.expanduser("~/.career-scout/webui")))
 
 
+_FINE_VERDICTS = frozenset({"match", "not_match", "mismatch", "uncertain"})
+
+
+def _split_resume_verdicts(verdicts: dict) -> tuple[dict, dict]:
+    """Split stored verdicts into fine-screen and rough-screen verdicts."""
+    fine = {}
+    rough = {}
+    for job_id, verdict in (verdicts or {}).items():
+        value = verdict if isinstance(verdict, dict) else {"verdict": str(verdict)}
+        target = fine if str(value.get("verdict") or "") in _FINE_VERDICTS else rough
+        target[str(job_id)] = value
+    return fine, rough
+
+
+def _resume_dropped_from_verdicts(raw_jobs, verdicts: dict) -> list[dict]:
+    """Reconstruct previously dropped jobs when a resume skips rough screening."""
+    dropped = []
+    for job in raw_jobs or []:
+        if not isinstance(job, dict):
+            continue
+        jid = str(job.get("job_id") or "")
+        verdict = verdicts.get(jid) or {}
+        if isinstance(verdict, dict) and str(verdict.get("verdict") or "") == "dropped":
+            dropped.append({
+                "job_id": jid,
+                "title": job.get("title") or "",
+                "reason": verdict.get("reason") or "粗筛移除",
+                "canonical_url": job.get("source_url") or job.get("job_link") or "",
+            })
+    return dropped
+
+
 def _iso_epoch_ms(value):
     """Convert an ISO timestamp string (or epoch ms int) to epoch milliseconds."""
     if value is None:
@@ -1563,9 +1595,11 @@ def create_app(config=None):
         with _pipeline_lock:
             task = _pipeline_tasks.get(task_id) or {}
             account = str(task.get("browser_account") or "")
-        if account in ("a", "b"):
-            from webui.pipeline_exec import set_active_cdp_data_dir
-            set_active_cdp_data_dir(account)
+        from webui.pipeline_exec import resolve_browser_account, set_active_cdp_data_dir
+        profile_dir = resolve_browser_account(
+            account, app.config["BROWSER_ACCOUNTS_PATH"])
+        if profile_dir:
+            set_active_cdp_data_dir(profile_dir)
         else:
             _activate_run_browser()
 
@@ -2250,6 +2284,9 @@ def create_app(config=None):
                     emit(stage="resume",
                          message=f"接着上次进度：已有 {len(resume_verdicts)} 条判定、"
                                  f"{len(resume_jd)} 条 JD，跳过重复工作")
+            resume_fine_verdicts = {}
+            if resume_from_run_id:
+                resume_fine_verdicts, _ = _split_resume_verdicts(resume_verdicts)
 
             # 2) AI 凭据
             settings = store.get_ai_settings()
@@ -2353,13 +2390,19 @@ def create_app(config=None):
             # 合并 resume 已判定的结果（resume 的岗位默认 kept，因为上次没被 drop）
             kept_ids = set(screen_result["kept"]) | {str(j.get("job_id", "")) for j in _rough_kept_from_resume}
             # 粗筛成功完成：保存全部已判定 job_id（用于未来继续时跳过）
+            dropped_by_id = {
+                str(d.get("job_id") or ""): d for d in (screen_result.get("dropped") or [])
+            }
+            if resume_from_run_id:
+                for item in _resume_dropped_from_verdicts(raw_jobs, resume_verdicts):
+                    dropped_by_id.setdefault(str(item.get("job_id") or ""), item)
+            dropped = list(dropped_by_id.values())
             store.save_checkpoint(
                 task_id,
                 "ai_rough",
-                list(kept_ids | {d["job_id"] for d in screen_result["dropped"]}),
+                list(kept_ids | {str(d.get("job_id") or "") for d in dropped}),
             )
             survivors = [j for j in raw_jobs if str(j.get("job_id", "")) in kept_ids]
-            dropped = screen_result["dropped"]
             emit(stage="screen_a_done", kept=len(survivors), dropped=len(dropped),
                  message=f"粗筛完成：保留 {len(survivors)} 条，移除 {len(dropped)} 条")
             store.update_screening_run(
@@ -2521,7 +2564,7 @@ def create_app(config=None):
                     return
                 # 分段精筛，每段判定落库（screening_results）+ 更新 processed_count：
                 # 进程崩了已筛的判定不丢，重跑自动跳过。
-                done_verdicts = dict(resume_verdicts)
+                done_verdicts = dict(resume_fine_verdicts)
                 # 切片6：从 checkpoint 恢复已判定 job_id（resume 场景）
                 if resume_from_run_id:
                     _fine_done = store.load_checkpoint(
@@ -3018,11 +3061,22 @@ def create_app(config=None):
 
     @app.route("/api/browser-accounts/<account_id>", methods=["DELETE"])
     def delete_browser_account_endpoint(account_id):
-        from webui.pipeline_exec import delete_browser_account
+        from webui.pipeline_exec import delete_browser_account, load_browser_accounts
         if _browser_busy():
             return jsonify({
                 "ok": False, "error": "browser_busy",
                 "message": "任务运行或暂停中不能删除账号",
+            }), 409
+        accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
+        account = accounts.get(str(account_id))
+        if account is None:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        if (boss.is_cdp_ready(boss.DEFAULT_CDP_PORT)
+                and boss.cdp_port_uses_profile(
+                    boss.DEFAULT_CDP_PORT, str(account["profile_dir"]))):
+            return jsonify({
+                "ok": False, "error": "browser_in_use",
+                "message": "该账号的自动化浏览器正在运行，请先打开其他账号或手动关闭后再删除",
             }), 409
         try:
             delete_browser_account(
@@ -3544,12 +3598,16 @@ def create_app(config=None):
         ):
             return jsonify({"ok": False, "error": "抓取任务尚未成功完成"}), 409
         task_id = uuid.uuid4().hex
-        # 断点续筛只继承 paused。failed/cancelled/interrupted 都是终态，
-        # 新任务不得暗中复活其断点（FR-005/FR-024）。
+        # paused 就地继续；服务重启打断的 interrupted（error_code=restart）
+        # 也可以被“重新开始 AI 筛选”继承断点，但保留旧 run 的终态记录。
         resume_from_run_id = ""
+        prev = None
         try:
             prev = store.latest_screening_run_for_source(
                 scrape_task_id, statuses=("paused",))
+            if prev is None:
+                prev = store.latest_screening_run_for_source(
+                    scrape_task_id, statuses=("interrupted",))
         except _OPERATIONAL_ERRORS as exc:
             return jsonify({
                 "ok": False,
@@ -3560,9 +3618,14 @@ def create_app(config=None):
             prev_params = prev.get("execution_params") or {}
             same_fields = prev.get("frozen_filters") == screening_fields
             same_profile = str(prev_params.get("profile_summary", "")) == profile_summary
-            if same_fields and same_profile:
+            restart_interrupted = (
+                prev["status"] == "interrupted"
+                and str(prev.get("error_code") or "") == "restart"
+            )
+            if same_fields and same_profile and (
+                    prev["status"] == "paused" or restart_interrupted):
                 resume_from_run_id = prev["id"]
-        if resume_from_run_id:
+        if resume_from_run_id and prev is not None and prev["status"] == "paused":
             # paused run 就地转为 running，保持唯一任务身份和 canonical 状态。
             try:
                 claimed = store.claim_paused_screening_run(resume_from_run_id)
@@ -3580,7 +3643,8 @@ def create_app(config=None):
             task_id = resume_from_run_id
         claimed_task, previous_task = _claim_pipeline_task_id(task_id, "ai_screen")
         if claimed_task is None:
-            if resume_from_run_id:
+            if (resume_from_run_id and prev is not None
+                    and prev["status"] == "paused"):
                 store.update_screening_run(resume_from_run_id, status="paused")
             return jsonify({
                 "ok": False, "error": "already_running",
@@ -3601,7 +3665,8 @@ def create_app(config=None):
             )
         except RuntimeError:
             _release_pipeline_claim(task_id, claimed_task, previous_task)
-            if resume_from_run_id:
+            if (resume_from_run_id and prev is not None
+                    and prev["status"] == "paused"):
                 store.update_screening_run(resume_from_run_id, status="paused")
             raise
         return jsonify({"ok": True, "task_id": task_id,
@@ -3739,13 +3804,17 @@ def create_app(config=None):
                 "has_task": True,
                 "task_id": run["id"],
                 "kind": "ai_screen",
-                "status": "cancelled",
+                "status": "interrupted",
                 "progress": {"message": "上次 AI 筛选因服务重启被中断"},
                 "logs": [],
                 "error": "",
                 "started_at": _iso_epoch_ms(run.get("started_at")),
                 "finished_at": _iso_epoch_ms(run.get("finished_at")),
-                "resumable": False,
+                "resumable": True,
+                "error_code": run.get("error_code"),
+                "source_run_id": (run.get("execution_params") or {}).get("source_run_id"),
+                "scrape_task_id": (run.get("execution_params") or {}).get("scrape_task_id"),
+                "scrape_completed": bool((run.get("execution_params") or {}).get("scrape_completed")),
             })
         return jsonify({"ok": True, "has_task": False})
 

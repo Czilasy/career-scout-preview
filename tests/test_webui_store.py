@@ -371,6 +371,19 @@ class ScreeningRunStoreTests(unittest.TestCase):
         )
         self.assertIsNone(self.store.latest_interrupted_screening_run())
 
+    def test_claim_paused_screening_run_clears_block_reason(self):
+        self.store.create_screening_run("claim-clear-block", source_count=1)
+        self.store.update_screening_run("claim-clear-block", status="running")
+        self.store.update_screening_run(
+            "claim-clear-block", status="paused",
+            error_code="ai_rate_limited", error_reason="限流",
+        )
+        self.assertTrue(self.store.claim_paused_screening_run("claim-clear-block"))
+        run = self.store.get_screening_run("claim-clear-block")
+        self.assertEqual(run["status"], "running")
+        self.assertIsNone(run["error_code"])
+        self.assertIsNone(run["error_reason"])
+
     def test_create_screening_run_marks_process_log(self):
         """工作日记（process_log）：create_screening_run 写入的 run 必须标 process_log。"""
         self.store.create_screening_run("sr-pl", source_count=10)
@@ -404,6 +417,21 @@ class ScreeningRunStoreTests(unittest.TestCase):
         loaded = self.store.load_latest_pipeline_result(run_id)
         self.assertEqual(loaded["execution_config"]["screen_batch_size"], 50)
         self.assertEqual(loaded["execution_config"]["match_batch_size"], 10)
+
+    def test_save_pipeline_result_with_pending_jobs_marks_partial(self):
+        result = {
+            "jobs": [
+                {"job_id": "p1", "verdict": "uncertain", "verdict_reason": "待确认"},
+            ],
+            "dropped": [], "total_scraped": 1, "total_kept": 1,
+            "total_matched": 0, "total_dropped": 0,
+        }
+        run_id = self.store.save_pipeline_result(result, {})
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["status"], "partial")
+        loaded = self.store.load_latest_pipeline_result(run_id)
+        self.assertEqual(loaded["status"], "completed_with_pending")
+        self.assertEqual(self.store.get_latest_done_run_id(), run_id)
 
     def test_load_latest_pipeline_result_skips_process_log(self):
         """load_latest_pipeline_result 只能返回 result_snapshot，跳过 process_log。"""

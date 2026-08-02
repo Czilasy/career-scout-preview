@@ -19,6 +19,7 @@ import os
 import random
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -104,6 +105,7 @@ BROWSER_ACCOUNTS: dict[str, dict[str, str]] = {
 }
 
 _BROWSER_ACCOUNTS_PATH: Path | None = None
+_BROWSER_ACCOUNTS_LOCK = threading.RLock()
 
 def set_browser_accounts_path(path: str | os.PathLike[str]) -> None:
     """Set the JSON file used for user-defined browser accounts."""
@@ -114,6 +116,11 @@ def browser_accounts_path() -> Path:
     if _BROWSER_ACCOUNTS_PATH is not None:
         return _BROWSER_ACCOUNTS_PATH
     return _ADVANCED_SETTINGS_DIR / "browser_accounts.json"
+
+def reset_browser_accounts_path() -> None:
+    """Clear the app-injected account file path (mainly for test isolation)."""
+    global _BROWSER_ACCOUNTS_PATH
+    _BROWSER_ACCOUNTS_PATH = None
 
 def _default_browser_accounts() -> dict[str, dict[str, str | bool]]:
     return {
@@ -160,7 +167,7 @@ def save_browser_accounts(accounts: dict, path: str | os.PathLike[str] | None = 
             "profile_dir": os.path.abspath(os.path.expanduser(str(item.get("profile_dir") or ""))),
             "builtin": bool(item.get("builtin", False)),
         }
-    tmp = f"{accounts_path}.tmp"
+    tmp = accounts_path.with_name(f".{accounts_path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(clean, f, ensure_ascii=False, indent=2)
@@ -185,35 +192,49 @@ def _normalize_account_name(name: str, accounts: dict) -> str:
         raise ValueError("账号名称已存在")
     return name
 
+def resolve_browser_account(
+        account_id: str, path: str | os.PathLike[str] | None = None) -> str:
+    """Return the profile dir for a registered account id, or '' if unknown."""
+    accounts = load_browser_accounts(path)
+    account = accounts.get(str(account_id or ""))
+    return str(account["profile_dir"]) if account else ""
+
 def add_browser_account(
         name: str, profile_dir: str = "", path: str | os.PathLike[str] | None = None) -> dict:
     """Add a user-defined browser account and return it."""
-    accounts = load_browser_accounts(path)
-    name = _normalize_account_name(name, accounts)
-    account_id = uuid.uuid4().hex[:10]
-    if not str(profile_dir or "").strip():
-        profile_dir = os.path.join(
-            str(Path(__file__).resolve().parents[1]), ".chrome-profiles", f"account_{account_id}"
-        )
-    account = {
-        "id": account_id, "name": name,
-        "profile_dir": os.path.abspath(os.path.expanduser(str(profile_dir))), "builtin": False,
-    }
-    accounts[account_id] = account
-    save_browser_accounts(accounts, path)
-    return dict(account)
+    with _BROWSER_ACCOUNTS_LOCK:
+        accounts = load_browser_accounts(path)
+        name = _normalize_account_name(name, accounts)
+        account_id = uuid.uuid4().hex[:10]
+        if not str(profile_dir or "").strip():
+            profile_dir = os.path.join(
+                str(Path(__file__).resolve().parents[1]), ".chrome-profiles", f"account_{account_id}"
+            )
+        normalized_dir = os.path.abspath(os.path.expanduser(str(profile_dir)))
+        existing_dirs = {
+            os.path.normcase(str(v.get("profile_dir") or ""))
+            for v in accounts.values()
+        }
+        if os.path.normcase(normalized_dir) in existing_dirs:
+            raise ValueError("浏览器资料目录不能与其他账号重复")
+        account = {
+            "id": account_id, "name": name,
+            "profile_dir": normalized_dir, "builtin": False,
+        }
+        accounts[account_id] = account
+        save_browser_accounts(accounts, path)
+        return dict(account)
 
 def delete_browser_account(account_id: str, path: str | os.PathLike[str] | None = None) -> None:
-    accounts = load_browser_accounts(path)
-    account = accounts.get(str(account_id))
-    if account is None:
-        raise KeyError(account_id)
-    if account.get("builtin"):
-        raise ValueError("内置账号不能删除")
-    del accounts[str(account_id)]
-    save_browser_accounts(accounts, path)
-
-_ACTIVE_CDP_DATA_DIR: str | None = None
+    with _BROWSER_ACCOUNTS_LOCK:
+        accounts = load_browser_accounts(path)
+        account = accounts.get(str(account_id))
+        if account is None:
+            raise KeyError(account_id)
+        if account.get("builtin"):
+            raise ValueError("内置账号不能删除")
+        del accounts[str(account_id)]
+        save_browser_accounts(accounts, path)
 
 _ACTIVE_CDP_DATA_DIR: str | None = None
 

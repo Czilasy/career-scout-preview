@@ -864,6 +864,8 @@ class BrowserAccountApiTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+        from webui.pipeline_exec import reset_browser_accounts_path
+        reset_browser_accounts_path()
 
     def test_list_add_activate_custom_account(self):
         data = self.client.get("/api/browser-accounts").get_json()
@@ -909,6 +911,66 @@ class BrowserAccountApiTests(unittest.TestCase):
         resp = self.client.post("/api/browser-accounts/a/open")
         self.assertEqual(resp.status_code, 200, resp.get_json())
         self.assertTrue(resp.get_json()["ok"])
+
+    def test_resolve_browser_account_returns_custom_profile(self):
+        from webui import pipeline_exec
+        resp = self.client.post("/api/browser-accounts", json={"name": "账号 C"})
+        account = resp.get_json()["account"]
+        path = self.app.config["BROWSER_ACCOUNTS_PATH"]
+        self.assertEqual(
+            pipeline_exec.resolve_browser_account(account["id"], path),
+            account["profile_dir"],
+        )
+        self.assertEqual(pipeline_exec.resolve_browser_account("missing", path), "")
+
+    def test_add_rejects_duplicate_profile_dir(self):
+        first = self.client.post("/api/browser-accounts", json={"name": "账号 C"})
+        profile_dir = first.get_json()["account"]["profile_dir"]
+        dup = self.client.post("/api/browser-accounts", json={
+            "name": "账号 D", "profile_dir": profile_dir,
+        })
+        self.assertEqual(dup.status_code, 422, dup.get_json())
+        self.assertIn("不能与其他账号重复", dup.get_json()["error"])
+
+    @mock.patch("webui.app.boss.cdp_port_uses_profile", return_value=True)
+    @mock.patch("webui.app.boss.is_cdp_ready", return_value=True)
+    def test_delete_refuses_when_browser_running(self, _ready, _uses):
+        resp = self.client.post("/api/browser-accounts", json={"name": "账号 C"})
+        account = resp.get_json()["account"]
+        deleted = self.client.delete(f"/api/browser-accounts/{account['id']}")
+        self.assertEqual(deleted.status_code, 409, deleted.get_json())
+        self.assertEqual(deleted.get_json()["error"], "browser_in_use")
+
+
+class AiResumeVerdictSplitTests(unittest.TestCase):
+    """续跑时粗筛 kept 不得被当成精筛判定。"""
+
+    def test_split_resume_verdicts_keeps_rough_out_of_fine(self):
+        from webui.app import _split_resume_verdicts
+        verdicts = {
+            "job-kept": {"verdict": "kept", "reason": ""},
+            "job-drop": {"verdict": "dropped", "reason": "粗筛移除"},
+            "job-match": {"verdict": "match", "reason": "匹配"},
+            "job-uncertain": {"verdict": "uncertain", "reason": "待确认"},
+        }
+        fine, rough = _split_resume_verdicts(verdicts)
+        self.assertEqual(set(fine), {"job-match", "job-uncertain"})
+        self.assertEqual(set(rough), {"job-kept", "job-drop"})
+
+    def test_resume_dropped_reconstructed_from_raw_jobs(self):
+        from webui.app import _resume_dropped_from_verdicts
+        raw_jobs = [
+            {"job_id": "j1", "title": "前端", "source_url": "https://a/j1.html"},
+            {"job_id": "j2", "title": "后端", "source_url": "https://a/j2.html"},
+        ]
+        verdicts = {
+            "j1": {"verdict": "kept"},
+            "j2": {"verdict": "dropped", "reason": "经验不符"},
+        }
+        dropped = _resume_dropped_from_verdicts(raw_jobs, verdicts)
+        self.assertEqual(len(dropped), 1)
+        self.assertEqual(dropped[0]["job_id"], "j2")
+        self.assertEqual(dropped[0]["reason"], "经验不符")
 
 
 class RunSearchAllFailTests(unittest.TestCase):
