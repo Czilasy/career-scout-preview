@@ -1612,6 +1612,12 @@ def create_app(config=None):
         source_jobs = store.load_scrape_run_jobs(scrape_task_id)
         if not source_jobs:
             return None
+        try:
+            source_run = store.get_screening_run(scrape_task_id)
+        except _OPERATIONAL_ERRORS:
+            source_run = None
+        if source_run is None or source_run.get("status") != "succeeded":
+            return None
         snapshot = {
             "kind": "scrape", "status": "done", "progress": {}, "logs": [],
             "result": {
@@ -2459,6 +2465,7 @@ def create_app(config=None):
                 chrome_ok, chrome_err = ensure_chrome_ready()
                 if not chrome_ok:
                     reason = f"调试浏览器未就绪（{chrome_err}），请处理后继续"
+                    _save_jd_checkpoint(jd_path, jd_map)
                     store.update_screening_run(
                         task_id, status="paused", error_code="cdp_unavailable",
                         current_stage="jd_detail", processed_count=len(jd_map),
@@ -2480,6 +2487,7 @@ def create_app(config=None):
                 source = _make_cdp_source()
                 if source is None:
                     reason = "CDP 抓取源不可用，请确认调试浏览器后继续"
+                    _save_jd_checkpoint(jd_path, jd_map)
                     store.update_screening_run(
                         task_id, status="paused", error_code="cdp_unavailable",
                         current_stage="jd_detail", processed_count=len(jd_map),
@@ -3632,6 +3640,17 @@ def create_app(config=None):
             or not source_result.get("ok")
         ):
             return jsonify({"ok": False, "error": "抓取任务尚未成功完成"}), 409
+        # 同一抓取任务只允许一个 AI 筛选工作线程；防止多标签页重复提交。
+        with _pipeline_lock:
+            for existing_id, existing in _pipeline_tasks.items():
+                if (existing.get("kind") == "ai_screen"
+                        and existing.get("source_task_id") == scrape_task_id
+                        and existing.get("status") in ("queued", "running")):
+                    return jsonify({
+                        "ok": False, "error": "already_running",
+                        "existing_task_id": existing_id,
+                        "message": "同一抓取任务已有 AI 筛选在运行",
+                    }), 409
         task_id = uuid.uuid4().hex
         # paused 就地继续；服务重启打断的 interrupted（error_code=restart）
         # 也可以被“重新开始 AI 筛选”继承断点，但保留旧 run 的终态记录。
@@ -3676,11 +3695,22 @@ def create_app(config=None):
                     "error": "resume_already_claimed",
                 }), 409
             task_id = resume_from_run_id
+        claimed_old_resume = False
+        if (resume_from_run_id and prev is not None
+                and prev["status"] == "interrupted"):
+            if not _claim_resume(resume_from_run_id):
+                return jsonify({
+                    "ok": False, "error": "already_running",
+                    "message": "该任务正在继续，请勿重复点击",
+                }), 409
+            claimed_old_resume = True
         claimed_task, previous_task = _claim_pipeline_task_id(task_id, "ai_screen")
         if claimed_task is None:
             if (resume_from_run_id and prev is not None
                     and prev["status"] == "paused"):
                 store.update_screening_run(resume_from_run_id, status="paused")
+            if claimed_old_resume:
+                _release_resume_claim(resume_from_run_id)
             return jsonify({
                 "ok": False, "error": "already_running",
             }), 409
@@ -3703,7 +3733,20 @@ def create_app(config=None):
             if (resume_from_run_id and prev is not None
                     and prev["status"] == "paused"):
                 store.update_screening_run(resume_from_run_id, status="paused")
+            if claimed_old_resume:
+                _release_resume_claim(resume_from_run_id)
             raise
+        if claimed_old_resume:
+            try:
+                store.update_screening_run(
+                    resume_from_run_id,
+                    error_code="resumed",
+                    error_reason="已由新任务接管续跑",
+                )
+                store.append_task_event(
+                    resume_from_run_id, "resume", {"task_id": task_id})
+            except _OPERATIONAL_ERRORS:
+                pass
         return jsonify({"ok": True, "task_id": task_id,
                         "resuming": bool(resume_from_run_id)})
 
@@ -3838,7 +3881,11 @@ def create_app(config=None):
                 "ok": True,
                 "has_task": True,
                 "task_id": run["id"],
-                "kind": "ai_screen",
+                "kind": (
+                    "recrawl" if str(run.get("current_stage") or "").startswith("recrawl_")
+                    else "scrape" if run.get("current_stage") == "scrape"
+                    else "ai_screen"
+                ),
                 "status": "interrupted",
                 "progress": {"message": "上次 AI 筛选因服务重启被中断"},
                 "logs": [],
@@ -5295,6 +5342,11 @@ def create_app(config=None):
                 }), 409
             if task is not None and task.get("stop_event") is not None:
                 task["stop_event"].set()
+            if run_id in _resume_claims:
+                return jsonify({
+                    "ok": False, "error": "already_running",
+                    "message": "该任务已被续跑接管，请结束续跑任务后再保存",
+                }), 409
         params = run.get("execution_params") or {}
         scrape_task_id = str(params.get("scrape_task_id") or "")
         source_run_id = str(params.get("source_run_id") or "")

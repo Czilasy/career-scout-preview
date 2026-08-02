@@ -1262,6 +1262,58 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(self.store.load_checkpoint(task_id, "ai_rough"), {"job-1"})
         self.assertEqual(run["processed_count"], 0)
 
+    def test_resumed_ai_screen_persists_inherited_jd_before_early_pause(self):
+        """新 run 继承旧 JD 断点后，Chrome 未就绪暂停也必须把继承 JD 落盘。"""
+        scrape_task_id = "resume-jd-early-pause-source"
+        interrupted_run_id = "resume-jd-early-pause-run"
+        jobs = [{"job_id": "job-1", "title": "后端工程师"}]
+        self._install_scrape_source(scrape_task_id, jobs)
+        self.store.create_screening_run(
+            interrupted_run_id,
+            source_count=1,
+            frozen_filters={"keyword": "后端"},
+            execution_params={
+                "scrape_task_id": scrape_task_id,
+                "profile_summary": "后端工程师",
+            },
+        )
+        self.store.update_screening_run(interrupted_run_id, status="running")
+        self.store.update_screening_run(
+            interrupted_run_id, status="interrupted", error_code="restart")
+        old_jd = (
+            pathlib.Path(self.app.config["RESULT_DIR"])
+            / f"ai_screen_jd_{interrupted_run_id}.json"
+        )
+        old_jd.write_text(
+            json.dumps({"job-1": "已抓取的 JD 正文"}), encoding="utf-8")
+
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.screen_jobs", return_value={
+                    "kept": ["job-1"], "dropped": [],
+                }), \
+                mock.patch(
+                    "webui.pipeline_exec.ensure_chrome_ready",
+                    return_value=(False, "debug port unavailable"),
+                ):
+            response = self._post_ai_screen(scrape_task_id)
+            self.assertEqual(response.status_code, 200, response.get_json())
+            task_id = response.get_json()["task_id"]
+            paused = _wait_for_pipeline_task(self.client, task_id)
+
+        self.assertEqual(paused["status"], "paused", paused)
+        run = self.store.get_screening_run(task_id)
+        self.assertEqual(run["status"], "paused")
+        self.assertEqual(run["error_code"], "cdp_unavailable")
+        new_jd = (
+            pathlib.Path(self.app.config["RESULT_DIR"])
+            / f"ai_screen_jd_{task_id}.json"
+        )
+        self.assertTrue(new_jd.exists(), "继承的 JD 断点必须在新 run 落盘")
+        self.assertEqual(
+            json.loads(new_jd.read_text(encoding="utf-8")),
+            {"job-1": "已抓取的 JD 正文"},
+        )
+
     def test_main_ai_run_creation_failure_stops_before_ai(self):
         """无法建立持久化 run 时不得继续做任何 AI 工作。"""
         scrape_task_id = "create-run-failure-source"
@@ -2345,6 +2397,7 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
         self.store.create_screening_run(scrape_task_id, source_count=len(jobs))
         self.store.save_scrape_combo_result(
             scrape_task_id, "后端|上海", jobs, ["后端|上海"])
+        self.store.update_screening_run(scrape_task_id, status="succeeded")
         self.store.create_screening_run(
             interrupted_run_id, source_count=1,
             frozen_filters=screening_fields,
@@ -2392,6 +2445,56 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
         self.assertTrue(data["resumable"])
         self.assertEqual(data["frozen_filters"], {"keyword": "后端"})
         self.assertEqual(data["profile_summary"], "后端工程师")
+        self.assertEqual(data["kind"], "ai_screen")
+
+    def test_latest_running_task_reports_interrupted_scrape_kind(self):
+        self.store.create_screening_run("latest-interrupted-scrape", source_count=1)
+        self.store.update_screening_run(
+            "latest-interrupted-scrape", status="running", current_stage="scrape")
+        self.store.update_screening_run(
+            "latest-interrupted-scrape", status="interrupted", error_code="restart")
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertEqual(data["kind"], "scrape")
+        self.assertEqual(data["status"], "interrupted")
+
+    def test_ai_screen_marks_old_interrupted_consumed_and_blocks_duplicate(self):
+        """重启中断续跑接管旧 run 后，重复提交同一来源会被拒绝。"""
+        scrape_task_id = "restart-claimed-source"
+        interrupted_run_id = "restart-claimed-ai-run"
+        screening_fields = {"keyword": "后端"}
+        self.app.config["PIPELINE_TASKS"][scrape_task_id] = {
+            "kind": "scrape", "status": "done",
+            "result": {"ok": True, "jobs": [{"job_id": "job-1"}]},
+            "progress": {}, "logs": [], "error": "",
+        }
+        self.store.create_screening_run(
+            interrupted_run_id, source_count=1,
+            frozen_filters=screening_fields,
+            execution_params={
+                "scrape_task_id": scrape_task_id,
+                "profile_summary": "后端工程师",
+            },
+        )
+        self.store.update_screening_run(interrupted_run_id, status="running")
+        self.store.update_screening_run(
+            interrupted_run_id, status="interrupted", error_code="restart")
+        payload = {
+            "screening_fields": screening_fields,
+            "profile_summary": "后端工程师",
+            "scrape_task_id": scrape_task_id,
+        }
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit") as submit:
+            first = self.client.post("/api/ai-screen", json=payload, headers=self.headers)
+            self.assertEqual(first.status_code, 200, first.get_json())
+            self.assertTrue(first.get_json()["resuming"])
+            self.assertEqual(submit.call_args.args[-1], interrupted_run_id)
+            self.assertEqual(
+                self.store.get_screening_run(interrupted_run_id)["error_code"], "resumed")
+            self.assertIsNone(self.store.latest_interrupted_screening_run())
+            second = self.client.post("/api/ai-screen", json=payload, headers=self.headers)
+            self.assertEqual(second.status_code, 409)
+            self.assertEqual(second.get_json()["error"], "already_running")
 
     def test_concurrent_new_ai_screen_claims_paused_run_once(self):
         """自动继承 paused 断点也必须原子 claim，只能提交一次。"""

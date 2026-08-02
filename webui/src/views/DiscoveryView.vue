@@ -335,14 +335,29 @@ async function restoreRunningTask() {
       : data.kind === "recrawl" ? "recrawl" : "screen";
     if (data.status === "interrupted") {
       // 服务重启打断的任务：工作线程已死不能 poll；提示用户重开（后端会自动接着上次进度）
+      interruptedRunId.value = data.task_id;
+      if (data.kind === "scrape") {
+        scrapeTaskId.value = data.task_id;
+        analysisReady.value = true;
+        activeStep.value = "search";
+        restoredTaskHint.value = "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取";
+        return;
+      }
+      if (data.kind === "recrawl") {
+        recrawlTaskId.value = data.task_id;
+        resultLoaded.value = true;
+        activeCategory.value = "uncertain";
+        activeStep.value = "results";
+        restoredTaskHint.value = "上次补抓因服务重启被中断；可结束保存已有结果";
+        return;
+      }
       restoredTaskHint.value = "上次 AI 筛选因服务重启被中断；重新开始 AI 筛选会接着上次进度，不重复消耗";
       scrapeTaskId.value = data.scrape_task_id || "";
-      scrapeCompleted.value = Boolean(data.scrape_completed || data.scrape_task_id);
+      scrapeCompleted.value = Boolean(data.scrape_completed);
       screenTaskId.value = data.task_id;
       analysisReady.value = true;
       screenPanelOpen.value = false;
       activeStep.value = "screen";
-      interruptedRunId.value = data.task_id;
       const savedFilters = data.frozen_filters || {};
       filterValues.value = Object.fromEntries(
         Object.entries(savedFilters)
@@ -714,6 +729,7 @@ async function startScrape() {
   scrapeCompleted.value = false;
   resultLoaded.value = false;
   pipelineResult.value = null;
+  interruptedRunId.value = "";
   scrapeSnapshot.value = { status: "running", progress: { message: "正在创建抓取任务…" }, logs: [] };
   try {
     const data = await apiRequest<{ task_id: string }>("/api/execute-search", {
@@ -741,6 +757,7 @@ async function cancelScrape() {
     scrapeBusy.value = false;
     restoredTaskHint.value = "";
     scrapeSnapshot.value = { status: "cancelled", progress: { message: "已停止抓取" }, logs: [], error: "" };
+    interruptedRunId.value = "";
     notify("已停止抓取", "warning");
   } catch (error) {
     // 取消接口失败时不要卡死：恢复轮询让前端看真实状态
@@ -754,6 +771,7 @@ async function continueScrape() {
   scrapeBusy.value = true;
   scrapeCompleted.value = false;
   pausedRunId.value = ""; // 切片7：清掉 DB paused 标记，进入内存工作模式
+  interruptedRunId.value = "";
   restoredTaskHint.value = "";
   scrapeSnapshot.value = { status: "running", progress: { message: "正在从断点继续…" }, logs: [] };
   try {
@@ -1251,6 +1269,7 @@ async function recrawlUncertain() {
     logs: [],
     error: "",
   };
+  interruptedRunId.value = "";
   try {
     const data = await apiRequest<{ task_id: string }>("/api/pipeline/recrawl", {
       method: "POST",
@@ -1276,6 +1295,7 @@ async function continueRecrawl() {
   const taskId = recrawlTaskId.value;
   recrawlBusy.value = true;
   restoredTaskHint.value = "";
+  interruptedRunId.value = "";
   recrawlSnapshot.value = {
     status: "running", progress: { message: "正在从重抓断点继续…" }, logs: [],
   };
@@ -1581,6 +1601,9 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
                   @click="finishPausedTask(pausedRunId || scrapeTaskId)">
             结束并保存结果
           </button>
+          <button v-if="interruptedRunId" class="button danger" type="button" data-testid="finish-interrupted-scrape" @click="finishPausedTask(interruptedRunId)">
+            结束并保存结果
+          </button>
           <button v-if="scrapeCompleted" class="button secondary" type="button" data-testid="continue-to-screen" @click="activeStep = 'screen'">
             继续确认筛选条件
           </button>
@@ -1671,16 +1694,19 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
           >{{ tab.label }}<span>{{ tab.count }}</span></button>
         </div>
 
-        <div v-if="activeCategory === 'uncertain' && recrawlSnapshot" class="recrawl-banner">
+        <div v-if="activeCategory === 'uncertain' && (recrawlSnapshot || interruptedRunId)" class="recrawl-banner">
           <TaskProgress :snapshot="recrawlSnapshot" kind="screen" />
-          <button v-if="recrawlSnapshot.status === 'paused'"
+          <button v-if="recrawlSnapshot && recrawlSnapshot.status === 'paused'"
                   class="button primary" type="button" data-testid="resume-recrawl"
                   :disabled="recrawlBusy" @click="continueRecrawl()">
             继续
           </button>
-          <button v-if="recrawlSnapshot.status === 'paused'"
+          <button v-if="recrawlSnapshot && recrawlSnapshot.status === 'paused'"
                   class="button danger" type="button" data-testid="finish-paused-recrawl"
                   :disabled="recrawlBusy" @click="finishPausedTask(recrawlTaskId || pausedRunId)">
+            结束并保存结果
+          </button>
+          <button v-if="interruptedRunId" class="button danger" type="button" data-testid="finish-interrupted-recrawl" @click="finishPausedTask(interruptedRunId)">
             结束并保存结果
           </button>
         </div>

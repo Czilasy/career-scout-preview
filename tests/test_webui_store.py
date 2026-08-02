@@ -371,6 +371,24 @@ class ScreeningRunStoreTests(unittest.TestCase):
         )
         self.assertIsNone(self.store.latest_interrupted_screening_run())
 
+    def test_latest_interrupted_excludes_user_cancelled_without_code(self):
+        """用户主动停止的任务 error_code 为空，也不得当成服务重启中断。"""
+        self.store.create_screening_run("sr-user-cancelled")
+        self.store.update_screening_run("sr-user-cancelled", status="running")
+        self.store.update_screening_run(
+            "sr-user-cancelled", status="cancelled", error_reason="用户已停止筛选")
+        self.assertIsNone(self.store.latest_interrupted_screening_run())
+
+    def test_latest_interrupted_excludes_resumed_old_run(self):
+        """旧 run 被新任务接管后标记 resumed，不再出现在重启恢复队列。"""
+        self.store.create_screening_run("sr-resumed")
+        self.store.update_screening_run("sr-resumed", status="running")
+        self.store.update_screening_run(
+            "sr-resumed", status="interrupted", error_code="restart")
+        self.store.update_screening_run(
+            "sr-resumed", error_code="resumed", error_reason="已由新任务接管续跑")
+        self.assertIsNone(self.store.latest_interrupted_screening_run())
+
     def test_claim_paused_screening_run_clears_block_reason(self):
         self.store.create_screening_run("claim-clear-block", source_count=1)
         self.store.update_screening_run("claim-clear-block", status="running")
