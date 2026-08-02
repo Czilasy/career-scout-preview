@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { Check, ExternalLink, Plus, Trash2, UserRound } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
 import { apiRequest, errorMessage } from "../api";
@@ -19,6 +19,9 @@ const accounts = ref<BrowserAccount[]>([]);
 const activeAccount = ref("");
 const busy = ref(false);
 const busyAccount = ref("");
+const serverBusy = ref(false);
+const busyKind = ref("");
+const lockedAccount = ref("");
 const newName = ref("");
 const localNotice = ref<Notice | null>(null);
 
@@ -27,6 +30,9 @@ watch(() => props.open, (open) => {
     localNotice.value = null;
     newName.value = "";
     busyAccount.value = "";
+    serverBusy.value = false;
+    busyKind.value = "";
+    lockedAccount.value = "";
     void loadAccounts();
   } else {
     localNotice.value = null;
@@ -44,9 +50,15 @@ async function loadAccounts() {
     const data = await apiRequest<{
       accounts?: BrowserAccount[];
       active_account?: string;
+      busy?: boolean;
+      busy_kind?: string;
+      locked_account?: string;
     }>("/api/browser-accounts");
     accounts.value = data.accounts || [];
     activeAccount.value = data.active_account || "";
+    serverBusy.value = Boolean(data.busy);
+    busyKind.value = data.busy_kind || "";
+    lockedAccount.value = data.locked_account || "";
   } catch (error) {
     setLocalNotice({ message: errorMessage(error, "浏览器账号加载失败"), tone: "error" });
   } finally {
@@ -103,6 +115,21 @@ async function openBrowser(id: string) {
   }
 }
 
+const lockNotice = computed(() => {
+  if (!serverBusy.value) return "";
+  if (busyKind.value === "paused" && lockedAccount.value) {
+    const name = accounts.value.find((item) => item.id === lockedAccount.value)?.name || lockedAccount.value;
+    return `当前有暂停任务，浏览器已锁定到「${name}」；请打开该账号登录/处理，或先结束/取消暂停任务。`;
+  }
+  return "当前有任务运行或暂停，请先结束或取消任务后再打开浏览器。";
+});
+
+function canOpen(id: string): boolean {
+  if (busyAccount.value) return false;
+  if (!serverBusy.value) return true;
+  return busyKind.value === "paused" && lockedAccount.value === id;
+}
+
 async function removeAccount(id: string) {
   const account = accounts.value.find((item) => item.id === id);
   if (!account) return;
@@ -133,6 +160,14 @@ async function removeAccount(id: string) {
     @close="$emit('close')"
   >
     <div class="browser-account-list">
+      <div
+        v-if="lockNotice"
+        class="browser-account-notice"
+        data-tone="warning"
+        role="status"
+      >
+        {{ lockNotice }}
+      </div>
       <article
         v-for="account in accounts"
         :key="account.id"
@@ -150,7 +185,7 @@ async function removeAccount(id: string) {
           <button
             type="button"
             class="button secondary small"
-            :disabled="Boolean(busyAccount)"
+            :disabled="!canOpen(account.id)"
             @click="openBrowser(account.id)"
           >
             <ExternalLink :size="15" aria-hidden="true" />打开浏览器登录

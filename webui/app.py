@@ -3029,21 +3029,34 @@ def create_app(config=None):
                 pass  # store 保存失败不阻塞旧路径
         return jsonify({"ok": True, "settings": _load_legacy_advanced_settings()})
 
-    def _browser_busy() -> bool:
+    def _browser_lock() -> tuple[str | None, str | None]:
+        """Return the active browser lock as (kind, account id).
+
+        Running/queued tasks lock every account; a paused run locks only the
+        account frozen into its execution params (or the current fallback)."""
         with _pipeline_lock:
-            if any(
-                task.get("status") in ("running", "queued")
-                for task in _pipeline_tasks.values()
-            ):
-                return True
+            for _task_id, task in reversed(list(_pipeline_tasks.items())):
+                if task.get("status") in ("running", "queued"):
+                    return "running", str(task.get("browser_account") or "")
         try:
             with store._connection() as conn:
                 row = conn.execute(
-                    "SELECT 1 FROM screening_runs WHERE status = 'paused' LIMIT 1"
+                    "SELECT id FROM screening_runs WHERE status = 'paused' "
+                    "ORDER BY updated_at DESC LIMIT 1"
                 ).fetchone()
-            return row is not None
         except (sqlite3.Error, RuntimeError):
-            return False
+            row = None
+        if row is None:
+            return None, None
+        try:
+            run = store.get_screening_run(row["id"]) or {}
+            account = _account_for_run(run)
+        except _OPERATIONAL_ERRORS:
+            return "paused", None
+        return "paused", account
+
+    def _browser_busy() -> bool:
+        return _browser_lock()[0] is not None
 
     @app.route("/api/browser-accounts", methods=["GET"])
     def list_browser_accounts():
@@ -3052,11 +3065,16 @@ def create_app(config=None):
         active = str((_load_legacy_advanced_settings() or {}).get("browser_account") or "a")
         if active not in accounts:
             active = "a"
+        lock_kind, locked_account = _browser_lock()
         return jsonify({
             "ok": True,
             "accounts": list(accounts.values()),
             "active_account": active,
             "busy": _browser_busy(),
+            "busy_kind": lock_kind,
+            "locked_account": (
+                locked_account if lock_kind == "paused" else None
+            ),
         })
 
     @app.route("/api/browser-accounts", methods=["POST"])
@@ -3096,10 +3114,38 @@ def create_app(config=None):
         account = accounts.get(str(account_id))
         if account is None:
             return jsonify({"ok": False, "error": "账号不存在"}), 404
-        if _browser_busy():
+        lock_kind, locked_account = _browser_lock()
+        if lock_kind is not None:
+            if lock_kind == "paused" and locked_account == str(account_id):
+                set_active_cdp_data_dir(str(account_id))
+                ok, msg = ensure_chrome_ready()
+                if not ok:
+                    return jsonify({
+                        "ok": False, "error": "chrome_not_ready", "message": msg,
+                    }), 409
+                return jsonify({
+                    "ok": True,
+                    "message": (
+                        f"已打开「{account['name']}」的自动化浏览器，请登录 BOSS直聘；"
+                        "登录或处理完成后请回到任务页点「继续」"
+                    ),
+                })
+            if lock_kind == "paused":
+                locked_name = (
+                    accounts.get(locked_account, {}).get("name") if locked_account else ""
+                )
+                message = (
+                    f"当前有暂停任务，浏览器已锁定到「{locked_name}」；" if locked_name else ""
+                    "请先打开该账号登录/处理，或结束/取消暂停任务后再切换账号"
+                ) if locked_name else (
+                    "当前有暂停任务；请先结束或取消任务后再打开浏览器账号"
+                )
+                return jsonify({
+                    "ok": False, "error": "browser_busy", "message": message,
+                }), 409
             return jsonify({
                 "ok": False, "error": "browser_busy",
-                "message": "当前有任务运行或暂停，无法打开其他账号浏览器；请先结束或取消任务",
+                "message": "当前有任务运行，浏览器正在被占用；请先等待、取消或结束任务",
             }), 409
         set_active_cdp_data_dir(str(account_id))
         ok, msg = ensure_chrome_ready()

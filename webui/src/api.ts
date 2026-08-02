@@ -28,7 +28,7 @@ export class ApiError extends Error {
 
   constructor(status: number, payload: Record<string, unknown>) {
     const message = String(
-      payload.user_message || payload.error || payload.error_code || `请求失败（${status}）`,
+      payload.user_message || payload.message || payload.error || payload.error_code || `请求失败（${status}）`,
     );
     super(message);
     this.name = "ApiError";

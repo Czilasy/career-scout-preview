@@ -965,13 +965,37 @@ class BrowserAccountApiTests(unittest.TestCase):
         self.assertEqual(data["active_account"], "a")
         self.assertNotIn(custom["id"], [a["id"] for a in data["accounts"]])
 
-    def test_open_browser_refuses_when_task_paused(self):
-        self.store.create_screening_run("busy-account-run", source_count=1)
-        self.store.update_screening_run("busy-account-run", status="running")
-        self.store.update_screening_run("busy-account-run", status="paused")
+    def _seed_paused_run(self, account="b", run_id="busy-account-run"):
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={"browser_account": account},
+        )
+        self.store.update_screening_run(run_id, status="running")
+        self.store.update_screening_run(run_id, status="paused")
+        return run_id
+
+    def test_open_browser_refuses_other_account_when_task_paused(self):
+        self._seed_paused_run(account="b")
         resp = self.client.post("/api/browser-accounts/a/open")
         self.assertEqual(resp.status_code, 409)
-        self.assertEqual(resp.get_json()["error"], "browser_busy")
+        data = resp.get_json()
+        self.assertEqual(data["error"], "browser_busy")
+        self.assertIn("账号B", data["message"])
+
+    @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
+    def test_open_browser_allows_paused_task_account(self, _ready):
+        self._seed_paused_run(account="b")
+        resp = self.client.post("/api/browser-accounts/b/open")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertTrue(resp.get_json()["ok"])
+        self.assertIn("登录", resp.get_json()["message"])
+
+    def test_list_exposes_paused_account_lock(self):
+        self._seed_paused_run(account="b")
+        data = self.client.get("/api/browser-accounts").get_json()
+        self.assertTrue(data["busy"])
+        self.assertEqual(data["busy_kind"], "paused")
+        self.assertEqual(data["locked_account"], "b")
 
     @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
     def test_open_browser_succeeds_when_idle(self, _ready):
