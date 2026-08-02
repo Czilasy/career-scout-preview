@@ -79,6 +79,7 @@ Thumbs.db
 .worktrees/
 CODE_REVIEW.md
 spec011-*.yaml
+.trash/
 
 # 覆盖全局 gitignore 对 AGENTS.md 的忽略，本项目需要提交
 !AGENTS.md
