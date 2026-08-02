@@ -45,7 +45,9 @@ _PIPELINE_OPERATION_ERRORS = (
 # 与 app.py 的 DEFAULT_STATE_DIR 保持一致：允许通过环境变量把状态目录改到
 # 项目内，避免在沙箱环境中因无法写用户 home 目录而保存失败。
 _ADVANCED_SETTINGS_DIR = Path(
-    os.environ.get("BOSS_WEBUI_STATE_DIR", os.path.expanduser("~/.career-scout/webui"))
+    os.environ.get("CAREER_SCOUT_STATE_DIR")
+    or os.environ.get("BOSS_WEBUI_STATE_DIR")
+    or os.path.expanduser("~/.career-scout/webui")
 )
 ADVANCED_SETTINGS_PATH = _ADVANCED_SETTINGS_DIR / "advanced_settings.json"
 

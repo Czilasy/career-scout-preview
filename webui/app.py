@@ -111,7 +111,11 @@ def _classify_scrape_block(err_msg: str) -> str:
 
 
 SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
-DEFAULT_STATE_DIR = Path(os.environ.get("BOSS_WEBUI_STATE_DIR", os.path.expanduser("~/.career-scout/webui")))
+DEFAULT_STATE_DIR = Path(
+    os.environ.get("CAREER_SCOUT_STATE_DIR")
+    or os.environ.get("BOSS_WEBUI_STATE_DIR")
+    or os.path.expanduser("~/.career-scout/webui")
+)
 
 
 _FINE_VERDICTS = frozenset({"match", "not_match", "mismatch", "uncertain"})

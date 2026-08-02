@@ -23,7 +23,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-_REAL_DB = pathlib.Path(r"~/.career-scout\webui\webui.db")
+_REAL_DB = pathlib.Path(r"~\.career-scout\webui\webui.db")
 
 # 真实不变量（与 historical_recovery.py 常量一致）
 ROUGH_RUN_ID = "15847d27-7419-4f01-ae09-9e4c9e2641bb"
