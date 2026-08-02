@@ -2469,6 +2469,16 @@ class TaskStore:
             ).fetchone()
         return row["id"] if row else None
 
+    def latest_pipeline_result_saved_at(self) -> str | None:
+        """Return created_at of the newest result snapshot, or None."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT created_at FROM screening_runs "
+                "WHERE status IN ('done', 'partial') AND record_kind = 'result_snapshot' "
+                "ORDER BY created_at DESC LIMIT 1",
+            ).fetchone()
+        return row["created_at"] if row is not None else None
+
     def update_pipeline_job_jd(self, run_id: str, job_id: str, jd: str):
         """Update the JD text for a specific job in a pipeline run (补抓 JD)."""
         with self._connection() as conn:

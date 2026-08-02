@@ -720,6 +720,46 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(data["total"], 667)
         self.assertEqual(data["source_total"], 930)
 
+    def test_task_state_done_stage_uses_kept_total(self):
+        """完成阶段也按粗筛保留数统计，不再把剔除岗位显示成未开始。"""
+        run_id = "count-done-kept"
+        self.store.create_screening_run(run_id, source_count=311)
+        self.store.update_screening_run(
+            run_id, status="succeeded", current_stage="done",
+            processed_count=246, match_count=133, mismatch_count=113,
+            pending_count=0, total_kept=246, total_dropped=65,
+        )
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+        self.assertEqual(data["success_count"], 246)
+        self.assertEqual(data["fail_count"], 0)
+        self.assertEqual(data["unstarted_count"], 0)
+        self.assertEqual(data["total"], 246)
+        self.assertEqual(data["source_total"], 311)
+
+    def test_latest_running_task_skips_stale_paused_when_newer_result_saved(self):
+        """已有更新的完成结果时，旧 paused 任务不再抢占刷新后的恢复提示。"""
+        run_id = "stale-paused"
+        self.store.create_screening_run(run_id, source_count=930)
+        self.store.update_screening_run(run_id, status="running")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="ai_fine",
+            error_code="ai_rate_limited", error_reason="AI 服务限流",
+        )
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET updated_at = ? WHERE id = ?",
+                ("2026-08-01T08:00:00+08:00", run_id),
+            )
+        self.store.save_pipeline_result(
+            {
+                "jobs": [], "dropped": [], "total_scraped": 930,
+                "total_kept": 0, "total_dropped": 930, "profile_summary": "",
+            },
+            {},
+        )
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertFalse(data["has_task"])
+
     def test_finish_paused_task_saves_partial_snapshot_and_latest(self):
         run_id = self._seed_paused_ai_screen()
         resp = self.client.post(f"/api/task/finish/{run_id}")

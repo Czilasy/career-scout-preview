@@ -3783,6 +3783,16 @@ def create_app(config=None):
                 snapshot["result"] = task["result"]
         return jsonify(snapshot)
 
+    def _has_newer_saved_result_than(timestamp: str | None) -> bool:
+        """True when a result snapshot was saved after the given DB timestamp."""
+        if not timestamp:
+            return False
+        try:
+            saved_at = store.latest_pipeline_result_saved_at()
+        except _OPERATIONAL_ERRORS:
+            return False
+        return bool(saved_at and str(saved_at) > str(timestamp))
+
     @app.route("/api/latest-running-task")
     def latest_running_task():
         """返回最近一个仍在运行（running/queued）的 pipeline 任务。
@@ -3823,6 +3833,8 @@ def create_app(config=None):
                     "ORDER BY updated_at DESC LIMIT 1"
                 ).fetchone()
         except (sqlite3.Error, RuntimeError):
+            prow = None
+        if prow is not None and _has_newer_saved_result_than(prow["updated_at"]):
             prow = None
         if prow is not None:
             paused_run = store.get_screening_run(prow["id"]) or {}
@@ -3876,6 +3888,8 @@ def create_app(config=None):
                 "error": "task_state_unavailable",
                 "detail": type(exc).__name__,
             }), 503
+        if run is not None and _has_newer_saved_result_than(run.get("updated_at")):
+            run = None
         if run is not None:
             return jsonify({
                 "ok": True,
@@ -4989,7 +5003,7 @@ def create_app(config=None):
         # 是已失败并进入待确认的独立工作单元，两者不能互相扣减。
         # JD 详情/精筛阶段只处理粗筛保留的岗位；原始列表里的 dropped
         # 已经作为独立结果展示，不能继续混进当前阶段的成功/失败/未开始。
-        jd_stage = stage in ("jd_detail", "fetch_jd", "ai_fine", "screen_b")
+        jd_stage = stage in ("jd_detail", "fetch_jd", "ai_fine", "screen_b", "done")
         stage_total = kept if jd_stage and kept > 0 else source
         # processed_count 只记录已成功完成的当前阶段工作单元；pending
         # 是已失败并进入待确认的独立工作单元，两者不能互相扣减。
