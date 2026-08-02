@@ -27,6 +27,8 @@ webui/node_modules/
 *.egg-info/
 .eggs/
 *.egg
+*.whl
+*.tar.gz
 
 # Test and tool caches
 .coverage
@@ -53,9 +55,16 @@ tests/fixtures/discovery/*_result.json
 # WebUI runtime state (sqlite DB, resumes, latest_*.json) - per-machine, sensitive
 .career-scout/
 .webui-state/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+backups/
 
 # Playwright CLI test artifacts
 .playwright-cli/
+playwright-report/
+test-results/
 
 # IDE/tool config
 .trae/
@@ -79,6 +88,11 @@ _tmp_*.py
 ._*
 Thumbs.db
 
+# Private keys and credentials
+*.pem
+*.key
+*.p12
+
 # Local agent/tool state and archived internal docs
 .agents/
 .uploads/
@@ -86,7 +100,4 @@ Thumbs.db
 CODE_REVIEW.md
 spec011-*.yaml
 .trash/
-
-# 覆盖全局 gitignore 对 AGENTS.md 的忽略，本项目需要提交
-!AGENTS.md
 .devlog/

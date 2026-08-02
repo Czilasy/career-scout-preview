@@ -806,18 +806,18 @@ class ChromeSetupTests(unittest.TestCase):
     def test_windows_default_paths_use_localappdata(self):
         module = load_module()
         env = {
-            "LOCALAPPDATA": r"C:\Users\leon\AppData\Local",
+            "LOCALAPPDATA": r"C:\Users\demo-user\AppData\Local",
             "PROGRAMFILES": r"C:\Program Files",
             "PROGRAMFILES(X86)": r"C:\Program Files (x86)",
         }
-        expected_chrome = r"C:\Users\leon\AppData\Local\Google\Chrome\Application\chrome.exe"
+        expected_chrome = r"C:\Users\demo-user\AppData\Local\Google\Chrome\Application\chrome.exe"
         with mock.patch.object(module.platform, "system", return_value="Windows"), \
                 mock.patch.dict(module.os.environ, env, clear=False), \
                 mock.patch.object(module.os.path, "exists", side_effect=lambda p: p == expected_chrome):
             self.assertEqual(module.get_default_chrome_path(), expected_chrome)
             self.assertEqual(
                 module.get_default_profile_dir(),
-                r"C:\Users\leon\AppData\Local\Google\Chrome\User Data",
+                r"C:\Users\demo-user\AppData\Local\Google\Chrome\User Data",
             )
 
     def test_windows_process_parsing_matches_user_data_dir_and_cdp_port(self):
@@ -827,18 +827,18 @@ class ChromeSetupTests(unittest.TestCase):
             "CommandLine": (
                 r'"C:\Program Files\Google\Chrome\Application\chrome.exe" '
                 r'--remote-debugging-port=9333 '
-                r'--user-data-dir="C:\Users\leon\.career-scout\chrome-profile"'
+                r'--user-data-dir="C:\Users\demo-user\.career-scout\chrome-profile"'
             ),
         }])
         with mock.patch.object(module.platform, "system", return_value="Windows"), \
                 mock.patch.object(module.subprocess, "run", return_value=type("Completed", (), {"stdout": ps_json, "returncode": 0})()):
             self.assertEqual(
-                module.chrome_pids_for_user_data_dir(r"C:\Users\leon\.career-scout\chrome-profile"),
+                module.chrome_pids_for_user_data_dir(r"C:\Users\demo-user\.career-scout\chrome-profile"),
                 [456],
             )
             self.assertEqual(
                 module.chrome_user_data_dirs_for_cdp_port(9333),
-                [r"C:\Users\leon\.career-scout\chrome-profile"],
+                [r"C:\Users\demo-user\.career-scout\chrome-profile"],
             )
 
     def test_smoke_jobs_require_api_salary_and_link(self):

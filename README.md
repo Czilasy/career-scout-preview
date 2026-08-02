@@ -16,7 +16,7 @@ Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的 BOSS直聘职�
 
 - Python 3.10+
 - Chrome 浏览器
-- 可选：Node.js 18+（仅在修改 WebUI 前端源码时需要）
+- 可选：Node.js 20+（仅在修改 WebUI 前端源码时需要）
 
 ### 安装
 
@@ -123,6 +123,11 @@ npm run build
 ```
 
 修改前端源码后必须重新构建并提交 `webui/dist`，否则 Web 工作台可能使用旧构建产物。
+
+## 参与贡献与安全
+
+- 贡献指南：[CONTRIBUTING.md](./CONTRIBUTING.md)
+- 安全政策：[SECURITY.md](./SECURITY.md)
 
 ## License
 

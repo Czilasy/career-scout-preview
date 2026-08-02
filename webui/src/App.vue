@@ -67,7 +67,7 @@ onMounted(async () => {
     await initializeSession();
     const profileData = await apiRequest<{ profiles?: CandidateProfile[] }>("/api/profiles");
     profiles.value = profileData.profiles || [];
-    const saved = localStorage.getItem("boss-current-profile") || "";
+    const saved = localStorage.getItem("career-scout-current-profile") || "";
     currentProfileId.value = profiles.value.some((profile) => profile.id === saved)
       ? saved
       : profiles.value[0]?.id || "";
@@ -82,7 +82,7 @@ onBeforeUnmount(() => {
 
 function selectProfile(profileId: string) {
   currentProfileId.value = profileId;
-  if (profileId) localStorage.setItem("boss-current-profile", profileId);
+  if (profileId) localStorage.setItem("career-scout-current-profile", profileId);
 }
 
 function showNotice(next: Notice) {
@@ -112,9 +112,9 @@ function acceptCreatedProfile(profile: CandidateProfile) {
 <template>
   <div class="app-shell">
     <header class="app-header">
-      <a class="brand" href="/" aria-label="AI 求职工作台首页">
+      <a class="brand" href="/" aria-label="Career Scout 工作台首页">
         <span class="brand-mark" aria-hidden="true"><BriefcaseBusiness :size="20" /></span>
-        <span><strong>求职雷达</strong><small>BOSS 工作台</small></span>
+        <span><strong>Career Scout</strong><small>BOSS 求职工作台</small></span>
       </a>
 
 

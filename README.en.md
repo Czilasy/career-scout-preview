@@ -16,7 +16,7 @@ This project is provided for learning and technical research only. Please read t
 
 - Python 3.10+
 - Chrome browser
-- Optional: Node.js 18+ (only needed when modifying the WebUI frontend)
+- Optional: Node.js 20+ (only needed when modifying the WebUI frontend)
 
 ### Install
 
@@ -123,6 +123,11 @@ npm run build
 ```
 
 After changing frontend source, rebuild and commit `webui/dist`; otherwise the workbench may serve stale assets.
+
+## Contributing and Security
+
+- Contribution guide: [CONTRIBUTING.md](./CONTRIBUTING.md)
+- Security policy: [SECURITY.md](./SECURITY.md)
 
 ## License
 

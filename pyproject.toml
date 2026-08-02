@@ -31,6 +31,11 @@ all = [
 career-scout = "scripts.boss_cdp_raw:main"
 career-summary = "scripts.job_summary:main"
 
+[project.urls]
+Homepage = "https://github.com/czyooutzilas-sketch/career-scout-preview"
+Repository = "https://github.com/czyooutzilas-sketch/career-scout-preview"
+Issues = "https://github.com/czyooutzilas-sketch/career-scout-preview/issues"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
