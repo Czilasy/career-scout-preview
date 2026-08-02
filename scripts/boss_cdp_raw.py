@@ -664,15 +664,25 @@ def extract_job_description(extracted, min_length=0):
         )
     if _looks_like_navigation_page(diagnostic_text):
         raise DetailExtractionError("detail page rendered navigation chrome without a JD")
-    if looks_like_rate_limited(diagnostic_text):
-        raise DetailRateLimitedError(
-            extract_block_hint(diagnostic_text)
-            or "BOSS 账号/操作频繁被限流"
-        )
-    if looks_like_risk_control(diagnostic_text):
-        raise DetailVerificationRequiredError(
-            "detail page shows captcha/verification instead of JD content"
-        )
+    # 真实 JD 正文可能包含“限流/频繁/解锁”等岗位职责词汇，只有拿不到真实 JD
+    # 时才允许把页面文本判成风控/限流页。
+    raw_jd_text = raw_jd
+    if DETAIL_DESCRIPTION_MARKER in raw_jd_text:
+        raw_jd_text = raw_jd_text.split(DETAIL_DESCRIPTION_MARKER, 1)[1]
+    has_real_jd = (
+        bool(_normalize_detail_whitespace(raw_jd_text))
+        and not _looks_like_detail_shell(raw_jd_text)
+    )
+    if not has_real_jd:
+        if looks_like_rate_limited(diagnostic_text):
+            raise DetailRateLimitedError(
+                extract_block_hint(diagnostic_text)
+                or "BOSS 账号/操作频繁被限流"
+            )
+        if looks_like_risk_control(diagnostic_text):
+            raise DetailVerificationRequiredError(
+                "detail page shows captcha/verification instead of JD content"
+            )
 
     text = raw_jd
     if not text and DETAIL_DESCRIPTION_MARKER in page_text:

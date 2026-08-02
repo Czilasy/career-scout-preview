@@ -701,6 +701,28 @@ class ChromeSetupTests(unittest.TestCase):
         with self.assertRaisesRegex(module.DetailExtractionError, "too short"):
             module.extract_job_description({"jd": "职位描述\n只有一句话"})
 
+    def test_extract_job_description_keeps_jd_with_rate_limit_words(self):
+        """真实 JD 正文含“限流/解锁”等词时不得误判成账号限流页。"""
+        module = load_module()
+        description = (
+            "岗位职责\n负责模型调用成本和系统稳定性控制，包括 Token、并发、超时、重试、限流和用量统计。\n"
+            "需要处理操作频繁导致的告警，并设计解锁与冻结策略。\n" * 6
+        ).strip()
+        page_text = f"职位描述\n{description}\n招聘者\nBOSS 安全提示"
+
+        jd = module.extract_job_description({"jd": page_text, "page_text": page_text})
+
+        self.assertIn("限流", jd)
+        self.assertIn("解锁", jd)
+
+    def test_extract_job_description_still_rejects_rate_limit_page(self):
+        """没有真实 JD 的限流提示页仍必须按限流处理。"""
+        module = load_module()
+        page_text = "操作频繁，请稍后再试\n您的账号访问受限，请解锁后继续"
+
+        with self.assertRaises(module.DetailRateLimitedError):
+            module.extract_job_description({"jd": "", "page_text": page_text})
+
     def test_detail_url_adds_security_context_without_changing_job_link(self):
         module = load_module()
         job = {
