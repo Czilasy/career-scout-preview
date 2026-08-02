@@ -1453,7 +1453,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(match_jds.call_count, 1)
 
     def test_main_ai_screen_marks_fine_stage_before_match(self):
-        """精筛开始前 DB current_stage 必须切到 ai_fine，不能停在 jd_detail。"""
+        """精筛开始前阶段切到 ai_fine，且进度归零、不再沿用 JD 计数。"""
         scrape_task_id = "fine-stage-source"
         jobs = [{"job_id": "job-1", "title": "后端工程师"}]
         self._install_scrape_source(scrape_task_id, jobs)
@@ -1463,6 +1463,8 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
             run = self.store.latest_screening_run_for_source(
                 scrape_task_id, statuses=("running",))
             seen["stage"] = run.get("current_stage") if run else None
+            seen["processed"] = run.get("processed_count") if run else None
+            seen["pending"] = run.get("pending_count") if run else None
             return {"verdicts": {
                 str(job["job_id"]): {
                     "verdict": "match", "reason": "匹配", "caveats": [],
@@ -1489,6 +1491,53 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
 
         self.assertEqual(finished["status"], "done", finished)
         self.assertEqual(seen.get("stage"), "ai_fine")
+        self.assertEqual(seen.get("processed"), 0)
+        self.assertEqual(seen.get("pending"), 0)
+
+    def test_main_ai_screen_counts_missing_jd_as_pending_at_fine_start(self):
+        """无 JD 岗位进入精筛时即计为待确认，不再伪装成未开始。"""
+        scrape_task_id = "fine-pending-source"
+        jobs = [
+            {"job_id": "job-ok", "title": "后端工程师"},
+            {"job_id": "job-missing", "title": "测试岗位"},
+        ]
+        self._install_scrape_source(scrape_task_id, jobs)
+        seen = {}
+
+        def matched(chunk, *_args, **_kwargs):
+            run = self.store.latest_screening_run_for_source(
+                scrape_task_id, statuses=("running",))
+            seen["pending"] = run.get("pending_count") if run else None
+            return {"verdicts": {
+                str(job["job_id"]): {
+                    "verdict": "match", "reason": "匹配", "caveats": [],
+                }
+                for job in chunk
+            }}
+
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.screen_jobs", return_value={
+                    "kept": [job["job_id"] for job in jobs], "dropped": [],
+                }), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
+                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch("webui.pipeline_exec.fetch_job_details", return_value={
+                    "jobs": [
+                        {**jobs[0], "jd": "负责后端开发"},
+                        {**jobs[1], "jd": "", "jd_failed_code": "detail_timeout",
+                         "jd_failed_reason": "岗位详情请求超时"},
+                    ],
+                    "hard_stop": False, "hard_stop_code": None,
+                    "stopped": False, "fetched": 1,
+                }), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"), \
+                mock.patch("webui.ai.match_jds", side_effect=matched):
+            response = self._post_ai_screen(scrape_task_id)
+            task_id = response.get_json()["task_id"]
+            finished = _wait_for_pipeline_task(self.client, task_id)
+
+        self.assertEqual(finished["status"], "done", finished)
+        self.assertEqual(seen.get("pending"), 1)
 
     def test_main_ai_screen_splits_by_frozen_batch_settings(self):
         """主链路按冻结设置切分：JD 每批 15、精筛 4/并发 10，不再固定 10/20。"""

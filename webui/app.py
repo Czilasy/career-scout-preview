@@ -2626,7 +2626,12 @@ def create_app(config=None):
                         done_verdicts.update(_extra)
                 todo_match = [j for j in jobs_with_jd
                               if str(j.get("job_id", "")) not in done_verdicts]
-                store.update_screening_run(task_id, current_stage="ai_fine")
+                no_jd_pending = len(enriched) - len(jobs_with_jd)
+                store.update_screening_run(
+                    task_id, current_stage="ai_fine",
+                    processed_count=len(done_verdicts),
+                    pending_count=no_jd_pending,
+                )
                 emit(stage="screen_b",
                      current=min(len(done_verdicts), len(jobs_with_jd)),
                      total=len(jobs_with_jd),
