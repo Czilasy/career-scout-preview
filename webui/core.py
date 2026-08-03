@@ -411,7 +411,7 @@ def parse_legacy_platform(raw):
     零副作用保证由路由层在捕获异常后不执行任何后续操作实现。
     不得从 URL、任务标题或当前 UI 猜平台（FR-013/SC-012）。
     """
-    from webui.platforms import UnknownPlatformError, KNOWN_PLATFORM_KEYS
+    from webui.platforms import UnknownPlatformError
 
     if raw is None:
         return "boss"

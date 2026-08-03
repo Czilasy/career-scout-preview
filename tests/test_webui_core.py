@@ -277,11 +277,15 @@ class LegacyPlatformGuardTests(unittest.TestCase):
         )
 
     def test_guard_is_alias_of_parse(self):
-        from webui.core import parse_legacy_platform, legacy_platform_guard
+        from webui.core import (
+            parse_legacy_platform,
+            legacy_platform_guard,
+            LegacyPlatformNotSupportedError,
+        )
 
         self.assertEqual(legacy_platform_guard(None), "boss")
         self.assertEqual(legacy_platform_guard("boss"), "boss")
-        with self.assertRaises(parse_legacy_platform.__class__.__name__ and ValueError):
+        with self.assertRaises(LegacyPlatformNotSupportedError):
             legacy_platform_guard("zhilian")
 
     def test_zero_side_effect_pure_function(self):
