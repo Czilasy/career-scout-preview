@@ -592,6 +592,34 @@ class JobUpsertDualIndexTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_code"], "platform_url_mismatch")
 
+    def test_branch_2_url_hit_different_platform_conflict(self):
+        """分支2：URL 命中但该行平台与输入平台不一致，返回 job_identity_conflict。
+
+        构造脏数据（BOSS URL 被标记为 zhilian 平台，模拟历史/迁移残留），
+        以 boss 平台 upsert 同一 URL：分支1 通过（URL 属于 boss），
+        分支2 命中 by_url.platform='zhilian' != 'boss'，返回冲突，不得跨平台认领。
+        """
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO jobs (id, canonical_url, platform, platform_job_id, first_seen_at, last_seen_at) "
+                "VALUES ('job-dirty', ?, 'zhilian', NULL, ?, ?)",
+                (self._boss_url(1), _now(), _now()),
+            )
+        result = self.store.upsert_job(
+            platform="boss", platform_job_id="b1",
+            canonical_url=self._boss_url(1),
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "job_identity_conflict")
+        # 冲突时原行数据保持不变
+        with self.store._connection() as conn:
+            row = conn.execute(
+                "SELECT id, platform, canonical_url FROM jobs WHERE canonical_url=?",
+                (self._boss_url(1),),
+            ).fetchone()
+        self.assertEqual(row["id"], "job-dirty")
+        self.assertEqual(row["platform"], "zhilian")
+
     def test_branch_3_both_miss_create_new_job(self):
         """分支3：平台ID和URL都未命中，创建新内部UUID。"""
         result = self.store.upsert_job(
