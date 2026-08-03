@@ -87,6 +87,7 @@ tuning/
 
 # Temporary diagnostic/scratch scripts
 _tmp_*.py
+webui/.tmp-*.mjs
 
 # Backup and patch leftovers
 *.bak

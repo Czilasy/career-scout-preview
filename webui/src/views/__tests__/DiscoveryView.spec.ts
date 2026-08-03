@@ -178,6 +178,8 @@ describe("DiscoveryView", () => {
         return response({
           ok: true, has_task: true, task_id: "interrupted-run",
           kind: "ai_screen", status: "interrupted",
+          // T509：所有 has_task=true 响应含 platform（http-api.md L201）
+          platform: "boss",
           scrape_task_id: "scrape-1", scrape_completed: true,
           frozen_filters: { salary: ["406"], experience: [] },
           profile_summary: "后端工程师",
@@ -241,6 +243,74 @@ describe("DiscoveryView", () => {
     // T508：execute-search 不发 platform 也不发 AI filters（已由其它测试覆盖 scope_digest）
     // T506：screening_fields 是 boss 平台草稿（draftPlatform 默认 boss）
     expect(JSON.parse(aiCall![1]!.body as string).screening_fields).not.toHaveProperty("stage");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("T509: restores zhilian interrupted AI screen task by loading zhilian schema/city but keeps draft boss", async () => {
+    // platform-schema.md L157：恢复任务时先设置任务自身平台，再加载对应 schema/城市/筛选快照；
+    // 不变式 2：setTaskPlatform 不改 draft/result。所以草稿仍是 BOSS，但已加载 schema/city 是 zhilian。
+    // 不 click start-ai-screen：draft≠task 时会触发已知 UX 问题（zhilian 任务恢复后表单读 boss 草稿），
+    // 由 T515 真实联调阶段修复；本会话只验证 schema/city/draft 三身份独立。
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) {
+        return response({
+          ok: true, has_task: true, task_id: "zhilian-interrupted",
+          kind: "ai_screen", status: "interrupted",
+          platform: "zhilian",
+          scrape_task_id: "scrape-zhilian-1", scrape_completed: true,
+          frozen_filters: { company_nature: ["1"] },
+          profile_summary: "后端工程师",
+        });
+      }
+      if (url.includes("/api/latest-pipeline-result")) {
+        return response({ ok: true, has_result: false });
+      }
+      if (url.includes("/api/filter-labels")) {
+        const platform = url.includes("platform=boss") ? "boss" : "zhilian";
+        return response({
+          ok: true, platform, schema_version: 1, enabled_for_new_tasks: true,
+          fields: platform === "boss"
+            ? [{ key: "stage", label: "融资阶段", multiple: false, options: [{ value: "804", label: "B轮" }] }]
+            : [{ key: "company_nature", label: "公司性质", multiple: false, options: [{ value: "0", label: "不限" }, { value: "1", label: "国企" }] }],
+        });
+      }
+      if (url.includes("/api/options")) {
+        const platform = url.includes("platform=boss") ? "boss" : "zhilian";
+        return response({ ok: true, platform, city_mapping_version: 1, cities: [] });
+      }
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({
+          ok: true, selection: "balanced", settings: {
+            inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+            detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+            screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+          }, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1,
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+
+    // 任务平台为 zhilian：恢复时 setTaskPlatform(zhilian) + loadFilterLabels(zhilian) + loadCityCatalog(zhilian)
+    const segment = wrapper.find(".platform-segment");
+    expect(segment.exists()).toBe(true);
+    expect(segment.attributes("data-loaded-schema-platform")).toBe("zhilian");
+    expect(segment.attributes("data-loaded-city-platform")).toBe("zhilian");
+
+    // 草稿平台仍是 BOSS（setTaskPlatform 不改 draft — platform-schema.md L142 不变式 2）
+    expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="platform-current-zhilian"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="platform-segment-boss"]').attributes("aria-selected")).toBe("true");
+    expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("aria-selected")).toBe("false");
+
+    // interrupted screen 仍可重开（与 boss 任务对称）
+    expect(wrapper.find('[data-testid="finish-interrupted-screen"]').exists()).toBe(true);
+    expect(wrapper.find(".task-progress").exists()).toBe(false);
 
     vi.unstubAllGlobals();
   });
@@ -638,6 +708,313 @@ describe("DiscoveryView", () => {
     const segment = wrapper.find(".platform-segment");
     expect(segment.attributes("data-loaded-schema-platform")).toBe("zhilian");
     expect(segment.attributes("data-loaded-city-platform")).toBe("zhilian");
+
+    vi.unstubAllGlobals();
+  });
+
+  // ---------- T513：8 类状态覆盖 ----------
+
+  const t513Settings = {
+    inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+    detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+    screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+  };
+
+  function bossSchema(enabled = true) {
+    return {
+      ok: true, platform: "boss", schema_version: 1, enabled_for_new_tasks: enabled,
+      fields: [{ key: "stage", label: "融资阶段", multiple: false, options: [{ value: "804", label: "B轮" }] }],
+    };
+  }
+
+  it("T513 empty state: no task and no result renders the default BOSS draft platform without task progress", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
+    expect(wrapper.find(".task-progress").exists()).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("T513 loading state: schema platform is not advanced while the filter-labels fetch is pending", async () => {
+    const pending: Array<{ url: string; resolve: (value: Response) => void }> = [];
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/filter-labels")) {
+        return new Promise<Response>((resolve) => { pending.push({ url, resolve }); });
+      }
+      return Promise.resolve(response({
+        ok: true, has_result: false, has_task: false,
+        selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null,
+        manual_ranges: {}, config_schema_version: 1,
+      }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    // 先放行 boss 的初始 schema 请求
+    const bossPending = pending.find((p) => p.url.includes("platform=boss"));
+    if (bossPending) bossPending.resolve(response(bossSchema()));
+    await flushPromises();
+
+    await wrapper.get('[data-testid="platform-segment-zhilian"]').trigger("click");
+    await flushPromises();
+
+    // zhilian 的 filter-labels 仍 pending：loaded-schema-platform 不应前进到 zhilian
+    const segment = wrapper.find(".platform-segment");
+    expect(segment.attributes("data-loaded-schema-platform")).not.toBe("zhilian");
+
+    // resolve zhilian 后才前进
+    const zhilianPending = pending.find((p) => p.url.includes("platform=zhilian"));
+    zhilianPending!.resolve(response({
+      ok: true, platform: "zhilian", schema_version: 1, enabled_for_new_tasks: true, fields: [],
+    }));
+    await flushPromises();
+    expect(segment.attributes("data-loaded-schema-platform")).toBe("zhilian");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("T513 success state: a completed historical result renders the completed task status", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/latest-pipeline-result")) {
+        return response({
+          ok: true, has_result: true, source_run_id: "completed-run",
+          result: { jobs: [], profile_summary: "历史画像", total_kept: 4, total_dropped: 0 },
+          started_at: 1_000, finished_at: 2_000,
+        });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("广泛抓取"))!.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find(".task-progress").text()).toContain("已完成");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("T513 failed state: a failed scrape start surfaces the failed task status", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [{ label: "上海", value: "上海" }] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({
+          ok: true,
+          scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:fail" },
+          deduplicated: { keywords: ["python"], cities: ["上海"] },
+        });
+      }
+      if (url.endsWith("/api/execute-search")) {
+        return response({ ok: false, error_code: "source_unreachable", user_message: "浏览器自动化启动失败" }, 500);
+      }
+      return response({ init });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+
+    const status = wrapper.get(".task-status");
+    expect(status.attributes("data-status")).toBe("failed");
+    expect(status.text()).toContain("执行失败");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("T513 paused state: a paused scrape task shows pause reason and cancel/finish actions", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) {
+        return response({
+          ok: true, has_task: true, task_id: "paused-1", kind: "scrape", status: "paused",
+          platform: "boss",
+          pause_info: { error_code: "captcha_required", error_reason: "触发验证码" },
+        });
+      }
+      if (url.includes("/api/task-state/paused-1")) {
+        return response({ status: "paused", success_count: 2, fail_count: 0, unstarted_count: 3, total: 5, pause_info: { error_code: "captcha_required", error_reason: "触发验证码" } });
+      }
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+
+    const status = wrapper.get(".task-status");
+    expect(status.attributes("data-status")).toBe("paused");
+    expect(status.text()).toContain("已暂停");
+    expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("触发验证码");
+    expect(wrapper.find('[data-testid="cancel-paused-scrape"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="finish-paused-scrape"]').exists()).toBe(true);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("T513 partial state: a completed_with_pending result renders the partial status tone", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/latest-pipeline-result")) {
+        return response({
+          ok: true, has_result: true, source_run_id: "partial-run", status: "completed_with_pending",
+          result: {
+            jobs: [{ job_id: "j1", title: "前端", verdict: "uncertain", verdict_reason: "详情超时" }],
+            total_kept: 1, total_dropped: 0,
+          },
+        });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("广泛抓取"))!.trigger("click");
+    await flushPromises();
+
+    // completed_with_pending 历史结果：task-progress 显示 partial 文案，scope 仍可编辑
+    expect(wrapper.find(".task-progress").text()).toContain("完成，但有待确认");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("T513 no source evidence: recrawl carries empty source_run_id instead of fabricating one", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/latest-pipeline-result")) {
+        return response({
+          ok: true, has_result: true,
+          // 故意不带 source_run_id：前端不得伪造来源证据
+          result: {
+            jobs: [{ job_id: "pending-1", title: "前端", verdict: "uncertain", verdict_reason: "详情超时" }],
+            total_kept: 1, total_dropped: 0,
+          },
+        });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/pipeline/recrawl")) {
+        return response({ ok: true, task_id: "recrawl-nosrc" }, 202);
+      }
+      if (url.includes("/api/task-state/recrawl-nosrc")) {
+        return response({ status: "paused", progress: {}, logs: [], error: "验证码" });
+      }
+      return response({ init });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    const resultsStep = wrapper.findAll("button").find((b) => b.text().includes("查看结果"));
+    await resultsStep?.trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="recrawl-uncertain"]').trigger("click");
+    await flushPromises();
+
+    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/pipeline/recrawl"));
+    expect(call).toBeDefined();
+    // 无 source 证据时 source_run_id 为空串，不是伪造的 id（platform-schema.md 不变式：前端不猜来源）
+    expect(JSON.parse(String(call?.[1]?.body)).source_run_id).toBe("");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("T513 platform disabled: zhilian schema with enabled_for_new_tasks=false disables new task entry", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) {
+        const platform = url.includes("platform=boss") ? "boss" : "zhilian";
+        return response(platform === "boss"
+          ? bossSchema()
+          : { ok: true, platform: "zhilian", schema_version: 1, enabled_for_new_tasks: false, fields: [] });
+      }
+      if (url.includes("/api/options")) {
+        const platform = url.includes("platform=boss") ? "boss" : "zhilian";
+        return response({ ok: true, platform, city_mapping_version: 1, cities: [] });
+      }
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    // 进入 search 步骤后 start-scrape / 禁用提示才会渲染
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await flushPromises();
+    // 切到智联：schema 标记 enabled_for_new_tasks=false
+    await wrapper.get('[data-testid="platform-segment-zhilian"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="platform-disabled-notice"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="start-scrape"]').attributes("disabled")).toBeDefined();
+
+    // 切回 BOSS：恢复可用
+    await wrapper.get('[data-testid="platform-segment-boss"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="platform-disabled-notice"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="start-scrape"]').attributes("disabled")).toBeUndefined();
 
     vi.unstubAllGlobals();
   });

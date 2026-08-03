@@ -1686,3 +1686,99 @@ body,
   outline: 2px solid var(--accent, #6366f1);
   outline-offset: 2px;
 }
+
+/* T510：TaskProgress 顶部任务平台徽章（data-platform=zhilian|boss）。 */
+.task-platform {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--accent-ink, #fff);
+  background: var(--accent, #6366f1);
+}
+.task-platform[data-platform="boss"] {
+  background: color-mix(in srgb, var(--accent, #6366f1) 70%, #2563eb);
+}
+.task-platform[data-platform="zhilian"] {
+  background: color-mix(in srgb, var(--accent, #6366f1) 70%, #16a34a);
+}
+
+/* T511：JobWorkspace 岗位平台徽章。 */
+.platform-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--muted, inherit);
+  background: var(--surface-alt, rgb(0 0 0 / 4%));
+  border: 1px solid var(--border, rgb(0 0 0 / 8%));
+}
+.platform-pill[data-platform="boss"] {
+  color: #2563eb;
+}
+.platform-pill[data-platform="zhilian"] {
+  color: #16a34a;
+}
+
+/* T511：JobWorkspace extra 区块（公司性质/规模/融资阶段等额外字段）。 */
+.job-extra-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 6px 0 0;
+  padding: 6px 0 0;
+  border-top: 1px dashed var(--border, rgb(0 0 0 / 8%));
+  font-size: 12px;
+  line-height: 1.5;
+}
+.job-extra-facts:empty {
+  display: none;
+}
+.job-extra-fact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+.job-extra-fact-label {
+  color: var(--muted, inherit);
+}
+.job-extra-fact-value {
+  color: var(--text, inherit);
+  word-break: break-word;
+}
+
+/* T513：平台禁用新建任务提示。 */
+.platform-disabled-notice {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--warning, #d97706);
+  background: color-mix(in srgb, var(--warning, #d97706) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning, #d97706) 35%, transparent);
+}
+
+/* 窄视口（390×844）下平台徽章与 extra 区块换行，避免横向溢出。 */
+@media (max-width: 640px) {
+  .task-platform,
+  .platform-pill {
+    font-size: 11px;
+  }
+  .job-extra-facts {
+    gap: 4px 10px;
+  }
+  .browser-account-actions {
+    flex-wrap: wrap;
+  }
+}

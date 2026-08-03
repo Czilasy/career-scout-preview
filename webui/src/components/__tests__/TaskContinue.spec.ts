@@ -93,6 +93,77 @@ describe("DiscoveryView paused AI recovery", () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/search-progress")))
       .toBe(false);
   });
+
+  it("T510: displays zhilian platform badge and continues without submitting platform body", async () => {
+    // T510：任务自身平台从 /api/latest-running-task 透传到 TaskProgress（snapshot.platform）；
+    // cancel/continue/finish 是无 body POST，不提交草稿平台选择（http-api.md L323 平台不属于 activate 状态）。
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/latest-running-task") {
+        return response({
+          ok: true,
+          has_task: true,
+          task_id: "paused-zhilian-run",
+          kind: "ai_screen",
+          status: "paused",
+          platform: "zhilian",
+          stage: "ai_rough",
+          scrape_task_id: "scrape-task-1",
+          scrape_completed: true,
+          pause_info: { error_code: "ai_rate_limited", error_reason: "AI 接口限流" },
+          version_match: true,
+        });
+      }
+      if (url === "/api/task-state/paused-zhilian-run") {
+        return response({
+          status: "paused",
+          stage: "ai_rough",
+          progress: 40,
+          success_count: 20,
+          fail_count: 0,
+          unstarted_count: 30,
+          total: 50,
+        });
+      }
+      if (url === "/api/task/continue/paused-zhilian-run") {
+        return response({ ok: true, task_id: "resumed-zhilian-run", status: "running" });
+      }
+      if (url === "/api/task-state/resumed-zhilian-run") {
+        return response({ status: "paused", progress: {}, logs: [], error: "AI 接口限流" });
+      }
+      if (url.startsWith("/api/latest-pipeline-result")) {
+        return response({ ok: true, has_result: false });
+      }
+      if (url === "/api/version") {
+        return response({
+          backend_version: "010",
+          build_hash: expectedBackendBuildHash,
+          build_time: "now",
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+
+    // T510：TaskProgress 头部展示任务自身平台（zhilian）徽章，与 .platform-segment 草稿徽章独立
+    const badge = wrapper.get('[data-testid="task-platform-badge"]');
+    expect(badge.text()).toContain("智联");
+    expect(badge.attributes("data-platform")).toBe("zhilian");
+
+    // 点继续：continue 不发 body（不发 platform — 任务平台已冻结，后端从父 run 读）
+    await wrapper.get('[data-testid="resume-ai-screen"]').trigger("click");
+    await flushPromises();
+
+    const continueCall = fetchMock.mock.calls.find(
+      ([url]) => String(url) === "/api/task/continue/paused-zhilian-run",
+    );
+    expect(continueCall).toBeTruthy();
+    // T510：cancel/continue/finish 都是无 body POST，不提交草稿平台选择
+    expect(continueCall?.[1]?.body).toBeUndefined();
+  });
 });
 
 describe("TaskProgress canonical terminal states", () => {
@@ -424,5 +495,51 @@ describe("TaskProgress smooth progression and grouped counts", () => {
     expect(text).toMatch(/保留 57\s*·\s*淘汰 33/);
     expect(text).not.toContain("共 57");
     expect(text).not.toContain("失败 0");
+  });
+});
+
+describe("TaskProgress platform badge (T510)", () => {
+  // T510：snapshot.platform 由父组件从 /api/latest-running-task 或 /api/task-state 透传；
+  // 草稿平台切换不影响此处 — 这里展示的是任务自身平台，与 .platform-segment 草稿徽章独立。
+  it("displays 智联 badge when snapshot.platform is zhilian", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: {
+          status: "running",
+          platform: "zhilian",
+          progress: { stage: "fetch_jd", current: 0, total: 10 },
+        },
+      },
+    });
+    const badge = wrapper.get('[data-testid="task-platform-badge"]');
+    expect(badge.text()).toContain("智联");
+    expect(badge.attributes("data-platform")).toBe("zhilian");
+  });
+
+  it("displays BOSS badge when snapshot.platform is boss", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: {
+          status: "running",
+          platform: "boss",
+          progress: { stage: "searching" },
+        },
+      },
+    });
+    const badge = wrapper.get('[data-testid="task-platform-badge"]');
+    expect(badge.text()).toContain("BOSS");
+    expect(badge.attributes("data-platform")).toBe("boss");
+  });
+
+  it("hides platform badge when snapshot.platform is undefined", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: { status: "running", progress: { stage: "searching" } },
+      },
+    });
+    expect(wrapper.find('[data-testid="task-platform-badge"]').exists()).toBe(false);
   });
 });

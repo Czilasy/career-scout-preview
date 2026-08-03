@@ -111,6 +111,12 @@ watch(() => props.jobs, (jobs) => {
 }, { deep: false, immediate: true });
 
 function jobKey(job: JobItem): string {
+  // T511：双 ID 优先 — (platform, platform_job_id) 是岗位稳定键。
+  // job_id 是内部 UUID，跨平台可能冲突；platform_job_id 在平台内稳定。
+  // 草稿切换不改 task/result，结果 jobKey 不变（platform-schema.md 不变式 5）。
+  if (job.platform && job.platform_job_id) {
+    return `${job.platform}:${job.platform_job_id}`;
+  }
   return String(job.job_id || job.id || job.canonical_url || job.title || "unknown");
 }
 
@@ -131,19 +137,53 @@ function company(job: JobItem): string {
   return String(job.company || job.boss_name || "公司待确认");
 }
 
+// T511：按 job.platform 选 host 白名单（platform-schema.md L196-216）。
+// 不按 URL 猜平台 — job.platform 是后端权威来源；缺失时退化为 BOSS 兼容旧结果。
 function jobUrl(job: JobItem): string {
   const raw = String(job.canonical_url || job.job_link || job.source_url || "").trim();
   if (!raw) return "";
   try {
     const parsed = new URL(raw);
     const host = parsed.hostname.toLowerCase();
-    const isBossHost = host === "zhipin.com"
-      || host.endsWith(".zhipin.com");
+    if (job.platform === "zhilian") {
+      // 智联：host 恰为 zhaopin.com 或 www.zhaopin.com；
+      // path 符合 jobdetail/<id>.htm；http 升级为 https；移除 query 和 fragment。
+      const isZhilianHost = host === "zhaopin.com" || host === "www.zhaopin.com";
+      if (!isZhilianHost) return "";
+      if (!/^\/jobdetail\/[^/]+\.htm$/.test(parsed.pathname)) return "";
+      const clean = new URL(parsed.toString());
+      clean.protocol = "https:";
+      clean.search = "";
+      clean.hash = "";
+      return clean.toString();
+    }
+    // 默认分支（boss 或缺失 platform）：保持现有 BOSS HTTPS-only 规则
+    const isBossHost = host === "zhipin.com" || host.endsWith(".zhipin.com");
     return parsed.protocol === "https:" && isBossHost ? parsed.toString() : "";
   } catch {
     return "";
   }
 }
+
+// T511：智联结果常带的 extra 标签（如 company_nature_label）。
+// 后端权威标签在 extra 里，前端只做透传展示，不翻译/重命名。
+const EXTRA_LABEL_MAP: Record<string, string> = {
+  company_nature_label: "公司性质",
+  industry_label: "行业",
+  scale_label: "规模",
+  stage_label: "融资阶段",
+};
+const extraLabels = computed(() => {
+  const extra = selectedJob.value?.extra;
+  if (!extra) return [];
+  return Object.entries(extra)
+    .filter(([, v]) => typeof v === "string" && v)
+    .map(([k, v]) => ({
+      key: k,
+      label: EXTRA_LABEL_MAP[k] || k.replace(/_label$/, "").replace(/_/g, " "),
+      value: v as string,
+    }));
+});
 
 function verdictLabel(job: JobItem): string {
   if (job.verdict === "match") return "匹配";
@@ -207,6 +247,12 @@ function verdictLabel(job: JobItem): string {
           <span v-if="verdictLabel(selectedJob)" class="status-pill" :data-verdict="selectedJob.verdict">
             {{ verdictLabel(selectedJob) }}
           </span>
+          <span
+            v-if="selectedJob.platform"
+            class="status-pill platform-pill"
+            :data-platform="selectedJob.platform"
+            data-testid="job-platform-badge"
+          >{{ selectedJob.platform === 'boss' ? 'BOSS' : '智联' }}</span>
           <h2>{{ selectedJob.title || "未知岗位" }}</h2>
           <p>{{ company(selectedJob) }}</p>
         </div>
@@ -219,6 +265,16 @@ function verdictLabel(job: JobItem): string {
         <span><strong>{{ selectedJob.salary || "薪资面议" }}</strong></span>
         <span><MapPin :size="16" aria-hidden="true" />{{ selectedJob.location || "地点待确认" }}</span>
         <span><BriefcaseBusiness :size="16" aria-hidden="true" />{{ company(selectedJob) }}</span>
+        <span v-if="selectedJob.experience" data-testid="job-experience">{{ selectedJob.experience }}</span>
+        <span v-if="selectedJob.degree" data-testid="job-degree">{{ selectedJob.degree }}</span>
+      </div>
+
+      <div v-if="extraLabels.length" class="job-extra-facts" data-testid="job-extra-facts">
+        <span
+          v-for="item in extraLabels"
+          :key="item.key"
+          :data-extra-key="item.key"
+        >{{ item.label }}: {{ item.value }}</span>
       </div>
 
       <div v-if="selectedJob.verdict_reason || selectedJob.reason" class="verdict-reason">

@@ -150,8 +150,8 @@ export interface BrowserAccountPlatformSpace {
 export interface BrowserAccount {
   id: string;
   name: string;
-  profile_dir: string;
   builtin?: boolean;
+  // GET /api/browser-accounts 不返回 profile 路径或路径摘要（http-api.md L319）。
   platforms?: Partial<Record<Platform, BrowserAccountPlatformSpace>>;
 }
 

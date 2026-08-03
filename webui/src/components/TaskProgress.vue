@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { CircleCheck, CircleX, LoaderCircle, Octagon, PauseCircle } from "@lucide/vue";
+import type { Platform } from "../types";
 
 interface PauseInfo {
   error_code?: string;
@@ -27,6 +28,9 @@ interface TaskSnapshot {
   pending_count?: number;
   source_total?: number;
   execution_config?: Record<string, unknown> | null;
+  // T510：任务自身平台，用于在 header 展示真实平台徽章（http-api.md L201）。
+  // 由父组件从 /api/latest-running-task 或 /api/task-state 透传；草稿平台切换不影响此处。
+  platform?: Platform;
 }
 
 const props = defineProps<{
@@ -423,6 +427,13 @@ const statusLabel = computed(() => {
   return "运行中";
 });
 
+// T510：任务自身平台徽章（http-api.md L201）。仅当 snapshot.platform 存在时显示；
+// 草稿平台切换不影响此处 — 这里展示的是任务自身平台，与 .platform-segment 草稿徽章独立。
+const platformLabel = computed(() => {
+  if (!props.snapshot?.platform) return "";
+  return props.snapshot.platform === "boss" ? "BOSS" : "智联";
+});
+
 // 切片7：阶段中文标签（FR-037/SC-006）
 const STAGE_LABELS: Record<string, string> = {
   scrape: "列表抓取",
@@ -497,6 +508,12 @@ const timeLabel = computed(() => {
         <LoaderCircle v-else class="spin" :size="17" aria-hidden="true" />
         {{ statusLabel }}
       </span>
+      <span
+        v-if="platformLabel"
+        class="task-platform"
+        :data-platform="snapshot.platform"
+        data-testid="task-platform-badge"
+      >· {{ platformLabel }}</span>
       <span v-if="stageLabel" class="task-stage">· {{ stageLabel }}</span>
       <span v-if="timeLabel" class="task-elapsed">· {{ timeLabel }}</span>
       <span class="task-percentage">{{ percentage }}%</span>

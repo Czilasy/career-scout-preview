@@ -72,6 +72,8 @@ interface TaskSnapshot {
   source_total?: number;
   pause_info?: { error_code?: string; error_reason?: string } | null;
   execution_config?: Record<string, unknown> | null;
+  // T510：任务自身平台，供 TaskProgress 展示真实平台徽章（http-api.md L201）
+  platform?: Platform;
 }
 
 
@@ -95,6 +97,12 @@ const schemaRef = ref<PlatformFilterSchema | null>(null);
 const cityCatalogRef = ref<PlatformCityCatalog | null>(null);
 const schemaBusy = ref(false);
 const cityCatalogBusy = ref(false);
+// T513：草稿平台 schema 标记 enabled_for_new_tasks=false 时，禁用新建任务入口。
+// 平台注册表权威来自后端；前端只读 schema 投影，不猜原因（platform-schema.md L222）。
+// 用 draftPlatform ref（响应式）；platformState.draft 是普通闭包 getter，不触发追踪。
+const draftPlatformDisabled = computed(() => Boolean(
+  schemaRef.value && schemaRef.value.platform === draftPlatform.value && schemaRef.value.enabled_for_new_tasks === false,
+));
 function setDraftPlatform(platform: Platform) {
   if (platformState.draft === platform) return;
   platformState.setDraftPlatform(platform);
@@ -344,6 +352,8 @@ async function restoreRunningTask() {
       task_id?: string;
       kind?: string;
       status?: string;
+      // T509：任务自身平台（http-api.md L201，所有 has_task=true 响应含 platform）
+      platform?: Platform;
       progress?: Record<string, unknown>;
       logs?: string[];
       error?: string;
@@ -362,6 +372,16 @@ async function restoreRunningTask() {
       profile_summary?: string;
     }>("/api/latest-running-task");
     if (!data.has_task || !data.task_id) return;
+    // T509：先设置任务自身平台，再加载对应 schema/城市（platform-schema.md L157）。
+    // 不改草稿平台（不变式 2：setTaskPlatform 不改 draft/result）。
+    const taskPlatform = data.platform;
+    if (taskPlatform) {
+      platformState.setTaskPlatform(taskPlatform);
+      void loadFilterLabels(taskPlatform);
+      void loadCityCatalog(taskPlatform);
+    }
+    // frozen_filters 写入任务平台对应的草稿槽；缺平台时退化到草稿平台（兼容旧 mock）
+    const filterPlatform: Platform = taskPlatform ?? draftPlatform.value;
     if (data.kind === "recrawl") {
       await loadLatestResult();
     }
@@ -374,6 +394,8 @@ async function restoreRunningTask() {
       pause_info: data.pause_info,
       started_at: data.started_at,
       finished_at: data.finished_at,
+      // T510：快照携带任务平台，供 TaskProgress 展示真实平台徽章
+      platform: taskPlatform,
     };
     const kind: "scrape" | "screen" | "recrawl" = data.kind === "scrape"
       ? "scrape"
@@ -404,8 +426,9 @@ async function restoreRunningTask() {
       screenPanelOpen.value = false;
       activeStep.value = "screen";
       const savedFilters = data.frozen_filters || {};
-      // T506：恢复时写入当前草稿平台对应的草稿槽（任务平台由 T509 显式设置）
-      const drafts = filterValues.value[draftPlatform.value];
+      // T509：写入任务平台对应的草稿槽（platform-schema.md L157），
+      // 不再用草稿平台槽 — 否则 zhilian 任务恢复后 filters 落到 boss 槽会被 boss schema 拒绝。
+      const drafts = filterValues.value[filterPlatform];
       for (const key of Object.keys(drafts)) delete drafts[key];
       Object.assign(
         drafts,
@@ -430,6 +453,19 @@ async function restoreRunningTask() {
         screenTaskId.value = data.task_id;
         screenPanelOpen.value = false;
         activeStep.value = "screen";
+        // T509：paused screen 任务也投影冻结筛选快照（platform-schema.md L157）
+        const savedFilters = data.frozen_filters || {};
+        const drafts = filterValues.value[filterPlatform];
+        for (const key of Object.keys(drafts)) delete drafts[key];
+        Object.assign(
+          drafts,
+          Object.fromEntries(
+            Object.entries(savedFilters)
+              .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
+              .map(([key, value]) => [key, value as string[]]),
+          ),
+        );
+        profileSummary.value = data.profile_summary || "";
       } else {
         recrawlTaskId.value = data.task_id;
         resultLoaded.value = true;
@@ -533,16 +569,18 @@ async function enrichPausedSnapshot(
   }
 }
 
-// T505：按草稿平台加载 schema（/api/filter-labels?platform=）。
+// T505/T509：按指定平台加载 schema（/api/filter-labels?platform=）。
 // schemaLoader 内部用单调 reqId + AbortController + 响应平台校验，
 // 保证旧平台响应晚到不覆盖当前平台（platform-schema.md L151-156）。
-async function loadFilterLabels() {
-  if (schemaLoader.loadedPlatform === platformState.draft && schemaRef.value) return;
+// T509：默认参数 = 草稿平台（新任务表单/简历建议路径）；restoreRunningTask 显式传入任务平台
+// 以满足 platform-schema.md L157「先从任务响应设置任务平台，再加载对应 schema/城市」。
+async function loadFilterLabels(platform: Platform = platformState.draft) {
+  if (schemaLoader.loadedPlatform === platform && schemaRef.value) return;
   schemaBusy.value = true;
   try {
-    const accepted = await schemaLoader.load(platformState.draft, (platform, signal) =>
+    const accepted = await schemaLoader.load(platform, (p, signal) =>
       apiRequest<PlatformFilterSchema>(
-        `/api/filter-labels?platform=${encodeURIComponent(platform)}`,
+        `/api/filter-labels?platform=${encodeURIComponent(p)}`,
         { signal },
       ),
     );
@@ -555,15 +593,15 @@ async function loadFilterLabels() {
   }
 }
 
-// T505：按草稿平台加载城市目录（/api/options?platform=）。
+// T505/T509：按指定平台加载城市目录（/api/options?platform=）。
 // 与 loadFilterLabels 共用同一份序号 + 取消 + 校验逻辑（createAsyncResourceLoader）。
-async function loadCityCatalog() {
-  if (cityLoader.loadedPlatform === platformState.draft && cityCatalogRef.value) return;
+async function loadCityCatalog(platform: Platform = platformState.draft) {
+  if (cityLoader.loadedPlatform === platform && cityCatalogRef.value) return;
   cityCatalogBusy.value = true;
   try {
-    const accepted = await cityLoader.load(platformState.draft, (platform, signal) =>
+    const accepted = await cityLoader.load(platform, (p, signal) =>
       apiRequest<PlatformCityCatalog>(
-        `/api/options?platform=${encodeURIComponent(platform)}`,
+        `/api/options?platform=${encodeURIComponent(p)}`,
         { signal },
       ),
     );
@@ -1706,7 +1744,10 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
 
         <TaskProgress :snapshot="scrapeSnapshot" kind="scrape" />
         <div class="workflow-actions">
-          <button class="button primary" type="button" data-testid="start-scrape" @click="scrapeBusy ? cancelScrape() : startScrape()">
+          <p v-if="draftPlatformDisabled" class="platform-disabled-notice" data-testid="platform-disabled-notice" role="status">
+            当前平台（{{ draftPlatform === 'boss' ? 'BOSS' : '智联' }}）已禁用新建任务，请切换到可用平台。
+          </p>
+          <button class="button primary" type="button" data-testid="start-scrape" :disabled="draftPlatformDisabled" @click="scrapeBusy ? cancelScrape() : startScrape()">
             <Search v-if="!scrapeBusy" :size="18" aria-hidden="true" />
             <Square v-else :size="18" aria-hidden="true" />{{ scrapeBusy ? "停止抓取" : "开始抓取" }}
           </button>
@@ -1774,7 +1815,7 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
 
         <TaskProgress :snapshot="screenSnapshot" kind="screen" />
         <div class="workflow-actions">
-          <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="!screenBusy && !scrapeCompleted" @click="screenBusy ? cancelAiScreen() : startAiScreen()">
+          <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="draftPlatformDisabled || (!screenBusy && !scrapeCompleted)" @click="screenBusy ? cancelAiScreen() : startAiScreen()">
             <Square v-if="screenBusy" :size="18" aria-hidden="true" />
             <Sparkles v-else :size="18" aria-hidden="true" />{{ screenBusy ? "停止筛选" : "开始 AI 筛选" }}
           </button>
