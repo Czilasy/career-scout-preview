@@ -4101,7 +4101,7 @@ class Slice12AiRoughCheckpointTests(unittest.TestCase):
             with store._connection() as conn:
                 row = conn.execute(
                     "SELECT verdict FROM screening_results "
-                    "WHERE run_id = ? AND job_id = ?",
+                    "WHERE run_id = ? AND platform_job_id = ?",
                     (run_id, "job-1")).fetchone()
             self.assertIsNotNone(row, "verdict 必须写入 screening_results")
             self.assertEqual(json.loads(row["verdict"])["verdict"], "match")
@@ -4155,7 +4155,7 @@ class Slice12AiRoughCheckpointTests(unittest.TestCase):
             with store._connection() as conn:
                 row = conn.execute(
                     "SELECT verdict FROM screening_results "
-                    "WHERE run_id = ? AND job_id = ?",
+                    "WHERE run_id = ? AND platform_job_id = ?",
                     (run_id, "job-1")).fetchone()
             self.assertIsNotNone(row, "限流后第一批 verdict 不得丢失")
             self.assertEqual(json.loads(row["verdict"])["verdict"], "match")
@@ -4218,7 +4218,7 @@ class Slice13ComboDoneHardStopTests(unittest.TestCase):
                     OneComboSource(),
                     pages=1,
                     sleeper=lambda _seconds: None,
-                    on_combo_done=lambda combo, jobs, completed: delivered.append(
+                    on_combo_done=lambda combo, jobs, completed, **kw: delivered.append(
                         (combo, jobs, list(completed))),
                 )
         except TypeError as exc:

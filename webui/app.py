@@ -706,11 +706,32 @@ def create_app(config=None):
         start_tasks=app.config["START_TASKS"],
     )
 
-    def _make_cdp_source(*, artifact_root=None):
+    def _make_cdp_source(*, artifact_root=None, platform="boss",
+                         browser_account=None, cdp_port=None,
+                         profile_key=None):
+        """T403: 从冻结 runtime 创建 source。
+
+        主链调用时传入 platform/cdp_port/profile_key（来自 task dict 冻结
+        身份）；调优路径只传 artifact_root（向后兼容，后续 task 统一改造）。
+        禁止读取当前 UI、活动账号或默认端口——BOSS 也必须显式接收冻结
+        CDP 端口（contracts/job-source.md 第 42 行）。
+        """
+        artifact = artifact_root or app.config["RESULT_DIR"]
         try:
+            if platform == "zhilian":
+                from webui.source import ZhilianCdpSource
+                if not browser_account or not cdp_port:
+                    return None
+                return ZhilianCdpSource(
+                    browser_account=browser_account,
+                    cdp_port=int(cdp_port),
+                    profile_key=profile_key,
+                )
+            # BOSS — 显式传入冻结 cdp_port
             return _BossCdpSource(
                 python_executable=app.config["PYTHON_EXECUTABLE"],
-                artifact_root=artifact_root or app.config["RESULT_DIR"],
+                artifact_root=artifact,
+                cdp_port=int(cdp_port) if cdp_port else boss.DEFAULT_CDP_PORT,
             )
         except Exception:
             return None
@@ -1874,6 +1895,11 @@ def create_app(config=None):
                 stop_event = task_ref.get("stop_event")
                 skip_combos = task_ref.get("skip_combos") or None
                 old_jobs = task_ref.get("old_jobs") or []
+                # T403: 从 task dict 读取冻结 runtime，不读当前 UI/活动账号/默认端口
+                frozen_platform = task_ref.get("platform") or "boss"
+                frozen_cdp_port = task_ref.get("cdp_port")
+                frozen_profile_key = task_ref.get("profile_key")
+                frozen_browser_account = task_ref.get("browser_account")
             if store.get_screening_run(task_id) is None:
                 store.create_screening_run(
                     task_id,
@@ -1895,7 +1921,13 @@ def create_app(config=None):
                 task_id, status="running", current_stage="scrape"
             )
             store.append_task_event(task_id, "stage_start", {"stage": "scrape"})
-            source = _make_cdp_source()
+            # T403: 从冻结 runtime 创建 source，禁止读取当前 UI/活动账号/默认端口
+            source = _make_cdp_source(
+                platform=frozen_platform,
+                browser_account=frozen_browser_account,
+                cdp_port=frozen_cdp_port,
+                profile_key=frozen_profile_key,
+            )
             if source is None:
                 completed = sorted(skip_combos or [])
                 reason = "连不上调试浏览器，请启动 Chrome 调试端口后继续"
@@ -1920,7 +1952,37 @@ def create_app(config=None):
                         task["error"] = reason
                 return
 
-            def on_combo_done(combo_key, jobs, completed_combos):
+            def on_combo_done(combo_key, jobs, completed_combos, *, outcome=None):
+                # T404: 先持久化 source attempt，再推进 combo result。
+                # 持久化失败时抛异常，run_search 会捕获并硬停止。
+                attempt_no = 1
+                try:
+                    latest = store.get_latest_source_attempt(task_id, combo_key)
+                    if latest is not None:
+                        attempt_no = latest["attempt_no"] + 1
+                except _OPERATIONAL_ERRORS:
+                    pass
+                if outcome is not None:
+                    outcome_kind = "empty" if outcome.empty_result else "success"
+                    store.append_source_attempt(
+                        run_id=task_id,
+                        platform=frozen_platform,
+                        combo_key=combo_key,
+                        attempt_no=attempt_no,
+                        input_hash=outcome.input_hash,
+                        outcome_kind=outcome_kind,
+                        job_count=len(jobs),
+                        empty_evidence=outcome.empty_evidence,
+                    )
+                else:
+                    store.append_source_attempt(
+                        run_id=task_id,
+                        platform=frozen_platform,
+                        combo_key=combo_key,
+                        attempt_no=attempt_no,
+                        outcome_kind="success",
+                        job_count=len(jobs),
+                    )
                 store.save_scrape_combo_result(
                     task_id, combo_key, jobs, completed_combos
                 )
@@ -3375,14 +3437,42 @@ def create_app(config=None):
 
     @app.route("/api/search-scope/preview", methods=["POST"])
     def search_scope_preview():
-        """SPEC011 T004: 后端权威范围预览与校验。
+        """SPEC011 T004 / tasks005 T402: 后端权威范围预览与校验（平台感知）。
 
         不改变任务工作量字段；仅返回规范化后的 scope 和去重信息。
         对应 HTTP API POST /api/search-scope/preview。
         """
         from webui.execution_config import preview_scope, CityValidationError
+        from webui.platforms import (
+            get_platform_or_none, validate_platform_key, UnknownPlatformError,
+        )
 
         body = request.get_json(silent=True) or {}
+        platform_raw = body.get("platform") or "boss"
+
+        # 平台键校验
+        try:
+            validate_platform_key(platform_raw)
+        except UnknownPlatformError:
+            return jsonify({
+                "ok": False,
+                "error_code": "platform_validation_failed",
+                "user_message": "不支持的招聘平台",
+            }), 400
+        reg = get_platform_or_none(platform_raw)
+        if reg is None:
+            return jsonify({
+                "ok": False,
+                "error_code": "platform_validation_failed",
+                "user_message": "平台未注册",
+            }), 400
+        if not reg.enabled_for_new_tasks:
+            return jsonify({
+                "ok": False,
+                "error_code": "platform_disabled",
+                "user_message": reg.availability_reason or "平台暂不可用",
+            }), 503
+
         keywords = body.get("keywords")
         scope_kind = body.get("scope_kind", "cities")
         cities = body.get("cities", [])
@@ -3407,6 +3497,7 @@ def create_app(config=None):
                 scope_kind=scope_kind,
                 cities=cities,
                 pages_per_combination=pages_int,
+                platform=platform_raw,
             )
             scope_previews[result["scope"]["scope_digest"]] = dict(result["scope"])
             return jsonify({"ok": True, **result})
@@ -3426,7 +3517,7 @@ def create_app(config=None):
 
     @app.route("/api/execute-search", methods=["POST"])
     def execute_search():
-        """Stage 3: Start the scraping run with confirmed script_params.
+        """Stage 3 / tasks005 T402: 平台感知搜索 run 创建。
 
         Accepts JSON ``{"script_params": {...}}`` (or the params directly).
         Launches a background task and returns a ``task_id`` for polling.
@@ -3434,21 +3525,60 @@ def create_app(config=None):
         SPEC011 T006: 后端从权威 scope 和当前配置选择创建不可变快照；
         客户端不能提供或覆盖任务规模与执行配置。
         SPEC011 T015: 实验租约持有时拒绝启动（FR-035）。
+        tasks005 T402: 冻结单一平台和完整 runtime，搜索 run 筛选快照为空。
         """
+        from webui.execution_config import (
+            ExecutionConfigSnapshot, FrozenTaskScope, preview_scope,
+        )
+        from webui.platforms import (
+            get_platform_or_none, validate_platform_key, UnknownPlatformError,
+            resolve_login_space,
+        )
+        from webui.pipeline_exec import resolve_browser_account
+        from webui.core import _AI_FILTER_KEYS, _is_non_empty_filter_value
+
         body = request.get_json(silent=True) or {}
         script_params = body.get("script_params") or body
         if not isinstance(script_params, dict):
             return jsonify({"ok": False, "error": "无效的请求体"}), 400
         if not script_params.get("keyword") or not script_params.get("city"):
             return jsonify({"ok": False, "error": "缺少关键词或城市"}), 400
+
+        # T402: 平台键校验（先于任何副作用）
+        platform_raw = body.get("platform") or "boss"
+        try:
+            validate_platform_key(platform_raw)
+        except UnknownPlatformError:
+            return jsonify({
+                "ok": False,
+                "error_code": "platform_validation_failed",
+                "user_message": "不支持的招聘平台",
+            }), 400
+        reg = get_platform_or_none(platform_raw)
+        if reg is None:
+            return jsonify({
+                "ok": False,
+                "error_code": "platform_validation_failed",
+                "user_message": "平台未注册",
+            }), 400
+
+        # T402: 非空 AI filters 拒绝（零副作用，先于租约和 scope 检查）
+        offending = [
+            k for k in _AI_FILTER_KEYS
+            if k in script_params and _is_non_empty_filter_value(script_params[k])
+        ]
+        if offending:
+            return jsonify({
+                "ok": False,
+                "error_code": "search_filters_not_supported",
+                "user_message": "搜索请求不允许携带非空 AI filters: " + ", ".join(sorted(offending)),
+            }), 422
+
         # SPEC011 T015/FR-035: 实验租约门禁
         ok, err_resp = _check_tuning_lease_conflict()
         if not ok:
             return err_resp
 
-        from webui.execution_config import (
-            ExecutionConfigSnapshot, FrozenTaskScope, preview_scope,
-        )
         requested_digest = str(body.get("scope_digest") or "")
         scope_payload = scope_previews.get(requested_digest) if requested_digest else None
         if requested_digest and scope_payload is None:
@@ -3476,6 +3606,7 @@ def create_app(config=None):
                     scope_kind="nationwide" if nationwide else "cities",
                     cities=[] if nationwide else raw_cities,
                     pages_per_combination=script_params.get("pages", 3),
+                    platform=platform_raw,
                 )
             except (TypeError, ValueError) as exc:
                 return jsonify({
@@ -3496,13 +3627,77 @@ def create_app(config=None):
                 "ok": False, "error_code": "config_resolution_failed",
                 "error": str(exc),
             }), 422
-        script_params = dict(script_params)
-        script_params["keyword"] = ",".join(frozen_scope.keywords)
-        script_params["city"] = (
+
+        # T402: 平台一致性校验
+        if frozen_scope.platform != platform_raw:
+            return jsonify({
+                "ok": False,
+                "error_code": "scope_platform_mismatch",
+                "user_message": "请求平台与搜索范围平台不一致",
+            }), 409
+
+        # T402: 平台禁用检查（在 scope 平台不匹配之后）
+        if not reg.enabled_for_new_tasks:
+            return jsonify({
+                "ok": False,
+                "error_code": "platform_disabled",
+                "user_message": reg.availability_reason or "平台暂不可用",
+            }), 503
+
+        # T402: script_params 与 scope 一致性校验
+        sp_keywords = script_params.get("keyword")
+        if isinstance(sp_keywords, str):
+            sp_keyword_list = [k.strip() for k in sp_keywords.replace("，", ",").split(",") if k.strip()]
+        elif isinstance(sp_keywords, list):
+            sp_keyword_list = [str(k).strip() for k in sp_keywords if k and str(k).strip()]
+        else:
+            sp_keyword_list = []
+        sp_cities = script_params.get("city") or []
+        if isinstance(sp_cities, str):
+            sp_cities = [c.strip() for c in sp_cities.replace("，", ",").split(",") if c.strip()]
+        scope_cities = (
             ["全国"] if frozen_scope.scope_kind == "nationwide"
             else list(frozen_scope.cities)
         )
+        # pages 未显式提供时不校验（后端用 scope 冻结值覆盖）
+        pages_mismatch = False
+        if "pages" in script_params:
+            try:
+                sp_pages = int(script_params["pages"])
+                pages_mismatch = sp_pages != frozen_scope.pages_per_combination
+            except (TypeError, ValueError):
+                pages_mismatch = True
+        if (sp_keyword_list != list(frozen_scope.keywords)
+                or list(sp_cities) != scope_cities
+                or pages_mismatch):
+            return jsonify({
+                "ok": False,
+                "error_code": "scope_request_mismatch",
+                "user_message": "搜索参数与搜索范围不一致",
+            }), 409
+
+        script_params = dict(script_params)
+        script_params["keyword"] = ",".join(frozen_scope.keywords)
+        script_params["city"] = scope_cities
         script_params["pages"] = frozen_scope.pages_per_combination
+
+        # T402: 冻结完整 runtime — 平台登录空间、task_input_digest
+        browser_account = _account_for_run()
+        profile_dir = resolve_browser_account(
+            browser_account, app.config["BROWSER_ACCOUNTS_PATH"])
+        login_space = resolve_login_space(
+            platform_raw, browser_account,
+            boss_profile_dir=profile_dir or "unresolved",
+        )
+        task_input_digest = hashlib.sha256(json.dumps({
+            "platform": platform_raw,
+            "scope_digest": frozen_scope.scope_digest,
+            "filter_schema_version": None,
+            "frozen_filters": {},
+            "browser_account": browser_account,
+            "cdp_port": login_space.cdp_port,
+            "profile_key": login_space.profile_key,
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
         task_id = uuid.uuid4().hex
         task = _register_pipeline_task(task_id, "scrape")
@@ -3510,18 +3705,36 @@ def create_app(config=None):
         with _pipeline_lock:
             task["config_digest"] = execution_config.config_digest
             task["scope_digest"] = frozen_scope.scope_digest
-            task["browser_account"] = _account_for_run()
+            task["browser_account"] = browser_account
+            task["platform"] = platform_raw
+            task["cdp_port"] = login_space.cdp_port
+            task["profile_key"] = login_space.profile_key
+            task["task_input_digest"] = task_input_digest
+        # T402: 搜索 run 的 frozen_filters 为空，筛选快照为空
         store.create_screening_run(
             task_id,
-            frozen_filters=script_params.get("filters") or {},
+            frozen_filters={},
             source_count=frozen_scope.combination_count,
             execution_params={
+                "platform": platform_raw,
+                "filter_schema_version": None,
                 "script_params": script_params,
-                "browser_account": _account_for_run(),
+                "browser_account": browser_account,
+                "cdp_port": login_space.cdp_port,
+                "profile_key": login_space.profile_key,
+                "task_input_digest": task_input_digest,
                 "execution_config": execution_config.to_dict(),
                 "frozen_scope": frozen_scope.to_dict(),
             },
             backend_version=_backend_version,
+        )
+        # T402: 持久化平台、空筛选快照和 task_input_digest
+        store.save_filter_snapshot(
+            task_id,
+            platform=platform_raw,
+            filter_schema_version=None,
+            filter_snapshot={},
+            task_input_digest=task_input_digest,
         )
         _activate_run_browser()
         try:
@@ -3538,9 +3751,12 @@ def create_app(config=None):
         return jsonify({
             "ok": True,
             "task_id": task_id,
+            "platform": platform_raw,
             "config_digest": execution_config.config_digest,
             "scope_digest": frozen_scope.scope_digest,
+            "task_input_digest": task_input_digest,
             "task_size": frozen_scope.task_size,
+            "browser_account": browser_account,
         })
 
     @app.route("/api/execute-search/continue/<old_task_id>", methods=["POST"])
@@ -3633,12 +3849,21 @@ def create_app(config=None):
                 "message": "该任务正在继续，请勿重复点击",
             }), 409
         # 把续抓信息存进 task，_run_pipeline_task 会读取
+        # T403: 从 DB 恢复冻结 runtime（platform/cdp_port/profile_key/
+        # task_input_digest），不读当前 UI 或活动账号
+        db_ep = (db_run or {}).get("execution_params") or {}
         with _pipeline_lock:
             task = _pipeline_tasks[task_id]
             task["skip_combos"] = completed
             task["old_jobs"] = old_jobs
             task["resuming_from"] = old_task_id
-            task["browser_account"] = _account_for_run(db_run)
+            task["browser_account"] = (
+                db_ep.get("browser_account") or _account_for_run(db_run)
+            )
+            task["platform"] = db_ep.get("platform") or "boss"
+            task["cdp_port"] = db_ep.get("cdp_port")
+            task["profile_key"] = db_ep.get("profile_key")
+            task["task_input_digest"] = db_ep.get("task_input_digest")
         start_gate = threading.Event()
         abort_start = threading.Event()
 

@@ -191,14 +191,73 @@ class TuningController:
         self, *, spec_version: str, source_scope: dict,
         workloads: list[dict], quality_context: dict,
     ) -> dict:
-        """Create the HTTP experiment draft with its proposed input bundle."""
+        """Create the HTTP experiment draft with its proposed input bundle.
+
+        T606: 显式冻结 platform、规范城市解析、filter_schema_version、
+        browser_account、cdp_port、profile_key、scope/task digest。
+        见 data-model.md 第 230 行：新 experiment 创建时冻结 browser_account、
+        cdp_port、profile_key 与 filter_schema_version 到 source scope。
+        """
+        frozen_scope = self._freeze_experiment_source_scope(source_scope)
         return self._store.create_tuning_experiment_with_input(
             spec_version=spec_version,
-            source_scope=source_scope,
+            source_scope=frozen_scope,
             workloads=workloads,
             quality_context=quality_context,
             workspace_root=self._workspace_root,
         )
+
+    _EXPERIMENT_RUNTIME_FIELDS = (
+        "browser_account", "cdp_port", "profile_key", "filter_schema_version",
+    )
+
+    def _freeze_experiment_source_scope(self, source_scope: dict) -> dict:
+        """T606: 校验并冻结 platform 和 runtime 字段到 source_scope。
+
+        - platform 必须是已知已注册平台（不回退 BOSS）
+        - browser_account 必须非空字符串
+        - cdp_port 必须与平台默认端口一致
+        - profile_key 必须为 '<platform>:<account>' 形式
+        - filter_schema_version 必须为正整数
+        - task_input_digest 由 _build_task_input_digest 计算
+
+        见 data-model.md 第 230 行。
+        """
+        from webui.platforms import (
+            get_platform, is_known_platform_key, validate_platform_key,
+        )
+        platform = source_scope.get("platform", "boss")
+        validate_platform_key(platform)
+        registry = get_platform(platform)
+        browser_account = source_scope.get("browser_account")
+        if not isinstance(browser_account, str) or not browser_account.strip():
+            raise ValueError("source_scope.browser_account 不能为空")
+        browser_account = browser_account.strip()
+        cdp_port = source_scope.get("cdp_port", registry.default_cdp_port)
+        if cdp_port != registry.default_cdp_port:
+            raise ValueError(
+                f"cdp_port={cdp_port} 与平台 {platform} 默认端口"
+                f" {registry.default_cdp_port} 不一致"
+            )
+        expected_profile_key = f"{platform}:{browser_account}"
+        profile_key = source_scope.get("profile_key", expected_profile_key)
+        if profile_key != expected_profile_key:
+            raise ValueError(
+                f"profile_key={profile_key!r} 必须为 "
+                f"{expected_profile_key!r}"
+            )
+        filter_schema_version = source_scope.get("filter_schema_version")
+        if not isinstance(filter_schema_version, int) or filter_schema_version < 1:
+            raise ValueError("filter_schema_version 必须为正整数")
+        frozen = dict(source_scope)
+        frozen.update({
+            "platform": platform,
+            "browser_account": browser_account,
+            "cdp_port": cdp_port,
+            "profile_key": profile_key,
+            "filter_schema_version": filter_schema_version,
+        })
+        return frozen
 
     def confirm_input(self, experiment_id: str) -> dict:
         """Freeze a complete representative workload matrix."""
@@ -661,6 +720,171 @@ class TuningController:
             "migration_cutoff": migration_cutoff,
             "digest_verified": True,
             "provenance": provenance,
+        }
+
+    # -- T609: stage kind 与 source_artifact_kind 固定枚举守卫 ---------------
+
+    ALLOWED_STAGE_KINDS = frozenset({
+        "list", "detail", "rough", "fine", "end_to_end",
+    })
+    REUSABLE_SOURCE_ARTIFACT_KINDS = frozenset({"list", "detail"})
+    _STAGE_TO_SOURCE_ARTIFACT_KIND = {
+        "list": "list", "detail": "detail",
+        "rough": None, "fine": None, "end_to_end": None,
+    }
+
+    def validate_stage_kind(self, stage: str) -> None:
+        """T609: 校验 stage 仅为 list/detail/rough/fine/end_to_end。
+
+        见 data-model.md 第 273 行。未知 stage 抛 ValueError，由调用方阻断。
+        """
+        if stage not in self.ALLOWED_STAGE_KINDS:
+            raise ValueError(
+                f"未知 stage: {stage!r}，仅允许 "
+                f"{sorted(self.ALLOWED_STAGE_KINDS)}"
+            )
+
+    def source_artifact_kind_for_stage(
+        self, stage: str,
+    ) -> str | None:
+        """T609: 返回 stage 对应的 source_artifact_kind。
+
+        见 data-model.md 第 274 行：
+        - stage=list → 'list'（可作为 rough 的 source 输入）
+        - stage=detail → 'detail'（可作为 fine 的 source 输入）
+        - rough/fine/end_to_end → None（不可被复用）
+        """
+        self.validate_stage_kind(stage)
+        return self._STAGE_TO_SOURCE_ARTIFACT_KIND[stage]
+
+    def validate_reusable_source_artifact_kind(self, kind: str) -> None:
+        """T609: 校验 source_artifact_kind 仅为 list/detail。
+
+        见 data-model.md 第 274、279 行：
+        只有 list/detail 产物可作为 rough/fine 的 source 输入；
+        end_to_end 输出 source_artifact_kind=NULL，不得被 rough/fine 复用。
+        """
+        if kind not in self.REUSABLE_SOURCE_ARTIFACT_KINDS:
+            raise ValueError(
+                f"不可复用的 source_artifact_kind: {kind!r}，仅允许 "
+                f"{sorted(self.REUSABLE_SOURCE_ARTIFACT_KINDS)}"
+            )
+
+    # -- T612: rough/fine source artifact 继承校验 ------------------------
+
+    def validate_rough_source_artifact(
+        self, *, source_artifact_id: str,
+    ) -> dict:
+        """T612: rough 只接受 list artifact 作为 source。
+
+        纯校验器：不创建 JobSource，不修改 artifact。
+        见 data-model.md 第 279 行：rough 只接受 source_artifact_kind=list。
+        """
+        record = self._store.get_tuning_stage_artifact(source_artifact_id)
+        if record["stage"] != "list":
+            raise ValueError(
+                f"rough 只接受 list artifact 作为 source，"
+                f"实际 stage={record['stage']!r}"
+            )
+        return record
+
+    def validate_fine_source_artifact(
+        self, *, source_artifact_id: str,
+    ) -> dict:
+        """T612: fine 只接受 detail artifact 作为 source。
+
+        纯校验器：不创建 JobSource，不修改 artifact。
+        见 data-model.md 第 279 行：fine 只接受 source_artifact_kind=detail。
+        """
+        record = self._store.get_tuning_stage_artifact(source_artifact_id)
+        if record["stage"] != "detail":
+            raise ValueError(
+                f"fine 只接受 detail artifact 作为 source，"
+                f"实际 stage={record['stage']!r}"
+            )
+        return record
+
+    def prove_source_artifact_platform_inheritance(
+        self, *, source_artifact_id: str,
+    ) -> dict:
+        """T612: 证明 source artifact 的平台继承自 experiment。
+
+        纯校验器：不查询 migration 27 外层 platform 列（尚未实现）。
+        证据链：artifact → round → experiment → source_scope.platform。
+
+        由于 store 不暴露 platform 外层列，当前从 experiment.source_scope.platform
+        推断。T606/T607 实现后，应改为从 experiment/platform 外层列读取。
+        见 data-model.md 第 271 行：stage artifact 与 experiment 平台一致。
+        """
+        artifact = self._store.get_tuning_stage_artifact(source_artifact_id)
+        experiment = self._store.get_tuning_experiment(
+            artifact["experiment_id"]
+        )
+        source_scope = experiment.get("source_scope", {})
+        platform = source_scope.get("platform")
+        if not platform:
+            raise ValueError(
+                f"experiment {experiment['id']} source_scope 缺少 platform，"
+                f"无法证明 artifact 平台继承"
+            )
+        return {
+            "inferred_platform": platform,
+            "evidence_source": "experiment_source_scope",
+            "experiment_id": experiment["id"],
+            "artifact_id": artifact["id"],
+            "artifact_stage": artifact["stage"],
+        }
+
+    # -- T615: 禁用平台守卫与取消登录空间 --------------------------------
+
+    def validate_platform_enabled_for_new_source_round(
+        self, *, platform: str,
+    ) -> None:
+        """T615: 校验平台是否允许签发新 source round。
+
+        见 data-model.md 第 22 行：enabled_for_new_tasks=false 时
+        只禁用新任务创建/补抓，不影响历史读取。
+        见 tasks007.md T615：禁用平台不签发或执行新的 source round。
+        """
+        from webui.platforms import (
+            get_platform_or_none, is_known_platform_key,
+        )
+        if not is_known_platform_key(platform):
+            raise ValueError(
+                f"未知平台: {platform!r}，不能签发新 source round"
+            )
+        registry = get_platform_or_none(platform)
+        if registry is None:
+            raise ValueError(
+                f"平台 {platform!r} 已知但未注册，不能签发新 source round"
+            )
+        if not registry.enabled_for_new_tasks:
+            raise ValueError(
+                f"平台 {platform!r} 当前禁用新任务"
+                f"（{registry.availability_reason}）"
+            )
+
+    def cancel_experiment_login_spaces(
+        self, *, experiment_id: str,
+    ) -> dict:
+        """T615: 取消实验时只处理已知平台的登录空间。
+
+        见 tasks007.md T615：取消只处理已知平台登录空间。
+        从 experiment.source_scope.platform 读取平台，
+        只返回已知平台的登录空间列表，未知平台不处理。
+        """
+        experiment = self._store.get_tuning_experiment(experiment_id)
+        source_scope = experiment.get("source_scope", {})
+        platform = source_scope.get("platform")
+        handled_platforms: list[str] = []
+        if platform:
+            from webui.platforms import is_known_platform_key
+            if is_known_platform_key(platform):
+                handled_platforms.append(platform)
+        return {
+            "experiment_id": experiment_id,
+            "handled_platforms": handled_platforms,
+            "platform_from_source_scope": platform,
         }
 
     def create_rerun_for_uncertain(self, round_id: str) -> dict | None:

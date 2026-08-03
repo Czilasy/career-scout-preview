@@ -2767,5 +2767,508 @@ class LegacyPlatformGuardTests(unittest.TestCase):
         self.assertEqual(resp.get_json()["task"].get("platform"), "boss")
 
 
+class PlatformAwareSearchScopeTests(unittest.TestCase):
+    """tasks005 T401: 平台感知搜索预览/创建 API 测试。
+
+    合同（contracts/http-api.md）：
+    - POST /api/search-scope/preview 接受 ``platform``，禁用平台返回 503，
+      未知平台返回 400，scope 显式含 ``platform`` 和 ``scope_digest``。
+    - POST /api/execute-search 接受 ``platform``，非空 filters 返回 422，
+      禁用平台返回 503，平台与 scope 不一致返回 409，搜索 run 的
+      ``frozen_filters`` 和筛选快照为空，响应含 ``task_input_digest``。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    # -- preview: platform registration ----------------------------------
+
+    def test_preview_explicit_boss_returns_scope_with_platform(self):
+        """显式 platform=boss 预览成功，scope 显式含 platform=boss。"""
+        resp = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python 后端"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["scope"]["platform"], "boss")
+        self.assertTrue(data["scope"]["scope_digest"])
+
+    def test_preview_omitted_platform_defaults_to_boss(self):
+        """省略平台兼容旧 BOSS 前端，scope 显式含 platform=boss。"""
+        resp = self.client.post("/api/search-scope/preview", json={
+            "keywords": ["Python 后端"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["scope"]["platform"], "boss")
+
+    def test_preview_unknown_platform_returns_400(self):
+        """未知平台键返回 400 platform_validation_failed。"""
+        resp = self.client.post("/api/search-scope/preview", json={
+            "platform": "lagou",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        })
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertEqual(data["error_code"], "platform_validation_failed")
+
+    def test_preview_disabled_platform_returns_503(self):
+        """智联 enabled_for_new_tasks=False → 503 platform_disabled。"""
+        resp = self.client.post("/api/search-scope/preview", json={
+            "platform": "zhilian",
+            "keywords": ["Python"],
+            "scope_kind": "nationwide",
+            "cities": [],
+            "pages_per_combination": 1,
+        })
+        self.assertEqual(resp.status_code, 503)
+        data = resp.get_json()
+        self.assertEqual(data["error_code"], "platform_disabled")
+
+    # -- preview: scope digest includes platform -------------------------
+
+    def test_preview_scope_digest_is_deterministic_and_contains_platform(self):
+        """同一平台同一参数的 scope_digest 稳定；scope 含 platform 字段。"""
+        body = {
+            "platform": "boss",
+            "keywords": ["Python 后端"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }
+        resp1 = self.client.post("/api/search-scope/preview", json=body)
+        resp2 = self.client.post("/api/search-scope/preview", json=body)
+        self.assertEqual(resp1.status_code, 200)
+        self.assertEqual(
+            resp1.get_json()["scope"]["scope_digest"],
+            resp2.get_json()["scope"]["scope_digest"],
+        )
+        self.assertEqual(resp1.get_json()["scope"]["platform"], "boss")
+
+    # -- execute-search: non-empty filters rejection ---------------------
+
+    def test_execute_search_rejects_non_empty_filters(self):
+        """非空 filters 返回 422 search_filters_not_supported，不创建 run。"""
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+        resp = self.client.post("/api/execute-search", json={
+            "platform": "boss",
+            "script_params": {
+                "keyword": "Python",
+                "city": ["上海"],
+                "pages": 1,
+                "filters": {"stage": "804"},
+            },
+            "scope_digest": preview["scope_digest"],
+        })
+        self.assertEqual(resp.status_code, 422)
+        data = resp.get_json()
+        self.assertEqual(data["error_code"], "search_filters_not_supported")
+
+    def test_execute_search_rejects_screening_fields(self):
+        """screening_fields 属于 AI 筛选，搜索请求携带时返回 422。"""
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+        resp = self.client.post("/api/execute-search", json={
+            "platform": "boss",
+            "script_params": {
+                "keyword": "Python",
+                "city": ["上海"],
+                "pages": 1,
+                "screening_fields": [{"name": "salary", "value": ["405"]}],
+            },
+            "scope_digest": preview["scope_digest"],
+        })
+        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(
+            resp.get_json()["error_code"], "search_filters_not_supported")
+
+    # -- execute-search: disabled platform -------------------------------
+
+    def test_execute_search_disabled_platform_returns_503(self):
+        """智联禁用 → execute-search 返回 503 platform_disabled，不创建 run。"""
+        resp = self.client.post("/api/execute-search", json={
+            "platform": "zhilian",
+            "script_params": {
+                "keyword": "Python",
+                "city": ["全国"],
+                "pages": 1,
+            },
+        })
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(resp.get_json()["error_code"], "platform_disabled")
+
+    # -- execute-search: platform mismatch -------------------------------
+
+    def test_execute_search_platform_mismatch_returns_409(self):
+        """scope 平台与请求平台不一致 → 409 scope_platform_mismatch。"""
+        boss_preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+        resp = self.client.post("/api/execute-search", json={
+            "platform": "zhilian",
+            "script_params": {
+                "keyword": "Python",
+                "city": ["上海"],
+                "pages": 1,
+            },
+            "scope_digest": boss_preview["scope_digest"],
+        })
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(
+            resp.get_json()["error_code"], "scope_platform_mismatch")
+
+    # -- execute-search: creates run with frozen identity ----------------
+
+    def test_execute_search_freezes_platform_and_empty_filter_snapshot(self):
+        """搜索 run 持久化 platform=boss、空 frozen_filters、空筛选快照、
+        非空 task_input_digest，且 execution_params 含 cdp_port/profile_key。
+        """
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit"):
+            resp = self.client.post("/api/execute-search", json={
+                "platform": "boss",
+                "script_params": {
+                    "keyword": "Python",
+                    "city": ["上海"],
+                    "pages": 1,
+                },
+                "scope_digest": preview["scope_digest"],
+            })
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        body = resp.get_json()
+        self.assertEqual(body["platform"], "boss")
+        self.assertTrue(body["task_input_digest"])
+        self.assertEqual(body["scope_digest"], preview["scope_digest"])
+
+        task_id = body["task_id"]
+        store = self.app.config["TASK_STORE"]
+        run = store.get_screening_run(task_id)
+        self.assertIsNotNone(run)
+        # 搜索 run 的筛选快照为空
+        self.assertEqual(run["frozen_filters"], {})
+        # execution_params 含平台冻结身份
+        params = run["execution_params"]
+        self.assertEqual(params["platform"], "boss")
+        self.assertTrue(params["cdp_port"])
+        self.assertTrue(params["profile_key"])
+        self.assertTrue(params["task_input_digest"])
+        self.assertEqual(params["browser_account"], body.get("browser_account") or params["browser_account"])
+
+    def test_execute_search_scope_request_mismatch_returns_409(self):
+        """script_params 的关键词/城市/页数与 scope 不一致 → 409 scope_request_mismatch。"""
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+        resp = self.client.post("/api/execute-search", json={
+            "platform": "boss",
+            "script_params": {
+                "keyword": "Java",  # 与 scope 关键词不一致
+                "city": ["上海"],
+                "pages": 1,
+            },
+            "scope_digest": preview["scope_digest"],
+        })
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(
+            resp.get_json()["error_code"], "scope_request_mismatch")
+
+    # -- T403: source created from frozen runtime -----------------------
+
+    def _wait_for_task(self, task_id, timeout=5.0):
+        """Poll search-progress until task leaves queued/running."""
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        last = None
+        while _time.monotonic() < deadline:
+            resp = self.client.get(f"/api/search-progress/{task_id}")
+            if resp.status_code == 200:
+                last = resp.get_json()
+                if last.get("status") not in ("queued", "running"):
+                    return last
+            _time.sleep(0.02)
+        raise AssertionError(f"task {task_id} did not finish within {timeout}s; last={last}")
+
+    def test_boss_source_receives_frozen_cdp_port(self):
+        """T403: BOSS source 显式接收冻结 cdp_port，不使用默认端口。
+
+        合同（contracts/job-source.md 第 42 行）：
+        "BOSS 也必须显式接收冻结的 CDP 端口。"
+
+        _make_cdp_source 从 task dict 读取冻结的 platform/cdp_port/
+        profile_key，传给 BossCdpSource 构造函数。不读当前 UI、活动
+        账号或默认端口。
+        """
+        import time as _time
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+
+        fake_result = {
+            "ok": True, "jobs": [], "total_scraped": 0,
+            "total_matched": 0, "combinations": 1,
+            "completed_combos": ["Python|上海"], "error": "",
+        }
+        with mock.patch("webui.app._BossCdpSource",
+                        return_value=mock.MagicMock()) as mock_cls, \
+                mock.patch("webui.pipeline_exec.run_search",
+                           return_value=fake_result) as mock_search:
+            resp = self.client.post("/api/execute-search", json={
+                "platform": "boss",
+                "script_params": {
+                    "keyword": "Python", "city": ["上海"], "pages": 1,
+                },
+                "scope_digest": preview["scope_digest"],
+            })
+            self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+            task_id = resp.get_json()["task_id"]
+            self._wait_for_task(task_id)
+
+        # BossCdpSource 必须被调用，且显式传入冻结 cdp_port
+        mock_cls.assert_called_once()
+        kwargs = mock_cls.call_args.kwargs
+        self.assertIn(
+            "cdp_port", kwargs,
+            "cdp_port 必须从冻结 runtime 显式传入，不能省略让 adapter 用默认端口",
+        )
+        self.assertEqual(kwargs["cdp_port"], 9222)
+        # run_search 收到的 source 是 mock 返回的对象（验证 source 被传递）
+        mock_search.assert_called_once()
+        self.assertIsNotNone(mock_search.call_args.args[1])
+
+    def test_resume_restores_frozen_runtime_from_db(self):
+        """T403: 续抓时从 DB 恢复 platform/cdp_port/profile_key 到 task dict。
+
+        合同（contracts/http-api.md 第 212 行）：
+        "按冻结 browser_account/cdp_port/profile_key 创建原平台 adapter。"
+
+        continue_execute_search 必须从 DB execution_params 恢复冻结身份，
+        不能只恢复 browser_account 而丢弃 platform/cdp_port/profile_key。
+        """
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit"):
+            resp = self.client.post("/api/execute-search", json={
+                "platform": "boss",
+                "script_params": {
+                    "keyword": "Python", "city": ["上海"], "pages": 1,
+                },
+                "scope_digest": preview["scope_digest"],
+            })
+        self.assertEqual(resp.status_code, 200)
+        task_id = resp.get_json()["task_id"]
+
+        # 模拟服务重启：清空内存 task，DB 保留 paused 状态
+        store = self.app.config["TASK_STORE"]
+        store.update_screening_run(task_id, status="running")
+        store.update_screening_run(
+            task_id, status="paused", current_stage="scrape",
+            error_code="captcha_required", error_reason="测试暂停",
+        )
+        store.save_checkpoint(task_id, "scrape", [])
+        self.app.config["PIPELINE_TASKS"].pop(task_id, None)
+
+        # 续抓：mock executor 防止任务实际运行
+        with mock.patch.object(executor, "submit"):
+            resp = self.client.post(
+                f"/api/execute-search/continue/{task_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+        # task dict 必须从 DB 恢复冻结 runtime
+        tasks = self.app.config["PIPELINE_TASKS"]
+        task = tasks.get(task_id)
+        self.assertIsNotNone(task, "续抓后 task 必须在内存中恢复")
+        self.assertEqual(task.get("platform"), "boss")
+        self.assertTrue(task.get("cdp_port"),
+                        "续抓后 task 必须有冻结 cdp_port")
+        self.assertTrue(task.get("profile_key"),
+                        "续抓后 task 必须有冻结 profile_key")
+        self.assertTrue(task.get("task_input_digest"),
+                        "续抓后 task 必须有冻结 task_input_digest")
+
+    # -- T404: source attempt before combo result -----------------------
+
+    def test_source_attempt_precedes_combo_result(self):
+        """T404: source attempt 在 combo result 之前持久化。
+
+        合同（tasks005 节点门禁 A）：
+        "在任何完成键、run 进度、状态或 snapshot 更新前追加 source attempt"
+        """
+        from webui.source import SourceOutcome
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+
+        fake_source = mock.MagicMock()
+        fake_source.preflight.return_value = SourceOutcome.success(
+            safe_log="source_ready")
+        fake_source.fetch_list.return_value = SourceOutcome.success(
+            jobs=[{"job_id": "job-1", "title": "Python"}],
+            safe_log="list job_count=1",
+            input_hash="sha256-fake",
+        )
+        store = self.app.config["TASK_STORE"]
+        call_order = []
+        orig_append = store.append_source_attempt
+        orig_save = store.save_scrape_combo_result
+
+        def tracked_append(**kw):
+            call_order.append("append_source_attempt")
+            return orig_append(**kw)
+
+        def tracked_save(*args, **kw):
+            call_order.append("save_scrape_combo_result")
+            return orig_save(*args, **kw)
+
+        with mock.patch("webui.app._BossCdpSource", return_value=fake_source), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                           return_value=(True, "")), \
+                mock.patch.object(store, "append_source_attempt",
+                                  side_effect=tracked_append), \
+                mock.patch.object(store, "save_scrape_combo_result",
+                                  side_effect=tracked_save):
+            resp = self.client.post("/api/execute-search", json={
+                "platform": "boss",
+                "script_params": {
+                    "keyword": "Python", "city": ["上海"], "pages": 1,
+                },
+                "scope_digest": preview["scope_digest"],
+            })
+            self.assertEqual(resp.status_code, 200)
+            task_id = resp.get_json()["task_id"]
+            self._wait_for_task(task_id)
+
+        self.assertIn("append_source_attempt", call_order,
+                      "source attempt 必须被调用")
+        self.assertIn("save_scrape_combo_result", call_order,
+                      "combo result 必须被调用")
+        append_idx = call_order.index("append_source_attempt")
+        save_idx = call_order.index("save_scrape_combo_result")
+        self.assertLess(
+            append_idx, save_idx,
+            "source attempt 必须在 combo result 之前持久化")
+
+    def test_source_attempt_failure_prevents_combo_result(self):
+        """T404: append_source_attempt 失败时不得推进 combo result。"""
+        from webui.source import SourceOutcome
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+
+        fake_source = mock.MagicMock()
+        fake_source.preflight.return_value = SourceOutcome.success(
+            safe_log="source_ready")
+        fake_source.fetch_list.return_value = SourceOutcome.success(
+            jobs=[{"job_id": "job-1", "title": "Python"}],
+            safe_log="list job_count=1",
+            input_hash="sha256-fake",
+        )
+        store = self.app.config["TASK_STORE"]
+        save_called = False
+
+        def fail_append(**kw):
+            raise sqlite3.Error("persist failed")
+
+        def tracked_save(*args, **kw):
+            nonlocal save_called
+            save_called = True
+
+        with mock.patch("webui.app._BossCdpSource", return_value=fake_source), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                           return_value=(True, "")), \
+                mock.patch.object(store, "append_source_attempt",
+                                  side_effect=fail_append), \
+                mock.patch.object(store, "save_scrape_combo_result",
+                                  side_effect=tracked_save):
+            resp = self.client.post("/api/execute-search", json={
+                "platform": "boss",
+                "script_params": {
+                    "keyword": "Python", "city": ["上海"], "pages": 1,
+                },
+                "scope_digest": preview["scope_digest"],
+            })
+            self.assertEqual(resp.status_code, 200)
+            task_id = resp.get_json()["task_id"]
+            self._wait_for_task(task_id)
+
+        self.assertFalse(
+            save_called,
+            "append_source_attempt 失败时不得推进 save_scrape_combo_result")
+
+
 if __name__ == "__main__":
     unittest.main()

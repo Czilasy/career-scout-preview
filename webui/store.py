@@ -2981,6 +2981,28 @@ class TaskStore:
                     f"migration_27 orphan feedback_events: {orphan_fb[0]}"
                 )
 
+            # 调优摘要守恒：回填 platform 后行数不得变化（回填只更新不删除）
+            # tuning_experiments / tuning_task_manifests / tuning_stage_artifacts
+            # 的 platform 列必须全部为 'boss'（存量只有 BOSS）
+            for tune_table in (
+                "tuning_experiments", "tuning_task_manifests", "tuning_stage_artifacts",
+            ):
+                non_boss = conn.execute(
+                    f"SELECT COUNT(*) FROM {tune_table} WHERE platform != 'boss'"
+                ).fetchone()
+                if non_boss and non_boss[0] > 0:
+                    raise RuntimeError(
+                        f"migration_27 {tune_table} has non-boss rows: {non_boss[0]}"
+                    )
+                # 行数守恒：platform 列不得为空（NOT NULL 约束已保证，复核）
+                null_platform = conn.execute(
+                    f"SELECT COUNT(*) FROM {tune_table} WHERE platform IS NULL OR platform = ''"
+                ).fetchone()
+                if null_platform and null_platform[0] > 0:
+                    raise RuntimeError(
+                        f"migration_27 {tune_table} has null platform: {null_platform[0]}"
+                    )
+
             # 记录 migration
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
@@ -3361,6 +3383,54 @@ class TaskStore:
             "task_input_digest": row["task_input_digest"],
             "interruption_kind": row["interruption_kind"],
         }
+
+    def save_checkpoint_identity(
+        self,
+        run_id: str,
+        *,
+        platform: str,
+        filter_schema_version: int | None = None,
+        filter_snapshot: dict | None = None,
+        task_input_digest: str | None = None,
+        interruption_kind: str | None = None,
+    ) -> None:
+        """T115: 持久化 checkpoint 身份一致性信息（写入端）。
+
+        一次性写入 platform、filter_schema_version、filter_snapshot_json、
+        task_input_digest 和 interruption_kind。用于 run 创建时冻结身份。
+        """
+        snapshot_json = json.dumps(filter_snapshot or {}, ensure_ascii=False, sort_keys=True)
+        ts = _now()
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            conn.execute(
+                "UPDATE screening_runs SET platform=?, filter_schema_version=?, "
+                "filter_snapshot_json=?, task_input_digest=?, interruption_kind=?, "
+                "updated_at=? WHERE id=?",
+                (str(platform), filter_schema_version, snapshot_json,
+                 task_input_digest, interruption_kind, ts, str(run_id)),
+            )
+
+    def verify_checkpoint_identity(
+        self,
+        run_id: str,
+        *,
+        expected_platform: str,
+        expected_task_input_digest: str | None = None,
+    ) -> tuple[bool, str]:
+        """T115: 校验 checkpoint 身份一致性。
+
+        继续运行前调用：若 run 的 platform 与 expected_platform 不一致，
+        或 task_input_digest 与期望值不一致，返回 (False, reason)。
+        """
+        identity = self.get_run_checkpoint_identity(run_id)
+        if identity is None:
+            return (False, "run_not_found")
+        if identity["platform"] != expected_platform:
+            return (False, f"platform_mismatch: {identity['platform']} != {expected_platform}")
+        if expected_task_input_digest is not None and identity["task_input_digest"] != expected_task_input_digest:
+            return (False, "task_input_digest_mismatch")
+        return (True, "")
 
     # -- T116: 收藏/反馈原子 upsert + 内部 UUID 关联 ----------------------
 
@@ -4188,7 +4258,7 @@ class TaskStore:
             for job_id, jd in (jd_by_job or {}).items():
                 conn.execute(
                     "UPDATE screening_results SET jd = ? "
-                    "WHERE run_id = ? AND job_id = ?",
+                    "WHERE run_id = ? AND platform_job_id = ?",
                     (str(jd), str(source_run_id), str(job_id)),
                 )
             conn.execute(
@@ -4942,8 +5012,16 @@ class TaskStore:
             scope_kind=source_scope.get("scope_kind", "cities"),
             cities=source_scope.get("cities", []),
             pages_per_combination=int(source_scope.get("pages_per_combination", 0)),
+            platform=source_scope.get("platform", "boss"),
         )
         normalized_source = source_result["scope"]
+        # T606: 保留 controller 冻结的 runtime 字段（preview_scope 不返回它们）
+        for runtime_field in (
+            "browser_account", "cdp_port", "profile_key",
+            "filter_schema_version", "task_input_digest",
+        ):
+            if runtime_field in source_scope:
+                normalized_source[runtime_field] = source_scope[runtime_field]
         normalized_workloads = []
         for raw in workloads:
             if not isinstance(raw, dict):
@@ -4979,6 +5057,8 @@ class TaskStore:
         for task_size, structure_index, frozen_scope in normalized_workloads:
             workload_id = _uuid()
             artifact_path = f"tuning/{exp_id}/input/{workload_id}.json"
+            # T606: workload artifact manifest 必须保存 platform/runtime
+            # 见 data-model.md 第 233-249 行
             artifact_manifest = {
                 "schema_version": 1,
                 "artifact_manifest_path": artifact_path,
@@ -4993,6 +5073,12 @@ class TaskStore:
                 "expected_raw_jobs": frozen_scope["planned_pages"] * 40,
                 "quality_context": normalized_quality_context,
                 "quality_context_digest": quality_context_digest,
+                "platform": normalized_source.get("platform", "boss"),
+                "browser_account": normalized_source.get("browser_account"),
+                "cdp_port": normalized_source.get("cdp_port"),
+                "profile_key": normalized_source.get("profile_key"),
+                "filter_schema_version": normalized_source.get("filter_schema_version"),
+                "task_input_digest": normalized_source.get("task_input_digest"),
             }
             artifact_bytes = json.dumps(
                 artifact_manifest, ensure_ascii=False, sort_keys=True,
@@ -5049,13 +5135,16 @@ class TaskStore:
 
             now = _now()
             with self._connection() as conn:
+                scope_json_str = json.dumps(
+                    normalized_source, ensure_ascii=False, sort_keys=True,
+                )
                 conn.execute(
                     "INSERT INTO tuning_experiments "
-                    "(id, spec_version, status, input_version_id, source_scope_json, "
-                    " created_at, updated_at) VALUES (?, ?, 'draft', ?, ?, ?, ?)",
+                    "(id, spec_version, status, input_version_id, platform, "
+                    " source_scope_json, created_at, updated_at) "
+                    "VALUES (?, ?, 'draft', ?, json_extract(?, '$.platform'), ?, ?, ?)",
                     (exp_id, spec_version, input_version_id,
-                     json.dumps(normalized_source, ensure_ascii=False, sort_keys=True),
-                     now, now),
+                     scope_json_str, scope_json_str, now, now),
                 )
                 conn.execute(
                     "INSERT INTO tuning_input_versions "
@@ -5159,7 +5248,8 @@ class TaskStore:
         now = _now()
         with self._connection() as conn:
             experiment = conn.execute(
-                "SELECT status, input_version_id FROM tuning_experiments WHERE id = ?",
+                "SELECT status, input_version_id, source_scope_json "
+                "FROM tuning_experiments WHERE id = ?",
                 (experiment_id,),
             ).fetchone()
             if experiment is None:
@@ -5169,6 +5259,10 @@ class TaskStore:
             input_version_id = experiment["input_version_id"]
             if not input_version_id:
                 raise ValueError("实验缺少输入版本")
+            # T606: 读取 experiment source_scope 用于 workload artifact manifest 校验
+            experiment_scope = _decode_json(
+                experiment["source_scope_json"], {}
+            )
             rows = conn.execute(
                 "SELECT id, task_size, structure_index, frozen_scope_json, "
                 "planned_pages, expected_raw_jobs, artifact_manifest_json, "
@@ -5245,6 +5339,14 @@ class TaskStore:
                     "expected_raw_jobs": row["expected_raw_jobs"],
                     "quality_context": quality_context,
                     "quality_context_digest": quality_context_digest,
+                    "platform": experiment_scope.get("platform", "boss"),
+                    "browser_account": experiment_scope.get("browser_account"),
+                    "cdp_port": experiment_scope.get("cdp_port"),
+                    "profile_key": experiment_scope.get("profile_key"),
+                    "filter_schema_version": experiment_scope.get(
+                        "filter_schema_version"
+                    ),
+                    "task_input_digest": experiment_scope.get("task_input_digest"),
                 }
                 if artifact_manifest != expected_manifest:
                     raise ValueError("workload artifact manifest 身份或内容不匹配")
@@ -5307,6 +5409,7 @@ class TaskStore:
             raise KeyError(f"实验不存在: {experiment_id}")
         return {
             "id": row["id"],
+            "platform": row["platform"],
             "spec_version": row["spec_version"],
             "status": row["status"],
             "input_version_id": row["input_version_id"],
@@ -5630,6 +5733,20 @@ class TaskStore:
             ).fetchone()
             if workload is None:
                 raise KeyError("轮次 workload 不存在")
+            # T607: 从 experiment 读取 platform/scope_digest/task_input_digest
+            # 写入 stage artifact 外层列
+            experiment_row = conn.execute(
+                "SELECT platform, source_scope_json FROM tuning_experiments "
+                "WHERE id = ?",
+                (round_record["experiment_id"],),
+            ).fetchone()
+            artifact_platform = experiment_row["platform"] if experiment_row else None
+            source_scope_json = (
+                experiment_row["source_scope_json"] if experiment_row else None
+            )
+            source_scope = _decode_json(source_scope_json, {})
+            scope_digest = source_scope.get("scope_digest")
+            task_input_digest = source_scope.get("task_input_digest")
             if source_artifact_id is not None:
                 source = conn.execute(
                     "SELECT experiment_id, input_version_id, workload_id, status "
@@ -5685,16 +5802,20 @@ class TaskStore:
                 else 0
             )
             with self._connection() as conn:
+                # T609: source_artifact_kind 只有 list/detail 可复用
+                source_artifact_kind = stage if stage in ("list", "detail") else None
                 conn.execute(
                     "INSERT INTO tuning_stage_artifacts "
                     "(id, experiment_id, input_version_id, workload_id, "
-                    " producer_round_id, stage, source_artifact_id, artifact_path, "
-                    " artifact_digest, item_count, status, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)",
+                    " producer_round_id, stage, platform, source_artifact_kind, "
+                    " scope_digest, task_input_digest, source_artifact_id, "
+                    " artifact_path, artifact_digest, item_count, status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)",
                     (artifact_id, round_record["experiment_id"],
                      workload["input_version_id"], round_record["workload_id"],
-                     round_id, stage, source_artifact_id, relative_path,
-                     artifact_digest, item_count, _now()),
+                     round_id, stage, artifact_platform, source_artifact_kind,
+                     scope_digest, task_input_digest, source_artifact_id,
+                     relative_path, artifact_digest, item_count, _now()),
                 )
         except sqlite3.IntegrityError as exc:
             temporary_path.unlink(missing_ok=True)
@@ -5722,6 +5843,10 @@ class TaskStore:
             "workload_id": row["workload_id"],
             "producer_round_id": row["producer_round_id"],
             "stage": row["stage"],
+            "platform": row["platform"],
+            "source_artifact_kind": row["source_artifact_kind"],
+            "scope_digest": row["scope_digest"],
+            "task_input_digest": row["task_input_digest"],
             "source_artifact_id": row["source_artifact_id"],
             "artifact_path": row["artifact_path"],
             "artifact_digest": row["artifact_digest"],
@@ -6163,11 +6288,13 @@ class TaskStore:
             conn.execute(
                 "INSERT INTO tuning_task_manifests "
                 "(id, experiment_id, candidate_id, round_id, manifest_version, "
-                "manifest_json, manifest_digest, rendered_task_path, status, "
-                "issued_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?)",
+                "platform, manifest_json, manifest_digest, rendered_task_path, "
+                "status, issued_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, json_extract(?, '$.fixed_fields.platform'), "
+                "?, ?, ?, 'issued', ?, ?)",
                 (manifest_id, experiment_id, candidate_id, round_id,
-                 manifest_version, manifest_json, manifest_digest,
-                 rendered_task_path, now, now),
+                 manifest_version, manifest_json, manifest_json,
+                 manifest_digest, rendered_task_path, now, now),
             )
             conn.execute(
                 "UPDATE tuning_rounds SET status = 'issued', manifest_id = ? WHERE id = ?",
@@ -6197,6 +6324,7 @@ class TaskStore:
             "candidate_id": row["candidate_id"],
             "round_id": row["round_id"],
             "manifest_version": row["manifest_version"],
+            "platform": row["platform"],
             "manifest": _decode_json(row["manifest_json"], {}),
             "manifest_digest": row["manifest_digest"],
             "rendered_task_path": row["rendered_task_path"],

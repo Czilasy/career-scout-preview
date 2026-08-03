@@ -882,7 +882,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                     merged[jid] = job
             if on_combo_done is not None:
                 try:
-                    on_combo_done(combo_key, list(outcome.jobs), list(completed_combos))
+                    on_combo_done(combo_key, list(outcome.jobs), list(completed_combos), outcome=outcome)
                 except _PIPELINE_OPERATION_ERRORS as exc:
                     emit(
                         stage="hard_stop", current=idx + 1, total=len(combos),
