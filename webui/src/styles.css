@@ -932,15 +932,51 @@ button:disabled {
 .task-progress > p { margin: 10px 0 0; color: var(--text-soft); font-size: 13px; line-height: 1.5; }
 .task-pause-reason { display: flex; align-items: center; gap: 6px; color: var(--warning, #d97706); font-weight: 600; }
 .task-stage { color: var(--muted); font-weight: 500; }
-.task-counts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; font-size: 12px; }
-.count-chip { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px; background: var(--surface-3); color: var(--text-soft); font-weight: 600; }
+.task-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 16px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.count-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.count-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.count-row {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.count-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text-soft);
+  font-weight: 600;
+  white-space: nowrap;
+}
 .count-chip.success { color: var(--success); }
 .count-chip.fail { color: var(--danger); }
 .count-chip.unstarted { color: var(--warning, #d97706); }
-.count-chip.total { color: var(--muted); }
 .count-chip.kept { color: var(--success); }
 .count-chip.dropped { color: var(--muted); }
 .count-chip.source { color: var(--info); }
+.count-chip.pending { color: var(--warning, #d97706); }
+.count-sep { color: var(--muted); font-weight: 600; }
 .version-footer {
   display: flex;
   flex-wrap: wrap;

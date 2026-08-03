@@ -2,6 +2,10 @@
 
 本仓库是公开仓库，提交或推送后的任何内容都可能被其他人克隆。以下规则适用所有人和所有 AI 代理。
 
+## 设计新功能前必读
+
+- 本地开发时，设计新东西先查看 `roadmap/` 下的本地参考文档（如 `REFERENCE_GET_JOBS.md`）；有可借鉴的零件就借鉴，没有现成方案再自由发挥。
+
 ## 提交或推送前必做
 
 - 先运行：`uv run python -m unittest tests.test_repo_hygiene`
