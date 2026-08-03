@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from scripts import boss_cdp_raw as boss
 from webui.process_executor import ScraperExecutor
@@ -46,6 +46,12 @@ class SourceOutcome:
         ok: whether the fetch produced usable data
         jobs: list of job dicts (list fetch) or single detail dict (detail fetch)
         detail: detail payload when fetching detail
+        empty_result: only for list fetch; True when the search genuinely
+            returned zero jobs with explicit empty-state evidence. ``ok=True``
+            and ``jobs=[]`` is only allowed when ``empty_result=True``.
+        empty_evidence: required when ``empty_result=True``; must contain
+            ``kind``, ``fixture_version`` and ``marker`` (脱敏). Must be
+            ``None`` for non-empty success and all failures.
         failed_code: safe failure code when ``ok`` is False; one of
             ``source_unreachable`` / ``source_blocked`` / ``source_not_found``
             / ``source_invalid_output`` / ``source_input_drift``.
@@ -53,7 +59,8 @@ class SourceOutcome:
     """
 
     __slots__ = (
-        "ok", "jobs", "detail", "failed_code", "safe_log", "input_hash",
+        "ok", "jobs", "detail", "empty_result", "empty_evidence",
+        "failed_code", "safe_log", "input_hash",
         "failed_reason",
     )
 
@@ -63,6 +70,8 @@ class SourceOutcome:
         ok: bool,
         jobs: list[dict] | None = None,
         detail: dict | None = None,
+        empty_result: bool = False,
+        empty_evidence: dict | None = None,
         failed_code: str | None = None,
         safe_log: str = "",
         input_hash: str | None = None,
@@ -71,6 +80,8 @@ class SourceOutcome:
         self.ok = bool(ok)
         self.jobs = jobs or []
         self.detail = detail or {}
+        self.empty_result = bool(empty_result)
+        self.empty_evidence = empty_evidence
         self.failed_code = failed_code
         self.safe_log = safe_log
         self.input_hash = input_hash
@@ -79,6 +90,23 @@ class SourceOutcome:
     @classmethod
     def success(cls, *, jobs: list[dict] | None = None, detail: dict | None = None, safe_log: str = "", input_hash: str | None = None) -> "SourceOutcome":
         return cls(ok=True, jobs=jobs, detail=detail, safe_log=safe_log, input_hash=input_hash)
+
+    @classmethod
+    def empty_success(cls, *, empty_evidence: dict, safe_log: str = "", input_hash: str | None = None) -> "SourceOutcome":
+        """真实空结果：ok=True, jobs=[], empty_result=True, empty_evidence 必填。
+
+        empty_evidence 必须包含 ``kind``、``fixture_version`` 和 ``marker``；
+        只含脱敏标记，不含页面正文、Cookie、JD 或本地路径。
+        """
+        if not isinstance(empty_evidence, dict) or not empty_evidence:
+            raise ValueError("empty_evidence 必须为非空 dict")
+        for key in ("kind", "fixture_version", "marker"):
+            if not empty_evidence.get(key):
+                raise ValueError(f"empty_evidence 缺少必填字段: {key}")
+        return cls(
+            ok=True, jobs=[], empty_result=True, empty_evidence=empty_evidence,
+            safe_log=safe_log, input_hash=input_hash,
+        )
 
     @classmethod
     def failure(cls, *, failed_code: str, safe_log: str = "", failed_reason: str = "") -> "SourceOutcome":
@@ -90,6 +118,8 @@ class SourceOutcome:
             "ok": self.ok,
             "job_count": len(self.jobs),
             "has_detail": bool(self.detail),
+            "empty_result": self.empty_result,
+            "empty_evidence": self.empty_evidence,
             "failed_code": self.failed_code,
             "safe_log": self.safe_log,
             "failed_reason": self.failed_reason,
@@ -215,6 +245,66 @@ class SourceCircuitBreaker:
 
 
 # ---------------------------------------------------------------------------
+# JobSource Protocol（contracts/job-source.md）
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class JobSource(Protocol):
+    """平台无关的 JobSource 契约（contracts/job-source.md）。
+
+    所有平台 adapter（BossCdpSource、ZhilianCdpSource、FakeJobSource）
+    必须结构化符合本 Protocol。adapter 只负责平台访问和字段归一化，
+    不持久化业务数据、不推进 run 状态、不执行 AI 筛选。
+
+    列表搜索输入只包含关键词、城市解析快照和页数；薪资、经验、学历、
+    行业、公司规模、融资阶段或公司性质均不得进入 adapter 列表参数。
+    """
+
+    #: 平台键，必须与平台注册表（webui/platforms.py）注册键一致。
+    platform: str
+
+    def preflight(self) -> SourceOutcome:
+        """检查冻结 CDP 端口、profile、登录态和平台可访问性。
+
+        每个新运行及每次继续运行前执行一次。任一条件失败时返回
+        错误矩阵中的单一确定结果，不允许"失败或暂停"二选一语义。
+        """
+        ...
+
+    def fetch_list(self, plan_item: dict) -> SourceOutcome:
+        """抓取一个搜索组合的岗位列表页。
+
+        plan_item 必须包含 platform、keyword、city（含平台码和映射版本）、
+        target_pages、input_hash 和 list_output_path。输入不得出现
+        source_filters、AI 筛选字段、融资阶段或公司性质。
+        """
+        ...
+
+    def fetch_detail(
+        self, job: dict, *, detail_output_path: str | None = None,
+    ) -> SourceOutcome:
+        """抓取单个岗位详情页。
+
+        输入必须含 platform、platform_job_id 和经过平台注册规则规范化
+        的 canonical_url。详情缺失、下架、单项解析失败和平台级阻断
+        按错误矩阵区分。
+        """
+        ...
+
+    def fetch_details_batch(
+        self, jobs: list[dict], **bounded_options,
+    ) -> dict[str, SourceOutcome]:
+        """批量抓取岗位详情页。
+
+        返回映射键为输入 platform_job_id，每个输入恰有一个终态 outcome。
+        单岗位失败不抛出到批次外；平台级 signal 进入熔断器。每个
+        subprocess 显式携带冻结 CDP 端口。
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
 # JobSource adapter for the BOSS CDP scraper
 # ---------------------------------------------------------------------------
 
@@ -233,6 +323,9 @@ class BossCdpSource:
     text, or credentials. Failures from one query never raise into the
     orchestrator; they are returned as ``SourceOutcome.failure(...)``.
     """
+
+    #: 平台键，与平台注册表注册键一致（contracts/job-source.md）。
+    platform: str = "boss"
 
     def __init__(
         self,
@@ -896,6 +989,7 @@ class BossCdpSource:
         command = [
             self.python_executable,
             str(self.scraper_path),
+            "--cdp-port", str(self.cdp_port),
             "--keyword", keyword,
             "--city", city or "_",
             "--pages", str(int(target_pages)),
@@ -912,6 +1006,7 @@ class BossCdpSource:
         return [
             self.python_executable,
             str(self.scraper_path),
+            "--cdp-port", str(self.cdp_port),
             "--input", detail_input_path,
             "--detail-output", detail_output_path,
             "--max-details", "1",
@@ -944,6 +1039,7 @@ class BossCdpSource:
         return [
             self.python_executable,
             str(self.scraper_path),
+            "--cdp-port", str(self.cdp_port),
             "--input", batch_input_path,
             "--detail-output", detail_output_path,
             "--events-output", events_output_path,
@@ -1027,6 +1123,10 @@ class FakeJobSource:
     Constructed with a mapping of (keyword, city) -> list[dict] for list
     fetches and an optional mapping of job_id -> dict for detail fetches.
     Failures are simulated by mapping to a sentinel ``__fail__:code``.
+
+    符合 ``JobSource`` Protocol（contracts/job-source.md）：携带 ``platform``
+    和显式 ``cdp_port``，支持 ``preflight``、``fetch_list``、
+    ``fetch_detail`` 和 ``fetch_details_batch``。
     """
 
     def __init__(
@@ -1037,14 +1137,39 @@ class FakeJobSource:
         list_failures: set[tuple[str, str]] | None = None,
         detail_failures: set[str] | None = None,
         input_hash_seed: str = "fake",
+        platform: str = "boss",
+        cdp_port: int = 9222,
+        preflight_failure: str | None = None,
     ):
         self.list_jobs = list_jobs or {}
         self.detail_jobs = detail_jobs or {}
         self.list_failures = list_failures or set()
         self.detail_failures = detail_failures or set()
         self.input_hash_seed = input_hash_seed
+        self.platform = str(platform)
+        if not isinstance(cdp_port, int) or isinstance(cdp_port, bool) or cdp_port <= 0:
+            raise ValueError("cdp_port 必须为正整数")
+        self.cdp_port = int(cdp_port)
+        self._preflight_failure = preflight_failure
         self.list_calls: list[dict] = []
         self.detail_calls: list[dict] = []
+        self.preflight_calls: int = 0
+
+    def preflight(self) -> SourceOutcome:
+        """检查登录态和运行环境就绪性（测试替身）。
+
+        默认返回成功；构造时传入 ``preflight_failure`` 可模拟平台级
+        阻断（如 ``source_login_required``）。
+        """
+        self.preflight_calls += 1
+        if self._preflight_failure:
+            return SourceOutcome.failure(
+                failed_code=self._preflight_failure,
+                safe_log=f"fake preflight platform={self.platform} port={self.cdp_port} blocked=1",
+            )
+        return SourceOutcome.success(
+            safe_log=f"fake preflight platform={self.platform} port={self.cdp_port} ready=1",
+        )
 
     def fetch_list(self, plan_item: dict) -> SourceOutcome:
         if not isinstance(plan_item, dict):
@@ -1105,6 +1230,26 @@ class FakeJobSource:
             )
         detail = self.detail_jobs.get(job_id, {})
         return SourceOutcome.success(detail=detail, safe_log=f"fake detail job_id_present=1 fields={sorted(detail.keys())[:3]}")
+
+    def fetch_details_batch(
+        self, jobs: list[dict], **bounded_options,
+    ) -> dict[str, SourceOutcome]:
+        """批量抓取详情（测试替身）：逐个调用 fetch_detail 并按 job_id 汇总。
+
+        单岗位失败不抛出；每个输入恰有一个终态 outcome。
+        """
+        results: dict[str, SourceOutcome] = {}
+        for i, job in enumerate(jobs):
+            if not isinstance(job, dict):
+                results[f"idx{i}"] = SourceOutcome.failure(
+                    failed_code="source_invalid_output",
+                    safe_log="job_not_dict",
+                )
+                continue
+            job_id = str(job.get("job_id") or job.get("id") or "").strip()
+            key = job_id or f"idx{i}"
+            results[key] = self.fetch_detail(job, **bounded_options)
+        return results
 
 
 # ---------------------------------------------------------------------------
@@ -1227,6 +1372,8 @@ def _safe_host(url: str) -> str:
 __all__ = [
     "BossCdpSource",
     "FakeJobSource",
+    "JobSource",
     "SourceOutcome",
+    "SourceCircuitBreaker",
     "SAFE_FAILURE_CODES",
 ]

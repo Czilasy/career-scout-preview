@@ -27,6 +27,9 @@ def normalize_job_link(raw: str) -> str:
     Strips query/fragment to avoid leaking tracking parameters, keeping only
     the scheme, host and path.  Anything that is not HTTPS on an expected
     BOSS domain is rejected as empty.
+
+    保留为 BOSS 兼容入口；平台感知调用方应使用
+    :func:`normalize_job_link_for_platform`。
     """
     if not raw or not isinstance(raw, str):
         return ""
@@ -46,6 +49,27 @@ def normalize_job_link(raw: str) -> str:
     # frontend never opens a URL carrying attacker-controlled params.
     cleaned = parsed._replace(query="", fragment="")
     return urlunparse(cleaned)
+
+
+def normalize_job_link_for_platform(raw: str, *, platform: str | None = None) -> str:
+    """按平台规则规范化岗位链接（T009 平台感知入口）。
+
+    - ``platform=None`` 或 ``"boss"``：退化为 BOSS 兼容规则，与
+      :func:`normalize_job_link` 完全一致，保证现有调用方行为不变。
+    - ``platform="zhilian"``：委托 ``webui.platforms.normalize_job_url``，
+      按 zhaopin.com / jobdetail/<id>.htm 规则归一化。
+    - 未知平台：抛 ``ValueError``（由 ``webui.platforms.validate_platform_key``
+      映射为 ``platform_validation_failed``），不静默回退 BOSS。
+
+    智联平台未注册时（真实 fixture 未核验），抛
+    ``PlatformNotRegisteredError``；调用方应在上层转为
+    ``503 platform_schema_unavailable`` 或等价错误，不得改走 BOSS。
+    """
+    if platform is None or platform == "boss":
+        return normalize_job_link(raw)
+    # 延迟导入避免 workbench.py 在被 platforms.py 间接导入时形成循环。
+    from webui.platforms import normalize_job_url as _platform_normalize
+    return _platform_normalize(platform, raw)
 
 
 def canonical_job_id(job: dict) -> str:
@@ -107,16 +131,33 @@ def _truncate(text: str, limit: int = JD_EXCERPT_LIMIT) -> str:
     return raw[: limit - 1].rstrip() + "…"
 
 
-def project_card(job: dict, detail: dict | None, *, interest_state: str = "new") -> dict:
+def project_card(
+    job: dict,
+    detail: dict | None,
+    *,
+    interest_state: str = "new",
+    platform: str | None = None,
+) -> dict:
     """Project a job + detail into a frontend card with no AI internals.
 
     Accepts both the scraper's job dict (``job_link``) and the store's job
     row (``source_url`` / ``canonical_url``) so the card layer does not
     depend on a single source shape.
+
+    ``platform`` 为可选平台感知参数：省略或 ``"boss"`` 时退化为 BOSS
+    兼容链接归一化（保持现有调用方行为）；显式传入其它平台时按该平台
+    规则归一化。岗位自身携带的 ``platform`` 字段优先于本参数，以便
+    历史结果刷新时保持来源平台身份。
     """
     detail = detail or {}
     link = job.get("job_link") or job.get("source_url") or job.get("canonical_url") or ""
     jd_text = detail.get("jd") or job.get("jd") or ""
+    # 岗位自身 platform 优先于调用方 platform 参数（FR-030/FR-012）。
+    job_platform = str(job.get("platform") or "").strip() or platform
+    if job_platform:
+        canonical = normalize_job_link_for_platform(link, platform=job_platform)
+    else:
+        canonical = normalize_job_link(link)
     return {
         "job_id": str(job.get("job_id") or job.get("id") or ""),
         "title": str(job.get("title") or "未命名岗位"),
@@ -124,7 +165,7 @@ def project_card(job: dict, detail: dict | None, *, interest_state: str = "new")
         "salary": str(job.get("salary") or "薪资未标注"),
         "location": str(job.get("location") or "地点未标注"),
         "jd_excerpt": _truncate(jd_text),
-        "canonical_url": normalize_job_link(link),
+        "canonical_url": canonical,
         "interest_state": interest_state,
     }
 

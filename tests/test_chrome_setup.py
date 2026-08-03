@@ -2067,5 +2067,58 @@ class CdpMeasurementEventTests(unittest.TestCase):
                           "每个 item 必须有明确终态")
 
 
+class CdpPortThreadingTests(unittest.TestCase):
+    """tasks001 T007 — 验证 --cdp-port 显式端口贯穿 scraper 调用边界。
+
+    合同（contracts/job-source.md 构造合同）：所有 list/detail/batch
+    subprocess 必须显式透传冻结 CDP 端口，不得回退读取默认端口。
+    """
+
+    def test_default_cdp_port_is_9222(self):
+        module = load_module()
+        self.assertEqual(module.DEFAULT_CDP_PORT, 9222)
+
+    def test_cdp_session_accepts_custom_port(self):
+        """CDPSession 构造接受显式 cdp_port 参数。"""
+        module = load_module()
+        import inspect
+        sig = inspect.signature(module.CDPSession.__init__)
+        self.assertIn("cdp_port", sig.parameters)
+
+    def test_check_login_state_accepts_custom_port(self):
+        """check_login_state 接受显式 cdp_port 参数。"""
+        module = load_module()
+        import inspect
+        sig = inspect.signature(module.check_login_state)
+        self.assertIn("cdp_port", sig.parameters)
+
+    def test_scrape_list_accepts_custom_port(self):
+        """scrape_list 接受显式 cdp_port 关键字参数。"""
+        module = load_module()
+        import inspect
+        sig = inspect.signature(module.scrape_list)
+        self.assertIn("cdp_port", sig.parameters)
+
+    def test_run_check_accepts_custom_port(self):
+        """run_check 接受显式 cdp_port 参数。"""
+        module = load_module()
+        import inspect
+        sig = inspect.signature(module.run_check)
+        self.assertIn("cdp_port", sig.parameters)
+
+    def test_main_parser_includes_cdp_port_argument(self):
+        """--cdp-port 参数被 argparse 接受且默认值为 DEFAULT_CDP_PORT。"""
+        module = load_module()
+        import argparse
+        p = argparse.ArgumentParser()
+        p.add_argument("--cdp-port", type=int, default=module.DEFAULT_CDP_PORT)
+        args = p.parse_args(["--cdp-port", "9223"])
+        self.assertEqual(args.cdp_port, 9223)
+
+        # 默认值验证
+        args_default = p.parse_args([])
+        self.assertEqual(args_default.cdp_port, module.DEFAULT_CDP_PORT)
+
+
 if __name__ == "__main__":
     unittest.main()

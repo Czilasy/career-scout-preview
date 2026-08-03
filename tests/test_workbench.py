@@ -235,5 +235,171 @@ class ProfileOverrideTests(unittest.TestCase):
         self.assertEqual(merged["roles"], ["Java"])
 
 
+class PlatformAwareLinkNormalizationTests(unittest.TestCase):
+    """T009: normalize_job_link_for_platform 平台感知 URL 规范化。"""
+
+    def test_none_platform_falls_back_to_boss(self):
+        from webui.workbench import (
+            normalize_job_link,
+            normalize_job_link_for_platform,
+        )
+
+        url = "https://www.zhipin.com/job_detail/abc.html"
+        self.assertEqual(normalize_job_link_for_platform(url, platform=None), url)
+        self.assertEqual(
+            normalize_job_link_for_platform(url, platform=None),
+            normalize_job_link(url),
+        )
+
+    def test_boss_platform_matches_legacy_function(self):
+        from webui.workbench import (
+            normalize_job_link,
+            normalize_job_link_for_platform,
+        )
+
+        for raw in (
+            "https://www.zhipin.com/job_detail/abc.html",
+            "https://zhipin.com/job_detail/x.html",
+            "http://www.zhipin.com/job_detail/x.html",
+            "https://evil.example.com/x.html",
+            "",
+            "not a url",
+        ):
+            self.assertEqual(
+                normalize_job_link_for_platform(raw, platform="boss"),
+                normalize_job_link(raw),
+                f"BOSS 平台分支应与 legacy 完全一致: {raw!r}",
+            )
+
+    def test_unknown_platform_rejected(self):
+        from webui.workbench import normalize_job_link_for_platform
+        from webui.platforms import UnknownPlatformError
+
+        with self.assertRaises(UnknownPlatformError):
+            normalize_job_link_for_platform(
+                "https://www.zhaopin.com/jobdetail/abc.htm",
+                platform="linkedin",
+            )
+
+    def test_zhilian_not_registered_raises(self):
+        """智联已知但未注册（真实 fixture 未核验）时拒绝，不回退 BOSS。"""
+        from webui.workbench import normalize_job_link_for_platform
+        from webui.platforms import PlatformNotRegisteredError
+
+        with self.assertRaises(PlatformNotRegisteredError):
+            normalize_job_link_for_platform(
+                "https://www.zhaopin.com/jobdetail/abc.htm",
+                platform="zhilian",
+            )
+
+    def test_zhilian_normalizes_when_registered(self):
+        """注册测试用智联平台后，链接按 zhaopin 规则归一化。"""
+        from webui.workbench import normalize_job_link_for_platform
+        from webui.platforms import (
+            PlatformRegistry,
+            PlatformFilterSchema,
+            PlatformCityCatalog,
+            register_platform,
+            normalize_zhilian_job_url,
+            resolve_zhilian_login_space,
+        )
+
+        schema = PlatformFilterSchema(
+            platform="zhilian",
+            schema_version=1,
+            enabled_for_new_tasks=False,
+            fields=(),
+        )
+        catalog = PlatformCityCatalog(
+            platform="zhilian", mapping_version=1, entries=(),
+        )
+        reg = PlatformRegistry(
+            key="zhilian",
+            display_name="智联招聘",
+            filter_schema=schema,
+            city_catalog=catalog,
+            enabled_for_new_tasks=False,
+            availability_reason="测试",
+            default_cdp_port=9223,
+            normalize_job_url_fn=normalize_zhilian_job_url,
+            resolve_login_space_fn=resolve_zhilian_login_space,
+        )
+        try:
+            register_platform(reg)
+            url = "https://www.zhaopin.com/jobdetail/abc123.htm?lid=x#frag"
+            self.assertEqual(
+                normalize_job_link_for_platform(url, platform="zhilian"),
+                "https://www.zhaopin.com/jobdetail/abc123.htm",
+            )
+            # http 升级
+            self.assertEqual(
+                normalize_job_link_for_platform(
+                    "http://www.zhaopin.com/jobdetail/abc.htm",
+                    platform="zhilian",
+                ),
+                "https://www.zhaopin.com/jobdetail/abc.htm",
+            )
+            # 非 zhaopin 域名拒绝
+            self.assertEqual(
+                normalize_job_link_for_platform(
+                    "https://evil.example.com/jobdetail/abc.htm",
+                    platform="zhilian",
+                ),
+                "",
+            )
+            # 非 jobdetail path 拒绝
+            self.assertEqual(
+                normalize_job_link_for_platform(
+                    "https://www.zhaopin.com/sou/abc.htm",
+                    platform="zhilian",
+                ),
+                "",
+            )
+        finally:
+            # 清理注册表，避免污染其它测试。
+            from webui.platforms import _REGISTRY
+            _REGISTRY.pop("zhilian", None)
+
+
+class PlatformAwareCardProjectionTests(unittest.TestCase):
+    """T009: project_card 平台感知 canonical_url。"""
+
+    def test_card_with_boss_platform_uses_boss_rules(self):
+        from webui.workbench import project_card
+
+        job = sample_job(job_id="c-boss")
+        job["job_link"] = "https://www.zhipin.com/job_detail/abc.html"
+        detail = sample_detail("c-boss")
+        card = project_card(job, detail, platform="boss")
+        self.assertEqual(
+            card["canonical_url"], "https://www.zhipin.com/job_detail/abc.html"
+        )
+
+    def test_card_job_platform_field_overrides_param(self):
+        """岗位自身 platform 字段优先于调用方 platform 参数（FR-012）。"""
+        from webui.workbench import project_card
+
+        job = sample_job(job_id="c-boss-2")
+        job["platform"] = "boss"
+        job["job_link"] = "https://www.zhipin.com/job_detail/abc.html"
+        detail = sample_detail("c-boss-2")
+        # 调用方传 zhilian 但岗位自身是 boss，应走 boss 规则
+        # （zhilian 未注册，若走 zhilian 会抛错；走 boss 则成功）
+        card = project_card(job, detail, platform="zhilian")
+        self.assertEqual(
+            card["canonical_url"], "https://www.zhipin.com/job_detail/abc.html"
+        )
+
+    def test_card_without_platform_falls_back_to_boss(self):
+        """省略 platform 时退化为 BOSS 兼容行为（保持现有调用方不变）。"""
+        from webui.workbench import project_card
+
+        job = sample_job(job_id="c-legacy")
+        job["job_link"] = "https://evil.example.com/x.html"
+        detail = sample_detail("c-legacy")
+        card = project_card(job, detail)
+        self.assertEqual(card["canonical_url"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -507,6 +507,146 @@ class ScopePreviewTests(unittest.TestCase):
 
 
 # ===========================================================================
+# T008: platform 进入 scope/task digest
+# ===========================================================================
+class PlatformInScopeDigestTests(unittest.TestCase):
+    """T008: platform 进入 FrozenTaskScope 和 scope_digest 规范输入。"""
+
+    def test_default_platform_is_boss(self):
+        scope = execution_config.normalize_scope(
+            keywords=["AI"],
+            scope_kind="cities",
+            cities=["北京"],
+            pages_per_combination=1,
+        )
+        self.assertEqual(scope.platform, "boss")
+
+    def test_custom_platform_zhilian(self):
+        scope = execution_config.normalize_scope(
+            keywords=["AI"],
+            scope_kind="cities",
+            cities=["北京"],
+            pages_per_combination=1,
+            platform="zhilian",
+        )
+        self.assertEqual(scope.platform, "zhilian")
+
+    def test_unknown_platform_rejected(self):
+        with self.assertRaises(ValueError):
+            execution_config.normalize_scope(
+                keywords=["AI"],
+                scope_kind="cities",
+                cities=["北京"],
+                pages_per_combination=1,
+                platform="unknown",
+            )
+
+    def test_empty_platform_rejected(self):
+        with self.assertRaises(ValueError):
+            execution_config.normalize_scope(
+                keywords=["AI"],
+                scope_kind="cities",
+                cities=["北京"],
+                pages_per_combination=1,
+                platform="",
+            )
+
+    def test_different_platforms_produce_different_digests(self):
+        """不同平台的相同搜索参数产生不同 scope_digest。"""
+        scope_boss = execution_config.normalize_scope(
+            keywords=["AI"],
+            scope_kind="cities",
+            cities=["北京"],
+            pages_per_combination=1,
+            platform="boss",
+        )
+        scope_zhilian = execution_config.normalize_scope(
+            keywords=["AI"],
+            scope_kind="cities",
+            cities=["北京"],
+            pages_per_combination=1,
+            platform="zhilian",
+        )
+        self.assertNotEqual(scope_boss.scope_digest, scope_zhilian.scope_digest)
+
+    def test_same_platform_produces_same_digest(self):
+        """相同平台 + 相同参数产生相同 scope_digest。"""
+        scope1 = execution_config.normalize_scope(
+            keywords=["AI"],
+            scope_kind="cities",
+            cities=["北京"],
+            pages_per_combination=1,
+            platform="boss",
+        )
+        scope2 = execution_config.normalize_scope(
+            keywords=["AI"],
+            scope_kind="cities",
+            cities=["北京"],
+            pages_per_combination=1,
+            platform="boss",
+        )
+        self.assertEqual(scope1.scope_digest, scope2.scope_digest)
+
+    def test_platform_in_canonical_json(self):
+        scope = execution_config.normalize_scope(
+            keywords=["AI"],
+            scope_kind="cities",
+            cities=["北京"],
+            pages_per_combination=1,
+            platform="zhilian",
+        )
+        canonical = json.loads(scope.canonical_json())
+        self.assertEqual(canonical["platform"], "zhilian")
+
+    def test_platform_in_to_dict(self):
+        scope = execution_config.normalize_scope(
+            keywords=["AI"],
+            scope_kind="cities",
+            cities=["北京"],
+            pages_per_combination=1,
+            platform="zhilian",
+        )
+        data = scope.to_dict()
+        self.assertEqual(data["platform"], "zhilian")
+
+    def test_from_dict_restores_platform(self):
+        scope = execution_config.normalize_scope(
+            keywords=["AI"],
+            scope_kind="cities",
+            cities=["北京"],
+            pages_per_combination=1,
+            platform="zhilian",
+        )
+        data = scope.to_dict()
+        restored = execution_config.FrozenTaskScope.from_dict(data)
+        self.assertEqual(restored.platform, "zhilian")
+        self.assertEqual(restored.scope_digest, scope.scope_digest)
+
+    def test_from_dict_defaults_platform_to_boss_when_missing(self):
+        """旧数据缺少 platform 字段时 from_dict 默认 "boss"。"""
+        scope = execution_config.normalize_scope(
+            keywords=["AI"],
+            scope_kind="cities",
+            cities=["北京"],
+            pages_per_combination=1,
+        )
+        data = scope.to_dict()
+        del data["platform"]
+        restored = execution_config.FrozenTaskScope.from_dict(data)
+        self.assertEqual(restored.platform, "boss")
+
+    def test_preview_scope_includes_platform(self):
+        result = execution_config.preview_scope(
+            keywords=["AI"],
+            scope_kind="cities",
+            cities=["北京"],
+            pages_per_combination=1,
+            platform="zhilian",
+        )
+        self.assertEqual(result["scope"]["platform"], "zhilian")
+
+
+# ===========================================================================
 # 模式选择不应改变 pages (FR-009)
 # ===========================================================================
 class ModeSelectionDoesNotTouchPagesTests(unittest.TestCase):

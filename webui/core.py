@@ -249,3 +249,206 @@ def match_jobs(jobs, details=None, profile=None):
         ranked.append(item)
     ranked.sort(key=lambda item: (-int(item["eligible"]), -item["match_score"], str(item.get("title") or "")))
     return ranked
+
+
+# ---------------------------------------------------------------------------
+# T009: 平台校验、schema 投影、岗位身份校验公共函数
+# ---------------------------------------------------------------------------
+
+
+def validate_platform(platform: str) -> str:
+    """校验平台键已知；返回规范化键，未知抛 ValueError。
+
+    委托 ``webui.platforms.validate_platform_key``，为 core.py 调用方
+    提供统一入口。
+    """
+    from webui.platforms import validate_platform_key
+    try:
+        return validate_platform_key(platform)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def project_platform_filter_schema(platform: str) -> dict:
+    """投影平台 AI 筛选 schema 为 API 响应。
+
+    委托 ``webui.platforms.project_filter_schema``，为 core.py 调用方
+    提供统一入口。
+    """
+    from webui.platforms import project_filter_schema
+    return project_filter_schema(platform)
+
+
+def validate_job_identity(job: dict, *, platform: str) -> tuple[str, str]:
+    """校验岗位身份：platform + platform_job_id。
+
+    返回 ``(platform, platform_job_id)``。岗位缺失 platform_job_id 时，
+    对 BOSS 兼容回退使用 job_id；其它平台必须显式提供 platform_job_id。
+
+    岗位的 platform 字段（如有）必须与期望平台一致，否则抛 ValueError。
+    """
+    if not isinstance(job, dict):
+        raise ValueError("job 必须为 dict")
+    norm_platform = validate_platform(platform)
+    job_platform = str(job.get("platform") or "").strip()
+    if job_platform and job_platform != norm_platform:
+        raise ValueError(
+            f"岗位平台不匹配: 期望 {norm_platform}, 实际 {job_platform}"
+        )
+    platform_job_id = str(job.get("platform_job_id") or "").strip()
+    if not platform_job_id and norm_platform == "boss":
+        # BOSS 兼容回退：存量岗位使用 job_id 作为身份。
+        platform_job_id = str(job.get("job_id") or job.get("encrypt_job_id") or "").strip()
+    if not platform_job_id:
+        raise ValueError(
+            f"岗位缺少 platform_job_id（平台 {norm_platform}）"
+        )
+    return norm_platform, platform_job_id
+
+
+# ---------------------------------------------------------------------------
+# T010: 搜索请求拒绝非空 AI filters
+# ---------------------------------------------------------------------------
+
+# AI 筛选字段集合：搜索请求（/api/execute-search）不得携带这些字段。
+# BOSS 旧码（salary/stage/experience/degree/industry/scale）+
+# 智联 company_nature + AI run 才用的 screening_fields/filter_schema_version。
+_AI_FILTER_KEYS: frozenset[str] = frozenset({
+    "salary", "experience", "degree", "industry", "scale", "stage",
+    "company_nature", "screening_fields", "filter_schema_version",
+    # 顶层 filters 字段也应为空（contracts/http-api.md）。
+    "filters",
+})
+
+
+class SearchFiltersNotSupportedError(ValueError):
+    """搜索请求携带非空 AI filters 时抛出。
+
+    对应 ``contracts/http-api.md`` 中 ``/api/execute-search`` 的
+    ``422 search_filters_not_supported`` 错误。搜索请求只接收
+    keyword/city/pages，AI 筛选必须留到后续 AI run 阶段。
+    """
+
+    ERROR_CODE = "search_filters_not_supported"
+
+
+def _is_non_empty_filter_value(value) -> bool:
+    """判断 filter 字段值是否为非空（字符串/列表/字典/数字）。"""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    if isinstance(value, (list, tuple, set)):
+        return len(value) > 0
+    if isinstance(value, dict):
+        return len(value) > 0
+    # 数字/布尔等标量视为非空
+    return True
+
+
+def validate_search_request(raw, *, platform: str | None = None):
+    """校验搜索请求：只接收 keyword/city/pages，拒绝非空 AI filters。
+
+    - 复用 :func:`validate_search_params` 的 keyword/city/pages/detail/
+      analysis/format 基础校验，保证与现有行为一致。
+    - 在基础校验前先检查 AI filter 字段：任何非空 AI filter 抛
+      :class:`SearchFiltersNotSupportedError`（零副作用，不写 DB、不
+      启动任务、不读 profile）。
+    - 返回的 dict 中 ``filters`` 固定为 ``{}``，防止下游误用。
+
+    ``platform`` 参数保留为后续 T011 平台感知校验的入口；当前仅做
+    透传到基础校验（BOSS 兼容），不改变拒绝行为。
+    """
+    raw = raw or {}
+    # 1. 拒绝非空 AI filters（零副作用，先于任何写入操作）。
+    offending = []
+    for key in _AI_FILTER_KEYS:
+        if key in raw and _is_non_empty_filter_value(raw[key]):
+            offending.append(key)
+    if offending:
+        raise SearchFiltersNotSupportedError(
+            "搜索请求不允许携带非空 AI filters: " + ", ".join(sorted(offending))
+        )
+    # 2. 复用基础校验（keyword/city/pages/detail/analysis/format）。
+    #    validate_search_params 仍会解析 filters 字段，但因为我们在第 1 步
+    # 已经把非空 filters 拒绝了，这里 filters 只会是空或全空值，最终
+    # 返回的 filters 为 {}。
+    validated = validate_search_params(raw)
+    # 3. 强制 filters 为空，防止下游误用。
+    validated["filters"] = {}
+    return validated
+
+
+# ---------------------------------------------------------------------------
+# T011: legacy 平台参数解析与零副作用拒绝助手
+# ---------------------------------------------------------------------------
+
+class LegacyPlatformNotSupportedError(ValueError):
+    """legacy BOSS-only 入口收到显式 ``zhilian`` 平台时抛出。
+
+    对应 ``contracts/http-api.md`` 中 ``422 legacy_platform_not_supported``。
+    路由层应在任务/对象查找和任何副作用前捕获此异常并返回 422，
+    保证数据库、事件、artifact、浏览器、profile 和注册表零变化。
+
+    本异常本身是纯信号，不携带任何副作用。
+    """
+
+    ERROR_CODE = "legacy_platform_not_supported"
+
+
+def parse_legacy_platform(raw):
+    """解析 legacy 入口的平台参数（零副作用纯函数）。
+
+    合同（contracts/http-api.md 第 353 行）：
+    - 省略或 ``None`` → 返回 ``"boss"``（兼容既有 BOSS 行为）。
+    - 显式 ``"boss"`` → 返回 ``"boss"``（兼容）。
+    - 显式 ``"zhilian"`` → 抛 :class:`LegacyPlatformNotSupportedError`，
+      路由层映射为 ``422 legacy_platform_not_supported``。
+    - 其它值 → 抛 :class:`UnknownPlatformError`，路由层映射为
+      ``400 platform_validation_failed``。
+
+    本函数不读取 DB、不启动任务、不触碰浏览器/profile/注册表；
+    零副作用保证由路由层在捕获异常后不执行任何后续操作实现。
+    不得从 URL、任务标题或当前 UI 猜平台（FR-013/SC-012）。
+    """
+    from webui.platforms import UnknownPlatformError, KNOWN_PLATFORM_KEYS
+
+    if raw is None:
+        return "boss"
+    if not isinstance(raw, str):
+        raise UnknownPlatformError(
+            f"platform 必须是字符串，实际类型: {type(raw).__name__}"
+        )
+    key = raw.strip().lower()
+    if not key:
+        # 省略平台（空字符串视为省略）→ 兼容 BOSS
+        return "boss"
+    if key == "boss":
+        return "boss"
+    if key == "zhilian":
+        raise LegacyPlatformNotSupportedError(
+            "legacy BOSS-only 入口不支持智联平台；"
+            "请使用 /api/execute-search 等多平台入口"
+        )
+    # 其它已知/未知键统一拒绝，不静默回退 BOSS
+    raise UnknownPlatformError(f"未知平台键: {raw}")
+
+
+def legacy_platform_guard(raw):
+    """legacy 入口平台参数守卫：返回 ``"boss"`` 或抛异常。
+
+    等价于 :func:`parse_legacy_platform`，语义别名，供路由层显式表达
+    "此处是 legacy 入口的门禁"。路由层应在任何副作用前调用：
+
+        try:
+            platform = legacy_platform_guard(body.get("platform"))
+        except LegacyPlatformNotSupportedError:
+            return jsonify({"ok": False,
+                            "error_code": "legacy_platform_not_supported",
+                            "error": "..."}), 422
+        except UnknownPlatformError:
+            return jsonify({"ok": False,
+                            "error_code": "platform_validation_failed",
+                            "error": "..."}), 400
+    """
+    return parse_legacy_platform(raw)

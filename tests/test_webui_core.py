@@ -106,5 +106,207 @@ class WebUICoreTests(unittest.TestCase):
         self.assertEqual(matched[0]["missing_skills"], [])
 
 
+class SearchRequestFiltersTests(unittest.TestCase):
+    """T010: /api/execute-search 搜索请求拒绝非空 AI filters。"""
+
+    def _minimal_raw(self):
+        return {"keyword": "Python 后端", "city": "上海", "pages": 1}
+
+    def test_empty_filters_accepted(self):
+        from webui.core import validate_search_request
+
+        raw = self._minimal_raw()
+        raw["filters"] = {}
+        result = validate_search_request(raw)
+        self.assertEqual(result["filters"], {})
+        self.assertEqual(result["keyword"], "Python 后端")
+
+    def test_missing_filters_accepted(self):
+        from webui.core import validate_search_request
+
+        result = validate_search_request(self._minimal_raw())
+        self.assertEqual(result["filters"], {})
+
+    def test_boss_salary_code_rejected(self):
+        from webui.core import (
+            validate_search_request,
+            SearchFiltersNotSupportedError,
+        )
+
+        raw = self._minimal_raw()
+        raw["salary"] = "405"  # BOSS 10-20K 码
+        with self.assertRaises(SearchFiltersNotSupportedError):
+            validate_search_request(raw)
+
+    def test_zhilian_company_nature_rejected(self):
+        from webui.core import (
+            validate_search_request,
+            SearchFiltersNotSupportedError,
+        )
+
+        raw = self._minimal_raw()
+        raw["company_nature"] = "国企"
+        with self.assertRaises(SearchFiltersNotSupportedError):
+            validate_search_request(raw)
+
+    def test_screening_fields_rejected(self):
+        from webui.core import (
+            validate_search_request,
+            SearchFiltersNotSupportedError,
+        )
+
+        raw = self._minimal_raw()
+        raw["screening_fields"] = [{"name": "must_skills", "value": ["Python"]}]
+        with self.assertRaises(SearchFiltersNotSupportedError):
+            validate_search_request(raw)
+
+    def test_non_empty_filters_dict_rejected(self):
+        from webui.core import (
+            validate_search_request,
+            SearchFiltersNotSupportedError,
+        )
+
+        raw = self._minimal_raw()
+        raw["filters"] = {"stage": "804"}
+        with self.assertRaises(SearchFiltersNotSupportedError):
+            validate_search_request(raw)
+
+    def test_error_code_constant(self):
+        """错误码固定为 search_filters_not_supported，供路由层映射 HTTP 422。"""
+        from webui.core import SearchFiltersNotSupportedError
+
+        self.assertEqual(
+            SearchFiltersNotSupportedError.ERROR_CODE,
+            "search_filters_not_supported",
+        )
+
+    def test_zero_value_salary_rejected(self):
+        """BOSS '不限' 前端 value 是 ''（见 build_filter_options），不是 '0'。
+
+        搜索请求不应携带任何 filter 字段值；'0' 是 SALARY_MAP 内部码，
+        不应出现在 /api/execute-search 请求中，应被拒绝。
+        """
+        from webui.core import (
+            validate_search_request,
+            SearchFiltersNotSupportedError,
+        )
+
+        raw = self._minimal_raw()
+        raw["salary"] = "0"
+        with self.assertRaises(SearchFiltersNotSupportedError):
+            validate_search_request(raw)
+
+    def test_empty_string_filter_values_accepted(self):
+        """空字符串 filter 字段视为空，搜索请求应接受。"""
+        from webui.core import validate_search_request
+
+        raw = self._minimal_raw()
+        raw["stage"] = ""
+        raw["degree"] = ""
+        result = validate_search_request(raw)
+        self.assertEqual(result["filters"], {})
+
+    def test_platform_param_accepted_without_changing_behavior(self):
+        """platform 参数当前透传，不改变拒绝行为（T011 会扩展）。"""
+        from webui.core import validate_search_request
+
+        result = validate_search_request(self._minimal_raw(), platform="boss")
+        self.assertEqual(result["filters"], {})
+
+
+class LegacyPlatformGuardTests(unittest.TestCase):
+    """T011: legacy BOSS-only 入口平台参数解析与零副作用拒绝助手。"""
+
+    def test_none_returns_boss(self):
+        from webui.core import parse_legacy_platform
+
+        self.assertEqual(parse_legacy_platform(None), "boss")
+
+    def test_empty_string_returns_boss(self):
+        from webui.core import parse_legacy_platform
+
+        self.assertEqual(parse_legacy_platform(""), "boss")
+        self.assertEqual(parse_legacy_platform("   "), "boss")
+
+    def test_explicit_boss_returns_boss(self):
+        from webui.core import parse_legacy_platform
+
+        self.assertEqual(parse_legacy_platform("boss"), "boss")
+        self.assertEqual(parse_legacy_platform("BOSS"), "boss")
+        self.assertEqual(parse_legacy_platform("Boss"), "boss")
+
+    def test_zhilian_raises_legacy_not_supported(self):
+        from webui.core import (
+            parse_legacy_platform,
+            LegacyPlatformNotSupportedError,
+        )
+
+        with self.assertRaises(LegacyPlatformNotSupportedError):
+            parse_legacy_platform("zhilian")
+        # 大小写归一化
+        with self.assertRaises(LegacyPlatformNotSupportedError):
+            parse_legacy_platform("Zhilian")
+        with self.assertRaises(LegacyPlatformNotSupportedError):
+            parse_legacy_platform("ZHILIAN")
+
+    def test_unknown_platform_raises_unknown(self):
+        from webui.core import parse_legacy_platform
+        from webui.platforms import UnknownPlatformError
+
+        with self.assertRaises(UnknownPlatformError):
+            parse_legacy_platform("linkedin")
+        with self.assertRaises(UnknownPlatformError):
+            parse_legacy_platform("maimai")
+
+    def test_non_string_raises_unknown(self):
+        from webui.core import parse_legacy_platform
+        from webui.platforms import UnknownPlatformError
+
+        with self.assertRaises(UnknownPlatformError):
+            parse_legacy_platform(123)
+        with self.assertRaises(UnknownPlatformError):
+            parse_legacy_platform(["boss"])
+
+    def test_error_code_constant(self):
+        """错误码固定为 legacy_platform_not_supported。"""
+        from webui.core import LegacyPlatformNotSupportedError
+
+        self.assertEqual(
+            LegacyPlatformNotSupportedError.ERROR_CODE,
+            "legacy_platform_not_supported",
+        )
+
+    def test_guard_is_alias_of_parse(self):
+        from webui.core import parse_legacy_platform, legacy_platform_guard
+
+        self.assertEqual(legacy_platform_guard(None), "boss")
+        self.assertEqual(legacy_platform_guard("boss"), "boss")
+        with self.assertRaises(parse_legacy_platform.__class__.__name__ and ValueError):
+            legacy_platform_guard("zhilian")
+
+    def test_zero_side_effect_pure_function(self):
+        """parse_legacy_platform 是纯函数：不读取 DB/浏览器/profile/注册表。
+
+        本测试通过 mock 验证不触发常见副作用入口；路由层零副作用保证
+        属于 tasks007 范围，此处只验证助手函数本身。
+        """
+        from unittest import mock
+        from webui.core import parse_legacy_platform
+
+        # 智联拒绝路径：确保抛异常前不触碰任何外部资源
+        with mock.patch("webui.platforms._REGISTRY", {}) as mock_reg:
+            with self.assertRaises(ValueError):
+                parse_legacy_platform("zhilian")
+            # 注册表未被修改
+            self.assertEqual(mock_reg, {})
+
+        # 兼容路径：boss 不触碰注册表
+        with mock.patch("webui.platforms._REGISTRY", {"boss": object()}) as mock_reg:
+            result = parse_legacy_platform("boss")
+            self.assertEqual(result, "boss")
+            # 注册表内容未被修改（仍只有 boss）
+            self.assertEqual(set(mock_reg.keys()), {"boss"})
+
+
 if __name__ == "__main__":
     unittest.main()

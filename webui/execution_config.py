@@ -387,6 +387,21 @@ def _suggest_cities(input_city: str, registry: dict[str, Any]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# 平台键校验 (T008)
+# ---------------------------------------------------------------------------
+_KNOWN_PLATFORM_KEYS: tuple[str, ...] = ("boss", "zhilian")
+
+
+def _validate_platform(platform: str) -> str:
+    """校验平台键在已知集合中；返回规范化键，未知抛 ValueError。"""
+    if not platform or not isinstance(platform, str):
+        raise ValueError("platform 不能为空")
+    if platform not in _KNOWN_PLATFORM_KEYS:
+        raise ValueError(f"未知平台键: {platform}")
+    return platform
+
+
+# ---------------------------------------------------------------------------
 # 任务规模分类 (FR-006, FR-007)
 # ---------------------------------------------------------------------------
 def classify_task_size(planned_pages: int) -> str:
@@ -406,12 +421,14 @@ def classify_task_size(planned_pages: int) -> str:
 # FrozenTaskScope — 不可变任务范围快照
 # ---------------------------------------------------------------------------
 class FrozenTaskScope:
-    """冻结的任务范围，包含规范化关键词、城市、页数、规模和摘要。
+    """冻结的任务范围，包含平台、规范化关键词、城市、页数、规模和摘要。
 
     nationwide 与 cities 互斥；任务开始后不可修改。
+    platform 进入 scope_digest 规范输入，不同平台的相同搜索参数产生不同摘要。
     """
 
     __slots__ = (
+        "platform",
         "keywords",
         "scope_kind",
         "cities",
@@ -433,8 +450,10 @@ class FrozenTaskScope:
         combination_count: int,
         planned_pages: int,
         task_size: str,
+        platform: str = "boss",
         scope_digest: str | None = None,
     ):
+        object.__setattr__(self, "platform", str(platform))
         object.__setattr__(self, "keywords", tuple(keywords))
         object.__setattr__(self, "scope_kind", scope_kind)
         object.__setattr__(self, "cities", tuple(cities))
@@ -457,6 +476,7 @@ class FrozenTaskScope:
         """规范 JSON，不含 scope_digest 字段。"""
         payload: dict[str, Any] = {
             "schema_version": SCOPE_SCHEMA_VERSION,
+            "platform": self.platform,
             "keywords": list(self.keywords),
             "scope_kind": self.scope_kind,
             "cities": list(self.cities),
@@ -470,6 +490,7 @@ class FrozenTaskScope:
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
+            "platform": self.platform,
             "keywords": list(self.keywords),
             "scope_kind": self.scope_kind,
             "cities": list(self.cities),
@@ -491,6 +512,7 @@ class FrozenTaskScope:
             combination_count=data["combination_count"],
             planned_pages=data["planned_pages"],
             task_size=data["task_size"],
+            platform=data.get("platform", "boss"),
             scope_digest=None,
         )
         if expected_digest is not None and expected_digest != scope._scope_digest:
@@ -518,6 +540,7 @@ def normalize_scope(
     scope_kind: str,
     cities: list[str] | None,
     pages_per_combination: int,
+    platform: str = "boss",
 ) -> FrozenTaskScope:
     """规范化任务范围，生成不可变 FrozenTaskScope。
 
@@ -525,12 +548,15 @@ def normalize_scope(
     FR-006: planned_pages = keyword_count × scope_count × pages_per_combination。
     FR-007: 1-9=small, 10-49=medium, 50-200=large。
     FR-008: 任务开始前完成分类。
+    T008: platform 进入 scope_digest 规范输入；省略时默认 "boss"（BOSS 兼容）。
     """
     if scope_kind not in ("cities", "nationwide"):
         raise ValueError(f"无效 scope_kind: {scope_kind}")
 
     if pages_per_combination < 1:
         raise ValueError(f"pages_per_combination 必须 >= 1, 实际 {pages_per_combination}")
+
+    norm_platform = _validate_platform(platform)
 
     norm_keywords = normalize_keywords(keywords)
     if not norm_keywords:
@@ -565,6 +591,7 @@ def normalize_scope(
         combination_count=combination_count,
         planned_pages=planned_pages,
         task_size=task_size,
+        platform=norm_platform,
     )
 
 
@@ -577,6 +604,7 @@ def preview_scope(
     scope_kind: str,
     cities: list[str] | None,
     pages_per_combination: int,
+    platform: str = "boss",
 ) -> dict[str, Any]:
     """后端权威预览，返回规范化 scope 和去重信息。
 
@@ -591,6 +619,7 @@ def preview_scope(
         scope_kind=scope_kind,
         cities=cities,
         pages_per_combination=pages_per_combination,
+        platform=platform,
     )
 
     dedup_keywords = [k for k in raw_keywords if k not in [kw.lower() for kw in scope.keywords]]
@@ -598,6 +627,7 @@ def preview_scope(
 
     return {
         "scope": {
+            "platform": scope.platform,
             "keywords": list(scope.keywords),
             "scope_kind": scope.scope_kind,
             "cities": list(scope.cities),
