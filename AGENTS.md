@@ -17,5 +17,5 @@
 
 ## 提交身份
 
-- 提交作者和提交者邮箱必须使用 `czyooutzilas-sketch@users.noreply.github.com`。
-- 不在公开仓库使用个人邮箱或其他账号身份。
+- 提交作者和提交者邮箱必须使用 `czyooutzilas@gmail.com`。
+- 不在公开仓库使用其他账号身份。

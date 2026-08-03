@@ -6,7 +6,7 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 authors = [
-    { name = "czyooutzilas-sketch", email = "czyooutzilas-sketch@users.noreply.github.com" }
+    { name = "Czilasy", email = "czyooutzilas@gmail.com" }
 ]
 keywords = ["career", "zhipin", "boss", "jobs", "cdp", "scraper"]
 
@@ -32,9 +32,9 @@ career-scout = "scripts.boss_cdp_raw:main"
 career-summary = "scripts.job_summary:main"
 
 [project.urls]
-Homepage = "https://github.com/czyooutzilas-sketch/career-scout-preview"
-Repository = "https://github.com/czyooutzilas-sketch/career-scout-preview"
-Issues = "https://github.com/czyooutzilas-sketch/career-scout-preview/issues"
+Homepage = "https://github.com/Czilasy/career-scout-preview"
+Repository = "https://github.com/Czilasy/career-scout-preview"
+Issues = "https://github.com/Czilasy/career-scout-preview/issues"
 
 [build-system]
 requires = ["hatchling"]

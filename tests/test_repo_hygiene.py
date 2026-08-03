@@ -97,9 +97,9 @@ class RepoHygieneTests(unittest.TestCase):
                 bad.append(rel)
         self.assertEqual(bad, [])
 
-    def test_commit_author_email_is_noreply(self):
+    def test_commit_author_email_is_gmail(self):
         email = _git("log", "-1", "--format=%ae").strip()
         self.assertEqual(
             email,
-            "czyooutzilas-sketch@users.noreply.github.com",
+            "czyooutzilas@gmail.com",
         )

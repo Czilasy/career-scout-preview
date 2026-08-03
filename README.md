@@ -21,7 +21,7 @@ Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的 BOSS直聘职�
 ### 安装
 
 ```bash
-git clone https://github.com/czyooutzilas-sketch/career-scout-preview.git
+git clone https://github.com/Czilasy/career-scout-preview.git
 cd career-scout-preview
 pip install -r requirements.txt
 # 或使用 uv
