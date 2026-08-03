@@ -3269,6 +3269,147 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
             save_called,
             "append_source_attempt 失败时不得推进 save_scrape_combo_result")
 
+    # -- T405: 按 combo 最新 attempt 汇总 source outcomes ----------------
+
+    def _create_finished_scrape_task(self, platform="boss"):
+        """创建一个已完成的搜索任务，返回 (task_id, store)。"""
+        from webui.source import SourceOutcome
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": platform,
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+
+        fake_source = mock.MagicMock()
+        fake_source.preflight.return_value = SourceOutcome.success(
+            safe_log="source_ready")
+        fake_source.fetch_list.return_value = SourceOutcome.success(
+            jobs=[{"job_id": "job-1", "title": "Python"}],
+            safe_log="list job_count=1",
+            input_hash="sha256-fake",
+        )
+        with mock.patch("webui.app._BossCdpSource", return_value=fake_source), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                           return_value=(True, "")):
+            resp = self.client.post("/api/execute-search", json={
+                "platform": platform,
+                "script_params": {
+                    "keyword": "Python", "city": ["上海"], "pages": 1,
+                },
+                "scope_digest": preview["scope_digest"],
+            })
+            self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+            task_id = resp.get_json()["task_id"]
+            self._wait_for_task(task_id)
+        store = self.app.config["TASK_STORE"]
+        return task_id, store
+
+    def test_search_progress_returns_platform_and_digest(self):
+        """T405: search-progress 返回 platform、task_input_digest、
+        source_summary 和 source_outcomes。"""
+        task_id, _ = self._create_finished_scrape_task()
+
+        resp = self.client.get(f"/api/search-progress/{task_id}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data.get("platform"), "boss")
+        self.assertTrue(data.get("task_input_digest"))
+        self.assertIn("source_summary", data)
+        self.assertIn("source_outcomes", data)
+
+    def test_task_state_returns_platform_and_digest(self):
+        """T405: task-state 返回 platform、task_input_digest、
+        source_summary 和 source_outcomes。"""
+        task_id, _ = self._create_finished_scrape_task()
+
+        resp = self.client.get(f"/api/task-state/{task_id}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data.get("platform"), "boss")
+        self.assertTrue(data.get("task_input_digest"))
+        self.assertIn("source_summary", data)
+        self.assertIn("source_outcomes", data)
+
+    def test_source_outcomes_latest_per_combo(self):
+        """T405: source_outcomes 按 combo 最新 attempt 汇总。
+
+        同一 combo 多次 attempt 时只返回最新；不同 combo 各自返回最新。
+        """
+        task_id, store = self._create_finished_scrape_task()
+
+        # 任务完成后已有 1 条 attempt（combo: Python|上海，non_empty）
+        # 追加同 combo 第 2 次 attempt（模拟重试后变 empty）
+        store.append_source_attempt(
+            run_id=task_id, platform="boss",
+            combo_key="Python|上海", attempt_no=2,
+            input_hash="sha256-v2",
+            outcome_kind="empty", job_count=0,
+            empty_evidence={"kind": "explicit_empty_state",
+                            "fixture_version": "v1",
+                            "marker": "normalized-empty-state"},
+        )
+        # 另一个 combo
+        store.append_source_attempt(
+            run_id=task_id, platform="boss",
+            combo_key="Java|上海", attempt_no=1,
+            input_hash="sha256-java",
+            outcome_kind="non_empty", job_count=3,
+        )
+
+        resp = self.client.get(f"/api/task-state/{task_id}")
+        data = resp.get_json()
+        outcomes = data.get("source_outcomes") or []
+        by_combo = {o["combo_key"]: o for o in outcomes}
+        self.assertIn("Python|上海", by_combo)
+        self.assertIn("Java|上海", by_combo)
+        # Python|上海 最新是 attempt_no=2，empty
+        self.assertEqual(by_combo["Python|上海"]["attempt_no"], 2)
+        self.assertEqual(by_combo["Python|上海"]["outcome_kind"], "empty")
+        # Java|上海 是 non_empty
+        self.assertEqual(by_combo["Java|上海"]["outcome_kind"], "non_empty")
+
+    def test_no_empty_inference_from_zero_jobs(self):
+        """T405: 无 source attempt 记录时不从岗位数为零推断 empty。
+
+        刷新/重启后若 DB 无 attempt 记录，source_outcomes 为空列表，
+        source_summary 不报告 empty。
+        """
+        task_id, store = self._create_finished_scrape_task()
+
+        # 删除所有 source attempts 模拟无记录
+        with store._connection() as conn:
+            conn.execute(
+                "DELETE FROM screening_source_attempts WHERE run_id=?",
+                (task_id,))
+
+        resp = self.client.get(f"/api/task-state/{task_id}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        outcomes = data.get("source_outcomes") or []
+        self.assertEqual(outcomes, [],
+                         "无 attempt 记录时 source_outcomes 必须为空，"
+                         "不从零岗位推断 empty")
+        summary = data.get("source_summary") or {}
+        self.assertEqual(summary.get("empty_count", 0), 0,
+                         "无 attempt 记录时不得报告 empty")
+
+    def test_search_progress_identity_conflict(self):
+        """T405: 内存 task 平台与 DB run 不一致 → 409 run_identity_conflict。"""
+        task_id, store = self._create_finished_scrape_task()
+
+        # 篡改 DB run 的 platform，制造内存（boss）与 DB（zhilian）不一致
+        with store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET platform='zhilian' WHERE id=?",
+                (task_id,))
+
+        resp = self.client.get(f"/api/search-progress/{task_id}")
+        self.assertEqual(resp.status_code, 409)
+        data = resp.get_json()
+        self.assertEqual(data.get("error"), "run_identity_conflict")
+
 
 if __name__ == "__main__":
     unittest.main()

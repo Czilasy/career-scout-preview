@@ -3318,6 +3318,31 @@ class TaskStore:
             ).fetchone()
         if row is None:
             return None
+        return self._source_attempt_row(row)
+
+    def list_latest_source_attempts(self, run_id: str) -> list[dict]:
+        """T405: 按 run 列出所有 combo 的最新 attempt。
+
+        返回安全投影列表（不含敏感字段），每个 combo 一条。
+        刷新/重启后从此方法汇总 source outcomes，不从岗位数为零反推 empty。
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT s.* FROM screening_source_attempts s "
+                "INNER JOIN ("
+                "  SELECT combo_key, MAX(attempt_no) AS max_no "
+                "  FROM screening_source_attempts WHERE run_id=? "
+                "  GROUP BY combo_key"
+                ") m ON s.combo_key=m.combo_key AND s.attempt_no=m.max_no "
+                "WHERE s.run_id=? "
+                "ORDER BY s.combo_key",
+                (str(run_id), str(run_id)),
+            ).fetchall()
+        return [self._source_attempt_row(row) for row in rows]
+
+    @staticmethod
+    def _source_attempt_row(row) -> dict:
+        """安全投影：返回 source attempt 的安全字段。"""
         return {
             "id": row["id"],
             "run_id": row["run_id"],
@@ -4581,6 +4606,7 @@ class TaskStore:
         return out
 
     def _screening_run_row(self, row) -> dict:
+        keys = row.keys()
         return {
             "id": row["id"],
             "status": row["status"],
@@ -4595,8 +4621,8 @@ class TaskStore:
             "execution_params": json.loads(row["execution_params_json"] or "{}"),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
-            "started_at": row["started_at"] if "started_at" in row.keys() else None,
-            "finished_at": row["finished_at"] if "finished_at" in row.keys() else None,
+            "started_at": row["started_at"] if "started_at" in keys else None,
+            "finished_at": row["finished_at"] if "finished_at" in keys else None,
             "record_kind": row["record_kind"],
             # FR-016/SC-018 守恒字段（migration_007/018 加的列，必须读出来）
             "pending_count": row["pending_count"],
@@ -4609,9 +4635,13 @@ class TaskStore:
             "search_params": json.loads(row["search_params_json"] or "{}"),
             "profile_summary": row["profile_summary"],
             # FR-005/FR-037 新增字段（migration_020 加的列）
-            "current_stage": row["current_stage"] if "current_stage" in row.keys() else None,
-            "error_reason": row["error_reason"] if "error_reason" in row.keys() else None,
-            "backend_version": row["backend_version"] if "backend_version" in row.keys() else None,
+            "current_stage": row["current_stage"] if "current_stage" in keys else None,
+            "error_reason": row["error_reason"] if "error_reason" in keys else None,
+            "backend_version": row["backend_version"] if "backend_version" in keys else None,
+            # migration 27 平台身份字段（T405: 进度/状态接口返回）
+            "platform": row["platform"] if "platform" in keys else None,
+            "task_input_digest": row["task_input_digest"] if "task_input_digest" in keys else None,
+            "interruption_kind": row["interruption_kind"] if "interruption_kind" in keys else None,
         }
 
     def append_search_event(self, run_id, event_type, payload=None):

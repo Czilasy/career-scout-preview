@@ -4103,6 +4103,61 @@ def create_app(config=None):
         return jsonify({"ok": True, "task_id": task_id,
                         "resuming": bool(resume_from_run_id)})
 
+    def _build_source_summary_and_outcomes(run_id):
+        """T405: 从持久化 screening_source_attempts 汇总 source outcomes。
+
+        按 combo 最新 attempt 汇总，不从岗位数为零反推 empty。
+        返回 (source_summary, source_outcomes)。
+        """
+        try:
+            attempts = store.list_latest_source_attempts(run_id)
+        except _OPERATIONAL_ERRORS:
+            attempts = []
+        outcomes = []
+        counts = {"non_empty": 0, "empty": 0, "failed": 0, "paused": 0}
+        for a in attempts:
+            outcomes.append({
+                "combo_key": a["combo_key"],
+                "attempt_no": a["attempt_no"],
+                "outcome_kind": a["outcome_kind"],
+                "job_count": a["job_count"],
+                "input_hash": a["input_hash"],
+                "error_code": a["error_code"],
+            })
+            if a["outcome_kind"] in counts:
+                counts[a["outcome_kind"]] += 1
+        summary = {"total_combos": len(outcomes), **counts}
+        return summary, outcomes
+
+    def _check_run_identity_conflict(run_id, task_dict):
+        """T405: 校验内存 task 与 DB run 的 platform/task_input_digest 一致。
+
+        返回 (db_run, error_response)。一致时 error_response=None；
+        不一致时 error_response 为 409 响应。
+        """
+        mem_platform = (task_dict or {}).get("platform")
+        mem_digest = (task_dict or {}).get("task_input_digest")
+        try:
+            db_run = store.get_screening_run(run_id)
+        except _OPERATIONAL_ERRORS:
+            db_run = None
+        if db_run is not None and mem_platform:
+            db_platform = db_run.get("platform")
+            db_digest = db_run.get("task_input_digest")
+            if db_platform and db_platform != mem_platform:
+                return None, (jsonify({
+                    "ok": False,
+                    "error": "run_identity_conflict",
+                    "message": "内存任务平台与数据库记录不一致",
+                }), 409)
+            if db_digest and mem_digest and db_digest != mem_digest:
+                return None, (jsonify({
+                    "ok": False,
+                    "error": "run_identity_conflict",
+                    "message": "内存任务输入摘要与数据库记录不一致",
+                }), 409)
+        return db_run, None
+
     @app.route("/api/search-progress/<task_id>")
     def search_progress(task_id):
         """Poll the progress of a pipeline run.
@@ -4115,9 +4170,15 @@ def create_app(config=None):
             task = _pipeline_tasks.get(task_id)
             if task is None:
                 return jsonify({"ok": False, "error": "任务不存在"}), 404
+            # T405: 内存 task 与 DB run 身份一致性校验
+            db_run, conflict = _check_run_identity_conflict(task_id, task)
+            if conflict is not None:
+                return conflict
             # 终态补结束时间戳（首次进入终态时记一次），供前端计时器显示真实用时
             if task["status"] in ("done", "failed", "cancelled") and task.get("finished_at") is None:
                 task["finished_at"] = int(time.time() * 1000)
+            # T405: 按 combo 最新 attempt 汇总 source outcomes
+            source_summary, source_outcomes = _build_source_summary_and_outcomes(task_id)
             snapshot = {
                 "ok": True,
                 "kind": task.get("kind", ""),
@@ -4129,6 +4190,11 @@ def create_app(config=None):
                 "finished_at": task.get("finished_at"),
                 "config_digest": task.get("config_digest"),
                 "scope_digest": task.get("scope_digest"),
+                # T405: 平台身份与 source outcomes 汇总
+                "platform": task.get("platform") or (db_run or {}).get("platform"),
+                "task_input_digest": task.get("task_input_digest") or (db_run or {}).get("task_input_digest"),
+                "source_summary": source_summary,
+                "source_outcomes": source_outcomes,
             }
             if task["status"] in ("done", "failed") and task["result"] is not None:
                 # 原样返回整个 result：抓取任务含 jobs/计数；
@@ -5329,6 +5395,10 @@ def create_app(config=None):
         with _pipeline_lock:
             task = _pipeline_tasks.get(run_id)
             if task is not None:
+                # T405: 内存 task 与 DB run 身份一致性校验
+                _, conflict = _check_run_identity_conflict(run_id, task)
+                if conflict is not None:
+                    return conflict
                 if task["status"] in ("done", "failed", "cancelled") and task.get(
                     "finished_at"
                 ) is None:
@@ -5348,6 +5418,8 @@ def create_app(config=None):
         run = store.get_screening_run(run_id)
         if run is None and live is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
+        # T405: 按 combo 最新 attempt 汇总 source outcomes
+        source_summary, source_outcomes = _build_source_summary_and_outcomes(run_id)
         live_progress = (live or {}).get("progress") or {}
         source = int((run or {}).get("source_count") or live_progress.get("total") or 0)
         processed = int((run or {}).get("processed_count") or live_progress.get("current") or 0)
@@ -5437,6 +5509,11 @@ def create_app(config=None):
             "updated_at": (run or {}).get("updated_at"),
             "started_at": started_at,
             "finished_at": finished_at,
+            # T405: 平台身份与 source outcomes 汇总
+            "platform": (run or {}).get("platform") or (live or {}).get("platform"),
+            "task_input_digest": (run or {}).get("task_input_digest"),
+            "source_summary": source_summary,
+            "source_outcomes": source_outcomes,
             **(
                 {"result": live["result"]}
                 if live is not None and live.get("result") is not None else {}
