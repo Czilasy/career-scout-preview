@@ -1,4 +1,4 @@
-"""tasks001 T003 — 平台注册表 BOSS 基线测试。
+"""tasks001 T003 + tasks003 T204-T210 — 平台注册表测试。
 
 验证 ``webui/platforms.py`` 作为唯一平台注册边界，符合
 ``specs/001-add-zhilian-platform/contracts/platform-schema.md`` 合同。
@@ -6,9 +6,13 @@
 覆盖：
 - 已知平台键集合与默认平台；
 - BOSS 注册项字段集合、城市目录、URL allowlist、默认端口和兼容行为；
-- 智联已知但未注册（真实 fixture 未核验前保持禁用）；
+- 智联已注册但 fixture 未核验前 ``enabled_for_new_tasks=False``（tasks003 T204）；
+- 智联城市目录仅含全国 ``jl0``（T205）；
+- schema/城市 fixture 完整性检查（T206）；
+- 服务投影不泄露 profile 路径（T207）；
+- 登录空间 profile_dir 派生、受控切换、双平台 delete/activate 检查（T208-T210）；
 - FilterOption / FilterField / PlatformFilterSchema 不可变值对象校验；
-- 登录空间解析、URL 规范化、schema 投影与筛选快照。
+- URL 规范化、schema 投影与筛选快照。
 """
 from __future__ import annotations
 
@@ -25,8 +29,18 @@ from webui.platforms import (
     PlatformNotRegisteredError,
     PlatformRegistry,
     UnknownPlatformError,
+    ZHILIAN_AVAILABILITY_REASON,
+    ZHILIAN_CITY_MAPPING_VERSION,
     ZHILIAN_DEFAULT_CDP_PORT,
+    ZHILIAN_FILTER_SCHEMA_VERSION,
+    ZHILIAN_NATIONWIDE_CODE,
+    ZHILIAN_NATIONWIDE_NAME,
     build_filter_snapshot,
+    check_browser_account_activate,
+    check_browser_account_delete,
+    check_login_space_conflict,
+    check_platform_fixture_integrity,
+    derive_zhilian_profile_dir,
     get_platform,
     get_platform_or_none,
     is_known_platform_key,
@@ -35,6 +49,7 @@ from webui.platforms import (
     normalize_job_url,
     project_filter_schema,
     resolve_login_space,
+    resolve_platform_city,
     resolve_platform_or_default,
     validate_filter_values,
     validate_platform_key,
@@ -91,12 +106,16 @@ class BossRegistrationTests(unittest.TestCase):
         keys = list_platform_keys()
         self.assertIn("boss", keys)
 
-    def test_zhilian_known_but_not_registered(self):
-        """智联已知但真实 fixture 未核验前不注册。"""
+    def test_zhilian_registered_but_disabled(self):
+        """智联已注册但 fixture 未核验前 enabled_for_new_tasks=False（T204）。"""
         self.assertIn("zhilian", KNOWN_PLATFORM_KEYS)
-        with self.assertRaises(PlatformNotRegisteredError):
-            get_platform("zhilian")
-        self.assertIsNone(get_platform_or_none("zhilian"))
+        zhilian = get_platform("zhilian")
+        self.assertIsNotNone(zhilian)
+        self.assertFalse(zhilian.enabled_for_new_tasks)
+        self.assertTrue(zhilian.availability_reason)
+        self.assertEqual(zhilian.availability_reason, ZHILIAN_AVAILABILITY_REASON)
+        self.assertEqual(zhilian.display_name, "智联招聘")
+        self.assertEqual(zhilian.default_cdp_port, ZHILIAN_DEFAULT_CDP_PORT)
 
     def test_unknown_platform_raises_unknown(self):
         with self.assertRaises(UnknownPlatformError):
@@ -212,9 +231,30 @@ class NormalizeJobUrlTests(unittest.TestCase):
         ok = "https://www.zhipin.com/job_detail/abc.htm"
         self.assertEqual(normalize_job_url("boss", ok), ok)
 
-    def test_zhilian_not_registered_url_raises(self):
-        with self.assertRaises(PlatformNotRegisteredError):
-            normalize_job_url("zhilian", "https://www.zhaopin.com/jobdetail/abc.htm")
+    def test_zhilian_url_via_registry(self):
+        """智联 URL 规范化：HTTPS + zhaopin.com + jobdetail/<id>.htm。"""
+        ok = "https://www.zhaopin.com/jobdetail/abc123.htm"
+        self.assertEqual(normalize_job_url("zhilian", ok), ok)
+        # http 升级为 https
+        self.assertEqual(
+            normalize_job_url("zhilian", "http://www.zhaopin.com/jobdetail/abc.htm"),
+            "https://www.zhaopin.com/jobdetail/abc.htm",
+        )
+        # query/fragment 剥离
+        self.assertEqual(
+            normalize_job_url("zhilian", "https://zhaopin.com/jobdetail/abc.htm?x=1#f"),
+            "https://zhaopin.com/jobdetail/abc.htm",
+        )
+        # 非 zhaopin 域名拒绝
+        self.assertEqual(
+            normalize_job_url("zhilian", "https://evil.com/jobdetail/abc.htm"),
+            "",
+        )
+        # 非 jobdetail path 拒绝
+        self.assertEqual(
+            normalize_job_url("zhilian", "https://www.zhaopin.com/sou/jl0/kwPython"),
+            "",
+        )
 
     def test_unknown_platform_url_raises(self):
         with self.assertRaises(UnknownPlatformError):
@@ -387,9 +427,25 @@ class ProjectFilterSchemaTests(unittest.TestCase):
                 self.assertTrue(opt["value"], f"字段 {f['key']} option.value 不能为空")
                 self.assertTrue(opt["label"], f"字段 {f['key']} option.label 不能为空")
 
-    def test_zhilian_schema_unavailable(self):
-        with self.assertRaises(PlatformNotRegisteredError):
-            project_filter_schema("zhilian")
+    def test_zhilian_schema_available_but_disabled(self):
+        """智联 schema 已注册但 enabled=False，字段顺序正确，options 为空（T204/T207）。"""
+        schema = project_filter_schema("zhilian")
+        self.assertTrue(schema["ok"])
+        self.assertEqual(schema["platform"], "zhilian")
+        self.assertEqual(schema["schema_version"], ZHILIAN_FILTER_SCHEMA_VERSION)
+        self.assertFalse(schema["enabled_for_new_tasks"])
+        keys = [f["key"] for f in schema["fields"]]
+        self.assertEqual(
+            keys,
+            ["salary", "experience", "degree", "industry", "scale", "company_nature"],
+        )
+        # fixture 未核验前所有字段 options 为空
+        for f in schema["fields"]:
+            self.assertEqual(len(f["options"]), 0, f"字段 {f['key']} options 应为空")
+        # 响应不含 profile 路径
+        self.assertNotIn("profile_dir", repr(schema))
+        self.assertNotIn("profile_key", repr(schema))
+        self.assertNotIn("cdp_port", repr(schema))
 
 
 class ValidateFilterValuesTests(unittest.TestCase):
@@ -485,6 +541,423 @@ class RegistryStorageTests(unittest.TestCase):
         )
         with self.assertRaises(UnknownPlatformError):
             register_platform(reg)
+
+
+# ===========================================================================
+# T204: 智联注册细节
+# ===========================================================================
+class ZhilianRegistrationTests(unittest.TestCase):
+    """智联平台注册项字段集合（T204）。"""
+
+    def test_zhilian_filter_schema_fields_order(self):
+        """智联 schema 字段顺序：salary, experience, degree, industry, scale, company_nature。"""
+        zhilian = get_platform("zhilian")
+        keys = [f.key for f in zhilian.filter_schema.fields]
+        self.assertEqual(
+            keys,
+            ["salary", "experience", "degree", "industry", "scale", "company_nature"],
+        )
+
+    def test_zhilian_filter_schema_version(self):
+        zhilian = get_platform("zhilian")
+        self.assertEqual(zhilian.filter_schema.schema_version, ZHILIAN_FILTER_SCHEMA_VERSION)
+        self.assertGreaterEqual(zhilian.filter_schema.schema_version, 1)
+
+    def test_zhilian_filter_schema_excludes_stage(self):
+        """智联 schema 禁止 stage 字段。"""
+        zhilian = get_platform("zhilian")
+        keys = {f.key for f in zhilian.filter_schema.fields}
+        self.assertNotIn("stage", keys)
+
+    def test_zhilian_filter_schema_all_fields_multiple(self):
+        """智联所有筛选字段为多选。"""
+        zhilian = get_platform("zhilian")
+        for f in zhilian.filter_schema.fields:
+            self.assertTrue(f.multiple, f"字段 {f.key} 应为 multiple=True")
+
+    def test_zhilian_all_options_empty_before_verification(self):
+        """fixture 未核验前所有字段 options 为空。"""
+        zhilian = get_platform("zhilian")
+        for f in zhilian.filter_schema.fields:
+            self.assertEqual(len(f.options), 0, f"字段 {f.key} options 应为空")
+
+    def test_zhilian_enabled_false_with_reason(self):
+        zhilian = get_platform("zhilian")
+        self.assertFalse(zhilian.enabled_for_new_tasks)
+        self.assertTrue(zhilian.availability_reason)
+
+    def test_zhilian_in_list_platforms(self):
+        """list_platforms 包含智联（禁用项仍需返回）。"""
+        keys = list_platform_keys()
+        self.assertIn("zhilian", keys)
+        platforms_list = list_platforms()
+        zhilian_keys = [p.key for p in platforms_list]
+        self.assertIn("zhilian", zhilian_keys)
+
+    def test_zhilian_normalize_job_url_fn(self):
+        """智联 URL 规范化函数已绑定。"""
+        zhilian = get_platform("zhilian")
+        ok = "https://www.zhaopin.com/jobdetail/abc.htm"
+        self.assertEqual(zhilian.normalize_job_url(ok), ok)
+        self.assertEqual(zhilian.normalize_job_url("https://evil.com/x"), "")
+
+    def test_zhilian_resolve_login_space_fn(self):
+        """智联登录空间解析函数已绑定。"""
+        zhilian = get_platform("zhilian")
+        space = zhilian.resolve_login_space("a", boss_profile_dir="/tmp/profile-a")
+        self.assertEqual(space.platform, "zhilian")
+        self.assertEqual(space.browser_account, "a")
+        self.assertEqual(space.profile_key, "zhilian:a")
+        self.assertEqual(space.cdp_port, ZHILIAN_DEFAULT_CDP_PORT)
+
+
+# ===========================================================================
+# T205: 智联城市目录
+# ===========================================================================
+class ZhilianCityCatalogTests(unittest.TestCase):
+    """智联城市目录仅含全国 jl0（T205）。"""
+
+    def test_zhilian_city_catalog_has_nationwide_only(self):
+        zhilian = get_platform("zhilian")
+        names = zhilian.city_catalog.names()
+        self.assertEqual(names, (ZHILIAN_NATIONWIDE_NAME,))
+
+    def test_zhilian_nationwide_code_is_jl0(self):
+        zhilian = get_platform("zhilian")
+        nationwide = zhilian.city_catalog.find(ZHILIAN_NATIONWIDE_NAME)
+        self.assertIsNotNone(nationwide)
+        self.assertEqual(nationwide.platform_code, ZHILIAN_NATIONWIDE_CODE)
+        self.assertEqual(ZHILIAN_NATIONWIDE_CODE, "jl0")
+
+    def test_zhilian_city_catalog_version(self):
+        zhilian = get_platform("zhilian")
+        self.assertEqual(zhilian.city_catalog.mapping_version, ZHILIAN_CITY_MAPPING_VERSION)
+
+    def test_zhilian_non_nationwide_city_missing(self):
+        """非全国城市未核验，解析时阻断。"""
+        with self.assertRaises(ValueError) as ctx:
+            resolve_platform_city("zhilian", "上海")
+        self.assertIn("city_mapping_missing", str(ctx.exception))
+
+    def test_zhilian_nationwide_resolvable(self):
+        """全国 jl0 可解析。"""
+        entry = resolve_platform_city("zhilian", ZHILIAN_NATIONWIDE_NAME)
+        self.assertEqual(entry.platform_code, "jl0")
+
+    def test_zhilian_city_codes_json_file_exists(self):
+        """data/zhilian_city_codes.json 存在且仅含全国。"""
+        import json
+        from pathlib import Path
+        path = Path(__file__).resolve().parents[1] / "data" / "zhilian_city_codes.json"
+        self.assertTrue(path.exists(), "data/zhilian_city_codes.json 应存在")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["platform"], "zhilian")
+        self.assertEqual(data["nationwide"]["code"], "jl0")
+        self.assertEqual(data["cities"], [])
+
+
+# ===========================================================================
+# T206: fixture 完整性检查
+# ===========================================================================
+class ZhilianFixtureIntegrityTests(unittest.TestCase):
+    """智联 fixture 完整性检查返回不通过（T206）。"""
+
+    def test_zhilian_fixture_integrity_fails(self):
+        """智联所有字段 options 为空 → 完整性检查失败。"""
+        ok, reason = check_platform_fixture_integrity("zhilian")
+        self.assertFalse(ok)
+        self.assertTrue(reason)
+        self.assertIn("empty options", reason)
+
+    def test_boss_fixture_integrity_passes(self):
+        """BOSS 所有字段 options 非空 → 完整性检查通过。"""
+        ok, reason = check_platform_fixture_integrity("boss")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_zhilian_disabled_consistent_with_integrity(self):
+        """智联 enabled=False 与 fixture 完整性检查失败一致。"""
+        zhilian = get_platform("zhilian")
+        ok, _ = check_platform_fixture_integrity("zhilian")
+        self.assertEqual(zhilian.enabled_for_new_tasks, ok)
+
+
+# ===========================================================================
+# T207: 服务投影不泄露 profile 路径
+# ===========================================================================
+class ZhilianServiceProjectionTests(unittest.TestCase):
+    """智联服务投影不返回 profile 路径或路径摘要（T207）。"""
+
+    def test_zhilian_project_filter_schema_no_profile(self):
+        schema = project_filter_schema("zhilian")
+        repr_text = repr(schema)
+        self.assertNotIn("profile_dir", repr_text)
+        self.assertNotIn("profile_key", repr_text)
+        self.assertNotIn("cdp_port", repr_text)
+        self.assertNotIn("boss_profile_dir", repr_text)
+
+    def test_zhilian_platform_registry_no_profile_in_repr(self):
+        """PlatformRegistry 的 repr 不含 profile 路径。"""
+        zhilian = get_platform("zhilian")
+        repr_text = repr(zhilian)
+        self.assertNotIn("profile_dir", repr_text.lower())
+        # profile_key 是逻辑标识，不含路径
+        self.assertNotIn("/tmp", repr_text)
+        self.assertNotIn("\\users", repr_text.lower())
+
+    def test_list_platforms_no_profile_paths(self):
+        """list_platforms 返回的注册项不含 profile 路径。"""
+        for reg in list_platforms():
+            repr_text = repr(reg)
+            self.assertNotIn("/tmp/", repr_text)
+            self.assertNotIn("\\users\\", repr_text.lower())
+            self.assertNotIn("chrome-profile", repr_text.lower())
+
+    def test_zhilian_login_space_no_profile_dir(self):
+        """LoginSpace 不含 profile_dir 字段。"""
+        from webui.platforms import LoginSpace
+        space = LoginSpace(
+            platform="zhilian", browser_account="a",
+            profile_key="zhilian:a", cdp_port=9223,
+        )
+        self.assertFalse(hasattr(space, "profile_dir"))
+        repr_text = repr(space)
+        self.assertNotIn("profile_dir", repr_text)
+        self.assertNotIn("/tmp", repr_text)
+
+
+# ===========================================================================
+# T208-T210: 浏览器登录空间派生与双平台检查
+# ===========================================================================
+class LoginSpaceIsolationTests(unittest.TestCase):
+    """T208: profile_dir 派生；T209: 受控切换；T210: delete/activate 检查。"""
+
+    # ----- T208: derive_zhilian_profile_dir -----
+
+    def test_derive_zhilian_profile_dir_appends_suffix(self):
+        self.assertEqual(
+            derive_zhilian_profile_dir("/home/user/.career-scout/chrome-profile"),
+            "/home/user/.career-scout/chrome-profile.zhilian",
+        )
+
+    def test_derive_zhilian_profile_dir_strips_trailing_slash(self):
+        self.assertEqual(
+            derive_zhilian_profile_dir("/home/user/chrome-profile/"),
+            "/home/user/chrome-profile.zhilian",
+        )
+        self.assertEqual(
+            derive_zhilian_profile_dir("C:\\Users\\u\\profile\\"),
+            "C:\\Users\\u\\profile.zhilian",
+        )
+
+    def test_derive_zhilian_profile_dir_differs_from_boss(self):
+        """智联 profile_dir 与 BOSS profile_dir 不同（隔离）。"""
+        boss_dir = "/home/user/.career-scout/chrome-profile"
+        zhilian_dir = derive_zhilian_profile_dir(boss_dir)
+        self.assertNotEqual(boss_dir, zhilian_dir)
+        self.assertTrue(zhilian_dir.endswith(".zhilian"))
+
+    def test_derive_zhilian_profile_dir_deterministic(self):
+        """同一 boss_profile_dir 总是产生同一智联 profile_dir。"""
+        boss_dir = "/home/user/chrome-profile"
+        self.assertEqual(
+            derive_zhilian_profile_dir(boss_dir),
+            derive_zhilian_profile_dir(boss_dir),
+        )
+
+    def test_derive_zhilian_profile_dir_empty_raises(self):
+        with self.assertRaises(ValueError):
+            derive_zhilian_profile_dir("")
+
+    # ----- T209: check_login_space_conflict -----
+
+    def test_login_space_conflict_port_idle(self):
+        """端口空闲 → 允许。"""
+        ok, reason = check_login_space_conflict(
+            "zhilian", "a",
+            boss_profile_dir="/tmp/profile-a",
+            port_profile_paths=[],
+            known_profile_paths=["/tmp/profile-a.zhilian", "/tmp/profile-b.zhilian"],
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_login_space_conflict_expected_profile(self):
+        """端口被期望 profile 占用 → 复用。"""
+        zhilian_dir = derive_zhilian_profile_dir("/tmp/profile-a")
+        ok, reason = check_login_space_conflict(
+            "zhilian", "a",
+            boss_profile_dir="/tmp/profile-a",
+            port_profile_paths=[zhilian_dir],
+            known_profile_paths=[zhilian_dir],
+        )
+        self.assertTrue(ok)
+
+    def test_login_space_conflict_known_profile_allows_switch(self):
+        """端口被同平台已知 profile 占用 → 允许受控切换。"""
+        ok, reason = check_login_space_conflict(
+            "zhilian", "a",
+            boss_profile_dir="/tmp/profile-a",
+            port_profile_paths=["/tmp/profile-b.zhilian"],
+            known_profile_paths=["/tmp/profile-a.zhilian", "/tmp/profile-b.zhilian"],
+        )
+        self.assertTrue(ok)
+
+    def test_login_space_conflict_unknown_profile_rejected(self):
+        """端口被未知 profile 占用 → 拒绝。"""
+        ok, reason = check_login_space_conflict(
+            "zhilian", "a",
+            boss_profile_dir="/tmp/profile-a",
+            port_profile_paths=["/tmp/unknown-profile"],
+            known_profile_paths=["/tmp/profile-a.zhilian", "/tmp/profile-b.zhilian"],
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "login_space_conflict")
+
+    def test_login_space_conflict_boss_platform(self):
+        """BOSS 平台同样适用受控切换。"""
+        ok, reason = check_login_space_conflict(
+            "boss", "a",
+            boss_profile_dir="/tmp/profile-a",
+            port_profile_paths=[],
+            known_profile_paths=["/tmp/profile-a", "/tmp/profile-b"],
+        )
+        self.assertTrue(ok)
+
+    def test_login_space_conflict_unknown_platform_raises(self):
+        with self.assertRaises(UnknownPlatformError):
+            check_login_space_conflict(
+                "linkedin", "a",
+                boss_profile_dir="/tmp/profile-a",
+                port_profile_paths=[],
+                known_profile_paths=[],
+            )
+
+    # ----- T210: check_browser_account_delete -----
+
+    def test_delete_allowed_when_no_locks_no_port_use(self):
+        """无运行锁、无端口占用 → 允许删除。"""
+        ok, reason = check_browser_account_delete(
+            "a",
+            boss_profile_dir="/tmp/profile-a",
+            running_locks=[],
+            port_profiles_boss=[],
+            port_profiles_zhilian=[],
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_delete_blocked_by_running_lock(self):
+        """有运行锁 → 阻断删除。"""
+        ok, reason = check_browser_account_delete(
+            "a",
+            boss_profile_dir="/tmp/profile-a",
+            running_locks=[{"platform": "boss", "account": "a", "kind": "running"}],
+            port_profiles_boss=[],
+            port_profiles_zhilian=[],
+        )
+        self.assertFalse(ok)
+        self.assertIn("browser_busy", reason)
+
+    def test_delete_blocked_by_boss_port_use(self):
+        """BOSS profile 被 9222 占用 → 阻断删除。"""
+        ok, reason = check_browser_account_delete(
+            "a",
+            boss_profile_dir="/tmp/profile-a",
+            running_locks=[],
+            port_profiles_boss=["/tmp/profile-a"],
+            port_profiles_zhilian=[],
+        )
+        self.assertFalse(ok)
+        self.assertIn("browser_in_use", reason)
+
+    def test_delete_blocked_by_zhilian_port_use(self):
+        """智联 profile 被 9223 占用 → 阻断删除。"""
+        zhilian_dir = derive_zhilian_profile_dir("/tmp/profile-a")
+        ok, reason = check_browser_account_delete(
+            "a",
+            boss_profile_dir="/tmp/profile-a",
+            running_locks=[],
+            port_profiles_boss=[],
+            port_profiles_zhilian=[zhilian_dir],
+        )
+        self.assertFalse(ok)
+        self.assertIn("browser_in_use", reason)
+        self.assertIn("zhilian", reason)
+
+    def test_delete_atomic_check_both_profiles(self):
+        """delete 原子检查两个 profile，任一占用即阻断。"""
+        zhilian_dir = derive_zhilian_profile_dir("/tmp/profile-a")
+        # BOSS 占用但智联不占用 → 仍阻断
+        ok1, _ = check_browser_account_delete(
+            "a", boss_profile_dir="/tmp/profile-a",
+            running_locks=[], port_profiles_boss=["/tmp/profile-a"],
+            port_profiles_zhilian=[],
+        )
+        self.assertFalse(ok1)
+        # 智联占用但 BOSS 不占用 → 仍阻断
+        ok2, _ = check_browser_account_delete(
+            "a", boss_profile_dir="/tmp/profile-a",
+            running_locks=[], port_profiles_boss=[],
+            port_profiles_zhilian=[zhilian_dir],
+        )
+        self.assertFalse(ok2)
+
+    def test_delete_does_not_leak_profile_paths_in_reason(self):
+        """delete reason 不含 profile 路径。"""
+        ok, reason = check_browser_account_delete(
+            "a",
+            boss_profile_dir="/tmp/secret-profile-path",
+            running_locks=[],
+            port_profiles_boss=["/tmp/secret-profile-path"],
+            port_profiles_zhilian=[],
+        )
+        self.assertFalse(ok)
+        self.assertNotIn("/tmp/secret-profile-path", reason)
+        self.assertNotIn("secret", reason)
+
+    # ----- T210: check_browser_account_activate -----
+
+    def test_activate_allowed_when_account_exists(self):
+        """账号存在 → 允许激活（只改草稿）。"""
+        ok, reason = check_browser_account_activate("a", account_exists=True)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_activate_blocked_when_account_missing(self):
+        """账号不存在 → 阻断激活。"""
+        ok, reason = check_browser_account_activate("a", account_exists=False)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "account_not_found")
+
+    def test_activate_does_not_check_ports(self):
+        """activate 不检查端口/profile（只改草稿），无端口参数。"""
+        import inspect
+        sig = inspect.signature(check_browser_account_activate)
+        param_names = list(sig.parameters.keys())
+        self.assertNotIn("port_profiles_boss", param_names)
+        self.assertNotIn("port_profiles_zhilian", param_names)
+        self.assertNotIn("running_locks", param_names)
+
+
+# ===========================================================================
+# T208: 端口隔离常量
+# ===========================================================================
+class PortIsolationTests(unittest.TestCase):
+    """BOSS 9222 与智联 9223 端口隔离（T208/T211）。"""
+
+    def test_boss_and_zhilian_ports_differ(self):
+        self.assertNotEqual(BOSS_DEFAULT_CDP_PORT, ZHILIAN_DEFAULT_CDP_PORT)
+        self.assertEqual(BOSS_DEFAULT_CDP_PORT, 9222)
+        self.assertEqual(ZHILIAN_DEFAULT_CDP_PORT, 9223)
+
+    def test_boss_and_zhilian_login_spaces_use_different_ports(self):
+        boss_space = resolve_login_space("boss", "a", boss_profile_dir="/tmp/p")
+        zhilian_space = resolve_login_space("zhilian", "a", boss_profile_dir="/tmp/p")
+        self.assertNotEqual(boss_space.cdp_port, zhilian_space.cdp_port)
+        self.assertNotEqual(boss_space.profile_key, zhilian_space.profile_key)
+        self.assertEqual(boss_space.profile_key, "boss:a")
+        self.assertEqual(zhilian_space.profile_key, "zhilian:a")
 
 
 if __name__ == "__main__":

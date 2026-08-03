@@ -129,3 +129,4 @@ spec011-*.yaml
 # Other-session build artifacts (temporary)
 webui/dist/assets/index-*.js
 webui/src/__tests__/types.spec.ts
+scripts/zhilian_cdp_raw.py

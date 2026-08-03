@@ -1,0 +1,10 @@
+{
+  "platform": "zhilian",
+  "mapping_version": 1,
+  "nationwide": {
+    "name": "全国",
+    "code": "jl0"
+  },
+  "cities": [],
+  "note": "仅包含已核验的全国 jl0（冻结设计决策，platform-schema.md L176）。其它城市码未由真实页面核验，不写入。核验后追加到 cities 数组并递增 mapping_version。"
+}

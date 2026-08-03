@@ -1,0 +1,121 @@
+{
+  "platform": "zhilian",
+  "manifest_version": 1,
+  "created_at": "2026-08-04",
+  "summary": "智联平台外部事实核验清单。当前无可用人工登录态，未核验项标为阻断，enabled_for_new_tasks 保持 false。",
+  "verified_facts": [
+    {
+      "key": "nationwide_city_code",
+      "value": "jl0",
+      "source": "specs/001-add-zhilian-platform/contracts/platform-schema.md L176; data-model.md L55",
+      "verified_at": "frozen-design-decision",
+      "sufficient_for_real_tasks": true,
+      "fixture_version": null,
+      "note": "全国 jl0 是冻结设计决策，可作为稳定值写入城市目录。"
+    },
+    {
+      "key": "official_host",
+      "value": ["zhaopin.com", "www.zhaopin.com"],
+      "source": "specs/001-add-zhilian-platform/contracts/platform-schema.md L204",
+      "verified_at": "frozen-design-decision",
+      "sufficient_for_real_tasks": true,
+      "fixture_version": null,
+      "note": "URL allowlist 已在 webui/platforms.py normalize_zhilian_job_url 实现。"
+    },
+    {
+      "key": "job_detail_path_pattern",
+      "value": "^/jobdetail/[A-Za-z0-9_-]+\\.htm$",
+      "source": "specs/001-add-zhilian-platform/contracts/platform-schema.md L205",
+      "verified_at": "frozen-design-decision",
+      "sufficient_for_real_tasks": true,
+      "fixture_version": null
+    },
+    {
+      "key": "default_cdp_port",
+      "value": 9223,
+      "source": "specs/001-add-zhilian-platform/contracts/platform-schema.md L188",
+      "verified_at": "frozen-design-decision",
+      "sufficient_for_real_tasks": true,
+      "fixture_version": null
+    },
+    {
+      "key": "filter_schema_fields",
+      "value": ["salary", "experience", "degree", "industry", "scale", "company_nature"],
+      "source": "specs/001-add-zhilian-platform/contracts/platform-schema.md L79",
+      "verified_at": "frozen-design-decision",
+      "sufficient_for_real_tasks": true,
+      "fixture_version": null,
+      "note": "字段集合已冻结；但 company_nature 的 options 值未核验，字段本身可注册为空。"
+    }
+  ],
+  "blocked_facts": [
+    {
+      "key": "company_nature_options",
+      "reason": "智联公司性质枚举稳定值/标签未由当前真实登录页面核验；research.md L180 明确要求实施时读取 fe-api.zhaopin.com/c/i/search/base/data 并脱敏冻结。",
+      "blocks_enablement": true,
+      "historical_reference": "research.md L180 提到元数据入口，但未实测编码值。",
+      "must_verify_before": "tasks004 真实启用智联"
+    },
+    {
+      "key": "city_codes_non_nationwide",
+      "reason": "除全国 jl0 外的其它城市码未由真实页面或官方页面数据核验。",
+      "blocks_enablement": true,
+      "historical_reference": "research.md L177 提到搜索 URL jl{city} 模式，但具体城市码未脱敏保存。",
+      "must_verify_before": "tasks004 真实启用智联"
+    },
+    {
+      "key": "metadata_api_endpoint",
+      "reason": "fe-api.zhaopin.com/c/i/search/base/data 仅为历史观察，未实测确认是否仍可用、是否需要登录态、返回结构是否包含公司性质编码。",
+      "blocks_enablement": true,
+      "must_verify_before": "tasks004 真实启用智联"
+    },
+    {
+      "key": "list_page_markers",
+      "reason": "列表卡片 div.joblist-box__item、标题 a.jobinfo__name、薪资 p.jobinfo__salary 等选择器为历史参考(research.md L178)，未实测。",
+      "blocks_enablement": true,
+      "must_verify_before": "tasks004 真实启用智联"
+    },
+    {
+      "key": "detail_page_markers",
+      "reason": "详情 JD 容器 div.describtion-card__detail-content 为历史参考(research.md L179)，未实测。",
+      "blocks_enablement": true,
+      "must_verify_before": "tasks004 真实启用智联"
+    },
+    {
+      "key": "login_wall_markers",
+      "reason": "未登录时列表不可用并提示登录的行为为历史观察(research.md L181)，未实测 marker。",
+      "blocks_enablement": true,
+      "must_verify_before": "tasks004 真实启用智联"
+    },
+    {
+      "key": "edgeone_verification_markers",
+      "reason": "无头访问触发腾讯 EdgeOne 为历史观察(research.md L181)，未实测 marker。",
+      "blocks_enablement": true,
+      "must_verify_before": "tasks004 真实启用智联"
+    },
+    {
+      "key": "empty_state_markers",
+      "reason": "明确空状态页面 marker 未核验。",
+      "blocks_enablement": true,
+      "must_verify_before": "tasks004 真实启用智联"
+    },
+    {
+      "key": "rate_limit_markers",
+      "reason": "限流页面 marker 未核验。",
+      "blocks_enablement": true,
+      "must_verify_before": "tasks004 真实启用智联"
+    },
+    {
+      "key": "block_page_markers",
+      "reason": "封禁页面 marker 未核验。",
+      "blocks_enablement": true,
+      "must_verify_before": "tasks004 真实启用智联"
+    }
+  ],
+  "enablement_decision": {
+    "enabled_for_new_tasks": false,
+    "availability_reason": "company_nature options / non-nationwide city codes / page markers 未由当前真实页面核验",
+    "skeleton_complete": true,
+    "can_run_real_tasks": false
+  }
+}

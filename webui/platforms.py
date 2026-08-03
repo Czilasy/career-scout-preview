@@ -26,6 +26,11 @@ __all__ = [
     "ZHILIAN_DEFAULT_CDP_PORT",
     "BOSS_FILTER_SCHEMA_VERSION",
     "BOSS_CITY_MAPPING_VERSION",
+    "ZHILIAN_FILTER_SCHEMA_VERSION",
+    "ZHILIAN_CITY_MAPPING_VERSION",
+    "ZHILIAN_NATIONWIDE_CODE",
+    "ZHILIAN_NATIONWIDE_NAME",
+    "ZHILIAN_AVAILABILITY_REASON",
     "FilterOption",
     "FilterField",
     "PlatformFilterSchema",
@@ -46,6 +51,12 @@ __all__ = [
     "resolve_platform_or_default",
     "normalize_job_url",
     "resolve_login_space",
+    "check_platform_fixture_integrity",
+    "resolve_platform_city",
+    "derive_zhilian_profile_dir",
+    "check_login_space_conflict",
+    "check_browser_account_delete",
+    "check_browser_account_activate",
     "project_filter_schema",
     "validate_filter_values",
     "build_filter_snapshot",
@@ -74,6 +85,12 @@ BOSS_FILTER_SCHEMA_VERSION = 1
 
 #: BOSS 城市目录映射版本。城市码集合变化时递增。
 BOSS_CITY_MAPPING_VERSION = 2
+
+#: 智联 AI 筛选 schema 版本。字段集合或稳定值/标签核验后变化时递增。
+ZHILIAN_FILTER_SCHEMA_VERSION = 1
+
+#: 智联城市目录映射版本。城市码集合变化时递增。
+ZHILIAN_CITY_MAPPING_VERSION = 1
 
 # BOSS AI 筛选公共字段顺序（contracts/platform-schema.md 字段集合表）。
 _BOSS_COMMON_FIELDS: tuple[str, ...] = (
@@ -511,6 +528,172 @@ def resolve_login_space(
 
 
 # ---------------------------------------------------------------------------
+# T206: schema/城市 fixture 完整性检查
+# ---------------------------------------------------------------------------
+
+def check_platform_fixture_integrity(platform: str) -> tuple[bool, str]:
+    """检查平台 schema/城市 fixture 完整性（T206）。
+
+    返回 ``(ok, reason)``：
+    - 需选项字段非空（每个 FilterField.options 必须有元素）；
+    - 稳定值和标签非空（FilterOption.__post_init__ 已强制）；
+    - 映射版本存在（PlatformCityCatalog 已强制 mapping_version 正整数）；
+    - 城市目录非空。
+
+    ok=False 时 reason 描述缺失项；调用方据此保持 ``enabled_for_new_tasks=False``
+    或返回 ``platform_schema_unavailable`` / ``city_mapping_unavailable``。
+    """
+    reg = get_platform(platform)
+    schema = reg.filter_schema
+    catalog = reg.city_catalog
+
+    empty_option_fields = [f.key for f in schema.fields if not f.options]
+    if empty_option_fields:
+        return False, (
+            f"fields with empty options: {', '.join(empty_option_fields)}"
+        )
+
+    if not catalog.entries:
+        return False, "city catalog is empty"
+
+    return True, ""
+
+
+def resolve_platform_city(platform: str, city_name: str) -> CityEntry:
+    """按平台城市目录解析规范城市名为平台码（T206 缺城阻断）。
+
+    缺城时抛 ``ValueError("city_mapping_missing")``；
+    平台未注册时抛 ``PlatformNotRegisteredError``。
+    """
+    reg = get_platform(platform)
+    entry = reg.city_catalog.find(city_name)
+    if entry is None:
+        raise ValueError(
+            f"city_mapping_missing: 平台 {platform} 缺少城市映射: {city_name}"
+        )
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# T208-T210: 浏览器登录空间派生与双平台检查
+# ---------------------------------------------------------------------------
+
+def derive_zhilian_profile_dir(boss_profile_dir: str) -> str:
+    """派生智联 profile_dir = boss_profile_dir + '.zhilian'（T208）。
+
+    确定性派生：同一 ``boss_profile_dir`` 总是产生同一智联 profile_dir。
+    与 BOSS profile_dir 不同（后缀 ``.zhilian``），保证两个平台的 profile
+    目录隔离。绝对路径只在后端运行时存在，不写数据库、日志或用户 API。
+    """
+    if not boss_profile_dir:
+        raise ValueError("boss_profile_dir 不能为空")
+    return str(boss_profile_dir).rstrip("/\\") + ".zhilian"
+
+
+def check_login_space_conflict(
+    platform: str,
+    browser_account: str,
+    *,
+    boss_profile_dir: str,
+    port_profile_paths: list[str],
+    known_profile_paths: list[str],
+) -> tuple[bool, str]:
+    """检查登录空间冲突（T209）。
+
+    受控切换规则（platform-schema.md 浏览器登录空间）：
+
+    - 端口空闲 → ``(True, "")``；
+    - 端口被期望 profile 占用 → ``(True, "")``（复用）；
+    - 端口被同平台已知 profile 占用 → ``(True, "")``（允许受控切换）；
+    - 端口被未知 profile 占用 → ``(False, "login_space_conflict")``。
+
+    参数：
+        platform: ``boss`` 或 ``zhilian``
+        browser_account: 账号 ID
+        boss_profile_dir: 该账号的 BOSS profile 目录
+        port_profile_paths: 端口上当前占用的 profile 路径列表（已规范化）
+        known_profile_paths: 该平台所有已知账号的 profile 路径列表（已规范化）
+
+    未知平台抛 ``UnknownPlatformError``。
+    """
+    validate_platform_key(platform)
+    if not browser_account:
+        raise ValueError("browser_account 不能为空")
+
+    if platform == "boss":
+        expected = str(boss_profile_dir)
+    else:  # zhilian
+        expected = derive_zhilian_profile_dir(boss_profile_dir)
+
+    if not port_profile_paths:
+        return True, ""
+
+    if expected in port_profile_paths:
+        return True, ""
+
+    known_set = set(known_profile_paths)
+    for port_path in port_profile_paths:
+        if port_path in known_set:
+            return True, ""
+
+    return False, "login_space_conflict"
+
+
+def check_browser_account_delete(
+    browser_account: str,
+    *,
+    boss_profile_dir: str,
+    running_locks: list[dict],
+    port_profiles_boss: list[str],
+    port_profiles_zhilian: list[str],
+) -> tuple[bool, str]:
+    """检查账号删除是否允许（T210）。
+
+    原子检查两个平台 profile、两个端口和运行锁：
+
+    - ``running_locks``: ``[{platform, account, kind}, ...]``，任一命中该账号
+      → ``(False, "browser_busy")``；
+    - ``port_profiles_boss``: 9222 端口上的 profile 路径，BOSS profile 命中
+      → ``(False, "browser_in_use")``；
+    - ``port_profiles_zhilian``: 9223 端口上的 profile 路径，智联派生 profile
+      命中 → ``(False, "browser_in_use")``。
+
+    任一命中即阻断删除，不先删除其中一个目录。
+    """
+    if not browser_account:
+        raise ValueError("browser_account 不能为空")
+
+    for lock in running_locks:
+        if lock.get("account") == browser_account:
+            kind = lock.get("kind", "unknown")
+            return False, f"browser_busy: {kind} lock"
+
+    if boss_profile_dir and boss_profile_dir in port_profiles_boss:
+        return False, "browser_in_use: boss profile"
+
+    zhilian_dir = derive_zhilian_profile_dir(boss_profile_dir)
+    if zhilian_dir in port_profiles_zhilian:
+        return False, "browser_in_use: zhilian profile"
+
+    return True, ""
+
+
+def check_browser_account_activate(
+    browser_account: str,
+    *,
+    account_exists: bool,
+) -> tuple[bool, str]:
+    """检查账号激活是否允许（T210）。
+
+    ``activate`` 只改草稿（设置当前活跃账号），不启动 Chrome、不切换
+    profile、不触碰端口。只验证账号存在，不检查运行锁或端口占用。
+    """
+    if not account_exists:
+        return False, "account_not_found"
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
 # AI 筛选 schema 投影与快照
 # ---------------------------------------------------------------------------
 
@@ -829,6 +1012,103 @@ def _ensure_boss_registered() -> PlatformRegistry:
 
 # 启动时尝试从真实 boss_cdp_raw 注册；失败时保留空注册表，由调用方兜底。
 _initialize_boss_from_runtime()
+
+
+# ---------------------------------------------------------------------------
+# 智联注册（tasks003 T204-T206）
+# ---------------------------------------------------------------------------
+
+# 智联 AI 筛选字段顺序（contracts/platform-schema.md 字段集合表）。
+_ZHILIAN_FILTER_FIELDS: tuple[str, ...] = (
+    "salary", "experience", "degree", "industry", "scale", "company_nature",
+)
+
+_ZHILIAN_FIELD_LABELS: dict[str, str] = {
+    "salary": "薪资范围",
+    "experience": "经验要求",
+    "degree": "学历",
+    "industry": "行业",
+    "scale": "公司规模",
+    "company_nature": "公司性质",
+}
+
+#: 智联全国城市码（冻结设计决策，platform-schema.md L176）。
+ZHILIAN_NATIONWIDE_CODE = "jl0"
+ZHILIAN_NATIONWIDE_NAME = "全国"
+
+#: 智联禁用原因：公司性质 options / 非全国城市码 / 页面 marker 未核验。
+ZHILIAN_AVAILABILITY_REASON = (
+    "company_nature options / non-nationwide city codes / page markers "
+    "未由当前真实页面核验"
+)
+
+
+def _build_zhilian_filter_schema() -> PlatformFilterSchema:
+    """构建智联 AI 筛选 schema。
+
+    字段集合已冻结（salary/experience/degree/industry/scale/company_nature）；
+    但所有字段 options 为空，因为稳定值/标签未由真实页面核验
+    （fixture_manifest.json blocked_facts）。``enabled_for_new_tasks=False``。
+    """
+    fields: list[FilterField] = []
+    for key in _ZHILIAN_FILTER_FIELDS:
+        fields.append(FilterField(
+            key=key,
+            label=_ZHILIAN_FIELD_LABELS.get(key, key),
+            multiple=True,
+            options=(),  # 未核验，保持空
+        ))
+    return PlatformFilterSchema(
+        platform="zhilian",
+        schema_version=ZHILIAN_FILTER_SCHEMA_VERSION,
+        enabled_for_new_tasks=False,
+        fields=tuple(fields),
+    )
+
+
+def _build_zhilian_city_catalog() -> PlatformCityCatalog:
+    """构建智联城市目录。
+
+    仅包含全国 ``jl0``（冻结设计决策）。其它城市码未核验，不写入
+    （fixture_manifest.json blocked_facts: city_codes_non_nationwide）。
+    """
+    return PlatformCityCatalog(
+        platform="zhilian",
+        mapping_version=ZHILIAN_CITY_MAPPING_VERSION,
+        entries=(
+            CityEntry(
+                name=ZHILIAN_NATIONWIDE_NAME,
+                label=ZHILIAN_NATIONWIDE_NAME,
+                platform_code=ZHILIAN_NATIONWIDE_CODE,
+                mapping_version=ZHILIAN_CITY_MAPPING_VERSION,
+            ),
+        ),
+    )
+
+
+def _register_zhilian() -> PlatformRegistry:
+    """注册智联平台（enabled_for_new_tasks=False）。
+
+    公司性质 options / 非全国城市码 / 页面 marker 未核验前保持禁用。
+    """
+    registry = PlatformRegistry(
+        key="zhilian",
+        display_name="智联招聘",
+        filter_schema=_build_zhilian_filter_schema(),
+        city_catalog=_build_zhilian_city_catalog(),
+        enabled_for_new_tasks=False,
+        availability_reason=ZHILIAN_AVAILABILITY_REASON,
+        default_cdp_port=ZHILIAN_DEFAULT_CDP_PORT,
+        normalize_job_url_fn=normalize_zhilian_job_url,
+        resolve_login_space_fn=resolve_zhilian_login_space,
+        source_factory=None,  # 由 app.py 在启动时注入（tasks004+）
+    )
+    register_platform(registry)
+    return registry
+
+
+# 模块加载时注册智联（不依赖外部运行时数据，直接使用冻结值）。
+_register_zhilian()
 
 
 # 纯函数注册兜底用的最小 BOSS 映射（仅在 boss_cdp_raw 不可导入时使用，

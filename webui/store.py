@@ -2475,7 +2475,7 @@ class TaskStore:
             for job in jobs:
                 conn.execute(
                     "INSERT OR REPLACE INTO screening_results "
-                    "(id, run_id, job_id, verdict, created_at, title, company, salary, "
+                    "(id, run_id, platform_job_id, verdict, created_at, title, company, salary, "
                     " location, tags, jd, source_url, verdict_reason, caveats_json, is_dropped) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
                     (
@@ -2498,7 +2498,7 @@ class TaskStore:
             for job in dropped:
                 conn.execute(
                     "INSERT OR REPLACE INTO screening_results "
-                    "(id, run_id, job_id, verdict, created_at, title, company, salary, "
+                    "(id, run_id, platform_job_id, verdict, created_at, title, company, salary, "
                     " location, tags, jd, source_url, verdict_reason, caveats_json, is_dropped) "
                     "VALUES (?, ?, ?, 'dropped', ?, ?, ?, ?, ?, ?, '', ?, ?, '[]', 1)",
                     (
@@ -2582,7 +2582,7 @@ class TaskStore:
                 except (json.JSONDecodeError, TypeError):
                     pass
                 dropped.append({
-                    "job_id": row["job_id"],
+                    "job_id": row["platform_job_id"],
                     "title": row["title"],
                     "reason": reason,
                     "canonical_url": row["source_url"],
@@ -2606,7 +2606,7 @@ class TaskStore:
                 except (json.JSONDecodeError, TypeError):
                     pass
                 jobs.append({
-                    "job_id": row["job_id"],
+                    "job_id": row["platform_job_id"],
                     "title": row["title"],
                     "company": row["company"],
                     "salary": row["salary"],
@@ -2730,7 +2730,7 @@ class TaskStore:
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
             conn.execute(
-                "UPDATE screening_results SET jd = ? WHERE run_id = ? AND job_id = ?",
+                "UPDATE screening_results SET jd = ? WHERE run_id = ? AND platform_job_id = ?",
                 (jd, str(run_id), str(job_id)),
             )
 
@@ -2822,18 +2822,20 @@ class TaskStore:
             )
 
             # --------------------------------------------------------------
-            # 3. screening_results 新增列（内部 job_id 保留，新增 platform_job_id）
+            # 3. screening_results: 旧 job_id（语义=平台原始ID）重命名为
+            #    platform_job_id，再新增可空内部 job_id（语义=内部UUID）
             # --------------------------------------------------------------
             self._add_column_if_missing(
                 conn, "screening_results", "platform", "TEXT NOT NULL DEFAULT 'boss'"
             )
-            self._add_column_if_missing(
-                conn, "screening_results", "platform_job_id", "TEXT"
+            # 旧 job_id 列语义=平台原始ID，按 data-model.md 重命名为 platform_job_id
+            self._rename_column_with_data(
+                conn, "screening_results", "job_id", "platform_job_id",
+                old_type="TEXT NOT NULL", new_type="TEXT NOT NULL",
             )
-            # 旧的 screening_results.job_id 语义=平台原始ID，复制到 platform_job_id
-            conn.execute(
-                "UPDATE screening_results SET platform_job_id = job_id "
-                "WHERE platform_job_id IS NULL AND job_id IS NOT NULL"
+            # 新增可空内部 job_id（内部UUID语义，落库前可空）
+            self._add_column_if_missing(
+                conn, "screening_results", "job_id", "TEXT"
             )
             self._add_column_if_missing(
                 conn, "screening_results", "experience", "TEXT NOT NULL DEFAULT ''"
@@ -2896,7 +2898,7 @@ class TaskStore:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS screening_source_attempts (
-                    id TEXT PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL,
                     platform TEXT NOT NULL,
                     combo_key TEXT NOT NULL,
@@ -3063,6 +3065,11 @@ class TaskStore:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_scrape_run_jobs_run_job "
                 "ON scrape_run_jobs(run_id, platform_job_id)"
             )
+        elif table == "screening_results":
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_screening_results_run_pid "
+                "ON screening_results(run_id, platform_job_id)"
+            )
 
     def _copy_legacy_default_profile(self):
         """Copy old default profile to candidate_profiles if not already present."""
@@ -3078,11 +3085,6 @@ class TaskStore:
                 )
 
     # -- T112: Job 双索引冲突算法 upsert ---------------------------------
-
-    _PLATFORM_HOSTS = {
-        "boss": ("www.zhipin.com", "zhipin.com"),
-        "zhilian": ("zhaopin.com", "www.zhaopin.com"),
-    }
 
     def upsert_job(
         self,
@@ -3104,8 +3106,10 @@ class TaskStore:
         返回 {"ok": bool, "job_id": str | None, "error_code": str | None}。
         所有 8 个分支在同一事务中完成。
         """
-        # 分支1：URL host 必须属于声明平台
-        if not self._url_belongs_to_platform(canonical_url, platform):
+        # 分支1：URL host/path 必须属于声明平台——复用 tasks001 的平台注册规则
+        # （contracts/job-source.md 禁止在 store 内复制第二套 host/path 规则）
+        from webui.platforms import normalize_job_url
+        if not normalize_job_url(platform, canonical_url):
             return {"ok": False, "job_id": None, "error_code": "platform_url_mismatch"}
 
         extra_json = json.dumps(extra or {}, ensure_ascii=False, sort_keys=True)
@@ -3201,19 +3205,6 @@ class TaskStore:
 
             return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
 
-    @classmethod
-    def _url_belongs_to_platform(cls, url: str, platform: str) -> bool:
-        """检查 URL host 是否属于声明平台。"""
-        from urllib.parse import urlparse
-        allowed = cls._PLATFORM_HOSTS.get(platform)
-        if not allowed:
-            return False
-        try:
-            host = urlparse(url).hostname or ""
-        except Exception:
-            return False
-        return host in allowed
-
     # -- T113: 结果快照读写 API -------------------------------------------
 
     def save_result_snapshot(
@@ -3281,18 +3272,18 @@ class TaskStore:
             raise ValueError("outcome_kind='empty' 时 empty_evidence 必填")
         evidence_json = json.dumps(empty_evidence or {}, ensure_ascii=False, sort_keys=True) if empty_evidence else None
         ts = _now()
-        attempt_id = _uuid()
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO screening_source_attempts "
-                "(id, run_id, platform, combo_key, attempt_no, input_hash, "
+                "(run_id, platform, combo_key, attempt_no, input_hash, "
                 " outcome_kind, job_count, empty_evidence_json, error_code, error_reason, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (attempt_id, str(run_id), str(platform), str(combo_key), int(attempt_no),
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(run_id), str(platform), str(combo_key), int(attempt_no),
                  input_hash, str(outcome_kind), int(job_count), evidence_json,
                  error_code, error_reason, ts),
             )
+            attempt_id = cur.lastrowid
         return attempt_id
 
     def get_latest_source_attempt(self, run_id: str, combo_key: str) -> dict | None:
@@ -4421,9 +4412,9 @@ class TaskStore:
                     caveats = []
                 conn.execute(
                     "INSERT INTO screening_results "
-                    "(id, run_id, job_id, verdict, verdict_reason, caveats_json, is_dropped, created_at) "
+                    "(id, run_id, platform_job_id, verdict, verdict_reason, caveats_json, is_dropped, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(run_id, job_id) DO UPDATE SET "
+                    "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET "
                     " verdict = excluded.verdict, "
                     " verdict_reason = excluded.verdict_reason, "
                     " caveats_json = excluded.caveats_json, "
@@ -4444,8 +4435,8 @@ class TaskStore:
             for job_id, verdict in (verdicts or {}).items():
                 conn.execute(
                     "INSERT INTO screening_results "
-                    "(id, run_id, job_id, verdict, created_at) VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(run_id, job_id) DO UPDATE SET verdict = excluded.verdict",
+                    "(id, run_id, platform_job_id, verdict, created_at) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET verdict = excluded.verdict",
                     (
                         _uuid(), str(run_id), str(job_id),
                         json.dumps(verdict, ensure_ascii=False), ts,
@@ -4472,7 +4463,7 @@ class TaskStore:
         """
         with self._connection() as conn:
             rows = conn.execute(
-                "SELECT job_id, verdict, verdict_reason, caveats_json "
+                "SELECT platform_job_id, verdict, verdict_reason, caveats_json "
                 "FROM screening_results WHERE run_id = ?",
                 (str(run_id),),
             ).fetchall()
@@ -4491,13 +4482,13 @@ class TaskStore:
                         value["reason"] = reason
                     if "caveats" not in value:
                         value["caveats"] = caveats
-                    out[str(row["job_id"])] = value
+                    out[str(row["platform_job_id"])] = value
                 else:
-                    out[str(row["job_id"])] = {"verdict": str(value), "reason": reason, "caveats": caveats}
+                    out[str(row["platform_job_id"])] = {"verdict": str(value), "reason": reason, "caveats": caveats}
             except (json.JSONDecodeError, TypeError):
                 # 纯字符串 verdict（如 match/not_match/uncertain/dropped）
                 if v:
-                    out[str(row["job_id"])] = {"verdict": v, "reason": reason, "caveats": caveats}
+                    out[str(row["platform_job_id"])] = {"verdict": v, "reason": reason, "caveats": caveats}
         return out
 
     def load_screening_pending(self, run_id):

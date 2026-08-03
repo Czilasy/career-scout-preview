@@ -929,7 +929,7 @@ class ScreeningRunStoreTests(unittest.TestCase):
         with self.store._connection() as conn:
             conn.execute(
                 "UPDATE screening_results SET verdict = ?, verdict_reason = '' "
-                "WHERE run_id = ? AND job_id = ?",
+                "WHERE run_id = ? AND platform_job_id = ?",
                 (json.dumps({"verdict": "match", "reason": "JSON原因",
                             "caveats": ["JSON提示"]}, ensure_ascii=False),
                  run_id, "j1"),

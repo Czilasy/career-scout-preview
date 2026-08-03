@@ -1230,6 +1230,120 @@ class ChromeSetupTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
 
 
+# ===========================================================================
+# tasks003 T211: 智联登录空间 profile/端口隔离、未知占用、运行锁、不泄露路径
+# ===========================================================================
+class ZhilianLoginSpaceTests(unittest.TestCase):
+    """T208-T211: BOSS 9222 与智联 9223 profile/端口隔离、未知占用拒绝。
+
+    覆盖 webui.platforms 的登录空间派生和双平台检查函数，确认：
+    - profile 隔离（boss_profile_dir ≠ zhilian profile_dir）；
+    - 端口隔离（9222 ≠ 9223）；
+    - 未知 profile 占用端口 → login_space_conflict；
+    - 运行锁 → browser_busy；
+    - 不泄露 profile 路径。
+    """
+
+    def test_profile_isolation_boss_vs_zhilian(self):
+        """同一账号的 BOSS 与智联 profile_dir 不同（T208）。"""
+        from webui.platforms import derive_zhilian_profile_dir
+        boss_dir = "/home/user/.career-scout/chrome-profile"
+        zhilian_dir = derive_zhilian_profile_dir(boss_dir)
+        self.assertNotEqual(boss_dir, zhilian_dir)
+        self.assertTrue(zhilian_dir.endswith(".zhilian"))
+
+    def test_port_isolation_9222_vs_9223(self):
+        """BOSS 9222 与智联 9223 端口不同（T208/T211）。"""
+        from webui.platforms import (
+            BOSS_DEFAULT_CDP_PORT, ZHILIAN_DEFAULT_CDP_PORT,
+        )
+        self.assertEqual(BOSS_DEFAULT_CDP_PORT, 9222)
+        self.assertEqual(ZHILIAN_DEFAULT_CDP_PORT, 9223)
+        self.assertNotEqual(BOSS_DEFAULT_CDP_PORT, ZHILIAN_DEFAULT_CDP_PORT)
+
+    def test_login_space_profile_key_isolation(self):
+        """BOSS 与智联 profile_key 不同（boss:a ≠ zhilian:a）。"""
+        from webui.platforms import resolve_login_space
+        boss_space = resolve_login_space("boss", "a", boss_profile_dir="/tmp/p")
+        zhilian_space = resolve_login_space("zhilian", "a", boss_profile_dir="/tmp/p")
+        self.assertNotEqual(boss_space.profile_key, zhilian_space.profile_key)
+        self.assertNotEqual(boss_space.cdp_port, zhilian_space.cdp_port)
+
+    def test_unknown_profile_occupation_rejected(self):
+        """未知 profile 占用端口 → login_space_conflict（T209）。"""
+        from webui.platforms import check_login_space_conflict
+        ok, reason = check_login_space_conflict(
+            "zhilian", "a",
+            boss_profile_dir="/tmp/profile-a",
+            port_profile_paths=["/tmp/unknown-profile"],
+            known_profile_paths=["/tmp/profile-a.zhilian", "/tmp/profile-b.zhilian"],
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "login_space_conflict")
+
+    def test_known_profile_occupation_allows_switch(self):
+        """同平台已知 profile 占用 → 允许受控切换（T209）。"""
+        from webui.platforms import check_login_space_conflict
+        ok, reason = check_login_space_conflict(
+            "zhilian", "a",
+            boss_profile_dir="/tmp/profile-a",
+            port_profile_paths=["/tmp/profile-b.zhilian"],
+            known_profile_paths=["/tmp/profile-a.zhilian", "/tmp/profile-b.zhilian"],
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_running_lock_blocks_delete(self):
+        """运行锁 → browser_busy，阻断删除（T210）。"""
+        from webui.platforms import check_browser_account_delete
+        ok, reason = check_browser_account_delete(
+            "a", boss_profile_dir="/tmp/profile-a",
+            running_locks=[{"platform": "boss", "account": "a", "kind": "running"}],
+            port_profiles_boss=[], port_profiles_zhilian=[],
+        )
+        self.assertFalse(ok)
+        self.assertIn("browser_busy", reason)
+
+    def test_delete_does_not_leak_profile_path(self):
+        """delete reason 不含 profile 路径（T210/T211）。"""
+        from webui.platforms import check_browser_account_delete
+        secret_path = "/tmp/secret-profile-xyz"
+        ok, reason = check_browser_account_delete(
+            "a", boss_profile_dir=secret_path,
+            running_locks=[], port_profiles_boss=[secret_path],
+            port_profiles_zhilian=[],
+        )
+        self.assertFalse(ok)
+        self.assertNotIn(secret_path, reason)
+        self.assertNotIn("secret", reason)
+        self.assertNotIn("xyz", reason)
+
+    def test_login_space_repr_no_profile_dir(self):
+        """LoginSpace 不含 profile_dir 字段，repr 不泄露路径（T211）。"""
+        from webui.platforms import LoginSpace
+        space = LoginSpace(
+            platform="zhilian", browser_account="a",
+            profile_key="zhilian:a", cdp_port=9223,
+        )
+        self.assertFalse(hasattr(space, "profile_dir"))
+        repr_text = repr(space)
+        self.assertNotIn("profile_dir", repr_text)
+        self.assertNotIn("/tmp", repr_text)
+        self.assertNotIn("chrome-profile", repr_text)
+
+    def test_boss_profile_unchanged_by_zhilian_registration(self):
+        """智联注册不改变 BOSS 9222/基础 profile（T209）。"""
+        from webui.platforms import get_platform, BOSS_DEFAULT_CDP_PORT
+        boss = get_platform("boss")
+        self.assertEqual(boss.default_cdp_port, BOSS_DEFAULT_CDP_PORT)
+        self.assertEqual(boss.default_cdp_port, 9222)
+        self.assertTrue(boss.enabled_for_new_tasks)
+        # BOSS 仍然使用 boss_profile_dir 原值，不加后缀
+        space = boss.resolve_login_space("a", boss_profile_dir="/tmp/boss-profile")
+        self.assertEqual(space.profile_key, "boss:a")
+        self.assertEqual(space.cdp_port, 9222)
+
+
 class tempfile_profile:
     def __enter__(self):
         import tempfile
