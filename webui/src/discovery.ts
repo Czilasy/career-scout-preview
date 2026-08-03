@@ -4,6 +4,7 @@ import type {
   ExecutionSettings,
   FrozenSearchScope,
   JobItem,
+  Platform,
   ScopePreviewResponse,
   TaskSize,
 } from "./types";
@@ -83,4 +84,61 @@ export function recoverSelectionSettings(
     return { ...state.last_custom.settings };
   }
   return { ...state.settings };
+}
+
+// ---------------------------------------------------------------------------
+// T502：平台身份状态容器（contracts/platform-schema.md L142-159 + tasks006 L27）
+// ---------------------------------------------------------------------------
+// 三身份独立：草稿平台 / 任务平台 / 最近结果平台。
+// 不引入 Vue reactivity，保持 discovery.ts 纯函数 + 闭包风格；T503 起由组件接到 ref。
+// mock 阶段：DEFAULT_PLATFORM 硬编码 "boss"；T515 真实联调由组件从 /api/platforms.default_platform
+// 读取后传入 createPlatformState(initial)。task / result 初始为 null（无运行任务、无最近结果）。
+
+/** mock 阶段的默认草稿平台。真实联调阶段由组件从后端读取后传入工厂。 */
+export const DEFAULT_PLATFORM: Platform = "boss";
+
+/**
+ * 三身份独立平台状态容器。
+ * 不变式（platform-schema.md L142-159）：
+ *  1. setDraftPlatform 不改 task/result
+ *  2. setTaskPlatform 不改 draft/result（任务恢复）
+ *  3. setResultPlatform 不改 draft/task；不触发草稿切换
+ *  4. 不用 watcher 相互覆盖
+ */
+export interface PlatformState {
+  readonly draft: Platform;
+  readonly task: Platform | null;
+  readonly result: Platform | null;
+  /** 草稿切换：只作用于新任务草稿，不改 task/result。 */
+  setDraftPlatform: (platform: Platform) => void;
+  /** 任务恢复：从任务响应设置任务平台，不改 draft/result；null 表示无运行任务。 */
+  setTaskPlatform: (platform: Platform | null) => void;
+  /** 结果加载：从结果 snapshot 设置结果平台，不改 draft/task；不触发草稿切换。null 表示无最近结果。 */
+  setResultPlatform: (platform: Platform | null) => void;
+}
+
+export function createPlatformState(initial: Platform = DEFAULT_PLATFORM): PlatformState {
+  let draft = initial;
+  let task: Platform | null = null;
+  let result: Platform | null = null;
+  return {
+    get draft() {
+      return draft;
+    },
+    get task() {
+      return task;
+    },
+    get result() {
+      return result;
+    },
+    setDraftPlatform(platform: Platform) {
+      draft = platform;
+    },
+    setTaskPlatform(platform: Platform | null) {
+      task = platform;
+    },
+    setResultPlatform(platform: Platform | null) {
+      result = platform;
+    },
+  };
 }
