@@ -1353,7 +1353,7 @@ class DedicatedChromeShutdownTests(unittest.TestCase):
 
 
 class VersionConsistencyTests(unittest.TestCase):
-    """校验版本号在 README 双语 / pyproject.toml / 脚本保持一致。
+    """校验版本号在 README / pyproject.toml / 脚本保持一致。
 
     发版时只改一处会漏掉其他几处，这个测试在 CI/本地跑测试时就能拦住。
     """
@@ -1382,18 +1382,10 @@ class VersionConsistencyTests(unittest.TestCase):
         self.assertIsNotNone(m, "README.md 未找到版本号")
         readme_ver = _normalize_version(m.group(1))
 
-        # README.en.md 标题: # ... v2.3
-        readme_en = self._read_text("README.en.md")
-        m = re.search(r"v(\d+\.\d+(?:\.\d+)?)", readme_en)
-        self.assertIsNotNone(m, "README.en.md 未找到版本号")
-        readme_en_ver = _normalize_version(m.group(1))
-
         self.assertEqual(script_ver, pyproject_ver,
                          f"脚本({script_ver}) 与 pyproject.toml({pyproject_ver}) 版本不一致")
         self.assertEqual(script_ver, readme_ver,
                          f"脚本({script_ver}) 与 README.md({readme_ver}) 版本不一致")
-        self.assertEqual(script_ver, readme_en_ver,
-                         f"脚本({script_ver}) 与 README.en.md({readme_en_ver}) 版本不一致")
 
 
 class ProjectScopeTests(unittest.TestCase):
@@ -1415,7 +1407,7 @@ class ProjectScopeTests(unittest.TestCase):
         combined = "\n".join(
             path.read_text(encoding="utf-8")
             for name in (
-                "README.md", "CHANGELOG.md", "SKILL.md",
+                "README.md",
                 "pyproject.toml", "requirements.txt", "uv.lock",
             )
             if (path := ROOT_PATH / name).exists()

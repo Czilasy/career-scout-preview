@@ -22,6 +22,7 @@ build/
 dist/
 .release/
 webui/node_modules/
+node_modules/
 !webui/dist/
 !webui/dist/**
 *.egg-info/
@@ -40,6 +41,10 @@ htmlcov/
 .ruff_cache/
 .tox/
 .nox/
+.vite/
+*.tsbuildinfo
+coverage/
+webui/coverage/
 
 # Local-only tests, not part of the public release
 tests/run_isolated_webui.py
@@ -60,6 +65,8 @@ tests/fixtures/discovery/*_result.json
 *.sqlite
 *.sqlite3
 backups/
+*.sqlite-shm
+*.sqlite-wal
 
 # Playwright CLI test artifacts
 .playwright-cli/
@@ -81,17 +88,30 @@ tuning/
 # Temporary diagnostic/scratch scripts
 _tmp_*.py
 
+# Backup and patch leftovers
+*.bak
+*.orig
+*.rej
+*.tmp
+
 # Editor and OS files
 .idea/
 .vscode/
 .DS_Store
 ._*
 Thumbs.db
+*~
+*.swp
+*.swo
 
 # Private keys and credentials
 *.pem
 *.key
 *.p12
+*.crt
+*.cer
+*.pfx
+*.jks
 
 # Local agent/tool state and archived internal docs
 .agents/
@@ -101,3 +121,4 @@ CODE_REVIEW.md
 spec011-*.yaml
 .trash/
 .devlog/
+.specify/

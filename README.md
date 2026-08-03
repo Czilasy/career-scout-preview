@@ -22,7 +22,7 @@ Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的 BOSS直聘职�
 
 ```bash
 git clone https://github.com/czyooutzilas-sketch/career-scout-preview.git
-cd career-scout
+cd career-scout-preview
 pip install -r requirements.txt
 # 或使用 uv
 uv sync
@@ -123,11 +123,6 @@ npm run build
 ```
 
 修改前端源码后必须重新构建并提交 `webui/dist`，否则 Web 工作台可能使用旧构建产物。
-
-## 参与贡献与安全
-
-- 贡献指南：[CONTRIBUTING.md](./CONTRIBUTING.md)
-- 安全政策：[SECURITY.md](./SECURITY.md)
 
 ## License
 

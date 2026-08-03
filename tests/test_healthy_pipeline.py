@@ -621,7 +621,7 @@ class Sc015AcceptanceHarnessTests(unittest.TestCase):
         self.assertNotIn("import websockets", source)
 
     def test_spec010_public_validation_entrypoints_have_docstrings(self):
-        """Public recovery and SC-015 entrypoints follow CONTRIBUTING.md."""
+        """Public recovery and SC-015 entrypoints follow project conventions."""
         root = pathlib.Path(__file__).resolve().parents[1]
         required = {
             root / "webui" / "historical_recovery.py": {
