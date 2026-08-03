@@ -19,7 +19,13 @@ import JobWorkspace from "../components/JobWorkspace.vue";
 import StepNavigator from "../components/StepNavigator.vue";
 import TaskProgress from "../components/TaskProgress.vue";
 import { apiRequest, errorMessage, settingsApi } from "../api";
-import { buildSearchScriptParams, normalizeScopePreview, partitionPipelineResult } from "../discovery";
+import {
+  buildSearchScriptParams,
+  createPlatformState,
+  DEFAULT_PLATFORM,
+  normalizeScopePreview,
+  partitionPipelineResult,
+} from "../discovery";
 import type { PipelineResult } from "../discovery";
 import type {
   AdvancedSettingsState,
@@ -29,6 +35,7 @@ import type {
   FrozenSearchScope,
   JobItem,
   Notice,
+  Platform,
 } from "../types";
 
 type StepId = "upload" | "search" | "screen" | "results";
@@ -69,6 +76,17 @@ const emit = defineEmits<{
   notify: [notice: Notice];
   "profile-created": [profile: CandidateProfile];
 }>();
+
+// T503：平台三身份独立（platform-schema.md L142-159）
+// platformState 是真相之源（非响应式闭包）；draftPlatform 是 Vue 镜像，仅供模板渲染。
+// setDraftPlatform 同步更新两者，不用 watcher 相互覆盖（不变式 4）。
+// 仅切换新任务草稿，不改 task/result（不变式 1）；T505 起按 platformState.draft 加载 schema/城市。
+const platformState = createPlatformState(DEFAULT_PLATFORM);
+const draftPlatform = ref<Platform>(platformState.draft);
+function setDraftPlatform(platform: Platform) {
+  platformState.setDraftPlatform(platform);
+  draftPlatform.value = platform;
+}
 
 const steps = [
   { id: "upload", label: "上传简历" },
@@ -1410,6 +1428,23 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
       <LoaderCircle :size="16" class="spin" aria-hidden="true" />
       <span>{{ restoredTaskHint }}</span>
       <button type="button" class="restore-close" aria-label="关闭提示" @click="restoredTaskHint = ''">×</button>
+    </div>
+    <div
+      class="platform-segment"
+      role="tablist"
+      aria-label="新任务目标平台"
+      :data-testid="`platform-current-${draftPlatform}`"
+    >
+      <button
+        v-for="platform in (['boss', 'zhilian'] as const)"
+        :key="platform"
+        type="button"
+        role="tab"
+        :aria-selected="draftPlatform === platform"
+        :class="['platform-segment-btn', { active: draftPlatform === platform }]"
+        :data-testid="`platform-segment-${platform}`"
+        @click="setDraftPlatform(platform)"
+      >{{ platform === 'boss' ? 'BOSS' : '智联' }}</button>
     </div>
     <StepNavigator
       :steps="steps"

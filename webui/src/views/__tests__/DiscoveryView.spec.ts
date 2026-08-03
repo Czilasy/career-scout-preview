@@ -427,4 +427,105 @@ describe("DiscoveryView", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("renders BOSS as default draft platform and switches draft to zhilian without touching task/result", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({
+          ok: true, selection: "balanced", settings: {
+            inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+            detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+            screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+          }, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1,
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+
+    // 默认草稿平台为 BOSS（DEFAULT_PLATFORM）
+    expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="platform-current-zhilian"]').exists()).toBe(false);
+    const bossBtn = wrapper.get('[data-testid="platform-segment-boss"]');
+    const zhilianBtn = wrapper.get('[data-testid="platform-segment-zhilian"]');
+    expect(bossBtn.attributes("aria-selected")).toBe("true");
+    expect(zhilianBtn.attributes("aria-selected")).toBe("false");
+
+    // 切换到智联：只作用于草稿，不应触发任何后端调用
+    const callsBefore = fetchMock.mock.calls.length;
+    await zhilianBtn.trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="platform-current-zhilian"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(false);
+    expect(zhilianBtn.attributes("aria-selected")).toBe("true");
+    expect(bossBtn.attributes("aria-selected")).toBe("false");
+    // 切换草稿平台不应触发额外的网络请求（T503 阶段尚未接入按平台加载 schema）
+    expect(fetchMock.mock.calls.length).toBe(callsBefore);
+
+    // 切回 BOSS
+    await bossBtn.trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
+    expect(bossBtn.attributes("aria-selected")).toBe("true");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps draft platform switch independent of a running task platform", async () => {
+    // 不变式 1（platform-schema.md L147）：切换草稿平台不改 task/result。
+    // 这里 mock 一个运行中的 BOSS 抓取任务，再切草稿到智联，验证 BOSS 任务状态不被改写。
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) {
+        return response({
+          ok: true, has_task: true, task_id: "boss-run-1",
+          kind: "scrape", status: "running",
+        });
+      }
+      if (url.includes("/api/task-state/boss-run-1")) {
+        return response({ status: "running", progress: { message: "BOSS 抓取中" }, logs: [] });
+      }
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({
+          ok: true, selection: "balanced", settings: {
+            inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+            detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+            screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+          }, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1,
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+
+    // 任务被接回后 activeStep 仍是 upload；切到 search 步骤才会渲染 TaskProgress。
+    // 草稿平台分段控件在所有步骤都常驻顶部，不受 activeStep 影响。
+    expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
+
+    // 草稿切到智联：仅改 draftPlatform，不触发后端调用，也不改 task snapshot
+    const callsBefore = fetchMock.mock.calls.length;
+    await wrapper.get('[data-testid="platform-segment-zhilian"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="platform-current-zhilian"]').exists()).toBe(true);
+    expect(fetchMock.mock.calls.length).toBe(callsBefore);
+
+    // 切回 BOSS 草稿
+    await wrapper.get('[data-testid="platform-segment-boss"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
+
+    vi.unstubAllGlobals();
+  });
 });
