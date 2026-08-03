@@ -564,6 +564,79 @@ class TuningController:
             source_artifact_id=source_artifact_id,
         )
 
+    # -- T614: 外层与 JSON 一致性校验（在 source/AI 前阻断） ---------------
+
+    def validate_consistency_before_execution(
+        self, *, manifest_id: str,
+    ) -> dict:
+        """T614: 校验 experiment/workload/artifact/manifest 外层与 JSON 一致性。
+
+        在 source 或 AI 执行前调用：
+        - manifest 外层 platform 与 manifest JSON fixed_fields.platform 一致
+        - manifest 外层 experiment_id 与 manifest JSON experiment_id 一致
+        - experiment 外层 platform 与 manifest 外层 platform 一致
+        - 若 manifest 有 source_artifact_id，其平台与实验平台一致
+
+        任一项错配时抛 ValueError 阻断，不在 source 或 AI 后报错。
+        """
+        record = self._store.get_task_manifest(manifest_id)
+        manifest = record["manifest"]
+        outer_platform = record.get("platform")
+        json_platform = (
+            manifest.get("fixed_fields", {}).get("platform")
+        )
+        if outer_platform and json_platform and outer_platform != json_platform:
+            raise ValueError(
+                f"manifest 外层平台 {outer_platform!r} 与 JSON 平台 "
+                f"{json_platform!r} 不一致"
+            )
+        outer_experiment_id = record.get("experiment_id")
+        json_experiment_id = manifest.get("experiment_id")
+        if (
+            outer_experiment_id and json_experiment_id
+            and outer_experiment_id != json_experiment_id
+        ):
+            raise ValueError(
+                f"manifest 外层 experiment_id {outer_experiment_id!r} 与 JSON "
+                f"{json_experiment_id!r} 不一致"
+            )
+        # 校验 experiment 外层 platform 与 manifest 一致
+        experiment = self._store.get_tuning_experiment(
+            outer_experiment_id or json_experiment_id or "",
+        )
+        exp_platform = experiment.get("platform")
+        manifest_platform = outer_platform or json_platform
+        if exp_platform and manifest_platform and exp_platform != manifest_platform:
+            raise ValueError(
+                f"实验外层平台 {exp_platform!r} 与 manifest 平台 "
+                f"{manifest_platform!r} 不一致"
+            )
+        source_artifact_id = manifest.get("frozen_input", {}).get(
+            "source_artifact_id"
+        )
+        if source_artifact_id:
+            try:
+                source = self._store.get_tuning_stage_artifact(
+                    source_artifact_id
+                )
+            except KeyError:
+                raise ValueError(
+                    f"manifest 引用的上游产物 {source_artifact_id} 不存在"
+                )
+            source_platform = source.get("platform")
+            if source_platform and exp_platform and source_platform != exp_platform:
+                raise ValueError(
+                    f"上游产物平台 {source_platform!r} 与实验平台 "
+                    f"{exp_platform!r} 不一致"
+                )
+        return {
+            "manifest_id": manifest_id,
+            "outer_platform": outer_platform,
+            "json_platform": json_platform,
+            "experiment_platform": exp_platform,
+            "consistent": True,
+        }
+
     # -- T608: 旧 BOSS manifest/artifact 客观证明纯校验器 -----------------
 
     _LEGACY_PROOFABLE_STAGES = frozenset({"list", "detail"})

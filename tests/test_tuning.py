@@ -509,7 +509,7 @@ class FrozenInputArtifactTests(unittest.TestCase):
         ]
         return self.controller.create_experiment_with_input(
             spec_version="011-deep-configuration-probing",
-            source_scope=scopes[0][1],
+            source_scope={**scopes[0][1], "browser_account": "a", "filter_schema_version": 1},
             quality_context=self._quality_context(),
             workloads=[
                 {
@@ -650,7 +650,8 @@ class TuningStageArtifactTests(unittest.TestCase):
         self.experiment = self.controller.create_experiment_with_input(
             spec_version="011-deep-configuration-probing",
             source_scope={"keywords": ["AI"], "scope_kind": "cities",
-                          "cities": ["东莞"], "pages_per_combination": 3},
+                          "cities": ["东莞"], "pages_per_combination": 3,
+                          "browser_account": "a", "filter_schema_version": 1},
             quality_context=quality_context,
             workloads=[{
                 "task_size": size,
@@ -730,7 +731,7 @@ class CompletionGateTests(unittest.TestCase):
         ]
         experiment = self.controller.create_experiment_with_input(
             spec_version="011-deep-configuration-probing",
-            source_scope=scopes[0][1],
+            source_scope={**scopes[0][1], "browser_account": "a", "filter_schema_version": 1},
             quality_context={
                 "profile_summary": "Python AI 应用开发候选人",
                 "screening_fields": {"salary": ["403"]},
@@ -1772,7 +1773,7 @@ class ManifestReportValidationTests(unittest.TestCase):
         ]
         self.experiment = self.controller.create_experiment_with_input(
             spec_version="011-deep-configuration-probing",
-            source_scope=scopes[0][1],
+            source_scope={**scopes[0][1], "browser_account": "a", "filter_schema_version": 1},
             quality_context={
                 "profile_summary": "Python AI 应用开发候选人",
                 "screening_fields": {"salary": ["403"]},
@@ -1834,6 +1835,7 @@ class ManifestReportValidationTests(unittest.TestCase):
                 "planned_pages", "task_size",
             )
         }
+        manifest["fixed_fields"]["platform"] = "boss"
         manifest["monitoring"]["final_artifact_path"] = (
             f"{root}/evidence/{self.round['id']}.json"
         )
@@ -2921,7 +2923,7 @@ class TuningRoundRunnerTests(unittest.TestCase):
             "execution_config": ExecutionConfigSnapshot.create(
                 _sample_nine_fields()).to_dict(),
             "fixed_fields": {
-                "keywords": ["AI"], "scope_kind": "cities",
+                "platform": "boss", "keywords": ["AI"], "scope_kind": "cities",
                 "cities": ["东莞"], "pages_per_combination": 1,
             },
             "frozen_input": {
@@ -3069,6 +3071,7 @@ class TuningRoundRunnerTests(unittest.TestCase):
             pathlib.Path(captured["artifact_root"]),
             self.root / "tuning" / "exp-run" / "artifacts" / "round-list",
         )
+        self.assertEqual(captured.get("platform"), "boss")
 
     def test_tampered_source_artifact_blocks_before_stage_execution(self):
         from webui.pipeline_exec import TuningRoundRunner
@@ -3254,6 +3257,160 @@ class PhaseRoundAdapterTests(unittest.TestCase):
                 repetition_index=1,
                 source_input_version="iv-1",
                 target_input_version="iv-2",
+            )
+
+
+class ConsistencyValidationBeforeExecutionTests(unittest.TestCase):
+    """T614: 外层与 JSON 一致性校验阻断。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db_path = pathlib.Path(self.temp.name) / "state" / "webui.db"
+        self.store = TaskStore(self.db_path)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _create_experiment(self, platform="boss"):
+        from webui.tuning import TuningController
+        controller = TuningController(self.store)
+        return controller.create_experiment_with_input(
+            spec_version="011-deep-configuration-probing",
+            source_scope={
+                "keywords": ["AI应用开发"],
+                "scope_kind": "cities",
+                "cities": ["东莞"],
+                "pages_per_combination": 3,
+                "platform": platform,
+                "browser_account": "a",
+                "cdp_port": 9222,
+                "profile_key": "boss:a",
+                "filter_schema_version": 1,
+            },
+            workloads=[
+                {"task_size": "small", "structure_index": 1, "scope": {}},
+            ],
+            quality_context={
+                "screening_fields": {"salary": ["403"]},
+                "profile_summary": "Python developer",
+                "profile_ref": "user-confirmed:test",
+            },
+        )
+
+    def test_consistent_manifest_passes(self):
+        """manifest 外层与 JSON 一致时通过。"""
+        from webui.tuning import TuningController
+        controller = TuningController(self.store)
+        experiment = self._create_experiment("boss")
+        bundle = self.store.get_tuning_input_bundle(experiment["id"])
+        workload = bundle["workloads"][0]
+        self.store.update_tuning_experiment_status(
+            experiment["id"], status="preflight",
+        )
+        self.store.update_tuning_experiment_status(
+            experiment["id"], status="awaiting_instruction",
+        )
+        candidate = controller.add_candidate(
+            experiment_id=experiment["id"],
+            stage="list", strategy_step="single_field",
+            config=_sample_nine_fields(),
+        )
+        round_rec = controller.create_round(
+            experiment_id=experiment["id"],
+            candidate_id=candidate["id"],
+            workload_id=workload["id"],
+            round_kind="list", repetition_index=1,
+        )
+        manifest = {
+            "experiment_id": experiment["id"],
+            "round_id": round_rec["id"],
+            "round_kind": "list",
+            "fixed_fields": {
+                "platform": "boss",
+                "keywords": ["AI"],
+                "scope_kind": "cities",
+                "cities": ["东莞"],
+                "pages_per_combination": 3,
+            },
+            "frozen_input": {},
+            "execution_config": {},
+        }
+        manifest_json = json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True,
+        )
+        manifest_digest = "sha256:" + hashlib.sha256(
+            manifest_json.encode("utf-8")).hexdigest()
+        issued = self.store.issue_task_manifest_atomic(
+            experiment_id=experiment["id"],
+            candidate_id=candidate["id"],
+            round_id=round_rec["id"],
+            manifest_version=1,
+            manifest_json=manifest_json,
+            manifest_digest=manifest_digest,
+            rendered_task_path="tasks/tuning/exp-round.json",
+            owner_token="test-token",
+        )
+        result = controller.validate_consistency_before_execution(
+            manifest_id=issued["manifest_id"],
+        )
+        self.assertTrue(result["consistent"])
+
+    def test_platform_mismatch_blocks(self):
+        """manifest 外层 platform 与 JSON 不一致时阻断。"""
+        from webui.tuning import TuningController
+        controller = TuningController(self.store)
+        experiment = self._create_experiment("boss")
+        bundle = self.store.get_tuning_input_bundle(experiment["id"])
+        workload = bundle["workloads"][0]
+        self.store.update_tuning_experiment_status(
+            experiment["id"], status="preflight",
+        )
+        self.store.update_tuning_experiment_status(
+            experiment["id"], status="awaiting_instruction",
+        )
+        candidate = controller.add_candidate(
+            experiment_id=experiment["id"],
+            stage="list", strategy_step="single_field",
+            config=_sample_nine_fields(),
+        )
+        round_rec = controller.create_round(
+            experiment_id=experiment["id"],
+            candidate_id=candidate["id"],
+            workload_id=workload["id"],
+            round_kind="list", repetition_index=1,
+        )
+        manifest = {
+            "experiment_id": experiment["id"],
+            "round_id": round_rec["id"],
+            "round_kind": "list",
+            "fixed_fields": {
+                "platform": "zhilian",
+                "keywords": ["AI"],
+                "scope_kind": "cities",
+                "cities": ["东莞"],
+                "pages_per_combination": 3,
+            },
+            "frozen_input": {},
+            "execution_config": {},
+        }
+        manifest_json = json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True,
+        )
+        manifest_digest = "sha256:" + hashlib.sha256(
+            manifest_json.encode("utf-8")).hexdigest()
+        issued = self.store.issue_task_manifest_atomic(
+            experiment_id=experiment["id"],
+            candidate_id=candidate["id"],
+            round_id=round_rec["id"],
+            manifest_version=1,
+            manifest_json=manifest_json,
+            manifest_digest=manifest_digest,
+            rendered_task_path="tasks/tuning/exp-round.json",
+            owner_token="test-token",
+        )
+        with self.assertRaisesRegex(ValueError, "平台.*不一致"):
+            controller.validate_consistency_before_execution(
+                manifest_id=issued["manifest_id"],
             )
 
 
@@ -3945,6 +4102,7 @@ class LegacyBossProofTests(unittest.TestCase):
                 "planned_pages", "task_size",
             )
         }
+        manifest["fixed_fields"]["platform"] = "boss"
         manifest["monitoring"]["final_artifact_path"] = (
             f"{root}/evidence/{self.round['id']}.json"
         )
@@ -4897,6 +5055,7 @@ class TuningDisabledPlatformGuardTests(unittest.TestCase):
                 "planned_pages", "task_size",
             )
         }
+        manifest["fixed_fields"]["platform"] = "zhilian"
         manifest["monitoring"]["final_artifact_path"] = (
             f"{root}/evidence/{self.round['id']}.json"
         )

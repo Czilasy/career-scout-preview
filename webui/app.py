@@ -1439,6 +1439,10 @@ def create_app(config=None):
 
         error_code = None
         try:
+            # T614: 在 source/AI 执行前校验一致性，错配时阻断
+            controller.validate_consistency_before_execution(
+                manifest_id=manifest_id,
+            )
             result = _tuning_round_runner.execute(
                 manifest, measurement_callback=measured,
             )

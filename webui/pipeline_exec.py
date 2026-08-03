@@ -1319,7 +1319,10 @@ class TuningRoundRunner:
         if not isinstance(quality_context, dict):
             raise ValueError("冻结输入产物缺少 quality_context")
         source = (
-            self.source_factory(artifact_root=artifact_dir)
+            self.source_factory(
+                artifact_root=artifact_dir,
+                platform=manifest.get("fixed_fields", {}).get("platform"),
+            )
             if kind in {"list", "detail", "end_to_end"}
             else None
         )

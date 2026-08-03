@@ -5882,7 +5882,8 @@ class TaskStore:
             task_input_digest = source_scope.get("task_input_digest")
             if source_artifact_id is not None:
                 source = conn.execute(
-                    "SELECT experiment_id, input_version_id, workload_id, status "
+                    "SELECT experiment_id, input_version_id, workload_id, "
+                    "platform, status "
                     "FROM tuning_stage_artifacts WHERE id = ?",
                     (source_artifact_id,),
                 ).fetchone()
@@ -5895,6 +5896,12 @@ class TaskStore:
                     or source["status"] != "ready"
                 ):
                     raise ValueError("上游阶段产物身份不匹配")
+                # T611: detail 只接受同平台 list artifact
+                if source["platform"] != artifact_platform:
+                    raise ValueError(
+                        f"上游阶段产物平台 {source['platform']!r} 与当前实验 "
+                        f"平台 {artifact_platform!r} 不一致"
+                    )
 
         artifact_id = _uuid()
         relative_path = (
