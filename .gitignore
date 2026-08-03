@@ -125,3 +125,7 @@ spec011-*.yaml
 .trash/
 .devlog/
 .specify/
+
+# Other-session build artifacts (temporary)
+webui/dist/assets/index-*.js
+webui/src/__tests__/types.spec.ts

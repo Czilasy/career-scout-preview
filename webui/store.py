@@ -26,6 +26,14 @@ class DiscoveryStoreConflictError(Exception):
     """Raised when a CAS-guarded store update detects a state conflict."""
 
 
+class MigrationBackupError(RuntimeError):
+    """Raised when pre-migration bootstrap backup or verification fails.
+
+    TaskStore construction must abort when this is raised; the source database
+    must not receive any v27 partial writes.
+    """
+
+
 # ---------------------------------------------------------------------------
 # State constants
 # ---------------------------------------------------------------------------
@@ -185,6 +193,7 @@ class TaskStore:
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         with _INITIALIZE_LOCK:
             self._configure_database()
+            self._bootstrap_migration_backup()
             self._initialize()
             self._migrate()
             self._mark_stale_runs_interrupted()
@@ -207,6 +216,169 @@ class TaskStore:
             connection.execute("PRAGMA synchronous = NORMAL")
         finally:
             connection.close()
+
+    # -- pre-migration bootstrap backup (T103) ----------------------------
+
+    _MIGRATION_BACKUP_TARGET_VERSION = 27
+    _MIGRATION_BACKUP_TOOL_VERSION = "career-scout-bootstrap-v1"
+
+    def backup_dir_for_tests(self) -> Path:
+        """Return the absolute backup directory used by the bootstrap step.
+
+        Tests use this to locate generated backup and manifest artifacts.
+        Production code should not call this method.
+        """
+        return self._migration_backup_dir()
+
+    def _migration_backup_dir(self) -> Path:
+        """Local-only, git-ignored directory for migration backups and manifests."""
+        # 位于仓库根的 .career-scout/backups/ 下；.gitignore 已覆盖 .career-scout/
+        repo_root = Path(__file__).resolve().parent.parent
+        return repo_root / ".career-scout" / "backups"
+
+    def _bootstrap_migration_backup(self) -> None:
+        """在 _initialize/_migrate 之前为待迁移库生成一致性备份与 manifest。
+
+        合同（data-model.md 迁移前 bootstrap）：
+        1. 源库文件不存在或 schema version >= 27 时跳过，不生成备份。
+        2. 源库 schema version < 27 时，用 SQLite backup API 生成带时间戳的备份。
+        3. 生成 manifest，含源库/备份 schema version、字节大小、SHA-256、
+           创建时间和工具版本；manifest 不得记录本地绝对路径。
+        4. 关闭备份连接后用只读连接验证 SHA-256、PRAGMA quick_check、
+           schema_migrations 可读且版本等于源版本；任一失败抛 MigrationBackupError。
+        5. 备份文件、manifest 位于本地忽略目录，不进入仓库。
+
+        失败时 TaskStore 构造中止；源库不被 v27 部分写入（因为 _migrate 还未执行）。
+        """
+        if not os.path.exists(self.db_path):
+            return  # 新库，无需备份
+
+        source_version = self._read_schema_version_readonly()
+        # source_version == 0 表示空库（_configure_database 刚创建文件但无表），
+        # 或无法读取；此时无数据需要保护，跳过备份。
+        if source_version < 1:
+            return  # 新库或空库，无需备份
+        if source_version >= self._MIGRATION_BACKUP_TARGET_VERSION:
+            return  # 已迁移或更高，无需备份
+
+        backup_dir = self._migration_backup_dir()
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        backup_name = f"webui-v{source_version}-to-v{self._MIGRATION_BACKUP_TARGET_VERSION}-{timestamp}.sqlite"
+        backup_path = backup_dir / backup_name
+
+        # 用 SQLite backup API 生成一致性快照
+        source_conn = sqlite3.connect(self.db_path, timeout=10)
+        backup_conn = sqlite3.connect(str(backup_path))
+        try:
+            source_conn.backup(backup_conn)
+        except sqlite3.Error as exc:
+            source_conn.close()
+            backup_conn.close()
+            self._safe_unlink(backup_path)
+            raise MigrationBackupError(f"backup_failed: {exc}") from exc
+        finally:
+            try:
+                source_conn.close()
+            except Exception:
+                pass
+            try:
+                backup_conn.close()
+            except Exception:
+                pass
+
+        source_size = os.path.getsize(self.db_path)
+        backup_size = os.path.getsize(backup_path)
+        source_sha = self._sha256_of_file(self.db_path)
+        backup_sha = self._sha256_of_file(backup_path)
+
+        # 只读连接验证备份库：quick_check、schema_migrations 可读、版本一致
+        try:
+            ro = sqlite3.connect(f"file:{backup_path}?mode=ro", uri=True)
+        except sqlite3.Error as exc:
+            self._safe_unlink(backup_path)
+            raise MigrationBackupError(f"backup_open_failed: {exc}") from exc
+        try:
+            row = ro.execute("PRAGMA quick_check").fetchone()
+            if row is None or row[0] != "ok":
+                self._safe_unlink(backup_path)
+                raise MigrationBackupError("backup_quick_check_failed")
+            v_row = ro.execute(
+                "SELECT MAX(version) AS v FROM schema_migrations"
+            ).fetchone()
+            backup_version = int(v_row[0] or 0) if v_row else 0
+            if backup_version != source_version:
+                self._safe_unlink(backup_path)
+                raise MigrationBackupError(
+                    f"backup_version_mismatch: source={source_version} backup={backup_version}"
+                )
+        except sqlite3.Error as exc:
+            self._safe_unlink(backup_path)
+            raise MigrationBackupError(f"backup_verify_failed: {exc}") from exc
+        finally:
+            ro.close()
+
+        # manifest：只含文件名和元数据，不含绝对路径
+        manifest = {
+            "backup_file": backup_path.name,
+            "source_schema_version": source_version,
+            "backup_schema_version": backup_version,
+            "source_size_bytes": source_size,
+            "backup_size_bytes": backup_size,
+            "source_sha256": source_sha,
+            "backup_sha256": backup_sha,
+            "created_at": _now(),
+            "tool_version": self._MIGRATION_BACKUP_TOOL_VERSION,
+        }
+        manifest_path = backup_path.with_suffix(".manifest.json")
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+
+    def _read_schema_version_readonly(self) -> int:
+        """以只读连接读取源库 schema_migrations 的最大版本号。
+
+        新库（无 schema_migrations 表或文件刚创建）返回 0。
+        任何读取异常返回 0，保守视为需要备份。
+        """
+        try:
+            ro = sqlite3.connect(
+                f"file:{self.db_path}?mode=ro", uri=True, timeout=5
+            )
+        except sqlite3.Error:
+            return 0
+        try:
+            # 检查 schema_migrations 表是否存在
+            row = ro.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+            ).fetchone()
+            if row is None:
+                return 0
+            v_row = ro.execute(
+                "SELECT MAX(version) AS v FROM schema_migrations"
+            ).fetchone()
+            return int(v_row[0] or 0) if v_row else 0
+        except sqlite3.Error:
+            return 0
+        finally:
+            ro.close()
+
+    @staticmethod
+    def _sha256_of_file(path) -> str:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    @staticmethod
+    def _safe_unlink(path) -> None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
     @contextmanager
     def _connection(self):
@@ -324,6 +496,8 @@ class TaskStore:
             self._migration_025()
         if current < 26:
             self._migration_026()
+        if current < 27:
+            self._migration_027()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -2351,7 +2525,7 @@ class TaskStore:
                 )
                 conn.execute(
                     "INSERT INTO screening_pending_results "
-                    "(id, run_id, job_id, failure_stage, retryable, attempts, "
+                    "(id, run_id, platform_job_id, failure_stage, retryable, attempts, "
                     " last_failed_at, origin_zone, ai_payload_json, created_at, failed_code) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
@@ -2587,6 +2761,309 @@ class TaskStore:
             conn.execute("DELETE FROM screening_runs WHERE id = ?", (run_id,))
             return True
 
+    def _migration_027(self):
+        """Migration 27: 平台字段、双身份、筛选快照、source attempt（tasks002 T106-T110）。
+
+        单事务原子操作：
+        1. jobs 新增 platform、platform_job_id、experience、degree、extra_json
+        2. screening_runs 新增 platform、filter_schema_version、filter_snapshot_json、
+           task_input_digest、interruption_kind
+        3. screening_results 新增 platform、platform_job_id、内部 job_id 可空、
+           experience、degree、extra_json
+        4. screening_pending_results 新增 platform，job_id 重命名为 platform_job_id
+        5. scrape_run_jobs 的 job_id 重命名为 platform_job_id
+        6. tuning_experiments/tuning_task_manifests 新增 platform
+        7. tuning_stage_artifacts 新增 platform、source_artifact_kind、scope_digest、task_input_digest
+        8. 创建 screening_source_attempts 追加表
+        9. 存量记录回填 platform='boss'
+        10. 创建 (platform, platform_job_id) 部分唯一索引
+        11. 外键、重复身份、URL 归属、收藏/反馈计数、调优摘要守恒检查
+
+        任一检查失败整笔回滚。
+        """
+        with self._connection() as conn:
+            conn.execute("PRAGMA foreign_keys = ON")
+            # --------------------------------------------------------------
+            # 1. jobs 新增列
+            # --------------------------------------------------------------
+            self._add_column_if_missing(
+                conn, "jobs", "platform", "TEXT NOT NULL DEFAULT 'boss'"
+            )
+            self._add_column_if_missing(
+                conn, "jobs", "platform_job_id", "TEXT"
+            )
+            self._add_column_if_missing(
+                conn, "jobs", "experience", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._add_column_if_missing(
+                conn, "jobs", "degree", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._add_column_if_missing(
+                conn, "jobs", "extra_json", "TEXT NOT NULL DEFAULT '{}'"
+            )
+
+            # --------------------------------------------------------------
+            # 2. screening_runs 新增列
+            # --------------------------------------------------------------
+            self._add_column_if_missing(
+                conn, "screening_runs", "platform", "TEXT NOT NULL DEFAULT 'boss'"
+            )
+            self._add_column_if_missing(
+                conn, "screening_runs", "filter_schema_version", "INTEGER"
+            )
+            self._add_column_if_missing(
+                conn, "screening_runs", "filter_snapshot_json", "TEXT"
+            )
+            self._add_column_if_missing(
+                conn, "screening_runs", "task_input_digest", "TEXT"
+            )
+            self._add_column_if_missing(
+                conn, "screening_runs", "interruption_kind", "TEXT"
+            )
+
+            # --------------------------------------------------------------
+            # 3. screening_results 新增列（内部 job_id 保留，新增 platform_job_id）
+            # --------------------------------------------------------------
+            self._add_column_if_missing(
+                conn, "screening_results", "platform", "TEXT NOT NULL DEFAULT 'boss'"
+            )
+            self._add_column_if_missing(
+                conn, "screening_results", "platform_job_id", "TEXT"
+            )
+            # 旧的 screening_results.job_id 语义=平台原始ID，复制到 platform_job_id
+            conn.execute(
+                "UPDATE screening_results SET platform_job_id = job_id "
+                "WHERE platform_job_id IS NULL AND job_id IS NOT NULL"
+            )
+            self._add_column_if_missing(
+                conn, "screening_results", "experience", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._add_column_if_missing(
+                conn, "screening_results", "degree", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._add_column_if_missing(
+                conn, "screening_results", "extra_json", "TEXT NOT NULL DEFAULT '{}'"
+            )
+
+            # --------------------------------------------------------------
+            # 4. screening_pending_results: job_id → platform_job_id
+            # --------------------------------------------------------------
+            self._rename_column_with_data(
+                conn, "screening_pending_results", "job_id", "platform_job_id",
+                old_type="TEXT NOT NULL", new_type="TEXT NOT NULL",
+            )
+            self._add_column_if_missing(
+                conn, "screening_pending_results", "platform", "TEXT NOT NULL DEFAULT 'boss'"
+            )
+
+            # --------------------------------------------------------------
+            # 5. scrape_run_jobs: job_id → platform_job_id
+            # --------------------------------------------------------------
+            self._rename_column_with_data(
+                conn, "scrape_run_jobs", "job_id", "platform_job_id",
+                old_type="TEXT NOT NULL", new_type="TEXT NOT NULL",
+            )
+
+            # --------------------------------------------------------------
+            # 6. tuning_experiments / tuning_task_manifests 新增 platform
+            # --------------------------------------------------------------
+            self._add_column_if_missing(
+                conn, "tuning_experiments", "platform", "TEXT NOT NULL DEFAULT 'boss'"
+            )
+            self._add_column_if_missing(
+                conn, "tuning_task_manifests", "platform", "TEXT NOT NULL DEFAULT 'boss'"
+            )
+
+            # --------------------------------------------------------------
+            # 7. tuning_stage_artifacts 新增外层列
+            # --------------------------------------------------------------
+            self._add_column_if_missing(
+                conn, "tuning_stage_artifacts", "platform", "TEXT NOT NULL DEFAULT 'boss'"
+            )
+            self._add_column_if_missing(
+                conn, "tuning_stage_artifacts", "source_artifact_kind", "TEXT"
+            )
+            self._add_column_if_missing(
+                conn, "tuning_stage_artifacts", "scope_digest", "TEXT"
+            )
+            self._add_column_if_missing(
+                conn, "tuning_stage_artifacts", "task_input_digest", "TEXT"
+            )
+
+            # --------------------------------------------------------------
+            # 8. 创建 screening_source_attempts 追加表
+            # --------------------------------------------------------------
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS screening_source_attempts (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    combo_key TEXT NOT NULL,
+                    attempt_no INTEGER NOT NULL,
+                    input_hash TEXT,
+                    outcome_kind TEXT NOT NULL,
+                    job_count INTEGER NOT NULL DEFAULT 0,
+                    empty_evidence_json TEXT,
+                    error_code TEXT,
+                    error_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(run_id, combo_key, attempt_no),
+                    FOREIGN KEY (run_id) REFERENCES screening_runs(id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            # --------------------------------------------------------------
+            # 9. 存量记录回填 platform='boss'（DEFAULT 'boss' 已覆盖新插入，
+            #    但 ALTER TABLE ADD COLUMN ... DEFAULT 对旧行也生效；
+            #    显式 UPDATE 确保 NOT NULL 约束满足）
+            # --------------------------------------------------------------
+            for table in (
+                "jobs", "screening_runs", "screening_results",
+                "screening_pending_results", "tuning_experiments",
+                "tuning_task_manifests", "tuning_stage_artifacts",
+            ):
+                conn.execute(
+                    f"UPDATE {table} SET platform = 'boss' WHERE platform IS NULL OR platform = ''"
+                )
+
+            # --------------------------------------------------------------
+            # 10. (platform, platform_job_id) 部分唯一索引
+            # --------------------------------------------------------------
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_platform_job_id "
+                "ON jobs(platform, platform_job_id) WHERE platform_job_id IS NOT NULL"
+            )
+
+            # --------------------------------------------------------------
+            # 11. 守恒检查（失败整笔回滚）
+            # --------------------------------------------------------------
+            # 外键检查
+            fk_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if fk_errors:
+                raise RuntimeError(f"migration_27 foreign_key_check failed: {fk_errors}")
+
+            # 重复身份检查：同一 (platform, platform_job_id) 不得有多行
+            dup = conn.execute(
+                "SELECT platform, platform_job_id, COUNT(*) AS c FROM jobs "
+                "WHERE platform_job_id IS NOT NULL "
+                "GROUP BY platform, platform_job_id HAVING c > 1"
+            ).fetchall()
+            if dup:
+                raise RuntimeError(f"migration_27 duplicate platform_job_id: {dup}")
+
+            # URL 归属检查：canonical_url 全局唯一（表定义已含 UNIQUE，此处复核）
+            url_dup = conn.execute(
+                "SELECT canonical_url, COUNT(*) AS c FROM jobs "
+                "GROUP BY canonical_url HAVING c > 1"
+            ).fetchall()
+            if url_dup:
+                raise RuntimeError(f"migration_27 duplicate canonical_url: {url_dup}")
+
+            # 收藏/反馈计数守恒：profile_jobs/feedback_events 的 job_id 必须在 jobs.id 中存在
+            orphan_pj = conn.execute(
+                "SELECT COUNT(*) FROM profile_jobs pj "
+                "LEFT JOIN jobs j ON pj.job_id = j.id WHERE j.id IS NULL"
+            ).fetchone()
+            if orphan_pj and orphan_pj[0] > 0:
+                raise RuntimeError(
+                    f"migration_27 orphan profile_jobs: {orphan_pj[0]}"
+                )
+            orphan_fb = conn.execute(
+                "SELECT COUNT(*) FROM feedback_events fe "
+                "LEFT JOIN jobs j ON fe.job_id = j.id WHERE j.id IS NULL"
+            ).fetchone()
+            if orphan_fb and orphan_fb[0] > 0:
+                raise RuntimeError(
+                    f"migration_27 orphan feedback_events: {orphan_fb[0]}"
+                )
+
+            # 记录 migration
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (27, ?, 'platform fields, dual identity, filter snapshot, source attempts')",
+                (_now(),),
+            )
+
+    # -- migration 27 helpers ---------------------------------------------
+
+    @staticmethod
+    def _add_column_if_missing(conn, table: str, column: str, definition: str) -> None:
+        """若列不存在则 ALTER TABLE ADD COLUMN。"""
+        cols = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+        }
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    @staticmethod
+    def _rename_column_with_data(
+        conn, table: str, old_col: str, new_col: str,
+        old_type: str = "TEXT", new_type: str = "TEXT",
+    ) -> None:
+        """重命名列并保留数据（SQLite < 3.25 无 ALTER TABLE RENAME COLUMN 时用重建表）。
+
+        SQLite 3.25+ 支持 ALTER TABLE RENAME COLUMN，但为兼容性用安全方案：
+        1. 新增 new_col 列（若不存在）
+        2. UPDATE 复制 old_col → new_col
+        3. 重建表去掉 old_col（保留索引和约束）
+
+        注意：重建表会丢失部分索引，调用方需负责重建。
+        """
+        cols = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+        }
+        if new_col in cols:
+            return  # 已重命名
+        if old_col not in cols:
+            return  # 旧列不存在，无需重命名
+
+        # 新增新列
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {new_col} {new_type}")
+        # 复制数据
+        conn.execute(
+            f"UPDATE {table} SET {new_col} = {old_col} WHERE {old_col} IS NOT NULL"
+        )
+
+        # 重建表去掉旧列：获取当前表定义，移除 old_col，CREATE 新表，复制数据
+        schema_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        schema_sql = schema_row["sql"] if schema_row else ""
+
+        # 临时表名
+        tmp_name = f"_tmp_{table}_{old_col}_removed"
+        # 获取列列表（去掉 old_col）
+        all_cols = [
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+        ]
+        keep_cols = [c for c in all_cols if c != old_col]
+        col_list = ", ".join(keep_cols)
+
+        # 用 CREATE TABLE AS SELECT 重建（保留数据，但丢失约束/索引）
+        conn.execute(f"DROP TABLE IF EXISTS {tmp_name}")
+        conn.execute(
+            f"CREATE TABLE {tmp_name} AS SELECT {col_list} FROM {table}"
+        )
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {tmp_name} RENAME TO {table}")
+
+        # 重建索引（针对被重建的表）
+        # 注：原表的 UNIQUE/PK 约束已丢失，需要调用方或上层重建
+        # screening_pending_results 和 scrape_run_jobs 的 UNIQUE 约束需重建
+        if table == "screening_pending_results":
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_screening_pending_run_job "
+                "ON screening_pending_results(run_id, platform_job_id)"
+            )
+        elif table == "scrape_run_jobs":
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_scrape_run_jobs_run_job "
+                "ON scrape_run_jobs(run_id, platform_job_id)"
+            )
+
     def _copy_legacy_default_profile(self):
         """Copy old default profile to candidate_profiles if not already present."""
         with self._connection() as conn:
@@ -2599,6 +3076,335 @@ class TaskStore:
                     "VALUES (?, 'default', ?, '{}', ?, ?)",
                     (_uuid(), old["value_json"], _now(), _now()),
                 )
+
+    # -- T112: Job 双索引冲突算法 upsert ---------------------------------
+
+    _PLATFORM_HOSTS = {
+        "boss": ("www.zhipin.com", "zhipin.com"),
+        "zhilian": ("zhaopin.com", "www.zhaopin.com"),
+    }
+
+    def upsert_job(
+        self,
+        *,
+        platform: str,
+        platform_job_id: str | None,
+        canonical_url: str,
+        title: str = "",
+        company: str = "",
+        salary: str = "",
+        location: str = "",
+        jd: str = "",
+        experience: str = "",
+        degree: str = "",
+        extra: dict | None = None,
+    ) -> dict:
+        """Job 双索引冲突算法（data-model.md "Job upsert 冲突算法"）。
+
+        返回 {"ok": bool, "job_id": str | None, "error_code": str | None}。
+        所有 8 个分支在同一事务中完成。
+        """
+        # 分支1：URL host 必须属于声明平台
+        if not self._url_belongs_to_platform(canonical_url, platform):
+            return {"ok": False, "job_id": None, "error_code": "platform_url_mismatch"}
+
+        extra_json = json.dumps(extra or {}, ensure_ascii=False, sort_keys=True)
+        now = _now()
+
+        with self._connection() as conn:
+            # 分支2：查询 (platform, platform_job_id) 和 canonical_url
+            by_pid = None
+            if platform_job_id:
+                row = conn.execute(
+                    "SELECT id, canonical_url FROM jobs WHERE platform=? AND platform_job_id=?",
+                    (platform, platform_job_id),
+                ).fetchone()
+                if row is not None:
+                    by_pid = {"id": row["id"], "canonical_url": row["canonical_url"]}
+
+            by_url = conn.execute(
+                "SELECT id, platform, platform_job_id FROM jobs WHERE canonical_url=?",
+                (canonical_url,),
+            ).fetchone()
+            by_url_dict = None
+            if by_url is not None:
+                by_url_dict = {
+                    "id": by_url["id"],
+                    "platform": by_url["platform"],
+                    "platform_job_id": by_url["platform_job_id"],
+                }
+
+            # 分支2：URL 命中但平台不一致
+            if by_url_dict and by_url_dict["platform"] != platform:
+                return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
+
+            # 分支3：两者都没有 → 创建新行
+            if by_pid is None and by_url_dict is None:
+                new_id = _uuid()
+                conn.execute(
+                    "INSERT INTO jobs (id, canonical_url, source_url, title, company, salary, "
+                    "location, jd, first_seen_at, last_seen_at, platform, platform_job_id, "
+                    "experience, degree, extra_json) "
+                    "VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (new_id, canonical_url, title, company, salary, location, jd,
+                     now, now, platform, platform_job_id, experience, degree, extra_json),
+                )
+                return {"ok": True, "job_id": new_id, "error_code": None}
+
+            # 分支4：只命中平台ID
+            if by_pid is not None and by_url_dict is None:
+                # 检查新 URL 是否被其它行占用
+                other = conn.execute(
+                    "SELECT id FROM jobs WHERE canonical_url=? AND id != ?",
+                    (canonical_url, by_pid["id"]),
+                ).fetchone()
+                if other is not None:
+                    return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
+                # 更新原行的 URL 和可变字段
+                conn.execute(
+                    "UPDATE jobs SET canonical_url=?, title=?, company=?, salary=?, location=?, "
+                    "jd=?, experience=?, degree=?, extra_json=?, last_seen_at=? WHERE id=?",
+                    (canonical_url, title, company, salary, location, jd,
+                     experience, degree, extra_json, now, by_pid["id"]),
+                )
+                return {"ok": True, "job_id": by_pid["id"], "error_code": None}
+
+            # 分支5：只命中URL
+            if by_pid is None and by_url_dict is not None:
+                # 平台必须一致（分支2已检查）
+                # platform_job_id 为 NULL 或等于输入值时补写
+                existing_pid = by_url_dict["platform_job_id"]
+                if existing_pid is not None and platform_job_id is not None and existing_pid != platform_job_id:
+                    return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
+                conn.execute(
+                    "UPDATE jobs SET platform_job_id=?, title=?, company=?, salary=?, location=?, "
+                    "jd=?, experience=?, degree=?, extra_json=?, last_seen_at=? WHERE id=?",
+                    (platform_job_id, title, company, salary, location, jd,
+                     experience, degree, extra_json, now, by_url_dict["id"]),
+                )
+                return {"ok": True, "job_id": by_url_dict["id"], "error_code": None}
+
+            # 分支6和7：两者都命中
+            if by_pid is not None and by_url_dict is not None:
+                if by_pid["id"] == by_url_dict["id"]:
+                    # 分支6：同一行，更新可变字段
+                    conn.execute(
+                        "UPDATE jobs SET canonical_url=?, title=?, company=?, salary=?, location=?, "
+                        "jd=?, experience=?, degree=?, extra_json=?, last_seen_at=? WHERE id=?",
+                        (canonical_url, title, company, salary, location, jd,
+                         experience, degree, extra_json, now, by_pid["id"]),
+                    )
+                    return {"ok": True, "job_id": by_pid["id"], "error_code": None}
+                else:
+                    # 分支7：不同行，冲突
+                    return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
+
+            return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
+
+    @classmethod
+    def _url_belongs_to_platform(cls, url: str, platform: str) -> bool:
+        """检查 URL host 是否属于声明平台。"""
+        from urllib.parse import urlparse
+        allowed = cls._PLATFORM_HOSTS.get(platform)
+        if not allowed:
+            return False
+        try:
+            host = urlparse(url).hostname or ""
+        except Exception:
+            return False
+        return host in allowed
+
+    # -- T113: 结果快照读写 API -------------------------------------------
+
+    def save_result_snapshot(
+        self,
+        *,
+        run_id: str,
+        platform: str,
+        platform_job_id: str,
+        job_id: str | None = None,
+        verdict: str,
+        title: str = "",
+        company: str = "",
+        salary: str = "",
+        location: str = "",
+        jd: str = "",
+        experience: str = "",
+        degree: str = "",
+        extra: dict | None = None,
+    ) -> str:
+        """T113: 保存结果快照，同时记录 platform、platform_job_id、可空内部 job_id 和完整岗位字段。
+
+        返回结果行 id。如果 (run_id, platform_job_id) 已存在则更新。
+        """
+        extra_json = json.dumps(extra or {}, ensure_ascii=False, sort_keys=True)
+        ts = _now()
+        result_id = _uuid()
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            conn.execute(
+                "INSERT INTO screening_results "
+                "(id, run_id, job_id, verdict, created_at, platform, platform_job_id, "
+                " experience, degree, extra_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET "
+                " job_id = excluded.job_id, verdict = excluded.verdict, "
+                " experience = excluded.experience, degree = excluded.degree, "
+                " extra_json = excluded.extra_json",
+                (result_id, str(run_id), job_id, str(verdict), ts,
+                 str(platform), str(platform_job_id),
+                 experience, degree, extra_json),
+            )
+        return result_id
+
+    # -- T114: source attempt 追加及汇总 API ------------------------------
+
+    def append_source_attempt(
+        self,
+        *,
+        run_id: str,
+        platform: str,
+        combo_key: str,
+        attempt_no: int,
+        input_hash: str | None = None,
+        outcome_kind: str,
+        job_count: int = 0,
+        empty_evidence: dict | None = None,
+        error_code: str | None = None,
+        error_reason: str | None = None,
+    ) -> str:
+        """T114: 追加一条 source attempt 记录。返回记录 id。
+
+        禁止从零岗位反推 empty：outcome_kind='empty' 时 empty_evidence 必填。
+        """
+        if outcome_kind == "empty" and not empty_evidence:
+            raise ValueError("outcome_kind='empty' 时 empty_evidence 必填")
+        evidence_json = json.dumps(empty_evidence or {}, ensure_ascii=False, sort_keys=True) if empty_evidence else None
+        ts = _now()
+        attempt_id = _uuid()
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            conn.execute(
+                "INSERT INTO screening_source_attempts "
+                "(id, run_id, platform, combo_key, attempt_no, input_hash, "
+                " outcome_kind, job_count, empty_evidence_json, error_code, error_reason, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (attempt_id, str(run_id), str(platform), str(combo_key), int(attempt_no),
+                 input_hash, str(outcome_kind), int(job_count), evidence_json,
+                 error_code, error_reason, ts),
+            )
+        return attempt_id
+
+    def get_latest_source_attempt(self, run_id: str, combo_key: str) -> dict | None:
+        """T114: 按 run/combo 获取最新 attempt。返回字典或 None。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM screening_source_attempts "
+                "WHERE run_id=? AND combo_key=? ORDER BY attempt_no DESC LIMIT 1",
+                (str(run_id), str(combo_key)),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "run_id": row["run_id"],
+            "platform": row["platform"],
+            "combo_key": row["combo_key"],
+            "attempt_no": int(row["attempt_no"]),
+            "input_hash": row["input_hash"],
+            "outcome_kind": row["outcome_kind"],
+            "job_count": int(row["job_count"]),
+            "empty_evidence": json.loads(row["empty_evidence_json"] or "{}") if row["empty_evidence_json"] else None,
+            "error_code": row["error_code"],
+            "error_reason": row["error_reason"],
+            "created_at": row["created_at"],
+        }
+
+    # -- T115: 筛选快照、task digest、interruption kind 持久化 ------------
+
+    def save_filter_snapshot(
+        self,
+        run_id: str,
+        *,
+        platform: str,
+        filter_schema_version: int | None = None,
+        filter_snapshot: dict | None = None,
+        task_input_digest: str | None = None,
+    ) -> None:
+        """T115: 持久化筛选快照、schema version 和 task input digest。"""
+        snapshot_json = json.dumps(filter_snapshot or {}, ensure_ascii=False, sort_keys=True)
+        ts = _now()
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            conn.execute(
+                "UPDATE screening_runs SET platform=?, filter_schema_version=?, "
+                "filter_snapshot_json=?, task_input_digest=?, updated_at=? WHERE id=?",
+                (str(platform), filter_schema_version, snapshot_json,
+                 task_input_digest, ts, str(run_id)),
+            )
+
+    def save_interruption_kind(self, run_id: str, interruption_kind: str) -> None:
+        """T115: 持久化 interruption kind（仅 status=interrupted 时使用）。"""
+        ts = _now()
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            conn.execute(
+                "UPDATE screening_runs SET interruption_kind=?, updated_at=? WHERE id=?",
+                (str(interruption_kind), ts, str(run_id)),
+            )
+
+    def get_run_checkpoint_identity(self, run_id: str) -> dict | None:
+        """T115: 读取 run 的 checkpoint 身份一致性信息。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT platform, filter_schema_version, filter_snapshot_json, "
+                "task_input_digest, interruption_kind FROM screening_runs WHERE id=?",
+                (str(run_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "platform": row["platform"],
+            "filter_schema_version": row["filter_schema_version"],
+            "filter_snapshot": json.loads(row["filter_snapshot_json"] or "{}") if row["filter_snapshot_json"] else {},
+            "task_input_digest": row["task_input_digest"],
+            "interruption_kind": row["interruption_kind"],
+        }
+
+    # -- T116: 收藏/反馈原子 upsert + 内部 UUID 关联 ----------------------
+
+    def upsert_job_for_favorite(
+        self,
+        *,
+        platform: str,
+        platform_job_id: str,
+        canonical_url: str,
+        title: str = "",
+        company: str = "",
+        salary: str = "",
+        location: str = "",
+        jd: str = "",
+        experience: str = "",
+        degree: str = "",
+        extra: dict | None = None,
+    ) -> dict:
+        """T116: 收藏/反馈所需的原子"岗位 upsert + 内部 UUID 关联"存储操作。
+
+        不把 platform_job_id 当内部 UUID。内部 job_id 由 upsert_job 分配。
+        """
+        return self.upsert_job(
+            platform=platform,
+            platform_job_id=platform_job_id,
+            canonical_url=canonical_url,
+            title=title,
+            company=company,
+            salary=salary,
+            location=location,
+            jd=jd,
+            experience=experience,
+            degree=degree,
+            extra=extra,
+        )
 
     def schema_version(self) -> int:
         with self._connection() as conn:
@@ -3256,10 +4062,10 @@ class TaskStore:
             self._assert_recovery_writes_allowed(conn)
             conn.execute(
                 "INSERT INTO screening_pending_results "
-                "(id, run_id, job_id, failure_stage, retryable, attempts, last_failed_at, "
+                "(id, run_id, platform_job_id, failure_stage, retryable, attempts, last_failed_at, "
                 " origin_zone, ai_payload_json, created_at, failed_code) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(run_id, job_id) DO UPDATE SET "
+                "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET "
                 " failure_stage = excluded.failure_stage, "
                 " retryable = excluded.retryable, "
                 " attempts = excluded.attempts, "
@@ -3301,7 +4107,7 @@ class TaskStore:
     def get_pending_result(self, run_id, job_id):
         with self._connection() as conn:
             row = conn.execute(
-                "SELECT * FROM screening_pending_results WHERE run_id = ? AND job_id = ?",
+                "SELECT * FROM screening_pending_results WHERE run_id = ? AND platform_job_id = ?",
                 (str(run_id), str(job_id)),
             ).fetchone()
         return self._pending_result_row(row) if row is not None else None
@@ -3320,7 +4126,7 @@ class TaskStore:
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
             cur = conn.execute(
-                "DELETE FROM screening_pending_results WHERE run_id = ? AND job_id = ?",
+                "DELETE FROM screening_pending_results WHERE run_id = ? AND platform_job_id = ?",
                 (str(run_id), str(job_id)),
             )
             deleted = cur.rowcount > 0
@@ -3332,7 +4138,7 @@ class TaskStore:
         return {
             "id": row["id"],
             "run_id": row["run_id"],
-            "job_id": row["job_id"],
+            "job_id": row["platform_job_id"],
             "failure_stage": row["failure_stage"],
             "retryable": bool(row["retryable"]),
             "attempts": int(row["attempts"]),
@@ -3358,9 +4164,9 @@ class TaskStore:
                     continue
                 conn.execute(
                     "INSERT INTO scrape_run_jobs "
-                    "(run_id, job_id, combo_key, job_payload_json, scraped_at) "
+                    "(run_id, platform_job_id, combo_key, job_payload_json, scraped_at) "
                     "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(run_id, job_id) DO UPDATE SET "
+                    "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET "
                     " combo_key = excluded.combo_key, "
                     " job_payload_json = excluded.job_payload_json, "
                     " scraped_at = excluded.scraped_at",
@@ -3413,7 +4219,7 @@ class TaskStore:
         with self._connection() as conn:
             rows = conn.execute(
                 "SELECT job_payload_json FROM scrape_run_jobs "
-                "WHERE run_id = ? ORDER BY scraped_at ASC, job_id ASC",
+                "WHERE run_id = ? ORDER BY scraped_at ASC, platform_job_id ASC",
                 (str(run_id),),
             ).fetchall()
         jobs = []
@@ -3698,7 +4504,7 @@ class TaskStore:
         """Return per-job pending failures for a screening run."""
         with self._connection() as conn:
             rows = conn.execute(
-                "SELECT job_id, failure_stage, retryable, attempts, failed_code, "
+                "SELECT platform_job_id, failure_stage, retryable, attempts, failed_code, "
                 " ai_payload_json, last_failed_at FROM screening_pending_results "
                 "WHERE run_id = ?", (str(run_id),),
             ).fetchall()
