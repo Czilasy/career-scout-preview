@@ -1,5 +1,13 @@
 # Tasks 007：调优实验与 Legacy BOSS-only 边界
 
+## 新会话启动提示词
+
+```text
+请在当前仓库根目录执行 specs\001-add-zhilian-platform\tasks007.md。先读取仓库根目录 AGENTS.md、智联功能目录全部冻结工件和 tasks001.md；进入调优持久化与真实 source round 前分别读取并现场核验 tasks002.md、tasks004.md。正式实施前输出【已查阅】。
+
+本会话只负责 tasks007.md。可以先完成 Legacy 零副作用测试和不依赖前序模块的纯校验器，但 migration/store 或 adapter 未完成时不得继续相应接线，也不得宣称整个任务完成。每个 legacy 路由的智联拒绝必须发生在查询对象或产生任何副作用之前；调优五类 round 必须从 experiment/workload/manifest/artifact 的冻结身份取平台，禁止回退全局 BOSS source。不得改写旧 manifest/artifact JSON 或摘要。两部分都通过后才可完成提交；只提交本任务改动，不 push，不自动执行 tasks008。
+```
+
 ## 给独立执行 AI 的指令
 
 本任务处理两个独立但边界明确的横向能力：调优五类 round 的平台守恒，以及旧 BOSS-only 路由对显式智联的零副作用拒绝。开始时读取根规则、全部冻结工件和 `tasks001.md`；到相应节点再核验 `tasks002.md`、`tasks004.md`。

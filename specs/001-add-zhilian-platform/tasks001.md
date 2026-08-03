@@ -1,5 +1,13 @@
 # Tasks 001：平台内核与 BOSS 兼容基线
 
+## 新会话启动提示词
+
+```text
+请在当前仓库根目录执行 specs\001-add-zhilian-platform\tasks001.md。先读取仓库根目录 AGENTS.md，以及该功能目录中的 spec.md、plan.md、research.md、data-model.md、quickstart.md 和 contracts\ 全部文件；正式实施前输出【已查阅】。
+
+本会话只负责 tasks001.md，不要提前执行 tasks002.md 至 tasks008.md。先现场运行启动门禁和现有 BOSS 基线，不要相信旧会话的完成声明。按任务文件逐项实施、测试和勾选；每到节点门禁都重新核验真实代码与测试，缺少条件时停止对应节点并明确报告，禁止猜接口、削弱测试或扩大范围。完成后按 AGENTS.md 运行验证、仓库卫生检查、检查 git diff，只提交本任务改动，不 push，不自动开始后继任务。
+```
+
 ## 给独立执行 AI 的指令
 
 本文件设计为可在全新会话中单独执行。开始前必须读取仓库根目录 `AGENTS.md`，再读取本功能目录的 `spec.md`、`plan.md`、`research.md`、`data-model.md`、`quickstart.md` 和 `contracts/` 全部文件。冻结规格高于本任务中的概括；发现冲突时停止实施并报告，不得自行改写规格。

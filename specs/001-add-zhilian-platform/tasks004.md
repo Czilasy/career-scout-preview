@@ -1,5 +1,13 @@
 # Tasks 004：智联 JobSource Adapter
 
+## 新会话启动提示词
+
+```text
+请在当前仓库根目录执行 specs\001-add-zhilian-platform\tasks004.md。先读取仓库根目录 AGENTS.md、智联功能目录全部冻结工件、tasks001.md 和 tasks003.md；正式实施前输出【已查阅】。
+
+本会话只负责 tasks004.md。先现场核验统一 JobSource 协议以及 tasks003 的 schema、城市、URL、runtime、脱敏 fixture、测试和提交。外部事实不完整时只能实现有证据覆盖的 adapter 部分，并保持智联新任务禁用；禁止使用历史猜测、默认值或零卡片伪装空结果。JobSource 只负责平台访问和字段归一化，不写数据库、不推进 run、不执行 AI。逐项执行节点门禁、实现和测试；不得绕过验证码或 EdgeOne，不得记录敏感页面内容。完成后只提交本任务改动，不 push，不自动执行 tasks005 或 tasks007。
+```
+
 ## 给独立执行 AI 的指令
 
 本任务只负责平台访问和字段归一化。开始时读取根 `AGENTS.md`、冻结工件、`tasks001.md`、`tasks003.md`。JobSource 不写数据库、不推进 run、不执行 AI。

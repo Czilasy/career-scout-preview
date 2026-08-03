@@ -1,5 +1,13 @@
 # Tasks 005：后台主链、恢复与平台敏感 API
 
+## 新会话启动提示词
+
+```text
+请在当前仓库根目录执行 specs\001-add-zhilian-platform\tasks005.md。先读取仓库根目录 AGENTS.md、智联功能目录全部冻结工件、tasks001.md、tasks002.md 和 tasks004.md；正式实施前输出【已查阅】。
+
+本会话只负责 tasks005.md。先现场核验 migration 27/store API 与智联 JobSource adapter 的实际代码、聚焦测试和独立提交。若 store 已完成但 adapter 未完成，只允许基于 FakeJobSource 做独立编排工作，不得连接真实智联或宣称任务完成。每次首次写 run、推进 source outcome、创建 AI run、恢复状态或关闭浏览器前，都执行对应节点门禁；禁止从 UI 当前平台、最近结果或默认 BOSS 推断旧 run。保证 source attempt 先持久化再推进状态，所有外围操作从目标 run 继承冻结身份。完成后只提交本任务改动，不 push，不自动执行 tasks006 联调或 tasks008。
+```
+
 ## 给独立执行 AI 的指令
 
 本任务负责 screening_runs 主链和所有会继续访问 source、改变 run 状态、关闭浏览器或删除结果快照的外围入口。新会话必须读取根规则、全部冻结工件及 `tasks001.md`、`tasks002.md`、`tasks004.md`。

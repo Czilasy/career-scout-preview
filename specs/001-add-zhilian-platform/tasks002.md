@@ -1,5 +1,13 @@
 # Tasks 002：Migration 27、持久化与岗位身份
 
+## 新会话启动提示词
+
+```text
+请在当前仓库根目录执行 specs\001-add-zhilian-platform\tasks002.md。先读取仓库根目录 AGENTS.md、智联功能目录全部冻结工件和 tasks001.md；正式实施前输出【已查阅】。
+
+本会话只负责 tasks002.md。首先现场核验 tasks001 的平台内核、测试证据和独立提交是否真实完整；前置门禁不通过就停止并列出缺失项，不要自行补写或重做 tasks001。只修改 tasks002 允许范围，首次使用前序符号、执行 migration 27、实现双身份 API 时分别执行文件内节点门禁。必须使用临时 v26 数据副本，不得在唯一正式数据库试迁移。逐项实施、测试和勾选；完成后运行聚焦验证与仓库卫生检查，只提交本任务改动，不 push，不自动执行 tasks005 或 tasks007。
+```
+
 ## 给独立执行 AI 的指令
 
 本任务可由全新 AI 会话执行。先读取根 `AGENTS.md`、本功能全部冻结工件和 `tasks001.md`。本任务独占 migration 与 `webui/store.py` 的平台持久化改造；不得实现 source、Vue 或调优 runner。

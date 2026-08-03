@@ -1,5 +1,13 @@
 # Tasks 003：智联元数据、城市与浏览器登录空间
 
+## 新会话启动提示词
+
+```text
+请在当前仓库根目录执行 specs\001-add-zhilian-platform\tasks003.md。先读取仓库根目录 AGENTS.md、智联功能目录全部冻结工件、roadmap\REFERENCE_GET_JOBS.md 和 tasks001.md；正式实施前输出【已查阅】。
+
+本会话只负责 tasks003.md。先现场核验 tasks001 的平台注册表、schema、城市、URL 合同、测试和提交；不完整时停止并报告，不得另造一套平台体系。历史参考只用于侦察，所有公司性质、城市码、页面 marker 和登录空间结论必须来自当前可验证证据。没有人工登录态或关键事实无法确认时，完成可独立验证的骨架和测试，但必须保持 zhilian.enabled_for_new_tasks=false，并明确记录阻断。不得保存 Cookie、完整页面、JD、账号或绝对 profile 路径。完成后只提交本任务改动，不 push，不自动执行 tasks004。
+```
+
 ## 给独立执行 AI 的指令
 
 本任务负责可变外部事实和平台登录空间，可在全新会话中执行。先读根 `AGENTS.md`、全部冻结工件、`roadmap/REFERENCE_GET_JOBS.md` 和 `tasks001.md`。历史参考只能作为侦察起点，不能作为当前事实。
