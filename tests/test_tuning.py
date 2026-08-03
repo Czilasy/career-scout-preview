@@ -3831,5 +3831,285 @@ class HardStopAndRetryTests(unittest.TestCase):
         self.assertFalse(self.controller.is_recoverable_error("login_expired"))
 
 
+class LegacyBossProofTests(unittest.TestCase):
+    """T608: 旧 BOSS manifest/artifact 客观证明纯校验器。
+
+    纯校验器：不修改 JSON/digest，不查询 migration 27 外层 platform 列。
+    证据不足时抛 ValueError 阻断，不猜填摘要、不重标智联。
+    见 data-model.md 第 263、281 行的存量证明规则。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+        self.store = TaskStore(self.root / "state" / "webui.db")
+        from webui.tuning import TuningController
+        self.controller = TuningController(self.store)
+        quality_context = {
+            "profile_summary": "Python AI 应用开发候选人",
+            "screening_fields": {"salary": ["403"]},
+            "profile_ref": "user-confirmed:test",
+        }
+        scopes = [
+            ("small", 1, 3), ("small", 2, 3),
+            ("medium", 2, 5), ("medium", 3, 5),
+            ("large", 10, 5), ("large", 11, 5),
+        ]
+        self.experiment = self.controller.create_experiment_with_input(
+            spec_version="011-deep-configuration-probing",
+            source_scope={
+                "keywords": ["AI"], "scope_kind": "cities",
+                "cities": ["东莞"], "pages_per_combination": 3,
+            },
+            quality_context=quality_context,
+            workloads=[{
+                "task_size": size,
+                "structure_index": index % 2 + 1,
+                "scope": {
+                    "keywords": [f"AI-{i}" for i in range(count)],
+                    "scope_kind": "cities",
+                    "cities": ["东莞"],
+                    "pages_per_combination": pages,
+                },
+            } for index, (size, count, pages) in enumerate(scopes)],
+        )
+        self.controller.confirm_input(self.experiment["id"])
+        self.bundle = self.store.get_tuning_input_bundle(self.experiment["id"])
+        self.workload = self.bundle["workloads"][0]
+        self.candidate = self.controller.add_candidate(
+            experiment_id=self.experiment["id"],
+            stage="list", strategy_step="baseline",
+            config=_sample_nine_fields(),
+        )
+        self.round = self.controller.create_round(
+            experiment_id=self.experiment["id"],
+            candidate_id=self.candidate["id"],
+            workload_id=self.workload["id"],
+            round_kind="list", repetition_index=1,
+        )
+        # 签发 manifest 并执行，使 round 进入 running
+        self.manifest = self._build_valid_manifest()
+        self.issued = self.controller.issue_manifest(self.manifest)
+        self.manifest_record = self.store.get_task_manifest(
+            self.issued["manifest_id"]
+        )
+        self.controller.execute_manifest(self.issued["manifest_id"])
+        # 持久化 list artifact
+        self.artifact = self.controller.persist_stage_artifact(
+            round_id=self.round["id"], stage="list",
+            payload={"round_kind": "list", "jobs": [{"job_id": "j1"}]},
+        )
+        self.artifact_record = self.store.get_tuning_stage_artifact(
+            self.artifact["id"]
+        )
+        # cutoff: future 表示所有记录都"迁移前"，past 表示所有记录都"迁移后"
+        self.future_cutoff = "2099-01-01T00:00:00+00:00"
+        self.past_cutoff = "2000-01-01T00:00:00+00:00"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _build_valid_manifest(self) -> dict:
+        """构造一份能通过 _validate_manifest 的合法 manifest payload。"""
+        manifest = _make_valid_manifest_payload(
+            experiment_id=self.experiment["id"],
+            candidate_id=self.candidate["id"],
+            round_id=self.round["id"],
+        )
+        scope = self.workload["scope"]
+        root = f"tuning/{self.experiment['id']}"
+        manifest["frozen_input"].update({
+            "input_version_id": self.bundle["input_version"]["id"],
+            "workload_id": self.workload["id"],
+            "task_size": self.workload["task_size"],
+            "structure_index": self.workload["structure_index"],
+            "scope_digest": scope["scope_digest"],
+            "artifact_manifest_path": f"{root}/input/{self.workload['id']}.json",
+            "artifact_digest": self.workload["artifact_digest"],
+            "quality_context_digest": self.bundle["input_version"][
+                "quality_context_digest"
+            ],
+            "planned_pages": self.workload["planned_pages"],
+        })
+        manifest["execution_config"] = self.store.get_tuning_candidate(
+            self.candidate["id"]
+        )["config"]
+        manifest["fixed_fields"] = {
+            key: scope[key] for key in (
+                "keywords", "scope_kind", "cities", "pages_per_combination",
+                "planned_pages", "task_size",
+            )
+        }
+        manifest["monitoring"]["final_artifact_path"] = (
+            f"{root}/evidence/{self.round['id']}.json"
+        )
+        manifest["allowed_writes"] = [
+            f"{root}/evidence/{self.round['id']}.json",
+            f"{root}/artifacts/{self.round['id']}/",
+        ]
+        manifest["required_artifacts"][0]["path"] = (
+            f"{root}/evidence/{self.round['id']}.json"
+        )
+        return manifest
+
+    # -- manifest 客观证明 -----------------------------------------------
+
+    def test_manifest_proof_passes_for_pre_migration_record(self):
+        """迁移前 manifest + 有效 digest + experiment 迁移前 → 证明为 boss。"""
+        proof = self.controller.prove_legacy_boss_manifest(
+            manifest_record=self.manifest_record,
+            migration_cutoff=self.future_cutoff,
+        )
+        self.assertEqual(proof["platform"], "boss")
+        self.assertEqual(proof["proof_kind"], "legacy_manifest")
+        self.assertTrue(proof["digest_verified"])
+        self.assertIn("experiment:", proof["provenance"][0])
+
+    def test_manifest_proof_fails_when_issued_after_cutoff(self):
+        """issued_at >= cutoff → 阻断。"""
+        with self.assertRaises(ValueError) as ctx:
+            self.controller.prove_legacy_boss_manifest(
+                manifest_record=self.manifest_record,
+                migration_cutoff=self.past_cutoff,
+            )
+        self.assertIn("不早于 migration cutoff", str(ctx.exception))
+
+    def test_manifest_proof_fails_when_digest_tampered(self):
+        """manifest_digest 与重算不一致 → 阻断。"""
+        tampered = dict(self.manifest_record)
+        tampered["manifest_digest"] = "sha256:deadbeef"
+        with self.assertRaises(ValueError) as ctx:
+            self.controller.prove_legacy_boss_manifest(
+                manifest_record=tampered,
+                migration_cutoff=self.future_cutoff,
+            )
+        self.assertIn("manifest_digest", str(ctx.exception))
+
+    def test_manifest_proof_fails_when_json_declares_zhilian(self):
+        """manifest JSON 显式 platform=zhilian → 阻断，不重标为 BOSS。"""
+        tampered_manifest = dict(self.manifest_record["manifest"])
+        tampered_manifest["fixed_fields"] = {
+            **tampered_manifest.get("fixed_fields", {}),
+            "platform": "zhilian",
+        }
+        tampered = dict(self.manifest_record)
+        tampered["manifest"] = tampered_manifest
+        with self.assertRaises(ValueError) as ctx:
+            self.controller.prove_legacy_boss_manifest(
+                manifest_record=tampered,
+                migration_cutoff=self.future_cutoff,
+            )
+        self.assertIn("zhilian", str(ctx.exception))
+
+    def test_manifest_proof_fails_when_experiment_created_after_cutoff(self):
+        """manifest issued_at 早于 cutoff 但 experiment 创建晚于 cutoff → 阻断。"""
+        tampered = dict(self.manifest_record)
+        tampered["issued_at"] = "1999-01-01T00:00:00+00:00"
+        with self.assertRaises(ValueError) as ctx:
+            self.controller.prove_legacy_boss_manifest(
+                manifest_record=tampered,
+                migration_cutoff=self.past_cutoff,
+            )
+        self.assertIn("experiment", str(ctx.exception).lower())
+
+    def test_manifest_proof_does_not_modify_json_or_digest(self):
+        """证明过程不修改 manifest JSON 或 manifest_digest。"""
+        original_digest = self.manifest_record["manifest_digest"]
+        original_json = json.dumps(
+            self.manifest_record["manifest"], sort_keys=True
+        )
+        self.controller.prove_legacy_boss_manifest(
+            manifest_record=self.manifest_record,
+            migration_cutoff=self.future_cutoff,
+        )
+        refreshed = self.store.get_task_manifest(self.manifest_record["id"])
+        self.assertEqual(refreshed["manifest_digest"], original_digest)
+        self.assertEqual(
+            json.dumps(refreshed["manifest"], sort_keys=True),
+            original_json,
+        )
+
+    # -- artifact 客观证明 -----------------------------------------------
+
+    def test_artifact_proof_passes_for_pre_migration_list(self):
+        """迁移前 list artifact + 有效 digest → 证明为 boss。"""
+        proof = self.controller.prove_legacy_boss_artifact(
+            artifact_record=self.artifact_record,
+            migration_cutoff=self.future_cutoff,
+        )
+        self.assertEqual(proof["platform"], "boss")
+        self.assertEqual(proof["proof_kind"], "legacy_artifact")
+        self.assertEqual(proof["stage"], "list")
+        self.assertTrue(proof["digest_verified"])
+
+    def test_artifact_proof_passes_for_pre_migration_detail(self):
+        """迁移前 detail artifact 同样可证明（stage=detail 在允许集合内）。"""
+        detail_record = dict(self.artifact_record)
+        detail_record["stage"] = "detail"
+        proof = self.controller.prove_legacy_boss_artifact(
+            artifact_record=detail_record,
+            migration_cutoff=self.future_cutoff,
+        )
+        self.assertEqual(proof["platform"], "boss")
+        self.assertEqual(proof["stage"], "detail")
+
+    def test_artifact_proof_fails_for_rough_stage(self):
+        """stage=rough → 阻断（仅 list/detail 可证明）。"""
+        rough_record = dict(self.artifact_record)
+        rough_record["stage"] = "rough"
+        with self.assertRaises(ValueError) as ctx:
+            self.controller.prove_legacy_boss_artifact(
+                artifact_record=rough_record,
+                migration_cutoff=self.future_cutoff,
+            )
+        self.assertIn("list/detail", str(ctx.exception))
+
+    def test_artifact_proof_fails_for_end_to_end_stage(self):
+        """stage=end_to_end → 阻断（仅 list/detail 可证明）。"""
+        e2e_record = dict(self.artifact_record)
+        e2e_record["stage"] = "end_to_end"
+        with self.assertRaises(ValueError) as ctx:
+            self.controller.prove_legacy_boss_artifact(
+                artifact_record=e2e_record,
+                migration_cutoff=self.future_cutoff,
+            )
+        self.assertIn("list/detail", str(ctx.exception))
+
+    def test_artifact_proof_fails_when_created_after_cutoff(self):
+        """created_at >= cutoff → 阻断。"""
+        with self.assertRaises(ValueError) as ctx:
+            self.controller.prove_legacy_boss_artifact(
+                artifact_record=self.artifact_record,
+                migration_cutoff=self.past_cutoff,
+            )
+        self.assertIn("不早于 migration cutoff", str(ctx.exception))
+
+    def test_artifact_proof_fails_when_digest_tampered(self):
+        """artifact_digest 与文件内容不一致 → 阻断。"""
+        tampered = dict(self.artifact_record)
+        tampered["artifact_digest"] = "sha256:deadbeef"
+        with self.assertRaises(ValueError) as ctx:
+            self.controller.prove_legacy_boss_artifact(
+                artifact_record=tampered,
+                migration_cutoff=self.future_cutoff,
+            )
+        self.assertIn("artifact_digest", str(ctx.exception))
+
+    def test_artifact_proof_does_not_modify_file_or_digest(self):
+        """证明过程不修改 artifact 文件或 digest。"""
+        original_digest = self.artifact_record["artifact_digest"]
+        absolute = self.root / self.artifact_record["artifact_path"]
+        original_bytes = absolute.read_bytes()
+        self.controller.prove_legacy_boss_artifact(
+            artifact_record=self.artifact_record,
+            migration_cutoff=self.future_cutoff,
+        )
+        refreshed = self.store.get_tuning_stage_artifact(
+            self.artifact_record["id"]
+        )
+        self.assertEqual(refreshed["artifact_digest"], original_digest)
+        self.assertEqual(absolute.read_bytes(), original_bytes)
+
+
 if __name__ == "__main__":
     unittest.main()

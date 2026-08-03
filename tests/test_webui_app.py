@@ -2,6 +2,7 @@ import hashlib
 import json
 import pathlib
 import re
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -2527,6 +2528,244 @@ class SourceDetailBatchCommandTests(unittest.TestCase):
             .parameters["tab_pool_size"].default,
             5,
         )
+
+class LegacyPlatformGuardTests(unittest.TestCase):
+    """tasks007 T601-T604: legacy BOSS-only 路由对显式智联/未知平台的零副作用拒绝。
+
+    合同（contracts/http-api.md 第 351-370 行 Legacy BOSS-only 矩阵）：
+    - 显式 ``zhilian`` → ``422 legacy_platform_not_supported``，且发生在任务/对象
+      查找和任何副作用之前。
+    - 其它未知平台 → ``400 platform_validation_failed``。
+    - 显式 ``boss`` 或省略平台 → 走既有 BOSS 行为，成功对象标识 ``platform=boss``。
+    """
+
+    _TASK_BODY = {
+        "keyword": "Python 后端", "city": "上海", "pages": 1,
+        "detail": False, "analysis": False, "format": "json",
+    }
+    _CONFIRM_BODY = {
+        "keyword": [{"word": "Python", "recommended": True}],
+        "city": "上海",
+    }
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.result_dir = root / "results"
+        self.db_path = root / "state" / "webui.db"
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(self.result_dir),
+            "DB_PATH": str(self.db_path),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        session = self.client.get("/api/session")
+        self.assertEqual(session.status_code, 200)
+        self.token = session.get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = self.token
+        # 预置一个 BOSS 任务用于 task 子路由（cancel/retry/result/summary/export）。
+        resp = self.client.post("/api/tasks", json=self._TASK_BODY)
+        self.assertEqual(resp.status_code, 202)
+        self.task_id = resp.get_json()["task"]["id"]
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    # ----- 快照助手 -------------------------------------------------------
+
+    def _db_table_counts(self):
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            names = [row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()]
+            return {
+                name: conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
+                for name in names
+            }
+        finally:
+            conn.close()
+
+    def _result_files(self):
+        if not self.result_dir.exists():
+            return []
+        return sorted(p.name for p in self.result_dir.glob("*"))
+
+    def _snapshot(self):
+        return {
+            "db": self._db_table_counts(),
+            "result_files": self._result_files(),
+            "task_count": len(self.client.get("/api/tasks").get_json()["tasks"]),
+        }
+
+    def _assert_no_side_effects(self, before, *, context=""):
+        after = self._snapshot()
+        self.assertEqual(
+            after["db"], before["db"],
+            f"{context}DB 表行数发生变化: {before['db']} -> {after['db']}",
+        )
+        self.assertEqual(
+            after["result_files"], before["result_files"],
+            f"{context}结果文件列表发生变化: {before['result_files']} -> {after['result_files']}",
+        )
+        self.assertEqual(
+            after["task_count"], before["task_count"],
+            f"{context}任务数量发生变化: {before['task_count']} -> {after['task_count']}",
+        )
+
+    # ----- 路由矩阵 -------------------------------------------------------
+
+    def _legacy_routes(self):
+        """返回 (name, method, path, body_or_None) 列表，path 已填入 task_id。"""
+        tid = self.task_id
+        return [
+            ("tasks_get", "GET", "/api/tasks", None),
+            ("tasks_post", "POST", "/api/tasks", dict(self._TASK_BODY)),
+            ("scrape_post", "POST", "/api/scrape", dict(self._TASK_BODY)),
+            ("setup_chrome_post", "POST", "/api/setup-chrome", {}),
+            ("task_detail_get", "GET", f"/api/tasks/{tid}", None),
+            ("task_cancel_post", "POST", f"/api/tasks/{tid}/cancel", {}),
+            ("task_retry_post", "POST", f"/api/tasks/{tid}/retry", {}),
+            ("task_result_get", "GET", f"/api/tasks/{tid}/result", None),
+            ("task_summary_get", "GET", f"/api/tasks/{tid}/summary", None),
+            ("task_export_get", "GET", f"/api/tasks/{tid}/export.csv", None),
+            ("results_get", "GET", "/api/results", None),
+            ("confirm_fields_post", "POST", "/api/confirm-fields", dict(self._CONFIRM_BODY)),
+            ("search_runs_post", "POST", "/api/search-runs",
+             {"profile_id": "missing", "manual_keywords": ["Python"]}),
+            ("search_run_detail_get", "GET", "/api/search-runs/missing-run", None),
+            ("search_run_jobs_get", "GET", "/api/search-runs/missing-run/jobs", None),
+            ("search_run_cancel_post", "POST", "/api/search-runs/missing-run/cancel", {}),
+        ]
+
+    def _send(self, method, path, *, platform, body=None):
+        if method == "GET":
+            qs = {} if platform is None else {"platform": platform}
+            return self.client.get(path, query_string=qs)
+        payload = dict(body or {})
+        if platform is not None:
+            payload["platform"] = platform
+        return self.client.post(path, json=payload)
+
+    # ----- T601/T602: 显式 zhilian → 422 + 零副作用 -----------------------
+
+    def test_zhilian_rejected_with_422_and_zero_side_effects(self):
+        for name, method, path, body in self._legacy_routes():
+            with self.subTest(route=name):
+                before = self._snapshot()
+                resp = self._send(method, path, platform="zhilian", body=body)
+                self.assertEqual(
+                    resp.status_code, 422,
+                    f"{name}: 期望 422，实际 {resp.status_code} "
+                    f"{resp.get_data(as_text=True)[:200]}",
+                )
+                data = resp.get_json()
+                self.assertIsNotNone(data, f"{name}: 响应非 JSON")
+                self.assertEqual(
+                    data["error_code"], "legacy_platform_not_supported",
+                    f"{name}: error_code={data.get('error_code')}",
+                )
+                self._assert_no_side_effects(before, context=f"[{name}] ")
+
+    # ----- T601/T602: 未知平台 → 400 + 零副作用 ---------------------------
+
+    def test_unknown_platform_rejected_with_400_and_zero_side_effects(self):
+        for name, method, path, body in self._legacy_routes():
+            with self.subTest(route=name):
+                before = self._snapshot()
+                resp = self._send(method, path, platform="weird-platform", body=body)
+                self.assertEqual(
+                    resp.status_code, 400,
+                    f"{name}: 期望 400，实际 {resp.status_code} "
+                    f"{resp.get_data(as_text=True)[:200]}",
+                )
+                data = resp.get_json()
+                self.assertIsNotNone(data, f"{name}: 响应非 JSON")
+                self.assertEqual(
+                    data["error_code"], "platform_validation_failed",
+                    f"{name}: error_code={data.get('error_code')}",
+                )
+                self._assert_no_side_effects(before, context=f"[{name}] ")
+
+    # ----- T601/T602: zhilian 拒绝发生在对象查找前（不返回 404） -----------
+
+    def test_zhilian_rejects_before_object_lookup(self):
+        """对不存在的 task/run id，显式 zhilian 必须返回 422 而非 404。"""
+        cases = [
+            ("missing_task_detail", "GET", "/api/tasks/missing-task", None),
+            ("missing_task_cancel", "POST", "/api/tasks/missing-task/cancel", {}),
+            ("missing_task_retry", "POST", "/api/tasks/missing-task/retry", {}),
+            ("missing_task_result", "GET", "/api/tasks/missing-task/result", None),
+            ("missing_task_summary", "GET", "/api/tasks/missing-task/summary", None),
+            ("missing_task_export", "GET", "/api/tasks/missing-task/export.csv", None),
+            ("missing_run_detail", "GET", "/api/search-runs/missing-run", None),
+            ("missing_run_jobs", "GET", "/api/search-runs/missing-run/jobs", None),
+            ("missing_run_cancel", "POST", "/api/search-runs/missing-run/cancel", {}),
+        ]
+        for name, method, path, body in cases:
+            with self.subTest(route=name):
+                resp = self._send(method, path, platform="zhilian", body=body)
+                self.assertEqual(
+                    resp.status_code, 422,
+                    f"{name}: 期望 422（拒绝先于对象查找），实际 {resp.status_code}",
+                )
+                self.assertEqual(
+                    resp.get_json()["error_code"], "legacy_platform_not_supported",
+                )
+
+    # ----- T604: 显式 boss / 省略平台 → 既有 BOSS 行为 --------------------
+
+    def test_explicit_boss_preserves_legacy_behavior(self):
+        for name, path in [
+            ("tasks_list", "/api/tasks"),
+            ("results", "/api/results"),
+            ("task_detail", f"/api/tasks/{self.task_id}"),
+            ("task_result", f"/api/tasks/{self.task_id}/result"),
+            ("task_summary", f"/api/tasks/{self.task_id}/summary"),
+        ]:
+            with self.subTest(route=name):
+                resp = self.client.get(path, query_string={"platform": "boss"})
+                self.assertEqual(resp.status_code, 200, f"{name}: {resp.status_code}")
+
+    def test_omitted_platform_preserves_legacy_behavior(self):
+        for name, path in [
+            ("tasks_list", "/api/tasks"),
+            ("results", "/api/results"),
+            ("task_detail", f"/api/tasks/{self.task_id}"),
+            ("task_result", f"/api/tasks/{self.task_id}/result"),
+            ("task_summary", f"/api/tasks/{self.task_id}/summary"),
+        ]:
+            with self.subTest(route=name):
+                resp = self.client.get(path)
+                self.assertEqual(resp.status_code, 200, f"{name}: {resp.status_code}")
+
+    def test_boss_success_objects_marked_platform_boss(self):
+        """T604: legacy 成功对象补充 platform=boss 标识。"""
+        resp = self.client.post("/api/tasks", json=self._TASK_BODY)
+        self.assertEqual(resp.status_code, 202)
+        task = resp.get_json()["task"]
+        self.assertEqual(
+            task.get("platform"), "boss",
+            f"任务对象缺少 platform=boss 标识: {task.get('platform')}",
+        )
+
+        detail = self.client.get(f"/api/tasks/{task['id']}").get_json()["task"]
+        self.assertEqual(detail.get("platform"), "boss")
+
+        results = self.client.get("/api/results").get_json()
+        self.assertEqual(
+            results.get("platform"), "boss",
+            f"/api/results 响应缺少 platform=boss: {results.get('platform')}",
+        )
+
+    def test_scrape_omitted_platform_creates_boss_task(self):
+        """/api/scrape 省略平台保持旧创建别名，任务标识 platform=boss。"""
+        resp = self.client.post("/api/scrape", json=self._TASK_BODY)
+        self.assertEqual(resp.status_code, 202)
+        self.assertEqual(resp.get_json()["task"].get("platform"), "boss")
+
 
 if __name__ == "__main__":
     unittest.main()

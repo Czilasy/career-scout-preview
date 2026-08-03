@@ -1,3 +1,199 @@
+// ---------------------------------------------------------------------------
+// 平台身份与稳定错误码（contracts/platform-schema.md、http-api.md、job-source.md）
+// ---------------------------------------------------------------------------
+
+/** 平台稳定键。注册表权威来源是后端 `webui/platforms.py`。 */
+export type Platform = "boss" | "zhilian";
+
+/**
+ * 任务 API 公共状态映射（http-api.md 公共状态映射表）。
+ * 后端 DB 写 canonical 值，前端 / `/api/latest-running-task` /
+ * 状态/进度/取消/结束/最近结果都使用本映射。
+ */
+export type TaskApiStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "completed"
+  | "completed_with_pending"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+/** 平台注册表 / API 错误响应中的稳定错误码。 */
+export type PlatformErrorCode =
+  | "platform_validation_failed"
+  | "platform_disabled"
+  | "platform_schema_unavailable"
+  | "filter_schema_version_mismatch"
+  | "filter_snapshot_incompatible"
+  | "city_mapping_unavailable"
+  | "city_mapping_missing"
+  | "search_filters_not_supported"
+  | "job_identity_conflict"
+  | "platform_url_mismatch"
+  | "task_input_mismatch"
+  | "run_identity_conflict"
+  | "mixed_platform_jobs"
+  | "non_pending_platform_job_ids"
+  | "result_not_clearable"
+  | "login_space_conflict"
+  | "legacy_platform_not_supported"
+  | "tuning_platform_mismatch"
+  | "migration_backup_failed"
+  | "migration_failed";
+
+/** JobSource adapter 错误矩阵中的稳定失败码（job-source.md）。 */
+export type SourceErrorCode =
+  | "source_cdp_unavailable"
+  | "source_login_required"
+  | "source_unreachable"
+  | "source_blocked"
+  | "source_not_found"
+  | "source_invalid_output"
+  | "source_input_drift"
+  | "source_timeout"
+  | "source_unknown_error"
+  | "source_verification_required"
+  | "source_rate_limited";
+
+// ---------------------------------------------------------------------------
+// 平台注册表投影
+// ---------------------------------------------------------------------------
+
+/** `GET /api/platforms` 返回的单个平台注册项摘要。 */
+export interface PlatformSummary {
+  key: Platform;
+  display_name: string;
+  filter_schema_version: number;
+  city_mapping_version: number;
+  enabled_for_new_tasks: boolean;
+  availability_reason: string;
+}
+
+/** `GET /api/platforms` 响应体。 */
+export interface PlatformsResponse {
+  ok: true;
+  platforms: PlatformSummary[];
+  default_platform: Platform;
+}
+
+// ---------------------------------------------------------------------------
+// AI 筛选 schema（GET /api/filter-labels）
+// ---------------------------------------------------------------------------
+
+export interface FilterOption {
+  value: string;
+  label: string;
+}
+
+export interface FilterField {
+  key: string;
+  label: string;
+  multiple: boolean;
+  options: FilterOption[];
+}
+
+/** `GET /api/filter-labels?platform=...` 响应体。 */
+export interface PlatformFilterSchema {
+  ok: true;
+  platform: Platform;
+  schema_version: number;
+  enabled_for_new_tasks: boolean;
+  fields: FilterField[];
+}
+
+// ---------------------------------------------------------------------------
+// 城市目录（GET /api/options）
+// ---------------------------------------------------------------------------
+
+export interface CityEntry {
+  label: string;
+  value: string;
+}
+
+/** `GET /api/options?platform=...` 响应体。 */
+export interface PlatformCityCatalog {
+  ok: true;
+  platform: Platform;
+  city_mapping_version: number;
+  cities: CityEntry[];
+}
+
+// ---------------------------------------------------------------------------
+// AI 筛选冻结快照
+// ---------------------------------------------------------------------------
+
+/** 单字段冻结值与当时标签（值与标签数组按同序一一对应）。 */
+export interface FilterSnapshotField {
+  values: string[];
+  labels: string[];
+}
+
+/** AI run 保存的完整筛选快照（platform-schema.md 完整冻结快照）。 */
+export interface FilterSnapshot {
+  schema_version: number;
+  platform: Platform;
+  fields: Record<string, FilterSnapshotField>;
+}
+
+// ---------------------------------------------------------------------------
+// 浏览器账号投影（GET /api/browser-accounts）
+// ---------------------------------------------------------------------------
+
+/** 单个平台在浏览器账号上的登录空间投影。 */
+export interface BrowserAccountPlatformSpace {
+  cdp_port: number;
+}
+
+/** 浏览器账号记录，平台登录空间以非敏感投影形式返回。 */
+export interface BrowserAccount {
+  id: string;
+  name: string;
+  profile_dir: string;
+  builtin?: boolean;
+  platforms?: Partial<Record<Platform, BrowserAccountPlatformSpace>>;
+}
+
+// ---------------------------------------------------------------------------
+// 统一任务快照（GET /api/task-state、/api/search-progress、/api/latest-running-task）
+// ---------------------------------------------------------------------------
+
+/** 任务暂停 / 阻断时的稳定错误信息。 */
+export interface TaskPauseInfo {
+  error_code?: PlatformErrorCode | SourceErrorCode | string;
+  error_reason?: string;
+}
+
+/**
+ * 任务统一快照。覆盖状态、进度、平台身份、输入摘要、来源审计与暂停原因。
+ * DiscoveryView.vue / TaskProgress.vue 等组件应直接复用本类型。
+ */
+export interface TaskSnapshot {
+  status?: TaskApiStatus | string;
+  progress?: Record<string, unknown>;
+  logs?: string[];
+  error?: string;
+  started_at?: number;
+  finished_at?: number;
+  stage?: string;
+  success_count?: number;
+  fail_count?: number;
+  unstarted_count?: number;
+  total?: number;
+  kept_count?: number;
+  dropped_count?: number;
+  pending_count?: number;
+  source_total?: number;
+  pause_info?: TaskPauseInfo | null;
+  execution_config?: Record<string, unknown> | null;
+  platform?: Platform;
+  task_input_digest?: string;
+  scope_digest?: string;
+  source_summary?: Record<string, unknown> | null;
+  source_outcomes?: Array<Record<string, unknown>> | null;
+}
+
 export interface CandidateProfile {
   id: string;
   name: string;
@@ -7,11 +203,21 @@ export interface CandidateProfile {
 export interface JobItem {
   id?: string;
   job_id?: string;
+  /**
+   * 平台原始身份。任何接口不得把 `platform_job_id` 填进 `job_id`：
+   * `job_id` 是内部 UUID，`platform_job_id` 是平台稳定 ID。
+   * 见 http-api.md 岗位对象合同。
+   */
+  platform_job_id?: string;
+  /** 该岗位所属平台。后端权威来源，前端不按 URL 猜。 */
+  platform?: Platform;
   title?: string;
   company?: string;
   boss_name?: string;
   salary?: string;
   location?: string;
+  experience?: string;
+  degree?: string;
   jd?: string;
   jd_excerpt?: string;
   job_link?: string;

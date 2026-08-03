@@ -54,7 +54,15 @@ from flask import Flask, jsonify, request, send_from_directory
 from scripts import boss_cdp_raw as boss
 from scripts import job_summary
 from webui.constants import CLEANUP_EXPIRED_DAYS, FEEDBACK_THRESHOLD, LIST_LIMIT, LOG_TAIL_LINES
-from webui.core import build_filter_options, match_jobs, normalize_profile, validate_search_params
+from webui.core import (
+    LegacyPlatformNotSupportedError,
+    build_filter_options,
+    legacy_platform_guard,
+    match_jobs,
+    normalize_profile,
+    validate_search_params,
+)
+from webui.platforms import UnknownPlatformError
 from webui.store import SYSTEMIC_BLOCK_CODES, TaskStore
 from webui.workbench import (
     allocate_detail_budget,
@@ -768,10 +776,32 @@ def create_app(config=None):
 
     @app.errorhandler(ValueError)
     def handle_value_error(error):
+        # T603: legacy 平台守卫异常优先映射，不被通用 invalid_request 吞掉。
+        if isinstance(error, LegacyPlatformNotSupportedError):
+            return jsonify({
+                "error_code": "legacy_platform_not_supported",
+                "user_message": str(error),
+            }), 422
+        if isinstance(error, UnknownPlatformError):
+            return jsonify({
+                "error_code": "platform_validation_failed",
+                "user_message": "不支持的招聘平台",
+            }), 400
         return jsonify({
             "error_code": "invalid_request",
             "user_message": str(error),
         }), 400
+
+    def _tag_boss(obj):
+        """T604: legacy 成功响应标识 platform=boss（仅响应层，不持久化）。
+
+        合同第 370 行：所有 legacy 成功响应中的任务/run/岗位/结果对象补充
+        ``platform=boss``；该标识不把这些链路升级成多平台主链。返回浅拷贝，
+        避免污染 store 内部对象。
+        """
+        if isinstance(obj, dict):
+            return {**obj, "platform": "boss"}
+        return obj
 
     @app.errorhandler(KeyError)
     def handle_key_error(error):
@@ -878,15 +908,17 @@ def create_app(config=None):
     @app.route("/api/tasks", methods=["GET", "POST"])
     def tasks():
         if request.method == "GET":
+            legacy_platform_guard(request.args.get("platform"))
             limit = min(LIST_LIMIT, max(1, request.args.get("limit", 30, type=int) or 30))
-            return jsonify({"tasks": store.list_tasks(limit=limit)})
+            return jsonify({"tasks": [_tag_boss(t) for t in store.list_tasks(limit=limit)]})
         raw = request.get_json(silent=True) or {}
+        legacy_platform_guard(raw.get("platform"))
         search = validate_search_params(raw)
         profile_raw = raw.get("profile") if "profile" in raw else store.load_profile()
         normalized_profile = normalize_profile(profile_raw)
         store.save_profile(normalized_profile)
         task = runner.create_scrape(search, normalized_profile)
-        return jsonify({"task": task}), 202
+        return jsonify({"task": _tag_boss(task)}), 202
 
     @app.route("/api/scrape", methods=["POST"])
     def legacy_scrape():
@@ -894,29 +926,38 @@ def create_app(config=None):
 
     @app.route("/api/setup-chrome", methods=["POST"])
     def setup_chrome():
-        return jsonify({"task": runner.create_setup_chrome()}), 202
+        raw = request.get_json(silent=True) or {}
+        legacy_platform_guard(raw.get("platform"))
+        return jsonify({"task": _tag_boss(runner.create_setup_chrome())}), 202
 
     @app.route("/api/tasks/<task_id>")
     def task_detail(task_id):
+        legacy_platform_guard(request.args.get("platform"))
         task = store.get_task(task_id)
         after = request.args.get("after", 0, type=int)
         task["logs"] = store.get_logs(task_id, after=after)
-        return jsonify({"task": task})
+        return jsonify({"task": _tag_boss(task)})
 
     @app.route("/api/tasks/<task_id>/cancel", methods=["POST"])
     def cancel_task(task_id):
-        return jsonify({"task": runner.cancel(task_id)})
+        raw = request.get_json(silent=True) or {}
+        legacy_platform_guard(raw.get("platform"))
+        return jsonify({"task": _tag_boss(runner.cancel(task_id))})
 
     @app.route("/api/tasks/<task_id>/retry", methods=["POST"])
     def retry_task(task_id):
-        return jsonify({"task": runner.retry(task_id)}), 202
+        raw = request.get_json(silent=True) or {}
+        legacy_platform_guard(raw.get("platform"))
+        return jsonify({"task": _tag_boss(runner.retry(task_id))}), 202
 
     @app.route("/api/tasks/<task_id>/result")
     def task_result(task_id):
+        legacy_platform_guard(request.args.get("platform"))
         task, list_payload, jobs, details = _task_payload(store, task_id)
         ranked = match_jobs(jobs, details, task["params"].get("profile"))
         return jsonify({
             "task_id": task_id,
+            "platform": "boss",
             "keyword": list_payload.get("keyword", task["params"].get("search", {}).get("keyword", "")),
             "city": list_payload.get("city", task["params"].get("search", {}).get("city", "")),
             "total": len(ranked),
@@ -926,6 +967,7 @@ def create_app(config=None):
 
     @app.route("/api/tasks/<task_id>/summary")
     def task_summary(task_id):
+        legacy_platform_guard(request.args.get("platform"))
         task, list_payload, jobs, details = _task_payload(store, task_id)
         search = task["params"].get("search", {})
         summary = job_summary.build_summary(
@@ -942,6 +984,7 @@ def create_app(config=None):
 
     @app.route("/api/tasks/<task_id>/export.csv")
     def export_csv(task_id):
+        legacy_platform_guard(request.args.get("platform"))
         task, _, jobs, details = _task_payload(store, task_id)
         ranked = match_jobs(jobs, details, task["params"].get("profile"))
         columns = [
@@ -964,9 +1007,10 @@ def create_app(config=None):
 
     @app.route("/api/results")
     def results():
+        legacy_platform_guard(request.args.get("platform"))
         result_dir = Path(app.config["RESULT_DIR"])
         files = sorted(result_dir.glob("boss_jobs_*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
-        return jsonify({"files": [path.name for path in files]})
+        return jsonify({"platform": "boss", "files": [path.name for path in files]})
 
     # == US1: AI settings, profiles, resumes =============================
 
@@ -1166,6 +1210,7 @@ def create_app(config=None):
     @app.route("/api/search-runs", methods=["POST"])
     def create_search_run():
         raw = request.get_json(silent=True) or {}
+        legacy_platform_guard(raw.get("platform"))
         profile_id = raw.get("profile_id")
         if not profile_id:
             raise ValueError("profile_id 不能为空")
@@ -1195,6 +1240,7 @@ def create_app(config=None):
 
     @app.route("/api/search-runs/<run_id>")
     def search_run_detail(run_id):
+        legacy_platform_guard(request.args.get("platform"))
         run = store.get_search_run(run_id)
         run["queries"] = store.list_run_queries(run_id)
         run["events"] = store.list_search_events(run_id, after=request.args.get("after_event_id", 0, type=int))
@@ -1202,10 +1248,13 @@ def create_app(config=None):
 
     @app.route("/api/search-runs/<run_id>/cancel", methods=["POST"])
     def cancel_search_run(run_id):
+        raw = request.get_json(silent=True) or {}
+        legacy_platform_guard(raw.get("platform"))
         return jsonify(workbench_runner.cancel_search_run(run_id))
 
     @app.route("/api/search-runs/<run_id>/jobs")
     def search_run_jobs(run_id):
+        legacy_platform_guard(request.args.get("platform"))
         run = store.get_search_run(run_id)
         profile_id = run["profile_id"]
         profile_jobs = store.list_profile_jobs(profile_id, run_id=run_id)
@@ -2940,6 +2989,8 @@ def create_app(config=None):
         from webui.ai import _validate_unified_fields, UNIFIED_SEARCH_FIELDS
 
         body = request.get_json(silent=True)
+        if isinstance(body, dict):
+            legacy_platform_guard(body.get("platform"))
         if not body or not isinstance(body, dict):
             return jsonify({"ok": False, "error": "无效的请求体"}), 400
 

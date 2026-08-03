@@ -301,5 +301,681 @@ class BossCdpSourcePlatformTests(unittest.TestCase):
         self.assertIn("cdp_port", sig.parameters)
 
 
+# ===========================================================================
+# tasks004 T301 — ZhilianCdpSource 构造与安全运行配置校验
+#
+# 实施门禁说明（fixture_manifest.json blocked_facts）：
+#   - list/detail/empty/login wall/edgeone/rate limit/block marker 全部未核验；
+#   - company_nature options、非全国城市码未核验；
+#   - can_run_real_tasks=false。
+#
+# 因此本任务只实现有证据覆盖的 adapter 骨架：构造校验、preflight 分类骨架、
+# fetch_list 输入校验骨架、fetch_detail URL/平台校验骨架、熔断器复用、
+# outcome 合同表达。真实页面 marker 检测、字段归一化、空结果判定保持占位，
+# 在 marker 核验后才解锁（T305/T307/T308/T310/T311 真实分支）。
+# ===========================================================================
+from webui.source import ZhilianCdpSource  # noqa: E402
+
+
+class ZhilianCdpSourceConstructionTests(unittest.TestCase):
+    """T301/T302：智联 adapter 构造参数与安全运行配置校验。"""
+
+    def test_class_attribute_platform_is_zhilian(self):
+        self.assertEqual(ZhilianCdpSource.platform, "zhilian")
+
+    def test_construction_requires_browser_account(self):
+        """缺少 browser_account 时返回稳定错误，不回退 BOSS factory/活动账号/默认端口。"""
+        with self.assertRaises((ValueError, TypeError)):
+            ZhilianCdpSource(browser_account="", cdp_port=9223)
+
+    def test_construction_requires_explicit_cdp_port(self):
+        """智联必须显式接收冻结 CDP 端口（9223），不得隐式默认。"""
+        # cdp_port 必须为正整数；0/负数拒绝。
+        with self.assertRaises((ValueError, TypeError)):
+            ZhilianCdpSource(browser_account="a", cdp_port=0)
+
+    def test_construction_rejects_profile_key_mismatch(self):
+        """profile_key 必须等于 'zhilian:<browser_account>'，不得使用 BOSS profile_key。"""
+        with self.assertRaises(ValueError):
+            ZhilianCdpSource(
+                browser_account="a",
+                cdp_port=9223,
+                profile_key="boss:a",  # 错配
+            )
+
+    def test_construction_rejects_boss_default_port(self):
+        """智联不得使用 BOSS 默认端口 9222（profile/platform 边界隔离）。"""
+        # 构造允许传入任意正整数端口（受控切换场景），但 platform=boss 默认端口
+        # 必须被显式拒绝，避免隐式回退 BOSS 登录空间。
+        with self.assertRaises(ValueError):
+            ZhilianCdpSource(
+                browser_account="a",
+                cdp_port=9222,  # BOSS 默认端口
+            )
+
+    def test_construction_rejects_platform_disabled(self):
+        """智联 enabled_for_new_tasks=False 时新任务创建前阻断。
+
+        返回 ``platform_disabled`` 稳定错误码，不静默切换 BOSS。
+        """
+        outcome = ZhilianCdpSource.preflight_disabled_platform()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "platform_disabled")
+
+    def test_construction_does_not_fallback_to_boss_factory(self):
+        """智联 adapter 不得回退 BOSS factory 或活动账号。"""
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        self.assertEqual(source.platform, "zhilian")
+        self.assertEqual(source.cdp_port, 9223)
+        self.assertNotEqual(source.platform, "boss")
+
+    def test_construction_freezes_runtime_config(self):
+        """构造冻结 platform/browser_account/cdp_port/profile_key，不读全局活动账号。"""
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            profile_key="zhilian:a",
+        )
+        self.assertEqual(source.browser_account, "a")
+        self.assertEqual(source.cdp_port, 9223)
+        self.assertEqual(source.profile_key, "zhilian:a")
+
+
+class ZhilianCdpSourcePreflightTests(unittest.TestCase):
+    """T303：preflight 分类骨架（CDP 不可用、登录墙、EdgeOne/验证码、限流、封禁、连接失败、超时）。
+
+    marker 检测需要真实页面 fixture（blocked_facts），本任务只实现分类逻辑骨架：
+    adapter 调用 scripts/zhilian_cdp_raw.py 的 preflight 函数，按返回的稳定
+    signal 映射到错误矩阵。真实 marker 检测函数保持占位（返回 None 表示未核验）。
+    """
+
+    def test_preflight_cdp_unavailable_returns_source_cdp_unavailable(self):
+        """CDP 9223 不可用 → source_cdp_unavailable（平台级 paused）。"""
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="cdp_unavailable"),
+        )
+        outcome = source.preflight()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_cdp_unavailable")
+
+    def test_preflight_login_required_returns_source_login_required(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="login_required"),
+        )
+        outcome = source.preflight()
+        self.assertEqual(outcome.failed_code, "source_login_required")
+
+    def test_preflight_edgeone_verification_returns_source_verification_required(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="verification"),
+        )
+        outcome = source.preflight()
+        self.assertEqual(outcome.failed_code, "source_verification_required")
+
+    def test_preflight_rate_limited_returns_source_rate_limited(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="rate_limited"),
+        )
+        outcome = source.preflight()
+        self.assertEqual(outcome.failed_code, "source_rate_limited")
+
+    def test_preflight_blocked_returns_source_blocked(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="blocked"),
+        )
+        outcome = source.preflight()
+        self.assertEqual(outcome.failed_code, "source_blocked")
+
+    def test_preflight_unreachable_returns_source_unreachable(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="unreachable"),
+        )
+        outcome = source.preflight()
+        self.assertEqual(outcome.failed_code, "source_unreachable")
+
+    def test_preflight_timeout_returns_source_timeout(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="timeout"),
+        )
+        outcome = source.preflight()
+        self.assertEqual(outcome.failed_code, "source_timeout")
+
+    def test_preflight_success_returns_ok(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="ok"),
+        )
+        outcome = source.preflight()
+        self.assertTrue(outcome.ok)
+        self.assertIsNone(outcome.failed_code)
+
+    def test_preflight_does_not_fallback_to_boss_port(self):
+        """preflight 只检查智联冻结端口 9223，不触碰 BOSS 9222。"""
+        captured_ports = []
+
+        def runner(port):
+            captured_ports.append(port)
+            return _fake_preflight(signal="ok")
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=runner,
+        )
+        source.preflight()
+        self.assertEqual(captured_ports, [9223])
+        self.assertNotIn(9222, captured_ports)
+
+
+class ZhilianCdpSourcePreflightLogSafetyTests(unittest.TestCase):
+    """T304：日志只含平台/阶段/计数/ID 是否存在/URL host，不含 Cookie/JD/页面正文/profile 路径。"""
+
+    _FORBIDDEN_LOG_TOKENS = (
+        "cookie", "jd", "description", "profile_dir", "profile_path",
+        ".zhilian", "C:\\", "/home/", "/Users/", "password", "token",
+        "secret", "api_key", "resume",
+    )
+
+    def test_preflight_success_log_is_safe(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="ok"),
+        )
+        outcome = source.preflight()
+        self._assert_safe_log(outcome.safe_log)
+
+    def test_preflight_failure_log_is_safe(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="login_required"),
+        )
+        outcome = source.preflight()
+        self._assert_safe_log(outcome.safe_log)
+        # 平台和阶段必须出现，便于审计。
+        self.assertIn("zhilian", outcome.safe_log)
+        self.assertIn("preflight", outcome.safe_log)
+
+    def _assert_safe_log(self, log_text: str) -> None:
+        low = (log_text or "").lower()
+        for token in self._FORBIDDEN_LOG_TOKENS:
+            self.assertNotIn(
+                token, low,
+                f"safe_log 含禁止 token: {token!r} (full: {log_text!r})",
+            )
+
+
+class ZhilianCdpSourceFetchListInputTests(unittest.TestCase):
+    """T306：fetch_list 输入校验骨架。
+
+    真实列表抓取与字段归一化需要 list_page_markers fixture（blocked_facts），
+    本任务只实现输入校验：拒绝 AI filters、要求规范城市解析快照、页数。
+    """
+
+    def _valid_plan_item(self, **overrides) -> dict:
+        item = {
+            "platform": "zhilian",
+            "keyword": "Python 后端",
+            "city": {
+                "name": "全国",
+                "platform_code": "jl0",
+                "mapping_version": 1,
+                "mapping_label": "全国",
+            },
+            "target_pages": 1,
+            "input_hash": _zhilian_input_hash({
+                "platform": "zhilian",
+                "keyword": "Python 后端",
+                "city": {
+                    "name": "全国",
+                    "platform_code": "jl0",
+                    "mapping_version": 1,
+                },
+                "target_pages": 1,
+            }),
+            "list_output_path": "",  # 由 _bind_temp_output 注入
+        }
+        item.update(overrides)
+        return item
+
+    def test_fetch_list_rejects_non_dict_plan_item(self):
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        outcome = source.fetch_list("not-a-dict")
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_list_rejects_platform_mismatch(self):
+        """plan_item.platform 必须与 adapter platform 一致，不回退 BOSS。"""
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        item = self._valid_plan_item(platform="boss")
+        outcome = source.fetch_list(item)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_list_rejects_ai_filters_in_plan_item(self):
+        """AI 筛选字段（salary/experience/degree/industry/scale/company_nature/stage）
+        不得进入 adapter 列表参数。"""
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        for forbidden_key in ("source_filters", "filters", "screening_fields",
+                              "company_nature", "stage", "salary"):
+            item = self._valid_plan_item(**{forbidden_key: ["x"]})
+            outcome = source.fetch_list(item)
+            self.assertFalse(outcome.ok, f"应拒绝 {forbidden_key}")
+            self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_list_requires_city_snapshot_with_platform_code(self):
+        """city 必须是带 platform_code/mapping_version 的解析快照，不接受裸字符串。"""
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        item = self._valid_plan_item(city="上海")  # 裸字符串，缺平台码
+        outcome = source.fetch_list(item)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_list_rejects_missing_city_mapping(self):
+        """缺城映射（city.platform_code 为空或缺失）→ city_mapping_missing。"""
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        item = self._valid_plan_item(city={"name": "未知城市"})
+        outcome = source.fetch_list(item)
+        self.assertFalse(outcome.ok)
+        # 缺城映射属于输入校验失败，归入 source_invalid_output
+        # （编排层在任务创建前应已用 city_mapping_missing 阻断）。
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_list_rejects_zero_pages(self):
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        item = self._valid_plan_item(target_pages=0)
+        outcome = source.fetch_list(item)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_list_rejects_missing_keyword(self):
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        item = self._valid_plan_item(keyword="")
+        outcome = source.fetch_list(item)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_list_rejects_missing_input_hash(self):
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        item = self._valid_plan_item(input_hash="")
+        outcome = source.fetch_list(item)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+
+class ZhilianCdpSourceInputHashTests(unittest.TestCase):
+    """T309：input_hash 覆盖 platform/关键词/完整城市解析快照/页数。"""
+
+    def test_input_hash_includes_platform(self):
+        from webui.source import _zhilian_input_hash
+        base = {
+            "keyword": "Python", "city": {"name": "全国", "platform_code": "jl0",
+                                           "mapping_version": 1},
+            "target_pages": 1,
+        }
+        h1 = _zhilian_input_hash({**base, "platform": "zhilian"})
+        h2 = _zhilian_input_hash({**base, "platform": "boss"})
+        self.assertNotEqual(h1, h2, "platform 必须影响 input_hash")
+
+    def test_input_hash_includes_keyword(self):
+        from webui.source import _zhilian_input_hash
+        base = {
+            "platform": "zhilian",
+            "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+            "target_pages": 1,
+        }
+        h1 = _zhilian_input_hash({**base, "keyword": "Python"})
+        h2 = _zhilian_input_hash({**base, "keyword": "Java"})
+        self.assertNotEqual(h1, h2)
+
+    def test_input_hash_includes_full_city_snapshot(self):
+        from webui.source import _zhilian_input_hash
+        base = {
+            "platform": "zhilian", "keyword": "Python", "target_pages": 1,
+        }
+        h1 = _zhilian_input_hash({**base, "city": {
+            "name": "全国", "platform_code": "jl0", "mapping_version": 1,
+        }})
+        # 缺 mapping_version 的不完整快照必须产生不同 hash。
+        h2 = _zhilian_input_hash({**base, "city": {
+            "name": "全国", "platform_code": "jl0",
+        }})
+        self.assertNotEqual(h1, h2)
+        # 不同 platform_code 产生不同 hash。
+        h3 = _zhilian_input_hash({**base, "city": {
+            "name": "全国", "platform_code": "jl999", "mapping_version": 1,
+        }})
+        self.assertNotEqual(h1, h3)
+
+    def test_input_hash_includes_target_pages(self):
+        from webui.source import _zhilian_input_hash
+        base = {
+            "platform": "zhilian", "keyword": "Python",
+            "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+        }
+        h1 = _zhilian_input_hash({**base, "target_pages": 1})
+        h2 = _zhilian_input_hash({**base, "target_pages": 2})
+        self.assertNotEqual(h1, h2)
+
+    def test_input_hash_is_deterministic(self):
+        from webui.source import _zhilian_input_hash
+        payload = {
+            "platform": "zhilian", "keyword": "Python",
+            "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+            "target_pages": 1,
+        }
+        self.assertEqual(
+            _zhilian_input_hash(payload),
+            _zhilian_input_hash(dict(payload)),
+        )
+
+
+class ZhilianCdpSourceFetchDetailTests(unittest.TestCase):
+    """T310/T311：fetch_detail URL/平台校验骨架。
+
+    真实 JD 取得需要 detail_page_markers fixture（blocked_facts），本任务只实现
+    URL/平台/平台岗位身份校验骨架。无法取得 JD 时返回明确单项失败，不伪造正文。
+    """
+
+    def test_fetch_detail_rejects_non_dict_job(self):
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        outcome = source.fetch_detail("not-a-dict")
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_detail_requires_platform_job_id(self):
+        """岗位必须有可归属的 platform_job_id，不能只凭客户端任意 URL 抓取。"""
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        outcome = source.fetch_detail({
+            "platform": "zhilian",
+            "canonical_url": "https://www.zhaopin.com/jobdetail/abc.htm",
+            # 缺 platform_job_id
+        })
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_detail_requires_canonical_url(self):
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        outcome = source.fetch_detail({
+            "platform": "zhilian",
+            "platform_job_id": "abc",
+            # 缺 canonical_url
+        })
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_detail_rejects_non_zhilian_url(self):
+        """非智联域名 URL 不得作为智联原链接打开（platform_url_mismatch）。"""
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        outcome = source.fetch_detail({
+            "platform": "zhilian",
+            "platform_job_id": "abc",
+            "canonical_url": "https://www.zhipin.com/job/abc",  # BOSS 域名
+        })
+        self.assertFalse(outcome.ok)
+        # URL host 不匹配智联 allowlist → platform_url_mismatch 映射到 invalid_output
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_detail_rejects_platform_mismatch(self):
+        """plan_item.platform != zhilian 时拒绝，不串平台。"""
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        outcome = source.fetch_detail({
+            "platform": "boss",  # 错配
+            "platform_job_id": "abc",
+            "canonical_url": "https://www.zhaopin.com/jobdetail/abc.htm",
+        })
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_detail_returns_not_found_without_faking_jd(self):
+        """无法取得真实 JD 时返回 source_not_found，不伪造正文（T311）。"""
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            detail_runner=lambda job, **kw: _fake_detail(signal="not_found"),
+        )
+        outcome = source.fetch_detail({
+            "platform": "zhilian",
+            "platform_job_id": "abc",
+            "canonical_url": "https://www.zhaopin.com/jobdetail/abc.htm",
+        })
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_not_found")
+        # 不得伪造 JD 正文。
+        self.assertFalse(outcome.detail)
+
+    def test_fetch_detail_returns_invalid_output_on_parse_failure(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            detail_runner=lambda job, **kw: _fake_detail(signal="invalid_output"),
+        )
+        outcome = source.fetch_detail({
+            "platform": "zhilian",
+            "platform_job_id": "abc",
+            "canonical_url": "https://www.zhaopin.com/jobdetail/abc.htm",
+        })
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_fetch_detail_returns_timeout(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            detail_runner=lambda job, **kw: _fake_detail(signal="timeout"),
+        )
+        outcome = source.fetch_detail({
+            "platform": "zhilian",
+            "platform_job_id": "abc",
+            "canonical_url": "https://www.zhaopin.com/jobdetail/abc.htm",
+        })
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_timeout")
+
+    def test_fetch_detail_returns_login_required_on_platform_block(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            detail_runner=lambda job, **kw: _fake_detail(signal="login_required"),
+        )
+        outcome = source.fetch_detail({
+            "platform": "zhilian",
+            "platform_job_id": "abc",
+            "canonical_url": "https://www.zhaopin.com/jobdetail/abc.htm",
+        })
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_login_required")
+
+
+class ZhilianCdpSourceBatchTests(unittest.TestCase):
+    """T312：fetch_details_batch 单项异常继续，连续平台级 signal 触发熔断。"""
+
+    def test_batch_returns_outcome_per_job(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            detail_runner=lambda job, **kw: _fake_detail(signal="ok"),
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": "j1",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/j1.htm"},
+            {"platform": "zhilian", "platform_job_id": "j2",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/j2.htm"},
+        ]
+        results = source.fetch_details_batch(jobs)
+        self.assertEqual(set(results.keys()), {"j1", "j2"})
+        self.assertTrue(results["j1"].ok)
+        self.assertTrue(results["j2"].ok)
+
+    def test_batch_single_failure_does_not_block_others(self):
+        """单岗位失败不抛出到批次外（T312）。"""
+        def runner(job, **kw):
+            if job["platform_job_id"] == "j2":
+                return _fake_detail(signal="not_found")
+            return _fake_detail(signal="ok")
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223, detail_runner=runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": "j1",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/j1.htm"},
+            {"platform": "zhilian", "platform_job_id": "j2",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/j2.htm"},
+            {"platform": "zhilian", "platform_job_id": "j3",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/j3.htm"},
+        ]
+        results = source.fetch_details_batch(jobs)
+        self.assertTrue(results["j1"].ok)
+        self.assertFalse(results["j2"].ok)
+        self.assertEqual(results["j2"].failed_code, "source_not_found")
+        self.assertTrue(results["j3"].ok)
+
+    def test_batch_consecutive_platform_signals_open_breaker(self):
+        """连续两次平台级 signal（login_required/verification/rate_limited/blocked）
+        触发熔断，后续岗位返回 source_blocked（T312 熔断器合同）。"""
+        call_count = {"n": 0}
+
+        def runner(job, **kw):
+            call_count["n"] += 1
+            return _fake_detail(signal="login_required")
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223, detail_runner=runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(4)
+        ]
+        results = source.fetch_details_batch(jobs)
+        # 前两个调用产生 login_required signal，第 2 个之后熔断器打开。
+        self.assertFalse(results["j0"].ok)
+        self.assertEqual(results["j0"].failed_code, "source_login_required")
+        self.assertFalse(results["j1"].ok)
+        self.assertEqual(results["j1"].failed_code, "source_login_required")
+        # 熔断器打开后，后续岗位不再调用 runner，直接返回 source_blocked。
+        self.assertLess(call_count["n"], len(jobs))
+        for jid in ("j2", "j3"):
+            self.assertFalse(results[jid].ok)
+            self.assertEqual(results[jid].failed_code, "source_blocked")
+
+    def test_batch_invalid_job_gets_failure(self):
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        results = source.fetch_details_batch(["not-a-dict"])
+        self.assertIn("idx0", results)
+        self.assertFalse(results["idx0"].ok)
+
+
+class ZhilianCdpSourceOutcomeContractTests(unittest.TestCase):
+    """T313：adapter outcome 可无损表达 non_empty/empty/failed/paused、计数、证据和安全错误。"""
+
+    def test_non_empty_outcome_carries_job_count(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            list_runner=lambda item: _fake_list(signal="ok", jobs=[
+                {"platform": "zhilian", "platform_job_id": "x",
+                 "title": "T", "company": "C", "canonical_url": "https://www.zhaopin.com/jobdetail/x.htm"},
+            ]),
+        )
+        item = {
+            "platform": "zhilian", "keyword": "Python",
+            "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+            "target_pages": 1,
+            "input_hash": _zhilian_input_hash({
+                "platform": "zhilian", "keyword": "Python",
+                "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+                "target_pages": 1,
+            }),
+        }
+        outcome = source.fetch_list(item)
+        self.assertTrue(outcome.ok)
+        self.assertFalse(outcome.empty_result)
+        self.assertEqual(len(outcome.jobs), 1)
+        self.assertIsNone(outcome.failed_code)
+        self.assertIsNotNone(outcome.input_hash)
+
+    def test_failed_outcome_carries_safe_code_and_reason(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=lambda port: _fake_preflight(signal="rate_limited"),
+        )
+        outcome = source.preflight()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_rate_limited")
+        self.assertIsInstance(outcome.failed_reason, str)
+
+    def test_paused_signal_codes_are_distinct_from_failed_codes(self):
+        """paused 信号码（login/verification/rate_limited/blocked/cdp_unavailable）
+        必须与 failed 信号码（unreachable/timeout/invalid_output/not_found/input_drift）
+        可区分。"""
+        paused_codes = {
+            "source_login_required", "source_verification_required",
+            "source_rate_limited", "source_blocked", "source_cdp_unavailable",
+        }
+        failed_codes = {
+            "source_unreachable", "source_timeout", "source_invalid_output",
+            "source_not_found", "source_input_drift", "source_unknown_error",
+        }
+        self.assertTrue(paused_codes.isdisjoint(failed_codes))
+
+    def test_empty_result_requires_evidence_and_zero_jobs(self):
+        """真实空结果 outcome：ok=True, jobs=[], empty_result=True, empty_evidence 必填。
+
+        T308 真实空结果判定需要 empty_state_markers fixture（blocked_facts），
+        本任务不实现真实判定，但 outcome 合同必须能无损表达。
+        """
+        evidence = {
+            "kind": "explicit_empty_state",
+            "fixture_version": "zhilian-list-v1",
+            "marker": "normalized-empty-state",
+        }
+        outcome = SourceOutcome.empty_success(
+            empty_evidence=evidence,
+            safe_log="platform=zhilian stage=list empty_result=1",
+        )
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.jobs, [])
+        self.assertTrue(outcome.empty_result)
+        self.assertEqual(outcome.empty_evidence, evidence)
+
+
+# ---------------------------------------------------------------------------
+# 测试替身：模拟 scripts/zhilian_cdp_raw.py 的 preflight/detail/list 返回。
+# 真实 marker 检测函数在 scripts/zhilian_cdp_raw.py 中保持占位（返回 None），
+# adapter 通过 preflight_runner/detail_runner/list_runner 注入测试替身。
+# ---------------------------------------------------------------------------
+
+def _fake_preflight(*, signal: str):
+    """模拟 zhilian_cdp_raw.preflight() 返回的 signal 字符串。
+
+    返回值约定（与 scripts/zhilian_cdp_raw.py preflight 一致）：
+      "ok" / "cdp_unavailable" / "login_required" / "verification" /
+      "rate_limited" / "blocked" / "unreachable" / "timeout"
+    """
+    return signal
+
+
+def _fake_detail(*, signal: str):
+    """模拟 zhilian_cdp_raw.fetch_detail() 返回的 (signal, detail_dict)。"""
+    if signal == "ok":
+        return "ok", {"jd": "fake-jd", "platform_job_id": "fake"}
+    if signal == "not_found":
+        return "not_found", {}
+    return signal, {}
+
+
+def _fake_list(*, signal: str, jobs=None):
+    """模拟 zhilian_cdp_raw.fetch_list() 返回的 (signal, jobs_list)。"""
+    if signal == "ok":
+        return "ok", jobs or []
+    return signal, []
+
+
+def _zhilian_input_hash(payload: dict) -> str:
+    """测试用 input_hash 计算（与 webui.source._zhilian_input_hash 一致）。"""
+    from webui.source import _zhilian_input_hash as _impl
+    return _impl(payload)
+
+
 if __name__ == "__main__":
     unittest.main()

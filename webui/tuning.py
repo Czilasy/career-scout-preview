@@ -505,6 +505,164 @@ class TuningController:
             source_artifact_id=source_artifact_id,
         )
 
+    # -- T608: 旧 BOSS manifest/artifact 客观证明纯校验器 -----------------
+
+    _LEGACY_PROOFABLE_STAGES = frozenset({"list", "detail"})
+    _LEGACY_BOSS_PLATFORM = "boss"
+
+    def prove_legacy_boss_manifest(
+        self, *, manifest_record: dict, migration_cutoff: str,
+    ) -> dict:
+        """T608: 客观证明旧 manifest 为迁移前 BOSS。
+
+        纯校验器：不修改 manifest_json 或 manifest_digest，不查询 migration 27
+        才有的外层 platform 列。证据不足抛 ValueError，由调用方阻断。
+
+        见 data-model.md 第 263 行：存量已签发 manifest 不修改 JSON 和摘要；
+        外层列仅将可证明为迁移前记录的条目回填 boss。
+        """
+        issued_at = manifest_record.get("issued_at")
+        if not issued_at or issued_at >= migration_cutoff:
+            raise ValueError(
+                f"manifest issued_at={issued_at!r} 不早于 migration cutoff"
+                f"={migration_cutoff!r}"
+            )
+        manifest = manifest_record["manifest"]
+        fixed_platform = manifest.get("fixed_fields", {}).get("platform")
+        frozen_platform = manifest.get("frozen_input", {}).get("platform")
+        if fixed_platform == "zhilian" or frozen_platform == "zhilian":
+            raise ValueError(
+                "manifest JSON 显式声明 platform=zhilian，不能证明为 BOSS"
+            )
+        canonical = json.dumps(
+            {k: v for k, v in manifest.items() if k != "manifest_digest"},
+            ensure_ascii=False, sort_keys=True,
+        )
+        recomputed = "sha256:" + hashlib.sha256(
+            canonical.encode("utf-8")
+        ).hexdigest()
+        if recomputed != manifest_record["manifest_digest"]:
+            raise ValueError(
+                "manifest_digest 与重算值不一致，无法客观证明"
+            )
+        experiment = self._store.get_tuning_experiment(
+            manifest_record["experiment_id"]
+        )
+        if experiment["created_at"] >= migration_cutoff:
+            raise ValueError(
+                f"experiment created_at={experiment['created_at']!r}"
+                f" 不早于 migration cutoff"
+            )
+        return {
+            "platform": self._LEGACY_BOSS_PLATFORM,
+            "proof_kind": "legacy_manifest",
+            "manifest_id": manifest_record["id"],
+            "issued_at": issued_at,
+            "migration_cutoff": migration_cutoff,
+            "digest_verified": True,
+            "provenance": [
+                f"experiment:{experiment['id']}@{experiment['created_at']}",
+                f"manifest:{manifest_record['id']}@{issued_at}",
+            ],
+        }
+
+    def prove_legacy_boss_artifact(
+        self, *, artifact_record: dict, migration_cutoff: str,
+    ) -> dict:
+        """T608: 客观证明旧 stage artifact 为迁移前 BOSS。
+
+        纯校验器：不修改 artifact JSON 或 digest。仅 stage=list/detail 可证明。
+        证据不足抛 ValueError，由调用方阻断。
+
+        见 data-model.md 第 281 行：仅当记录创建时间早于 migration 27、
+        所属 experiment/input version/workload/manifest 均可证明为迁移前 BOSS、
+        原摘要有效，且 stage 为 list/detail 时，才可解释为 BOSS source artifact。
+        """
+        created_at = artifact_record.get("created_at")
+        if not created_at or created_at >= migration_cutoff:
+            raise ValueError(
+                f"artifact created_at={created_at!r} 不早于 migration cutoff"
+                f"={migration_cutoff!r}"
+            )
+        stage = artifact_record["stage"]
+        if stage not in self._LEGACY_PROOFABLE_STAGES:
+            raise ValueError(
+                f"artifact stage={stage!r} 不可证明（仅 list/detail 允许）"
+            )
+        stored_digest = artifact_record.get("artifact_digest")
+        if not stored_digest:
+            raise ValueError("artifact 缺少 artifact_digest，不猜填")
+        artifact_path = artifact_record["artifact_path"]
+        absolute = (self._workspace_root / artifact_path).resolve()
+        experiment_root = (
+            self._workspace_root
+            / "tuning"
+            / artifact_record["experiment_id"]
+        ).resolve()
+        if experiment_root not in absolute.parents:
+            raise ValueError("artifact 路径越过实验根目录")
+        if not absolute.is_file():
+            raise ValueError(f"artifact 文件不存在: {artifact_path}")
+        recomputed = "sha256:" + hashlib.sha256(
+            absolute.read_bytes()
+        ).hexdigest()
+        if recomputed != stored_digest:
+            raise ValueError(
+                "artifact_digest 与重算值不一致，无法客观证明"
+            )
+        experiment = self._store.get_tuning_experiment(
+            artifact_record["experiment_id"]
+        )
+        if experiment["created_at"] >= migration_cutoff:
+            raise ValueError(
+                f"experiment created_at={experiment['created_at']!r}"
+                f" 不早于 migration cutoff"
+            )
+        round_record = self._store.get_tuning_round(
+            artifact_record["producer_round_id"]
+        )
+        with self._store._connection() as conn:
+            row = conn.execute(
+                "SELECT iv.created_at AS iv_created_at "
+                "FROM tuning_workloads w "
+                "JOIN tuning_input_versions iv ON iv.id = w.input_version_id "
+                "WHERE w.id = ?",
+                (round_record["workload_id"],),
+            ).fetchone()
+        if row is None:
+            raise ValueError("artifact 所属 workload/input_version 不存在")
+        if row["iv_created_at"] >= migration_cutoff:
+            raise ValueError(
+                f"input_version created_at={row['iv_created_at']!r}"
+                f" 不早于 migration cutoff"
+            )
+        provenance = [
+            f"experiment:{experiment['id']}@{experiment['created_at']}",
+            f"input_version@{row['iv_created_at']}",
+            f"round:{round_record['id']}",
+            f"artifact:{artifact_record['id']}@{created_at}",
+        ]
+        manifest_id = round_record.get("manifest_id")
+        if manifest_id:
+            manifest_record = self._store.get_task_manifest(manifest_id)
+            self.prove_legacy_boss_manifest(
+                manifest_record=manifest_record,
+                migration_cutoff=migration_cutoff,
+            )
+            provenance.append(
+                f"manifest:{manifest_id}@{manifest_record['issued_at']}"
+            )
+        return {
+            "platform": self._LEGACY_BOSS_PLATFORM,
+            "proof_kind": "legacy_artifact",
+            "artifact_id": artifact_record["id"],
+            "stage": stage,
+            "created_at": created_at,
+            "migration_cutoff": migration_cutoff,
+            "digest_verified": True,
+            "provenance": provenance,
+        }
+
     def create_rerun_for_uncertain(self, round_id: str) -> dict | None:
         """为 uncertain 轮次创建重跑（新 repetition）。
 
