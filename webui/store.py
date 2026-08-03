@@ -2558,7 +2558,7 @@ class TaskStore:
                 run = conn.execute(
                     "SELECT * FROM screening_runs WHERE status IN ('done', 'partial') "
                     "AND record_kind = 'result_snapshot' "
-                    "ORDER BY created_at DESC LIMIT 1",
+                    "ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 ).fetchone()
             if run is None:
                 return None
@@ -2644,6 +2644,7 @@ class TaskStore:
         }
         return {
             "run_id": run["id"],
+            "platform": run.get("platform"),
             "saved_at": run["created_at"],
             "started_at": run.get("started_at"),
             "finished_at": run.get("finished_at"),
@@ -2715,6 +2716,83 @@ class TaskStore:
             ).fetchone()
         return row["id"] if row else None
 
+    def load_latest_pipeline_result_for_platform(self, platform: str) -> dict | None:
+        """T409: 按平台加载最近一次成功结果。"""
+        with self._connection() as conn:
+            run = conn.execute(
+                "SELECT * FROM screening_runs WHERE platform=? AND "
+                "status IN ('done', 'partial') AND record_kind = 'result_snapshot' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (str(platform),),
+            ).fetchone()
+            if run is None:
+                return None
+            run = dict(run)
+            rows = conn.execute(
+                "SELECT * FROM screening_results WHERE run_id = ? ORDER BY rowid",
+                (run["id"],),
+            ).fetchall()
+
+        jobs = []
+        dropped = []
+        for row in rows:
+            row = dict(row)
+            if row.get("is_dropped"):
+                raw_verdict = row.get("verdict") or ""
+                reason = row.get("verdict_reason") or ""
+                try:
+                    parsed = json.loads(raw_verdict)
+                    if isinstance(parsed, dict):
+                        reason = str(parsed.get("reason") or reason)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                dropped.append({
+                    "job_id": row.get("job_id"),
+                    "platform_job_id": row.get("platform_job_id"),
+                    "platform": row.get("platform"),
+                    "title": row.get("title"),
+                    "company": row.get("company"),
+                    "salary": row.get("salary"),
+                    "location": row.get("location"),
+                    "reason": reason,
+                    "canonical_url": row.get("canonical_url"),
+                })
+                continue
+            jobs.append({
+                "job_id": row.get("job_id"),
+                "platform_job_id": row.get("platform_job_id"),
+                "platform": row.get("platform"),
+                "title": row.get("title"),
+                "company": row.get("company"),
+                "salary": row.get("salary"),
+                "location": row.get("location"),
+                "experience": row.get("experience"),
+                "degree": row.get("degree"),
+                "jd": row.get("jd") or "",
+                "canonical_url": row.get("canonical_url"),
+                "source_url": row.get("canonical_url"),
+                "extra": {},
+            })
+
+        execution_params = json.loads(run["execution_params_json"] or "{}") if "execution_params_json" in run.keys() else {}
+        return {
+            "run_id": run["id"],
+            "platform": run.get("platform"),
+            "status": run.get("status"),
+            "saved_at": run.get("created_at"),
+            "started_at": run.get("started_at"),
+            "finished_at": run.get("finished_at"),
+            "script_params": execution_params.get("script_params", {}),
+            "execution_config": execution_params.get("execution_config", {}),
+            "result": {
+                "total_scraped": run.get("total_scraped", 0),
+                "total_matched": run.get("total_scraped", 0),
+                "jobs": jobs,
+                "dropped": dropped,
+                "profile_summary": execution_params.get("profile_summary", ""),
+            },
+        }
+
     def latest_pipeline_result_saved_at(self) -> str | None:
         """Return created_at of the newest result snapshot, or None."""
         with self._connection() as conn:
@@ -2759,6 +2837,31 @@ class TaskStore:
             ):
                 conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
             conn.execute("DELETE FROM screening_runs WHERE id = ?", (run_id,))
+            return True
+
+    def clear_pipeline_result(self, run_id: str) -> bool:
+        """T418: 删除指定 run 的结果存档，保留 source attempts 和审计记录。
+
+        不删除 screening_source_attempts、jobs、profile_jobs、feedback_events
+        或其他 run 的数据。
+        """
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            run = conn.execute(
+                "SELECT id FROM screening_runs WHERE id=? AND record_kind='result_snapshot'",
+                (str(run_id),),
+            ).fetchone()
+            if run is None:
+                return False
+            conn.execute("DELETE FROM tasks WHERE id = ?", (str(run_id),))
+            for table in (
+                "screening_results",
+                "screening_pending_results",
+                "pipeline_checkpoints",
+                "scrape_run_jobs",
+            ):
+                conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (str(run_id),))
+            conn.execute("DELETE FROM screening_runs WHERE id = ?", (str(run_id),))
             return True
 
     def _migration_027(self):

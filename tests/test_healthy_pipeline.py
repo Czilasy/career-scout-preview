@@ -1340,8 +1340,19 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self._install_scrape_source(
             scrape_task_id, [{"job_id": "job-1", "title": "后端工程师"}]
         )
+        # T407: create_screening_run 现在在路由处理器中调用。
+        # 使用原始方法保存引用，避免递归调用 patched 版本。
+        _orig_create = self.store.create_screening_run
+        _create_call = [0]
+
+        def _side_effect_create(*a, **kw):
+            _create_call[0] += 1
+            if _create_call[0] > 1:
+                raise RuntimeError("disk full")
+            return _orig_create(*a, **kw)
+
         with mock.patch.object(
-            self.store, "create_screening_run", side_effect=RuntimeError("disk full")
+            self.store, "create_screening_run", side_effect=_side_effect_create
         ), mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
                 mock.patch("webui.ai.screen_jobs", return_value={
                     "kept": ["job-1"], "dropped": [],
@@ -1351,7 +1362,9 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     return_value=(False, "must not reach Chrome"),
                 ):
             response = self._post_ai_screen(scrape_task_id)
-            task_id = response.get_json()["task_id"]
+            data = response.get_json()
+            self.assertEqual(response.status_code, 200, data)
+            task_id = data["task_id"]
             finished = _wait_for_pipeline_task(self.client, task_id)
 
         self.assertEqual(finished["status"], "failed", finished)

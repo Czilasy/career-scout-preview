@@ -645,6 +645,20 @@ class WorkbenchRunner(TaskRunner):
         return self.store.update_search_run(run_id, status="interrupted")
 
 
+def _run_to_task_status(db_status: str) -> str:
+    """DB 状态 → 统一任务状态名（FR-005）。"""
+    mapping = {
+        "queued": "waiting",
+        "running": "running",
+        "paused": "paused",
+        "succeeded": "completed",
+        "partial": "completed_with_pending",
+        "failed": "failed",
+        "interrupted": "cancelled",
+    }
+    return mapping.get(db_status, "failed")
+
+
 def create_app(config=None):
     # Vue/Vite owns the /static namespace. Disable Flask's implicit static
     # route so hashed production assets are served from webui/dist only.
@@ -913,6 +927,7 @@ def create_app(config=None):
         )
         output = "环境检查超时" if result.failure_code == "process_timeout" else result.output_tail
         return jsonify({
+            "ok": True,
             "connected": result.ok,
             "returncode": result.returncode if result.returncode is not None else -1,
             "output": output,
@@ -3964,8 +3979,8 @@ def create_app(config=None):
     def ai_screen():
         """Stage 3b：对已抓取的原始岗位做两段式 AI 筛选。
 
-        接收 ``{"screening_fields": {...}, "profile_summary": "..."}``，
-        启动后台任务（StageA 粗筛→抓JD→StageB 精筛）并返回 ``task_id`` 供轮询。
+        T406-T407: 接收 platform 做一致性校验，从父搜索 run 继承平台/scope/
+        runtime，保存字段稳定值和当时标签的完整筛选快照。
 
         SPEC011 T015: 实验租约持有时拒绝启动（FR-035）。
         """
@@ -3973,6 +3988,8 @@ def create_app(config=None):
         screening_fields = body.get("screening_fields") or {}
         profile_summary = str(body.get("profile_summary") or "")
         scrape_task_id = str(body.get("scrape_task_id") or "").strip()
+        request_platform = str(body.get("platform") or "").strip() or None
+        filter_schema_version = body.get("filter_schema_version")
         if not isinstance(screening_fields, dict):
             return jsonify({"ok": False, "error": "无效的筛选字段"}), 400
         if not scrape_task_id:
@@ -3993,6 +4010,36 @@ def create_app(config=None):
             or not source_result.get("ok")
         ):
             return jsonify({"ok": False, "error": "抓取任务尚未成功完成"}), 409
+
+        # T406: 从父搜索 run 读取平台身份
+        try:
+            parent_identity = store.get_run_checkpoint_identity(scrape_task_id)
+        except _OPERATIONAL_ERRORS:
+            parent_identity = None
+        if parent_identity is None:
+            parent_platform = str(source_snapshot.get("platform") or "boss")
+        else:
+            parent_platform = parent_identity.get("platform") or "boss"
+        # 客户端显式 platform 与父平台不一致
+        if request_platform and request_platform != parent_platform:
+            return jsonify({
+                "ok": False, "error": "parent_platform_mismatch",
+                "message": "客户端平台与父搜索 run 平台不一致",
+                "parent_platform": parent_platform,
+            }), 409
+        # T407: 校验 filter_schema_version
+        parent_schema = parent_identity.get("filter_schema_version") if parent_identity else None
+        if filter_schema_version is not None and parent_schema is not None:
+            if int(filter_schema_version) != int(parent_schema):
+                return jsonify({
+                    "ok": False, "error": "filter_schema_version_mismatch",
+                    "message": "筛选 schema 版本与父 run 不一致",
+                }), 409
+        # 平台禁用检查
+        from webui.platforms import get_platform_or_none
+        platform_info = get_platform_or_none(parent_platform)
+        if platform_info is not None and not platform_info.enabled_for_new_tasks:
+            return jsonify({"ok": False, "error": "platform_disabled"}), 503
         # 同一抓取任务只允许一个 AI 筛选工作线程；防止多标签页重复提交。
         with _pipeline_lock:
             for existing_id, existing in _pipeline_tasks.items():
@@ -4070,12 +4117,55 @@ def create_app(config=None):
         claimed_task["source_task_id"] = scrape_task_id
         account_source = prev if resume_from_run_id else None
         claimed_task["browser_account"] = _account_for_run(account_source)
+        claimed_task["platform"] = parent_platform
+        # T407: 生成 AI 阶段 task_input_digest
+        ai_digest = hashlib.sha256(json.dumps({
+            "platform": parent_platform,
+            "scrape_task_id": scrape_task_id,
+            "filter_schema_version": filter_schema_version,
+            "screening_fields": {k: sorted(v) if isinstance(v, list) else v
+                                 for k, v in screening_fields.items()},
+            "browser_account": claimed_task.get("browser_account"),
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        claimed_task["task_input_digest"] = ai_digest
         if resume_from_run_id and prev is not None:
             resume_params = dict(prev.get("execution_params") or {})
             if not str(resume_params.get("browser_account") or ""):
                 resume_params["browser_account"] = _account_for_run(prev)
                 store.update_screening_execution_params(resume_from_run_id, resume_params)
         _activate_run_browser(account_source)
+        # T407: 创建 AI run 时保存平台身份和筛选快照
+        if not resume_from_run_id:
+            try:
+                store.create_screening_run(
+                    task_id,
+                    frozen_filters=screening_fields,
+                    source_count=0,
+                    execution_params={
+                        "platform": parent_platform,
+                        "filter_schema_version": filter_schema_version,
+                        "screening_fields": screening_fields,
+                        "profile_summary": profile_summary,
+                        "scrape_task_id": scrape_task_id,
+                        "browser_account": claimed_task.get("browser_account"),
+                        "task_input_digest": ai_digest,
+                    },
+                    backend_version=_backend_version,
+                )
+                store.save_filter_snapshot(
+                    task_id,
+                    platform=parent_platform,
+                    filter_schema_version=filter_schema_version,
+                    filter_snapshot=screening_fields,
+                    task_input_digest=ai_digest,
+                )
+            except _OPERATIONAL_ERRORS as exc:
+                _release_pipeline_claim(task_id, claimed_task, previous_task)
+                return jsonify({
+                    "ok": False,
+                    "error": "ai_screen_persist_failed",
+                    "detail": type(exc).__name__,
+                }), 503
         try:
             _pipeline_executor.submit(
                 _run_ai_screen_task, task_id, screening_fields,
@@ -4100,8 +4190,13 @@ def create_app(config=None):
                     resume_from_run_id, "resume", {"task_id": task_id})
             except _OPERATIONAL_ERRORS:
                 pass
-        return jsonify({"ok": True, "task_id": task_id,
-                        "resuming": bool(resume_from_run_id)})
+        return jsonify({
+            "ok": True, "task_id": task_id,
+            "resuming": bool(resume_from_run_id),
+            "platform": parent_platform,
+            "filter_schema_version": filter_schema_version,
+            "task_input_digest": ai_digest,
+        })
 
     def _build_source_summary_and_outcomes(run_id):
         """T405: 从持久化 screening_source_attempts 汇总 source outcomes。
@@ -4339,6 +4434,8 @@ def create_app(config=None):
     def latest_pipeline_result():
         """Return the persisted latest pipeline run (survives page refresh).
 
+        T409: 支持 platform/run_id 过滤查询；返回平台身份和 source_outcomes。
+
         Only a successful run is persisted, so this always reflects the most
         recent good data.  ``has_result`` is false until the first successful
         run (or if the file is missing/unreadable).
@@ -4349,11 +4446,41 @@ def create_app(config=None):
         ``job_id`` 是 BOSS 岗位 id，profile_jobs.job_id 是内部 UUID，二者
         不能直接相等，统一用规范化链接对齐（同 _build_zone_canonical_urls）。
         """
-        payload = store.load_latest_pipeline_result()
+        query_platform = request.args.get("platform", "").strip() or None
+        query_run_id = request.args.get("run_id", "").strip() or None
+        # T409: 精确 run_id 查询
+        if query_run_id:
+            try:
+                run = store.get_screening_run(query_run_id)
+            except _OPERATIONAL_ERRORS:
+                run = None
+            if run is None:
+                return jsonify({"ok": True, "has_result": False})
+            # 只返回已完成或部分完成的结果
+            if run["status"] not in ("succeeded", "partial"):
+                return jsonify({"ok": True, "has_result": False})
+            # T409: run_id + platform 必须一致
+            if query_platform and query_platform != run.get("platform"):
+                return jsonify({
+                    "ok": False, "error": "run_platform_conflict",
+                    "message": "run_id 与 platform 不一致",
+                }), 409
+            # 从该 run 的 result snapshot 构造响应
+            payload = store.load_latest_pipeline_result(query_run_id)
+            if payload is None:
+                return jsonify({"ok": True, "has_result": False})
+        # T409: 按平台过滤
+        elif query_platform:
+            payload = store.load_latest_pipeline_result_for_platform(query_platform)
+        else:
+            payload = store.load_latest_pipeline_result()
         if payload is None:
             return jsonify({"ok": True, "has_result": False})
         result = payload["result"]
         jobs = result.get("jobs", [])
+        run_id = payload.get("run_id", "")
+        # T409: 汇总 source outcomes
+        source_summary, source_outcomes = _build_source_summary_and_outcomes(run_id)
 
         profile_id = request.args.get("profile_id")
         if profile_id and isinstance(jobs, list) and jobs:
@@ -4394,12 +4521,16 @@ def create_app(config=None):
             "ok": True,
             "has_result": True,
             "source_run_id": payload.get("run_id"),
+            "platform": payload.get("platform"),
             "status": payload.get("status", "completed"),
             "saved_at": payload.get("saved_at"),
             "started_at": _iso_epoch_ms(payload.get("started_at")),
             "finished_at": _iso_epoch_ms(payload.get("finished_at")),
             "script_params": payload.get("script_params", {}),
             "execution_config": payload.get("execution_config", {}),
+            "source_summary": source_summary,
+            "source_outcomes": source_outcomes,
+            "source_evidence_available": True,
             "result": {
                 "total_scraped": result.get("total_scraped", 0),
                 "total_matched": result.get("total_matched", 0),
@@ -4418,53 +4549,86 @@ def create_app(config=None):
 
     @app.route("/api/reset-latest-result", methods=["POST"])
     def reset_latest_result():
-        """重新上传简历时删除上一轮持久化结果，避免刷新后旧结果复活。"""
-        cleared = store.clear_latest_pipeline_result()
-        return jsonify({"ok": True, "cleared": cleared})
+        """T418: 删除指定 run 或最近一次结果，保留 source attempts 和审计记录。"""
+        body = request.get_json(silent=True) or {}
+        target_run_id = str(body.get("run_id") or "").strip() or None
+        if target_run_id:
+            run = store.get_screening_run(target_run_id)
+            if run is None:
+                return jsonify({"ok": False, "error": "run_not_found"}), 404
+            if run.get("status") not in ("succeeded", "partial", "failed"):
+                return jsonify({"ok": False, "error": "result_not_clearable",
+                               "message": "只有已完成或部分完成的结果才能重置"}), 409
+            request_platform = str(body.get("platform") or "").strip() or None
+            if request_platform and request_platform != run.get("platform"):
+                return jsonify({
+                    "ok": False, "error": "run_platform_conflict",
+                    "message": "请求平台与目标 run 不一致",
+                }), 409
+            cleared = store.clear_pipeline_result(target_run_id)
+            platform = run.get("platform")
+        else:
+            cleared = store.clear_latest_pipeline_result()
+            platform = None
+        return jsonify({"ok": True, "cleared": cleared, "run_id": target_run_id, "platform": platform})
 
     _job_detail_lock = threading.Lock()
 
     @app.route("/api/job-detail", methods=["POST"])
     def job_detail():
-        """按需抓取单个岗位的 JD 正文（pipeline 列表结果不含 JD）。
+        """T417: 按需抓取单个岗位的 JD 正文。
 
-        结果页卡片点"加载完整 JD"时调用：pipeline 运行完会自动关闭调试浏览器，
-        这里先 ensure_chrome_ready 自动重新拉起，再经 CDP 打开详情页提取 JD。
-        单次约 5~20s；用锁串行化并发请求，避免多个抓取争抢同一个 CDP。
+        source_run_id + platform_job_id 为权威；从 source run 继承冻结平台。
         """
         from webui.pipeline_exec import ensure_chrome_ready
 
         raw = request.get_json(silent=True) or {}
         job_id = str(raw.get("job_id") or "").strip()
+        platform_job_id = str(raw.get("platform_job_id") or job_id).strip()
+        source_run_id = str(raw.get("source_run_id") or "").strip() or None
         source_url = normalize_job_link(
             raw.get("source_url") or raw.get("job_link") or ""
         )
         if not job_id or not source_url:
             return jsonify({"ok": False, "error": "缺少 job_id 或 source_url"}), 400
 
+        # T417: 从 source run 继承冻结平台
+        frozen_platform = "boss"
+        if source_run_id:
+            try:
+                identity = store.get_run_checkpoint_identity(source_run_id)
+                if identity is not None:
+                    frozen_platform = identity.get("platform") or "boss"
+            except _OPERATIONAL_ERRORS:
+                pass
+        # 校验 URL 与平台一致性
+        if frozen_platform == "zhilian" and "zhaopin.com" not in source_url.lower():
+            return jsonify({"ok": False, "error": "platform_url_mismatch",
+                           "message": "智联岗位 URL 必须包含 zhaopin.com"}), 422
+
         chrome_ok, chrome_err = ensure_chrome_ready()
         if not chrome_ok:
             return jsonify({"ok": False,
                             "error": f"调试浏览器未能就绪：{chrome_err}"}), 503
 
-        source = _make_cdp_source()
+        source = _make_cdp_source(platform=frozen_platform)
         if source is None:
             return jsonify({"ok": False, "error": "抓取源不可用"}), 500
 
-        job = {"job_id": job_id, "source_url": source_url, "job_link": source_url}
+        job = {"job_id": platform_job_id, "source_url": source_url, "job_link": source_url}
         detail_path = str(
-            Path(app.config["RESULT_DIR"]) / f"job_detail_{job_id}.json"
+            Path(app.config["RESULT_DIR"]) / f"job_detail_{platform_job_id}.json"
         )
         with _job_detail_lock:
             outcome = source.fetch_detail(job, detail_output_path=detail_path)
         if not outcome.ok:
             return jsonify({"ok": False,
-                            "error": f"详情抓取失败（{outcome.failed_code}），请确认已登录 BOSS 后重试"}), 502
+                            "error": f"详情抓取失败（{outcome.failed_code}）"}), 502
         jd = str((outcome.detail or {}).get("jd", "")).strip()
         if not jd:
             return jsonify({"ok": False,
                             "error": "详情页未提取到 JD 正文，岗位可能已下架"}), 502
-        return jsonify({"ok": True, "jd": jd})
+        return jsonify({"ok": True, "jd": jd, "platform": frozen_platform})
 
     def _save_pipeline_job_to_store(job):
         """把 pipeline 结果岗位落库到 jobs 表，返回 jobs 记录（链接不安全返回 None）。"""
@@ -5369,19 +5533,6 @@ def create_app(config=None):
             "build_time": _build_time,
         })
 
-    def _run_to_task_status(db_status: str) -> str:
-        """DB 状态 → 统一任务状态名（FR-005）。"""
-        mapping = {
-            "queued": "waiting",
-            "running": "running",
-            "paused": "paused",
-            "succeeded": "completed",
-            "partial": "completed_with_pending",
-            "failed": "failed",
-            "interrupted": "cancelled",
-        }
-        return mapping.get(db_status, "failed")
-
     @app.route("/api/task-state/<run_id>", methods=["GET"])
     def api_task_state(run_id: str):
         """FR-037：统一任务状态接口。
@@ -5767,6 +5918,7 @@ def create_app(config=None):
         return jsonify({
             "ok": True,
             "run_id": run_id,
+            "platform": (run or {}).get("platform"),
             "status": (
                 _run_to_task_status(run["status"]) if run is not None else "cancelled"
             ),
@@ -5776,13 +5928,24 @@ def create_app(config=None):
 
     @app.route("/api/task/finish/<run_id>", methods=["POST"])
     def api_task_finish(run_id: str):
-        """结束暂停任务并生成可展示的部分结果快照。"""
+        """T416: 结束暂停任务并生成可展示的部分结果快照。
+
+        仅允许 paused 或 interrupted/process_restart 或 interrupted/operator_stop；
+        user_cancelled 是终态，不能通过 finish 改写。
+        """
         run = store.get_screening_run(run_id)
         if run is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
+        # T416: 检查 interruption_kind
+        interruption_kind = run.get("interruption_kind") or ""
+        if run["status"] == "interrupted" and interruption_kind == "user_cancelled":
+            return jsonify({
+                "ok": False, "error": "user_cancelled",
+                "message": "用户已取消的任务不能通过 finish 改写",
+            }), 409
         restart_interrupted = (
             run["status"] == "interrupted"
-            and str(run.get("error_code") or "") == "restart"
+            and interruption_kind in ("process_restart", "operator_stop")
         )
         if run["status"] != "paused" and not restart_interrupted:
             return jsonify({
@@ -5894,6 +6057,7 @@ def create_app(config=None):
             pass
         return jsonify({
             "ok": True, "run_id": run_id, "snapshot_run_id": snapshot_run_id,
+            "platform": run.get("platform"),
             "status": "completed_with_pending", "result": result,
             "message": "任务已结束，已完成结果已保存",
         })

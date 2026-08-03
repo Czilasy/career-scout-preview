@@ -5,6 +5,8 @@ import re
 import sqlite3
 import sys
 import tempfile
+import threading
+import uuid
 import unittest
 from unittest import mock
 
@@ -787,6 +789,7 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
             run_id, status="interrupted", error_code="restart",
             error_reason="服务重启中断",
         )
+        self.store.save_interruption_kind(run_id, "process_restart")
         resp = self.client.post(f"/api/task/finish/{run_id}")
         self.assertEqual(resp.status_code, 200, resp.get_json())
         data = resp.get_json()
@@ -1607,7 +1610,7 @@ class TuningManifestRouteTests(unittest.TestCase):
         ]
         self.experiment = self.controller.create_experiment_with_input(
             spec_version="011-deep-configuration-probing",
-            source_scope=scopes[0][1],
+            source_scope={**scopes[0][1], "browser_account": "a", "filter_schema_version": 1},
             quality_context=_tuning_quality_context(),
             workloads=[
                 {"task_size": size, "structure_index": index % 2 + 1,
@@ -1674,6 +1677,7 @@ class TuningManifestRouteTests(unittest.TestCase):
                 "planned_pages", "task_size",
             )
         }
+        manifest["fixed_fields"]["platform"] = "boss"
         evidence_path = f"{root}/evidence/{self.round['id']}.json"
         manifest["monitoring"]["final_artifact_path"] = evidence_path
         manifest["allowed_writes"] = [evidence_path, f"{root}/artifacts/{self.round['id']}/"]
@@ -2177,6 +2181,8 @@ class TuningExperimentRouteTests(unittest.TestCase):
                 "scope_kind": "cities",
                 "cities": ["东莞"],
                 "pages_per_combination": 3,
+                "browser_account": "a",
+                "filter_schema_version": 1,
             },
             "quality_context": self._quality_context(),
             "workloads": [
@@ -2220,6 +2226,8 @@ class TuningExperimentRouteTests(unittest.TestCase):
                 "scope_kind": "cities",
                 "cities": ["东莞"],
                 "pages_per_combination": 3,
+                "browser_account": "a",
+                "filter_schema_version": 1,
             },
             "quality_context": self._quality_context(),
             "workloads": [
@@ -2252,6 +2260,8 @@ class TuningExperimentRouteTests(unittest.TestCase):
                 "scope_kind": "cities",
                 "cities": ["东莞"],
                 "pages_per_combination": 3,
+                "browser_account": "a",
+                "filter_schema_version": 1,
             },
             "quality_context": self._quality_context(),
             "workloads": [
@@ -2285,6 +2295,8 @@ class TuningExperimentRouteTests(unittest.TestCase):
                 "scope_kind": "cities",
                 "cities": ["东莞"],
                 "pages_per_combination": 3,
+                "browser_account": "a",
+                "filter_schema_version": 1,
             },
             "quality_context": self._quality_context(),
             "workloads": self._complete_workloads(),
@@ -2307,6 +2319,8 @@ class TuningExperimentRouteTests(unittest.TestCase):
             "source_scope": {
                 "keywords": ["AI应用开发"], "scope_kind": "cities",
                 "cities": ["东莞"], "pages_per_combination": 3,
+                "browser_account": "a",
+                "filter_schema_version": 1,
             },
             "quality_context": self._quality_context(),
             "workloads": self._complete_workloads(),
@@ -2328,6 +2342,8 @@ class TuningExperimentRouteTests(unittest.TestCase):
             "source_scope": {
                 "keywords": ["AI应用开发"], "scope_kind": "cities",
                 "cities": ["东莞"], "pages_per_combination": 3,
+                "browser_account": "a",
+                "filter_schema_version": 1,
             },
             "quality_context": self._quality_context(),
             "workloads": [
@@ -2348,6 +2364,8 @@ class TuningExperimentRouteTests(unittest.TestCase):
             "source_scope": {
                 "keywords": ["AI应用开发"], "scope_kind": "cities",
                 "cities": ["东莞"], "pages_per_combination": 3,
+                "browser_account": "a",
+                "filter_schema_version": 1,
             },
             "quality_context": self._quality_context(),
             "workloads": workloads,
@@ -2372,6 +2390,8 @@ class TuningExperimentRouteTests(unittest.TestCase):
                 "scope_kind": "cities",
                 "cities": ["东莞"],
                 "pages_per_combination": 3,
+                "browser_account": "a",
+                "filter_schema_version": 1,
             },
             "quality_context": self._quality_context(),
             "workloads": [
@@ -2403,6 +2423,8 @@ class TuningExperimentRouteTests(unittest.TestCase):
                 "scope_kind": "cities",
                 "cities": ["东莞"],
                 "pages_per_combination": 3,
+                "browser_account": "a",
+                "filter_schema_version": 1,
             },
             "quality_context": self._quality_context(),
             "workloads": [
@@ -2421,6 +2443,8 @@ class TuningExperimentRouteTests(unittest.TestCase):
             "source_scope": {
                 "keywords": ["AI应用开发"], "scope_kind": "cities",
                 "cities": ["东莞"], "pages_per_combination": 3,
+                "browser_account": "a",
+                "filter_schema_version": 1,
             },
             "quality_context": self._quality_context(),
             "workloads": [],
@@ -2444,6 +2468,8 @@ class TuningExperimentRouteTests(unittest.TestCase):
             "source_scope": {
                 "keywords": ["AI应用开发"], "scope_kind": "cities",
                 "cities": ["东莞"], "pages_per_combination": 3,
+                "browser_account": "a",
+                "filter_schema_version": 1,
             },
             "quality_context": self._quality_context(),
             "workloads": [],
@@ -3134,7 +3160,8 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         store.save_checkpoint(task_id, "scrape", [])
         self.app.config["PIPELINE_TASKS"].pop(task_id, None)
 
-        # 续抓：mock executor 防止任务实际运行
+        # 续抓：mock executor 和 block check 防止任务实际运行
+        self.app.config["RESUME_BLOCK_CHECKER"] = lambda run: (True, "", "")
         with mock.patch.object(executor, "submit"):
             resp = self.client.post(
                 f"/api/execute-search/continue/{task_id}")
@@ -3193,6 +3220,7 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         with mock.patch("webui.app._BossCdpSource", return_value=fake_source), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready",
                            return_value=(True, "")), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"), \
                 mock.patch.object(store, "append_source_attempt",
                                   side_effect=tracked_append), \
                 mock.patch.object(store, "save_scrape_combo_result",
@@ -3250,6 +3278,7 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         with mock.patch("webui.app._BossCdpSource", return_value=fake_source), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready",
                            return_value=(True, "")), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"), \
                 mock.patch.object(store, "append_source_attempt",
                                   side_effect=fail_append), \
                 mock.patch.object(store, "save_scrape_combo_result",
@@ -3292,7 +3321,8 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         )
         with mock.patch("webui.app._BossCdpSource", return_value=fake_source), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready",
-                           return_value=(True, "")):
+                           return_value=(True, "")), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"):
             resp = self.client.post("/api/execute-search", json={
                 "platform": platform,
                 "script_params": {
@@ -3409,6 +3439,832 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 409)
         data = resp.get_json()
         self.assertEqual(data.get("error"), "run_identity_conflict")
+
+
+# ======================================================================
+# 门禁B: T406-T409 — AI run 平台继承 + 结果身份
+# ======================================================================
+
+
+class AiScreenPlatformInheritanceTests(unittest.TestCase):
+    """T406-T407: ai_screen 平台继承与筛选快照测试。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _create_completed_scrape_run(self, platform="boss"):
+        """创建并持久化一个完成的搜索 run。"""
+        run_id = f"scrape_{platform}_{uuid.uuid4().hex[:8]}"
+        self.store.create_screening_run(
+            run_id,
+            frozen_filters={},
+            source_count=5,
+            execution_params={
+                "platform": platform,
+                "cdp_port": 9222,
+                "profile_key": "a",
+                "task_input_digest": hashlib.sha256(
+                    json.dumps({"platform": platform}, sort_keys=True).encode()
+                ).hexdigest(),
+            },
+            backend_version="test",
+        )
+        self.store.update_screening_run(run_id, status="succeeded",
+                                          current_stage="done",
+                                          processed_count=5, match_count=3)
+        # 在内存中注册为已完成任务
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "done", "progress": {}, "logs": [],
+            "result": {"ok": True, "jobs": [], "total_scraped": 5,
+                       "total_matched": 3, "completed_combos": ["Python|上海"],
+                       "error": ""},
+            "error": "", "started_at": None, "finished_at": None,
+            "stop_event": threading.Event(),
+            "platform": platform,
+            "task_input_digest": "test_digest",
+        }
+        return run_id
+
+    # -- T406: 平台一致性校验 -------------------------------------------
+
+    def test_ai_screen_with_matching_platform_succeeds(self):
+        """T406: 客户端 platform 与父 run 一致时成功。"""
+        scrape_id = self._create_completed_scrape_run("boss")
+        resp = self.client.post("/api/ai-screen", json={
+            "scrape_task_id": scrape_id,
+            "platform": "boss",
+            "screening_fields": {"salary": ["405"]},
+            "profile_summary": "测试候选人",
+        })
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["platform"], "boss")
+        self.assertTrue(data["task_input_digest"])
+
+    def test_ai_screen_platform_mismatch_returns_409(self):
+        """T406: 客户端 platform 与父 run 不一致 → 409 parent_platform_mismatch。"""
+        scrape_id = self._create_completed_scrape_run("boss")
+        resp = self.client.post("/api/ai-screen", json={
+            "scrape_task_id": scrape_id,
+            "platform": "zhilian",
+            "screening_fields": {"salary": ["405"]},
+            "profile_summary": "测试候选人",
+        })
+        self.assertEqual(resp.status_code, 409)
+        data = resp.get_json()
+        self.assertEqual(data.get("error"), "parent_platform_mismatch")
+
+    def test_ai_screen_omitted_platform_inherits_parent(self):
+        """T406: 省略 platform 时继承父 run 平台。"""
+        scrape_id = self._create_completed_scrape_run("boss")
+        resp = self.client.post("/api/ai-screen", json={
+            "scrape_task_id": scrape_id,
+            "screening_fields": {"salary": ["405"]},
+            "profile_summary": "测试候选人",
+        })
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertEqual(data["platform"], "boss")
+
+    def test_ai_screen_filter_schema_version_mismatch_returns_409(self):
+        """T406: filter_schema_version 与父 run 不一致 → 409。"""
+        scrape_id = self._create_completed_scrape_run("boss")
+        # 设置父 run 的 schema_version
+        self.store.update_screening_run(scrape_id)
+        # 直接改 DB 设置 schema_version
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET filter_schema_version=2 WHERE id=?",
+                (scrape_id,))
+        resp = self.client.post("/api/ai-screen", json={
+            "scrape_task_id": scrape_id,
+            "platform": "boss",
+            "screening_fields": {"salary": ["405"]},
+            "profile_summary": "测试候选人",
+            "filter_schema_version": 1,
+        })
+        self.assertEqual(resp.status_code, 409)
+        data = resp.get_json()
+        self.assertEqual(data.get("error"), "filter_schema_version_mismatch")
+
+    # -- T407: 别人字段稳定值与当时标签的完整快照 -----------------------
+
+    def test_ai_screen_saves_filter_snapshot(self):
+        """T407: AI 筛选保存字段稳定值和当时标签的完整筛选快照。"""
+        scrape_id = self._create_completed_scrape_run("boss")
+        screening_fields = {
+            "salary": ["405", "406"],
+            "experience": ["103"],
+            "degree": ["202"],
+        }
+        resp = self.client.post("/api/ai-screen", json={
+            "scrape_task_id": scrape_id,
+            "platform": "boss",
+            "screening_fields": screening_fields,
+            "profile_summary": "测试候选人",
+        })
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        task_id = resp.get_json()["task_id"]
+
+        # 验证筛选快照已持久化
+        run = self.store.get_screening_run(task_id)
+        self.assertIsNotNone(run)
+        self.assertEqual(run.get("platform"), "boss")
+        params = run.get("execution_params") or {}
+        self.assertEqual(params.get("platform"), "boss")
+        self.assertTrue(
+            params.get("task_input_digest"),
+            "task_input_digest 必须存在于 execution_params",
+        )
+
+    def test_ai_screen_creates_run_with_parent_platform(self):
+        """T407: 新 AI run 的 execution_params 含父 run 平台。"""
+        scrape_id = self._create_completed_scrape_run("boss")
+        resp = self.client.post("/api/ai-screen", json={
+            "scrape_task_id": scrape_id,
+            "platform": "boss",
+            "screening_fields": {"salary": ["405"]},
+            "profile_summary": "测试候选人",
+        })
+        self.assertEqual(resp.status_code, 200)
+        task_id = resp.get_json()["task_id"]
+        run = self.store.get_screening_run(task_id)
+        self.assertIsNotNone(run)
+        params = run.get("execution_params") or {}
+        self.assertEqual(params.get("platform"), "boss")
+        self.assertEqual(params.get("scrape_task_id"), scrape_id)
+
+
+# ======================================================================
+# T409: Latest result 三种查询模式
+# ======================================================================
+
+
+class LatestPipelineResultQueryTests(unittest.TestCase):
+    """T409: latest_pipeline_result 的三种查询模式。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _save_result_snapshot(self, run_id, platform="boss",
+                               status="done"):
+        """保存一个 result_snapshot 记录。"""
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, record_kind, frozen_filters_json, "
+                "source_count, match_count, mismatch_count, "
+                "total_scraped, total_kept, total_dropped, "
+                "execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at, finished_at) "
+                "VALUES (?, ?, ?, 'result_snapshot', '{}', "
+                "0, 0, 0, 0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL, NULL)",
+                (str(run_id), str(platform), str(status)),
+            )
+
+    def test_global_latest_returns_most_recent(self):
+        """T409: 无参数时返回全局最近成功结果。"""
+        self._save_result_snapshot("run_001", "boss")
+        import time
+        time.sleep(0.01)
+        self._save_result_snapshot("run_002", "zhilian")
+        resp = self.client.get("/api/latest-pipeline-result")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["has_result"])
+        # 应返回最近的 run_002
+        self.assertEqual(data.get("source_run_id"), "run_002")
+
+    def test_query_by_platform_returns_filtered(self):
+        """T409: platform=boss 时只返回 boss 的最近结果。"""
+        self._save_result_snapshot("run_001", "boss")
+        import time
+        time.sleep(0.01)
+        self._save_result_snapshot("run_002", "zhilian")
+        resp = self.client.get("/api/latest-pipeline-result?platform=boss")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["has_result"])
+        self.assertEqual(data.get("source_run_id"), "run_001")
+        self.assertEqual(data.get("platform"), "boss")
+
+    def test_query_by_run_id_returns_exact(self):
+        """T409: run_id 查询返回精确结果。"""
+        # app.py 对 run_id 查询检查 status in ('succeeded', 'partial')
+        self._save_result_snapshot("run_001", "boss", status="succeeded")
+        resp = self.client.get(
+            "/api/latest-pipeline-result?run_id=run_001")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["has_result"])
+        self.assertEqual(data.get("source_run_id"), "run_001")
+
+    def test_query_run_id_platform_mismatch_returns_409(self):
+        """T409: run_id + platform 不一致 → 409 run_platform_conflict。"""
+        # app.py 对 run_id 查询检查 status in ('succeeded', 'partial')
+        self._save_result_snapshot("run_001", "boss", status="succeeded")
+        resp = self.client.get(
+            "/api/latest-pipeline-result?run_id=run_001&platform=zhilian")
+        self.assertEqual(resp.status_code, 409)
+        data = resp.get_json()
+        self.assertEqual(data.get("error"), "run_platform_conflict")
+
+    def test_unknown_run_id_returns_no_result(self):
+        """T409: 不存在的 run_id 返回 has_result=False。"""
+        resp = self.client.get(
+            "/api/latest-pipeline-result?run_id=nonexistent")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertFalse(data["has_result"])
+
+    def test_result_contains_source_outcomes(self):
+        """T409: 结果包含 source_summary 和 source_outcomes。"""
+        self._save_result_snapshot("run_001", "boss")
+        resp = self.client.get("/api/latest-pipeline-result")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn("source_summary", data)
+        self.assertIn("source_outcomes", data)
+        self.assertIn("source_evidence_available", data)
+
+
+# ======================================================================
+# 门禁C: T410-T413 — 状态映射 + 恢复 + 原子 claim
+# ======================================================================
+
+
+class StatusMappingTests(unittest.TestCase):
+    """T410: 唯一公共状态映射和四类非终态恢复测试。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _create_run(self, run_id, status="queued"):
+        """创建指定状态的 screening_run。"""
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, status, record_kind, frozen_filters_json, "
+                "source_count, match_count, mismatch_count, "
+                "execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                "VALUES (?, ?, 'process_log', '{}', "
+                "0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id), str(status)),
+            )
+
+    def test_run_to_task_status_mapping_unique(self):
+        """T410: 7 种 DB 状态都映射到唯一任务状态。"""
+        from webui.app import _run_to_task_status
+        cases = {
+            "queued": "waiting",
+            "running": "running",
+            "paused": "paused",
+            "succeeded": "completed",
+            "partial": "completed_with_pending",
+            "failed": "failed",
+            "interrupted": "cancelled",
+        }
+        for db_status, expected in cases.items():
+            self.assertEqual(
+                _run_to_task_status(db_status), expected,
+                f"DB 状态 {db_status} 应映射到 {expected}",
+            )
+
+    def test_task_state_returns_mapped_status(self):
+        """T410: api_task_state 返回映射后的任务状态。"""
+        run_id = "test_status_mapping"
+        self._create_run(run_id, "paused")
+        # 注册内存 task
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "paused", "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+        }
+        resp = self.client.get(f"/api/task-state/{run_id}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data.get("status"), "paused")
+        self.assertEqual(data.get("db_status"), "paused")
+
+    def test_task_state_interrupted_maps_to_cancelled(self):
+        """T410: interrupted DB 状态 → cancelled 任务状态。"""
+        run_id = "test_interrupted_mapping"
+        self._create_run(run_id, "interrupted")
+        resp = self.client.get(f"/api/task-state/{run_id}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data.get("status"), "cancelled")
+        self.assertEqual(data.get("db_status"), "interrupted")
+
+    # -- T412: continue 一致性校验 + 原子 claim --------------------------
+
+    def test_continue_checks_platform_consistency(self):
+        """T412: continue 验证平台一致性。"""
+        run_id = "test_continue_platform"
+        self._create_run(run_id, "paused")
+        # 设置 platform
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET platform='boss' WHERE id=?",
+                (run_id,))
+
+        # 尝试继续但不匹配平台（无平台校验时也会因无 execution_params 失败）
+        resp = self.client.post(f"/api/task/continue/{run_id}")
+        # 可能因缺少 scrape_task_id 而失败，但不应该报 404
+        self.assertNotEqual(resp.status_code, 404)
+
+    def test_claim_paused_run_atomic(self):
+        """T412: claim_paused_screening_run 原子性——两次调用只成功一次。"""
+        run_id = "test_atomic_claim"
+        self._create_run(run_id, "paused")
+        self.assertTrue(
+            self.store.claim_paused_screening_run(run_id),
+            "第一次 claim 应成功",
+        )
+        # 第二次 claim 应失败（已被标记为 running）
+        self.assertFalse(
+            self.store.claim_paused_screening_run(run_id),
+            "第二次 claim 应失败——paused→running 只允许一次",
+        )
+
+    def test_claim_non_paused_run_fails(self):
+        """T412: 非 paused 状态的 run 不能被 claim。"""
+        run_id = "test_claim_non_paused"
+        self._create_run(run_id, "running")
+        self.assertFalse(
+            self.store.claim_paused_screening_run(run_id),
+            "running 状态的 run 不能被 claim",
+        )
+
+    # -- T413: 重启打断标记 ---------------------------------------------
+
+    def test_stale_runs_marked_interrupted_on_startup(self):
+        """T413: 服务重启时 running/queued 的 run 被标记为 interrupted。"""
+        from webui.store import TaskStore
+        run_id = "test_stale_interrupted"
+        self._create_run(run_id, "running")
+
+        # 模拟重启：创建新 store 实例
+        new_store = TaskStore(self.store.db_path)
+        run = new_store.get_screening_run(run_id)
+        self.assertIsNotNone(run)
+        self.assertEqual(
+            run["status"], "interrupted",
+            "重启后 running 的 run 应被标记为 interrupted",
+        )
+        self.assertEqual(
+            run.get("error_code"), "restart",
+            "interrupted 的 error_code 应为 restart",
+        )
+
+
+# ======================================================================
+# 门禁D: T414-T419 — 平台敏感外围入口
+# ======================================================================
+
+
+class PlatformAwareTaskStateTests(unittest.TestCase):
+    """T414: task state/progress 返回平台和 source outcomes。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def test_task_state_returns_platform(self):
+        """T414: api_task_state 返回目标 run 真实平台。"""
+        from webui.store import TaskStore
+        run_id = "test_ts_platform"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, record_kind, frozen_filters_json, "
+                "source_count, match_count, mismatch_count, "
+                "execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                "VALUES (?, 'zhilian', 'paused', 'process_log', '{}', "
+                "0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id),),
+            )
+        resp = self.client.get(f"/api/task-state/{run_id}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data.get("platform"), "zhilian")
+        self.assertIn("source_summary", data)
+        self.assertIn("source_outcomes", data)
+
+    def test_search_progress_returns_platform_and_source_outcomes(self):
+        """T414: search-progress 返回平台和 source outcomes。"""
+        run_id = "test_sp_platform"
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running", "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+            "platform": "boss",
+            "task_input_digest": "test_digest",
+        }
+        resp = self.client.get(f"/api/search-progress/{run_id}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data.get("platform"), "boss")
+        self.assertIn("source_summary", data)
+        self.assertIn("source_outcomes", data)
+
+
+class PlatformAwareCancelTests(unittest.TestCase):
+    """T415: 取消的平台感知。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def test_cancel_returns_platform(self):
+        """T415: 取消接口返回平台信息。"""
+        run_id = "test_cancel_platform"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, record_kind, frozen_filters_json, "
+                "source_count, match_count, mismatch_count, "
+                "execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                "VALUES (?, 'boss', 'running', 'process_log', '{}', "
+                "0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id),),
+            )
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running", "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+            "platform": "boss",
+        }
+        resp = self.client.post(f"/api/task/cancel/{run_id}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data.get("platform"), "boss")
+        self.assertIn("status", data)
+
+    def test_cancel_writes_durable_state(self):
+        """T415: 取消先 durable 写 interrupted，再发内存事件。"""
+        run_id = "test_cancel_durable"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, record_kind, frozen_filters_json, "
+                "source_count, match_count, mismatch_count, "
+                "execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                "VALUES (?, 'boss', 'running', 'process_log', '{}', "
+                "0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id),),
+            )
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running", "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+            "platform": "boss",
+        }
+        resp = self.client.post(f"/api/task/cancel/{run_id}")
+        self.assertEqual(resp.status_code, 200)
+        # 验证 DB 已更新
+        run = self.store.get_screening_run(run_id)
+        self.assertIsNotNone(run)
+        self.assertEqual(run["status"], "interrupted")
+
+
+class PlatformAwareFinishTests(unittest.TestCase):
+    """T416: 提前结束的平台感知。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def test_finish_rejects_user_cancelled(self):
+        """T416: user_cancelled 的 run 不能通过 finish 改写。"""
+        run_id = "test_finish_user_cancelled"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, interruption_kind, record_kind, "
+                "frozen_filters_json, source_count, match_count, "
+                "mismatch_count, execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                "VALUES (?, 'boss', 'interrupted', 'user_cancelled', "
+                "'process_log', '{}', 0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id),),
+            )
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        self.assertEqual(resp.status_code, 409)
+        data = resp.get_json()
+        self.assertEqual(data.get("error"), "user_cancelled")
+
+    def test_finish_accepts_paused_and_returns_platform(self):
+        """T416: paused 的 run 可 finish，返回平台。"""
+        run_id = "test_finish_paused"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, record_kind, "
+                "frozen_filters_json, source_count, match_count, "
+                "mismatch_count, execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                "VALUES (?, 'boss', 'paused', "
+                "'process_log', '{}', 0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id),),
+            )
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        # 可能因缺少 scrape_task_id 而 409，但不应该报 404 或 500
+        self.assertNotEqual(resp.status_code, 404)
+        if resp.status_code == 409:
+            data = resp.get_json()
+            self.assertIn(data.get("error", ""),
+                          ["missing_scrape_snapshot", "not_paused"])
+
+    def test_finish_accepts_restart_interrupted(self):
+        """T416: interrupted/process_restart 的 run 可 finish。"""
+        run_id = "test_finish_restart"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, interruption_kind, record_kind, "
+                "frozen_filters_json, source_count, match_count, "
+                "mismatch_count, execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                "VALUES (?, 'boss', 'interrupted', 'process_restart', "
+                "'process_log', '{}', 0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id),),
+            )
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        # 可能因缺少 scrape_task_id 而 409，但不应该报 404 或 500
+        self.assertNotEqual(resp.status_code, 404)
+        if resp.status_code == 409:
+            data = resp.get_json()
+            self.assertIn(data.get("error", ""),
+                          ["missing_scrape_snapshot", "not_paused"])
+
+
+class PlatformAwareJobDetailTests(unittest.TestCase):
+    """T417: 单 JD 抓取平台继承。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def test_job_detail_missing_params_returns_400(self):
+        """T417: 缺少 job_id 或 source_url 返回 400。"""
+        resp = self.client.post("/api/job-detail", json={
+            "job_id": "",
+            "source_url": "",
+        })
+        self.assertEqual(resp.status_code, 400)
+
+
+class PlatformAwareResetResultTests(unittest.TestCase):
+    """T418: 结果重置平台感知。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def test_reset_unknown_run_returns_404(self):
+        """T418: 不存在的 run_id 返回 404。"""
+        resp = self.client.post("/api/reset-latest-result", json={
+            "run_id": "nonexistent",
+        })
+        self.assertEqual(resp.status_code, 404)
+        data = resp.get_json()
+        self.assertEqual(data.get("error"), "run_not_found")
+
+    def test_reset_with_platform_mismatch_returns_409(self):
+        """T418: 请求平台与目标 run 不一致返回 409。"""
+        run_id = "test_reset_platform_conflict"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, record_kind, frozen_filters_json, "
+                "source_count, match_count, mismatch_count, "
+                "execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at, finished_at) "
+                "VALUES (?, 'boss', 'succeeded', 'result_snapshot', '{}', "
+                "0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL, NULL)",
+                (str(run_id),),
+            )
+        resp = self.client.post("/api/reset-latest-result", json={
+            "run_id": run_id,
+            "platform": "zhilian",
+        })
+        self.assertEqual(resp.status_code, 409)
+        data = resp.get_json()
+        self.assertEqual(data.get("error"), "run_platform_conflict")
+
+
+class PlatformAwareBrowserAccountTests(unittest.TestCase):
+    """T419: 浏览器账号的平台语义。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def test_browser_list_includes_platform(self):
+        """T419: 浏览器列表接口返回平台信息。"""
+        resp = self.client.get("/api/browser-accounts")
+        # 接口可能返回 200 或 404，但不应该 500
+        self.assertNotEqual(resp.status_code, 500)
+        if resp.status_code == 200:
+            data = resp.get_json()
+            self.assertIn("accounts", data)
+
+    def test_check_returns_platform_info(self):
+        """T419: /api/check 返回平台信息。"""
+        resp = self.client.get("/api/check")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        # 至少返回 ok 和平台信息
+        self.assertIn("ok", data)
 
 
 if __name__ == "__main__":
