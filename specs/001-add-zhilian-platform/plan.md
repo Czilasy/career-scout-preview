@@ -153,6 +153,43 @@ webui/src/**/__tests__/       # schema、切换、恢复、来源、链接和窄
 - BOSS profile 使用现有账号 `profile_dir`；智联 profile 固定派生为 `<boss_profile_dir>.zhilian`。BOSS 使用平台端口 9222，智联使用 9223；同平台切账号沿用受控替换，未知 profile 占用时拒绝。
 - 验证智联全国 `jl0`、缺失城市映射阻断及两个平台 profile 目录不碰撞；审查后提交。
 
+### 切片 3 补丁：后端 HTTP 端点暴露（补 T207 切片遗漏）
+
+**背景**：T207（tasks003）规划"为 `/api/platforms`、`/api/filter-labels`、`/api/options` 所需服务投影补后端测试"，但 tasks003 允许文件范围只含 `webui/platforms.py` 和 `tests/test_platforms.py`，不含 `webui/app.py`。结果 T207 当时的落地（[test_platforms.py](../../tests/test_platforms.py) L686-727）只测了 `project_filter_schema`、`list_platforms`、`LoginSpace` 的 Python 函数投影，**从未测 app.py 的 HTTP 端点路由**——因为不允许动 app.py。`platforms.py` 的投影函数已就位但从未被 `app.py` 暴露为 HTTP 端点；tasks006 前端 T502-T515 需要 HTTP 端点而非 Python 函数。本补丁补齐这层遗漏。
+
+**实施位置**：`webui/app.py` 的 `/api/options`（L869）和 `/api/filter-labels`（L895）路由改造 + 新增 `/api/platforms` 路由；测试在 `tests/test_webui_app.py` 末尾新增 `PlatformAwareEndpointsTests` 类（10 个用例），不动 `tests/test_platforms.py` 的 T207 函数投影测试。
+
+**兼容策略（最贴合 BOSS 现状）**：
+
+| 端点 | 无 `platform` 参数 | 显式 `platform` 参数 |
+| --- | --- | --- |
+| `/api/options` | 旧 BOSS 形状 `{filters, cities}`（不动一行） | 新形状 `{ok, platform, city_mapping_version, cities:[{label, value}]}` |
+| `/api/filter-labels` | 旧 BOSS 形状 `{labels: {salary, stage, ...}}`（不动一行） | 新形状 `{ok, platform, schema_version, enabled_for_new_tasks, fields}` |
+| `/api/platforms` | 全新路由，无旧形状 | 不适用（无参数） |
+
+旧形状保护 `test_options_come_from_scraper_maps`（[test_webui_app.py](../../tests/test_webui_app.py) L71-77）和现有 `DiscoveryView.vue` 的 `/api/filter-labels` 调用；新形状只在显式带 `platform` 时生效。BOSS 现有调用零影响。
+
+**复用**：`/api/filter-labels?platform=` 直接复用 `platforms.project_filter_schema(platform)`（[platforms.py](../../webui/platforms.py) L700-718），零自定义代码。`/api/platforms` 复用 `list_platforms()` + `DEFAULT_PLATFORM`。`/api/options?platform=` 复用 `PlatformRegistry.city_catalog.entries`，每个 `CityEntry` 的 `label` 和 `name` 投影为 `{label, value}`（value 是规范名，不是平台码——合同 L57"前端不接收平台城市码；后端解析并冻结"）。
+
+**错误码选择**：
+
+- 未知平台键 → `400 platform_validation_failed`（合同 L386）
+- 已知平台但未注册 → `503 platform_schema_unavailable`（合同 L387，语义更宽；前端可统一一个错误码处理"平台基础设施不可用"）。`city_mapping_unavailable`（合同 L391）不采用，因为未注册时 schema 也不可用，语义不够覆盖。
+
+**测试边界**：`tests/test_webui_app.py` 新增 `PlatformAwareEndpointsTests` 类，10 个用例覆盖：
+1. `/api/platforms` 返回 BOSS+智联、`default_platform=boss`、智联 `enabled_for_new_tasks=False`、不返回 profile 路径
+2. `/api/platforms` 返回 `filter_schema_version` 和 `city_mapping_version` 字段
+3. `/api/options`（无参数）保持旧形状
+4. `/api/options?platform=boss` 返回新形状，cities 不含平台码
+5. `/api/options?platform=zhilian` 只返回全国
+6. `/api/options?platform=unknown` 返回 400
+7. `/api/filter-labels`（无参数）保持旧形状
+8. `/api/filter-labels?platform=zhilian` 含 `company_nature` 不含 `stage`，options 为空
+9. `/api/filter-labels?platform=boss` 含 `stage` 不含 `company_nature`
+10. `/api/filter-labels?platform=unknown` 返回 400
+
+**提交边界**：作为单独提交，不混入 tasks006 前端提交。提交信息："补 T207 切片遗漏：app.py 暴露 /api/platforms、/api/options?platform、/api/filter-labels?platform"。
+
 ### 切片 4：智联抓取 adapter
 
 - 实现智联 setup/preflight/list/detail/batch，保留 artifact、input hash、安全日志和熔断器合同。

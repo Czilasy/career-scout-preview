@@ -4267,5 +4267,176 @@ class PlatformAwareBrowserAccountTests(unittest.TestCase):
         self.assertIn("ok", data)
 
 
+# ======================================================================
+# T207 补丁：HTTP 端点暴露（/api/platforms、/api/options?platform、/api/filter-labels?platform）
+# ======================================================================
+# platforms.py 的服务投影函数（project_filter_schema、list_platforms）在
+# tasks003 已测（见 tests/test_platforms.py T207），但 app.py 从未将其暴露
+# 为 HTTP 端点——tasks003 允许文件范围不含 app.py。本类补 HTTP 端点测试，
+# 与 test_platforms.py 的函数投影测试互补。详见 plan.md 切片 3 末尾。
+class PlatformAwareEndpointsTests(unittest.TestCase):
+    """T207 补丁：三平台感知端点的 HTTP 行为。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    # -- /api/platforms -----------------------------------------------
+
+    def test_platforms_endpoint_returns_registry_with_default(self):
+        """/api/platforms 返回 BOSS+智联注册项，default=boss。"""
+        resp = self.client.get("/api/platforms")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(data.get("default_platform"), "boss")
+        platforms = {p["key"]: p for p in data.get("platforms", [])}
+        self.assertIn("boss", platforms)
+        self.assertIn("zhilian", platforms)
+        # 智联 fixture 未核验，禁用新任务；BOSS 已启用
+        self.assertFalse(platforms["zhilian"]["enabled_for_new_tasks"])
+        self.assertTrue(platforms["boss"]["enabled_for_new_tasks"])
+        # 不返回 profile 路径/路径摘要（T207 安全要求）
+        for p in data.get("platforms", []):
+            for key in ("profile_dir", "boss_profile_dir", "profile_key", "cdp_port"):
+                self.assertNotIn(key, p, f"平台投影不得返回 {key}")
+
+    def test_platforms_endpoint_returns_schema_and_city_versions(self):
+        """/api/platforms 返回 filter_schema_version 和 city_mapping_version。"""
+        resp = self.client.get("/api/platforms")
+        data = resp.get_json()
+        platforms = {p["key"]: p for p in data["platforms"]}
+        self.assertEqual(platforms["boss"]["filter_schema_version"], 1)
+        self.assertEqual(platforms["boss"]["city_mapping_version"], 2)
+        self.assertEqual(platforms["zhilian"]["filter_schema_version"], 1)
+        self.assertEqual(platforms["zhilian"]["city_mapping_version"], 1)
+
+    # -- /api/options -------------------------------------------------
+
+    def test_options_without_platform_keeps_legacy_shape(self):
+        """无 platform 参数时保持旧 BOSS 形状 {filters, cities}（兼容现有前端）。"""
+        resp = self.client.get("/api/options")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn("filters", data)
+        self.assertIn("cities", data)
+        self.assertIn("stage", data["filters"])
+        self.assertIn({"label": "上海", "value": "上海"}, data["cities"])
+        # 不应出现新形状字段
+        for forbidden in ("ok", "platform", "city_mapping_version", "schema_version"):
+            self.assertNotIn(forbidden, data)
+
+    def test_options_with_platform_boss_returns_canonical_cities(self):
+        """/api/options?platform=boss 返回新形状 {ok, platform, city_mapping_version, cities}。"""
+        resp = self.client.get("/api/options?platform=boss")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(data["platform"], "boss")
+        self.assertEqual(data["city_mapping_version"], 2)
+        for city in data["cities"]:
+            self.assertIn("label", city)
+            self.assertIn("value", city)
+            # 合同：前端不接收平台城市码；后端解析并冻结
+            self.assertNotIn("platform_code", city)
+            self.assertNotIn("code", city)
+
+    def test_options_with_platform_zhilian_returns_nationwide_only(self):
+        """/api/options?platform=zhilian 只返回全国（jl0），其它城市码未核验不暴露。"""
+        resp = self.client.get("/api/options?platform=zhilian")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(data["platform"], "zhilian")
+        self.assertEqual(data["city_mapping_version"], 1)
+        cities = data["cities"]
+        self.assertEqual(len(cities), 1)
+        self.assertEqual(cities[0]["label"], "全国")
+        self.assertEqual(cities[0]["value"], "全国")
+
+    def test_options_with_unknown_platform_returns_400(self):
+        """未知平台返回 400 platform_validation_failed。"""
+        resp = self.client.get("/api/options?platform=unknown")
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertEqual(data.get("error_code"), "platform_validation_failed")
+
+    # -- /api/filter-labels -------------------------------------------
+
+    def test_filter_labels_without_platform_keeps_legacy_shape(self):
+        """无 platform 参数时保持旧 BOSS 形状 {labels: {...}}（兼容现有前端）。"""
+        resp = self.client.get("/api/filter-labels")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn("labels", data)
+        # 旧形状是 6 字段，含 stage，不含 company_nature
+        self.assertIn("stage", data["labels"])
+        self.assertNotIn("company_nature", data["labels"])
+        # 不应出现新形状字段
+        for forbidden in ("ok", "platform", "schema_version", "enabled_for_new_tasks", "fields"):
+            self.assertNotIn(forbidden, data)
+
+    def test_filter_labels_with_platform_zhilian_returns_company_nature(self):
+        """/api/filter-labels?platform=zhilian 返回 company_nature，不含 stage；options 未核验为空。"""
+        resp = self.client.get("/api/filter-labels?platform=zhilian")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(data["platform"], "zhilian")
+        self.assertEqual(data["schema_version"], 1)
+        # 智联已注册但 fixture 未核验，enabled_for_new_tasks=False
+        self.assertFalse(data["enabled_for_new_tasks"])
+        field_keys = [f["key"] for f in data["fields"]]
+        # 字段顺序：salary/experience/degree/industry/scale/company_nature
+        self.assertEqual(field_keys, [
+            "salary", "experience", "degree", "industry", "scale", "company_nature",
+        ])
+        self.assertNotIn("stage", field_keys)
+        # 智联 options 未核验，应为空数组
+        for f in data["fields"]:
+            self.assertEqual(f["options"], [])
+            self.assertTrue(f["multiple"])
+
+    def test_filter_labels_with_platform_boss_returns_stage(self):
+        """/api/filter-labels?platform=boss 返回 stage，不含 company_nature。"""
+        resp = self.client.get("/api/filter-labels?platform=boss")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(data["platform"], "boss")
+        self.assertTrue(data["enabled_for_new_tasks"])
+        field_keys = [f["key"] for f in data["fields"]]
+        # BOSS 字段顺序：salary/experience/degree/industry/scale/stage
+        self.assertEqual(field_keys, [
+            "salary", "experience", "degree", "industry", "scale", "stage",
+        ])
+        self.assertNotIn("company_nature", field_keys)
+
+    def test_filter_labels_with_unknown_platform_returns_400(self):
+        """未知平台返回 400 platform_validation_failed。"""
+        resp = self.client.get("/api/filter-labels?platform=unknown")
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertEqual(data.get("error_code"), "platform_validation_failed")
+
+
 if __name__ == "__main__":
     unittest.main()

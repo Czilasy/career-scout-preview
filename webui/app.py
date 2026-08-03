@@ -866,10 +866,74 @@ def create_app(config=None):
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 
+    @app.route("/api/platforms")
+    def platforms_list():
+        """T207 补丁：返回平台注册表投影（contracts/http-api.md GET /api/platforms）。
+
+        platforms.py 的 list_platforms() 已在 tasks003 测过投影函数；
+        本路由只负责 HTTP 暴露，不返回 profile 路径或路径摘要。
+        """
+        from webui.platforms import list_platforms, DEFAULT_PLATFORM
+        platforms = [
+            {
+                "key": reg.key,
+                "display_name": reg.display_name,
+                "filter_schema_version": reg.filter_schema.schema_version,
+                "city_mapping_version": reg.city_catalog.mapping_version,
+                "enabled_for_new_tasks": reg.enabled_for_new_tasks,
+                "availability_reason": reg.availability_reason,
+            }
+            for reg in list_platforms()
+        ]
+        return jsonify({
+            "ok": True,
+            "platforms": platforms,
+            "default_platform": DEFAULT_PLATFORM,
+        })
+
     @app.route("/api/options")
     def options():
-        cities = [{"label": name, "value": name} for name in boss.CITY_MAP]
-        return jsonify({"filters": build_filter_options(), "cities": cities})
+        """T207 补丁：平台感知城市目录（contracts/http-api.md GET /api/options?platform）。
+
+        兼容策略：
+        - 无 platform 参数 → 旧 BOSS 形状 {filters, cities}（保护现有前端和测试）
+        - 显式 platform → 新形状 {ok, platform, city_mapping_version, cities:[{label, value}]}
+          cities 的 value 是规范名（不是平台码）；后端解析并冻结（合同 L57）。
+        """
+        platform_raw = request.args.get("platform")
+        if not platform_raw:
+            # 旧 BOSS 兼容形状（不动一行，保护 test_options_come_from_scraper_maps）
+            cities = [{"label": name, "value": name} for name in boss.CITY_MAP]
+            return jsonify({"filters": build_filter_options(), "cities": cities})
+        # 新平台感知形状
+        from webui.platforms import (
+            validate_platform_key, UnknownPlatformError, get_platform_or_none,
+        )
+        try:
+            validate_platform_key(platform_raw)
+        except UnknownPlatformError:
+            return jsonify({
+                "ok": False,
+                "error_code": "platform_validation_failed",
+                "user_message": "不支持的招聘平台",
+            }), 400
+        reg = get_platform_or_none(platform_raw)
+        if reg is None:
+            return jsonify({
+                "ok": False,
+                "error_code": "platform_schema_unavailable",
+                "user_message": "平台尚未注册",
+            }), 503
+        cities = [
+            {"label": e.label, "value": e.name}
+            for e in reg.city_catalog.entries
+        ]
+        return jsonify({
+            "ok": True,
+            "platform": reg.key,
+            "city_mapping_version": reg.city_catalog.mapping_version,
+            "cities": cities,
+        })
 
     @app.route("/api/favorites")
     def favorites_list():
@@ -894,15 +958,44 @@ def create_app(config=None):
 
     @app.route("/api/filter-labels")
     def filter_labels():
-        """Return field label metadata for the 6 filter chip groups (no resume needed)."""
-        return jsonify({"labels": {
-            "salary": ("薪资范围", [], boss.SALARY_MAP),
-            "experience": ("经验要求", [], boss.EXPERIENCE_MAP),
-            "degree": ("学历", [], boss.DEGREE_MAP),
-            "industry": ("行业", [], boss.INDUSTRY_MAP),
-            "scale": ("公司规模", [], boss.SCALE_MAP),
-            "stage": ("融资阶段", [], boss.STAGE_MAP),
-        }})
+        """T207 补丁：平台 AI 筛选 schema（contracts/http-api.md GET /api/filter-labels?platform）。
+
+        兼容策略：
+        - 无 platform 参数 → 旧 BOSS 形状 {labels: {salary, stage, ...}}（保护现有前端）
+        - 显式 platform → 新形状 {ok, platform, schema_version, enabled_for_new_tasks, fields}
+          复用 platforms.project_filter_schema 直接返回所需结构。
+        """
+        platform_raw = request.args.get("platform")
+        if not platform_raw:
+            # 旧 BOSS 兼容形状（不动一行，保护 DiscoveryView.vue 现有调用）
+            return jsonify({"labels": {
+                "salary": ("薪资范围", [], boss.SALARY_MAP),
+                "experience": ("经验要求", [], boss.EXPERIENCE_MAP),
+                "degree": ("学历", [], boss.DEGREE_MAP),
+                "industry": ("行业", [], boss.INDUSTRY_MAP),
+                "scale": ("公司规模", [], boss.SCALE_MAP),
+                "stage": ("融资阶段", [], boss.STAGE_MAP),
+            }})
+        # 新平台感知形状：复用 platforms.project_filter_schema
+        from webui.platforms import (
+            project_filter_schema, validate_platform_key, UnknownPlatformError,
+            get_platform_or_none,
+        )
+        try:
+            validate_platform_key(platform_raw)
+        except UnknownPlatformError:
+            return jsonify({
+                "ok": False,
+                "error_code": "platform_validation_failed",
+                "user_message": "不支持的招聘平台",
+            }), 400
+        if get_platform_or_none(platform_raw) is None:
+            return jsonify({
+                "ok": False,
+                "error_code": "platform_schema_unavailable",
+                "user_message": "平台 schema 不可用",
+            }), 503
+        return jsonify(project_filter_schema(platform_raw))
 
     @app.route("/api/session")
     def session():
