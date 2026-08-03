@@ -189,7 +189,20 @@ describe("DiscoveryView", () => {
           result: { jobs: [{ job_id: "old-1", verdict: "uncertain", verdict_reason: "旧待确认" }], total_kept: 1, total_dropped: 0 },
         });
       }
-      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.includes("/api/filter-labels")) {
+        // T507/T508：mock 返回新 PlatformFilterSchema 格式，含 schema_version
+        return response({
+          ok: true, platform: "boss", schema_version: 3, enabled_for_new_tasks: true,
+          fields: [
+            { key: "salary", label: "薪资范围", multiple: true, options: [{ value: "0", label: "不限" }, { value: "406", label: "20-50K" }] },
+            { key: "experience", label: "经验要求", multiple: true, options: [{ value: "0", label: "不限" }] },
+            { key: "stage", label: "融资阶段", multiple: true, options: [{ value: "0", label: "不限" }, { value: "804", label: "B轮" }] },
+          ],
+        });
+      }
+      if (url.includes("/api/options")) {
+        return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      }
       if (url.endsWith("/api/advanced-settings")) {
         return response({
           ok: true, selection: "balanced", settings, last_custom: null, mode_version: null,
@@ -222,7 +235,12 @@ describe("DiscoveryView", () => {
       scrape_task_id: "scrape-1",
       screening_fields: { salary: ["406"], experience: [] },
       profile_summary: "后端工程师",
+      // T508：提交当前平台 schema 版本（不发 platform，父 run 已冻结）
+      filter_schema_version: 3,
     });
+    // T508：execute-search 不发 platform 也不发 AI filters（已由其它测试覆盖 scope_digest）
+    // T506：screening_fields 是 boss 平台草稿（draftPlatform 默认 boss）
+    expect(JSON.parse(aiCall![1]!.body as string).screening_fields).not.toHaveProperty("stage");
 
     vi.unstubAllGlobals();
   });
@@ -432,7 +450,19 @@ describe("DiscoveryView", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
-      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.includes("/api/filter-labels")) {
+        const platform = url.includes("platform=boss") ? "boss" : "zhilian";
+        return response({
+          ok: true, platform, schema_version: 1, enabled_for_new_tasks: true,
+          fields: platform === "boss"
+            ? [{ key: "stage", label: "融资阶段", multiple: false, options: [{ value: "0", label: "不限" }, { value: "804", label: "B轮" }] }]
+            : [{ key: "company_nature", label: "公司性质", multiple: false, options: [{ value: "0", label: "不限" }, { value: "1", label: "国企" }] }],
+        });
+      }
+      if (url.includes("/api/options")) {
+        const platform = url.includes("platform=boss") ? "boss" : "zhilian";
+        return response({ ok: true, platform, city_mapping_version: 1, cities: [{ label: "上海", value: "上海" }] });
+      }
       if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
       if (url.endsWith("/api/advanced-settings")) {
         return response({
@@ -458,7 +488,8 @@ describe("DiscoveryView", () => {
     expect(bossBtn.attributes("aria-selected")).toBe("true");
     expect(zhilianBtn.attributes("aria-selected")).toBe("false");
 
-    // 切换到智联：只作用于草稿，不应触发任何后端调用
+    // 切换到智联：T505 起按草稿平台重新加载 schema + 城市（2 个新请求），
+    // 但不改 task/result（task 仍为 null）。
     const callsBefore = fetchMock.mock.calls.length;
     await zhilianBtn.trigger("click");
     await flushPromises();
@@ -466,8 +497,8 @@ describe("DiscoveryView", () => {
     expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(false);
     expect(zhilianBtn.attributes("aria-selected")).toBe("true");
     expect(bossBtn.attributes("aria-selected")).toBe("false");
-    // 切换草稿平台不应触发额外的网络请求（T503 阶段尚未接入按平台加载 schema）
-    expect(fetchMock.mock.calls.length).toBe(callsBefore);
+    // 切换平台触发 schema + 城市 2 个新请求
+    expect(fetchMock.mock.calls.length).toBe(callsBefore + 2);
 
     // 切回 BOSS
     await bossBtn.trigger("click");
@@ -493,7 +524,19 @@ describe("DiscoveryView", () => {
         return response({ status: "running", progress: { message: "BOSS 抓取中" }, logs: [] });
       }
       if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
-      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.includes("/api/filter-labels")) {
+        const platform = url.includes("platform=boss") ? "boss" : "zhilian";
+        return response({
+          ok: true, platform, schema_version: 1, enabled_for_new_tasks: true,
+          fields: platform === "boss"
+            ? [{ key: "stage", label: "融资阶段", multiple: false, options: [] }]
+            : [{ key: "company_nature", label: "公司性质", multiple: false, options: [] }],
+        });
+      }
+      if (url.includes("/api/options")) {
+        const platform = url.includes("platform=boss") ? "boss" : "zhilian";
+        return response({ ok: true, platform, city_mapping_version: 1, cities: [] });
+      }
       if (url.endsWith("/api/advanced-settings")) {
         return response({
           ok: true, selection: "balanced", settings: {
@@ -510,21 +553,91 @@ describe("DiscoveryView", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
 
-    // 任务被接回后 activeStep 仍是 upload；切到 search 步骤才会渲染 TaskProgress。
-    // 草稿平台分段控件在所有步骤都常驻顶部，不受 activeStep 影响。
+    // 任务被接回后 activeStep 仍是 upload；草稿平台分段控件在所有步骤都常驻顶部。
     expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
 
-    // 草稿切到智联：仅改 draftPlatform，不触发后端调用，也不改 task snapshot
-    const callsBefore = fetchMock.mock.calls.length;
+    // 草稿切到智联：T505 触发 schema + 城市重新加载，但 task snapshot 不被改写
     await wrapper.get('[data-testid="platform-segment-zhilian"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="platform-current-zhilian"]').exists()).toBe(true);
-    expect(fetchMock.mock.calls.length).toBe(callsBefore);
 
     // 切回 BOSS 草稿
     await wrapper.get('[data-testid="platform-segment-boss"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("T505: drops stale schema response when platform switches quickly", async () => {
+    // 节点门禁 B（tasks006.md L35）：首次应用异步响应前，必须有请求序号或取消机制测试，
+    // 证明旧平台响应晚到不会覆盖当前平台。discovery.spec.ts 已在 loader 层覆盖 100 次；
+    // 这里在组件层端到端验证：boss 旧响应晚到不覆盖 zhilian 当前选择。
+    const pendingFetches: Array<{
+      url: string;
+      resolve: (value: Response) => void;
+    }> = [];
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/filter-labels") || url.includes("/api/options")) {
+        return new Promise<Response>((resolve) => {
+          pendingFetches.push({ url, resolve });
+        });
+      }
+      // 其它 endpoint 立即返回
+      return Promise.resolve(response({
+        ok: true, has_result: false, has_task: false, labels: {},
+        selection: "balanced", settings: {}, last_custom: null, mode_version: null,
+        manual_ranges: {}, config_schema_version: 1,
+      }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    // 让初始 boss 的 advanced-settings 等先解析；filter-labels/options 仍 pending
+    await flushPromises();
+
+    // 切到智联：触发新 schema + 城市 请求（boss 的旧请求仍 pending）
+    await wrapper.get('[data-testid="platform-segment-zhilian"]').trigger("click");
+    await flushPromises();
+
+    // 现在 pendingFetches 里至少有 4 个：boss filter-labels, boss options, zhilian filter-labels, zhilian options
+    // 先 resolve zhilian 的响应（最新请求）
+    for (const p of pendingFetches) {
+      if (p.url.includes("platform=zhilian")) {
+        if (p.url.includes("/api/filter-labels")) {
+          p.resolve(response({
+            ok: true, platform: "zhilian", schema_version: 1, enabled_for_new_tasks: true,
+            fields: [{ key: "company_nature", label: "公司性质", multiple: false, options: [{ value: "1", label: "国企" }] }],
+          }));
+        } else if (p.url.includes("/api/options")) {
+          p.resolve(response({ ok: true, platform: "zhilian", city_mapping_version: 1, cities: [] }));
+        }
+      }
+    }
+    await flushPromises();
+
+    // 现在 resolve boss 的旧响应（晚到）——应被丢弃，不覆盖 zhilian
+    for (const p of pendingFetches) {
+      if (p.url.includes("platform=boss")) {
+        if (p.url.includes("/api/filter-labels")) {
+          p.resolve(response({
+            ok: true, platform: "boss", schema_version: 1, enabled_for_new_tasks: true,
+            fields: [{ key: "stage", label: "融资阶段", multiple: false, options: [{ value: "804", label: "B轮" }] }],
+          }));
+        } else if (p.url.includes("/api/options")) {
+          p.resolve(response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] }));
+        }
+      }
+    }
+    await flushPromises();
+
+    // 当前草稿仍是 zhilian（旧 boss 响应没改写）
+    expect(wrapper.find('[data-testid="platform-current-zhilian"]').exists()).toBe(true);
+    // 已加载 schema 平台是 zhilian（boss 旧响应被丢弃）
+    const segment = wrapper.find(".platform-segment");
+    expect(segment.attributes("data-loaded-schema-platform")).toBe("zhilian");
+    expect(segment.attributes("data-loaded-city-platform")).toBe("zhilian");
 
     vi.unstubAllGlobals();
   });

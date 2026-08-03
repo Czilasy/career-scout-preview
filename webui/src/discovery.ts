@@ -5,6 +5,8 @@ import type {
   FrozenSearchScope,
   JobItem,
   Platform,
+  PlatformCityCatalog,
+  PlatformFilterSchema,
   ScopePreviewResponse,
   TaskSize,
 } from "./types";
@@ -141,4 +143,104 @@ export function createPlatformState(initial: Platform = DEFAULT_PLATFORM): Platf
       result = platform;
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// T504/T505：异步平台资源加载器（contracts/platform-schema.md L151-156）
+// ---------------------------------------------------------------------------
+// platform-schema.md L151-156 要求：发出请求时捕获目标平台和请求版本；
+// 响应返回后同时校验请求仍为该资源的最新请求、响应平台与目标平台一致；
+// 任一校验失败时丢弃响应，不更新 schema、城市、筛选草稿、加载状态或错误状态；
+// 快速切换导致旧请求被取消不显示为当前平台错误。
+//
+// 用于 /api/filter-labels?platform=（PlatformFilterSchema）和
+// /api/options?platform=（PlatformCityCatalog）。两者结构都带 platform 字段，
+// 故用泛型 T extends { platform: Platform } 复用同一份序号 + 取消 + 校验逻辑。
+
+export interface AsyncResourceLoader<T extends { platform: Platform }> {
+  /** 当前已加载平台（仅成功响应后才更新；旧响应被丢弃时不更新）。 */
+  readonly loadedPlatform: Platform | null;
+  /** 当前已加载数据；仅当 loadedPlatform !== null 时有效。 */
+  readonly data: T | null;
+  /** 当前正在请求的平台（发出请求即设；请求结束清空）。 */
+  readonly pendingPlatform: Platform | null;
+  /** 上次错误（仅当最新请求失败时写入；旧请求被取消或被覆盖不写错误）。 */
+  readonly error: string | null;
+  /**
+   * 发起请求；若已有请求在跑会取消旧的。
+   * 返回 true 当且仅当响应被采纳（仍是最新请求 + 响应平台匹配）。
+   * fetcher 应尊重 signal.aborted 并抛 AbortError 以释放资源；
+   * 但即使 fetcher 忽略 signal，load 内部仍会通过 reqId 校验丢弃旧响应。
+   */
+  load(
+    platform: Platform,
+    fetcher: (platform: Platform, signal: AbortSignal) => Promise<T>,
+  ): Promise<boolean>;
+  /** 取消任何在途请求；后续 load 仍可正常发起。 */
+  cancel(): void;
+}
+
+export function createAsyncResourceLoader<T extends { platform: Platform }>(): AsyncResourceLoader<T> {
+  let loadedPlatform: Platform | null = null;
+  let data: T | null = null;
+  let pendingPlatform: Platform | null = null;
+  let error: string | null = null;
+  let reqId = 0;
+  let activeController: AbortController | null = null;
+  return {
+    get loadedPlatform() {
+      return loadedPlatform;
+    },
+    get data() {
+      return data;
+    },
+    get pendingPlatform() {
+      return pendingPlatform;
+    },
+    get error() {
+      return error;
+    },
+    async load(platform, fetcher) {
+      // 取消旧请求（不变式：旧请求的 signal 被 abort，旧 fetcher 应据此释放）
+      if (activeController) activeController.abort();
+      reqId += 1;
+      const myReqId = reqId;
+      pendingPlatform = platform;
+      const myController = new AbortController();
+      activeController = myController;
+      try {
+        const result = await fetcher(platform, myController.signal);
+        // 校验 1：仍是最新请求（被后续 load 覆盖则丢弃）
+        if (myReqId !== reqId) return false;
+        // 校验 2：响应平台匹配目标平台（防后端串台）
+        if (result.platform !== platform) return false;
+        loadedPlatform = platform;
+        data = result;
+        error = null;
+        pendingPlatform = null;
+        return true;
+      } catch (err) {
+        // 旧请求的错误不污染 error 状态（platform-schema.md L156）
+        if (myReqId !== reqId) return false;
+        error = err instanceof Error ? err.message : String(err);
+        pendingPlatform = null;
+        return false;
+      }
+    },
+    cancel() {
+      if (activeController) activeController.abort();
+      reqId += 1; // 让在途请求的 myReqId 不再匹配，使其响应被丢弃
+      pendingPlatform = null;
+    },
+  };
+}
+
+/** 便于 DiscoveryView 区分 schema / 城市两类资源加载器实例的别名。 */
+export type SchemaLoader = AsyncResourceLoader<PlatformFilterSchema>;
+export type CityCatalogLoader = AsyncResourceLoader<PlatformCityCatalog>;
+export function createSchemaLoader(): SchemaLoader {
+  return createAsyncResourceLoader<PlatformFilterSchema>();
+}
+export function createCityCatalogLoader(): CityCatalogLoader {
+  return createAsyncResourceLoader<PlatformCityCatalog>();
 }

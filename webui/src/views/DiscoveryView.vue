@@ -21,7 +21,9 @@ import TaskProgress from "../components/TaskProgress.vue";
 import { apiRequest, errorMessage, settingsApi } from "../api";
 import {
   buildSearchScriptParams,
+  createCityCatalogLoader,
   createPlatformState,
+  createSchemaLoader,
   DEFAULT_PLATFORM,
   normalizeScopePreview,
   partitionPipelineResult,
@@ -36,6 +38,8 @@ import type {
   JobItem,
   Notice,
   Platform,
+  PlatformCityCatalog,
+  PlatformFilterSchema,
 } from "../types";
 
 type StepId = "upload" | "search" | "screen" | "results";
@@ -83,9 +87,21 @@ const emit = defineEmits<{
 // 仅切换新任务草稿，不改 task/result（不变式 1）；T505 起按 platformState.draft 加载 schema/城市。
 const platformState = createPlatformState(DEFAULT_PLATFORM);
 const draftPlatform = ref<Platform>(platformState.draft);
+// T505：schema / 城市目录加载器。带请求序号 + AbortController + 响应平台校验，
+// 旧响应晚到不会覆盖当前平台（platform-schema.md L151-156）。
+const schemaLoader = createSchemaLoader();
+const cityLoader = createCityCatalogLoader();
+const schemaRef = ref<PlatformFilterSchema | null>(null);
+const cityCatalogRef = ref<PlatformCityCatalog | null>(null);
+const schemaBusy = ref(false);
+const cityCatalogBusy = ref(false);
 function setDraftPlatform(platform: Platform) {
+  if (platformState.draft === platform) return;
   platformState.setDraftPlatform(platform);
   draftPlatform.value = platform;
+  // 切换草稿平台后按新平台重新加载 schema / 城市；旧请求被 loader 内部取消丢弃。
+  void loadFilterLabels();
+  void loadCityCatalog();
 }
 
 const steps = [
@@ -130,7 +146,13 @@ const customKeyword = ref("");
 const cityText = ref("");
 const customCity = ref("");
 const fieldLabels = ref<Record<string, FieldLabel>>({});
-const filterValues = ref<Record<string, string[]>>({});
+// T506：筛选草稿分平台独立保存（platform-schema.md L139）。
+// boss.stage 与 zhilian.company_nature 互不串用；公共字段（salary/experience/...）
+// 也按平台隔离，避免切换平台时把 A 平台不支持的值带给 B 平台。
+const filterValues = ref<Record<Platform, Record<string, string[]>>>({
+  boss: {},
+  zhilian: {},
+});
 const profileSummary = ref("");
 const scrapeTaskId = ref("");
 const scrapeBusy = ref(false);
@@ -244,19 +266,19 @@ const cityList = computed(() => cityText.value
   .map((city) => city.trim())
   .filter(Boolean));
 const effectiveSearchCities = computed(() => cityList.value.length ? cityList.value : ["全国"]);
+// T505：filterGroups 由当前已加载 schema 派生（platform-schema.md L147）。
+// 旧 fieldLabels 不再驱动筛选 UI；T507 起由 analyzeResume 按当前 schema 投影建议。
 const filterGroups = computed(() => {
-  return ["salary", "experience", "degree", "industry", "scale", "stage"]
-    .map((key) => {
-      const meta = fieldLabels.value[key];
-      const mapping = meta?.[2];
-      return {
-        key,
-        label: meta?.[0] || key,
-        options: typeof mapping === "object" && mapping
-          ? Object.entries(mapping).filter(([, code]) => code !== "0")
-          : [],
-      };
-    })
+  const schema = schemaRef.value;
+  if (!schema) return [];
+  return schema.fields
+    .map((field) => ({
+      key: field.key,
+      label: field.label,
+      options: field.options
+        .filter((opt) => opt.value !== "0")
+        .map((opt) => [opt.label, opt.value] as [string, string]),
+    }))
     .filter((group) => group.options.length);
 });
 const searchSummary = computed(() => {
@@ -269,8 +291,9 @@ const searchSummary = computed(() => {
 });
 const screenSummaryChips = computed(() => {
   const chips: { label: string; value: string }[] = [];
+  const drafts = filterValues.value[draftPlatform.value];
   filterGroups.value.forEach((group) => {
-    const values = filterValues.value[group.key] || [];
+    const values = drafts[group.key] || [];
     if (!values.length) return;
     const labels = values.map((code) => {
       const option = group.options.find(([, optCode]) => optCode === code);
@@ -306,6 +329,7 @@ const currentEmptyMessage = computed(() => ({
 onMounted(() => {
   void loadAdvancedSettings();
   void loadFilterLabels();
+  void loadCityCatalog();
   void restoreRunningTask().finally(() => {
     if (!pausedRunId.value && !scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
       void loadLatestResult();
@@ -380,10 +404,16 @@ async function restoreRunningTask() {
       screenPanelOpen.value = false;
       activeStep.value = "screen";
       const savedFilters = data.frozen_filters || {};
-      filterValues.value = Object.fromEntries(
-        Object.entries(savedFilters)
-          .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
-          .map(([key, value]) => [key, value as string[]]),
+      // T506：恢复时写入当前草稿平台对应的草稿槽（任务平台由 T509 显式设置）
+      const drafts = filterValues.value[draftPlatform.value];
+      for (const key of Object.keys(drafts)) delete drafts[key];
+      Object.assign(
+        drafts,
+        Object.fromEntries(
+          Object.entries(savedFilters)
+            .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
+            .map(([key, value]) => [key, value as string[]]),
+        ),
       );
       profileSummary.value = data.profile_summary || "";
       return;
@@ -503,12 +533,47 @@ async function enrichPausedSnapshot(
   }
 }
 
+// T505：按草稿平台加载 schema（/api/filter-labels?platform=）。
+// schemaLoader 内部用单调 reqId + AbortController + 响应平台校验，
+// 保证旧平台响应晚到不覆盖当前平台（platform-schema.md L151-156）。
 async function loadFilterLabels() {
-  if (Object.keys(fieldLabels.value).length) return;
+  if (schemaLoader.loadedPlatform === platformState.draft && schemaRef.value) return;
+  schemaBusy.value = true;
   try {
-    const data = await apiRequest<{ labels?: Record<string, unknown> }>("/api/filter-labels");
-    if (data.labels) fieldLabels.value = data.labels as typeof fieldLabels.value;
-  } catch { /* non-critical */ }
+    const accepted = await schemaLoader.load(platformState.draft, (platform, signal) =>
+      apiRequest<PlatformFilterSchema>(
+        `/api/filter-labels?platform=${encodeURIComponent(platform)}`,
+        { signal },
+      ),
+    );
+    if (accepted && schemaLoader.data) {
+      schemaRef.value = schemaLoader.data;
+    }
+  } catch { /* non-critical：loader 已记录 error */ }
+  finally {
+    if (schemaLoader.pendingPlatform === null) schemaBusy.value = false;
+  }
+}
+
+// T505：按草稿平台加载城市目录（/api/options?platform=）。
+// 与 loadFilterLabels 共用同一份序号 + 取消 + 校验逻辑（createAsyncResourceLoader）。
+async function loadCityCatalog() {
+  if (cityLoader.loadedPlatform === platformState.draft && cityCatalogRef.value) return;
+  cityCatalogBusy.value = true;
+  try {
+    const accepted = await cityLoader.load(platformState.draft, (platform, signal) =>
+      apiRequest<PlatformCityCatalog>(
+        `/api/options?platform=${encodeURIComponent(platform)}`,
+        { signal },
+      ),
+    );
+    if (accepted && cityLoader.data) {
+      cityCatalogRef.value = cityLoader.data;
+    }
+  } catch { /* non-critical：loader 已记录 error */ }
+  finally {
+    if (cityLoader.pendingPlatform === null) cityCatalogBusy.value = false;
+  }
 }
 
 watch(() => props.profileId, () => {
@@ -541,7 +606,9 @@ function handleDrop(event: DragEvent) {
 
 function initializeFromAnalysis(data: AnalyzeResponse) {
   const fields = data.fields || {};
-  fieldLabels.value = data.labels || {};
+  // T507：不替换权威标签 fieldLabels（platform-schema.md L147）。
+  // filterGroups 由 schemaLoader 加载的 schema 驱动，不用 analyze 响应的 labels 覆盖。
+  // data.labels 仍保留给 fallback 或后续调试，但不写入 fieldLabels。
   const rawKeywords = Array.isArray(fields.keyword) ? fields.keyword : [];
   keywords.value = rawKeywords
     .map((item) => typeof item === "string"
@@ -556,12 +623,20 @@ function initializeFromAnalysis(data: AnalyzeResponse) {
   cityText.value = Array.isArray(fields.city)
     ? fields.city.map(String).join(", ")
     : String(fields.city || "");
-  filterValues.value = {};
-  for (const key of ["salary", "experience", "degree", "industry", "scale", "stage"]) {
-    const value = fields[key];
-    filterValues.value[key] = (Array.isArray(value) ? value : value ? [value] : [])
-      .map(String)
-      .filter((item) => item !== "0");
+  // T507：按当前已加载 schema 投影筛选建议（platform-schema.md L147）。
+  // 只接受 schema 允许的字段；boss.stage 与 zhilian.company_nature 因 schema 不同不会串用。
+  // 若 schema 未加载（如刚切平台尚未响应），保留空草稿，不投影。
+  const drafts = filterValues.value[draftPlatform.value];
+  for (const key of Object.keys(drafts)) delete drafts[key];
+  const schema = schemaRef.value;
+  if (schema) {
+    for (const field of schema.fields) {
+      const value = fields[field.key];
+      const codes = (Array.isArray(value) ? value : value ? [value] : [])
+        .map(String)
+        .filter((item) => item !== "0");
+      if (codes.length) drafts[field.key] = codes;
+    }
   }
   profileSummary.value = String(fields.profile_summary || "");
 }
@@ -654,8 +729,9 @@ function removeCity(city: string) {
 }
 
 function toggleFilter(key: string, code: string) {
-  const values = filterValues.value[key] || [];
-  filterValues.value[key] = values.includes(code)
+  const drafts = filterValues.value[draftPlatform.value];
+  const values = drafts[key] || [];
+  drafts[key] = values.includes(code)
     ? values.filter((value) => value !== code)
     : [...values, code];
 }
@@ -826,7 +902,10 @@ async function startAiScreen() {
     const data = await apiRequest<{ task_id: string; resuming?: boolean }>("/api/ai-screen", {
       method: "POST",
       json: {
-        screening_fields: filterValues.value,
+        // T506/T508：只提交当前草稿平台的筛选草稿 + schema 版本。
+        // 不发 platform（父 run 已冻结平台，后端从父 run 读）；不发 BOSS 的 stage 给智联 run。
+        screening_fields: filterValues.value[draftPlatform.value],
+        filter_schema_version: schemaRef.value?.schema_version ?? null,
         profile_summary: profileSummary.value,
         scrape_task_id: scrapeTaskId.value,
       },
@@ -1140,7 +1219,8 @@ function resetWorkflow() {
   customKeyword.value = "";
   cityText.value = "";
   customCity.value = "";
-  filterValues.value = {};
+  // T506：重置两个平台的筛选草稿
+  filterValues.value = { boss: {}, zhilian: {} };
   profileSummary.value = "";
   scrapeBusy.value = false;
   screenBusy.value = false;
@@ -1434,6 +1514,8 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
       role="tablist"
       aria-label="新任务目标平台"
       :data-testid="`platform-current-${draftPlatform}`"
+      :data-loaded-schema-platform="schemaRef?.platform || ''"
+      :data-loaded-city-platform="cityCatalogRef?.platform || ''"
     >
       <button
         v-for="platform in (['boss', 'zhilian'] as const)"
@@ -1669,20 +1751,20 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
               <div class="chip-grid compact">
                 <button
                   class="choice-chip"
-                  :class="{ selected: !(filterValues[group.key] || []).length }"
+                  :class="{ selected: !(filterValues[draftPlatform][group.key] || []).length }"
                   type="button"
                   :disabled="screenBusy"
-                  :aria-pressed="!(filterValues[group.key] || []).length"
-                  @click="filterValues[group.key] = []"
+                  :aria-pressed="!(filterValues[draftPlatform][group.key] || []).length"
+                  @click="filterValues[draftPlatform][group.key] = []"
                 >不限</button>
                 <button
                   v-for="([label, code]) in group.options"
                   :key="code"
                   class="choice-chip"
-                  :class="{ selected: (filterValues[group.key] || []).includes(code) }"
+                  :class="{ selected: (filterValues[draftPlatform][group.key] || []).includes(code) }"
                   type="button"
                   :disabled="screenBusy"
-                  :aria-pressed="(filterValues[group.key] || []).includes(code)"
+                  :aria-pressed="(filterValues[draftPlatform][group.key] || []).includes(code)"
                   @click="toggleFilter(group.key, code)"
                 >{{ label }}</button>
               </div>

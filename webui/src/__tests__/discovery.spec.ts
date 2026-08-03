@@ -1,13 +1,19 @@
 import {
   buildSearchScriptParams,
   classifyTaskSize,
+  createAsyncResourceLoader,
   createPlatformState,
   DEFAULT_PLATFORM,
   normalizeScopePreview,
   partitionPipelineResult,
   recoverSelectionSettings,
 } from "../discovery";
-import type { AdvancedSettingsState, Platform, ScopePreviewResponse } from "../types";
+import type {
+  AdvancedSettingsState,
+  Platform,
+  PlatformFilterSchema,
+  ScopePreviewResponse,
+} from "../types";
 
 describe("discovery helpers", () => {
   it("keeps uncertain AI results separate from real matches", () => {
@@ -229,5 +235,152 @@ describe("platform state (T502)", () => {
     state.setTaskPlatform(task);
     state.setResultPlatform(result);
     expect(true).toBe(true);
+  });
+});
+
+describe("platform schema race (T504)", () => {
+  // 不变式锚点：contracts/platform-schema.md L151-156 + tasks006.md L35-37
+  // 首次应用异步响应前，必须有请求序号或取消机制测试，证明旧平台响应晚到不会覆盖当前平台。
+  // 首次应用简历建议前，必须按当前已加载 schema 投影。
+
+  function makeSchema(platform: Platform): PlatformFilterSchema {
+    return {
+      ok: true,
+      platform,
+      schema_version: 1,
+      enabled_for_new_tasks: true,
+      fields: platform === "boss"
+        ? [{ key: "stage", label: "融资阶段", multiple: false, options: [] }]
+        : [{ key: "company_nature", label: "公司性质", multiple: false, options: [] }],
+    };
+  }
+
+  it("100 交错切换乱序 resolve：只有最后一次被采纳", async () => {
+    const loader = createAsyncResourceLoader<PlatformFilterSchema>();
+    // 受控 fetcher：每次调用注册一个 { resolve, reject }，由测试决定何时回应。
+    const pending: Array<{
+      platform: Platform;
+      resolve: (value: PlatformFilterSchema) => void;
+      reject: (reason: unknown) => void;
+      signal: AbortSignal;
+    }> = [];
+    const fetcher = (platform: Platform, signal: AbortSignal) =>
+      new Promise<PlatformFilterSchema>((resolve, reject) => {
+        pending.push({ platform, resolve, reject, signal });
+      });
+
+    // 发起 100 次切换：boss/zhilian 交替
+    const platforms: Platform[] = Array.from({ length: 100 }, (_, i) =>
+      i % 2 === 0 ? "boss" : "zhilian",
+    );
+    const promises = platforms.map((p) => loader.load(p, fetcher));
+    expect(pending.length).toBe(100);
+
+    // 乱序 resolve：用倒序（旧请求最后 resolve，模拟"旧响应晚到"）
+    for (let i = pending.length - 1; i >= 0; i--) {
+      pending[i].resolve(makeSchema(pending[i].platform));
+    }
+    const results = await Promise.all(promises);
+
+    // 只有最后一次（i=99）的响应应被采纳
+    expect(results.filter((accepted) => accepted === true)).toHaveLength(1);
+    const lastPlatform = platforms[99];
+    expect(loader.loadedPlatform).toBe(lastPlatform);
+    expect(loader.data?.platform).toBe(lastPlatform);
+    expect(loader.pendingPlatform).toBeNull();
+    expect(loader.error).toBeNull();
+    // 字段与最终平台匹配（boss→stage，zhilian→company_nature）
+    if (lastPlatform === "boss") {
+      expect(loader.data?.fields[0]?.key).toBe("stage");
+    } else {
+      expect(loader.data?.fields[0]?.key).toBe("company_nature");
+    }
+  });
+
+  it("旧请求 reject 不污染当前 error 状态（错误归属）", async () => {
+    const loader = createAsyncResourceLoader<PlatformFilterSchema>();
+    const pending: Array<{
+      resolve: (value: PlatformFilterSchema) => void;
+      reject: (reason: unknown) => void;
+    }> = [];
+    const fetcher = () =>
+      new Promise<PlatformFilterSchema>((resolve, reject) => {
+        pending.push({ resolve, reject });
+      });
+
+    // 第一次请求 boss，pending 中
+    const p1 = loader.load("boss", fetcher);
+    expect(loader.pendingPlatform).toBe("boss");
+
+    // 第二次请求 zhilian，应取消第一次
+    const p2 = loader.load("zhilian", fetcher);
+    expect(loader.pendingPlatform).toBe("zhilian");
+
+    // 第一次 reject（旧请求失败）
+    pending[0].reject(new Error("boss 网络抖动"));
+    // 第二次 resolve（成功）
+    pending[1].resolve(makeSchema("zhilian"));
+
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1).toBe(false); // 旧请求被丢弃
+    expect(r2).toBe(true); // 新请求被采纳
+    expect(loader.error).toBeNull(); // 旧请求的错误没污染
+    expect(loader.loadedPlatform).toBe("zhilian");
+  });
+
+  it("最新请求失败时 error 被正确记录", async () => {
+    const loader = createAsyncResourceLoader<PlatformFilterSchema>();
+    const fetcherOk = () => Promise.resolve(makeSchema("boss"));
+    const fetcherErr = () => Promise.reject(new Error("zhilian 503"));
+
+    // 第一次 boss 成功
+    const r1 = await loader.load("boss", fetcherOk);
+    expect(r1).toBe(true);
+    expect(loader.loadedPlatform).toBe("boss");
+    expect(loader.error).toBeNull();
+
+    // 第二次 zhilian 失败
+    const r2 = await loader.load("zhilian", fetcherErr);
+    expect(r2).toBe(false);
+    expect(loader.loadedPlatform).toBe("boss"); // 保留上次成功
+    expect(loader.error).toBe("zhilian 503");
+  });
+
+  it("响应 platform 与请求 platform 不匹配被丢弃", async () => {
+    const loader = createAsyncResourceLoader<PlatformFilterSchema>();
+    // 请求 boss 但响应说 zhilian（后端串台）
+    const fetcher = () => Promise.resolve(makeSchema("zhilian"));
+    const r = await loader.load("boss", fetcher);
+    expect(r).toBe(false);
+    expect(loader.loadedPlatform).toBeNull();
+    expect(loader.data).toBeNull();
+    expect(loader.error).toBeNull(); // 平台不匹配不算错误，只算丢弃
+  });
+
+  it("cancel() 后在途请求的响应被丢弃，后续 load 仍正常", async () => {
+    const loader = createAsyncResourceLoader<PlatformFilterSchema>();
+    const pending: Array<{
+      resolve: (value: PlatformFilterSchema) => void;
+    }> = [];
+    const fetcher = () =>
+      new Promise<PlatformFilterSchema>((resolve) => {
+        pending.push({ resolve });
+      });
+
+    const p1 = loader.load("boss", fetcher);
+    expect(loader.pendingPlatform).toBe("boss");
+
+    loader.cancel();
+    expect(loader.pendingPlatform).toBeNull();
+
+    // 取消后再 resolve 旧请求：应被丢弃
+    pending[0].resolve(makeSchema("boss"));
+    expect(await p1).toBe(false);
+    expect(loader.loadedPlatform).toBeNull();
+
+    // 后续 load 仍正常工作
+    const r2 = await loader.load("zhilian", () => Promise.resolve(makeSchema("zhilian")));
+    expect(r2).toBe(true);
+    expect(loader.loadedPlatform).toBe("zhilian");
   });
 });
