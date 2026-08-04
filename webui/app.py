@@ -68,6 +68,7 @@ from webui.workbench import (
     allocate_detail_budget,
     MAX_DETAIL_BUDGET,
     normalize_job_link,
+    normalize_job_link_for_platform,
     select_keywords,
     project_card,
     aggregate_feedback_state,
@@ -658,6 +659,24 @@ def _run_to_task_status(db_status: str) -> str:
     }
     return mapping.get(db_status, "failed")
 
+def _public_task_status(status: str, interruption_kind: str | None = None) -> str:
+    """Canonical DB/内存状态 → 公共 API 状态（http-api.md 公共状态映射）。"""
+    mapping = {
+        "queued": "queued",
+        "waiting": "queued",
+        "running": "running",
+        "paused": "paused",
+        "succeeded": "completed",
+        "partial": "completed_with_pending",
+        "failed": "failed",
+        "done": "completed",
+        "interrupted": "cancelled",
+        "cancelled": "cancelled",
+    }
+    if status == "interrupted" and interruption_kind in (
+            "process_restart", "operator_stop"):
+        return "interrupted"
+    return mapping.get(status, status or "failed")
 
 def create_app(config=None):
     # Vue/Vite owns the /static namespace. Disable Flask's implicit static
@@ -4616,7 +4635,8 @@ def create_app(config=None):
             snapshot = {
                 "ok": True,
                 "kind": task.get("kind", ""),
-                "status": task["status"],
+                "status": _public_task_status(
+                    task["status"], (db_run or {}).get("interruption_kind")),
                 "progress": task["progress"],
                 "logs": list(task["logs"][-LOG_TAIL_LINES:]),
                 "error": task["error"],
@@ -4939,32 +4959,75 @@ def create_app(config=None):
         job_id = str(raw.get("job_id") or "").strip()
         platform_job_id = str(raw.get("platform_job_id") or job_id).strip()
         source_run_id = str(raw.get("source_run_id") or "").strip() or None
-        source_url = normalize_job_link(
-            raw.get("source_url") or raw.get("job_link") or ""
-        )
-        if not job_id or not source_url:
+        raw_source_url = str(raw.get("source_url") or raw.get("job_link") or "")
+        if not job_id or not raw_source_url.strip():
             return jsonify({"ok": False, "error": "缺少 job_id 或 source_url"}), 400
 
         # T417: 从 source run 继承冻结平台
         frozen_platform = "boss"
+        frozen_browser_account = None
+        frozen_cdp_port = None
+        frozen_profile_key = None
+        parent_run = None
         if source_run_id:
             try:
                 identity = store.get_run_checkpoint_identity(source_run_id)
-                if identity is not None:
-                    frozen_platform = identity.get("platform") or "boss"
+                parent_run = store.get_screening_run(source_run_id)
             except _OPERATIONAL_ERRORS:
-                pass
+                identity = parent_run = None
+            if identity is not None:
+                frozen_platform = str(identity.get("platform") or "boss")
+            parent_params = (parent_run or {}).get("execution_params") or {}
+            frozen_browser_account = str(parent_params.get("browser_account") or "") or None
+            frozen_cdp_port = parent_params.get("cdp_port")
+            frozen_profile_key = parent_params.get("profile_key")
+            gp_task_id = str(parent_params.get("scrape_task_id") or "")
+            if (not frozen_cdp_port or not frozen_profile_key) and gp_task_id:
+                try:
+                    gp = store.get_screening_run(gp_task_id)
+                    gp_params = (gp or {}).get("execution_params") or {}
+                    frozen_cdp_port = frozen_cdp_port or gp_params.get("cdp_port")
+                    frozen_profile_key = frozen_profile_key or gp_params.get("profile_key")
+                except _OPERATIONAL_ERRORS:
+                    pass
+        else:
+            if "zhaopin.com" in raw_source_url.lower():
+                return jsonify({
+                    "ok": False, "error": "run_identity_conflict",
+                    "error_code": "run_identity_conflict",
+                    "message": "智联单 JD 必须携带 source_run_id，不能按 URL 猜测来源",
+                }), 409
+        source_url = normalize_job_link_for_platform(
+            raw_source_url, platform=frozen_platform
+        )
+        if not source_url:
+            return jsonify({"ok": False, "error": "缺少合法 source_url"}), 400
         # 校验 URL 与平台一致性
         if frozen_platform == "zhilian" and "zhaopin.com" not in source_url.lower():
             return jsonify({"ok": False, "error": "platform_url_mismatch",
                            "message": "智联岗位 URL 必须包含 zhaopin.com"}), 422
-
-        chrome_ok, chrome_err = ensure_chrome_ready()
+        if frozen_platform == "zhilian" and not (
+                frozen_browser_account and frozen_cdp_port and frozen_profile_key):
+            return jsonify({
+                "ok": False, "error": "run_identity_conflict",
+                "error_code": "run_identity_conflict",
+                "message": "智联来源 run 缺少冻结浏览器身份",
+            }), 409
+        if source_run_id and parent_run is not None:
+            _activate_run_browser(parent_run)
+        chrome_ok, chrome_err = ensure_chrome_ready(
+            frozen_cdp_port if frozen_platform == "zhilian" else None
+        )
         if not chrome_ok:
             return jsonify({"ok": False,
                             "error": f"调试浏览器未能就绪：{chrome_err}"}), 503
 
-        source = _make_cdp_source(platform=frozen_platform)
+        source = _make_cdp_source(
+            platform=frozen_platform,
+            browser_account=frozen_browser_account,
+            cdp_port=frozen_cdp_port,
+            profile_key=frozen_profile_key,
+        )
         if source is None:
             return jsonify({"ok": False, "error": "抓取源不可用"}), 500
 
@@ -5196,12 +5259,17 @@ def create_app(config=None):
         _activate_run_browser()
         from webui.pipeline_exec import ensure_chrome_ready
 
-        source_url = normalize_job_link(
-            raw.get("source_url") or raw.get("job_link") or ""
-        )
-        if not source_url:
+        raw_source_url = str(raw.get("source_url") or raw.get("job_link") or "")
+        if not raw_source_url.strip():
             return jsonify({"ok": False, "error": "缺少 source_url 或 job_link",
                             "job_id": job_id}), 400
+
+        if "zhaopin.com" in raw_source_url.lower():
+            return jsonify({
+                "ok": False, "error": "run_identity_conflict",
+                "error_code": "run_identity_conflict",
+                "message": "智联补抓必须携带 source_run_id，不能按 URL 猜测身份",
+            }), 409
 
         chrome_ok, chrome_err = ensure_chrome_ready()
         if not chrome_ok:
@@ -5211,10 +5279,9 @@ def create_app(config=None):
         # T406: fallback 路径从 source_url 推断平台，不依赖 latest done run
         # （最新完成 run 可能是另一平台，会误用平台身份）。智联无冻结
         # 账号/端口时 _make_cdp_source 返回 None，由下方 500 阻断默认 BOSS。
-        fallback_platform = (
-            "zhilian" if "zhaopin.com" in source_url.lower() else "boss"
-        )
+        fallback_platform = "boss"
         source = _make_cdp_source(platform=fallback_platform)
+        source_url = normalize_job_link(raw_source_url)
         if source is None:
             return jsonify({"ok": False, "error": "抓取源不可用", "job_id": job_id}), 500
 
@@ -5711,7 +5778,7 @@ def create_app(config=None):
             fetched_jd: dict = {}
             detail_jobs: list = []
             if no_jd:
-                chrome_ok, chrome_err = ensure_chrome_ready()
+                chrome_ok, chrome_err = ensure_chrome_ready(frozen_cdp_port)
                 if chrome_ok:
                     source = _make_cdp_source(
                         platform=frozen_platform,
@@ -5775,7 +5842,7 @@ def create_app(config=None):
                                                   "请在自动化浏览器中处理，完成后点「继续」")
                             return
                         if detail.get("stopped"):
-                            close_debug_chrome()
+                            close_debug_chrome(frozen_cdp_port)
                             with _pipeline_lock:
                                 t = _pipeline_tasks.get(task_id)
                                 if t is not None:
@@ -5783,7 +5850,7 @@ def create_app(config=None):
                                     t["error"] = "用户已停止重抓"
                             _schedule_pipeline_task_cleanup(task_id)
                             return
-                        close_debug_chrome()
+                        close_debug_chrome(frozen_cdp_port)
                     else:
                         reason = "CDP 抓取源不可用，请确认调试浏览器后继续"
                         emit(stage="fetch_jd", current=0, total=total, message=reason)
@@ -6082,9 +6149,9 @@ def create_app(config=None):
         progress.setdefault("current", success_count if jd_stage else completed_count)
         progress.setdefault("total", stage_total)
         pause_info = None
-        effective_status = (
-            str(live.get("status")) if live is not None
-            else _run_to_task_status(str(run["status"]))
+        effective_status = _public_task_status(
+            str(live.get("status")) if live is not None else str(run["status"]),
+            (run or {}).get("interruption_kind"),
         )
         if effective_status == "paused" or (
                 error_code and error_code in SYSTEMIC_BLOCK_CODES):

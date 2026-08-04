@@ -920,6 +920,8 @@ button:disabled {
   color: var(--info);
   font-weight: 700;
 }.task-status[data-status="done"] { color: var(--success); }
+.task-status[data-status="completed"] { color: var(--success); }
+.task-status[data-status="completed_with_pending"] { color: var(--warning, #d97706); }
 .task-status[data-status="failed"] { color: var(--danger); }
 .task-progress[data-blocked="true"] .task-status { color: var(--danger); }
 .task-progress[data-blocked="true"] > p { color: var(--danger); }

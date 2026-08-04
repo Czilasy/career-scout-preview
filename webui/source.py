@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import time
+import random
 from pathlib import Path
 from typing import Any, Callable, Protocol, runtime_checkable
 
@@ -293,7 +294,8 @@ class JobSource(Protocol):
         ...
 
     def fetch_details_batch(
-        self, jobs: list[dict], **bounded_options,
+        self, jobs: list[dict], *, detail_output_path: str | None = None,
+        **bounded_options,
     ) -> dict[str, SourceOutcome]:
         """批量抓取岗位详情页。
 
@@ -1232,7 +1234,8 @@ class FakeJobSource:
         return SourceOutcome.success(detail=detail, safe_log=f"fake detail job_id_present=1 fields={sorted(detail.keys())[:3]}")
 
     def fetch_details_batch(
-        self, jobs: list[dict], **bounded_options,
+        self, jobs: list[dict], *, detail_output_path: str | None = None,
+        **bounded_options,
     ) -> dict[str, SourceOutcome]:
         """批量抓取详情（测试替身）：逐个调用 fetch_detail 并按 job_id 汇总。
 
@@ -1774,7 +1777,8 @@ class ZhilianCdpSource:
     # T312: fetch_details_batch 熔断器复用
     # ------------------------------------------------------------------
     def fetch_details_batch(
-        self, jobs: list[dict], **bounded_options,
+        self, jobs: list[dict], *, detail_output_path: str | None = None,
+        **bounded_options,
     ) -> dict[str, SourceOutcome]:
         """批量抓取详情：单项异常继续，连续平台级 signal 触发熔断。
 
@@ -1782,6 +1786,10 @@ class ZhilianCdpSource:
         （可暂停 outcome，编排层可后续 retry）。
         """
         results: dict[str, SourceOutcome] = {}
+        # BOSS 专用节流参数由编排层透传；智联详情在同一调试标签页串行抓取，
+        # 只消费 gap_min/gap_max 作为条间间隔，其余参数忽略。
+        gap_min = max(0.0, float(bounded_options.get("gap_min") or 0.0))
+        gap_max = max(gap_min, float(bounded_options.get("gap_max") or gap_min))
         for i, job in enumerate(jobs):
             if not isinstance(job, dict):
                 results[f"idx{i}"] = SourceOutcome.failure(
@@ -1805,7 +1813,9 @@ class ZhilianCdpSource:
                     failed_reason="熔断器已打开，连续平台级 signal 触发",
                 )
                 continue
-            results[key] = self.fetch_detail(job, **bounded_options)
+            results[key] = self.fetch_detail(job, detail_output_path=detail_output_path)
+            if gap_min > 0 and i + 1 < len(jobs):
+                time.sleep(random.uniform(gap_min, gap_max))
         return results
 
 

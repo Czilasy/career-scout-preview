@@ -8,6 +8,7 @@
 - SAFE_FAILURE_CODES 覆盖错误矩阵全部稳定码。
 """
 import unittest
+from unittest import mock
 
 from webui.source import (
     BossCdpSource,
@@ -864,6 +865,35 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         results = source.fetch_details_batch(["not-a-dict"])
         self.assertIn("idx0", results)
         self.assertFalse(results["idx0"].ok)
+
+    def test_batch_accepts_boss_bounded_options_and_applies_gap(self):
+        """BOSS 专用节流参数不得透传给智联 fetch_detail（T312 集成回归）。"""
+        calls = []
+
+        def runner(job, **kw):
+            calls.append(kw)
+            return _fake_detail(signal="ok")
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223, detail_runner=runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(3)
+        ]
+        with mock.patch("webui.source.time.sleep") as sleep:
+            results = source.fetch_details_batch(
+                jobs, detail_output_path="out.json", max_batch_size=5,
+                gap_min=1, gap_max=2, reset_every=3, tab_pool_size=4,
+            )
+        self.assertEqual(set(results.keys()), {"j0", "j1", "j2"})
+        self.assertTrue(all(r.ok for r in results.values()))
+        self.assertEqual(sleep.call_count, len(jobs) - 1)
+        self.assertEqual(
+            calls, [{"detail_output_path": "out.json"}] * len(jobs),
+            "BOSS 专用参数不得透传给智联 detail runner",
+        )
 
 
 class ZhilianCdpSourceOutcomeContractTests(unittest.TestCase):

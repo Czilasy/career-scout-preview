@@ -429,7 +429,7 @@ def _classify_detail_batch_exception(exc: Exception) -> str:
     """Map a batch-level detail failure to a systemic, user-visible code."""
     text = f"{type(exc).__name__}: {exc}".lower()
     cdp_markers = (
-        "cdp", "websocket", "chrome", "browser", "session",
+        "cdp_", "devtools", "websocket", "chrome", "browser", "session",
         "connection", "disconnected", "target closed",
     )
     if isinstance(exc, (ConnectionError, TimeoutError)) or any(

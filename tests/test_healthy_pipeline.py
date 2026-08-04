@@ -394,6 +394,17 @@ class JDBatchExceptionClassificationTests(unittest.TestCase):
         self.assertEqual(result["hard_stop_code"], "internal_error")
         self.assertEqual(result["jobs"][0]["jd_failed_code"], "internal_error")
 
+    def test_type_error_with_cdp_class_name_is_not_misclassified_as_cdp(self):
+        """类名里的 Cdp 不能把普通 TypeError 误判成 cdp_unavailable（真实回归）。"""
+        from webui.pipeline_exec import _classify_detail_batch_exception
+        exc = TypeError(
+            "ZhilianCdpSource.fetch_detail() got an unexpected keyword argument "
+            "'max_batch_size'"
+        )
+        self.assertEqual(
+            _classify_detail_batch_exception(exc), "internal_error",
+        )
+
     def test_source_cdp_unavailable_outcome_stops_before_next_batch(self):
         from webui.pipeline_exec import fetch_job_details
         from webui.source import SourceOutcome
@@ -1038,7 +1049,7 @@ class Slice7And9ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.get_json())
         data = response.get_json()
-        self.assertEqual(data["status"], "done")
+        self.assertEqual(data["status"], "completed")
         self.assertEqual(data["progress"]["stage"], "done")
         self.assertEqual(data["logs"], ["第一条", "第二条"])
         self.assertEqual(data["result"]["updates"]["job-1"]["verdict"], "match")
@@ -1424,7 +1435,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200, response.get_json())
             finished = _wait_for_pipeline_task(self.client, run_id)
-        self.assertEqual(finished["status"], "done", finished)
+        self.assertEqual(finished["status"], "completed", finished)
         self.assertEqual(match_jds.call_count, 1)
         called_jobs = match_jds.call_args.args[0]
         self.assertEqual([j["job_id"] for j in called_jobs], ["job-kept"])
@@ -1502,7 +1513,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200, response.get_json())
             finished = _wait_for_pipeline_task(self.client, run_id)
-        self.assertEqual(finished["status"], "done", finished)
+        self.assertEqual(finished["status"], "completed", finished)
         self.assertEqual(match_jds.call_count, 1)
         self.assertEqual(match_jds.call_args.args[0], [])
         run = self.store.get_screening_run(run_id)
@@ -1601,7 +1612,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
             task_id = response.get_json()["task_id"]
             finished = _wait_for_pipeline_task(self.client, task_id)
 
-        self.assertEqual(finished["status"], "done", finished)
+        self.assertEqual(finished["status"], "completed", finished)
         self.assertEqual(seen.get("stage"), "ai_fine")
         self.assertEqual(seen.get("processed"), 0)
         self.assertEqual(seen.get("pending"), 0)
@@ -1648,7 +1659,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
             task_id = response.get_json()["task_id"]
             finished = _wait_for_pipeline_task(self.client, task_id)
 
-        self.assertEqual(finished["status"], "done", finished)
+        self.assertEqual(finished["status"], "completed", finished)
         self.assertEqual(seen.get("pending"), 1)
 
     def test_main_ai_screen_splits_by_frozen_batch_settings(self):
@@ -1693,7 +1704,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
             task_id = response.get_json()["task_id"]
             finished = _wait_for_pipeline_task(self.client, task_id)
 
-        self.assertEqual(finished["status"], "done", finished)
+        self.assertEqual(finished["status"], "completed", finished)
         self.assertEqual(detail_chunks, [15, 6])
         self.assertEqual(len(match_calls), 1)
         self.assertEqual(match_calls[0][0], 21)
@@ -2866,7 +2877,7 @@ class ConvergenceTaskEventSequenceTests(unittest.TestCase):
             task_id = response.get_json()["task_id"]
             snapshot = _wait_for_pipeline_task(self.client, task_id)
 
-        self.assertEqual(snapshot["status"], "done")
+        self.assertEqual(snapshot["status"], "completed")
         events = self.store.list_task_events(task_id)
         event_types = [event["type"] for event in events]
         self.assertEqual(event_types, ["stage_start", "job_success", "stage_complete"])
@@ -3481,7 +3492,7 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
                 )
                 task_id = response.get_json()["task_id"]
                 finished = _wait_for_pipeline_task(client, task_id)
-            self.assertEqual(finished["status"], "done", finished)
+            self.assertEqual(finished["status"], "completed", finished)
             run = app.config["TASK_STORE"].get_screening_run(task_id)
             self.assertEqual(run["status"], "succeeded")
             self.assertEqual(run["source_count"], 2)
@@ -3628,7 +3639,7 @@ class Slice9ResumeAfterRestartConservationTests(unittest.TestCase):
                 new_task_id = response.get_json()["task_id"]
                 finished = _wait_for_pipeline_task(client_b, new_task_id)
 
-            self.assertEqual(finished["status"], "done", finished)
+            self.assertEqual(finished["status"], "completed", finished)
             jobs = finished["result"]["jobs"]
             self.assertEqual({job["job_id"] for job in jobs}, {"old-1", "new-1"})
             self.assertEqual(len(jobs), 2)
@@ -4027,7 +4038,7 @@ class Slice11RecrawlResumeTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.get_json())
             finished = _wait_for_pipeline_task(self.client, task_id)
 
-        self.assertEqual(finished["status"], "done", finished)
+        self.assertEqual(finished["status"], "completed", finished)
         self.assertEqual(resumed_calls, [["j2"]])
 
 

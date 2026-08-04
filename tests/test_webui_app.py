@@ -3852,6 +3852,27 @@ class StatusMappingTests(unittest.TestCase):
                 f"DB 状态 {db_status} 应映射到 {expected}",
             )
 
+    def test_public_task_status_mapping_unique(self):
+        """T410: 内存/DB canonical 状态统一映射到公共 API 状态。"""
+        from webui.app import _public_task_status
+        cases = {
+            ("queued", None): "queued",
+            ("waiting", None): "queued",
+            ("running", None): "running",
+            ("paused", None): "paused",
+            ("succeeded", None): "completed",
+            ("done", None): "completed",
+            ("partial", None): "completed_with_pending",
+            ("failed", None): "failed",
+            ("interrupted", "user_cancelled"): "cancelled",
+            ("interrupted", "process_restart"): "interrupted",
+            ("interrupted", "operator_stop"): "interrupted",
+        }
+        for (status, kind), expected in cases.items():
+            self.assertEqual(
+                _public_task_status(status, kind), expected,
+                f"状态 {status}/{kind} 应映射到 {expected}",
+            )
     def test_task_state_returns_mapped_status(self):
         """T410: api_task_state 返回映射后的任务状态。"""
         run_id = "test_status_mapping"
@@ -4663,6 +4684,27 @@ class ContractCompliancePatchTests(unittest.TestCase):
         # _make_cdp_source 走 boss 分支（_BossCdpSource 被调用）
         self.assertTrue(fake_source.fetch_detail.called)
 
+    def test_job_detail_zhilian_requires_source_run_id(self):
+        """契约 L247-251：智联单 JD 不得只凭 URL 猜测来源。"""
+        from webui.source import SourceOutcome
+        fake_source = mock.MagicMock()
+        fake_source.fetch_detail.return_value = SourceOutcome.success(
+            detail={"jd": "岗位职责：负责后端业务开发与 API 设计。"},
+            safe_log="detail ok",
+        )
+        with mock.patch("webui.source.ZhilianCdpSource",
+                        return_value=fake_source), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                           return_value=(True, "")):
+            resp = self.client.post("/api/job-detail", json={
+                "job_id": "job-abc",
+                "platform_job_id": "job-abc",
+                "source_url": "https://www.zhaopin.com/jobdetail/job-abc.htm",
+            })
+        self.assertEqual(resp.status_code, 409, resp.get_json())
+        self.assertEqual(resp.get_json().get("error_code"), "run_identity_conflict")
+        self.assertFalse(fake_source.fetch_detail.called)
+
     # -- (e) /api/pipeline/jobs/<job_id>/jd fallback path --------------
 
     def test_pipeline_job_jd_fallback_infers_boss_platform_from_url(self):
@@ -4692,6 +4734,15 @@ class ContractCompliancePatchTests(unittest.TestCase):
         # 且无 browser_account/cdp_port 时 _make_cdp_source 返回 None → 500）
         self.assertTrue(boss_mock.called)
         self.assertTrue(fake_source.fetch_detail.called)
+
+    def test_pipeline_job_jd_zhilian_without_source_run_id_rejects(self):
+        """契约 L253-255：智联补抓必须携带 source_run_id，不能按 URL 猜测。"""
+        resp = self.client.post(
+            "/api/pipeline/jobs/job-xyz/jd",
+            json={"source_url": "https://www.zhaopin.com/jobdetail/job-xyz.htm"},
+        )
+        self.assertEqual(resp.status_code, 409, resp.get_json())
+        self.assertEqual(resp.get_json().get("error_code"), "run_identity_conflict")
 
 
 if __name__ == "__main__":
