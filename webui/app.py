@@ -2155,7 +2155,7 @@ def create_app(config=None):
                 except _OPERATIONAL_ERRORS:
                     pass
                 if outcome is not None:
-                    outcome_kind = "empty" if outcome.empty_result else "success"
+                    outcome_kind = "empty" if outcome.empty_result else "non_empty"
                     store.append_source_attempt(
                         run_id=task_id,
                         platform=frozen_platform,
@@ -2172,7 +2172,7 @@ def create_app(config=None):
                         platform=frozen_platform,
                         combo_key=combo_key,
                         attempt_no=attempt_no,
-                        outcome_kind="success",
+                        outcome_kind="non_empty",
                         job_count=len(jobs),
                     )
                 store.save_scrape_combo_result(
