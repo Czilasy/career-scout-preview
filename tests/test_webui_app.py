@@ -799,6 +799,10 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(latest["source_run_id"], data["snapshot_run_id"])
         finished = self.store.get_screening_run(run_id)
         self.assertEqual(finished["error_code"], "user_finished")
+        # finish 表示用户主动结束，kind 必须从 process_restart 改为
+        # user_cancelled，否则公共状态仍显示 interrupted（可恢复），
+        # 误导用户以为任务还能继续。
+        self.assertEqual(finished["interruption_kind"], "user_cancelled")
 
     def test_finish_rejects_user_cancelled_interrupted_run(self):
         run_id = "finish-cancelled-run"

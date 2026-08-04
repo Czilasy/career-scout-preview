@@ -6581,6 +6581,11 @@ def create_app(config=None):
             error_code="user_finished",
             error_reason="用户提前结束，已保存部分结果",
         )
+        # finish 是用户主动结束，kind 必须写 user_cancelled（终态）；
+        # 否则原 process_restart 会保留，公共状态仍显示 interrupted（可恢复），
+        # 误导用户以为任务还能继续。update_screening_run 不接受
+        # interruption_kind 参数，用 save_interruption_kind 单独写。
+        store.save_interruption_kind(run_id, "user_cancelled")
         store.append_task_event(run_id, "finish", {
             "snapshot_run_id": snapshot_run_id,
             "stage": run.get("current_stage") or "", "jobs": len(result["jobs"]),
