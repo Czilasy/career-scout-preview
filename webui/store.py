@@ -4078,13 +4078,14 @@ class TaskStore:
             self._assert_recovery_writes_allowed(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO screening_runs "
-                "(id, frozen_filters_json, status, source_count, match_count, mismatch_count, "
+                "(id, platform, frozen_filters_json, status, source_count, match_count, mismatch_count, "
                 "created_at, updated_at, started_at, error_code, resume_id, pending_count, "
                 "processed_count, source_cursor, parse_failure_count, parse_failures_json, "
                 "profile_id, execution_params_json, record_kind, backend_version) "
-                "VALUES (?, ?, 'queued', ?, 0, 0, ?, ?, ?, NULL, NULL, 0, 0, 0, 0, '{}', ?, ?, 'process_log', ?)",
+                "VALUES (?, ?, ?, 'queued', ?, 0, 0, ?, ?, ?, NULL, NULL, 0, 0, 0, 0, '{}', ?, ?, 'process_log', ?)",
                 (
                     str(run_id),
+                    str((execution_params or {}).get("platform") or "boss"),
                     json.dumps(frozen_filters or {}, ensure_ascii=False),
                     int(source_count), ts, ts, ts,
                     str(profile_id) if profile_id else None,

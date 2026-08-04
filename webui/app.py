@@ -1018,20 +1018,47 @@ def create_app(config=None):
         # 兼容 BOSS。智联检查不得调用旧 BOSS scraper，新前端走 browser
         # account open 打开登录空间。
         check_platform = (request.args.get("platform") or "boss").strip()
-        if check_platform != "boss":
+        from webui.platforms import get_platform_or_none, resolve_login_space
+        reg = get_platform_or_none(check_platform)
+        if reg is None:
             return jsonify({
                 "ok": False,
-                "error_code": "legacy_platform_not_supported",
-                "user_message": "该平台检查请使用浏览器账号入口",
+                "error_code": "platform_validation_failed",
+                "user_message": "不支持的招聘平台",
                 "platform": check_platform,
-            }), 422
+            }), 400
+        if check_platform != "boss":
+            from webui.pipeline_exec import resolve_browser_account
+            account = _account_for_run()
+            boss_dir = resolve_browser_account(
+                account, app.config["BROWSER_ACCOUNTS_PATH"])
+            if not boss_dir:
+                return jsonify({
+                    "ok": False, "platform": check_platform, "connected": False,
+                    "error_code": "platform_schema_unavailable",
+                    "user_message": "账号浏览器资料目录不可用",
+                }), 503
+            login_space = resolve_login_space(
+                check_platform, account, boss_profile_dir=boss_dir)
+            from webui.source import ZhilianCdpSource
+            source = ZhilianCdpSource(
+                browser_account=account, cdp_port=login_space.cdp_port,
+                profile_key=login_space.profile_key)
+            outcome = source.preflight()
+            return jsonify({
+                "ok": bool(outcome.ok),
+                "platform": check_platform,
+                "connected": bool(outcome.ok),
+                "error_code": outcome.failed_code or "",
+                "error_reason": outcome.failed_reason or "",
+            })
         result = ScraperExecutor(max_output_bytes=64_000).execute(
             [app.config["PYTHON_EXECUTABLE"], str(SCRAPER), "--check"],
             cwd=PROJECT_ROOT, timeout_seconds=30, env=_env(),
         )
         output = "环境检查超时" if result.failure_code == "process_timeout" else result.output_tail
         return jsonify({
-            "ok": True,
+            "ok": bool(result.ok),
             "platform": "boss",
             "connected": result.ok,
             "returncode": result.returncode if result.returncode is not None else -1,
@@ -3364,7 +3391,7 @@ def create_app(config=None):
                 pass  # store 保存失败不阻塞旧路径
         return jsonify({"ok": True, "settings": _load_legacy_advanced_settings()})
 
-    def _browser_lock() -> tuple[str | None, str | None]:
+    def _browser_lock() -> tuple[str | None, str | None, str | None]:
         """Return the active browser lock as (kind, account id).
 
         Running/queued tasks lock every account; a paused run locks only the
@@ -3372,7 +3399,8 @@ def create_app(config=None):
         with _pipeline_lock:
             for _task_id, task in reversed(list(_pipeline_tasks.items())):
                 if task.get("status") in ("running", "queued"):
-                    return "running", str(task.get("browser_account") or "")
+                    return ("running", str(task.get("browser_account") or ""),
+                            str(task.get("platform") or "boss"))
         try:
             with store._connection() as conn:
                 row = conn.execute(
@@ -3382,16 +3410,36 @@ def create_app(config=None):
         except (sqlite3.Error, RuntimeError):
             row = None
         if row is None:
-            return None, None
+            return None, None, None
         try:
             run = store.get_screening_run(row["id"]) or {}
             account = _account_for_run(run)
         except _OPERATIONAL_ERRORS:
-            return "paused", None
-        return "paused", account
+            return "paused", None, None
+        params = run.get("execution_params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        platform = str(params.get("platform") or run.get("platform") or "boss")
+        return "paused", account, platform
 
     def _browser_busy() -> bool:
         return _browser_lock()[0] is not None
+    def _project_browser_accounts(accounts: dict) -> list[dict]:
+        """Project accounts to the non-sensitive API shape (http-api.md L319)."""
+        from webui.platforms import get_platform, list_platform_keys
+        projected = []
+        for acc in accounts.values():
+            platforms = {}
+            for key in list_platform_keys():
+                reg = get_platform(key)
+                platforms[key] = {"cdp_port": reg.default_cdp_port}
+            projected.append({
+                "id": str(acc.get("id") or ""),
+                "name": str(acc.get("name") or ""),
+                "builtin": bool(acc.get("builtin", False)),
+                "platforms": platforms,
+            })
+        return projected
 
     @app.route("/api/browser-accounts", methods=["GET"])
     def list_browser_accounts():
@@ -3400,15 +3448,18 @@ def create_app(config=None):
         active = str((_load_legacy_advanced_settings() or {}).get("browser_account") or "a")
         if active not in accounts:
             active = "a"
-        lock_kind, locked_account = _browser_lock()
+        lock_kind, locked_account, lock_platform = _browser_lock()
         return jsonify({
             "ok": True,
-            "accounts": list(accounts.values()),
+            "accounts": _project_browser_accounts(accounts),
             "active_account": active,
             "busy": _browser_busy(),
             "busy_kind": lock_kind,
             "locked_account": (
                 locked_account if lock_kind == "paused" else None
+            ),
+            "locked_platform": (
+                lock_platform if lock_kind is not None else None
             ),
         })
 
@@ -3449,11 +3500,43 @@ def create_app(config=None):
         account = accounts.get(str(account_id))
         if account is None:
             return jsonify({"ok": False, "error": "账号不存在"}), 404
-        lock_kind, locked_account = _browser_lock()
+        body = request.get_json(silent=True) or {}
+        platform = str(body.get("platform") or "boss").strip()
+        from webui.platforms import (
+            derive_zhilian_profile_dir, get_platform_or_none, resolve_login_space,
+        )
+        reg = get_platform_or_none(platform)
+        if reg is None:
+            return jsonify({
+                "ok": False, "error_code": "platform_validation_failed",
+                "user_message": "不支持的招聘平台", "platform": platform,
+            }), 400
+        boss_profile_dir = str(account.get("profile_dir") or "")
+        if not boss_profile_dir:
+            return jsonify({
+                "ok": False, "error": "profile_missing",
+                "message": "账号未配置浏览器资料目录",
+            }), 409
+        try:
+            login_space = resolve_login_space(
+                platform, str(account_id), boss_profile_dir=boss_profile_dir,
+            )
+        except (ValueError, RuntimeError) as exc:
+            return jsonify({
+                "ok": False, "error": "login_space_invalid", "message": str(exc),
+            }), 409
+        profile_dir = (
+            boss_profile_dir if platform == "boss"
+            else derive_zhilian_profile_dir(boss_profile_dir)
+        )
+        platform_label = reg.display_name
+        lock_kind, locked_account, locked_platform = _browser_lock()
         if lock_kind is not None:
-            if lock_kind == "paused" and locked_account == str(account_id):
-                set_active_cdp_data_dir(str(account_id))
-                ok, msg = ensure_chrome_ready()
+            if (lock_kind == "paused"
+                    and locked_account == str(account_id)
+                    and locked_platform == platform):
+                set_active_cdp_data_dir(profile_dir)
+                ok, msg = ensure_chrome_ready(login_space.cdp_port)
                 if not ok:
                     return jsonify({
                         "ok": False, "error": "chrome_not_ready", "message": msg,
@@ -3461,17 +3544,19 @@ def create_app(config=None):
                 return jsonify({
                     "ok": True,
                     "message": (
-                        f"已打开「{account['name']}」的自动化浏览器，请登录 BOSS直聘；"
-                        "登录或处理完成后请回到任务页点「继续」"
+                        f"已打开「{account['name']}」的{platform_label}自动化浏览器，"
+                        "请登录后回到任务页点「继续」"
                     ),
                 })
             if lock_kind == "paused":
                 locked_name = (
                     accounts.get(locked_account, {}).get("name") if locked_account else ""
                 )
+                lock_reg = get_platform_or_none(locked_platform or "")
+                lock_label = (lock_reg.display_name if lock_reg else locked_platform or "BOSS")
                 message = (
-                    f"当前有暂停任务，浏览器已锁定到「{locked_name}」；" if locked_name else ""
-                    "请先打开该账号登录/处理，或结束/取消暂停任务后再切换账号"
+                    f"当前有暂停任务，浏览器已锁定到「{locked_name}」的{lock_label}登录空间；" if locked_name else ""
+                    "请先打开该登录空间或结束/取消暂停任务后再操作"
                 ) if locked_name else (
                     "当前有暂停任务；请先结束或取消任务后再打开浏览器账号"
                 )
@@ -3482,13 +3567,13 @@ def create_app(config=None):
                 "ok": False, "error": "browser_busy",
                 "message": "当前有任务运行，浏览器正在被占用；请先等待、取消或结束任务",
             }), 409
-        set_active_cdp_data_dir(str(account_id))
-        ok, msg = ensure_chrome_ready()
+        set_active_cdp_data_dir(profile_dir)
+        ok, msg = ensure_chrome_ready(login_space.cdp_port)
         if not ok:
             return jsonify({"ok": False, "error": "chrome_not_ready", "message": msg}), 409
         return jsonify({
             "ok": True,
-            "message": f"已打开「{account['name']}」的自动化浏览器，请登录 BOSS直聘",
+            "message": f"已打开「{account['name']}」的{platform_label}自动化浏览器，请登录",
         })
 
     @app.route("/api/browser-accounts/<account_id>", methods=["DELETE"])
@@ -3503,13 +3588,50 @@ def create_app(config=None):
         account = accounts.get(str(account_id))
         if account is None:
             return jsonify({"ok": False, "error": "账号不存在"}), 404
-        if (boss.is_cdp_ready(boss.DEFAULT_CDP_PORT)
-                and boss.cdp_port_uses_profile(
-                    boss.DEFAULT_CDP_PORT, str(account["profile_dir"]))):
+        from webui.platforms import derive_zhilian_profile_dir, get_platform_or_none
+        zhilian_reg = get_platform_or_none("zhilian")
+        zhilian_port = int(zhilian_reg.default_cdp_port) if zhilian_reg else 9223
+        boss_profile_dir = str(account.get("profile_dir") or "")
+        zhilian_profile_dir = (
+            derive_zhilian_profile_dir(boss_profile_dir) if boss_profile_dir else ""
+        )
+
+        def _port_profiles(port: int) -> list[str]:
+            if not boss.is_cdp_ready(port):
+                return []
+            return [boss.normalize_profile_path(p) for p in boss.chrome_user_data_dirs_for_cdp_port(port) if p]
+
+        port_profiles_boss = _port_profiles(boss.DEFAULT_CDP_PORT)
+        port_profiles_zhilian = _port_profiles(zhilian_port)
+        known_boss = {
+            boss.normalize_profile_path(str(a.get("profile_dir") or ""))
+            for a in accounts.values() if str(a.get("profile_dir") or "").strip()
+        }
+        known_zhilian = {
+            boss.normalize_profile_path(derive_zhilian_profile_dir(
+                str(a.get("profile_dir") or "")))
+            for a in accounts.values() if str(a.get("profile_dir") or "").strip()
+        }
+        if boss_profile_dir and boss.normalize_profile_path(boss_profile_dir) in port_profiles_boss:
             return jsonify({
                 "ok": False, "error": "browser_in_use",
-                "message": "该账号的自动化浏览器正在运行，请先打开其他账号或手动关闭后再删除",
+                "message": "该账号的 BOSS 自动化浏览器正在运行，请先打开其他账号或手动关闭后再删除",
             }), 409
+        if zhilian_profile_dir and boss.normalize_profile_path(zhilian_profile_dir) in port_profiles_zhilian:
+            return jsonify({
+                "ok": False, "error": "browser_in_use",
+                "message": "该账号的智联自动化浏览器正在运行，请先打开其他账号或手动关闭后再删除",
+            }), 409
+        for port, profiles, known, label in (
+            (boss.DEFAULT_CDP_PORT, port_profiles_boss, known_boss, "boss"),
+            (zhilian_port, port_profiles_zhilian, known_zhilian, "zhilian"),
+        ):
+            unknown = [p for p in profiles if p and p not in known]
+            if unknown:
+                return jsonify({
+                    "ok": False, "error": "login_space_conflict",
+                    "message": f"端口 {port} 被未知 {label} profile 占用，不能删除账号",
+                }), 409
         try:
             delete_browser_account(
                 str(account_id), path=app.config["BROWSER_ACCOUNTS_PATH"],

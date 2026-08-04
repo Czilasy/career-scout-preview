@@ -1043,10 +1043,10 @@ class BrowserAccountApiTests(unittest.TestCase):
         self.assertEqual(data["active_account"], "a")
         self.assertNotIn(custom["id"], [a["id"] for a in data["accounts"]])
 
-    def _seed_paused_run(self, account="b", run_id="busy-account-run"):
+    def _seed_paused_run(self, account="b", run_id="busy-account-run", platform="boss"):
         self.store.create_screening_run(
             run_id, source_count=1,
-            execution_params={"browser_account": account},
+            execution_params={"browser_account": account, "platform": platform},
         )
         self.store.update_screening_run(run_id, status="running")
         self.store.update_screening_run(run_id, status="paused")
@@ -1081,6 +1081,49 @@ class BrowserAccountApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.get_json())
         self.assertTrue(resp.get_json()["ok"])
 
+    def test_list_accounts_returns_platforms_without_profile_dir(self):
+        data = self.client.get("/api/browser-accounts").get_json()
+        self.assertEqual(len(data["accounts"]), 2)
+        for account in data["accounts"]:
+            self.assertNotIn("profile_dir", account)
+            self.assertIn("boss", account["platforms"])
+            self.assertIn("zhilian", account["platforms"])
+            self.assertEqual(account["platforms"]["boss"]["cdp_port"], 9222)
+            self.assertEqual(account["platforms"]["zhilian"]["cdp_port"], 9223)
+
+    @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
+    def test_open_zhilian_uses_zhilian_port(self, _ready):
+        resp = self.client.post("/api/browser-accounts/b/open", json={"platform": "zhilian"})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertIn("智联", resp.get_json()["message"])
+        _ready.assert_called_once_with(9223)
+
+    def test_open_unknown_platform_returns_400(self):
+        resp = self.client.post("/api/browser-accounts/a/open", json={"platform": "unknown"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.get_json()["error_code"], "platform_validation_failed")
+
+    @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
+    def test_paused_zhilian_run_blocks_boss_open_but_allows_zhilian(self, _ready):
+        self._seed_paused_run(account="b", platform="zhilian")
+        blocked = self.client.post("/api/browser-accounts/b/open", json={"platform": "boss"})
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.get_json()["error"], "browser_busy")
+        allowed = self.client.post("/api/browser-accounts/b/open", json={"platform": "zhilian"})
+        self.assertEqual(allowed.status_code, 200, allowed.get_json())
+        _ready.assert_called_once_with(9223)
+
+    def test_delete_refuses_zhilian_browser_running(self):
+        resp = self.client.post("/api/browser-accounts", json={"name": "账号 Z"})
+        account = resp.get_json()["account"]
+        zhilian_dir = account["profile_dir"].rstrip("/\\") + ".zhilian"
+        with mock.patch("webui.app.boss.is_cdp_ready", side_effect=[False, True]), \
+                mock.patch("webui.app.boss.chrome_user_data_dirs_for_cdp_port",
+                           side_effect=lambda port: [] if port == 9222 else [zhilian_dir]):
+            deleted = self.client.delete(f"/api/browser-accounts/{account['id']}")
+        self.assertEqual(deleted.status_code, 409, deleted.get_json())
+        self.assertEqual(deleted.get_json()["error"], "browser_in_use")
+
     def test_resolve_browser_account_returns_custom_profile(self):
         from webui import pipeline_exec
         resp = self.client.post("/api/browser-accounts", json={"name": "账号 C"})
@@ -1101,12 +1144,14 @@ class BrowserAccountApiTests(unittest.TestCase):
         self.assertEqual(dup.status_code, 422, dup.get_json())
         self.assertIn("不能与其他账号重复", dup.get_json()["error"])
 
-    @mock.patch("webui.app.boss.cdp_port_uses_profile", return_value=True)
-    @mock.patch("webui.app.boss.is_cdp_ready", return_value=True)
-    def test_delete_refuses_when_browser_running(self, _ready, _uses):
+    def test_delete_refuses_when_browser_running(self):
         resp = self.client.post("/api/browser-accounts", json={"name": "账号 C"})
         account = resp.get_json()["account"]
-        deleted = self.client.delete(f"/api/browser-accounts/{account['id']}")
+        profile_dir = account["profile_dir"]
+        with mock.patch("webui.app.boss.is_cdp_ready", side_effect=[True, False]), \
+                mock.patch("webui.app.boss.chrome_user_data_dirs_for_cdp_port",
+                           side_effect=lambda port: [profile_dir] if port == 9222 else []):
+            deleted = self.client.delete(f"/api/browser-accounts/{account['id']}")
         self.assertEqual(deleted.status_code, 409, deleted.get_json())
         self.assertEqual(deleted.get_json()["error"], "browser_in_use")
 
@@ -4508,15 +4553,20 @@ class ContractCompliancePatchTests(unittest.TestCase):
         self.assertEqual(data["platform"], "boss")
         self.assertTrue(data["connected"])
 
-    def test_check_zhilian_returns_422_legacy_not_supported(self):
-        """契约 L334-336 + L353：智联检查不得调旧 BOSS scraper，返回 422。"""
-        with mock.patch("webui.app.ScraperExecutor.execute") as exec_mock:
+    def test_check_zhilian_returns_preflight_without_boss_scraper(self):
+        """契约 L334-336：智联检查走自身 preflight，不调用旧 BOSS scraper。"""
+        with (
+            mock.patch("webui.app.ScraperExecutor.execute") as exec_mock,
+            mock.patch("webui.source.ZhilianCdpSource") as source_cls,
+        ):
+            source_cls.return_value.preflight.return_value = mock.Mock(
+                ok=True, failed_code="", failed_reason="")
             resp = self.client.get("/api/check?platform=zhilian")
-        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
-        self.assertFalse(data["ok"])
-        self.assertEqual(data["error_code"], "legacy_platform_not_supported")
+        self.assertTrue(data["ok"])
         self.assertEqual(data["platform"], "zhilian")
+        self.assertTrue(data["connected"])
         # 关键：智联检查路径不得调用旧 BOSS scraper
         self.assertFalse(exec_mock.called)
 

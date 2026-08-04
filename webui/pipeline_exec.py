@@ -472,6 +472,18 @@ def ensure_chrome_ready(cdp_port: int | None = None) -> tuple[bool, str]:
             boss.normalize_profile_path(str(info["profile_dir"]))
             for info in load_browser_accounts().values()
         }
+        try:
+            from webui.platforms import derive_zhilian_profile_dir, get_platform
+            zhilian_port = int(get_platform("zhilian").default_cdp_port)
+        except Exception:
+            zhilian_port = 9223
+        if port == zhilian_port:
+            known_profiles.update(
+                boss.normalize_profile_path(derive_zhilian_profile_dir(
+                    str(info["profile_dir"])))
+                for info in load_browser_accounts().values()
+                if str(info.get("profile_dir") or "").strip()
+            )
         port_profiles = [
             boss.normalize_profile_path(path)
             for path in boss.chrome_user_data_dirs_for_cdp_port(port)
