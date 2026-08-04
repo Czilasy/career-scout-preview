@@ -1313,6 +1313,7 @@ function feedbackPayload(job: JobItem, profileId: string) {
       salary: job.salary,
       location: job.location,
       company: job.company || job.boss_name,
+      jd: job.jd,
       job_link: job.job_link || job.source_url || job.canonical_url,
     },
   };

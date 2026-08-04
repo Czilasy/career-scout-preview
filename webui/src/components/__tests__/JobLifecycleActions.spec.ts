@@ -85,6 +85,7 @@ function jobFixture(overrides: Partial<JobItem> = {}): JobItem {
     canonical_url: "https://www.zhipin.com/job_detail/p-1.html",
     title: "Python 后端工程师",
     company: "示例公司",
+    jd: "岗位职责：负责 Python 后端开发。",
     ...overrides,
   };
 }
@@ -231,7 +232,7 @@ describe("T056/T057 身份 payload 与主命令矩阵", () => {
 
   it("未入库 pipeline 岗位：写命令携带完整权威三元组，成功后缓存并使用服务端内部 ID", async () => {
     const { calls } = installFetch([
-      stateHandler(null),
+      stateHandler(null, { job_id: "internal-1" }),
       {
         pattern: /^\/api\/profile-jobs\/actions$/,
         respond: (_url, init) => {
@@ -255,6 +256,7 @@ describe("T056/T057 身份 payload 与主命令矩阵", () => {
       platform: "boss",
       platform_job_id: "p-1",
       canonical_url: "https://www.zhipin.com/job_detail/p-1.html",
+      jd: "岗位职责：负责 Python 后端开发。",
     });
     expect(firstBody.job).not.toHaveProperty("job_id");
     expect(wrapper.get('[data-testid="lca-current-status"]').text()).toBe("已投递");

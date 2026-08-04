@@ -70,6 +70,7 @@ const identity = computed<JobIdentity | null>(() => {
       location: props.job.location ?? null,
       experience: props.job.experience ?? null,
       degree: props.job.degree ?? null,
+      jd: props.job.jd ?? null,
       extra: props.job.extra ?? null,
     });
   } catch {
@@ -107,7 +108,7 @@ async function loadState() {
     if (response.state) {
       lifecycle.value = mergeJobLifecycleState(lifecycle.value, response.state);
       cachedJobId.value = response.state.job_id;
-    } else if (typeof response.job_id === "string" && response.job_id) {
+    } else if (response.exists && typeof response.job_id === "string" && response.job_id) {
       cachedJobId.value = response.job_id;
     }
   } catch (error) {
