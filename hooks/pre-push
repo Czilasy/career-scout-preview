@@ -1,0 +1,45 @@
+#!/bin/sh
+# Push 前自动运行仓库卫生、待推送差异、提交身份和前端构建同步检查。
+# 启用：git config core.hooksPath hooks
+set -e
+
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+echo "==> Repo hygiene check"
+if ! uv run python -m unittest tests.test_repo_hygiene; then
+    echo "!! Repo hygiene check failed. Fix the issues above, then push again."
+    exit 1
+fi
+echo "==> Repo hygiene check passed"
+
+if git rev-parse --verify -q @{push} >/dev/null 2>&1; then
+    BASE="@{push}"
+elif git rev-parse --verify -q HEAD~1 >/dev/null 2>&1; then
+    BASE="HEAD~1"
+else
+    BASE="HEAD"
+fi
+
+echo "==> Pending diff whitespace check ($BASE..HEAD)"
+if ! git diff --check "$BASE..HEAD"; then
+    echo "!! Pending diff has whitespace errors. Fix them, then push again."
+    exit 1
+fi
+echo "==> Pending diff whitespace check passed"
+
+echo "==> Pending commit identity check"
+if git log "$BASE..HEAD" --format='%ae|%ce' | grep -v '^czyooutzilas@gmail.com|czyooutzilas@gmail.com$' >/dev/null; then
+    echo "!! Pending commits contain a non-project commit identity."
+    exit 1
+fi
+echo "==> Pending commit identity check passed"
+
+echo "==> Frontend dist sync check"
+if ! uv run python webui/ensure_frontend_sync.py; then
+    echo "!! webui/dist is out of sync with source. Rebuild before push."
+    exit 1
+fi
+echo "==> Frontend dist sync check passed"
+
+echo "==> Pre-push checks passed"

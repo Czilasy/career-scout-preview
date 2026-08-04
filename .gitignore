@@ -16,6 +16,8 @@ venv/
 env/
 ENV/
 .env
+.env.*
+!.env.example
 
 # Build and package artifacts
 build/
@@ -75,6 +77,7 @@ test-results/
 
 # IDE/tool config
 .trae/
+*.code-workspace
 
 # Tuning experiment runtime data (machine-specific, contains DB evidence)
 tuning/
@@ -89,9 +92,6 @@ tuning/
 _tmp_*.py
 webui/.tmp-*.mjs
 
-# Git hooks (per AGENTS.md: optional, not tracked; each clone opts in via
-# `git config core.hooksPath hooks`)
-hooks/
 
 # Backup and patch leftovers
 *.bak
@@ -104,6 +104,7 @@ hooks/
 .vscode/
 .DS_Store
 ._*
+desktop.ini
 Thumbs.db
 *~
 *.swp
@@ -130,6 +131,9 @@ spec011-*.yaml
 .trash/
 .devlog/
 .specify/
+
+# Local design exploration drafts (not project code)
+design-demos/
 
 # Source maps are build-time only; dist release snapshots stay tracked
 webui/dist/**/*.map

@@ -13,10 +13,11 @@
 - 查看 `git status` 和 `git diff --cached`，确认没有把无关文件一起提交。
 - 提交信息使用 Conventional Commits（`feat|fix|docs|style|refactor|test|perf|build|ci|chore|revert`），卫生测试会校验最近 3 条非 merge 提交的格式。
 
-## 提交钩子（可选启用）
+## 提交钩子（已入库，克隆后启用）
 
-- `hooks/pre-commit` 会在提交前自动运行卫生测试，失败即阻断提交。
-- 启用方式（仓库级配置，不入库，克隆者需自行启用）：`git config core.hooksPath hooks`
+- `hooks/pre-commit` 会在提交前自动运行卫生测试和暂存区差异检查，失败即阻断提交。
+- `hooks/pre-push` 会在推送前自动运行卫生测试、待推送差异检查、提交身份检查和前端构建同步检查，失败即阻断推送。
+- 启用方式：`git config core.hooksPath hooks`
 
 ## 文件边界
 

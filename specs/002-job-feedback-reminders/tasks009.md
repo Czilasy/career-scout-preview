@@ -88,4 +88,3 @@ Task 008 完成后，用本地服务和临时数据执行 HTTP 冒烟；用 Play
     Blocked: none or reproducible blocker
 
 完成后停止。不要运行最终全量、不要做独立审查、不要宣布整项功能已交付；这些属于主会话 Converge。
-

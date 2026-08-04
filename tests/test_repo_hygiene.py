@@ -21,6 +21,11 @@ def _git(*args: str) -> str:
         errors="replace",
     ).stdout
 
+def _is_ignored(path: str) -> bool:
+    return subprocess.run(
+        ["git", "check-ignore", "-q", "--", path],
+        cwd=ROOT, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    ).returncode == 0
 
 class RepoHygieneTests(unittest.TestCase):
     def test_no_untracked_non_ignored_files(self):
@@ -44,6 +49,8 @@ class RepoHygieneTests(unittest.TestCase):
             "*.sqlite3",
             "*.log",
             ".env",
+            ".env.*",
+            "!.env.example",
             "__pycache__/",
             "node_modules/",
             "tests/run_isolated_webui.py",
@@ -52,6 +59,34 @@ class RepoHygieneTests(unittest.TestCase):
         ]
         missing = [rule for rule in required if rule not in text]
         self.assertEqual(missing, [])
+
+    def test_gitignore_rules_are_effective(self):
+        must_ignore = [
+            ".env.local",
+            ".env.production",
+            "scratch.db",
+            ".chrome-profiles/account_x",
+            "logs/run.log",
+            "roadmap/REFERENCE_GET_JOBS.md",
+            ".career-scout/webui.db",
+            "webui/node_modules/pkg/index.js",
+            "docs/private.md",
+        ]
+        must_not_ignore = [
+            "webui/dist/assets/app.js",
+            ".env.example",
+            "hooks/pre-commit",
+            "hooks/pre-push",
+        ]
+        bad_ignored = [p for p in must_ignore if not _is_ignored(p)]
+        bad_tracked = [p for p in must_not_ignore if _is_ignored(p)]
+        self.assertEqual(bad_ignored, [], "关键路径应被 .gitignore 忽略")
+        self.assertEqual(bad_tracked, [], "公开必需路径不应被 .gitignore 忽略")
+
+    def test_hooks_are_tracked(self):
+        raw = _git("ls-files", "--", "hooks/pre-commit", "hooks/pre-push")
+        paths = [p for p in raw.splitlines() if p]
+        self.assertEqual(paths, ["hooks/pre-commit", "hooks/pre-push"])
 
     def test_no_sensitive_or_local_files_tracked(self):
         raw = _git("ls-files", "-z")
@@ -100,12 +135,11 @@ class RepoHygieneTests(unittest.TestCase):
                 bad.append(rel)
         self.assertEqual(bad, [])
 
-    def test_commit_author_email_is_gmail(self):
-        email = _git("log", "-1", "--format=%ae").strip()
-        self.assertEqual(
-            email,
-            "czyooutzilas@gmail.com",
-        )
+    def test_commit_identity_email_is_gmail(self):
+        ident = _git("log", "-1", "--format=%ae|%ce").strip()
+        author, committer = ident.split("|", 1)
+        self.assertEqual(author, "czyooutzilas@gmail.com")
+        self.assertEqual(committer, "czyooutzilas@gmail.com")
 
     def test_commit_messages_follow_conventional_commits(self):
         raw = _git("log", "--no-merges", "-3", "--format=%s")
