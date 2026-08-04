@@ -507,6 +507,12 @@ class TaskStore:
         A process restart cannot resume an in-memory child process. Mark runs
         left in an active state as interrupted so the UI does not show a
         permanently "running" state.
+
+        screening_runs 必须同时写 interruption_kind='process_restart'
+        （data-model.md:114 / quickstart.md:173）：否则 _public_task_status
+        会把 interrupted 映射成终态 cancelled、finish 接口因
+        interruption_kind 不在 (process_restart, operator_stop) 而 409 拒绝，
+        任务既不能 continue 也不能 finish，彻底卡死。
         """
         with self._connection() as conn:
             conn.execute(
@@ -515,7 +521,8 @@ class TaskStore:
                 (_now(),),
             )
             conn.execute(
-                "UPDATE screening_runs SET status = 'interrupted', error_code = 'restart', updated_at = ? "
+                "UPDATE screening_runs SET status = 'interrupted', error_code = 'restart', "
+                "interruption_kind = 'process_restart', updated_at = ? "
                 "WHERE status IN ('queued', 'running')",
                 (_now(),),
             )

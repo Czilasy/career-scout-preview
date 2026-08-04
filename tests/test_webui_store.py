@@ -1023,6 +1023,10 @@ class ScreeningRunStoreTests(unittest.TestCase):
         run = reopened.get_screening_run("sr-3")
         self.assertEqual(run["status"], "interrupted")
         self.assertEqual(run["error_code"], "restart")
+        # data-model.md:114 / quickstart.md:173 —— 服务重启打断必须写
+        # interruption_kind='process_restart'，否则公共状态会被映射成
+        # 终态 cancelled、finish 接口 409 拒绝，任务卡死无法恢复。
+        self.assertEqual(run["interruption_kind"], "process_restart")
         self.assertEqual(reopened.latest_interrupted_screening_run()["id"], "sr-3")
 
     def test_latest_interrupted_excludes_user_finished(self):
