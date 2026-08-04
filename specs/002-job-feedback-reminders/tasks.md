@@ -4,7 +4,7 @@
 
 **执行方式**：用户已明确指定多 AI、多会话并行。实现共拆为 9 个执行包；每个会话只领取一个 `tasksNNN.md`，不得顺带执行后续包。
 
-**状态**：Tasks 设计已完成；尚未授权实现。
+**状态**：Implement 已授权；按 Wave 1 → Wave 2 → Wave 3 执行，完成后进入 Converge。
 
 ## 清单格式
 
@@ -24,6 +24,7 @@
 4. 并行会话使用互斥写入范围。共享入口只由 Task 008/009 所有者修改。
 5. 每个包先写或补齐失败测试，再实现，再运行聚焦回归；测试失败、越界改动或仓库共享暂存区不干净时禁止提交。
 6. 提交前运行本包命令、`uv run python -m unittest tests.test_repo_hygiene`、`git diff --check`、`git status --short` 和 `git diff --cached`；仅暂存本包文件，commit email 固定为 `czyooutzilas@gmail.com`。
+7. 并行 Wave 中，执行会话不得使用 broad `git add .`、不得提交其它会话文件；为避免共享 Git index 竞态，主会话在该 Wave 全部返回后统一运行仓库卫生、差异审计并按任务范围创建小步提交。执行会话先提交聚焦测试、差异和变更路径证据。
 
 ## Wave 1：基础合同实现（四路并行）
 
@@ -49,7 +50,7 @@
 
 **执行包**：[`tasks002.md`](tasks002.md)
 
-- [ ] T014 [P] [US3] 读取 `webui/ai_client.py`、`tests/test_ai.py` 和冻结 advice 合同，记录可复用 AI 调用边界但不修改这些既有文件
+- [ ] T014 [P] [US3] 读取 `webui/ai.py`、`tests/test_ai.py` 和冻结 advice 合同，记录可复用 AI 调用边界但不修改这些既有文件
 - [ ] T015 [US3] 在 `tests/test_job_advice.py` 添加正常 AI、缺 JD、未配置、超时、网络失败、无效 JSON 和非法 action 的先失败测试
 - [ ] T016 [US3] 在 `tests/test_job_advice.py` 添加输入最小化、平台字段缺席、输出清洗以及调用前后状态/事件零变化测试
 - [ ] T017 [US3] 在 `webui/job_advice.py` 实现仅含 JD、投递时间、最后跟进时间和经过天数的建议输入构造
