@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { Bot, BriefcaseBusiness, Star, UserRound, X } from "@lucide/vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Bell, Bot, BriefcaseBusiness, Star, UserRound, X } from "@lucide/vue";
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
 import BrowserAccountsDialog from "./components/BrowserAccountsDialog.vue";
 import NoticeBar from "./components/NoticeBar.vue";
+import ReminderDrawer from "./components/ReminderDrawer.vue";
 import DiscoveryView from "./views/DiscoveryView.vue";
 import { apiRequest, errorMessage, initializeSession } from "./api";
+import { getJobReminderCount } from "./jobFeedback";
 import type { CandidateProfile, Notice } from "./types";
 
 const aiSettingsOpen = ref(false);
@@ -107,6 +109,69 @@ function acceptCreatedProfile(profile: CandidateProfile) {
   else profiles.value.push(profile);
   selectProfile(profile.id);
 }
+
+// ---------------------------------------------------------------------------
+// 提醒入口（Task 009）：App 持有当前 profile 的提醒状态。
+// count/list/state 全部以服务端响应为唯一来源；不在前端计算 720h 资格，
+// 不传 platform 过滤，不做乐观更新。
+// ---------------------------------------------------------------------------
+
+const reminderDrawerOpen = ref(false);
+const reminderTotal = ref(0);
+/** 请求序号：profile 切换后，旧 profile 的 count 响应不得覆盖新 profile。 */
+let reminderCountSeq = 0;
+
+async function refreshReminderCount() {
+  const profileId = currentProfileId.value;
+  if (!profileId) {
+    reminderTotal.value = 0;
+    return;
+  }
+  const seq = ++reminderCountSeq;
+  try {
+    const data = await getJobReminderCount(profileId);
+    // 丢弃旧 profile 的陈旧响应；徽标只采用当前 profile 的服务端总数。
+    if (seq !== reminderCountSeq || profileId !== currentProfileId.value) return;
+    reminderTotal.value = data.total;
+  } catch {
+    // 加载失败：保留上次已知数量，不清零也不伪造（下次变更时再刷新）。
+  }
+}
+
+const reminderBadgeText = computed(() =>
+  reminderTotal.value >= 100 ? "99+" : String(reminderTotal.value));
+
+// 可访问名称始终包含真实总数；100+ 时视觉显示 99+。
+const reminderAriaLabel = computed(() =>
+  reminderTotal.value > 0
+    ? `查看投递提醒，共 ${reminderTotal.value} 个逾期岗位`
+    : "查看投递提醒");
+
+function toggleReminderDrawer() {
+  if (reminderDrawerOpen.value) {
+    reminderDrawerOpen.value = false;
+    return;
+  }
+  // profile 为空时不请求也不打开抽屉。
+  if (!currentProfileId.value) return;
+  reminderDrawerOpen.value = true;
+}
+
+// profile 初始化/切换：关闭并重置旧抽屉，废弃在途旧请求，重新加载 count。
+watch(currentProfileId, (profileId) => {
+  reminderDrawerOpen.value = false;
+  reminderTotal.value = 0;
+  reminderCountSeq += 1;
+  if (profileId) void refreshReminderCount();
+});
+
+// 详情动作（DiscoveryView）或抽屉快捷动作（ReminderDrawer）成功后刷新 count。
+// 抽屉列表由 ReminderDrawer 自身按服务端刷新结果更新。
+function handleJobFeedbackChanged(payload?: { profileId?: string }) {
+  // profile 已切换时丢弃旧 action 触发的刷新，不代旧 profile 发请求。
+  if (payload?.profileId && payload.profileId !== currentProfileId.value) return;
+  void refreshReminderCount();
+}
 </script>
 
 <template>
@@ -119,6 +184,22 @@ function acceptCreatedProfile(profile: CandidateProfile) {
 
 
       <div class="header-actions">
+        <button
+          class="button secondary reminder-trigger"
+          type="button"
+          data-testid="reminder-trigger"
+          :aria-label="reminderAriaLabel"
+          :disabled="!currentProfileId"
+          @click="toggleReminderDrawer"
+        >
+          <Bell :size="18" aria-hidden="true" /><span>提醒</span>
+          <em
+            v-if="reminderTotal > 0"
+            class="fav-badge reminder-badge"
+            data-testid="reminder-badge"
+            aria-hidden="true"
+          >{{ reminderBadgeText }}</em>
+        </button>
         <button
           class="button secondary favorites-trigger"
           type="button"
@@ -185,11 +266,19 @@ function acceptCreatedProfile(profile: CandidateProfile) {
 
     <NoticeBar :notice="notice" @dismiss="dismissNotice" />
 
+    <ReminderDrawer
+      :open="reminderDrawerOpen"
+      :profile-id="currentProfileId || null"
+      @close="reminderDrawerOpen = false"
+      @job-feedback-changed="handleJobFeedbackChanged"
+    />
+
     <div class="app-content">
       <DiscoveryView
         :profile-id="currentProfileId"
         @notify="showNotice"
         @profile-created="acceptCreatedProfile"
+        @job-feedback-changed="handleJobFeedbackChanged"
       />
     </div>
 

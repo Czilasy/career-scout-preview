@@ -440,6 +440,10 @@ class HistoryAndCleanupTests(WorkbenchAPITestBase):
         self.assertEqual(len(resp.get_json()["jobs"]), 1)
 
     def test_patch_profile_job_status(self):
+        # Task 008 集成回归：legacy PATCH 已转入统一命令服务，写请求必须
+        # 携带 request ID（contracts/http-api.md Legacy PATCH 节）。
+        import uuid
+        from datetime import datetime, timedelta, timezone
         pid = self._make_profile()
         store = self.app.config["TASK_STORE"]
         job = store.save_job(
@@ -448,11 +452,31 @@ class HistoryAndCleanupTests(WorkbenchAPITestBase):
             "T", "C", "S", "L", "JD",
         )
         store.link_profile_job(pid, job["id"], None, None)
-        resp = self.client.patch(f"/api/profile-jobs/{pid}/{job['id']}", json={
+        missing_key = self.client.patch(f"/api/profile-jobs/{pid}/{job['id']}", json={
             "status": "applied",
         })
+        self.assertEqual(missing_key.status_code, 428)
+        self.assertEqual(
+            missing_key.get_json()["error_code"], "idempotency_key_required")
+        # 无历史投递时间时纠正为 applied 必须同时提供真实投递时间，
+        # 命令服务不得猜测当前时刻（data-model.md correct_status）。
+        no_time = self.client.patch(f"/api/profile-jobs/{pid}/{job['id']}", json={
+            "status": "applied",
+            "request_id": str(uuid.uuid4()),
+        })
+        self.assertEqual(no_time.status_code, 422)
+        self.assertEqual(
+            no_time.get_json()["error_code"], "applied_at_required")
+        applied_at = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        resp = self.client.patch(f"/api/profile-jobs/{pid}/{job['id']}", json={
+            "status": "applied",
+            "applied_at": applied_at,
+            "request_id": str(uuid.uuid4()),
+        })
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.get_json()["status"], "applied")
+        pj = store.get_profile_job(pid, job["id"])
+        self.assertEqual(pj["status"], "applied")
+        self.assertEqual(pj["applied_at"], applied_at)
 
     def test_cleanup_preview(self):
         resp = self.client.get("/api/cleanup-preview")

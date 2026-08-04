@@ -155,7 +155,7 @@ class JobFeedbackDomainTests(JobFeedbackTestCase):
     def test_invalid_and_future_times_do_not_change_snapshot(self):
         job_id = self.create_job()
         self.action(job_id, "mark_applied", "r-applied", applied_at="2026-07-01T00:00:00Z")
-        before = self.service.get_state(self.profile["id"], job_id)
+        before = self.service.get_state(self.profile["id"], job_id, now=NOW)
 
         for request_id, value, code in (
             ("r-future", "2026-08-05T00:00:01Z", "applied_at_in_future"),
@@ -165,7 +165,7 @@ class JobFeedbackDomainTests(JobFeedbackTestCase):
                 self.action(job_id, "correct_applied_at", request_id, applied_at=value)
             self.assertEqual(ctx.exception.code, code)
 
-        self.assertEqual(self.service.get_state(self.profile["id"], job_id), before)
+        self.assertEqual(self.service.get_state(self.profile["id"], job_id, now=NOW), before)
         self.assertEqual(len(self.service.list_events(self.profile["id"], job_id)), 1)
 
     def test_same_request_replays_and_different_payload_conflicts(self):

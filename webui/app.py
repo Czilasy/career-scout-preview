@@ -16,6 +16,7 @@ import uuid
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -71,13 +72,22 @@ from webui.workbench import (
     normalize_job_link_for_platform,
     select_keywords,
     project_card,
-    aggregate_feedback_state,
     merge_profile_fields,
 )
 from webui.source import BossCdpSource as _BossCdpSource
 from webui.process_executor import ArtifactSpec, ScraperExecutor
 from webui import resume as resume_service
 from webui import ai as ai_service
+# Task 008：生命周期/提醒/事件/建议的命令服务与路由注册器（Task 001/005），
+# 以及 pipeline 权威岗位身份解析（Task 003）。app.py 只做装配，不复制规则。
+from webui.job_feedback import JobFeedbackError, JobFeedbackService
+from webui.job_feedback_api import _ERROR_STATUS as _FEEDBACK_ERROR_STATUS
+from webui.job_feedback_api import register_job_feedback_routes
+from webui.pipeline_job_identity import (
+    JobIdentityError,
+    parse_identity_payload,
+    resolve_job_identity,
+)
 
 
 _OPERATIONAL_ERRORS = (
@@ -678,6 +688,84 @@ def _public_task_status(status: str, interruption_kind: str | None = None) -> st
         return "interrupted"
     return mapping.get(status, status or "failed")
 
+
+# ---------------------------------------------------------------------------
+# Task 008 集成胶合：legacy PATCH 原子性与 pipeline 身份映射。
+# 不复制任何 action/时间/提醒规则，规则全部由 JobFeedbackService 与
+# pipeline_job_identity 拥有。
+# ---------------------------------------------------------------------------
+
+class _SharedConnectionStore:
+    """让命令服务复用调用方持有的 SQLite 连接（仅限 legacy 混合 PATCH）。
+
+    JobFeedbackService 只依赖 ``store._connection()`` 与
+    ``store.upsert_job_with_connection``；本代理把 ``_connection()`` 重定向到
+    外部连接，使 note 与生命周期写入能在同一事务中提交或回滚。
+    其余属性全部透传真实 store。
+    """
+
+    def __init__(self, store, conn):
+        self._store = store
+        self._conn = conn
+
+    def _connection(self):
+        shared = self._conn
+
+        @contextmanager
+        def _shared_connection():
+            yield shared
+
+        return _shared_connection()
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+
+def _feedback_error_response(code, user_message, details=None, status=None):
+    """稳定错误体（contracts/http-api.md），不泄露 SQL/路径。"""
+    if status is None:
+        status = _FEEDBACK_ERROR_STATUS.get(code, 500)
+    return jsonify({
+        "ok": False,
+        "error_code": code,
+        "user_message": user_message,
+        "details": details or {},
+    }), status
+
+
+def _pipeline_identity_payload(job: dict) -> dict:
+    """把 legacy pipeline 岗位载荷映射为权威身份请求。
+
+    三元组必须原样来自载荷（job_link/source_url 只作为规范链接候选）；
+    只有三元组不完整时才把 job_id 当内部 ID 候选。绝不用裸 platform_job_id
+    反查内部岗位，也不从 URL/界面猜平台。
+    """
+    payload = {
+        "platform": job.get("platform"),
+        "platform_job_id": job.get("platform_job_id"),
+        "canonical_url": str(
+            job.get("canonical_url")
+            or job.get("job_link")
+            or job.get("source_url")
+            or ""
+        ),
+        "title": job.get("title") or "",
+        "company": job.get("company") or job.get("boss_name") or "",
+        "salary": job.get("salary") or "",
+        "location": job.get("location") or "",
+        "jd": job.get("jd") or "",
+        "experience": job.get("experience") or "",
+        "degree": job.get("degree") or "",
+    }
+    triple_complete = all(
+        payload[key] not in (None, "")
+        for key in ("platform", "platform_job_id", "canonical_url")
+    )
+    if not triple_complete:
+        payload["job_id"] = job.get("stored_job_id") or job.get("job_id")
+    return payload
+
+
 def create_app(config=None):
     # Vue/Vite owns the /static namespace. Disable Flask's implicit static
     # route so hashed production assets are served from webui/dist only.
@@ -726,6 +814,9 @@ def create_app(config=None):
         ))
     scope_previews: dict[str, dict] = {}
     store.cleanup_expired_jobs(days=CLEANUP_EXPIRED_DAYS)
+    # Task 008：统一生命周期命令服务；legacy PATCH 与新 API 共用同一入口，
+    # 不允许绕过事件、幂等回执和时间校验直接 UPDATE 快照。
+    job_feedback_service = JobFeedbackService(store)
     runner = TaskRunner(
         store,
         app.config["RESULT_DIR"],
@@ -1477,11 +1568,10 @@ def create_app(config=None):
                 continue  # job 已被清理，跳过
             # job row already carries jd; pass it as detail so project_card
             # can emit the truncated excerpt.
-            feedback_events = store.list_feedback(profile_id, job_id=pj["job_id"])
-            interest_state = aggregate_feedback_state(feedback_events) if feedback_events else pj["status"]
-            if interest_state == "not_interested":
-                continue
-            cards.append(project_card(job, job, interest_state=interest_state))
+            # Task 008：profile_jobs.status 是当前生命周期状态的唯一来源；
+            # 历史 feedback_events 只保留偏好学习语义，不再在读投影时
+            # 把 applied/read/stale 覆盖回 interested。
+            cards.append(project_card(job, job, interest_state=pj["status"]))
         return jsonify({"jobs": cards})
 
     # == US3: feedback ===================================================
@@ -1495,6 +1585,13 @@ def create_app(config=None):
         if not profile_id or action not in {"interested", "not_interested"}:
             raise ValueError("需要 profile_id 和 action (interested/not_interested)")
         fb = store.create_feedback(profile_id, job_id, None, action, reason=reason)
+        if action == "not_interested":
+            # Task 008：显式不感兴趣是一条新的用户操作，直接把当前快照写为
+            # deleted；不再依赖读取时历史反馈聚合覆盖 profile_jobs.status。
+            try:
+                store.update_profile_job(profile_id, job_id, status="deleted")
+            except KeyError:
+                pass
         feedback_count = store.count_effective_feedback(profile_id)
         settings = store.get_ai_settings()
         if feedback_count and feedback_count % FEEDBACK_THRESHOLD == 0 and settings.get("is_configured"):
@@ -1518,7 +1615,29 @@ def create_app(config=None):
 
     @app.route("/api/feedback/<feedback_id>/revoke", methods=["POST"])
     def revoke_feedback(feedback_id):
+        try:
+            fb = store.get_feedback(feedback_id)
+        except KeyError:
+            raise
+        already_revoked = bool(fb.get("revoked_at"))
         store.revoke_feedback(feedback_id)
+        if fb["action"] == "not_interested" and not already_revoked:
+            # Task 008：显式撤销也是一次用户操作。仅当当前快照仍是 deleted
+            # 且没有其他生效中的不感兴趣反馈时，恢复为 new；历史事件保留。
+            remaining = [
+                event for event in store.list_feedback(
+                    fb["profile_id"], job_id=fb["job_id"])
+                if event.get("action") == "not_interested"
+                and not event.get("revoked_at")
+            ]
+            if not remaining:
+                try:
+                    pj = store.get_profile_job(fb["profile_id"], fb["job_id"])
+                except KeyError:
+                    pj = None
+                if pj is not None and pj["status"] == "deleted":
+                    store.update_profile_job(
+                        fb["profile_id"], fb["job_id"], status="new")
         return jsonify({"revoked": True})
 
     # == US4: history, favorites, cleanup ================================
@@ -1535,9 +1654,95 @@ def create_app(config=None):
 
     @app.route("/api/profile-jobs/<profile_id>/<job_id>", methods=["PATCH"])
     def patch_profile_job(profile_id, job_id):
+        """Legacy PATCH：迁移期兼容，全部生命周期写入转入统一命令服务。
+
+        不允许直接 UPDATE status/applied_at 绕过事件、幂等回执和时间校验；
+        request ID 来自 Idempotency-Key 请求头或 body request_id，缺失 428；
+        note 与生命周期混合请求在同一事务中原子完成或整体拒绝。
+        """
         raw = request.get_json(silent=True) or {}
-        allowed = {k: raw[k] for k in ("status", "note", "applied_at") if k in raw}
-        return jsonify(store.update_profile_job(profile_id, job_id, **allowed))
+        has_status = "status" in raw
+        has_applied = "applied_at" in raw
+        has_note = "note" in raw
+        if not (has_status or has_applied):
+            # note-only（或空载荷）保持现有独立备注语义，无需 request ID
+            allowed = {k: raw[k] for k in ("note",) if k in raw}
+            return jsonify(store.update_profile_job(profile_id, job_id, **allowed))
+
+        request_id = str(
+            request.headers.get("Idempotency-Key")
+            or raw.get("request_id")
+            or ""
+        ).strip()
+        if not request_id:
+            return _feedback_error_response(
+                "idempotency_key_required",
+                "写请求必须携带 Idempotency-Key 或 request_id",
+                status=428,
+            )
+
+        # 保持 legacy 语义：画像岗位关联不存在时 404，不隐式创建
+        try:
+            store.get_profile_job(profile_id, job_id)
+        except KeyError:
+            return _feedback_error_response("not_found", "画像岗位不存在", 404)
+
+        if has_status and has_applied:
+            action, target_status, applied_at = (
+                "correct_status", raw["status"], raw["applied_at"])
+        elif has_status:
+            action, target_status, applied_at = (
+                "correct_status", raw["status"], None)
+        else:
+            action, target_status, applied_at = (
+                "correct_applied_at", None, raw["applied_at"])
+
+        def _run_command(service):
+            return service.execute_action(
+                request_id=request_id,
+                profile_id=profile_id,
+                job={"job_id": job_id},
+                action=action,
+                applied_at=applied_at,
+                target_status=target_status,
+            )
+
+        try:
+            if has_note:
+                # 混合请求：命令服务与 note 共用同一连接/事务，
+                # 要么一起提交，要么整体回滚后拒绝 legacy_patch_ambiguous。
+                conn = store._connect()
+                try:
+                    shared_service = JobFeedbackService(
+                        _SharedConnectionStore(store, conn))
+                    result = _run_command(shared_service)
+                    conn.execute(
+                        "UPDATE profile_jobs SET note=? "
+                        "WHERE profile_id=? AND job_id=?",
+                        (raw["note"], str(profile_id), str(job_id)),
+                    )
+                    conn.commit()
+                except JobFeedbackError:
+                    conn.rollback()
+                    raise
+                except sqlite3.Error:
+                    conn.rollback()
+                    raise JobFeedbackError(
+                        "legacy_patch_ambiguous",
+                        "备注与生命周期写入无法原子完成",
+                    )
+                finally:
+                    conn.close()
+            else:
+                result = _run_command(job_feedback_service)
+        except JobFeedbackError as exc:
+            if exc.code == "legacy_patch_ambiguous":
+                return _feedback_error_response(exc.code, str(exc), exc.details, 400)
+            return _feedback_error_response(exc.code, str(exc), exc.details)
+        except sqlite3.Error:
+            return _feedback_error_response(
+                "persistence_failed", "岗位数据保存失败，请重试", status=500)
+        return jsonify({"ok": True, **result})
 
     @app.route("/api/cleanup-preview")
     def cleanup_preview():
@@ -5049,39 +5254,32 @@ def create_app(config=None):
             "platform": frozen_platform, "platform_job_id": platform_job_id,
         })
 
-    def _save_pipeline_job_to_store(job):
-        """把 pipeline 结果岗位落库到 jobs 表，返回 jobs 记录（链接不安全返回 None）。
+    def _resolve_pipeline_job_identity(job):
+        """Task 008：pipeline 入口统一走权威岗位身份解析（Task 003）。
 
-        T711 平台感知：按 ``job.platform`` 选择 URL 规范化规则（T009）。
-        智联岗位用 zhaopin.com 规则，BOSS 用 zhipin.com 规则；缺失平台退化为 BOSS。
-        落库后回写 platform / platform_job_id，避免 save_job 默认 'boss' 错配。
+        使用 Task 001 的 connection-aware 双索引 upsert，在调用方事务内
+        完成可靠入库并返回内部 jobs.id；身份失败在关联写入前抛出，
+        保证零副作用。BOSS 与智联共用同一协议，无平台分支。
         """
-        platform = job.get("platform")
-        canonical_url = normalize_job_link_for_platform(
-            job.get("job_link") or job.get("source_url") or "",
-            platform=platform,
-        )
-        if not canonical_url:
-            return None
-        company = job.get("boss_name") or job.get("company") or ""
-        saved = store.save_job(
-            canonical_url, canonical_url,
-            job.get("title", ""), company,
-            job.get("salary", ""), job.get("location", ""), "",
-        )
-        if saved and platform:
-            store.update_job_platform_identity(
-                saved["id"], platform, job.get("platform_job_id")
-            )
-            saved = store.get_job(saved["id"])
-        return saved
+        identity_request = parse_identity_payload(
+            _pipeline_identity_payload(job))
+        with store._connection() as conn:
+            return resolve_job_identity(conn, store, identity_request)
+
+    def _pipeline_identity_error_response(exc: JobIdentityError):
+        return jsonify({
+            "ok": False,
+            "error_code": exc.code,
+            "user_message": str(exc),
+            "details": exc.details,
+        }), exc.http_status
 
     @app.route("/api/pipeline/jobs/interest", methods=["POST"])
     def pipeline_mark_interest():
-        """标记 pipeline 结果岗位为感兴趣：save_job + profile_jobs(interested)。
+        """标记 pipeline 结果岗位为感兴趣：权威身份入库 + profile_jobs(interested)。
 
         复用筛选工作台的持久感兴趣区——标记后可在工作台"感兴趣"区看到
-        （list_screening_interested 不按 run_id 过滤）。
+        （list_screening_interested 不按 run_id 过滤）。响应 job_id 是内部 ID。
         """
         raw = request.get_json(silent=True) or {}
         profile_id = raw.get("profile_id")
@@ -5092,17 +5290,18 @@ def create_app(config=None):
             store.get_profile(profile_id)
         except KeyError:
             return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
-        saved = _save_pipeline_job_to_store(job)
-        if not saved:
-            return jsonify({"error_code": "invalid_link", "user_message": "岗位链接不安全"}), 400
-        store.mark_screening_interest(profile_id, saved["id"], run_id=None)
-        return jsonify({"interest_state": "interested", "job_id": saved["id"]})
+        try:
+            resolved = _resolve_pipeline_job_identity(job)
+        except JobIdentityError as exc:
+            return _pipeline_identity_error_response(exc)
+        store.mark_screening_interest(profile_id, resolved.job_id, run_id=None)
+        return jsonify({"interest_state": "interested", "job_id": resolved.job_id})
 
     @app.route("/api/pipeline/jobs/reject", methods=["POST"])
     def pipeline_mark_reject():
-        """标记 pipeline 结果岗位为不感兴趣：save_job + profile_jobs(deleted)。
+        """标记 pipeline 结果岗位为不感兴趣：权威身份入库 + profile_jobs(deleted)。
 
-        标记后进入筛选工作台垃圾桶区。
+        标记后进入筛选工作台垃圾桶区。响应 job_id 是内部 ID。
         """
         raw = request.get_json(silent=True) or {}
         profile_id = raw.get("profile_id")
@@ -5113,18 +5312,20 @@ def create_app(config=None):
             store.get_profile(profile_id)
         except KeyError:
             return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
-        saved = _save_pipeline_job_to_store(job)
-        if not saved:
-            return jsonify({"error_code": "invalid_link", "user_message": "岗位链接不安全"}), 400
-        store.mark_screening_reject(profile_id, saved["id"], run_id=None)
-        return jsonify({"reject_state": "rejected", "job_id": saved["id"]})
+        try:
+            resolved = _resolve_pipeline_job_identity(job)
+        except JobIdentityError as exc:
+            return _pipeline_identity_error_response(exc)
+        store.mark_screening_reject(profile_id, resolved.job_id, run_id=None)
+        return jsonify({"reject_state": "rejected", "job_id": resolved.job_id})
 
     @app.route("/api/pipeline/jobs/interest/cancel", methods=["POST"])
     def pipeline_cancel_interest():
         """撤销 pipeline 结果岗位的感兴趣标记：profile_jobs.status 回退。
 
-        payload 结构与 /api/pipeline/jobs/interest 一致（profile_id + job）。
-        幂等——即便当前不是 interested 也不报错，使前端"感兴趣"按钮可再次点击取消。
+        payload 结构与 /api/pipeline/jobs/interest 一致（profile_id + job）；
+        岗位必须能通过权威三元组或内部 ID 解析。幂等——即便当前不是
+        interested 也不报错，使前端"感兴趣"按钮可再次点击取消。
         """
         raw = request.get_json(silent=True) or {}
         profile_id = raw.get("profile_id")
@@ -5135,27 +5336,15 @@ def create_app(config=None):
             store.get_profile(profile_id)
         except KeyError:
             return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
-
-        # Pipeline 列表里的 job_id 是 BOSS 外部 ID，而 profile_jobs 保存的是
-        # jobs 表内部 UUID。与标记接口使用同一条 canonical_url 落库/查找链，
-        # 才能撤销刚才实际写入的那条记录。
-        saved = _save_pipeline_job_to_store(job)
-        job_id = saved["id"] if saved else str(
-            job.get("stored_job_id") or job.get("job_id") or ""
-        )
-        if not saved:
-            try:
-                store.get_job(job_id)
-            except KeyError:
-                return jsonify({
-                    "error_code": "invalid_link",
-                    "user_message": "无法定位要撤销的岗位",
-                }), 400
         try:
-            store.cancel_screening_interest(profile_id, job_id)
+            resolved = _resolve_pipeline_job_identity(job)
+        except JobIdentityError as exc:
+            return _pipeline_identity_error_response(exc)
+        try:
+            store.cancel_screening_interest(profile_id, resolved.job_id)
         except sqlite3.Error as exc:
             return jsonify({"error": f"撤销感兴趣失败: {exc}"}), 500
-        return jsonify({"interest_state": "cancelled", "job_id": job_id})
+        return jsonify({"interest_state": "cancelled", "job_id": resolved.job_id})
 
     @app.route("/api/pipeline/jobs/<job_id>/jd", methods=["POST"])
     def pipeline_job_refetch_jd(job_id):
@@ -7226,6 +7415,11 @@ def create_app(config=None):
             "decision": decision,
             "candidate_id": candidate_id,
         }), 200
+
+    # Task 008：注册 lifecycle/state/events/reminders/advice 路由（Task 005）。
+    # before_request 的 Host/会话令牌/build identity 防护自动覆盖这些路由；
+    # 提醒/生命周期规则平台无关，无 platform 过滤。
+    register_job_feedback_routes(app, store)
 
     return app
 

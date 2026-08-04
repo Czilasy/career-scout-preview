@@ -1297,7 +1297,13 @@ button:disabled {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 28px;
-}.dialog-backdrop {
+}
+/* Task 009：详情生命周期控件在 actions 区独占一行，不与收藏/不感兴趣按钮挤排。 */
+.job-detail-actions .job-lifecycle-actions {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+.dialog-backdrop {
   position: fixed;
   z-index: 100;
   inset: 0;

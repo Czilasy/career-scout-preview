@@ -8,6 +8,7 @@ import tempfile
 import threading
 import uuid
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 import requests
@@ -486,9 +487,11 @@ class PipelineFeedbackRegressionTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_interest_can_be_cancelled_with_original_pipeline_job_payload(self):
+    def test_interest_can_be_cancelled_with_authoritative_identity(self):
+        # Task 008: pipeline 收藏/撤销必须走权威三元组，不再接受裸平台 ID。
         job = {
-            "job_id": "boss-external-001",
+            "platform": "boss",
+            "platform_job_id": "boss-external-001",
             "title": "Python 后端工程师",
             "salary": "20-30K",
             "location": "上海",
@@ -4915,6 +4918,507 @@ class ContractCompliancePatchTests(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 409, resp.get_json())
         self.assertEqual(resp.get_json().get("error_code"), "run_identity_conflict")
+
+
+class Task008BackendIntegrationTests(unittest.TestCase):
+    """Task 008：后端共享入口与兼容集成。
+
+    覆盖：新 API 注册与认证、生命周期写入/失败保持/重启持久化、
+    legacy PATCH 命令服务映射、pipeline 权威身份、跨平台提醒无过滤、
+    相似岗位隔离、不安全 URL 和偏好反馈兼容。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+        self.db_path = str(self.root / "state" / "webui.db")
+        self.app = self._build_app(self.root / "app-1")
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+        self.profile_id = self.client.post(
+            "/api/profiles", json={"name": "t008", "confirmed_fields": {}},
+        ).get_json()["id"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _build_app(self, subdir):
+        return create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(self.root / subdir / "results"),
+            "DB_PATH": self.db_path,
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+
+    def _past(self, days):
+        return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    def _future(self, hours):
+        return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+
+    def _add_job(self, *, platform="boss", pid=None, url=None,
+                 title="岗位", company="公司"):
+        pid = pid or f"{platform}-pid-{uuid.uuid4().hex[:8]}"
+        url = url or (
+            f"https://www.zhipin.com/job_detail/{pid}.html"
+            if platform == "boss"
+            else f"https://www.zhaopin.com/jobdetail/{pid}.htm"
+        )
+        result = self.store.upsert_job(
+            platform=platform, platform_job_id=pid, canonical_url=url,
+            title=title, company=company, salary="20-30K", location="上海",
+            jd="负责后端开发。",
+        )
+        assert result["ok"], result
+        return result["job_id"], pid, url
+
+    def _post_action(self, job_id, action, *, request_id=None,
+                     applied_at=None, target_status=None, profile_id=None):
+        return self.client.post("/api/profile-jobs/actions", json={
+            "request_id": request_id or str(uuid.uuid4()),
+            "profile_id": profile_id or self.profile_id,
+            "job": {"job_id": job_id},
+            "action": action,
+            "applied_at": applied_at,
+            "target_status": target_status,
+        })
+
+    def _state(self, job_id):
+        resp = self.client.get("/api/profile-jobs/state", query_string={
+            "profile_id": self.profile_id, "job_id": job_id,
+        })
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        return resp.get_json()
+
+    def _table_counts(self):
+        with self.store._connection() as conn:
+            return {
+                table: conn.execute(
+                    f"SELECT COUNT(*) AS c FROM {table}"
+                ).fetchone()["c"]
+                for table in (
+                    "jobs", "profile_jobs", "profile_job_events",
+                    "profile_job_command_receipts", "feedback_events",
+                )
+            }
+
+    # -- 1. 新 API 注册且保留认证 ----------------------------------------
+
+    def test_new_feedback_routes_registered_and_auth_protected(self):
+        job_id, _, _ = self._add_job()
+
+        count = self.client.get("/api/job-reminders/count", query_string={
+            "profile_id": self.profile_id,
+        })
+        self.assertEqual(count.status_code, 200)
+        body = count.get_json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["total"], 0)
+        self.assertEqual(body["threshold_hours"], 720)
+
+        reminders = self.client.get("/api/job-reminders", query_string={
+            "profile_id": self.profile_id,
+        })
+        self.assertEqual(reminders.status_code, 200)
+        self.assertEqual(reminders.get_json()["items"], [])
+
+        state = self._state(job_id)
+        self.assertTrue(state["ok"])
+        self.assertFalse(state["exists"])
+
+        events = self.client.get(
+            f"/api/profile-jobs/{self.profile_id}/{job_id}/events",
+        )
+        self.assertEqual(events.status_code, 200)
+        self.assertEqual(events.get_json()["events"], [])
+
+        advice = self.client.post(
+            f"/api/profile-jobs/{self.profile_id}/{job_id}/advice", json={},
+        )
+        self.assertEqual(advice.status_code, 409)
+        self.assertEqual(advice.get_json()["error_code"], "reminder_not_eligible")
+
+        # 写路由必须保留会话令牌防护
+        anon = self.app.test_client()
+        blocked = anon.post("/api/profile-jobs/actions", json={
+            "request_id": str(uuid.uuid4()),
+            "profile_id": self.profile_id,
+            "job": {"job_id": job_id},
+            "action": "mark_read",
+        })
+        self.assertEqual(blocked.status_code, 403)
+        blocked_reminders_write = anon.post(
+            f"/api/profile-jobs/{self.profile_id}/{job_id}/advice", json={},
+        )
+        self.assertEqual(blocked_reminders_write.status_code, 403)
+
+    # -- 2. 生命周期写入、失败保持原状态、重启持久化 -------------------
+
+    def test_lifecycle_write_failure_keeps_state_and_survives_restart(self):
+        job_id, _, _ = self._add_job()
+        applied_at = self._past(40)
+
+        ok = self._post_action(job_id, "mark_applied", applied_at=applied_at)
+        self.assertEqual(ok.status_code, 200, ok.get_data(as_text=True))
+        state = self._state(job_id)["state"]
+        self.assertEqual(state["status"], "applied")
+        self.assertEqual(state["applied_at"], applied_at)
+        self.assertTrue(state["reminder"]["eligible"])
+
+        bad = self._post_action(job_id, "correct_applied_at",
+                                applied_at=self._future(2))
+        self.assertEqual(bad.status_code, 422)
+        self.assertEqual(bad.get_json()["error_code"], "applied_at_in_future")
+        state = self._state(job_id)["state"]
+        self.assertEqual(state["status"], "applied")
+        self.assertEqual(state["applied_at"], applied_at)
+        events = self.client.get(
+            f"/api/profile-jobs/{self.profile_id}/{job_id}/events",
+        ).get_json()["events"]
+        self.assertEqual(len(events), 1)
+
+        # 模拟应用重启：同一 DB 重新构造应用
+        restarted = self._build_app("app-2")
+        client2 = restarted.test_client()
+        client2.environ_base["HTTP_X_BOSS_TOKEN"] = client2.get(
+            "/api/session").get_json()["token"]
+        state2 = client2.get("/api/profile-jobs/state", query_string={
+            "profile_id": self.profile_id, "job_id": job_id,
+        }).get_json()
+        self.assertTrue(state2["exists"])
+        self.assertEqual(state2["state"]["status"], "applied")
+        self.assertEqual(state2["state"]["applied_at"], applied_at)
+        count2 = client2.get("/api/job-reminders/count", query_string={
+            "profile_id": self.profile_id,
+        }).get_json()
+        self.assertEqual(count2["total"], 1)
+
+    # -- 3. legacy PATCH 命令服务映射 ------------------------------------
+
+    def test_legacy_patch_requires_request_id_and_maps_to_command_service(self):
+        job_id, _, _ = self._add_job()
+        self.store.link_profile_job(self.profile_id, job_id, None, None)
+        url = f"/api/profile-jobs/{self.profile_id}/{job_id}"
+        applied_at = self._past(40)
+
+        missing = self.client.patch(url, json={
+            "status": "applied", "applied_at": applied_at,
+        })
+        self.assertEqual(missing.status_code, 428)
+        self.assertEqual(
+            missing.get_json()["error_code"], "idempotency_key_required")
+        self.assertEqual(self.store.get_profile_job(
+            self.profile_id, job_id)["status"], "new")
+        self.assertEqual(self._table_counts()["profile_job_events"], 0)
+
+        request_id = str(uuid.uuid4())
+        marked = self.client.patch(
+            url,
+            json={"status": "applied", "applied_at": applied_at,
+                  "request_id": request_id},
+        )
+        self.assertEqual(marked.status_code, 200, marked.get_data(as_text=True))
+        pj = self.store.get_profile_job(self.profile_id, job_id)
+        self.assertEqual(pj["status"], "applied")
+        self.assertEqual(pj["applied_at"], applied_at)
+        counts = self._table_counts()
+        self.assertEqual(counts["profile_job_events"], 1)
+        self.assertEqual(counts["profile_job_command_receipts"], 1)
+
+        # 同 request_id 同载荷重放：不产生第二次写入
+        replay = self.client.patch(
+            url,
+            json={"status": "applied", "applied_at": applied_at,
+                  "request_id": request_id},
+        )
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.get_json()["replayed"])
+        counts = self._table_counts()
+        self.assertEqual(counts["profile_job_events"], 1)
+        self.assertEqual(counts["profile_job_command_receipts"], 1)
+
+        # Idempotency-Key 请求头同样是合法 request ID 来源
+        via_header = self.client.patch(
+            url,
+            json={"status": "read"},
+            headers={"Idempotency-Key": str(uuid.uuid4())},
+        )
+        self.assertEqual(via_header.status_code, 200)
+        self.assertEqual(self.store.get_profile_job(
+            self.profile_id, job_id)["status"], "read")
+
+        # 时间校验不得被 legacy 入口绕过
+        future = self.client.patch(
+            url,
+            json={"status": "applied", "applied_at": self._future(3),
+                  "request_id": str(uuid.uuid4())},
+        )
+        self.assertEqual(future.status_code, 422)
+        self.assertEqual(
+            future.get_json()["error_code"], "applied_at_in_future")
+        self.assertEqual(self.store.get_profile_job(
+            self.profile_id, job_id)["status"], "read")
+
+    def test_legacy_patch_note_and_lifecycle_are_atomic(self):
+        job_id, _, _ = self._add_job()
+        self.store.link_profile_job(self.profile_id, job_id, None, None)
+        url = f"/api/profile-jobs/{self.profile_id}/{job_id}"
+        applied_at = self._past(40)
+
+        mixed = self.client.patch(
+            url,
+            json={"status": "applied", "applied_at": applied_at,
+                  "note": "混合备注",
+                  "request_id": str(uuid.uuid4())},
+        )
+        self.assertEqual(mixed.status_code, 200, mixed.get_data(as_text=True))
+        pj = self.store.get_profile_job(self.profile_id, job_id)
+        self.assertEqual(pj["status"], "applied")
+        self.assertEqual(pj["note"], "混合备注")
+        self.assertEqual(self._table_counts()["profile_job_events"], 1)
+
+        # 非法生命周期字段 + note：整体拒绝，note 不部分写入
+        rejected = self.client.patch(
+            url,
+            json={"status": "nonsense", "note": "不应写入",
+                  "request_id": str(uuid.uuid4())},
+        )
+        self.assertEqual(rejected.status_code, 400)
+        pj = self.store.get_profile_job(self.profile_id, job_id)
+        self.assertEqual(pj["note"], "混合备注")
+        self.assertEqual(pj["status"], "applied")
+        self.assertEqual(self._table_counts()["profile_job_events"], 1)
+
+        # note-only 保持现有独立备注语义，无需 request ID
+        note_only = self.client.patch(url, json={"note": "仅备注"})
+        self.assertEqual(note_only.status_code, 200)
+        self.assertEqual(self.store.get_profile_job(
+            self.profile_id, job_id)["note"], "仅备注")
+
+    # -- 4. pipeline interest/reject/cancel 权威三元组 -------------------
+
+    def test_pipeline_feedback_uses_authoritative_triple_both_platforms(self):
+        boss_job = {
+            "platform": "boss",
+            "platform_job_id": "boss-pid-1",
+            "title": "Python 后端",
+            "company": "甲公司",
+            "job_link": "https://www.zhipin.com/job_detail/boss-pid-1.html",
+        }
+        zhilian_job = {
+            "platform": "zhilian",
+            "platform_job_id": "zl-pid-1",
+            "title": "Python 后端",
+            "company": "甲公司",
+            "job_link": "https://www.zhaopin.com/jobdetail/zl-pid-1.htm",
+        }
+
+        marked = self.client.post("/api/pipeline/jobs/interest",
+                                  json={"profile_id": self.profile_id,
+                                        "job": boss_job})
+        self.assertEqual(marked.status_code, 200, marked.get_data(as_text=True))
+        boss_internal = marked.get_json()["job_id"]
+        self.assertNotEqual(boss_internal, "boss-pid-1")
+        boss_row = self.store.get_job(boss_internal)
+        self.assertEqual(boss_row["platform"], "boss")
+        self.assertEqual(boss_row["platform_job_id"], "boss-pid-1")
+
+        marked_zl = self.client.post("/api/pipeline/jobs/interest",
+                                     json={"profile_id": self.profile_id,
+                                           "job": zhilian_job})
+        self.assertEqual(marked_zl.status_code, 200)
+        zl_internal = marked_zl.get_json()["job_id"]
+        self.assertNotEqual(zl_internal, "zl-pid-1")
+        self.assertEqual(self.store.get_job(zl_internal)["platform"], "zhilian")
+        self.assertEqual(
+            len(self.store.list_screening_interested(self.profile_id)), 2)
+
+        rejected = self.client.post("/api/pipeline/jobs/reject",
+                                    json={"profile_id": self.profile_id,
+                                          "job": zhilian_job})
+        self.assertEqual(rejected.status_code, 200)
+        self.assertEqual(rejected.get_json()["job_id"], zl_internal)
+        self.assertEqual(self.store.get_profile_job(
+            self.profile_id, zl_internal)["status"], "deleted")
+
+        cancelled = self.client.post("/api/pipeline/jobs/interest/cancel",
+                                     json={"profile_id": self.profile_id,
+                                           "job": boss_job})
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(cancelled.get_json()["job_id"], boss_internal)
+        self.assertEqual(self.store.get_profile_job(
+            self.profile_id, boss_internal)["status"], "new")
+
+    def test_pipeline_identity_failures_have_zero_side_effects(self):
+        before = self._table_counts()
+
+        incomplete = self.client.post("/api/pipeline/jobs/interest", json={
+            "profile_id": self.profile_id,
+            "job": {
+                "platform_job_id": "bare-pid",
+                "job_link": "https://www.zhipin.com/job_detail/bare-pid.html",
+            },
+        })
+        self.assertEqual(incomplete.status_code, 422)
+        self.assertEqual(
+            incomplete.get_json()["error_code"], "job_identity_incomplete")
+
+        mismatch = self.client.post("/api/pipeline/jobs/interest", json={
+            "profile_id": self.profile_id,
+            "job": {
+                "platform": "boss",
+                "platform_job_id": "mismatch-pid",
+                "job_link": "https://www.zhaopin.com/jobdetail/mismatch-pid.htm",
+            },
+        })
+        self.assertEqual(mismatch.status_code, 422)
+        self.assertEqual(
+            mismatch.get_json()["error_code"], "platform_url_mismatch")
+
+        # 双索引冲突：(platform,pid) 与 canonical_url 命中不同记录
+        self._add_job(platform="boss", pid="conflict-a",
+                      url="https://www.zhipin.com/job_detail/conflict-a.html")
+        self._add_job(platform="boss", pid="conflict-b",
+                      url="https://www.zhipin.com/job_detail/conflict-b.html")
+        after_seed = self._table_counts()
+        conflict = self.client.post("/api/pipeline/jobs/interest", json={
+            "profile_id": self.profile_id,
+            "job": {
+                "platform": "boss",
+                "platform_job_id": "conflict-a",
+                "job_link": "https://www.zhipin.com/job_detail/conflict-b.html",
+            },
+        })
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(
+            conflict.get_json()["error_code"], "job_identity_conflict")
+
+        self.assertEqual(self._table_counts(), after_seed)
+        self.assertGreaterEqual(after_seed["jobs"], before["jobs"] + 2)
+        self.assertEqual(after_seed["profile_jobs"], before["profile_jobs"])
+        self.assertEqual(
+            after_seed["feedback_events"], before["feedback_events"])
+
+    # -- 5. 相似岗位隔离 / 无平台过滤 / 不安全 URL / 偏好兼容 ----------
+
+    def test_similar_jobs_are_isolated_by_internal_id(self):
+        job_a, _, _ = self._add_job(
+            platform="boss", title="高级后端工程师", company="同名公司")
+        job_b, _, _ = self._add_job(
+            platform="zhilian", title="高级后端工程师", company="同名公司")
+        self.assertNotEqual(job_a, job_b)
+
+        self.assertEqual(
+            self._post_action(job_b, "mark_read").status_code, 200)
+        self.assertEqual(
+            self._post_action(job_a, "mark_applied",
+                              applied_at=self._past(40)).status_code, 200)
+
+        self.assertEqual(self._state(job_a)["state"]["status"], "applied")
+        self.assertEqual(self._state(job_b)["state"]["status"], "read")
+        total = self.client.get("/api/job-reminders/count", query_string={
+            "profile_id": self.profile_id,
+        }).get_json()["total"]
+        self.assertEqual(total, 1)
+
+    def test_reminders_mix_boss_and_zhilian_without_platform_filter(self):
+        boss_job, _, _ = self._add_job(platform="boss")
+        zhilian_job, _, _ = self._add_job(platform="zhilian")
+        for job_id in (boss_job, zhilian_job):
+            self.assertEqual(
+                self._post_action(job_id, "mark_applied",
+                                  applied_at=self._past(35)).status_code, 200)
+
+        payload = self.client.get("/api/job-reminders", query_string={
+            "profile_id": self.profile_id,
+        }).get_json()
+        self.assertEqual(payload["total"], 2)
+        platforms = {item["platform"] for item in payload["items"]}
+        self.assertEqual(platforms, {"boss", "zhilian"})
+        for item in payload["items"]:
+            self.assertTrue(item["can_open"])
+
+    def test_invalid_canonical_url_blocks_open_but_not_lifecycle_data(self):
+        unsafe_id = uuid.uuid4().hex
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO jobs (id, canonical_url, source_url, title, "
+                "company, salary, location, jd, first_seen_at, last_seen_at, "
+                "platform, platform_job_id, experience, degree, extra_json) "
+                "VALUES (?, ?, '', '不安全链接', '公司', '20K', '上海', 'JD', "
+                "datetime('now'), datetime('now'), 'boss', 'unsafe-pid', "
+                "'', '', '{}')",
+                (unsafe_id, "javascript:alert(1)"),
+            )
+        self.assertEqual(
+            self._post_action(unsafe_id, "mark_applied",
+                              applied_at=self._past(40)).status_code, 200)
+
+        state = self._state(unsafe_id)
+        self.assertTrue(state["exists"])
+        self.assertEqual(state["state"]["status"], "applied")
+
+        payload = self.client.get("/api/job-reminders", query_string={
+            "profile_id": self.profile_id,
+        }).get_json()
+        items = [item for item in payload["items"]
+                 if item["job_id"] == unsafe_id]
+        self.assertEqual(len(items), 1)
+        self.assertFalse(items[0]["can_open"])
+        self.assertIsNone(items[0]["canonical_url"])
+
+    def test_history_preference_feedback_never_overrides_current_status(self):
+        # search-runs 需要带城市的画像；生命周期断言仍用主画像
+        run_profile = self.client.post("/api/profiles", json={
+            "name": "t008-run",
+            "confirmed_fields": {"city": "上海", "roles": ["Python"]},
+        }).get_json()["id"]
+        run = self.client.post("/api/search-runs", json={
+            "profile_id": run_profile,
+            "manual_keywords": ["Python"],
+        })
+        self.assertEqual(run.status_code, 202, run.get_data(as_text=True))
+        run = run.get_json()
+        job = self.store.save_job(
+            "https://www.zhipin.com/job_detail/t008-compat.html",
+            "https://www.zhipin.com/job_detail/t008-compat.html",
+            "兼容岗位", "公司", "20K", "上海", "JD",
+        )
+        self.store.link_profile_job(
+            run_profile, job["id"], run["id"], run["id"])
+
+        self.assertEqual(self.client.post(
+            f"/api/jobs/{job['id']}/feedback",
+            json={"profile_id": run_profile, "action": "interested"},
+        ).status_code, 200)
+        cards = self.client.get(
+            f"/api/search-runs/{run['id']}/jobs").get_json()["jobs"]
+        self.assertEqual(cards[0]["interest_state"], "interested")
+
+        self.assertEqual(
+            self._post_action(job["id"], "mark_applied",
+                              applied_at=self._past(40),
+                              profile_id=run_profile).status_code, 200)
+
+        cards = self.client.get(
+            f"/api/search-runs/{run['id']}/jobs").get_json()["jobs"]
+        self.assertEqual(len(cards), 1)
+        # 历史 interested 事件不得把当前 applied 投影回 interested
+        self.assertEqual(cards[0]["interest_state"], "applied")
+        # 偏好事件仍保留（偏好学习语义不变）
+        events = self.store.list_feedback(run_profile, job_id=job["id"])
+        self.assertEqual(
+            [e["action"] for e in events if not e["revoked_at"]],
+            ["interested"],
+        )
 
 
 if __name__ == "__main__":

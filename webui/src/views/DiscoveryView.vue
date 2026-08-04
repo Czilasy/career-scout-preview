@@ -15,6 +15,7 @@ import {
 } from "@lucide/vue";
 import CollapsibleCard from "../components/CollapsibleCard.vue";
 import ExecutionModeSelector from "../components/ExecutionModeSelector.vue";
+import JobLifecycleActions from "../components/JobLifecycleActions.vue";
 import JobWorkspace from "../components/JobWorkspace.vue";
 import StepNavigator from "../components/StepNavigator.vue";
 import TaskProgress from "../components/TaskProgress.vue";
@@ -81,6 +82,8 @@ const props = defineProps<{ profileId: string }>();
 const emit = defineEmits<{
   notify: [notice: Notice];
   "profile-created": [profile: CandidateProfile];
+  // Task 009：详情生命周期 action 成功后上抛，App 刷新当前 profile 提醒。
+  "job-feedback-changed": [payload: { profileId: string; jobId: string }];
 }>();
 
 // T503：平台三身份独立（platform-schema.md L142-159）
@@ -1546,6 +1549,27 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
     if (Array.isArray(map.caveats)) job.caveats = map.caveats as string[];
   }
 }
+
+// ---------------------------------------------------------------------------
+// Task 009：详情生命周期控件接入（JobWorkspace actions slot）
+// ---------------------------------------------------------------------------
+
+/**
+ * 传给 JobLifecycleActions 的岗位身份投影：
+ * 权威三元组（job 自身冻结 platform + platform_job_id + canonical_url）完整时
+ * 优先按三元组解析，避免把 pipeline pending 映射的平台原始 ID 误当内部 job_id。
+ * 三元组不完整时保留原 job（由组件内部阻断写操作），绝不用当前 UI 平台补值。
+ */
+function lifecycleJob(job: JobItem): JobItem {
+  if (job.platform && job.platform_job_id && job.canonical_url) {
+    return { ...job, id: undefined, job_id: undefined };
+  }
+  return job;
+}
+
+function onJobFeedbackChanged(payload: { profileId: string; jobId: string }) {
+  emit("job-feedback-changed", payload);
+}
 </script>
 
 <template>
@@ -1920,6 +1944,11 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
                 <FileText :size="17" aria-hidden="true" />{{ jdBusyIds.has(jobId(job)) ? "补抓中…" : "补抓 JD" }}
               </button>
             </template>
+            <JobLifecycleActions
+              :profile-id="profileId"
+              :job="lifecycleJob(job)"
+              @job-feedback-changed="onJobFeedbackChanged"
+            />
           </template>
         </JobWorkspace>
       </section>

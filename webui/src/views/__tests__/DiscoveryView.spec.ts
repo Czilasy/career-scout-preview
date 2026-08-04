@@ -1021,4 +1021,176 @@ describe("DiscoveryView", () => {
 
     vi.unstubAllGlobals();
   });
+
+  // ---------- Task 009：详情 slot 接入 JobLifecycleActions ----------
+
+  function lifecycleJobFixture() {
+    return {
+      // 故意给一个平台原始 ID：完整三元组存在时不得被当作内部 job_id 发送。
+      job_id: "raw-platform-id",
+      platform: "zhilian",
+      platform_job_id: "z-1",
+      canonical_url: "https://www.zhaopin.com/jobdetail/z-1.htm",
+      title: "Python 后端工程师",
+      company: "示例公司",
+      salary: "20-30K",
+      location: "上海",
+      verdict: "match",
+    };
+  }
+
+  function lifecycleStateFixture(overrides: Record<string, unknown> = {}) {
+    return {
+      profile_id: "profile-1",
+      job_id: "internal-uuid-1",
+      status: "applied",
+      applied_at: "2026-05-01T02:00:00+00:00",
+      last_follow_up_at: null,
+      revision: 1,
+      reminder: { eligible: true, baseline_at: "2026-05-01T02:00:00+00:00", elapsed_seconds: 8294400, elapsed_days: 96 },
+      ...overrides,
+    };
+  }
+
+  function lifecycleFetchMock(options: {
+    state?: unknown;
+    action?: (url: string, init?: RequestInit) => Response | Promise<Response>;
+  } = {}) {
+    return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/latest-pipeline-result")) {
+        return response({
+          ok: true, has_result: true, source_run_id: "run-lifecycle",
+          result: { jobs: [lifecycleJobFixture()], total_kept: 1, total_dropped: 0 },
+        });
+      }
+      if (url.startsWith("/api/profile-jobs/state")) {
+        return response(options.state ?? { ok: true, exists: true, state: lifecycleStateFixture() });
+      }
+      if (url.endsWith("/api/profile-jobs/actions")) {
+        if (options.action) return options.action(url, init ?? {});
+        return response({
+          ok: true, replayed: false, changed: true, event_id: "ev-1", event_sequence: 1,
+          state: lifecycleStateFixture({ revision: 2 }),
+        });
+      }
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "custom", settings: {}, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.includes("/api/filter-labels")) {
+        return response({ ok: true, platform: "boss", schema_version: 1, enabled_for_new_tasks: true, fields: [] });
+      }
+      if (url.includes("/api/options")) {
+        return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      }
+      return response({});
+    });
+  }
+
+  async function mountAtResults(fetchMock: ReturnType<typeof vi.fn>) {
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("查看结果"))!.trigger("click");
+    await flushPromises();
+    return wrapper;
+  }
+
+  it("loads detail lifecycle state read-only with the authoritative triple and never auto mark_read", async () => {
+    const fetchMock = lifecycleFetchMock();
+    const wrapper = await mountAtResults(fetchMock);
+
+    expect(wrapper.find('[data-testid="job-lifecycle-actions"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="lca-current-status"]').text()).toBe("已投递");
+
+    // 初始详情加载只 GET state：用权威三元组解析，不把平台原始 ID 当内部 job_id。
+    const stateCall = fetchMock.mock.calls.find(([u]) => String(u).startsWith("/api/profile-jobs/state"));
+    expect(stateCall).toBeTruthy();
+    const stateUrl = String(stateCall![0]);
+    expect(stateUrl).toContain("profile_id=profile-1");
+    expect(stateUrl).toContain("platform=zhilian");
+    expect(stateUrl).toContain("platform_job_id=z-1");
+    expect(stateUrl).toContain(`canonical_url=${encodeURIComponent("https://www.zhaopin.com/jobdetail/z-1.htm")}`);
+    // 不带内部 job_id 参数（注意 platform_job_id= 子串包含 job_id=，需按参数边界判断）。
+    expect(`${stateUrl}&`).not.toContain("&job_id=");
+    // 只打开详情不得发送任何生命周期写命令（FR-002）。
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/profile-jobs/actions"))).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("adopts the server job_id after a successful action and emits job-feedback-changed", async () => {
+    let capturedBody: Record<string, unknown> | null = null;
+    const fetchMock = lifecycleFetchMock({
+      action: (_url, init) => {
+        capturedBody = JSON.parse(String((init ?? {}).body));
+        return response({
+          ok: true, replayed: false, changed: true, event_id: "ev-2", event_sequence: 2,
+          state: lifecycleStateFixture({ revision: 2, last_follow_up_at: "2026-08-05T02:00:00+00:00" }),
+        });
+      },
+    });
+    const wrapper = await mountAtResults(fetchMock);
+
+    await wrapper.get('[data-testid="lca-action-follow_up"]').trigger("click");
+    await flushPromises();
+
+    // 写命令携带内部 job_id（初始只读加载的服务端返回值），不是平台原始 ID。
+    expect(capturedBody).toMatchObject({
+      profile_id: "profile-1",
+      action: "follow_up",
+      job: { job_id: "internal-uuid-1" },
+    });
+    expect(capturedBody!.request_id).toBeTruthy();
+    // 成功后通知 App 刷新当前 profile 的 count/list。
+    expect(wrapper.emitted("job-feedback-changed")).toBeTruthy();
+    expect(wrapper.emitted("job-feedback-changed")![0]).toEqual([{ profileId: "profile-1", jobId: "internal-uuid-1" }]);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the original state and shows the API message when an action fails", async () => {
+    const fetchMock = lifecycleFetchMock({
+      action: () => response(
+        { ok: false, error_code: "state_precondition_failed", user_message: "当前状态不支持该操作" },
+        409,
+      ),
+    });
+    const wrapper = await mountAtResults(fetchMock);
+
+    await wrapper.get('[data-testid="lca-action-follow_up"]').trigger("click");
+    await flushPromises();
+
+    // 失败保留原状态（FR-037），不乐观更新，也不发出刷新事件。
+    expect(wrapper.get('[data-testid="lca-action-error"]').text()).toContain("当前状态不支持该操作");
+    expect(wrapper.get('[data-testid="lca-current-status"]').text()).toBe("已投递");
+    expect(wrapper.emitted("job-feedback-changed")).toBeFalsy();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("drops a late action response after the profile prop switches", async () => {
+    let resolveAction!: (value: Response) => void;
+    const pendingAction = new Promise<Response>((resolve) => { resolveAction = resolve; });
+    const fetchMock = lifecycleFetchMock({ action: () => pendingAction });
+    const wrapper = await mountAtResults(fetchMock);
+
+    await wrapper.get('[data-testid="lca-action-follow_up"]').trigger("click");
+    await flushPromises();
+
+    // 切换到新 profile：旧 action 的响应晚到后不得覆盖新 state、不得发事件。
+    await wrapper.setProps({ profileId: "profile-2" });
+    await flushPromises();
+    resolveAction(response({
+      ok: true, replayed: false, changed: true, event_id: "ev-3", event_sequence: 3,
+      state: { ...lifecycleStateFixture(), profile_id: "profile-1", revision: 9 },
+    }));
+    await flushPromises();
+
+    expect(wrapper.emitted("job-feedback-changed")).toBeFalsy();
+    expect(wrapper.find('[data-testid="lca-action-error"]').exists()).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
 });
