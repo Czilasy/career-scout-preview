@@ -5050,18 +5050,31 @@ def create_app(config=None):
         })
 
     def _save_pipeline_job_to_store(job):
-        """把 pipeline 结果岗位落库到 jobs 表，返回 jobs 记录（链接不安全返回 None）。"""
-        canonical_url = normalize_job_link(
-            job.get("job_link") or job.get("source_url") or ""
+        """把 pipeline 结果岗位落库到 jobs 表，返回 jobs 记录（链接不安全返回 None）。
+
+        T711 平台感知：按 ``job.platform`` 选择 URL 规范化规则（T009）。
+        智联岗位用 zhaopin.com 规则，BOSS 用 zhipin.com 规则；缺失平台退化为 BOSS。
+        落库后回写 platform / platform_job_id，避免 save_job 默认 'boss' 错配。
+        """
+        platform = job.get("platform")
+        canonical_url = normalize_job_link_for_platform(
+            job.get("job_link") or job.get("source_url") or "",
+            platform=platform,
         )
         if not canonical_url:
             return None
         company = job.get("boss_name") or job.get("company") or ""
-        return store.save_job(
+        saved = store.save_job(
             canonical_url, canonical_url,
             job.get("title", ""), company,
             job.get("salary", ""), job.get("location", ""), "",
         )
+        if saved and platform:
+            store.update_job_platform_identity(
+                saved["id"], platform, job.get("platform_job_id")
+            )
+            saved = store.get_job(saved["id"])
+        return saved
 
     @app.route("/api/pipeline/jobs/interest", methods=["POST"])
     def pipeline_mark_interest():

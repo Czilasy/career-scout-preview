@@ -804,6 +804,7 @@ async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
   scopePreviewBusy.value = true;
   try {
     const data = await settingsApi.previewScope({
+      platform: draftPlatform.value,
       keywords: selectedKeywords.value,
       scope_kind: cityList.value.length ? "cities" : "nationwide",
       cities: cityList.value.length ? cityList.value : [],
@@ -871,7 +872,7 @@ async function startScrape() {
   try {
     const data = await apiRequest<{ task_id: string }>("/api/execute-search", {
       method: "POST",
-      json: { script_params: scriptParams, scope_digest: preview.scope_digest },
+      json: { platform: draftPlatform.value, script_params: scriptParams, scope_digest: preview.scope_digest },
     });
     scrapeTaskId.value = data.task_id;
     await pollTask(data.task_id, "scrape");
@@ -1269,6 +1270,15 @@ function resetWorkflow() {
 }
 
 function jobId(job: JobItem): string {
+  // T511/T714：pipeline 待确认岗位稳定键是 platform_job_id（store._pending_result_row
+  // 把 platform_job_id 映射成 job_id 返回）。智联岗位 job_id 经常为 null（未落库），
+  // 旧实现 fallback 到 canonical_url，导致 /api/pipeline/jobs/<id>/jd 等接口 404。
+  // 这里优先 platform_job_id（后端按 platform_job_id 查 pending 表），
+  // BOSS 历史结果 platform_job_id 缺失时退回 job_id/id/canonical_url 兼容旧行为。
+  // 与 JobWorkspace.jobKey（带 platform 前缀，用于 Vue v-for 跨平台唯一）用途不同。
+  if (job.platform_job_id) {
+    return String(job.platform_job_id);
+  }
   return String(job.job_id || job.id || job.canonical_url || "");
 }
 
@@ -1294,6 +1304,8 @@ function feedbackPayload(job: JobItem, profileId: string) {
     profile_id: profileId,
     job: {
       job_id: job.job_id || job.id,
+      platform: job.platform,
+      platform_job_id: job.platform_job_id,
       title: job.title,
       salary: job.salary,
       location: job.location,

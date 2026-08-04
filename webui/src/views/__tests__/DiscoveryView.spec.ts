@@ -377,7 +377,10 @@ describe("DiscoveryView", () => {
         });
       }
       if (url.endsWith("/api/execute-search")) {
+        // http-api.md L101-116：execute-search 必须显式携带 platform 字段（合同要求）。
+        // T508 只禁止提交 AI filters / screening_fields，不禁止 platform。
         expect(JSON.parse(String(init?.body))).toEqual({
+          platform: "boss",
           script_params: { keyword: "Python 后端", city: ["上海"], filters: {} },
           scope_digest: "sha256:scope-existing",
         });

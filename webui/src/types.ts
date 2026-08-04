@@ -271,6 +271,7 @@ export interface FrozenSearchScope {
 }
 
 export interface ScopePreviewRequest {
+  platform: Platform;
   keywords: string[];
   scope_kind: "cities" | "nationwide";
   cities: string[];

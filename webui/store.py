@@ -4893,6 +4893,28 @@ class TaskStore:
             raise KeyError(job_id)
         return dict(row)
 
+    def update_job_platform_identity(self, job_id, platform, platform_job_id=None):
+        """回写 jobs 表的 platform / platform_job_id（T711 平台身份完整）。
+
+        ``save_job`` 走 canonical_url UPSERT，不写 platform（默认 'boss'）。
+        pipeline 收藏/反馈落库的智联岗位需要在这里补回真实平台身份，
+        避免刷新后 jobs.platform 错配成 'boss'。``platform_job_id`` 非空时
+        一并写入；为空时只更新 platform，保留原 platform_job_id。
+        """
+        if not job_id or not platform:
+            return
+        with self._connection() as conn:
+            if platform_job_id:
+                conn.execute(
+                    "UPDATE jobs SET platform=?, platform_job_id=? WHERE id=?",
+                    (str(platform), str(platform_job_id), str(job_id)),
+                )
+            else:
+                conn.execute(
+                    "UPDATE jobs SET platform=? WHERE id=?",
+                    (str(platform), str(job_id)),
+                )
+
     def list_jobs_by_ids(self, job_ids) -> dict:
         """批量查询 jobs，一次 SELECT WHERE id IN (...)。
 
