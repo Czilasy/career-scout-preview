@@ -4438,5 +4438,195 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         self.assertEqual(data.get("error_code"), "platform_validation_failed")
 
 
+# ======================================================================
+# 契约合规补丁测试：覆盖本次 5 处契约违规修复（webui/app.py）
+# ======================================================================
+# 详见 contracts/http-api.md：
+# - L219-229：cancel 合同（run_id + platform + status，DB 权威、内存快照兜底）
+# - L247-251：/api/job-detail 成功响应含 platform + platform_job_id + jd
+# - L253-255：/api/pipeline/jobs/{platform_job_id}/jd（fallback 无 source_run_id
+#   是历史兼容路径，不得依赖 latest done run 猜平台）
+# - L334-336：/api/check 显式平台解析；智联不得调旧 BOSS scraper
+class ContractCompliancePatchTests(unittest.TestCase):
+    """契约合规补丁：5 处修复的 HTTP 行为回归。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    # -- (a) /api/check ------------------------------------------------
+
+    def test_check_default_returns_boss_platform(self):
+        """契约 L334-336：省略 platform 只兼容 BOSS，返回 platform=boss。"""
+        completed = type("Completed", (), {
+            "returncode": 0,
+            "output_tail": "",
+            "failure_code": None,
+            "ok": True,
+        })()
+        with mock.patch("webui.app.ScraperExecutor.execute",
+                        return_value=completed):
+            resp = self.client.get("/api/check")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["platform"], "boss")
+        self.assertTrue(data["connected"])
+
+    def test_check_zhilian_returns_422_legacy_not_supported(self):
+        """契约 L334-336 + L353：智联检查不得调旧 BOSS scraper，返回 422。"""
+        with mock.patch("webui.app.ScraperExecutor.execute") as exec_mock:
+            resp = self.client.get("/api/check?platform=zhilian")
+        self.assertEqual(resp.status_code, 422)
+        data = resp.get_json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error_code"], "legacy_platform_not_supported")
+        self.assertEqual(data["platform"], "zhilian")
+        # 关键：智联检查路径不得调用旧 BOSS scraper
+        self.assertFalse(exec_mock.called)
+
+    # -- (b) /api/execute-search/<id>/cancel ---------------------------
+
+    def test_execute_search_cancel_returns_run_id_and_platform(self):
+        """契约 L219-229：取消响应含 run_id + platform + status=cancelled。"""
+        run_id = "test_exec_cancel_platform"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, record_kind, frozen_filters_json, "
+                "source_count, match_count, mismatch_count, "
+                "execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                "VALUES (?, 'boss', 'running', 'process_log', '{}', "
+                "0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id),),
+            )
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running", "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+            "platform": "boss",
+        }
+        with mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            resp = self.client.post(f"/api/execute-search/{run_id}/cancel")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["run_id"], run_id)
+        self.assertEqual(data["task_id"], run_id)
+        self.assertEqual(data["platform"], "boss")
+        self.assertEqual(data["status"], "cancelled")
+
+    # -- (c) /api/ai-screen/<id>/cancel --------------------------------
+
+    def test_ai_screen_cancel_returns_run_id_and_platform(self):
+        """契约 L219-229：AI 筛选取消响应含 run_id + platform + status。"""
+        run_id = "test_ai_cancel_platform"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, record_kind, frozen_filters_json, "
+                "source_count, match_count, mismatch_count, "
+                "execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                "VALUES (?, 'boss', 'running', 'process_log', '{}', "
+                "0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id),),
+            )
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "ai_screen", "status": "running", "progress": {},
+            "logs": [], "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+            "platform": "boss",
+        }
+        with mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            resp = self.client.post(f"/api/ai-screen/{run_id}/cancel")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["run_id"], run_id)
+        self.assertEqual(data["platform"], "boss")
+        self.assertEqual(data["status"], "cancelled")
+
+    # -- (d) /api/job-detail success path ------------------------------
+
+    def test_job_detail_success_includes_platform_and_platform_job_id(self):
+        """契约 L247-251：成功响应含 platform + platform_job_id + jd。"""
+        from webui.source import SourceOutcome
+        fake_source = mock.MagicMock()
+        fake_source.fetch_detail.return_value = SourceOutcome.success(
+            detail={"jd": "岗位职责：负责后端业务开发与 API 设计。"},
+            safe_log="detail ok",
+        )
+        with mock.patch("webui.app._BossCdpSource",
+                        return_value=fake_source), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                           return_value=(True, "")):
+            resp = self.client.post("/api/job-detail", json={
+                "job_id": "job-abc",
+                "platform_job_id": "job-abc",
+                "source_url": "https://www.zhipin.com/job/abc.html",
+            })
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["platform"], "boss")
+        self.assertEqual(data["platform_job_id"], "job-abc")
+        self.assertTrue(data["jd"])
+        # _make_cdp_source 走 boss 分支（_BossCdpSource 被调用）
+        self.assertTrue(fake_source.fetch_detail.called)
+
+    # -- (e) /api/pipeline/jobs/<job_id>/jd fallback path --------------
+
+    def test_pipeline_job_jd_fallback_infers_boss_platform_from_url(self):
+        """契约 L253-255：无 source_run_id 的 fallback 路径从 source_url 推断
+        BOSS 平台，不依赖 latest done run（避免最新完成 run 是另一平台时
+        误用平台身份）。"""
+        from webui.source import SourceOutcome
+        fake_source = mock.MagicMock()
+        fake_source.fetch_detail.return_value = SourceOutcome.success(
+            detail={"jd": "岗位职责：后端开发与系统维护。"},
+            safe_log="detail ok",
+        )
+        with mock.patch("webui.app._BossCdpSource",
+                        return_value=fake_source) as boss_mock, \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                           return_value=(True, "")):
+            resp = self.client.post(
+                "/api/pipeline/jobs/job-xyz/jd",
+                json={"source_url": "https://www.zhipin.com/job/xyz.html"},
+            )
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["jd"])
+        # _BossCdpSource 被调用证明 fallback_platform == "boss"
+        # （若误判 zhilian，会调 ZhilianCdpSource 而非 _BossCdpSource，
+        # 且无 browser_account/cdp_port 时 _make_cdp_source 返回 None → 500）
+        self.assertTrue(boss_mock.called)
+        self.assertTrue(fake_source.fetch_detail.called)
+
+
 if __name__ == "__main__":
     unittest.main()

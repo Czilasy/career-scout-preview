@@ -3129,14 +3129,10 @@ class TaskStore:
         conn, table: str, old_col: str, new_col: str,
         old_type: str = "TEXT", new_type: str = "TEXT",
     ) -> None:
-        """重命名列并保留数据（SQLite < 3.25 无 ALTER TABLE RENAME COLUMN 时用重建表）。
+        """重命名列并保留数据；优先使用 SQLite 原生 RENAME COLUMN。
 
-        SQLite 3.25+ 支持 ALTER TABLE RENAME COLUMN，但为兼容性用安全方案：
-        1. 新增 new_col 列（若不存在）
-        2. UPDATE 复制 old_col → new_col
-        3. 重建表去掉 old_col（保留索引和约束）
-
-        注意：重建表会丢失部分索引，调用方需负责重建。
+        原生重命名完整保留 NOT NULL、UNIQUE、索引和外键。旧版 SQLite（< 3.25）
+        回退为：新增可空 new_col、复制数据、重建表去掉 old_col。
         """
         cols = {
             row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
@@ -3146,30 +3142,25 @@ class TaskStore:
         if old_col not in cols:
             return  # 旧列不存在，无需重命名
 
-        # 新增新列
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {new_col} {new_type}")
-        # 复制数据
+        sqlite_version = getattr(sqlite3, "sqlite_version_info", (0,))
+        if sqlite_version >= (3, 25, 0):
+            conn.execute(f"ALTER TABLE {table} RENAME COLUMN {old_col} TO {new_col}")
+            return
+
+        # 旧版 SQLite 回退：新列先按可空添加，避免 NOT NULL 无默认值报错
+        nullable_new_type = new_type.replace(" NOT NULL", "", 1)
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {new_col} {nullable_new_type}")
         conn.execute(
             f"UPDATE {table} SET {new_col} = {old_col} WHERE {old_col} IS NOT NULL"
         )
 
-        # 重建表去掉旧列：获取当前表定义，移除 old_col，CREATE 新表，复制数据
-        schema_row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
-            (table,),
-        ).fetchone()
-        schema_sql = schema_row["sql"] if schema_row else ""
-
-        # 临时表名
+        # 重建表去掉旧列，并重建调用方依赖的唯一索引
         tmp_name = f"_tmp_{table}_{old_col}_removed"
-        # 获取列列表（去掉 old_col）
         all_cols = [
             row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
         ]
         keep_cols = [c for c in all_cols if c != old_col]
         col_list = ", ".join(keep_cols)
-
-        # 用 CREATE TABLE AS SELECT 重建（保留数据，但丢失约束/索引）
         conn.execute(f"DROP TABLE IF EXISTS {tmp_name}")
         conn.execute(
             f"CREATE TABLE {tmp_name} AS SELECT {col_list} FROM {table}"

@@ -1014,6 +1014,17 @@ def create_app(config=None):
 
     @app.route("/api/check")
     def check():
+        # 契约 http-api.md L334-336：显式平台解析对应登录空间；省略平台只
+        # 兼容 BOSS。智联检查不得调用旧 BOSS scraper，新前端走 browser
+        # account open 打开登录空间。
+        check_platform = (request.args.get("platform") or "boss").strip()
+        if check_platform != "boss":
+            return jsonify({
+                "ok": False,
+                "error_code": "legacy_platform_not_supported",
+                "user_message": "该平台检查请使用浏览器账号入口",
+                "platform": check_platform,
+            }), 422
         result = ScraperExecutor(max_output_bytes=64_000).execute(
             [app.config["PYTHON_EXECUTABLE"], str(SCRAPER), "--check"],
             cwd=PROJECT_ROOT, timeout_seconds=30, env=_env(),
@@ -1021,6 +1032,7 @@ def create_app(config=None):
         output = "环境检查超时" if result.failure_code == "process_timeout" else result.output_tail
         return jsonify({
             "ok": True,
+            "platform": "boss",
             "connected": result.ok,
             "returncode": result.returncode if result.returncode is not None else -1,
             "output": output,
@@ -1850,13 +1862,25 @@ def create_app(config=None):
                     "source_cdp_unavailable",
                 }:
                     from webui.pipeline_exec import ensure_chrome_ready, ERROR_TAXONOMY
+                    # T403: 从 run 继承冻结平台/浏览器身份
+                    _resume_params = run.get("execution_params") or {}
+                    _resume_platform = (
+                        run.get("platform")
+                        or _resume_params.get("platform")
+                        or "boss"
+                    )
                     chrome_ok, chrome_err = ensure_chrome_ready()
                     if not chrome_ok:
                         passed = False
                         code = "cdp_unavailable"
                         reason = f"调试浏览器尚未就绪：{chrome_err}"
                     else:
-                        source = _make_cdp_source()
+                        source = _make_cdp_source(
+                            platform=_resume_platform,
+                            browser_account=_resume_params.get("browser_account"),
+                            cdp_port=_resume_params.get("cdp_port"),
+                            profile_key=_resume_params.get("profile_key"),
+                        )
                         outcome = source.preflight() if source is not None else None
                         if outcome is None or not outcome.ok:
                             passed = False
@@ -2472,6 +2496,28 @@ def create_app(config=None):
                 source_run.get("execution_params")
                 if isinstance(source_run, dict) else None
             ) or {}
+            # T403: 从父 scrape run 继承冻结平台/浏览器身份
+            frozen_platform = (
+                task.get("platform")
+                or source_params.get("platform")
+                or (source_run or {}).get("platform")
+                or "boss"
+            )
+            frozen_cdp_port = (
+                task.get("cdp_port") or source_params.get("cdp_port")
+            )
+            frozen_profile_key = (
+                task.get("profile_key") or source_params.get("profile_key")
+            )
+            frozen_browser_account = (
+                task.get("browser_account")
+                or source_params.get("browser_account")
+            )
+            ai_task_input_digest = (
+                task.get("task_input_digest")
+                or source_params.get("task_input_digest")
+                or (source_run or {}).get("task_input_digest")
+            )
             from webui.execution_config import (
                 ExecutionConfigSnapshot, FrozenTaskScope,
             )
@@ -2497,10 +2543,19 @@ def create_app(config=None):
                     source_count=len(source_result.get("jobs") or []),
                     execution_params={"scrape_task_id": scrape_task_id,
                                       "profile_summary": profile_summary or "",
-                                      "browser_account": _account_for_run(),
+                                      "browser_account": frozen_browser_account or _account_for_run(),
                                       "execution_config": execution_config.to_dict(),
-                                      "frozen_scope": frozen_scope.to_dict()},
+                                      "frozen_scope": frozen_scope.to_dict(),
+                                      "platform": frozen_platform,
+                                      "cdp_port": frozen_cdp_port,
+                                      "profile_key": frozen_profile_key,
+                                      "task_input_digest": ai_task_input_digest},
                     backend_version=_backend_version)
+                store.save_filter_snapshot(
+                    task_id,
+                    platform=frozen_platform,
+                    task_input_digest=ai_task_input_digest,
+                )
                 store.update_screening_run(
                     task_id, status="running", current_stage="scrape"
                 )
@@ -2544,11 +2599,20 @@ def create_app(config=None):
                     execution_params={
                         "scrape_task_id": scrape_task_id,
                         "profile_summary": profile_summary,
-                        "browser_account": _account_for_run(),
+                        "browser_account": frozen_browser_account or _account_for_run(),
                         "execution_config": execution_config.to_dict(),
                         "frozen_scope": frozen_scope.to_dict(),
+                        "platform": frozen_platform,
+                        "cdp_port": frozen_cdp_port,
+                        "profile_key": frozen_profile_key,
+                        "task_input_digest": ai_task_input_digest,
                     },
                     backend_version=_backend_version,
+                )
+                store.save_filter_snapshot(
+                    task_id,
+                    platform=frozen_platform,
+                    task_input_digest=ai_task_input_digest,
                 )
                 store.update_screening_run(
                     task_id, status="running", current_stage="ai_rough"
@@ -2732,7 +2796,12 @@ def create_app(config=None):
                             t["status"] = "paused"
                             t["error"] = reason
                     return
-                source = _make_cdp_source()
+                source = _make_cdp_source(
+                    platform=frozen_platform,
+                    browser_account=frozen_browser_account,
+                    cdp_port=frozen_cdp_port,
+                    profile_key=frozen_profile_key,
+                )
                 if source is None:
                     reason = "CDP 抓取源不可用，请确认调试浏览器后继续"
                     _save_jd_checkpoint(jd_path, jd_map)
@@ -4032,13 +4101,25 @@ def create_app(config=None):
             task["status"] = "cancelled"
             task["error"] = "用户已停止抓取"
             task["logs"].append("用户取消任务")
+            cancel_platform = task.get("platform")
         # 关浏览器放到锁外，避免持锁时间过长。best-effort，失败不阻塞取消。
         try:
             from webui.pipeline_exec import close_debug_chrome
             close_debug_chrome()
         except Exception:
             pass
-        return jsonify({"ok": True, "task_id": task_id, "status": "cancelled"})
+        # T412 契约 http-api.md L223-229：DB run 存在时以 DB platform 为权威；
+        # 仅 DB 创建前内存窗口用注册 task 的不可变平台快照。
+        if not cancel_platform:
+            try:
+                _db_run = store.get_screening_run(task_id)
+                cancel_platform = (_db_run or {}).get("platform")
+            except _OPERATIONAL_ERRORS:
+                pass
+        return jsonify({
+            "ok": True, "run_id": task_id, "task_id": task_id,
+            "platform": cancel_platform, "status": "cancelled",
+        })
 
     @app.route("/api/ai-screen/<task_id>/cancel", methods=["POST"])
     def cancel_ai_screen(task_id):
@@ -4064,13 +4145,25 @@ def create_app(config=None):
             task["status"] = "cancelled"
             task["error"] = "用户已停止筛选"
             task["logs"].append("用户取消任务")
+            cancel_platform = task.get("platform")
         # 关浏览器放到锁外（仅抓 JD 阶段有意义），best-effort，失败不阻塞取消。
         try:
             from webui.pipeline_exec import close_debug_chrome
             close_debug_chrome()
         except Exception:
             pass
-        return jsonify({"ok": True, "task_id": task_id, "status": "cancelled"})
+        # T412 契约 http-api.md L223-229：DB run 存在时以 DB platform 为权威；
+        # 仅 DB 创建前内存窗口用注册 task 的不可变平台快照。
+        if not cancel_platform:
+            try:
+                _db_run = store.get_screening_run(task_id)
+                cancel_platform = (_db_run or {}).get("platform")
+            except _OPERATIONAL_ERRORS:
+                pass
+        return jsonify({
+            "ok": True, "run_id": task_id, "task_id": task_id,
+            "platform": cancel_platform, "status": "cancelled",
+        })
 
     @app.route("/api/ai-screen", methods=["POST"])
     def ai_screen():
@@ -4432,6 +4525,11 @@ def create_app(config=None):
                         "error": task["error"],
                         "started_at": task.get("started_at"),
                         "finished_at": task.get("finished_at"),
+                        # T409 契约 http-api.md L200-202：所有 has_task=true
+                        # 响应增加 platform 和 task_input_digest。内存任务读取
+                        # 注册时冻结值，不得因缺平台补成 BOSS。
+                        "platform": task.get("platform"),
+                        "task_input_digest": task.get("task_input_digest"),
                     })
         # 2. DB 中最近 paused（服务重启后恢复暂停态，FR-028）
         try:
@@ -4488,6 +4586,11 @@ def create_app(config=None):
                 "scrape_completed": _scrape_completed_for_run(execution_params),
                 "source_run_id": execution_params.get("source_run_id"),
                 "checkpoint_stage": prow["current_stage"],
+                # T409 契约 http-api.md L200-202：DB paused 从 screening_runs
+                # 读取 platform/task_input_digest；source 字段只表示状态数据
+                # 来源，不能承载招聘平台。
+                "platform": paused_run.get("platform"),
+                "task_input_digest": paused_run.get("task_input_digest"),
             })
         # 3. DB 中被进程重启打断的筛选。重启后工作线程已死，
         # 不能假装还在跑——如实告诉前端有个可续跑的中断任务。
@@ -4524,6 +4627,10 @@ def create_app(config=None):
                 "scrape_completed": _scrape_completed_for_run(run.get("execution_params") or {}),
                 "frozen_filters": run.get("frozen_filters") or {},
                 "profile_summary": str((run.get("execution_params") or {}).get("profile_summary") or ""),
+                # T409 契约 http-api.md L200-202：DB interrupted 从
+                # screening_runs 读取 platform/task_input_digest。
+                "platform": run.get("platform"),
+                "task_input_digest": run.get("task_input_digest"),
             })
         return jsonify({"ok": True, "has_task": False})
 
@@ -4725,7 +4832,10 @@ def create_app(config=None):
         if not jd:
             return jsonify({"ok": False,
                             "error": "详情页未提取到 JD 正文，岗位可能已下架"}), 502
-        return jsonify({"ok": True, "jd": jd, "platform": frozen_platform})
+        return jsonify({
+            "ok": True, "jd": jd,
+            "platform": frozen_platform, "platform_job_id": platform_job_id,
+        })
 
     def _save_pipeline_job_to_store(job):
         """把 pipeline 结果岗位落库到 jobs 表，返回 jobs 记录（链接不安全返回 None）。"""
@@ -4847,9 +4957,37 @@ def create_app(config=None):
                             "existing_task_id": existing_id,
                         }), 409
             task_id = f"recrawl-{uuid.uuid4().hex[:12]}"
+            # T406: 从父 run 读取冻结平台身份和浏览器身份
+            parent_identity = None
+            parent_run = None
+            try:
+                parent_identity = store.get_run_checkpoint_identity(source_run_id)
+                parent_run = store.get_screening_run(source_run_id)
+            except _OPERATIONAL_ERRORS:
+                pass
+            parent_platform = (parent_identity or {}).get("platform") or "boss"
+            parent_task_input_digest = (parent_identity or {}).get("task_input_digest")
+            parent_params = (parent_run or {}).get("execution_params") or {}
+            parent_browser_account = str(parent_params.get("browser_account") or "") or None
+            parent_cdp_port = parent_params.get("cdp_port")
+            parent_profile_key = parent_params.get("profile_key")
+            gp_task_id = str(parent_params.get("scrape_task_id") or "")
+            if (not parent_cdp_port or not parent_profile_key) and gp_task_id:
+                try:
+                    grandparent = store.get_screening_run(gp_task_id)
+                    gp_params = (grandparent or {}).get("execution_params") or {}
+                    parent_cdp_port = parent_cdp_port or gp_params.get("cdp_port")
+                    parent_profile_key = parent_profile_key or gp_params.get("profile_key")
+                except _OPERATIONAL_ERRORS:
+                    pass
             _register_pipeline_task(task_id, "recrawl")
             with _pipeline_lock:
                 _pipeline_tasks[task_id]["source_run_id"] = source_run_id
+                _pipeline_tasks[task_id]["platform"] = parent_platform
+                _pipeline_tasks[task_id]["cdp_port"] = parent_cdp_port
+                _pipeline_tasks[task_id]["profile_key"] = parent_profile_key
+                _pipeline_tasks[task_id]["browser_account"] = parent_browser_account or _account_for_run()
+                _pipeline_tasks[task_id]["task_input_digest"] = parent_task_input_digest
             profile_summary = str(raw.get("profile_summary") or "")
             store.create_screening_run(
                 task_id,
@@ -4859,16 +4997,23 @@ def create_app(config=None):
                     "job_ids": [str(job_id)],
                     "profile_summary": profile_summary,
                     "single_retry": True,
-                    "browser_account": _account_for_run(),
+                    "browser_account": _pipeline_tasks[task_id]["browser_account"],
+                    "platform": parent_platform,
+                    "cdp_port": parent_cdp_port,
+                    "profile_key": parent_profile_key,
+                    "task_input_digest": parent_task_input_digest,
                 },
                 backend_version=_backend_version,
+            )
+            store.save_filter_snapshot(
+                task_id,
+                platform=parent_platform,
+                task_input_digest=parent_task_input_digest,
             )
             store.update_screening_run(
                 task_id, status="running", current_stage="recrawl_fetch_jd"
             )
-            with _pipeline_lock:
-                _pipeline_tasks[task_id]["browser_account"] = _account_for_run()
-            _activate_run_browser()
+            _activate_run_browser(parent_run)
             try:
                 _pipeline_executor.submit(
                     _run_recrawl_task, task_id, [str(job_id)], profile_summary,
@@ -4914,7 +5059,13 @@ def create_app(config=None):
             return jsonify({"error": f"CDP Chrome 未运行：{chrome_err}",
                             "error_code": "cdp_not_ready"}), 503
 
-        source = _make_cdp_source()
+        # T406: fallback 路径从 source_url 推断平台，不依赖 latest done run
+        # （最新完成 run 可能是另一平台，会误用平台身份）。智联无冻结
+        # 账号/端口时 _make_cdp_source 返回 None，由下方 500 阻断默认 BOSS。
+        fallback_platform = (
+            "zhilian" if "zhaopin.com" in source_url.lower() else "boss"
+        )
+        source = _make_cdp_source(platform=fallback_platform)
         if source is None:
             return jsonify({"ok": False, "error": "抓取源不可用", "job_id": job_id}), 500
 
@@ -5035,6 +5186,30 @@ def create_app(config=None):
                 "job_ids": non_pending,
             }), 409
         job_ids = sorted(requested_ids)
+        # T406: 从父 run 读取冻结平台身份和浏览器身份
+        parent_identity = None
+        parent_run = None
+        try:
+            parent_identity = store.get_run_checkpoint_identity(source_run_id)
+            parent_run = store.get_screening_run(source_run_id)
+        except _OPERATIONAL_ERRORS:
+            pass
+        parent_platform = (parent_identity or {}).get("platform") or "boss"
+        parent_task_input_digest = (parent_identity or {}).get("task_input_digest")
+        parent_params = (parent_run or {}).get("execution_params") or {}
+        parent_browser_account = str(parent_params.get("browser_account") or "") or None
+        parent_cdp_port = parent_params.get("cdp_port")
+        parent_profile_key = parent_params.get("profile_key")
+        # AI screen run 不含 cdp_port/profile_key → 从祖父 scrape run 读
+        gp_task_id = str(parent_params.get("scrape_task_id") or "")
+        if (not parent_cdp_port or not parent_profile_key) and gp_task_id:
+            try:
+                grandparent = store.get_screening_run(gp_task_id)
+                gp_params = (grandparent or {}).get("execution_params") or {}
+                parent_cdp_port = parent_cdp_port or gp_params.get("cdp_port")
+                parent_profile_key = parent_profile_key or gp_params.get("profile_key")
+            except _OPERATIONAL_ERRORS:
+                pass
         task_id = f"recrawl-{uuid.uuid4().hex[:12]}"
         claimed_task, existing_task_id = _claim_recrawl_start(
             task_id, source_run_id
@@ -5045,8 +5220,12 @@ def create_app(config=None):
                 "error": "已有重抓任务在运行，请等待完成或取消后再试",
                 "existing_task_id": existing_task_id,
             }), 409
-        claimed_task["browser_account"] = _account_for_run()
-        _activate_run_browser()
+        claimed_task["browser_account"] = parent_browser_account or _account_for_run()
+        claimed_task["platform"] = parent_platform
+        claimed_task["cdp_port"] = parent_cdp_port
+        claimed_task["profile_key"] = parent_profile_key
+        claimed_task["task_input_digest"] = parent_task_input_digest
+        _activate_run_browser(parent_run)
         try:
             store.create_screening_run(
                 task_id,
@@ -5055,9 +5234,18 @@ def create_app(config=None):
                     "source_run_id": source_run_id,
                     "job_ids": [str(x) for x in job_ids],
                     "profile_summary": profile_summary,
-                    "browser_account": _account_for_run(),
+                    "browser_account": claimed_task["browser_account"],
+                    "platform": parent_platform,
+                    "cdp_port": parent_cdp_port,
+                    "profile_key": parent_profile_key,
+                    "task_input_digest": parent_task_input_digest,
                 },
                 backend_version=_backend_version,
+            )
+            store.save_filter_snapshot(
+                task_id,
+                platform=parent_platform,
+                task_input_digest=parent_task_input_digest,
             )
             store.update_screening_run(
                 task_id, status="running", current_stage="recrawl_fetch_jd"
@@ -5139,6 +5327,11 @@ def create_app(config=None):
         if not str(resume_params.get("browser_account") or ""):
             resume_params["browser_account"] = _account_for_run(run)
             store.update_screening_execution_params(task_id, resume_params)
+        # T406: 继续时从 run 的 execution_params 恢复冻结平台身份
+        claimed_task["platform"] = resume_params.get("platform") or "boss"
+        claimed_task["cdp_port"] = resume_params.get("cdp_port")
+        claimed_task["profile_key"] = resume_params.get("profile_key")
+        claimed_task["task_input_digest"] = resume_params.get("task_input_digest")
         try:
             store.update_screening_run(task_id, status="running")
             store.append_task_event(task_id, "resume", {
@@ -5213,6 +5406,24 @@ def create_app(config=None):
             stop_event = task.get("stop_event")
 
         _activate_task_browser(task_id)
+
+        # T403: 从 task dict 读取冻结平台/浏览器身份，fallback 到 run execution_params
+        with _pipeline_lock:
+            _t_ref = _pipeline_tasks.get(task_id, {})
+            frozen_platform = _t_ref.get("platform")
+            frozen_cdp_port = _t_ref.get("cdp_port")
+            frozen_profile_key = _t_ref.get("profile_key")
+            frozen_browser_account = _t_ref.get("browser_account")
+        if not frozen_platform:
+            try:
+                _run_ref = store.get_screening_run(task_id)
+                _params_ref = (_run_ref or {}).get("execution_params") or {}
+                frozen_platform = _params_ref.get("platform") or "boss"
+                frozen_cdp_port = frozen_cdp_port or _params_ref.get("cdp_port")
+                frozen_profile_key = frozen_profile_key or _params_ref.get("profile_key")
+                frozen_browser_account = frozen_browser_account or _params_ref.get("browser_account")
+            except _OPERATIONAL_ERRORS:
+                frozen_platform = frozen_platform or "boss"
 
         last_event_stage = None
 
@@ -5344,7 +5555,12 @@ def create_app(config=None):
             if no_jd:
                 chrome_ok, chrome_err = ensure_chrome_ready()
                 if chrome_ok:
-                    source = _make_cdp_source()
+                    source = _make_cdp_source(
+                        platform=frozen_platform,
+                        browser_account=frozen_browser_account,
+                        cdp_port=frozen_cdp_port,
+                        profile_key=frozen_profile_key,
+                    )
                     if source is not None:
                         def _jd_progress(done, tot):
                             emit(stage="fetch_jd", current=min(done, total), total=total,
@@ -5942,6 +6158,10 @@ def create_app(config=None):
             "resumed_from": run_id,
             "status": "running",
             "message": "AI 筛选已从断点继续",
+            # T412 契约 http-api.md L216：成功响应增加 platform 和
+            # task_input_digest。平台不由客户端选择，从原 run 读取。
+            "platform": run.get("platform"),
+            "task_input_digest": run.get("task_input_digest"),
         })
 
     @app.route("/api/task/cancel/<run_id>", methods=["POST"])
