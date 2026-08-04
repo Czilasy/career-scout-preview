@@ -101,7 +101,7 @@ INDEPENDENT_FAILURE_CODES = {
 QUERY_STATUSES = {"queued", "running", "succeeded", "failed", "interrupted"}
 FEEDBACK_ACTIONS = {"interested", "not_interested"}
 FEEDBACK_REASONS = {"role", "salary", "location", "company", None}
-PROFILE_JOB_STATUSES = {"new", "interested", "applied", "deleted"}
+PROFILE_JOB_STATUSES = {"new", "interested", "read", "applied", "stale", "deleted"}
 AI_STATUS_VALUES = {"unconfigured", "testing", "ready", "failed"}
 RESUME_FORMATS = {"txt", "pdf", "docx"}
 MAX_DETAIL_BUDGET = 60
@@ -219,7 +219,7 @@ class TaskStore:
 
     # -- pre-migration bootstrap backup (T103) ----------------------------
 
-    _MIGRATION_BACKUP_TARGET_VERSION = 27
+    _MIGRATION_BACKUP_TARGET_VERSION = 28
     _MIGRATION_BACKUP_TOOL_VERSION = "career-scout-bootstrap-v1"
 
     def backup_dir_for_tests(self) -> Path:
@@ -498,6 +498,8 @@ class TaskStore:
             self._migration_026()
         if current < 27:
             self._migration_027()
+        if current < 28:
+            self._migration_028()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -3156,6 +3158,104 @@ class TaskStore:
                 (_now(),),
             )
 
+    def _migration_028(self):
+        """Migration 28: lifecycle timestamps, append-only events and receipts.
+
+        This migration is additive. Existing profile-job and preference rows are
+        preserved byte-for-byte at the application level; no historical lifecycle
+        facts are inferred from them.
+        """
+        with self._connection() as conn:
+            # DDL is transactional in SQLite only after an explicit BEGIN.
+            # Start before the first ALTER so any migration failure restores v27.
+            conn.execute("BEGIN IMMEDIATE")
+            profile_job_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM profile_jobs"
+            ).fetchone()["c"]
+            feedback_rows = [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT id, profile_id, job_id, run_id, action, reason, revoked_at, created_at "
+                    "FROM feedback_events ORDER BY id"
+                )
+            ]
+
+            self._add_column_if_missing(
+                conn, "profile_jobs", "last_follow_up_at", "TEXT"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS profile_job_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE,
+                    profile_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    from_status TEXT,
+                    to_status TEXT,
+                    from_applied_at TEXT,
+                    to_applied_at TEXT,
+                    from_last_follow_up_at TEXT,
+                    to_last_follow_up_at TEXT,
+                    occurred_at TEXT NOT NULL,
+                    FOREIGN KEY (profile_id, job_id)
+                        REFERENCES profile_jobs(profile_id, job_id) ON DELETE RESTRICT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS profile_job_command_receipts (
+                    request_id TEXT PRIMARY KEY,
+                    request_fingerprint TEXT NOT NULL,
+                    profile_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    changed INTEGER NOT NULL CHECK (changed IN (0, 1)),
+                    event_id TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (profile_id, job_id)
+                        REFERENCES profile_jobs(profile_id, job_id) ON DELETE RESTRICT,
+                    FOREIGN KEY (event_id) REFERENCES profile_job_events(id)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_profile_jobs_reminder_candidates "
+                "ON profile_jobs(profile_id, status, applied_at, last_follow_up_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_profile_job_events_history "
+                "ON profile_job_events(profile_id, job_id, sequence)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_profile_job_command_receipts_job "
+                "ON profile_job_command_receipts(profile_id, job_id, created_at)"
+            )
+
+            post_profile_job_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM profile_jobs"
+            ).fetchone()["c"]
+            post_feedback_rows = [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT id, profile_id, job_id, run_id, action, reason, revoked_at, created_at "
+                    "FROM feedback_events ORDER BY id"
+                )
+            ]
+            if post_profile_job_count != profile_job_count:
+                raise RuntimeError("migration_28 profile_jobs row count changed")
+            if post_feedback_rows != feedback_rows:
+                raise RuntimeError("migration_28 feedback_events changed")
+            if conn.execute("PRAGMA foreign_key_check").fetchall():
+                raise RuntimeError("migration_28 foreign_key_check failed")
+
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (28, ?, 'job lifecycle events, command receipts and reminders')",
+                (_now(),),
+            )
+
     # -- migration 27 helpers ---------------------------------------------
 
     @staticmethod
@@ -3265,104 +3365,113 @@ class TaskStore:
         返回 {"ok": bool, "job_id": str | None, "error_code": str | None}。
         所有 8 个分支在同一事务中完成。
         """
-        # 分支1：URL host/path 必须属于声明平台——复用 tasks001 的平台注册规则
-        # （contracts/job-source.md 禁止在 store 内复制第二套 host/path 规则）
         from webui.platforms import normalize_job_url
-        if not normalize_job_url(platform, canonical_url):
+        normalized_url = normalize_job_url(platform, canonical_url)
+        if not normalized_url:
+            return {"ok": False, "job_id": None, "error_code": "platform_url_mismatch"}
+        with self._connection() as conn:
+            return self.upsert_job_with_connection(
+                conn, platform=platform, platform_job_id=platform_job_id,
+                canonical_url=normalized_url, title=title, company=company,
+                salary=salary, location=location, jd=jd, experience=experience,
+                degree=degree, extra=extra, _validated_url=True,
+            )
+
+    def upsert_job_with_connection(
+        self, conn, *, platform: str, platform_job_id: str | None,
+        canonical_url: str, title: str = "", company: str = "",
+        salary: str = "", location: str = "", jd: str = "",
+        experience: str = "", degree: str = "", extra: dict | None = None,
+        _validated_url: bool = False,
+    ) -> dict:
+        """Run the dual-index upsert on a caller-owned transaction.
+
+        Lifecycle and pipeline actions use this method so job identity, the
+        profile link and lifecycle records can commit or roll back together.
+        """
+        from webui.platforms import normalize_job_url
+        normalized_url = canonical_url if _validated_url else normalize_job_url(platform, canonical_url)
+        if not normalized_url:
             return {"ok": False, "job_id": None, "error_code": "platform_url_mismatch"}
 
+        platform_job_id = None if platform_job_id in (None, "") else str(platform_job_id)
         extra_json = json.dumps(extra or {}, ensure_ascii=False, sort_keys=True)
         now = _now()
-
-        with self._connection() as conn:
-            # 分支2：查询 (platform, platform_job_id) 和 canonical_url
-            by_pid = None
-            if platform_job_id:
-                row = conn.execute(
-                    "SELECT id, canonical_url FROM jobs WHERE platform=? AND platform_job_id=?",
-                    (platform, platform_job_id),
-                ).fetchone()
-                if row is not None:
-                    by_pid = {"id": row["id"], "canonical_url": row["canonical_url"]}
-
-            by_url = conn.execute(
-                "SELECT id, platform, platform_job_id FROM jobs WHERE canonical_url=?",
-                (canonical_url,),
+        by_pid = None
+        if platform_job_id is not None:
+            row = conn.execute(
+                "SELECT id, canonical_url FROM jobs WHERE platform=? AND platform_job_id=?",
+                (str(platform), platform_job_id),
             ).fetchone()
-            by_url_dict = None
-            if by_url is not None:
-                by_url_dict = {
-                    "id": by_url["id"],
-                    "platform": by_url["platform"],
-                    "platform_job_id": by_url["platform_job_id"],
-                }
+            if row is not None:
+                by_pid = {"id": row["id"], "canonical_url": row["canonical_url"]}
 
-            # 分支2：URL 命中但平台不一致
-            if by_url_dict and by_url_dict["platform"] != platform:
-                return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
+        by_url = conn.execute(
+            "SELECT id, platform, platform_job_id FROM jobs WHERE canonical_url=?",
+            (normalized_url,),
+        ).fetchone()
+        by_url_dict = None if by_url is None else {
+            "id": by_url["id"], "platform": by_url["platform"],
+            "platform_job_id": by_url["platform_job_id"],
+        }
+        if by_url_dict and by_url_dict["platform"] != platform:
+            return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
 
-            # 分支3：两者都没有 → 创建新行
-            if by_pid is None and by_url_dict is None:
-                new_id = _uuid()
-                conn.execute(
-                    "INSERT INTO jobs (id, canonical_url, source_url, title, company, salary, "
-                    "location, jd, first_seen_at, last_seen_at, platform, platform_job_id, "
-                    "experience, degree, extra_json) "
-                    "VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (new_id, canonical_url, title, company, salary, location, jd,
-                     now, now, platform, platform_job_id, experience, degree, extra_json),
-                )
-                return {"ok": True, "job_id": new_id, "error_code": None}
+        def insert_job(job_id):
+            conn.execute(
+                "INSERT INTO jobs (id, canonical_url, source_url, title, company, salary, "
+                "location, jd, first_seen_at, last_seen_at, platform, platform_job_id, "
+                "experience, degree, extra_json) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (job_id, normalized_url, title, company, salary, location, jd, now, now,
+                 platform, platform_job_id, experience, degree, extra_json),
+            )
 
-            # 分支4：只命中平台ID
-            if by_pid is not None and by_url_dict is None:
-                # 检查新 URL 是否被其它行占用
-                other = conn.execute(
-                    "SELECT id FROM jobs WHERE canonical_url=? AND id != ?",
-                    (canonical_url, by_pid["id"]),
-                ).fetchone()
-                if other is not None:
-                    return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
-                # 更新原行的 URL 和可变字段
+        def update_job(job_id, *, update_url=False, update_platform_id=False):
+            if update_url:
                 conn.execute(
                     "UPDATE jobs SET canonical_url=?, title=?, company=?, salary=?, location=?, "
                     "jd=?, experience=?, degree=?, extra_json=?, last_seen_at=? WHERE id=?",
-                    (canonical_url, title, company, salary, location, jd,
-                     experience, degree, extra_json, now, by_pid["id"]),
+                    (normalized_url, title, company, salary, location, jd, experience,
+                     degree, extra_json, now, job_id),
                 )
-                return {"ok": True, "job_id": by_pid["id"], "error_code": None}
-
-            # 分支5：只命中URL
-            if by_pid is None and by_url_dict is not None:
-                # 平台必须一致（分支2已检查）
-                # platform_job_id 为 NULL 或等于输入值时补写
-                existing_pid = by_url_dict["platform_job_id"]
-                if existing_pid is not None and platform_job_id is not None and existing_pid != platform_job_id:
-                    return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
+            elif update_platform_id:
                 conn.execute(
-                    "UPDATE jobs SET platform_job_id=?, title=?, company=?, salary=?, location=?, "
+                    "UPDATE jobs SET platform_job_id=COALESCE(?, platform_job_id), title=?, company=?, salary=?, location=?, "
                     "jd=?, experience=?, degree=?, extra_json=?, last_seen_at=? WHERE id=?",
-                    (platform_job_id, title, company, salary, location, jd,
-                     experience, degree, extra_json, now, by_url_dict["id"]),
+                    (platform_job_id, title, company, salary, location, jd, experience,
+                     degree, extra_json, now, job_id),
                 )
-                return {"ok": True, "job_id": by_url_dict["id"], "error_code": None}
+            else:
+                conn.execute(
+                    "UPDATE jobs SET title=?, company=?, salary=?, location=?, jd=?, "
+                    "experience=?, degree=?, extra_json=?, last_seen_at=? WHERE id=?",
+                    (title, company, salary, location, jd, experience, degree, extra_json,
+                     now, job_id),
+                )
 
-            # 分支6和7：两者都命中
-            if by_pid is not None and by_url_dict is not None:
-                if by_pid["id"] == by_url_dict["id"]:
-                    # 分支6：同一行，更新可变字段
-                    conn.execute(
-                        "UPDATE jobs SET canonical_url=?, title=?, company=?, salary=?, location=?, "
-                        "jd=?, experience=?, degree=?, extra_json=?, last_seen_at=? WHERE id=?",
-                        (canonical_url, title, company, salary, location, jd,
-                         experience, degree, extra_json, now, by_pid["id"]),
-                    )
-                    return {"ok": True, "job_id": by_pid["id"], "error_code": None}
-                else:
-                    # 分支7：不同行，冲突
-                    return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
-
+        if by_pid is None and by_url_dict is None:
+            new_id = _uuid()
+            insert_job(new_id)
+            return {"ok": True, "job_id": new_id, "error_code": None}
+        if by_pid is not None and by_url_dict is None:
+            other = conn.execute(
+                "SELECT id FROM jobs WHERE canonical_url=? AND id != ?",
+                (normalized_url, by_pid["id"]),
+            ).fetchone()
+            if other is not None:
+                return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
+            update_job(by_pid["id"], update_url=True)
+            return {"ok": True, "job_id": by_pid["id"], "error_code": None}
+        if by_pid is None and by_url_dict is not None:
+            existing_pid = by_url_dict["platform_job_id"]
+            if existing_pid is not None and platform_job_id is not None and existing_pid != platform_job_id:
+                return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
+            update_job(by_url_dict["id"], update_platform_id=True)
+            return {"ok": True, "job_id": by_url_dict["id"], "error_code": None}
+        if by_pid["id"] != by_url_dict["id"]:
             return {"ok": False, "job_id": None, "error_code": "job_identity_conflict"}
+        update_job(by_pid["id"])
+        return {"ok": True, "job_id": by_pid["id"], "error_code": None}
 
     # -- T113: 结果快照读写 API -------------------------------------------
 

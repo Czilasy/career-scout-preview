@@ -4,6 +4,7 @@ import pathlib
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from webui.store import TaskStore, _now
 
@@ -61,6 +62,149 @@ class TaskStoreTests(unittest.TestCase):
     def test_missing_task_raises_key_error(self):
         with self.assertRaises(KeyError):
             self.store.get_task("missing")
+
+
+class Migration28SchemaTests(unittest.TestCase):
+    """Task 001 migration 28 contract tests."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db_path = pathlib.Path(self.temp.name) / "state" / "webui.db"
+        self._cleanup_shared_backup_dir()
+
+    def tearDown(self):
+        self._cleanup_shared_backup_dir()
+        self.temp.cleanup()
+
+    @staticmethod
+    def _cleanup_shared_backup_dir():
+        dummy = TaskStore.__new__(TaskStore)
+        backup_dir = TaskStore._migration_backup_dir(dummy)
+        if backup_dir.exists():
+            for path in backup_dir.iterdir():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    def _build_v27_database(self):
+        with patch.object(TaskStore, "_migration_028", return_value=None):
+            store = TaskStore(self.db_path)
+        self.assertEqual(store.schema_version(), 27)
+        return store
+
+    def test_migration_28_adds_lifecycle_tables_column_and_indexes(self):
+        store = TaskStore(self.db_path)
+
+        with store._connection() as conn:
+            profile_job_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(profile_jobs)")
+            }
+            tables = {
+                row["name"]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            index_sql = [
+                row["sql"] or ""
+                for row in conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index'"
+                )
+            ]
+
+        self.assertGreaterEqual(store.schema_version(), 28)
+        self.assertIn("last_follow_up_at", profile_job_columns)
+        self.assertIn("profile_job_events", tables)
+        self.assertIn("profile_job_command_receipts", tables)
+        joined = " ".join(index_sql).lower()
+        self.assertIn("idx_profile_jobs_reminder_candidates", joined)
+        self.assertIn("idx_profile_job_events_history", joined)
+        self.assertIn("idx_profile_job_command_receipts_job", joined)
+
+    def test_migration_28_is_idempotent_and_new_history_tables_enforce_foreign_keys(self):
+        store = TaskStore(self.db_path)
+        reopened = TaskStore(self.db_path)
+
+        self.assertEqual(reopened.schema_version(), 28)
+        with reopened._connection() as conn:
+            migration_count = conn.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=28"
+            ).fetchone()[0]
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO profile_job_events (id, profile_id, job_id, action, occurred_at) "
+                    "VALUES ('orphan-event', 'missing-profile', 'missing-job', 'mark_read', ?)",
+                    (_now(),),
+                )
+
+        self.assertEqual(store.schema_version(), 28)
+        self.assertEqual(migration_count, 1)
+
+    def test_migration_27_to_28_keeps_existing_rows_and_creates_no_history(self):
+        store = self._build_v27_database()
+        profile = store.create_profile("迁移画像")
+        job = store.save_job(
+            "https://www.zhipin.com/job_detail/migration-28.html",
+            "https://www.zhipin.com/job_detail/migration-28.html",
+            "岗位", "公司", "20K", "上海", "JD",
+        )
+        store.link_profile_job(profile["id"], job["id"], None, None, status="interested")
+
+        reopened = TaskStore(self.db_path)
+        with reopened._connection() as conn:
+            profile_job = conn.execute(
+                "SELECT status, applied_at, last_follow_up_at FROM profile_jobs "
+                "WHERE profile_id=? AND job_id=?",
+                (profile["id"], job["id"]),
+            ).fetchone()
+            event_count = conn.execute(
+                "SELECT COUNT(*) FROM profile_job_events"
+            ).fetchone()[0]
+            receipt_count = conn.execute(
+                "SELECT COUNT(*) FROM profile_job_command_receipts"
+            ).fetchone()[0]
+
+        self.assertGreaterEqual(reopened.schema_version(), 28)
+        self.assertEqual(profile_job["status"], "interested")
+        self.assertIsNone(profile_job["applied_at"])
+        self.assertIsNone(profile_job["last_follow_up_at"])
+        self.assertEqual(event_count, 0)
+        self.assertEqual(receipt_count, 0)
+        manifest_path = next(reopened.backup_dir_for_tests().glob("*.manifest.json"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["source_schema_version"], 27)
+        self.assertEqual(manifest["backup_schema_version"], 27)
+        self.assertIn("-to-v28-", manifest["backup_file"])
+
+    def test_failed_migration_28_rolls_back_schema_and_version(self):
+        self._build_v27_database()
+
+        original_add_column = TaskStore._add_column_if_missing
+
+        def fail_after_first_alter(conn, table, column, definition):
+            original_add_column(conn, table, column, definition)
+            raise RuntimeError("injected migration failure")
+
+        with patch.object(
+            TaskStore, "_add_column_if_missing", side_effect=fail_after_first_alter
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected migration failure"):
+                TaskStore(self.db_path)
+
+        with sqlite3.connect(self.db_path) as conn:
+            version = conn.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+            ).fetchone()[0]
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(profile_jobs)")
+            }
+            event_table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='profile_job_events'"
+            ).fetchone()
+        self.assertEqual(version, 27)
+        self.assertNotIn("last_follow_up_at", columns)
+        self.assertIsNone(event_table)
 
 
 class SchemaMigrationTests(unittest.TestCase):
@@ -539,6 +683,44 @@ class Migration27SchemaTests(unittest.TestCase):
         store = TaskStore(self.db_path)
         self.assertGreaterEqual(store.schema_version(), 27)
 
+    def test_failed_migration_27_rolls_back_schema_and_version(self):
+        """T705: migration 27 中途失败必须整笔回滚，源库版本仍是 26，无部分写入。"""
+        # 先构造一个 v26 库（含 jobs/screening_runs 等基础表，无 platform 列）
+        TaskStore(self.db_path)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM schema_migrations WHERE version >= 27")
+            # 记录 migration 27 前的 jobs 列集（无 platform/platform_job_id）
+            pre_cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+        self.assertNotIn("platform", pre_cols)
+        self.assertNotIn("platform_job_id", pre_cols)
+
+        # 注入失败：第一次 ALTER 成功后立即抛错
+        original_add_column = TaskStore._add_column_if_missing
+
+        def fail_after_first_alter(conn, table, column, definition):
+            original_add_column(conn, table, column, definition)
+            raise RuntimeError("injected migration 27 failure")
+
+        with patch.object(
+            TaskStore, "_add_column_if_missing", side_effect=fail_after_first_alter
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected migration 27 failure"):
+                TaskStore(self.db_path)
+
+        # 验证源库未被部分写入：版本仍是 26，jobs 仍无 platform 列
+        with sqlite3.connect(self.db_path) as conn:
+            version = conn.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+            ).fetchone()[0]
+            post_cols = {
+                row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+        self.assertEqual(version, 26, "migration 27 失败后版本必须仍是 26")
+        self.assertNotIn("platform", post_cols, "回滚后 jobs 不得残留 platform 列")
+        self.assertNotIn("platform_job_id", post_cols, "回滚后 jobs 不得残留 platform_job_id 列")
+
     def test_old_jobs_canonical_url_unique_constraint_preserved(self):
         """migration 27 必须保留 jobs.canonical_url 的全局唯一约束。"""
         store = TaskStore(self.db_path)
@@ -684,6 +866,26 @@ class JobUpsertDualIndexTests(unittest.TestCase):
         with self.store._connection() as conn:
             row = conn.execute("SELECT title FROM jobs WHERE platform='boss' AND platform_job_id='b1'").fetchone()
         self.assertEqual(row["title"], "new")
+
+    def test_url_only_upsert_preserves_existing_platform_job_id(self):
+        url = self._boss_url(10)
+        first = self.store.upsert_job(
+            platform="boss", platform_job_id="stable-id", canonical_url=url
+        )
+
+        second = self.store.upsert_job(
+            platform="boss", platform_job_id=None, canonical_url=url, title="updated"
+        )
+
+        self.assertTrue(second["ok"])
+        self.assertEqual(second["job_id"], first["job_id"])
+        with self.store._connection() as conn:
+            row = conn.execute(
+                "SELECT platform_job_id, title FROM jobs WHERE id=?",
+                (first["job_id"],),
+            ).fetchone()
+        self.assertEqual(row["platform_job_id"], "stable-id")
+        self.assertEqual(row["title"], "updated")
 
     def test_branch_7_both_hit_different_rows_conflict(self):
         """分支7：平台ID和URL分别命中不同内部UUID，返回冲突。"""
@@ -872,6 +1074,46 @@ class CleanupStoreTests(unittest.TestCase):
         remaining = self.store.list_profile_jobs(self.profile["id"])
         statuses = [pj["status"] for pj in remaining]
         self.assertIn("interested", statuses)
+
+    def test_cleanup_preserves_read_stale_and_lifecycle_events(self):
+        from datetime import datetime, timezone, timedelta
+
+        old = datetime.now(timezone.utc) - timedelta(days=35)
+        preserved = []
+        with self.store._connection() as conn:
+            for status in ("read", "stale"):
+                job = self.store.save_job(
+                    f"https://www.zhipin.com/job_detail/cleanup-{status}.html",
+                    f"https://www.zhipin.com/job_detail/cleanup-{status}.html",
+                    "T", "C", "S", "L", "JD",
+                )
+                self.store.update_job_expiry(job["id"], old)
+                self.store.link_profile_job(
+                    self.profile["id"], job["id"], None, None, status=status
+                )
+                preserved.append((job["id"], status))
+
+        # A real lifecycle event must remain attached to the explicit state.
+        job_id, _ = preserved[0]
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO profile_job_events (id, profile_id, job_id, action, from_status, to_status, occurred_at) "
+                "VALUES ('cleanup-event', ?, ?, 'mark_read', 'new', 'read', ?)",
+                (self.profile["id"], job_id, _now()),
+            )
+
+        self.store.cleanup_expired_jobs(days=30)
+
+        with self.store._connection() as conn:
+            rows = conn.execute(
+                "SELECT job_id, status FROM profile_jobs WHERE profile_id=? AND job_id IN (?, ?)",
+                (self.profile["id"], preserved[0][0], preserved[1][0]),
+            ).fetchall()
+            event_count = conn.execute(
+                "SELECT COUNT(*) FROM profile_job_events WHERE id='cleanup-event'"
+            ).fetchone()[0]
+        self.assertEqual({(row["job_id"], row["status"]) for row in rows}, set(preserved))
+        self.assertEqual(event_count, 1)
 
 
 class ScreeningRunStoreTests(unittest.TestCase):
