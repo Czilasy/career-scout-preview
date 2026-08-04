@@ -127,6 +127,5 @@ spec011-*.yaml
 .devlog/
 .specify/
 
-# Other-session build artifacts (temporary)
-webui/dist/assets/index-*.js
-webui/src/__tests__/types.spec.ts
+# Source maps are build-time only; dist release snapshots stay tracked
+webui/dist/**/*.map
