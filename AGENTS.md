@@ -4,13 +4,19 @@
 
 ## 设计新功能前必读
 
-- 本地开发时，设计新东西先查看 `roadmap/` 下的本地参考文档（如 `REFERENCE_GET_JOBS.md`）；有可借鉴的零件就借鉴，没有现成方案再自由发挥。
+- 本地开发时，设计新东西先查看 `roadmap/` 下的本地参考文档（如 `REFERENCE_GET_JOBS.md`；该目录仅本地存在且已被 `.gitignore` 忽略，公开仓库不含）。有可借鉴的零件就借鉴，没有现成方案再自由发挥。
 
 ## 提交或推送前必做
 
 - 先运行：`uv run python -m unittest tests.test_repo_hygiene`
 - 测试失败时禁止提交和推送，先处理未跟踪文件、忽略规则或敏感文件。
 - 查看 `git status` 和 `git diff --cached`，确认没有把无关文件一起提交。
+- 提交信息使用 Conventional Commits（`feat|fix|docs|style|refactor|test|perf|build|ci|chore|revert`），卫生测试会校验最近 3 条非 merge 提交的格式。
+
+## 提交钩子（可选启用）
+
+- `hooks/pre-commit` 会在提交前自动运行卫生测试，失败即阻断提交。
+- 启用方式（仓库级配置，不入库，克隆者需自行启用）：`git config core.hooksPath hooks`
 
 ## 文件边界
 

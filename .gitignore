@@ -89,6 +89,10 @@ tuning/
 _tmp_*.py
 webui/.tmp-*.mjs
 
+# Git hooks (per AGENTS.md: optional, not tracked; each clone opts in via
+# `git config core.hooksPath hooks`)
+hooks/
+
 # Backup and patch leftovers
 *.bak
 *.orig

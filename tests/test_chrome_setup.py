@@ -841,6 +841,22 @@ class ChromeSetupTests(unittest.TestCase):
                 [r"C:\Users\demo-user\.career-scout\chrome-profile"],
             )
 
+    def test_windows_process_parsing_decodes_utf8_non_ascii_paths(self):
+        """非 ASCII 项目路径必须按 UTF-8 解码，避免 profile 识别成未知。"""
+        module = load_module()
+        profile_path = r"D:\测试\demo-project\.chrome-profiles\account_b.zhilian"
+        ps_json = json.dumps([{
+            "ProcessId": 789,
+            "CommandLine": (
+                r'"C:\Program Files\Google\Chrome\Application\chrome.exe" '
+                f'--remote-debugging-port=9333 --user-data-dir="{profile_path}"'
+            ),
+        }], ensure_ascii=False)
+        with mock.patch.object(module.platform, "system", return_value="Windows"), \
+                mock.patch.object(module.subprocess, "run", return_value=type(
+                    "Completed", (), {"stdout": ps_json, "returncode": 0})()) as run:
+            self.assertEqual(module.chrome_user_data_dirs_for_cdp_port(9333), [profile_path])
+        self.assertEqual(run.call_args.kwargs.get("encoding"), "utf-8")
     def test_smoke_jobs_require_api_salary_and_link(self):
         module = load_module()
 

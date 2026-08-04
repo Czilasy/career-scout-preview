@@ -2729,13 +2729,14 @@ def iter_chrome_process_commands():
     """Return (pid, command line) tuples for Chrome-like browser processes."""
     if platform.system() == "Windows":
         ps_script = (
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
             "Get-CimInstance Win32_Process -Filter \"name = 'chrome.exe'\" | "
             "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
         )
         try:
             r = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps_script],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, encoding="utf-8", errors="replace", timeout=5,
             )
         except Exception:
             return []
