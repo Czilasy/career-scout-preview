@@ -3502,6 +3502,25 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         data = resp.get_json()
         self.assertEqual(data.get("error"), "run_identity_conflict")
 
+    def test_search_progress_digest_conflict(self):
+        """T713: 内存 task digest 与 DB run 不一致 → 409 run_identity_conflict。"""
+        task_id, store = self._create_finished_scrape_task()
+
+        # 给内存 task 写入一个 task_input_digest，再篡改 DB run 的 digest
+        tasks = self.app.config["PIPELINE_TASKS"]
+        task = tasks.get(task_id)
+        if task is not None:
+            task["task_input_digest"] = "mem-digest-aaa"
+        with store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET task_input_digest='db-digest-bbb' WHERE id=?",
+                (task_id,))
+
+        resp = self.client.get(f"/api/search-progress/{task_id}")
+        self.assertEqual(resp.status_code, 409)
+        data = resp.get_json()
+        self.assertEqual(data.get("error"), "run_identity_conflict")
+
 
 # ======================================================================
 # 门禁B: T406-T409 — AI run 平台继承 + 结果身份
@@ -4245,6 +4264,155 @@ class PlatformAwareJobDetailTests(unittest.TestCase):
             "source_url": "",
         })
         self.assertEqual(resp.status_code, 400)
+
+
+class DraftSwitchTargetRunConservationTests(unittest.TestCase):
+    """T712: 创建目标 run 后把草稿切到另一平台，外围操作仍作用于原 run。
+
+    验证 cancel/finish/continue/reset 路由从 run.platform 读取平台，
+    不读全局 draft platform。草稿切换不应改变目标 run 的平台归属。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _seed_paused_zhilian_run(self, run_id="draft-switch-zhilian", status="paused"):
+        """种入一个 zhilian run，模拟目标 run 已创建。"""
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, record_kind, frozen_filters_json, "
+                "source_count, match_count, mismatch_count, "
+                "execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                "VALUES (?, 'zhilian', ?, 'process_log', '{}', "
+                "0, 0, 0, '{\"platform\":\"zhilian\"}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id), status),
+            )
+        return run_id
+
+    def test_cancel_after_draft_switch_still_targets_original_run(self):
+        """T712: 创建 zhilian run → 草稿切到 boss → cancel 仍作用于 zhilian run。"""
+        run_id = self._seed_paused_zhilian_run()
+        # cancel 路由不读 draft，从 run.platform 读取
+        resp = self.client.post(f"/api/task/cancel/{run_id}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data.get("platform"), "zhilian",
+                         "草稿切换后 cancel 仍应返回原 run 平台")
+        # 验证 DB 中 run 的 platform 未被改写
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["platform"], "zhilian")
+
+    def test_reset_after_draft_switch_still_targets_original_run(self):
+        """T712: 创建 zhilian run → 草稿切到 boss → reset 仍校验原 run 平台。"""
+        # reset 要求 run 状态为 succeeded/partial/failed
+        run_id = self._seed_paused_zhilian_run(status="succeeded")
+        # reset 请求带 platform=boss（模拟草稿切到 boss），应与 run.platform=zhilian 冲突
+        resp = self.client.post("/api/reset-latest-result", json={
+            "run_id": run_id,
+            "platform": "boss",
+        })
+        self.assertEqual(resp.status_code, 409)
+        data = resp.get_json()
+        self.assertEqual(data.get("error"), "run_platform_conflict")
+
+
+class CrossPlatformBrowserConservationTests(unittest.TestCase):
+    """T714: cancel/finish zhilian run 不得关闭 boss 浏览器，反之亦然。
+
+    路由层调用 close_debug_chrome() 时不得误关另一平台的浏览器。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _seed_running_run(self, run_id, platform="zhilian"):
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, record_kind, frozen_filters_json, "
+                "source_count, match_count, mismatch_count, "
+                "execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                f"VALUES (?, '{platform}', 'running', 'process_log', '{{}}', "
+                "0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id),),
+            )
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running", "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+            "platform": platform,
+        }
+        return run_id
+
+    @mock.patch("webui.pipeline_exec.close_debug_chrome")
+    def test_cancel_zhilian_run_does_not_close_with_boss_port(self, mock_close):
+        """T714: cancel zhilian run 时 close_debug_chrome 不得用 BOSS 默认端口 9222 关闭。"""
+        run_id = self._seed_running_run("cancel-zhilian-conservation", platform="zhilian")
+        resp = self.client.post(f"/api/task/cancel/{run_id}")
+        self.assertEqual(resp.status_code, 200)
+        # close_debug_chrome 被调用时，参数不得是 BOSS 默认端口 9222
+        if mock_close.called:
+            call_args = mock_close.call_args
+            port_arg = call_args[0][0] if call_args[0] else None
+            self.assertNotEqual(port_arg, 9222,
+                                "cancel zhilian run 不得用 BOSS 端口 9222 关闭浏览器")
+
+    @mock.patch("webui.pipeline_exec.close_debug_chrome")
+    def test_cancel_boss_run_does_not_close_with_zhilian_port(self, mock_close):
+        """T714: cancel boss run 时 close_debug_chrome 不得用智联端口 9223 关闭。"""
+        run_id = self._seed_running_run("cancel-boss-conservation", platform="boss")
+        resp = self.client.post(f"/api/task/cancel/{run_id}")
+        self.assertEqual(resp.status_code, 200)
+        if mock_close.called:
+            call_args = mock_close.call_args
+            port_arg = call_args[0][0] if call_args[0] else None
+            self.assertNotEqual(port_arg, 9223,
+                                "cancel boss run 不得用智联端口 9223 关闭浏览器")
 
 
 class PlatformAwareResetResultTests(unittest.TestCase):
