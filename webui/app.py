@@ -1785,8 +1785,14 @@ def create_app(config=None):
 
     def _activate_run_browser(run=None) -> None:
         """Point the shared CDP helper at the selected profile."""
-        from webui.pipeline_exec import set_active_cdp_data_dir
-        set_active_cdp_data_dir(_account_for_run(run))
+        from webui.pipeline_exec import resolve_browser_account, set_active_cdp_data_dir
+        from webui.platforms import derive_zhilian_profile_dir, resolve_login_space
+        account = str((run or {}).get("browser_account") or (run or {}).get("execution_params", {}).get("browser_account") or "") or _account_for_run(run)
+        platform = str((run or {}).get("platform") or (run or {}).get("execution_params", {}).get("platform") or "boss")
+        boss_dir = resolve_browser_account(account, app.config["BROWSER_ACCOUNTS_PATH"]) or ""
+        resolve_login_space(platform, account, boss_profile_dir=boss_dir or "unresolved")
+        profile_dir = boss_dir if platform == "boss" else derive_zhilian_profile_dir(boss_dir)
+        set_active_cdp_data_dir(profile_dir)
 
     def _activate_task_browser(task_id: str) -> None:
         """Use the account captured when the task was submitted, if present."""
@@ -1797,7 +1803,11 @@ def create_app(config=None):
         profile_dir = resolve_browser_account(
             account, app.config["BROWSER_ACCOUNTS_PATH"])
         if profile_dir:
-            set_active_cdp_data_dir(profile_dir)
+            platform = str(task.get("platform") or "boss")
+            from webui.platforms import resolve_login_space
+            space = resolve_login_space(platform, account or "a", boss_profile_dir=profile_dir)
+            from webui.platforms import derive_zhilian_profile_dir
+            set_active_cdp_data_dir(profile_dir if platform == "boss" else derive_zhilian_profile_dir(profile_dir))
         else:
             _activate_run_browser()
 
@@ -1869,7 +1879,7 @@ def create_app(config=None):
                         or _resume_params.get("platform")
                         or "boss"
                     )
-                    chrome_ok, chrome_err = ensure_chrome_ready()
+                    chrome_ok, chrome_err = ensure_chrome_ready(_resume_params.get("cdp_port"))
                     if not chrome_ok:
                         passed = False
                         code = "cdp_unavailable"
@@ -1954,7 +1964,7 @@ def create_app(config=None):
         for job in jobs or []:
             if not isinstance(job, dict) or str(job.get("jd") or "").strip():
                 continue
-            job_id = str(job.get("job_id") or job.get("id") or "").strip()
+            job_id = str(job.get("platform_job_id") or job.get("job_id") or job.get("id") or "").strip()
             failed_code = str(job.get("jd_failed_code") or "").strip()
             if not job_id or not failed_code:
                 continue
@@ -2297,7 +2307,8 @@ def create_app(config=None):
             reason = str(vobj.get("reason") or job.get("verdict_reason") or "")
             if verdict == "dropped":
                 dropped.append({
-                    "job_id": jid,
+                    "platform_job_id": str(job.get("platform_job_id") or jid),
+                    "job_id": str(job.get("job_id") or "") or None,
                     "title": job.get("title") or "", "reason": reason or "粗筛移除",
                     "canonical_url": job.get("source_url") or job.get("job_link") or "",
                 })
@@ -2321,7 +2332,8 @@ def create_app(config=None):
                     or "未开始抓取 JD（提前结束）"
                 )
             jobs.append({
-                "job_id": jid,
+                "platform_job_id": str(job.get("platform_job_id") or jid),
+                "job_id": str(job.get("job_id") or "") or None,
                 "title": job.get("title") or "",
                 "company": job.get("company") or job.get("boss_name") or "",
                 "salary": job.get("salary") or "",
@@ -2334,15 +2346,16 @@ def create_app(config=None):
                 "caveats": caveats,
                 "failed_code": pending_codes.get(jid) or "",
             })
-        dropped_ids = {str(item.get("job_id") or "") for item in dropped}
+        dropped_ids = {str(item.get("platform_job_id") or item.get("job_id") or "") for item in dropped}
         for item in source_dropped or []:
             if not isinstance(item, dict):
                 continue
-            jid = str(item.get("job_id") or item.get("source_url") or "")
+            jid = str(item.get("platform_job_id") or item.get("job_id") or item.get("source_url") or "")
             if jid and jid in dropped_ids:
                 continue
             dropped.append({
-                "job_id": jid,
+                "platform_job_id": str(item.get("platform_job_id") or jid),
+                "job_id": str(item.get("job_id") or "") or None,
                 "title": item.get("title") or "",
                 "reason": item.get("reason") or item.get("verdict_reason") or "粗筛移除",
                 "canonical_url": item.get("canonical_url") or item.get("source_url") or "",
@@ -2586,6 +2599,9 @@ def create_app(config=None):
                 dict(job) for job in source_result.get("jobs", [])
                 if isinstance(job, dict)
             ]
+            for job in raw_jobs:
+                job["job_id"] = str(job.get("platform_job_id") or job.get("job_id") or job.get("id") or "")
+                job.setdefault("platform_job_id", job["job_id"])
             if not raw_jobs:
                 raise RuntimeError("empty_scrape_result")
 
@@ -2774,7 +2790,7 @@ def create_app(config=None):
             jd_failures: dict[str, dict[str, str]] = {}
             if survivors:
                 emit(stage="ensure_chrome", message="启动调试浏览器，准备抓取 JD…")
-                chrome_ok, chrome_err = ensure_chrome_ready()
+                chrome_ok, chrome_err = ensure_chrome_ready(frozen_cdp_port)
                 if not chrome_ok:
                     reason = f"调试浏览器未就绪（{chrome_err}），请处理后继续"
                     _save_jd_checkpoint(jd_path, jd_map)
@@ -2831,7 +2847,7 @@ def create_app(config=None):
                 DETAIL_CHUNK = max(1, int(execution_config.detail_batch_size))
                 for chunk_start in range(0, len(todo_jd), DETAIL_CHUNK):
                     if _stop_requested():
-                        close_debug_chrome()
+                        close_debug_chrome(frozen_cdp_port)
                         _mark_cancelled()
                         return
                     chunk = todo_jd[chunk_start:chunk_start + DETAIL_CHUNK]
@@ -2898,10 +2914,10 @@ def create_app(config=None):
                                 )
                         return
                     if detail_result.get("stopped"):
-                        close_debug_chrome()
+                        close_debug_chrome(frozen_cdp_port)
                         _mark_cancelled()
                         return
-                close_debug_chrome()
+                close_debug_chrome(frozen_cdp_port)
             for job in enriched:
                 jid = str(job.get("job_id", ""))
                 job["jd"] = jd_map.get(jid, "")
@@ -3075,7 +3091,7 @@ def create_app(config=None):
                 ))
             store.append_task_events(task_id, job_events)
             source_run_id = store.save_pipeline_result(
-                result, {"screening": screening_fields},
+                result, {"screening": screening_fields, "platform": frozen_platform},
                 started_at=task.get("started_at"),
                 finished_at=int(time.time() * 1000),
                 execution_config=execution_config.to_dict(),
@@ -3870,6 +3886,16 @@ def create_app(config=None):
             platform_raw, browser_account,
             boss_profile_dir=profile_dir or "unresolved",
         )
+        from webui.platforms import resolve_platform_city
+        resolved_cities = []
+        for city_name in scope_cities:
+            entry = resolve_platform_city(platform_raw, city_name)
+            resolved_cities.append({
+                "name": entry.name,
+                "label": entry.label,
+                "platform_code": entry.platform_code,
+                "mapping_version": entry.mapping_version,
+            })
         task_input_digest = hashlib.sha256(json.dumps({
             "platform": platform_raw,
             "scope_digest": frozen_scope.scope_digest,
@@ -3905,6 +3931,7 @@ def create_app(config=None):
                 "profile_key": login_space.profile_key,
                 "task_input_digest": task_input_digest,
                 "execution_config": execution_config.to_dict(),
+                "resolved_cities": resolved_cities,
                 "frozen_scope": frozen_scope.to_dict(),
             },
             backend_version=_backend_version,
@@ -5517,7 +5544,13 @@ def create_app(config=None):
             payload = store.load_latest_pipeline_result(source_run_id or None)
             run_id = source_run_id or store.get_latest_done_run_id()
             jobs = (payload or {}).get("result", {}).get("jobs", []) if payload else []
-            by_id = {str(j.get("job_id", "")): j for j in jobs if isinstance(j, dict)}
+            by_id: dict[str, dict] = {}
+            for j in jobs:
+                if not isinstance(j, dict):
+                    continue
+                pid = str(j.get("platform_job_id") or j.get("job_id") or "").strip()
+                if pid:
+                    by_id.setdefault(pid, j)
             targets = [by_id[jid] for jid in job_ids if jid in by_id]
             total = len(targets)
             emit(stage="fetch_jd", current=0, total=total,
@@ -5548,8 +5581,11 @@ def create_app(config=None):
                     j.get("source_url") or j.get("job_link") or j.get("canonical_url") or ""
                 )
                 if url:
-                    no_jd.append({"job_id": str(j.get("job_id", "")),
-                                  "source_url": url, "job_link": url})
+                    no_jd.append({
+                        "platform_job_id": str(j.get("platform_job_id") or j.get("job_id") or ""),
+                        "job_id": str(j.get("platform_job_id") or j.get("job_id") or ""),
+                        "source_url": url, "job_link": url,
+                    })
             fetched_jd: dict = {}
             detail_jobs: list = []
             if no_jd:
@@ -5679,10 +5715,12 @@ def create_app(config=None):
             else:
                 to_judge = []
                 for j in targets:
-                    jid = str(j.get("job_id", ""))
+                    jid = str(j.get("platform_job_id") or j.get("job_id") or "")
                     jd = str(j.get("jd", "")).strip() or fetched_jd.get(jid, "")
                     if jd:
-                        to_judge.append(j)
+                        jj = dict(j)
+                        jj["job_id"] = jid
+                        to_judge.append(jj)
                 if to_judge:
                     _adv = _load_legacy_advanced_settings()
                     match_batch = int(_adv.get("match_batch_size") or 4)
@@ -6343,7 +6381,7 @@ def create_app(config=None):
             total_scraped=source_total_scraped,
         )
         snapshot_run_id = store.save_pipeline_result(
-            result, {"screening": run.get("frozen_filters") or {}},
+            result, {"screening": run.get("frozen_filters") or {}, "platform": params.get("platform") or run.get("platform") or "boss"},
             started_at=run.get("started_at"),
             finished_at=int(time.time() * 1000),
             execution_config=params.get("execution_config") or {},

@@ -1370,24 +1370,14 @@ def _safe_host(url: str) -> str:
 
 
 # ===========================================================================
-# tasks004 — ZhilianCdpSource adapter 骨架
+# tasks004 — ZhilianCdpSource adapter（2026-08-04 真实页面核验后启用）
 #
-# 实施门禁（fixture_manifest.json blocked_facts）：
-#   list/detail/empty/login wall/edgeone/rate limit/block marker 全部未核验；
-#   company_nature options、非全国城市码未核验；can_run_real_tasks=false。
-#
-# 本任务只实现有证据覆盖的 adapter 骨架：
-#   - 构造校验（T301/T302）：禁用平台、显式冻结端口、profile_key 边界、不回退 BOSS；
-#   - preflight 分类骨架（T303）：调用 zhilian_cdp_raw.preflight，signal → 错误矩阵；
-#   - 日志安全（T304）：只含平台/阶段/计数/ID/URL host，脱敏；
-#   - fetch_list 输入校验骨架（T306）：拒绝 AI filters、要求城市解析快照、页数；
-#   - input_hash（T309）：覆盖 platform/关键词/完整城市快照/页数；
-#   - fetch_detail URL/平台/身份校验骨架（T311）：不伪造 JD；
-#   - fetch_details_batch 熔断器复用（T312）；
-#   - outcome 合同表达（T313）。
-#
-# 真实页面 marker 检测、字段归一化、空结果判定、真实 JD 取得保持占位，
-# 在 marker fixture 核验后才解锁（T305/T307/T308/T310/T311 真实分支）。
+#   - 构造校验（T301/T302）：显式冻结端口、profile_key 边界、不回退 BOSS；
+#   - preflight（T303）：zhilian_cdp_raw.preflight 真实登录/DOM 判定；
+#   - fetch_list（T306/T307/T308）：真实 API 列表、统一字段、空结果证据；
+#   - fetch_detail（T311）：真实 __INITIAL_STATE__ JD，不伪造正文；
+#   - fetch_details_batch（T312）：熔断器复用；
+#   - 日志安全（T304）：只含平台/阶段/计数/ID/URL host，脱敏。
 # ===========================================================================
 
 # 智联 CDP 冻结端口（与 BOSS 9222 隔离，避免 profile/平台边界泄漏）。
@@ -1401,6 +1391,7 @@ _ZHILIAN_HOST_ALLOWLIST = frozenset({
     "www.zhaopin.com",
     "zhaopin.com",
     "m.zhaopin.com",
+    "jobs.zhaopin.com",
     "fe-api.zhaopin.com",
     "i.zhaopin.com",
 })
@@ -1544,39 +1535,12 @@ def _validate_zhilian_detail_input(job: Any) -> tuple[bool, str]:
 
 
 class ZhilianCdpSource:
-    """智联 CDP adapter 骨架（tasks004）。
+    """智联 CDP adapter（tasks004，2026-08-04 真实页面核验后启用）。
 
     符合 ``JobSource`` Protocol（contracts/job-source.md）：携带 ``platform``
     和显式 ``cdp_port``，支持 ``preflight``、``fetch_list``、``fetch_detail``
     和 ``fetch_details_batch``。
 
-    实施门禁：fixture_manifest.json 记录智联页面 marker 全部为 blocked_facts，
-    本任务只实现有证据覆盖的 adapter 骨架。真实页面 marker 检测、字段归一化、
-    空结果判定、真实 JD 取得保持占位，在 marker fixture 核验后才解锁。
-
-    构造校验（T301/T302）：
-    - 必须显式接收 browser_account 和冻结 CDP 端口（9223），不得隐式默认；
-    - profile_key 必须等于 'zhilian:<browser_account>'，不得使用 BOSS profile_key；
-    - 显式拒绝 BOSS 默认端口 9222，避免隐式回退 BOSS 登录空间；
-    - 不读全局活动账号，构造冻结 platform/browser_account/cdp_port/profile_key。
-
-    preflight（T303）：调用 scripts/zhilian_cdp_raw.py 的 preflight 函数，
-    按返回的稳定 signal 映射到错误矩阵。真实 marker 检测函数在
-    zhilian_cdp_raw.py 中保持占位（返回 None），marker fixture 核验后才解锁。
-
-    日志安全（T304）：safe_log 只含平台/阶段/计数/ID 是否存在/URL host/失败码，
-    不含 Cookie、JD 正文、页面正文、profile 路径、绝对路径、token。
-
-    fetch_list（T306）：只接收关键词、规范城市解析快照和页数，拒绝任何 AI filters。
-    真实列表抓取与字段归一化保持占位（T305/T307 fixture 缺失）。
-
-    fetch_detail（T311）：URL/平台/平台岗位身份校验骨架。无法取得真实 JD 时
-    返回 source_not_found，不伪造正文。真实 JD 取得保持占位（T310 fixture 缺失）。
-
-    fetch_details_batch（T312）：单项异常继续，连续平台级 signal 触发熔断器，
-    熔断后后续岗位返回 source_blocked。
-
-    outcome（T313）：可无损表达 non_empty/empty/failed/paused、计数、证据和安全错误。
     """
 
     platform: str = "zhilian"
@@ -1612,7 +1576,7 @@ class ZhilianCdpSource:
         self.cdp_port = int(cdp_port)
         self.profile_key = expected_profile_key
         self.breaker = breaker or SourceCircuitBreaker()
-        # runner 注入：默认调用 zhilian_cdp_raw 的真实函数（marker 检测占位）；
+        # runner 注入：默认调用 zhilian_cdp_raw 的真实函数；测试通过替身绕过真实 CDP。
         # 测试通过注入替身绕过真实 CDP 调用。
         self._preflight_runner = preflight_runner or _default_zhilian_preflight_runner
         self._list_runner = list_runner or _default_zhilian_list_runner
@@ -1638,14 +1602,13 @@ class ZhilianCdpSource:
         )
 
     # ------------------------------------------------------------------
-    # T303: preflight 分类骨架
+    # T303: preflight 分类
     # ------------------------------------------------------------------
     def preflight(self) -> SourceOutcome:
         """检查智联冻结 CDP 端口、profile、登录态和平台可访问性。
 
         调用 ``_preflight_runner``（默认 zhilian_cdp_raw.preflight），按返回的
-        signal 字符串映射到错误矩阵。marker 检测需要真实页面 fixture
-        （blocked_facts），本任务只实现分类逻辑骨架。
+        signal 字符串映射到错误矩阵（登录/验证/限流/封禁/CDP/超时）。
         """
         try:
             signal = self._preflight_runner(self.cdp_port)
@@ -1673,14 +1636,13 @@ class ZhilianCdpSource:
         )
 
     # ------------------------------------------------------------------
-    # T306: fetch_list 输入校验骨架
+    # T306: fetch_list 输入校验
     # ------------------------------------------------------------------
     def fetch_list(self, plan_item: dict) -> SourceOutcome:
-        """抓取智联岗位列表页（输入校验骨架）。
+        """抓取智联岗位列表页。
 
-        真实列表抓取与字段归一化需要 list_page_markers fixture（blocked_facts），
-        本任务只实现输入校验和 outcome 合同表达。runner 返回 ok 时透传 jobs；
-        runner 返回 empty signal 时需要 marker fixture（未核验），当前归入失败。
+        只接收关键词、规范城市解析快照和页数；真实 API 结果统一字段。
+        runner 返回 empty signal 时必须携带 empty_evidence，否则按失败处理。
         """
         ok, reason = _validate_zhilian_plan_item(plan_item)
         if not ok:
@@ -1693,7 +1655,14 @@ class ZhilianCdpSource:
                 failed_reason=f"输入校验失败: {reason}",
             )
         try:
-            signal, jobs = self._list_runner(plan_item)
+            runner_item = dict(plan_item)
+            runner_item["cdp_port"] = self.cdp_port
+            runner_result = self._list_runner(runner_item)
+            if isinstance(runner_result, tuple) and len(runner_result) == 2:
+                signal, jobs = runner_result
+                empty_evidence = None
+            else:
+                signal, jobs, empty_evidence = runner_result
         except Exception:
             return SourceOutcome.failure(
                 failed_code="source_unknown_error",
@@ -1703,8 +1672,7 @@ class ZhilianCdpSource:
             )
         signal = str(signal or "invalid_output")
         if signal == "ok":
-            # 真实字段归一化（T307）需要 list_page_markers fixture，未核验前
-            # 只透传 runner 返回的 jobs，不做 BOSS 字段映射。
+            # 字段归一化由 zhilian_cdp_raw._normalize_job 完成，这里透传。
             return SourceOutcome.success(
                 jobs=list(jobs or []),
                 safe_log=_zhilian_safe_log(
@@ -1715,15 +1683,21 @@ class ZhilianCdpSource:
                 input_hash=str(plan_item.get("input_hash") or ""),
             )
         if signal == "empty":
-            # T308 真实空结果判定需要 empty_state_markers fixture（blocked_facts），
-            # 未核验前不得返回 empty_success（避免伪造证据）。归入失败。
-            return SourceOutcome.failure(
-                failed_code="source_invalid_output",
+            if not isinstance(empty_evidence, dict) or not empty_evidence:
+                return SourceOutcome.failure(
+                    failed_code="source_invalid_output",
+                    safe_log=_zhilian_safe_log(
+                        stage="list", failed_code="source_invalid_output",
+                        counts={"reason": "empty_evidence_missing"},
+                    ),
+                    failed_reason="空结果证据缺失，不得返回 empty_success",
+                )
+            return SourceOutcome.empty_success(
+                empty_evidence=empty_evidence,
                 safe_log=_zhilian_safe_log(
-                    stage="list", failed_code="source_invalid_output",
-                    counts={"reason": "empty_marker_not_verified"},
+                    stage="list", counts={"empty_result": 1},
                 ),
-                failed_reason="空结果 marker 未核验，不得返回 empty_success",
+                input_hash=str(plan_item.get("input_hash") or ""),
             )
         failed_code = _ZHILIAN_LIST_SIGNAL_MAP.get(signal, "source_unknown_error")
         if failed_code is None:
@@ -1739,15 +1713,15 @@ class ZhilianCdpSource:
         )
 
     # ------------------------------------------------------------------
-    # T311: fetch_detail URL/平台/身份校验骨架
+    # T311: fetch_detail URL/平台/身份校验
     # ------------------------------------------------------------------
     def fetch_detail(
         self, job: dict, *, detail_output_path: str | None = None,
     ) -> SourceOutcome:
-        """抓取智联单个岗位详情页（URL/平台/身份校验骨架）。
+        """抓取智联单个岗位详情页。
 
-        真实 JD 取得需要 detail_page_markers fixture（blocked_facts），本任务
-        只实现校验骨架。无法取得真实 JD 时返回 source_not_found，不伪造正文。
+        校验平台/URL/身份后调用真实 __INITIAL_STATE__ 抓取；
+        无法取得真实 JD 时返回明确单项失败，不伪造正文。
         """
         ok, reason = _validate_zhilian_detail_input(job)
         if not ok:
@@ -1760,7 +1734,9 @@ class ZhilianCdpSource:
                 failed_reason=f"输入校验失败: {reason}",
             )
         try:
-            signal, detail = self._detail_runner(job, detail_output_path=detail_output_path)
+            runner_job = dict(job)
+            runner_job["cdp_port"] = self.cdp_port
+            signal, detail = self._detail_runner(runner_job, detail_output_path=detail_output_path)
         except Exception:
             return SourceOutcome.failure(
                 failed_code="source_unknown_error",
@@ -1835,16 +1811,14 @@ class ZhilianCdpSource:
 
 # ---------------------------------------------------------------------------
 # 默认 runner：调用 scripts/zhilian_cdp_raw.py 的真实函数。
-# marker 检测在 zhilian_cdp_raw.py 中保持占位（返回 None），未核验前
-# preflight/detail/list 都返回 "unreachable" / "not_found" 占位 signal，
-# 避免在 marker 缺失下伪造真实结果。
+# preflight/list/detail 分别调用真实登录判定、搜索 API 与详情页抓取。
 # ---------------------------------------------------------------------------
 
 def _default_zhilian_preflight_runner(cdp_port: int) -> str:
     """默认 preflight runner：调用 zhilian_cdp_raw.preflight。
 
-    marker 检测未核验前，zhilian_cdp_raw.preflight 返回 None（占位），
-    本函数将 None 转为 "unreachable" signal，触发 source_unreachable 失败。
+    zhilian_cdp_raw.preflight 返回稳定 signal；
+    本函数把 None 转为 "unreachable"，避免伪造成功。
     """
     try:
         from scripts import zhilian_cdp_raw as zha
@@ -1856,27 +1830,28 @@ def _default_zhilian_preflight_runner(cdp_port: int) -> str:
     return str(result)
 
 
-def _default_zhilian_list_runner(plan_item: dict) -> tuple[str, list[dict]]:
-    """默认 list runner：调用 zhilian_cdp_raw.fetch_list。
-
-    marker 检测未核验前，zhilian_cdp_raw.fetch_list 返回 (None, [])（占位），
-    本函数将 None 转为 "invalid_output" signal，触发 source_invalid_output 失败。
-    """
+def _default_zhilian_list_runner(plan_item: dict) -> tuple[str, list[dict], dict | None]:
+    """默认 list runner：调用 zhilian_cdp_raw.fetch_list 真实分支。"""
     try:
         from scripts import zhilian_cdp_raw as zha
     except ImportError:
-        return "unreachable", []
-    signal, jobs = zha.fetch_list(plan_item)
+        return "unreachable", [], None
+    result = zha.fetch_list(plan_item)
+    if len(result) == 2:
+        signal, jobs = result
+        evidence = None
+    else:
+        signal, jobs, evidence = result
     if signal is None:
-        return "invalid_output", []
-    return str(signal), list(jobs or [])
+        return "invalid_output", [], None
+    return str(signal), list(jobs or []), evidence
 
 
 def _default_zhilian_detail_runner(job: dict, *, detail_output_path: str | None = None) -> tuple[str, dict]:
     """默认 detail runner：调用 zhilian_cdp_raw.fetch_detail。
 
-    marker 检测未核验前，zhilian_cdp_raw.fetch_detail 返回 (None, {})（占位），
-    本函数将 None 转为 "not_found" signal，触发 source_not_found 失败（不伪造 JD）。
+    zhilian_cdp_raw.fetch_detail 返回真实 signal；
+    本函数把 None 转为 "not_found"，不伪造 JD。
     """
     try:
         from scripts import zhilian_cdp_raw as zha

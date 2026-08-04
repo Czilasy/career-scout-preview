@@ -87,10 +87,10 @@ BOSS_FILTER_SCHEMA_VERSION = 1
 BOSS_CITY_MAPPING_VERSION = 2
 
 #: 智联 AI 筛选 schema 版本。字段集合或稳定值/标签核验后变化时递增。
-ZHILIAN_FILTER_SCHEMA_VERSION = 1
+ZHILIAN_FILTER_SCHEMA_VERSION = 2
 
 #: 智联城市目录映射版本。城市码集合变化时递增。
-ZHILIAN_CITY_MAPPING_VERSION = 1
+ZHILIAN_CITY_MAPPING_VERSION = 2
 
 # BOSS AI 筛选公共字段顺序（contracts/platform-schema.md 字段集合表）。
 _BOSS_COMMON_FIELDS: tuple[str, ...] = (
@@ -102,8 +102,10 @@ _ZHILIAN_EXCLUSIVE_FIELDS: tuple[str, ...] = ("company_nature",)
 # BOSS URL allowlist（保持与现有 webui/workbench.normalize_job_link 一致）。
 _BOSS_ALLOWED_HOSTS = frozenset({"www.zhipin.com", "zhipin.com"})
 
-# 智联 URL allowlist（contracts/platform-schema.md URL 规范化）。
-_ZHILIAN_ALLOWED_HOSTS = frozenset({"zhaopin.com", "www.zhaopin.com"})
+# 智联 URL allowlist（2026-08-04 真实页面核验：jobs.zhaopin.com 为官方详情源站）。
+_ZHILIAN_ALLOWED_HOSTS = frozenset({
+    "zhaopin.com", "www.zhaopin.com", "jobs.zhaopin.com", "m.zhaopin.com",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -335,8 +337,9 @@ def normalize_boss_job_url(raw: str) -> str:
 def normalize_zhilian_job_url(raw: str) -> str:
     """智联岗位链接规范化。
 
-    允许 host 恰为 zhaopin.com 或 www.zhaopin.com；path 符合
-    jobdetail/<id>.htm；http 升级为 https；移除 query/fragment。
+    允许 zhaopin.com/www.zhaopin.com/m.zhaopin.com 的 jobdetail/<id>.htm，
+    以及 jobs.zhaopin.com/<id>.htm（真实详情源站）；http 升级为 https，
+    jobs/m 域名统一归一为 www.zhaopin.com/jobdetail/<id>.htm，移除 query/fragment。
     """
     if not raw or not isinstance(raw, str):
         return ""
@@ -356,7 +359,11 @@ def normalize_zhilian_job_url(raw: str) -> str:
     if host not in _ZHILIAN_ALLOWED_HOSTS:
         return ""
     path = parsed.path or ""
-    # path 必须符合 jobdetail/<id>.htm（contracts/platform-schema.md）。
+    if host in ("jobs.zhaopin.com", "m.zhaopin.com"):
+        job_match = _ZHILIAN_JOB_SOURCE_PATH_RE.match(path)
+        if job_match is None:
+            return ""
+        return _ZHILIAN_DETAIL_PATTERN.format(job_id=job_match.group(1))
     if not _ZHILIAN_JOB_PATH_RE.match(path):
         return ""
     cleaned = parsed._replace(query="", fragment="", params="")
@@ -365,6 +372,8 @@ def normalize_zhilian_job_url(raw: str) -> str:
 
 import re as _re
 _ZHILIAN_JOB_PATH_RE = _re.compile(r"^/jobdetail/[A-Za-z0-9_-]+\.htm$")
+_ZHILIAN_JOB_SOURCE_PATH_RE = _re.compile(r"^/([A-Za-z0-9_-]+)\.htm$")
+_ZHILIAN_DETAIL_PATTERN = "https://www.zhaopin.com/jobdetail/{job_id}.htm"
 
 
 # ---------------------------------------------------------------------------
@@ -1032,11 +1041,87 @@ _ZHILIAN_FIELD_LABELS: dict[str, str] = {
     "company_nature": "公司性质",
 }
 
+#: 智联 AI 筛选选项（2026-08-04 fe-api.zhaopin.com/c/i/search/base/data 核验）。
+_ZHILIAN_FIELD_OPTIONS: dict[str, tuple[tuple[str, str], ...]] = {
+    "salary": (
+        ("0000,9999999", "不限"),
+        ("0000,4000", "4K以下"),
+        ("4001,6000", "4K-6K"),
+        ("6001,8000", "6K-8K"),
+        ("8001,10000", "8K-10K"),
+        ("10001,15000", "10K-15K"),
+        ("15001,25000", "15K-25K"),
+        ("25001,35000", "25K-35K"),
+        ("35001,50000", "35K-50K"),
+        ("50001,9999999", "50K以上"),
+    ),
+    "experience": (
+        ("-99", "全部"),
+        ("-1", "经验不限"),
+        ("0001", "1年以下"),
+        ("0103", "1-3年"),
+        ("0305", "3-5年"),
+        ("0510", "5-10年"),
+        ("1099", "10年以上"),
+    ),
+    "degree": (
+        ("-1", "不限"),
+        ("9", "初中及以下"),
+        ("7", "高中"),
+        ("12", "中专/中技"),
+        ("5", "大专"),
+        ("4", "本科"),
+        ("3", "硕士"),
+        ("10", "MBA/EMBA"),
+        ("1", "博士"),
+    ),
+    "industry": (
+        ("-1", "不限"),
+        ("1600000000", "汽车/摩托车/电动车"),
+        ("1300000000", "生物/制药/医疗/医美"),
+        ("1700000000", "电子/通信/半导体"),
+        ("1800000000", "互联网/AI/软件/IT服务"),
+        ("1900000000", "新能源/环保/能源供应"),
+        ("2000000000", "石油/矿产/化工/材料"),
+        ("400000000", "房地产/建筑/工程"),
+        ("600000000", "农/林/牧/渔"),
+        ("1400000000", "政府/非盈利机构"),
+        ("1200000000", "教育/培训/科研"),
+        ("300000000", "金融业"),
+        ("900000000", "广告/传媒/文化/体育"),
+        ("1000000000", "交通/运输/仓储/物流"),
+        ("800000000", "专业服务"),
+        ("1500000000", "生活服务"),
+        ("500000000", "制造业"),
+        ("700000000", "批发/零售/贸易"),
+    ),
+    "scale": (
+        ("-1", "不限"),
+        ("1", "20人以下"),
+        ("2", "20-99人"),
+        ("3", "100-299人"),
+        ("8", "300-499人"),
+        ("4", "500-999人"),
+        ("5", "1000-9999人"),
+        ("6", "10000人以上"),
+    ),
+    "company_nature": (
+        ("1", "国企"),
+        ("2;3", "外企"),
+        ("4", "合资"),
+        ("5", "民营"),
+        ("9", "上市公司"),
+        ("8", "股份制企业"),
+        ("6;10", "事业单位"),
+        ("11;12;13;14;15;16;7", "其他"),
+    ),
+}
+
 #: 智联全国城市码（冻结设计决策，platform-schema.md L176）。
 ZHILIAN_NATIONWIDE_CODE = "jl0"
 ZHILIAN_NATIONWIDE_NAME = "全国"
 
-#: 智联禁用原因：公司性质 options / 非全国城市码 / 页面 marker 未核验。
+#: 智联禁用原因（真实页面核验后置空）。
 ZHILIAN_AVAILABILITY_REASON = (
     "company_nature options / non-nationwide city codes / page markers "
     "未由当前真实页面核验"
@@ -1044,60 +1129,72 @@ ZHILIAN_AVAILABILITY_REASON = (
 
 
 def _build_zhilian_filter_schema() -> PlatformFilterSchema:
-    """构建智联 AI 筛选 schema。
-
-    字段集合已冻结（salary/experience/degree/industry/scale/company_nature）；
-    但所有字段 options 为空，因为稳定值/标签未由真实页面核验
-    （fixture_manifest.json blocked_facts）。``enabled_for_new_tasks=False``。
-    """
+    """构建智联 AI 筛选 schema（2026-08-04 真实元数据核验后启用）。"""
     fields: list[FilterField] = []
     for key in _ZHILIAN_FILTER_FIELDS:
+        options = tuple(
+            FilterOption(value=value, label=label)
+            for value, label in _ZHILIAN_FIELD_OPTIONS.get(key, ())
+        )
         fields.append(FilterField(
             key=key,
             label=_ZHILIAN_FIELD_LABELS.get(key, key),
             multiple=True,
-            options=(),  # 未核验，保持空
+            options=options,
         ))
     return PlatformFilterSchema(
         platform="zhilian",
         schema_version=ZHILIAN_FILTER_SCHEMA_VERSION,
-        enabled_for_new_tasks=False,
+        enabled_for_new_tasks=True,
         fields=tuple(fields),
     )
 
 
 def _build_zhilian_city_catalog() -> PlatformCityCatalog:
-    """构建智联城市目录。
-
-    仅包含全国 ``jl0``（冻结设计决策）。其它城市码未核验，不写入
-    （fixture_manifest.json blocked_facts: city_codes_non_nationwide）。
-    """
+    """构建智联城市目录（2026-08-04 真实元数据核验）。"""
+    entries: list[CityEntry] = [
+        CityEntry(
+            name=ZHILIAN_NATIONWIDE_NAME,
+            label=ZHILIAN_NATIONWIDE_NAME,
+            platform_code=ZHILIAN_NATIONWIDE_CODE,
+            mapping_version=ZHILIAN_CITY_MAPPING_VERSION,
+        ),
+    ]
+    city_path = Path(__file__).resolve().parent.parent / "data" / "zhilian_city_codes.json"
+    try:
+        raw = json.loads(city_path.read_text(encoding="utf-8"))
+        for item in raw.get("cities", []) or []:
+            name = str(item.get("name") or "").strip()
+            code = str(item.get("code") or "").strip()
+            if not name or not code or name == ZHILIAN_NATIONWIDE_NAME:
+                continue
+            entries.append(CityEntry(
+                name=name,
+                label=str(item.get("label") or name),
+                platform_code=code,
+                mapping_version=ZHILIAN_CITY_MAPPING_VERSION,
+            ))
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
     return PlatformCityCatalog(
         platform="zhilian",
         mapping_version=ZHILIAN_CITY_MAPPING_VERSION,
-        entries=(
-            CityEntry(
-                name=ZHILIAN_NATIONWIDE_NAME,
-                label=ZHILIAN_NATIONWIDE_NAME,
-                platform_code=ZHILIAN_NATIONWIDE_CODE,
-                mapping_version=ZHILIAN_CITY_MAPPING_VERSION,
-            ),
-        ),
+        entries=tuple(entries),
     )
 
 
 def _register_zhilian() -> PlatformRegistry:
-    """注册智联平台（enabled_for_new_tasks=False）。
-
-    公司性质 options / 非全国城市码 / 页面 marker 未核验前保持禁用。
-    """
+    """注册智联平台（2026-08-04 外部事实核验后启用）。"""
+    schema = _build_zhilian_filter_schema()
+    catalog = _build_zhilian_city_catalog()
+    enabled = bool(all(f.options for f in schema.fields) and catalog.entries)
     registry = PlatformRegistry(
         key="zhilian",
         display_name="智联招聘",
-        filter_schema=_build_zhilian_filter_schema(),
-        city_catalog=_build_zhilian_city_catalog(),
-        enabled_for_new_tasks=False,
-        availability_reason=ZHILIAN_AVAILABILITY_REASON,
+        filter_schema=schema,
+        city_catalog=catalog,
+        enabled_for_new_tasks=enabled,
+        availability_reason="" if enabled else ZHILIAN_AVAILABILITY_REASON,
         default_cdp_port=ZHILIAN_DEFAULT_CDP_PORT,
         normalize_job_url_fn=normalize_zhilian_job_url,
         resolve_login_space_fn=resolve_zhilian_login_space,

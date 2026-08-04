@@ -899,9 +899,9 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(result["total_kept"], 2)
         self.assertEqual(result["total_dropped"], 1)
         self.assertEqual(len(result["dropped"]), 1)
-        self.assertEqual(result["dropped"][0]["job_id"], "d1")
+        self.assertEqual(result["dropped"][0]["platform_job_id"], "d1")
         self.assertEqual(result["dropped"][0]["reason"], "经验不符")
-        jobs = {job["job_id"]: job for job in result["jobs"]}
+        jobs = {job["platform_job_id"]: job for job in result["jobs"]}
         self.assertEqual(jobs["j1"]["verdict_reason"], "技能匹配")
         self.assertEqual(jobs["j1"]["caveats"], ["注意学历"])
         self.assertEqual(jobs["j2"]["verdict_reason"], "AI 漏判，待确认")
@@ -2870,16 +2870,23 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
 
     def test_preview_disabled_platform_returns_503(self):
         """智联 enabled_for_new_tasks=False → 503 platform_disabled。"""
-        resp = self.client.post("/api/search-scope/preview", json={
-            "platform": "zhilian",
-            "keywords": ["Python"],
-            "scope_kind": "nationwide",
-            "cities": [],
-            "pages_per_combination": 1,
-        })
-        self.assertEqual(resp.status_code, 503)
-        data = resp.get_json()
-        self.assertEqual(data["error_code"], "platform_disabled")
+        from unittest import mock
+        from webui.platforms import get_platform, get_platform_or_none
+        def _disabled(platform_raw):
+            if platform_raw == "zhilian":
+                return mock.Mock(enabled_for_new_tasks=False, availability_reason="disabled for test")
+            return get_platform_or_none(platform_raw)
+        with mock.patch("webui.platforms.get_platform_or_none", side_effect=_disabled):
+            resp = self.client.post("/api/search-scope/preview", json={
+                "platform": "zhilian",
+                "keywords": ["Python"],
+                "scope_kind": "nationwide",
+                "cities": [],
+                "pages_per_combination": 1,
+            })
+            self.assertEqual(resp.status_code, 503)
+            data = resp.get_json()
+            self.assertEqual(data["error_code"], "platform_disabled")
 
     # -- preview: scope digest includes platform -------------------------
 
@@ -2953,16 +2960,22 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
 
     def test_execute_search_disabled_platform_returns_503(self):
         """智联禁用 → execute-search 返回 503 platform_disabled，不创建 run。"""
-        resp = self.client.post("/api/execute-search", json={
-            "platform": "zhilian",
-            "script_params": {
-                "keyword": "Python",
-                "city": ["全国"],
-                "pages": 1,
-            },
-        })
-        self.assertEqual(resp.status_code, 503)
-        self.assertEqual(resp.get_json()["error_code"], "platform_disabled")
+        from webui.platforms import get_platform, get_platform_or_none
+        def _disabled(platform_raw):
+            if platform_raw == "zhilian":
+                return mock.Mock(enabled_for_new_tasks=False, availability_reason="disabled for test")
+            return get_platform_or_none(platform_raw)
+        with mock.patch("webui.platforms.get_platform_or_none", side_effect=_disabled):
+            resp = self.client.post("/api/execute-search", json={
+                "platform": "zhilian",
+                "script_params": {
+                    "keyword": "Python",
+                    "city": ["全国"],
+                    "pages": 1,
+                },
+            })
+            self.assertEqual(resp.status_code, 503)
+            self.assertEqual(resp.get_json()["error_code"], "platform_disabled")
 
     # -- execute-search: platform mismatch -------------------------------
 
@@ -4312,7 +4325,8 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         self.assertIn("boss", platforms)
         self.assertIn("zhilian", platforms)
         # 智联 fixture 未核验，禁用新任务；BOSS 已启用
-        self.assertFalse(platforms["zhilian"]["enabled_for_new_tasks"])
+        # 智联真实元数据核验后启用；BOSS 已启用
+        self.assertTrue(platforms["zhilian"]["enabled_for_new_tasks"])
         self.assertTrue(platforms["boss"]["enabled_for_new_tasks"])
         # 不返回 profile 路径/路径摘要（T207 安全要求）
         for p in data.get("platforms", []):
@@ -4326,8 +4340,8 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         platforms = {p["key"]: p for p in data["platforms"]}
         self.assertEqual(platforms["boss"]["filter_schema_version"], 1)
         self.assertEqual(platforms["boss"]["city_mapping_version"], 2)
-        self.assertEqual(platforms["zhilian"]["filter_schema_version"], 1)
-        self.assertEqual(platforms["zhilian"]["city_mapping_version"], 1)
+        self.assertEqual(platforms["zhilian"]["filter_schema_version"], 2)
+        self.assertEqual(platforms["zhilian"]["city_mapping_version"], 2)
 
     # -- /api/options -------------------------------------------------
 
@@ -4366,11 +4380,12 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         data = resp.get_json()
         self.assertTrue(data.get("ok"))
         self.assertEqual(data["platform"], "zhilian")
-        self.assertEqual(data["city_mapping_version"], 1)
+        self.assertEqual(data["city_mapping_version"], 2)
         cities = data["cities"]
-        self.assertEqual(len(cities), 1)
-        self.assertEqual(cities[0]["label"], "全国")
-        self.assertEqual(cities[0]["value"], "全国")
+        self.assertGreaterEqual(len(cities), 20)
+        labels = {c["label"] for c in cities}
+        self.assertIn("全国", labels)
+        self.assertIn("上海", labels)
 
     def test_options_with_unknown_platform_returns_400(self):
         """未知平台返回 400 platform_validation_failed。"""
@@ -4401,9 +4416,9 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         data = resp.get_json()
         self.assertTrue(data.get("ok"))
         self.assertEqual(data["platform"], "zhilian")
-        self.assertEqual(data["schema_version"], 1)
-        # 智联已注册但 fixture 未核验，enabled_for_new_tasks=False
-        self.assertFalse(data["enabled_for_new_tasks"])
+        self.assertEqual(data["schema_version"], 2)
+        # 智联真实元数据核验后启用
+        self.assertTrue(data["enabled_for_new_tasks"])
         field_keys = [f["key"] for f in data["fields"]]
         # 字段顺序：salary/experience/degree/industry/scale/company_nature
         self.assertEqual(field_keys, [
@@ -4411,8 +4426,9 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         ])
         self.assertNotIn("stage", field_keys)
         # 智联 options 未核验，应为空数组
+        # 智联 options 已由真实元数据核验，全部非空
         for f in data["fields"]:
-            self.assertEqual(f["options"], [])
+            self.assertGreater(len(f["options"]), 0, f"字段 {f['key']} options 应已核验")
             self.assertTrue(f["multiple"])
 
     def test_filter_labels_with_platform_boss_returns_stage(self):

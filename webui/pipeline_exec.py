@@ -799,7 +799,9 @@ def run_search(params: dict, source, *, pages: int = 3,
     # Auto-launch the debug Chrome if it isn't running, so the user is shown
     # the browser instead of a raw infrastructure error.
     emit(stage="ensure_chrome", message="检查并启动调试浏览器…")
-    chrome_ok, chrome_err = ensure_chrome_ready()
+    platform = str(getattr(source, "platform", "boss") or "boss")
+    cdp_port = getattr(source, "cdp_port", None)
+    chrome_ok, chrome_err = ensure_chrome_ready(cdp_port)
     if not chrome_ok:
         return {"ok": False, "jobs": [], "total_scraped": 0,
                 "total_matched": 0, "combinations": len(combos),
@@ -807,11 +809,12 @@ def run_search(params: dict, source, *, pages: int = 3,
                          "若始终无法启动，请手动运行 scripts/boss_cdp_raw.py --setup-chrome 后重试。"}
 
     # Preflight: CDP connection + BOSS login.
-    emit(stage="preflight", message="检查 BOSS 登录状态…")
+    emit(stage="preflight", message=f"检查 {('BOSS直聘' if platform == 'boss' else '智联招聘')} 登录状态…")
     pre = source.preflight()
     if not pre.ok:
         if pre.failed_code == "source_login_required":
-            msg = "浏览器已打开，但还未登录 BOSS。请在刚打开的浏览器窗口中登录 zhipin.com，登录后重新点击确认参数。"
+            msg = ("浏览器已打开，但还未登录 BOSS。请在浏览器中登录 zhipin.com，登录后重新继续。" if platform == "boss"
+                   else "浏览器已打开，但还未登录智联招聘。请在浏览器中登录 zhaopin.com，登录后重新继续。")
         else:
             msg = f"预检失败：{pre.failed_code}"
         return {"ok": False, "jobs": [], "total_scraped": 0,
@@ -842,14 +845,36 @@ def run_search(params: dict, source, *, pages: int = 3,
              keyword=kw, city=city,
              message=f"正在搜索 [{idx + 1}/{len(combos)}] {kw} · {city}")
 
-        plan_item = {
-            "keyword": kw,
-            "city": city,
-            "source_filters": {},  # broad search; multi-select applied as post-filter
-            "target_pages": pages,
-            "input_hash": _combo_hash(kw, city, pages),
-            "list_output_path": _combo_output_path(artifact_dir, kw, city),
-        }
+        if platform == "zhilian":
+            from webui.platforms import resolve_platform_city
+            from webui.source import _zhilian_input_hash
+            city_entry = resolve_platform_city("zhilian", city)
+            city_snapshot = {
+                "name": city_entry.name,
+                "label": city_entry.label,
+                "platform_code": city_entry.platform_code,
+                "mapping_version": city_entry.mapping_version,
+            }
+            plan_item = {
+                "platform": "zhilian",
+                "keyword": kw,
+                "city": city_snapshot,
+                "target_pages": pages,
+                "input_hash": _zhilian_input_hash({
+                    "platform": "zhilian", "keyword": kw,
+                    "city": city_snapshot, "target_pages": pages,
+                }),
+                "list_output_path": _combo_output_path(artifact_dir, kw, city),
+            }
+        else:
+            plan_item = {
+                "keyword": kw,
+                "city": city,
+                "source_filters": {},  # broad search; multi-select applied as post-filter
+                "target_pages": pages,
+                "input_hash": _combo_hash(kw, city, pages),
+                "list_output_path": _combo_output_path(artifact_dir, kw, city),
+            }
         outcome = source.fetch_list(plan_item)
         if not outcome.ok:
             # 系统性阻断（验证码/登录失效/IP风控/CDP不可用）：立即停止，不继续跑其他组合
@@ -877,7 +902,7 @@ def run_search(params: dict, source, *, pages: int = 3,
             total_scraped += len(outcome.jobs)
             completed_combos.append(combo_key)
             for job in outcome.jobs:
-                jid = job.get("job_id") or job.get("source_url") or ""
+                jid = (job.get("platform_job_id") or job.get("job_id") or job.get("source_url") or "")
                 if jid and jid not in merged:
                     merged[jid] = job
             if on_combo_done is not None:
@@ -949,7 +974,7 @@ def run_search(params: dict, source, *, pages: int = 3,
     # 有数据才关浏览器（任务完成）；全失败则保留窗口供用户排查/重试。
     if total_scraped > 0 and close_chrome_on_success:
         emit(stage="closing_chrome", message="正在关闭调试浏览器…")
-        close_debug_chrome()
+        close_debug_chrome(cdp_port)
     emit(stage="done", total_scraped=total_scraped, total_matched=len(all_jobs),
          message=f"完成：抓取 {total_scraped} 条，去重 {len(all_jobs)} 条")
 
@@ -1016,10 +1041,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         if not isinstance(job, dict):
             indexed_jobs.append((idx, f"idx{idx}", {}))
             continue
-        jid = str(job.get("job_id") or job.get("id") or "").strip()
+        jid = str(job.get("platform_job_id") or job.get("job_id") or job.get("id") or "").strip()
         if not jid:
             jid = f"idx{idx}"
-        indexed_jobs.append((idx, jid, dict(job, job_id=jid)))
+        indexed_jobs.append((idx, jid, dict(job)))
     jd_by_idx = {}
     jd_fail_by_idx: dict[int, str] = {}
     jd_fail_reason_by_idx: dict[int, str] = {}
@@ -1145,7 +1170,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     enriched = []
     for idx, job in enumerate(jobs):
         e = dict(job) if isinstance(job, dict) else {}
-        jid = str(e.get("job_id") or e.get("id") or "")
+        jid = str(e.get("platform_job_id") or e.get("job_id") or e.get("id") or "")
         if jid and jid in done_ids and str(e.get("jd", "")).strip():
             # 断点续抓：已抓过的岗位保留原 JD，不重复抓也不覆盖
             enriched.append(e)

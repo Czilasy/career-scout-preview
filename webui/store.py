@@ -2445,14 +2445,15 @@ class TaskStore:
             self._assert_recovery_writes_allowed(conn)
             conn.execute(
                 "INSERT INTO screening_runs "
-                "(id, frozen_filters_json, status, source_count, match_count, mismatch_count, "
+                "(id, platform, frozen_filters_json, status, source_count, match_count, mismatch_count, "
                 " pending_count, processed_count, created_at, updated_at, started_at, "
                 " finished_at, search_params_json, execution_params_json, "
                 " profile_summary, total_scraped, total_kept, total_dropped, record_kind) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
                 "'result_snapshot')",
                 (
                     run_id,
+                    str(script_params.get("platform") or result.get("platform") or "boss"),
                     json.dumps(script_params, ensure_ascii=False),
                     str(status),
                     result.get("total_scraped", 0),
@@ -2473,14 +2474,17 @@ class TaskStore:
             )
             # Insert kept jobs
             for job in jobs:
+                platform = str(script_params.get("platform") or result.get("platform") or "boss")
                 conn.execute(
                     "INSERT OR REPLACE INTO screening_results "
-                    "(id, run_id, platform_job_id, verdict, created_at, title, company, salary, "
-                    " location, tags, jd, source_url, verdict_reason, caveats_json, is_dropped) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                    "(id, run_id, platform, platform_job_id, job_id, verdict, created_at, title, company, salary, "
+                    " location, tags, jd, source_url, verdict_reason, caveats_json, is_dropped, "
+                    " experience, degree, extra_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
                     (
-                        str(uuid.uuid4()), run_id,
-                        str(job.get("job_id", "")),
+                        str(uuid.uuid4()), run_id, platform,
+                        str(job.get("platform_job_id") or job.get("job_id") or ""),
+                        None,  # 内部 UUID 由收藏/反馈落库时回填
                         job.get("verdict", "uncertain"),
                         now,
                         job.get("title", ""),
@@ -2489,21 +2493,27 @@ class TaskStore:
                         job.get("location", ""),
                         job.get("tags", ""),
                         job.get("jd", ""),
-                        job.get("source_url", ""),
+                        job.get("canonical_url") or job.get("source_url") or "",
                         job.get("verdict_reason", ""),
                         json.dumps(job.get("caveats") or [], ensure_ascii=False),
+                        job.get("experience", ""),
+                        job.get("degree", ""),
+                        json.dumps(job.get("extra") or {}, ensure_ascii=False, sort_keys=True),
                     ),
                 )
             # Insert dropped jobs
             for job in dropped:
+                platform = str(script_params.get("platform") or result.get("platform") or "boss")
                 conn.execute(
                     "INSERT OR REPLACE INTO screening_results "
-                    "(id, run_id, platform_job_id, verdict, created_at, title, company, salary, "
-                    " location, tags, jd, source_url, verdict_reason, caveats_json, is_dropped) "
-                    "VALUES (?, ?, ?, 'dropped', ?, ?, ?, ?, ?, ?, '', ?, ?, '[]', 1)",
+                    "(id, run_id, platform, platform_job_id, job_id, verdict, created_at, title, company, salary, "
+                    " location, tags, jd, source_url, verdict_reason, caveats_json, is_dropped, "
+                    " experience, degree, extra_json) "
+                    "VALUES (?, ?, ?, ?, ?, 'dropped', ?, ?, ?, ?, ?, ?, '', ?, ?, '[]', 1, ?, ?, ?)",
                     (
-                        str(uuid.uuid4()), run_id,
-                        str(job.get("job_id", "")),
+                        str(uuid.uuid4()), run_id, platform,
+                        str(job.get("platform_job_id") or job.get("job_id") or ""),
+                        None,
                         now,
                         job.get("title", ""),
                         job.get("company", ""),
@@ -2512,6 +2522,9 @@ class TaskStore:
                         job.get("tags", ""),
                         job.get("canonical_url", ""),
                         job.get("reason", ""),
+                        job.get("experience", ""),
+                        job.get("degree", ""),
+                        json.dumps(job.get("extra") or {}, ensure_ascii=False, sort_keys=True),
                     ),
                 )
             for job in pending_jobs:
@@ -2525,11 +2538,13 @@ class TaskStore:
                 )
                 conn.execute(
                     "INSERT INTO screening_pending_results "
-                    "(id, run_id, platform_job_id, failure_stage, retryable, attempts, "
+                    "(id, run_id, platform, platform_job_id, failure_stage, retryable, attempts, "
                     " last_failed_at, origin_zone, ai_payload_json, created_at, failed_code) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        str(uuid.uuid4()), run_id, str(job.get("job_id", "")),
+                        str(uuid.uuid4()), run_id,
+                        str(script_params.get("platform") or result.get("platform") or "boss"),
+                        str(job.get("platform_job_id") or job.get("job_id") or ""),
                         failure_stage,
                         0 if failed_code == "job_offline" else 1,
                         int(job.get("attempts") or 1), now,
@@ -2581,9 +2596,19 @@ class TaskStore:
                         reason = str(parsed.get("reason") or reason)
                 except (json.JSONDecodeError, TypeError):
                     pass
+                extra = {}
+                try:
+                    extra = json.loads(row.get("extra_json") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
                 dropped.append({
-                    "job_id": row["platform_job_id"],
+                    "platform": row.get("platform"),
+                    "platform_job_id": row["platform_job_id"],
+                    "job_id": row.get("job_id"),
                     "title": row["title"],
+                    "experience": row.get("experience") or "",
+                    "degree": row.get("degree") or "",
+                    "extra": extra,
                     "reason": reason,
                     "canonical_url": row["source_url"],
                 })
@@ -2605,15 +2630,26 @@ class TaskStore:
                             caveats = parsed["caveats"]
                 except (json.JSONDecodeError, TypeError):
                     pass
+                extra = {}
+                try:
+                    extra = json.loads(row.get("extra_json") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
                 jobs.append({
-                    "job_id": row["platform_job_id"],
+                    "platform": row.get("platform"),
+                    "platform_job_id": row["platform_job_id"],
+                    "job_id": row.get("job_id"),
                     "title": row["title"],
                     "company": row["company"],
                     "salary": row["salary"],
                     "location": row["location"],
+                    "experience": row.get("experience") or "",
+                    "degree": row.get("degree") or "",
+                    "extra": extra,
                     "tags": row["tags"],
                     "jd": row["jd"],
                     "source_url": row["source_url"],
+                    "canonical_url": row["source_url"],
                     "verdict": verdict,
                     "verdict_reason": verdict_reason,
                     "caveats": caveats,
@@ -4339,7 +4375,7 @@ class TaskStore:
             for job in jobs or []:
                 if not isinstance(job, dict):
                     continue
-                job_id = str(job.get("job_id") or job.get("source_url") or "").strip()
+                job_id = str(job.get("platform_job_id") or job.get("job_id") or job.get("source_url") or "").strip()
                 if not job_id:
                     continue
                 conn.execute(

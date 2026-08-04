@@ -1150,7 +1150,8 @@ class ScreeningRunStoreTests(unittest.TestCase):
         self.assertIsNotNone(loaded)
         # 加载到的必须是 result_snapshot（有 jobs 字段且非空），不是 process_log
         self.assertEqual(len(loaded["result"]["jobs"]), 1)
-        self.assertEqual(loaded["result"]["jobs"][0]["job_id"], "j2")
+        self.assertEqual(loaded["result"]["jobs"][0]["platform_job_id"], "j2")
+        self.assertIsNone(loaded["result"]["jobs"][0]["job_id"])
 
 
     def test_clear_latest_pipeline_result_removes_only_latest_snapshot(self):
@@ -1191,7 +1192,8 @@ class ScreeningRunStoreTests(unittest.TestCase):
         loaded = self.store.load_latest_pipeline_result()
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded["run_id"], older_id)
-        self.assertEqual(loaded["result"]["jobs"][0]["job_id"], "old")
+        self.assertEqual(loaded["result"]["jobs"][0]["platform_job_id"], "old")
+        self.assertIsNone(loaded["result"]["jobs"][0]["job_id"])
         with self.store._connection() as conn:
             rows = conn.execute(
                 "SELECT COUNT(*) AS n FROM screening_results WHERE run_id = ?", (newer_id,),

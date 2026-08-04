@@ -1,10 +1,37 @@
 {
   "platform": "zhilian",
-  "mapping_version": 1,
+  "mapping_version": 2,
+  "verified_at": "2026-08-04",
+  "source": "fe-api.zhaopin.com/c/i/search/base/data hotCity/allCity (current logged-in session)",
   "nationwide": {
     "name": "全国",
     "code": "jl0"
   },
-  "cities": [],
-  "note": "仅包含已核验的全国 jl0（冻结设计决策，platform-schema.md L176）。其它城市码未由真实页面核验，不写入。核验后追加到 cities 数组并递增 mapping_version。"
+  "cities": [
+    {"name": "北京", "label": "北京", "code": "530"},
+    {"name": "上海", "label": "上海", "code": "538"},
+    {"name": "广州", "label": "广州", "code": "763"},
+    {"name": "深圳", "label": "深圳", "code": "765"},
+    {"name": "天津", "label": "天津", "code": "531"},
+    {"name": "武汉", "label": "武汉", "code": "736"},
+    {"name": "西安", "label": "西安", "code": "854"},
+    {"name": "成都", "label": "成都", "code": "801"},
+    {"name": "大连", "label": "大连", "code": "600"},
+    {"name": "长春", "label": "长春", "code": "613"},
+    {"name": "沈阳", "label": "沈阳", "code": "599"},
+    {"name": "南京", "label": "南京", "code": "635"},
+    {"name": "济南", "label": "济南", "code": "702"},
+    {"name": "青岛", "label": "青岛", "code": "703"},
+    {"name": "杭州", "label": "杭州", "code": "653"},
+    {"name": "苏州", "label": "苏州", "code": "639"},
+    {"name": "无锡", "label": "无锡", "code": "636"},
+    {"name": "宁波", "label": "宁波", "code": "654"},
+    {"name": "重庆", "label": "重庆", "code": "551"},
+    {"name": "郑州", "label": "郑州", "code": "719"},
+    {"name": "长沙", "label": "长沙", "code": "749"},
+    {"name": "福州", "label": "福州", "code": "681"},
+    {"name": "厦门", "label": "厦门", "code": "682"},
+    {"name": "哈尔滨", "label": "哈尔滨", "code": "622"}
+  ],
+  "note": "全国 jl0 为冻结设计决策；其余城市码来自 2026-08-04 真实登录会话的官方元数据，已脱敏保存。"
 }

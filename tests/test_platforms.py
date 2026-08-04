@@ -111,9 +111,8 @@ class BossRegistrationTests(unittest.TestCase):
         self.assertIn("zhilian", KNOWN_PLATFORM_KEYS)
         zhilian = get_platform("zhilian")
         self.assertIsNotNone(zhilian)
-        self.assertFalse(zhilian.enabled_for_new_tasks)
-        self.assertTrue(zhilian.availability_reason)
-        self.assertEqual(zhilian.availability_reason, ZHILIAN_AVAILABILITY_REASON)
+        self.assertTrue(zhilian.enabled_for_new_tasks)
+        self.assertEqual(zhilian.availability_reason, "")
         self.assertEqual(zhilian.display_name, "智联招聘")
         self.assertEqual(zhilian.default_cdp_port, ZHILIAN_DEFAULT_CDP_PORT)
 
@@ -433,7 +432,7 @@ class ProjectFilterSchemaTests(unittest.TestCase):
         self.assertTrue(schema["ok"])
         self.assertEqual(schema["platform"], "zhilian")
         self.assertEqual(schema["schema_version"], ZHILIAN_FILTER_SCHEMA_VERSION)
-        self.assertFalse(schema["enabled_for_new_tasks"])
+        self.assertTrue(schema["enabled_for_new_tasks"])
         keys = [f["key"] for f in schema["fields"]]
         self.assertEqual(
             keys,
@@ -441,7 +440,7 @@ class ProjectFilterSchemaTests(unittest.TestCase):
         )
         # fixture 未核验前所有字段 options 为空
         for f in schema["fields"]:
-            self.assertEqual(len(f["options"]), 0, f"字段 {f['key']} options 应为空")
+            self.assertGreater(len(f["options"]), 0, f"字段 {f['key']} options 应已核验")
         # 响应不含 profile 路径
         self.assertNotIn("profile_dir", repr(schema))
         self.assertNotIn("profile_key", repr(schema))
@@ -579,12 +578,12 @@ class ZhilianRegistrationTests(unittest.TestCase):
         """fixture 未核验前所有字段 options 为空。"""
         zhilian = get_platform("zhilian")
         for f in zhilian.filter_schema.fields:
-            self.assertEqual(len(f.options), 0, f"字段 {f.key} options 应为空")
+            self.assertGreater(len(f.options), 0, f"字段 {f.key} options 应已核验")
 
     def test_zhilian_enabled_false_with_reason(self):
         zhilian = get_platform("zhilian")
-        self.assertFalse(zhilian.enabled_for_new_tasks)
-        self.assertTrue(zhilian.availability_reason)
+        self.assertTrue(zhilian.enabled_for_new_tasks)
+        self.assertEqual(zhilian.availability_reason, "")
 
     def test_zhilian_in_list_platforms(self):
         """list_platforms 包含智联（禁用项仍需返回）。"""
@@ -620,7 +619,9 @@ class ZhilianCityCatalogTests(unittest.TestCase):
     def test_zhilian_city_catalog_has_nationwide_only(self):
         zhilian = get_platform("zhilian")
         names = zhilian.city_catalog.names()
-        self.assertEqual(names, (ZHILIAN_NATIONWIDE_NAME,))
+        self.assertIn(ZHILIAN_NATIONWIDE_NAME, names)
+        self.assertIn("上海", names)
+        self.assertIn("北京", names)
 
     def test_zhilian_nationwide_code_is_jl0(self):
         zhilian = get_platform("zhilian")
@@ -635,9 +636,10 @@ class ZhilianCityCatalogTests(unittest.TestCase):
 
     def test_zhilian_non_nationwide_city_missing(self):
         """非全国城市未核验，解析时阻断。"""
-        with self.assertRaises(ValueError) as ctx:
-            resolve_platform_city("zhilian", "上海")
-        self.assertIn("city_mapping_missing", str(ctx.exception))
+        """真实元数据核验后的城市可解析。"""
+        entry = resolve_platform_city("zhilian", "上海")
+        self.assertEqual(entry.platform_code, "538")
+        self.assertEqual(entry.mapping_version, ZHILIAN_CITY_MAPPING_VERSION)
 
     def test_zhilian_nationwide_resolvable(self):
         """全国 jl0 可解析。"""
@@ -653,7 +655,9 @@ class ZhilianCityCatalogTests(unittest.TestCase):
         data = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(data["platform"], "zhilian")
         self.assertEqual(data["nationwide"]["code"], "jl0")
-        self.assertEqual(data["cities"], [])
+        self.assertGreaterEqual(len(data["cities"]), 20)
+        names = {c["name"] for c in data["cities"]}
+        self.assertIn("上海", names)
 
 
 # ===========================================================================
@@ -664,10 +668,10 @@ class ZhilianFixtureIntegrityTests(unittest.TestCase):
 
     def test_zhilian_fixture_integrity_fails(self):
         """智联所有字段 options 为空 → 完整性检查失败。"""
+        """智联真实元数据核验后 → 完整性检查通过。"""
         ok, reason = check_platform_fixture_integrity("zhilian")
-        self.assertFalse(ok)
-        self.assertTrue(reason)
-        self.assertIn("empty options", reason)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "")
 
     def test_boss_fixture_integrity_passes(self):
         """BOSS 所有字段 options 非空 → 完整性检查通过。"""

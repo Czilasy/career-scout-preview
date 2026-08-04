@@ -72,7 +72,7 @@ def _query_run_summary(conn, run_id: str) -> dict:
 
 def _identify_rough_50_json_split(conn, rough_run_id: str) -> dict:
     rows = conn.execute(
-        "SELECT job_id, verdict FROM screening_results "
+        "SELECT platform_job_id, verdict FROM screening_results "
         "WHERE run_id = ? AND verdict LIKE '{%'", (rough_run_id,),
     ).fetchall()
     counts = {"match": 0, "not_match": 0, "other": 0}
@@ -87,7 +87,7 @@ def _identify_rough_50_json_split(conn, rough_run_id: str) -> dict:
         counts[key] += 1
         if isinstance(value, dict) and len(samples) < 3:
             samples.append({
-                "job_id": row["job_id"], "inner": inner,
+                "job_id": row["platform_job_id"], "platform_job_id": row["platform_job_id"], "inner": inner,
                 "reason": str(value.get("reason", ""))[:100],
             })
     return {
@@ -102,7 +102,7 @@ def _identify_rough_50_json_split(conn, rough_run_id: str) -> dict:
 
 def _identify_fine_50_uncertain(conn, fine_run_id: str) -> dict:
     rows = conn.execute(
-        "SELECT job_id, verdict FROM screening_results WHERE run_id = ?",
+        "SELECT platform_job_id, verdict FROM screening_results WHERE run_id = ?",
         (fine_run_id,),
     ).fetchall()
     count = 0
@@ -117,7 +117,7 @@ def _identify_fine_50_uncertain(conn, fine_run_id: str) -> dict:
             count += 1
             reason = reason or str(value.get("reason", ""))
             if len(sample_ids) < 5:
-                sample_ids.append(row["job_id"])
+                sample_ids.append(row["platform_job_id"])
     return {
         "count": count,
         "reason": reason,
@@ -130,14 +130,14 @@ def _identify_fine_50_uncertain(conn, fine_run_id: str) -> dict:
 
 def _identify_pending_646(conn, rough_run_id: str, fine_run_id: str) -> dict:
     rough_ids = {
-        row["job_id"] for row in conn.execute(
-            "SELECT job_id FROM screening_results "
+        row["platform_job_id"] for row in conn.execute(
+            "SELECT platform_job_id FROM screening_results "
             "WHERE run_id = ? AND verdict = 'uncertain'", (rough_run_id,),
         ).fetchall()
     }
     fine_ids = {
-        row["job_id"] for row in conn.execute(
-            "SELECT job_id FROM screening_results WHERE run_id = ?", (fine_run_id,),
+        row["platform_job_id"] for row in conn.execute(
+            "SELECT platform_job_id FROM screening_results WHERE run_id = ?", (fine_run_id,),
         ).fetchall()
     }
     pending_ids = sorted(rough_ids - fine_ids)
@@ -243,14 +243,14 @@ def _compute_source_fingerprint_conn(conn) -> str:
         "WHERE id IN (?, ?) ORDER BY id", (ROUGH_RUN_ID, FINE_RUN_ID),
     ).fetchall()]
     results = [list(row) for row in conn.execute(
-        "SELECT run_id, job_id, verdict, COALESCE(jd, '') FROM screening_results "
-        "WHERE run_id IN (?, ?) ORDER BY run_id, job_id, verdict, COALESCE(jd, '')",
+        "SELECT run_id, platform_job_id, verdict, COALESCE(jd, '') FROM screening_results "
+        "WHERE run_id IN (?, ?) ORDER BY run_id, platform_job_id, verdict, COALESCE(jd, '')",
         (ROUGH_RUN_ID, FINE_RUN_ID),
     ).fetchall()]
     pending = [list(row) for row in conn.execute(
-        "SELECT run_id, job_id, failure_stage, retryable, attempts, origin_zone, "
+        "SELECT run_id, platform_job_id, failure_stage, retryable, attempts, origin_zone, "
         "COALESCE(failed_code, ''), ai_payload_json FROM screening_pending_results "
-        "WHERE run_id IN (?, ?) ORDER BY run_id, job_id",
+        "WHERE run_id IN (?, ?) ORDER BY run_id, platform_job_id",
         (ROUGH_RUN_ID, FINE_RUN_ID),
     ).fetchall()]
     payload = {
@@ -411,10 +411,10 @@ def _insert_pending(conn, *, run_id: str, job_id: str, failure_stage: str,
     timestamp = _now()
     conn.execute(
         "INSERT INTO screening_pending_results "
-        "(id, run_id, job_id, failure_stage, retryable, attempts, last_failed_at, "
+        "(id, run_id, platform_job_id, failure_stage, retryable, attempts, last_failed_at, "
         "origin_zone, ai_payload_json, created_at, failed_code) "
         "VALUES (?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(run_id, job_id) DO UPDATE SET "
+        "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET "
         " failure_stage = excluded.failure_stage, retryable = 1, "
         " last_failed_at = excluded.last_failed_at, origin_zone = excluded.origin_zone, "
         " ai_payload_json = excluded.ai_payload_json, failed_code = excluded.failed_code",
@@ -428,7 +428,7 @@ def _insert_pending(conn, *, run_id: str, job_id: str, failure_stage: str,
 
 def _apply_action_1(conn) -> int:
     rows = conn.execute(
-        "SELECT job_id, verdict FROM screening_results "
+        "SELECT platform_job_id, verdict FROM screening_results "
         "WHERE run_id = ? AND verdict LIKE '{%'", (ROUGH_RUN_ID,),
     ).fetchall()
     changed = 0
@@ -439,11 +439,11 @@ def _apply_action_1(conn) -> int:
             continue
         cursor = conn.execute(
             "UPDATE screening_results SET verdict = ?, verdict_reason = ?, caveats_json = ? "
-            "WHERE run_id = ? AND job_id = ? AND verdict LIKE '{%'",
+            "WHERE run_id = ? AND platform_job_id = ? AND verdict LIKE '{%'",
             (
                 inner, str(value.get("reason", "")),
                 json.dumps(value.get("caveats", []), ensure_ascii=False),
-                ROUGH_RUN_ID, row["job_id"],
+                ROUGH_RUN_ID, row["platform_job_id"],
             ),
         )
         changed += cursor.rowcount
@@ -452,7 +452,7 @@ def _apply_action_1(conn) -> int:
 
 def _apply_action_2(conn) -> int:
     rows = conn.execute(
-        "SELECT job_id, verdict FROM screening_results WHERE run_id = ?",
+        "SELECT platform_job_id, verdict FROM screening_results WHERE run_id = ?",
         (FINE_RUN_ID,),
     ).fetchall()
     changed = 0
@@ -463,7 +463,7 @@ def _apply_action_2(conn) -> int:
             continue
         if isinstance(value, dict) and value.get("verdict") == "uncertain":
             _insert_pending(
-                conn, run_id=FINE_RUN_ID, job_id=row["job_id"],
+                conn, run_id=FINE_RUN_ID, job_id=row["platform_job_id"],
                 failure_stage="ai_fine", failed_code="ai_missing_job",
                 origin_zone="match", ai_payload=value,
             )
@@ -473,14 +473,14 @@ def _apply_action_2(conn) -> int:
 
 def _apply_action_4(conn) -> int:
     rows = conn.execute(
-        "SELECT job_id FROM screening_results "
+        "SELECT platform_job_id FROM screening_results "
         "WHERE run_id = ? AND verdict = 'uncertain' "
-        "AND job_id NOT IN (SELECT job_id FROM screening_results WHERE run_id = ?)",
+        "AND platform_job_id NOT IN (SELECT platform_job_id FROM screening_results WHERE run_id = ?)",
         (ROUGH_RUN_ID, FINE_RUN_ID),
     ).fetchall()
     for row in rows:
         _insert_pending(
-            conn, run_id=ROUGH_RUN_ID, job_id=row["job_id"],
+            conn, run_id=ROUGH_RUN_ID, job_id=row["platform_job_id"],
             failure_stage="jd_detail",
             failed_code="historical_reason_unavailable",
             origin_zone="kept",
@@ -499,8 +499,8 @@ def _historical_pending_payload() -> dict:
 
 def _recovery_integrity_snapshot(conn) -> dict:
     rows = [list(row) for row in conn.execute(
-        "SELECT run_id, job_id, COALESCE(jd, '') FROM screening_results "
-        "WHERE run_id IN (?, ?) ORDER BY run_id, job_id",
+        "SELECT run_id, platform_job_id, COALESCE(jd, '') FROM screening_results "
+        "WHERE run_id IN (?, ?) ORDER BY run_id, platform_job_id",
         (ROUGH_RUN_ID, FINE_RUN_ID),
     ).fetchall()]
     encoded = json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -518,7 +518,7 @@ def _recovery_integrity_snapshot(conn) -> dict:
 def _expected_fine_pending_ids(conn) -> set[str]:
     pending_ids = set()
     rows = conn.execute(
-        "SELECT job_id, verdict FROM screening_results WHERE run_id = ?",
+        "SELECT platform_job_id, verdict FROM screening_results WHERE run_id = ?",
         (FINE_RUN_ID,),
     ).fetchall()
     for row in rows:
@@ -527,17 +527,17 @@ def _expected_fine_pending_ids(conn) -> set[str]:
         except (json.JSONDecodeError, TypeError):
             continue
         if isinstance(value, dict) and value.get("verdict") == "uncertain":
-            pending_ids.add(row["job_id"])
+            pending_ids.add(row["platform_job_id"])
     return pending_ids
 
 
 def _check_post_recovery_gate(conn, before: dict, stats: dict) -> dict:
     after = _recovery_integrity_snapshot(conn)
     expected_rough = {
-        row["job_id"] for row in conn.execute(
-            "SELECT job_id FROM screening_results "
+        row["platform_job_id"] for row in conn.execute(
+            "SELECT platform_job_id FROM screening_results "
             "WHERE run_id = ? AND verdict = 'uncertain' "
-            "AND job_id NOT IN (SELECT job_id FROM screening_results WHERE run_id = ?)",
+            "AND platform_job_id NOT IN (SELECT platform_job_id FROM screening_results WHERE run_id = ?)",
             (ROUGH_RUN_ID, FINE_RUN_ID),
         ).fetchall()
     }
@@ -546,11 +546,11 @@ def _check_post_recovery_gate(conn, before: dict, stats: dict) -> dict:
     rough_metadata_exact = True
     for run_id in (ROUGH_RUN_ID, FINE_RUN_ID):
         rows = conn.execute(
-            "SELECT job_id, failed_code, ai_payload_json "
+            "SELECT platform_job_id, failed_code, ai_payload_json "
             "FROM screening_pending_results WHERE run_id = ?",
             (run_id,),
         ).fetchall()
-        actual[run_id] = {row["job_id"] for row in rows}
+        actual[run_id] = {row["platform_job_id"] for row in rows}
         if run_id == ROUGH_RUN_ID:
             expected_payload = _historical_pending_payload()
             for row in rows:
@@ -566,8 +566,8 @@ def _check_post_recovery_gate(conn, before: dict, stats: dict) -> dict:
 
     duplicate_count = conn.execute(
         "SELECT COUNT(*) AS n FROM ("
-        " SELECT run_id, job_id FROM screening_results "
-        " WHERE run_id IN (?, ?) GROUP BY run_id, job_id HAVING COUNT(*) > 1"
+        " SELECT run_id, platform_job_id FROM screening_results "
+        " WHERE run_id IN (?, ?) GROUP BY run_id, platform_job_id HAVING COUNT(*) > 1"
         ")", (ROUGH_RUN_ID, FINE_RUN_ID),
     ).fetchone()["n"]
     invalid_rough = conn.execute(
@@ -875,18 +875,18 @@ def repair_committed_pending_metadata(backup_id: str, *, store) -> dict:
             prior_recovery = recovery_candidates[0]
 
             expected_ids = {
-                row["job_id"] for row in conn.execute(
-                    "SELECT job_id FROM screening_results "
+                row["platform_job_id"] for row in conn.execute(
+                    "SELECT platform_job_id FROM screening_results "
                     "WHERE run_id = ? AND verdict = 'uncertain' "
-                    "AND job_id NOT IN (SELECT job_id FROM screening_results WHERE run_id = ?)",
+                    "AND platform_job_id NOT IN (SELECT platform_job_id FROM screening_results WHERE run_id = ?)",
                     (ROUGH_RUN_ID, FINE_RUN_ID),
                 ).fetchall()
             }
             pending_rows = conn.execute(
-                "SELECT job_id, failed_code FROM screening_pending_results WHERE run_id = ?",
+                "SELECT platform_job_id, failed_code FROM screening_pending_results WHERE run_id = ?",
                 (ROUGH_RUN_ID,),
             ).fetchall()
-            pending_ids = {row["job_id"] for row in pending_rows}
+            pending_ids = {row["platform_job_id"] for row in pending_rows}
             allowed_codes = {None, "", "historical_reason_unavailable"}
             if (
                 len(expected_ids) != PENDING_646

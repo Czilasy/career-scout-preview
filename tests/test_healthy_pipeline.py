@@ -749,40 +749,40 @@ class Slice10HistoricalRecoveryTests(unittest.TestCase):
             # 198 match（带 JD，受保护）
             for i in range(198):
                 conn.execute(
-                    "INSERT INTO screening_results (id, run_id, job_id, verdict, jd, created_at) "
+                    "INSERT INTO screening_results (id, run_id, platform_job_id, verdict, jd, created_at) "
                     "VALUES (?, ?, ?, 'match', ?, ?)",
                     (f"r-pm{i}", rough_id, f"job-pm{i}",
                      f"JD content for match job {i}", "2026-07-28"))
             # 514 not_match（带 JD，受保护）
             for i in range(514):
                 conn.execute(
-                    "INSERT INTO screening_results (id, run_id, job_id, verdict, jd, created_at) "
+                    "INSERT INTO screening_results (id, run_id, platform_job_id, verdict, jd, created_at) "
                     "VALUES (?, ?, ?, 'not_match', ?, ?)",
                     (f"r-pn{i}", rough_id, f"job-pn{i}",
                      f"JD content for not_match job {i}", "2026-07-28"))
             # 646 uncertain（无 JD，pending 646）
             for i in range(646):
                 conn.execute(
-                    "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
+                    "INSERT INTO screening_results (id, run_id, platform_job_id, verdict, created_at) "
                     "VALUES (?, ?, ?, 'uncertain', ?)",
                     (f"r-u{i}", rough_id, f"job-u{i}", "2026-07-28"))
             # 518 dropped（无 JD）
             for i in range(518):
                 conn.execute(
-                    "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
+                    "INSERT INTO screening_results (id, run_id, platform_job_id, verdict, created_at) "
                     "VALUES (?, ?, ?, 'dropped', ?)",
                     (f"r-d{i}", rough_id, f"job-d{i}", "2026-07-28"))
             # 15847d27 JSON verdict（异常 50 条，带 JD，受保护）
             for i in range(17):
                 conn.execute(
-                    "INSERT INTO screening_results (id, run_id, job_id, verdict, jd, created_at) "
+                    "INSERT INTO screening_results (id, run_id, platform_job_id, verdict, jd, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (f"r-jm{i}", rough_id, f"job-jm{i}",
                      json.dumps({"verdict": "match", "reason": "ok"}),
                      f"JD content for JSON match job {i}", "2026-07-28"))
             for i in range(33):
                 conn.execute(
-                    "INSERT INTO screening_results (id, run_id, job_id, verdict, jd, created_at) "
+                    "INSERT INTO screening_results (id, run_id, platform_job_id, verdict, jd, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
                     (f"r-jn{i}", rough_id, f"job-jn{i}",
                      json.dumps({"verdict": "not_match", "reason": "no"}),
@@ -792,20 +792,20 @@ class Slice10HistoricalRecoveryTests(unittest.TestCase):
             # 这 762 条进精筛，646 条 rough uncertain 未进精筛 → pending_646=646
             for i in range(198):
                 conn.execute(
-                    "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
+                    "INSERT INTO screening_results (id, run_id, platform_job_id, verdict, created_at) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (f"f-m{i}", fine_id, f"job-pm{i}",
                      json.dumps({"verdict": "match", "reason": "ok"}), "2026-07-28"))
             for i in range(514):
                 conn.execute(
-                    "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
+                    "INSERT INTO screening_results (id, run_id, platform_job_id, verdict, created_at) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (f"f-n{i}", fine_id, f"job-pn{i}",
                      json.dumps({"verdict": "not_match", "reason": "no"}), "2026-07-28"))
             # 50 条 uncertain = 17 job-jm* + 33 job-jn*（rough 的 JSON 50 条进精筛后 AI 超时）
             for i in range(17):
                 conn.execute(
-                    "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
+                    "INSERT INTO screening_results (id, run_id, platform_job_id, verdict, created_at) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (f"f-cm{i}", fine_id, f"job-jm{i}",
                      json.dumps({"verdict": "uncertain",
@@ -813,7 +813,7 @@ class Slice10HistoricalRecoveryTests(unittest.TestCase):
                      "2026-07-28"))
             for i in range(33):
                 conn.execute(
-                    "INSERT INTO screening_results (id, run_id, job_id, verdict, created_at) "
+                    "INSERT INTO screening_results (id, run_id, platform_job_id, verdict, created_at) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (f"f-cn{i}", fine_id, f"job-jn{i}",
                      json.dumps({"verdict": "uncertain",
