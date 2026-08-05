@@ -1845,6 +1845,10 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
     Re-raises ``RuntimeError`` for login-wall truncation so the caller
     can stop the run before persisting truncated data.
 
+    账号限流（``DetailRateLimitedError``）不是单岗位独立失败：整个运行
+    立即停止（raise ``RiskControlError``），且限流页不关闭——把它留在
+    屏幕上给用户看，避免继续开新页面撞限流形成开关页循环。
+
     The inter-job gap is slept via ``sleeper(label="inter_job_gap")``
     for every non-terminal-excepted job (success or isolated failure)
     unless this is the last job in the run and ``trailing_wait`` is
@@ -1911,12 +1915,18 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
             ) from exc
         except DetailRateLimitedError as exc:
             print(f"  ⚠ 账号/操作频繁被限流: {exc}")
-            ws.send("Target.closeTarget", {"targetId": tid})
+            # 限流是账号级阻断：立即停止整个运行，不再开新页面。
+            # 限流页不关闭（无 closeTarget），留在屏幕上给用户看。
             _emit_detail_safe_event(
                 event_callback, job, "failed",
                 "source_rate_limited", started_at, safe_hint=str(exc),
             )
-            return False
+            # Run is stopping — do not sleep the inter-job gap.
+            skip_gap = True
+            raise RiskControlError(
+                f"BOSS 账号/操作频繁被限流：{exc}",
+                scraped_count=len(results), output_path=output_path or "",
+            ) from exc
         except DetailExtractionError as exc:
             print(f"  跳过无效详情页: {exc}")
             ws.send("Target.closeTarget", {"targetId": tid})
@@ -2015,7 +2025,8 @@ def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
             safe_hint=str(exc),
         )
         print(f"[{tab_label}]   ⚠ 账号/操作频繁被限流")
-        return False
+        # 账号级阻断：由 _tab_worker 触发降级停工；限流页留在原地不关闭
+        return "rate_limited"
     except DetailExtractionError as exc:
         print(f"[{tab_label}]   跳过无效详情页: {exc}")
         _emit_detail_safe_event(
@@ -2060,7 +2071,7 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
                 sleeper, event_callback, readiness_timeout_seconds,
                 max_readiness_retries, inter_job_gap_range, stagger_range,
                 tab_id, results_lock, results, output_path, degrade_event,
-                trailing_wait, reset_every=3):
+                trailing_wait, reset_every=3, degrade_reason=None):
     """常驻 tab 工作线程：建池 → 错峰启动 → 循环领任务抓详情 → 补位节奏 → 关池。
 
     spec 007 ⑧：每个 tab 配一条独立工作线程 + 独立 CDP 会话（CDPSession 是
@@ -2070,6 +2081,7 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
     tab_label = f"tab{tab_id + 1}"
     ws = session_factory(cdp_port)
     tid = None
+    keep_tab_open = False  # 限流停工时限流页留在屏幕上，不关闭
     try:
         # 建池：createTarget + attach + visibility 注入（后台反爬）
         r = ws.send("Target.createTarget", {"url": "about:blank", "background": True})
@@ -2111,6 +2123,15 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
                 degrade_event.set()
                 print(f"[{tab_label}] 登录墙触发降级，停止领新任务")
                 break
+            if result == "rate_limited":
+                # 账号限流：全体停工；本 tab 停在限流页不关闭，
+                # 不再开新页面撞限流（避免页面开关循环）
+                if degrade_reason is not None:
+                    degrade_reason["reason"] = "rate_limited"
+                degrade_event.set()
+                keep_tab_open = True
+                print(f"[{tab_label}] 账号限流，停止抓取；限流页保留在屏幕上")
+                break
             jobs_done_on_tab += 1
             # 每抓 reset_every 个详情重置一次 session（同列表翻页防 code:37 策略）：
             # 导航回 BOSS 首页 + 滚动，重置 BOSS 的 session 级请求计数器。
@@ -2122,8 +2143,8 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
                 print(f"[{tab_label}]   等待 {gap:.1f}s 后抓下一个...")
                 sleeper(gap, label="inter_job_gap")
     finally:
-        # 结束一次性关 tab + 关会话
-        if tid is not None:
+        # 结束一次性关 tab + 关会话（限流停工时限流页保留不关）
+        if tid is not None and not keep_tab_open:
             try:
                 ws.send("Target.closeTarget", {"targetId": tid})
             except Exception:
@@ -2223,6 +2244,8 @@ def scrape_details(list_data, max_details=None, output_path=None,
         import queue as _queue_mod
         results_lock = threading.Lock()
         degrade_event = threading.Event()
+        # 降级原因共享标记：区分登录墙降级与账号限流停工（限流需退出码 10）
+        degrade_reason: dict[str, str] = {}
         work_queue = _queue_mod.Queue()
         # 随机顺序：进队列前打乱 JD 列表，请求顺序不可预测
         shuffled = unique_jobs[:]
@@ -2247,6 +2270,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
                     "results": results,
                     "output_path": output_path,
                     "degrade_event": degrade_event,
+                    "degrade_reason": degrade_reason,
                     "trailing_wait": trailing_wait,
                     "reset_every": reset_every,
                 },
@@ -2257,6 +2281,13 @@ def scrape_details(list_data, max_details=None, output_path=None,
             threads.append(t)
         for t in threads:
             t.join()
+        if degrade_reason.get("reason") == "rate_limited":
+            # 账号限流：醒目报错 + 退出码 10（webui 据此分类
+            # source_rate_limited 并停掉整个任务）；限流页已留在屏幕上。
+            raise RiskControlError(
+                "BOSS 账号/操作频繁被限流，已停止抓取（限流页保留在浏览器中）",
+                scraped_count=len(results), output_path=output_path or "",
+            )
         if degrade_event.is_set():
             print("\n⚠ 检测到登录墙，已降级停止；已抓取结果保留。")
     else:
