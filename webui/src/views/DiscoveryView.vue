@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Bookmark,
   Check,
+  Download,
   FileText,
   Filter,
   LoaderCircle,
@@ -19,7 +20,7 @@ import JobLifecycleActions from "../components/JobLifecycleActions.vue";
 import JobWorkspace from "../components/JobWorkspace.vue";
 import StepNavigator from "../components/StepNavigator.vue";
 import TaskProgress from "../components/TaskProgress.vue";
-import { apiRequest, errorMessage, settingsApi } from "../api";
+import { ApiError, apiRequest, errorMessage, settingsApi } from "../api";
 import { setThemePlatform } from "../composables/useTheme";
 import {
   buildSearchScriptParams,
@@ -183,6 +184,7 @@ const recrawlSnapshot = ref<TaskSnapshot | null>(null);
 let recrawlRetryCount = 0;
 const scrapeCompleted = ref(false);
 const resultLoaded = ref(false);
+const exportBusy = ref(false);
 // 刷新后接回任务时显示的恢复提示条；任务结束后清空
 const restoredTaskHint = ref("");
 // 切片7：从 DB 恢复的 paused 任务 run_id（无内存工作线程，不能 poll）
@@ -1233,6 +1235,41 @@ async function clearLatestResult() {
   }
 }
 
+async function exportResultCsv() {
+  if (exportBusy.value) return;
+  exportBusy.value = true;
+  try {
+    // 优先按当前结果的 run_id 导出，与结果页展示完全同源
+    const query = pipelineResultRunId.value
+      ? `?run_id=${encodeURIComponent(pipelineResultRunId.value)}`
+      : "";
+    const response = await fetch(`/api/pipeline-result/export.csv${query}`, {
+      credentials: "same-origin",
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+      throw new ApiError(response.status, payload);
+    }
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const matched = /filename=([^;]+)/.exec(disposition);
+    const filename = matched?.[1]?.trim() || "career_scout_jobs.csv";
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    notify("已导出匹配/不匹配分组 CSV", "success");
+  } catch (error) {
+    notify(errorMessage(error, "导出 CSV 失败"), "error");
+  } finally {
+    exportBusy.value = false;
+  }
+}
+
 function resetWorkflow() {
   if (pollTimer) window.clearTimeout(pollTimer);
   activeStep.value = "upload";
@@ -1640,9 +1677,20 @@ watch(roundStatusPayload, (payload) => {
           <h1>{{ currentCopy.title }}</h1>
           <p>{{ currentCopy.description }}</p>
         </div>
-        <button v-if="activeStep === 'results'" class="button secondary" type="button" @click="resetWorkflow">
-          <RotateCcw :size="17" aria-hidden="true" />开始新一轮
-        </button>
+        <div v-if="activeStep === 'results'" class="stage-actions">
+          <button
+            class="button secondary"
+            type="button"
+            data-testid="export-result-csv"
+            :disabled="exportBusy || !resultLoaded"
+            @click="exportResultCsv"
+          >
+            <Download :size="17" aria-hidden="true" />{{ exportBusy ? "导出中…" : "导出 CSV" }}
+          </button>
+          <button class="button secondary" type="button" @click="resetWorkflow">
+            <RotateCcw :size="17" aria-hidden="true" />开始新一轮
+          </button>
+        </div>
       </header>
 
       <section v-if="activeStep === 'upload'" class="content-card workflow-card upload-layout">

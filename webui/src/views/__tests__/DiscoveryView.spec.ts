@@ -1060,9 +1060,17 @@ describe("DiscoveryView", () => {
   function lifecycleFetchMock(options: {
     state?: unknown;
     action?: (url: string, init?: RequestInit) => Response | Promise<Response>;
+    exportCsv?: (url: string) => Response | Promise<Response>;
   } = {}) {
     return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.startsWith("/api/pipeline-result/export.csv")) {
+        if (options.exportCsv) return options.exportCsv(url);
+        return new Response("title,job_link\n", {
+          status: 200,
+          headers: { "Content-Type": "text/csv" },
+        });
+      }
       if (url.includes("/api/latest-pipeline-result")) {
         return response({
           ok: true, has_result: true, source_run_id: "run-lifecycle",
@@ -1197,5 +1205,42 @@ describe("DiscoveryView", () => {
     expect(wrapper.find('[data-testid="lca-action-error"]').exists()).toBe(false);
 
     vi.unstubAllGlobals();
+  });
+
+  it("exports grouped CSV from the results header using the current run id", async () => {
+    let exportUrl = "";
+    const fetchMock = lifecycleFetchMock({
+      exportCsv: (url) => {
+        exportUrl = url;
+        return new Response("title,job_link\n匹配：,\n", {
+          status: 200,
+          headers: {
+            "Content-Type": "text/csv",
+            "Content-Disposition": "attachment; filename=career_scout_jobs_zhilian.csv",
+          },
+        });
+      },
+    });
+    const createObjectURL = vi.fn(() => "blob:export-csv");
+    const revokeObjectURL = vi.fn();
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = createObjectURL;
+    URL.revokeObjectURL = revokeObjectURL;
+    try {
+      const wrapper = await mountAtResults(fetchMock);
+
+      await wrapper.get('[data-testid="export-result-csv"]').trigger("click");
+      await flushPromises();
+
+      // 导出必须按当前结果的 run_id 请求分组 CSV，并触发浏览器下载
+      expect(exportUrl).toBe("/api/pipeline-result/export.csv?run_id=run-lifecycle");
+      expect(createObjectURL).toHaveBeenCalled();
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:export-csv");
+    } finally {
+      URL.createObjectURL = originalCreate;
+      URL.revokeObjectURL = originalRevoke;
+      vi.unstubAllGlobals();
+    }
   });
 });

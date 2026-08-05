@@ -2800,7 +2800,7 @@ class TaskStore:
                     "salary": row.get("salary"),
                     "location": row.get("location"),
                     "reason": reason,
-                    "canonical_url": row.get("canonical_url"),
+                    "canonical_url": row.get("source_url"),
                 })
                 continue
             jobs.append({
@@ -2814,8 +2814,8 @@ class TaskStore:
                 "experience": row.get("experience"),
                 "degree": row.get("degree"),
                 "jd": row.get("jd") or "",
-                "canonical_url": row.get("canonical_url"),
-                "source_url": row.get("canonical_url"),
+                "canonical_url": row.get("source_url"),
+                "source_url": row.get("source_url"),
                 "extra": {},
             })
 

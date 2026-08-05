@@ -984,6 +984,76 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.get_json()["error"], "not_paused")
 
+    def _save_zhilian_pipeline_result(self):
+        return self.store.save_pipeline_result({
+            "jobs": [
+                {"job_id": "j1", "platform_job_id": "pj1", "title": "匹配岗",
+                 "company": "公司A", "salary": "2-3万", "location": "上海",
+                 "experience": "1-3年", "degree": "本科",
+                 "canonical_url": "https://zhaopin.example/j1.htm",
+                 "verdict": "match", "verdict_reason": "", "caveats": []},
+            ],
+            "dropped": [
+                {"job_id": "d1", "platform_job_id": "pd1", "title": "淘汰岗",
+                 "reason": "薪资低于期望",
+                 "canonical_url": "https://zhaopin.example/d1.htm"},
+            ],
+            "total_scraped": 2, "total_kept": 1, "total_matched": 1,
+            "total_dropped": 1, "profile_summary": "画像", "error": "",
+        }, {"platform": "zhilian"})
+
+    def test_platform_latest_result_keeps_job_links(self):
+        """按平台读取结果快照时，岗位链接必须从 source_url 列回填。"""
+        self._save_zhilian_pipeline_result()
+        latest = self.client.get(
+            "/api/latest-pipeline-result?platform=zhilian").get_json()
+        self.assertTrue(latest["has_result"])
+        self.assertEqual(
+            latest["result"]["jobs"][0]["canonical_url"],
+            "https://zhaopin.example/j1.htm",
+        )
+        self.assertEqual(
+            latest["result"]["dropped"][0]["canonical_url"],
+            "https://zhaopin.example/d1.htm",
+        )
+
+    def test_pipeline_export_csv_groups_matched_before_dropped_with_links(self):
+        self._save_zhilian_pipeline_result()
+
+        response = self.client.get(
+            "/api/pipeline-result/export.csv?platform=zhilian")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/csv", response.content_type)
+        self.assertIn("career_scout_jobs_zhilian.csv", response.headers["Content-Disposition"])
+        lines = [
+            line for line in response.get_data(as_text=True).splitlines()
+            if line.strip()
+        ]
+        titles = [line.lstrip("\ufeff").split(",")[0] for line in lines]
+        self.assertEqual(titles, ["title", "匹配：", "匹配岗", "不匹配：", "淘汰岗"])
+        self.assertIn("https://zhaopin.example/j1.htm", lines[2])
+        self.assertIn("薪资低于期望", lines[4])
+        self.assertIn("https://zhaopin.example/d1.htm", lines[4])
+
+    def test_pipeline_export_csv_without_result_returns_not_found(self):
+        response = self.client.get(
+            "/api/pipeline-result/export.csv?platform=zhilian")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["error_code"], "not_found")
+
+    def test_pipeline_export_csv_by_run_id_accepts_done_snapshot(self):
+        """前端按当前结果的 run_id 导出：done 状态快照必须可导出。"""
+        run_id = self._save_zhilian_pipeline_result()
+
+        response = self.client.get(
+            f"/api/pipeline-result/export.csv?run_id={run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        text = response.get_data(as_text=True)
+        self.assertIn("匹配：", text)
+        self.assertIn("不匹配：", text)
+
 
 class ChromeAccountProfileSwitchTests(unittest.TestCase):
     """账号切换时，端口上旧账号的 Chrome 必须被替换而不是复用。"""

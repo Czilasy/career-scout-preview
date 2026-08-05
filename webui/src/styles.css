@@ -446,6 +446,13 @@ button:disabled {
   justify-content: space-between;
   min-height: 72px;
   margin-bottom: 18px;
+}
+
+.stage-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
 }.stage-header h1 {
   margin: 4px 0 0;
   font-size: clamp(24px, 2.6vw, 30px);
