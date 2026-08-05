@@ -1175,6 +1175,82 @@ def create_app(config=None):
             "output": output,
         })
 
+    @app.route("/api/env-check")
+    def env_check():
+        """结构化环境检查：浏览器 / AI / 本地 三组，逐项返回状态。
+
+        检查逻辑与 CLI ``--check`` 共用 boss.collect_check_items；
+        AI Key 只判配置是否齐全（不验有效性，连通性由前端单独按钮触发）。
+        """
+        items, _ = boss.collect_check_items(cdp_port=boss.DEFAULT_CDP_PORT)
+        by_id = {item["id"]: item for item in items}
+
+        browser_items = [by_id["browsers"], by_id["cdp"], by_id["boss_login"]]
+
+        ai_settings = store.get_ai_settings()
+        ai_configured = bool(ai_settings.get("is_configured"))
+        ai_items = [{
+            "id": "ai_key",
+            "name": "AI Key 配置",
+            "status": "ok" if ai_configured else "fail",
+            "detail": (
+                "已配置（模型与端点就绪）"
+                if ai_configured else "未配置 — 到「AI 设置」填入 API Key"
+            ),
+            "fix": None if ai_configured else "打开 AI 设置",
+        }]
+
+        data_dir = Path.home() / ".career-scout"
+        data_writable = False
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            probe = data_dir / ".write_probe"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            data_writable = True
+        except OSError:
+            data_writable = False
+        dist_ok = (FRONTEND_DIST / "index.html").is_file()
+        local_items = [
+            {
+                "id": "data_dir",
+                "name": "数据目录可写",
+                "status": "ok" if data_writable else "fail",
+                "detail": (
+                    "~/.career-scout 可写"
+                    if data_writable else "~/.career-scout 不可写，请检查用户目录权限"
+                ),
+                "fix": None if data_writable else "检查用户目录权限",
+            },
+            {
+                "id": "webui_dist",
+                "name": "前端构建产物",
+                "status": "ok" if dist_ok else "fail",
+                "detail": (
+                    "webui/dist 存在"
+                    if dist_ok else "webui/dist 缺失，请运行 npm run build"
+                ),
+                "fix": None if dist_ok else "npm run build",
+            },
+            {
+                "id": "deps",
+                "name": "Python 依赖",
+                "status": by_id["deps"]["status"],
+                "detail": by_id["deps"]["detail"],
+                "fix": by_id["deps"]["fix"],
+            },
+        ]
+
+        return jsonify({
+            "ok": True,
+            "groups": [
+                {"id": "browser", "name": "浏览器", "items": browser_items},
+                {"id": "ai", "name": "AI", "items": ai_items},
+                {"id": "local", "name": "本地环境", "items": local_items},
+            ],
+            "checked_at": int(time.time()),
+        })
+
     @app.route("/api/profile", methods=["GET", "PUT"])
     def profile():
         if request.method == "GET":
@@ -5134,6 +5210,88 @@ def create_app(config=None):
                 "profile_summary": result.get("profile_summary", ""),
             },
         })
+
+    @app.route("/api/pipeline-result/export.csv")
+    def export_pipeline_result_csv():
+        """导出最终结果页数据：匹配的在前、不匹配的在后，各自带分组标志行。
+
+        数据源与 ``/api/latest-pipeline-result`` 完全同源；支持 platform /
+        run_id 参数，语义与该接口一致。每个岗位行带岗位直达链接。
+        """
+        query_platform = request.args.get("platform", "").strip() or None
+        query_run_id = request.args.get("run_id", "").strip() or None
+        if query_run_id:
+            try:
+                run = store.get_screening_run(query_run_id)
+            except _OPERATIONAL_ERRORS:
+                run = None
+            if run is None:
+                return jsonify({
+                    "error_code": "not_found", "user_message": "任务不存在",
+                }), 404
+            if run["status"] not in ("done", "succeeded", "partial"):
+                return jsonify({
+                    "error_code": "result_not_ready",
+                    "user_message": "结果尚未完成，暂无法导出",
+                }), 409
+            if query_platform and query_platform != run.get("platform"):
+                return jsonify({
+                    "error_code": "run_platform_conflict",
+                    "user_message": "run_id 与 platform 不一致",
+                }), 409
+            payload = store.load_latest_pipeline_result(query_run_id)
+        elif query_platform:
+            payload = store.load_latest_pipeline_result_for_platform(query_platform)
+        else:
+            payload = store.load_latest_pipeline_result()
+        if payload is None:
+            return jsonify({
+                "error_code": "not_found", "user_message": "暂无可导出的结果",
+            }), 404
+
+        result = payload["result"]
+        columns = [
+            "title", "company", "salary", "location", "experience", "degree",
+            "reason", "job_link",
+        ]
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+
+        def _write_section(label, rows):
+            section_row = {column: "" for column in columns}
+            section_row["title"] = label
+            writer.writerow(section_row)
+            for row in rows:
+                writer.writerow(row)
+
+        matched_rows = [
+            {
+                **job,
+                "reason": "",
+                "job_link": job.get("canonical_url") or job.get("source_url") or "",
+            }
+            for job in (result.get("jobs") or []) if isinstance(job, dict)
+        ]
+        dropped_rows = [
+            {
+                **job,
+                "job_link": job.get("canonical_url") or job.get("source_url") or "",
+            }
+            for job in (result.get("dropped") or []) if isinstance(job, dict)
+        ]
+        _write_section("匹配：", matched_rows)
+        _write_section("不匹配：", dropped_rows)
+        platform_label = payload.get("platform") or "all"
+        return app.response_class(
+            "\ufeff" + buffer.getvalue(),
+            mimetype="text/csv",
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=career_scout_jobs_{platform_label}.csv"
+                ),
+            },
+        )
 
     # ------------------------------------------------------------------
     # Pipeline 结果增强：按需抓 JD 详情 + 感兴趣/不感兴趣（接入筛选工作台）

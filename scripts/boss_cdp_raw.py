@@ -72,34 +72,66 @@ CITY_GROUP_URL = "https://www.zhipin.com/wapi/zpCommon/data/cityGroup.json"
 MAX_PAGES = 10          # 单次最大页数
 MAX_API_REQUESTS = 500  # 单次最大 API 请求数
 
-def get_default_chrome_path():
+BROWSER_NOT_FOUND_HINT = "请安装 Chrome 或使用系统自带 Edge"
+
+
+def detect_chromium_browsers():
+    """探测本机 Chromium 系浏览器（Chrome / Edge），返回结构化结果。
+
+    Returns:
+        {"chrome": 可执行文件路径或 None, "edge": 可执行文件路径或 None}
+
+    Windows 依次查 LOCALAPPDATA / PROGRAMFILES / PROGRAMFILES(X86) 下的
+    chrome.exe 与 msedge.exe；macOS / Linux 顺带支持常见安装路径。
+    两类浏览器各保留第一个命中的路径；两者都找不到时返回两个 None。
+    """
     system = platform.system()
-    if system == "Darwin":
-        return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    found = {"chrome": None, "edge": None}
     if system == "Windows":
-        candidates = []
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        if local_app_data:
-            candidates.append(ntpath.join(local_app_data, "Google", "Chrome", "Application", "chrome.exe"))
-        for env_name in ("PROGRAMFILES", "PROGRAMFILES(X86)"):
+        candidates = (
+            ("chrome", "LOCALAPPDATA", "Google", "Chrome", "Application", "chrome.exe"),
+            ("chrome", "PROGRAMFILES", "Google", "Chrome", "Application", "chrome.exe"),
+            ("chrome", "PROGRAMFILES(X86)", "Google", "Chrome", "Application", "chrome.exe"),
+            ("edge", "PROGRAMFILES", "Microsoft", "Edge", "Application", "msedge.exe"),
+            ("edge", "PROGRAMFILES(X86)", "Microsoft", "Edge", "Application", "msedge.exe"),
+            ("edge", "LOCALAPPDATA", "Microsoft", "Edge", "Application", "msedge.exe"),
+        )
+        for kind, env_name, *parts in candidates:
+            if found[kind]:
+                continue
             base = os.environ.get(env_name)
-            if base:
-                candidates.append(ntpath.join(base, "Google", "Chrome", "Application", "chrome.exe"))
+            if not base:
+                continue
+            candidate = ntpath.join(base, *parts)
+            if os.path.exists(candidate):
+                found[kind] = candidate
+        return found
+    if system == "Darwin":
+        for kind, path in (
+            ("chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            ("edge", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+        ):
+            if os.path.exists(path):
+                found[kind] = path
+        return found
+    for kind, candidates in (
+        ("chrome", (
+            "/usr/bin/google-chrome", "/usr/bin/chromium-browser",
+            "/usr/bin/chromium", "/snap/bin/chromium",
+        )),
+        ("edge", ("/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable")),
+    ):
         for candidate in candidates:
             if os.path.exists(candidate):
-                return candidate
-        return candidates[0] if candidates else "chrome.exe"
+                found[kind] = candidate
+                break
+    return found
 
-    candidates = [
-        "/usr/bin/google-chrome",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/chromium",
-        "/snap/bin/chromium",
-    ]
-    for candidate in candidates:
-        if os.path.exists(candidate):
-            return candidate
-    return candidates[0]
+
+def get_default_chrome_path():
+    """返回首选浏览器路径（Chrome 优先，其次 Edge）；都找不到返回 None。"""
+    browsers = detect_chromium_browsers()
+    return browsers.get("chrome") or browsers.get("edge")
 
 
 def get_default_profile_dir():
@@ -2426,62 +2458,116 @@ def run_smoke_test(cdp_port=DEFAULT_CDP_PORT):
 # ============================================================
 # --check 环境检查
 # ============================================================
-def run_check(cdp_port=DEFAULT_CDP_PORT):
-    """运行环境诊断检查"""
-    print("=" * 50)
-    print("  BOSS直聘 CDP 环境检查")
-    print("=" * 50)
-    print()
+def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
+    """收集结构化环境检查结果，CLI 与 Web 展示共用同一套逻辑。
 
+    Returns:
+        (items, all_pass)
+        items: [{
+            "id": "browsers" | "deps" | "cdp" | "boss_login",
+            "name": str,
+            "status": "ok" | "fail" | "skip",
+            "detail": str,
+            "fix": str | None,   # 可选修复动作文案
+        }]
+    """
+    items = []
     all_pass = True
 
-    # 检查 1: Python 依赖
-    print("[1/3] Python 依赖...")
-    deps_ok = require_runtime_dependencies("websocket", "requests")
-    if requests is not None:
-        print(f"  ✅ requests 可导入")
-    if websocket is not None:
-        print(f"  ✅ websocket 可导入")
-    if deps_ok:
-        print(f"  ✅ 依赖完整")
-    else:
-        all_pass = False
+    def append(item_id, name, status, detail, fix=None):
+        nonlocal all_pass
+        items.append({
+            "id": item_id, "name": name,
+            "status": status, "detail": detail, "fix": fix,
+        })
+        if status == "fail":
+            all_pass = False
 
-    # 检查 2: CDP 端口连通性
-    print("[2/3] CDP 端口连通性...")
+    # 检查 1: Chromium 浏览器（Chrome / Edge 双探测）
+    browsers = detect_chromium_browsers()
+    found_parts = []
+    if browsers.get("chrome"):
+        found_parts.append("找到 Chrome ✅")
+    if browsers.get("edge"):
+        found_parts.append("找到 Edge ✅")
+    if found_parts:
+        append("browsers", "Chromium 浏览器",
+               "ok", "；".join(found_parts))
+    else:
+        append("browsers", "Chromium 浏览器", "fail",
+               "未找到 Chrome 或 Edge", BROWSER_NOT_FOUND_HINT)
+
+    # 检查 2: Python 依赖
+    deps_ok = require_runtime_dependencies("websocket", "requests")
+    if deps_ok:
+        append("deps", "Python 依赖", "ok", "requests / websocket 可导入")
+    else:
+        missing = []
+        if requests is None:
+            missing.append("requests")
+        if websocket is None:
+            missing.append("websocket")
+        append("deps", "Python 依赖", "fail",
+               f"缺少依赖: {', '.join(missing)}，请运行 uv sync 或 pip install -r requirements.txt")
+
+    # 检查 3: CDP 端口连通性（专用浏览器是否已启动）
+    cdp_status = "skip"
     if requests is None:
-        print(f"  ❌ 跳过 — 缺少 requests")
-        all_pass = False
+        append("cdp", "专用浏览器已启动", "skip",
+               f"跳过 — 缺少 requests（无法探测 127.0.0.1:{cdp_port}）")
     else:
         try:
             resp = requests.get(f"http://127.0.0.1:{cdp_port}/json/version", timeout=5)
             data = resp.json()
             browser = data.get("Browser", "未知")
-            print(f"  ✅ 通过 — Chrome {browser}")
+            cdp_status = "ok"
+            append("cdp", "专用浏览器已启动", "ok",
+                   f"CDP 端口 {cdp_port} 就绪 — {browser}")
         except (requests.ConnectionError, requests.Timeout):
-            print(f"  ❌ 失败 — 无法连接 127.0.0.1:{cdp_port}")
-            print(f"     请先启动 Chrome CDP: python3 {__file__} --setup-chrome")
-            all_pass = False
+            cdp_status = "fail"
+            append("cdp", "专用浏览器已启动", "fail",
+                   f"无法连接 127.0.0.1:{cdp_port}",
+                   "启动专用浏览器: python3 scripts/boss_cdp_raw.py --setup-chrome")
         except (json.JSONDecodeError, KeyError) as e:
-            print(f"  ❌ 失败 — CDP 响应异常: {e}")
-            all_pass = False
+            cdp_status = "fail"
+            append("cdp", "专用浏览器已启动", "fail",
+                   f"CDP 响应异常: {e}")
 
-    # 检查 3: BOSS直聘登录状态
-    print("[3/3] BOSS直聘登录状态...")
-    if not deps_ok:
-        print(f"  ❌ 跳过 — 缺少运行依赖")
-        all_pass = False
+    # 检查 4: BOSS 登录状态
+    if not deps_ok or cdp_status != "ok":
+        append("boss_login", "BOSS 登录状态", "skip",
+               "跳过 — 浏览器未就绪，无法探测登录态")
     else:
         try:
             logged_in = check_login_state(cdp_port)
             if logged_in:
-                print(f"  ✅ 已登录")
+                append("boss_login", "BOSS 登录状态", "ok",
+                       "已登录（接口返回明文薪资）")
             else:
-                print(f"  ❌ 未登录 — 请先在 Chrome 中登录 zhipin.com")
-                all_pass = False
+                append("boss_login", "BOSS 登录状态", "fail",
+                       "未登录 — 请先在专用浏览器中登录 zhipin.com",
+                       "打开专用浏览器登录: python3 scripts/boss_cdp_raw.py --setup-chrome")
         except Exception as e:
-            print(f"  ❌ 检测失败: {e}")
-            all_pass = False
+            append("boss_login", "BOSS 登录状态", "fail",
+                   f"检测失败: {e}")
+
+    return items, all_pass
+
+
+def run_check(cdp_port=DEFAULT_CDP_PORT):
+    """运行环境诊断检查（终端展示层，逻辑见 collect_check_items）"""
+    print("=" * 50)
+    print("  BOSS直聘 CDP 环境检查")
+    print("=" * 50)
+    print()
+
+    items, all_pass = collect_check_items(cdp_port)
+    for index, item in enumerate(items, start=1):
+        mark = {"ok": "✅", "fail": "❌", "skip": "⏭️"}.get(item["status"], "?")
+        print(f"[{index}/{len(items)}] {item['name']}...")
+        print(f"  {mark} {item['detail']}")
+        if item["fix"]:
+            print(f"     🔧 {item['fix']}")
 
     print()
     if all_pass:
@@ -2941,6 +3027,10 @@ def run_setup_chrome(cdp_port=DEFAULT_CDP_PORT, copy_login_state=False,
         print("   请改用 --import-boss-session + --confirm-session-import。")
         return 1
     if not require_runtime_dependencies("requests"):
+        return 1
+
+    if not DEFAULT_CHROME_PATH:
+        print(f"❌ 未找到 Chrome/Edge，{BROWSER_NOT_FOUND_HINT}")
         return 1
 
     print("=" * 50)
