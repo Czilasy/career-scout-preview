@@ -803,6 +803,14 @@ def create_app(config=None):
     )
     set_browser_accounts_path(app.config["BROWSER_ACCOUNTS_PATH"])
 
+    from scripts.login_state_cache import set_login_state_path as _set_login_state_path
+    from webui.cooldown import set_cooldown_path as _set_cooldown_path
+    state_dir = Path(app.config["DB_PATH"]).parent
+    app.config["LOGIN_STATE_PATH"] = str(state_dir / "login-state.json")
+    app.config["COOLDOWN_PATH"] = str(state_dir / "cooldown.json")
+    _set_login_state_path(app.config["LOGIN_STATE_PATH"])
+    _set_cooldown_path(app.config["COOLDOWN_PATH"])
+
     store = TaskStore(app.config["DB_PATH"])
     from webui.tuning import TuningController
     TuningController(store).recover_after_restart()
@@ -856,6 +864,7 @@ def create_app(config=None):
                 python_executable=app.config["PYTHON_EXECUTABLE"],
                 artifact_root=artifact,
                 cdp_port=int(cdp_port) if cdp_port else boss.DEFAULT_CDP_PORT,
+                browser_account=str(browser_account or "").strip() or None,
             )
         except Exception:
             return None
@@ -1180,12 +1189,35 @@ def create_app(config=None):
         """结构化环境检查：浏览器 / AI / 本地 三组，逐项返回状态。
 
         检查逻辑与 CLI ``--check`` 共用 boss.collect_check_items；
-        AI Key 只判配置是否齐全（不验有效性，连通性由前端单独按钮触发）。
+        BOSS 登录项优先读激活账号的登录态缓存（D3），未命中才真实探测；
+        AI Key 只判配置是否齐全（不验有效性，连通性由前端单独按钮触发）；
+        冷却记录随响应返回（D6：面板显示「建议等待至 XX 点」）。
         """
         items, _ = boss.collect_check_items(cdp_port=boss.DEFAULT_CDP_PORT)
         by_id = {item["id"]: item for item in items}
 
-        browser_items = [by_id["browsers"], by_id["cdp"], by_id["boss_login"]]
+        # BOSS 登录状态：激活账号走缓存优先（TTL 15 分钟），
+        # 未命中回退 collect_check_items 的真实探测结果。
+        account = _account_for_run()
+        boss_login = by_id["boss_login"]
+        if account:
+            from scripts.login_state_cache import read_cached_state
+            cached = read_cached_state(account, "boss")
+            if cached == "logged_in":
+                boss_login = {"id": "boss_login", "name": "BOSS 登录状态",
+                              "status": "ok", "detail": "已登录（缓存）", "fix": None}
+            elif cached == "restricted":
+                boss_login = {"id": "boss_login", "name": "BOSS 登录状态",
+                              "status": "fail", "detail": "受限中（缓存） — 账号或 IP 命中风控，建议等待后重试",
+                              "fix": None}
+            elif cached == "not_logged_in":
+                boss_login = {"id": "boss_login", "name": "BOSS 登录状态",
+                              "status": "fail", "detail": "未登录（缓存） — 请打开该账号的 BOSS 窗口登录",
+                              "fix": "打开账号浏览器登录"}
+            elif cached == "unknown":
+                boss_login = {"id": "boss_login", "name": "BOSS 登录状态",
+                              "status": "skip", "detail": "状态未知（缓存） — CDP 不可用，稍后重试", "fix": None}
+        browser_items = [by_id["browsers"], by_id["cdp"], boss_login]
 
         ai_settings = store.get_ai_settings()
         ai_configured = bool(ai_settings.get("is_configured"))
@@ -1241,6 +1273,17 @@ def create_app(config=None):
             },
         ]
 
+        cooldowns = []
+        from webui.cooldown import all_cooldowns
+        for aid, platforms in all_cooldowns().items():
+            for pid, rec in platforms.items():
+                cooldowns.append({
+                    "account_id": aid,
+                    "platform": pid,
+                    "until": rec["until"],
+                    "until_text": _format_unlock_time(rec["until"]),
+                    "reason": rec.get("reason") or "",
+                })
         return jsonify({
             "ok": True,
             "groups": [
@@ -1248,6 +1291,8 @@ def create_app(config=None):
                 {"id": "ai", "name": "AI", "items": ai_items},
                 {"id": "local", "name": "本地环境", "items": local_items},
             ],
+            "active_account": account,
+            "cooldowns": cooldowns,
             "checked_at": int(time.time()),
         })
 
@@ -1267,12 +1312,18 @@ def create_app(config=None):
             return jsonify({"tasks": [_tag_boss(t) for t in store.list_tasks(limit=limit)]})
         raw = request.get_json(silent=True) or {}
         legacy_platform_guard(raw.get("platform"))
+        error_resp, error_status, warning = _submit_cooldown_guard(raw)
+        if error_resp is not None:
+            return error_resp, error_status
         search = validate_search_params(raw)
         profile_raw = raw.get("profile") if "profile" in raw else store.load_profile()
         normalized_profile = normalize_profile(profile_raw)
         store.save_profile(normalized_profile)
         task = runner.create_scrape(search, normalized_profile)
-        return jsonify({"task": _tag_boss(task)}), 202
+        payload: dict = {"task": _tag_boss(task)}
+        if warning is not None:
+            payload["warning"] = warning
+        return jsonify(payload), 202
 
     @app.route("/api/scrape", methods=["POST"])
     def legacy_scrape():
@@ -2123,6 +2174,74 @@ def create_app(config=None):
                     return account
         account = str((_load_legacy_advanced_settings() or {}).get("browser_account") or "a")
         return account if account in accounts else "a"
+
+    def _format_unlock_time(until: float) -> str:
+        """把解封时间戳格式化为用户可读的「MM-DD HH:MM」。"""
+        from datetime import datetime as _dt
+        return _dt.fromtimestamp(until).strftime("%m-%d %H:%M")
+
+    def _invalidate_login_cache(account_id: str, platform: str) -> None:
+        """打开浏览器登录窗口时失效该账号该平台的登录态缓存（D3 信号）。
+
+        用户可能刚完成登录；失效后下次 preflight / env-check 重新真实探测，
+        避免沿用登录前的旧状态（如缓存里的 not_logged_in 挡住任务提交）。
+        """
+        try:
+            from scripts.login_state_cache import invalidate_login_state
+            invalidate_login_state(str(account_id), str(platform))
+        except Exception:
+            pass
+
+    def _submit_cooldown_guard(raw: dict):
+        """任务提交前的冷却校验（D6）。
+
+        Returns:
+            (error_response, error_status, warning_payload)
+            - error_response: 同账号正处于冷却 → jsonify 拒绝响应，否则 None；
+            - error_status: 拒绝时的 HTTP 状态码（409），无拒绝时为 None；
+            - warning_payload: 其他账号冷却中 → 连坐提醒 dict，否则 None。
+        """
+        from webui.cooldown import all_cooldowns
+        from webui.pipeline_exec import load_browser_accounts
+        accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
+        account = str(raw.get("browser_account") or "") or _account_for_run()
+        if account not in accounts:
+            account = "a"
+        platform = str(raw.get("platform") or "boss")
+        cooldowns = all_cooldowns()
+        record = cooldowns.get(account, {}).get(platform)
+        if record is not None:
+            remaining = max(1, int(record["until"] - time.time()))
+            return jsonify({
+                "ok": False,
+                "error_code": "account_in_cooldown",
+                "remaining_seconds": remaining,
+                "until": record["until"],
+                "user_message": (
+                    f"账号正处风控冷却，建议等待至 "
+                    f"{_format_unlock_time(record['until'])} 后再提交任务"
+                ),
+            }), 409, None
+        warnings = [
+            {
+                "account_id": aid,
+                "platform": pid,
+                "until": rec["until"],
+            }
+            for aid, platforms in cooldowns.items()
+            for pid, rec in platforms.items()
+            if aid != account or pid != platform
+        ]
+        if not warnings:
+            return None, None, None
+        return None, None, {
+            "code": "other_account_cooldown",
+            "message": (
+                "其他账号正处于风控冷却（连坐风险），新任务仍会提交，"
+                "但抓取可能受影响，建议等待冷却结束后再跑"
+            ),
+            "cooldowns": warnings,
+        }
 
     def _activate_run_browser(run=None) -> None:
         """Point the shared CDP helper at the selected profile."""
@@ -3855,6 +3974,7 @@ def create_app(config=None):
                     return jsonify({
                         "ok": False, "error": "chrome_not_ready", "message": msg,
                     }), 409
+                _invalidate_login_cache(str(account_id), platform)
                 return jsonify({
                     "ok": True,
                     "message": (
@@ -3885,6 +4005,7 @@ def create_app(config=None):
         ok, msg = ensure_chrome_ready(login_space.cdp_port)
         if not ok:
             return jsonify({"ok": False, "error": "chrome_not_ready", "message": msg}), 409
+        _invalidate_login_cache(str(account_id), platform)
         return jsonify({
             "ok": True,
             "message": f"已打开「{account['name']}」的{platform_label}自动化浏览器，请登录",
@@ -3960,6 +4081,22 @@ def create_app(config=None):
         if str(settings.get("browser_account") or "") == str(account_id):
             settings["browser_account"] = "a"
             _save_legacy_advanced_settings(settings)
+        return jsonify({"ok": True})
+
+    @app.route("/api/cooldown/clear", methods=["POST"])
+    def clear_cooldown_endpoint():
+        """手动解除风控冷却（D6）。
+
+        只清 cooldown.json 中该账号（可选平台）的记录，不碰登录态缓存；
+        前端二次确认弹窗后再调用。
+        """
+        from webui.cooldown import clear_cooldown
+        body = request.get_json(silent=True) or {}
+        account_id = str(body.get("account_id") or "").strip()
+        platform = str(body.get("platform") or "").strip() or None
+        if not account_id:
+            return jsonify({"ok": False, "error": "account_id 不能为空"}), 400
+        clear_cooldown(account_id, platform)
         return jsonify({"ok": True})
 
     @app.route("/api/advanced-settings/custom", methods=["PUT"])

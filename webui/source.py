@@ -344,6 +344,7 @@ class BossCdpSource:
         max_artifact_bytes: int = 20_000_000,
         cdp_port: int = boss.DEFAULT_CDP_PORT,
         breaker: SourceCircuitBreaker | None = None,
+        browser_account: str | None = None,
     ):
         self.python_executable = python_executable or sys.executable or "python"
         self.cwd = Path(cwd) if cwd else PROJECT_ROOT
@@ -357,13 +358,21 @@ class BossCdpSource:
         self.cdp_port = int(cdp_port)
         self._runner = runner or self._default_run
         self.breaker = breaker or SourceCircuitBreaker()
+        # 登录态缓存 / 风控冷却的账号维度；None 表示不记录（CLI 直连场景）
+        self.browser_account = (
+            str(browser_account).strip() if browser_account else None
+        )
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def preflight(self) -> SourceOutcome:
-        """Check the dedicated Chrome connection and BOSS login once per run."""
+        """Check the dedicated Chrome connection and BOSS login once per run.
+
+        登录探测走缓存优先（D3）：账号 × 平台 15 分钟 TTL 内命中直接复用，
+        不反复触发搜索 API；CDP 连通性检查保持轻量每次都做。
+        """
         if boss.requests is None:
             return SourceOutcome.failure(
                 failed_code="source_unreachable",
@@ -397,12 +406,37 @@ class BossCdpSource:
                 safe_log="cdp_response_invalid",
             )
 
-        if not boss.check_login_state(self.cdp_port):
+        if self.browser_account:
+            from scripts.login_state_cache import read_cached_state
+            cached = read_cached_state(self.browser_account, "boss")
+            if cached == "logged_in":
+                return SourceOutcome.success(safe_log="source_ready cache=hit")
+            if cached == "restricted":
+                return SourceOutcome.failure(
+                    failed_code="source_blocked",
+                    safe_log="boss_login_restricted cache=hit",
+                )
+            if cached == "not_logged_in":
+                return SourceOutcome.failure(
+                    failed_code="source_login_required",
+                    safe_log="boss_login_required cache=hit",
+                )
+
+        state = boss.check_login_state_tri(self.cdp_port)
+        if self.browser_account:
+            from scripts.login_state_cache import write_login_state
+            write_login_state(self.browser_account, "boss", state)
+        if state == "logged_in":
+            return SourceOutcome.success(safe_log="source_ready")
+        if state == "restricted":
             return SourceOutcome.failure(
-                failed_code="source_login_required",
-                safe_log="boss_login_required",
+                failed_code="source_blocked",
+                safe_log="boss_login_restricted",
             )
-        return SourceOutcome.success(safe_log="source_ready")
+        return SourceOutcome.failure(
+            failed_code="source_login_required",
+            safe_log="boss_login_required",
+        )
 
     def fetch_list(self, plan_item: dict) -> SourceOutcome:
         """Fetch a job list for one search plan item.
@@ -460,6 +494,7 @@ class BossCdpSource:
             failed_code = _classify_failed_code(returncode, captured)
             self.breaker.record_signal(failed_code)
             reason = _exit_reason(returncode, captured)
+            _record_risk_signals(self.browser_account, "boss", failed_code, captured)
             return SourceOutcome.failure(
                 failed_code=failed_code,
                 safe_log=f"{safe_log} returncode={returncode} reason={reason}",
@@ -494,6 +529,8 @@ class BossCdpSource:
         # to fail with source_invalid_output and detail_count stays at 0.
         normalized_jobs = [_normalize_job_fields(j) for j in jobs]
         self.breaker.record_success()
+        if normalized_jobs:
+            _record_success_signal(self.browser_account, "boss")
         return SourceOutcome.success(
             jobs=normalized_jobs,
             safe_log=f"{safe_log} job_count={len(normalized_jobs)}",
@@ -565,6 +602,7 @@ class BossCdpSource:
         if returncode != 0:
             failed_code = _classify_failed_code(returncode, captured)
             self.breaker.record_signal(failed_code)
+            _record_risk_signals(self.browser_account, "boss", failed_code, captured)
             return SourceOutcome.failure(
                 failed_code=failed_code,
                 safe_log=f"{safe_log} returncode={returncode} stderr_tail_safe={_safe_tail(captured)}",
@@ -1352,6 +1390,35 @@ def _classify_failed_code(returncode: int, captured: str) -> str:
     return "source_blocked"
 
 
+def _record_risk_signals(account, platform, failed_code, captured, run_id=""):
+    """抓取失败时同步回写登录态缓存与风控冷却（D3/D6 信号回写）。
+
+    - restricted 类错误码（blocked/rate_limited/verification）→
+      登录缓存写 restricted，并用风控 hint 文本标记 cooldown
+      （文本含完整日期时间解封点时用精确时间，否则默认 4 小时）；
+    - source_login_required → 登录缓存写 not_logged_in（不冷却）。
+    account 为空时跳过（CLI 直连场景不记录账号维度）。
+    """
+    if not account:
+        return
+    from scripts.login_state_cache import write_login_state
+    from webui.cooldown import mark_cooldown
+    if failed_code in ("source_blocked", "source_rate_limited", "source_verification_required"):
+        write_login_state(account, platform, "restricted")
+        hint = boss.extract_block_hint(captured) if captured else ""
+        mark_cooldown(account, platform, hint or failed_code, from_run=run_id)
+    elif failed_code == "source_login_required":
+        write_login_state(account, platform, "not_logged_in")
+
+
+def _record_success_signal(account, platform):
+    """列表抓取持续拿到明文工资 → 登录缓存写 logged_in（D3 信号回写）。"""
+    if not account:
+        return
+    from scripts.login_state_cache import write_login_state
+    write_login_state(account, platform, "logged_in")
+
+
 def _exit_reason(returncode: int, captured: str) -> str:
     """从退出码和输出尾部提取一句用户可读的失败原因。"""
     base = _EXIT_REASONS.get(returncode, f"scraper 异常退出（code={returncode}）")
@@ -1417,6 +1484,20 @@ _ZHILIAN_PREFLIGHT_SIGNAL_MAP = {
     "unreachable": "source_unreachable",
     "timeout": "source_timeout",
 }
+
+# 智联 preflight signal ↔ 登录态缓存四态（D3：智联状态也进同一缓存）
+_SIGNAL_TO_STATE = {
+    "ok": "logged_in",
+    "login_required": "not_logged_in",
+    "verification": "restricted",
+    "rate_limited": "restricted",
+    "blocked": "restricted",
+    "cdp_unavailable": "unknown",
+    "unreachable": "unknown",
+    "timeout": "unknown",
+}
+_STATE_TO_SIGNAL = {state: signal for signal, state in _SIGNAL_TO_STATE.items()}
+_STATE_TO_SIGNAL["unknown"] = "unreachable"  # 缓存 unknown 时回退真实探测
 
 # zhilian_cdp_raw.fetch_detail signal → SAFE_FAILURE_CODES 映射。
 _ZHILIAN_DETAIL_SIGNAL_MAP = {
@@ -1612,12 +1693,31 @@ class ZhilianCdpSource:
 
         调用 ``_preflight_runner``（默认 zhilian_cdp_raw.preflight），按返回的
         signal 字符串映射到错误矩阵（登录/验证/限流/封禁/CDP/超时）。
+
+        登录判定缓存优先（D3）：账号 × 平台 15 分钟 TTL 内命中直接复用
+        DOM marker 探测结果，不反复导航搜索页。
         """
+        cached = None
+        if self.browser_account:
+            from scripts.login_state_cache import read_cached_state
+            cached = read_cached_state(self.browser_account, "zhilian")
+        if cached is not None and cached != "unknown":
+            return self._outcome_for_signal(_STATE_TO_SIGNAL.get(cached, "ok"))
         try:
             signal = self._preflight_runner(self.cdp_port)
         except Exception:
             signal = "unreachable"
         signal = str(signal or "unreachable")
+        if self.browser_account:
+            from scripts.login_state_cache import write_login_state
+            write_login_state(
+                self.browser_account, "zhilian",
+                _SIGNAL_TO_STATE.get(signal, "unknown"),
+            )
+        return self._outcome_for_signal(signal)
+
+    def _outcome_for_signal(self, signal: str) -> SourceOutcome:
+        """把智联 preflight signal 映射为统一 SourceOutcome。"""
         failed_code = _ZHILIAN_PREFLIGHT_SIGNAL_MAP.get(signal, "source_unknown_error")
         if failed_code is None:
             return SourceOutcome.success(

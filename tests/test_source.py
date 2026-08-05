@@ -7,6 +7,8 @@
 - BossCdpSource 携带 platform 和显式 cdp_port；
 - SAFE_FAILURE_CODES 覆盖错误矩阵全部稳定码。
 """
+import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
@@ -381,7 +383,23 @@ class ZhilianCdpSourceConstructionTests(unittest.TestCase):
         self.assertEqual(source.profile_key, "zhilian:a")
 
 
-class ZhilianCdpSourcePreflightTests(unittest.TestCase):
+class _LoginCacheIsolated(unittest.TestCase):
+    """D3：preflight 缓存优先会读 login-state.json，使用 browser_account 的测试
+    类必须指向临时文件，避免命中 ~/.career-scout/login-state.json 的真实残留。"""
+
+    def setUp(self):
+        self._state_tmp = tempfile.TemporaryDirectory()
+        from scripts import login_state_cache as _cache
+        _cache.set_login_state_path(
+            pathlib.Path(self._state_tmp.name) / "login-state.json")
+
+    def tearDown(self):
+        from scripts import login_state_cache as _cache
+        _cache.reset_login_state_path()
+        self._state_tmp.cleanup()
+
+
+class ZhilianCdpSourcePreflightTests(_LoginCacheIsolated):
     """T303：preflight 分类骨架（CDP 不可用、登录墙、EdgeOne/验证码、限流、封禁、连接失败、超时）。
 
     marker 检测需要真实页面 fixture（blocked_facts），本任务只实现分类逻辑骨架：
@@ -473,7 +491,7 @@ class ZhilianCdpSourcePreflightTests(unittest.TestCase):
         self.assertNotIn(9222, captured_ports)
 
 
-class ZhilianCdpSourcePreflightLogSafetyTests(unittest.TestCase):
+class ZhilianCdpSourcePreflightLogSafetyTests(_LoginCacheIsolated):
     """T304：日志只含平台/阶段/计数/ID 是否存在/URL host，不含 Cookie/JD/页面正文/profile 路径。"""
 
     _FORBIDDEN_LOG_TOKENS = (
@@ -896,7 +914,7 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         )
 
 
-class ZhilianCdpSourceOutcomeContractTests(unittest.TestCase):
+class ZhilianCdpSourceOutcomeContractTests(_LoginCacheIsolated):
     """T313：adapter outcome 可无损表达 non_empty/empty/failed/paused、计数、证据和安全错误。"""
 
     def test_non_empty_outcome_carries_job_count(self):

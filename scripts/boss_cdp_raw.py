@@ -975,8 +975,13 @@ def check_login_state_tri(cdp_port=DEFAULT_CDP_PORT):
         return "unknown"
 
 
-def wait_for_login(cdp_port=DEFAULT_CDP_PORT, timeout=DEFAULT_LOGIN_TIMEOUT, interval=3):
-    """Open BOSS login page and wait until plaintext salary is available."""
+def wait_for_login(cdp_port=DEFAULT_CDP_PORT, timeout=DEFAULT_LOGIN_TIMEOUT, interval=3,
+                   account_id=None):
+    """Open BOSS login page and wait until plaintext salary is available.
+
+    account_id 非空时，登录成功会失效该账号的登录态缓存（D3 信号回写），
+    下次探测重新判定，避免沿用登录前的旧状态。
+    """
     cdp = CDPSession(cdp_port)
     r = cdp.send("Target.createTarget", {"url": "https://www.zhipin.com/web/user/"})
     tid = r["result"]["targetId"]
@@ -991,6 +996,12 @@ def wait_for_login(cdp_port=DEFAULT_CDP_PORT, timeout=DEFAULT_LOGIN_TIMEOUT, int
             if probe_login_state(cdp, sid):
                 logged_in = True
                 print("\n✅ 已检测到 BOSS 登录态，且接口返回明文薪资")
+                if account_id:
+                    try:
+                        from scripts.login_state_cache import invalidate_login_state
+                        invalidate_login_state(account_id, "boss")
+                    except Exception:
+                        pass
                 return True
             print(".", end="", flush=True)
             time.sleep(interval)
@@ -1278,6 +1289,45 @@ def looks_like_rate_limited(text):
     if not text:
         return False
     return any(keyword in text for keyword in RATE_LIMIT_KEYWORDS)
+
+
+_UNLOCK_TIME_PATTERNS = (
+    # 完整年月日: 2026-08-05 18:30 / 2026/8/5 18:30 / 2026年8月5日 18:30
+    re.compile(r"(?P<y>\d{4})[-/年](?P<m>\d{1,2})[-/月](?P<d>\d{1,2})日?\s+(?P<H>\d{1,2}):(?P<M>\d{2})"),
+    # 月日: 8月5日 18:30（无年份 → 当年）
+    re.compile(r"(?P<m>\d{1,2})月(?P<d>\d{1,2})日\s+(?P<H>\d{1,2}):(?P<M>\d{2})"),
+)
+
+
+def parse_unlock_time(text):
+    """从风控/限流文本里提取完整日期时间形式的解封点。
+
+    Returns:
+        命中且时间在未来时返回 datetime，否则 None。
+
+    支持格式（D6）：``YYYY-MM-DD HH:MM``、``YYYY年M月D日 HH:MM``、
+    ``M月D日 HH:MM``（无年份按当年）。时间已过去的解析结果视为无效
+    （风控文案里的历史时间不构成解封点），返回 None 由调用方走默认冷却。
+    """
+    if not text:
+        return None
+    now = datetime.now()
+    for pattern in _UNLOCK_TIME_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        try:
+            year = int(match.group("y")) if "y" in match.groupdict() else now.year
+            candidate = datetime(
+                year, int(match.group("m")), int(match.group("d")),
+                int(match.group("H")), int(match.group("M")),
+            )
+        except (ValueError, TypeError):
+            continue
+        if candidate <= now:
+            continue
+        return candidate
+    return None
 
 def extract_block_hint(text, max_chars=160):
     """从风控/限流页文本里取一句最相关提示，避免整页落入错误信息。"""

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Bell, Bot, Moon, Star, Sun, UserRound, X } from "@lucide/vue";
+import { Activity, Bell, Bot, Moon, Star, Sun, UserRound, X } from "@lucide/vue";
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
 import BrowserAccountsDialog from "./components/BrowserAccountsDialog.vue";
+import EnvCheckDialog from "./components/EnvCheckDialog.vue";
 import NoticeBar from "./components/NoticeBar.vue";
 import ReminderDrawer from "./components/ReminderDrawer.vue";
 import DiscoveryView from "./views/DiscoveryView.vue";
@@ -33,6 +34,7 @@ const roundStatusText = computed(() => {
 
 const aiSettingsOpen = ref(false);
 const browserAccountsOpen = ref(false);
+const envCheckOpen = ref(false);
 const profiles = ref<CandidateProfile[]>([]);
 const currentProfileId = ref("");
 const notice = ref<Notice | null>(null);
@@ -265,6 +267,15 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           <UserRound :size="18" aria-hidden="true" /><span>浏览器账号</span>
         </button>
         <button
+          class="button secondary env-check-trigger"
+          type="button"
+          data-testid="env-check-trigger"
+          aria-label="环境检查"
+          @click="envCheckOpen = true"
+        >
+          <Activity :size="18" aria-hidden="true" /><span>环境检查</span>
+        </button>
+        <button
           class="button secondary ai-settings-trigger"
           type="button"
           data-testid="ai-settings-trigger"
@@ -363,6 +374,12 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
     <BrowserAccountsDialog
       :open="browserAccountsOpen"
       @close="browserAccountsOpen = false"
+    />
+    <EnvCheckDialog
+      :open="envCheckOpen"
+      @close="envCheckOpen = false"
+      @open-browser-accounts="browserAccountsOpen = true; envCheckOpen = false"
+      @open-ai-settings="aiSettingsOpen = true; envCheckOpen = false"
     />
   </div>
 </template>
