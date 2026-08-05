@@ -33,15 +33,15 @@
 
 ## 执行清单
 
-- [ ] T046 写 loading/error/empty/populated/旧数据保留和重试测试。
-- [ ] T047 实现稳定尺寸 drawer、标题、关闭、Escape、打开焦点和关闭焦点恢复。
-- [ ] T048 实现真实 total、最多 100 项、最长未活动优先和唯一内部滚动区。
-- [ ] T049 实现岗位信息、来源、天数、查看、跟进、荒废和建议操作。
-- [ ] T050 实现逐项 action busy、refresh 驱动退出、失败保留原项和真实错误。
-- [ ] T051 实现逐项 advice loading/result/error、AI/规则 source 和不自动执行。
-- [ ] T052 实现 can_open + platform URL 复验，无效链接禁用但其它操作可用。
-- [ ] T053 用 scoped CSS 完成 1440×900 与 390×844，44px 点击区、可换行、无横向溢出。
-- [ ] T054 运行组件/client 测试和 build，只提交允许路径。
+- [x] T046 写 loading/error/empty/populated/旧数据保留和重试测试。
+- [x] T047 实现稳定尺寸 drawer、标题、关闭、Escape、打开焦点和关闭焦点恢复。
+- [x] T048 实现真实 total、最多 100 项、最长未活动优先和唯一内部滚动区。
+- [x] T049 实现岗位信息、来源、天数、查看、跟进、荒废和建议操作。
+- [x] T050 实现逐项 action busy、refresh 驱动退出、失败保留原项和真实错误。
+- [x] T051 实现逐项 advice loading/result/error、AI/规则 source 和不自动执行。
+- [x] T052 实现 can_open + platform URL 复验，无效链接禁用但其它操作可用。
+- [x] T053 用 scoped CSS 完成 1440×900 与 390×844，44px 点击区、可换行、无横向溢出。
+- [x] T054 运行组件/client 测试和 build，只提交允许路径。
 
 ## 验证命令
 

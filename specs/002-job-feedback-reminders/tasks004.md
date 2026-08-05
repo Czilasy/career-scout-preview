@@ -45,14 +45,14 @@
 
 ## 执行清单
 
-- [ ] T029 写生命周期 state/action/event 类型和错误响应映射的失败测试。
-- [ ] T030 写 reminder count/list、真实 total、最多 100 条投影测试。
-- [ ] T031 写 advice action/source allowlist 与服务端错误投影测试。
-- [ ] T032 写一次确认 ID、网络不确定 retry 复用 ID、明确再次确认新 ID 测试。
-- [ ] T033 写低 revision response 不覆盖较新 state 测试。
-- [ ] T034 写内部 ID/权威三元组 payload、身份不完整阻断和平台安全 URL 测试。
-- [ ] T035 实现冻结类型、API client、错误类、request context 和 revision merge helper。
-- [ ] T036 运行测试与 build；仅提交允许文件，提交 `feat: add job feedback client`。
+- [x] T029 写生命周期 state/action/event 类型和错误响应映射的失败测试。
+- [x] T030 写 reminder count/list、真实 total、最多 100 条投影测试。
+- [x] T031 写 advice action/source allowlist 与服务端错误投影测试。
+- [x] T032 写一次确认 ID、网络不确定 retry 复用 ID、明确再次确认新 ID 测试。
+- [x] T033 写低 revision response 不覆盖较新 state 测试。
+- [x] T034 写内部 ID/权威三元组 payload、身份不完整阻断和平台安全 URL 测试。
+- [x] T035 实现冻结类型、API client、错误类、request context 和 revision merge helper。
+- [x] T036 运行测试与 build；仅提交允许文件，提交 `feat: add job feedback client`。
 
 ## 精确验证命令
 

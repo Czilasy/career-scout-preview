@@ -57,19 +57,19 @@
 
 ## 执行清单
 
-- [ ] T001 读取并记录四个目标源码/测试文件的当前基线、既有改动、连接生命周期和可复用接口。
-- [ ] T002 在 `tests/test_webui_store.py` 先写 migration 27→28 备份、schema、重复初始化、失败回滚、外键和数据守恒测试。
-- [ ] T003 在 `webui/store.py` 实现 migration 28：`last_follow_up_at`、事件表、命令回执表、索引、备份目标 28、迁移完整性检查；不得猜填旧时间或生成旧事件。
-- [ ] T004 在 `tests/test_job_feedback.py` 先写 action 矩阵、时间解析、幂等、并发、冲突和 rollback 测试。
-- [ ] T005 在 `webui/job_feedback.py` 实现状态集合、七个 action、RFC 3339/UTC 规范化、命令 fingerprint、领域错误与快照投影。
-- [ ] T006 在 `webui/store.py` 抽出可接收现有 connection 的双索引岗位 upsert/解析 helper，并使公开 upsert 复用它；验证两个索引命中不同内部岗位时零副作用。
-- [ ] T007 在 `webui/store.py`/`webui/job_feedback.py` 实现单事务岗位解析、画像关联、状态/时间更新、receipt 写入和真实变化 event 追加；同 request 同 fingerprint replay，不同 fingerprint 返回冲突。
-- [ ] T008 实现当前 state/revision 与按 sequence 读取 events；no-op 仅有 `changed=0` receipt，不产生 event；响应 state 重新读取当前快照。
-- [ ] T009 先写提醒阈值矩阵：固定 now 下 720 小时前/恰好/后、last follow-up 优先、损坏 follow-up 不回退、缺时间排除、profile 隔离、101 条和稳定排序。
-- [ ] T010 实现 count/list 共用同一资格函数；只限当前 profile、只读 `status='applied'`，无任何平台过滤，count 全量、items 最多 100。
-- [ ] T011 验证生命周期不改变 `feedback_events`，清理仍只处理 `status='new'` 并保留明确状态和事件。
-- [ ] T012 运行聚焦测试、相关既有 store 测试，完成 RED→GREEN；检查 `git diff --check`。
-- [ ] T013 只检查本包变更并提交。提交前运行 repo hygiene；提交信息 `feat: add job lifecycle storage`，邮箱必须为项目规则指定值。
+- [x] T001 读取并记录四个目标源码/测试文件的当前基线、既有改动、连接生命周期和可复用接口。
+- [x] T002 在 `tests/test_webui_store.py` 先写 migration 27→28 备份、schema、重复初始化、失败回滚、外键和数据守恒测试。
+- [x] T003 在 `webui/store.py` 实现 migration 28：`last_follow_up_at`、事件表、命令回执表、索引、备份目标 28、迁移完整性检查；不得猜填旧时间或生成旧事件。
+- [x] T004 在 `tests/test_job_feedback.py` 先写 action 矩阵、时间解析、幂等、并发、冲突和 rollback 测试。
+- [x] T005 在 `webui/job_feedback.py` 实现状态集合、七个 action、RFC 3339/UTC 规范化、命令 fingerprint、领域错误与快照投影。
+- [x] T006 在 `webui/store.py` 抽出可接收现有 connection 的双索引岗位 upsert/解析 helper，并使公开 upsert 复用它；验证两个索引命中不同内部岗位时零副作用。
+- [x] T007 在 `webui/store.py`/`webui/job_feedback.py` 实现单事务岗位解析、画像关联、状态/时间更新、receipt 写入和真实变化 event 追加；同 request 同 fingerprint replay，不同 fingerprint 返回冲突。
+- [x] T008 实现当前 state/revision 与按 sequence 读取 events；no-op 仅有 `changed=0` receipt，不产生 event；响应 state 重新读取当前快照。
+- [x] T009 先写提醒阈值矩阵：固定 now 下 720 小时前/恰好/后、last follow-up 优先、损坏 follow-up 不回退、缺时间排除、profile 隔离、101 条和稳定排序。
+- [x] T010 实现 count/list 共用同一资格函数；只限当前 profile、只读 `status='applied'`，无任何平台过滤，count 全量、items 最多 100。
+- [x] T011 验证生命周期不改变 `feedback_events`，清理仍只处理 `status='new'` 并保留明确状态和事件。
+- [x] T012 运行聚焦测试、相关既有 store 测试，完成 RED→GREEN；检查 `git diff --check`。
+- [x] T013 只检查本包变更并提交。提交前运行 repo hygiene；提交信息 `feat: add job lifecycle storage`，邮箱必须为项目规则指定值。
 
 ## 精确验证命令
 

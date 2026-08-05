@@ -47,16 +47,16 @@
 
 ## 执行清单
 
-- [ ] T064 读取已有 app/test 改动并记录认证包装与兼容行为。
-- [ ] T065 注册 state/actions/events/reminders/advice route registrar。
-- [ ] T066 将 legacy PATCH 映射统一命令，落实 Idempotency-Key/body request_id、note 混合原子性和 428/400。
-- [ ] T067 接入身份 resolver 和 connection-aware helper，移除 pipeline BOSS-only 保存分支。
-- [ ] T068 让 interest/reject/cancel 以内部 ID 原子写入，身份冲突零副作用。
-- [ ] T069 移除 feedback aggregate 对当前 snapshot 的隐式覆盖，保留历史偏好学习和显式偏好。
-- [ ] T070 添加 lifecycle 主链、失败原状态、重启持久化和 legacy 兼容集成测试。
-- [ ] T071 添加 BOSS/智联混合、无 platform 谓词、相似岗位隔离、安全 URL 回归。
-- [ ] T072 运行后端聚焦和既有相关测试，修复本包范围回归。
-- [ ] T073 仅提交允许路径，提交 feat: integrate job feedback backend；不得做最终 converge。
+- [x] T064 读取已有 app/test 改动并记录认证包装与兼容行为。
+- [x] T065 注册 state/actions/events/reminders/advice route registrar。
+- [x] T066 将 legacy PATCH 映射统一命令，落实 Idempotency-Key/body request_id、note 混合原子性和 428/400。
+- [x] T067 接入身份 resolver 和 connection-aware helper，移除 pipeline BOSS-only 保存分支。
+- [x] T068 让 interest/reject/cancel 以内部 ID 原子写入，身份冲突零副作用。
+- [x] T069 移除 feedback aggregate 对当前 snapshot 的隐式覆盖，保留历史偏好学习和显式偏好。
+- [x] T070 添加 lifecycle 主链、失败原状态、重启持久化和 legacy 兼容集成测试。
+- [x] T071 添加 BOSS/智联混合、无 platform 谓词、相似岗位隔离、安全 URL 回归。
+- [x] T072 运行后端聚焦和既有相关测试，修复本包范围回归。
+- [x] T073 仅提交允许路径，提交 feat: integrate job feedback backend；不得做最终 converge。
 
 ## 验证命令
 

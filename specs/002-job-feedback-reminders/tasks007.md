@@ -32,15 +32,15 @@
 
 ## 执行清单
 
-- [ ] T055 写详情变化读取 state、只读无 action、loading/error 测试。
-- [ ] T056 实现内部 job ID 或完整三元组 state/action payload，成功采用服务端 job ID。
-- [ ] T057 实现唯一当前状态和五类主命令。
-- [ ] T058 实现目标状态/带时区时间纠正表单、future/缺失提示和 applied 缺时间补入口。
-- [ ] T059 实现同岗位写锁、retry ID 复用、再次确认新 ID、无乐观写和 revision 防倒退。
-- [ ] T060 实现按需 events 展开和 sequence 分页，不加载偏好事件。
-- [ ] T061 实现身份不完整阻断、安全 URL 禁用、不从 UI platform 猜身份。
-- [ ] T062 用 scoped CSS 完成桌面/窄屏可达操作、焦点、错误文案和无横向溢出。
-- [ ] T063 运行组件/client 测试和 build，只提交允许路径。
+- [x] T055 写详情变化读取 state、只读无 action、loading/error 测试。
+- [x] T056 实现内部 job ID 或完整三元组 state/action payload，成功采用服务端 job ID。
+- [x] T057 实现唯一当前状态和五类主命令。
+- [x] T058 实现目标状态/带时区时间纠正表单、future/缺失提示和 applied 缺时间补入口。
+- [x] T059 实现同岗位写锁、retry ID 复用、再次确认新 ID、无乐观写和 revision 防倒退。
+- [x] T060 实现按需 events 展开和 sequence 分页，不加载偏好事件。
+- [x] T061 实现身份不完整阻断、安全 URL 禁用、不从 UI platform 猜身份。
+- [x] T062 用 scoped CSS 完成桌面/窄屏可达操作、焦点、错误文案和无横向溢出。
+- [x] T063 运行组件/client 测试和 build，只提交允许路径。
 
 ## 验证命令
 

@@ -43,13 +43,13 @@
 
 ## 执行清单
 
-- [ ] T014 读取 `webui/ai.py`、`tests/test_ai.py` 与 advice 合同，记录调用边界；不得修改既有文件。
-- [ ] T015 在 `tests/test_job_advice.py` 写正常 AI、缺 JD、未配置、缺 Key、超时、网络失败、无效 JSON、非法 action 的失败测试。
-- [ ] T016 写 input 最小化、平台字段缺席、解释文本清洗、原始异常不泄露和状态/事件零变化测试。
-- [ ] T017 在 `webui/job_advice.py` 实现最小输入 DTO 与 elapsed days 计算/接收边界；不自行决定提醒资格。
-- [ ] T018 实现 AI 输出解析、`follow_up|review` allowlist、reason 清洗和 `source` 投影；非法或空 reason 进入规则兜底。
-- [ ] T019 实现缺 JD 固定 `review`；其它 AI 故障在有 JD 时返回规则 `follow_up`，无 JD 时返回规则 `review`；保证无写入副作用。
-- [ ] T020 运行 advice 与既有 AI 测试，检查只改允许路径并提交 `feat: add job advice fallback`。
+- [x] T014 读取 `webui/ai.py`、`tests/test_ai.py` 与 advice 合同，记录调用边界；不得修改既有文件。
+- [x] T015 在 `tests/test_job_advice.py` 写正常 AI、缺 JD、未配置、缺 Key、超时、网络失败、无效 JSON、非法 action 的失败测试。
+- [x] T016 写 input 最小化、平台字段缺席、解释文本清洗、原始异常不泄露和状态/事件零变化测试。
+- [x] T017 在 `webui/job_advice.py` 实现最小输入 DTO 与 elapsed days 计算/接收边界；不自行决定提醒资格。
+- [x] T018 实现 AI 输出解析、`follow_up|review` allowlist、reason 清洗和 `source` 投影；非法或空 reason 进入规则兜底。
+- [x] T019 实现缺 JD 固定 `review`；其它 AI 故障在有 JD 时返回规则 `follow_up`，无 JD 时返回规则 `review`；保证无写入副作用。
+- [x] T020 运行 advice 与既有 AI 测试，检查只改允许路径并提交 `feat: add job advice fallback`。
 
 ## 精确验证命令
 

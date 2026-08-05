@@ -43,15 +43,15 @@
 
 ## 执行清单
 
-- [ ] T037 记录前置模块导出、app.py 路由约定，并建立隔离 registrar fixture。
-- [ ] T038 测试 state/events 只读、revision、after_sequence、limit 上限和偏好事件不混入。
-- [ ] T039 测试七种 action、首次权威三元组入库、replay/冲突、回滚和稳定错误体。
-- [ ] T040 实现 state/actions/events route registrar，按合同映射 status/error_code/user_message。
-- [ ] T041 实现 count/list 共用 projection、当前 profile 隔离、最多 100、无 platform 参数和零副作用。
-- [ ] T042 实现单岗位逾期 advice route：服务端重读岗位事实、调用只读 adapter、非逾期 409、规则兜底。
-- [ ] T043 测试 BOSS/智联同规则、提醒混排、身份错误零副作用和所有业务查询没有平台谓词。
-- [ ] T044 运行本包及前置模块回归，修复本包范围问题。
-- [ ] T045 仅提交两个允许路径，提交 feat: add job feedback api；不要注册 app。
+- [x] T037 记录前置模块导出、app.py 路由约定，并建立隔离 registrar fixture。
+- [x] T038 测试 state/events 只读、revision、after_sequence、limit 上限和偏好事件不混入。
+- [x] T039 测试七种 action、首次权威三元组入库、replay/冲突、回滚和稳定错误体。
+- [x] T040 实现 state/actions/events route registrar，按合同映射 status/error_code/user_message。
+- [x] T041 实现 count/list 共用 projection、当前 profile 隔离、最多 100、无 platform 参数和零副作用。
+- [x] T042 实现单岗位逾期 advice route：服务端重读岗位事实、调用只读 adapter、非逾期 409、规则兜底。
+- [x] T043 测试 BOSS/智联同规则、提醒混排、身份错误零副作用和所有业务查询没有平台谓词。
+- [x] T044 运行本包及前置模块回归，修复本包范围问题。
+- [x] T045 仅提交两个允许路径，提交 feat: add job feedback api；不要注册 app。
 
 ## 验证命令
 

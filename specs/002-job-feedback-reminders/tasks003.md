@@ -44,14 +44,14 @@
 
 ## 执行清单
 
-- [ ] T021 读取平台、存储、app 并记录 BOSS/智联 URL 校验、双索引字段和 pipeline payload。
-- [ ] T022 为内部 job ID、完整三元组、展示字段规范化写失败测试。
-- [ ] T023 为三元组缺失、URL 与 platform 错配、内部 ID 与三元组冲突、双索引冲突和零副作用写失败测试。
-- [ ] T024 为跨平台相同裸 ID、相似标题/公司不合并、不从 UI platform 猜身份写失败测试。
-- [ ] T025 定义权威身份 DTO、规范化展示字段、领域错误和接收 connection 的 store helper Protocol。
-- [ ] T026 实现内部 ID 校验、三元组完整性、URL 校验、平台枚举和安全投影。
-- [ ] T027 实现调用方 transaction 内的解析/upsert 编排；用 fake connection/store 证明成功、冲突和不完整身份不产生关联写入。
-- [ ] T028 运行 focused tests，检查只改允许路径并提交 `feat: add authoritative job identity resolver`。
+- [x] T021 读取平台、存储、app 并记录 BOSS/智联 URL 校验、双索引字段和 pipeline payload。
+- [x] T022 为内部 job ID、完整三元组、展示字段规范化写失败测试。
+- [x] T023 为三元组缺失、URL 与 platform 错配、内部 ID 与三元组冲突、双索引冲突和零副作用写失败测试。
+- [x] T024 为跨平台相同裸 ID、相似标题/公司不合并、不从 UI platform 猜身份写失败测试。
+- [x] T025 定义权威身份 DTO、规范化展示字段、领域错误和接收 connection 的 store helper Protocol。
+- [x] T026 实现内部 ID 校验、三元组完整性、URL 校验、平台枚举和安全投影。
+- [x] T027 实现调用方 transaction 内的解析/upsert 编排；用 fake connection/store 证明成功、冲突和不完整身份不产生关联写入。
+- [x] T028 运行 focused tests，检查只改允许路径并提交 `feat: add authoritative job identity resolver`。
 
 ## 精确验证命令
 

@@ -53,17 +53,17 @@
 
 ## 执行清单
 
-- [ ] T074 读取已有 App/Discovery/types/styles/tests 改动并记录必须保留行为。
-- [ ] T075 接入 Lucide Bell、真实 total badge、0 隐藏、99+ 显示和可访问名称。
-- [ ] T076 让 App 持有 ReminderDrawer，打开加载 list，profile 空/切换关闭或重置旧抽屉。
-- [ ] T077 通过现有 JobWorkspace actions slot 接入 JobLifecycleActions。
-- [ ] T078 传递内部 ID/权威三元组，成功采用服务端 job ID，不从 UI platform 补值。
-- [ ] T079 接通 job-feedback-changed，action 成功后刷新当前 profile count/list/state。
-- [ ] T080 丢弃 profile 切换后的旧 count/list/state/action 响应，包括 action 触发的刷新。
-- [ ] T081 验证查看/关闭/建议不清除，跟进/荒废成功后按服务端结果更新 badge/list。
-- [ ] T082 验证只打开详情不 mark_read、失败保留原状态、成功刷新且既有详情不回归。
-- [ ] T083 仅必要时改 shared types/styles，完成 1440×900 与 390×844 无重叠、无横向溢出、焦点可达。
-- [ ] T084 运行组件/集成测试和 build；等待 Task 008 后真实 HTTP 冒烟；仅提交允许路径，提交 feat: integrate job feedback frontend。
+- [x] T074 读取已有 App/Discovery/types/styles/tests 改动并记录必须保留行为。
+- [x] T075 接入 Lucide Bell、真实 total badge、0 隐藏、99+ 显示和可访问名称。
+- [x] T076 让 App 持有 ReminderDrawer，打开加载 list，profile 空/切换关闭或重置旧抽屉。
+- [x] T077 通过现有 JobWorkspace actions slot 接入 JobLifecycleActions。
+- [x] T078 传递内部 ID/权威三元组，成功采用服务端 job ID，不从 UI platform 补值。
+- [x] T079 接通 job-feedback-changed，action 成功后刷新当前 profile count/list/state。
+- [x] T080 丢弃 profile 切换后的旧 count/list/state/action 响应，包括 action 触发的刷新。
+- [x] T081 验证查看/关闭/建议不清除，跟进/荒废成功后按服务端结果更新 badge/list。
+- [x] T082 验证只打开详情不 mark_read、失败保留原状态、成功刷新且既有详情不回归。
+- [x] T083 仅必要时改 shared types/styles，完成 1440×900 与 390×844 无重叠、无横向溢出、焦点可达。
+- [x] T084 运行组件/集成测试和 build；等待 Task 008 后真实 HTTP 冒烟；仅提交允许路径，提交 feat: integrate job feedback frontend。
 
 ## 验证命令
 
