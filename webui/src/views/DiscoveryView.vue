@@ -88,7 +88,42 @@ const emit = defineEmits<{
   "job-feedback-changed": [payload: { profileId: string; jobId: string }];
   // 顶栏本轮状态胶囊：纯展示数据，空闲时上抛 null（不新增任何请求）。
   "round-status": [payload: { platform: Platform; phase: "scraping" | "screening" | "judged"; judged: number } | null];
+  // D7：岗位发现流程检测未登录，引导用户去账号面板打开浏览器窗口登录。
+  "open-browser-accounts": [];
 }>();
+
+// D7：未登录类错误码（BOSS/智联 preflight 与任务暂停的稳定错误码）。
+const LOGIN_ERROR_CODES = new Set([
+  "source_login_required", "login_expired", "boss_login_required",
+]);
+// 任务失败后显示的登录引导条；visible 时展示「打开账号 X 的 BOSS 窗口登录」。
+const loginGuide = ref<{ visible: boolean; platform: Platform; accountName: string }>({
+  visible: false,
+  platform: "boss",
+  accountName: "",
+});
+
+function isLoginErrorCode(code: unknown): boolean {
+  return typeof code === "string" && LOGIN_ERROR_CODES.has(code);
+}
+
+async function showLoginGuide(platform: Platform) {
+  loginGuide.value = { visible: true, platform, accountName: "" };
+  try {
+    const data = await apiRequest<{
+      accounts?: { id: string; name: string }[];
+      active_account?: string;
+    }>("/api/browser-accounts");
+    const active = data.active_account || "a";
+    const account = (data.accounts || []).find((item) => item.id === active);
+    // 内置 ~/.career-scout/chrome-profile 账号在 UI 上固定叫「默认账号」（D7）。
+    loginGuide.value.accountName = account
+      ? (account.id === "a" ? "默认账号" : account.name)
+      : active;
+  } catch {
+    // 账号名只是引导文案辅助，拉不到就显示通用文案。
+  }
+}
 
 // T503：平台三身份独立（platform-schema.md L142-159）
 // platformState 是真相之源（非响应式闭包）；draftPlatform 是 Vue 镜像，仅供模板渲染。
@@ -885,6 +920,10 @@ async function startScrape() {
     scrapeBusy.value = false;
     scrapeSnapshot.value = { status: "failed", error: errorMessage(error, "抓取启动失败") };
     notify(errorMessage(error, "抓取启动失败"), "error");
+    // D7：未登录被拒时给出账号级登录引导并跳转账号面板。
+    if (error instanceof ApiError && isLoginErrorCode(error.payload.error_code)) {
+      void showLoginGuide(draftPlatform.value);
+    }
   }
 }
 
@@ -1125,6 +1164,10 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       if (kind === "scrape") scrapeBusy.value = false;
       else screenBusy.value = false;
       notify(data.error || "任务执行失败", "error");
+      // D7：任务因未登录失败时给出账号级登录引导。
+      if (kind === "scrape" && isLoginErrorCode(data.pause_info?.error_code)) {
+        void showLoginGuide(data.platform || draftPlatform.value);
+      }
       return;
     }
     pollTimer = window.setTimeout(() => void pollTask(taskId, kind), 1800);
@@ -1851,6 +1894,26 @@ watch(roundStatusPayload, (payload) => {
         </CollapsibleCard>
 
         <TaskProgress :snapshot="scrapeSnapshot" kind="scrape" />
+        <div
+          v-if="loginGuide.visible"
+          class="login-guide"
+          data-testid="login-guide"
+          role="status"
+        >
+          <p>
+            {{ loginGuide.platform === 'boss' ? 'BOSS' : '智联' }} 尚未登录：请打开账号
+            <strong>{{ loginGuide.accountName || '当前账号' }}</strong> 的
+            {{ loginGuide.platform === 'boss' ? 'BOSS' : '智联' }} 窗口登录后，再重新开始任务。
+          </p>
+          <button
+            type="button"
+            class="button secondary small"
+            data-testid="open-accounts-from-guide"
+            @click="emit('open-browser-accounts')"
+          >
+            打开账号面板
+          </button>
+        </div>
         <div class="workflow-actions">
           <p v-if="draftPlatformDisabled" class="platform-disabled-notice" data-testid="platform-disabled-notice" role="status">
             当前平台（{{ draftPlatform === 'boss' ? 'BOSS' : '智联' }}）已禁用新建任务，请切换到可用平台。

@@ -2343,6 +2343,31 @@ body,
   border: 1px solid var(--unsure-edge);
 }
 
+/* D7：未登录引导条（岗位发现流程检测未登录时展示，含跳转账号面板按钮）。 */
+.login-guide {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--unsure-deep);
+  background: var(--unsure-wash);
+  border: 1px solid var(--unsure-edge);
+}
+.login-guide p {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.login-guide .button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 /* 窄视口（390×844）下平台徽章与 extra 区块换行，避免横向溢出。 */
 @media (max-width: 640px) {
   .task-platform,

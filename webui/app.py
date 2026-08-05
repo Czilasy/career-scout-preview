@@ -3882,10 +3882,12 @@ def create_app(config=None):
         if active not in accounts:
             active = "a"
         lock_kind, locked_account, lock_platform = _browser_lock()
+        from scripts.login_state_cache import all_login_states
         return jsonify({
             "ok": True,
             "accounts": _project_browser_accounts(accounts),
             "active_account": active,
+            "login_states": all_login_states(),
             "busy": _browser_busy(),
             "busy_kind": lock_kind,
             "locked_account": (

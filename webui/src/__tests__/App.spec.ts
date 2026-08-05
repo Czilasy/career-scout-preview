@@ -61,7 +61,8 @@ describe("App", () => {
 
     await wrapper.get('[data-testid="browser-accounts-trigger"]').trigger("click");
     const dialog = wrapper.get('[role="dialog"]');
-    expect(dialog.text()).toContain("自动化浏览器账号");
+    expect(dialog.text()).toContain("账号");
+    expect(dialog.text()).toContain("每个账号使用独立的浏览器环境");
 
     await dialog.trigger("keydown", { key: "Escape" });
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);

@@ -870,6 +870,54 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
+  it("D7: login-required failure shows an account login guide that opens the accounts panel", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [{ label: "上海", value: "上海" }] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({
+          ok: true,
+          scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:login" },
+          deduplicated: { keywords: ["python"], cities: ["上海"] },
+        });
+      }
+      if (url.endsWith("/api/execute-search")) {
+        return response({ ok: false, error_code: "source_login_required", user_message: "请先登录" }, 409);
+      }
+      if (url.endsWith("/api/browser-accounts")) {
+        return response({ accounts: [{ id: "a", name: "账号A" }], active_account: "a" });
+      }
+      return response({ init });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+
+    const guide = wrapper.get('[data-testid="login-guide"]');
+    expect(guide.text()).toContain("BOSS");
+    expect(guide.text()).toContain("默认账号");
+
+    await wrapper.get('[data-testid="open-accounts-from-guide"]').trigger("click");
+    expect(wrapper.emitted("open-browser-accounts")).toHaveLength(1);
+
+    vi.unstubAllGlobals();
+  });
+
   it("T513 paused state: a paused scrape task shows pause reason and cancel/finish actions", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

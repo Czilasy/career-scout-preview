@@ -11,19 +11,29 @@ const PLATFORM_LABELS: Record<Platform, string> = {
   zhilian: "智联",
 };
 
+// 登录态缓存 TTL 与后端 scripts/login_state_cache.py 保持一致（15 分钟）。
+const LOGIN_STATE_TTL_MS = 15 * 60 * 1000;
+
+// D7：内置 ~/.career-scout/chrome-profile 账号在 UI 上固定叫「默认账号」，
+// 是第一张卡片，不可删除/改名；未激活任何账号时任务回退到它。
+function displayName(account: BrowserAccount): string {
+  if (account.builtin && account.id === "a") return "默认账号";
+  return account.name || account.id;
+}
+
 // 账号的可选登录平台；GET /api/browser-accounts 不再返回 profile_dir（http-api.md L319）。
 function platformsOf(account: BrowserAccount): Platform[] {
   if (account.platforms) {
     const keys = Object.keys(account.platforms) as Platform[];
     if (keys.length) return keys;
   }
-  // 旧响应回退：未带 platforms 时按双平台渲染，open 仍显式发 boss。
+  // 旧响应回退：未带 platforms 时按双平台渲染。
   return ["boss", "zhilian"];
 }
 
-function defaultOpenPlatform(account: BrowserAccount): Platform {
-  const list = platformsOf(account);
-  return list.includes("boss") ? "boss" : list[0];
+interface LoginStateRecord {
+  state: "logged_in" | "not_logged_in" | "restricted" | "unknown";
+  at: number;
 }
 
 const props = defineProps<{ open: boolean }>();
@@ -31,16 +41,16 @@ const emit = defineEmits<{ close: [] }>();
 
 const accounts = ref<BrowserAccount[]>([]);
 const activeAccount = ref("");
+const loginStates = ref<Record<string, Partial<Record<Platform, LoginStateRecord>>>>({});
 const busy = ref(false);
 const busyAccount = ref("");
 const serverBusy = ref(false);
 const busyKind = ref("");
 const lockedAccount = ref("");
-const lockedPlatform = ref<Platform | string>("");
-// 每个账号 open 时显式选择的平台（http-api.md L328：open 必须带 platform）。
-const accountPlatform = ref<Record<string, Platform>>({});
 const newName = ref("");
 const localNotice = ref<Notice | null>(null);
+// 切换账号/打开窗口后缓存已失效或待重探的账号：徽章显示「待刷新」。
+const pendingRefresh = ref<Set<string>>(new Set());
 
 watch(() => props.open, (open) => {
   if (open) {
@@ -50,7 +60,6 @@ watch(() => props.open, (open) => {
     serverBusy.value = false;
     busyKind.value = "";
     lockedAccount.value = "";
-    lockedPlatform.value = "";
     void loadAccounts();
   } else {
     localNotice.value = null;
@@ -68,24 +77,29 @@ async function loadAccounts() {
     const data = await apiRequest<{
       accounts?: BrowserAccount[];
       active_account?: string;
+      login_states?: Record<string, Partial<Record<Platform, LoginStateRecord>>>;
       busy?: boolean;
       busy_kind?: string;
       locked_account?: string;
-      locked_platform?: Platform | string;
     }>("/api/browser-accounts");
     accounts.value = data.accounts || [];
     activeAccount.value = data.active_account || "";
+    loginStates.value = data.login_states || {};
     serverBusy.value = Boolean(data.busy);
     busyKind.value = data.busy_kind || "";
     lockedAccount.value = data.locked_account || "";
-    lockedPlatform.value = data.locked_platform || "";
-    const next: Record<string, Platform> = {};
-    for (const acc of accounts.value) {
-      next[acc.id] = defaultOpenPlatform(acc);
+    // 响应里已有新鲜记录（15 分钟 TTL 内）的账号视为已重探，清除待刷新标记。
+    const next = new Set<string>();
+    for (const id of pendingRefresh.value) {
+      const platformRecords = loginStates.value[id] || {};
+      const fresh = Object.values(platformRecords).some(
+        (record) => record && Date.now() - record.at * 1000 <= LOGIN_STATE_TTL_MS,
+      );
+      if (!fresh) next.add(id);
     }
-    accountPlatform.value = next;
+    pendingRefresh.value = next;
   } catch (error) {
-    setLocalNotice({ message: errorMessage(error, "浏览器账号加载失败"), tone: "error" });
+    setLocalNotice({ message: errorMessage(error, "账号加载失败"), tone: "error" });
   } finally {
     busy.value = false;
   }
@@ -101,16 +115,15 @@ async function addAccount() {
       json: { name },
     });
     newName.value = "";
-    setLocalNotice({ message: "浏览器账号已添加，可打开浏览器登录", tone: "success" });
+    setLocalNotice({ message: "账号已添加，可打开浏览器登录", tone: "success" });
     await loadAccounts();
   } catch (error) {
-    setLocalNotice({ message: errorMessage(error, "添加浏览器账号失败"), tone: "error" });
+    setLocalNotice({ message: errorMessage(error, "添加账号失败"), tone: "error" });
   } finally {
     busy.value = false;
   }
 }
 
-// activate 只更新新任务使用的账号草稿，不传平台（http-api.md L323：平台不属于 activate 状态）。
 async function activateAccount(id: string) {
   busyAccount.value = id;
   try {
@@ -118,6 +131,10 @@ async function activateAccount(id: string) {
       method: "POST",
     });
     activeAccount.value = id;
+    // 切换后缓存可能还是旧账号的探测结果，标记待刷新直到真实重探发生。
+    const next = new Set(pendingRefresh.value);
+    next.add(id);
+    pendingRefresh.value = next;
     setLocalNotice({ message: "已设为当前账号，下一次任务将使用它", tone: "success" });
   } catch (error) {
     setLocalNotice({ message: errorMessage(error, "切换当前账号失败"), tone: "error" });
@@ -126,16 +143,20 @@ async function activateAccount(id: string) {
   }
 }
 
-// open 必须显式带 platform（http-api.md L328）；省略平台只兼容旧 BOSS 客户端，新前端不发省略请求。
-async function openBrowser(id: string) {
-  const platform = accountPlatform.value[id] || "boss";
+// D7：每个平台一个按钮，不再用下拉框选择平台。
+async function openBrowser(id: string, platform: Platform) {
   busyAccount.value = id;
   try {
     const data = await apiRequest<{ message?: string }>(
       `/api/browser-accounts/${encodeURIComponent(id)}/open`,
       { method: "POST", json: { platform } },
     );
+    // 打开窗口会失效登录态缓存（后端 D3 信号），标记待刷新等真实探测。
+    const next = new Set(pendingRefresh.value);
+    next.add(id);
+    pendingRefresh.value = next;
     setLocalNotice({ message: data.message || "已打开自动化浏览器", tone: "info" });
+    await loadAccounts();
   } catch (error) {
     setLocalNotice({ message: errorMessage(error, "打开浏览器失败"), tone: "error" });
   } finally {
@@ -143,16 +164,36 @@ async function openBrowser(id: string) {
   }
 }
 
+// D7：徽章三态 + 第四态 unknown + 无记录/过期两种弱状态。
+function platformBadge(account: BrowserAccount, platform: Platform) {
+  if (pendingRefresh.value.has(account.id)) {
+    return { text: "待刷新", tone: "refresh" };
+  }
+  const record = loginStates.value[account.id]?.[platform];
+  if (!record) {
+    return { text: "未使用过", tone: "empty" };
+  }
+  if (Date.now() - record.at * 1000 > LOGIN_STATE_TTL_MS) {
+    return { text: "待刷新", tone: "refresh" };
+  }
+  const map: Record<string, { text: string; tone: string }> = {
+    logged_in: { text: "已登录", tone: "ok" },
+    not_logged_in: { text: "未登录", tone: "warn" },
+    restricted: { text: "受限中", tone: "restricted" },
+    unknown: { text: "状态未知", tone: "empty" },
+  };
+  return map[record.state] || { text: "未使用过", tone: "empty" };
+}
+
+// D7：锁定文案简化为「有任务正在使用账号 X，请先结束任务」。
 const lockNotice = computed(() => {
   if (!serverBusy.value) return "";
-  if (busyKind.value === "paused" && lockedAccount.value) {
-    const name = accounts.value.find((item) => item.id === lockedAccount.value)?.name || lockedAccount.value;
-    const platformLabel = lockedPlatform.value
-      ? `${PLATFORM_LABELS[lockedPlatform.value as Platform] || lockedPlatform.value} 登录空间`
-      : "浏览器";
-    return `当前有暂停任务，${platformLabel}已锁定到「${name}」；请打开该账号登录/处理，或先结束/取消暂停任务。`;
-  }
-  return "当前有任务运行或暂停，请先结束或取消任务后再打开浏览器。";
+  const name = lockedAccount.value
+    ? accounts.value.find((item) => item.id === lockedAccount.value)?.name || lockedAccount.value
+    : "";
+  return name
+    ? `有任务正在使用账号「${name}」，请先结束任务`
+    : "当前有任务运行，请先结束或取消任务后再操作";
 });
 
 function canOpen(id: string): boolean {
@@ -161,10 +202,13 @@ function canOpen(id: string): boolean {
   return busyKind.value === "paused" && lockedAccount.value === id;
 }
 
-// 把 409 的双平台占用 details 拼成可读串；details 字段基于 http-api.md L328/L332 推断，
-// 真实联调（T515）核验后端实际 details 形状。user_message 始终是权威主文案。
+function canManage(id: string): boolean {
+  return !busyAccount.value && !serverBusy.value;
+}
+
+// 把 409 的双平台占用 details 拼成可读串（沿用既有契约）。
 function formatDeleteError(error: unknown): string {
-  const fallback = "删除浏览器账号失败";
+  const fallback = "删除账号失败";
   if (!(error instanceof ApiError)) {
     return errorMessage(error, fallback);
   }
@@ -199,14 +243,14 @@ function formatDeleteError(error: unknown): string {
 async function removeAccount(id: string) {
   const account = accounts.value.find((item) => item.id === id);
   if (!account) return;
-  if (!window.confirm(`删除「${account.name}」？该账号的自动化浏览器资料不会被删除，但将无法再选择。`)) return;
+  if (!window.confirm(`删除「${displayName(account)}」？该账号的自动化浏览器资料不会被删除，但将无法再选择。`)) return;
   busyAccount.value = id;
   try {
     await apiRequest(`/api/browser-accounts/${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
     if (activeAccount.value === id) activeAccount.value = "a";
-    setLocalNotice({ message: "浏览器账号已删除", tone: "success" });
+    setLocalNotice({ message: "账号已删除", tone: "success" });
     await loadAccounts();
   } catch (error) {
     setLocalNotice({ message: formatDeleteError(error), tone: "error" });
@@ -220,8 +264,8 @@ async function removeAccount(id: string) {
   <BaseDialog
     id="browser-accounts"
     :open="open"
-    title="自动化浏览器账号"
-    description="提前为多个账号保存登录态；任务开始前在这里选择当前账号。"
+    title="账号"
+    description="每个账号使用独立的浏览器环境，登录一次后长期有效。任务会使用「当前账号」的登录态抓取。"
     size="md"
     @close="$emit('close')"
   >
@@ -242,9 +286,9 @@ async function removeAccount(id: string) {
       >
         <div class="browser-account-head">
           <span class="browser-account-icon" aria-hidden="true"><UserRound :size="17" /></span>
-          <strong>{{ account.name }}</strong>
+          <strong>{{ displayName(account) }}</strong>
           <span v-if="account.id === activeAccount" class="browser-account-badge">当前账号</span>
-          <span v-else-if="account.builtin" class="browser-account-badge muted">内置</span>
+          <span v-else class="browser-account-badge muted">非当前账号</span>
         </div>
         <ul class="browser-account-platforms" :data-testid="`account-platforms-${account.id}`">
           <li
@@ -253,38 +297,33 @@ async function removeAccount(id: string) {
             :data-platform="platform"
           >
             <span class="browser-account-platform-label">{{ PLATFORM_LABELS[platform] }}</span>
-            <span v-if="account.platforms?.[platform]?.cdp_port" class="browser-account-platform-port">
-              端口 {{ account.platforms[platform]!.cdp_port }}
+            <span
+              class="browser-account-state"
+              :data-tone="platformBadge(account, platform).tone"
+              :data-testid="`account-state-${account.id}-${platform}`"
+            >
+              {{ platformBadge(account, platform).text }}
             </span>
           </li>
         </ul>
         <div class="browser-account-actions">
-          <label class="browser-account-platform-select">
-            <span class="field-label-text">打开平台</span>
-            <select
-              :data-testid="`open-platform-${account.id}`"
-              :value="accountPlatform[account.id] || 'boss'"
-              :disabled="Boolean(busyAccount)"
-              @change="accountPlatform[account.id] = ($event.target as HTMLSelectElement).value as Platform"
-            >
-              <option v-for="platform in platformsOf(account)" :key="platform" :value="platform">
-                {{ PLATFORM_LABELS[platform] }}
-              </option>
-            </select>
-          </label>
           <button
+            v-for="platform in platformsOf(account)"
+            :key="`open-${platform}`"
             type="button"
             class="button secondary small"
+            :data-testid="`open-${platform}-${account.id}`"
             :disabled="!canOpen(account.id)"
-            @click="openBrowser(account.id)"
+            @click="openBrowser(account.id, platform)"
           >
-            <ExternalLink :size="15" aria-hidden="true" />打开浏览器登录
+            <ExternalLink :size="15" aria-hidden="true" />
+            打开 {{ PLATFORM_LABELS[platform] }} 窗口
           </button>
           <button
             v-if="account.id !== activeAccount"
             type="button"
             class="button secondary small"
-            :disabled="Boolean(busyAccount)"
+            :disabled="!canManage(account.id)"
             @click="activateAccount(account.id)"
           >
             <Check :size="15" aria-hidden="true" />设为当前账号
@@ -293,19 +332,19 @@ async function removeAccount(id: string) {
             v-if="!account.builtin"
             type="button"
             class="button danger small"
-            :disabled="Boolean(busyAccount)"
+            :disabled="!canManage(account.id)"
             @click="removeAccount(account.id)"
           >
             <Trash2 :size="15" aria-hidden="true" />删除
           </button>
         </div>
       </article>
-      <p v-if="!accounts.length && !busy" class="browser-account-empty">暂无账号，先添加一个浏览器账号。</p>
+      <p v-if="!accounts.length && !busy" class="browser-account-empty">暂无账号，先添加一个账号。</p>
     </div>
 
     <form class="browser-account-add" @submit.prevent="addAccount">
       <label class="field-label">
-        <span>添加新浏览器账号</span>
+        <span>添加新账号</span>
         <input
           v-model.trim="newName"
           type="text"
@@ -315,7 +354,7 @@ async function removeAccount(id: string) {
         >
       </label>
       <button class="button primary" type="submit" :disabled="busy">
-        <Plus :size="16" aria-hidden="true" />添加浏览器
+        <Plus :size="16" aria-hidden="true" />添加账号
       </button>
     </form>
 
@@ -402,8 +441,33 @@ async function removeAccount(id: string) {
   font-weight: 600;
   color: var(--ink-1);
 }
-.browser-account-platform-port {
-  color: var(--muted);
+.browser-account-state {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.browser-account-state[data-tone="ok"] {
+  color: var(--match-deep);
+  background: var(--match-wash);
+}
+.browser-account-state[data-tone="warn"] {
+  color: var(--unsure-deep);
+  background: var(--unsure-wash);
+}
+.browser-account-state[data-tone="restricted"] {
+  color: var(--reject-deep);
+  background: var(--reject-wash);
+}
+.browser-account-state[data-tone="refresh"] {
+  color: var(--unsure-deep);
+  background: var(--unsure-wash);
+  font-weight: 600;
+}
+.browser-account-state[data-tone="empty"] {
+  color: var(--ink-3);
+  background: var(--hair-2);
+  font-weight: 600;
 }
 .browser-account-actions {
   display: flex;
@@ -413,25 +477,6 @@ async function removeAccount(id: string) {
 }
 .browser-account-actions .button {
   min-height: 34px;
-}
-.browser-account-platform-select {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--muted);
-}
-.browser-account-platform-select .field-label-text {
-  white-space: nowrap;
-}
-.browser-account-platform-select select {
-  min-height: 34px;
-  padding: 4px 8px;
-  border: 1px solid var(--hair);
-  border-radius: 6px;
-  background: var(--panel);
-  color: var(--ink-1);
-  font-size: 13px;
 }
 .browser-account-empty {
   margin: 0;

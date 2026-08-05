@@ -48,7 +48,90 @@ describe("BrowserAccountsDialog", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders account platforms and defaults the open platform to boss", async () => {
+  it("renders account platforms with per-platform login badges and window buttons", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/browser-accounts") {
+        return response({
+          accounts: [dualAccount],
+          active_account: "a",
+          login_states: {
+            a: {
+              boss: { state: "logged_in", at: Date.now() / 1000 },
+              zhilian: { state: "not_logged_in", at: Date.now() / 1000 },
+            },
+          },
+        });
+      }
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    const platforms = wrapper.get('[data-testid="account-platforms-a"]');
+    expect(platforms.find('[data-platform="boss"]').text()).toContain("BOSS");
+    expect(platforms.find('[data-platform="zhilian"]').text()).toContain("智联");
+
+    // 平台徽章：BOSS 已登录 / 智联未登录
+    expect(wrapper.get('[data-testid="account-state-a-boss"]').text()).toBe("已登录");
+    expect(wrapper.get('[data-testid="account-state-a-zhilian"]').text()).toBe("未登录");
+
+    // 双平台窗口按钮（不再有平台下拉框）
+    expect(wrapper.get('[data-testid="open-boss-a"]').text()).toContain("打开 BOSS 窗口");
+    expect(wrapper.get('[data-testid="open-zhilian-a"]').text()).toContain("打开 智联 窗口");
+    expect(wrapper.find('[data-testid="open-platform-a"]').exists()).toBe(false);
+  });
+
+  it("shows the builtin profile account as 默认账号 and marks others as 非当前账号", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/browser-accounts") {
+        return response({
+          accounts: [
+            { id: "a", name: "账号A", builtin: true, platforms: { boss: { cdp_port: 9222 } } },
+            { id: "b", name: "账号B", builtin: true, platforms: { boss: { cdp_port: 9222 } } },
+          ],
+          active_account: "a",
+        });
+      }
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    expect(wrapper.text()).toContain("默认账号");
+    // 内置默认账号没有删除按钮，非当前账号有「非当前账号」标记
+    const accountCards = wrapper.findAll(".browser-account-card");
+    expect(accountCards[0].find("button.danger").exists()).toBe(false);
+    expect(accountCards[1].text()).toContain("非当前账号");
+  });
+
+  it("shows 受限中 badge and 待刷新 for expired records", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/browser-accounts") {
+        return response({
+          accounts: [dualAccount],
+          active_account: "a",
+          login_states: {
+            a: {
+              boss: { state: "restricted", at: Date.now() / 1000 - 16 * 60 },
+              zhilian: { state: "restricted", at: Date.now() / 1000 },
+            },
+          },
+        });
+      }
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    // 新鲜受限记录 → 受限中；过期记录 → 待刷新
+    expect(wrapper.get('[data-testid="account-state-a-boss"]').text()).toBe("待刷新");
+    expect(wrapper.get('[data-testid="account-state-a-zhilian"]').text()).toBe("受限中");
+  });
+
+  it("shows 未使用过 for accounts without cache records", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/browser-accounts") {
@@ -59,17 +142,35 @@ describe("BrowserAccountsDialog", () => {
 
     const wrapper = await mountOpen(fetchMock);
 
-    const platforms = wrapper.get('[data-testid="account-platforms-a"]');
-    expect(platforms.find('[data-platform="boss"]').text()).toContain("BOSS");
-    expect(platforms.find('[data-platform="boss"]').text()).toContain("9222");
-    expect(platforms.find('[data-platform="zhilian"]').text()).toContain("智联");
-    expect(platforms.find('[data-platform="zhilian"]').text()).toContain("9223");
-
-    const select = wrapper.get('[data-testid="open-platform-a"]').element as HTMLSelectElement;
-    expect(select.value).toBe("boss");
+    expect(wrapper.get('[data-testid="account-state-a-boss"]').text()).toBe("未使用过");
   });
 
-  it("sends the selected platform when opening the browser", async () => {
+  it("marks the account as 待刷新 after switching to it", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/browser-accounts") {
+        return response({
+          accounts: [bossOnlyAccount, dualAccount],
+          active_account: "a",
+          login_states: { b: { boss: { state: "logged_in", at: Date.now() / 1000 } } },
+        });
+      }
+      if (url.endsWith("/api/browser-accounts/b/activate")) {
+        return response({ active_account: "b" });
+      }
+      return response({ init });
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    await findButton(wrapper, "设为当前账号").trigger("click");
+    await flushPromises();
+
+    // 切换后账号 b 的徽章标记为待刷新，直到后端有新鲜探测记录
+    expect(wrapper.get('[data-testid="account-state-b-boss"]').text()).toBe("待刷新");
+  });
+
+  it("sends the platform of the clicked window button", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/browser-accounts") {
@@ -83,8 +184,7 @@ describe("BrowserAccountsDialog", () => {
 
     const wrapper = await mountOpen(fetchMock);
 
-    await wrapper.get('[data-testid="open-platform-a"]').setValue("zhilian");
-    await findButton(wrapper, "打开浏览器登录").trigger("click");
+    await wrapper.get('[data-testid="open-zhilian-a"]').trigger("click");
     await flushPromises();
 
     const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/browser-accounts/a/open"));
@@ -92,7 +192,7 @@ describe("BrowserAccountsDialog", () => {
     expect(JSON.parse(String(call?.[1]?.body))).toEqual({ platform: "zhilian" });
   });
 
-  it("defaults the open platform to boss when the platform select is not changed", async () => {
+  it("boss window button sends boss platform", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/browser-accounts") {
@@ -106,7 +206,7 @@ describe("BrowserAccountsDialog", () => {
 
     const wrapper = await mountOpen(fetchMock);
 
-    await findButton(wrapper, "打开浏览器登录").trigger("click");
+    await wrapper.get('[data-testid="open-boss-a"]').trigger("click");
     await flushPromises();
 
     const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/browser-accounts/a/open"));

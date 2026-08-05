@@ -364,6 +364,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
         @profile-created="acceptCreatedProfile"
         @job-feedback-changed="handleJobFeedbackChanged"
         @round-status="roundStatus = $event"
+        @open-browser-accounts="browserAccountsOpen = true"
       />
     </div>
 
