@@ -762,16 +762,78 @@ class ChromeSetupTests(unittest.TestCase):
             [{"title": "Java", "job_link": "https://example.com"}],
         )
 
-    def test_login_probe_tries_multiple_urls_until_plaintext_salary(self):
+    def _probe_payload(self, module, text, status=0):
+        """构造 probe eval_js 返回值：{status, text} 包装的 JSON 字符串。"""
+        return json.dumps({"status": status, "text": text})
+
+    def test_login_probe_uses_single_request_for_tri_state(self):
         module = load_module()
         cdp = mock.Mock()
-        cdp.eval_js.side_effect = [
-            json.dumps({"code": 0, "zpData": {"jobList": [{"jobName": "Java", "salaryDesc": ""}]}}),
-            json.dumps({"code": 0, "zpData": {"jobList": [{"jobName": "AI", "salaryDesc": "20-40K"}]}}),
-        ]
+        cdp.eval_js.return_value = self._probe_payload(
+            module,
+            json.dumps({"code": 0, "zpData": {"jobList": [
+                {"jobName": "Java", "salaryDesc": "20-40K"},
+            ]}}),
+        )
 
         self.assertTrue(module.probe_login_state(cdp, "sid"))
-        self.assertEqual(cdp.eval_js.call_count, 2)
+        self.assertEqual(cdp.eval_js.call_count, 1)
+
+    def test_probe_tri_state_logged_in(self):
+        module = load_module()
+        cdp = mock.Mock()
+        cdp.eval_js.return_value = self._probe_payload(
+            module,
+            json.dumps({"code": 0, "zpData": {"jobList": [
+                {"jobName": "Java", "salaryDesc": "20-40K"},
+            ]}}),
+        )
+        self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "logged_in")
+
+    def test_probe_tri_state_not_logged_in_without_plaintext_salary(self):
+        module = load_module()
+        cdp = mock.Mock()
+        cdp.eval_js.return_value = self._probe_payload(
+            module,
+            json.dumps({"code": 0, "zpData": {"jobList": [
+                {"jobName": "Java", "salaryDesc": ""},
+            ]}}),
+        )
+        self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "not_logged_in")
+
+    def test_probe_tri_state_restricted_on_http_error(self):
+        module = load_module()
+        cdp = mock.Mock()
+        cdp.eval_js.return_value = self._probe_payload(module, "", status=403)
+        self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "restricted")
+
+    def test_probe_tri_state_restricted_on_risk_text(self):
+        module = load_module()
+        cdp = mock.Mock()
+        cdp.eval_js.return_value = self._probe_payload(
+            module, "访问受限，请完成安全验证")
+        self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "restricted")
+
+    def test_probe_tri_state_restricted_on_429(self):
+        module = load_module()
+        cdp = mock.Mock()
+        cdp.eval_js.return_value = self._probe_payload(
+            module, "操作频繁，请稍后再试", status=429)
+        self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "restricted")
+
+    def test_probe_tri_state_empty_probe_is_not_logged_in(self):
+        module = load_module()
+        cdp = mock.Mock()
+        cdp.eval_js.return_value = ""
+        self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "not_logged_in")
+
+    def test_check_login_state_unknown_on_cdp_failure(self):
+        module = load_module()
+        import requests as _requests
+        with mock.patch.object(module, "CDPSession",
+                               side_effect=_requests.ConnectionError("down")):
+            self.assertEqual(module.check_login_state_tri(9333), "unknown")
+            self.assertFalse(module.check_login_state(9333))
 
     def test_find_latest_detail_file_uses_default_result_dir(self):
         module = load_module()

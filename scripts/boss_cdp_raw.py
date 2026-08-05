@@ -153,9 +153,7 @@ DEFAULT_CDP_DATA_DIR = os.path.expanduser("~/.career-scout/chrome-profile")
 DEFAULT_RESULT_DIR = os.path.expanduser("~/.career-scout/job-result")
 DEFAULT_CITY_INPUT = "上海"
 LOGIN_PROBE_QUERY = "Java"
-LOGIN_PROBE_QUERIES = ("Java", "AI Agent", "产品经理")
 LOGIN_PROBE_CITY = "101020100"
-LOGIN_PROBE_CITIES = ("101020100", "101010100", "101280600")
 LOGIN_PROBE_PAGE_SIZE = 10
 DEFAULT_LOGIN_TIMEOUT = 300
 
@@ -866,37 +864,81 @@ def build_login_probe_url(query, city_code):
 
 
 def probe_login_state(cdp, sid):
-    for query in LOGIN_PROBE_QUERIES:
-        for city_code in LOGIN_PROBE_CITIES:
-            probe_url = build_login_probe_url(query, city_code)
-            js = f"""
-            (function(){{
-                var xhr = new XMLHttpRequest();
-                xhr.open('GET', '{probe_url}', false);
-                xhr.send();
-                return xhr.responseText;
-            }})()
-            """
-            val = cdp.eval_js(js, sid)
-            if not val:
-                continue
-            try:
-                data = json.loads(val) if isinstance(val, str) else val
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if is_logged_in_search_response(data):
-                return True
-    return False
+    """单次搜索 API 探测 BOSS 登录态（bool 兼容包装）。
+
+    三态实现在 probe_login_state_tri；本函数只保留「是否已登录」语义，
+    供 wait_for_login 等既有调用方使用。
+    """
+    return probe_login_state_tri(cdp, sid) == "logged_in"
+
+
+def probe_login_state_tri(cdp, sid):
+    """单次搜索 API 探测，返回三态: "logged_in" | "not_logged_in" | "restricted"。
+
+    判定顺序：
+    - 受限中: HTTP 4xx/429，或响应文本命中风控特征词（RISK_CONTROL_KEYWORDS）
+    - 已登录: code==0 且 jobList 含明文 salaryDesc（is_logged_in_search_response）
+    - 未登录: 其余情况（含解析失败、空响应、无明文工资）
+
+    相比旧版 3 关键词 × 3 城市共 9 次请求，这里固定单关键词单城市只发 1 次。
+    """
+    probe_url = build_login_probe_url(LOGIN_PROBE_QUERY, LOGIN_PROBE_CITY)
+    js = f"""
+    (function(){{
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', '{probe_url}', false);
+        var text = '';
+        var status = 0;
+        try {{ xhr.send(); text = xhr.responseText; status = xhr.status; }}
+        catch (e) {{ text = ''; status = 0; }}
+        return JSON.stringify({{status: status, text: text}});
+    }})()
+    """
+    val = cdp.eval_js(js, sid)
+    if not val:
+        return "not_logged_in"
+    try:
+        payload = json.loads(val) if isinstance(val, str) else val
+    except (json.JSONDecodeError, ValueError):
+        return "not_logged_in"
+    status = 0
+    text = ""
+    if isinstance(payload, dict):
+        status = int(payload.get("status") or 0)
+        text = str(payload.get("text") or "")
+    elif isinstance(payload, str):
+        text = payload
+    else:
+        text = json.dumps(payload, ensure_ascii=False)
+    if status in (401, 403, 412, 418, 429):
+        return "restricted"
+    if looks_like_risk_control(text):
+        return "restricted"
+    try:
+        data = json.loads(text) if isinstance(text, str) else text
+    except (json.JSONDecodeError, ValueError):
+        return "not_logged_in"
+    return "logged_in" if is_logged_in_search_response(data) else "not_logged_in"
 
 
 # ============================================================
 # 登录状态检测
 # ============================================================
 def check_login_state(cdp_port=DEFAULT_CDP_PORT):
-    """通过 CDP 检测 BOSS直聘登录状态。
+    """通过 CDP 检测 BOSS直聘登录状态（bool 兼容包装）。
 
     Returns:
-        True 已登录, False 未登录
+        True 已登录, False 未登录/受限/CDP 失败
+    """
+    return check_login_state_tri(cdp_port) == "logged_in"
+
+
+def check_login_state_tri(cdp_port=DEFAULT_CDP_PORT):
+    """通过 CDP 检测 BOSS直聘登录状态，返回三态。
+
+    Returns:
+        "logged_in" 已登录 / "not_logged_in" 未登录 /
+        "restricted" 受限中 / "unknown" CDP 连接失败或超时
     """
     try:
         cdp = CDPSession(cdp_port)
@@ -921,16 +963,16 @@ def check_login_state(cdp_port=DEFAULT_CDP_PORT):
         cdp.send("Page.navigate", {"url": "https://www.zhipin.com/"}, sid)
         time.sleep(4)
 
-        logged_in = probe_login_state(cdp, sid)
+        state = probe_login_state_tri(cdp, sid)
 
         cdp.send("Target.closeTarget", {"targetId": tid})
         cdp.close()
 
-        return logged_in
-    except (requests.ConnectionError, requests.Timeout, KeyError,
-            json.JSONDecodeError, websocket.WebSocketException) as e:
+        return state
+    except Exception as e:
+        # 覆盖 CDP 连接失败/超时/响应异常；requests 未加载时也要兜底返回 unknown
         log.error(f"登录状态检测失败: {e}")
-        return False
+        return "unknown"
 
 
 def wait_for_login(cdp_port=DEFAULT_CDP_PORT, timeout=DEFAULT_LOGIN_TIMEOUT, interval=3):
@@ -2533,16 +2575,19 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
             append("cdp", "专用浏览器已启动", "fail",
                    f"CDP 响应异常: {e}")
 
-    # 检查 4: BOSS 登录状态
+    # 检查 4: BOSS 登录状态（三态）
     if not deps_ok or cdp_status != "ok":
         append("boss_login", "BOSS 登录状态", "skip",
                "跳过 — 浏览器未就绪，无法探测登录态")
     else:
         try:
-            logged_in = check_login_state(cdp_port)
-            if logged_in:
+            state = check_login_state_tri(cdp_port)
+            if state == "logged_in":
                 append("boss_login", "BOSS 登录状态", "ok",
                        "已登录（接口返回明文薪资）")
+            elif state == "restricted":
+                append("boss_login", "BOSS 登录状态", "fail",
+                       "受限中 — 账号或 IP 命中风控，建议等待后重试")
             else:
                 append("boss_login", "BOSS 登录状态", "fail",
                        "未登录 — 请先在专用浏览器中登录 zhipin.com",

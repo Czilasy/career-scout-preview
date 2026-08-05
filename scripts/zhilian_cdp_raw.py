@@ -39,6 +39,7 @@ ZHILIAN_HOST_ALLOWLIST = frozenset({
 })
 
 _ZHILIAN_LOGIN_PROBE_URL = "https://www.zhaopin.com/"
+_ZHILIAN_SEARCH_PROBE_URL = "https://www.zhaopin.com/sou/"
 _ZHILIAN_SEARCH_API = "https://fe-api.zhaopin.com/c/i/search/positions"
 _ZHILIAN_DETAIL_PATTERN = "https://www.zhaopin.com/jobdetail/{job_id}.htm"
 
@@ -241,6 +242,57 @@ def _api_city_code(platform_code: str) -> str:
     if platform_code == "jl0":
         return "0"
     return platform_code
+
+
+def check_login_state_tri(cdp_port: int = DEFAULT_CDP_PORT) -> str:
+    """智联登录态 DOM marker 探测，零 API 请求。
+
+    Returns:
+        "logged_in" / "not_logged_in" / "restricted" / "unknown"
+
+    方法：导航智联搜索页，读取页面文本做 marker 判定：
+    - _LOGIN_MARKERS 命中（"请登录"等）→ not_logged_in
+    - _VERIFY_MARKERS（EdgeOne/人机验证）或 _RATE_MARKERS（访问过于频繁）→ restricted
+    - 均未命中 → logged_in（宽松判定）
+    - CDP 连接失败 / 导航超时 → unknown
+
+    marker 可靠性说明（2026-08-04 + 2026-08-05 真实页面冒烟核验）：
+    - 无 Cookie 的新 profile 访问搜索页会先落到 Tencent EdgeOne 人机验证页
+      （文本约 180 字符，含 "EdgeOne"/"请完成验证"），判定为 restricted；
+    - 未登录搜索页会出现"请登录"引导且 URL 可能跳转 passport.zhaopin.com，
+      两者都可稳定命中；
+    - 已登录搜索页 header 显示用户名，不出现"请登录/立即登录"字样，
+      因此宽松判定不会误伤已登录用户；
+    - 限流页固定含"访问过于频繁"。
+    """
+    try:
+        ws = _connect(cdp_port)
+    except Exception:
+        return "unknown"
+    try:
+        _navigate(ws, _ZHILIAN_SEARCH_PROBE_URL)
+        loaded = _wait_expression(
+            ws,
+            "document.body && document.body.innerText.trim().length > 40",
+            timeout=30,
+        )
+        if not loaded:
+            return "unknown"
+        body = str(_evaluate(ws, "document.body.innerText.slice(0, 6000)") or "")
+        url = str(_evaluate(ws, "location.href") or "")
+    except Exception:
+        return "unknown"
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+    low = body.lower()
+    if any(m.lower() in low for m in _LOGIN_MARKERS) or "passport.zhaopin.com" in url:
+        return "not_logged_in"
+    if any(m.lower() in low for m in _VERIFY_MARKERS) or any(m.lower() in low for m in _RATE_MARKERS):
+        return "restricted"
+    return "logged_in"
 
 
 def preflight(cdp_port: int = DEFAULT_CDP_PORT) -> str | None:

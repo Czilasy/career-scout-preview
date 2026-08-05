@@ -64,12 +64,12 @@ class VueBrowserContractTests(unittest.TestCase):
     def test_ai_settings_is_reachable_on_narrow_screens(self):
         self.assertIn('data-testid="ai-settings-trigger"', APP)
         self.assertIn(".ai-settings-trigger", CSS)
-        mobile = CSS.split("@media (max-width: 760px)", 1)[1]
+        mobile = CSS.split("@media (max-width: 760px)")[-1]
         self.assertIn(".ai-settings-trigger", mobile)
         self.assertNotRegex(mobile, r"\.ai-settings-trigger\s*\{[^}]*display:\s*none")
 
     def test_profile_switcher_is_reachable_on_narrow_screens(self):
-        mobile = CSS.split("@media (max-width: 760px)", 1)[1]
+        mobile = CSS.split("@media (max-width: 760px)")[-1]
         profile = mobile.split(".profile-picker", 1)[1].split("}", 1)[0]
         self.assertNotIn("display: none", profile)
         self.assertIn("grid-row: 3", profile)
@@ -80,22 +80,26 @@ class VueBrowserContractTests(unittest.TestCase):
         self.assertIn(":focus-visible", CSS)
         self.assertIn("outline: 3px", CSS)
         self.assertRegex(CSS, r"\.brand\s*\{[^}]*min-height:\s*44px")
-        self.assertRegex(CSS, r"\.result-tabs button\s*\{[^}]*min-height:\s*44px")
+        # 重构后 result-tabs 按钮选择器带 .vtab（min-height 52px ≥ 44px 触控目标）
+        self.assertRegex(
+            CSS,
+            r"\.result-tabs button(?:\.vtab)?\s*\{[^}]*min-height:\s*(?:4[4-9]|[5-9]\d)\d*px",
+        )
 
     def test_mobile_detail_is_full_screen_and_page_does_not_gain_horizontal_scroll(self):
-        mobile = CSS.split("@media (max-width: 760px)", 1)[1]
+        mobile = CSS.split("@media (max-width: 760px)")[-1]
         detail = mobile.split(".job-detail-pane", 1)[1].split("}", 1)[0]
         self.assertIn("position: fixed", detail)
         self.assertIn("inset: 0", detail)
         self.assertIn("min-width: 320px", CSS)
 
     def test_mobile_navigation_uses_fitted_grids_without_scrollbars(self):
-        mobile = CSS.split("@media (max-width: 760px)", 1)[1]
+        mobile = CSS.split("@media (max-width: 760px)")[-1]
         self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", mobile)
         self.assertNotIn("min-width: 390px", mobile)
 
     def test_mobile_header_actions_stay_exactly_44_pixels(self):
-        mobile = CSS.split("@media (max-width: 760px)", 1)[1]
+        mobile = CSS.split("@media (max-width: 760px)")[-1]
         stage_action = mobile.split(".stage-header .button", 1)[1].split("}", 1)[0]
         self.assertIn("height: 44px", stage_action)
         self.assertIn("font-size: 0", stage_action)

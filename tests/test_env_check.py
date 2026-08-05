@@ -137,7 +137,8 @@ class CollectCheckItemsTests(unittest.TestCase):
             mock.patch.object(module, "requests", FakeRequests),
             mock.patch.object(module, "detect_chromium_browsers",
                               return_value={"chrome": "C:/chrome.exe", "edge": None}),
-            mock.patch.object(module, "check_login_state", return_value=logged_in),
+            mock.patch.object(module, "check_login_state_tri",
+                              return_value="logged_in" if logged_in else "not_logged_in"),
         ]
         for patcher in patchers:
             patcher.start()
@@ -184,7 +185,7 @@ class CollectCheckItemsTests(unittest.TestCase):
                 mock.patch.object(module2, "detect_chromium_browsers",
                                   return_value={"chrome": None, "edge": None}), \
                 mock.patch.object(module2, "requests", mock.Mock()), \
-                mock.patch.object(module2, "check_login_state", return_value=True):
+                mock.patch.object(module2, "check_login_state_tri", return_value="logged_in"):
             items, all_pass = module2.collect_check_items(cdp_port=9333)
         self.assertFalse(all_pass)
         self.assertEqual(items[0]["status"], "fail")
@@ -253,6 +254,56 @@ class EnvCheckApiTests(unittest.TestCase):
             ["data_dir", "webui_dist", "deps"],
         )
         self.assertIsInstance(payload["checked_at"], int)
+
+
+class ZhilianLoginProbeTests(unittest.TestCase):
+    """D4: 智联登录态 DOM marker 探测（fixture 兜底，真实冒烟结论见代码注释）。"""
+
+    def _probe(self, body="", url="https://www.zhaopin.com/sou/", loaded=True):
+        from scripts import zhilian_cdp_raw as zha
+        with mock.patch.object(zha, "_connect", return_value=object()), \
+                mock.patch.object(zha, "_navigate"), \
+                mock.patch.object(zha, "_wait_expression", return_value=loaded), \
+                mock.patch.object(zha, "_evaluate", side_effect=[body, url]):
+            return zha.check_login_state_tri(9223)
+
+    def test_login_marker_means_not_logged_in(self):
+        self.assertEqual(
+            self._probe(body="职位列表\n请登录后查看完整职位信息"),
+            "not_logged_in",
+        )
+
+    def test_passport_redirect_means_not_logged_in(self):
+        self.assertEqual(
+            self._probe(body="正在跳转...", url="https://passport.zhaopin.com/login"),
+            "not_logged_in",
+        )
+
+    def test_verify_marker_means_restricted(self):
+        self.assertEqual(
+            self._probe(body="请完成验证以确认安全性\nProtected by Tencent Cloud EdgeOne"),
+            "restricted",
+        )
+
+    def test_rate_marker_means_restricted(self):
+        self.assertEqual(
+            self._probe(body="访问过于频繁，请稍后再试"),
+            "restricted",
+        )
+
+    def test_no_marker_means_logged_in(self):
+        self.assertEqual(
+            self._probe(body="Java 开发工程师\n上海\n20-40K"),
+            "logged_in",
+        )
+
+    def test_cdp_failure_means_unknown(self):
+        from scripts import zhilian_cdp_raw as zha
+        with mock.patch.object(zha, "_connect", side_effect=RuntimeError("down")):
+            self.assertEqual(zha.check_login_state_tri(9223), "unknown")
+
+    def test_page_not_loaded_means_unknown(self):
+        self.assertEqual(self._probe(body="", loaded=False), "unknown")
 
 
 if __name__ == "__main__":
