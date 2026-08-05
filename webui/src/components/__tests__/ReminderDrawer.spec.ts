@@ -1,7 +1,6 @@
 // Task 006：提醒抽屉组件合同测试。
 // 不变式锚点：specs/002-job-feedback-reminders/contracts/ui-interaction.md
 // （ReminderDrawer 节、跳转安全、视口验收）、http-api.md（job-reminders/actions/advice）。
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { flushPromises, mount } from "@vue/test-utils";
@@ -659,8 +658,9 @@ describe("T053 布局合同（scoped CSS 静态校验）", () => {
   it("使用 scoped 样式且包含窄屏断点", () => {
     expect(source).toContain("<style scoped>");
     expect(source).toMatch(/@media\s*\(max-width:\s*720px\)/);
-    // 窄屏抽屉占满可用宽度。
-    expect(source).toMatch(/width:\s*100vw/);
+    // 圆润浮窗合同：宽度受视口约束（min(380px, calc(100vw - 32px))），窄屏仍留 16px 边距。
+    expect(source).toMatch(/width:\s*min\(380px,\s*calc\(100vw - 32px\)\)/);
+    expect(source).toMatch(/width:\s*calc\(100vw - 32px\)/);
   });
 
   it("动作按钮保持 ≥44px 点击区且可换行不逐字竖排", () => {
@@ -673,7 +673,8 @@ describe("T053 布局合同（scoped CSS 静态校验）", () => {
     expect(source).toMatch(/\.reminder-list\s*\{[^}]*overflow-x:\s*hidden/s);
     expect(source).toContain("overflow-wrap: anywhere");
     expect(source).toMatch(/\.reminder-drawer\s*\{[^}]*overflow-x:\s*hidden/s);
-    expect(source).toMatch(/max-width:\s*100vw/);
+    // 浮窗宽度用 calc(100vw - 32px) 封顶，不会产生横向溢出。
+    expect(source).toMatch(/calc\(100vw - 32px\)/);
   });
 
   it("渲染的操作行使用可换行容器且不出现嵌套按钮", async () => {

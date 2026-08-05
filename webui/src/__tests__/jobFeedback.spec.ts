@@ -1,7 +1,6 @@
 // Task 004：岗位反馈前端 client 合同测试。
 // 不变式锚点：specs/002-job-feedback-reminders/contracts/http-api.md（job-feedback-v1）、
 // contracts/ui-interaction.md 幂等与失败节、data-model.md 岗位身份解析节。
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, expectedBackendBuildHash, setBuildIdentity } from "../api";
 import {
   JOB_FEEDBACK_ACTIONS,

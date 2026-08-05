@@ -1,7 +1,6 @@
 // Task 007：岗位详情生命周期控件（JobLifecycleActions）组件测试。
 // 不变式锚点：specs/002-job-feedback-reminders/contracts/http-api.md（job-feedback-v1）、
 // contracts/ui-interaction.md `JobLifecycleActions` 节、data-model.md 岗位身份解析节。
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import JobLifecycleActions from "../JobLifecycleActions.vue";
 import type { JobItem } from "../../types";

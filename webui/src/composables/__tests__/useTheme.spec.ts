@@ -1,4 +1,3 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // useTheme 用模块级单例保存 mode/platform + initialized 标志。
 // 每个测试通过 vi.resetModules() + 动态 import 重新加载模块，

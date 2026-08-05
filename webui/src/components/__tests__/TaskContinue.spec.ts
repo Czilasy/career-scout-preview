@@ -1,5 +1,4 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import DiscoveryView from "../../views/DiscoveryView.vue";
 import { expectedBackendBuildHash } from "../../api";
 import TaskProgress from "../TaskProgress.vue";

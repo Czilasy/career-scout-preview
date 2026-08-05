@@ -1,5 +1,4 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import BrowserAccountsDialog from "../BrowserAccountsDialog.vue";
 
 function response(body: unknown, status = 200): Response {
