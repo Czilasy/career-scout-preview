@@ -273,10 +273,10 @@ function selectModel(item: string) {
   margin-top: 0.25rem;
   max-height: 14rem;
   overflow-y: auto;
-  background: var(--bg, #fff);
-  border: 1px solid var(--border, #ddd);
-  border-radius: 0.4rem;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  background: var(--panel);
+  border: 1px solid var(--hair);
+  border-radius: 0.5rem;
+  box-shadow: var(--shadow);
   list-style: none;
   padding: 0.25rem 0;
   z-index: 10;
@@ -292,11 +292,12 @@ function selectModel(item: string) {
 }
 
 .model-dropdown li:hover {
-  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+  background: var(--hair-2);
 }
 
 .model-dropdown li.active {
-  background: var(--primary-bg, rgba(0, 120, 212, 0.12));
+  background: var(--brand-wash);
+  color: var(--brand-ink);
   font-weight: 600;
 }
 
@@ -310,26 +311,26 @@ function selectModel(item: string) {
 }
 
 .ai-local-notice[data-tone="success"] {
-  color: #1a7f37;
-  background: #e8f5ec;
-  border-color: #b7dec3;
+  color: var(--match-deep);
+  background: var(--match-wash);
+  border-color: var(--match-edge);
 }
 
 .ai-local-notice[data-tone="error"] {
-  color: #b42318;
-  background: #fdecea;
-  border-color: #f5c6c0;
+  color: var(--reject-deep);
+  background: var(--reject-wash);
+  border-color: var(--reject-edge);
 }
 
 .ai-local-notice[data-tone="warning"] {
-  color: #946300;
-  background: #fff8e0;
-  border-color: #f3d97e;
+  color: var(--unsure-deep);
+  background: var(--unsure-wash);
+  border-color: var(--unsure-edge);
 }
 
 .ai-local-notice[data-tone="info"] {
-  color: #2c5282;
-  background: #eef4fb;
-  border-color: #c5d8ee;
+  color: var(--brand-ink);
+  background: var(--brand-wash);
+  border-color: var(--brand-edge);
 }
 </style>

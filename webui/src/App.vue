@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Bell, Bot, BriefcaseBusiness, Moon, Star, Sun, UserRound, X } from "@lucide/vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Bell, Bot, Moon, Star, Sun, UserRound, X } from "@lucide/vue";
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
 import BrowserAccountsDialog from "./components/BrowserAccountsDialog.vue";
 import NoticeBar from "./components/NoticeBar.vue";
@@ -17,6 +17,20 @@ const { mode, toggleTheme } = useTheme();
 const themeToggleLabel = computed(() =>
   mode.value === "light" ? "切换到暗色模式" : "切换到浅色模式");
 
+// ---------------------------------------------------------------------------
+// 顶栏本轮状态胶囊：纯展示。数据来自 DiscoveryView 上抛的 round-status，
+// 空闲（无任务上下文且无结果）时不渲染。
+// ---------------------------------------------------------------------------
+const roundStatus = ref<{ platform: "boss" | "zhilian"; phase: string; judged: number } | null>(null);
+const roundStatusRunning = computed(() =>
+  roundStatus.value?.phase === "scraping" || roundStatus.value?.phase === "screening");
+const roundStatusText = computed(() => {
+  if (!roundStatus.value) return "";
+  if (roundStatus.value.phase === "scraping") return "抓取进行中";
+  if (roundStatus.value.phase === "screening") return "筛选进行中";
+  return `${roundStatus.value.judged} 个岗位已判定`;
+});
+
 const aiSettingsOpen = ref(false);
 const browserAccountsOpen = ref(false);
 const profiles = ref<CandidateProfile[]>([]);
@@ -26,6 +40,7 @@ let noticeTimer: number | undefined;
 
 const favoritesOpen = ref(false);
 const favorites = ref<Record<string, unknown>[]>([]);
+const favPanelEl = ref<HTMLElement | null>(null);
 
 async function loadFavorites() {
   try {
@@ -43,6 +58,15 @@ function toggleFavorites() {
     favoritesOpen.value = true;
     void loadFavorites();
   }
+}
+
+// 抽屉打开时聚焦面板，Esc 可关闭（与提醒抽屉一致的交互习惯）。
+watch(favoritesOpen, (open) => {
+  if (open) nextTick(() => favPanelEl.value?.focus());
+});
+
+function handleFavoritesKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") favoritesOpen.value = false;
 }
 
 async function removeFavorite(job: Record<string, unknown>) {
@@ -80,6 +104,8 @@ onMounted(async () => {
     currentProfileId.value = profiles.value.some((profile) => profile.id === saved)
       ? saved
       : profiles.value[0]?.id || "";
+    // 顶栏收藏徽标随首屏加载展示，不必等用户先打开过面板。
+    void loadFavorites();
   } catch (error) {
     showNotice({ message: errorMessage(error, "WebUI 初始化失败"), tone: "error" });
   }
@@ -178,6 +204,8 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
   // profile 已切换时丢弃旧 action 触发的刷新，不代旧 profile 发请求。
   if (payload?.profileId && payload.profileId !== currentProfileId.value) return;
   void refreshReminderCount();
+  // 收藏/取消收藏属于 interest 变更，同步刷新收藏数量。
+  void loadFavorites();
 }
 </script>
 
@@ -185,10 +213,21 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
   <div class="app-shell">
     <header class="app-header">
       <a class="brand" href="/" aria-label="Career Scout 工作台首页">
-        <span class="brand-mark" aria-hidden="true"><BriefcaseBusiness :size="20" /></span>
-        <span><strong>Career Scout</strong><small>BOSS 求职工作台</small></span>
+        <svg class="brand-mark" width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+          <path d="M25.5 6.5 L18.3 18.3 L6.5 25.5 Z" fill="var(--logo-a)" />
+          <path d="M25.5 6.5 L13.7 13.7 L6.5 25.5 Z" fill="var(--logo-b)" />
+          <circle cx="16" cy="16" r="1.9" fill="var(--logo-dot)" />
+        </svg>
+        <span class="brand-name">Career<span class="tick">·</span>Scout</span>
       </a>
 
+      <div v-if="roundStatus" class="round-pill" data-testid="round-status-pill">
+        <span v-if="roundStatusRunning" class="live" aria-hidden="true"></span>
+        <span class="pf">{{ roundStatus.platform === 'boss' ? 'BOSS' : '智联' }}</span>
+        <span class="sep" aria-hidden="true"></span>
+        <span class="round-status-text">{{ roundStatusText }}</span>
+      </div>
+      <span v-else aria-hidden="true"></span>
 
       <div class="header-actions">
         <button
@@ -248,36 +287,52 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
       </div>
     </header>
 
-    <aside v-if="favoritesOpen" class="fav-drawer">
-      <div class="fav-drawer-head">
-        <strong>我的收藏</strong>
-        <button type="button" class="fav-drawer-close" aria-label="关闭收藏面板" @click="favoritesOpen = false">&times;</button>
-      </div>
-      <p v-if="!favorites.length" class="fav-drawer-empty">暂无收藏，在结果页点「收藏」即可添加。</p>
-      <div v-else class="fav-drawer-list">
-        <div
-          v-for="job in favorites"
-          :key="String(job.job_id || job.id)"
-          class="fav-card"
-        >
-          <a
-            class="fav-card-main"
-            :href="String(job.job_link || '#')"
-            target="_blank"
-            rel="noopener"
+    <aside
+      v-if="favoritesOpen"
+      ref="favPanelEl"
+      class="fav-drawer"
+      role="dialog"
+      aria-modal="true"
+      aria-label="我的收藏"
+      tabindex="-1"
+      @keydown="handleFavoritesKeydown"
+    >
+      <header class="fav-drawer-head">
+        <div class="fav-drawer-heading">
+          <h2>我的收藏</h2>
+          <p v-if="favorites.length" class="fav-total">共 {{ favorites.length }} 个岗位</p>
+        </div>
+        <button type="button" class="fav-drawer-close" aria-label="关闭收藏面板" @click="favoritesOpen = false">
+          <X :size="18" aria-hidden="true" />
+        </button>
+      </header>
+      <div class="fav-drawer-body">
+        <p v-if="!favorites.length" class="fav-drawer-empty">暂无收藏，在结果页点「收藏」即可添加。</p>
+        <div v-else class="fav-drawer-list">
+          <div
+            v-for="job in favorites"
+            :key="String(job.job_id || job.id)"
+            class="fav-card"
           >
-            <strong class="fav-card-title">{{ job.title || "未知岗位" }}</strong>
-            <span class="fav-card-meta">{{ job.salary || "薪资面议" }} · {{ job.location || "" }}</span>
-            <span class="fav-card-company">{{ job.company || "" }}</span>
-          </a>
-          <button
-            type="button"
-            class="fav-card-remove"
-            aria-label="取消收藏"
-            @click.stop.prevent="removeFavorite(job)"
-          >
-            <X :size="16" aria-hidden="true" />
-          </button>
+            <a
+              class="fav-card-main"
+              :href="String(job.job_link || '#')"
+              target="_blank"
+              rel="noopener"
+            >
+              <strong class="fav-card-title">{{ job.title || "未知岗位" }}</strong>
+              <span class="fav-card-meta">{{ job.salary || "薪资面议" }} · {{ job.location || "" }}</span>
+              <span class="fav-card-company">{{ job.company || "" }}</span>
+            </a>
+            <button
+              type="button"
+              class="fav-card-remove"
+              aria-label="取消收藏"
+              @click.stop.prevent="removeFavorite(job)"
+            >
+              <X :size="16" aria-hidden="true" />
+            </button>
+          </div>
         </div>
       </div>
     </aside>
@@ -297,6 +352,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
         @notify="showNotice"
         @profile-created="acceptCreatedProfile"
         @job-feedback-changed="handleJobFeedbackChanged"
+        @round-status="roundStatus = $event"
       />
     </div>
 

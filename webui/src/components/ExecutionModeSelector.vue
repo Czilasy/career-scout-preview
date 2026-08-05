@@ -59,37 +59,40 @@ function select(value: ExecutionSelection) {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 4px;
   padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--surface-2);
+  border: 1px solid var(--hair);
+  border-radius: 9px;
+  background: var(--panel);
 }
 
 .mode-segments button {
   min-width: 0;
-  min-height: 38px;
+  min-height: 34px;
   padding: 7px 8px;
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: 7px;
   background: transparent;
-  color: var(--muted);
+  color: var(--ink-3);
   font: inherit;
-  font-weight: 650;
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
+  transition: border-color .15s ease, background .15s ease, color .15s ease;
 }
 
 .mode-segments button.active {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--accent-ink);
+  border-color: var(--brand-strong);
+  background: var(--brand-wash);
+  color: var(--brand-ink);
 }
 
 .mode-segments button:focus-visible {
-  outline: 3px solid rgb(14 116 144 / 28%);
+  outline: 3px solid color-mix(in srgb, var(--brand) 28%, transparent);
   outline-offset: 1px;
 }
 
 .mode-segments button:hover:not(:disabled) {
-  background: rgb(14 116 144 / 10%);
+  border-color: var(--brand);
+  color: var(--brand-ink);
 }
 
 .mode-segments button:disabled {

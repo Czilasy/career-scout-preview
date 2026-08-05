@@ -57,8 +57,20 @@
   --canvas-tint: #eef8f6;
   --dot-rgba: rgba(0, 90, 80, 0.03);
 
-  /* 暗色主按钮字色（仅暗色用；浅色不引用） */
+  /* 暗色主按钮字色（暗色下 .button.primary / 顶栏数字徽标用） */
   --on-bright-bg: #04241e;
+
+  /* 裸指南针 logo（固定色，不随平台主题变；明暗各一套） */
+  --logo-a: #17313b;
+  --logo-b: #9fb4bc;
+  --logo-dot: #14212b;
+
+  /* 结果页「AI 判断说明」分节 wash：跟随平台主题（Boss 绿 / 智联蓝） */
+  --ai-wash: #e8f5ee;
+  --ai-wash-deep: #0c6b46;
+
+  /* 危险按钮描边 */
+  --danger-edge: #e5c9c6;
 
   /* 旧变量兼容层：映射到新令牌，旧 styles.css 不改也能跑 */
   --bg: var(--canvas);
@@ -132,6 +144,9 @@
   --canvas-tint: #edf2fa;
   --dot-rgba: rgba(20, 60, 140, 0.03);
 
+  --ai-wash: #e9eff8;
+  --ai-wash-deep: #0b3b80;
+
   color-scheme: light;
 }
 
@@ -177,6 +192,14 @@
 
   --on-bright-bg: #04241e;
 
+  --logo-a: #dfe9ea;
+  --logo-b: #5d7076;
+  --logo-dot: #ecf2f3;
+
+  /* 暗色 Boss：AI 判断说明分节 wash 用提亮绿（不继承 :root 浅色值） */
+  --ai-wash: rgba(59, 212, 153, 0.13);
+  --ai-wash-deep: #6ce3b2;
+
   color-scheme: dark;
 }
 
@@ -207,7 +230,23 @@
 
   --on-bright-bg: #071a38;
 
+  --logo-a: #e4ebf7;
+  --logo-b: #5a6b8c;
+  --logo-dot: #edf2fa;
+
+  --ai-wash: rgba(91, 150, 238, 0.13);
+  --ai-wash-deep: #aecbf8;
+
   color-scheme: dark;
+}
+
+/* ===========================================================================
+ * 暗色反转：主按钮与数字徽标改「亮品牌底 + 深墨字」（brand-spec 规则 2）
+ * ========================================================================= */
+:root[data-theme="dark"] {
+  --accent: var(--brand);
+  --accent-strong: var(--brand-strong);
+  --accent-ink: var(--on-bright-bg);
 }
 
 /* ===========================================================================

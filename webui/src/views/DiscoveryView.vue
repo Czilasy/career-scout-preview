@@ -85,6 +85,8 @@ const emit = defineEmits<{
   "profile-created": [profile: CandidateProfile];
   // Task 009：详情生命周期 action 成功后上抛，App 刷新当前 profile 提醒。
   "job-feedback-changed": [payload: { profileId: string; jobId: string }];
+  // 顶栏本轮状态胶囊：纯展示数据，空闲时上抛 null（不新增任何请求）。
+  "round-status": [payload: { platform: Platform; phase: "scraping" | "screening" | "judged"; judged: number } | null];
 }>();
 
 // T503：平台三身份独立（platform-schema.md L142-159）
@@ -250,9 +252,7 @@ function clampAdvanced(field: string) {
   else if (next > max) next = max;
   if (next !== raw) advancedSettings.value[field] = next;
 }
-const searchPanelOpen = ref(true);
 const screenPanelOpen = ref(true);
-const advancedPanelOpen = ref(false);
 let pollTimer: number | undefined;
 
 const scopeLocked = computed(() => Boolean(
@@ -316,9 +316,6 @@ const screenSummaryChips = computed(() => {
     chips.push({ label: group.label, value: labels.join(" / ") });
   });
   return chips;
-});
-watch(advancedPanelOpen, (open) => {
-  if (open) searchPanelOpen.value = false;
 });
 watch(
   [selectedKeywords, cityText, () => advancedSettings.value.pages],
@@ -869,8 +866,6 @@ async function startScrape() {
   }
   const preview = scopePreview.value || await refreshScopePreview();
   if (!preview) return;
-  searchPanelOpen.value = false;
-  advancedPanelOpen.value = false;
   scrapeBusy.value = true;
   scrapeCompleted.value = false;
   resultLoaded.value = false;
@@ -1576,6 +1571,28 @@ function lifecycleJob(job: JobItem): JobItem {
 function onJobFeedbackChanged(payload: { profileId: string; jobId: string }) {
   emit("job-feedback-changed", payload);
 }
+
+// ---------------------------------------------------------------------------
+// 顶栏本轮状态胶囊数据（纯派生，不发请求）：
+// 运行中（抓取/筛选/补抓）显示进行中态；有结果时显示已判定数；其余空闲态上抛 null。
+// 平台优先取任务自身平台（恢复任务快照携带），缺省时用草稿平台。
+// ---------------------------------------------------------------------------
+const roundStatusPayload = computed(() => {
+  const platform: Platform = scrapeSnapshot.value?.platform
+    || screenSnapshot.value?.platform
+    || draftPlatform.value;
+  if (scrapeBusy.value || recrawlBusy.value) return { platform, phase: "scraping" as const, judged: 0 };
+  if (screenBusy.value) return { platform, phase: "screening" as const, judged: 0 };
+  if (resultLoaded.value && pipelineResult.value) {
+    const g = groups.value;
+    const judged = g.matched.length + g.unmatched.length + g.uncertain.length + g.dropped.length;
+    return { platform, phase: "judged" as const, judged };
+  }
+  return null;
+});
+watch(roundStatusPayload, (payload) => {
+  emit("round-status", payload);
+}, { immediate: true });
 </script>
 
 <template>
@@ -1681,12 +1698,13 @@ function onJobFeedbackChanged(payload: { profileId: string; jobId: string }) {
         </div>
       </section>
 
-      <section v-else-if="activeStep === 'search'" class="workflow-stack">
-        <CollapsibleCard title="哪些词用于广泛抓取？" v-model="searchPanelOpen">
+      <section v-else-if="activeStep === 'search'" class="workflow-stack search-layout">
+        <CollapsibleCard title="哪些词用于广泛抓取？" static :model-value="true" :class="{ locked: scopeLocked }">
           <template #prefix>
             <Search :size="17" aria-hidden="true" />
           </template>
           <template #summary>
+            <span v-if="scopeLocked" class="lock-chip" role="status">{{ scrapeBusy || recrawlBusy ? '抓取中 · 范围已锁定' : screenBusy ? '筛选中 · 范围已锁定' : '范围已锁定' }}</span>
             <span class="selection-summary">{{ searchSummary }}</span>
           </template>
           <div class="search-columns">
@@ -1735,7 +1753,7 @@ function onJobFeedbackChanged(payload: { profileId: string; jobId: string }) {
           </label>
         </CollapsibleCard>
 
-        <CollapsibleCard class="advanced-panel" title="高级执行设置" v-model="advancedPanelOpen">
+        <CollapsibleCard class="advanced-panel" title="高级执行设置" static :model-value="true">
           <template #prefix>
             <SlidersHorizontal :size="17" aria-hidden="true" />
           </template>
@@ -1889,16 +1907,19 @@ function onJobFeedbackChanged(payload: { profileId: string; jobId: string }) {
           'has-recrawl-banner': activeCategory === 'uncertain' && recrawlSnapshot,
         }"
       >
-        <div class="result-tabs" role="tablist" aria-label="AI 筛选结果分类">
-          <button
-            v-for="tab in resultTabs"
-            :key="tab.id"
-            type="button"
-            role="tab"
-            :aria-selected="activeCategory === tab.id"
-            :class="{ active: activeCategory === tab.id }"
-            @click="activeCategory = tab.id"
-          >{{ tab.label }}<span>{{ tab.count }}</span></button>
+        <div class="command-band">
+          <div class="result-tabs" role="tablist" aria-label="AI 筛选结果分类">
+            <button
+              v-for="tab in resultTabs"
+              :key="tab.id"
+              type="button"
+              role="tab"
+              :aria-selected="activeCategory === tab.id"
+              :class="['vtab', `vtab--${tab.id}`, { active: activeCategory === tab.id }]"
+              @click="activeCategory = tab.id"
+            ><span class="vtab-dot" aria-hidden="true"></span>{{ tab.label }}<span class="vtab-count">{{ tab.count }}</span></button>
+          </div>
+          <span class="command-note" aria-hidden="true">判定依据：你的简历关键词 · 两阶段判断</span>
         </div>
 
         <div v-if="activeCategory === 'uncertain' && (recrawlSnapshot || interruptedRunId)" class="recrawl-banner">

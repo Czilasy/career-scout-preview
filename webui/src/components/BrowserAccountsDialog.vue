@@ -343,12 +343,13 @@ async function removeAccount(id: string) {
   display: grid;
   gap: 8px;
   padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-1);
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: var(--panel);
 }
 .browser-account-card[data-active="true"] {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  border-color: var(--brand-edge);
+  background: var(--brand-wash);
 }
 .browser-account-head {
   display: flex;
@@ -362,22 +363,24 @@ async function removeAccount(id: string) {
   height: 30px;
   align-items: center;
   justify-content: center;
-  border-radius: 7px;
-  color: var(--accent-ink);
-  background: var(--accent);
+  border-radius: 8px;
+  color: var(--brand-strong);
+  background: var(--brand-wash);
 }
 .browser-account-badge {
   padding: 2px 8px;
+  border: 1px solid var(--brand-edge);
   border-radius: 999px;
-  color: var(--accent-ink);
-  background: var(--accent);
+  color: var(--brand-ink);
+  background: var(--brand-wash);
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
 }
 .browser-account-badge.muted {
-  color: var(--muted);
-  background: var(--surface-3);
+  color: var(--ink-3);
+  border-color: var(--hair);
+  background: var(--hair-2);
 }
 .browser-account-platforms {
   display: flex;
@@ -397,7 +400,7 @@ async function removeAccount(id: string) {
 }
 .browser-account-platform-label {
   font-weight: 600;
-  color: var(--ink);
+  color: var(--ink-1);
 }
 .browser-account-platform-port {
   color: var(--muted);
@@ -424,10 +427,10 @@ async function removeAccount(id: string) {
 .browser-account-platform-select select {
   min-height: 34px;
   padding: 4px 8px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--hair);
   border-radius: 6px;
-  background: var(--surface-1);
-  color: var(--ink);
+  background: var(--panel);
+  color: var(--ink-1);
   font-size: 13px;
 }
 .browser-account-empty {
@@ -440,7 +443,7 @@ async function removeAccount(id: string) {
   align-items: end;
   gap: 10px;
   padding-top: 16px;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--hair);
 }
 .browser-account-add .field-label {
   flex: 1 1 200px;
@@ -455,20 +458,20 @@ async function removeAccount(id: string) {
   margin-top: 14px;
   padding: 9px 11px;
   border-radius: 7px;
-  color: var(--info);
-  background: color-mix(in srgb, var(--info) 12%, transparent);
+  color: var(--brand-ink);
+  background: var(--brand-wash);
   font-size: 13px;
 }
 .browser-account-notice[data-tone="success"] {
-  color: var(--success);
-  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--match-deep);
+  background: var(--match-wash);
 }
 .browser-account-notice[data-tone="error"] {
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--reject-deep);
+  background: var(--reject-wash);
 }
 .browser-account-notice[data-tone="warning"] {
-  color: var(--warning, #d97706);
-  background: color-mix(in srgb, var(--warning, #d97706) 12%, transparent);
+  color: var(--unsure-deep);
+  background: var(--unsure-wash);
 }
 </style>

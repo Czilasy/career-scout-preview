@@ -445,27 +445,28 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* 稳定尺寸：桌面固定宽度右侧抽屉；窄屏占满可用宽度与高度。 */
+/* 与收藏面板一致的圆润浮窗：右上悬浮、透明遮罩保留点击外部关闭。 */
 .reminder-drawer-backdrop {
   position: fixed;
   inset: 0;
   z-index: 60;
-  display: flex;
-  justify-content: flex-end;
-  background: rgb(4 10 18 / 55%);
+  background: transparent;
 }
 
 .reminder-drawer {
+  position: fixed;
+  top: 80px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 61;
   display: flex;
   flex-direction: column;
-  width: min(420px, 100vw);
-  max-width: 100vw;
-  height: 100vh;
-  height: 100dvh;
+  width: min(380px, calc(100vw - 32px));
   overflow-x: hidden;
-  border-left: 1px solid var(--line, #2b3648);
-  background: var(--surface, #10161f);
-  box-shadow: -16px 0 40px rgb(0 0 0 / 35%);
+  border: 1px solid var(--hair);
+  border-radius: 13px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
 }
 
 .reminder-drawer-header {
@@ -474,7 +475,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 16px 16px 8px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--hair-2);
 }
 
 .reminder-drawer-heading h2 {
@@ -508,9 +510,9 @@ onBeforeUnmount(() => {
 .reminder-error {
   padding: 12px;
   margin-bottom: 8px;
-  border: 1px solid rgb(255 126 134 / 58%);
+  border: 1px solid var(--reject-edge);
   border-radius: 8px;
-  background: rgb(255 126 134 / 10%);
+  background: var(--reject-wash);
   overflow-wrap: anywhere;
 }
 
@@ -519,14 +521,15 @@ onBeforeUnmount(() => {
 }
 
 .reminder-stale-note {
-  color: var(--warning, #d97706);
+  color: var(--unsure-deep);
   font-size: .85rem;
 }
 
 .reminder-notice {
   margin: 0 0 8px;
   padding: 8px 10px;
-  border: 1px solid rgb(244 199 107 / 55%);
+  border: 1px solid var(--unsure-edge);
+  background: var(--unsure-wash);
   border-radius: 8px;
   font-size: .85rem;
   overflow-wrap: anywhere;
@@ -545,7 +548,7 @@ onBeforeUnmount(() => {
 .reminder-item {
   min-width: 0;
   padding: 12px 0;
-  border-bottom: 1px solid var(--line, #2b3648);
+  border-bottom: 1px solid var(--hair-2);
   overflow-wrap: anywhere;
 }
 
@@ -566,10 +569,11 @@ onBeforeUnmount(() => {
 .reminder-platform-pill {
   flex: none;
   padding: 2px 8px;
-  border: 1px solid var(--line-strong, #3d4a5f);
+  border: 1px solid var(--brand-edge);
   border-radius: 999px;
   font-size: .72rem;
-  color: var(--text-soft, #9fb0c3);
+  color: var(--brand-ink);
+  background: var(--brand-wash);
   white-space: nowrap;
 }
 
@@ -589,7 +593,7 @@ onBeforeUnmount(() => {
 }
 
 .reminder-item-days {
-  color: var(--warning, #d97706);
+  color: var(--unsure-deep);
 }
 
 /* 操作可换行但不逐字竖排；全部按钮保持 ≥44px 点击区。 */
@@ -617,7 +621,7 @@ onBeforeUnmount(() => {
 
 .reminder-item-error {
   margin: 8px 0 0;
-  color: #ff9aa0;
+  color: var(--reject);
   font-size: .85rem;
   overflow-wrap: anywhere;
 }
@@ -625,9 +629,9 @@ onBeforeUnmount(() => {
 .reminder-advice {
   margin-top: 8px;
   padding: 8px 10px;
-  border: 1px solid var(--line, #2b3648);
+  border: 1px solid var(--hair);
   border-radius: 8px;
-  background: var(--surface-2, #161e29);
+  background: var(--panel-2);
   font-size: .85rem;
   overflow-wrap: anywhere;
 }
@@ -642,9 +646,9 @@ onBeforeUnmount(() => {
 .reminder-advice-source {
   padding: 1px 8px;
   border-radius: 999px;
-  border: 1px solid var(--line-strong, #3d4a5f);
+  border: 1px solid var(--hair);
   font-size: .72rem;
-  color: var(--text-soft, #9fb0c3);
+  color: var(--text-soft);
 }
 
 .reminder-advice-reason {
@@ -661,8 +665,7 @@ onBeforeUnmount(() => {
 /* 窄屏（390×844 验收）：抽屉全屏，关闭按钮固定可达，无横向溢出。 */
 @media (max-width: 720px) {
   .reminder-drawer {
-    width: 100vw;
-    border-left: none;
+    width: calc(100vw - 32px);
   }
 
   .reminder-item-actions .button {

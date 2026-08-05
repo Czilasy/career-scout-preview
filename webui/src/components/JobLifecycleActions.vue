@@ -624,7 +624,7 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
   font-weight: 600;
   padding: 2px 10px;
   border-radius: 999px;
-  background: var(--surface-muted, rgba(15, 23, 42, 0.08));
+  background: var(--hair-2);
 }
 
 .lca-loading,
@@ -632,7 +632,7 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
 .lca-missing-time,
 .lca-url-disabled {
   font-size: 0.9rem;
-  color: var(--text-muted, #5b6472);
+  color: var(--ink-3);
 }
 
 .lca-meta {
@@ -640,7 +640,7 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
   flex-wrap: wrap;
   gap: 12px;
   font-size: 0.9rem;
-  color: var(--text-muted, #5b6472);
+  color: var(--ink-3);
 }
 
 .lca-commands,
@@ -657,7 +657,7 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
 }
 
 .lca-error {
-  color: #b42318;
+  color: var(--reject-deep);
   word-break: break-word;
   overflow-wrap: anywhere;
 }
@@ -665,8 +665,8 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
 .lca-blocked {
   padding: 10px 12px;
   border-radius: 8px;
-  background: rgba(180, 35, 24, 0.08);
-  color: #b42318;
+  background: var(--reject-wash);
+  color: var(--reject-deep);
   word-break: break-word;
 }
 
@@ -686,7 +686,7 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
   gap: 8px;
   max-width: 100%;
   padding: 12px;
-  border: 1px solid rgba(15, 23, 42, 0.12);
+  border: 1px solid var(--hair);
   border-radius: 10px;
 }
 

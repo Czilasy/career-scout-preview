@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ArrowUpRight, BriefcaseBusiness, MapPin, X } from "@lucide/vue";
+import { ArrowUpRight, BriefcaseBusiness, Check, MapPin, X } from "@lucide/vue";
 import type { JobItem } from "../types";
 
 const props = withDefaults(defineProps<{
@@ -244,15 +244,19 @@ function verdictLabel(job: JobItem): string {
     >
       <header class="job-detail-header">
         <div>
-          <span v-if="verdictLabel(selectedJob)" class="status-pill" :data-verdict="selectedJob.verdict">
-            {{ verdictLabel(selectedJob) }}
-          </span>
-          <span
-            v-if="selectedJob.platform"
-            class="status-pill platform-pill"
-            :data-platform="selectedJob.platform"
-            data-testid="job-platform-badge"
-          >{{ selectedJob.platform === 'boss' ? 'BOSS' : '智联' }}</span>
+          <div class="verdict-line">
+            <span v-if="verdictLabel(selectedJob)" class="status-pill" :data-verdict="selectedJob.verdict">
+              <Check v-if="selectedJob.verdict === 'match'" :size="13" :stroke-width="2.4" aria-hidden="true" />
+              {{ verdictLabel(selectedJob) }}
+            </span>
+            <span v-if="verdictLabel(selectedJob)" class="verdict-by">AI 判定</span>
+            <span
+              v-if="selectedJob.platform"
+              class="status-pill platform-pill"
+              :data-platform="selectedJob.platform"
+              data-testid="job-platform-badge"
+            >{{ selectedJob.platform === 'boss' ? 'BOSS' : '智联' }}</span>
+          </div>
           <h2>{{ selectedJob.title || "未知岗位" }}</h2>
           <p>{{ company(selectedJob) }}</p>
         </div>
@@ -278,19 +282,19 @@ function verdictLabel(job: JobItem): string {
       </div>
 
       <div v-if="selectedJob.verdict_reason || selectedJob.reason" class="verdict-reason">
-        <strong>判断说明</strong>
+        <strong><span class="sec-mk" aria-hidden="true"></span>AI 判断说明</strong>
         <p>{{ selectedJob.verdict_reason || selectedJob.reason }}</p>
       </div>
 
       <div v-if="selectedJob.caveats && selectedJob.caveats.length" class="caveats-list">
-        <strong>软性要求提醒（不影响匹配，自己判断）</strong>
+        <strong><span class="sec-mk" aria-hidden="true"></span>软性要求提醒（不影响匹配，自己判断）</strong>
         <ul>
           <li v-for="(c, i) in selectedJob.caveats" :key="i">{{ c }}</li>
         </ul>
       </div>
 
       <section class="jd-content">
-        <h3>职位描述</h3>
+        <h3><span class="sec-mk" aria-hidden="true"></span>职位描述</h3>
         <p>{{ selectedJob.jd || selectedJob.jd_excerpt || "尚未获取职位描述。" }}</p>
       </section>
 
