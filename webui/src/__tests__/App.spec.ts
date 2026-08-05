@@ -2,6 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import App from "../App.vue";
 import DiscoveryView from "../views/DiscoveryView.vue";
 import { expectedBackendBuildHash } from "../api";
+import { toggleTheme } from "../composables/useTheme";
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -398,5 +399,30 @@ describe("App", () => {
     wrapper.findComponent(DiscoveryView).vm.$emit("job-feedback-changed", { profileId: "profile-other", jobId: "internal-x" });
     await flushPromises();
     expect(countCalls).toBe(callsBeforeStale);
+  });
+
+  // ---------- 主题切换按钮（阶段 1）----------
+
+  it("renders a theme toggle button in the header that switches data-theme on click", async () => {
+    // 重置 useTheme 单例到已知 light 状态（其他用例可能已切换过）。
+    toggleTheme("light");
+    document.documentElement.removeAttribute("data-theme");
+
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const toggle = wrapper.get('[data-testid="theme-toggle"]');
+    // 初始为 light，aria-label 提示可切到暗色。
+    expect(toggle.attributes("aria-label")).toBe("切换到暗色模式");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+
+    await toggle.trigger("click");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    expect(wrapper.get('[data-testid="theme-toggle"]').attributes("aria-label"))
+      .toBe("切换到浅色模式");
+
+    // 再点一次回到 light。
+    await wrapper.get('[data-testid="theme-toggle"]').trigger("click");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
 });

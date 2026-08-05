@@ -1,0 +1,238 @@
+/* ===========================================================================
+ * Career Scout 主题令牌系统（brand-spec.md 落地）
+ *
+ * 四套令牌：boss 浅 / 智联浅 / boss 暗 / 智联暗
+ * 切换方式：<html data-theme="light|dark" data-platform="boss|zhilian">
+ *
+ * 旧变量名（--bg / --surface-1 / --accent 等）通过兼容层映射到新令牌，
+ * 1780 行旧 styles.css 不需要全改，只需改关键视觉位。
+ * ========================================================================= */
+
+/* ---- 字体 ---- */
+@import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Archivo:ital,wght@1,700;1,800&display=swap");
+
+:root {
+  /* 字体族令牌 */
+  --font-display: "Sora", -apple-system, "Segoe UI", sans-serif;
+  --font-body: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-brand: "Archivo", var(--font-display);
+
+  /* 默认 = boss 浅色（首屏未挂 data-theme/data-platform 时的兜底） */
+  --brand: #00beab;
+  --brand-strong: #00857a;
+  --brand-ink: #005e53;
+  --brand-wash: #e3f6f2;
+
+  --match: #12905f;
+  --match-deep: #0c6b46;
+  --match-wash: #e8f5ee;
+
+  --unsure: #9a6700;
+  --unsure-deep: #7a5200;
+  --unsure-wash: #fbf3df;
+
+  --reject: #a85751;
+  --reject-deep: #8a4640;
+  --reject-wash: #f8edeb;
+
+  --canvas: #f4f7f9;
+  --panel: #ffffff;
+  --panel-2: #fafcfd;        /* fact-row / fgroup 等次级面板 */
+  --panel-3: #fcfdfe;        /* actions 区底 */
+  --hover-row: #f7fafc;      /* job-row hover */
+  --ink-1: #14212b;
+  --ink-2: #455565;
+  --ink-3: #5e6e7e;
+  --hair: #e3e9ee;
+  --hair-2: #eef2f5;
+
+  /* 品牌浅底描边（次级硬编码色，按平台切换） */
+  --brand-edge: #bee9e2;
+  --match-edge: #bfe3cf;
+  --reject-edge: #e5c9c6;
+  --unsure-edge: #ecd9a8;
+
+  /* 顶部装饰：渐变顶色 + 点阵纹理 rgba */
+  --canvas-tint: #eef8f6;
+  --dot-rgba: rgba(0, 90, 80, 0.03);
+
+  /* 暗色主按钮字色（仅暗色用；浅色不引用） */
+  --on-bright-bg: #04241e;
+
+  /* 旧变量兼容层：映射到新令牌，旧 styles.css 不改也能跑 */
+  --bg: var(--canvas);
+  --surface-1: var(--panel);
+  --surface-2: var(--panel-2);
+  --surface-3: var(--panel-3);
+  --surface-muted: var(--hair-2);
+  --line: var(--hair);
+  --line-strong: var(--hair-2);
+  --text: var(--ink-1);
+  --text-soft: var(--ink-2);
+  --text-muted: var(--ink-3);
+  --muted: var(--ink-3);
+  --accent: var(--brand-strong);
+  --accent-strong: var(--brand);
+  --accent-ink: var(--brand-ink);
+  --success: var(--match);
+  --warning: var(--unsure);
+  --danger: var(--reject);
+  --info: var(--brand-strong);
+
+  /* 半径与阴影 */
+  --radius-sm: 8px;
+  --radius-md: 13px;
+  --radius-lg: 18px;
+  --shadow: 0 18px 48px rgb(20 40 60 / 12%);
+
+  color-scheme: light;
+}
+
+/* ===========================================================================
+ * Boss 浅色（默认）
+ * ========================================================================= */
+:root[data-theme="light"][data-platform="boss"],
+:root:not([data-theme])[data-platform="boss"],
+:root[data-theme="light"]:not([data-platform]),
+:root:not([data-theme]):not([data-platform]) {
+  --brand: #00beab;
+  --brand-strong: #00857a;
+  --brand-ink: #005e53;
+  --brand-wash: #e3f6f2;
+
+  --canvas: #f4f7f9;
+  --panel: #ffffff;
+  --panel-2: #fafcfd;
+  --panel-3: #fcfdfe;
+  --hover-row: #f7fafc;
+  --ink-1: #14212b;
+  --ink-2: #455565;
+  --ink-3: #5e6e7e;
+  --hair: #e3e9ee;
+  --hair-2: #eef2f5;
+
+  --brand-edge: #bee9e2;
+  --canvas-tint: #eef8f6;
+  --dot-rgba: rgba(0, 90, 80, 0.03);
+
+  color-scheme: light;
+}
+
+/* ===========================================================================
+ * 智联浅色
+ * ========================================================================= */
+:root[data-theme="light"][data-platform="zhilian"] {
+  --brand: #0f4ca3;
+  --brand-strong: #0b3b80;
+  --brand-ink: #082c60;
+  --brand-wash: #e9eff8;
+
+  --brand-edge: #c4d4ec;
+  --canvas-tint: #edf2fa;
+  --dot-rgba: rgba(20, 60, 140, 0.03);
+
+  color-scheme: light;
+}
+
+/* ===========================================================================
+ * Boss 暗色（品牌色提亮上移）
+ * ========================================================================= */
+:root[data-theme="dark"][data-platform="boss"] {
+  --brand: #00d4bc;
+  --brand-strong: #14c3ae;
+  --brand-ink: #82f0e1;
+  --brand-wash: rgba(0, 212, 188, 0.12);
+
+  --match: #3bd499;
+  --match-deep: #6ce3b2;
+  --match-wash: rgba(59, 212, 153, 0.13);
+
+  --unsure: #e2b558;
+  --unsure-deep: #f0cb7e;
+  --unsure-wash: rgba(226, 181, 88, 0.13);
+
+  --reject: #f08c8c;
+  --reject-deep: #f5abab;
+  --reject-wash: rgba(240, 140, 140, 0.12);
+
+  --canvas: #0d1113;
+  --panel: #141b1e;
+  --panel-2: rgba(255, 255, 255, 0.03);
+  --panel-3: #10181b;
+  --hover-row: rgba(255, 255, 255, 0.04);
+  --ink-1: #ecf2f3;
+  --ink-2: #a7b8bc;
+  --ink-3: #78898e;
+  --hair: #26343a;
+  --hair-2: #1d282d;
+
+  --brand-edge: rgba(0, 212, 188, 0.35);
+  --match-edge: rgba(59, 212, 153, 0.35);
+  --reject-edge: rgba(240, 140, 140, 0.35);
+  --unsure-edge: rgba(226, 181, 88, 0.35);
+
+  --canvas-tint: #0e181a;
+  --dot-rgba: rgba(0, 212, 188, 0.045);
+
+  --on-bright-bg: #04241e;
+
+  color-scheme: dark;
+}
+
+/* ===========================================================================
+ * 智联暗色
+ * ========================================================================= */
+:root[data-theme="dark"][data-platform="zhilian"] {
+  --brand: #5b96ee;
+  --brand-strong: #4e86e4;
+  --brand-ink: #aecbf8;
+  --brand-wash: rgba(91, 150, 238, 0.13);
+
+  --canvas: #0b0f18;
+  --panel: #131a29;
+  --panel-2: rgba(255, 255, 255, 0.03);
+  --panel-3: #101828;
+  --hover-row: rgba(255, 255, 255, 0.04);
+  --ink-1: #edf2fa;
+  --ink-2: #a9b6cd;
+  --ink-3: #77839d;
+  --hair: #26334f;
+  --hair-2: #1c2538;
+
+  --brand-edge: rgba(91, 150, 238, 0.35);
+
+  --canvas-tint: #0d1526;
+  --dot-rgba: rgba(91, 150, 238, 0.05);
+
+  --on-bright-bg: #071a38;
+
+  color-scheme: dark;
+}
+
+/* ===========================================================================
+ * 全局基础：画布背景（点阵 + 顶部渐变）
+ * ========================================================================= */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-body);
+  background:
+    radial-gradient(circle at 1px 1px, var(--dot-rgba) 1px, transparent 1px) 0 0 / 22px 22px,
+    linear-gradient(180deg, var(--canvas-tint) 0%, var(--canvas) 220px);
+  background-color: var(--canvas);
+  color: var(--ink-1);
+  min-height: 100vh;
+}
+
+body.dialog-open {
+  overflow: hidden;
+}
+
+/* ===========================================================================
+ * 数字 / Sora 应用位（全局工具类）
+ * ========================================================================= */
+.font-display {
+  font-family: var(--font-display);
+}

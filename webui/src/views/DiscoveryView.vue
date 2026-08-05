@@ -20,6 +20,7 @@ import JobWorkspace from "../components/JobWorkspace.vue";
 import StepNavigator from "../components/StepNavigator.vue";
 import TaskProgress from "../components/TaskProgress.vue";
 import { apiRequest, errorMessage, settingsApi } from "../api";
+import { setThemePlatform } from "../composables/useTheme";
 import {
   buildSearchScriptParams,
   createCityCatalogLoader,
@@ -110,6 +111,8 @@ function setDraftPlatform(platform: Platform) {
   if (platformState.draft === platform) return;
   platformState.setDraftPlatform(platform);
   draftPlatform.value = platform;
+  // 同步主题品牌色到新平台（boss 青 / 智联蓝）。
+  setThemePlatform(platform);
   // 切换草稿平台后按新平台重新加载 schema / 城市；旧请求被 loader 内部取消丢弃。
   void loadFilterLabels();
   void loadCityCatalog();
@@ -380,6 +383,8 @@ async function restoreRunningTask() {
     const taskPlatform = data.platform;
     if (taskPlatform) {
       platformState.setTaskPlatform(taskPlatform);
+      // 任务平台变化时同步主题品牌色（如恢复一个智联任务时切到蓝色品牌色）。
+      setThemePlatform(taskPlatform);
       void loadFilterLabels(taskPlatform);
       void loadCityCatalog(taskPlatform);
     }

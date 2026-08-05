@@ -81,7 +81,7 @@ input {
   min-height: 72px;
   padding: 12px clamp(16px, 3vw, 40px);
   border-bottom: 1px solid var(--line);
-  background: rgb(11 14 19 / 96%);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
   backdrop-filter: blur(18px);
 }.brand {
   display: inline-flex;
@@ -99,7 +99,7 @@ input {
   border: 1px solid color-mix(in srgb, var(--accent) 64%, var(--line));
   border-radius: 12px;
   color: var(--accent);
-  background: #1d1911;
+  background: var(--brand-wash);
 }.brand strong,
 .brand small {
   display: block;
@@ -314,7 +314,7 @@ button:disabled {
   border: 1px solid var(--line-strong);
   border-radius: 12px;
   color: var(--text);
-  background: #181e28;
+  background: var(--panel);
   box-shadow: var(--shadow);
   transform: translateX(-50%);
 }.notice-bar[data-tone="success"] { border-color: rgb(82 210 160 / 55%); }.notice-bar[data-tone="warning"] { border-color: rgb(244 199 107 / 55%); }.notice-bar[data-tone="error"] { border-color: rgb(255 126 134 / 58%); }.notice-bar[data-tone="info"] { border-color: rgb(115 184 255 / 50%); }.app-content {
@@ -466,13 +466,13 @@ button:disabled {
   border-radius: var(--radius-md);
   color: var(--muted);
   text-align: center;
-  background: #0e131a;
+  background: var(--surface-2);
   cursor: pointer;
 }.file-drop:hover,
 .file-drop.active {
   border-color: var(--accent);
   color: var(--text-soft);
-  background: #171712;
+  background: var(--brand-wash);
 }.file-drop.chosen {
   border-style: solid;
   border-color: color-mix(in srgb, var(--success) 48%, var(--line));
@@ -1081,7 +1081,7 @@ button:disabled {
 }.job-list-pane {
   min-width: 0;
   border-right: 1px solid var(--line);
-  background: #0f141c;
+  background: var(--surface-1);
 }.job-list-heading {
   display: flex;
   align-items: center;
@@ -1145,7 +1145,7 @@ button:disabled {
   background: var(--surface-2);
 }.job-row.selected {
   box-shadow: inset 3px 0 var(--accent);
-  background: #1a202b;
+  background: var(--hover-row);
 }.job-row-main,
 .job-row-meta {
   display: grid;
@@ -1197,7 +1197,7 @@ button:disabled {
   transition: transform .12s ease, background .12s ease;
 }
 .back-to-top:hover {
-  background: #1e2430;
+  background: var(--surface-3);
   transform: translateY(-2px);
 }.job-detail-pane {
   min-width: 0;
@@ -1261,7 +1261,7 @@ button:disabled {
   padding: 14px 16px;
   border-left: 3px solid var(--accent);
   border-radius: 0 8px 8px 0;
-  background: #1b1914;
+  background: var(--brand-wash);
 }.verdict-reason strong,
 .jd-content h3 {
   font-size: 13px;

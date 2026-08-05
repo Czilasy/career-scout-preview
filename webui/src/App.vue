@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Bell, Bot, BriefcaseBusiness, Star, UserRound, X } from "@lucide/vue";
+import { Bell, Bot, BriefcaseBusiness, Moon, Star, Sun, UserRound, X } from "@lucide/vue";
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
 import BrowserAccountsDialog from "./components/BrowserAccountsDialog.vue";
 import NoticeBar from "./components/NoticeBar.vue";
@@ -8,7 +8,14 @@ import ReminderDrawer from "./components/ReminderDrawer.vue";
 import DiscoveryView from "./views/DiscoveryView.vue";
 import { apiRequest, errorMessage, initializeSession } from "./api";
 import { getJobReminderCount } from "./jobFeedback";
+import { useTheme } from "./composables/useTheme";
 import type { CandidateProfile, Notice } from "./types";
+
+// 主题切换：mode（明暗）由顶栏按钮触发；platform（boss/智联）由 DiscoveryView 同步。
+const { mode, toggleTheme } = useTheme();
+
+const themeToggleLabel = computed(() =>
+  mode.value === "light" ? "切换到暗色模式" : "切换到浅色模式");
 
 const aiSettingsOpen = ref(false);
 const browserAccountsOpen = ref(false);
@@ -226,6 +233,17 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           @click="aiSettingsOpen = true"
         >
           <Bot :size="18" aria-hidden="true" /><span>AI 设置</span>
+        </button>
+        <button
+          class="icon-button theme-toggle"
+          type="button"
+          data-testid="theme-toggle"
+          :aria-label="themeToggleLabel"
+          :title="themeToggleLabel"
+          @click="toggleTheme()"
+        >
+          <Sun v-if="mode === 'dark'" :size="18" aria-hidden="true" />
+          <Moon v-else :size="18" aria-hidden="true" />
         </button>
       </div>
     </header>
