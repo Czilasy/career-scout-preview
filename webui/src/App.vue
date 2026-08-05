@@ -43,6 +43,7 @@ let noticeTimer: number | undefined;
 const favoritesOpen = ref(false);
 const favorites = ref<Record<string, unknown>[]>([]);
 const favPanelEl = ref<HTMLElement | null>(null);
+const favTriggerEl = ref<HTMLButtonElement | null>(null);
 
 async function loadFavorites() {
   try {
@@ -58,13 +59,30 @@ function toggleFavorites() {
     favoritesOpen.value = false;
   } else {
     favoritesOpen.value = true;
+    // 两个抽屉互斥：打开收藏时收起提醒，避免叠加导致点空白“回落到收藏”。
+    reminderDrawerOpen.value = false;
     void loadFavorites();
   }
 }
 
-// 抽屉打开时聚焦面板，Esc 可关闭（与提醒抽屉一致的交互习惯）。
+// 点击收藏面板与触发按钮之外的任意区域自动收起（与提醒抽屉的点外部关闭一致）。
+function onDocPointerDown(event: PointerEvent) {
+  if (!favoritesOpen.value) return;
+  const target = event.target as Node | null;
+  if (!target) return;
+  if (favPanelEl.value && favPanelEl.value.contains(target)) return;
+  if (favTriggerEl.value && favTriggerEl.value.contains(target)) return;
+  favoritesOpen.value = false;
+}
+
+// 抽屉打开时聚焦面板并挂全局指针监听；关闭时移除监听（Esc 仍可关闭）。
 watch(favoritesOpen, (open) => {
-  if (open) nextTick(() => favPanelEl.value?.focus());
+  if (open) {
+    nextTick(() => favPanelEl.value?.focus());
+    document.addEventListener("pointerdown", onDocPointerDown);
+  } else {
+    document.removeEventListener("pointerdown", onDocPointerDown);
+  }
 });
 
 function handleFavoritesKeydown(event: KeyboardEvent) {
@@ -115,6 +133,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (noticeTimer) window.clearTimeout(noticeTimer);
+  document.removeEventListener("pointerdown", onDocPointerDown);
 });
 
 function selectProfile(profileId: string) {
@@ -190,6 +209,19 @@ function toggleReminderDrawer() {
   // profile 为空时不请求也不打开抽屉。
   if (!currentProfileId.value) return;
   reminderDrawerOpen.value = true;
+  // 两个抽屉互斥：打开提醒时收起收藏。
+  favoritesOpen.value = false;
+}
+
+// 抽屉触发按钮：鼠标左键“按下”即展开/收起，不等松开；
+// 键盘 Enter/Space 触发的是 detail===0 的 click，照常响应（可访问性）；
+// 鼠标产生的 click（detail>=1）跳过，避免与 mousedown 双重触发。
+function handleDrawerTrigger(trigger: () => void, event: MouseEvent) {
+  if (event.type === "mousedown") {
+    if (event.button === 0) trigger();
+    return;
+  }
+  if (event.detail === 0) trigger();
 }
 
 // profile 初始化/切换：关闭并重置旧抽屉，废弃在途旧请求，重新加载 count。
@@ -238,7 +270,8 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           data-testid="reminder-trigger"
           :aria-label="reminderAriaLabel"
           :disabled="!currentProfileId"
-          @click="toggleReminderDrawer"
+          @mousedown="handleDrawerTrigger(toggleReminderDrawer, $event)"
+          @click="handleDrawerTrigger(toggleReminderDrawer, $event)"
         >
           <Bell :size="18" aria-hidden="true" /><span>提醒</span>
           <em
@@ -249,10 +282,12 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           >{{ reminderBadgeText }}</em>
         </button>
         <button
+          ref="favTriggerEl"
           class="button secondary favorites-trigger"
           type="button"
           aria-label="查看收藏"
-          @click="toggleFavorites"
+          @mousedown="handleDrawerTrigger(toggleFavorites, $event)"
+          @click="handleDrawerTrigger(toggleFavorites, $event)"
         >
           <Star :size="18" aria-hidden="true" /><span>收藏</span>
           <em v-if="favorites.length" class="fav-badge">{{ favorites.length }}</em>
@@ -313,8 +348,8 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           <h2>我的收藏</h2>
           <p v-if="favorites.length" class="fav-total">共 {{ favorites.length }} 个岗位</p>
         </div>
-        <button type="button" class="fav-drawer-close" aria-label="关闭收藏面板" @click="favoritesOpen = false">
-          <X :size="18" aria-hidden="true" />
+        <button type="button" class="icon-button" aria-label="关闭收藏面板" @click="favoritesOpen = false">
+          <X :size="20" aria-hidden="true" />
         </button>
       </header>
       <div class="fav-drawer-body">
