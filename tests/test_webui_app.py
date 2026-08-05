@@ -241,6 +241,43 @@ class WebUIAppTests(unittest.TestCase):
         self.assertIn("text/csv", csv_response.content_type)
         self.assertIn("owned", csv_response.get_data(as_text=True))
 
+    def test_export_csv_groups_matched_before_unmatched_with_labels(self):
+        task = self._create_scrape_task()
+        output_path = pathlib.Path(task["output_path"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps({
+            "keyword": "Python 后端",
+            "city": "上海",
+            "jobs": [
+                {
+                    "job_id": "bad",
+                    "title": "Java 工程师",
+                    "boss_name": "某公司",
+                    "salary": "10-15K",
+                    "location": "上海",
+                    "skills": "Java",
+                },
+                {
+                    "job_id": "good",
+                    "title": "Python 后端工程师",
+                    "boss_name": "产品公司",
+                    "salary": "25-35K",
+                    "location": "上海·浦东新区",
+                    "skills": "Python,FastAPI",
+                },
+            ],
+        }, ensure_ascii=False), encoding="utf-8")
+
+        response = self.client.get(f"/api/tasks/{task['id']}/export.csv")
+
+        self.assertEqual(response.status_code, 200)
+        lines = [
+            line for line in response.get_data(as_text=True).splitlines()
+            if line.strip()
+        ]
+        first_cells = [line.lstrip("\ufeff").split(",")[0] for line in lines]
+        self.assertEqual(first_cells, ["job_id", "匹配：", "good", "不匹配：", "bad"])
+
     def test_unknown_filter_is_rejected_with_400(self):
         response = self.client.post("/api/tasks", json={"keyword": "Python", "salary": "999"})
 

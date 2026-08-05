@@ -1272,11 +1272,25 @@ def create_app(config=None):
         buffer = io.StringIO()
         writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
-        for job in ranked:
+
+        def _write_job_row(job):
             row = dict(job)
             for key in ("matched_skills", "missing_skills", "risk_flags"):
                 row[key] = " | ".join(row.get(key) or [])
             writer.writerow(row)
+
+        def _write_section(label, jobs):
+            section_row = {column: "" for column in columns}
+            section_row["job_id"] = label
+            writer.writerow(section_row)
+            for job in jobs:
+                _write_job_row(job)
+
+        # 结果页同源数据按匹配结果分组：匹配的在前，不匹配的在后
+        matched_jobs = [job for job in ranked if job.get("eligible")]
+        unmatched_jobs = [job for job in ranked if not job.get("eligible")]
+        _write_section("匹配：", matched_jobs)
+        _write_section("不匹配：", unmatched_jobs)
         return app.response_class(
             "\ufeff" + buffer.getvalue(),
             mimetype="text/csv",
