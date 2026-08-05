@@ -6,6 +6,7 @@ import {
   Download,
   FileText,
   Filter,
+  History,
   LoaderCircle,
   RotateCcw,
   Search,
@@ -13,6 +14,7 @@ import {
   Sparkles,
   Square,
   UploadCloud,
+  X,
 } from "@lucide/vue";
 import CollapsibleCard from "../components/CollapsibleCard.vue";
 import ExecutionModeSelector from "../components/ExecutionModeSelector.vue";
@@ -319,18 +321,27 @@ const cityList = computed(() => cityText.value
 const effectiveSearchCities = computed(() => cityList.value.length ? cityList.value : ["全国"]);
 // T505：filterGroups 由当前已加载 schema 派生（platform-schema.md L147）。
 // 旧 fieldLabels 不再驱动筛选 UI；T507 起由 analyzeResume 按当前 schema 投影建议。
+// 每组自带一个“清空键”（BOSS 的 value="0"，智联的“不限/全部”）：
+// 点它等于不选任何值（空数组，提交时该字段不下发），不再另加内置“不限”芯片造成重复。
+const FILTER_SENTINEL_LABELS = new Set(["不限", "全部"]);
 const filterGroups = computed(() => {
   const schema = schemaRef.value;
   if (!schema) return [];
   return schema.fields
-    .map((field) => ({
-      key: field.key,
-      label: field.label,
-      options: field.options
-        .filter((opt) => opt.value !== "0")
-        .map((opt) => [opt.label, opt.value] as [string, string]),
-    }))
-    .filter((group) => group.options.length);
+    .map((field) => {
+      const sentinelOpt = field.options.find(
+        (opt) => opt.value === "0" || FILTER_SENTINEL_LABELS.has(opt.label),
+      );
+      return {
+        key: field.key,
+        label: field.label,
+        sentinel: sentinelOpt ? { label: sentinelOpt.label, code: sentinelOpt.value } : null,
+        options: field.options
+          .filter((opt) => !sentinelOpt || opt.value !== sentinelOpt.value)
+          .map((opt) => [opt.label, opt.value] as [string, string]),
+      };
+    })
+    .filter((group) => group.options.length || group.sentinel);
 });
 const searchSummary = computed(() => {
   const kw = selectedKeywords.value.length;
@@ -664,6 +675,7 @@ watch(() => props.profileId, () => {
 
 onBeforeUnmount(() => {
   if (pollTimer) window.clearTimeout(pollTimer);
+  document.removeEventListener("keydown", handleLifecycleDialogKeydown);
 });
 
 function notify(message: string, tone: Notice["tone"] = "info") {
@@ -1653,6 +1665,31 @@ function onJobFeedbackChanged(payload: { profileId: string; jobId: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// 轨迹浮窗：大卡片收敛为“查看轨迹”小按钮，点击后居中弹窗展示全部内容
+// ---------------------------------------------------------------------------
+
+const lifecycleDialogOpen = ref(false);
+const lifecycleDialogJob = ref<JobItem | null>(null);
+
+function openLifecycleDialog(job: JobItem) {
+  lifecycleDialogJob.value = lifecycleJob(job);
+  lifecycleDialogOpen.value = true;
+}
+
+function closeLifecycleDialog() {
+  lifecycleDialogOpen.value = false;
+}
+
+function handleLifecycleDialogKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") closeLifecycleDialog();
+}
+
+watch(lifecycleDialogOpen, (open) => {
+  if (open) document.addEventListener("keydown", handleLifecycleDialogKeydown);
+  else document.removeEventListener("keydown", handleLifecycleDialogKeydown);
+});
+
+// ---------------------------------------------------------------------------
 // 顶栏本轮状态胶囊数据（纯派生，不发请求）：
 // 运行中（抓取/筛选/补抓）显示进行中态；有结果时显示已判定数；其余空闲态上抛 null。
 // 平台优先取任务自身平台（恢复任务快照携带），缺省时用草稿平台。
@@ -1957,18 +1994,45 @@ watch(roundStatusPayload, (payload) => {
             </span>
             <span v-else class="selection-summary">未设置筛选条件</span>
           </template>
+          <template #actions>
+            <div class="workflow-actions screen-card-actions">
+              <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="draftPlatformDisabled || (!screenBusy && !scrapeCompleted)" @click="screenBusy ? cancelAiScreen() : startAiScreen()">
+                <Square v-if="screenBusy" :size="18" aria-hidden="true" />
+                <Sparkles v-else :size="18" aria-hidden="true" />{{ screenBusy ? "停止筛选" : "开始 AI 筛选" }}
+              </button>
+              <button v-if="interruptedRunId" class="button danger" type="button" data-testid="finish-interrupted-screen" @click="finishPausedTask(interruptedRunId)">
+                结束并保存结果
+              </button>
+              <button v-if="screenSnapshot && screenSnapshot.status === 'paused'"
+                      class="button secondary" type="button" data-testid="resume-ai-screen"
+                      :disabled="screenBusy" @click="continueAiScreen()">
+                继续
+              </button>
+              <button v-if="screenSnapshot && screenSnapshot.status === 'paused' && pausedRunId"
+                      class="button danger" type="button" data-testid="cancel-paused-screen"
+                      @click="cancelPausedTask(pausedRunId)">
+                取消任务
+              </button>
+              <button v-if="screenSnapshot && screenSnapshot.status === 'paused' && (pausedRunId || screenTaskId)"
+                      class="button danger" type="button" data-testid="finish-paused-screen"
+                      @click="finishPausedTask(pausedRunId || screenTaskId)">
+                结束并保存结果
+              </button>
+            </div>
+          </template>
           <div class="filter-groups">
             <fieldset v-for="group in filterGroups" :key="group.key" class="filter-group">
               <legend>{{ group.label }}</legend>
               <div class="chip-grid compact">
                 <button
+                  v-if="group.sentinel"
                   class="choice-chip"
                   :class="{ selected: !(filterValues[draftPlatform][group.key] || []).length }"
                   type="button"
                   :disabled="screenBusy"
                   :aria-pressed="!(filterValues[draftPlatform][group.key] || []).length"
                   @click="filterValues[draftPlatform][group.key] = []"
-                >不限</button>
+                >{{ group.sentinel.label }}</button>
                 <button
                   v-for="([label, code]) in group.options"
                   :key="code"
@@ -1985,30 +2049,6 @@ watch(roundStatusPayload, (payload) => {
         </CollapsibleCard>
 
         <TaskProgress :snapshot="screenSnapshot" kind="screen" />
-        <div class="workflow-actions">
-          <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="draftPlatformDisabled || (!screenBusy && !scrapeCompleted)" @click="screenBusy ? cancelAiScreen() : startAiScreen()">
-            <Square v-if="screenBusy" :size="18" aria-hidden="true" />
-            <Sparkles v-else :size="18" aria-hidden="true" />{{ screenBusy ? "停止筛选" : "开始 AI 筛选" }}
-          </button>
-          <button v-if="interruptedRunId" class="button danger" type="button" data-testid="finish-interrupted-screen" @click="finishPausedTask(interruptedRunId)">
-            结束并保存结果
-          </button>
-          <button v-if="screenSnapshot && screenSnapshot.status === 'paused'"
-                  class="button secondary" type="button" data-testid="resume-ai-screen"
-                  :disabled="screenBusy" @click="continueAiScreen()">
-            继续
-          </button>
-          <button v-if="screenSnapshot && screenSnapshot.status === 'paused' && pausedRunId"
-                  class="button danger" type="button" data-testid="cancel-paused-screen"
-                  @click="cancelPausedTask(pausedRunId)">
-            取消任务
-          </button>
-          <button v-if="screenSnapshot && screenSnapshot.status === 'paused' && (pausedRunId || screenTaskId)"
-                  class="button danger" type="button" data-testid="finish-paused-screen"
-                  @click="finishPausedTask(pausedRunId || screenTaskId)">
-            结束并保存结果
-          </button>
-        </div>
       </section>
 
       <section
@@ -2081,15 +2121,46 @@ watch(roundStatusPayload, (payload) => {
               <button v-if="!job.jd" class="button secondary" type="button" :disabled="jdBusyIds.has(jobId(job))" @click="retryJd(job)">
                 <FileText :size="17" aria-hidden="true" />{{ jdBusyIds.has(jobId(job)) ? "补抓中…" : "补抓 JD" }}
               </button>
+              <button
+                class="button secondary"
+                type="button"
+                data-testid="open-lifecycle-dialog"
+                @click="openLifecycleDialog(job)"
+              >
+                <History :size="17" aria-hidden="true" />查看轨迹
+              </button>
             </template>
-            <JobLifecycleActions
-              :profile-id="profileId"
-              :job="lifecycleJob(job)"
-              @job-feedback-changed="onJobFeedbackChanged"
-            />
           </template>
         </JobWorkspace>
       </section>
     </section>
+
+    <!-- 岗位轨迹浮窗：居中弹窗，内容为原生命周期卡片全部能力 -->
+    <div
+      v-if="lifecycleDialogOpen && lifecycleDialogJob"
+      class="dialog-backdrop lifecycle-dialog-backdrop"
+      data-testid="lifecycle-dialog"
+      @click.self="closeLifecycleDialog"
+    >
+      <section class="dialog-panel lifecycle-dialog" role="dialog" aria-modal="true" aria-label="岗位轨迹">
+        <header class="lifecycle-dialog-header">
+          <h2>岗位轨迹</h2>
+          <button
+            class="icon-button"
+            type="button"
+            aria-label="关闭岗位轨迹浮窗"
+            data-testid="lifecycle-dialog-close"
+            @click="closeLifecycleDialog"
+          >
+            <X :size="18" aria-hidden="true" />
+          </button>
+        </header>
+        <JobLifecycleActions
+          :profile-id="profileId"
+          :job="lifecycleDialogJob"
+          @job-feedback-changed="onJobFeedbackChanged"
+        />
+      </section>
+    </div>
   </main>
 </template>

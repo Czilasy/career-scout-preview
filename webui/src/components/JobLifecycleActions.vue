@@ -23,7 +23,6 @@ import {
   getJobLifecycleState,
   mapJobFeedbackError,
   mergeJobLifecycleState,
-  safeCanonicalUrl,
   submitJobFeedbackAction,
 } from "../jobFeedback";
 import type {
@@ -86,6 +85,8 @@ const identityIncomplete = computed(() => identity.value === null);
 
 const loading = ref(false);
 const loadError = ref("");
+/** 岗位尚未入库（读取 404）：展示“暂无轨迹”中性文案，不用红色警示误导用户。 */
+const notFound = ref(false);
 const lifecycle = ref<JobLifecycleStateSnapshot | null>(null);
 const exists = ref(false);
 const busy = ref(false);
@@ -97,6 +98,7 @@ async function loadState() {
   const sequence = ++readSequence;
   const ident = identity.value;
   loadError.value = "";
+  notFound.value = false;
   actionError.value = "";
   if (!props.profileId || !ident) return;
   loading.value = true;
@@ -111,9 +113,17 @@ async function loadState() {
     } else if (response.exists && typeof response.job_id === "string" && response.job_id) {
       cachedJobId.value = response.job_id;
     }
+    // 浮窗本身就是轨迹视图：已入库岗位直接加载事件轨迹，不再需要手动展开。
+    if (cachedJobId.value) void loadEventsPage(0);
   } catch (error) {
     if (sequence !== readSequence) return;
-    loadError.value = mapJobFeedbackError(error).userMessage;
+    const info = mapJobFeedbackError(error);
+    if (info.status === 404 || info.errorCode === "not_found" || info.errorCode === "job_not_found") {
+      // 还没记录过任何操作：不报警，展示“暂无轨迹”。
+      notFound.value = true;
+    } else {
+      loadError.value = info.userMessage;
+    }
   } finally {
     if (sequence === readSequence) loading.value = false;
   }
@@ -125,9 +135,9 @@ function resetOnJobChange() {
   generation += 1;
   lifecycle.value = null;
   exists.value = false;
+  notFound.value = false;
   cachedJobId.value = "";
   correctionOpen.value = false;
-  eventsOpen.value = false;
   events.value = [];
   eventsExhausted.value = false;
   nextAfterSequence.value = 0;
@@ -144,6 +154,7 @@ const statusLabel = computed(() => {
   if (identityIncomplete.value) return "身份未确认";
   if (loading.value) return "读取中…";
   if (lifecycle.value) return JOB_LIFECYCLE_STATUS_LABELS[lifecycle.value.status];
+  if (notFound.value) return "暂无轨迹";
   if (loadError.value) return "未知";
   return "未记录";
 });
@@ -225,7 +236,7 @@ async function perform(
       exists.value = true;
       lifecycle.value = mergeJobLifecycleState(lifecycle.value, response.state);
       emit("job-feedback-changed", { profileId, jobId: response.state.job_id });
-      if (eventsOpen.value) void loadEventsPage(0);
+      void loadEventsPage(0);
       break;
     } catch (error) {
       if (error instanceof JobFeedbackClientError) {
@@ -352,7 +363,6 @@ function submitCorrection() {
 // ---------------------------------------------------------------------------
 
 const EVENTS_PAGE_LIMIT = 20;
-const eventsOpen = ref(false);
 const eventsBusy = ref(false);
 const eventsError = ref("");
 const events = ref<JobFeedbackEvent[]>([]);
@@ -371,15 +381,6 @@ const EVENT_ACTION_LABELS: Record<string, string> = {
 
 function eventActionLabel(event: JobFeedbackEvent): string {
   return EVENT_ACTION_LABELS[event.action] || event.action;
-}
-
-async function toggleEvents() {
-  if (eventsOpen.value) {
-    eventsOpen.value = false;
-    return;
-  }
-  eventsOpen.value = true;
-  if (!events.value.length && !eventsExhausted.value) void loadEventsPage(0);
 }
 
 async function loadEventsPage(afterSequence: number) {
@@ -416,18 +417,6 @@ function loadMoreEvents() {
   void loadEventsPage(nextAfterSequence.value);
 }
 
-// ---------------------------------------------------------------------------
-// 跳转安全：只用后端已入库 canonical_url，并按所属平台复验 host/path
-// ---------------------------------------------------------------------------
-
-const safeUrl = computed(() =>
-  props.job.platform
-    ? safeCanonicalUrl(props.job.platform, props.job.canonical_url ?? null)
-    : null);
-
-const unsafeUrlPresent = computed(() =>
-  Boolean(String(props.job.canonical_url || "").trim()) && !safeUrl.value);
-
 // 详情岗位/画像变化时重置并重新只读加载。
 // 放在全部 ref 声明之后，避免 immediate watch 触发 TDZ。
 watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
@@ -449,7 +438,7 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
     </div>
 
     <template v-else>
-      <div class="lca-header">
+      <div v-if="lifecycle || loading" class="lca-header">
         <span
           class="lca-status"
           :data-status="lifecycle?.status ?? (loading ? 'loading' : 'none')"
@@ -487,6 +476,10 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
       <p v-if="loadError" class="lca-error" role="alert" data-testid="lca-load-error">
         {{ loadError }}
         <button class="lca-inline-link" type="button" data-testid="lca-load-retry" @click="loadState">重试</button>
+      </p>
+
+      <p v-if="notFound" class="lca-empty" role="status" data-testid="lca-empty-track">
+        暂无轨迹。还没有记录过任何操作，可用下方按钮开始记录。
       </p>
 
       <div class="lca-commands" data-testid="lca-commands">
@@ -546,59 +539,33 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
         </div>
       </form>
 
-      <div class="lca-events" data-testid="lca-events">
+      <div v-if="cachedJobId || !notFound" class="lca-events" data-testid="lca-events">
+        <p v-if="!cachedJobId && !notFound" class="lca-events-empty" role="status">还没有任何操作记录，可用上方按钮开始记录。</p>
+        <p v-else-if="eventsBusy && !events.length" class="lca-events-empty" role="status" data-testid="lca-events-loading">
+          轨迹加载中…
+        </p>
+        <p v-else-if="!events.length && !eventsError" class="lca-events-empty" role="status" data-testid="lca-events-empty">
+          暂无生命周期变化记录。
+        </p>
+        <p v-if="eventsError" class="lca-error" role="alert" data-testid="lca-events-error">{{ eventsError }}</p>
+        <ol v-if="events.length" class="lca-event-list" data-testid="lca-event-list">
+          <li v-for="event in events" :key="event.sequence" :data-sequence="event.sequence">
+            <strong>#{{ event.sequence }} {{ eventActionLabel(event) }}</strong>
+            <span v-if="event.from_status || event.to_status">
+              {{ event.from_status ? JOB_LIFECYCLE_STATUS_LABELS[event.from_status] : "—" }}
+              → {{ event.to_status ? JOB_LIFECYCLE_STATUS_LABELS[event.to_status] : "—" }}
+            </span>
+            <span>{{ formatDateTime(event.occurred_at) }}</span>
+          </li>
+        </ol>
         <button
-          class="lca-inline-link"
-          type="button"
-          data-testid="lca-toggle-events"
-          :disabled="!cachedJobId || eventsBusy"
-          @click="toggleEvents"
-        >{{ eventsOpen ? "收起轨迹" : "查看轨迹" }}</button>
-        <template v-if="eventsOpen">
-          <p v-if="!cachedJobId" class="lca-events-empty" role="status">岗位尚未可靠入库，暂无轨迹。</p>
-          <p v-else-if="eventsBusy && !events.length" class="lca-events-empty" role="status" data-testid="lca-events-loading">
-            轨迹加载中…
-          </p>
-          <p v-else-if="!events.length && !eventsError" class="lca-events-empty" role="status" data-testid="lca-events-empty">
-            暂无生命周期变化记录。
-          </p>
-          <p v-if="eventsError" class="lca-error" role="alert" data-testid="lca-events-error">{{ eventsError }}</p>
-          <ol v-if="events.length" class="lca-event-list" data-testid="lca-event-list">
-            <li v-for="event in events" :key="event.sequence" :data-sequence="event.sequence">
-              <strong>#{{ event.sequence }} {{ eventActionLabel(event) }}</strong>
-              <span v-if="event.from_status || event.to_status">
-                {{ event.from_status ? JOB_LIFECYCLE_STATUS_LABELS[event.from_status] : "—" }}
-                → {{ event.to_status ? JOB_LIFECYCLE_STATUS_LABELS[event.to_status] : "—" }}
-              </span>
-              <span>{{ formatDateTime(event.occurred_at) }}</span>
-            </li>
-          </ol>
-          <button
-            v-if="events.length && !eventsExhausted"
-            class="button secondary lca-btn"
-            type="button"
-            data-testid="lca-load-more-events"
-            :disabled="eventsBusy"
-            @click="loadMoreEvents"
-          >{{ eventsBusy ? "加载中…" : "加载更多" }}</button>
-        </template>
-      </div>
-
-      <div class="lca-original-link">
-        <a
-          v-if="safeUrl"
+          v-if="events.length && !eventsExhausted"
           class="button secondary lca-btn"
-          :href="safeUrl"
-          target="_blank"
-          rel="noopener noreferrer"
-          data-testid="lca-open-original"
-        >打开原岗位</a>
-        <span
-          v-else-if="unsafeUrlPresent"
-          class="lca-url-disabled"
-          role="status"
-          data-testid="lca-url-unavailable"
-        >原岗位链接未通过安全校验，已禁用跳转</span>
+          type="button"
+          data-testid="lca-load-more-events"
+          :disabled="eventsBusy"
+          @click="loadMoreEvents"
+        >{{ eventsBusy ? "加载中…" : "加载更多" }}</button>
       </div>
     </template>
   </section>
@@ -707,6 +674,17 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
   border-color: color-mix(in srgb, var(--unsure) 45%, transparent);
   background: var(--unsure-wash);
   color: var(--unsure);
+}
+
+/* 暂无轨迹：中性提示条，不使用错误红，避免误导用户以为出了故障。 */
+.lca-empty {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--hair-2);
+  border-radius: 8px;
+  background: var(--panel-3);
+  color: var(--ink-2);
+  font-size: .85rem;
 }
 
 .lca-blocked {

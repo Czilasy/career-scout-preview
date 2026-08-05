@@ -269,6 +269,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           type="button"
           data-testid="reminder-trigger"
           :aria-label="reminderAriaLabel"
+          :title="reminderAriaLabel"
           :disabled="!currentProfileId"
           @mousedown="handleDrawerTrigger(toggleReminderDrawer, $event)"
           @click="handleDrawerTrigger(toggleReminderDrawer, $event)"
@@ -286,6 +287,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           class="button secondary favorites-trigger"
           type="button"
           aria-label="查看收藏"
+          title="查看收藏"
           @mousedown="handleDrawerTrigger(toggleFavorites, $event)"
           @click="handleDrawerTrigger(toggleFavorites, $event)"
         >
@@ -297,6 +299,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           type="button"
           data-testid="browser-accounts-trigger"
           aria-label="管理自动化浏览器账号"
+          title="浏览器账号"
           @click="browserAccountsOpen = true"
         >
           <UserRound :size="18" aria-hidden="true" /><span>浏览器账号</span>
@@ -306,6 +309,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           type="button"
           data-testid="env-check-trigger"
           aria-label="环境检查"
+          title="环境检查"
           @click="envCheckOpen = true"
         >
           <Activity :size="18" aria-hidden="true" /><span>环境检查</span>
@@ -315,6 +319,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           type="button"
           data-testid="ai-settings-trigger"
           aria-label="打开 AI 设置"
+          title="AI 设置"
           @click="aiSettingsOpen = true"
         >
           <Bot :size="18" aria-hidden="true" /><span>AI 设置</span>

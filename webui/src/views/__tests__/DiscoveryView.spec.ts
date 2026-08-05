@@ -1135,6 +1135,10 @@ describe("DiscoveryView", () => {
           state: lifecycleStateFixture({ revision: 2 }),
         });
       }
+      if (url.includes("/events")) {
+        // 轨迹浮窗自动加载事件：默认返回空轨迹。
+        return response({ ok: true, events: [], next_after_sequence: 0 });
+      }
       if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
       if (url.endsWith("/api/advanced-settings")) {
         return response({ ok: true, selection: "custom", settings: {}, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
@@ -1158,14 +1162,25 @@ describe("DiscoveryView", () => {
     return wrapper;
   }
 
+  /** 轨迹已收敛为浮窗：点“查看轨迹”打开居中弹窗后才渲染生命周期组件。 */
+  async function openLifecycleDialog(wrapper: ReturnType<typeof mount>) {
+    await wrapper.get('[data-testid="open-lifecycle-dialog"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="lifecycle-dialog"]').exists()).toBe(true);
+  }
+
   it("loads detail lifecycle state read-only with the authoritative triple and never auto mark_read", async () => {
     const fetchMock = lifecycleFetchMock();
     const wrapper = await mountAtResults(fetchMock);
 
+    // 详情区不再内嵌大卡片，只有一个与收藏/不感兴趣同排的“查看轨迹”按钮。
+    expect(wrapper.find('[data-testid="job-lifecycle-actions"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="open-lifecycle-dialog"]').exists()).toBe(true);
+    await openLifecycleDialog(wrapper);
     expect(wrapper.find('[data-testid="job-lifecycle-actions"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="lca-current-status"]').text()).toBe("已投递");
 
-    // 初始详情加载只 GET state：用权威三元组解析，不把平台原始 ID 当内部 job_id。
+    // 打开浮窗时的初始加载只 GET state：用权威三元组解析，不把平台原始 ID 当内部 job_id。
     const stateCall = fetchMock.mock.calls.find(([u]) => String(u).startsWith("/api/profile-jobs/state"));
     expect(stateCall).toBeTruthy();
     const stateUrl = String(stateCall![0]);
@@ -1175,7 +1190,7 @@ describe("DiscoveryView", () => {
     expect(stateUrl).toContain(`canonical_url=${encodeURIComponent("https://www.zhaopin.com/jobdetail/z-1.htm")}`);
     // 不带内部 job_id 参数（注意 platform_job_id= 子串包含 job_id=，需按参数边界判断）。
     expect(`${stateUrl}&`).not.toContain("&job_id=");
-    // 只打开详情不得发送任何生命周期写命令（FR-002）。
+    // 只查看不得发送任何生命周期写命令（FR-002）。
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/profile-jobs/actions"))).toBe(false);
 
     vi.unstubAllGlobals();
@@ -1193,6 +1208,7 @@ describe("DiscoveryView", () => {
       },
     });
     const wrapper = await mountAtResults(fetchMock);
+    await openLifecycleDialog(wrapper);
 
     await wrapper.get('[data-testid="lca-action-follow_up"]').trigger("click");
     await flushPromises();
@@ -1219,6 +1235,7 @@ describe("DiscoveryView", () => {
       ),
     });
     const wrapper = await mountAtResults(fetchMock);
+    await openLifecycleDialog(wrapper);
 
     await wrapper.get('[data-testid="lca-action-follow_up"]').trigger("click");
     await flushPromises();
@@ -1236,6 +1253,7 @@ describe("DiscoveryView", () => {
     const pendingAction = new Promise<Response>((resolve) => { resolveAction = resolve; });
     const fetchMock = lifecycleFetchMock({ action: () => pendingAction });
     const wrapper = await mountAtResults(fetchMock);
+    await openLifecycleDialog(wrapper);
 
     await wrapper.get('[data-testid="lca-action-follow_up"]').trigger("click");
     await flushPromises();

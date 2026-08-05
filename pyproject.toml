@@ -1,14 +1,14 @@
 [project]
 name = "career-scout"
 version = "2.3.0"
-description = "Career Scout — BOSS直聘职位助手（Chrome CDP + API 明文薪资 + 简历驱动筛选）"
+description = "Career Scout — BOSS直聘 & 智联招聘职位助手（Chrome CDP + 简历驱动筛选 + 投递过期提醒）"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 authors = [
     { name = "Czilasy", email = "czyooutzilas@gmail.com" }
 ]
-keywords = ["career", "zhipin", "boss", "jobs", "cdp", "scraper"]
+keywords = ["career", "zhipin", "boss", "zhilian", "jobs", "cdp", "scraper"]
 
 dependencies = [
     "websocket-client>=1.6.0,<2.0.0",

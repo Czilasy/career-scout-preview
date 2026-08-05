@@ -256,6 +256,10 @@ function verdictLabel(job: JobItem): string {
     >
       <header class="job-detail-header">
         <div>
+          <h2>{{ selectedJob.title || "未知岗位" }}</h2>
+          <p>{{ company(selectedJob) }}</p>
+        </div>
+        <div class="job-detail-header-side">
           <div class="verdict-line">
             <span v-if="verdictLabel(selectedJob)" class="status-pill" :data-verdict="selectedJob.verdict">
               <Check v-if="selectedJob.verdict === 'match'" :size="13" :stroke-width="2.4" aria-hidden="true" />
@@ -269,12 +273,10 @@ function verdictLabel(job: JobItem): string {
               data-testid="job-platform-badge"
             >{{ selectedJob.platform === 'boss' ? 'BOSS' : '智联' }}</span>
           </div>
-          <h2>{{ selectedJob.title || "未知岗位" }}</h2>
-          <p>{{ company(selectedJob) }}</p>
+          <button class="icon-button mobile-detail-close" type="button" aria-label="关闭岗位详情" @click="detailOpen = false">
+            <X :size="20" />
+          </button>
         </div>
-        <button class="icon-button mobile-detail-close" type="button" aria-label="关闭岗位详情" @click="detailOpen = false">
-          <X :size="20" />
-        </button>
       </header>
 
       <div class="job-detail-facts">

@@ -54,7 +54,8 @@ tests/sc002_24h_monitor.py
 tests/test_historical_recovery_realdb.py
 
 # Project-generated local files
-docs/
+docs/*
+!docs/screenshots/
 debug.log
 tests/regression_*.txt
 tests/fixtures/discovery/*_result.json

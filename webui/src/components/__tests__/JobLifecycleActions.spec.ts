@@ -177,14 +177,33 @@ describe("T055 只读初始加载", () => {
     expect(actionCalls(calls)).toHaveLength(0);
   });
 
-  it("加载中显示读取状态，加载失败显示真实文案并可重试", async () => {
+  it("岗位未入库（404）：展示中性“暂无轨迹”，不用红色警示，仍可开始记录", async () => {
+    installFetch([
+      {
+        pattern: /^\/api\/profile-jobs\/state/,
+        respond: () => jsonResponse(errorBody("not_found", "岗位不存在"), 404),
+      },
+    ]);
+    const wrapper = mountComponent();
+    await flushPromises();
+
+    // 未记录过任何操作：不显示错误红条，显示“暂无轨迹”；不渲染状态胶囊（浮窗标题已表达语境）。
+    expect(wrapper.find('[data-testid="lca-load-error"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="lca-empty-track"]').text()).toContain("暂无轨迹");
+    expect(wrapper.find('[data-testid="lca-current-status"]').exists()).toBe(false);
+    // 未入库岗位仍可通过主命令首次记录。
+    expect(wrapper.find('[data-testid="lca-action-mark_read"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="lca-action-mark_applied"]').exists()).toBe(true);
+  });
+
+  it("其它加载失败仍显示真实错误文案并可重试", async () => {
     let attempt = 0;
-    const { calls } = installFetch([
+    installFetch([
       {
         pattern: /^\/api\/profile-jobs\/state/,
         respond: () => {
           attempt += 1;
-          if (attempt === 1) return jsonResponse(errorBody("not_found", "岗位不存在"), 404);
+          if (attempt === 1) return jsonResponse(errorBody("persistence_failed", "服务暂时不可用"), 500);
           return jsonResponse({ ok: true, exists: true, state: snapshot(4) });
         },
       },
@@ -192,12 +211,9 @@ describe("T055 只读初始加载", () => {
     const wrapper = mountComponent();
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="lca-load-error"]').text()).toContain("岗位不存在");
-
+    expect(wrapper.get('[data-testid="lca-load-error"]').text()).toContain("服务暂时不可用");
     await wrapper.get('[data-testid="lca-load-retry"]').trigger("click");
     await flushPromises();
-
-    expect(stateCalls(calls)).toHaveLength(2);
     expect(wrapper.find('[data-testid="lca-load-error"]').exists()).toBe(false);
     expect(wrapper.get('[data-testid="lca-current-status"]').text()).toBe("已读");
   });
@@ -537,7 +553,7 @@ describe("T059 幂等、写锁、revision 防倒退与失败保留", () => {
   });
 });
 
-describe("T060 events 按需展开与 sequence 分页", () => {
+describe("T060 events 直接展示与 sequence 分页", () => {
   function makeEvent(sequence: number) {
     return {
       sequence,
@@ -553,7 +569,7 @@ describe("T060 events 按需展开与 sequence 分页", () => {
     };
   }
 
-  it("展开才加载 events；按 next_after_sequence 分页，末页后隐藏加载更多", async () => {
+  it("已入库岗位自动加载 events；按 next_after_sequence 分页，末页后隐藏加载更多", async () => {
     const { calls } = installFetch([
       stateHandler(snapshot(4, "applied")),
       {
@@ -572,11 +588,7 @@ describe("T060 events 按需展开与 sequence 分页", () => {
     const wrapper = mountComponent();
     await flushPromises();
 
-    // 未展开时不加载任何事件。
-    expect(calls.filter((call) => call.url.includes("/events"))).toHaveLength(0);
-
-    await wrapper.get('[data-testid="lca-toggle-events"]').trigger("click");
-    await flushPromises();
+    // 浮窗即轨迹视图：读取状态成功后自动加载第一页，无需手动展开。
     const eventCalls = calls.filter((call) => call.url.includes("/events"));
     expect(eventCalls).toHaveLength(1);
     expect(eventCalls[0].url).toBe("/api/profile-jobs/p1/j1/events?after_sequence=0&limit=20");
@@ -605,26 +617,12 @@ describe("T061 身份不完整阻断与安全 URL", () => {
     expect(calls.filter((call) => call.url !== "/api/session")).toHaveLength(0);
   });
 
-  it("安全 URL：非法/跨平台链接禁用跳转并提示；合法链接正常渲染", async () => {
+  it("原岗位跳转入口已收敛到详情区，组件内不再渲染打开原岗位链接", async () => {
     installFetch([stateHandler(snapshot(4))]);
-    const unsafeWrapper = mountComponent({ canonical_url: "javascript:alert(1)" });
+    const wrapper = mountComponent({ canonical_url: "https://jobs.zhipin.com/job_detail/p-1.html" });
     await flushPromises();
-    expect(unsafeWrapper.find('[data-testid="lca-open-original"]').exists()).toBe(false);
-    expect(unsafeWrapper.find('[data-testid="lca-url-unavailable"]').exists()).toBe(true);
-    await unsafeWrapper.unmount();
-
-    installFetch([stateHandler(snapshot(4))]);
-    const httpWrapper = mountComponent({ canonical_url: "http://www.zhipin.com/job_detail/p-1.html" });
-    await flushPromises();
-    expect(httpWrapper.find('[data-testid="lca-open-original"]').exists()).toBe(false);
-    await httpWrapper.unmount();
-
-    installFetch([stateHandler(snapshot(4))]);
-    const safeWrapper = mountComponent({ canonical_url: "https://jobs.zhipin.com/job_detail/p-1.html" });
-    await flushPromises();
-    const link = safeWrapper.get('[data-testid="lca-open-original"]');
-    expect(link.attributes("href")).toBe("https://jobs.zhipin.com/job_detail/p-1.html");
-    expect(link.attributes("rel")).toBe("noopener noreferrer");
+    expect(wrapper.find('[data-testid="lca-open-original"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="lca-url-unavailable"]').exists()).toBe(false);
   });
 });
 
