@@ -194,6 +194,26 @@ describe("JobWorkspace", () => {
     expect(wrapper.find('[data-extra-key="company_nature_label"]').exists()).toBe(true);
   });
 
+  it("extra 原始键（company_size/industry）也映射为中文，不渲染英文", () => {
+    const wrapper = mount(JobWorkspace, {
+      props: {
+        jobs: [{
+          platform: "zhilian",
+          platform_job_id: "zhilian-extra",
+          title: "智联岗位",
+          extra: { company_size: "100-499人", industry: "互联网", company_nature_label: "国企" },
+        }],
+        emptyMessage: "暂无岗位",
+      },
+    });
+    const extras = wrapper.get('[data-testid="job-extra-facts"]');
+    expect(extras.text()).toContain("公司规模: 100-499人");
+    expect(extras.text()).toContain("行业: 互联网");
+    expect(extras.text()).toContain("公司性质: 国企");
+    expect(extras.text()).not.toContain("company size");
+    expect(extras.text()).not.toContain("industry:");
+  });
+
   it("T511: uses (platform, platform_job_id) for jobKey — two jobs same platform_job_id different platform are distinct", () => {
     // jobKey 不再依赖 job_id（内部 UUID 跨平台可能冲突）；
     // 两个岗位 platform_job_id 相同但 platform 不同 → Vue v-for :key 不同 → 都渲染。
@@ -210,5 +230,17 @@ describe("JobWorkspace", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0].text()).toContain("BOSS 岗位");
     expect(rows[1].text()).toContain("智联岗位");
+  });
+
+  it("renders 匹配优先 mode chip alongside heading-actions slot", () => {
+    const wrapper = mount(JobWorkspace, {
+      props: { jobs: [jobs[0]], emptyMessage: "暂无岗位" },
+      slots: { "heading-actions": '<button data-testid="recrawl-btn">全部重抓</button>' },
+    });
+    const mode = wrapper.get('[data-testid="job-list-mode"]');
+    expect(mode.text()).toBe("匹配优先");
+    expect(mode.classes()).toContain("job-list-mode");
+    // heading-actions slot 内容仍正常渲染（模式标签不占用补抓按钮位置）。
+    expect(wrapper.find('[data-testid="recrawl-btn"]').exists()).toBe(true);
   });
 });

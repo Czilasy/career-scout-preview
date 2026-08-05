@@ -166,12 +166,21 @@ function jobUrl(job: JobItem): string {
 }
 
 // T511：智联结果常带的 extra 标签（如 company_nature_label）。
-// 后端权威标签在 extra 里，前端只做透传展示，不翻译/重命名。
+// 后端权威标签在 extra 里，前端只做透传展示；已知键统一映射为中文，
+// 避免 company_size / industry 等原始键被兜底逻辑渲染成英文。
 const EXTRA_LABEL_MAP: Record<string, string> = {
   company_nature_label: "公司性质",
+  company_nature: "公司性质",
+  company_size: "公司规模",
+  scale_label: "公司规模",
+  scale: "公司规模",
+  company_scale: "公司规模",
   industry_label: "行业",
-  scale_label: "规模",
+  industry: "行业",
+  company_industry: "行业",
   stage_label: "融资阶段",
+  stage: "融资阶段",
+  company_stage: "融资阶段",
 };
 const extraLabels = computed(() => {
   const extra = selectedJob.value?.extra;
@@ -208,7 +217,10 @@ function verdictLabel(job: JobItem): string {
           <span>{{ jobs.length }} 个岗位</span>
           <span>已加载 {{ visibleJobs.length }}</span>
         </div>
-        <slot name="heading-actions" />
+        <div class="job-list-heading-right">
+          <span class="job-list-mode" data-testid="job-list-mode">匹配优先</span>
+          <slot name="heading-actions" />
+        </div>
       </div>
       <div ref="listEl" class="job-list" role="list">
         <button
@@ -277,8 +289,9 @@ function verdictLabel(job: JobItem): string {
         <span
           v-for="item in extraLabels"
           :key="item.key"
+          class="job-extra-fact"
           :data-extra-key="item.key"
-        >{{ item.label }}: {{ item.value }}</span>
+        ><span class="job-extra-fact-label">{{ item.label + ": " }}</span><span class="job-extra-fact-value">{{ item.value }}</span></span>
       </div>
 
       <div v-if="selectedJob.verdict_reason || selectedJob.reason" class="verdict-reason">

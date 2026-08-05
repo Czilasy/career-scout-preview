@@ -605,12 +605,19 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
 </template>
 
 <style scoped>
+/* 生命周期状态块：独立卡片容器，与详情其它区块形成清晰层级，
+   避免状态标签/错误/按钮裸堆在一起像未上样式。 */
 .job-lifecycle-actions {
   display: flex;
   flex-direction: column;
   gap: 10px;
   max-width: 100%;
   min-width: 0;
+  margin-top: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--hair);
+  border-radius: 12px;
+  background: var(--panel-3);
 }
 
 .lca-header {
@@ -620,16 +627,33 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
   gap: 8px;
 }
 
+/* 当前状态胶囊：中性底为默认，按 data-status 上语义色 */
 .lca-status {
-  font-weight: 600;
-  padding: 2px 10px;
+  font-weight: 700;
+  font-size: 0.85rem;
+  padding: 3px 12px;
   border-radius: 999px;
   background: var(--hair-2);
+  color: var(--ink-2);
+}
+.lca-status[data-status="applied"] {
+  background: var(--match-wash);
+  color: var(--match-deep);
+}
+.lca-status[data-status="read"],
+.lca-status[data-status="interested"],
+.lca-status[data-status="new"] {
+  background: var(--brand-wash);
+  color: var(--brand-ink);
+}
+.lca-status[data-status="stale"],
+.lca-status[data-status="deleted"] {
+  background: var(--reject-wash);
+  color: var(--reject-deep);
 }
 
 .lca-loading,
 .lca-reminder,
-.lca-missing-time,
 .lca-url-disabled {
   font-size: 0.9rem;
   color: var(--ink-3);
@@ -655,11 +679,34 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
   min-height: 36px;
   overflow-wrap: anywhere;
 }
+/* 卡片内的 ghost 按钮补上描边，避免退化成裸文字 */
+.lca-commands .button.ghost,
+.lca-correction-actions .button.ghost {
+  border-color: var(--hair);
+  background: var(--panel);
+}
 
-.lca-error {
+/* 错误与提醒统一为警示条：底色 + 描边 + 圆角，不再是一行裸文字 */
+.lca-error,
+.lca-missing-time {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--reject-edge);
+  border-radius: 8px;
+  background: var(--reject-wash);
   color: var(--reject-deep);
+  font-size: 0.9rem;
   word-break: break-word;
   overflow-wrap: anywhere;
+}
+.lca-missing-time {
+  border-color: color-mix(in srgb, var(--unsure) 45%, transparent);
+  background: var(--unsure-wash);
+  color: var(--unsure);
 }
 
 .lca-blocked {
