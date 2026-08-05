@@ -5,6 +5,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import JobLifecycleActions from "../JobLifecycleActions.vue";
 import type { JobItem } from "../../types";
 import type { JobLifecycleStateSnapshot, JobLifecycleStatus } from "../../jobFeedback";
+import { expectedBackendBuildHash, setBuildIdentity } from "../../api";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -140,6 +141,11 @@ function stateCalls(calls: RecordedCall[]): RecordedCall[] {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+// 本文件引用的 api 模块实例可能未被 setup.ts 验证过（vitest 模块实例隔离），逐用例重新验证
+beforeEach(() => {
+  setBuildIdentity(expectedBackendBuildHash);
 });
 
 describe("T055 只读初始加载", () => {

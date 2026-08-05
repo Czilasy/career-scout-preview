@@ -7,6 +7,12 @@ import { flushPromises, mount } from "@vue/test-utils";
 import type { VueWrapper } from "@vue/test-utils";
 import ReminderDrawer from "../ReminderDrawer.vue";
 import type { JobReminderItem } from "../../jobFeedback";
+import { expectedBackendBuildHash, setBuildIdentity } from "../../api";
+
+// 本文件引用的 api 模块实例可能未被 setup.ts 验证过（vitest 模块实例隔离），逐用例重新验证
+beforeEach(() => {
+  setBuildIdentity(expectedBackendBuildHash);
+});
 
 // ---------------------------------------------------------------------------
 // 测试基建：fetch mock 与提醒项工厂

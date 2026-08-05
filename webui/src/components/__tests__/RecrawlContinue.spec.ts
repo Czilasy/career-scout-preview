@@ -1,6 +1,11 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import DiscoveryView from "../../views/DiscoveryView.vue";
-import { expectedBackendBuildHash } from "../../api";
+import { expectedBackendBuildHash, setBuildIdentity } from "../../api";
+
+// 本文件引用的 api 模块实例可能未被 setup.ts 验证过（vitest 模块实例隔离），逐用例重新验证
+beforeEach(() => {
+  setBuildIdentity(expectedBackendBuildHash);
+});
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {

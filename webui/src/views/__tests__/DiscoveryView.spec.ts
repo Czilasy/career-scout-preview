@@ -1,5 +1,6 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import DiscoveryView from "../DiscoveryView.vue";
+import { expectedBackendBuildHash, setBuildIdentity } from "../../api";
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -9,6 +10,10 @@ function response(body: unknown, status = 200): Response {
 }
 
 describe("DiscoveryView", () => {
+  beforeEach(() => {
+    // 确保当前测试引用的 api 模块实例处于已验证状态（setup.ts 的验证可能落在另一个模块实例上）
+    setBuildIdentity(expectedBackendBuildHash);
+  });
   it("keeps scope editable when only a completed historical result is restored", async () => {
     const settings = {
       inter_combo_delay: 10,
