@@ -15,6 +15,12 @@ permissions:
 jobs:
   build-dmg:
     runs-on: macos-latest
+    env:
+      # 强制 uv 用 setup-python 装的 python.org universal2 解释器（而非
+      # uv 自管的 python-build-standalone 单架构 Python），否则 flask 等
+      # 依赖的 C 扩展只有当前架构切片，PyInstaller
+      # target_arch=universal2 会报 IncompatibleBinaryArchError
+      UV_PYTHON_PREFERENCE: only-system
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -35,7 +41,12 @@ jobs:
           enable-cache: true
 
       - name: 安装项目依赖
-        run: uv sync
+        run: uv sync --python 3.11
+
+      - name: 校验解释器为 universal2
+        run: |
+          uv run python -c 'import platform,sys; print(sys.version); print(platform.machine())'
+          lipo -info "$(uv run python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')/libpython3.11.dylib"
 
       - name: 构建 DMG
         run: bash packaging/build_dmg.sh
