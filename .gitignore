@@ -23,6 +23,7 @@ ENV/
 build/
 dist/
 .release/
+# PyInstaller intermediate output (build/, dist/) and release artifacts (.release/) covered above
 webui/node_modules/
 node_modules/
 !webui/dist/
