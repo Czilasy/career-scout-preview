@@ -44,12 +44,16 @@ jobs:
       - name: 校验产物
         run: ls -lh .release/*.dmg
 
-      # 留档便于排错（构建失败时下载 artifact 检查 dmg 内容）
+      # 留档便于排错（构建失败时下载 artifact 检查 dmg 内容）；
+      # upload-artifact 的 glob 不认 .release 隐藏目录，先拷到普通目录
       - name: 上传构建产物（artifact）
-        uses: actions/upload-artifact@v4
+        run: |
+          mkdir -p dmg-artifact
+          cp .release/*.dmg dmg-artifact/
+      - uses: actions/upload-artifact@v4
         with:
           name: CareerScout-macos-dmg
-          path: .release/*.dmg
+          path: dmg-artifact/*.dmg
 
       - name: 附加 DMG 到 Release
         uses: softprops/action-gh-release@v2
