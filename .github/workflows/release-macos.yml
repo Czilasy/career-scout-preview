@@ -1,8 +1,9 @@
 name: release-macos
 
 # 与 Windows EXE 同版本发布：推 vX.Y.Z tag 后在 GitHub 的 macOS runner
-# 上构建 universal2 dmg，自动挂到该 tag 对应的 Release（已有则附加，
-# 没有则创建）。构建机是 GitHub 的 Mac，仓库维护者无需本地 macOS 环境。
+# 上构建 dmg（arm64，覆盖 Apple Silicon Mac；PyPI 依赖 wheel 无
+# universal2，无法双架构），自动挂到该 tag 对应的 Release（已有则
+# 附加，没有则创建）。构建机是 GitHub 的 Mac，维护者无需本地 macOS。
 on:
   push:
     tags:
@@ -15,17 +16,11 @@ permissions:
 jobs:
   build-dmg:
     runs-on: macos-latest
-    env:
-      # 强制 uv 用 setup-python 装的 python.org universal2 解释器（而非
-      # uv 自管的 python-build-standalone 单架构 Python），否则 flask 等
-      # 依赖的 C 扩展只有当前架构切片，PyInstaller
-      # target_arch=universal2 会报 IncompatibleBinaryArchError
-      UV_PYTHON_PREFERENCE: only-system
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 安装 Python（python.org universal2 解释器）
+      - name: 安装 Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -42,11 +37,6 @@ jobs:
 
       - name: 安装项目依赖
         run: uv sync --python 3.11
-
-      - name: 校验解释器为 universal2
-        run: |
-          uv run python -c 'import platform,sys; print(sys.version); print(platform.machine())'
-          lipo -info "$(uv run python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')/libpython3.11.dylib"
 
       - name: 构建 DMG
         run: bash packaging/build_dmg.sh

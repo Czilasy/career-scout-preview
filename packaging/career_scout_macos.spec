@@ -17,10 +17,11 @@ entry 脚本 ``packaging/desktop.py`` 已跨平台：
 - 错误提示：macOS 走 osascript 原生对话框；
 - 资源定位与 Windows 一致（frozen 时资源根 = ``sys._MEIPASS``）。
 
-universal2 双架构：GitHub Actions macos runner 的 setup-python 装的是
-python.org universal2 解释器，``target_arch="universal2"`` 即可同时
-覆盖 Apple Silicon 与 Intel Mac；若本地解释器是单架构，改为 ``None``
-（跟随当前架构）。
+架构策略：PyPI 上部分依赖（如 markupsafe）只提供单架构 wheel，
+无法构建真正的 universal2 包（PyInstaller 会报
+IncompatibleBinaryArchError）。因此默认跟随构建机架构
+（GitHub macos-latest 为 arm64，覆盖所有 Apple Silicon Mac）；
+如需 Intel 版，在 Intel Mac 或 x86_64 runner 上重跑同一脚本即可。
 """
 
 import re
@@ -47,8 +48,8 @@ def _read_version():
 
 VERSION = _read_version()
 
-# 双架构产物；单架构解释器上构建时改成 None 即可
-TARGET_ARCH = "universal2"
+# 跟随构建机架构（macos-latest = arm64）；显式写死可改 "arm64"/"x86_64"
+TARGET_ARCH = None
 
 a = Analysis(
     # entry 脚本路径用绝对路径避免 CWD/SPECPATH 歧义

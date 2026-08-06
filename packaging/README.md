@@ -112,7 +112,7 @@ npm run build
 5. **发布**：确认无误后点击 "Publish release"。
 6. **macOS DMG 自动挂接**：推同一个 `v{version}` tag 后，
    `.github/workflows/release-macos.yml` 在 GitHub 的 Mac runner 上构建
-   universal2 dmg，自动附加到该 tag 的 Release（已有则附加，没有则创建）。
+   dmg，自动附加到该 tag 的 Release（已有则附加，没有则创建）。
    构建失败时在 Actions 页看日志修复后重推 tag（或手动 workflow_dispatch）。
 
 ## macOS DMG 打包
@@ -135,9 +135,9 @@ npm run build
 ### 产物形态
 
 - `.app`（onedir）而非 onefile：macOS GUI 应用不支持 PyInstaller onefile。
-- universal2 双架构：同时支持 Apple Silicon 与 Intel Mac；
-  本地单架构解释器构建时，把 `career_scout_macos.spec` 的
-  `TARGET_ARCH` 改为 `None`。
+- 架构跟随构建机（macos-latest = arm64，覆盖所有 Apple Silicon Mac）。
+  PyPI 上部分依赖（如 markupsafe）只有单架构 wheel，无法构建
+  universal2；如需 Intel Mac 版，在 x86_64 环境重跑同一脚本即可。
 
 ### 用户首次打开（未签名应用）
 
