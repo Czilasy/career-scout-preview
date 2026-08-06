@@ -30,6 +30,7 @@ interface CooldownRecord {
 
 interface EnvCheckResponse {
   ok: boolean;
+  runtime_mode?: "source" | "exe";
   groups: CheckGroup[];
   active_account: string;
   cooldowns: CooldownRecord[];
@@ -48,6 +49,9 @@ const groups = ref<CheckGroup[]>([]);
 const cooldowns = ref<CooldownRecord[]>([]);
 const activeAccount = ref("");
 const checkedAt = ref<number | null>(null);
+// 运行时模式：仅用于展示差异文案（EXE 模式 deps=内置运行时、新增 webview2 项），不改变检查流程。
+// 响应缺失 runtime_mode 时默认 "source"，保证源码模式零回归（合同 §2.3、§4）。
+const runtimeMode = ref<"source" | "exe">("source");
 const localNotice = ref<Notice | null>(null);
 // 逐项点亮的动画进度：加载完成后按顺序把每项从 ⏳ 翻到真实状态。
 const litOrder = ref<string[]>([]);
@@ -122,6 +126,7 @@ async function runCheck() {
     cooldowns.value = data.cooldowns || [];
     activeAccount.value = data.active_account || "";
     checkedAt.value = data.checked_at || null;
+    runtimeMode.value = data.runtime_mode === "exe" ? "exe" : "source";
     animateItems(data.groups?.flatMap((g) => g.items) || []);
   } catch (error) {
     setLocalNotice({ message: errorMessage(error, "环境检查失败"), tone: "error" });
@@ -243,7 +248,7 @@ async function clearCooldown(record: CooldownRecord) {
       </button>
     </div>
 
-    <div class="env-check-groups">
+    <div class="env-check-groups" :data-runtime-mode="runtimeMode">
       <section
         v-for="group in groups"
         :key="group.id"

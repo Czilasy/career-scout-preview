@@ -43,6 +43,53 @@ const envPayload = {
   checked_at: 1785940000,
 };
 
+// EXE 模式响应：runtime_mode="exe"；local 组 deps 为「内置运行时」差异文案，新增 webview2 项。
+// 依据 specs/003-desktop-exe/contracts/runtime-mode.md §2.2。
+const exePayload = {
+  ok: true,
+  runtime_mode: "exe",
+  groups: [
+    {
+      id: "browser",
+      name: "浏览器",
+      items: [
+        { id: "browsers", name: "Chromium 浏览器", status: "ok", detail: "找到 Chrome ✅", fix: null },
+      ],
+    },
+    {
+      id: "local",
+      name: "本地环境",
+      items: [
+        { id: "deps", name: "内置运行时", status: "ok", detail: "Python 运行时与依赖已内置，无需安装", fix: null },
+        { id: "webview2", name: "WebView2 运行时", status: "ok", detail: "已安装", fix: null },
+        { id: "data_dir", name: "数据目录可写", status: "ok", detail: "可写", fix: null },
+      ],
+    },
+  ],
+  active_account: "",
+  cooldowns: [],
+  checked_at: 1785940000,
+};
+
+// 源码模式响应：runtime_mode="source"；local 组 deps 保持源码模式文案，无 webview2 项（合同 §2.3）。
+const sourcePayload = {
+  ok: true,
+  runtime_mode: "source",
+  groups: [
+    {
+      id: "local",
+      name: "本地环境",
+      items: [
+        { id: "deps", name: "Python 依赖", status: "ok", detail: "已安装", fix: null },
+        { id: "data_dir", name: "数据目录可写", status: "ok", detail: "可写", fix: null },
+      ],
+    },
+  ],
+  active_account: "",
+  cooldowns: [],
+  checked_at: 1785940000,
+};
+
 async function mountOpen(fetchMock: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
   vi.stubGlobal("fetch", fetchMock);
   const wrapper = mount(EnvCheckDialog, { props: { open: false } });
@@ -182,5 +229,107 @@ describe("EnvCheckDialog", () => {
     await wrapper.get('[data-testid="env-check-rerun"]').trigger("click");
     await flushPromises();
     expect(calls).toBe(2);
+  });
+
+  it("renders exe mode deps as built-in runtime and webview2 item", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/env-check") return response(exePayload);
+      if (url === "/api/browser-accounts") return response({ accounts: [] });
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    // runtime_mode 读取：exe 模式下容器暴露 data-runtime-mode="exe"（可测试性钩子，不可见）。
+    expect(wrapper.find(".env-check-groups").attributes("data-runtime-mode")).toBe("exe");
+
+    // deps 项：名称「内置运行时」、状态 ok（✅）、差异 detail、无修复按钮（fix=null）。
+    const deps = wrapper.get('[data-testid="env-item-deps"]');
+    expect(deps.text()).toContain("内置运行时");
+    expect(deps.text()).toContain("✅");
+    expect(deps.text()).toContain("Python 运行时与依赖已内置，无需安装");
+    expect(deps.find("button").exists()).toBe(false);
+
+    // webview2 项按通用 CheckItem 渲染（ok → ✅）。
+    const webview2 = wrapper.get('[data-testid="env-item-webview2"]');
+    expect(webview2.text()).toContain("✅");
+  });
+
+  it("renders webview2 fail without fix button for install guidance", async () => {
+    // EXE 模式下 webview2 缺失：fix 文案含「安装 WebView2 运行时」，遵循现有 fixAction 策略不生成按钮。
+    const exeFailPayload = {
+      ...exePayload,
+      groups: [
+        { id: "browser", name: "浏览器", items: [] },
+        {
+          id: "local",
+          name: "本地环境",
+          items: [
+            { id: "deps", name: "内置运行时", status: "ok", detail: "Python 运行时与依赖已内置，无需安装", fix: null },
+            {
+              id: "webview2",
+              name: "WebView2 运行时",
+              status: "fail",
+              detail: "未检测到 WebView2 运行时，请安装 Microsoft Edge WebView2",
+              fix: "安装 WebView2 运行时（下载地址见环境检查提示）",
+            },
+          ],
+        },
+      ],
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/env-check") return response(exeFailPayload);
+      if (url === "/api/browser-accounts") return response({ accounts: [] });
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    const webview2 = wrapper.get('[data-testid="env-item-webview2"]');
+    expect(webview2.text()).toContain("❌");
+    // 现有 fixAction 仅识别三类修复动作；「安装 WebView2 运行时」不在其中 → 不生成按钮（合同 §4）。
+    expect(webview2.find("button").exists()).toBe(false);
+  });
+
+  it("renders source mode without webview2 and marks runtime-mode source", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/env-check") return response(sourcePayload);
+      if (url === "/api/browser-accounts") return response({ accounts: [] });
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    expect(wrapper.find(".env-check-groups").attributes("data-runtime-mode")).toBe("source");
+    // 源码模式不返回 webview2 项（合同 §2.3）。
+    expect(wrapper.find('[data-testid="env-item-webview2"]').exists()).toBe(false);
+    // deps 保持源码模式文案，非「内置运行时」。
+    const deps = wrapper.get('[data-testid="env-item-deps"]');
+    expect(deps.text()).toContain("Python 依赖");
+    expect(deps.text()).not.toContain("内置运行时");
+  });
+
+  it("defaults missing runtime_mode to source and keeps legacy rendering", async () => {
+    // envPayload 无 runtime_mode 字段（模拟源码模式/旧后端），前端应默认 source 且既有渲染不变。
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/env-check") return response(envPayload);
+      if (url === "/api/browser-accounts") return response({ accounts: [{ id: "a", name: "账号 A" }] });
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    expect(wrapper.find(".env-check-groups").attributes("data-runtime-mode")).toBe("source");
+    // 既有渲染零回归：三组齐全、browsers ✅、cdp ❌、无 webview2。
+    expect(wrapper.find('[data-testid="env-group-browser"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="env-group-ai"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="env-group-local"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="env-item-browsers"]').text()).toContain("✅");
+    expect(wrapper.get('[data-testid="env-item-cdp"]').text()).toContain("❌");
+    expect(wrapper.find('[data-testid="env-item-webview2"]').exists()).toBe(false);
   });
 });
