@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Career Scout EXE 构建脚本（spec003 tasks006 T043）。
 

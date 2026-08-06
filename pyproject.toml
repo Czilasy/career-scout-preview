@@ -1,6 +1,6 @@
 [project]
 name = "career-scout"
-version = "2.3.0"
+version = "2.4.0"
 description = "Career Scout — BOSS直聘 & 智联招聘职位助手（Chrome CDP + 简历驱动筛选 + 投递过期提醒）"
 readme = "README.md"
 license = { text = "Apache-2.0" }

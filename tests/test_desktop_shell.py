@@ -696,11 +696,11 @@ class ShellOrchestrationTests(unittest.TestCase):
     def test_window_title_contains_version(self):
         """窗口标题为 Career Scout v{version}（合同 §5）。"""
         webview_mod = _FakeWebview()
-        deps = _make_deps(webview_module=webview_mod, version="2.3.0")
+        deps = _make_deps(webview_module=webview_mod, version="2.4.0")
         desktop.run_desktop_shell(deps)
         self.assertTrue(webview_mod.create_window_calls)
         self.assertEqual(
-            webview_mod.create_window_calls[0]["title"], "Career Scout v2.3.0"
+            webview_mod.create_window_calls[0]["title"], "Career Scout v2.4.0"
         )
 
     def test_window_min_size_is_1024_700(self):
@@ -818,7 +818,7 @@ class ReadVersionTests(unittest.TestCase):
 
     def test_reads_version_from_pyproject(self):
         version = desktop.read_version()
-        self.assertEqual(version, "2.3.0")
+        self.assertEqual(version, "2.4.0")
 
     def test_read_version_returns_string(self):
         self.assertIsInstance(desktop.read_version(), str)

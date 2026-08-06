@@ -40,7 +40,7 @@ pwsh packaging/build_exe.ps1
 
 ## 产物位置
 
-`.release/CareerScout-v{version}.exe`（如 `CareerScout-v2.3.0.exe`）
+`.release/CareerScout-v{version}.exe`（如 `CareerScout-v2.4.0.exe`）
 
 ## 常见排错
 
@@ -96,7 +96,7 @@ npm run build
 
 3. **创建 GitHub Release**：
    - 在仓库 Releases 页点击 "Draft a new release"
-   - Tag 填 `v{version}`（如 `v2.3.0`），目标分支选 `main`
+   - Tag 填 `v{version}`（如 `v2.4.0`），目标分支选 `main`
    - 上传 `CareerScout-v{version}.exe`
    - 上传 SHA256 校验值（粘贴到发布说明或单独 `.sha256` 文件）
 4. **发布说明模板要点**：
