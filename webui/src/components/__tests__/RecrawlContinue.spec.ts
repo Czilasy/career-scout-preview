@@ -96,6 +96,10 @@ describe("DiscoveryView paused recrawl recovery", () => {
         return response({ ok: true, has_task: false });
       }
       if (url.startsWith("/api/latest-pipeline-result")) {
+        // 合并载入按平台分别查询；智联无结果，只有 BOSS 这一份。
+        if (url.includes("platform=zhilian")) {
+          return response({ ok: true, has_result: false });
+        }
         return response({
           ok: true,
           has_result: true,
@@ -128,6 +132,9 @@ describe("DiscoveryView paused recrawl recovery", () => {
     const resultsStep = wrapper.findAll("button").find((button) => button.text().includes("查看结果"));
     expect(resultsStep).toBeDefined();
     await resultsStep?.trigger("click");
+    await flushPromises();
+    // “全部重抓”只在单平台视图可见：先切到 BOSS 视图再触发。
+    await wrapper.get('[data-testid="result-platform-filter-boss"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="recrawl-uncertain"]').trigger("click");
     await flushPromises();

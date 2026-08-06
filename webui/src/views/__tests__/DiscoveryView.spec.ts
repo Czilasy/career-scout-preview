@@ -991,6 +991,10 @@ describe("DiscoveryView", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/latest-pipeline-result")) {
+        // 合并载入按平台分别查询；智联无结果，只有 BOSS 这一份。
+        if (url.includes("platform=zhilian")) {
+          return response({ ok: true, has_result: false });
+        }
         return response({
           ok: true, has_result: true,
           // 故意不带 source_run_id：前端不得伪造来源证据
@@ -1020,6 +1024,9 @@ describe("DiscoveryView", () => {
     await flushPromises();
     const resultsStep = wrapper.findAll("button").find((b) => b.text().includes("查看结果"));
     await resultsStep?.trigger("click");
+    await flushPromises();
+    // “全部重抓”只在单平台视图可见：先切到 BOSS 视图再触发。
+    await wrapper.get('[data-testid="result-platform-filter-boss"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="recrawl-uncertain"]').trigger("click");
     await flushPromises();

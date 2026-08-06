@@ -57,6 +57,20 @@ if ! uv run python -c 'import PyInstaller, webview' 2>/dev/null; then
 fi
 
 # ---------------------------------------------------------------------------
+# 3.5 生成 .app 图标：iconutil 把 icon.iconset 转 career_scout.icns
+# ---------------------------------------------------------------------------
+ICONSET_DIR='packaging/assets/icon.iconset'
+ICNS_PATH='packaging/assets/career_scout.icns'
+if [[ -d "$ICONSET_DIR" ]]; then
+    if command -v iconutil >/dev/null 2>&1; then
+        echo '> iconutil 生成 career_scout.icns'
+        iconutil -c icns "$ICONSET_DIR" -o "$ICNS_PATH"
+    else
+        echo '警告：未找到 iconutil，.app 将使用默认图标' >&2
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # 4. PyInstaller 构建 .app
 # ---------------------------------------------------------------------------
 echo '> uv run pyinstaller packaging/career_scout_macos.spec --noconfirm'

@@ -19,7 +19,7 @@ BOSS直聘职位抓取 + 分析 — 纯 CDP raw protocol
   uv run python3 scripts/boss_cdp_raw.py --version
 """
 
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 
 import json
 import time
@@ -723,7 +723,7 @@ def extract_job_description(extracted, min_length=0):
         and not _looks_like_detail_shell(raw_jd_text)
     )
     if not has_real_jd:
-        if looks_like_rate_limited(diagnostic_text):
+        if looks_like_detail_rate_limited(diagnostic_text):
             raise DetailRateLimitedError(
                 extract_block_hint(diagnostic_text)
                 or "BOSS 账号/操作频繁被限流"
@@ -1244,6 +1244,14 @@ RATE_LIMIT_KEYWORDS = (
     "too many", "429", "稍后再试", "账号受限", "解锁", "冻结",
 )
 
+# 详情页限流判定专用：只认高置信度的限流特征。
+# 裸词“频繁/解锁/冻结”会命中页面 chrome（如“登录解锁更多职位”），
+# 在 JD 提取失败时误判成限流页，把没被封的账号误停成“限流”（用户反馈回归）。
+DETAIL_RATE_LIMIT_KEYWORDS = (
+    "操作频繁", "访问受限", "异常流量", "限流", "rate limit",
+    "too many", "429", "稍后再试", "账号受限",
+)
+
 # 列表抓取：连续多少页拿不到数据就判定异常并停止（正常搜索极少连续空页）
 MAX_CONSECUTIVE_EMPTY_PAGES = 3
 
@@ -1308,6 +1316,13 @@ def looks_like_rate_limited(text):
     if not text:
         return False
     return any(keyword in text for keyword in RATE_LIMIT_KEYWORDS)
+
+
+def looks_like_detail_rate_limited(text):
+    """详情页专用：只匹配高置信度限流特征，避免页面 chrome 词汇误判。"""
+    if not text:
+        return False
+    return any(keyword in text for keyword in DETAIL_RATE_LIMIT_KEYWORDS)
 
 
 _UNLOCK_TIME_PATTERNS = (
@@ -1569,6 +1584,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             }, sid)
 
     consecutive_empty = 0
+    legit_empty_streak = 0  # API 正常应答但无职位的连续空页数（非风控信号）
     prev_has_more = None  # 上一页 API 返回的 hasMore（None=未知）
     try:
         for pg in range(start_page, max_pages + 1):
@@ -1646,6 +1662,12 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
 
             if not jobs:
                 consecutive_empty += 1
+                # API 以合法结构应答但无职位（diagnosis=None）→ 正常空页。
+                # 正常空页连续出现说明是搜索条件本身没结果，不是 IP 风控。
+                if api_diagnosis is None:
+                    legit_empty_streak += 1
+                else:
+                    legit_empty_streak = 0
                 print(f"  ⚠️ 无数据（连续 {consecutive_empty} 页）")
                 last_completed_page = pg
                 if output_path:
@@ -1663,12 +1685,23 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 if prev_has_more is False:
                     print(f"  ℹ️ 上一页 hasMore=false，搜索结果已翻完，停止（已抓 {len(all_jobs)} 条）")
                     break
+                # 当页 API 正常应答且明确无更多数据 → 该组合确实没有职位，与风控无关。
+                # 不提前 break 会在连续空页后被误判成风控，把没被封的账号报成 IP 限流。
+                if (api_diagnosis is None and api_meta
+                        and (api_meta.get("totalCount") == 0
+                             or api_meta.get("hasMore") is False)):
+                    print(f"  ℹ️ API 正常返回但该搜索组合无职位（totalCount/hasMore 明确），停止（已抓 {len(all_jobs)} 条）")
+                    break
                 # 有数据 + 连续空页达阈值 → 大概率翻完了（兜底，防 hasMore 不准）
                 if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES and len(all_jobs) > 0:
                     print(f"  ℹ️ 连续 {consecutive_empty} 页无数据，搜索结果已翻完，停止翻页（已抓 {len(all_jobs)} 条）")
                     break
-                # 从头就空 + 连续达阈值 → 实锤风控
+                # 从头就空 + 连续达阈值：全部空页都是 API 正常应答 → 真实空结果，不报风控；
+                # 只有空页伴随结构异常/HTTP 错误等可疑诊断才按风控处置。
                 if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES and len(all_jobs) == 0:
+                    if legit_empty_streak >= consecutive_empty:
+                        print(f"  ℹ️ 连续 {consecutive_empty} 页 API 正常应答但无职位，判定该搜索条件没有职位（非风控）")
+                        break
                     risk = check_list_risk(
                         api_diagnosis, page=pg, consecutive_empty=consecutive_empty,
                         scraped_count=0, output_path=output_path,
@@ -1678,6 +1711,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 continue
 
             consecutive_empty = 0
+            legit_empty_streak = 0
             prev_has_more = api_meta.get("hasMore") if api_meta else None
             new = 0
             for j in jobs:

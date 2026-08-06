@@ -598,5 +598,95 @@ class ExceptionMappingTests(unittest.TestCase):
             self.assertIs(ctx.exception, err)
 
 
+class EmptyPageNotRiskControlTests(unittest.TestCase):
+    """API 正常应答但无职位（真实空结果）不得误判风控。
+
+    回归背景：连续空页曾被一律当成“IP 级风控”，把没被封的账号
+    误报成限流/风控阻断，还连带写入 4 小时风控冷却。
+    """
+
+    def setUp(self):
+        self.module = load_module()
+
+    def _patch_deps(self):
+        patches = [
+            mock.patch.object(self.module, "resolve_city", return_value=("上海", "101020100")),
+            mock.patch.object(self.module, "incr_request"),
+            mock.patch.object(self.module.time, "sleep", _no_sleep),
+            mock.patch.object(self.module.random, "uniform", lambda a, b: 0.0),
+            mock.patch.object(self.module.random, "randint", lambda a, b: 1),
+            mock.patch.object(self.module.random, "random", lambda: 0.0),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _run_scrape_list(self, payload):
+        self._patch_deps()
+        session = _FakeListCDPSession(payload)
+        with tempfile.TemporaryDirectory() as tmp:
+            output = str(pathlib.Path(tmp) / "list.json")
+            with mock.patch.object(self.module, "CDPSession",
+                                   lambda cdp_port=None: session):
+                result = self.module.scrape_list("Java", "上海", 3, {}, output)
+        return result, session
+
+    def test_explicit_empty_meta_returns_empty_result_not_risk(self):
+        """API 正常返回 totalCount=0/hasMore=false → 空结果，不报风控。"""
+        payload = json.dumps({"jobs": [], "hasMore": False, "totalCount": 0})
+        result, session = self._run_scrape_list(payload)
+        self.assertEqual(result["jobs"], [])
+        # 第一页就确认无职位，不应继续翻页撞阈值
+        api_calls = [
+            c for c in session.call_log
+            if c["method"] == "Runtime.evaluate"
+            and "joblist" in c["params"].get("expression", "")
+        ]
+        self.assertEqual(len(api_calls), 1)
+
+    def test_legacy_empty_list_pages_are_not_risk(self):
+        """旧格式空列表连续 3 页（API 均正常应答）→ 空结果，不抛风控。"""
+        result, session = self._run_scrape_list(json.dumps([]))
+        self.assertEqual(result["jobs"], [])
+
+    def test_suspicious_empty_pages_still_raise_risk(self):
+        """空页伴随结构异常诊断（parse_failed）仍按风控处置，保护不削弱。"""
+        payload = json.dumps([{"error": "parse_failed", "sample": ""}])
+        self._patch_deps()
+        session = _FakeListCDPSession(payload)
+        with tempfile.TemporaryDirectory() as tmp:
+            output = str(pathlib.Path(tmp) / "list.json")
+            with mock.patch.object(self.module, "CDPSession",
+                                   lambda cdp_port=None: session):
+                with self.assertRaises(self.module.RiskControlError):
+                    self.module.scrape_list("Java", "上海", 3, {}, output)
+
+
+class DetailRateLimitFalsePositiveTests(unittest.TestCase):
+    """详情页限流判定不得被页面 chrome 词汇（解锁/冻结/裸词频繁）误触发。"""
+
+    def setUp(self):
+        self.module = load_module()
+
+    def test_chrome_words_without_jd_are_not_rate_limit(self):
+        """JD 提取失败但页面只含“登录解锁更多职位”类文案 → 不是限流页。"""
+        page_text = "首页\n职位\n登录解锁更多职位内容\n安全提示"
+        with self.assertRaises(self.module.DetailExtractionError):
+            self.module.extract_job_description({"jd": "", "page_text": page_text})
+        # 必须不是限流异常（DetailRateLimitedError 是 DetailExtractionError 子类）
+        try:
+            self.module.extract_job_description({"jd": "", "page_text": page_text})
+        except self.module.DetailRateLimitedError:
+            self.fail("页面 chrome 词汇不得误判为限流页")
+        except self.module.DetailExtractionError:
+            pass
+
+    def test_real_rate_limit_page_still_detected(self):
+        """真实限流页（操作频繁/稍后再试）仍按限流处理。"""
+        page_text = "操作频繁，请稍后再试"
+        with self.assertRaises(self.module.DetailRateLimitedError):
+            self.module.extract_job_description({"jd": "", "page_text": page_text})
+
+
 if __name__ == "__main__":
     unittest.main()

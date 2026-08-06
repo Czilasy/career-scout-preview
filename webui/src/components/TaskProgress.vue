@@ -401,7 +401,10 @@ watch(() => props.snapshot?.status, (status) => {
   if (status === "paused" || isTerminalStatus(status)) {
     if (rafId !== undefined) cancelAnimationFrame(rafId);
     rafId = undefined;
-    if (status === "paused") displayPercent.value = realAnchor.value;
+    // paused 与终态都必须把显示值校正到真实锚点：后端常在几毫秒内先后推送
+    // stage=done 和 status=done，轮询一次性收到两者时 RAF 被立即取消，
+    // 不校正就会把进度条永久冻结在最后一帧（如抓取完成卡在 9x%）。
+    displayPercent.value = realAnchor.value;
     return;
   }
   if (rafId === undefined) {

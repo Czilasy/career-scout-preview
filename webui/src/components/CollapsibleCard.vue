@@ -33,7 +33,7 @@ function toggle() {
         <span class="collapsible-title">{{ title }}</span>
         <span class="collapsible-header-extra">
           <slot name="summary" />
-          <ChevronDown v-if="!static" :size="18" class="collapsible-chevron" aria-hidden="true" />
+          <ChevronDown v-if="!static" :size="16" class="collapsible-chevron" aria-hidden="true" />
         </span>
       </component>
       <slot name="actions" />

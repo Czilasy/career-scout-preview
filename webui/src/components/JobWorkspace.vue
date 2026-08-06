@@ -8,10 +8,29 @@ const props = withDefaults(defineProps<{
   batchSize?: number;
   emptyMessage: string;
   deferMobileDetail?: boolean;
+  /** 结果页平台筛选档位；非空时列表头部渲染全部/智联/BOSS 滑块（纯展示层过滤由父组件做）。 */
+  platformFilter?: "" | "all" | "boss" | "zhilian";
 }>(), {
   batchSize: 30,
   deferMobileDetail: false,
+  platformFilter: "",
 });
+
+const emit = defineEmits<{
+  (e: "update:platformFilter", value: "all" | "boss" | "zhilian"): void;
+}>();
+
+const PLATFORM_FILTER_OPTIONS = [
+  { id: "all" as const, label: "全部" },
+  { id: "zhilian" as const, label: "智联" },
+  { id: "boss" as const, label: "BOSS" },
+];
+
+function platformLabel(job: JobItem): string {
+  if (job.platform === "zhilian") return "智联";
+  if (job.platform === "boss") return "BOSS";
+  return "";
+}
 
 const visibleCount = ref(props.batchSize);
 const localSelectedId = ref("");
@@ -215,10 +234,26 @@ function verdictLabel(job: JobItem): string {
       <div class="job-list-heading">
         <div class="job-list-heading-left">
           <span>{{ jobs.length }} 个岗位</span>
-          <span>已加载 {{ visibleJobs.length }}</span>
+        </div>
+        <div
+          v-if="platformFilter"
+          class="result-platform-segment"
+          role="tablist"
+          aria-label="结果平台筛选"
+          data-testid="result-platform-filter"
+        >
+          <button
+            v-for="option in PLATFORM_FILTER_OPTIONS"
+            :key="option.id"
+            type="button"
+            role="tab"
+            :aria-selected="platformFilter === option.id"
+            :class="['result-platform-segment-btn', { active: platformFilter === option.id }]"
+            :data-testid="`result-platform-filter-${option.id}`"
+            @click="emit('update:platformFilter', option.id)"
+          >{{ option.label }}</button>
         </div>
         <div class="job-list-heading-right">
-          <span class="job-list-mode" data-testid="job-list-mode">匹配优先</span>
           <slot name="heading-actions" />
         </div>
       </div>
@@ -234,7 +269,16 @@ function verdictLabel(job: JobItem): string {
           @click="selectJob(job)"
         >
           <span class="job-row-main">
-            <span class="job-row-title">{{ job.title || "未知岗位" }}</span>
+            <span class="job-row-titleline">
+              <span class="job-row-title">{{ job.title || "未知岗位" }}</span>
+              <span
+                v-if="platformLabel(job)"
+                class="job-row-platform"
+                :data-platform="job.platform"
+                data-testid="job-row-platform-badge"
+              >{{ platformLabel(job) }}</span>
+              <span v-if="job._applied" class="job-row-applied" data-testid="job-row-applied-badge">已投</span>
+            </span>
             <span class="job-row-company">{{ company(job) }}</span>
           </span>
           <span class="job-row-meta">
@@ -272,6 +316,11 @@ function verdictLabel(job: JobItem): string {
               :data-platform="selectedJob.platform"
               data-testid="job-platform-badge"
             >{{ selectedJob.platform === 'boss' ? 'BOSS' : '智联' }}</span>
+            <span
+              v-if="selectedJob._applied"
+              class="status-pill applied-pill"
+              data-testid="job-detail-applied-badge"
+            >已投递</span>
           </div>
           <button class="icon-button mobile-detail-close" type="button" aria-label="关闭岗位详情" @click="detailOpen = false">
             <X :size="20" />

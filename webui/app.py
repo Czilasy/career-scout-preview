@@ -5569,18 +5569,37 @@ def create_app(config=None):
                 interested_jobs = store.list_jobs_by_ids([pj["job_id"] for pj in interested_pjs])
                 interested_urls = set()
                 interested_slugs = set()
-                for pj in interested_pjs:
-                    stored = interested_jobs.get(str(pj["job_id"]))
-                    if not stored:
-                        continue
-                    url = normalize_job_link(stored.get("canonical_url", ""))
-                    if url:
-                        interested_urls.add(url)
-                        # 从 URL 路径提取 BOSS 岗位 slug 作为备用匹配
-                        slug = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".html")
+
+                def _collect_url_keys(pj_rows, job_map):
+                    """把 profile_jobs 行换成 (canonical_url, slug) 匹配键集合。"""
+                    urls = set()
+                    slugs = set()
+                    for pj in pj_rows:
+                        stored = job_map.get(str(pj["job_id"]))
+                        if not stored:
+                            continue
+                        url = normalize_job_link(stored.get("canonical_url", ""))
+                        if not url:
+                            continue
+                        urls.add(url)
+                        # 从 URL 路径提取平台岗位 slug 作为备用匹配（boss .html / 智联 .htm）
+                        slug = url.rstrip("/").rsplit("/", 1)[-1]
+                        for suffix in (".html", ".htm"):
+                            slug = slug.removesuffix(suffix)
                         if slug:
-                            interested_slugs.add(slug)
-                if interested_urls or interested_slugs:
+                            slugs.add(slug)
+                    return urls, slugs
+
+                interested_urls, interested_slugs = _collect_url_keys(
+                    interested_pjs, interested_jobs)
+                # 投递状态：applied_at 非空即“投递过”（含已投递后跟进/荒废的状态变迁）
+                applied_pjs = [
+                    pj for pj in store.list_profile_jobs(profile_id)
+                    if pj.get("applied_at")
+                ]
+                applied_jobs = store.list_jobs_by_ids([pj["job_id"] for pj in applied_pjs])
+                applied_urls, applied_slugs = _collect_url_keys(applied_pjs, applied_jobs)
+                if interested_urls or interested_slugs or applied_urls or applied_slugs:
                     for item in jobs:
                         if not isinstance(item, dict):
                             continue
@@ -5591,6 +5610,10 @@ def create_app(config=None):
                             item["_marked"] = "interested"
                         elif interested_slugs and str(item.get("job_id", "")) in interested_slugs:
                             item["_marked"] = "interested"
+                        if url and url in applied_urls:
+                            item["_applied"] = True
+                        elif applied_slugs and str(item.get("job_id", "")) in applied_slugs:
+                            item["_applied"] = True
 
         return jsonify({
             "ok": True,

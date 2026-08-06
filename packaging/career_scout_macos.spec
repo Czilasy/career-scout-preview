@@ -48,6 +48,11 @@ def _read_version():
 
 VERSION = _read_version()
 
+# 指南针应用图标（.app 图标）。.icns 由 build_dmg.sh 用 iconutil 从
+# packaging/assets/icon.iconset 生成；本地直跑 spec 而 .icns 缺失时降级为无图标。
+_APP_ICON = PROJECT_ROOT / "packaging" / "assets" / "career_scout.icns"
+_APP_ICON_ARG = str(_APP_ICON) if _APP_ICON.exists() else None
+
 # 跟随构建机架构（macos-latest = arm64）；显式写死可改 "arm64"/"x86_64"
 TARGET_ARCH = None
 
@@ -119,6 +124,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name="CareerScout.app",
+    icon=_APP_ICON_ARG,
     bundle_identifier="com.czilasy.careerscout",
     info_plist={
         "CFBundleName": "Career Scout",

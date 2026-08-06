@@ -232,15 +232,12 @@ describe("JobWorkspace", () => {
     expect(rows[1].text()).toContain("智联岗位");
   });
 
-  it("renders 匹配优先 mode chip alongside heading-actions slot", () => {
+  it("renders heading-actions slot in the heading right area", () => {
     const wrapper = mount(JobWorkspace, {
       props: { jobs: [jobs[0]], emptyMessage: "暂无岗位" },
       slots: { "heading-actions": '<button data-testid="recrawl-btn">全部重抓</button>' },
     });
-    const mode = wrapper.get('[data-testid="job-list-mode"]');
-    expect(mode.text()).toBe("匹配优先");
-    expect(mode.classes()).toContain("job-list-mode");
-    // heading-actions slot 内容仍正常渲染（模式标签不占用补抓按钮位置）。
+    expect(wrapper.find('[data-testid="job-list-mode"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="recrawl-btn"]').exists()).toBe(true);
   });
 });

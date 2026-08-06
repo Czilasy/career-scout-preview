@@ -42,6 +42,11 @@ def _read_version():
 
 VERSION = _read_version()
 
+# 指南针应用图标（EXE 文件图标 + 运行时窗口图标）；缺失时降级为默认图标，
+# 不阻断构建。
+_APP_ICON = PROJECT_ROOT / "packaging" / "assets" / "career_scout.ico"
+_APP_ICON_ARG = str(_APP_ICON) if _APP_ICON.exists() else None
+
 
 def _version_tuple(v):
     """版本字符串 → 四元组 ``(major, minor, patch, 0)``，非法段补 0。"""
@@ -123,7 +128,10 @@ a = Analysis(
         # pyproject.toml 收集到 _MEIPASS 根，desktop.py.read_version 靠
         # _PROJECT_ROOT/pyproject.toml 定位（_PROJECT_ROOT=_MEIPASS）→ 窗口标题版本正确（FR-013）
         (str(PROJECT_ROOT / "pyproject.toml"), "."),
-    ],
+    ] + (
+        # 图标收集进包，desktop.py 运行时用它设置窗口/任务栏图标
+        [(str(_APP_ICON), "packaging/assets")] if _APP_ICON.exists() else []
+    ),
     hiddenimports=[
         "flask",
         "keyring",
@@ -167,4 +175,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version=_version_info,
+    icon=_APP_ICON_ARG,
 )

@@ -230,6 +230,10 @@ const pausedRunId = ref("");
 const interruptedRunId = ref("");
 const pipelineResult = ref<PipelineResult | null>(null);
 const pipelineResultRunId = ref("");
+// 结果页平台筛选（全部/BOSS/智联）：纯展示层过滤，不改草稿/任务身份（不变式 1）。
+const resultPlatformFilter = ref<"all" | "boss" | "zhilian">("all");
+// 合并载入时每个平台各自的结果来源 run：单平台视图下“全部重抓”/导出用对应 run。
+const resultRunIds = ref<{ boss: string; zhilian: string }>({ boss: "", zhilian: "" });
 const activeCategory = ref<ResultCategory>("matched");
 const rejectedIds = ref(new Set<string>());
 const feedbackBusyIds = ref(new Set<string>());
@@ -370,7 +374,18 @@ watch(
   () => { if (!scopeLocked.value) void refreshScopePreview(); },
   { deep: true },
 );
-const groups = computed(() => partitionPipelineResult(pipelineResult.value || {}));
+// 分类基于当前平台过滤后的结果：页签计数跟随筛选联动。
+const filteredPipelineResult = computed<PipelineResult>(() => {
+  const full = pipelineResult.value || {};
+  const plat = resultPlatformFilter.value;
+  if (plat === "all") return full;
+  return {
+    ...full,
+    jobs: (Array.isArray(full.jobs) ? full.jobs : []).filter((job) => job.platform === plat),
+    dropped: (Array.isArray(full.dropped) ? full.dropped : []).filter((job) => job.platform === plat),
+  };
+});
+const groups = computed(() => partitionPipelineResult(filteredPipelineResult.value));
 const resultTabs = computed(() => [
   { id: "matched" as const, label: "匹配", count: groups.value.matched.length },
   { id: "unmatched" as const, label: "不匹配", count: groups.value.unmatched.length },
@@ -758,6 +773,8 @@ async function analyzeResume() {
     screenSnapshot.value = null;
     recrawlSnapshot.value = null;
     pipelineResultRunId.value = "";
+    resultPlatformFilter.value = "all";
+    resultRunIds.value = { boss: "", zhilian: "" };
     pausedRunId.value = "";
     interruptedRunId.value = "";
     restoredTaskHint.value = "";
@@ -1231,8 +1248,9 @@ function setPipelineResult(result: PipelineResult) {
 async function loadLatestResult() {
   if (pausedRunId.value || interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
   try {
-    const query = props.profileId ? `?profile_id=${encodeURIComponent(props.profileId)}` : "";
-    const data = await apiRequest<{
+    // 分别拉两个平台各自的最近结果，合并展示（后端 T409 按平台查询）。
+    const base = props.profileId ? `&profile_id=${encodeURIComponent(props.profileId)}` : "";
+    const fetchOne = (platform: "boss" | "zhilian") => apiRequest<{
       has_result?: boolean;
       source_run_id?: string;
       result?: PipelineResult;
@@ -1240,41 +1258,77 @@ async function loadLatestResult() {
       started_at?: number;
       finished_at?: number;
       execution_config?: Record<string, unknown> | null;
-    }>(`/api/latest-pipeline-result${query}`);
+    }>(`/api/latest-pipeline-result?platform=${platform}${base}`).catch(() => null);
+    const [bossData, zhilianData] = await Promise.all([fetchOne("boss"), fetchOne("zhilian")]);
     if (pausedRunId.value || interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
-    if (data.has_result && data.result) {
-      pipelineResultRunId.value = data.source_run_id || "";
-      setPipelineResult(data.result);
-      const ps = (data.result as Record<string, unknown>).profile_summary;
-      if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
-      const snapshotStatus = data.status === "completed_with_pending" ? "completed_with_pending" : "completed";
-      scrapeSnapshot.value = {
-        status: snapshotStatus, stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
-        started_at: data.started_at,
-        finished_at: data.finished_at,
-      };
-      screenSnapshot.value = {
-        status: snapshotStatus, stage: "done", progress: { message: "上次 AI 筛选已完成" }, logs: [],
-        started_at: data.started_at,
-        finished_at: data.finished_at,
-      };
-      const execConfig = data.execution_config || {};
-      scrapeSnapshot.value.execution_config = execConfig;
-      screenSnapshot.value.execution_config = execConfig;
-      screenSnapshot.value.kept_count = Number(data.result.total_kept || 0);
-      screenSnapshot.value.dropped_count = Number(data.result.total_dropped || 0);
-      const resultTotals = data.result as { total_scraped?: number };
-      const sourceTotal = Number(resultTotals.total_scraped || 0);
-      const stageTotal = snapshotStatus === "completed_with_pending"
-        ? Number(data.result.total_kept || 0)
-        : sourceTotal;
-      scrapeSnapshot.value.total = stageTotal || sourceTotal;
-      scrapeSnapshot.value.source_total = sourceTotal;
-      screenSnapshot.value.total = stageTotal || sourceTotal;
-      screenSnapshot.value.source_total = sourceTotal;
-      const uncertainCount = (data.result.jobs || []).filter((job) => job.verdict !== "match" && job.verdict !== "not_match" && job.verdict !== "mismatch").length;
-      screenSnapshot.value.pending_count = snapshotStatus === "completed_with_pending" ? uncertainCount : 0;
+
+    const parts = [
+      bossData?.has_result && bossData.result ? { platform: "boss" as const, data: bossData } : null,
+      zhilianData?.has_result && zhilianData.result ? { platform: "zhilian" as const, data: zhilianData } : null,
+    ].filter(Boolean) as { platform: "boss" | "zhilian"; data: NonNullable<typeof bossData> }[];
+    if (!parts.length) return;
+
+    // 每个岗位标记来源 run（单岗位补抓/单 JD 动作需要定位来源）。
+    for (const part of parts) {
+      resultRunIds.value[part.platform] = part.data.source_run_id || "";
+      const runId = part.data.source_run_id || "";
+      for (const list of [part.data.result?.jobs, part.data.result?.dropped]) {
+        if (!Array.isArray(list)) continue;
+        for (const job of list) {
+          if (job && typeof job === "object") {
+            (job as JobItem)._result_run_id = runId;
+            // 兼容旧快照缺 platform 字段：按查询平台回填（后端权威优先）。
+            if (!(job as JobItem).platform) (job as JobItem).platform = part.platform;
+          }
+        }
+      }
     }
+    // 以更新时间较新的一份为主干（profile_summary / 状态投影 / 默认 run）。
+    const newer = parts.length === 1
+      ? parts[0]
+      : (Number(parts[0].data.started_at || 0) >= Number(parts[1].data.started_at || 0) ? parts[0] : parts[1]);
+
+    const sum = (key: "total_scraped" | "total_matched" | "total_kept" | "total_dropped") =>
+      parts.reduce((acc, part) => acc + Number((part.data.result as Record<string, unknown> | undefined)?.[key] || 0), 0);
+    const merged: PipelineResult = {
+      ...(newer.data.result as PipelineResult),
+      jobs: parts.flatMap((part) => (Array.isArray(part.data.result?.jobs) ? part.data.result!.jobs : [])),
+      dropped: parts.flatMap((part) => (Array.isArray(part.data.result?.dropped) ? part.data.result!.dropped : [])),
+      total_scraped: sum("total_scraped"),
+      total_matched: sum("total_matched"),
+      total_kept: sum("total_kept"),
+      total_dropped: sum("total_dropped"),
+    };
+    pipelineResultRunId.value = newer.data.source_run_id || "";
+    setPipelineResult(merged);
+    const ps = (newer.data.result as Record<string, unknown>).profile_summary;
+    if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
+    const snapshotStatus = newer.data.status === "completed_with_pending" ? "completed_with_pending" : "completed";
+    scrapeSnapshot.value = {
+      status: snapshotStatus, stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
+      started_at: newer.data.started_at,
+      finished_at: newer.data.finished_at,
+    };
+    screenSnapshot.value = {
+      status: snapshotStatus, stage: "done", progress: { message: "上次 AI 筛选已完成" }, logs: [],
+      started_at: newer.data.started_at,
+      finished_at: newer.data.finished_at,
+    };
+    const execConfig = newer.data.execution_config || {};
+    scrapeSnapshot.value.execution_config = execConfig;
+    screenSnapshot.value.execution_config = execConfig;
+    screenSnapshot.value.kept_count = Number(merged.total_kept || 0);
+    screenSnapshot.value.dropped_count = Number(merged.total_dropped || 0);
+    const sourceTotal = Number(merged.total_scraped || 0);
+    const stageTotal = snapshotStatus === "completed_with_pending"
+      ? Number(merged.total_kept || 0)
+      : sourceTotal;
+    scrapeSnapshot.value.total = stageTotal || sourceTotal;
+    scrapeSnapshot.value.source_total = sourceTotal;
+    screenSnapshot.value.total = stageTotal || sourceTotal;
+    screenSnapshot.value.source_total = sourceTotal;
+    const uncertainCount = (merged.jobs || []).filter((job) => job.verdict !== "match" && job.verdict !== "not_match" && job.verdict !== "mismatch").length;
+    screenSnapshot.value.pending_count = snapshotStatus === "completed_with_pending" ? uncertainCount : 0;
   } catch (error) {
     notify(errorMessage(error, "上次结果暂时无法恢复"), "warning");
   }
@@ -1341,6 +1395,8 @@ function resetWorkflow() {
   recrawlSnapshot.value = null;
   pipelineResult.value = null;
   pipelineResultRunId.value = "";
+  resultPlatformFilter.value = "all";
+  resultRunIds.value = { boss: "", zhilian: "" };
   activeCategory.value = "matched";
   rejectedIds.value = new Set();
   pausedRunId.value = "";
@@ -1469,7 +1525,8 @@ async function retryJd(job: JobItem) {
       `/api/pipeline/jobs/${encodeURIComponent(id)}/jd`, {
       method: "POST",
       json: {
-        source_run_id: pipelineResultRunId.value,
+        // 单岗位动作优先用岗位自身来源 run（合并视图下跨平台也准确）。
+        source_run_id: job._result_run_id || pipelineResultRunId.value,
         source_url: job.source_url || job.job_link || job.canonical_url,
         profile_summary: profileSummary.value,
       },
@@ -1523,7 +1580,11 @@ async function recrawlUncertain() {
     const data = await apiRequest<{ task_id: string }>("/api/pipeline/recrawl", {
       method: "POST",
       json: {
-        source_run_id: pipelineResultRunId.value,
+        // “全部重抓”只在单平台视图可见，用当前视图平台的来源 run。
+        source_run_id: (
+          resultPlatformFilter.value !== "all"
+            && resultRunIds.value[resultPlatformFilter.value]
+        ) || pipelineResultRunId.value,
         job_ids: ids,
         profile_summary: profileSummary.value,
       },
@@ -1877,7 +1938,7 @@ watch(roundStatusPayload, (payload) => {
           </div>
           <label class="field-label">
             <span>求职画像（用于 AI 精筛）<small v-if="!profileSummary">　未填写将跳过精筛</small></span>
-            <textarea v-model="profileSummary" rows="2" :disabled="scopeLocked" placeholder="上传简历后自动生成；也可手动填写，如：3年Python后端，熟悉FastAPI/Redis，期望AI应用开发方向"></textarea>
+            <textarea v-model="profileSummary" rows="4" :disabled="scopeLocked" class="profile-summary-input" placeholder="上传简历后自动生成；也可手动填写，如：3年Python后端，熟悉FastAPI/Redis，期望AI应用开发方向"></textarea>
           </label>
         </CollapsibleCard>
 
@@ -1997,8 +2058,8 @@ watch(roundStatusPayload, (payload) => {
           <template #actions>
             <div class="workflow-actions screen-card-actions">
               <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="draftPlatformDisabled || (!screenBusy && !scrapeCompleted)" @click="screenBusy ? cancelAiScreen() : startAiScreen()">
-                <Square v-if="screenBusy" :size="18" aria-hidden="true" />
-                <Sparkles v-else :size="18" aria-hidden="true" />{{ screenBusy ? "停止筛选" : "开始 AI 筛选" }}
+                <Square v-if="screenBusy" :size="15" aria-hidden="true" />
+                <Sparkles v-else :size="15" aria-hidden="true" />{{ screenBusy ? "停止筛选" : "开始 AI 筛选" }}
               </button>
               <button v-if="interruptedRunId" class="button danger" type="button" data-testid="finish-interrupted-screen" @click="finishPausedTask(interruptedRunId)">
                 结束并保存结果
@@ -2094,9 +2155,11 @@ watch(roundStatusPayload, (payload) => {
           :jobs="currentJobs"
           :empty-message="currentEmptyMessage"
           :defer-mobile-detail="Boolean(recrawlSnapshot && recrawlSnapshot.status === 'paused')"
+          :platform-filter="resultPlatformFilter"
+          @update:platform-filter="(value) => { resultPlatformFilter = value; }"
         >
           <template #heading-actions>
-            <div v-if="activeCategory === 'uncertain'" class="recrawl-inline">
+            <div v-if="activeCategory === 'uncertain' && resultPlatformFilter !== 'all'" class="recrawl-inline">
               <button
                 class="button secondary small"
                 type="button"
