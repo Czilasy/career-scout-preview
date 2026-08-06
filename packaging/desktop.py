@@ -85,20 +85,37 @@ def read_version():
 # 单实例（T036 / 合同 §2）
 # ---------------------------------------------------------------------------
 def _default_mutex_factory(name):
-    """Windows named mutex 工厂（ctypes）。返回 ``(handle, last_error)``。
+    """单实例锁工厂（跨平台）。返回 ``(handle, last_error)``。
 
-    非 Windows 或 ctypes 不可用 → ``(None, 0)``，由调用方放行。
+    - Windows：named mutex（ctypes ``CreateMutexW``）；
+    - macOS/Linux：``~/.career-scout/{name}.lock`` 文件锁（``fcntl.flock``
+      非阻塞独占），已被占用时 ``last_error == ERROR_ALREADY_EXISTS``；
+    - 平台锁机制不可用 → ``(None, 0)``，由调用方放行。
     """
-    if sys.platform != "win32":
-        return (None, 0)
-    try:
-        import ctypes
+    if sys.platform == "win32":
+        try:
+            import ctypes
 
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.CreateMutexW(None, False, name)
-        last_error = kernel32.GetLastError()
-        return (handle, last_error)
-    except (OSError, AttributeError):
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.CreateMutexW(None, False, name)
+            last_error = kernel32.GetLastError()
+            return (handle, last_error)
+        except (OSError, AttributeError):
+            return (None, 0)
+    # POSIX（macOS/Linux）：文件锁实现单实例（进程退出 flock 自动释放）
+    try:
+        import fcntl
+
+        lock_dir = Path(os.path.expanduser("~/.career-scout"))
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_file = open(lock_dir / f"{name}.lock", "a+", encoding="utf-8")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return (lock_file, 0)
+        except (BlockingIOError, PermissionError, OSError):
+            lock_file.close()
+            return (True, ERROR_ALREADY_EXISTS)
+    except (ImportError, OSError):
         return (None, 0)
 
 
@@ -108,7 +125,7 @@ def acquire_single_instance_mutex(mutex_factory=None):
     返回 ``(handle, already_exists)``：
     - handle 非 None 且 already_exists=False：当前进程获得锁；
     - handle 非 None 且 already_exists=True：已有实例；
-    - handle 为 None：非 Windows 或 ctypes 不可用，放行。
+    - handle 为 None：平台锁机制不可用，放行。
     """
     factory = mutex_factory or _default_mutex_factory
     handle, last_error = factory(MUTEX_NAME)
@@ -118,13 +135,17 @@ def acquire_single_instance_mutex(mutex_factory=None):
 
 
 def release_single_instance_mutex(handle):
-    """释放单实例 mutex（进程退出时）。"""
-    if handle is None or sys.platform != "win32":
+    """释放单实例锁（进程退出时）。Windows 关闭 mutex 句柄；
+    POSIX 关闭锁文件句柄（flock 随 fd 关闭自动释放）。"""
+    if handle is None:
         return
     try:
-        import ctypes
+        if sys.platform == "win32":
+            import ctypes
 
-        ctypes.windll.kernel32.CloseHandle(handle)
+            ctypes.windll.kernel32.CloseHandle(handle)
+        elif hasattr(handle, "close"):
+            handle.close()
     except Exception:
         # 清理函数：任何异常（含 ctypes.ArgumentError 替身 handle）
         # 都不应向外抛，进程即将退出
@@ -341,15 +362,37 @@ def cancel_running_tasks(app):
 # 默认 MessageBox
 # ---------------------------------------------------------------------------
 def _default_messagebox(title, text):
-    if sys.platform != "win32":
-        print(f"[{title}] {text}")
-        return
-    try:
-        import ctypes
+    """跨平台消息框：Windows 用 ``MessageBoxW``，macOS 用 ``osascript``
+    原生对话框；平台机制不可用时回退 print。"""
+    if sys.platform == "win32":
+        try:
+            import ctypes
 
-        ctypes.windll.user32.MessageBoxW(0, text, title, 0x00000000)
-    except (OSError, AttributeError):
-        print(f"[{title}] {text}")
+            ctypes.windll.user32.MessageBoxW(0, text, title, 0x00000000)
+            return
+        except (OSError, AttributeError):
+            pass
+    elif sys.platform == "darwin":
+        try:
+            import subprocess
+
+            safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
+            safe_text = text.replace("\\", "\\\\").replace('"', '\\"')
+            subprocess.run(
+                [
+                    "osascript",
+                    "-e",
+                    f'display dialog "{safe_text}" with title "{safe_title}"'
+                    ' buttons {"好"} default button "好"',
+                ],
+                check=False,
+                capture_output=True,
+                timeout=120,
+            )
+            return
+        except Exception:
+            pass
+    print(f"[{title}] {text}")
 
 
 def _default_workarea_provider():
@@ -552,17 +595,24 @@ def run_desktop_shell(deps):
             events.closing += _on_closing
         webview_module.start()
     except Exception as exc:
-        # 合同 §7：webview.start() 抛初始化异常 → 提示安装 WebView2 + 微软下载指引
+        # 合同 §7：webview.start() 抛初始化异常 → 按平台给指引
         log_error(
             f"窗口初始化失败: {exc}", state_dir=state_dir, logger=logger
         )
-        messagebox(
-            "Career Scout",
-            "启动失败：WebView2 运行时缺失或初始化异常\n"
-            "请安装 Microsoft Edge WebView2 Runtime\n"
-            "下载地址：https://developer.microsoft.com/microsoft-edge/webview2/\n"
-            f"详情：{exc}",
-        )
+        if sys.platform == "win32":
+            failure_message = (
+                "启动失败：WebView2 运行时缺失或初始化异常\n"
+                "请安装 Microsoft Edge WebView2 Runtime\n"
+                "下载地址：https://developer.microsoft.com/microsoft-edge/webview2/\n"
+                f"详情：{exc}"
+            )
+        else:
+            failure_message = (
+                "启动失败：窗口初始化异常\n"
+                "macOS 下 pywebview 使用系统 WebKit，请确认系统版本 ≥ macOS 11\n"
+                f"详情：{exc}"
+            )
+        messagebox("Career Scout", failure_message)
         return 1
 
     # 7. 关闭后释放锁

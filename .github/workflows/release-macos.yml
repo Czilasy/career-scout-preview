@@ -1,0 +1,58 @@
+name: release-macos
+
+# 与 Windows EXE 同版本发布：推 vX.Y.Z tag 后在 GitHub 的 macOS runner
+# 上构建 universal2 dmg，自动挂到该 tag 对应的 Release（已有则附加，
+# 没有则创建）。构建机是 GitHub 的 Mac，仓库维护者无需本地 macOS 环境。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-dmg:
+    runs-on: macos-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python（python.org universal2 解释器）
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: 安装项目依赖
+        run: uv sync
+
+      - name: 构建 DMG
+        run: bash packaging/build_dmg.sh
+
+      - name: 校验产物
+        run: ls -lh .release/*.dmg
+
+      # 留档便于排错（构建失败时下载 artifact 检查 dmg 内容）
+      - name: 上传构建产物（artifact）
+        uses: actions/upload-artifact@v4
+        with:
+          name: CareerScout-macos-dmg
+          path: .release/*.dmg
+
+      - name: 附加 DMG 到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: .release/*.dmg
+          draft: false
+          prerelease: false
