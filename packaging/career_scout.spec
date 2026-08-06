@@ -110,13 +110,19 @@ except Exception:
 
 
 a = Analysis(
-    ["packaging/desktop.py"],
+    # entry 脚本路径 PyInstaller 按 SPECPATH（spec 所在目录 packaging/）解析，
+    # 用绝对路径避免 CWD/SPECPATH 歧义
+    [str(PROJECT_ROOT / "packaging" / "desktop.py")],
     pathex=[str(PROJECT_ROOT)],
     binaries=[],
     datas=[
-        ("webui/dist", "webui/dist"),
-        ("data/city_codes.json", "data"),
-        ("data/zhilian_city_codes.json", "data"),
+        # datas 源路径按 CWD 解析；用绝对路径消除 CWD/SPECPATH 歧义
+        (str(PROJECT_ROOT / "webui" / "dist"), "webui/dist"),
+        (str(PROJECT_ROOT / "data" / "city_codes.json"), "data"),
+        (str(PROJECT_ROOT / "data" / "zhilian_city_codes.json"), "data"),
+        # pyproject.toml 收集到 _MEIPASS 根，desktop.py.read_version 靠
+        # _PROJECT_ROOT/pyproject.toml 定位（_PROJECT_ROOT=_MEIPASS）→ 窗口标题版本正确（FR-013）
+        (str(PROJECT_ROOT / "pyproject.toml"), "."),
     ],
     hiddenimports=[
         "flask",
@@ -124,7 +130,6 @@ a = Analysis(
         "keyring.backends.Windows",
         "webview",
         "webview.platforms.winforms",
-        "webview.platforms.winforms.Forms",
         "webui.app",
         "webui.desktop_runtime",
         "scripts.boss_cdp_raw",

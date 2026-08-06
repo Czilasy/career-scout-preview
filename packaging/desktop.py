@@ -34,8 +34,18 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # 路径与常量
 # ---------------------------------------------------------------------------
-_HERE = Path(__file__).resolve().parent
-_PROJECT_ROOT = _HERE.parent
+# PyInstaller onefile 模式下，entry 脚本（desktop.py）被解压到 sys._MEIPASS 根目录
+# （不保留 packaging/ 子目录），而 webui/、scripts/、data/、pyproject.toml 等
+# 资源同样在 sys._MEIPASS 根目录；源码模式下 __file__ 位于 packaging/，_PROJECT_ROOT
+# 是其父（项目根）。两种模式下资源根都是 _PROJECT_ROOT。
+def _resolve_project_root():
+    if getattr(sys, "frozen", False):
+        # PyInstaller onefile/dir：资源根 = sys._MEIPASS
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    # 源码模式：__file__ = <root>/packaging/desktop.py
+    return Path(__file__).resolve().parent.parent
+
+_PROJECT_ROOT = _resolve_project_root()
 DEFAULT_STATE_DIR = Path(os.path.expanduser("~/.career-scout"))
 WINDOW_STATE_FILENAME = "desktop_window.json"
 LOG_FILENAME = "desktop.log"
@@ -435,6 +445,8 @@ def run_desktop_shell(deps):
         "height": height,
         "resizable": True,
         "min_size": (MIN_WIDTH, MIN_HEIGHT),
+        "background_color": "#0d1113",
+        "shadow": False,
     }
     if x is not None and y is not None:
         window_kwargs["x"] = x

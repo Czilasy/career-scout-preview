@@ -157,6 +157,7 @@ input {
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
+  margin-left: 12px;
 }
 /* 顶栏四入口：设计稿 .top-btn 样式（hair 描边，hover 品牌 wash） */
 .header-actions .button.secondary {
