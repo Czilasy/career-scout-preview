@@ -564,6 +564,25 @@ class CDPUnavailableError(RuntimeError):
     """连不上调试浏览器（Chrome 没开 / 端口不通 / 端口被占用）。"""
 
 
+class SearchCancelled(RuntimeError):
+    """用户通过 cancel_event 取消抓取，已写产物保留。
+
+    programmatic 入口专用（CLI 路径无取消语义）；调用方（TaskRunner /
+    WorkbenchRunner）将其映射为「用户取消」中断，不落失败码。
+    """
+
+    def __init__(self, message="用户取消抓取"):
+        super().__init__(message)
+
+
+class LoginRequiredError(RuntimeError):
+    """未检测到 BOSS 登录态（programmatic 等价 CLI exit 1）。
+
+    main() 在 check_login_state 返回 False 时 sys.exit(1)；programmatic
+    入口改为抛出本异常，调用方映射为登录失效失败码。
+    """
+
+
 EXTRACT_DETAIL_JS = """
 (function(){
     var pageText = document.body ? document.body.innerText : '';
@@ -1447,7 +1466,7 @@ def load_existing_details(input_path=None, detail_output=None, result_dir=DEFAUL
 # ============================================================
 def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 cdp_port=DEFAULT_CDP_PORT, fmt="json", allow_dom_fallback=False,
-                start_page=1):
+                start_page=1, *, cancel_event=None, on_poll=None):
     city_name, city_code = resolve_city(city_input)
     cdp = CDPSession(cdp_port)
     all_jobs = []
@@ -1553,6 +1572,12 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
     prev_has_more = None  # 上一页 API 返回的 hasMore（None=未知）
     try:
         for pg in range(start_page, max_pages + 1):
+            # programmatic 取消/轮询检查点（与 scrape_details 逐岗位检查点同语义）；
+            # CLI 不传 cancel_event/on_poll，行为与现状完全一致。
+            if cancel_event is not None and cancel_event.is_set():
+                raise SearchCancelled("用户取消抓取")
+            if on_poll is not None:
+                on_poll()
             print(f"--- [{pg}/{max_pages} 页, {len(all_jobs)} 条已抓] ---")
             incr_request()
 
@@ -1692,6 +1717,9 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
         raise
     except RiskControlError:
         # 醒目报错统一由程序入口输出，这里不重复打印
+        raise
+    except SearchCancelled:
+        # 用户取消：已写产物已在循环中 flush，直接传播，不打警告
         raise
     except RuntimeError as e:
         print(f"\n⚠️ {e}")
@@ -2071,7 +2099,8 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
                 sleeper, event_callback, readiness_timeout_seconds,
                 max_readiness_retries, inter_job_gap_range, stagger_range,
                 tab_id, results_lock, results, output_path, degrade_event,
-                trailing_wait, reset_every=3, degrade_reason=None):
+                trailing_wait, reset_every=3, degrade_reason=None,
+                cancel_event=None, on_poll=None):
     """常驻 tab 工作线程：建池 → 错峰启动 → 循环领任务抓详情 → 补位节奏 → 关池。
 
     spec 007 ⑧：每个 tab 配一条独立工作线程 + 独立 CDP 会话（CDPSession 是
@@ -2105,6 +2134,13 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
 
         jobs_done_on_tab = 0  # 本 tab 累计抓取数，用于触发 session 重置
         while not degrade_event.is_set():
+            # programmatic 取消检查点：置位后通知所有线程停（on_poll 在并行下
+            # 由调用方保证线程安全；CLI 不传，零影响）。
+            if cancel_event is not None and cancel_event.is_set():
+                degrade_event.set()
+                break
+            if on_poll is not None:
+                on_poll()
             try:
                 job, global_idx = work_queue.get_nowait()
             except Exception:
@@ -2160,7 +2196,8 @@ def scrape_details(list_data, max_details=None, output_path=None,
                    max_readiness_retries=1, inter_job_gap_range=(8, 15),
                    trailing_wait=False,
                    enable_parallel=False, tab_pool_size=5,
-                   stagger_range=(5, 10), reset_every=3):
+                   stagger_range=(5, 10), reset_every=3,
+                   cancel_event=None, on_poll=None):
     """抓取岗位详情页并返回结构化结果。
 
     Policy v2 keyword-only parameters (feature 005) +
@@ -2273,6 +2310,8 @@ def scrape_details(list_data, max_details=None, output_path=None,
                     "degrade_reason": degrade_reason,
                     "trailing_wait": trailing_wait,
                     "reset_every": reset_every,
+                    "cancel_event": cancel_event,
+                    "on_poll": on_poll,
                 },
                 name=f"detail-tab{tab_id + 1}",
                 daemon=True,
@@ -2281,6 +2320,10 @@ def scrape_details(list_data, max_details=None, output_path=None,
             threads.append(t)
         for t in threads:
             t.join()
+        # programmatic 取消：线程退出后 flush 已抓 results 并抛 SearchCancelled
+        if cancel_event is not None and cancel_event.is_set():
+            write_json_atomic(output_path, results)
+            raise SearchCancelled("用户取消抓取")
         if degrade_reason.get("reason") == "rate_limited":
             # 账号限流：醒目报错 + 退出码 10（webui 据此分类
             # source_rate_limited 并停掉整个任务）；限流页已留在屏幕上。
@@ -2302,6 +2345,13 @@ def scrape_details(list_data, max_details=None, output_path=None,
             try:
                 for i, job in enumerate(batch):
                     global_idx = batch_start + i
+                    # programmatic 取消/轮询检查点（与 scrape_list 逐页检查点同语义）；
+                    # CLI 不传 cancel_event/on_poll，行为与现状完全一致。
+                    if cancel_event is not None and cancel_event.is_set():
+                        write_json_atomic(output_path, results)
+                        raise SearchCancelled("用户取消抓取")
+                    if on_poll is not None:
+                        on_poll()
                     is_last_in_run = global_idx == total - 1
                     _scrape_one_detail(
                         ws, job, global_idx, total, results, output_path,
@@ -3237,6 +3287,209 @@ def run_stop_chrome():
     print("提示：仅关闭 scraper 隔离 profile 的 Chrome，不影响你的主 Chrome。")
     print()
     return 0
+
+
+# ============================================================
+# programmatic 入口（EXE 模式 in-process 执行）
+# ============================================================
+def run_search_programmatic(
+    *,
+    keyword: str,
+    city: str,
+    pages: int,
+    cdp_port: int = DEFAULT_CDP_PORT,
+    filters: dict | None = None,
+    output_path: str | None = None,
+    detail_output_path: str | None = None,
+    detail: bool = True,
+    max_details: int | None = None,
+    fmt: str = "json",
+    start_page: int = 1,
+    allow_dom_fallback: bool = False,
+    merge: str | None = None,
+    analysis: bool = False,
+    events_output: str | None = None,
+    enable_parallel: bool = False,
+    tab_pool_size: int = 5,
+    stagger_range: tuple[float, float] = (5.0, 10.0),
+    inter_job_gap_range: tuple[float, float] = (8.0, 15.0),
+    reset_every: int = 3,
+    close_chrome: bool = False,
+    on_log=None,
+    on_poll=None,
+    cancel_event=None,
+) -> dict:
+    """EXE 模式搜索全流程（列表 + 可选详情 + 可选分析/合并）。
+
+    与 CLI main() 的搜索路径语义等价；返回 {"list_data", "details"}；
+    失败通过异常表达（见 contract inprocess-runner.md §3）。
+    main() 零改动；CLI 路径不受影响。
+
+    - 参数 dict 直传，不经过 argv 文本往返。
+    - on_log 非 None 时，contextlib.redirect_stdout 把既有 print 按行转发；
+      on_log=None 时输出走原 stdout（等价 CLI）。
+    - cancel_event 置位时 scrape_list/scrape_details 抛 SearchCancelled，
+      已写产物保留；None 时行为与现状完全一致。
+    """
+    import contextlib
+
+    filters = dict(filters or {})
+
+    # 页数限制（与 main 一致）
+    if pages > MAX_PAGES:
+        print(f"⚠️ 页数 {pages} 超过上限 {MAX_PAGES}，已自动调整为 {MAX_PAGES}")
+        pages = MAX_PAGES
+    if start_page < 1 or start_page > pages:
+        raise ValueError(f"start_page 必须在 1 到 {pages} 之间")
+
+    # 运行时依赖（与 main 一致；EXE 模式下依赖已内置）
+    if not require_runtime_dependencies("requests", "websocket"):
+        raise RuntimeError("缺少 CDP 运行依赖")
+
+    # 日志转发：on_log 非 None 时 redirect_stdout 到行缓冲
+    buffer = _LineLogBuffer(on_log) if on_log is not None else None
+    redirect = (
+        contextlib.redirect_stdout(buffer)
+        if buffer is not None
+        else contextlib.nullcontext()
+    )
+    with redirect:
+        try:
+            # 登录状态检测
+            print("检测登录状态...")
+            if not check_login_state(cdp_port):
+                print("❌ 未检测到 BOSS直聘登录状态。请先在 Chrome 中登录 zhipin.com。")
+                print("   可运行 --check 检查环境，或 --setup-chrome 启动 Chrome。")
+                raise LoginRequiredError("未检测到 BOSS直聘登录状态")
+            print("✅ 已登录\n")
+
+            list_data = scrape_list(
+                keyword, city, pages, filters, output_path,
+                cdp_port=cdp_port, fmt=fmt,
+                allow_dom_fallback=allow_dom_fallback,
+                start_page=start_page,
+                cancel_event=cancel_event, on_poll=on_poll,
+            )
+
+            # 合并外部文件
+            merged_details = None
+            if merge:
+                merged_jobs = merge_jobs(merge, list_data.get("jobs", []))
+                list_data["jobs"] = merged_jobs
+                list_data["total"] = len(merged_jobs)
+                if output_path:
+                    flush_jobs(output_path, {
+                        "keyword": list_data.get("keyword", ""),
+                        "city": list_data.get("city", ""),
+                        "filters": list_data.get("filters", {}),
+                        "filter_desc": list_data.get("filter_desc", []),
+                        "scraped_at": datetime.now().isoformat(),
+                        "merged_from": merge,
+                    }, merged_jobs)
+                    print(f"合并结果已保存: {output_path}")
+                    if fmt == "csv":
+                        csv_path = output_path.rsplit(".", 1)[0] + ".csv"
+                        write_csv(csv_path, merged_jobs)
+                merged_details = merge_details(merge, [])
+
+            # 抓详情
+            details = None
+            if detail and list_data.get("jobs"):
+                events_callback = None
+                events_file_handle = None
+                if events_output:
+                    try:
+                        os.makedirs(os.path.dirname(events_output) or ".", exist_ok=True)
+                        events_file_handle = open(events_output, "w", encoding="utf-8")
+
+                        def events_callback(event, _f=events_file_handle):
+                            _f.write(json.dumps(event, ensure_ascii=False) + "\n")
+                            _f.flush()
+                    except OSError as exc:
+                        print(f"⚠️ 无法写入事件文件 ({events_output}): {exc}")
+                        events_callback = None
+                        if events_file_handle is not None:
+                            try:
+                                events_file_handle.close()
+                            except OSError:
+                                pass
+                            events_file_handle = None
+                try:
+                    details = scrape_details(
+                        list_data, max_details, detail_output_path,
+                        cdp_port=cdp_port, fmt=fmt,
+                        event_callback=events_callback,
+                        enable_parallel=enable_parallel,
+                        tab_pool_size=tab_pool_size,
+                        stagger_range=stagger_range,
+                        inter_job_gap_range=inter_job_gap_range,
+                        reset_every=reset_every,
+                        cancel_event=cancel_event, on_poll=on_poll,
+                    )
+                finally:
+                    if events_file_handle is not None:
+                        try:
+                            events_file_handle.close()
+                        except OSError:
+                            pass
+                if merged_details and detail_output_path:
+                    details = merge_details_from_lists(merged_details, details)
+                    os.makedirs(os.path.dirname(detail_output_path) or ".", exist_ok=True)
+                    write_json_atomic(detail_output_path, details)
+                    print(f"合并详情已保存: {detail_output_path}")
+                    if fmt == "csv":
+                        detail_csv = detail_output_path.rsplit(".", 1)[0] + ".csv"
+                        write_detail_csv(detail_csv, details)
+
+            # 分析
+            if analysis:
+                if not details:
+                    details = load_existing_details(None, detail_output_path)
+                analyze(list_data, details, search_keyword=keyword)
+
+            # 抓取正常结束后按需收尾（仅成功路径；异常不触发，保留登录态）
+            if close_chrome:
+                profile = prepare_cdp_profile(copy_login_state=False, reset=False)
+                stopped = stop_cdp_chrome(profile["path"])
+                if stopped:
+                    print(f"\n🧹 已按 close_chrome 关闭 BOSS 专用 Chrome 进程：{stopped} 个")
+                else:
+                    print(f"\nℹ️  close_chrome 未发现运行中的 BOSS 专用 Chrome 进程")
+
+            return {"list_data": list_data, "details": details}
+        except RiskControlError as e:
+            # 醒目报告经 redirect_stdout 转发 on_log，再原样抛出（等价 __main__ 块）
+            print_risk_control_report(e)
+            raise
+        finally:
+            if buffer is not None:
+                buffer.flush()
+
+
+class _LineLogBuffer:
+    """按行转发 stdout 到 on_log 回调（programmatic 日志契约 §2.2）。
+
+    contextlib.redirect_stdout 要求 file-like 对象；本类实现 write/flush，
+    遇换行触发 on_log(line)，未换行的尾部在 flush 时补发。
+    """
+
+    def __init__(self, on_log):
+        self._on_log = on_log
+        self._buf = ""
+
+    def write(self, s):
+        if not s:
+            return 0
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._on_log(line)
+        return len(s)
+
+    def flush(self):
+        if self._buf:
+            self._on_log(self._buf)
+            self._buf = ""
 
 
 # ============================================================
