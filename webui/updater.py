@@ -106,6 +106,7 @@ class UpdateInfo:
     asset_size: int = 0
     sha256_url: str = ""
     reason: str = ""  # ok=False / 无对应资产时的原因码
+    checked_at: float = 0.0  # 本次检查依据的数据时间（缓存命中时为缓存写入时间）
 
     def to_dict(self) -> dict:
         return {
@@ -120,6 +121,7 @@ class UpdateInfo:
             "asset_size": self.asset_size,
             "sha256_url": self.sha256_url,
             "reason": self.reason,
+            "checked_at": self.checked_at,
         }
 
 
@@ -194,7 +196,10 @@ def check_for_update(
     if not force:
         cached = _read_cache(state_dir)
         if cached and cached.get("api"):
-            return _build_info(cached["api"], current_version, update_platform)
+            return _build_info(
+                cached["api"], current_version, update_platform,
+                checked_at=float(cached.get("checked_at") or 0.0),
+            )
     getter = fetcher or (lambda: requests.get(
         GITHUB_LATEST_URL, timeout=DOWNLOAD_TIMEOUT,
         headers={"Accept": "application/vnd.github+json"},
@@ -207,17 +212,22 @@ def check_for_update(
     except Exception:
         return UpdateInfo(ok=False, current=current_version, reason="check_failed")
 
-    _write_cache({"checked_at": time.time(), "api": payload}, state_dir)
-    return _build_info(payload, current_version, update_platform)
+    checked_at = time.time()
+    _write_cache({"checked_at": checked_at, "api": payload}, state_dir)
+    return _build_info(payload, current_version, update_platform, checked_at=checked_at)
 
 
-def _build_info(api: dict, current_version: str, update_platform: str) -> UpdateInfo:
+def _build_info(
+    api: dict, current_version: str, update_platform: str, *,
+    checked_at: float = 0.0,
+) -> UpdateInfo:
     tag = str(api.get("tag_name") or "")
     info = UpdateInfo(
         current=current_version,
         latest=tag.lstrip("vV"),
         release_url=str(api.get("html_url") or ""),
         release_notes=str(api.get("body") or "")[:4000],
+        checked_at=checked_at,
     )
     info.has_update = bool(tag) and is_newer(tag, current_version)
     if not info.has_update:
@@ -414,12 +424,18 @@ def build_updater_script(
         content = "\r\n".join([
             "@echo off",
             "chcp 65001 >nul",
+            # 等主进程退出，最多 30 秒；超时强杀，避免无限等待导致更新卡死
+            # （pywebview 窗口销毁后事件循环可能不返回，主进程 PID 不消失）。
             f":wait_{pid}",
             f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul',
-            "if not errorlevel 1 (",
-            "  timeout /t 1 /nobreak >nul",
-            f"  goto wait_{pid}",
-            ")",
+            "if errorlevel 1 goto gone",
+            "set /a tries+=1",
+            "if %tries% geq 30 goto kill",
+            "ping -n 2 127.0.0.1 >nul",
+            f"goto wait_{pid}",
+            ":kill",
+            f"taskkill /F /PID {pid} >nul 2>nul",
+            ":gone",
             # move 失败说明目标仍被占用或权限不足 → 保留旧版，报错退出
             f'move /Y "{installer}" "{target}"',
             "if errorlevel 1 (",
@@ -440,8 +456,13 @@ def build_updater_script(
         f'INSTALLER="{installer}"',
         f'TARGET="{target}"',
         f'MOUNT="{mount_point}"',
-        # 等主进程退出
-        f"while kill -0 {pid} 2>/dev/null; do sleep 1; done",
+        # 等主进程退出，最多 30 秒；超时强杀，避免无限等待导致更新卡死
+        "i=0",
+        f"while kill -0 {pid} 2>/dev/null; do",
+        "  i=$((i+1))",
+        f"  if [ $i -ge 30 ]; then kill -9 {pid} 2>/dev/null; break; fi",
+        "  sleep 1",
+        "done",
         'rm -rf "$MOUNT"',
         'hdiutil attach "$INSTALLER" -nobrowse -readonly -mountpoint "$MOUNT" >/dev/null 2>&1',
         'if [ ! -d "$MOUNT/CareerScout.app" ]; then',

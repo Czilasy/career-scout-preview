@@ -30,6 +30,49 @@ def _tuning_quality_context():
     }
 
 
+class ThemeApiTests(unittest.TestCase):
+    """主题偏好持久化（/api/theme）。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.theme_path = root / "theme.json"
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        session = self.client.get("/api/session")
+        self.token = session.get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = self.token
+        self._patcher = mock.patch("webui.app._theme_path", return_value=self.theme_path)
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        self.temp.cleanup()
+
+    def test_theme_defaults_to_light(self):
+        data = self.client.get("/api/theme").get_json()
+        self.assertEqual(data, {"ok": True, "mode": "light"})
+
+    def test_theme_persists_put_then_get(self):
+        resp = self.client.put("/api/theme", json={"mode": "dark"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["mode"], "dark")
+        data = self.client.get("/api/theme").get_json()
+        self.assertEqual(data["mode"], "dark")
+        self.assertTrue(self.theme_path.exists())
+
+    def test_theme_rejects_invalid_mode(self):
+        resp = self.client.put("/api/theme", json={"mode": "neon"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(self.theme_path.exists())
+
+
 class WebUIAppTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

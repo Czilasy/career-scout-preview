@@ -167,7 +167,8 @@ class CollectCheckItemsTests(unittest.TestCase):
         self.assertFalse(all_pass)
         by_id = {item["id"]: item for item in items}
         self.assertEqual(by_id["cdp"]["status"], "fail")
-        self.assertIn("--setup-chrome", by_id["cdp"]["fix"])
+        # cdp 项只读展示：不再提供一键启动按钮（启动任务时自动拉起浏览器）
+        self.assertIsNone(by_id["cdp"]["fix"])
         self.assertEqual(by_id["boss_login"]["status"], "skip")
 
     def test_not_logged_in_fails_with_guidance(self):
@@ -304,6 +305,23 @@ class ZhilianLoginProbeTests(unittest.TestCase):
 
     def test_page_not_loaded_means_unknown(self):
         self.assertEqual(self._probe(body="", loaded=False), "unknown")
+
+    def test_api_city_code_nationwide_is_empty(self):
+        """全国（jl0）映射为空串：fe-api 不传城市字段才是全国搜索。"""
+        from scripts import zhilian_cdp_raw as zha
+        self.assertEqual(zha._api_city_code("jl0"), "")
+        self.assertEqual(zha._api_city_code("779"), "779")
+
+    def test_search_expression_omits_city_for_nationwide(self):
+        from scripts import zhilian_cdp_raw as zha
+        expr = zha._search_fetch_expression("Java 开发", "", 1)
+        self.assertNotIn("S_SOU_WORK_CITY", expr)
+
+    def test_search_expression_includes_specific_city(self):
+        from scripts import zhilian_cdp_raw as zha
+        expr = zha._search_fetch_expression("Java 开发", "779", 1)
+        self.assertIn("S_SOU_WORK_CITY", expr)
+        self.assertIn("779", expr)
 
 
 if __name__ == "__main__":

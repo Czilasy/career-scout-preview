@@ -153,19 +153,9 @@ async function testAiConnection() {
   }
 }
 
-// 第一版两个修复动作：启动专用浏览器、打开账号浏览器登录（D5）。
-// 其余 fix 文案仅作提示展示，不生成按钮。
+// 修复动作：登录指引、打开 AI 设置。其余 fix 文案仅作提示展示，不生成按钮。
 function fixAction(item: CheckItem): { label: string; run: () => Promise<void> } | null {
   const fix = item.fix || "";
-  if (fix.includes("启动专用浏览器")) {
-    return {
-      label: "启动专用浏览器",
-      run: async () => {
-        await apiRequest("/api/setup-chrome", { method: "POST" });
-        setLocalNotice({ message: "已发起启动专用浏览器任务，稍等片刻后重新检查", tone: "info" });
-      },
-    };
-  }
   if (fix.includes("打开账号浏览器登录") || fix.includes("浏览器登录")) {
     return {
       label: "登录指引",

@@ -113,6 +113,22 @@ input {
   color: var(--brand);
   font-style: normal;
 }
+/* 更新红点：新版本存在时挂在项目名右上角；点击项目名打开更新弹窗 */
+.brand {
+  position: relative;
+}
+.brand-update-dot {
+  position: absolute;
+  top: 6px;
+  right: -7px;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: #e5484d;
+  border: 1.5px solid var(--panel, #fff);
+  box-shadow: 0 0 0 1px rgba(229, 72, 77, 0.35);
+  pointer-events: none;
+}
 /* 本轮状态胶囊：仅有轮次/任务上下文时渲染（App.vue v-if） */
 .round-pill {
   justify-self: center;

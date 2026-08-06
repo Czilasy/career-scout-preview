@@ -167,6 +167,7 @@ export interface UpdateCheckResult {
   asset_size: number;
   sha256_url: string;
   reason: string;
+  checked_at?: number;
   runtime_mode: string;
   installable: boolean;
 }

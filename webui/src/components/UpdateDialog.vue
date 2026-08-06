@@ -23,7 +23,7 @@ const props = defineProps<{
   info: UpdateCheckResult | null;
 }>();
 
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: []; ignore: [] }>();
 
 const progress = ref<UpdateProgress | null>(null);
 const busy = ref(false);
@@ -35,6 +35,13 @@ const phase = computed(() => progress.value?.status || "idle");
 const percent = computed(() =>
   Math.min(100, Math.round((progress.value?.progress || 0) * 100)),
 );
+const checkedAtText = computed(() => {
+  const at = props.info?.checked_at;
+  if (!at) return "";
+  const date = new Date(at * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+});
 const sizeText = computed(() => {
   const size = props.info?.asset_size || 0;
   return size > 0 ? `${(size / 1024 / 1024).toFixed(1)} MB` : "";
@@ -141,6 +148,9 @@ onBeforeUnmount(stopPolling);
     @close="emit('close')"
   >
     <div class="update-dialog" data-testid="update-dialog">
+      <p v-if="checkedAtText" class="update-checked-at" data-testid="update-checked-at">
+        上次检查：{{ checkedAtText }}
+      </p>
       <pre v-if="info?.release_notes" class="update-notes">{{ info.release_notes }}</pre>
 
       <div v-if="error" class="update-error" role="alert" data-testid="update-error">{{ error }}</div>
@@ -168,6 +178,9 @@ onBeforeUnmount(stopPolling);
     </div>
 
     <template #footer>
+      <button class="button secondary" type="button" data-testid="update-ignore" @click="emit('ignore')">
+        忽略此版本
+      </button>
       <button class="button secondary" type="button" @click="emit('close')">稍后再说</button>
       <button
         v-if="info?.installable && phase === 'ready'"
@@ -208,6 +221,11 @@ onBeforeUnmount(stopPolling);
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+.update-checked-at {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 .update-notes {
   margin: 0;

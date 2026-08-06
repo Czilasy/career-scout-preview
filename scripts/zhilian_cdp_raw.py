@@ -44,16 +44,18 @@ _ZHILIAN_SEARCH_API = "https://fe-api.zhaopin.com/c/i/search/positions"
 _ZHILIAN_DETAIL_PATTERN = "https://www.zhaopin.com/jobdetail/{job_id}.htm"
 
 # 真实页面文本 marker（2026-08-04 核验；只保存脱敏 marker，不保存页面正文）。
+# 2026-08-07 收紧：移除 "verify"/"captcha"/"稍后再试" 等泛词——正常页面
+# 文案（按钮、提示、广告位）可能包含这些词，导致误判风控（账号被错误标记
+# restricted 并写入 4h 冷却）。现在只保留高置信度的完整短语。
 _LOGIN_MARKERS = (
     "请登录", "登录后查看", "扫码登录", "账号登录", "立即登录",
     "passport.zhaopin.com",
 )
 _VERIFY_MARKERS = (
     "EdgeOne", "人机验证", "安全验证", "请完成验证", "拖动滑块",
-    "verify", "captcha",
 )
 _RATE_MARKERS = (
-    "访问过于频繁", "请求过于频繁", "操作频繁", "稍后再试",
+    "访问过于频繁", "请求过于频繁", "操作频繁",
     "429", "too many requests",
 )
 _BLOCK_MARKERS = (
@@ -206,7 +208,6 @@ def _canonical_job_url(job_id: str) -> str:
 def _search_fetch_expression(keyword: str, city_code: str, page_index: int) -> str:
     body = {
         "S_SOU_FULL_INDEX": keyword,
-        "S_SOU_WORK_CITY": city_code,
         "order": 0,
         "actionid": f"zs-{int(time.time() * 1000)}",
         "pageSize": 20,
@@ -215,6 +216,11 @@ def _search_fetch_expression(keyword: str, city_code: str, page_index: int) -> s
         "platform": 13,
         "version": "0.0.0",
     }
+    # 全国（城市码为空）不传 S_SOU_WORK_CITY：智联 fe-api 对 "0"/"jl0"
+    # 一律忽略城市条件但返回空列表（2026-08-07 实测 code=200 空 list），
+    # 只有省略字段才是真正的全国搜索。
+    if city_code:
+        body["S_SOU_WORK_CITY"] = city_code
     return (
         "(async()=>{"
         "const body=" + json.dumps(body, ensure_ascii=False) + ";"
@@ -238,9 +244,13 @@ def _search_fetch_expression(keyword: str, city_code: str, page_index: int) -> s
 
 
 def _api_city_code(platform_code: str) -> str:
-    """把注册表城市码映射为搜索 API 的 S_SOU_WORK_CITY 值。"""
+    """把注册表城市码映射为搜索 API 的 S_SOU_WORK_CITY 值。
+
+    全国（jl0）返回空串：fe-api 不传城市字段才是真正的全国搜索
+    （"0"/"jl0" 会被服务端接受但恒返回空列表，2026-08-07 实测）。
+    """
     if platform_code == "jl0":
-        return "0"
+        return ""
     return platform_code
 
 

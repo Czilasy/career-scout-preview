@@ -694,6 +694,10 @@ def run_desktop_shell(deps):
                 window.destroy()
             except Exception:
                 pass
+            # pywebview 窗口销毁后 webview.start() 可能不返回（WinForms 事件
+            # 循环未结束），更新替换脚本会一直等主进程 PID 消失而卡死；
+            # 直接强制退出进程，确保 update_apply 脚本的等待立即通过。
+            os._exit(0)
 
         js_api.quit_handler = _quit_and_cleanup
         webview_module.start()

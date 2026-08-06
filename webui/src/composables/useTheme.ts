@@ -18,16 +18,47 @@ import type { Platform } from "../types";
 export type ThemeMode = "light" | "dark";
 
 const MODE_STORAGE_KEY = "career-scout-theme-mode";
+const THEME_API = "/api/theme";
 
 /** 全局单例：所有 useTheme() 调用共享同一份状态。 */
 const mode = ref<ThemeMode>("light");
 const platform = ref<Platform>("boss");
 let initialized = false;
+// 用户手动切换过主题后，启动期的后端回读结果不再覆盖（避免竞态覆盖用户选择）。
+let userInteracted = false;
 
 function applyAttributes() {
   if (typeof document === "undefined") return;
   document.documentElement.setAttribute("data-theme", mode.value);
   document.documentElement.setAttribute("data-platform", platform.value);
+}
+
+/** 从后端读主题偏好（桌面版随机端口导致 localStorage 不可靠，后端为准）。 */
+async function loadFromBackend() {
+  try {
+    const resp = await fetch(THEME_API, { headers: { Accept: "application/json" } });
+    if (!resp.ok) return;
+    const data = (await resp.json()) as { mode?: string };
+    if (!userInteracted && (data.mode === "light" || data.mode === "dark")) {
+      mode.value = data.mode;
+      applyAttributes();
+    }
+  } catch {
+    /* 后端不可达时保留 localStorage 结果 */
+  }
+}
+
+/** 写后端主题偏好；失败静默（下次启动以 localStorage 兜底）。 */
+function saveToBackend(next: ThemeMode) {
+  try {
+    void fetch(THEME_API, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: next }),
+    });
+  } catch {
+    /* 静默 */
+  }
 }
 
 function initFromStorage() {
@@ -45,17 +76,21 @@ function initFromStorage() {
     /* localStorage 不可用时退化为默认 light */
   }
   applyAttributes();
+  // 后端为权威来源：启动时异步回读并覆盖本地值（若用户尚未操作）。
+  void loadFromBackend();
 }
 
 /** 切换明暗模式（不传参则 toggle 当前值）。 */
 export function toggleTheme(next?: ThemeMode): ThemeMode {
   initFromStorage();
   mode.value = next ?? (mode.value === "light" ? "dark" : "light");
+  userInteracted = true;
   try {
     window.localStorage.setItem(MODE_STORAGE_KEY, mode.value);
   } catch {
     /* 持久化失败不阻断切换 */
   }
+  saveToBackend(mode.value);
   applyAttributes();
   return mode.value;
 }

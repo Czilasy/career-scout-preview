@@ -19,7 +19,7 @@ BOSS直聘职位抓取 + 分析 — 纯 CDP raw protocol
   uv run python3 scripts/boss_cdp_raw.py --version
 """
 
-__version__ = "2.6.0"
+__version__ = "2.7.0"
 
 import json
 import time
@@ -2734,8 +2734,7 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
         except (requests.ConnectionError, requests.Timeout):
             cdp_status = "fail"
             append("cdp", "专用浏览器已启动", "fail",
-                   f"无法连接 127.0.0.1:{cdp_port}",
-                   "启动专用浏览器: python3 scripts/boss_cdp_raw.py --setup-chrome")
+                   f"无法连接 127.0.0.1:{cdp_port}（启动任务时会自动拉起浏览器）")
         except (json.JSONDecodeError, KeyError) as e:
             cdp_status = "fail"
             append("cdp", "专用浏览器已启动", "fail",

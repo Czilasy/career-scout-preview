@@ -17,6 +17,8 @@ describe("useTheme", () => {
   beforeEach(() => {
     localStorage.clear();
     resetRootAttributes();
+    // 主题后端持久化依赖 fetch：测试环境统一 stub 为失败，避免真实网络调用。
+    global.fetch = vi.fn(async () => ({ ok: false }) as Response);
   });
 
   it("applies light mode as default when no saved preference", async () => {
@@ -103,5 +105,43 @@ describe("useTheme", () => {
     const { useTheme } = await loadModule();
     const { mode } = useTheme();
     expect(mode.value).toBe("light");
+  });
+
+  it("applies backend mode on first load when present", async () => {
+    global.fetch = vi.fn(
+      async () => ({ ok: true, json: async () => ({ mode: "dark" }) }) as Response,
+    );
+    const { useTheme } = await loadModule();
+    const { mode } = useTheme();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mode.value).toBe("dark");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+  });
+
+  it("does not let backend load overwrite user interaction", async () => {
+    let resolveFetch: ((value: Response) => void) | undefined;
+    global.fetch = vi.fn(
+      () => new Promise<Response>((resolve) => { resolveFetch = resolve; }),
+    );
+    const { useTheme, toggleTheme } = await loadModule();
+    const { mode } = useTheme();
+    toggleTheme("dark");
+    // 后端回读迟到且携带旧值：不得覆盖用户刚做的选择
+    resolveFetch?.({ ok: true, json: async () => ({ mode: "light" }) } as Response);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mode.value).toBe("dark");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+  });
+
+  it("persists toggle to backend endpoint", async () => {
+    const { useTheme, toggleTheme } = await loadModule();
+    useTheme();
+    toggleTheme("dark");
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    const putCall = fetchMock.mock.calls.find(([url, init]) =>
+      url === "/api/theme" && (init as RequestInit)?.method === "PUT");
+    expect(putCall).toBeTruthy();
+    const body = JSON.parse((putCall![1] as RequestInit).body as string);
+    expect(body.mode).toBe("dark");
   });
 });

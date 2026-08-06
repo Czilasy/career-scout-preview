@@ -217,6 +217,15 @@ DEFAULT_STATE_DIR = Path(
 )
 
 
+def _theme_path() -> Path:
+    """主题偏好文件：与登录态/冷却等同级放 ~/.career-scout/theme.json。
+
+    不用 DEFAULT_STATE_DIR（webui 子目录）：主题属于用户偏好，与桌面窗口
+    状态（desktop_window.json）同级，便于用户直接查看与备份。
+    """
+    return Path(os.path.expanduser("~/.career-scout")) / "theme.json"
+
+
 _FINE_VERDICTS = frozenset({"match", "not_match", "mismatch", "uncertain"})
 
 
@@ -1210,6 +1219,14 @@ def create_app(config=None):
                 "error_code": "platform_validation_failed",
                 "user_message": "不支持的招聘平台",
             }), 400
+        if str(error).startswith("city_mapping_missing"):
+            return jsonify({
+                "error_code": "city_mapping_missing",
+                "user_message": (
+                    str(error).split(":", 1)[-1].strip()
+                    + "，请检查城市名称或选择相近城市"
+                ),
+            }), 422
         return jsonify({
             "error_code": "invalid_request",
             "user_message": str(error),
@@ -6960,7 +6977,7 @@ def create_app(config=None):
         force = request.args.get("force", "").lower() in ("1", "true", "yes")
         info = _updater_mod.check_for_update(
             _product_version, force=force,
-            state_dir=None if app.config.get("TESTING") else DEFAULT_STATE_DIR,
+            state_dir=None if app.config.get("TESTING") else _updater_mod.DEFAULT_STATE_DIR,
         )
         return jsonify(_update_env_payload(info.to_dict()))
 
@@ -6969,7 +6986,7 @@ def create_app(config=None):
         """启动后台下载；仅接受带 sha256 资产的更新（无哈希拒绝）。"""
         info = _updater_mod.check_for_update(
             _product_version, force=False,
-            state_dir=None if app.config.get("TESTING") else DEFAULT_STATE_DIR,
+            state_dir=None if app.config.get("TESTING") else _updater_mod.DEFAULT_STATE_DIR,
         )
         if not info.has_update:
             return jsonify({"ok": False, "error_code": "no_update",
@@ -7019,13 +7036,13 @@ def create_app(config=None):
             installer_path=installer_path,
             install_target=install_target,
             pid=os.getpid(),
-            script_dir=DEFAULT_STATE_DIR,
+            script_dir=_updater_mod.DEFAULT_STATE_DIR,
         )
         try:
             if _sys.platform == "win32":
                 subprocess.Popen(
                     ["cmd", "/c", str(script)],
-                    cwd=str(DEFAULT_STATE_DIR),
+                    cwd=str(_updater_mod.DEFAULT_STATE_DIR),
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
                     | 0x00000008,  # DETACHED_PROCESS
@@ -7033,7 +7050,7 @@ def create_app(config=None):
             else:
                 subprocess.Popen(
                     [runner, str(script)],
-                    cwd=str(DEFAULT_STATE_DIR),
+                    cwd=str(_updater_mod.DEFAULT_STATE_DIR),
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     start_new_session=True,
                 )
@@ -7041,6 +7058,34 @@ def create_app(config=None):
             return jsonify({"ok": False, "error_code": "updater_launch_failed",
                             "user_message": f"更新脚本启动失败：{exc}"}), 500
         return jsonify({"ok": True, "user_message": "即将重启完成更新"})
+
+    # 主题偏好（明暗）：存 ~/.career-scout/theme.json。
+    # 桌面版每次启动使用随机端口，localStorage 按 origin（含端口）隔离，
+    # 前端本地持久化必然丢失；改由后端文件持久化，源码模式与 EXE 统一。
+    @app.route("/api/theme", methods=["GET"])
+    def api_theme_get():
+        mode = "light"
+        try:
+            data = json.loads(_theme_path().read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("mode") in ("light", "dark"):
+                mode = data["mode"]
+        except (OSError, ValueError):
+            pass
+        return jsonify({"ok": True, "mode": mode})
+
+    @app.route("/api/theme", methods=["PUT"])
+    def api_theme_put():
+        body = request.get_json(silent=True) or {}
+        mode = str(body.get("mode") or "")
+        if mode not in ("light", "dark"):
+            return jsonify({"ok": False, "error": "mode 必须为 light 或 dark"}), 400
+        try:
+            path = _theme_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"mode": mode}, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            return jsonify({"ok": False, "error": "theme 写入失败"}), 500
+        return jsonify({"ok": True, "mode": mode})
 
     @app.route("/api/task-state/<run_id>", methods=["GET"])
     def api_task_state(run_id: str):

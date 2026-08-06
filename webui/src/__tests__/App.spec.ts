@@ -426,4 +426,68 @@ describe("App", () => {
     await wrapper.get('[data-testid="theme-toggle"]').trigger("click");
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
+
+  // ---------- 更新提示：自动弹窗 / 忽略 / 项目名红点 ----------
+
+  function updateResponse() {
+    return response({
+      ok: true,
+      current: "2.5.0",
+      latest: "2.6.0",
+      has_update: true,
+      release_url: "https://github.com/Czilasy/career-scout-preview/releases/tag/v2.6.0",
+      release_notes: "## 更新内容",
+      asset_name: "CareerScout-v2.6.0.exe",
+      asset_url: "https://github.com/x/x.exe",
+      asset_size: 1000,
+      sha256_url: "https://github.com/x/x.sha256",
+      reason: "",
+      checked_at: 0,
+      runtime_mode: "exe",
+      installable: true,
+    });
+  }
+
+  function mountWithUpdate(overrides: { ignored?: string } = {}) {
+    localStorage.clear();
+    if (overrides.ignored) localStorage.setItem("career-scout-ignored-update", overrides.ignored);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/update-check")) return updateResponse();
+      if (url.endsWith("/api/profiles")) return response({ profiles: [] });
+      return baseAppResponse(url) ?? response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return mount(App);
+  }
+
+  it("auto-opens update dialog and shows brand dot on first discovery", async () => {
+    const wrapper = mountWithUpdate();
+    await flushPromises();
+    expect(wrapper.find('[data-testid="update-dialog"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="brand-update-dot"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="update-trigger"]').exists()).toBe(true);
+  });
+
+  it("does not auto-open dialog for ignored version but keeps brand dot", async () => {
+    const wrapper = mountWithUpdate({ ignored: "2.6.0" });
+    await flushPromises();
+    expect(wrapper.find('[data-testid="update-dialog"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="brand-update-dot"]').exists()).toBe(true);
+  });
+
+  it("closes dialog and records version when ignoring", async () => {
+    const wrapper = mountWithUpdate();
+    await flushPromises();
+    expect(wrapper.find('[data-testid="update-dialog"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="update-ignore"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="update-dialog"]').exists()).toBe(false);
+    expect(localStorage.getItem("career-scout-ignored-update")).toBe("2.6.0");
+    // 红点保留，点击项目名重新打开
+    expect(wrapper.find('[data-testid="brand-update-dot"]').exists()).toBe(true);
+    await wrapper.get(".brand").trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="update-dialog"]').exists()).toBe(true);
+  });
 });

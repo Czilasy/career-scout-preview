@@ -139,13 +139,56 @@ onMounted(async () => {
 // ---------------------------------------------------------------------------
 const updateInfo = ref<UpdateCheckResult | null>(null);
 const updateDialogOpen = ref(false);
+/** 用户点过「忽略此版本」的版本号（localStorage 持久化，跨启动生效）。 */
+const IGNORED_UPDATE_KEY = "career-scout-ignored-update";
+
+function ignoredUpdateVersion(): string {
+  try {
+    return window.localStorage.getItem(IGNORED_UPDATE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
 
 async function checkAppUpdate() {
   try {
     const result = await updateApi.check();
-    if (result?.ok && result.has_update) updateInfo.value = result;
+    if (result?.ok && result.has_update) {
+      updateInfo.value = result;
+      // 首次发现新版本自动弹出；用户忽略过该版本则只保留红点入口。
+      if (result.latest !== ignoredUpdateVersion()) {
+        updateDialogOpen.value = true;
+      }
+    }
   } catch {
     // 无网/限流/后端异常都静默，更新提示不是关键路径
+  }
+}
+
+/** 「忽略此版本」：记住版本号，本次及后续启动不再自动弹窗（红点保留）。 */
+function ignoreThisVersion() {
+  const latest = updateInfo.value?.latest;
+  if (!latest) return;
+  try {
+    window.localStorage.setItem(IGNORED_UPDATE_KEY, latest);
+  } catch {
+    /* 持久化失败不阻断关闭 */
+  }
+  updateDialogOpen.value = false;
+}
+
+// 手动检查更新：绕过 24h 缓存（force=1），无更新时给出明确反馈。
+async function manualCheckUpdate() {
+  try {
+    const result = await updateApi.check(true);
+    if (result?.ok && result.has_update) {
+      updateInfo.value = result;
+      updateDialogOpen.value = true;
+    } else {
+      showNotice({ message: "已是最新版本", tone: "success" });
+    }
+  } catch {
+    showNotice({ message: "检查更新失败，请检查网络后重试", tone: "warning" });
   }
 }
 
@@ -268,13 +311,26 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
 <template>
   <div class="app-shell">
     <header class="app-header">
-      <a class="brand" href="/" aria-label="Career Scout 工作台首页">
+      <a
+        class="brand"
+        href="/"
+        aria-label="Career Scout 工作台首页"
+        @click.prevent="updateInfo ? (updateDialogOpen = true) : undefined"
+      >
         <svg class="brand-mark" width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true">
           <path d="M25.5 6.5 L18.3 18.3 L6.5 25.5 Z" fill="var(--logo-a)" />
           <path d="M25.5 6.5 L13.7 13.7 L6.5 25.5 Z" fill="var(--logo-b)" />
           <circle cx="16" cy="16" r="1.9" fill="var(--logo-dot)" />
         </svg>
         <span class="brand-name">Career<span class="tick">·</span>Scout</span>
+        <span
+          v-if="updateInfo"
+          class="brand-update-dot"
+          data-testid="brand-update-dot"
+          role="status"
+          :aria-label="`发现新版本 v${updateInfo.latest}`"
+          title="发现新版本，点击查看更新"
+        ></span>
       </a>
 
       <div v-if="roundStatus" class="round-pill" data-testid="round-status-pill">
@@ -356,6 +412,17 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           @click="updateDialogOpen = true"
         >
           <Rocket :size="18" aria-hidden="true" /><span>新版本 v{{ updateInfo.latest }}</span>
+        </button>
+        <button
+          v-else
+          class="icon-button manual-update-check"
+          type="button"
+          data-testid="manual-update-check"
+          aria-label="检查更新"
+          title="检查更新"
+          @click="manualCheckUpdate"
+        >
+          <Rocket :size="18" aria-hidden="true" />
         </button>
         <button
           class="icon-button github-link"
@@ -472,6 +539,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
       :open="updateDialogOpen"
       :info="updateInfo"
       @close="updateDialogOpen = false"
+      @ignore="ignoreThisVersion"
     />
   </div>
 </template>
