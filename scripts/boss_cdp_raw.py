@@ -37,6 +37,7 @@ import shutil
 import signal
 import logging
 import ntpath
+import threading
 from datetime import datetime
 from collections import Counter
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
@@ -3386,13 +3387,10 @@ def run_search_programmatic(
     if not require_runtime_dependencies("requests", "websocket"):
         raise RuntimeError("缺少 CDP 运行依赖")
 
-    # 日志转发：on_log 非 None 时 redirect_stdout 到行缓冲
+    # 日志转发：on_log 非 None 时用线程感知的行缓冲（buffer 自带
+    # 上下文管理器，恢复时带守卫，避免并发任务的 redirect 互相覆盖）
     buffer = _LineLogBuffer(on_log) if on_log is not None else None
-    redirect = (
-        contextlib.redirect_stdout(buffer)
-        if buffer is not None
-        else contextlib.nullcontext()
-    )
+    redirect = buffer if buffer is not None else contextlib.nullcontext()
     with redirect:
         try:
             # 登录状态检测
@@ -3506,20 +3504,67 @@ def run_search_programmatic(
                 buffer.flush()
 
 
-class _LineLogBuffer:
-    """按行转发 stdout 到 on_log 回调（programmatic 日志契约 §2.2）。
+class _ThreadAwareStdout:
+    """stdout 替身：只捕获创建线程的输出，其他线程转发到 fallback。
 
-    contextlib.redirect_stdout 要求 file-like 对象；本类实现 write/flush，
+    in-process 模式下多个任务与 Flask 请求线程共存于同一进程，
+    ``contextlib.redirect_stdout`` 是进程级赋值，直接使用会把其他线程的
+    print 也劫持进任务日志。本类按线程分派：任务线程的输出进本 buffer，
+    其他线程原样转发到创建时的 ``sys.stdout``（链式收敛回真 stdout）。
+    恢复时仅在 ``sys.stdout`` 仍指向自己时还原，避免并发任务的 redirect
+    互相覆盖（后退出者恢复成先退出者留下的 buffer）。
+
+    可直接作上下文管理器使用（``with buffer:``），等价于带守卫的
+    ``contextlib.redirect_stdout(buffer)``。
+    """
+
+    def __init__(self):
+        self._tid = threading.get_ident()
+        self._fallback = sys.stdout
+        self._previous = None
+
+    def write(self, text):  # pragma: no cover - 由子类实现
+        raise NotImplementedError
+
+    def flush(self):
+        if threading.get_ident() != self._tid and self._fallback is not None:
+            try:
+                self._fallback.flush()
+            except Exception:
+                pass
+
+    def __enter__(self):
+        self._previous = sys.stdout
+        sys.stdout = self
+        return self
+
+    def __exit__(self, *exc):
+        if sys.stdout is self:
+            sys.stdout = self._previous
+        self.flush()
+
+
+class _LineLogBuffer(_ThreadAwareStdout):
+    """按行转发任务线程 stdout 到 on_log 回调（programmatic 日志契约 §2.2）。
+
     遇换行触发 on_log(line)，未换行的尾部在 flush 时补发。
     """
 
     def __init__(self, on_log):
+        super().__init__()
         self._on_log = on_log
         self._buf = ""
 
     def write(self, s):
         if not s:
             return 0
+        if threading.get_ident() != self._tid:
+            if self._fallback is not None:
+                try:
+                    self._fallback.write(s)
+                except Exception:
+                    pass
+            return len(s)
         self._buf += s
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
@@ -3527,6 +3572,9 @@ class _LineLogBuffer:
         return len(s)
 
     def flush(self):
+        if threading.get_ident() != self._tid:
+            super().flush()
+            return
         if self._buf:
             self._on_log(self._buf)
             self._buf = ""

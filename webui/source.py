@@ -13,13 +13,14 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import random
 from pathlib import Path
 from typing import Any, Callable, Protocol, runtime_checkable
 
 from scripts import boss_cdp_raw as boss
-from webui.process_executor import ScraperExecutor
+from webui.process_executor import ScraperExecutor, run_with_deadline
 from webui.workbench import normalize_job_link
 
 
@@ -1146,6 +1147,12 @@ class BossCdpSource:
         的命令（如 ``--setup-chrome``）返回 ``(127, "untranslatable_command")``，
         调用方按失败处理，不崩溃。
 
+        超时语义与子进程路径对齐：``timeout`` 秒未完成 → 请求协作取消，
+        再等待收尾；仍不退出则抛 ``subprocess.TimeoutExpired``，调用方
+        （fetch_*）按既有 ``except subprocess.TimeoutExpired`` 分类为
+        ``source_timeout``。成功时返回 ``(0, output_tail)``，captured
+        内容与子进程模式等价（截断到 executor 的输出上限）。
+
         异常映射（合同 §3，与子进程退出码语义等价）：
 
         - ``CDPUnavailableError`` → ``(2, str(exc))`` → source_cdp_unavailable
@@ -1154,15 +1161,20 @@ class BossCdpSource:
         - ``SearchCancelled`` → ``(-1, "cancelled")``
         - 其他 → ``(-1, str(exc))``
         """
-        parsed = self._translate_argv(command)
+        try:
+            parsed = self._translate_argv(command)
+        except ValueError as exc:
+            # 输入文件读取失败/格式非法：显式失败返回，与子进程模式的
+            # open()/json.load() 异常等价（不静默空成功，也不向调用方裸抛）
+            return (-1, str(exc))
         if parsed is None:
             return (127, "untranslatable_command")
         try:
-            if parsed["kind"] == "list":
-                boss.run_search_programmatic(**parsed["params"])
-            else:  # detail / detail_batch
-                boss.scrape_details(**parsed["params"])
-            return (0, "")
+            completed, payload = run_with_deadline(
+                lambda: self._run_in_process_impl(parsed),
+                timeout_seconds=timeout,
+                cancel_event=self.cancel_event,
+            )
         except boss.SearchCancelled:
             return (-1, "cancelled")
         except boss.CDPUnavailableError as exc:
@@ -1175,6 +1187,25 @@ class BossCdpSource:
             return (10, exc.reason)
         except Exception as exc:
             return (-1, str(exc))
+        if not completed:
+            # 与 _default_run 的 TimeoutExpired 语义一致 → source_timeout
+            raise subprocess.TimeoutExpired(command, timeout)
+        return payload
+
+    def _run_in_process_impl(self, parsed: dict) -> tuple[int, str]:
+        """实际库式调用；stdout 收集进线程感知 capture，返回 ``(0, tail)``。
+
+        run_search_programmatic / scrape_details 的内部 print 走 sys.stdout，
+        本方法期间被 capture 收集（其他线程的输出转发回真 stdout），
+        与子进程模式的 stdout 捕获等价。
+        """
+        capture = _InProcessCapture(max_bytes=self._executor.max_output_bytes)
+        with capture:
+            if parsed["kind"] == "list":
+                boss.run_search_programmatic(**parsed["params"])
+            else:  # detail / detail_batch
+                boss.scrape_details(**parsed["params"])
+        return (0, capture.tail())
 
     def _translate_argv(self, command: list[str]) -> dict | None:
         """解析本类 ``_build_*_command`` 产出的 argv，返回 ``{kind, params}``。
@@ -1283,15 +1314,20 @@ class BossCdpSource:
 
     @staticmethod
     def _read_detail_input(input_path: str) -> dict:
-        """读取 detail input JSON（fetch_detail/fetch_details_batch 写入）。"""
+        """读取 detail input JSON（fetch_detail/fetch_details_batch 写入）。
+
+        文件缺失或 JSON 非法 → 抛 ``ValueError``（in-process 模式显式失败，
+        与子进程模式 ``open()``/``json.load()`` 的异常语义等价），绝不
+        静默返回空列表——否则输入损坏会被误判为「成功抓到 0 条」。
+        """
         try:
             with open(input_path, encoding="utf-8") as handle:
                 payload = json.load(handle)
-            if isinstance(payload, dict):
-                return payload
-        except (OSError, json.JSONDecodeError):
-            pass
-        return {"jobs": []}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"无法读取详情输入文件 {input_path}: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"详情输入文件格式非法（应为对象）: {input_path}")
+        return payload
 
     def _artifact_path_allowed(self, raw_path: str) -> bool:
         if self.artifact_root is None:
@@ -1517,6 +1553,41 @@ def _normalize_job_fields(job: dict) -> dict:
         if alt:
             normalized["company"] = str(alt)
     return normalized
+
+
+class _InProcessCapture(boss._ThreadAwareStdout):
+    """in-process 模式 stdout 收集器：任务线程输出进缓冲，其余线程转发。
+
+    与子进程模式的 stdout 捕获等价：只收集任务线程的 print，其他线程
+    （Flask 请求等）的输出转发回真 stdout，避免日志串线；``tail()``
+    返回截断到 ``max_bytes`` 的尾部文本（对齐 ScraperExecutor 语义）。
+    """
+
+    def __init__(self, max_bytes: int = 1_000_000):
+        super().__init__()
+        self._chunks: list[str] = []
+        self._size = 0
+        self._max = max(1, int(max_bytes))
+
+    def write(self, text):
+        if not text:
+            return 0
+        if threading.get_ident() != self._tid:
+            if self._fallback is not None:
+                try:
+                    self._fallback.write(text)
+                except Exception:
+                    pass
+            return len(text)
+        if self._size < self._max:
+            take = text[: self._max - self._size]
+            self._chunks.append(take)
+            self._size += len(take)
+        return len(text)
+
+    def tail(self, max_chars: int | None = None) -> str:
+        limit = self._max if max_chars is None else int(max_chars)
+        return "".join(self._chunks)[-limit:]
 
 
 def _safe_tail(text: str, *, max_chars: int = 300) -> str:

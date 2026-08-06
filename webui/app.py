@@ -75,7 +75,7 @@ from webui.workbench import (
     merge_profile_fields,
 )
 from webui.source import BossCdpSource as _BossCdpSource
-from webui.process_executor import ArtifactSpec, ScraperExecutor
+from webui.process_executor import ArtifactSpec, ScraperExecutor, run_with_deadline
 from webui import desktop_runtime
 from webui import resume as resume_service
 from webui import ai as ai_service
@@ -106,7 +106,7 @@ _SCRAPE_BLOCK_PATTERNS = (
     ("login_expired", ("登录", "未登录", "wt2", "登 录", "BOSS 登录")),
     ("source_rate_limited", (
         "限流", "频繁", "rate limit", "too many", "稍后再试",
-        "解锁", "冻结", "账号受限",
+        "解锁", "冻结", "访问受限", "异常流量", "账号受限", "429",
     )),
     ("captcha_required", ("验证码", "滑块", "gtm", "geetest")),
     ("ip_risk_control", ("IP 级风控", "风控", "ip risk", "blocked")),
@@ -133,13 +133,17 @@ def _classify_scrape_block(err_msg: str) -> str:
 # 风控异常 reason → 安全失败码（合同 inprocess-runner §3）。
 # 顺序敏感：限流优先于验证码（与 _classify_scrape_block 一致），避免
 # "频繁 + 滑块" 文案被误判为验证码。
+# 关键词集与 webui/source.py 的 _RATE_LIMIT_KEYWORDS / _VERIFICATION_KEYWORDS
+# 及下方 _SCRAPE_BLOCK_PATTERNS 保持同步，避免两种模式下同一文案分类不一致。
 _RISK_CONTROL_REASON_PATTERNS = (
-    ("source_login_required", ("登录", "未登录", "wt2", "401")),
+    ("source_login_required", ("登录", "未登录", "登 录", "wt2", "401", "login", "cookie")),
     ("source_rate_limited", (
         "限流", "频繁", "rate limit", "too many", "稍后再试",
-        "解锁", "冻结", "账号受限", "429",
+        "解锁", "冻结", "访问受限", "异常流量", "账号受限", "429",
     )),
-    ("source_verification_required", ("验证码", "滑块", "gtm", "geetest", "captcha")),
+    ("source_verification_required", (
+        "验证码", "滑块", "captcha", "slider", "verify", "gtm", "geetest",
+    )),
 )
 
 
@@ -159,15 +163,17 @@ def _classify_risk_control_reason(reason: str) -> str:
     return "source_blocked"
 
 
-class _StdoutToLogBuffer:
-    """捕获 print 输出并按行转发到 store.append_log（合同 inprocess-runner §2.2）。
+class _StdoutToLogBuffer(boss._ThreadAwareStdout):
+    """捕获任务线程 print 输出并按行转发到 store.append_log（合同 §2.2）。
 
-    供 setup_chrome 等「无 on_log 参数的库式函数」使用：用
-    ``contextlib.redirect_stdout(buffer)`` 把既有 print 按行转发，
-    不修改既有 print 语句。行格式与子进程模式 stdout 完全一致。
+    供 setup_chrome 等「无 on_log 参数的库式函数」使用：以 buffer 自身
+    作上下文管理器（带守卫恢复）把既有 print 按行转发，不修改既有
+    print 语句；其他线程的输出转发回真 stdout，避免日志串线。
+    行格式与子进程模式 stdout 完全一致。
     """
 
     def __init__(self, store, task_id):
+        super().__init__()
         self._store = store
         self._task_id = task_id
         self._buf = []
@@ -175,6 +181,13 @@ class _StdoutToLogBuffer:
     def write(self, text):
         if not text:
             return 0
+        if threading.get_ident() != self._tid:
+            if self._fallback is not None:
+                try:
+                    self._fallback.write(text)
+                except Exception:
+                    pass
+            return len(text)
         parts = text.splitlines(keepends=True)
         for part in parts:
             self._buf.append(part)
@@ -186,6 +199,9 @@ class _StdoutToLogBuffer:
         return len(text)
 
     def flush(self):
+        if threading.get_ident() != self._tid:
+            super().flush()
+            return
         if self._buf:
             line = "".join(self._buf).rstrip("\r\n")
             if line.strip():
@@ -315,12 +331,14 @@ class TaskRunner:
     """Run scraper commands sequentially while persisting state and output."""
 
     def __init__(self, store, result_dir, python_executable, start_tasks=True,
-                 execution_mode="subprocess"):
+                 execution_mode="subprocess", in_process_timeout=600):
         self.store = store
         self.result_dir = Path(result_dir)
         self.python_executable = str(python_executable)
         self.start_tasks = bool(start_tasks)
         self.execution_mode = execution_mode
+        # in-process 模式硬超时（秒），与子进程模式 timeout_seconds=600 对齐
+        self.in_process_timeout = max(1.0, float(in_process_timeout))
         self._processes = {}
         self._cancel_events = {}
         self._process_lock = threading.Lock()
@@ -519,32 +537,19 @@ class TaskRunner:
     def _run_in_process(self, task_id, task, cancel_event):
         """in_process 模式执行：调用 boss 库式函数，异常按 §3 映射表冻结。
 
+        带硬超时（``in_process_timeout``，默认 600s，与子进程模式对齐）：
+        超时 → 置 cancel_event 请求协作停止，仍不退出则按
+        ``process_timeout`` 失败（后台线程自生自灭，调用方已按失败处理）。
+
         返回 ``(status, returncode, failure_code, output_tail)``；
         ``status`` ∈ ``{"succeeded", "failed", "interrupted"}``。
         """
         try:
-            if task["kind"] == "setup_chrome":
-                returncode = self._run_setup_chrome_in_process(task_id, cancel_event)
-                if returncode == 0:
-                    return ("succeeded", 0, None, "")
-                return ("failed", returncode, "process_failed", "")
-
-            search = task["params"]["search"]
-            boss.run_search_programmatic(
-                keyword=search["keyword"],
-                city=search["city"],
-                pages=int(search["pages"]),
-                cdp_port=boss.DEFAULT_CDP_PORT,
-                output_path=task["output_path"],
-                detail_output_path=task["detail_output_path"],
-                detail=bool(search["detail"]),
-                analysis=bool(search.get("analysis")),
-                fmt=search.get("format", "json"),
-                filters=dict(search.get("filters") or {}),
-                on_log=lambda line: self.store.append_log(task_id, line),
+            completed, payload = run_with_deadline(
+                lambda: self._run_in_process_impl(task_id, task, cancel_event),
+                timeout_seconds=self.in_process_timeout,
                 cancel_event=cancel_event,
             )
-            return ("succeeded", 0, None, "")
         except boss.SearchCancelled:
             return ("interrupted", -1, None, "")
         except boss.CDPUnavailableError as exc:
@@ -556,21 +561,48 @@ class TaskRunner:
             return ("failed", 10, failed_code, exc.reason)
         except Exception as exc:
             return ("failed", -1, "process_failed", str(exc))
+        if not completed:
+            # 与子进程模式 process_executor 的 process_timeout 语义对齐
+            return ("failed", -1, "process_timeout", str(payload))
+        return payload
+
+    def _run_in_process_impl(self, task_id, task, cancel_event):
+        """in-process 实际执行体（在 run_with_deadline 的 worker 线程中）。"""
+        if task["kind"] == "setup_chrome":
+            returncode = self._run_setup_chrome_in_process(task_id, cancel_event)
+            if returncode == 0:
+                return ("succeeded", 0, None, "")
+            return ("failed", returncode, "process_failed", "")
+
+        search = task["params"]["search"]
+        boss.run_search_programmatic(
+            keyword=search["keyword"],
+            city=search["city"],
+            pages=int(search["pages"]),
+            cdp_port=boss.DEFAULT_CDP_PORT,
+            output_path=task["output_path"],
+            detail_output_path=task["detail_output_path"],
+            detail=bool(search["detail"]),
+            analysis=bool(search.get("analysis")),
+            fmt=search.get("format", "json"),
+            filters=dict(search.get("filters") or {}),
+            on_log=lambda line: self.store.append_log(task_id, line),
+            cancel_event=cancel_event,
+        )
+        return ("succeeded", 0, None, "")
 
     def _run_setup_chrome_in_process(self, task_id, cancel_event):
         """in_process 模式 setup_chrome：调用 boss.run_setup_chrome 库式函数。
 
-        run_setup_chrome 无 cancel_event/on_log 参数；用 redirect_stdout
+        run_setup_chrome 无 cancel_event/on_log 参数；用线程感知 buffer
         把既有 print 按行转发到 store.append_log，cancel_event 仅在调用
         前后检查（mid-execution 不可中断，setup_chrome 通常短时）。
         """
         if cancel_event.is_set():
             return 1
-        import contextlib
         buffer = _StdoutToLogBuffer(self.store, task_id)
-        with contextlib.redirect_stdout(buffer):
+        with buffer:
             returncode = boss.run_setup_chrome(cdp_port=boss.DEFAULT_CDP_PORT)
-        buffer.flush()
         return returncode
 
 
@@ -782,6 +814,8 @@ class WorkbenchRunner(TaskRunner):
 
         把 ``_query_command`` 产出的 argv 翻译为 ``run_search_programmatic``
         直传参数；``on_poll`` 透传以保留增量入库语义；异常按 §3 映射表冻结。
+        带硬超时（``in_process_timeout``），超时 → 协作取消 → 仍不退出
+        则按 ``process_timeout`` 失败（与子进程模式语义对齐）。
 
         返回 ``(status, returncode, failure_code, output_tail)``；
         ``status`` ∈ ``{"succeeded", "failed", "interrupted"}``。
@@ -790,21 +824,13 @@ class WorkbenchRunner(TaskRunner):
         try:
             if cancel_event.is_set():
                 return ("interrupted", -1, None, "")
-            boss.run_search_programmatic(
-                keyword=str(frozen["keyword"]),
-                city=str(frozen["city"]),
-                pages=1,
-                cdp_port=boss.DEFAULT_CDP_PORT,
-                output_path=query["list_output_path"],
-                detail_output_path=query["detail_output_path"],
-                detail=True,
-                max_details=int(query["detail_budget"]),
-                filters=dict(frozen.get("filters") or {}),
-                on_log=lambda line: self.store.append_log(run_id, line),
-                on_poll=stream_progress,
+            completed, payload = run_with_deadline(
+                lambda: self._run_query_in_process_impl(
+                    run_id, query, cancel_event, stream_progress,
+                ),
+                timeout_seconds=self.in_process_timeout,
                 cancel_event=cancel_event,
             )
-            return ("succeeded", 0, None, "")
         except boss.SearchCancelled:
             return ("interrupted", -1, None, "")
         except boss.CDPUnavailableError as exc:
@@ -815,6 +841,28 @@ class WorkbenchRunner(TaskRunner):
             return ("failed", 10, _classify_risk_control_reason(exc.reason), exc.reason)
         except Exception as exc:
             return ("failed", -1, "process_failed", str(exc))
+        if not completed:
+            return ("failed", -1, "process_timeout", str(payload))
+        return payload
+
+    def _run_query_in_process_impl(self, run_id, query, cancel_event, stream_progress):
+        """in-process 实际执行体（在 run_with_deadline 的 worker 线程中）。"""
+        frozen = query["frozen_query"]
+        boss.run_search_programmatic(
+            keyword=str(frozen["keyword"]),
+            city=str(frozen["city"]),
+            pages=1,
+            cdp_port=boss.DEFAULT_CDP_PORT,
+            output_path=query["list_output_path"],
+            detail_output_path=query["detail_output_path"],
+            detail=True,
+            max_details=int(query["detail_budget"]),
+            filters=dict(frozen.get("filters") or {}),
+            on_log=lambda line: self.store.append_log(run_id, line),
+            on_poll=stream_progress,
+            cancel_event=cancel_event,
+        )
+        return ("succeeded", 0, None, "")
 
     def _finalize_run(self, run_id):
         """Promote parent run to succeeded/partial/failed based on child states."""

@@ -675,6 +675,14 @@ def run_desktop_shell(deps):
         events = getattr(window, "events", None)
         if events is not None and hasattr(events, "closing"):
             events.closing += _on_closing
+        else:
+            # pywebview <6 没有 events API：窗口状态记忆与关闭时任务取消
+            # 都会静默失效，必须明示（README 约束 pywebview>=6.0）
+            log_error(
+                "pywebview 事件 API 不可用（需 pywebview>=6.0）："
+                "窗口状态记忆与关闭时任务取消将不会生效",
+                state_dir=state_dir, logger=logger,
+            )
 
         def _quit_and_cleanup():
             """js_api.quit_app 的优雅退出：复用 closing 同样的清理逻辑。"""

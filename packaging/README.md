@@ -19,7 +19,8 @@
 - **Python**：≥ 3.10（本地实测 3.11.15）
 - **Node.js**：≥ 20（构建前端）
 - **uv**：Python 包管理器
-- **打包依赖**：`uv pip install pyinstaller pywebview`
+- **打包依赖**：`uv pip install pyinstaller "pywebview>=6.0"`
+  （窗口状态记忆与关闭时任务取消依赖 pywebview 6.x 的事件 API）
 
 ## 构建步骤
 
@@ -56,8 +57,11 @@ PyInstaller onefile 产物可能被部分杀软误报，属外部因素，本项
 运行 `build_exe.ps1` 报 `打包依赖缺失` 时，执行：
 
 ```powershell
-uv pip install pyinstaller pywebview
+uv pip install pyinstaller "pywebview>=6.0"
 ```
+
+pywebview 必须 ≥ 6.0（窗口事件 API `window.events.closing` 自 6.0 引入；
+旧版本下窗口状态记忆与关闭时任务取消会静默失效，desktop.log 会有提示）。
 
 ### WebView2 运行时缺失
 

@@ -12,9 +12,11 @@
 """
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -296,6 +298,47 @@ class TaskRunnerInProcessTests(unittest.TestCase):
         self.assertEqual(task.get("returncode"), -1)
         self.assertIn("process_failed", task.get("error") or "")
 
+    # ---- in-process 超时保护（与子进程 process_timeout 语义对齐） ----
+
+    def test_in_process_timeout_maps_to_process_timeout(self):
+        """超过硬超时且不响应协作取消 → failed + process_timeout，不无限挂起。"""
+        runner = TaskRunner(
+            self.store, str(self.result_dir), sys.executable,
+            start_tasks=False, execution_mode="in_process",
+            in_process_timeout=0.3,
+        )
+        self._create_scrape_task("t12", detail=False)
+
+        def fake_run(**kwargs):
+            # 不响应 cancel_event，模拟卡死在 CDP 调用
+            time.sleep(2)
+
+        with mock.patch.object(boss, "run_search_programmatic", side_effect=fake_run):
+            runner._execute("t12")
+        task = self.store.get_task("t12")
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(task.get("returncode"), -1)
+        self.assertIn("process_timeout", task.get("error") or "")
+
+    def test_in_process_timeout_collaborative_stop_still_timeout(self):
+        """超时后协作取消成功（SearchCancelled）仍按 process_timeout 失败。"""
+        runner = TaskRunner(
+            self.store, str(self.result_dir), sys.executable,
+            start_tasks=False, execution_mode="in_process",
+            in_process_timeout=0.3,
+        )
+        self._create_scrape_task("t13", detail=False)
+
+        def fake_run(**kwargs):
+            kwargs["cancel_event"].wait(timeout=2)
+            raise boss.SearchCancelled()
+
+        with mock.patch.object(boss, "run_search_programmatic", side_effect=fake_run):
+            runner._execute("t13")
+        task = self.store.get_task("t13")
+        self.assertEqual(task["status"], "failed")
+        self.assertIn("process_timeout", task.get("error") or "")
+
 
 # ===========================================================================
 # T025: WorkbenchRunner in_process 流式持久化
@@ -361,6 +404,245 @@ class WorkbenchRunnerInProcessTests(unittest.TestCase):
         # query 最终状态为 succeeded
         queries = self.store.list_run_queries(run_id)
         self.assertEqual(queries[0]["status"], "succeeded")
+
+    def test_query_timeout_maps_to_process_timeout(self):
+        """child query 超时 → query failed（parent 不卡死，按失败收敛）。"""
+        runner = WorkbenchRunner(
+            self.store, str(self.result_dir), sys.executable,
+            start_tasks=False, execution_mode="in_process",
+            in_process_timeout=0.3,
+        )
+        profile = self.store.create_profile("超时画像")
+        run = self.store.create_search_run(
+            profile["id"], {"city": "上海"}, "ai", total_detail_budget=5,
+        )
+        run_id = run["id"]
+        list_path = str(self.result_dir / f"list_{run_id}_0.json")
+        detail_path = str(self.result_dir / f"detail_{run_id}_0.json")
+        self.store.create_run_query(
+            run_id, 0, {"keyword": "AI", "city": "上海", "filters": {}},
+            list_path, detail_path, 5,
+        )
+
+        def fake_run(**kwargs):
+            time.sleep(2)
+
+        with mock.patch.object(boss, "run_search_programmatic", side_effect=fake_run):
+            runner._execute_search_run(run_id)
+
+        # query 失败收敛为 scrape_failed（与子进程模式失败的持久化语义一致）
+        queries = self.store.list_run_queries(run_id)
+        self.assertEqual(queries[0]["status"], "failed")
+        self.assertEqual(queries[0].get("error_code"), "scrape_failed")
+
+
+# ===========================================================================
+# BossCdpSource in-process 路径（超时 / 输入缺失显式失败 / captured 收集）
+# ===========================================================================
+class BossCdpSourceInProcessTests(unittest.TestCase):
+    """in_process=True 时 source 层行为与子进程模式对齐。"""
+
+    def setUp(self):
+        from webui.source import BossCdpSource
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+        self.source = BossCdpSource(
+            python_executable=sys.executable,
+            timeout_seconds=600,
+            in_process=True,
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _detail_command(self):
+        return [
+            sys.executable, str(self.source.scraper_path),
+            "--input", str(self.root / "nope.json"),
+            "--detail-output", str(self.root / "out.json"),
+            "--max-details", "1",
+            "--detail",
+        ]
+
+    def test_detail_input_missing_fails_explicitly(self):
+        """input 文件缺失 → ValueError（不再静默返回空成功）。"""
+        with self.assertRaises(ValueError):
+            self.source._read_detail_input(str(self.root / "nope.json"))
+
+    def test_detail_input_invalid_json_fails_explicitly(self):
+        """input JSON 非法 → ValueError。"""
+        bad = self.root / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            self.source._read_detail_input(str(bad))
+
+    def test_translate_detail_input_missing_returns_failure(self):
+        """完整链路：input 缺失 → 非零失败码 + 错误文本，而非 (0, "")。"""
+        code, captured = self.source._run_in_process(self._detail_command(), 5)
+        self.assertNotEqual(code, 0)
+        self.assertIn("无法读取详情输入文件", captured)
+
+    def test_success_captures_output_tail(self):
+        """成功路径 captured 非空（收集 print 输出），与子进程模式对齐。"""
+        output_path = self.root / "out.json"
+        command = [
+            sys.executable, str(self.source.scraper_path),
+            "--cdp-port", "9222",
+            "--keyword", "AI", "--city", "_", "--pages", "1",
+            "--output", str(output_path),
+            "--no-detail",
+        ]
+
+        def fake_run(**kwargs):
+            print("fake progress line")
+            out = pathlib.Path(kwargs["output_path"])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps({"jobs": []}), encoding="utf-8")
+            return {"list_data": {"jobs": []}, "details": None}
+
+        with mock.patch.object(boss, "run_search_programmatic", side_effect=fake_run):
+            code, captured = self.source._run_in_process(command, 5)
+        self.assertEqual(code, 0)
+        self.assertIn("fake progress line", captured)
+
+    def test_timeout_raises_timeout_expired(self):
+        """超时 → subprocess.TimeoutExpired（fetch_* 据此分类为 source_timeout）。"""
+        output_path = self.root / "out.json"
+        command = [
+            sys.executable, str(self.source.scraper_path),
+            "--cdp-port", "9222",
+            "--keyword", "AI", "--city", "_", "--pages", "1",
+            "--output", str(output_path),
+            "--no-detail",
+        ]
+
+        def fake_run(**kwargs):
+            time.sleep(2)
+
+        with mock.patch.object(boss, "run_search_programmatic", side_effect=fake_run):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.source._run_in_process(command, timeout=0.3)
+
+
+# ===========================================================================
+# run_with_deadline（in-process 超时执行器）
+# ===========================================================================
+class RunWithDeadlineTests(unittest.TestCase):
+    """超时执行器语义：正常完成 / 原样抛异常 / 超时置取消并返回 TimeoutError。"""
+
+    def test_completes_before_deadline(self):
+        from webui.process_executor import run_with_deadline
+
+        completed, payload = run_with_deadline(lambda: 42, timeout_seconds=5)
+        self.assertTrue(completed)
+        self.assertEqual(payload, 42)
+
+    def test_original_exception_is_re_raised(self):
+        from webui.process_executor import run_with_deadline
+
+        def boom():
+            raise ValueError("boom")
+
+        with self.assertRaises(ValueError):
+            run_with_deadline(boom, timeout_seconds=5)
+
+    def test_timeout_sets_cancel_event_and_returns_timeout_error(self):
+        from webui.process_executor import run_with_deadline
+
+        cancel = threading.Event()
+        started = threading.Event()
+
+        def slow():
+            started.set()
+            cancel.wait(timeout=3)
+            raise boss.SearchCancelled()
+
+        completed, payload = run_with_deadline(
+            slow, timeout_seconds=0.3, cancel_event=cancel,
+        )
+        self.assertFalse(completed)
+        self.assertIsInstance(payload, TimeoutError)
+        self.assertTrue(cancel.is_set())
+
+
+# ===========================================================================
+# 风控分类器词表（与 source.py / _SCRAPE_BLOCK_PATTERNS 对齐）
+# ===========================================================================
+class RiskControlClassifierTests(unittest.TestCase):
+    """_classify_risk_control_reason 对对齐后的词表命中正确。"""
+
+    def test_rate_limit_keywords_aligned(self):
+        from webui.app import _classify_risk_control_reason
+
+        for text in ("访问受限", "检测到异常流量", "操作频繁", "账号受限", "429 too many"):
+            self.assertEqual(
+                _classify_risk_control_reason(text), "source_rate_limited", text,
+            )
+
+    def test_verification_keywords_aligned(self):
+        from webui.app import _classify_risk_control_reason
+
+        for text in ("需要滑动滑块验证", "出现 captcha", "slider verify", "geetest 校验"):
+            self.assertEqual(
+                _classify_risk_control_reason(text), "source_verification_required", text,
+            )
+
+    def test_login_keywords_aligned(self):
+        from webui.app import _classify_risk_control_reason
+
+        for text in ("请先登录", "未登录", "登 录 失效", "wt2 参数错误", "401 unauthorized"):
+            self.assertEqual(
+                _classify_risk_control_reason(text), "source_login_required", text,
+            )
+
+    def test_unmatched_reason_maps_to_source_blocked(self):
+        from webui.app import _classify_risk_control_reason
+
+        self.assertEqual(_classify_risk_control_reason(""), "source_blocked")
+        self.assertEqual(_classify_risk_control_reason("unknown reason"), "source_blocked")
+
+
+# ===========================================================================
+# 线程感知 stdout buffer（并发日志不串线）
+# ===========================================================================
+class ThreadAwareStdoutTests(unittest.TestCase):
+    """_LineLogBuffer 只捕获任务线程输出，其他线程转发到 fallback。"""
+
+    def test_other_thread_output_forwards_to_fallback(self):
+        lines = []
+        buf = boss._LineLogBuffer(lines.append)
+        with buf:
+            print("main thread line")
+            other = threading.Thread(
+                target=lambda: print("other thread line"), daemon=True,
+            )
+            other.start()
+            other.join()
+        self.assertIn("main thread line", lines)
+        self.assertNotIn("other thread line", lines)
+
+    def test_guarded_restore_restores_previous_stdout(self):
+        original = sys.stdout
+        buf = boss._LineLogBuffer(lambda line: None)
+        with buf:
+            self.assertIs(sys.stdout, buf)
+        self.assertIs(sys.stdout, original)
+
+    def test_capture_collects_only_task_thread(self):
+        from webui.source import _InProcessCapture
+
+        capture = _InProcessCapture(max_bytes=1024)
+        with capture:
+            print("task line")
+            other = threading.Thread(
+                target=lambda: print("foreign line"), daemon=True,
+            )
+            other.start()
+            other.join()
+        tail = capture.tail()
+        self.assertIn("task line", tail)
+        self.assertNotIn("foreign line", tail)
 
 
 # ===========================================================================

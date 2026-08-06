@@ -175,3 +175,42 @@ class ScraperExecutor:
             except OSError:
                 return "artifact_unreadable"
         return None
+
+
+def run_with_deadline(fn, *, timeout_seconds, cancel_event=None, grace_seconds=30.0):
+    """在 worker 线程中执行阻塞调用，带硬截止时间（in-process 模式专用）。
+
+    Python 线程无法强杀：超时后先 set cancel_event 请求协作停止（抓取代码
+    在检查点抛 SearchCancelled），再留 grace_seconds 收尾；仍不退出则放弃
+    等待（后台线程自生自灭，调用方已按失败处理）。
+
+    返回 ``(completed, payload)``：
+
+    - completed=True：payload 为 fn() 的返回值；fn 抛出的异常会原样
+      重新抛出（调用方按既有异常映射处理，与同步调用语义一致）；
+    - completed=False：payload 为 TimeoutError，表示超过截止时间
+      （无论协作停止是否成功）。
+    """
+    box: dict = {}
+
+    def _worker() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - 原样传递给调用方
+            box["error"] = exc
+
+    worker = threading.Thread(target=_worker, name="in-process-deadline", daemon=True)
+    worker.start()
+    worker.join(timeout=max(0.1, float(timeout_seconds)))
+    if not worker.is_alive():
+        if "error" in box:
+            raise box["error"]
+        return True, box.get("value")
+    if cancel_event is not None:
+        cancel_event.set()
+    worker.join(timeout=max(0.1, float(grace_seconds)))
+    if worker.is_alive():
+        return False, TimeoutError(
+            f"in-process 执行超过 {timeout_seconds}s，协作停止失败，后台线程仍在运行"
+        )
+    return False, TimeoutError(f"in-process 执行超过 {timeout_seconds}s")
