@@ -980,7 +980,10 @@ def create_app(config=None):
         SESSION_COOKIE_NAME="boss_local_session",
         TRUSTED_HOSTS=["127.0.0.1", "localhost", "::1"],
         RESUME_DIR=str(DEFAULT_STATE_DIR / "resumes"),
-        REQUIRE_BUILD_IDENTITY=True,
+        # 构建身份拦截默认关闭：本地单机工具，防的“旧页面跑新接口”
+        # 风险远小于误拦体验；启动时自动重建前端（见下方 sync）+ pre-push
+        # 钩子已足够。测试可显式传 REQUIRE_BUILD_IDENTITY=True 验证拦截逻辑。
+        REQUIRE_BUILD_IDENTITY=False,
         RUNTIME_MODE="source",
     )
     if config:
@@ -1026,6 +1029,16 @@ def create_app(config=None):
     # source → subprocess（零回归）。判定集中在 desktop_runtime 模块。
     _runtime_mode = desktop_runtime.runtime_mode(app.config)
     app.config["RUNTIME_MODE"] = _runtime_mode
+    # 源码模式启动时自动同步前端：dist 落后于源码就自动重建，让
+    # “改代码 → 重启 → 刷新即最新版”成立，不再依赖 start.bat 入口；
+    # EXE 模式前后端同包冻结，无需也不会同步；失败不阻断启动。
+    if _runtime_mode == "source" and not app.config.get("TESTING"):
+        try:
+            from webui import ensure_frontend_sync
+
+            ensure_frontend_sync.main()
+        except Exception:
+            pass
     _execution_mode = "in_process" if _runtime_mode == "exe" else "subprocess"
     runner = TaskRunner(
         store,
@@ -1327,9 +1340,11 @@ def create_app(config=None):
     @app.route("/api/session")
     def session():
         payload = (
-            {"token": app.config["API_TOKEN"], "build_hash": _build_hash}
+            {"token": app.config["API_TOKEN"], "build_hash": _build_hash,
+             "version": _product_version, "runtime_mode": _runtime_mode}
             if app.config.get("TESTING") else {
                 "status": "ok", "build_hash": _build_hash,
+                "version": _product_version, "runtime_mode": _runtime_mode,
             }
         )
         response = jsonify(payload)
@@ -6838,6 +6853,123 @@ def create_app(config=None):
             "build_hash": _build_hash,
             "build_time": _build_time,
         })
+
+    # ------------------------------------------------------------------
+    # 应用内更新（webui/updater.py；quitAndInstall 模式）
+    # ------------------------------------------------------------------
+    from webui import updater as _updater_mod
+
+    def _read_product_version():
+        """从 pyproject.toml 读产品版本（frozen 时资源根含该文件）。"""
+        try:
+            text = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+            m = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+            if m:
+                return m.group(1)
+        except OSError:
+            pass
+        return "0.0.0"
+
+    _product_version = _read_product_version()
+    if not app.config.get("TESTING"):
+        _updater_mod.clean_download_dir(DEFAULT_STATE_DIR)
+    app.config["UPDATER"] = _updater_mod.UpdateDownloader(DEFAULT_STATE_DIR)
+
+    def _update_env_payload(info_dict):
+        """统一附加运行时环境信息：exe 模式才可应用内安装。"""
+        install_target = _updater_mod.current_install_target()
+        info_dict["runtime_mode"] = _runtime_mode
+        info_dict["installable"] = bool(
+            _runtime_mode == "exe" and install_target is not None
+        )
+        return info_dict
+
+    @app.route("/api/update-check", methods=["GET"])
+    def update_check():
+        force = request.args.get("force", "").lower() in ("1", "true", "yes")
+        info = _updater_mod.check_for_update(
+            _product_version, force=force,
+            state_dir=None if app.config.get("TESTING") else DEFAULT_STATE_DIR,
+        )
+        return jsonify(_update_env_payload(info.to_dict()))
+
+    @app.route("/api/update-download", methods=["POST"])
+    def update_download():
+        """启动后台下载；仅接受带 sha256 资产的更新（无哈希拒绝）。"""
+        info = _updater_mod.check_for_update(
+            _product_version, force=False,
+            state_dir=None if app.config.get("TESTING") else DEFAULT_STATE_DIR,
+        )
+        if not info.has_update:
+            return jsonify({"ok": False, "error_code": "no_update",
+                            "user_message": "当前已是最新版本"}), 409
+        if not info.asset_url:
+            return jsonify({"ok": False, "error_code": info.reason or "no_asset",
+                            "user_message": "该版本未提供当前平台的安装包，请到 Release 页手动下载"}), 422
+        if not info.sha256_url:
+            return jsonify({"ok": False, "error_code": "no_sha256",
+                            "user_message": "该版本未提供校验文件，为安全起见请到 Release 页手动下载"}), 422
+        started = app.config["UPDATER"].start(info)
+        if not started:
+            status = app.config["UPDATER"].status()
+            if status["status"] in ("downloading", "verifying", "ready"):
+                return jsonify({"ok": True, "already": True, **status})
+            return jsonify({"ok": False, "error_code": "download_start_failed",
+                            "user_message": status.get("error") or "下载启动失败"}), 500
+        return jsonify({"ok": True, **app.config["UPDATER"].status()})
+
+    @app.route("/api/update-status", methods=["GET"])
+    def update_status():
+        return jsonify({"ok": True, **app.config["UPDATER"].status()})
+
+    @app.route("/api/update-restart", methods=["POST"])
+    def update_restart():
+        """生成并 detached 启动替换脚本，随后由前端退出应用。
+
+        脚本等主进程退出后替换文件并拉起新版本；未就绪/非 exe 模式/
+        无安装目标一律拒绝（源码模式没有可替换产物）。
+        """
+        import subprocess
+        import sys as _sys
+
+        install_target = _updater_mod.current_install_target()
+        if _runtime_mode != "exe" or install_target is None:
+            return jsonify({"ok": False, "error_code": "not_installable",
+                            "user_message": "源码模式不支持应用内安装，请手动更新"}), 409
+        status = app.config["UPDATER"].status()
+        if status["status"] != "ready" or not status["path"]:
+            return jsonify({"ok": False, "error_code": "download_not_ready",
+                            "user_message": "更新包尚未就绪"}), 409
+        installer_path = Path(status["path"])
+        if not installer_path.exists():
+            return jsonify({"ok": False, "error_code": "installer_missing",
+                            "user_message": "更新包丢失，请重新下载"}), 409
+        runner, script = _updater_mod.build_updater_script(
+            installer_path=installer_path,
+            install_target=install_target,
+            pid=os.getpid(),
+            script_dir=DEFAULT_STATE_DIR,
+        )
+        try:
+            if _sys.platform == "win32":
+                subprocess.Popen(
+                    ["cmd", "/c", str(script)],
+                    cwd=str(DEFAULT_STATE_DIR),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                    | 0x00000008,  # DETACHED_PROCESS
+                )
+            else:
+                subprocess.Popen(
+                    [runner, str(script)],
+                    cwd=str(DEFAULT_STATE_DIR),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+        except OSError as exc:
+            return jsonify({"ok": False, "error_code": "updater_launch_failed",
+                            "user_message": f"更新脚本启动失败：{exc}"}), 500
+        return jsonify({"ok": True, "user_message": "即将重启完成更新"})
 
     @app.route("/api/task-state/<run_id>", methods=["GET"])
     def api_task_state(run_id: str):

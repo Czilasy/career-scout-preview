@@ -101,6 +101,8 @@ npm run build
    - 在仓库 Releases 页点击 "Draft a new release"
    - Tag 填 `v{version}`（如 `v2.4.0`），目标分支选 `main`
    - 上传 `CareerScout-v{version}.exe`
+   - 上传 `CareerScout-v{version}.exe.sha256`（构建脚本自动生成；
+     **应用内更新强制依赖该文件，缺失时用户端会拒绝自动安装**）
    - 上传 SHA256 校验值（粘贴到发布说明或单独 `.sha256` 文件）
 4. **发布说明模板要点**：
    - 版本号与 `pyproject.toml` 一致
@@ -113,7 +115,21 @@ npm run build
 6. **macOS DMG 自动挂接**：推同一个 `v{version}` tag 后，
    `.github/workflows/release-macos.yml` 在 GitHub 的 Mac runner 上构建
    dmg，自动附加到该 tag 的 Release（已有则附加，没有则创建）。
+   CI 会自检 dmg（挂载验证 .app/架构/完整性）并自动生成上传
+   `.sha256` 校验文件。
    构建失败时在 Actions 页看日志修复后重推 tag（或手动 workflow_dispatch）。
+
+## 应用内更新（v2.5.0 起）
+
+桌面版内置检查更新：启动时查 GitHub latest release（24h 缓存），
+发现新版顶栏提示 → 应用内下载（进度条 + SHA256 强制校验）→
+点「立即重启完成更新」自动替换并拉起新版（quitAndInstall 模式）。
+
+发布约束：
+
+- Release 必须附各产物的 `.sha256` 文件，否则用户端拒绝自动安装
+  （降级为引导浏览器下载）；
+- 源码模式（`python webui/app.py`）只提供提示与 Release 页链接。
 
 ## macOS DMG 打包
 

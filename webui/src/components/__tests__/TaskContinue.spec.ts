@@ -91,8 +91,9 @@ describe("DiscoveryView paused AI recovery", () => {
     const continueCall = fetchMock.mock.calls.find(
       ([url]) => String(url) === "/api/task/continue/paused-ai-run",
     );
+    // 构建身份拦截已下线：写请求不再携带 X-Boss-Build 头
     expect((continueCall?.[1]?.headers as Headers).get("X-Boss-Build"))
-      .toBe(expectedBackendBuildHash);
+      .toBeNull();
     expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/ai-screen")).toBe(false);
     expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/search-progress")))
       .toBe(false);

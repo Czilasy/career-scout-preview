@@ -143,22 +143,49 @@ async function activateAccount(id: string) {
   }
 }
 
-// D7：每个平台一个按钮，不再用下拉框选择平台。
-async function openBrowser(id: string, platform: Platform) {
-  busyAccount.value = id;
+// 单按钮「打开浏览器」：依次打开该账号所有平台的登录空间（各平台
+// 是独立 profile/端口，会各弹一个 Chrome 窗口）。部分失败不回滚已
+// 成功的，通知里拼接各平台结果。
+async function openAllBrowsers(account: BrowserAccount) {
+  busyAccount.value = account.id;
+  const platforms = platformsOf(account);
+  const okLabels: string[] = [];
+  const failBits: string[] = [];
   try {
-    const data = await apiRequest<{ message?: string }>(
-      `/api/browser-accounts/${encodeURIComponent(id)}/open`,
-      { method: "POST", json: { platform } },
-    );
+    for (const platform of platforms) {
+      try {
+        const data = await apiRequest<{ message?: string }>(
+          `/api/browser-accounts/${encodeURIComponent(account.id)}/open`,
+          { method: "POST", json: { platform } },
+        );
+        okLabels.push(PLATFORM_LABELS[platform]);
+        void data;
+      } catch (error) {
+        failBits.push(`${PLATFORM_LABELS[platform]}：${errorMessage(error, "打开失败")}`);
+      }
+    }
     // 打开窗口会失效登录态缓存（后端 D3 信号），标记待刷新等真实探测。
-    const next = new Set(pendingRefresh.value);
-    next.add(id);
-    pendingRefresh.value = next;
-    setLocalNotice({ message: data.message || "已打开自动化浏览器", tone: "info" });
+    if (okLabels.length) {
+      const next = new Set(pendingRefresh.value);
+      next.add(account.id);
+      pendingRefresh.value = next;
+    }
+    if (okLabels.length && !failBits.length) {
+      setLocalNotice({
+        message: platforms.length > 1
+          ? `已打开 ${okLabels.join("、")} 的登录窗口，请分别登录后回来`
+          : `已打开 ${okLabels[0]} 的登录窗口，请登录后回来`,
+        tone: "info",
+      });
+    } else if (okLabels.length) {
+      setLocalNotice({
+        message: `已打开 ${okLabels.join("、")}；${failBits.join("；")}`,
+        tone: "error",
+      });
+    } else {
+      setLocalNotice({ message: failBits.join("；") || "打开浏览器失败", tone: "error" });
+    }
     await loadAccounts();
-  } catch (error) {
-    setLocalNotice({ message: errorMessage(error, "打开浏览器失败"), tone: "error" });
   } finally {
     busyAccount.value = "";
   }
@@ -284,59 +311,67 @@ async function removeAccount(id: string) {
         class="browser-account-card"
         :data-active="account.id === activeAccount || undefined"
       >
-        <div class="browser-account-head">
-          <span class="browser-account-icon" aria-hidden="true"><UserRound :size="17" /></span>
-          <strong>{{ displayName(account) }}</strong>
-          <span v-if="account.id === activeAccount" class="browser-account-badge">当前账号</span>
-          <span v-else class="browser-account-badge muted">非当前账号</span>
-        </div>
-        <ul class="browser-account-platforms" :data-testid="`account-platforms-${account.id}`">
-          <li
-            v-for="platform in platformsOf(account)"
-            :key="platform"
-            :data-platform="platform"
-          >
-            <span class="browser-account-platform-label">{{ PLATFORM_LABELS[platform] }}</span>
-            <span
-              class="browser-account-state"
-              :data-tone="platformBadge(account, platform).tone"
-              :data-testid="`account-state-${account.id}-${platform}`"
+        <div class="browser-account-info">
+          <div class="browser-account-head">
+            <span class="browser-account-icon" aria-hidden="true"><UserRound :size="17" /></span>
+            <strong>{{ displayName(account) }}</strong>
+            <span v-if="account.id === activeAccount" class="browser-account-badge">当前账号</span>
+            <span v-else class="browser-account-badge muted">非当前账号</span>
+          </div>
+          <ul class="browser-account-platforms" :data-testid="`account-platforms-${account.id}`">
+            <li
+              v-for="platform in platformsOf(account)"
+              :key="platform"
+              :data-platform="platform"
             >
-              {{ platformBadge(account, platform).text }}
-            </span>
-          </li>
-        </ul>
+              <span class="browser-account-platform-label">{{ PLATFORM_LABELS[platform] }}</span>
+              <span
+                class="browser-account-state"
+                :data-tone="platformBadge(account, platform).tone"
+                :data-testid="`account-state-${account.id}-${platform}`"
+              >
+                {{ platformBadge(account, platform).text }}
+              </span>
+            </li>
+          </ul>
+        </div>
         <div class="browser-account-actions">
           <button
-            v-for="platform in platformsOf(account)"
-            :key="`open-${platform}`"
             type="button"
             class="button secondary small"
-            :data-testid="`open-${platform}-${account.id}`"
+            :data-testid="`open-browser-${account.id}`"
             :disabled="!canOpen(account.id)"
-            @click="openBrowser(account.id, platform)"
+            @click="openAllBrowsers(account)"
           >
             <ExternalLink :size="15" aria-hidden="true" />
-            打开 {{ PLATFORM_LABELS[platform] }} 窗口
+            打开浏览器
           </button>
-          <button
-            v-if="account.id !== activeAccount"
-            type="button"
-            class="button secondary small"
-            :disabled="!canManage(account.id)"
-            @click="activateAccount(account.id)"
-          >
-            <Check :size="15" aria-hidden="true" />设为当前账号
-          </button>
-          <button
-            v-if="!account.builtin"
-            type="button"
-            class="button danger small"
-            :disabled="!canManage(account.id)"
-            @click="removeAccount(account.id)"
-          >
-            <Trash2 :size="15" aria-hidden="true" />删除
-          </button>
+          <div class="browser-account-icon-actions">
+            <button
+              v-if="account.id !== activeAccount"
+              type="button"
+              class="icon-button activate-toggle"
+              :data-testid="`activate-${account.id}`"
+              aria-label="设为当前账号"
+              title="设为当前账号"
+              :disabled="!canManage(account.id)"
+              @click="activateAccount(account.id)"
+            >
+              <Check :size="17" aria-hidden="true" />
+            </button>
+            <button
+              v-if="!account.builtin"
+              type="button"
+              class="icon-button danger-icon"
+              :data-testid="`delete-${account.id}`"
+              aria-label="删除账号"
+              title="删除账号"
+              :disabled="!canManage(account.id)"
+              @click="removeAccount(account.id)"
+            >
+              <Trash2 :size="17" aria-hidden="true" />
+            </button>
+          </div>
         </div>
       </article>
       <p v-if="!accounts.length && !busy" class="browser-account-empty">暂无账号，先添加一个账号。</p>
@@ -379,12 +414,19 @@ async function removeAccount(id: string) {
   margin-bottom: 18px;
 }
 .browser-account-card {
-  display: grid;
-  gap: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
   padding: 12px;
   border: 1px solid var(--hair);
   border-radius: 10px;
   background: var(--panel);
+}
+.browser-account-info {
+  display: grid;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .browser-account-card[data-active="true"] {
   border-color: var(--brand-edge);
@@ -471,12 +513,25 @@ async function removeAccount(id: string) {
 }
 .browser-account-actions {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 .browser-account-actions .button {
   min-height: 34px;
+}
+.browser-account-icon-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.activate-toggle {
+  color: var(--match-deep);
+}
+.danger-icon {
+  color: var(--reject-deep);
 }
 .browser-account-empty {
   margin: 0;

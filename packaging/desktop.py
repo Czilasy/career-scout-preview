@@ -452,6 +452,74 @@ def _run_flask_server(app, port):
 
 
 # ---------------------------------------------------------------------------
+# pywebview JS API（前端 window.pywebview.api.*）
+# ---------------------------------------------------------------------------
+#: 外链域名白名单：只允许跳到项目仓库，防止被注入打开任意地址
+EXTERNAL_LINK_HOSTS = ("github.com",)
+EXTERNAL_REPO_URL = "https://github.com/Czilasy/career-scout-preview"
+
+
+def is_allowed_external_url(url):
+    """https + 白名单域名（含子域）才放行；其余一律拒绝。"""
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(str(url or ""))
+    except ValueError:
+        return False
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in EXTERNAL_LINK_HOSTS)
+
+
+class DesktopJsApi:
+    """暴露给 WebUI 前端的桌面壳能力。
+
+    - ``open_external(url)``：系统默认浏览器打开白名单链接（桌面壳
+      内直接跳转会吞掉应用页面，必须外抛到浏览器）；
+    - ``quit_app()``：应用内更新重启前的优雅退出：先保存窗口
+      状态、取消运行中任务，再销毁窗口。清理逻辑由
+      ``run_desktop_shell`` 在窗口创建后注入 ``quit_handler``。
+    """
+
+    def __init__(self):
+        # run_desktop_shell 创建窗口后注入（保存状态 + 取消任务 + 关窗）
+        self.quit_handler = None
+
+    def open_external(self, url=""):
+        target = str(url or "").strip() or EXTERNAL_REPO_URL
+        if not is_allowed_external_url(target):
+            return {"ok": False, "error": "url_not_allowed"}
+        try:
+            import webbrowser
+
+            webbrowser.open(target)
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def quit_app(self):
+        handler = getattr(self, "quit_handler", None)
+        if callable(handler):
+            try:
+                handler()
+                return {"ok": True}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+        try:
+            import webview
+
+            windows = list(getattr(webview, "windows", []) or [])
+            if not windows:
+                return {"ok": False, "error": "no_window"}
+            windows[0].destroy()
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
 # 主编排（T039）
 # ---------------------------------------------------------------------------
 def run_desktop_shell(deps):
@@ -551,6 +619,8 @@ def run_desktop_shell(deps):
             messagebox("Career Scout", "启动失败：缺少 pywebview 依赖")
             return 1
 
+    js_api = deps.get("js_api") or DesktopJsApi()
+
     window_kwargs = {
         "url": f"http://127.0.0.1:{port}",
         "title": title,
@@ -560,6 +630,8 @@ def run_desktop_shell(deps):
         "min_size": (MIN_WIDTH, MIN_HEIGHT),
         "background_color": "#0d1113",
         "shadow": False,
+        # 前端通过 window.pywebview.api 调用（外链打开/退出应用）
+        "js_api": js_api,
     }
     if x is not None and y is not None:
         window_kwargs["x"] = x
@@ -593,6 +665,19 @@ def run_desktop_shell(deps):
         events = getattr(window, "events", None)
         if events is not None and hasattr(events, "closing"):
             events.closing += _on_closing
+
+        def _quit_and_cleanup():
+            """js_api.quit_app 的优雅退出：复用 closing 同样的清理逻辑。"""
+            try:
+                _on_closing()
+            except Exception:
+                pass
+            try:
+                window.destroy()
+            except Exception:
+                pass
+
+        js_api.quit_handler = _quit_and_cleanup
         webview_module.start()
     except Exception as exc:
         # 合同 §7：webview.start() 抛初始化异常 → 按平台给指引

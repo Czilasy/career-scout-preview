@@ -11,6 +11,47 @@ let sessionToken = "";
 let buildIdentityVerified = false;
 let sessionInitialization: Promise<void> | null = null;
 
+// 桌面壳（pywebview）注入的 JS API；浏览器模式下不存在
+declare global {
+  interface Window {
+    pywebview?: {
+      api?: {
+        open_external?: (url: string) => Promise<{ ok: boolean; error?: string }>;
+        quit_app?: () => Promise<{ ok: boolean; error?: string }>;
+      };
+    };
+  }
+}
+
+export const GITHUB_REPO_URL = "https://github.com/Czilasy/career-scout-preview";
+
+/** 打开外链：桌面壳走 js_api 抛到系统浏览器（后端有域名白名单），
+ * 浏览器模式直接新窗口打开。 */
+export async function openExternalLink(url: string): Promise<void> {
+  const api = window.pywebview?.api;
+  if (api?.open_external) {
+    try {
+      await api.open_external(url);
+      return;
+    } catch {
+      // 落到浏览器打开
+    }
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+/** 应用内更新重启后优雅退出应用（仅桌面壳可用）。 */
+export async function quitDesktopApp(): Promise<boolean> {
+  const api = window.pywebview?.api;
+  if (!api?.quit_app) return false;
+  try {
+    const result = await api.quit_app();
+    return Boolean(result?.ok);
+  } catch {
+    return false;
+  }
+}
+
 export const expectedBackendBuildHash = __EXPECTED_BACKEND_BUILD_HASH__;
 
 export function setBuildIdentity(hash: string): boolean {
@@ -65,16 +106,6 @@ export async function apiRequest<T>(path: string, options: ApiOptions = {}): Pro
   const headers = new Headers(options.headers || {});
   headers.set("Accept", "application/json");
   if (sessionToken) headers.set("X-Boss-Token", sessionToken);
-  const method = (options.method || "GET").toUpperCase();
-  if (!["GET", "HEAD"].includes(method)) {
-    if (!buildIdentityVerified) {
-      throw new ApiError(409, {
-        error_code: "build_identity_mismatch",
-        user_message: "页面版本与当前后端不一致，请刷新页面后重试",
-      });
-    }
-    headers.set("X-Boss-Build", expectedBackendBuildHash);
-  }
 
   let body = options.body;
   if (options.json !== undefined) {
@@ -118,5 +149,54 @@ export const settingsApi = {
     return apiRequest<ModeSelectionResponse>("/api/advanced-settings/select-mode", {
       method: "POST", json: { mode, scope_digest: scopeDigest },
     });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// 应用内更新（后端 webui/updater.py）
+// ---------------------------------------------------------------------------
+export interface UpdateCheckResult {
+  ok: boolean;
+  current: string;
+  latest: string;
+  has_update: boolean;
+  release_url: string;
+  release_notes: string;
+  asset_name: string;
+  asset_url: string;
+  asset_size: number;
+  sha256_url: string;
+  reason: string;
+  runtime_mode: string;
+  installable: boolean;
+}
+
+export interface UpdateProgress {
+  ok?: boolean;
+  already?: boolean;
+  status: "idle" | "downloading" | "verifying" | "ready" | "failed";
+  received: number;
+  total: number;
+  progress: number;
+  path: string;
+  error: string;
+}
+
+export const updateApi = {
+  check(force = false) {
+    return apiRequest<UpdateCheckResult>(
+      `/api/update-check${force ? "?force=1" : ""}`,
+    );
+  },
+  download() {
+    return apiRequest<UpdateProgress>("/api/update-download", { method: "POST" });
+  },
+  status() {
+    return apiRequest<UpdateProgress>("/api/update-status");
+  },
+  restart() {
+    return apiRequest<{ ok: boolean; user_message?: string }>(
+      "/api/update-restart", { method: "POST" },
+    );
   },
 };

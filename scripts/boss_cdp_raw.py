@@ -19,7 +19,7 @@ BOSS直聘职位抓取 + 分析 — 纯 CDP raw protocol
   uv run python3 scripts/boss_cdp_raw.py --version
 """
 
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 
 import json
 import time
@@ -3182,7 +3182,13 @@ def launch_chrome(cmd):
         # 注意：不要加 DETACHED_PROCESS —— 实测在 Windows 上会导致 Chrome 启动后
         # 立即退出（exit code=21），9222 端口从未开放。只保留 CREATE_NEW_PROCESS_GROUP
         # 让 Chrome 在独立进程组里运行即可，Flask 退出也不会立即带走它。
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        # CREATE_NO_WINDOW：桌面壳是 windowed 程序（无控制台），子进程不抑制
+        # 控制台时系统会弹一个 CMD 窗口闪一下；Chrome 是 GUI 程序且
+        # stderr 已重定向到日志文件，不需要控制台（与 DETACHED_PROCESS
+        # 不同，它不影响 Chrome 进程存活）。
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+            subprocess, "CREATE_NO_WINDOW", 0
+        )
         if creationflags:
             kwargs["creationflags"] = creationflags
     else:

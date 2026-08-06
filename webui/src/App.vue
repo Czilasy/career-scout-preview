@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Activity, Bell, Bot, Moon, Star, Sun, UserRound, X } from "@lucide/vue";
+import { Activity, Bell, Bot, Moon, Rocket, Star, Sun, UserRound, X } from "@lucide/vue";
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
 import BrowserAccountsDialog from "./components/BrowserAccountsDialog.vue";
 import EnvCheckDialog from "./components/EnvCheckDialog.vue";
 import NoticeBar from "./components/NoticeBar.vue";
 import ReminderDrawer from "./components/ReminderDrawer.vue";
+import UpdateDialog from "./components/UpdateDialog.vue";
 import DiscoveryView from "./views/DiscoveryView.vue";
-import { apiRequest, errorMessage, initializeSession } from "./api";
+import { apiRequest, errorMessage, GITHUB_REPO_URL, initializeSession, openExternalLink, updateApi, type UpdateCheckResult } from "./api";
 import { getJobReminderCount } from "./jobFeedback";
 import { useTheme } from "./composables/useTheme";
 import type { CandidateProfile, Notice } from "./types";
@@ -126,10 +127,31 @@ onMounted(async () => {
       : profiles.value[0]?.id || "";
     // 顶栏收藏徽标随首屏加载展示，不必等用户先打开过面板。
     void loadFavorites();
+    // 检查更新：后台静默执行，失败不打扰（后端 24h 缓存，不重复消耗限流）
+    void checkAppUpdate();
   } catch (error) {
     showNotice({ message: errorMessage(error, "WebUI 初始化失败"), tone: "error" });
   }
 });
+
+// ---------------------------------------------------------------------------
+// 应用内更新：首屏检查一次，发现新版在顶栏显示入口
+// ---------------------------------------------------------------------------
+const updateInfo = ref<UpdateCheckResult | null>(null);
+const updateDialogOpen = ref(false);
+
+async function checkAppUpdate() {
+  try {
+    const result = await updateApi.check();
+    if (result?.ok && result.has_update) updateInfo.value = result;
+  } catch {
+    // 无网/限流/后端异常都静默，更新提示不是关键路径
+  }
+}
+
+function openGitHub() {
+  void openExternalLink(GITHUB_REPO_URL);
+}
 
 onBeforeUnmount(() => {
   if (noticeTimer) window.clearTimeout(noticeTimer);
@@ -325,6 +347,30 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           <Bot :size="18" aria-hidden="true" /><span>AI 设置</span>
         </button>
         <button
+          v-if="updateInfo"
+          class="button secondary update-trigger"
+          type="button"
+          data-testid="update-trigger"
+          :aria-label="`发现新版本 v${updateInfo.latest}`"
+          :title="`发现新版本 v${updateInfo.latest}，点击更新`"
+          @click="updateDialogOpen = true"
+        >
+          <Rocket :size="18" aria-hidden="true" /><span>新版本 v{{ updateInfo.latest }}</span>
+        </button>
+        <button
+          class="icon-button github-link"
+          type="button"
+          data-testid="github-link"
+          aria-label="在浏览器中打开 GitHub 仓库"
+          title="GitHub 仓库"
+          @click="openGitHub"
+        >
+          <!-- lucide 新版移除品牌图标，GitHub 标用内联 SVG（octicon mark-github） -->
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+          </svg>
+        </button>
+        <button
           class="icon-button theme-toggle"
           type="button"
           data-testid="theme-toggle"
@@ -421,6 +467,11 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
       @close="envCheckOpen = false"
       @open-browser-accounts="browserAccountsOpen = true; envCheckOpen = false"
       @open-ai-settings="aiSettingsOpen = true; envCheckOpen = false"
+    />
+    <UpdateDialog
+      :open="updateDialogOpen"
+      :info="updateInfo"
+      @close="updateDialogOpen = false"
     />
   </div>
 </template>

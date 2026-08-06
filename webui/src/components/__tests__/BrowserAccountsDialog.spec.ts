@@ -32,7 +32,11 @@ async function mountOpen(fetchMock: (input: RequestInfo | URL, init?: RequestIni
 }
 
 function findButton(wrapper: ReturnType<typeof mount>, text: string) {
-  const btn = wrapper.findAll("button").find((b) => b.text().includes(text));
+  // 文字按钮按 text 匹配；图标按钮按 aria-label/title 匹配
+  const btn = wrapper.findAll("button").find((b) =>
+    b.text().includes(text)
+    || (b.attributes("aria-label") || "").includes(text)
+    || (b.attributes("title") || "").includes(text));
   if (!btn) throw new Error(`button containing "${text}" not found`);
   return btn;
 }
@@ -76,9 +80,10 @@ describe("BrowserAccountsDialog", () => {
     expect(wrapper.get('[data-testid="account-state-a-boss"]').text()).toBe("已登录");
     expect(wrapper.get('[data-testid="account-state-a-zhilian"]').text()).toBe("未登录");
 
-    // 双平台窗口按钮（不再有平台下拉框）
-    expect(wrapper.get('[data-testid="open-boss-a"]').text()).toContain("打开 BOSS 窗口");
-    expect(wrapper.get('[data-testid="open-zhilian-a"]').text()).toContain("打开 智联 窗口");
+    // 单按钮「打开浏览器」（不再有每平台窗口按钮/下拉框）
+    expect(wrapper.get('[data-testid="open-browser-a"]').text()).toContain("打开浏览器");
+    expect(wrapper.find('[data-testid="open-boss-a"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="open-zhilian-a"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="open-platform-a"]').exists()).toBe(false);
   });
 
@@ -102,7 +107,7 @@ describe("BrowserAccountsDialog", () => {
     expect(wrapper.text()).toContain("默认账号");
     // 内置默认账号没有删除按钮，非当前账号有「非当前账号」标记
     const accountCards = wrapper.findAll(".browser-account-card");
-    expect(accountCards[0].find("button.danger").exists()).toBe(false);
+    expect(accountCards[0].find('[data-testid="delete-a"]').exists()).toBe(false);
     expect(accountCards[1].text()).toContain("非当前账号");
   });
 
@@ -170,7 +175,7 @@ describe("BrowserAccountsDialog", () => {
     expect(wrapper.get('[data-testid="account-state-b-boss"]').text()).toBe("待刷新");
   });
 
-  it("sends the platform of the clicked window button", async () => {
+  it("open-browser button sends one open call per platform in order", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/browser-accounts") {
@@ -184,21 +189,22 @@ describe("BrowserAccountsDialog", () => {
 
     const wrapper = await mountOpen(fetchMock);
 
-    await wrapper.get('[data-testid="open-zhilian-a"]').trigger("click");
+    await wrapper.get('[data-testid="open-browser-a"]').trigger("click");
     await flushPromises();
 
-    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/browser-accounts/a/open"));
-    expect(call).toBeDefined();
-    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ platform: "zhilian" });
+    const calls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/browser-accounts/a/open"));
+    expect(calls.length).toBe(2);
+    expect(JSON.parse(String(calls[0]?.[1]?.body))).toEqual({ platform: "boss" });
+    expect(JSON.parse(String(calls[1]?.[1]?.body))).toEqual({ platform: "zhilian" });
   });
 
-  it("boss window button sends boss platform", async () => {
+  it("single-platform account sends only that platform", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/browser-accounts") {
-        return response({ accounts: [dualAccount], active_account: "a" });
+        return response({ accounts: [bossOnlyAccount], active_account: "a" });
       }
-      if (url.endsWith("/api/browser-accounts/a/open")) {
+      if (url.endsWith("/api/browser-accounts/b/open")) {
         return response({ message: "已打开" });
       }
       return response({ init });
@@ -206,12 +212,12 @@ describe("BrowserAccountsDialog", () => {
 
     const wrapper = await mountOpen(fetchMock);
 
-    await wrapper.get('[data-testid="open-boss-a"]').trigger("click");
+    await wrapper.get('[data-testid="open-browser-b"]').trigger("click");
     await flushPromises();
 
-    const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/browser-accounts/a/open"));
-    expect(call).toBeDefined();
-    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ platform: "boss" });
+    const calls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/browser-accounts/b/open"));
+    expect(calls.length).toBe(1);
+    expect(JSON.parse(String(calls[0]?.[1]?.body))).toEqual({ platform: "boss" });
   });
 
   it("activate does not send a platform in the request body", async () => {

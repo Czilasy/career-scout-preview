@@ -44,20 +44,47 @@ jobs:
       - name: 校验产物
         run: ls -lh .release/*.dmg
 
+      # dmg 自检：挂载镜像确认 .app 存在、主二进制架构正确、镜像完整性
+      - name: 自检 DMG 产物
+        run: |
+          set -euo pipefail
+          DMG="$(ls .release/*.dmg | head -n1)"
+          hdiutil verify "$DMG"
+          MOUNT=/tmp/ci-dmg-check
+          rm -rf "$MOUNT"
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT"
+          test -d "$MOUNT/CareerScout.app" || { echo "dmg 内缺少 CareerScout.app"; exit 1; }
+          BIN="$MOUNT/CareerScout.app/Contents/MacOS/CareerScout"
+          test -f "$BIN" || { echo "app 主二进制缺失"; exit 1; }
+          lipo -info "$BIN"
+          python3 -c "import plistlib,sys; p=plistlib.load(open('$MOUNT/CareerScout.app/Contents/Info.plist','rb')); print('version:', p.get('CFBundleShortVersionString')); assert p.get('CFBundleShortVersionString'), '版本号为空'"
+          hdiutil detach "$MOUNT"
+          echo "DMG 自检通过"
+
+      - name: 生成 SHA256 校验文件
+        run: |
+          cd .release
+          for f in *.dmg; do shasum -a 256 "$f" > "$f.sha256"; done
+          ls -lh
+
       # 留档便于排错（构建失败时下载 artifact 检查 dmg 内容）；
       # upload-artifact 的 glob 不认 .release 隐藏目录，先拷到普通目录
       - name: 上传构建产物（artifact）
         run: |
           mkdir -p dmg-artifact
-          cp .release/*.dmg dmg-artifact/
+          cp .release/*.dmg .release/*.dmg.sha256 dmg-artifact/
       - uses: actions/upload-artifact@v4
         with:
           name: CareerScout-macos-dmg
-          path: dmg-artifact/*.dmg
+          path: |
+            dmg-artifact/*.dmg
+            dmg-artifact/*.sha256
 
       - name: 附加 DMG 到 Release
         uses: softprops/action-gh-release@v2
         with:
-          files: .release/*.dmg
+          files: |
+            .release/*.dmg
+            .release/*.sha256
           draft: false
           prerelease: false

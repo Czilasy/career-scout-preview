@@ -85,6 +85,14 @@ $releaseName = "CareerScout-v$version.exe"
 $releasePath = Join-Path $ProjectRoot ".release\$releaseName"
 Move-Item -Path 'dist/CareerScout.exe' -Destination $releasePath -Force
 
+# ---------------------------------------------------------------------------
+# 6. 生成 SHA256 校验文件（应用内更新强制依赖；随 Release 一起上传）
+# ---------------------------------------------------------------------------
+$hash = (Get-FileHash $releasePath -Algorithm SHA256).Hash.ToLower()
+$shaPath = "$releasePath.sha256"
+Set-Content -Path $shaPath -Value "$hash  $releaseName" -Encoding ascii -NoNewline
+Write-Host "SHA256：$hash"
+
 # 清理 PyInstaller 中间目录（build/ 与 dist/ 均已被 .gitignore 忽略，清理保持工作区干净）
 if (Test-Path 'dist') {
     Remove-Item -Recurse -Force 'dist' -ErrorAction SilentlyContinue
