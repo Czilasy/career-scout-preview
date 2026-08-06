@@ -81,13 +81,6 @@ def read_version():
     return "0.0.0"
 
 
-def resolve_window_icon():
-    """指南针窗口/任务栏图标路径；资源缺失返回 None（降级默认图标）。"""
-    name = "career_scout.icns" if sys.platform == "darwin" else "career_scout.ico"
-    candidate = _PROJECT_ROOT / "packaging" / "assets" / name
-    return str(candidate) if candidate.exists() else None
-
-
 # ---------------------------------------------------------------------------
 # 单实例（T036 / 合同 §2）
 # ---------------------------------------------------------------------------
@@ -643,9 +636,9 @@ def run_desktop_shell(deps):
     if x is not None and y is not None:
         window_kwargs["x"] = x
         window_kwargs["y"] = y
-    icon_path = resolve_window_icon()
-    if icon_path:
-        window_kwargs["icon"] = icon_path
+    # 窗口/任务栏图标：pywebview 6.x 的 create_window 已移除 icon 参数
+    # （传入会直接抛 TypeError），winforms 后端会自动从 EXE 资源提取图标
+    # （即 spec 里 icon=career_scout.ico 的指南针），无需显式传入。
 
     def _on_closing():
         try:
