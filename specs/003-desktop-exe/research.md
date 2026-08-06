@@ -9,7 +9,7 @@
 ### 1.1 版本与许可（来源：pywebview 官网，2026-08 查证）
 
 - 当前版本：**6.2.1**（https://pywebview.flowrl.com/）
-- 许可：BSD（与项目 MIT 兼容，可引用）
+- 许可：BSD（与项目 Apache-2.0 兼容，可引用）
 - 平台：Windows / macOS / Linux / Android
 
 ### 1.2 Windows 后端与渲染（来源：pywebview 官方文档）
@@ -59,7 +59,7 @@
 
 ### 2.4 产物可解包性
 
-- PyInstaller 产物可被 `pyinstxtractor` 等工具解包提取字节码——本项目源码本身公开（MIT），无保密诉求，该特性无影响
+- PyInstaller 产物可被 `pyinstxtractor` 等工具解包提取字节码——本项目源码本身公开（Apache-2.0），无保密诉求，该特性无影响
 
 ### 2.5 资源路径语义（PyInstaller 下 `__file__` 变化）
 
