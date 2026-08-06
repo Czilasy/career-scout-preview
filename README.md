@@ -1,4 +1,4 @@
-# Career Scout v2.6 · BOSS直聘 & 智联招聘职位助手
+# Career Scout · BOSS直聘 & 智联招聘职位助手
 
 Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的多平台职位搜索与求职工具，目前支持 **BOSS 直聘** 和 **智联招聘**。它连接你本机已经登录的 Chrome，复用真实登录态抓取职位列表与 JD 详情，并通过本地 Web 工作台完成简历驱动的两层筛选、AI 语义评估、岗位生命周期管理和投递过期提醒。
 
