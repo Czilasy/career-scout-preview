@@ -345,6 +345,7 @@ class BossCdpSource:
         cdp_port: int = boss.DEFAULT_CDP_PORT,
         breaker: SourceCircuitBreaker | None = None,
         browser_account: str | None = None,
+        in_process: bool = False,
     ):
         self.python_executable = python_executable or sys.executable or "python"
         self.cwd = Path(cwd) if cwd else PROJECT_ROOT
@@ -356,12 +357,16 @@ class BossCdpSource:
         self.artifact_root = Path(artifact_root).resolve() if artifact_root else None
         self.max_artifact_bytes = max(1, int(max_artifact_bytes))
         self.cdp_port = int(cdp_port)
-        self._runner = runner or self._default_run
         self.breaker = breaker or SourceCircuitBreaker()
         # 登录态缓存 / 风控冷却的账号维度；None 表示不记录（CLI 直连场景）
         self.browser_account = (
             str(browser_account).strip() if browser_account else None
         )
+        # in_process 模式（合同 inprocess-runner §4.3）：True 时内部执行器把
+        # 本类构建的 argv 翻译为 run_search_programmatic / scrape_details
+        # 库式调用，不 spawn 子进程；其余行为零改动。
+        self.in_process = bool(in_process)
+        self._runner = runner or self._default_run
 
     # ------------------------------------------------------------------
     # Public API
@@ -483,7 +488,7 @@ class BossCdpSource:
                 safe_log=f"{safe_log} breaker_open",
             )
         try:
-            returncode, captured = self._runner(command, self.timeout_seconds)
+            returncode, captured = self._run_command(command, self.timeout_seconds)
         except subprocess.TimeoutExpired:
             return SourceOutcome.failure(failed_code="source_timeout", safe_log=f"{safe_log} timeout={self.timeout_seconds}")
         except FileNotFoundError:
@@ -587,7 +592,7 @@ class BossCdpSource:
                 safe_log=f"{safe_log} breaker_open",
             )
         try:
-            returncode, captured = self._runner(command, self.timeout_seconds)
+            returncode, captured = self._run_command(command, self.timeout_seconds)
         except subprocess.TimeoutExpired:
             return SourceOutcome.failure(failed_code="source_timeout", safe_log=f"{safe_log} timeout={self.timeout_seconds}")
         except FileNotFoundError:
@@ -788,7 +793,7 @@ class BossCdpSource:
                 )
             return results
         try:
-            returncode, captured = self._runner(command, self.timeout_seconds)
+            returncode, captured = self._run_command(command, self.timeout_seconds)
         except subprocess.TimeoutExpired:
             for job_id in expected_urls_by_job_id:
                 results[job_id] = SourceOutcome.failure(
@@ -1111,6 +1116,182 @@ class BossCdpSource:
         if result.failure_code == "process_unreachable":
             raise FileNotFoundError(command[0])
         return result.returncode if result.returncode is not None else -1, result.output_tail
+
+    # ------------------------------------------------------------------
+    # in_process argv 翻译执行器（合同 inprocess-runner §4.3）
+    # ------------------------------------------------------------------
+
+    #: 无值布尔 flag（出现即为 True）。翻译器只识别本类构建的命令，
+    #: 其余命令一律视为不可翻译。
+    _IN_PROCESS_BOOL_FLAGS = frozenset({
+        "no-detail", "detail", "enable-parallel", "analysis",
+        "close-chrome", "setup-chrome", "stop-chrome", "smoke-test",
+    })
+
+    def _run_command(self, command: list[str], timeout: int) -> tuple[int, str]:
+        """按 in_process 模式分派执行器。
+
+        - ``in_process=False``（默认）：走 ``_runner``（子进程路径，零改动）。
+        - ``in_process=True``：走 ``_run_in_process``（argv 翻译为库式调用）。
+        """
+        if self.in_process:
+            return self._run_in_process(command, timeout)
+        return self._runner(command, timeout)
+
+    def _run_in_process(self, command: list[str], timeout: int) -> tuple[int, str]:
+        """in_process argv 翻译执行器（合同 inprocess-runner §4.3）。
+
+        解析本类构建的三类命令（list/detail/detail_batch）并翻译为
+        ``run_search_programmatic`` / ``scrape_details`` 库式调用。无法翻译
+        的命令（如 ``--setup-chrome``）返回 ``(127, "untranslatable_command")``，
+        调用方按失败处理，不崩溃。
+
+        异常映射（合同 §3，与子进程退出码语义等价）：
+
+        - ``CDPUnavailableError`` → ``(2, str(exc))`` → source_cdp_unavailable
+        - ``LoginRequiredError`` → ``(1, "登录态失效: ...")`` → source_login_required
+        - ``RiskControlError`` → ``(10, exc.reason)`` → 按 reason 分类
+        - ``SearchCancelled`` → ``(-1, "cancelled")``
+        - 其他 → ``(-1, str(exc))``
+        """
+        parsed = self._translate_argv(command)
+        if parsed is None:
+            return (127, "untranslatable_command")
+        try:
+            if parsed["kind"] == "list":
+                boss.run_search_programmatic(**parsed["params"])
+            else:  # detail / detail_batch
+                boss.scrape_details(**parsed["params"])
+            return (0, "")
+        except boss.SearchCancelled:
+            return (-1, "cancelled")
+        except boss.CDPUnavailableError as exc:
+            return (2, str(exc))
+        except boss.LoginRequiredError as exc:
+            # captured 含「登录」关键词，_classify_failed_code 据此映射为
+            # source_login_required（合同 §3 表 LoginRequiredError 行）
+            return (1, f"登录态失效: {exc}")
+        except boss.RiskControlError as exc:
+            return (10, exc.reason)
+        except Exception as exc:
+            return (-1, str(exc))
+
+    def _translate_argv(self, command: list[str]) -> dict | None:
+        """解析本类 ``_build_*_command`` 产出的 argv，返回 ``{kind, params}``。
+
+        无法翻译的命令返回 ``None``。只识别 list-only / detail-only /
+        detail-batch 三类；``--setup-chrome`` 等其他命令一律视为不可翻译。
+        """
+        flags: dict[str, str | bool] = {}
+        # 跳过 python_executable（command[0]）和 scraper_path（command[1]）
+        i = 2
+        while i < len(command):
+            token = command[i]
+            if not isinstance(token, str) or not token.startswith("--"):
+                i += 1
+                continue
+            flag = token[2:]
+            if flag in self._IN_PROCESS_BOOL_FLAGS:
+                flags[flag] = True
+                i += 1
+            elif i + 1 < len(command):
+                flags[flag] = command[i + 1]
+                i += 2
+            else:
+                flags[flag] = True
+                i += 1
+
+        # setup-chrome / stop-chrome / smoke-test 等不可翻译
+        if any(k in flags for k in ("setup-chrome", "stop-chrome", "smoke-test")):
+            return None
+        if "no-detail" in flags:
+            return self._translate_list_argv(flags)
+        if "events-output" in flags:
+            return self._translate_detail_batch_argv(flags)
+        if "detail" in flags and "input" in flags:
+            return self._translate_detail_argv(flags)
+        return None
+
+    def _translate_list_argv(self, flags: dict) -> dict:
+        """list-only（--no-detail）→ run_search_programmatic(detail=False)。"""
+        filters = {}
+        for name in SCRAPER_FILTER_FIELDS:
+            val = flags.get(name)
+            if val not in (None, False, ""):
+                filters[name] = str(val)
+        params = {
+            "keyword": str(flags.get("keyword", "")),
+            "city": str(flags.get("city", "_")),
+            "pages": int(flags.get("pages", "1")),
+            "cdp_port": int(flags.get("cdp-port", str(self.cdp_port))),
+            "output_path": str(flags.get("output", "")),
+            "detail": False,
+            "filters": filters,
+            "cancel_event": self.cancel_event,
+        }
+        return {"kind": "list", "params": params}
+
+    def _translate_detail_argv(self, flags: dict) -> dict:
+        """detail-only（--input + --detail + --max-details 1）→ scrape_details。"""
+        input_path = str(flags.get("input", ""))
+        output_path = str(flags.get("detail-output", ""))
+        list_data = self._read_detail_input(input_path)
+        params = {
+            "list_data": list_data,
+            "max_details": int(flags.get("max-details", "1")),
+            "output_path": output_path,
+            "cdp_port": int(flags.get("cdp-port", str(self.cdp_port))),
+            "cancel_event": self.cancel_event,
+        }
+        return {"kind": "detail", "params": params}
+
+    def _translate_detail_batch_argv(self, flags: dict) -> dict:
+        """detail-batch（--events-output + --enable-parallel）→ scrape_details with events。"""
+        input_path = str(flags.get("input", ""))
+        output_path = str(flags.get("detail-output", ""))
+        events_output_path = str(flags.get("events-output", ""))
+        list_data = self._read_detail_input(input_path)
+
+        # 清空 events 文件，event_callback 追加写 JSONL（与子进程产物格式一致）
+        try:
+            Path(events_output_path).write_text("", encoding="utf-8")
+        except OSError:
+            pass
+
+        def event_callback(event):
+            try:
+                with open(events_output_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+            except OSError:
+                pass
+
+        gap_min = float(flags.get("gap-min", "8"))
+        gap_max = float(flags.get("gap-max", "15"))
+        params = {
+            "list_data": list_data,
+            "max_details": int(flags.get("max-details", "5")),
+            "output_path": output_path,
+            "cdp_port": int(flags.get("cdp-port", str(self.cdp_port))),
+            "event_callback": event_callback,
+            "enable_parallel": True,
+            "tab_pool_size": int(flags.get("tab-pool-size", "5")),
+            "inter_job_gap_range": (gap_min, gap_max),
+            "reset_every": int(flags.get("reset-every", "3")),
+            "cancel_event": self.cancel_event,
+        }
+        return {"kind": "detail_batch", "params": params}
+
+    @staticmethod
+    def _read_detail_input(input_path: str) -> dict:
+        """读取 detail input JSON（fetch_detail/fetch_details_batch 写入）。"""
+        try:
+            with open(input_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, dict):
+                return payload
+        except (OSError, json.JSONDecodeError):
+            pass
+        return {"jobs": []}
 
     def _artifact_path_allowed(self, raw_path: str) -> bool:
         if self.artifact_root is None:

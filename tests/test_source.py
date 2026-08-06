@@ -1025,5 +1025,329 @@ def _zhilian_input_hash(payload: dict) -> str:
     return _impl(payload)
 
 
+# ===========================================================================
+# spec003 tasks004 T026 — BossCdpSource in_process argv 翻译
+#
+# 冻结合同：specs/003-desktop-exe/contracts/inprocess-runner.md §4.3。
+#
+# in_process=True 时，_runner 把本类构建的三类命令（list-only / detail-only /
+# detail-batch）翻译为 programmatic 库式调用（run_search_programmatic /
+# scrape_details），不经过 argv 文本往返；其余行为（SourceOutcome、事件校验、
+# 熔断器、输入 hash、产物读取）零改动。无法翻译的命令返回失败 outcome。
+# ===========================================================================
+import json as _json_for_inprocess  # noqa: E402
+from scripts import boss_cdp_raw as _boss_for_inprocess  # noqa: E402
+from webui.source import _input_hash as _boss_input_hash  # noqa: E402
+
+
+class BossCdpSourceInProcessTests(unittest.TestCase):
+    """T026：BossCdpSource in_process=True argv 翻译执行器。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+        self.artifact_root = self.root / "artifacts"
+        self.artifact_root.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _make_source(self, **overrides):
+        kwargs = dict(
+            artifact_root=self.artifact_root,
+            cdp_port=9222,
+            in_process=True,
+        )
+        kwargs.update(overrides)
+        return BossCdpSource(**kwargs)
+
+    def _write_json(self, path, payload):
+        p = pathlib.Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json_for_inprocess.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    # ---- 构造参数 ----------------------------------------------------
+
+    def test_constructor_accepts_in_process_false(self):
+        """in_process 参数默认 False。"""
+        source = BossCdpSource.__new__(BossCdpSource)
+        # 只验证签名接受参数，不触发依赖加载
+        import inspect
+        sig = inspect.signature(BossCdpSource.__init__)
+        self.assertIn("in_process", sig.parameters)
+        self.assertFalse(sig.parameters["in_process"].default)
+
+    # ---- list-only 翻译 ---------------------------------------------
+
+    def test_list_only_translates_to_programmatic(self):
+        """list-only（--no-detail）命令翻译为 run_search_programmatic(detail=False)。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list.json")
+        plan_item = {
+            "keyword": "AI",
+            "city": "上海",
+            "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+
+        captured = {}
+
+        def fake_run(**kwargs):
+            captured.update(kwargs)
+            # 写列表产物（jobs 含 BOSS 字段，触发 _normalize_job_fields）
+            self._write_json(kwargs["output_path"], {
+                "jobs": [{"encrypt_job_id": "j1", "job_link": "https://www.zhipin.com/job/1",
+                          "boss_name": "Corp"}]
+            })
+            return {"list_data": {"jobs": []}, "details": None}
+
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic", side_effect=fake_run):
+            outcome = source.fetch_list(plan_item)
+
+        # programmatic 被调用，detail=False
+        self.assertTrue(outcome.ok)
+        self.assertEqual(captured["keyword"], "AI")
+        self.assertEqual(captured["city"], "上海")
+        self.assertEqual(captured["pages"], 1)
+        self.assertFalse(captured["detail"])
+        self.assertEqual(captured["output_path"], list_path)
+        # jobs 被归一化（encrypt_job_id → job_id）
+        self.assertEqual(len(outcome.jobs), 1)
+        self.assertEqual(outcome.jobs[0]["job_id"], "j1")
+
+    def test_list_only_filters_translated(self):
+        """list-only 命令的 source_filters 翻译为 filters dict。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_filter.json")
+        filters = {"salary": "403", "experience": "003"}
+        plan_item = {
+            "keyword": "AI", "city": "北京",
+            "source_filters": filters,
+            "target_pages": 2,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "北京",
+                "source_filters": filters, "target_pages": 2,
+            }),
+            "list_output_path": list_path,
+        }
+
+        captured = {}
+
+        def fake_run(**kwargs):
+            captured.update(kwargs)
+            self._write_json(kwargs["output_path"], {"jobs": []})
+            return {"list_data": {"jobs": []}, "details": None}
+
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic", side_effect=fake_run):
+            source.fetch_list(plan_item)
+
+        self.assertEqual(captured["filters"], filters)
+
+    # ---- detail-only 翻译 -------------------------------------------
+
+    def test_detail_only_translates_to_scrape_details(self):
+        """detail-only（--input + --detail + --max-details 1）翻译为 scrape_details。"""
+        source = self._make_source()
+        detail_path = str(self.artifact_root / "detail.json")
+        job = {"job_id": "j1", "source_url": "https://www.zhipin.com/job/1",
+               "job_link": "https://www.zhipin.com/job/1", "company": "Corp"}
+
+        captured = {}
+
+        def fake_scrape_details(list_data, max_details, output_path, **kwargs):
+            captured.update(kwargs)
+            captured["list_data"] = list_data
+            captured["max_details"] = max_details
+            captured["output_path"] = output_path
+            self._write_json(output_path, [{"job_id": "j1", "jd": "desc",
+                                            "job_link": "https://www.zhipin.com/job/1"}])
+            return [{"job_id": "j1", "jd": "desc"}]
+
+        with mock.patch.object(_boss_for_inprocess, "scrape_details", side_effect=fake_scrape_details):
+            outcome = source.fetch_detail(job, detail_output_path=detail_path)
+
+        self.assertTrue(outcome.ok)
+        self.assertEqual(captured["max_details"], 1)
+        self.assertEqual(captured["output_path"], detail_path)
+        # input.json 被读取并构造为 list_data
+        self.assertEqual(len(captured["list_data"]["jobs"]), 1)
+
+    # ---- detail-batch 翻译 ------------------------------------------
+
+    def test_detail_batch_translates_to_scrape_details_with_events(self):
+        """detail-batch（--events-output + --enable-parallel）翻译为 scrape_details with events。"""
+        source = self._make_source()
+        detail_path = str(self.artifact_root / "batch_detail.json")
+        jobs = [
+            {"job_id": "j1", "source_url": "https://www.zhipin.com/job/1",
+             "job_link": "https://www.zhipin.com/job/1"},
+            {"job_id": "j2", "source_url": "https://www.zhipin.com/job/2",
+             "job_link": "https://www.zhipin.com/job/2"},
+        ]
+
+        captured = {}
+
+        def fake_scrape_details(list_data, max_details, output_path, **kwargs):
+            captured.update(kwargs)
+            captured["list_data"] = list_data
+            captured["max_details"] = max_details
+            captured["output_path"] = output_path
+            # 写详情产物
+            self._write_json(output_path, [
+                {"job_id": "j1", "jd": "d1", "job_link": "https://www.zhipin.com/job/1"},
+                {"job_id": "j2", "jd": "d2", "job_link": "https://www.zhipin.com/job/2"},
+            ])
+            # 发出 terminal safe events
+            if kwargs.get("event_callback"):
+                kwargs["event_callback"]({
+                    "kind": "detail", "status": "completed",
+                    "job_id": "https://www.zhipin.com/job/1",
+                    "duration_ms": 100, "safe_code": "ok",
+                })
+                kwargs["event_callback"]({
+                    "kind": "detail", "status": "completed",
+                    "job_id": "https://www.zhipin.com/job/2",
+                    "duration_ms": 200, "safe_code": "ok",
+                })
+            return [{"job_id": "j1"}, {"job_id": "j2"}]
+
+        with mock.patch.object(_boss_for_inprocess, "scrape_details", side_effect=fake_scrape_details):
+            results = source.fetch_details_batch(jobs, detail_output_path=detail_path)
+
+        # batch_size=2（len(valid_jobs)），enable_parallel=True
+        self.assertTrue(captured.get("enable_parallel"))
+        self.assertEqual(captured["max_details"], 2)
+        # event_callback 被传入（写 events JSONL）
+        self.assertTrue(callable(captured.get("event_callback")))
+        # 两个 job 都成功
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(o.ok for o in results.values()))
+
+    # ---- 异常映射 ----------------------------------------------------
+
+    def test_cdp_unavailable_maps_to_returncode_2(self):
+        """CDPUnavailableError → (2, ...) → source_cdp_unavailable，熔断器记录。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_cdp.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic",
+                               side_effect=_boss_for_inprocess.CDPUnavailableError("cdp down")):
+            outcome = source.fetch_list(plan_item)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_cdp_unavailable")
+
+    def test_login_required_maps_to_returncode_1(self):
+        """LoginRequiredError → (1, '登录') → source_login_required。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_login.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic",
+                               side_effect=_boss_for_inprocess.LoginRequiredError("not logged in")):
+            outcome = source.fetch_list(plan_item)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_login_required")
+
+    def test_risk_control_maps_to_returncode_10(self):
+        """RiskControlError → (10, reason) → 按 reason 分类。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_risk.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+        err = _boss_for_inprocess.RiskControlError("频繁访问，请稍后再试", page=1)
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic", side_effect=err):
+            outcome = source.fetch_list(plan_item)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_rate_limited")
+
+    # ---- 无法翻译命令 -----------------------------------------------
+
+    def test_untranslatable_command_returns_failure(self):
+        """无法翻译的命令（如 --setup-chrome）返回失败 outcome 而非崩溃。"""
+        source = self._make_source()
+        # 构造一个 --setup-chrome 命令，通过自定义 runner 触发翻译器
+        # setup-chrome 不属于三类命令，翻译器应返回失败
+        list_path = str(self.artifact_root / "list_setup.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+        # mock run_search_programmatic 不应被调用（setup-chrome 不可翻译）
+        # 但 fetch_list 构建的是 list-only 命令（--no-detail），不是 setup-chrome
+        # 所以这个测试验证的是：翻译器对未知 argv 模式返回失败
+        # 我们通过 mock _build_list_command 返回一个不可翻译的命令来测试
+        with mock.patch.object(BossCdpSource, "_build_list_command",
+                               return_value=["python", "scraper.py", "--setup-chrome"]):
+            with mock.patch.object(_boss_for_inprocess, "run_search_programmatic") as m_run:
+                outcome = source.fetch_list(plan_item)
+        # run_search_programmatic 不应被调用
+        self.assertEqual(m_run.call_count, 0)
+        # 返回失败 outcome
+        self.assertFalse(outcome.ok)
+
+    # ---- 熔断器/产物零改动 ------------------------------------------
+
+    def test_breaker_records_success_after_list(self):
+        """in_process 模式成功后熔断器 record_success 被调用（零改动路径）。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_breaker.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+
+        def fake_run(**kwargs):
+            self._write_json(kwargs["output_path"], {
+                "jobs": [{"encrypt_job_id": "j1", "job_link": "https://www.zhipin.com/job/1",
+                          "boss_name": "C"}]
+            })
+            return {"list_data": {"jobs": []}, "details": None}
+
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic", side_effect=fake_run), \
+                mock.patch.object(source.breaker, "record_success") as m_record:
+            outcome = source.fetch_list(plan_item)
+
+        self.assertTrue(outcome.ok)
+        # 熔断器 record_success 被调用（零改动路径复用）
+        self.assertEqual(m_record.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

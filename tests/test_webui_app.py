@@ -5528,5 +5528,171 @@ class Task008BackendIntegrationTests(unittest.TestCase):
         )
 
 
+# ===========================================================================
+# spec003 tasks004 T028/T029 — env_check EXE 模式 + _make_cdp_source EXE 接线
+#
+# 冻结合同：specs/003-desktop-exe/contracts/runtime-mode.md §2、
+# contracts/inprocess-runner.md §4.3。
+# ===========================================================================
+class EnvCheckRuntimeModeTests(unittest.TestCase):
+    """T028: env_check 响应含 runtime_mode 字段，EXE 模式检查项差异。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _make_app(self, runtime_mode="source"):
+        app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(self.root / "results"),
+            "DB_PATH": str(self.root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+            "RUNTIME_MODE": runtime_mode,
+        })
+        client = app.test_client()
+        token = client.get("/api/session").get_json()["token"]
+        client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        return app, client
+
+    def _fake_check_items(self):
+        return ([
+            {"id": "browsers", "name": "Chromium 浏览器", "status": "ok",
+             "detail": "找到 Chrome ✅", "fix": None},
+            {"id": "deps", "name": "Python 依赖", "status": "ok",
+             "detail": "requests / websocket 可导入", "fix": None},
+            {"id": "cdp", "name": "专用浏览器已启动", "status": "fail",
+             "detail": "无法连接 127.0.0.1:9222", "fix": "启动专用浏览器"},
+            {"id": "boss_login", "name": "BOSS 登录状态", "status": "skip",
+             "detail": "跳过", "fix": None},
+        ], False)
+
+    def test_source_mode_returns_runtime_mode_source(self):
+        """源码模式：runtime_mode='source'，local 组无 webview2 项。"""
+        app, client = self._make_app("source")
+        with mock.patch("webui.app.boss.collect_check_items",
+                        return_value=self._fake_check_items()):
+            payload = client.get("/api/env-check").get_json()
+        self.assertEqual(payload["runtime_mode"], "source")
+        local_items = next(g for g in payload["groups"] if g["id"] == "local")["items"]
+        item_ids = [item["id"] for item in local_items]
+        self.assertNotIn("webview2", item_ids)
+
+    def test_exe_mode_returns_runtime_mode_exe(self):
+        """EXE 模式：runtime_mode='exe'。"""
+        app, client = self._make_app("exe")
+        with mock.patch("webui.app.boss.collect_check_items",
+                        return_value=self._fake_check_items()), \
+                mock.patch("webui.desktop_runtime.check_webview2",
+                           return_value={"installed": True, "available": True,
+                                         "version": "120.0.0.0", "detail": "已安装"}):
+            payload = client.get("/api/env-check").get_json()
+        self.assertEqual(payload["runtime_mode"], "exe")
+
+    def test_exe_mode_deps_item_is_builtin_runtime(self):
+        """EXE 模式：deps 项名称改「内置运行时」，状态恒 ok，fix 为 null。"""
+        app, client = self._make_app("exe")
+        with mock.patch("webui.app.boss.collect_check_items",
+                        return_value=self._fake_check_items()), \
+                mock.patch("webui.desktop_runtime.check_webview2",
+                           return_value={"installed": True, "available": True,
+                                         "version": "120.0.0.0", "detail": "已安装"}):
+            payload = client.get("/api/env-check").get_json()
+        local_items = next(g for g in payload["groups"] if g["id"] == "local")["items"]
+        deps_item = next(item for item in local_items if item["id"] == "deps")
+        self.assertIn("内置运行时", deps_item["name"])
+        self.assertEqual(deps_item["status"], "ok")
+        self.assertIsNone(deps_item["fix"])
+
+    def test_exe_mode_webview2_item_present(self):
+        """EXE 模式：local 组含 webview2 项（注入检测替身）。"""
+        app, client = self._make_app("exe")
+        with mock.patch("webui.app.boss.collect_check_items",
+                        return_value=self._fake_check_items()), \
+                mock.patch("webui.desktop_runtime.check_webview2",
+                           return_value={"installed": True, "available": True,
+                                         "version": "120.0.0.0", "detail": "已安装 WebView2"}):
+            payload = client.get("/api/env-check").get_json()
+        local_items = next(g for g in payload["groups"] if g["id"] == "local")["items"]
+        webview2_item = next(item for item in local_items if item["id"] == "webview2")
+        self.assertEqual(webview2_item["status"], "ok")
+        self.assertIn("WebView2", webview2_item["detail"])
+
+    def test_exe_mode_webview2_not_installed(self):
+        """EXE 模式：webview2 未安装时 status=fail，fix 文案含「安装 WebView2」。"""
+        app, client = self._make_app("exe")
+        with mock.patch("webui.app.boss.collect_check_items",
+                        return_value=self._fake_check_items()), \
+                mock.patch("webui.desktop_runtime.check_webview2",
+                           return_value={"installed": False, "available": True,
+                                         "version": None, "detail": "未检测到 WebView2"}):
+            payload = client.get("/api/env-check").get_json()
+        local_items = next(g for g in payload["groups"] if g["id"] == "local")["items"]
+        webview2_item = next(item for item in local_items if item["id"] == "webview2")
+        self.assertEqual(webview2_item["status"], "fail")
+        self.assertIn("WebView2", webview2_item.get("fix") or "")
+
+
+class MakeCdpSourceRuntimeModeTests(unittest.TestCase):
+    """T029: _make_cdp_source EXE 模式 BOSS 传 in_process=True，智联不变。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _make_app(self, runtime_mode="source"):
+        app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(self.root / "results"),
+            "DB_PATH": str(self.root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+            "RUNTIME_MODE": runtime_mode,
+        })
+        return app
+
+    def test_exe_mode_boss_source_gets_in_process_true(self):
+        """EXE 模式：_make_cdp_source(platform=boss) 返回的 source.in_process=True。"""
+        app = self._make_app("exe")
+        factory = app.config["MAKE_CDP_SOURCE"]
+        source = factory(platform="boss", cdp_port=9222, browser_account="acc")
+        self.assertIsNotNone(source)
+        self.assertTrue(getattr(source, "in_process", False))
+
+    def test_source_mode_boss_source_in_process_false(self):
+        """源码模式：_make_cdp_source(platform=boss) 返回的 source.in_process=False。"""
+        app = self._make_app("source")
+        factory = app.config["MAKE_CDP_SOURCE"]
+        source = factory(platform="boss", cdp_port=9222, browser_account="acc")
+        self.assertIsNotNone(source)
+        self.assertFalse(getattr(source, "in_process", False))
+
+    def test_exe_mode_zhilian_source_unchanged(self):
+        """EXE 模式：_make_cdp_source(platform=zhilian) 智联构造不变（无 in_process）。"""
+        app = self._make_app("exe")
+        factory = app.config["MAKE_CDP_SOURCE"]
+        source = factory(platform="zhilian", cdp_port=9223,
+                         browser_account="acc", profile_key="zhilian:acc")
+        self.assertIsNotNone(source)
+        # 智联 source 不应有 in_process 属性，或属性为 False
+        self.assertFalse(getattr(source, "in_process", False))
+
+
 if __name__ == "__main__":
     unittest.main()

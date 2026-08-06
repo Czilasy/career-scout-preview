@@ -76,6 +76,7 @@ from webui.workbench import (
 )
 from webui.source import BossCdpSource as _BossCdpSource
 from webui.process_executor import ArtifactSpec, ScraperExecutor
+from webui import desktop_runtime
 from webui import resume as resume_service
 from webui import ai as ai_service
 # Task 008：生命周期/提醒/事件/建议的命令服务与路由注册器（Task 001/005），
@@ -127,6 +128,69 @@ def _classify_scrape_block(err_msg: str) -> str:
             if kw.lower() in text:
                 return code
     return ""
+
+
+# 风控异常 reason → 安全失败码（合同 inprocess-runner §3）。
+# 顺序敏感：限流优先于验证码（与 _classify_scrape_block 一致），避免
+# "频繁 + 滑块" 文案被误判为验证码。
+_RISK_CONTROL_REASON_PATTERNS = (
+    ("source_login_required", ("登录", "未登录", "wt2", "401")),
+    ("source_rate_limited", (
+        "限流", "频繁", "rate limit", "too many", "稍后再试",
+        "解锁", "冻结", "账号受限", "429",
+    )),
+    ("source_verification_required", ("验证码", "滑块", "gtm", "geetest", "captcha")),
+)
+
+
+def _classify_risk_control_reason(reason: str) -> str:
+    """把 RiskControlError.reason 文本映射到安全失败码；未命中返回 source_blocked。
+
+    用于 in_process 模式异常映射（合同 §3 表 RiskControlError 行）。
+    子进程模式按退出码 10 单独分类，不走本函数。
+    """
+    if not reason:
+        return "source_blocked"
+    text = str(reason).lower()
+    for code, keywords in _RISK_CONTROL_REASON_PATTERNS:
+        for kw in keywords:
+            if kw.lower() in text:
+                return code
+    return "source_blocked"
+
+
+class _StdoutToLogBuffer:
+    """捕获 print 输出并按行转发到 store.append_log（合同 inprocess-runner §2.2）。
+
+    供 setup_chrome 等「无 on_log 参数的库式函数」使用：用
+    ``contextlib.redirect_stdout(buffer)`` 把既有 print 按行转发，
+    不修改既有 print 语句。行格式与子进程模式 stdout 完全一致。
+    """
+
+    def __init__(self, store, task_id):
+        self._store = store
+        self._task_id = task_id
+        self._buf = []
+
+    def write(self, text):
+        if not text:
+            return 0
+        parts = text.splitlines(keepends=True)
+        for part in parts:
+            self._buf.append(part)
+            if part.endswith("\n") or part.endswith("\r"):
+                line = "".join(self._buf).rstrip("\r\n")
+                if line.strip():
+                    self._store.append_log(self._task_id, line)
+                self._buf = []
+        return len(text)
+
+    def flush(self):
+        if self._buf:
+            line = "".join(self._buf).rstrip("\r\n")
+            if line.strip():
+                self._store.append_log(self._task_id, line)
+            self._buf = []
 
 
 SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
@@ -250,11 +314,13 @@ def _mask_key(key: str) -> str:
 class TaskRunner:
     """Run scraper commands sequentially while persisting state and output."""
 
-    def __init__(self, store, result_dir, python_executable, start_tasks=True):
+    def __init__(self, store, result_dir, python_executable, start_tasks=True,
+                 execution_mode="subprocess"):
         self.store = store
         self.result_dir = Path(result_dir)
         self.python_executable = str(python_executable)
         self.start_tasks = bool(start_tasks)
+        self.execution_mode = execution_mode
         self._processes = {}
         self._cancel_events = {}
         self._process_lock = threading.Lock()
@@ -301,7 +367,14 @@ class TaskRunner:
         if process is not None:
             process.terminate()
         self.store.append_log(task_id, "用户取消任务")
-        return self.store.update_task(task_id, "interrupted", error="用户取消任务")
+        try:
+            return self.store.update_task(task_id, "interrupted", error="用户取消任务")
+        except ValueError:
+            # in_process 模式下，_execute 的 SearchCancelled 路径可能已抢先
+            # 改为 interrupted（cancel_event set → run_search_programmatic 抛
+            # SearchCancelled → _run_in_process 返回 interrupted → _execute 改
+            # 状态）。此时状态已是终态，返回当前快照而非抛异常。
+            return self.store.get_task(task_id)
 
     def retry(self, task_id):
         task = self.store.get_task(task_id)
@@ -367,37 +440,53 @@ class TaskRunner:
                 return
             self.store.update_task(task_id, "running")
             task = self.store.get_task(task_id)
-            command = self.build_command(task)
             self.store.append_log(task_id, "任务开始")
             cancel_event = threading.Event()
             with self._process_lock:
                 self._cancel_events[task_id] = cancel_event
-            artifacts = []
-            if task["kind"] == "scrape":
-                artifacts = [
-                    ArtifactSpec(task["output_path"], root=self.result_dir),
-                    ArtifactSpec(task["detail_output_path"], root=self.result_dir, required=False),
-                ]
-            result = self.process_executor.execute(
-                command, timeout_seconds=600, cwd=PROJECT_ROOT, env=_env(),
-                cancel_event=cancel_event, artifacts=artifacts,
-                on_output=lambda chunk: [
-                    self.store.append_log(task_id, line)
-                    for line in chunk.splitlines() if line.strip()
-                ],
-            )
+            if self.execution_mode == "in_process":
+                outcome = self._run_in_process(task_id, task, cancel_event)
+            else:
+                command = self.build_command(task)
+                artifacts = []
+                if task["kind"] == "scrape":
+                    artifacts = [
+                        ArtifactSpec(task["output_path"], root=self.result_dir),
+                        ArtifactSpec(task["detail_output_path"], root=self.result_dir, required=False),
+                    ]
+                result = self.process_executor.execute(
+                    command, timeout_seconds=600, cwd=PROJECT_ROOT, env=_env(),
+                    cancel_event=cancel_event, artifacts=artifacts,
+                    on_output=lambda chunk: [
+                        self.store.append_log(task_id, line)
+                        for line in chunk.splitlines() if line.strip()
+                    ],
+                )
+                outcome = (
+                    "succeeded" if result.ok else "failed",
+                    result.returncode if result.returncode is not None else -1,
+                    result.failure_code or "process_failed",
+                    "",
+                )
+            # SearchCancelled → interrupted（cancel() 可能已改状态，也可能尚未）
+            if outcome[0] == "interrupted":
+                try:
+                    if self.store.get_task(task_id)["status"] in {"queued", "running"}:
+                        self.store.update_task(task_id, "interrupted", error="用户取消任务")
+                except ValueError:
+                    pass  # cancel() 已抢先改为 interrupted
+                return
             if self.store.get_task(task_id)["status"] == "interrupted":
                 return
-            if result.ok:
+            if outcome[0] == "succeeded":
                 self.validate_artifacts(task)
                 self.store.append_log(task_id, "任务完成")
                 self.store.update_task(task_id, "succeeded", returncode=0)
             else:
-                message = f"抓取执行失败: {result.failure_code or 'process_failed'}"
+                message = f"抓取执行失败: {outcome[2] or 'process_failed'}"
                 self.store.append_log(task_id, message)
                 self.store.update_task(
-                    task_id, "failed", returncode=result.returncode if result.returncode is not None else -1,
-                    error=message,
+                    task_id, "failed", returncode=outcome[1], error=message,
                 )
         except Exception as exc:
             try:
@@ -422,6 +511,67 @@ class TaskRunner:
             with self._process_lock:
                 self._processes.pop(task_id, None)
                 self._cancel_events.pop(task_id, None)
+
+    # ------------------------------------------------------------------
+    # in_process 模式执行（合同 inprocess-runner §4.1）
+    # ------------------------------------------------------------------
+
+    def _run_in_process(self, task_id, task, cancel_event):
+        """in_process 模式执行：调用 boss 库式函数，异常按 §3 映射表冻结。
+
+        返回 ``(status, returncode, failure_code, output_tail)``；
+        ``status`` ∈ ``{"succeeded", "failed", "interrupted"}``。
+        """
+        try:
+            if task["kind"] == "setup_chrome":
+                returncode = self._run_setup_chrome_in_process(task_id, cancel_event)
+                if returncode == 0:
+                    return ("succeeded", 0, None, "")
+                return ("failed", returncode, "process_failed", "")
+
+            search = task["params"]["search"]
+            boss.run_search_programmatic(
+                keyword=search["keyword"],
+                city=search["city"],
+                pages=int(search["pages"]),
+                cdp_port=boss.DEFAULT_CDP_PORT,
+                output_path=task["output_path"],
+                detail_output_path=task["detail_output_path"],
+                detail=bool(search["detail"]),
+                analysis=bool(search.get("analysis")),
+                fmt=search.get("format", "json"),
+                filters=dict(search.get("filters") or {}),
+                on_log=lambda line: self.store.append_log(task_id, line),
+                cancel_event=cancel_event,
+            )
+            return ("succeeded", 0, None, "")
+        except boss.SearchCancelled:
+            return ("interrupted", -1, None, "")
+        except boss.CDPUnavailableError as exc:
+            return ("failed", 2, "source_cdp_unavailable", str(exc))
+        except boss.LoginRequiredError as exc:
+            return ("failed", 1, "source_login_required", str(exc))
+        except boss.RiskControlError as exc:
+            failed_code = _classify_risk_control_reason(exc.reason)
+            return ("failed", 10, failed_code, exc.reason)
+        except Exception as exc:
+            return ("failed", -1, "process_failed", str(exc))
+
+    def _run_setup_chrome_in_process(self, task_id, cancel_event):
+        """in_process 模式 setup_chrome：调用 boss.run_setup_chrome 库式函数。
+
+        run_setup_chrome 无 cancel_event/on_log 参数；用 redirect_stdout
+        把既有 print 按行转发到 store.append_log，cancel_event 仅在调用
+        前后检查（mid-execution 不可中断，setup_chrome 通常短时）。
+        """
+        if cancel_event.is_set():
+            return 1
+        import contextlib
+        buffer = _StdoutToLogBuffer(self.store, task_id)
+        with contextlib.redirect_stdout(buffer):
+            returncode = boss.run_setup_chrome(cdp_port=boss.DEFAULT_CDP_PORT)
+        buffer.flush()
+        return returncode
 
 
 class WorkbenchRunner(TaskRunner):
@@ -590,17 +740,24 @@ class WorkbenchRunner(TaskRunner):
                         self.store.update_search_run(
                             run_id, completed_jd_count=current["completed_jd_count"] + persisted,
                         )
-                result = self.process_executor.execute(
-                    self._query_command(query), timeout_seconds=600,
-                    cwd=PROJECT_ROOT, env=_env(), cancel_event=cancel_event,
-                    on_poll=stream_progress,
-                    artifacts=[
-                        ArtifactSpec(query["list_output_path"], root=self.result_dir),
-                        ArtifactSpec(query["detail_output_path"], root=self.result_dir, required=False),
-                    ],
-                )
-                if not result.ok:
-                    raise ValueError(result.failure_code or "抓取器执行失败")
+                if self.execution_mode == "in_process":
+                    query_outcome = self._run_query_in_process(
+                        run_id, query, cancel_event, stream_progress,
+                    )
+                    if query_outcome[0] != "succeeded":
+                        raise ValueError(query_outcome[2] or "抓取器执行失败")
+                else:
+                    result = self.process_executor.execute(
+                        self._query_command(query), timeout_seconds=600,
+                        cwd=PROJECT_ROOT, env=_env(), cancel_event=cancel_event,
+                        on_poll=stream_progress,
+                        artifacts=[
+                            ArtifactSpec(query["list_output_path"], root=self.result_dir),
+                            ArtifactSpec(query["detail_output_path"], root=self.result_dir, required=False),
+                        ],
+                    )
+                    if not result.ok:
+                        raise ValueError(result.failure_code or "抓取器执行失败")
                 jobs, details = self._read_query_artifacts(run_id, query)
                 persisted = self._stream_new_details(run_id, query, seen_detail_ids)
                 self.store.update_run_query(query["id"], status="succeeded", counts={"completed_jd": persisted})
@@ -619,6 +776,45 @@ class WorkbenchRunner(TaskRunner):
         if self.store.get_search_run(run_id)["status"] != "interrupted":
             self._finalize_run(run_id)
         self.store.cleanup_expired_jobs(days=CLEANUP_EXPIRED_DAYS)
+
+    def _run_query_in_process(self, run_id, query, cancel_event, stream_progress):
+        """in_process 模式执行单个 child query（合同 inprocess-runner §4.2）。
+
+        把 ``_query_command`` 产出的 argv 翻译为 ``run_search_programmatic``
+        直传参数；``on_poll`` 透传以保留增量入库语义；异常按 §3 映射表冻结。
+
+        返回 ``(status, returncode, failure_code, output_tail)``；
+        ``status`` ∈ ``{"succeeded", "failed", "interrupted"}``。
+        """
+        frozen = query["frozen_query"]
+        try:
+            if cancel_event.is_set():
+                return ("interrupted", -1, None, "")
+            boss.run_search_programmatic(
+                keyword=str(frozen["keyword"]),
+                city=str(frozen["city"]),
+                pages=1,
+                cdp_port=boss.DEFAULT_CDP_PORT,
+                output_path=query["list_output_path"],
+                detail_output_path=query["detail_output_path"],
+                detail=True,
+                max_details=int(query["detail_budget"]),
+                filters=dict(frozen.get("filters") or {}),
+                on_log=lambda line: self.store.append_log(run_id, line),
+                on_poll=stream_progress,
+                cancel_event=cancel_event,
+            )
+            return ("succeeded", 0, None, "")
+        except boss.SearchCancelled:
+            return ("interrupted", -1, None, "")
+        except boss.CDPUnavailableError as exc:
+            return ("failed", 2, "source_cdp_unavailable", str(exc))
+        except boss.LoginRequiredError as exc:
+            return ("failed", 1, "source_login_required", str(exc))
+        except boss.RiskControlError as exc:
+            return ("failed", 10, _classify_risk_control_reason(exc.reason), exc.reason)
+        except Exception as exc:
+            return ("failed", -1, "process_failed", str(exc))
 
     def _finalize_run(self, run_id):
         """Promote parent run to succeeded/partial/failed based on child states."""
@@ -785,6 +981,7 @@ def create_app(config=None):
         TRUSTED_HOSTS=["127.0.0.1", "localhost", "::1"],
         RESUME_DIR=str(DEFAULT_STATE_DIR / "resumes"),
         REQUIRE_BUILD_IDENTITY=True,
+        RUNTIME_MODE="source",
     )
     if config:
         app.config.update(config)
@@ -825,17 +1022,24 @@ def create_app(config=None):
     # Task 008：统一生命周期命令服务；legacy PATCH 与新 API 共用同一入口，
     # 不允许绕过事件、幂等回执和时间校验直接 UPDATE 快照。
     job_feedback_service = JobFeedbackService(store)
+    # 运行时模式（合同 runtime-mode §1）：exe → in_process 分派；
+    # source → subprocess（零回归）。判定集中在 desktop_runtime 模块。
+    _runtime_mode = desktop_runtime.runtime_mode(app.config)
+    app.config["RUNTIME_MODE"] = _runtime_mode
+    _execution_mode = "in_process" if _runtime_mode == "exe" else "subprocess"
     runner = TaskRunner(
         store,
         app.config["RESULT_DIR"],
         app.config["PYTHON_EXECUTABLE"],
         start_tasks=app.config["START_TASKS"],
+        execution_mode=_execution_mode,
     )
     workbench_runner = WorkbenchRunner(
         store,
         app.config["RESULT_DIR"],
         app.config["PYTHON_EXECUTABLE"],
         start_tasks=app.config["START_TASKS"],
+        execution_mode=_execution_mode,
     )
 
     def _make_cdp_source(*, artifact_root=None, platform="boss",
@@ -860,11 +1064,14 @@ def create_app(config=None):
                     profile_key=profile_key,
                 )
             # BOSS — 显式传入冻结 cdp_port
+            # EXE 模式传 in_process=True（合同 inprocess-runner §4.3）；
+            # 源码模式保持 in_process=False（子进程路径零改动）。
             return _BossCdpSource(
                 python_executable=app.config["PYTHON_EXECUTABLE"],
                 artifact_root=artifact,
                 cdp_port=int(cdp_port) if cdp_port else boss.DEFAULT_CDP_PORT,
                 browser_account=str(browser_account or "").strip() or None,
+                in_process=(_runtime_mode == "exe"),
             )
         except Exception:
             return None
@@ -873,6 +1080,7 @@ def create_app(config=None):
     app.config["TASK_STORE"] = store
     app.config["TASK_RUNNER"] = runner
     app.config["WORKBENCH_RUNNER"] = workbench_runner
+    app.config["MAKE_CDP_SOURCE"] = _make_cdp_source
 
     def _load_legacy_advanced_settings():
         from webui.pipeline_exec import load_advanced_settings
@@ -1171,6 +1379,28 @@ def create_app(config=None):
                 "error_code": outcome.failed_code or "",
                 "error_reason": outcome.failed_reason or "",
             })
+        if _runtime_mode == "exe":
+            # 合同 inprocess-runner §6：EXE 模式不 spawn 子进程，复用
+            # boss.collect_check_items 库式路径；返回结构与源码模式一致。
+            items, all_pass = boss.collect_check_items(cdp_port=boss.DEFAULT_CDP_PORT)
+            lines = []
+            for index, item in enumerate(items, start=1):
+                mark = {"ok": "✅", "fail": "❌", "skip": "⏭️"}.get(item["status"], "?")
+                lines.append(f"[{index}/{len(items)}] {item['name']}...")
+                lines.append(f"  {mark} {item['detail']}")
+                if item.get("fix"):
+                    lines.append(f"     🔧 {item['fix']}")
+            lines.append("")
+            lines.append("✅ 所有检查通过，可以开始抓取" if all_pass
+                         else "❌ 部分检查未通过，请修复后重试")
+            output = "\n".join(lines)
+            return jsonify({
+                "ok": bool(all_pass),
+                "platform": "boss",
+                "connected": bool(all_pass),
+                "returncode": 0 if all_pass else 1,
+                "output": output,
+            })
         result = ScraperExecutor(max_output_bytes=64_000).execute(
             [app.config["PYTHON_EXECUTABLE"], str(SCRAPER), "--check"],
             cwd=PROJECT_ROOT, timeout_seconds=30, env=_env(),
@@ -1243,6 +1473,25 @@ def create_app(config=None):
         except OSError:
             data_writable = False
         dist_ok = (FRONTEND_DIST / "index.html").is_file()
+        # 运行时模式差异（合同 runtime-mode §2.2）：
+        # - EXE 模式 deps 项改「内置运行时」恒 ok / fix=null；
+        # - EXE 模式新增 webview2 项（源码模式不存在该项）。
+        if _runtime_mode == "exe":
+            deps_item = {
+                "id": "deps",
+                "name": "内置运行时",
+                "status": "ok",
+                "detail": "Python 运行时与依赖已内置，无需安装",
+                "fix": None,
+            }
+        else:
+            deps_item = {
+                "id": "deps",
+                "name": "Python 依赖",
+                "status": by_id["deps"]["status"],
+                "detail": by_id["deps"]["detail"],
+                "fix": by_id["deps"]["fix"],
+            }
         local_items = [
             {
                 "id": "data_dir",
@@ -1264,14 +1513,17 @@ def create_app(config=None):
                 ),
                 "fix": None if dist_ok else "npm run build",
             },
-            {
-                "id": "deps",
-                "name": "Python 依赖",
-                "status": by_id["deps"]["status"],
-                "detail": by_id["deps"]["detail"],
-                "fix": by_id["deps"]["fix"],
-            },
+            deps_item,
         ]
+        if _runtime_mode == "exe":
+            wv2 = desktop_runtime.check_webview2()
+            local_items.append({
+                "id": "webview2",
+                "name": "WebView2 运行时",
+                "status": "ok" if wv2["installed"] else "fail",
+                "detail": wv2["detail"],
+                "fix": None if wv2["installed"] else "安装 WebView2 运行时",
+            })
 
         cooldowns = []
         from webui.cooldown import all_cooldowns
@@ -1286,6 +1538,7 @@ def create_app(config=None):
                 })
         return jsonify({
             "ok": True,
+            "runtime_mode": _runtime_mode,
             "groups": [
                 {"id": "browser", "name": "浏览器", "items": browser_items},
                 {"id": "ai", "name": "AI", "items": ai_items},
