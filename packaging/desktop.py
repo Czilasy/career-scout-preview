@@ -51,15 +51,17 @@ WINDOW_STATE_FILENAME = "desktop_window.json"
 LOG_FILENAME = "desktop.log"
 MUTEX_NAME = "CareerScout-SingleInstance"
 ERROR_ALREADY_EXISTS = 183
-DEFAULT_WIDTH = 1280
-DEFAULT_HEIGHT = 800
+# 默认窗口尺寸（用户可通过 desktop_window.json 的 default_* 字段自定义，
+# 见 contracts/desktop-shell.md §5；无记忆或未配置时使用此处常量）
+DEFAULT_WIDTH = 1366
+DEFAULT_HEIGHT = 768
 MIN_WIDTH = 1024
 MIN_HEIGHT = 700
 MAX_WIDTH = 8192
 MAX_HEIGHT = 8192
 BACKEND_READY_TIMEOUT = 30.0
 BACKEND_READY_POLL_INTERVAL = 0.2
-_WINDOW_STATE_SCHEMA_VERSION = 1
+_WINDOW_STATE_SCHEMA_VERSION = 2
 
 
 # ---------------------------------------------------------------------------
@@ -137,15 +139,43 @@ def _window_state_path(state_dir):
     return base / WINDOW_STATE_FILENAME
 
 
+def _read_default_size(state_dir):
+    """读取用户配置的默认尺寸（schema 2 的 default_width/default_height）。
+
+    文件缺失/字段非法/越界 → 回退常量 DEFAULT_WIDTH/DEFAULT_HEIGHT。
+    只读不写；用于「无记忆时打开什么尺寸」的判定（合同 §5）。
+    """
+    path = _window_state_path(state_dir)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+    if not isinstance(data, dict):
+        return (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+    try:
+        width = int(data["default_width"])
+        height = int(data["default_height"])
+    except (KeyError, ValueError, TypeError):
+        return (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+    if not (MIN_WIDTH <= width <= MAX_WIDTH) or not (MIN_HEIGHT <= height <= MAX_HEIGHT):
+        return (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+    return (width, height)
+
+
 def load_window_state(state_dir=None, workarea_provider=None):
     """读取并校验窗口状态。
 
     返回 ``(width, height, x, y)``：
-    - 文件缺失/JSON 非法/字段非法/尺寸越界 → 默认 ``(1280, 800, None, None)``；
+
+    - 文件缺失/JSON 非法/schema 不匹配 → ``(default_w, default_h, None, None)``，
+      default 取文件内用户配置（schema 2 的 default_* 字段），未配置用常量；
+    - 记忆字段（width/height/x/y）任一缺失或非法 → 视为**无记忆**，
+      同样以 default 尺寸打开（用户删掉记忆字段即可回到默认尺寸）；
     - 位置越出显示器工作区 → 回退居中（用第一个工作区）；
     - workarea_provider 为 None → 不做越界检查，直接返回原始 x/y。
     """
-    default = (DEFAULT_WIDTH, DEFAULT_HEIGHT, None, None)
+    default_w, default_h = _read_default_size(state_dir)
+    default = (default_w, default_h, None, None)
     path = _window_state_path(state_dir)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -161,6 +191,7 @@ def load_window_state(state_dir=None, workarea_provider=None):
         x = int(data["x"])
         y = int(data["y"])
     except (KeyError, ValueError, TypeError):
+        # 记忆字段不完整 → 无记忆，用用户配置的默认尺寸
         return default
 
     if not (MIN_WIDTH <= width <= MAX_WIDTH) or not (MIN_HEIGHT <= height <= MAX_HEIGHT):
@@ -185,7 +216,12 @@ def load_window_state(state_dir=None, workarea_provider=None):
 
 
 def save_window_state(width, height, x, y, state_dir=None):
-    """保存窗口状态到 ``{state_dir}/desktop_window.json``。"""
+    """保存窗口状态到 ``{state_dir}/desktop_window.json``。
+
+    schema 2：保留用户配置的 default_width/default_height（读旧文件回退常量），
+    只更新记忆的 width/height/x/y——用户自定义默认尺寸不会被覆盖（合同 §5）。
+    """
+    default_w, default_h = _read_default_size(state_dir)
     path = _window_state_path(state_dir)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -193,6 +229,8 @@ def save_window_state(width, height, x, y, state_dir=None):
             json.dumps(
                 {
                     "schema": _WINDOW_STATE_SCHEMA_VERSION,
+                    "default_width": default_w,
+                    "default_height": default_h,
                     "width": int(width),
                     "height": int(height),
                     "x": int(x),
@@ -315,17 +353,49 @@ def _default_messagebox(title, text):
 
 
 def _default_workarea_provider():
-    """返回主屏工作区 ``[(x, y, w, h)]``；非 Windows 或失败返回 ``[]``。"""
+    """返回所有显示器工作区 ``[(x, y, w, h)]``；非 Windows 或失败返回 ``[]``。
+
+    通过 ``EnumDisplayMonitors`` + ``GetMonitorInfoW`` 枚举每个显示器的
+    ``rcWork``（排除任务栏的可用区域），覆盖副屏场景——窗口在副屏上
+    不被误判为越界（合同 §5「任一可见显示器工作区」）。
+    """
     if sys.platform != "win32":
         return []
     try:
         import ctypes
         from ctypes import wintypes
 
-        rect = wintypes.RECT()
-        # SPI_GETWORKAREA = 0x0030
-        ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0)
-        return [(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)]
+        class _MonitorInfo(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        user32 = ctypes.windll.user32
+        workareas: list[tuple[int, int, int, int]] = []
+
+        monitor_enum_proc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL,
+            wintypes.HMONITOR,
+            wintypes.HDC,
+            ctypes.POINTER(wintypes.RECT),
+            wintypes.LPARAM,
+        )
+
+        def _callback(hmonitor, hdc, rect_ptr, lparam):
+            info = _MonitorInfo()
+            info.cbSize = ctypes.sizeof(_MonitorInfo)
+            if user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+                rect = info.rcWork
+                workareas.append(
+                    (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+                )
+            return True
+
+        user32.EnumDisplayMonitors(None, None, monitor_enum_proc(_callback), 0)
+        return workareas
     except Exception:
         return []
 
@@ -454,11 +524,17 @@ def run_desktop_shell(deps):
 
     def _on_closing():
         try:
+            # window.x/y 在未显式设置时可能为 None（首启），此时回退到
+            # 本次启动用的默认值，保证首次关闭也能写入状态文件。
+            win_w = getattr(window, "width", None)
+            win_h = getattr(window, "height", None)
+            win_x = getattr(window, "x", None)
+            win_y = getattr(window, "y", None)
             save_window_state(
-                getattr(window, "width", width),
-                getattr(window, "height", height),
-                getattr(window, "x", x or 0),
-                getattr(window, "y", y or 0),
+                win_w if win_w is not None else width,
+                win_h if win_h is not None else height,
+                win_x if win_x is not None else (x or 0),
+                win_y if win_y is not None else (y or 0),
                 state_dir=state_dir,
             )
         except Exception:

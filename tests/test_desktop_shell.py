@@ -317,7 +317,11 @@ class WindowStateTests(unittest.TestCase):
         path = self.state_dir / desktop.WINDOW_STATE_FILENAME
         path.write_text(
             json.dumps(
-                {"schema": 1, "width": 1280, "height": 800, "x": 5000, "y": 5000}
+                {
+                    "schema": 2,
+                    "default_width": 1366, "default_height": 768,
+                    "width": 1280, "height": 800, "x": 5000, "y": 5000,
+                }
             ),
             encoding="utf-8",
         )
@@ -335,7 +339,11 @@ class WindowStateTests(unittest.TestCase):
         path = self.state_dir / desktop.WINDOW_STATE_FILENAME
         path.write_text(
             json.dumps(
-                {"schema": 1, "width": 1280, "height": 800, "x": 100, "y": 100}
+                {
+                    "schema": 2,
+                    "default_width": 1366, "default_height": 768,
+                    "width": 1280, "height": 800, "x": 100, "y": 100,
+                }
             ),
             encoding="utf-8",
         )
@@ -345,12 +353,38 @@ class WindowStateTests(unittest.TestCase):
         )
         self.assertEqual(result, (1280, 800, 100, 100))
 
+    def test_load_position_on_secondary_monitor_kept(self):
+        """多显示器：窗口在副屏工作区 → 保留，不被拉回主屏（合同 §5）。"""
+        path = self.state_dir / desktop.WINDOW_STATE_FILENAME
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": 2,
+                    "default_width": 1366, "default_height": 768,
+                    "width": 1280, "height": 800, "x": 2000, "y": 200,
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = desktop.load_window_state(
+            state_dir=self.state_dir,
+            workarea_provider=lambda: [
+                (0, 0, 1920, 1040),   # 主屏
+                (1920, 0, 1920, 1040),  # 副屏（右侧扩展）
+            ],
+        )
+        self.assertEqual(result, (1280, 800, 2000, 200))
+
     def test_load_negative_position_falls_back_via_workarea(self):
         """位置为负且不在工作区 → 回退居中。"""
         path = self.state_dir / desktop.WINDOW_STATE_FILENAME
         path.write_text(
             json.dumps(
-                {"schema": 1, "width": 1280, "height": 800, "x": -9999, "y": -9999}
+                {
+                    "schema": 2,
+                    "default_width": 1366, "default_height": 768,
+                    "width": 1280, "height": 800, "x": -9999, "y": -9999,
+                }
             ),
             encoding="utf-8",
         )
@@ -368,6 +402,94 @@ class WindowStateTests(unittest.TestCase):
         self.assertTrue((isolated / desktop.WINDOW_STATE_FILENAME).exists())
         result = desktop.load_window_state(state_dir=isolated)
         self.assertEqual(result, (1400, 900, 50, 50))
+
+    def test_schema2_missing_memory_uses_configured_default(self):
+        """schema 2 缺记忆字段（width/height/x/y）→ 用用户配置的 default 尺寸。"""
+        path = self.state_dir / desktop.WINDOW_STATE_FILENAME
+        path.write_text(
+            json.dumps({
+                "schema": 2,
+                "default_width": 1440,
+                "default_height": 900,
+            }),
+            encoding="utf-8",
+        )
+        result = desktop.load_window_state(state_dir=self.state_dir)
+        self.assertEqual(result, (1440, 900, None, None))
+
+    def test_schema2_invalid_default_falls_back_constant(self):
+        """schema 2 的 default 字段非法 → 常量默认。"""
+        path = self.state_dir / desktop.WINDOW_STATE_FILENAME
+        path.write_text(
+            json.dumps({
+                "schema": 2,
+                "default_width": "wide",
+                "default_height": 99999,
+            }),
+            encoding="utf-8",
+        )
+        result = desktop.load_window_state(state_dir=self.state_dir)
+        self.assertEqual(
+            result, (desktop.DEFAULT_WIDTH, desktop.DEFAULT_HEIGHT, None, None)
+        )
+
+    def test_schema1_file_falls_back_constant_default(self):
+        """schema 1 旧文件（无 default 字段）→ 常量默认。"""
+        path = self.state_dir / desktop.WINDOW_STATE_FILENAME
+        path.write_text(
+            json.dumps({"schema": 1, "width": 1280, "height": 800, "x": 0, "y": 0}),
+            encoding="utf-8",
+        )
+        result = desktop.load_window_state(state_dir=self.state_dir)
+        self.assertEqual(
+            result, (desktop.DEFAULT_WIDTH, desktop.DEFAULT_HEIGHT, None, None)
+        )
+
+    def test_save_preserves_configured_default(self):
+        """save 必须保留用户配置的 default 尺寸（不被运行状态覆盖）。"""
+        path = self.state_dir / desktop.WINDOW_STATE_FILENAME
+        path.write_text(
+            json.dumps({
+                "schema": 2,
+                "default_width": 1440,
+                "default_height": 900,
+                "width": 1200,
+                "height": 700,
+                "x": 5,
+                "y": 5,
+            }),
+            encoding="utf-8",
+        )
+        desktop.save_window_state(1280, 720, 100, 100, state_dir=self.state_dir)
+        data = json.loads(
+            (self.state_dir / desktop.WINDOW_STATE_FILENAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(data["schema"], 2)
+        self.assertEqual(data["default_width"], 1440)
+        self.assertEqual(data["default_height"], 900)
+        self.assertEqual((data["width"], data["height"]), (1280, 720))
+        self.assertEqual((data["x"], data["y"]), (100, 100))
+
+    def test_closing_saves_state_when_window_xy_none(self):
+        """首启（window.x/y 为 None）closing 也能保存状态（FR-006 首启即生效）。"""
+        state_dir = tempfile.mkdtemp()
+        webview_mod = _FakeWebview(fire_closing=True)
+        original_create = webview_mod.create_window
+
+        def create_window(**kwargs):
+            win = original_create(**kwargs)
+            # 模拟首启：x/y 属性为 None，width/height 有值
+            win.x = None
+            win.y = None
+            win.width = 1366
+            win.height = 768
+            return win
+
+        webview_mod.create_window = create_window
+        deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
+        desktop.run_desktop_shell(deps)
+        result = desktop.load_window_state(state_dir=state_dir)
+        self.assertEqual(result, (1366, 768, 0, 0))
 
 
 # ===========================================================================
@@ -590,8 +712,8 @@ class ShellOrchestrationTests(unittest.TestCase):
             webview_mod.create_window_calls[0]["min_size"], (1024, 700)
         )
 
-    def test_window_default_size_1280_800(self):
-        """无窗口状态文件时默认 1280×800（合同 §5）。"""
+    def test_window_default_size_1366_768(self):
+        """无窗口状态文件时默认 1366×768（合同 §5，用户指定）。"""
         webview_mod = _FakeWebview()
         deps = _make_deps(
             webview_module=webview_mod,
@@ -599,8 +721,8 @@ class ShellOrchestrationTests(unittest.TestCase):
         )
         desktop.run_desktop_shell(deps)
         kwargs = webview_mod.create_window_calls[0]
-        self.assertEqual(kwargs["width"], 1280)
-        self.assertEqual(kwargs["height"], 800)
+        self.assertEqual(kwargs["width"], 1366)
+        self.assertEqual(kwargs["height"], 768)
 
     def test_window_resizable_true(self):
         """resizable = True（合同 §5）。"""

@@ -52,12 +52,31 @@ create_app(config={
 | 项 | 值 | 依据 |
 |---|---|---|
 | 标题 | `Career Scout v{version}`（版本号从 `pyproject.toml` 读取，打包时也可注入 `--version`） | FR-013 |
-| 默认尺寸 | 1280 × 800 | spec 验收基准 |
+| 默认尺寸 | 1366 × 768（可配置，见下） | 用户决定（2026-08-06） |
 | `min_size` | (1024, 700) | FR-005，避免进入手机断点布局 |
 | `resizable` | True | FR-005 |
 
-- 窗口状态记忆：文件 `~/.career-scout/desktop_window.json`（`{"width","height","x","y"}`，含 schema 版本字段）；启动时读取并校验（非法/越界 → 使用默认值，不崩溃）；`events.closing` 时保存当前尺寸位置。
+- 窗口状态记忆：文件 `~/.career-scout/desktop_window.json`，**schema 版本 2**：
+
+```jsonc
+{
+  "schema": 2,
+  "default_width": 1366,     // 用户自定义默认宽度（无记忆时打开此尺寸）
+  "default_height": 768,     // 用户自定义默认高度
+  "width": 1280,             // 上次记忆的宽度（用户拖拽后的实际尺寸）
+  "height": 800,
+  "x": 100,
+  "y": 100
+}
+```
+
+- 语义：
+  - **无记忆**（文件缺失/损坏/schema 不匹配）→ 以 `default_width`/`default_height` 打开（字段非法/越界回退常量 1366×768）。
+  - **有记忆** → 以记忆的 `width`/`height`/`x`/`y` 打开。
+  - `save_window_state` **必须保留** `default_*` 字段不被覆盖（用户自定义默认尺寸是配置，不是运行状态）。
+  - schema 1 旧文件：按无记忆处理（用 default 常量），下一次保存升级为 schema 2。
 - 恢复校验：窗口位置必须位于任一可见显示器工作区内（越界时回退默认居中），防止显示器变更后窗口不可见。
+- 首启（未显式设置 x/y 时窗口属性可能为 None）：closing 保存必须回退到本次启动尺寸，保证**首次关闭也写入状态文件**（FR-006 首启即生效）。
 
 ## 6. 关闭与进程终止（FR-007）
 
