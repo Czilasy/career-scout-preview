@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Career Scout EXE 构建脚本（spec003 tasks006 T043）。
 
@@ -63,11 +63,25 @@ if ($LASTEXITCODE -ne 0) {
 # ---------------------------------------------------------------------------
 # 4. PyInstaller 构建
 # ---------------------------------------------------------------------------
-Write-Host '> uv run pyinstaller packaging/career_scout.spec --noconfirm'
-& uv run pyinstaller packaging/career_scout.spec --noconfirm
-if ($LASTEXITCODE -ne 0) {
-    Write-Error 'PyInstaller 构建失败'
-    exit $LASTEXITCODE
+# 在临时目录执行：项目根 packaging/ 目录（本项目的桌面壳包）会遮蔽 PyPI
+# 的 packaging 库（PyInstaller 依赖其 packaging.requirements），在项目根
+# cwd 下 import 直接 ModuleNotFoundError。spec 内路径全部为绝对路径
+# （PROJECT_ROOT 由 SPECPATH 推导），产物经 --distpath/--workpath 指回。
+$pyiWork = Join-Path $env:TEMP 'career-scout-pyi'
+New-Item -ItemType Directory -Path $pyiWork -Force | Out-Null
+$pyiExe = Join-Path $ProjectRoot '.venv\Scripts\pyinstaller.exe'
+Write-Host '> pyinstaller packaging/career_scout.spec --noconfirm (cwd: temp)'
+Push-Location $pyiWork
+try {
+    & $pyiExe (Join-Path $ProjectRoot 'packaging\career_scout.spec') --noconfirm `
+        --distpath (Join-Path $ProjectRoot 'dist') --workpath (Join-Path $pyiWork 'build')
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'PyInstaller 构建失败'
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
 }
 
 if (-not (Test-Path 'dist/CareerScout.exe')) {
