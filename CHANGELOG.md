@@ -2,6 +2,19 @@
 
 本文件记录 Career Scout 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.8.0] - 2026-08-08
+
+### 新增
+
+- **智联抓 JD 完整遵循高级设置**：`detail_reset_every`、`detail_tab_pool_size` 对智联平台生效，5 个 JD 参数与 BOSS 完全对齐（同一套字段、同一套默认值）。
+- **智联 tab 池并行抓取**：`tab_pool_size > 1` 时后台 tab 池并行抓 JD（错峰启动、条间间隔、按 `reset_every` 导航回首页重置、平台级信号全体降级停工）；`=1` 保持原有串行路径。单条失败不中断，熔断器与结果映射语义不变。
+
+### 修复
+
+- **并行抓取 worker 崩溃**：默认等待函数不接受 `label` 关键字，首次错峰/间隔等待即抛 TypeError 杀死 worker（端到端实测发现）。
+- **并行抓取结果错位**：缺失或重复的详情 URL 导致并行结果张冠李戴，现已单独判失败。
+- **构建脚本被项目 packaging/ 目录遮蔽**：PyInstaller 在临时目录执行构建，修复 `ModuleNotFoundError: packaging.requirements`。
+
 ## [2.7.0] - 2026-08-07
 
 ### 新增
