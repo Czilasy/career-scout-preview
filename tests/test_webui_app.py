@@ -4085,6 +4085,25 @@ class StatusMappingTests(unittest.TestCase):
         # DB processed_count 为 0，但内存进度已推进到 7：取两者最大值。
         self.assertEqual(data["success_count"], 7)
 
+    def test_task_state_scrape_does_not_use_combo_index_as_success_count(self):
+        """scrape 任务的 searching 阶段 current 是组合序号，不得当成功数显示。
+
+        回归：live_current 只对条数语义的任务（ai_screen/recrawl）启用；
+        scrape 列表抓取把组合序号混进成功数会显示「已完成 3 / 127 岗位」。
+        """
+        run_id = "test_scrape_combo_current"
+        self._create_run(run_id, "running")
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running",
+            "progress": {"stage": "searching", "current": 3, "total": 5,
+                         "message": "正在抓第 3 个关键词组合", "overall_percent": 30},
+            "logs": [], "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+        }
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+        # DB processed_count=0、match/mismatch=0：组合序号 3 不得透出。
+        self.assertEqual(data["success_count"], 0)
+
     def test_task_state_interrupted_maps_to_cancelled(self):
         """T410: interrupted DB 状态 → cancelled 任务状态。"""
         run_id = "test_interrupted_mapping"

@@ -1321,4 +1321,68 @@ describe("DiscoveryView", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("search panels are collapsed by default, toggle together, and collapse on start", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({
+          ok: true,
+          scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:panels" },
+          deduplicated: { keywords: ["python"], cities: ["上海"] },
+        });
+      }
+      if (url.endsWith("/api/execute-search")) {
+        // 保持 pending：抓取任务停留在运行态，验证「开始抓取后自动收拢」。
+        return new Promise<Response>(() => { /* noop */ });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await flushPromises();
+
+    const keywordCard = ".search-layout > .collapsible-card:first-child";
+    const advancedCard = ".advanced-panel";
+
+    // ① 默认收拢
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(false);
+    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(false);
+
+    // ② 点任意卡头：两卡联动展开
+    await wrapper.get(`${keywordCard} .collapsible-header`).trigger("click");
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(true);
+    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(true);
+
+    // ③ 点另一卡头：两卡联动收起
+    await wrapper.get(`${advancedCard} .collapsible-header`).trigger("click");
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(false);
+    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(false);
+
+    // ④ 重新展开、配置关键词城市、开始抓取：自动收拢
+    await wrapper.get(`${keywordCard} .collapsible-header`).trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(false);
+    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
 });

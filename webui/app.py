@@ -7139,7 +7139,18 @@ def create_app(config=None):
         source_summary, source_outcomes = _build_source_summary_and_outcomes(run_id)
         live_progress = (live or {}).get("progress") or {}
         source = int((run or {}).get("source_count") or live_progress.get("total") or 0)
-        processed = int((run or {}).get("processed_count") or live_progress.get("current") or 0)
+        # 只有 AI 筛选/补抓任务的 live current 是“条数”语义，可作计数兜底；
+        # scrape 任务的 searching/waiting/combo_* 阶段 current 是组合序号，
+        # 混入成功数会显示「已完成 3 / 127 岗位」这类错误计数。
+        live_kind = str((live or {}).get("kind") or "")
+        count_live = live_kind in ("ai_screen", "recrawl")
+        live_current = int(live_progress.get("current") or 0)
+        if not count_live:
+            live_current = 0
+        processed_db = int((run or {}).get("processed_count") or 0)
+        # DB processed_count 是批次粒度（智联详情每批 15 条才落库一次），
+        # 为空时用实时 live current 兜底，保证进度按条前进且跨阶段不回退。
+        processed = processed_db if processed_db > 0 else live_current
         match = int((run or {}).get("match_count") or 0)
         mismatch = int((run or {}).get("mismatch_count") or 0)
         pending = int((run or {}).get("pending_count") or 0)
@@ -7163,10 +7174,8 @@ def create_app(config=None):
         # processed_count 只记录已成功完成的当前阶段工作单元；pending
         # 是已失败并进入待确认的独立工作单元，两者不能互相扣减。
         fail_count = pending
-        # success_count 必须单调且实时：live_progress.current 由 emit 按条推进
-        # （智联详情批内即时回报后逐条前进），DB processed_count 是批次粒度。
-        # 只取 max 保证跨阶段切换不回退（如粗筛 30 条完成后进入 JD 阶段）。
-        live_current = int(live_progress.get("current") or 0)
+        # success_count 必须单调且实时：live_current（条数语义）与 DB 计数
+        # 取最大值，保证智联详情逐条推进、跨阶段切换不回退。
         success_count = max(match + mismatch, processed, live_current)
         completed_count = min(stage_total, success_count + fail_count)
         unstarted = max(0, stage_total - completed_count)
