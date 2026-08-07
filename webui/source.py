@@ -1927,6 +1927,7 @@ class ZhilianCdpSource:
         preflight_runner: Callable[[int], str] | None = None,
         list_runner: Callable[[dict], tuple[str, list[dict]]] | None = None,
         detail_runner: Callable[[dict], tuple[str, dict]] | None = None,
+        batch_detail_runner: Callable[[dict], tuple[list[tuple[str, dict]], str | None]] | None = None,
     ):
         if not browser_account or not str(browser_account).strip():
             raise ValueError("browser_account 必须非空")
@@ -1953,6 +1954,7 @@ class ZhilianCdpSource:
         self._preflight_runner = preflight_runner or _default_zhilian_preflight_runner
         self._list_runner = list_runner or _default_zhilian_list_runner
         self._detail_runner = detail_runner or _default_zhilian_detail_runner
+        self._batch_detail_runner = batch_detail_runner or _default_zhilian_batch_detail_runner
 
     # ------------------------------------------------------------------
     # T301: 平台禁用门禁（新任务创建前由编排层调用）
@@ -2174,15 +2176,73 @@ class ZhilianCdpSource:
         熔断器打开后，后续岗位不再调用 runner，直接返回 source_blocked
         （可暂停 outcome，编排层可后续 retry）。
 
-        ``on_item_done``：智联串行逐条抓取，每条（无论成败）完成后回调
-        已处理条数（1 起递增），供编排层把进度实时回传给前端——否则
-        一批 15 条串行要十几分钟，前端进度条会一直停在 0。
+        ``on_item_done``：串行逐条抓取时每条完成后实时回调（1 起递增）；
+        tab 池并行模式在批返回后按条回放（对齐 BOSS 子进程批返回语义），
+        供编排层把进度回传给前端。
+
+        高级设置 5 个 JD 参数经 pipeline_exec 统一映射后透传（与 BOSS 同一
+        调用点）：gap_min/gap_max → 条间间隔；reset_every → 每抓 N 条导航回
+        首页重置；tab_pool_size → 常驻 tab 数（1 走串行，>1 走并行池，
+        钳制 1-10）。
         """
         results: dict[str, SourceOutcome] = {}
-        # BOSS 专用节流参数由编排层透传；智联详情在同一调试标签页串行抓取，
-        # 只消费 gap_min/gap_max 作为条间间隔，其余参数忽略。
         gap_min = max(0.0, float(bounded_options.get("gap_min") or 0.0))
         gap_max = max(gap_min, float(bounded_options.get("gap_max") or gap_min))
+        reset_every = max(1, int(bounded_options.get("reset_every") or 1))
+        try:
+            tab_pool_size = int(bounded_options.get("tab_pool_size") or 1)
+        except (TypeError, ValueError):
+            tab_pool_size = 1
+        tab_pool_size = max(1, min(10, tab_pool_size))
+
+        if tab_pool_size == 1:
+            # 串行路径：复用现有逐条抓取（_detail_runner 替身），
+            # gap_min/gap_max 作为条间间隔。
+            for i, job in enumerate(jobs):
+                if not isinstance(job, dict):
+                    results[f"idx{i}"] = SourceOutcome.failure(
+                        failed_code="source_invalid_output",
+                        safe_log=_zhilian_safe_log(
+                            stage="batch", failed_code="source_invalid_output",
+                            counts={"idx": i, "reason": "job_not_dict"},
+                        ),
+                    )
+                    if on_item_done is not None:
+                        try:
+                            on_item_done(i + 1)
+                        except Exception:
+                            pass
+                    continue
+                job_id = str(job.get("platform_job_id") or "").strip()
+                key = job_id or f"idx{i}"
+                # 熔断器打开：直接返回 source_blocked，不再调用 runner。
+                if self.breaker.is_open():
+                    results[key] = SourceOutcome.failure(
+                        failed_code="source_blocked",
+                        safe_log=_zhilian_safe_log(
+                            stage="batch", failed_code="source_blocked",
+                            counts={"idx": i, "breaker_open": 1},
+                        ),
+                        failed_reason="熔断器已打开，连续平台级 signal 触发",
+                    )
+                    if on_item_done is not None:
+                        try:
+                            on_item_done(i + 1)
+                        except Exception:
+                            pass
+                    continue
+                results[key] = self.fetch_detail(job, detail_output_path=detail_output_path)
+                if on_item_done is not None:
+                    try:
+                        on_item_done(i + 1)
+                    except Exception:
+                        pass
+                if gap_min > 0 and i + 1 < len(jobs):
+                    time.sleep(random.uniform(gap_min, gap_max))
+            return results
+
+        # 并行路径（tab_pool_size > 1）：常驻 tab 池，对齐 BOSS 并行分支。
+        valid: list[tuple[int, str]] = []  # (i, key)
         for i, job in enumerate(jobs):
             if not isinstance(job, dict):
                 results[f"idx{i}"] = SourceOutcome.failure(
@@ -2199,9 +2259,12 @@ class ZhilianCdpSource:
                         pass
                 continue
             job_id = str(job.get("platform_job_id") or "").strip()
-            key = job_id or f"idx{i}"
-            # 熔断器打开：直接返回 source_blocked，不再调用 runner。
-            if self.breaker.is_open():
+            valid.append((i, job_id or f"idx{i}"))
+        if not valid:
+            return results
+        # 熔断器已打开：整批不再调用 runner，全部 source_blocked。
+        if self.breaker.is_open():
+            for i, key in valid:
                 results[key] = SourceOutcome.failure(
                     failed_code="source_blocked",
                     safe_log=_zhilian_safe_log(
@@ -2215,15 +2278,70 @@ class ZhilianCdpSource:
                         on_item_done(i + 1)
                     except Exception:
                         pass
-                continue
-            results[key] = self.fetch_detail(job, detail_output_path=detail_output_path)
+            return results
+        runner_jobs = []
+        for i, _ in valid:
+            runner_job = dict(jobs[i])
+            runner_job["cdp_port"] = self.cdp_port
+            runner_jobs.append(runner_job)
+        try:
+            per_item, degrade_signal = self._batch_detail_runner(
+                {"jobs": runner_jobs},
+                cdp_port=self.cdp_port,
+                tab_pool_size=tab_pool_size,
+                inter_job_gap_range=(gap_min, gap_max),
+                reset_every=reset_every,
+            )
+        except Exception:
+            per_item, degrade_signal = [], "unreachable"
+        for idx, (i, key) in enumerate(valid):
+            signal, detail = per_item[idx] if idx < len(per_item) else ("skipped", {})
+            signal = str(signal or "invalid_output")
+            if signal == "ok":
+                results[key] = SourceOutcome.success(
+                    detail=dict(detail or {}),
+                    safe_log=_zhilian_safe_log(
+                        stage="batch", counts={"has_detail": 1},
+                        has_id=True,
+                        url_host=_safe_host(str(jobs[i].get("canonical_url") or "")),
+                    ),
+                )
+            elif signal == "skipped":
+                # degrade 停工后未处理：CDP 建池失败归因环境、runner 异常归
+                # 未知错误、其余风险降级归 source_blocked
+                if degrade_signal == "cdp_unavailable":
+                    skipped_code = "source_cdp_unavailable"
+                elif degrade_signal == "unreachable":
+                    skipped_code = "source_unknown_error"
+                else:
+                    skipped_code = "source_blocked"
+                results[key] = SourceOutcome.failure(
+                    failed_code=skipped_code,
+                    safe_log=_zhilian_safe_log(
+                        stage="batch", failed_code=skipped_code,
+                        counts={"idx": i, "degraded": 1},
+                    ),
+                    failed_reason=_zhilian_failed_reason(skipped_code),
+                )
+            else:
+                failed_code = _ZHILIAN_DETAIL_SIGNAL_MAP.get(signal, "source_unknown_error")
+                if failed_code in SourceCircuitBreaker.SIGNAL_CODES:
+                    self.breaker.record_signal(failed_code)
+                results[key] = SourceOutcome.failure(
+                    failed_code=failed_code,
+                    safe_log=_zhilian_safe_log(
+                        stage="batch", failed_code=failed_code,
+                        counts={"idx": i, "signal": signal},
+                        has_id=True,
+                        url_host=_safe_host(str(jobs[i].get("canonical_url") or "")),
+                    ),
+                    failed_reason=_zhilian_failed_reason(failed_code),
+                )
             if on_item_done is not None:
                 try:
                     on_item_done(i + 1)
                 except Exception:
                     pass
-            if gap_min > 0 and i + 1 < len(jobs):
-                time.sleep(random.uniform(gap_min, gap_max))
         return results
 
 
@@ -2279,6 +2397,35 @@ def _default_zhilian_detail_runner(job: dict, *, detail_output_path: str | None 
     if signal is None:
         return "not_found", {}
     return str(signal), dict(detail or {})
+
+
+def _default_zhilian_batch_detail_runner(
+    list_data: dict, *,
+    cdp_port: int, tab_pool_size: int,
+    inter_job_gap_range: tuple[float, float], reset_every: int,
+) -> tuple[list[tuple[str, dict]], str | None]:
+    """默认 batch runner：调用 zhilian_cdp_raw.scrape_details_batch 并行分支。
+
+    返回 ``(per_item, degrade_signal)``；ImportError（环境缺脚本）时全部按
+    skipped + unreachable 降级，不伪造成功。
+    """
+    try:
+        from scripts import zhilian_cdp_raw as zha
+    except ImportError:
+        count = len(list_data.get("jobs", []))
+        return [("skipped", {})] * count, "unreachable"
+    per_item, degrade_signal = zha.scrape_details_batch(
+        list_data,
+        cdp_port=cdp_port,
+        tab_pool_size=tab_pool_size,
+        inter_job_gap_range=inter_job_gap_range,
+        reset_every=reset_every,
+    )
+    normalized = []
+    for signal, detail in per_item:
+        sig = str(signal or "invalid_output")
+        normalized.append((sig, dict(detail or {})))
+    return normalized, degrade_signal
 
 
 def _zhilian_failed_reason(failed_code: str) -> str:

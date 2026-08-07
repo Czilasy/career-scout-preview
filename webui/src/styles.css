@@ -2628,14 +2628,6 @@ body,
   cursor: not-allowed;
 }
 
-/* 高级执行设置里智联串行模式下不生效的参数标注。 */
-.platform-note {
-  margin-left: 6px;
-  color: var(--text-soft);
-  font-size: 11px;
-  font-weight: 500;
-}
-
 /* T510：TaskProgress 顶部任务平台徽章（data-platform=zhilian|boss）。 */
 .task-platform {
   display: inline-flex;

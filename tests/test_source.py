@@ -885,34 +885,275 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         self.assertIn("idx0", results)
         self.assertFalse(results["idx0"].ok)
 
-    def test_batch_accepts_boss_bounded_options_and_applies_gap(self):
-        """BOSS 专用节流参数不得透传给智联 fetch_detail（T312 集成回归）。"""
-        calls = []
+    def test_batch_parallel_forwards_options_to_batch_runner(self):
+        """tab_pool_size>1 走并行分支：参数透传 _batch_detail_runner，不透传 detail_runner。
 
-        def runner(job, **kw):
-            calls.append(kw)
+        T313 回归：旧实现忽略 BOSS 节流参数走串行；新实现按高级设置参数
+        对齐 BOSS（gap_min/gap_max → inter_job_gap_range，reset_every、
+        tab_pool_size 同名透传）。
+        """
+        batch_calls = []
+        detail_calls = []
+
+        def batch_runner(list_data, **kw):
+            batch_calls.append((list_data, kw))
+            jobs = list_data.get("jobs", [])
+            return [("ok", {"jd": "fake-jd"}) for _ in jobs], None
+
+        def detail_runner(job, **kw):
+            detail_calls.append(job)
             return _fake_detail(signal="ok")
 
         source = ZhilianCdpSource(
-            browser_account="a", cdp_port=9223, detail_runner=runner,
+            browser_account="a", cdp_port=9223,
+            detail_runner=detail_runner,
+            batch_detail_runner=batch_runner,
         )
         jobs = [
             {"platform": "zhilian", "platform_job_id": f"j{i}",
              "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
             for i in range(3)
         ]
-        with mock.patch("webui.source.time.sleep") as sleep:
-            results = source.fetch_details_batch(
-                jobs, detail_output_path="out.json", max_batch_size=5,
-                gap_min=1, gap_max=2, reset_every=3, tab_pool_size=4,
-            )
+        results = source.fetch_details_batch(
+            jobs, detail_output_path="out.json", max_batch_size=5,
+            gap_min=1, gap_max=2, reset_every=3, tab_pool_size=4,
+        )
         self.assertEqual(set(results.keys()), {"j0", "j1", "j2"})
         self.assertTrue(all(r.ok for r in results.values()))
-        self.assertEqual(sleep.call_count, len(jobs) - 1)
-        self.assertEqual(
-            calls, [{"detail_output_path": "out.json"}] * len(jobs),
-            "BOSS 专用参数不得透传给智联 detail runner",
+        self.assertEqual(len(batch_calls), 1, "并行分支必须调用 _batch_detail_runner 一次")
+        _, kwargs = batch_calls[0]
+        self.assertEqual(kwargs["tab_pool_size"], 4)
+        self.assertEqual(kwargs["inter_job_gap_range"], (1.0, 2.0))
+        self.assertEqual(kwargs["reset_every"], 3)
+        self.assertEqual(kwargs["cdp_port"], 9223)
+        self.assertEqual(len(detail_calls), 0, "并行分支不得调用单条 detail_runner")
+
+    def test_batch_serial_default_when_tab_pool_size_absent(self):
+        """不传 tab_pool_size 必须走串行（现有测试零回归前提）。"""
+        batch_calls = []
+        detail_calls = []
+
+        def batch_runner(list_data, **kw):
+            batch_calls.append(kw)
+            return [], None
+
+        def detail_runner(job, **kw):
+            detail_calls.append(job)
+            return _fake_detail(signal="ok")
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            detail_runner=detail_runner,
+            batch_detail_runner=batch_runner,
         )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(2)
+        ]
+        with mock.patch("webui.source.time.sleep") as sleep:
+            results = source.fetch_details_batch(jobs, gap_min=1, gap_max=2)
+        self.assertTrue(all(r.ok for r in results.values()))
+        self.assertEqual(len(detail_calls), 2)
+        self.assertEqual(len(batch_calls), 0)
+        self.assertEqual(sleep.call_count, 1, "串行分支保留条间 gap")
+
+    def test_batch_tab_pool_size_one_keeps_serial(self):
+        """tab_pool_size=1 退化为串行路径（detail_runner 替身）。"""
+        batch_calls = []
+
+        def batch_runner(list_data, **kw):
+            batch_calls.append(kw)
+            return [], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            detail_runner=lambda job, **kw: _fake_detail(signal="ok"),
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [{"platform": "zhilian", "platform_job_id": "j0",
+                 "canonical_url": "https://www.zhaopin.com/jobdetail/j0.htm"}]
+        with mock.patch("webui.source.time.sleep"):
+            results = source.fetch_details_batch(jobs, tab_pool_size=1)
+        self.assertTrue(results["j0"].ok)
+        self.assertEqual(len(batch_calls), 0)
+
+    def test_batch_tab_pool_size_clamped(self):
+        """tab_pool_size 钳制 1-10：<=0 走串行，>10 钳 10，字符串可解析。"""
+        def make(batch_calls):
+            return ZhilianCdpSource(
+                browser_account="a", cdp_port=9223,
+                detail_runner=lambda job, **kw: _fake_detail(signal="ok"),
+                batch_detail_runner=lambda list_data, **kw: (
+                    batch_calls.append(kw) or
+                    ([( "ok", {"jd": "x"}) for _ in list_data.get("jobs", [])], None)
+                ),
+            )
+
+        jobs = [{"platform": "zhilian", "platform_job_id": "j0",
+                 "canonical_url": "https://www.zhaopin.com/jobdetail/j0.htm"}]
+        with mock.patch("webui.source.time.sleep"):
+            for bad_value in (0, -3):
+                batch_calls = []
+                source = make(batch_calls)
+                results = source.fetch_details_batch(jobs, tab_pool_size=bad_value)
+                self.assertTrue(results["j0"].ok)
+                self.assertEqual(batch_calls, [], f"tab_pool_size={bad_value} 应钳到 1 走串行")
+            for big_value, expected in ((11, 10), ("5", 5)):
+                batch_calls = []
+                source = make(batch_calls)
+                results = source.fetch_details_batch(jobs, tab_pool_size=big_value)
+                self.assertTrue(results["j0"].ok)
+                self.assertEqual(batch_calls[0]["tab_pool_size"], expected,
+                                 f"tab_pool_size={big_value} 应钳为 {expected}")
+
+    def test_batch_parallel_single_failure_continues(self):
+        """并行分支单条失败不阻断其余条目。"""
+        def batch_runner(list_data, **kw):
+            jobs = list_data.get("jobs", [])
+            return [
+                ("ok", {"jd": "jd-a"}) if j["platform_job_id"] != "j1"
+                else ("not_found", {})
+                for j in jobs
+            ], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(3)
+        ]
+        results = source.fetch_details_batch(jobs, tab_pool_size=2)
+        self.assertTrue(results["j0"].ok)
+        self.assertFalse(results["j1"].ok)
+        self.assertEqual(results["j1"].failed_code, "source_not_found")
+        self.assertTrue(results["j2"].ok)
+
+    def test_batch_parallel_platform_signals_open_breaker(self):
+        """并行分支多条平台级 signal 连续记录后熔断打开，下一批不再调 runner。"""
+        batch_calls = []
+
+        def batch_runner(list_data, **kw):
+            batch_calls.append(kw)
+            jobs = list_data.get("jobs", [])
+            return [("login_required", {}) for _ in jobs], "login_required"
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(4)
+        ]
+        results = source.fetch_details_batch(jobs, tab_pool_size=2)
+        self.assertTrue(source.breaker.is_open(), "连续平台级 signal 必须打开熔断器")
+        for jid in ("j0", "j1", "j2", "j3"):
+            self.assertFalse(results[jid].ok)
+            self.assertEqual(results[jid].failed_code, "source_login_required")
+        # 熔断打开后第二批不再调用 runner，直接 source_blocked
+        results2 = source.fetch_details_batch(jobs, tab_pool_size=2)
+        self.assertEqual(len(batch_calls), 1, "熔断打开后不得再调用 runner")
+        for jid in ("j0", "j1", "j2", "j3"):
+            self.assertEqual(results2[jid].failed_code, "source_blocked")
+
+    def test_batch_parallel_breaker_open_skips_runner(self):
+        """调用前熔断已打开：整批 source_blocked，runner 零调用。"""
+        batch_calls = []
+
+        def batch_runner(list_data, **kw):
+            batch_calls.append(kw)
+            return [], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        source.breaker.record_signal("source_blocked")
+        source.breaker.record_signal("source_blocked")
+        jobs = [{"platform": "zhilian", "platform_job_id": "j0",
+                 "canonical_url": "https://www.zhaopin.com/jobdetail/j0.htm"}]
+        results = source.fetch_details_batch(jobs, tab_pool_size=3)
+        self.assertEqual(results["j0"].failed_code, "source_blocked")
+        self.assertEqual(len(batch_calls), 0)
+
+    def test_batch_parallel_degraded_skipped_maps_blocked(self):
+        """degrade 停工后未处理项（skipped）映射 source_blocked。"""
+        def batch_runner(list_data, **kw):
+            jobs = list_data.get("jobs", [])
+            per_item = [("ok", {"jd": "jd"})] + [("skipped", {})] * (len(jobs) - 1)
+            return per_item, "rate_limited"
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(3)
+        ]
+        results = source.fetch_details_batch(jobs, tab_pool_size=2)
+        self.assertTrue(results["j0"].ok)
+        self.assertEqual(results["j1"].failed_code, "source_blocked")
+        self.assertEqual(results["j2"].failed_code, "source_blocked")
+
+    def test_batch_parallel_cdp_unavailable_maps_cdp_error(self):
+        """建池失败（cdp_unavailable 降级）映射 source_cdp_unavailable。"""
+        def batch_runner(list_data, **kw):
+            jobs = list_data.get("jobs", [])
+            return [("skipped", {}) for _ in jobs], "cdp_unavailable"
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [{"platform": "zhilian", "platform_job_id": "j0",
+                 "canonical_url": "https://www.zhaopin.com/jobdetail/j0.htm"}]
+        results = source.fetch_details_batch(jobs, tab_pool_size=2)
+        self.assertEqual(results["j0"].failed_code, "source_cdp_unavailable")
+
+    def test_batch_parallel_runner_exception_maps_unknown_error(self):
+        """runner 抛异常：整批 source_unknown_error（与串行异常语义一致）。"""
+        def batch_runner(list_data, **kw):
+            raise RuntimeError("boom")
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(2)
+        ]
+        results = source.fetch_details_batch(jobs, tab_pool_size=2)
+        self.assertEqual(results["j0"].failed_code, "source_unknown_error")
+        self.assertEqual(results["j1"].failed_code, "source_unknown_error")
+
+    def test_batch_parallel_item_done_replayed_in_input_order(self):
+        """并行分支按输入顺序回放 on_item_done（对齐 BOSS 批返回语义）。"""
+        def batch_runner(list_data, **kw):
+            jobs = list_data.get("jobs", [])
+            return [("ok", {"jd": "jd"}) for _ in jobs], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(3)
+        ]
+        done = []
+        results = source.fetch_details_batch(jobs, tab_pool_size=2, on_item_done=done.append)
+        self.assertTrue(all(r.ok for r in results.values()))
+        self.assertEqual(done, [1, 2, 3])
 
     def test_batch_reports_item_done_after_each_job(self):
         """智联串行逐条抓取必须逐条回调 on_item_done，供前端实时进度。
@@ -952,6 +1193,266 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         self.assertEqual(len(results), 4)
         self.assertEqual(done, [1, 2, 3, 4],
                          "熔断跳过项同样推进计数，进度才能走到底")
+
+
+# ===========================================================================
+# T313：zhilian_cdp_raw.scrape_details_batch tab 池并行逻辑
+# ===========================================================================
+class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
+    """scrape_details_batch：connector/sleeper 替身验证 worker 循环行为。
+
+    通过 patch ``_scrape_detail_on_ws``（按 job 查表返回，线程安全）与
+    ``_reset_detail_session``（记录导航次数）隔离 CDP 细节，只测并行编排：
+    错峰、条间 gap、reset、单条失败不中断、平台级信号降级、顺序恢复、去重。
+    """
+
+    def _make_waits(self):
+        waits = []
+
+        def sleeper(seconds, label=None):
+            waits.append((seconds, label))
+
+        return waits, sleeper
+
+    def _connector(self, ws_list):
+        import json as _json
+
+        class _FakeTabWS:
+            def __init__(self):
+                self.sent = []
+                self._msg_id = 0
+
+            def send(self, text):
+                self.sent.append(text)
+                self._msg_id = int(_json.loads(text)["id"])
+
+            def recv(self):
+                return _json.dumps({"id": self._msg_id, "result": {}})
+
+            def settimeout(self, timeout):
+                pass
+
+            def close(self):
+                pass
+
+        def connector(port):
+            ws = _FakeTabWS()
+            ws_list.append(ws)
+            return ws, f"target-{len(ws_list)}"
+
+        return connector
+
+    def _jobs(self, n=3, prefix="j"):
+        return [
+            {"platform": "zhilian", "platform_job_id": f"{prefix}{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/{prefix}{i}.htm"}
+            for i in range(n)
+        ]
+
+    def test_parallel_runs_all_jobs_and_restores_input_order(self):
+        """tab 池并行抓完全部任务，per_item 按输入顺序返回。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        jobs = self._jobs(4)
+        scraped = []
+
+        def fake_scrape(ws, job, *, sleeper=None):
+            scraped.append(job["platform_job_id"])
+            return "ok", {"jd": f"jd-{job['platform_job_id']}",
+                          "platform_job_id": job["platform_job_id"]}
+
+        waits, sleeper = self._make_waits()
+        ws_list = []
+        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws", side_effect=fake_scrape), \
+             mock.patch("scripts.zhilian_cdp_raw._reset_detail_session"):
+            per_item, degrade = zha.scrape_details_batch(
+                {"jobs": jobs}, tab_pool_size=2,
+                sleeper=sleeper, connector=self._connector(ws_list),
+            )
+        self.assertIsNone(degrade)
+        self.assertEqual([sig for sig, _ in per_item], ["ok"] * 4)
+        self.assertEqual(
+            [d["platform_job_id"] for _, d in per_item],
+            ["j0", "j1", "j2", "j3"],
+            "per_item 必须按输入顺序恢复",
+        )
+        self.assertEqual(sorted(scraped), ["j0", "j1", "j2", "j3"])
+        self.assertEqual(len(ws_list), 2, "tab_pool_size=2 应建 2 个 tab")
+
+    def test_single_failure_does_not_stop_others(self):
+        """单条失败（not_found）不中断，其余条目照常抓取。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        jobs = self._jobs(3)
+
+        def fake_scrape(ws, job, *, sleeper=None):
+            if job["platform_job_id"] == "j1":
+                return "not_found", {}
+            return "ok", {"jd": "jd"}
+
+        waits, sleeper = self._make_waits()
+        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws", side_effect=fake_scrape):
+            per_item, degrade = zha.scrape_details_batch(
+                {"jobs": jobs}, tab_pool_size=2,
+                sleeper=sleeper, connector=self._connector([]),
+            )
+        self.assertIsNone(degrade)
+        self.assertEqual(per_item[0], ("ok", {"jd": "jd"}))
+        self.assertEqual(per_item[1][0], "not_found")
+        self.assertEqual(per_item[2][0], "ok")
+
+    def test_platform_signal_triggers_degrade_and_skips_rest(self):
+        """平台级 signal 触发停工：剩余队列任务以 skipped 占位。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        jobs = self._jobs(4)
+
+        def fake_scrape(ws, job, *, sleeper=None):
+            return "rate_limited", {}
+
+        waits, sleeper = self._make_waits()
+        # tab=1 保证 degrade 后剩余任务确定留在队列（单 worker 串行领任务）
+        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws", side_effect=fake_scrape):
+            per_item, degrade = zha.scrape_details_batch(
+                {"jobs": jobs}, tab_pool_size=1,
+                sleeper=sleeper, connector=self._connector([]),
+            )
+        self.assertEqual(degrade, "rate_limited")
+        # 首个队列任务（seq=0，orig_idx 随机）命中信号，其余 3 个留在队列
+        self.assertEqual(per_item.count(("rate_limited", {})), 1)
+        self.assertEqual(per_item.count(("skipped", {})), 3)
+
+    def test_reset_every_navigates_home_between_jobs(self):
+        """每抓 reset_every 条导航回首页（非最后一条时）。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        waits, sleeper = self._make_waits()
+        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws",
+                        side_effect=lambda ws, job, *, sleeper=None: ("ok", {"jd": "jd"})), \
+             mock.patch("scripts.zhilian_cdp_raw._reset_detail_session") as reset_mock:
+            zha.scrape_details_batch(
+                {"jobs": self._jobs(3)}, tab_pool_size=1, reset_every=2,
+                sleeper=sleeper, connector=self._connector([]),
+            )
+        self.assertEqual(reset_mock.call_count, 1,
+                         "3 条任务 reset_every=2：第 2 条后重置一次，最后一条不重置")
+
+    def test_reset_not_on_last_job(self):
+        """最后一条之后不导航回首页（对齐 BOSS 不补尾节奏）。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        waits, sleeper = self._make_waits()
+        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws",
+                        side_effect=lambda ws, job, *, sleeper=None: ("ok", {"jd": "jd"})), \
+             mock.patch("scripts.zhilian_cdp_raw._reset_detail_session") as reset_mock:
+            zha.scrape_details_batch(
+                {"jobs": self._jobs(4)}, tab_pool_size=1, reset_every=2,
+                sleeper=sleeper, connector=self._connector([]),
+            )
+        self.assertEqual(reset_mock.call_count, 1,
+                         "4 条 reset_every=2：第 2 条后重置一次，第 4 条（最后）不重置")
+
+    def test_stagger_and_gap_sleeps(self):
+        """错峰启动（tab>0）与条间 gap 通过 sleeper 记录。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        jobs = self._jobs(3)
+        waits, sleeper = self._make_waits()
+        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws",
+                        side_effect=lambda ws, job, *, sleeper=None: ("ok", {"jd": "jd"})), \
+             mock.patch("scripts.zhilian_cdp_raw._reset_detail_session"):
+            zha.scrape_details_batch(
+                {"jobs": jobs}, tab_pool_size=2, reset_every=99,
+                sleeper=sleeper, connector=self._connector([]),
+            )
+        labels = [label for _, label in waits]
+        self.assertIn("stagger", labels, "tab2 必须错峰启动")
+        self.assertGreaterEqual(labels.count("inter_job_gap"), 1)
+
+    def test_visibility_injected_on_each_new_tab(self):
+        """每个新 tab 建池时必须注入 visibility 覆盖脚本。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        ws_list = []
+        waits, sleeper = self._make_waits()
+        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws",
+                        side_effect=lambda ws, job, *, sleeper=None: ("ok", {"jd": "jd"})), \
+             mock.patch("scripts.zhilian_cdp_raw._reset_detail_session"):
+            zha.scrape_details_batch(
+                {"jobs": self._jobs(2)}, tab_pool_size=2,
+                sleeper=sleeper, connector=self._connector(ws_list),
+            )
+        for ws in ws_list:
+            self.assertTrue(
+                any("Page.addScriptToEvaluateOnNewDocument" in s for s in ws.sent),
+                "新 tab 必须注入 visibility 覆盖脚本",
+            )
+
+    def test_deduplicates_by_canonical_url(self):
+        """同 canonical_url 只抓一条（保持输入顺序）。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        jobs = self._jobs(2)
+        jobs.append({"platform": "zhilian", "platform_job_id": "dup",
+                     "canonical_url": jobs[0]["canonical_url"]})
+        scraped = []
+
+        def fake_scrape(ws, job, *, sleeper=None):
+            scraped.append(job["platform_job_id"])
+            return "ok", {"jd": "jd"}
+
+        waits, sleeper = self._make_waits()
+        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws", side_effect=fake_scrape):
+            per_item, degrade = zha.scrape_details_batch(
+                {"jobs": jobs}, tab_pool_size=2,
+                sleeper=sleeper, connector=self._connector([]),
+            )
+        self.assertEqual(len(scraped), 2)
+        self.assertEqual([sig for sig, _ in per_item], ["ok", "ok"])
+
+    def test_empty_input_returns_empty(self):
+        """空任务列表直接返回 ([], None)，不建池。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        ws_list = []
+        per_item, degrade = zha.scrape_details_batch(
+            {"jobs": []}, tab_pool_size=2, connector=self._connector(ws_list),
+        )
+        self.assertEqual(per_item, [])
+        self.assertIsNone(degrade)
+        self.assertEqual(ws_list, [])
+
+    def test_connector_failure_degrades_cdp_unavailable(self):
+        """建池失败：全部 skipped + degrade=cdp_unavailable。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        def connector(port):
+            raise RuntimeError("no_cdp")
+
+        waits, sleeper = self._make_waits()
+        per_item, degrade = zha.scrape_details_batch(
+            {"jobs": self._jobs(2)}, tab_pool_size=2,
+            sleeper=sleeper, connector=connector,
+        )
+        self.assertEqual(degrade, "cdp_unavailable")
+        self.assertEqual(per_item, [("skipped", {}), ("skipped", {})])
+
+    def test_validates_parameters(self):
+        """tab_pool_size/reset_every/gap/stagger 非法值必须拒绝。"""
+        import scripts.zhilian_cdp_raw as zha
+
+        waits, sleeper = self._make_waits()
+        jobs = {"jobs": self._jobs(1)}
+        for bad in (0, 11, 1.5, "5"):
+            with self.assertRaises(ValueError):
+                zha.scrape_details_batch(jobs, tab_pool_size=bad, sleeper=sleeper)
+        for bad in (0, -2):
+            with self.assertRaises(ValueError):
+                zha.scrape_details_batch(jobs, reset_every=bad, sleeper=sleeper)
+        with self.assertRaises(ValueError):
+            zha.scrape_details_batch(jobs, inter_job_gap_range=(5, 1), sleeper=sleeper)
+        with self.assertRaises(ValueError):
+            zha.scrape_details_batch(jobs, stagger_range=(-1, 2), sleeper=sleeper)
 
 
 class ZhilianCdpSourceOutcomeContractTests(_LoginCacheIsolated):
