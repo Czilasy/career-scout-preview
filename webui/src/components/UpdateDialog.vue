@@ -28,6 +28,7 @@ const emit = defineEmits<{ close: []; ignore: [] }>();
 const progress = ref<UpdateProgress | null>(null);
 const busy = ref(false);
 const error = ref("");
+const notice = ref("");
 const restarting = ref(false);
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -92,14 +93,16 @@ async function startDownload() {
 
 async function restartAndUpdate() {
   error.value = "";
+  notice.value = "";
   restarting.value = true;
   try {
     await updateApi.restart();
     // 后端已启动替换脚本；优雅退出应用，脚本会替换文件并拉起新版本
     const quit = await quitDesktopApp();
     if (!quit) {
-      error.value = "退出应用失败，请手动关闭软件，更新脚本会自动完成替换并重启。";
-      restarting.value = false;
+      // 退出未确认（极端情况）：脚本仍在等待主进程退出，手动关闭窗口后
+      // 会自动完成替换并重启；保持按钮禁用，避免重复触发。
+      notice.value = "未能自动退出，请手动关闭软件窗口；更新将在此后自动完成。";
     }
   } catch (err) {
     error.value = errorMessage(err, "重启更新失败");
@@ -126,6 +129,7 @@ watch(() => props.open, (open) => {
   if (!open) {
     stopPolling();
     error.value = "";
+    notice.value = "";
     restarting.value = false;
     return;
   }
@@ -154,6 +158,7 @@ onBeforeUnmount(stopPolling);
       <pre v-if="info?.release_notes" class="update-notes">{{ info.release_notes }}</pre>
 
       <div v-if="error" class="update-error" role="alert" data-testid="update-error">{{ error }}</div>
+      <p v-if="notice" class="update-notice" data-testid="update-notice">{{ notice }}</p>
 
       <template v-if="info?.installable">
         <div v-if="phase === 'downloading' || phase === 'verifying'" class="update-progress">
@@ -246,6 +251,11 @@ onBeforeUnmount(stopPolling);
   background: rgba(220, 80, 60, 0.12);
   color: var(--danger, #d64541);
   font-size: 13px;
+}
+.update-notice {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
 }
 .update-progress-bar {
   height: 10px;

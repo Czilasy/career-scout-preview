@@ -10,9 +10,11 @@
    （exe/dmg）到 ``~/.career-scout/downloads/``，进度可查。
 3. ``verify_downloaded``：SHA256 校验（Release 必须附 ``.sha256``
    资产；缺失或校验失败一律拒绝，绝不静默替换）。
-4. ``build_updater_script``：生成平台替换脚本（Windows bat / macOS sh），
-   由调用方在主进程退出前 detached 启动；脚本等 PID 死透后替换文件并
-   重新拉起新版本（运行中的程序无法替换自己，借"身后脚本"完成）。
+4. ``build_updater_script``：生成平台替换脚本（Windows PowerShell /
+   macOS sh），由调用方在主进程退出前 detached 启动；脚本等 PID 死透
+   后替换文件并重新拉起新版本（运行中的程序无法替换自己，借"身后脚本"
+   完成）。Windows 版会把新版就位为带新版本号的文件名（如
+   ``CareerScout-v2.5.0.exe``），不再停留在旧文件名。
 
 源码模式（RUNTIME_MODE=source）没有可替换的安装产物，只提供检查与
 浏览器下载引导，apply/restart 端点需拒绝。
@@ -25,7 +27,6 @@ import json
 import os
 import platform
 import re
-import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -400,6 +401,22 @@ class UpdateDownloader:
 # ---------------------------------------------------------------------------
 # 替换脚本（"身后脚本"：等主进程退出后替换并重启）
 # ---------------------------------------------------------------------------
+def _versioned_new_target(installer: Path, target: Path) -> Path:
+    """新版就位路径：目标目录下带新版本号的文件名。
+
+    从 installer 文件名（``CareerScout-v2.5.0.exe``）提取版本号，构造
+    ``target 同目录 / CareerScout-v{版本}{后缀}``；解析失败或与 installer
+    同路径（同名同目录）时回退 ``target`` 本身（保持覆盖旧文件行为）。
+    """
+    m = re.search(r"v?\d+(?:\.\d+)+", installer.stem)
+    if not m:
+        return target
+    candidate = target.parent / f"CareerScout-{m.group(0)}{target.suffix}"
+    if candidate.resolve() == installer.resolve():
+        return target
+    return candidate
+
+
 def build_updater_script(
     *,
     installer_path: Path | str,
@@ -409,7 +426,9 @@ def build_updater_script(
 ) -> tuple[str, Path]:
     """生成平台替换脚本，返回 ``(执行命令 argv 的首元素描述, 脚本路径)``。
 
-    - Windows：bat。``move /Y`` 覆盖 exe 后 ``start`` 拉起；
+    - Windows：PowerShell（无窗口、无 cmd/find 依赖）。等主进程退出后
+      把新版就位为带新版本号的文件名（``CareerScout-v{新版本}.exe``），
+      清理旧文件并拉起新版；
     - macOS：sh。挂载 dmg → ``cp -R`` 覆盖 .app → 卸载 → ``open`` 拉起。
 
     脚本先写临时文件再原子 rename，避免半截脚本。
@@ -420,32 +439,76 @@ def build_updater_script(
     base.mkdir(parents=True, exist_ok=True)
 
     if platform.system() == "Windows":
-        script = base / "update_apply.bat"
-        content = "\r\n".join([
-            "@echo off",
-            "chcp 65001 >nul",
-            # 等主进程退出，最多 30 秒；超时强杀，避免无限等待导致更新卡死
-            # （pywebview 窗口销毁后事件循环可能不返回，主进程 PID 不消失）。
-            f":wait_{pid}",
-            f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul',
-            "if errorlevel 1 goto gone",
-            "set /a tries+=1",
-            "if %tries% geq 30 goto kill",
-            "ping -n 2 127.0.0.1 >nul",
-            f"goto wait_{pid}",
-            ":kill",
-            f"taskkill /F /PID {pid} >nul 2>nul",
-            ":gone",
-            # move 失败说明目标仍被占用或权限不足 → 保留旧版，报错退出
-            f'move /Y "{installer}" "{target}"',
-            "if errorlevel 1 (",
-            "  exit /b 1",
-            ")",
-            f'start "" "{target}"',
-            "exit /b 0",
+        new_target = _versioned_new_target(installer, target)
+        script = base / "update_apply.ps1"
+        # utf-8-sig（带 BOM）：Windows PowerShell 5.1 默认按 ANSI 解析无 BOM
+        # 脚本，路径含非 ASCII 字符时会乱码导致替换失败
+        content = "\n".join([
+            "$ErrorActionPreference = 'Stop'",
+            f"$logFile = '{base / 'update_apply.log'}'",
+            "function Log($msg) {",
+            "  try { Add-Content -LiteralPath $logFile -Encoding UTF8 -Value (",
+            "    '[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg) } catch {}",
+            "}",
+            "Log 'update_apply start'",
+            f"$installer = '{installer}'",
+            f"$target = '{target}'",
+            f"$newTarget = '{new_target}'",
+            f"$waitPid = {pid}",
+            "",
+            "# 等主进程退出，最多 30 秒；超时强杀，避免无限等待导致更新卡死",
+            "# （pywebview 窗口销毁后事件循环可能不返回，主进程 PID 不消失）。",
+            "# Get-Process 在进程不存在（或 PID 非法）时会抛错，必须 try/catch",
+            "# 兜底，否则 Stop 模式会让脚本直接终止。",
+            "$deadline = (Get-Date).AddSeconds(30)",
+            "while ($true) {",
+            "  $proc = $null",
+            "  try { $proc = Get-Process -Id $waitPid -ErrorAction SilentlyContinue } catch { $proc = $null }",
+            "  if (-not $proc) { break }",
+            "  if ((Get-Date) -ge $deadline) {",
+            "    try { Stop-Process -Id $waitPid -Force -ErrorAction Stop } catch {}",
+            "    break",
+            "  }",
+            "  Start-Sleep -Milliseconds 500",
+            "}",
+            "",
+            "# 新版就位：优先落到带新版本号的文件名；失败保留旧版退出",
+            "if (-not (Test-Path -LiteralPath $installer)) {",
+            "  Log \"installer missing: $installer\"",
+            "  exit 1",
+            "}",
+            "try {",
+            "  if ($newTarget -eq $target) {",
+            "    Move-Item -LiteralPath $installer -Destination $target -Force -ErrorAction Stop",
+            "  } else {",
+            "    Move-Item -LiteralPath $installer -Destination $newTarget -Force -ErrorAction Stop",
+            "    # 旧文件可能仍被 onefile 父进程短暂占用，重试删除；删不掉不阻塞新版启动",
+            "    $oldRemoved = $false",
+            "    for ($i = 0; $i -lt 20; $i++) {",
+            "      if (-not (Test-Path -LiteralPath $target)) { $oldRemoved = $true; break }",
+            "      try { Remove-Item -LiteralPath $target -Force -ErrorAction Stop; $oldRemoved = $true; break } catch { Start-Sleep -Milliseconds 500 }",
+            "    }",
+            "    if (-not $oldRemoved) { Log \"old target removal skipped: $target\" }",
+            "  }",
+            "} catch {",
+            "  Log \"install failed: $($_.Exception.Message)\"",
+            "  exit 1",
+            "}",
+            "if (-not (Test-Path -LiteralPath $newTarget)) {",
+            "  Log 'install failed: new target missing'",
+            "  exit 1",
+            "}",
+            "",
+            "# 拉起新版本",
+            "try { Start-Process -FilePath $newTarget } catch {",
+            "  Log \"launch failed: $($_.Exception.Message)\"",
+            "  exit 1",
+            "}",
+            "Log \"update_apply done: $newTarget\"",
+            "exit 0",
         ])
-        script.write_text(content, encoding="utf-8")
-        return ("cmd", script)
+        script.write_text(content, encoding="utf-8-sig")
+        return ("powershell", script)
 
     # macOS：installer 是 .dmg；target 是 CareerScout.app 目录
     script = base / "update_apply.sh"
@@ -507,8 +570,21 @@ def current_install_target() -> Path | None:
 
 
 def clean_download_dir(state_dir: Path | str | None = None) -> None:
-    """启动时清理历史下载残留。"""
+    """启动时清理下载残留：只删 ``.part`` 半成品与超过 30 天的完整包。
+
+    不整目录删除：新实例可能比替换脚本先启动（例如用户手动打开新 exe），
+    此时完整安装包被删会让替换脚本 ``Move-Item`` 找不到源而失败。
+    """
     base = Path(state_dir) if state_dir else DEFAULT_STATE_DIR
     downloads = base / "downloads"
-    if downloads.is_dir():
-        shutil.rmtree(downloads, ignore_errors=True)
+    if not downloads.is_dir():
+        return
+    cutoff = time.time() - 30 * 86400
+    for path in downloads.iterdir():
+        try:
+            if path.suffix == ".part" or (
+                path.is_file() and path.stat().st_mtime < cutoff
+            ):
+                path.unlink()
+        except OSError:
+            pass

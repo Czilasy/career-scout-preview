@@ -223,15 +223,54 @@ class UpdaterScriptTests(unittest.TestCase):
     def test_windows_script_contains_wait_replace_launch(self):
         with patch.object(updater.platform, "system", return_value="Windows"):
             _, script = updater.build_updater_script(
-                installer_path=self.dir / "new.exe",
+                installer_path=self.dir / "CareerScout-v2.5.0.exe",
                 install_target=self.dir / "CareerScout.exe",
                 pid=12345,
                 script_dir=self.dir,
             )
-        text = script.read_text(encoding="utf-8")
+        self.assertEqual(script.name, "update_apply.ps1")
+        text = script.read_text(encoding="utf-8-sig")
+        self.assertTrue(script.read_bytes().startswith(b"\xef\xbb\xbf"))  # BOM，PS 5.1 解析 UTF-8
         self.assertIn("12345", text)  # 等主进程退出
-        self.assertIn("move /Y", text)  # 替换
-        self.assertIn('start ""', text)  # 拉起新版
+        self.assertIn("Get-Process -Id", text)  # 替代 tasklist|find，无黑窗
+        self.assertIn("Move-Item", text)  # 替换
+        self.assertIn("Start-Process", text)  # 拉起新版
+
+    def test_windows_script_renames_target_to_new_version(self):
+        with patch.object(updater.platform, "system", return_value="Windows"):
+            _, script = updater.build_updater_script(
+                installer_path=self.dir / "CareerScout-v2.5.0.exe",
+                install_target=self.dir / "CareerScout-v2.4.0.exe",
+                pid=12345,
+                script_dir=self.dir,
+            )
+        text = script.read_text(encoding="utf-8-sig")
+        self.assertIn("CareerScout-v2.5.0.exe", text)  # 新版就位为带版本号文件名
+        self.assertIn("Remove-Item", text)  # 清理旧文件名
+        self.assertIn("for ($i = 0; $i -lt 20; $i++)", text)  # 旧文件被占用时重试删除
+
+    def test_versioned_new_target_fallback_without_version_in_name(self):
+        with patch.object(updater.platform, "system", return_value="Windows"):
+            _, script = updater.build_updater_script(
+                installer_path=self.dir / "career-scout-installer.exe",
+                install_target=self.dir / "CareerScout.exe",
+                pid=1,
+                script_dir=self.dir,
+            )
+        text = script.read_text(encoding="utf-8-sig")
+        # 无法解析版本号：保持覆盖旧文件行为，不引入重命名
+        self.assertIn(f"$newTarget = '{self.dir / 'CareerScout.exe'}'", text)
+
+    def test_clean_download_dir_keeps_recent_complete_files(self):
+        downloads = self.dir / "downloads"
+        downloads.mkdir()
+        part = downloads / "CareerScout-v2.5.0.exe.part"
+        complete = downloads / "CareerScout-v2.5.0.exe"
+        part.write_bytes(b"partial")
+        complete.write_bytes(b"full")
+        updater.clean_download_dir(self.dir)
+        self.assertFalse(part.exists())  # 半成品残留删除
+        self.assertTrue(complete.exists())  # 完整安装包保留（替换脚本可能还在用）
 
     def test_macos_script_mounts_copies_and_relaunches(self):
         with patch.object(updater.platform, "system", return_value="Darwin"):

@@ -135,8 +135,7 @@ spec011-*.yaml
 .specify/
 
 # Local design exploration drafts (not project code)
-design-demos/
-design-tmp/
+design/
 
 # Source maps are build-time only; dist release snapshots stay tracked
 webui/dist/**/*.map

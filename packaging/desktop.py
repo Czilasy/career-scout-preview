@@ -683,14 +683,13 @@ def run_desktop_shell(deps):
                 _on_closing()
             except Exception:
                 pass
-            try:
-                window.destroy()
-            except Exception:
-                pass
-            # pywebview 窗口销毁后 webview.start() 可能不返回（WinForms 事件
-            # 循环未结束），更新替换脚本会一直等主进程 PID 消失而卡死；
-            # 直接强制退出进程，确保 update_apply 脚本的等待立即通过。
-            os._exit(0)
+            # 不能立即 destroy + os._exit：pywebview 还来不及把 {"ok": true}
+            # 回传给前端 JS，用户会看到"退出失败"报错。这里保留窗口、先让
+            # 返回值回传（毫秒级），再由 Timer 兜底强制退出进程。
+            # 注：不调用 destroy，webview.start() 不会因本路径返回（WinForms
+            # 事件循环不结束），因此必须由本 Timer 退出，替换脚本才能等到
+            # 主进程 PID 消失并接棒替换。
+            threading.Timer(1.5, lambda: os._exit(0)).start()
 
         js_api.quit_handler = _quit_and_cleanup
         webview_module.start()

@@ -7064,11 +7064,13 @@ def create_app(config=None):
         try:
             if _sys.platform == "win32":
                 subprocess.Popen(
-                    ["cmd", "/c", str(script)],
+                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
+                     "-ExecutionPolicy", "Bypass", "-File", str(script)],
                     cwd=str(_updater_mod.DEFAULT_STATE_DIR),
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-                    | 0x00000008,  # DETACHED_PROCESS
+                    # CREATE_NO_WINDOW：绝不弹 cmd/powershell 黑窗
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                    | subprocess.CREATE_NEW_PROCESS_GROUP,
                 )
             else:
                 subprocess.Popen(

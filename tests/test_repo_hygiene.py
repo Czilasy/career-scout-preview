@@ -37,6 +37,23 @@ class RepoHygieneTests(unittest.TestCase):
             "Untracked non-ignored files should be committed or ignored",
         )
 
+    def test_no_temp_logs_in_project_root(self):
+        """项目根目录不得残留测试中转文件（fulltest.log 等）。
+
+        这些文件被 ``*.log`` 忽略规则覆盖，git 层面不可见（check-ignore
+        与 git status 都查不到），必须直接文件系统检查。
+        """
+        known = ("fulltest.log", "full_test_run.log", "testrun.log")
+        present = [name for name in known if (ROOT / name).exists()]
+        self.assertEqual(present, [], "已知测试中转文件必须删除，不得遗留")
+        root_logs = sorted(
+            p.name for p in ROOT.glob("*.log") if p.is_file()
+        )
+        self.assertEqual(
+            root_logs, [],
+            "项目根目录不得存在 .log 文件：测试日志/重定向必须写入系统临时目录",
+        )
+
     def test_required_ignore_rules_exist(self):
         text = (ROOT / ".gitignore").read_text(encoding="utf-8")
         required = [

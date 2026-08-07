@@ -1,4 +1,4 @@
-# Career Scout v2.7 · BOSS直聘 & 智联招聘职位助手
+# Career Scout v2.8.2 · BOSS直聘 & 智联招聘职位助手
 
 Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的多平台职位搜索与求职工具，目前支持 **BOSS 直聘** 和 **智联招聘**。它连接你本机已经登录的 Chrome，复用真实登录态抓取职位列表与 JD 详情，并通过本地 Web 工作台完成简历驱动的两层筛选、AI 语义评估、岗位生命周期管理和投递过期提醒。
 
@@ -17,6 +17,17 @@ Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的多平台职位
 ## 免责声明
 
 本项目仅供学习和技术研究参考。使用前请阅读 [BOSS直聘用户协议](https://www.zhipin.com/about/protocol.html)、智联招聘相关服务条款及相关法律法规，不要用于商业转售、恶意爬取或对目标网站造成负担。使用本项目产生的一切后果由使用者自行承担。
+
+## 桌面版
+
+Windows 与 macOS 用户可直接使用桌面版，无需安装 Python 或 Node.js：
+
+- 最新正式版：v2.8.2
+- Windows 安装包：`CareerScout-v2.8.2.exe`，下载后双击运行
+- macOS 安装包：`CareerScout-v2.8.2.dmg`，首次打开时右键选择“打开”
+- 应用内更新：启动时自动检查新版本，可一键下载、校验并重启完成更新
+
+下载地址：[GitHub Releases](https://github.com/Czilasy/career-scout-preview/releases)
 
 ## 快速开始
 
