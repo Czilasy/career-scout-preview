@@ -1194,6 +1194,62 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         self.assertEqual(done, [1, 2, 3, 4],
                          "熔断跳过项同样推进计数，进度才能走到底")
 
+    def test_batch_parallel_missing_url_isolated_no_misalignment(self):
+        """并行分支缺 canonical_url 的 job 单独判失败，其余结果不错位。
+
+        回归：旧实现不校验 URL，raw 层去重后 per_item 变短，按索引对齐
+        valid 导致后续 job 张冠李戴拿到前一个的 JD。
+        """
+        runner_inputs = []
+
+        def batch_runner(list_data, **kw):
+            runner_inputs.append(list_data.get("jobs", []))
+            jobs = list_data.get("jobs", [])
+            # 模拟真实 runner：每个收到的 job 都返回自己的详情
+            return [("ok", {"jd": f"jd-{j['platform_job_id']}"}) for j in jobs], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": "j0",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/j0.htm"},
+            {"platform": "zhilian", "platform_job_id": "j1"},  # 缺 URL
+            {"platform": "zhilian", "platform_job_id": "j2",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/j2.htm"},
+        ]
+        results = source.fetch_details_batch(jobs, tab_pool_size=2)
+        self.assertEqual(results["j0"].detail["jd"], "jd-j0")
+        self.assertEqual(results["j2"].detail["jd"], "jd-j2", "j2 不得拿到 j0 的结果")
+        self.assertFalse(results["j1"].ok)
+        self.assertEqual(results["j1"].failed_code, "source_invalid_output")
+        self.assertEqual([j["platform_job_id"] for j in runner_inputs[0]], ["j0", "j2"])
+
+    def test_batch_parallel_duplicate_url_isolated(self):
+        """并行分支重复 canonical_url 的 job 单独判失败，不触发错位。"""
+        def batch_runner(list_data, **kw):
+            jobs = list_data.get("jobs", [])
+            return [("ok", {"jd": f"jd-{j['platform_job_id']}"}) for j in jobs], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": "j0",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/same.htm"},
+            {"platform": "zhilian", "platform_job_id": "j1",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/same.htm"},
+            {"platform": "zhilian", "platform_job_id": "j2",
+             "canonical_url": "https://www.zhaopin.com/jobdetail/j2.htm"},
+        ]
+        results = source.fetch_details_batch(jobs, tab_pool_size=2)
+        self.assertEqual(results["j0"].detail["jd"], "jd-j0")
+        self.assertEqual(results["j2"].detail["jd"], "jd-j2")
+        self.assertFalse(results["j1"].ok)
+        self.assertEqual(results["j1"].failed_code, "source_invalid_output")
+
 
 # ===========================================================================
 # T313：zhilian_cdp_raw.scrape_details_batch tab 池并行逻辑
@@ -1453,6 +1509,54 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
             zha.scrape_details_batch(jobs, inter_job_gap_range=(5, 1), sleeper=sleeper)
         with self.assertRaises(ValueError):
             zha.scrape_details_batch(jobs, stagger_range=(-1, 2), sleeper=sleeper)
+
+    def test_worker_exception_maps_to_single_failure(self):
+        """worker 内 _scrape_detail_on_ws 抛异常只废掉该条，不杀线程。
+
+        回归：旧实现无异常保护，CDP 求值异常直接杀死 worker 线程，
+        剩余任务全部变 skipped，违反"单条失败不中断"契约。
+        """
+        import scripts.zhilian_cdp_raw as zha
+
+        jobs = self._jobs(3)
+
+        def fake_scrape(ws, job, *, sleeper=None):
+            if job["platform_job_id"] == "j1":
+                raise RuntimeError("page evaluate failed")
+            return "ok", {"jd": "jd"}
+
+        waits, sleeper = self._make_waits()
+        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws", side_effect=fake_scrape):
+            per_item, degrade = zha.scrape_details_batch(
+                {"jobs": jobs}, tab_pool_size=2,
+                sleeper=sleeper, connector=self._connector([]),
+            )
+        self.assertIsNone(degrade)
+        self.assertEqual(per_item[0], ("ok", {"jd": "jd"}))
+        self.assertEqual(per_item[1][0], "unreachable", "异常条映射单条失败")
+        self.assertEqual(per_item[2], ("ok", {"jd": "jd"}), "剩余任务继续抓取")
+
+    def test_default_sleeper_accepts_label_kwarg(self):
+        """默认 sleeper 必须兼容 label 关键字（对齐 BOSS _default_scrape_sleeper）。
+
+        回归：默认 time.sleep 不接受关键字参数，worker 在第一次
+        stagger/gap 等待时抛 TypeError 崩溃，全部任务变 skipped。
+        """
+        import scripts.zhilian_cdp_raw as zha
+
+        jobs = self._jobs(3)
+        # gap/stagger 置 0 避免真实等待；reset_every 放大避免触发首页重置
+        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws",
+                        return_value=("ok", {"jd": "jd"})), \
+             mock.patch("scripts.zhilian_cdp_raw._reset_detail_session"):
+            per_item, degrade = zha.scrape_details_batch(
+                {"jobs": jobs}, tab_pool_size=2,
+                inter_job_gap_range=(0, 0), stagger_range=(0, 0),
+                reset_every=999, connector=self._connector([]),
+            )
+        self.assertIsNone(degrade)
+        self.assertEqual([sig for sig, _ in per_item], ["ok", "ok", "ok"],
+                         "默认 sleeper 路径下全部任务必须完成，无线程崩溃")
 
 
 class ZhilianCdpSourceOutcomeContractTests(_LoginCacheIsolated):

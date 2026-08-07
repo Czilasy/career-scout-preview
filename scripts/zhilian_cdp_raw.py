@@ -604,6 +604,15 @@ def _close_background_tab(port: int, target_id: str) -> None:
         pass
 
 
+def _default_sleeper(seconds: float, label: str | None = None) -> None:
+    """默认 sleeper：兼容 ``label`` 关键字（对齐 BOSS ``_default_scrape_sleeper``）。
+
+    worker 里以 ``sleeper(x, label=...)`` 调用，而 ``time.sleep`` 不接受
+    关键字参数，直接当默认值会在线程里抛 TypeError 杀掉 worker。
+    """
+    time.sleep(seconds)
+
+
 def _reset_detail_session(ws: Any, sleeper: Any, tab_label: str) -> None:
     """导航回智联首页重置详情抓取上下文（对齐 BOSS ``_reset_detail_session``）。
 
@@ -663,7 +672,13 @@ def _detail_tab_worker(cdp_port: int, connector: Any, work_queue: Any,
             except Exception:
                 break  # 队列空，退出
             is_last = seq == total - 1
-            signal, detail = _scrape_detail_on_ws(ws, job, sleeper=sleeper)
+            # 单条异常不杀 worker：CDP 命令超时/求值异常映射为单条失败继续
+            try:
+                signal, detail = _scrape_detail_on_ws(ws, job, sleeper=sleeper)
+            except TimeoutError:
+                signal, detail = "timeout", {}
+            except Exception:
+                signal, detail = "unreachable", {}
             signal = str(signal or "invalid_output")
             with results_lock:
                 results[orig_idx] = (signal, dict(detail or {}))
@@ -730,7 +745,7 @@ def scrape_details_batch(list_data, max_details=None, output_path=None,
     if stagger_range[0] < 0 or stagger_range[1] < stagger_range[0]:
         raise ValueError(f"stagger_range invalid: {stagger_range!r}")
     if sleeper is None:
-        sleeper = time.sleep
+        sleeper = _default_sleeper
     if connector is None:
         connector = _create_background_tab
 

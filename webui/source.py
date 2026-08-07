@@ -2259,6 +2259,39 @@ class ZhilianCdpSource:
                         pass
                 continue
             job_id = str(job.get("platform_job_id") or "").strip()
+            # 并行 runner 按 canonical_url 去重；缺失/重复会导致 per_item 与
+            # valid 错位（结果张冠李戴），因此在此拦截（对齐 BOSS
+            # job_missing_source_url / job_duplicate_in_batch 语义）。
+            canonical = str(job.get("canonical_url") or "").strip()
+            if not canonical:
+                results[job_id or f"idx{i}"] = SourceOutcome.failure(
+                    failed_code="source_invalid_output",
+                    safe_log=_zhilian_safe_log(
+                        stage="batch", failed_code="source_invalid_output",
+                        counts={"idx": i, "reason": "job_missing_canonical_url"},
+                    ),
+                )
+                if on_item_done is not None:
+                    try:
+                        on_item_done(i + 1)
+                    except Exception:
+                        pass
+                continue
+            if any(str(jobs[j].get("canonical_url") or "").strip() == canonical
+                   for j, _ in valid):
+                results[job_id or f"idx{i}"] = SourceOutcome.failure(
+                    failed_code="source_invalid_output",
+                    safe_log=_zhilian_safe_log(
+                        stage="batch", failed_code="source_invalid_output",
+                        counts={"idx": i, "reason": "job_duplicate_in_batch"},
+                    ),
+                )
+                if on_item_done is not None:
+                    try:
+                        on_item_done(i + 1)
+                    except Exception:
+                        pass
+                continue
             valid.append((i, job_id or f"idx{i}"))
         if not valid:
             return results
