@@ -39,9 +39,18 @@ const sortLabel = computed(
 function closePopovers() {
   filterPanelOpen.value = false;
   sortMenuOpen.value = false;
+  activeAnchor = null;
+  activeGetPopover = null;
+  if (resizeCleanup) {
+    resizeCleanup();
+    resizeCleanup = undefined;
+  }
 }
 
 let scrollCleanup: (() => void) | undefined;
+let resizeCleanup: (() => void) | undefined;
+let activeAnchor: HTMLElement | null = null;
+let activeGetPopover: (() => HTMLElement | null) | null = null;
 
 function openPopover(
   which: "filter" | "sort",
@@ -55,11 +64,23 @@ function openPopover(
     sortMenuOpen.value = true;
     filterPanelOpen.value = false;
   }
+  activeAnchor = anchor;
+  activeGetPopover = getPopover;
   // 任意容器滚动时关闭浮层，避免 fixed 定位漂移
   if (scrollCleanup) scrollCleanup();
   const onScroll = () => { closePopovers(); };
   window.addEventListener("scroll", onScroll, { capture: true, passive: true });
   scrollCleanup = () => window.removeEventListener("scroll", onScroll, { capture: true });
+  // 窗口缩放/布局变化时重新锚定当前浮层
+  if (resizeCleanup) resizeCleanup();
+  const onResize = () => {
+    if (activeAnchor && activeGetPopover) {
+      const popover = activeGetPopover();
+      if (popover) positionPopover(activeAnchor, popover);
+    }
+  };
+  window.addEventListener("resize", onResize);
+  resizeCleanup = () => window.removeEventListener("resize", onResize);
   // v-if 渲染完成后才拿得到浮层元素做定位
   void nextTick(() => {
     const popover = getPopover();

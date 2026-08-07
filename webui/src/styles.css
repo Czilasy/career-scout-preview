@@ -261,12 +261,18 @@ input {
   font-style: normal;
   color: var(--panel);
   background: var(--brand-strong);
-}.fav-drawer {
+}.fav-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: transparent;
+}
+.fav-drawer {
   position: fixed;
   top: 80px;
   right: 16px;
   bottom: 16px;
-  z-index: 50;
+  z-index: 51;
   display: flex;
   flex-direction: column;
   width: min(380px, calc(100vw - 32px));
@@ -2821,26 +2827,44 @@ body,
   pointer-events: none;
 }
 
-/* 收藏抽屉：右侧滑入滑出 */
+/* 收藏抽屉：与提醒抽屉同构，遮罩淡入淡出，面板从右侧滑入滑出 */
 .drawer-enter-active,
 .drawer-leave-active {
-  transition: opacity .2s ease, transform .2s ease;
+  transition: opacity .2s ease;
+}
+.drawer-enter-active .fav-drawer,
+.drawer-leave-active .fav-drawer {
+  transition: transform .2s ease;
 }
 .drawer-enter-from,
 .drawer-leave-to {
   opacity: 0;
+}
+.drawer-enter-from .fav-drawer,
+.drawer-leave-to .fav-drawer {
   transform: translateX(28px);
 }
 .drawer-leave-active {
   pointer-events: none;
 }
 
-/* 工作流阶段与结果面板：进入时淡入上移 */
+/* 工作流阶段：进入时淡入上移（结果页不参与 transform 动画，避免 fixed 浮层错位） */
 .workflow-card,
 .workflow-stack,
-.results-stage,
 .empty-panel {
   animation: stage-in .22s ease both;
+}
+/* 结果页：只淡入不位移，保证内部 fixed 浮层以视口定位 */
+.results-stage {
+  animation: stage-fade .22s ease both;
+}
+@keyframes stage-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 @keyframes stage-in {
   from {

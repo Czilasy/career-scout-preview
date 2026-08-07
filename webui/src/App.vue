@@ -473,16 +473,20 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
     </header>
 
     <Transition name="drawer">
-      <aside
+      <div
         v-if="favoritesOpen"
-      ref="favPanelEl"
-      class="fav-drawer"
-      role="dialog"
-      aria-modal="true"
-      aria-label="我的收藏"
-      tabindex="-1"
-      @keydown="handleFavoritesKeydown"
-    >
+        class="fav-drawer-backdrop"
+        @mousedown.self="favoritesOpen = false"
+      >
+        <aside
+          ref="favPanelEl"
+          class="fav-drawer"
+          role="dialog"
+          aria-modal="true"
+          aria-label="我的收藏"
+          tabindex="-1"
+          @keydown="handleFavoritesKeydown"
+        >
       <header class="fav-drawer-head">
         <div class="fav-drawer-heading">
           <h2>我的收藏</h2>
@@ -521,7 +525,8 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           </div>
         </div>
       </div>
-      </aside>
+        </aside>
+      </div>
     </Transition>
 
     <NoticeBar :notice="notice" @dismiss="dismissNotice" />
