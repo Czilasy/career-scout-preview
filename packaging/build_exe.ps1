@@ -10,6 +10,9 @@
   在项目根目录执行：pwsh packaging/build_exe.ps1
 #>
 
+param(
+    [switch]$Force
+)
 $ErrorActionPreference = 'Stop'
 
 # 项目根（脚本在 packaging/ 下，父目录即项目根）
@@ -97,6 +100,10 @@ if (-not (Test-Path '.release')) {
 }
 $releaseName = "CareerScout-v$version.exe"
 $releasePath = Join-Path $ProjectRoot ".release\$releaseName"
+if ((Test-Path -LiteralPath $releasePath) -and -not $Force) {
+    Write-Error "已存在同名产物 $releasePath；版本未提升时禁止覆盖，请先升版本或传 -Force"
+    exit 1
+}
 Move-Item -Path 'dist/CareerScout.exe' -Destination $releasePath -Force
 
 # ---------------------------------------------------------------------------

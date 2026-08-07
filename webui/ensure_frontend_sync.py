@@ -108,6 +108,11 @@ def main() -> int:
         print("前端已同步，无需重新构建")
         return 0
 
+    check_only = "--check" in sys.argv[1:]
+    if check_only:
+        print("webui/dist 与源码不同步，请先运行 npm run build 并提交", file=sys.stderr)
+        return 1
+
     print("检测到代码变化，正在自动构建前端...")
     try:
         _run_build()

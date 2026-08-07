@@ -36,7 +36,7 @@ fi
 echo "==> Pending commit identity check passed"
 
 echo "==> Frontend dist sync check"
-if ! uv run python webui/ensure_frontend_sync.py; then
+if ! uv run python webui/ensure_frontend_sync.py --check; then
     echo "!! webui/dist is out of sync with source. Rebuild before push."
     exit 1
 fi

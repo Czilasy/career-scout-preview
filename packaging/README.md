@@ -2,6 +2,7 @@
 
 本目录存放 Career Scout 桌面版的打包配置。
 源码模式（`python webui/app.py`）不受影响，桌面版是新增的发行路径。
+本目录是打包发布操作手册；发布卫生规则以根目录 `AGENTS.md` 为准。
 
 ## 文件说明
 
@@ -108,13 +109,7 @@ npm run build
    - 上传 `CareerScout-v{version}.exe.sha256`（构建脚本自动生成；
      **应用内更新强制依赖该文件，缺失时用户端会拒绝自动安装**）
    - 上传 SHA256 校验值（粘贴到发布说明或单独 `.sha256` 文件）
-4. **发布说明模板要点**：
-   - 版本号与 `pyproject.toml` 一致
-   - 安装方式：下载 EXE 双击启动，无需安装依赖
-   - 前置：Windows 10/11、Chrome 或 Edge 浏览器并完成 BOSS/智联登录
-   - 数据目录：`~/.career-scout`，与源码版互通
-   - 已知限制：onefile 首启解压延迟数秒；杀软可能误报
-   - 校验：附 SHA256 供下载方核对
+4. **发布说明**：版本号与 `pyproject.toml` 一致；包含安装方式、前置要求、数据目录 `~/.career-scout`、已知限制（onefile 首启延迟、杀软误报）与 SHA256；格式按 `AGENTS.md`「文档卫生」简单列表。
 5. **发布**：确认无误后点击 "Publish release"。
 6. **macOS DMG 自动挂接**：推同一个 `v{version}` tag 后，
    `.github/workflows/release-macos.yml` 在 GitHub 的 Mac runner 上构建

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import pathlib
 import re
 import subprocess
@@ -21,11 +23,24 @@ def _git(*args: str) -> str:
         errors="replace",
     ).stdout
 
+
 def _is_ignored(path: str) -> bool:
     return subprocess.run(
         ["git", "check-ignore", "-q", "--", path],
         cwd=ROOT, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
     ).returncode == 0
+
+
+def _local_env_paths() -> list[str]:
+    """本机环境特征从环境变量或本地配置读取，避免硬编码进公开测试。"""
+    paths = [p for p in os.environ.get("CAREER_SCOUT_LOCAL_ENV_PATHS", "").split("|") if p]
+    config = pathlib.Path.home() / ".career-scout" / "local_env.txt"
+    if config.is_file():
+        paths.extend(
+            line.strip() for line in config.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
+    return paths
+
 
 class RepoHygieneTests(unittest.TestCase):
     def test_no_untracked_non_ignored_files(self):
@@ -38,11 +53,7 @@ class RepoHygieneTests(unittest.TestCase):
         )
 
     def test_no_temp_logs_in_project_root(self):
-        """项目根目录不得残留测试中转文件（fulltest.log 等）。
-
-        这些文件被 ``*.log`` 忽略规则覆盖，git 层面不可见（check-ignore
-        与 git status 都查不到），必须直接文件系统检查。
-        """
+        """项目根目录不得残留测试中转文件（fulltest.log 等）。"""
         known = ("fulltest.log", "full_test_run.log", "testrun.log")
         present = [name for name in known if (ROOT / name).exists()]
         self.assertEqual(present, [], "已知测试中转文件必须删除，不得遗留")
@@ -104,6 +115,39 @@ class RepoHygieneTests(unittest.TestCase):
         raw = _git("ls-files", "--", "hooks/pre-commit", "hooks/pre-push")
         paths = [p for p in raw.splitlines() if p]
         self.assertEqual(paths, ["hooks/pre-commit", "hooks/pre-push"])
+
+    def test_hooks_path_is_enabled(self):
+        result = subprocess.run(
+            ["git", "config", "--get", "core.hooksPath"],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(result.stdout.strip(), "hooks", "请先运行 git config core.hooksPath hooks")
+
+    def test_version_consistency(self):
+        text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+        self.assertIsNotNone(match, "pyproject.toml 缺少 version")
+        expected = match.group(1)
+        checks = [
+            ("webui/package.json", r'^\s*"version"\s*:\s*"([^"]+)"'),
+            ("scripts/boss_cdp_raw.py", r'^__version__\s*=\s*["\']([^"\']+)["\']'),
+            ("tests/test_desktop_shell.py", r'^\s*self\.assertEqual\(version,\s*"([^"]+)"\)'),
+            ("README.md", r'^# Career Scout v([\d.]+)(?= ·)'),
+        ]
+        mismatches = []
+        for rel, pattern in checks:
+            file_match = re.search(pattern, (ROOT / rel).read_text(encoding="utf-8"), re.MULTILINE)
+            if not file_match or file_match.group(1) != expected:
+                mismatches.append(rel)
+        lock = json.loads((ROOT / "webui/package-lock.json").read_text(encoding="utf-8"))
+        lock_values = [lock.get("version"), (lock.get("packages") or {}).get("", {}).get("version")]
+        if any(value != expected for value in lock_values if value):
+            mismatches.append("webui/package-lock.json")
+        uv = (ROOT / "uv.lock").read_text(encoding="utf-8")
+        uv_match = re.search(r'^name = "career-scout"\nversion = "([^"]+)"', uv, re.MULTILINE)
+        if not uv_match or uv_match.group(1) != expected:
+            mismatches.append("uv.lock")
+        self.assertEqual(mismatches, [], f"版本号应全仓库一致：{expected}")
 
     def test_no_sensitive_or_local_files_tracked(self):
         raw = _git("ls-files", "-z")
@@ -174,18 +218,11 @@ class RepoHygieneTests(unittest.TestCase):
             ".ini", ".cfg", ".vue", ".ts", ".js", ".mjs", ".css",
             ".html", ".bat", ".sh", ".ps1",
         }
-        # 本机真实环境特征：克隆者请替换成自己的本地路径片段。
-        # 拆开拼接是为了避免本文件自身的字面量被扫描命中。
-        local_env = [
-            "C:\\Users\\" + "22879",
-            "D:\\" + "项目",
-        ]
+        local_env = _local_env_paths()
         patterns = [
-            # 真实凭据形态：OpenAI key、PEM 私钥头、AWS Access Key
             re.compile(r"sk-[A-Za-z0-9]{20,}"),
             re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
             re.compile(r"AKIA[0-9A-Z]{16}"),
-            # Windows 用户目录，排除 demo/example 等测试占位用户名
             re.compile(
                 r"[A-Za-z]:[\\/]Users[\\/]"
                 r"(?!(?:demo|example|fake|mock|test|sample|public|guest)[\\/-])"

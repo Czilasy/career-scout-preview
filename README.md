@@ -151,6 +151,9 @@ webui/job_advice.py          # 按需 AI 行动建议
 webui/dist/                  # 已构建的前端产物，普通用户无需 Node.js
 tests/                       # unittest，全 mock，无需真实 Chrome/网络
 docs/screenshots/            # README 所用界面截图
+packaging/                   # 桌面版打包配置与构建脚本
+hooks/                       # 提交/推送门禁钩子
+.github/workflows/           # GitHub Actions（dmg 自动构建）
 tools/start.bat              # Windows 一键启动 Web 工作台
 pyproject.toml               # 打包配置，入口 career-scout / career-summary
 requirements.txt             # Python 依赖
