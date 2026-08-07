@@ -279,8 +279,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div
-    v-if="open"
+  <Transition name="reminder-drawer">
+    <div
+      v-if="open"
     class="reminder-drawer-backdrop"
     data-testid="reminder-drawer"
     @mousedown.self="emit('close')"
@@ -440,8 +441,9 @@ onBeforeUnmount(() => {
           </template>
         </template>
       </div>
-    </aside>
-  </div>
+      </aside>
+    </div>
+  </Transition>
 </template>
 
 <style scoped>
@@ -672,4 +674,25 @@ onBeforeUnmount(() => {
     flex: 1 1 auto;
   }
 }
+/* 抽屉进出动画：遮罩淡入淡出，面板从右侧滑入滑出。 */
+.reminder-drawer-enter-active,
+.reminder-drawer-leave-active {
+  transition: opacity .2s ease;
+}
+.reminder-drawer-enter-active .reminder-drawer,
+.reminder-drawer-leave-active .reminder-drawer {
+  transition: transform .2s ease;
+}
+.reminder-drawer-enter-from,
+.reminder-drawer-leave-to {
+  opacity: 0;
+}
+.reminder-drawer-enter-from .reminder-drawer,
+.reminder-drawer-leave-to .reminder-drawer {
+  transform: translateX(28px);
+}
+.reminder-drawer-leave-active {
+  pointer-events: none;
+}
+
 </style>

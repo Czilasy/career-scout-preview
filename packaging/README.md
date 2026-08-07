@@ -128,7 +128,7 @@ npm run build
 
 - Release 必须附各产物的 `.sha256` 文件，否则用户端拒绝自动安装
   （降级为引导浏览器下载）；
-- 源码模式（`python webui/app.py`）只提供提示与 Release 页链接。
+- 源码模式（`python webui/app.py`）不提供应用内更新提示；更新代码请用 `git pull`，顶栏 GitHub 链接保留。
 
 ## macOS DMG 打包
 

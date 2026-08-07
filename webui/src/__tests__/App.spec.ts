@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import App from "../App.vue";
 import DiscoveryView from "../views/DiscoveryView.vue";
-import { expectedBackendBuildHash } from "../api";
+import { expectedBackendBuildHash, resetSessionStateForTests } from "../api";
 import { toggleTheme } from "../composables/useTheme";
 
 function response(body: unknown, status = 200): Response {
@@ -13,6 +13,7 @@ function response(body: unknown, status = 200): Response {
 
 describe("App", () => {
   beforeEach(() => {
+    resetSessionStateForTests();
     localStorage.clear();
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -498,6 +499,9 @@ describe("App", () => {
     if (overrides.ignored) localStorage.setItem("career-scout-ignored-update", overrides.ignored);
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.endsWith("/api/session")) {
+        return response({ status: "ok", build_hash: expectedBackendBuildHash, runtime_mode: "exe" });
+      }
       if (url.includes("/api/update-check")) return updateResponse();
       if (url.endsWith("/api/profiles")) return response({ profiles: [] });
       return baseAppResponse(url) ?? response({});
@@ -534,5 +538,27 @@ describe("App", () => {
     await wrapper.get(".brand").trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="update-dialog"]').exists()).toBe(true);
+  });
+
+  it("skips update checks and hides update controls in source mode", async () => {
+    let updateCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/update-check")) {
+        updateCalls += 1;
+        return updateResponse();
+      }
+      if (url.endsWith("/api/profiles")) return response({ profiles: [] });
+      return baseAppResponse(url) ?? response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(updateCalls).toBe(0);
+    expect(wrapper.find('[data-testid="update-trigger"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="manual-update-check"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="brand-update-dot"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="github-link"]').exists()).toBe(true);
   });
 });

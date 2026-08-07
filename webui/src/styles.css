@@ -2746,3 +2746,260 @@ body,
     flex-wrap: wrap;
   }
 }
+
+/* ===========================================================================
+ * 全局微动画（纯表现层；prefers-reduced-motion 由既有全局规则统一关闭）
+ * ========================================================================= */
+
+/* 主题切换：从点击位置向外扩散的新主题色圈 */
+.theme-ripple {
+  position: fixed;
+  inset: 0;
+  z-index: 75;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--brand) 22%, transparent);
+  clip-path: circle(0 at var(--ripple-x, 50%) var(--ripple-y, 50%));
+  animation: theme-ripple 300ms ease-out forwards;
+}
+@keyframes theme-ripple {
+  0% {
+    clip-path: circle(0 at var(--ripple-x, 50%) var(--ripple-y, 50%));
+    opacity: .9;
+  }
+  72% {
+    clip-path: circle(150% at var(--ripple-x, 50%) var(--ripple-y, 50%));
+    opacity: .32;
+  }
+  100% {
+    clip-path: circle(150% at var(--ripple-x, 50%) var(--ripple-y, 50%));
+    opacity: 0;
+  }
+}
+
+/* 主题按钮上的太阳/月亮图标过渡 */
+.theme-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+}
+.theme-icon svg {
+  display: block;
+}
+.theme-icon-enter-active,
+.theme-icon-leave-active {
+  transition: opacity .18s ease, transform .18s ease;
+}
+.theme-icon-enter-from {
+  opacity: 0;
+  transform: rotate(70deg) scale(.55);
+}
+.theme-icon-leave-to {
+  opacity: 0;
+  transform: rotate(-70deg) scale(.55);
+}
+
+/* 弹窗：遮罩淡入淡出，面板缩放 + 轻移 */
+.dialog-enter-active,
+.dialog-leave-active {
+  transition: opacity .18s ease;
+}
+.dialog-enter-active .dialog-panel,
+.dialog-leave-active .dialog-panel {
+  transition: opacity .18s ease, transform .18s ease;
+}
+.dialog-enter-from,
+.dialog-leave-to {
+  opacity: 0;
+}
+.dialog-enter-from .dialog-panel,
+.dialog-leave-to .dialog-panel {
+  opacity: 0;
+  transform: translateY(8px) scale(.98);
+}
+.dialog-leave-active {
+  pointer-events: none;
+}
+
+/* 收藏抽屉：右侧滑入滑出 */
+.drawer-enter-active,
+.drawer-leave-active {
+  transition: opacity .2s ease, transform .2s ease;
+}
+.drawer-enter-from,
+.drawer-leave-to {
+  opacity: 0;
+  transform: translateX(28px);
+}
+.drawer-leave-active {
+  pointer-events: none;
+}
+
+/* 工作流阶段与结果面板：进入时淡入上移 */
+.workflow-card,
+.workflow-stack,
+.results-stage,
+.empty-panel {
+  animation: stage-in .22s ease both;
+}
+@keyframes stage-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 岗位详情面板：打开时淡入 */
+.job-detail-pane {
+  animation: panel-in .22s ease both;
+}
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 徽标出现：轻微弹入 */
+.fav-badge {
+  animation: badge-pop .18s ease both;
+}
+@keyframes badge-pop {
+  0% {
+    opacity: 0;
+    transform: scale(.55);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* 更新红点：低强度呼吸 */
+.brand-update-dot {
+  animation: dot-pulse 2.2s ease-in-out infinite;
+}
+@keyframes dot-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px rgb(229 72 77 / 35%);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgb(229 72 77 / 0%);
+  }
+}
+
+/* 任务进度条：缓慢扫光；状态图标切换弹入 */
+.progress-track span {
+  position: relative;
+  overflow: hidden;
+}
+.progress-track span::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(105deg, transparent 35%, rgb(255 255 255 / 22%) 50%, transparent 65%);
+  animation: progress-sheen 2.4s ease-in-out infinite;
+}
+@keyframes progress-sheen {
+  to {
+    transform: translateX(100%);
+  }
+}
+.task-status svg {
+  animation: icon-pop .2s ease both;
+}
+@keyframes icon-pop {
+  from {
+    opacity: 0;
+    transform: scale(.6) rotate(-12deg);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 顶栏按钮反馈：图标轻移、按下轻微收缩 */
+.header-actions .button.secondary svg,
+.header-actions .icon-button svg {
+  transition: transform .15s ease;
+}
+.header-actions .button.secondary:hover svg,
+.header-actions .icon-button:hover svg {
+  transform: translateY(-1px);
+}
+.button:active:not(:disabled) {
+  transform: translateY(1px) scale(.99);
+}
+.icon-button:active:not(:disabled) {
+  transform: scale(.94);
+}
+
+/* 空状态、错误与登录引导：轻微淡入 */
+.fav-drawer-empty,
+.reminder-empty,
+.reminder-loading,
+.reminder-error,
+.login-guide,
+.restore-banner {
+  animation: fade-in-up .2s ease both;
+}
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 全局通知条：顶部轻落入位 */
+.notice-bar {
+  animation: notice-in .22s ease both;
+}
+@keyframes notice-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -8px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+/* 岗位行选中过渡：高亮条与底色柔和变化 */
+.job-row {
+  transition: background .15s ease, box-shadow .15s ease;
+}
+
+/* 主题切换时主要面板颜色柔和过渡 */
+body {
+  transition: background-color .22s ease;
+}
+.app-header,
+.content-card,
+.workflow-stack,
+.task-progress,
+.command-band,
+.dialog-panel,
+.fav-drawer,
+.job-detail-pane {
+  transition: background-color .22s ease, border-color .22s ease;
+}

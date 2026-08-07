@@ -2237,12 +2237,13 @@ watch(roundStatusPayload, (payload) => {
     </section>
 
     <!-- 岗位轨迹浮窗：居中弹窗，内容为原生命周期卡片全部能力 -->
-    <div
-      v-if="lifecycleDialogOpen && lifecycleDialogJob"
-      class="dialog-backdrop lifecycle-dialog-backdrop"
-      data-testid="lifecycle-dialog"
-      @click.self="closeLifecycleDialog"
-    >
+    <Transition name="dialog">
+      <div
+        v-if="lifecycleDialogOpen && lifecycleDialogJob"
+        class="dialog-backdrop lifecycle-dialog-backdrop"
+        data-testid="lifecycle-dialog"
+        @click.self="closeLifecycleDialog"
+      >
       <section class="dialog-panel lifecycle-dialog" role="dialog" aria-modal="true" aria-label="岗位轨迹">
         <header class="lifecycle-dialog-header">
           <h2>岗位轨迹</h2>
@@ -2262,6 +2263,7 @@ watch(roundStatusPayload, (payload) => {
           @job-feedback-changed="onJobFeedbackChanged"
         />
       </section>
-    </div>
+      </div>
+    </Transition>
   </main>
 </template>

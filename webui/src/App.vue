@@ -8,7 +8,7 @@ import NoticeBar from "./components/NoticeBar.vue";
 import ReminderDrawer from "./components/ReminderDrawer.vue";
 import UpdateDialog from "./components/UpdateDialog.vue";
 import DiscoveryView from "./views/DiscoveryView.vue";
-import { apiRequest, errorMessage, GITHUB_REPO_URL, initializeSession, openExternalLink, updateApi, type UpdateCheckResult } from "./api";
+import { apiRequest, currentRuntimeMode, errorMessage, GITHUB_REPO_URL, initializeSession, openExternalLink, updateApi, type UpdateCheckResult } from "./api";
 import { getJobReminderCount } from "./jobFeedback";
 import { useTheme } from "./composables/useTheme";
 import type { CandidateProfile, Notice } from "./types";
@@ -116,6 +116,7 @@ async function removeFavorite(job: Record<string, unknown>) {
 onMounted(async () => {
   try {
     await initializeSession();
+    runtimeMode.value = currentRuntimeMode() === "exe" ? "exe" : "source";
     const profileData = await apiRequest<{ profiles?: CandidateProfile[] }>("/api/profiles");
     profiles.value = profileData.profiles || [];
     const saved = localStorage.getItem("career-scout-current-profile") || "";
@@ -124,15 +125,17 @@ onMounted(async () => {
       : profiles.value[0]?.id || "";
     // 顶栏收藏徽标随首屏加载展示，不必等用户先打开过面板。
     void loadFavorites();
-    // 检查更新：后台静默执行，失败不打扰（后端 24h 缓存，不重复消耗限流）
-    void checkAppUpdate();
+    // 检查更新：仅桌面版后台静默执行，失败不打扰（后端 24h 缓存）
+    if (updatesEnabled.value) void checkAppUpdate();
   } catch (error) {
     showNotice({ message: errorMessage(error, "WebUI 初始化失败"), tone: "error" });
   }
 });
 
 // ---------------------------------------------------------------------------
-// 应用内更新：首屏检查一次，发现新版在顶栏显示入口
+// 应用内更新：仅桌面 EXE 模式启用；源码模式不检查、不提示（GitHub 链接保留）。
+const runtimeMode = ref<"source" | "exe">("source");
+const updatesEnabled = computed(() => runtimeMode.value === "exe");
 // ---------------------------------------------------------------------------
 const updateInfo = ref<UpdateCheckResult | null>(null);
 const updateDialogOpen = ref(false);
@@ -187,6 +190,23 @@ async function manualCheckUpdate() {
   } catch {
     showNotice({ message: "检查更新失败，请检查网络后重试", tone: "warning" });
   }
+}
+
+function handleThemeToggle(event: MouseEvent) {
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+    toggleTheme();
+    return;
+  }
+  const x = event.clientX;
+  const y = event.clientY;
+  toggleTheme();
+  const ripple = document.createElement("span");
+  ripple.className = "theme-ripple";
+  ripple.style.setProperty("--ripple-x", `${x}px`);
+  ripple.style.setProperty("--ripple-y", `${y}px`);
+  ripple.setAttribute("aria-hidden", "true");
+  document.body.appendChild(ripple);
+  ripple.addEventListener("animationend", () => ripple.remove(), { once: true });
 }
 
 function openGitHub() {
@@ -321,7 +341,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
         </svg>
         <span class="brand-name">Career<span class="tick">·</span>Scout</span>
         <span
-          v-if="updateInfo"
+          v-if="updatesEnabled && updateInfo"
           class="brand-update-dot"
           data-testid="brand-update-dot"
           role="status"
@@ -400,7 +420,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           <Bot :size="18" aria-hidden="true" /><span>AI 设置</span>
         </button>
         <button
-          v-if="updateInfo"
+          v-if="updatesEnabled && updateInfo"
           class="button secondary update-trigger"
           type="button"
           data-testid="update-trigger"
@@ -411,7 +431,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           <Rocket :size="18" aria-hidden="true" /><span>新版本 v{{ updateInfo.latest }}</span>
         </button>
         <button
-          v-else
+          v-else-if="updatesEnabled"
           class="icon-button manual-update-check"
           type="button"
           data-testid="manual-update-check"
@@ -440,16 +460,21 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           data-testid="theme-toggle"
           :aria-label="themeToggleLabel"
           :title="themeToggleLabel"
-          @click="toggleTheme()"
+          @click="handleThemeToggle"
         >
-          <Sun v-if="mode === 'dark'" :size="18" aria-hidden="true" />
-          <Moon v-else :size="18" aria-hidden="true" />
+          <span class="theme-icon" aria-hidden="true">
+            <Transition name="theme-icon" mode="out-in">
+              <Sun v-if="mode === 'dark'" key="sun" :size="18" />
+              <Moon v-else key="moon" :size="18" />
+            </Transition>
+          </span>
         </button>
       </div>
     </header>
 
-    <aside
-      v-if="favoritesOpen"
+    <Transition name="drawer">
+      <aside
+        v-if="favoritesOpen"
       ref="favPanelEl"
       class="fav-drawer"
       role="dialog"
@@ -496,7 +521,8 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           </div>
         </div>
       </div>
-    </aside>
+      </aside>
+    </Transition>
 
     <NoticeBar :notice="notice" @dismiss="dismissNotice" />
 

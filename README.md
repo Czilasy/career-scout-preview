@@ -25,7 +25,9 @@ Windows 与 macOS 用户可直接使用桌面版，无需安装 Python 或 Node.
 - 最新正式版：v2.8.2
 - Windows 安装包：`CareerScout-v2.8.2.exe`，下载后双击运行
 - macOS 安装包：`CareerScout-v2.8.2.dmg`，首次打开时右键选择“打开”
-- 应用内更新：启动时自动检查新版本，可一键下载、校验并重启完成更新
+- 应用内更新（桌面版）：启动时自动检查新版本，可一键下载、校验并重启完成更新
+
+源码模式（`python webui/app.py`）不显示应用内更新提示；用 `git pull` 更新代码后重启 Web 工作台即可。
 
 下载地址：[GitHub Releases](https://github.com/Czilasy/career-scout-preview/releases)
 

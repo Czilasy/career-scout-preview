@@ -67,7 +67,8 @@ onBeforeUnmount(() => document.body.classList.remove("dialog-open"));
 </script>
 
 <template>
-  <div v-if="open" class="dialog-backdrop" @mousedown.self="close">
+  <Transition name="dialog">
+    <div v-if="open" class="dialog-backdrop" @mousedown.self="close">
     <section
       ref="panel"
       class="dialog-panel"
@@ -95,5 +96,6 @@ onBeforeUnmount(() => document.body.classList.remove("dialog-open"));
         <slot name="footer" />
       </footer>
     </section>
-  </div>
+    </div>
+  </Transition>
 </template>

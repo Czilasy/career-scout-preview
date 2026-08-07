@@ -9,6 +9,7 @@ import type {
 
 let sessionToken = "";
 let buildIdentityVerified = false;
+let sessionRuntimeMode = "source";
 let sessionInitialization: Promise<void> | null = null;
 
 // 桌面壳（pywebview）注入的 JS API；浏览器模式下不存在
@@ -91,14 +92,28 @@ export function initializeSession(): Promise<void> {
       headers: { Accept: "application/json" },
     });
     if (!response.ok) throw new ApiError(response.status, {});
-    const payload = await response.json() as { token?: string; build_hash?: string };
+    const payload = await response.json() as { token?: string; build_hash?: string; runtime_mode?: string };
     sessionToken = payload.token || "";
     if (payload.build_hash) setBuildIdentity(payload.build_hash);
+    sessionRuntimeMode = payload.runtime_mode === "exe" ? "exe" : "source";
   })().catch((error) => {
     sessionInitialization = null;
     throw error;
   });
   return sessionInitialization;
+}
+
+/** 当前会话运行时模式：桌面 EXE 为 exe，源码模式/未知为 source。 */
+export function currentRuntimeMode(): string {
+  return sessionRuntimeMode;
+}
+
+/** 仅测试使用：清除会话初始化缓存，让下一次 initializeSession 重新请求。 */
+export function resetSessionStateForTests(): void {
+  sessionToken = "";
+  buildIdentityVerified = false;
+  sessionRuntimeMode = "source";
+  sessionInitialization = null;
 }
 
 export async function apiRequest<T>(path: string, options: ApiOptions = {}): Promise<T> {
@@ -153,7 +168,7 @@ export const settingsApi = {
 };
 
 // ---------------------------------------------------------------------------
-// 应用内更新（后端 webui/updater.py）
+// 应用内更新（后端 webui/updater.py；仅桌面 EXE 模式启用入口）
 // ---------------------------------------------------------------------------
 export interface UpdateCheckResult {
   ok: boolean;
