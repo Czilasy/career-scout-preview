@@ -1353,6 +1353,11 @@ def create_app(config=None):
             items.append({
                 "job_id": job["id"],
                 "profile_id": pj.get("profile_id", ""),
+                # 身份字段一并返回：取消收藏走内部 ID 即可，但保留三元组
+                # 供调用方按权威身份协议使用（platform-schema 三身份独立）。
+                "platform": job.get("platform", ""),
+                "platform_job_id": job.get("platform_job_id", ""),
+                "canonical_url": job.get("canonical_url", ""),
                 "title": job.get("title", ""),
                 "company": job.get("company", ""),
                 "salary": job.get("salary", ""),
@@ -3855,6 +3860,13 @@ def create_app(config=None):
             if _stop_requested():
                 _mark_cancelled()
                 return
+            # 实时结果必须带平台身份：结果页按 job.platform 做平台筛选，
+            # 内存结果缺 platform 会把全部岗位过滤成 0（重启走 DB 恢复才有值）。
+            # 抓取脚本产物不带 platform，此处按任务冻结平台权威回填。
+            for job in enriched:
+                job.setdefault("platform", frozen_platform)
+            for job in dropped:
+                job.setdefault("platform", frozen_platform)
             result = {
                 "ok": True,
                 "jobs": enriched,
@@ -7151,7 +7163,11 @@ def create_app(config=None):
         # processed_count 只记录已成功完成的当前阶段工作单元；pending
         # 是已失败并进入待确认的独立工作单元，两者不能互相扣减。
         fail_count = pending
-        success_count = max(match + mismatch, processed)
+        # success_count 必须单调且实时：live_progress.current 由 emit 按条推进
+        # （智联详情批内即时回报后逐条前进），DB processed_count 是批次粒度。
+        # 只取 max 保证跨阶段切换不回退（如粗筛 30 条完成后进入 JD 阶段）。
+        live_current = int(live_progress.get("current") or 0)
+        success_count = max(match + mismatch, processed, live_current)
         completed_count = min(stage_total, success_count + fail_count)
         unstarted = max(0, stage_total - completed_count)
         overall_percent = (

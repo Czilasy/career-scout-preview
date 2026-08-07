@@ -2460,6 +2460,26 @@ body,
   outline-offset: 2px;
 }
 
+/* 任务运行中平台切换锁定：按钮降透明且不可点，旁边给出原因提示。 */
+.platform-segment-btn:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+.platform-lock-hint {
+  color: var(--text-soft);
+  font-size: 12px;
+  margin-left: 10px;
+  white-space: nowrap;
+}
+
+/* 高级执行设置里智联串行模式下不生效的参数标注。 */
+.platform-note {
+  margin-left: 6px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 500;
+}
+
 /* T510：TaskProgress 顶部任务平台徽章（data-platform=zhilian|boss）。 */
 .task-platform {
   display: inline-flex;

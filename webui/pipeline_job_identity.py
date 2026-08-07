@@ -307,7 +307,7 @@ def _resolve_by_internal_id(conn, request: JobIdentityRequest) -> ResolvedJobIde
         ]
         if missing:
             raise JobIdentityIncompleteError(
-                "内部岗位 ID 附带的身份三元组不完整",
+                "岗位身份信息不完整，请刷新结果后重试",
                 details={"missing_fields": missing},
             )
         _validate_platform(request.platform)
@@ -352,7 +352,8 @@ def _resolve_by_triple(
     ]
     if missing:
         raise JobIdentityIncompleteError(
-            "岗位身份三元组不完整", details={"missing_fields": missing},
+            "岗位身份信息不完整，请刷新结果后重试",
+            details={"missing_fields": missing},
         )
     _validate_platform(request.platform)
     normalized_url = _normalize_canonical_url(

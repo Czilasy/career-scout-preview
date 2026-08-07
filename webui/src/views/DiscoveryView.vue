@@ -25,11 +25,13 @@ import TaskProgress from "../components/TaskProgress.vue";
 import { ApiError, apiRequest, errorMessage, settingsApi } from "../api";
 import { setThemePlatform } from "../composables/useTheme";
 import {
+  backfillJobPlatform,
   buildSearchScriptParams,
   createCityCatalogLoader,
   createPlatformState,
   createSchemaLoader,
   DEFAULT_PLATFORM,
+  filterPipelineResultByPlatform,
   normalizeScopePreview,
   partitionPipelineResult,
 } from "../discovery";
@@ -296,6 +298,9 @@ function clampAdvanced(field: string) {
   if (next !== raw) advancedSettings.value[field] = next;
 }
 const screenPanelOpen = ref(true);
+// 步骤 2 两个面板（关键词配置 / 高级执行设置）共用同一受控状态：
+// 默认收拢、手动展开/收起联动（一个 ref 天然同步两卡）；开始抓取后自动收拢。
+const searchPanelsOpen = ref(false);
 let pollTimer: number | undefined;
 
 const scopeLocked = computed(() => Boolean(
@@ -375,16 +380,11 @@ watch(
   { deep: true },
 );
 // 分类基于当前平台过滤后的结果：页签计数跟随筛选联动。
-const filteredPipelineResult = computed<PipelineResult>(() => {
-  const full = pipelineResult.value || {};
-  const plat = resultPlatformFilter.value;
-  if (plat === "all") return full;
-  return {
-    ...full,
-    jobs: (Array.isArray(full.jobs) ? full.jobs : []).filter((job) => job.platform === plat),
-    dropped: (Array.isArray(full.dropped) ? full.dropped : []).filter((job) => job.platform === plat),
-  };
-});
+// 过滤逻辑抽到 discovery.ts 纯函数（filterPipelineResultByPlatform），
+// 切换筛选只影响展示层派生，不触碰 pipelineResult 本体。
+const filteredPipelineResult = computed<PipelineResult>(() =>
+  filterPipelineResultByPlatform(pipelineResult.value || {}, resultPlatformFilter.value),
+);
 const groups = computed(() => partitionPipelineResult(filteredPipelineResult.value));
 const resultTabs = computed(() => [
   { id: "matched" as const, label: "匹配", count: groups.value.matched.length },
@@ -932,6 +932,8 @@ async function startScrape() {
   }
   const preview = scopePreview.value || await refreshScopePreview();
   if (!preview) return;
+  // 开始抓取后自动收拢两个配置面板（用户可随时手动展开查看）。
+  searchPanelsOpen.value = false;
   scrapeBusy.value = true;
   scrapeCompleted.value = false;
   resultLoaded.value = false;
@@ -1161,7 +1163,9 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
         );
       } else {
         screenBusy.value = false;
-        setPipelineResult(data.result || {});
+        // 实时任务结果防御性回填平台身份：内存结果可能缺 job.platform
+        //（抓取脚本产物不带），缺了结果页平台筛选会把全部岗位过滤成 0。
+        setPipelineResult(backfillJobPlatform(data.result || {}, data.platform));
         activeStep.value = "results";
         notify(
           data.status === "completed_with_pending"
@@ -1800,8 +1804,11 @@ watch(roundStatusPayload, (payload) => {
         :aria-selected="draftPlatform === platform"
         :class="['platform-segment-btn', { active: draftPlatform === platform }]"
         :data-testid="`platform-segment-${platform}`"
+        :disabled="scopeLocked"
+        :title="scopeLocked ? '任务进行中，平台已锁定' : undefined"
         @click="setDraftPlatform(platform)"
       >{{ platform === 'boss' ? 'BOSS' : '智联' }}</button>
+      <span v-if="scopeLocked" class="platform-lock-hint" role="status">任务进行中，平台已锁定</span>
     </div>
     <StepNavigator
       :steps="steps"
@@ -1888,7 +1895,7 @@ watch(roundStatusPayload, (payload) => {
       </section>
 
       <section v-else-if="activeStep === 'search'" class="workflow-stack search-layout">
-        <CollapsibleCard title="哪些词用于广泛抓取？" static :model-value="true" :class="{ locked: scopeLocked }">
+        <CollapsibleCard title="哪些词用于广泛抓取？" v-model="searchPanelsOpen" :class="{ locked: scopeLocked }">
           <template #prefix>
             <Search :size="17" aria-hidden="true" />
           </template>
@@ -1942,7 +1949,7 @@ watch(roundStatusPayload, (payload) => {
           </label>
         </CollapsibleCard>
 
-        <CollapsibleCard class="advanced-panel" title="高级执行设置" static :model-value="true">
+        <CollapsibleCard class="advanced-panel" title="高级执行设置" v-model="searchPanelsOpen">
           <template #prefix>
             <SlidersHorizontal :size="17" aria-hidden="true" />
           </template>
@@ -1972,9 +1979,9 @@ watch(roundStatusPayload, (payload) => {
             <div class="advanced-grid">
               <label class="field-label"><span>每批抓取数量 <i class="tip" data-tip="范围由当前模式版本提供。每批交给浏览器抓JD的岗位数">?</i></span><input v-model.number="advancedSettings.detail_batch_size" data-testid="detail-batch-size" type="number" :min="advancedRange('detail_batch_size')[0]" :max="advancedRange('detail_batch_size')[1]" @change="clampAdvanced('detail_batch_size')"></label>
               <label class="field-label"><span>岗位间隔（秒） <i class="tip" data-tip="范围由当前模式版本提供。抓完一个岗位详情后等待再抓下一个">?</i></span><input v-model.number="advancedSettings.detail_interval" type="number" :min="advancedRange('detail_interval')[0]" :max="advancedRange('detail_interval')[1]" @change="clampAdvanced('detail_interval')"></label>
-              <label class="field-label"><span>重置频率 <i class="tip" data-tip="范围由当前模式版本提供。每抓多少个详情后重置会话计数器">?</i></span><input v-model.number="advancedSettings.detail_reset_every" type="number" :min="advancedRange('detail_reset_every')[0]" :max="advancedRange('detail_reset_every')[1]" @change="clampAdvanced('detail_reset_every')"></label>
+              <label class="field-label"><span>重置频率 <i class="tip" data-tip="范围由当前模式版本提供。每抓多少个详情后重置会话计数器">?</i><small v-if="draftPlatform === 'zhilian'" class="platform-note">（智联串行抓取，此项不生效）</small></span><input v-model.number="advancedSettings.detail_reset_every" type="number" :min="advancedRange('detail_reset_every')[0]" :max="advancedRange('detail_reset_every')[1]" @change="clampAdvanced('detail_reset_every')"></label>
               <label class="field-label"><span>批次冷却（秒） <i class="tip" data-tip="范围由当前模式版本提供。两批详情抓取之间的休息时间">?</i></span><input v-model.number="advancedSettings.detail_batch_cooldown" type="number" :min="advancedRange('detail_batch_cooldown')[0]" :max="advancedRange('detail_batch_cooldown')[1]" @change="clampAdvanced('detail_batch_cooldown')"></label>
-              <label class="field-label"><span>并发 Tab 数 <i class="tip" data-tip="范围由当前模式版本提供。同时常驻多少个浏览器 tab 抓 JD（1-10）">?</i></span><input v-model.number="advancedSettings.detail_tab_pool_size" data-testid="detail-tab-pool-size" type="number" :min="advancedRange('detail_tab_pool_size')[0]" :max="advancedRange('detail_tab_pool_size')[1]" @change="clampAdvanced('detail_tab_pool_size')"></label>
+              <label class="field-label"><span>并发 Tab 数 <i class="tip" data-tip="范围由当前模式版本提供。同时常驻多少个浏览器 tab 抓 JD（1-10）">?</i><small v-if="draftPlatform === 'zhilian'" class="platform-note">（智联串行抓取，此项不生效）</small></span><input v-model.number="advancedSettings.detail_tab_pool_size" data-testid="detail-tab-pool-size" type="number" :min="advancedRange('detail_tab_pool_size')[0]" :max="advancedRange('detail_tab_pool_size')[1]" @change="clampAdvanced('detail_tab_pool_size')"></label>
             </div>
           </div>
           <!-- AI 筛选 -->

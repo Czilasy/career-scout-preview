@@ -4065,6 +4065,26 @@ class StatusMappingTests(unittest.TestCase):
         self.assertEqual(data.get("status"), "paused")
         self.assertEqual(data.get("db_status"), "paused")
 
+    def test_task_state_success_count_tracks_live_progress_current(self):
+        """内存任务 progress.current 实时推进时，success_count 必须跟随。
+
+        回归：智联详情批内条级进度（on_item_done → emit current）必须实时
+        反映到 task-state 计数画面；此前只读 DB processed_count（批次粒度），
+        用户看到「已完成」长时间卡 0。
+        """
+        run_id = "test_live_current"
+        self._create_run(run_id, "running")
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "ai_screen", "status": "running",
+            "progress": {"stage": "fetch_jd", "current": 7, "total": 28,
+                         "message": "抓取 JD 7/28", "overall_percent": 37},
+            "logs": [], "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+        }
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+        # DB processed_count 为 0，但内存进度已推进到 7：取两者最大值。
+        self.assertEqual(data["success_count"], 7)
+
     def test_task_state_interrupted_maps_to_cancelled(self):
         """T410: interrupted DB 状态 → cancelled 任务状态。"""
         run_id = "test_interrupted_mapping"
@@ -5406,6 +5426,67 @@ class Task008BackendIntegrationTests(unittest.TestCase):
         self.assertEqual(cancelled.get_json()["job_id"], boss_internal)
         self.assertEqual(self.store.get_profile_job(
             self.profile_id, boss_internal)["status"], "new")
+
+    def test_cancel_interest_with_internal_id_only_succeeds(self):
+        """收藏抽屉取消收藏只传内部 job_id 必须成功（回归）。
+
+        App 收藏抽屉此前附带 job_link 但缺 platform/platform_job_id，
+        后端权威解析把「内部 ID + 部分三元组」判为身份不完整 → 422
+        “岗位身份信息不完整”。修复后前端只传内部 job_id，走内部 ID
+        解析，不再触发三元组校验。
+        """
+        job = {
+            "platform": "boss",
+            "platform_job_id": "fav-pid-1",
+            "job_link": "https://www.zhipin.com/job_detail/fav-pid-1.html",
+        }
+        marked = self.client.post("/api/pipeline/jobs/interest", json={
+            "profile_id": self.profile_id, "job": job,
+        })
+        self.assertEqual(marked.status_code, 200, marked.get_data(as_text=True))
+        internal_id = marked.get_json()["job_id"]
+
+        cancelled = self.client.post("/api/pipeline/jobs/interest/cancel", json={
+            "profile_id": self.profile_id,
+            "job": {"job_id": internal_id},
+        })
+        self.assertEqual(cancelled.status_code, 200, cancelled.get_data(as_text=True))
+        self.assertEqual(cancelled.get_json()["job_id"], internal_id)
+        self.assertEqual(
+            self.store.get_profile_job(self.profile_id, internal_id)["status"], "new")
+
+    def test_identity_failures_do_not_leak_internal_details(self):
+        """身份错误文案面向用户，不裸露“三元组”等内部数据结构。"""
+        resp = self.client.post("/api/pipeline/jobs/interest", json={
+            "profile_id": self.profile_id,
+            "job": {
+                "platform": "boss",
+                "platform_job_id": "bare-pid",
+                "job_link": "https://www.zhipin.com/job_detail/bare-pid.html",
+            },
+        })
+        self.assertEqual(resp.status_code, 200)
+        # 部分三元组 + 内部 ID 携带时后端必须拒绝，且文案不含内部术语。
+        seeded = self.client.post("/api/pipeline/jobs/interest", json={
+            "profile_id": self.profile_id,
+            "job": {
+                "platform": "boss",
+                "platform_job_id": "bare-pid",
+                "job_link": "https://www.zhipin.com/job_detail/bare-pid.html",
+            },
+        })
+        self.assertEqual(seeded.status_code, 200)
+        internal_id = seeded.get_json()["job_id"]
+        half = self.client.post("/api/pipeline/jobs/interest/cancel", json={
+            "profile_id": self.profile_id,
+            "job": {"job_id": internal_id,
+                    "job_link": "https://www.zhipin.com/job_detail/bare-pid.html"},
+        })
+        self.assertEqual(half.status_code, 422)
+        body = half.get_json()
+        self.assertEqual(body["error_code"], "job_identity_incomplete")
+        self.assertNotIn("三元组", body.get("user_message", ""))
+        self.assertNotIn("内部岗位", body.get("user_message", ""))
 
     def test_pipeline_identity_failures_have_zero_side_effects(self):
         before = self._table_counts()

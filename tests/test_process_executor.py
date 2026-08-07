@@ -178,6 +178,34 @@ class CancelProcessTreeTests(unittest.TestCase):
         cancelled.set()
         self.assertTrue(result.ok)
 
+    def test_windows_creationflags_suppress_console_window(self):
+        """Windows 抓取子进程必须带 CREATE_NO_WINDOW（桌面版不闪控制台窗）。
+
+        回归：此前只有 CREATE_NEW_PROCESS_GROUP，抓取开始/结束时各闪一次
+        空白 PowerShell 窗口。
+        """
+        if os.name != "nt":
+            self.skipTest("仅 Windows 有 creationflags 语义")
+        import subprocess as _sp
+
+        captured: dict = {}
+        original_popen = _sp.Popen
+
+        def fake_popen(command, **kwargs):
+            captured.update(kwargs)
+            return original_popen([sys.executable, "-c", "pass"], **kwargs)
+
+        with unittest.mock.patch("subprocess.Popen", fake_popen):
+            result = ScraperExecutor().execute(
+                [sys.executable, "-c", "pass"], timeout_seconds=5,
+            )
+        self.assertTrue(result.ok)
+        flags = int(captured.get("creationflags", 0))
+        self.assertTrue(flags & _sp.CREATE_NEW_PROCESS_GROUP,
+                        "必须保留独立进程组（取消时能整树终止）")
+        self.assertTrue(flags & _sp.CREATE_NO_WINDOW,
+                        "必须抑制控制台窗口（0x08000000）")
+
 
 if __name__ == "__main__":
     unittest.main()

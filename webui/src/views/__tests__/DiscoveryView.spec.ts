@@ -587,7 +587,7 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps draft platform switch independent of a running task platform", async () => {
+  it("locks draft platform switching while a task is running", async () => {
     // 不变式 1（platform-schema.md L147）：切换草稿平台不改 task/result。
     // 这里 mock 一个运行中的 BOSS 抓取任务，再切草稿到智联，验证 BOSS 任务状态不被改写。
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -634,13 +634,18 @@ describe("DiscoveryView", () => {
     // 任务被接回后 activeStep 仍是 upload；草稿平台分段控件在所有步骤都常驻顶部。
     expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
 
-    // 草稿切到智联：T505 触发 schema + 城市重新加载，但 task snapshot 不被改写
-    await wrapper.get('[data-testid="platform-segment-zhilian"]').trigger("click");
+    // 任务运行中平台切换被锁定（平台互切锁定）：按钮禁用、点击不生效，
+    // 任务快照与 schema 不被改写。
+    const zhilianBtn = wrapper.get('[data-testid="platform-segment-zhilian"]');
+    expect(zhilianBtn.attributes("disabled")).toBeDefined();
+    expect(zhilianBtn.attributes("title") || "").toContain("任务进行中");
+    await zhilianBtn.trigger("click");
     await flushPromises();
-    expect(wrapper.find('[data-testid="platform-current-zhilian"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
 
-    // 切回 BOSS 草稿
-    await wrapper.get('[data-testid="platform-segment-boss"]').trigger("click");
+    const bossBtn = wrapper.get('[data-testid="platform-segment-boss"]');
+    expect(bossBtn.attributes("disabled")).toBeDefined();
+    await bossBtn.trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
 

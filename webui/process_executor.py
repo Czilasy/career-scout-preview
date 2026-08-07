@@ -67,7 +67,11 @@ class ScraperExecutor:
             "text": False,
         }
         if os.name == "nt":
-            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            # CREATE_NO_WINDOW：桌面壳是无控制台窗口程序，不带此标志时
+            # 抓取子进程会各自弹出一个空白控制台窗口（开始/结束各闪一次）。
+            popen_kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            )
         else:
             popen_kwargs["start_new_session"] = True
 

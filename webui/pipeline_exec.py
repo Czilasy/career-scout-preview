@@ -1100,6 +1100,20 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         )
         batch_exception_code: str | None = None
         _t0_batch = time.time()
+
+        # 批内条级进度：智联串行逐条抓取时由 source 逐条回调（on_item_done），
+        # 否则一批 15 条要十几分钟，前端进度条一直停在 0。BOSS 子进程模式
+        # 在批返回时一次性回调（幂等），不改变原有批量语义。
+        batch_done_before = done
+
+        def _item_progress(n: int, _base: int = batch_done_before, _total: int = total) -> None:
+            if progress is None:
+                return
+            try:
+                progress(min(_base + n, _total), _total)
+            except Exception:
+                pass
+
         try:
             outcomes = source.fetch_details_batch(
                 batch_jobs,
@@ -1109,6 +1123,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 gap_max=_detail_interval + 7,
                 reset_every=_detail_reset_every,
                 tab_pool_size=_detail_tab_pool_size,
+                on_item_done=_item_progress,
             )
         except _PIPELINE_OPERATION_ERRORS as exc:
             # 批调用本身抛错时没有逐岗位 outcome 可供后续分类；这属于源/编排

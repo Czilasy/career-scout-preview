@@ -99,14 +99,11 @@ async function removeFavorite(job: Record<string, unknown>) {
       method: "POST",
       json: {
         profile_id: profileId,
-        job: {
-          job_id: jobId,
-          job_link: job.job_link,
-          title: job.title,
-          company: job.company,
-          salary: job.salary,
-          location: job.location,
-        },
+        // 只传内部 job_id（favorites 列表的 job_id 就是 jobs.id）。
+        // 不能附带 job_link 等身份候选字段：后端权威身份解析见
+        // _pipeline_identity_payload —— 部分三元组 + 内部 ID 会被判定为
+        // “身份信息不完整”而拒绝（此前取消收藏必现 422 报错）。
+        job: { job_id: jobId },
       },
     });
     favorites.value = favorites.value.filter((j) => j.job_id !== job.job_id);

@@ -653,6 +653,7 @@ class BossCdpSource:
         gap_max: float = 15,
         reset_every: int = 3,
         tab_pool_size: int = 5,
+        on_item_done: Callable[[int], None] | None = None,
     ) -> dict[str, SourceOutcome]:
         """Fetch details for a batch of jobs (≤5) using one scraper subprocess.
 
@@ -660,6 +661,10 @@ class BossCdpSource:
         is built from its atomic detail record (split from the combined
         output by ``job_link``) and the corresponding terminal safe event
         parsed from the events JSONL file.
+
+        ``on_item_done``：仅用于与 ZhilianCdpSource 对齐签名。BOSS 走子进程
+        tab 池整批抓取，条级回调由事件文件统一解析（event_callback），
+        本参数在批返回时一次性按批内条数回调一次，不做批内逐条推进。
 
         Contract (state machine §Producer / Consumer Boundaries):
 
@@ -922,6 +927,14 @@ class BossCdpSource:
                 self.breaker.record_success()
             elif outcome.failed_code in SourceCircuitBreaker.SIGNAL_CODES:
                 self.breaker.record_signal(outcome.failed_code)
+
+        # 批返回时一次性推进条数（与 ZhilianCdpSource 的条级回调同语义，
+        # 保证编排层 progress 计数在两种实现下都单调）。
+        if on_item_done is not None:
+            try:
+                on_item_done(len(jobs))
+            except Exception:
+                pass
 
         return results
 
@@ -1490,11 +1503,13 @@ class FakeJobSource:
 
     def fetch_details_batch(
         self, jobs: list[dict], *, detail_output_path: str | None = None,
+        on_item_done: Callable[[int], None] | None = None,
         **bounded_options,
     ) -> dict[str, SourceOutcome]:
         """批量抓取详情（测试替身）：逐个调用 fetch_detail 并按 job_id 汇总。
 
         单岗位失败不抛出；每个输入恰有一个终态 outcome。
+        ``on_item_done``：每条处理后回调已完成条数（与 ZhilianCdpSource 对齐）。
         """
         results: dict[str, SourceOutcome] = {}
         for i, job in enumerate(jobs):
@@ -1503,10 +1518,20 @@ class FakeJobSource:
                     failed_code="source_invalid_output",
                     safe_log="job_not_dict",
                 )
+                if on_item_done is not None:
+                    try:
+                        on_item_done(i + 1)
+                    except Exception:
+                        pass
                 continue
             job_id = str(job.get("job_id") or job.get("id") or "").strip()
             key = job_id or f"idx{i}"
             results[key] = self.fetch_detail(job, **bounded_options)
+            if on_item_done is not None:
+                try:
+                    on_item_done(i + 1)
+                except Exception:
+                    pass
         return results
 
 
@@ -2130,12 +2155,17 @@ class ZhilianCdpSource:
     # ------------------------------------------------------------------
     def fetch_details_batch(
         self, jobs: list[dict], *, detail_output_path: str | None = None,
+        on_item_done: Callable[[int], None] | None = None,
         **bounded_options,
     ) -> dict[str, SourceOutcome]:
         """批量抓取详情：单项异常继续，连续平台级 signal 触发熔断。
 
         熔断器打开后，后续岗位不再调用 runner，直接返回 source_blocked
         （可暂停 outcome，编排层可后续 retry）。
+
+        ``on_item_done``：智联串行逐条抓取，每条（无论成败）完成后回调
+        已处理条数（1 起递增），供编排层把进度实时回传给前端——否则
+        一批 15 条串行要十几分钟，前端进度条会一直停在 0。
         """
         results: dict[str, SourceOutcome] = {}
         # BOSS 专用节流参数由编排层透传；智联详情在同一调试标签页串行抓取，
@@ -2151,6 +2181,11 @@ class ZhilianCdpSource:
                         counts={"idx": i, "reason": "job_not_dict"},
                     ),
                 )
+                if on_item_done is not None:
+                    try:
+                        on_item_done(i + 1)
+                    except Exception:
+                        pass
                 continue
             job_id = str(job.get("platform_job_id") or "").strip()
             key = job_id or f"idx{i}"
@@ -2164,8 +2199,18 @@ class ZhilianCdpSource:
                     ),
                     failed_reason="熔断器已打开，连续平台级 signal 触发",
                 )
+                if on_item_done is not None:
+                    try:
+                        on_item_done(i + 1)
+                    except Exception:
+                        pass
                 continue
             results[key] = self.fetch_detail(job, detail_output_path=detail_output_path)
+            if on_item_done is not None:
+                try:
+                    on_item_done(i + 1)
+                except Exception:
+                    pass
             if gap_min > 0 and i + 1 < len(jobs):
                 time.sleep(random.uniform(gap_min, gap_max))
         return results

@@ -41,6 +41,34 @@ npm run build
 4. **禁止提交的内容**：真实 API Key、Cookie、密码、本地绝对路径、个人账号信息。本地运行数据、缓存、构建生成物、测试产物一律通过 `.gitignore` 忽略，禁止使用 `git add -f`。
 5. 修改前端源码后必须重新构建并提交 `webui/dist`（`hooks/pre-push` 会校验前端构建同步）。
 
+## 版本管理
+
+版本号遵循语义化版本（`MAJOR.MINOR.PATCH`），三处版本位置必须保持一致：
+
+- `pyproject.toml` 的 `version`（产品版本权威源，后端从这里读取）
+- `webui/package.json` 的 `version`
+- `scripts/boss_cdp_raw.py` 的 `__version__`
+
+递增规则：
+
+| 类型 | 示例 | 适用场景 |
+| --- | --- | --- |
+| PATCH | `2.7.0 -> 2.7.1` | 小修小补：bug 修复、文案、样式 |
+| MINOR | `2.7.x -> 2.8.0` | 新功能（向后兼容） |
+| MAJOR | `2.x.y -> 3.0.0` | 重构、超大功能、纪念性版本 |
+
+发布时使用工具一次改齐并生成 CHANGELOG 条目（`-m` 为条目描述，会同时写入
+CHANGELOG.md 的「变更」分组，如需「新增/修复」分组请手动调整后再提交）：
+
+```bash
+python scripts/bump_version.py patch -m "修复收藏抽屉取消收藏报错"
+python scripts/bump_version.py minor -m "新增平台筛选"
+python scripts/bump_version.py major -m "2.0 大版本"
+```
+
+工具只做版本号与 CHANGELOG 条目，不做 git 提交；请确认 diff 后自行按
+Conventional Commits 提交（发布类提交建议使用 `feat:` 或 `fix:` 前缀 + 版本号说明）。
+
 ## 测试要求
 
 - 后端测试：`python -m unittest discover -s tests`，全部使用 mock，不得依赖真实 Chrome、真实账号或网络。

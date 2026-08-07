@@ -30,6 +30,41 @@ export interface PipelineGroups {
   dropped: JobItem[];
 }
 
+export type ResultPlatformFilter = "all" | "boss" | "zhilian";
+
+/** 纯展示层平台过滤：按 job.platform 过滤 jobs/dropped；"all" 原样返回。
+ *
+ * 依赖后端保证每个岗位带 platform 身份（实时任务结果按任务平台回填、
+ * DB 恢复路径按 screening_results.platform 读取）；缺 platform 的岗位
+ * 在任何单一平台视图下都会被过滤掉，因此过滤前调用方应回填平台身份。
+ */
+export function filterPipelineResultByPlatform(
+  result: PipelineResult,
+  filter: ResultPlatformFilter,
+): PipelineResult {
+  if (filter === "all") return result;
+  return {
+    ...result,
+    jobs: (Array.isArray(result.jobs) ? result.jobs : []).filter((job) => job.platform === filter),
+    dropped: (Array.isArray(result.dropped) ? result.dropped : []).filter((job) => job.platform === filter),
+  };
+}
+
+/** 防御性平台回填：为缺 platform 的岗位补上任务自身平台（权威来源）。 */
+export function backfillJobPlatform(
+  result: PipelineResult,
+  platform: Platform | null | undefined,
+): PipelineResult {
+  if (!platform || !result) return result;
+  for (const job of Array.isArray(result.jobs) ? result.jobs : []) {
+    if (job && typeof job === "object" && !job.platform) job.platform = platform;
+  }
+  for (const job of Array.isArray(result.dropped) ? result.dropped : []) {
+    if (job && typeof job === "object" && !job.platform) job.platform = platform;
+  }
+  return result;
+}
+
 function uniqueNonEmpty(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }

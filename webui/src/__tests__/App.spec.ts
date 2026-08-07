@@ -326,8 +326,53 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="item-action-error"]').text()).toContain("保存失败，请稍后重试");
   });
 
-  it("closes the drawer on profile switch and drops stale count responses from the old profile", async () => {
-    const pendingCounts: Array<{ url: string; resolve: (value: Response) => void }> = [];
+  it("cancels a favorite with only the internal job id (no partial identity fields)", async () => {
+    // 回归：收藏抽屉点 X 取消收藏此前附带 job_link 但缺 platform，
+    // 后端权威解析报“岗位身份信息不完整”422；修复后只传内部 job_id。
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/favorites")) {
+        return response({
+          items: [{
+            job_id: "internal-1",
+            profile_id: "p1",
+            title: "Python 后端",
+            company: "甲公司",
+            salary: "20-30K",
+            location: "上海",
+            job_link: "https://www.zhipin.com/job_detail/x1.html",
+          }],
+          count: 1,
+        });
+      }
+      if (url.endsWith("/api/pipeline/jobs/interest/cancel")) {
+        const body = JSON.parse(String(init?.body));
+        // 身份字段只允许内部 job_id；不得携带 job_link 等部分三元组候选。
+        expect(body).toEqual({ profile_id: "p1", job: { job_id: "internal-1" } });
+        return response({ interest_state: "cancelled", job_id: "internal-1" });
+      }
+      if (url.endsWith("/api/profiles")) return response({ profiles: [{ id: "p1", name: "画像A" }] });
+      return baseAppResponse(url) ?? response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get(".favorites-trigger").trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".fav-card-remove").exists()).toBe(true);
+
+    await wrapper.get(".fav-card-remove").trigger("click");
+    await flushPromises();
+    // 取消成功后卡片移除，抽屉保持打开；提示是成功态，不弹错误。
+    expect(wrapper.find(".fav-card-remove").exists()).toBe(false);
+    const notice = wrapper.find(".notice-bar");
+    expect(notice.exists()).toBe(true);
+    expect(notice.text()).toContain("已取消收藏");
+    expect(notice.text()).not.toContain("失败");
+  });
+
+  it("closes the drawer on profile switch and drops stale count responses from the old profile", async () => {    const pendingCounts: Array<{ url: string; resolve: (value: Response) => void }> = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/job-reminders/count")) {

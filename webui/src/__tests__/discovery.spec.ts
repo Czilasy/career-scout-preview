@@ -1,15 +1,19 @@
 import {
+  backfillJobPlatform,
   buildSearchScriptParams,
   classifyTaskSize,
   createAsyncResourceLoader,
   createPlatformState,
   DEFAULT_PLATFORM,
+  filterPipelineResultByPlatform,
   normalizeScopePreview,
   partitionPipelineResult,
   recoverSelectionSettings,
+  type PipelineResult,
 } from "../discovery";
 import type {
   AdvancedSettingsState,
+  JobItem,
   Platform,
   PlatformFilterSchema,
   ScopePreviewResponse,
@@ -110,6 +114,92 @@ describe("discovery helpers", () => {
     });
     expect(recoverSelectionSettings(state, "stable")).toEqual(settings);
     expect(recoverSelectionSettings(state, "custom")).not.toHaveProperty("pages");
+  });
+
+  // ------------------------------------------------------------------
+  // 结果页平台筛选（回归：切换筛选后数据归 0）
+  // ------------------------------------------------------------------
+  function mixedResult(): PipelineResult {
+    return {
+      ok: true,
+      jobs: [
+        { job_id: "b1", platform: "boss", title: "BOSS 岗位", verdict: "match" },
+        { job_id: "z1", platform: "zhilian", title: "智联岗位", verdict: "match" },
+        { job_id: "b2", platform: "boss", title: "BOSS 待确认", verdict: "uncertain" },
+        { job_id: "z2", platform: "zhilian", title: "智联不匹配", verdict: "not_match" },
+      ] as JobItem[],
+      dropped: [
+        { job_id: "b3", platform: "boss", title: "BOSS 剔除" },
+        { job_id: "z3", platform: "zhilian", title: "智联剔除" },
+      ] as JobItem[],
+    };
+  }
+
+  it("keeps all jobs when the filter is 'all'", () => {
+    const result = filterPipelineResultByPlatform(mixedResult(), "all");
+    expect(result.jobs).toHaveLength(4);
+    expect(result.dropped).toHaveLength(2);
+    // “全部”视图不产生新对象，避免无谓的响应式重算。
+    expect(filterPipelineResultByPlatform(mixedResult(), "all")).toEqual(mixedResult());
+  });
+
+  it("filters jobs and dropped by platform without losing the other platform", () => {
+    const boss = filterPipelineResultByPlatform(mixedResult(), "boss");
+    expect(boss.jobs?.map((job) => job.job_id)).toEqual(["b1", "b2"]);
+    expect(boss.dropped?.map((job) => job.job_id)).toEqual(["b3"]);
+
+    const zhilian = filterPipelineResultByPlatform(mixedResult(), "zhilian");
+    expect(zhilian.jobs?.map((job) => job.job_id)).toEqual(["z1", "z2"]);
+    expect(zhilian.dropped?.map((job) => job.job_id)).toEqual(["z3"]);
+  });
+
+  it("preserves group counts after switching filters back and forth", () => {
+    const full = mixedResult();
+    // 模拟用户操作：全部 → boss → 全部 → zhilian → 全部
+    for (const filter of ["boss", "all", "zhilian", "all"] as const) {
+      const filtered = filterPipelineResultByPlatform(full, filter);
+      const groups = partitionPipelineResult(filtered);
+      const total = groups.matched.length + groups.unmatched.length
+        + groups.uncertain.length + groups.dropped.length;
+      // 切换筛选不得丢数据：总数只随平台视图收缩/恢复，回“全部”必须复原。
+      if (filter === "all") {
+        expect(total).toBe(6);
+      }
+    }
+  });
+
+  it("drops jobs whose platform is missing when a single platform is selected", () => {
+    // 缺 platform 的岗位（旧后端内存结果）在单平台视图下被过滤掉——
+    // 这正是“归 0”根因；回填函数负责在进入视图前补上平台身份。
+    const result = filterPipelineResultByPlatform(
+      { jobs: [{ job_id: "x1", title: "无平台" }] as JobItem[] },
+      "boss",
+    );
+    expect(result.jobs).toHaveLength(0);
+  });
+
+  it("backfills missing job platform from the authoritative task platform", () => {
+    const result = backfillJobPlatform(
+      {
+        jobs: [
+          { job_id: "x1", title: "无平台" },
+          { job_id: "x2", platform: "zhilian", title: "有平台" },
+        ] as JobItem[],
+        dropped: [{ job_id: "x3", title: "剔除无平台" }] as JobItem[],
+      },
+      "boss",
+    );
+    expect(result.jobs?.[0]).toMatchObject({ platform: "boss" });
+    expect(result.jobs?.[1]).toMatchObject({ platform: "zhilian" }); // 不回填已有平台
+    expect(result.dropped?.[0]).toMatchObject({ platform: "boss" });
+  });
+
+  it("backfill with no platform leaves jobs untouched", () => {
+    const result = backfillJobPlatform(
+      { jobs: [{ job_id: "x1", title: "无平台" }] as JobItem[] },
+      undefined,
+    );
+    expect(result.jobs?.[0]).not.toHaveProperty("platform");
   });
 });
 

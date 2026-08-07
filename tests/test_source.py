@@ -913,6 +913,45 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
             "BOSS 专用参数不得透传给智联 detail runner",
         )
 
+    def test_batch_reports_item_done_after_each_job(self):
+        """智联串行逐条抓取必须逐条回调 on_item_done，供前端实时进度。
+
+        回归：此前条级进度只在整批返回后一次性回报，一批 15 条串行
+        抓十几分钟，前端进度条一直停在 0、浏览器关闭才显示完成。
+        """
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            detail_runner=lambda job, **kw: _fake_detail(signal="ok"),
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(3)
+        ]
+        done = []
+        results = source.fetch_details_batch(jobs, on_item_done=done.append)
+        self.assertTrue(all(r.ok for r in results.values()))
+        self.assertEqual(done, [1, 2, 3], "每条完成后必须回调一次，含最后一条")
+
+    def test_batch_item_done_covers_failed_and_blocked_jobs(self):
+        """失败与熔断跳过项也必须推进 on_item_done 计数（进度不卡死）。"""
+        def runner(job, **kw):
+            return _fake_detail(signal="login_required")
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223, detail_runner=runner,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(4)
+        ]
+        done = []
+        results = source.fetch_details_batch(jobs, on_item_done=done.append)
+        self.assertEqual(len(results), 4)
+        self.assertEqual(done, [1, 2, 3, 4],
+                         "熔断跳过项同样推进计数，进度才能走到底")
+
 
 class ZhilianCdpSourceOutcomeContractTests(_LoginCacheIsolated):
     """T313：adapter outcome 可无损表达 non_empty/empty/failed/paused、计数、证据和安全错误。"""
