@@ -284,6 +284,8 @@ durable cancel 在同一事务写入 `status=interrupted` 与 `interruption_kind
 }
 ```
 
+`extra` 为平台专属可选键集合：BOSS 专属可选键 `welfare_list: string[]`（福利标签，如 `["五险一金", "双休"]`）；缺失或为空时不提供，不编造。智联岗位无福利数据，不含 `welfare_list`。
+
 未落库结果为 `job_id:null`；已落库后同时返回平台 ID 和内部 UUID。任何接口不得把平台 ID 填进 `job_id`。`dropped[]` 使用相同身份字段和可用岗位快照。
 
 ## Pipeline 收藏、拒绝和撤销

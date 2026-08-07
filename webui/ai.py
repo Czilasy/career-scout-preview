@@ -1060,6 +1060,10 @@ SCREEN_BATCH_SIZE = 50   # Stage A 每批送 AI 的岗位数（默认值，可�
 SCREEN_CONCURRENCY = 1   # Stage A 并发批次数（默认值，可被高级设置覆盖）
 MATCH_BATCH_SIZE = 4     # Stage B 每批送 AI 的岗位数（默认值，可被高级设置覆盖）
 MATCH_CONCURRENCY = 1    # Stage B 并发批次数（默认值，可被高级设置覆盖）
+# 岗位靠谱程度 flags 保守阈值：只有同时命中可疑特征达到该数量的岗位才输出提醒。
+# 默认 2（保守开）：prompt 要求模型"命中 2 个及以上特征才输出"，
+# 解析端再兜底过滤少于该条数的输出，防止低置信提醒混入 caveats。
+FLAGS_MIN_HITS = 2
 
 
 def _adv_setting(key, default):
@@ -1447,8 +1451,13 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         "- 行业经验不足不得作为 match=false 的理由，除非 JD 明确'必须有X行业经验'。\n"
         "- 拿不准时判 match=true 并写入 caveats，交给用户看详情。\n"
         "对每个岗位输出判定。严格输出JSON：\n"
-        '{"results":[{"i":0,"match":true,"reason":"一句话理由","caveats":["软性提醒"]},...]}\n'
-        "i 为岗位序号；match=true 适合，false 不适合；reason 简短（20字内）；caveats 可为空数组。"
+        '{"results":[{"i":0,"match":true,"reason":"一句话理由","caveats":["软性提醒"],"flags":["需留意：疑似中介/劳务派遣"]},...]}\n'
+        "i 为岗位序号；match=true 适合，false 不适合；reason 简短（20字内）；caveats 可为空数组。\n"
+        "岗位靠谱程度：顺带判断岗位是否存在可疑特征，如中介/劳务派遣、"
+        "薪资含销售提成、职位描述与标题明显不符、岗位常年挂着等。\n"
+        f"仅当同时命中 {FLAGS_MIN_HITS} 个及以上可疑特征时，才把提醒写入可选字段 "
+        "flags 数组（0~3 条短文本，每条一句话，措辞'需留意'级别，"
+        "如'需留意：疑似中介/劳务派遣'）；命中不足或无法判断时输出空数组或省略该字段。"
     )
     def _match_one_batch(batch, *, allow_transport_terminal=False):
         """单批精筛，返回 {jid: verdict}。
@@ -1544,10 +1553,17 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             match = r["match"]
             reason = str(r.get("reason", "")).strip()
             caveats = [str(c).strip() for c in r.get("caveats") or [] if isinstance(c, str) and c.strip()]
+            # flags 为可选字段（老模型不输出不报错）：清洗后按保守阈值
+            # 过滤——少于 FLAGS_MIN_HITS 条视为低置信提醒，不并入结果。
+            flags = [str(f).strip() for f in r.get("flags") or []
+                     if isinstance(f, str) and f.strip()][:3]
+            if len(flags) < FLAGS_MIN_HITS:
+                flags = []
             batch_verdicts[jid] = {
                 "verdict": "match" if match else "not_match",
                 "reason": reason,
                 "caveats": caveats,
+                "flags": flags,
             }
             _emit_final_terminal(job, idx, "match" if match else "not_match")
         _emit_batch_event(measurement_callback, "fine",

@@ -1,6 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ArrowUpRight, BriefcaseBusiness, Check, MapPin, X } from "@lucide/vue";
+import {
+  ArrowUpRight,
+  BriefcaseBusiness,
+  Check,
+  MapPin,
+  X,
+} from "@lucide/vue";
+import JobListToolbar from "./JobListToolbar.vue";
+import { countActiveFilters, emptyFilterState, filterJobs, sortJobs } from "../listFilter";
+import type { FilterState, SortKey } from "../listFilter";
 import type { JobItem } from "../types";
 
 const props = withDefaults(defineProps<{
@@ -10,10 +19,17 @@ const props = withDefaults(defineProps<{
   deferMobileDetail?: boolean;
   /** 结果页平台筛选档位；非空时列表头部渲染全部/智联/BOSS 滑块（纯展示层过滤由父组件做）。 */
   platformFilter?: "" | "all" | "boss" | "zhilian";
+  /**
+   * 结果加载代次（contracts/filter-sort.md §6 resultEpoch 信号）：
+   * 父组件在 pipelineResult 被新 run 结果替换时递增；本组件 watch 它重置筛选/排序/分片。
+   * 禁止用 props.jobs 内容变化判断重置——切分类/切平台同样改变 jobs（D3）。
+   */
+  resultEpoch?: number;
 }>(), {
   batchSize: 30,
   deferMobileDetail: false,
   platformFilter: "",
+  resultEpoch: 0,
 });
 
 const emit = defineEmits<{
@@ -37,12 +53,52 @@ const localSelectedId = ref("");
 const detailOpen = ref(true);
 const userSelectedDetail = ref(false);
 
-const visibleJobs = computed(() => props.jobs.slice(0, visibleCount.value));
-const selectedJob = computed(() => {
-  const selected = props.jobs.find((job) => jobKey(job) === localSelectedId.value);
-  return selected || props.jobs[0] || null;
+// ---------------------------------------------------------------------------
+// 列表筛选 / 排序（纯展示层派生，状态归本组件内部，UI 在 JobListToolbar）
+// 数据流（contracts/filter-sort.md §1）：
+//   props.jobs（父级已做平台+分类过滤）
+//     → filterJobs(jobs, filterState)   // 条件筛选：组内 OR、组间 AND
+//     → sortJobs(jobs, sortKey)         // 排序：稳定排序
+//     → visibleJobs（slice(batchSize)，无限滚动不变）
+// 状态生命周期（D3）：切分类/切平台保留；仅 resultEpoch 变化时重置。
+// ---------------------------------------------------------------------------
+const filterState = ref<FilterState>(emptyFilterState());
+const sortKey = ref<SortKey>("default");
+const filterCount = computed(() => countActiveFilters(filterState.value));
+
+const workspaceJobs = computed(() => sortJobs(filterJobs(props.jobs, filterState.value), sortKey.value));
+
+// 新结果加载（resultEpoch 递增）：重置筛选/排序/分片/选中。
+// 禁止用 props.jobs 内容变化判断重置（切分类/切平台同样改变 jobs，违反 D3）。
+watch(() => props.resultEpoch, () => {
+  filterState.value = emptyFilterState();
+  sortKey.value = "default";
+  visibleCount.value = props.batchSize;
+  // 新结果上的选中是新开始：未手动选择标记归零，保证后续筛选/排序的选中跟随
+  // 走「未手动选择 → 过滤排序后第一项」分支（contracts §6）。
+  userSelectedDetail.value = false;
+  localSelectedId.value = workspaceJobs.value[0] ? jobKey(workspaceJobs.value[0]) : "";
 });
-const hasMore = computed(() => visibleCount.value < props.jobs.length);
+
+// 筛选/排序变化（含确定提交）：重置分片；选中跟随——
+// 未手动选择过岗位 → 更新为过滤排序后第一项（保证列表第一项与右侧详情一致）；
+// 已手动选择 → 保持原选中项，被过滤掉则回退到第一项。
+watch([filterState, sortKey], () => {
+  visibleCount.value = props.batchSize;
+  const firstId = workspaceJobs.value[0] ? jobKey(workspaceJobs.value[0]) : "";
+  if (!userSelectedDetail.value) {
+    localSelectedId.value = firstId;
+  } else if (!workspaceJobs.value.some((job) => jobKey(job) === localSelectedId.value)) {
+    localSelectedId.value = firstId;
+  }
+}, { deep: true });
+
+const visibleJobs = computed(() => workspaceJobs.value.slice(0, visibleCount.value));
+const selectedJob = computed(() => {
+  const selected = workspaceJobs.value.find((job) => jobKey(job) === localSelectedId.value);
+  return selected || workspaceJobs.value[0] || null;
+});
+const hasMore = computed(() => visibleCount.value < workspaceJobs.value.length);
 
 // 无限滚动：列表底部哨兵进入视口即自动展开下一批（数据全在内存，无二次请求）
 const sentinel = ref<HTMLElement | null>(null);
@@ -219,11 +275,33 @@ function verdictLabel(job: JobItem): string {
   if (job.verdict === "uncertain") return "待确认";
   return "";
 }
+
+// 平台筛选到无数据的平台时给出专属空态；「全部」档位沿用分类空态文案。
+// 应用了筛选条件后列表为空 → 专属“无符合条件岗位”空态（含清除筛选按钮）。
+const emptyTitle = computed(() => {
+  if (filterCount.value) return "没有符合条件的岗位";
+  if (props.platformFilter === "boss" || props.platformFilter === "zhilian") {
+    return "该平台暂无数据";
+  }
+  return props.emptyMessage;
+});
+const emptyHint = computed(() => {
+  if (filterCount.value) return "试试调整筛选条件。";
+  if (props.platformFilter === "boss" || props.platformFilter === "zhilian") {
+    return "切回「全部」可查看另一平台的岗位。";
+  }
+  return "完成当前步骤后，岗位会集中显示在这里。";
+});
+/** 筛选空态（过滤后为空且原列表非空）时显示「清除筛选」按钮；原列表本身为空不显示。 */
+const showClearFilter = computed(() => filterCount.value > 0 && props.jobs.length > 0);
+
+function clearFilters() {
+  filterState.value = emptyFilterState();
+}
 </script>
 
 <template>
   <div
-    v-if="jobs.length"
     class="job-workspace"
     :class="{
       'defer-mobile-detail': deferMobileDetail,
@@ -254,10 +332,18 @@ function verdictLabel(job: JobItem): string {
           >{{ option.label }}</button>
         </div>
         <div class="job-list-heading-right">
+          <JobListToolbar
+            v-if="jobs.length"
+            :filter-state="filterState"
+            :sort-key="sortKey"
+            @apply-filter="(state) => { filterState = state; }"
+            @reset-filter="clearFilters"
+            @select-sort="(key) => { sortKey = key; }"
+          />
           <slot name="heading-actions" />
         </div>
       </div>
-      <div ref="listEl" class="job-list" role="list">
+      <div v-if="workspaceJobs.length" ref="listEl" class="job-list" role="list">
         <button
           v-for="job in visibleJobs"
           :key="jobKey(job)"
@@ -289,6 +375,18 @@ function verdictLabel(job: JobItem): string {
         </button>
         <div ref="sentinel" class="load-sentinel" aria-hidden="true"></div>
       </div>
+      <section v-else class="empty-panel" data-testid="job-workspace-empty">
+        <BriefcaseBusiness :size="28" aria-hidden="true" />
+        <h2>{{ emptyTitle }}</h2>
+        <p>{{ emptyHint }}</p>
+        <button
+          v-if="showClearFilter"
+          type="button"
+          class="button secondary small"
+          data-testid="clear-filter"
+          @click="clearFilters"
+        >清除筛选</button>
+      </section>
     </section>
 
     <aside
@@ -385,10 +483,4 @@ function verdictLabel(job: JobItem): string {
         ↑ 顶部
       </button>
   </div>
-
-  <section v-else class="empty-panel">
-    <BriefcaseBusiness :size="28" aria-hidden="true" />
-    <h2>{{ emptyMessage }}</h2>
-    <p>完成当前步骤后，岗位会集中显示在这里。</p>
-  </section>
 </template>

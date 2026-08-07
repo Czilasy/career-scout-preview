@@ -1528,6 +1528,78 @@ class MatchJdsResumeAndTruncationTests(unittest.TestCase):
                 )
 
 
+class MatchJdsFlagsTests(unittest.TestCase):
+    """精筛 flags（岗位靠谱程度提醒）：解析进 verdict、保守过滤、缺字段容错。"""
+
+    def _jobs(self, n):
+        return [{
+            "job_id": f"job-{i:03d}",
+            "title": f"岗位{i}",
+            "salary": "20-30K",
+            "location": "上海",
+            "jd": "负责后端开发",
+        } for i in range(n)]
+
+    def test_flags_parsed_into_verdict(self):
+        """命中 2 个及以上特征的 flags 原样并入 verdict（供调用方合并进 caveats）。"""
+        from webui.ai import match_jds
+
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{
+                "i": 0, "match": True, "reason": "合适",
+                "caveats": ["优先英语六级"],
+                "flags": ["需留意：疑似中介/劳务派遣", "薪资含销售提成"],
+            }]
+        }):
+            result = match_jds(self._jobs(1), "画像", "https://x", "key", batch_size=10)
+
+        verdict = result["verdicts"]["job-000"]
+        self.assertEqual(
+            verdict["flags"],
+            ["需留意：疑似中介/劳务派遣", "薪资含销售提成"])
+        # caveats 原样保留，flags 独立字段，由调用方决定合并
+        self.assertEqual(verdict["caveats"], ["优先英语六级"])
+
+    def test_flags_missing_field_does_not_break(self):
+        """老模型不输出 flags 字段：不报错，flags 为空列表。"""
+        from webui.ai import match_jds
+
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{"i": 0, "match": True, "reason": "合适"}]
+        }):
+            result = match_jds(self._jobs(1), "画像", "https://x", "key", batch_size=10)
+
+        self.assertEqual(result["verdicts"]["job-000"]["flags"], [])
+
+    def test_flags_fewer_than_conservative_threshold_are_filtered(self):
+        """少于保守阈值（默认 2 条）的 flags 视为低置信提醒，不输出。"""
+        from webui.ai import match_jds
+
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{
+                "i": 0, "match": True, "reason": "合适",
+                "flags": ["需留意：疑似中介/劳务派遣"],
+            }]
+        }):
+            result = match_jds(self._jobs(1), "画像", "https://x", "key", batch_size=10)
+
+        self.assertEqual(result["verdicts"]["job-000"]["flags"], [])
+
+    def test_flags_truncated_to_three(self):
+        """flags 最多保留 3 条（prompt 承诺 0~3 条，超限截断兜底）。"""
+        from webui.ai import match_jds
+
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{
+                "i": 0, "match": True, "reason": "合适",
+                "flags": ["提醒一", "提醒二", "提醒三", "提醒四"],
+            }]
+        }):
+            result = match_jds(self._jobs(1), "画像", "https://x", "key", batch_size=10)
+
+        self.assertEqual(result["verdicts"]["job-000"]["flags"], ["提醒一", "提醒二", "提醒三"])
+
+
 class ScreenJobsTruncationTests(unittest.TestCase):
     """screen_jobs 粗筛：截断拆半重跑，单条仍失败则该条保留（防错杀）。"""
 

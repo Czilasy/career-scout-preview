@@ -19,6 +19,7 @@ from webui.source import (
     SAFE_FAILURE_CODES,
     SourceCircuitBreaker,
     SourceOutcome,
+    _normalize_job_fields,
 )
 
 
@@ -1386,6 +1387,42 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         self.assertTrue(outcome.ok)
         # 熔断器 record_success 被调用（零改动路径复用）
         self.assertEqual(m_record.call_count, 1)
+
+
+# ===========================================================================
+# T002/T003：BOSS welfare → extra.welfare_list（specs/004 tasks001）
+# ===========================================================================
+class NormalizeJobFieldsWelfareTests(unittest.TestCase):
+    """_normalize_job_fields 将 BOSS welfare 拆分写入 extra.welfare_list。"""
+
+    def test_welfare_string_split_into_extra_welfare_list(self):
+        job = {"welfare": "五险一金 | 双休", "boss_name": "Corp"}
+        normalized = _normalize_job_fields(job)
+        self.assertEqual(normalized["extra"]["welfare_list"], ["五险一金", "双休"])
+
+    def test_welfare_split_tolerates_spaces_and_empty_segments(self):
+        job = {"welfare": " 五险一金|双休 | | 弹性工作 "}
+        normalized = _normalize_job_fields(job)
+        self.assertEqual(
+            normalized["extra"]["welfare_list"],
+            ["五险一金", "双休", "弹性工作"],
+        )
+
+    def test_existing_extra_dict_is_preserved_and_merged(self):
+        job = {"welfare": "双休", "extra": {"industry_label": "互联网"}}
+        normalized = _normalize_job_fields(job)
+        self.assertEqual(normalized["extra"]["industry_label"], "互联网")
+        self.assertEqual(normalized["extra"]["welfare_list"], ["双休"])
+
+    def test_missing_or_empty_welfare_omits_welfare_list_key(self):
+        for job in ({"boss_name": "Corp"}, {"welfare": "", "boss_name": "Corp"}, {"welfare": "|", "boss_name": "Corp"}):
+            normalized = _normalize_job_fields(job)
+            self.assertNotIn("welfare_list", normalized.get("extra") or {})
+
+    def test_input_dict_is_not_mutated(self):
+        job = {"welfare": "双休", "boss_name": "Corp"}
+        _normalize_job_fields(job)
+        self.assertNotIn("extra", job)
 
 
 if __name__ == "__main__":

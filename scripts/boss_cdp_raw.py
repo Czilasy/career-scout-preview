@@ -3177,6 +3177,54 @@ def close_cdp_chrome(cdp_port=DEFAULT_CDP_PORT, cdp_data_dir=DEFAULT_CDP_DATA_DI
     return not is_ready(cdp_port)
 
 
+def _cdp_page_target_id(cdp_port):
+    """Return the first page target id of the CDP browser, or None."""
+    try:
+        resp = urlopen(f"http://127.0.0.1:{cdp_port}/json", timeout=2)
+        targets = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+    for target in targets or []:
+        if target.get("type") == "page" and target.get("id"):
+            return target["id"]
+    return None
+
+
+def minimize_chrome_window(cdp_port=DEFAULT_CDP_PORT, *,
+                           session_factory=CDPSession,
+                           target_id_provider=None):
+    """Best-effort: minimize the scraper Chrome window via CDP Browser domain.
+
+    最小化不改变浏览器指纹（不切 headless，避免触发平台风控），只把窗口
+    收到任务栏，不打扰用户。任何失败都静默返回 False，不影响抓取主流程。
+    """
+    provider = target_id_provider or _cdp_page_target_id
+    try:
+        target_id = provider(cdp_port)
+        if not target_id:
+            return False
+        session = session_factory(cdp_port)
+        try:
+            resp = session.send(
+                "Browser.getWindowForTarget", {"targetId": target_id}, timeout=10,
+            )
+            window_id = (resp.get("result") or {}).get("windowId")
+            if not window_id:
+                return False
+            session.send("Browser.setWindowBounds", {
+                "windowId": window_id,
+                "bounds": {"windowState": "minimized"},
+            }, timeout=10)
+            return True
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
+    except Exception:
+        return False
+
+
 def wait_for_cdp(cdp_port, timeout=30):
     print("等待 CDP 可用", end="")
     for _ in range(timeout):

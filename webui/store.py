@@ -161,6 +161,76 @@ def _decode_json(value, fallback):
         return fallback
 
 
+def _build_pipeline_result_rows(rows: list) -> tuple[list, list]:
+    """把 screening_results 行转换为结果快照的 jobs/dropped。
+
+    两个加载函数（load_latest_pipeline_result / _for_platform）共用，
+    避免复制粘贴导致的字段漂移（曾漏 verdict/caveats/tags/extra，
+    使刷新后平台查询结果全部落入前端“待确认”）。
+    """
+    jobs = []
+    dropped = []
+    for row in rows:
+        row = dict(row)
+        if row.get("is_dropped"):
+            raw_verdict = row.get("verdict") or ""
+            reason = row.get("verdict_reason") or ""
+            try:
+                parsed = json.loads(raw_verdict)
+                if isinstance(parsed, dict):
+                    reason = str(parsed.get("reason") or reason)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            dropped.append({
+                "platform": row.get("platform"),
+                "platform_job_id": row["platform_job_id"],
+                "job_id": row.get("job_id"),
+                "title": row["title"],
+                "company": row["company"],
+                "salary": row["salary"],
+                "location": row["location"],
+                "experience": row.get("experience") or "",
+                "degree": row.get("degree") or "",
+                "extra": _decode_json(row.get("extra_json"), {}),
+                "reason": reason,
+                "canonical_url": row["source_url"],
+            })
+        else:
+            raw_verdict = row.get("verdict") or ""
+            verdict = raw_verdict
+            verdict_reason = row.get("verdict_reason") or ""
+            caveats = _decode_json(row.get("caveats_json"), [])
+            try:
+                parsed = json.loads(raw_verdict)
+                if isinstance(parsed, dict):
+                    verdict = str(parsed.get("verdict") or raw_verdict)
+                    verdict_reason = str(parsed.get("reason") or verdict_reason)
+                    if isinstance(parsed.get("caveats"), list):
+                        caveats = parsed["caveats"]
+            except (json.JSONDecodeError, TypeError):
+                pass
+            jobs.append({
+                "platform": row.get("platform"),
+                "platform_job_id": row["platform_job_id"],
+                "job_id": row.get("job_id"),
+                "title": row["title"],
+                "company": row["company"],
+                "salary": row["salary"],
+                "location": row["location"],
+                "experience": row.get("experience") or "",
+                "degree": row.get("degree") or "",
+                "extra": _decode_json(row.get("extra_json"), {}),
+                "tags": row["tags"],
+                "jd": row["jd"],
+                "source_url": row["source_url"],
+                "canonical_url": row["source_url"],
+                "verdict": verdict,
+                "verdict_reason": verdict_reason,
+                "caveats": caveats,
+            })
+    return jobs, dropped
+
+
 def _candidate_profile_content_hash(summary, unknowns, facts) -> str:
     normalized_facts = []
     for fact in facts or []:
@@ -2592,77 +2662,7 @@ class TaskStore:
                 (run["id"],),
             ).fetchall()
 
-        jobs = []
-        dropped = []
-        for row in rows:
-            row = dict(row)
-            if row.get("is_dropped"):
-                raw_verdict = row.get("verdict") or ""
-                reason = row.get("verdict_reason") or ""
-                try:
-                    parsed = json.loads(raw_verdict)
-                    if isinstance(parsed, dict):
-                        reason = str(parsed.get("reason") or reason)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                extra = {}
-                try:
-                    extra = json.loads(row.get("extra_json") or "{}")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                dropped.append({
-                    "platform": row.get("platform"),
-                    "platform_job_id": row["platform_job_id"],
-                    "job_id": row.get("job_id"),
-                    "title": row["title"],
-                    "experience": row.get("experience") or "",
-                    "degree": row.get("degree") or "",
-                    "extra": extra,
-                    "reason": reason,
-                    "canonical_url": row["source_url"],
-                })
-            else:
-                raw_verdict = row.get("verdict") or ""
-                verdict = raw_verdict
-                verdict_reason = row.get("verdict_reason") or ""
-                caveats = []
-                try:
-                    caveats = json.loads(row.get("caveats_json") or "[]")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                try:
-                    parsed = json.loads(raw_verdict)
-                    if isinstance(parsed, dict):
-                        verdict = str(parsed.get("verdict") or raw_verdict)
-                        verdict_reason = str(parsed.get("reason") or verdict_reason)
-                        if isinstance(parsed.get("caveats"), list):
-                            caveats = parsed["caveats"]
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                extra = {}
-                try:
-                    extra = json.loads(row.get("extra_json") or "{}")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                jobs.append({
-                    "platform": row.get("platform"),
-                    "platform_job_id": row["platform_job_id"],
-                    "job_id": row.get("job_id"),
-                    "title": row["title"],
-                    "company": row["company"],
-                    "salary": row["salary"],
-                    "location": row["location"],
-                    "experience": row.get("experience") or "",
-                    "degree": row.get("degree") or "",
-                    "extra": extra,
-                    "tags": row["tags"],
-                    "jd": row["jd"],
-                    "source_url": row["source_url"],
-                    "canonical_url": row["source_url"],
-                    "verdict": verdict,
-                    "verdict_reason": verdict_reason,
-                    "caveats": caveats,
-                })
+        jobs, dropped = _build_pipeline_result_rows(rows)
 
         script_params = {}
         try:
@@ -2762,7 +2762,11 @@ class TaskStore:
         return row["id"] if row else None
 
     def load_latest_pipeline_result_for_platform(self, platform: str) -> dict | None:
-        """T409: 按平台加载最近一次成功结果。"""
+        """T409: 按平台加载最近一次成功结果。
+
+        与 load_latest_pipeline_result 共用 _build_pipeline_result_rows，
+        保证 verdict/caveats/tags/extra 等字段一致（刷新后结果不落“待确认”）。
+        """
         with self._connection() as conn:
             run = conn.execute(
                 "SELECT * FROM screening_runs WHERE platform=? AND "
@@ -2778,64 +2782,33 @@ class TaskStore:
                 (run["id"],),
             ).fetchall()
 
-        jobs = []
-        dropped = []
-        for row in rows:
-            row = dict(row)
-            if row.get("is_dropped"):
-                raw_verdict = row.get("verdict") or ""
-                reason = row.get("verdict_reason") or ""
-                try:
-                    parsed = json.loads(raw_verdict)
-                    if isinstance(parsed, dict):
-                        reason = str(parsed.get("reason") or reason)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                dropped.append({
-                    "job_id": row.get("job_id"),
-                    "platform_job_id": row.get("platform_job_id"),
-                    "platform": row.get("platform"),
-                    "title": row.get("title"),
-                    "company": row.get("company"),
-                    "salary": row.get("salary"),
-                    "location": row.get("location"),
-                    "reason": reason,
-                    "canonical_url": row.get("source_url"),
-                })
-                continue
-            jobs.append({
-                "job_id": row.get("job_id"),
-                "platform_job_id": row.get("platform_job_id"),
-                "platform": row.get("platform"),
-                "title": row.get("title"),
-                "company": row.get("company"),
-                "salary": row.get("salary"),
-                "location": row.get("location"),
-                "experience": row.get("experience"),
-                "degree": row.get("degree"),
-                "jd": row.get("jd") or "",
-                "canonical_url": row.get("source_url"),
-                "source_url": row.get("source_url"),
-                "extra": {},
-            })
-
-        execution_params = json.loads(run["execution_params_json"] or "{}") if "execution_params_json" in run.keys() else {}
+        jobs, dropped = _build_pipeline_result_rows(rows)
+        script_params = _decode_json(run.get("search_params_json"), {})
+        execution_params = _decode_json(run.get("execution_params_json"), {})
+        result = {
+            "ok": True,
+            "jobs": jobs,
+            "dropped": dropped,
+            "total_scraped": run.get("total_scraped", 0),
+            "total_kept": run.get("total_kept", len(jobs)),
+            "total_matched": run.get("match_count", 0),
+            "total_dropped": run.get("total_dropped", len(dropped)),
+            "profile_summary": run.get("profile_summary", ""),
+            "error": "",
+        }
         return {
             "run_id": run["id"],
             "platform": run.get("platform"),
-            "status": run.get("status"),
             "saved_at": run.get("created_at"),
             "started_at": run.get("started_at"),
             "finished_at": run.get("finished_at"),
-            "script_params": execution_params.get("script_params", {}),
-            "execution_config": execution_params.get("execution_config", {}),
-            "result": {
-                "total_scraped": run.get("total_scraped", 0),
-                "total_matched": run.get("total_scraped", 0),
-                "jobs": jobs,
-                "dropped": dropped,
-                "profile_summary": execution_params.get("profile_summary", ""),
-            },
+            "script_params": script_params,
+            "status": (
+                "completed_with_pending" if run.get("status") == "partial"
+                else "completed"
+            ),
+            "execution_config": execution_params.get("execution_config") or {},
+            "result": result,
         }
 
     def latest_pipeline_result_saved_at(self) -> str | None:

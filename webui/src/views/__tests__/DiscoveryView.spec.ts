@@ -1385,4 +1385,133 @@ describe("DiscoveryView", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("R2: a completed live screen task merges both platform results instead of showing only one", async () => {
+    const settings = {
+      pages: 3,
+      inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+      detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+      screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+    };
+    // 实时任务完成前没有历史结果；完成后 latest-pipeline-result 才返回数据。
+    let screenDone = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) {
+        if (!screenDone) return response({ ok: true, has_result: false });
+        if (url.includes("platform=zhilian")) {
+          return response({
+            ok: true, has_result: true, source_run_id: "run-zhilian", status: "completed",
+            started_at: 2_000, finished_at: 3_000,
+            result: {
+              jobs: [{ job_id: "z-1", title: "智联岗位", company: "智联公司", verdict: "match" }],
+              total_scraped: 1, total_matched: 1, total_kept: 1, total_dropped: 0,
+            },
+          });
+        }
+        return response({
+          ok: true, has_result: true, source_run_id: "run-boss", status: "completed",
+          started_at: 1_000, finished_at: 2_000,
+          result: {
+            jobs: [{ job_id: "b-1", title: "BOSS岗位", company: "BOSS公司", verdict: "match" }],
+            total_scraped: 1, total_matched: 1, total_kept: 1, total_dropped: 0,
+          },
+        });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({
+          ok: true,
+          scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:r2" },
+          deduplicated: {},
+        });
+      }
+      if (url.endsWith("/api/execute-search")) return response({ ok: true, task_id: "scrape-r2" });
+      if (url.endsWith("/api/task-state/scrape-r2")) {
+        return response({ ok: true, status: "completed", progress: {}, logs: [], platform: "boss" });
+      }
+      if (url.endsWith("/api/ai-screen")) return response({ ok: true, task_id: "screen-r2" });
+      if (url.endsWith("/api/task-state/screen-r2")) {
+        screenDone = true;
+        return response({
+          ok: true, status: "completed", progress: {}, logs: [], platform: "boss",
+          result: { jobs: [{ job_id: "b-1", title: "BOSS岗位" }], total_scraped: 1, total_matched: 1, total_kept: 1, total_dropped: 0 },
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
+    await flushPromises();
+
+    // 完成路径必须拉两个平台的最近结果做合并（刷新路径的行为）
+    const mergeCalls = fetchMock.mock.calls
+      .filter(([u]) => String(u).includes("/api/latest-pipeline-result"))
+      .map(([u]) => String(u));
+    expect(mergeCalls.some((u) => u.includes("platform=boss"))).toBe(true);
+    expect(mergeCalls.some((u) => u.includes("platform=zhilian"))).toBe(true);
+    // 合并后两个平台的岗位同时在结果页可见（切平台筛选不再全 0）
+    const rows = wrapper.findAll('[data-testid="job-row"]');
+    const rowText = rows.map((row) => row.text()).join(" | ");
+    expect(rowText).toContain("BOSS岗位");
+    expect(rowText).toContain("智联岗位");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("R4: saving advanced settings submits pages together with the speed fields", async () => {
+    const settings = {
+      pages: 3,
+      inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+      detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+      screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings/custom")) {
+        return response({ ok: true, selection: "custom", config_digest: "sha256:r4", settings });
+      }
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="pages-per-combination"]').setValue(1);
+    await wrapper.findAll("button").find((b) => b.text().includes("保存高级设置"))!.trigger("click");
+    await flushPromises();
+
+    const putCall = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/advanced-settings/custom"));
+    expect(putCall).toBeTruthy();
+    const body = JSON.parse(String(putCall![1]!.body));
+    expect(body.settings.pages).toBe(1);
+    expect(body.settings.detail_batch_size).toBe(15);
+    expect(body.settings.screen_batch_size).toBe(50);
+
+    vi.unstubAllGlobals();
+  });
 });

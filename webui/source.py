@@ -1577,6 +1577,17 @@ def _normalize_job_fields(job: dict) -> dict:
         alt = normalized.get("boss_name") or normalized.get("brand_name")
         if alt:
             normalized["company"] = str(alt)
+    # welfare: BOSS 列表福利标签（"五险一金 | 双休"）→ extra.welfare_list
+    # （specs/004: 归一化层补齐，extra 全链路已持久化；缺失/空时不写键，不编造）
+    raw_welfare = normalized.get("welfare")
+    if isinstance(raw_welfare, str):
+        items = [part.strip() for part in raw_welfare.split("|") if part.strip()]
+        if items:
+            extra = normalized.get("extra")
+            if not isinstance(extra, dict):
+                extra = {}
+                normalized["extra"] = extra
+            extra["welfare_list"] = items
     return normalized
 
 

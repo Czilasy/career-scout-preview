@@ -1,5 +1,6 @@
 import { mount } from "@vue/test-utils";
 import JobWorkspace from "../JobWorkspace.vue";
+import type { JobItem } from "../../types";
 
 const jobs = Array.from({ length: 75 }, (_, index) => ({
   job_id: `job-${index + 1}`,
@@ -239,5 +240,342 @@ describe("JobWorkspace", () => {
     });
     expect(wrapper.find('[data-testid="job-list-mode"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="recrawl-btn"]').exists()).toBe(true);
+  });
+
+  it("R3: keeps the platform filter visible and shows the platform empty state when a platform has no jobs", () => {
+    const wrapper = mount(JobWorkspace, {
+      props: {
+        jobs: [],
+        platformFilter: "zhilian",
+        emptyMessage: "没有明确匹配的岗位",
+      },
+    });
+    expect(wrapper.find('[data-testid="result-platform-filter"]').exists()).toBe(true);
+    const empty = wrapper.get('[data-testid="job-workspace-empty"]');
+    expect(empty.text()).toContain("该平台暂无数据");
+    expect(empty.text()).toContain("切回「全部」");
+  });
+
+  it("R3: keeps the platform filter visible and falls back to the category message on the all filter", () => {
+    const wrapper = mount(JobWorkspace, {
+      props: {
+        jobs: [],
+        platformFilter: "all",
+        emptyMessage: "没有明确匹配的岗位",
+      },
+    });
+    expect(wrapper.find('[data-testid="result-platform-filter"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="job-workspace-empty"]').text()).toContain("没有明确匹配的岗位");
+  });
+
+  // -------------------------------------------------------------------------
+  // 筛选 / 排序（列表头部工具）
+  // -------------------------------------------------------------------------
+
+  const filterableJobs: JobItem[] = [
+    {
+      job_id: "f1", title: "资深后端", company: "A", salary: "25-35K",
+      experience: "3-5年", degree: "本科", jd: "五险一金，周末双休",
+      platform: "boss",
+    },
+    {
+      job_id: "f2", title: "初级前端", company: "B", salary: "6-8K",
+      experience: "应届生", degree: "大专", jd: "欢迎应届生",
+      platform: "boss",
+    },
+    {
+      job_id: "f3", title: "测试实习生", company: "C", salary: "200-300元/天",
+      experience: "", degree: "本科", jd: "",
+      platform: "boss",
+    },
+  ];
+
+  it("renders filter and sort buttons only when there are jobs", () => {
+    const empty = mount(JobWorkspace, { props: { jobs: [], emptyMessage: "暂无" } });
+    expect(empty.find('[data-testid="result-filter-toggle"]').exists()).toBe(false);
+    expect(empty.find('[data-testid="result-sort-toggle"]').exists()).toBe(false);
+
+    const wrapper = mount(JobWorkspace, { props: { jobs: filterableJobs, emptyMessage: "暂无" } });
+    expect(wrapper.find('[data-testid="result-filter-toggle"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="result-sort-toggle"]').exists()).toBe(true);
+  });
+
+  it("opens the filter panel, applies a salary band and filters the list", async () => {
+    const wrapper = mount(JobWorkspace, { props: { jobs: filterableJobs, emptyMessage: "暂无" } });
+    expect(wrapper.find('[data-testid="result-filter-panel"]').exists()).toBe(false);
+
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    const panel = wrapper.get('[data-testid="result-filter-panel"]');
+    expect(wrapper.find('[data-testid="result-filter-panel"]').exists()).toBe(true);
+
+    // 选择「15K以上」（25-35K 下限 25 → 15up）
+    const over15 = panel.findAll('[data-testid="filter-option"]').find((chip) => chip.text() === "15K以上")!;
+    await over15.trigger("click");
+    await wrapper.get('[data-testid="filter-apply"]').trigger("click");
+    await wrapper.vm.$nextTick();
+
+    const rows = wrapper.findAll('[data-testid="job-row"]');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].text()).toContain("资深后端");
+    // 按钮显示「筛选 1」
+    expect(wrapper.get('[data-testid="result-filter-label"]').text()).toBe("筛选 1");
+    // 面板已关闭
+    expect(wrapper.find('[data-testid="result-filter-panel"]').exists()).toBe(false);
+  });
+
+  it("sentinel 不限 is mutually exclusive with concrete options and selected by default", async () => {
+    const wrapper = mount(JobWorkspace, { props: { jobs: filterableJobs, emptyMessage: "暂无" } });
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    const panel = wrapper.get('[data-testid="result-filter-panel"]');
+
+    // 经验组：默认 sentinel「不限」选中
+    const sentinel = panel.findAll('[data-testid="filter-sentinel"]').find((chip) => chip.text() === "不限")!;
+    expect(sentinel.classes()).toContain("selected");
+
+    // 点「应届生」→ sentinel 取消（互斥）
+    await panel.findAll('[data-testid="filter-option"]').find((chip) => chip.text() === "应届生")!.trigger("click");
+    expect(sentinel.classes()).not.toContain("selected");
+
+    // 再点 sentinel → 具体选项全部取消（回到组无约束）
+    await sentinel.trigger("click");
+    expect(sentinel.classes()).toContain("selected");
+    expect(
+      panel.findAll('[data-testid="filter-option"]').some((chip) => chip.text() === "应届生" && chip.classes().includes("selected")),
+    ).toBe(false);
+  });
+
+  it("reset clears the draft and closes the panel; closing without 确定 keeps the applied filter", async () => {
+    const wrapper = mount(JobWorkspace, { props: { jobs: filterableJobs, emptyMessage: "暂无" } });
+    // 先应用一个筛选（15K以上）
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    let panel = wrapper.get('[data-testid="result-filter-panel"]');
+    await panel.findAll('[data-testid="filter-option"]').find((chip) => chip.text() === "15K以上")!.trigger("click");
+    await wrapper.get('[data-testid="filter-apply"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(1);
+
+    // 重新打开面板：选中「本科」但不点确定，直接关面板 → 应用状态不变
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    panel = wrapper.get('[data-testid="result-filter-panel"]');
+    await panel.findAll('[data-testid="filter-option"]').find((chip) => chip.text() === "本科")!.trigger("click");
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(1);
+    expect(wrapper.get('[data-testid="result-filter-label"]').text()).toBe("筛选 1");
+
+    // 点「重置」→ 草稿清空、面板关闭、列表恢复全量、徽标消失
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.get('[data-testid="filter-reset"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="result-filter-panel"]').exists()).toBe(false);
+    expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(3);
+    expect(wrapper.find('[data-testid="result-filter-label"]').exists()).toBe(false);
+  });
+
+  it("filtered-out result shows a dedicated empty state with a clear-filter button", async () => {
+    const wrapper = mount(JobWorkspace, { props: { jobs: filterableJobs, emptyMessage: "没有明确匹配的岗位" } });
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    const panel = wrapper.get('[data-testid="result-filter-panel"]');
+    await panel.findAll('[data-testid="filter-option"]').find((chip) => chip.text() === "硕士")!.trigger("click");
+    await wrapper.get('[data-testid="filter-apply"]').trigger("click");
+    await wrapper.vm.$nextTick();
+
+    const empty = wrapper.get('[data-testid="job-workspace-empty"]');
+    expect(empty.text()).toContain("没有符合条件的岗位");
+    // 「清除筛选」按钮恢复全量
+    await wrapper.get('[data-testid="clear-filter"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(3);
+    expect(wrapper.find('[data-testid="result-filter-label"]').exists()).toBe(false);
+  });
+
+  it("original empty list keeps the existing empty state without a clear button", () => {
+    const wrapper = mount(JobWorkspace, { props: { jobs: [], emptyMessage: "没有明确匹配的岗位" } });
+    expect(wrapper.get('[data-testid="job-workspace-empty"]').text()).toContain("没有明确匹配的岗位");
+    expect(wrapper.find('[data-testid="clear-filter"]').exists()).toBe(false);
+  });
+
+  it("sort menu reorders by salary desc, keeps 面议 last and disables unpublished sorts", async () => {
+    const wrapper = mount(JobWorkspace, { props: { jobs: filterableJobs, emptyMessage: "暂无" } });
+    await wrapper.get('[data-testid="result-sort-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    const menu = wrapper.get('[data-testid="result-sort-menu"]');
+    const options = menu.findAll('[data-testid="sort-option"]');
+    expect(options.map((option) => option.text().trim())).toEqual([
+      "综合排序", "薪资最高", "薪资最低", "最新发布", "匹配度最高",
+    ]);
+    // 最新发布 / 匹配度最高：置灰 disabled + 提示，点击无效果
+    expect(options[3].attributes("disabled")).toBeDefined();
+    expect(options[4].attributes("disabled")).toBeDefined();
+    expect(options[3].attributes("title")).toBe("数据补齐后开放");
+    await options[3].trigger("click");
+    await wrapper.vm.$nextTick();
+    // 置灰项点击无效：菜单仍打开、列表顺序不变（综合排序）
+    expect(wrapper.find('[data-testid="result-sort-menu"]').exists()).toBe(true);
+    expect(wrapper.findAll('[data-testid="job-row"]')[0].text()).toContain("资深后端");
+
+    await options[1].trigger("click");
+    await wrapper.vm.$nextTick();
+
+    const rows = wrapper.findAll('[data-testid="job-row"]');
+    expect(rows).toHaveLength(3);
+    // 25-35K → 6-8K → 200-300元/天（无法解析，恒沉底）
+    expect(rows[0].text()).toContain("资深后端");
+    expect(rows[1].text()).toContain("初级前端");
+    expect(rows[2].text()).toContain("测试实习生");
+    expect(wrapper.get('[data-testid="result-sort-label"]').text()).toBe("薪资最高");
+  });
+
+  it("selecting sort keeps the first visible job in sync with the detail pane", async () => {
+    const wrapper = mount(JobWorkspace, { props: { jobs: filterableJobs, emptyMessage: "暂无" } });
+    await wrapper.get('[data-testid="result-sort-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    // 薪资最低（index 2）
+    await wrapper.findAll('[data-testid="sort-option"]')[2].trigger("click");
+    await wrapper.vm.$nextTick();
+    // 薪资最低：6-8K 排第一 → 详情同步为「初级前端」
+    expect(wrapper.get('[data-testid="job-detail"]').text()).toContain("初级前端");
+    // 第一行选中态
+    expect(wrapper.findAll('[data-testid="job-row"]')[0].classes()).toContain("selected");
+  });
+
+  it("opening the sort menu closes the filter panel and vice versa", async () => {
+    const wrapper = mount(JobWorkspace, { props: { jobs: filterableJobs, emptyMessage: "暂无" } });
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="result-filter-panel"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="result-sort-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="result-filter-panel"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="result-sort-menu"]').exists()).toBe(true);
+  });
+
+  it("resultEpoch change resets filter and sort state (D3: jobs content change keeps state)", async () => {
+    const wrapper = mount(JobWorkspace, { props: { jobs: filterableJobs, emptyMessage: "暂无", resultEpoch: 1 } });
+    // 应用筛选 + 排序
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    const panel = wrapper.get('[data-testid="result-filter-panel"]');
+    await panel.findAll('[data-testid="filter-option"]').find((chip) => chip.text() === "15K以上")!.trigger("click");
+    await wrapper.get('[data-testid="filter-apply"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.get('[data-testid="result-sort-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.findAll('[data-testid="sort-option"]')[1].trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(1);
+    expect(wrapper.get('[data-testid="result-sort-label"]').text()).toBe("薪资最高");
+
+    // 新结果加载（resultEpoch 递增）→ 筛选/排序全部回到默认
+    await wrapper.setProps({ resultEpoch: 2 });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(3);
+    expect(wrapper.find('[data-testid="result-filter-label"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="result-sort-label"]').exists()).toBe(false);
+  });
+
+  it("D3: switching category/platform (jobs prop change) keeps filter and sort state", async () => {
+    const wrapper = mount(JobWorkspace, { props: { jobs: filterableJobs, emptyMessage: "暂无", resultEpoch: 1 } });
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    const panel = wrapper.get('[data-testid="result-filter-panel"]');
+    await panel.findAll('[data-testid="filter-option"]').find((chip) => chip.text() === "15K以上")!.trigger("click");
+    await wrapper.get('[data-testid="filter-apply"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.get('[data-testid="result-sort-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.findAll('[data-testid="sort-option"]')[1].trigger("click");
+    await wrapper.vm.$nextTick();
+
+    // 切分类/切平台：jobs 换成另一组岗位（结果集合变化，但 resultEpoch 不变）
+    const otherJobs: JobItem[] = [
+      { job_id: "g1", title: "另一组资深", company: "D", salary: "30-40K", experience: "5-10年", degree: "硕士", platform: "boss" },
+      { job_id: "g2", title: "另一组初级", company: "E", salary: "4-6K", experience: "1-3年", degree: "本科", platform: "boss" },
+      { job_id: "g3", title: "智联岗位", company: "F", salary: "面议", experience: "", degree: "", platform: "zhilian" },
+    ];
+    await wrapper.setProps({ jobs: otherJobs });
+    await wrapper.vm.$nextTick();
+    // 状态保留：徽标还在、排序标签还在，新列表按原条件收窄（30-40K 落 15up）
+    expect(wrapper.get('[data-testid="result-filter-label"]').text()).toBe("筛选 1");
+    expect(wrapper.get('[data-testid="result-sort-label"]').text()).toBe("薪资最高");
+    expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(1);
+    expect(wrapper.findAll('[data-testid="job-row"]')[0].text()).toContain("另一组资深");
+
+    // 只有 resultEpoch 递增才重置
+    await wrapper.setProps({ resultEpoch: 2 });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="result-filter-label"]').exists()).toBe(false);
+    expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(3);
+  });
+
+  it("filters by welfare from extra.welfare_list at the component level", async () => {
+    const jobs: JobItem[] = [
+      { job_id: "w1", title: "带双休", company: "A", salary: "10-15K", experience: "3-5年", degree: "本科", platform: "boss", extra: { welfare_list: ["五险一金", "双休"] } },
+      { job_id: "w2", title: "仅五险一金", company: "B", salary: "8-10K", experience: "1-3年", degree: "大专", platform: "boss", extra: { welfare_list: ["五险一金"] } },
+      { job_id: "w3", title: "智联无福利", company: "C", salary: "12-15K", experience: "", degree: "", platform: "zhilian", extra: {} },
+    ];
+    const wrapper = mount(JobWorkspace, { props: { jobs, emptyMessage: "暂无" } });
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    const panel = wrapper.get('[data-testid="result-filter-panel"]');
+    // 福利组提示始终显示
+    expect(panel.text()).toContain("智联岗位暂不支持福利筛选");
+    await panel.findAll('[data-testid="filter-option"]').find((chip) => chip.text() === "双休")!.trigger("click");
+    await wrapper.get('[data-testid="filter-apply"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    const rows = wrapper.findAll('[data-testid="job-row"]');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].text()).toContain("带双休");
+    // 智联岗位（无 welfare_list）被过滤属预期行为
+  });
+
+  it("keeps a manually selected job when it survives filtering; falls back to the first row when filtered out", async () => {
+    const wrapper = mount(JobWorkspace, { props: { jobs: filterableJobs, emptyMessage: "暂无" } });
+    // 手动选中「初级前端」（列表第二项）
+    await wrapper.findAll('[data-testid="job-row"]')[1].trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get('[data-testid="job-detail"]').text()).toContain("初级前端");
+
+    // 应用筛选：6-8K → 5-10 档，初级前端仍在 → 保持原选中
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    const panel = wrapper.get('[data-testid="result-filter-panel"]');
+    await panel.findAll('[data-testid="filter-option"]').find((chip) => chip.text() === "5-10K")!.trigger("click");
+    await wrapper.get('[data-testid="filter-apply"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(1);
+    expect(wrapper.get('[data-testid="job-detail"]').text()).toContain("初级前端");
+
+    // 换条件：15K以上 → 初级前端被过滤 → 回退到过滤后第一项（资深后端）
+    await wrapper.get('[data-testid="result-filter-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    const panel2 = wrapper.get('[data-testid="result-filter-panel"]');
+    await panel2.findAll('[data-testid="filter-option"]').find((chip) => chip.text() === "5-10K")!.trigger("click");
+    await panel2.findAll('[data-testid="filter-option"]').find((chip) => chip.text() === "15K以上")!.trigger("click");
+    await wrapper.get('[data-testid="filter-apply"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll('[data-testid="job-row"]')).toHaveLength(1);
+    expect(wrapper.get('[data-testid="job-detail"]').text()).toContain("资深后端");
+  });
+
+  it("a fresh result with no manual selection follows the first row when a filter is applied", async () => {
+    const wrapper = mount(JobWorkspace, { props: { jobs: filterableJobs, emptyMessage: "暂无", resultEpoch: 1 } });
+    // 新结果加载（resultEpoch 递增）→ 未手动选择
+    await wrapper.setProps({ resultEpoch: 2 });
+    await wrapper.vm.$nextTick();
+    // 应用筛选（薪资最低 6-8K → 初级前端排第一）→ 选中跟随第一项
+    await wrapper.get('[data-testid="result-sort-toggle"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    await wrapper.findAll('[data-testid="sort-option"]')[2].trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.get('[data-testid="job-detail"]').text()).toContain("初级前端");
+    expect(wrapper.findAll('[data-testid="job-row"]')[0].classes()).toContain("selected");
   });
 });

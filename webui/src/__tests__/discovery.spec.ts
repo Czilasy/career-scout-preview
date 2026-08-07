@@ -81,8 +81,9 @@ describe("discovery helpers", () => {
     expect(normalizeScopePreview(response)).toEqual(response.scope);
   });
 
-  it("restores all execution custom fields without pages", () => {
+  it("restores all execution custom fields including pages", () => {
     const settings = {
+      pages: 3,
       inter_combo_delay: 10,
       detail_batch_size: 15,
       detail_interval: 2,
@@ -113,7 +114,8 @@ describe("discovery helpers", () => {
       detail_batch_size: 8,
     });
     expect(recoverSelectionSettings(state, "stable")).toEqual(settings);
-    expect(recoverSelectionSettings(state, "custom")).not.toHaveProperty("pages");
+    // R4：pages 属于自定义保存字段，恢复时必须保留
+    expect(recoverSelectionSettings(state, "custom")).toHaveProperty("pages", 3);
   });
 
   // ------------------------------------------------------------------

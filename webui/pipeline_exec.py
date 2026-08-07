@@ -451,7 +451,8 @@ def _scrape_overall_percent(stage: str, current: int, total: int) -> int:
 # Auto-launch the debug Chrome (self-contained execution)
 # ---------------------------------------------------------------------------
 
-def ensure_chrome_ready(cdp_port: int | None = None) -> tuple[bool, str]:
+def ensure_chrome_ready(cdp_port: int | None = None, *,
+                        minimize_after_launch: bool = False) -> tuple[bool, str]:
     """Ensure the dedicated debug Chrome is running; launch it if not.
 
     Returns ``(True, "")`` when CDP is reachable (already running or just
@@ -462,6 +463,11 @@ def ensure_chrome_ready(cdp_port: int | None = None) -> tuple[bool, str]:
     This makes execution self-contained: confirming the params auto-opens the
     browser in front of the user instead of surfacing a raw "CDP unavailable"
     infrastructure error.  Login is checked separately afterwards.
+
+    ``minimize_after_launch``：仅当本函数实际启动了 Chrome 时，通过 CDP
+    把窗口最小化到任务栏（不切 headless，避免平台风控）。已运行的 Chrome
+    不动，避免打断用户正在进行的登录/人工操作；登录空间打开浏览器的调用
+    方不要开启此参数。
     """
     port = cdp_port or boss.DEFAULT_CDP_PORT
     if boss.is_cdp_ready(port):
@@ -511,6 +517,7 @@ def ensure_chrome_ready(cdp_port: int | None = None) -> tuple[bool, str]:
         "--remote-allow-origins=*",
     ]
     proc = boss.launch_chrome(cmd)
+    launched = True
     # 轮询 CDP，同时检查 Chrome 进程是否还活着
     # 死等 90 秒会让用户莫名其妙，Chrome 早退时立即返回失败原因
     deadline = time.time() + 90
@@ -524,6 +531,12 @@ def ensure_chrome_ready(cdp_port: int | None = None) -> tuple[bool, str]:
     PARENT_EXIT_GRACE = 10  # 主进程退出后给 CDP 10s 宽限期
     while time.time() < deadline:
         if boss.is_cdp_ready(port):
+            if launched and minimize_after_launch:
+                # 最小化是锦上添花，失败不阻断任务流程
+                try:
+                    boss.minimize_chrome_window(port)
+                except Exception:
+                    pass
             return True, ""
         try:
             rc = proc.poll()
@@ -813,7 +826,9 @@ def run_search(params: dict, source, *, pages: int = 3,
     emit(stage="ensure_chrome", message="检查并启动调试浏览器…")
     platform = str(getattr(source, "platform", "boss") or "boss")
     cdp_port = getattr(source, "cdp_port", None)
-    chrome_ok, chrome_err = ensure_chrome_ready(cdp_port)
+    chrome_ok, chrome_err = ensure_chrome_ready(
+        cdp_port, minimize_after_launch=True,
+    )
     if not chrome_ok:
         return {"ok": False, "jobs": [], "total_scraped": 0,
                 "total_matched": 0, "combinations": len(combos),

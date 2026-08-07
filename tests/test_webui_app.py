@@ -1060,6 +1060,48 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
             "https://zhaopin.example/d1.htm",
         )
 
+    def test_platform_latest_result_keeps_verdict_fields(self):
+        """R1: 按平台读取结果快照时 verdict 系字段必须完整（曾漏字段导致全部进“待确认”）。
+
+        jobs 必须带 verdict/verdict_reason/caveats/tags/extra；
+        total_matched 取 match_count 而非 total_scraped；
+        partial 快照映射为 completed_with_pending 与全量路径一致。
+        """
+        self.store.save_pipeline_result({
+            "jobs": [
+                {"job_id": "j1", "platform_job_id": "pj1", "title": "匹配岗",
+                 "company": "公司A", "salary": "2-3万", "location": "上海",
+                 "tags": "Python", "jd": "岗位描述",
+                 "canonical_url": "https://zhaopin.example/j1.htm",
+                 "verdict": "match", "verdict_reason": "技能匹配",
+                 "caveats": ["注意学历"], "extra": {"company_nature_label": "国企"}},
+                {"job_id": "j2", "platform_job_id": "pj2", "title": "待确认岗",
+                 "canonical_url": "https://zhaopin.example/j2.htm",
+                 "verdict": "uncertain", "verdict_reason": "AI 漏判",
+                 "caveats": ["薪资待确认"], "extra": {}},
+            ],
+            "dropped": [],
+            "total_scraped": 2, "total_kept": 2, "total_matched": 1,
+            "total_dropped": 0, "profile_summary": "画像", "error": "",
+        }, {"platform": "zhilian"})
+        latest = self.client.get(
+            "/api/latest-pipeline-result?platform=zhilian").get_json()
+        self.assertTrue(latest["has_result"])
+        self.assertEqual(latest["status"], "completed_with_pending")
+        jobs = {job["platform_job_id"]: job for job in latest["result"]["jobs"]}
+        self.assertEqual(jobs["pj1"]["verdict"], "match")
+        self.assertEqual(jobs["pj1"]["verdict_reason"], "技能匹配")
+        self.assertEqual(jobs["pj1"]["caveats"], ["注意学历"])
+        self.assertEqual(jobs["pj1"]["tags"], "Python")
+        self.assertEqual(jobs["pj1"]["jd"], "岗位描述")
+        self.assertEqual(jobs["pj1"]["extra"], {"company_nature_label": "国企"})
+        self.assertEqual(jobs["pj2"]["verdict"], "uncertain")
+        self.assertEqual(jobs["pj2"]["caveats"], ["薪资待确认"])
+        # total_matched 必须取 match_count（1），而不是 total_scraped（2）
+        self.assertEqual(latest["result"]["total_matched"], 1)
+        self.assertEqual(latest["result"]["total_kept"], 2)
+        self.assertEqual(latest["result"]["profile_summary"], "画像")
+
     def test_pipeline_export_csv_groups_matched_before_dropped_with_links(self):
         self._save_zhilian_pipeline_result()
 
@@ -1144,6 +1186,87 @@ class ChromeAccountProfileSwitchTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("避免误关", msg)
         close.assert_not_called()
+
+    def test_ensure_chrome_ready_minimizes_only_when_requested(self):
+        """R6: 实际启动 Chrome 且 minimize_after_launch=True 时最小化窗口；默认不最小化。"""
+        from webui import pipeline_exec
+        launched = mock.Mock()
+        launched.poll.return_value = None
+        base = [
+            mock.patch.object(
+                pipeline_exec.boss, "is_cdp_ready", side_effect=[False, True],
+            ),
+            mock.patch.object(
+                pipeline_exec.boss, "prepare_cdp_profile",
+                return_value={"path": "C:/profiles/r6"},
+            ),
+            mock.patch.object(pipeline_exec.boss, "stop_cdp_chrome"),
+            mock.patch.object(
+                pipeline_exec.boss, "launch_chrome", return_value=launched,
+            ),
+        ]
+        # 默认参数：不最小化（登录空间等调用方需要窗口在前台）
+        with base[0], base[1], base[2], base[3], mock.patch.object(
+            pipeline_exec.boss, "minimize_chrome_window",
+        ) as minimize:
+            ok, _msg = pipeline_exec.ensure_chrome_ready(9444)
+        self.assertTrue(ok)
+        minimize.assert_not_called()
+        # 任务路径：启动后立即最小化
+        with base[0], base[1], base[2], base[3], mock.patch.object(
+            pipeline_exec.boss, "minimize_chrome_window",
+        ) as minimize:
+            ok, _msg = pipeline_exec.ensure_chrome_ready(
+                9444, minimize_after_launch=True,
+            )
+        self.assertTrue(ok)
+        minimize.assert_called_once_with(9444)
+
+
+class ChromeWindowMinimizeTests(unittest.TestCase):
+    """R6: CDP Browser.setWindowBounds 最小化抓取浏览器窗口。"""
+
+    def test_minimize_chrome_window_sends_browser_commands(self):
+        from scripts import boss_cdp_raw as boss
+        session = mock.Mock()
+        session.send.side_effect = [
+            {"id": 1, "result": {"windowId": 42}},
+            {"id": 2, "result": {}},
+        ]
+        ok = boss.minimize_chrome_window(
+            9222,
+            session_factory=lambda _port: session,
+            target_id_provider=lambda _port: "target-1",
+        )
+        self.assertTrue(ok)
+        session.send.assert_any_call(
+            "Browser.getWindowForTarget", {"targetId": "target-1"}, timeout=10,
+        )
+        session.send.assert_any_call("Browser.setWindowBounds", {
+            "windowId": 42,
+            "bounds": {"windowState": "minimized"},
+        }, timeout=10)
+        session.close.assert_called_once()
+
+    def test_minimize_chrome_window_without_target_returns_false(self):
+        from scripts import boss_cdp_raw as boss
+        ok = boss.minimize_chrome_window(
+            9222,
+            session_factory=mock.Mock(),
+            target_id_provider=lambda _port: None,
+        )
+        self.assertFalse(ok)
+
+    def test_minimize_chrome_window_failure_is_silent(self):
+        from scripts import boss_cdp_raw as boss
+        session = mock.Mock()
+        session.send.side_effect = RuntimeError("cdp closed")
+        ok = boss.minimize_chrome_window(
+            9222,
+            session_factory=lambda _port: session,
+            target_id_provider=lambda _port: "target-1",
+        )
+        self.assertFalse(ok)
 
 
 class BrowserAccountApiTests(unittest.TestCase):

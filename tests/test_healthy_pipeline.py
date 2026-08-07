@@ -995,6 +995,42 @@ class Slice7And9ApiTests(unittest.TestCase):
         self.assertIn("unstarted_count", data)
         self.assertIn("total", data)
 
+    def test_task_state_fine_stage_ignores_prior_stage_match_mismatch(self):
+        """精筛阶段 success_count 不得沿用粗筛/详情阶段的 match+mismatch 累计。
+
+        回归：精筛开始时 match+mismatch 仍是上一阶段完成数（如 30），旧逻辑
+        success_count=max(match+mismatch, processed, live) 会把计数钉死在
+        30/30 + 100%，而精筛判定还没开始，界面干等。精筛阶段只认精筛自己的
+        进度：processed 在精筛开始时已重置为已判定数，live current 实时推送。
+        """
+        self.store.update_screening_run(self.run_id, status="running")
+        self.store.update_screening_run(
+            self.run_id, processed_count=0, match_count=20,
+            mismatch_count=10, current_stage="ai_fine")
+        resp = self.client.get(f"/api/task-state/{self.run_id}")
+        data = resp.get_json()
+        # match+mismatch=30 是上一阶段残留，不得当精筛成功数
+        self.assertEqual(data["success_count"], 0)
+        self.assertEqual(data["stage"], "ai_fine")
+
+    def test_task_state_fine_stage_tracks_live_fine_progress(self):
+        """精筛阶段 success_count 跟随精筛实时进度（processed/live current）。"""
+        self.store.update_screening_run(self.run_id, status="running")
+        self.store.update_screening_run(
+            self.run_id, processed_count=3, match_count=20,
+            mismatch_count=10, current_stage="ai_fine")
+        self.app.config["PIPELINE_TASKS"][self.run_id] = {
+            "kind": "ai_screen", "status": "running",
+            "progress": {"stage": "screen_b", "current": 5, "total": 30,
+                         "message": "AI 精筛 5/30", "overall_percent": 16},
+            "logs": [], "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+        }
+        resp = self.client.get(f"/api/task-state/{self.run_id}")
+        data = resp.get_json()
+        # 精筛已判定 5 条：取实时进度，而不是残留的 30（match+mismatch）
+        self.assertEqual(data["success_count"], 5)
+
     def test_task_state_api_paused_with_error_code(self):
         """暂停状态返回具体 error_code（SC-006）。"""
         self.store.update_screening_run(self.run_id, status="running")
@@ -1793,6 +1829,44 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()["error"], "non_pending_job_ids")
         submit.assert_not_called()
+
+    def test_ai_fine_flags_merged_into_job_caveats(self):
+        """精筛 flags（岗位靠谱程度提醒）合并进结果 job 的 caveats 列表。"""
+        scrape_task_id = "fine-flags-source"
+        self._install_scrape_source(scrape_task_id, [{
+            "job_id": "job-1", "title": "后端工程师",
+            "source_url": "https://www.zhipin.com/job_detail/job-1.html",
+        }])
+        detail_result = {
+            "jobs": [{"job_id": "job-1", "title": "后端工程师", "jd": "负责后端开发"}],
+            "hard_stop": False, "hard_stop_code": None,
+            "stopped": False, "fetched": 1,
+        }
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.screen_jobs", return_value={
+                    "kept": ["job-1"], "dropped": [],
+                }), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
+                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_result), \
+                mock.patch("webui.ai.match_jds", return_value={
+                    "verdicts": {"job-1": {
+                        "verdict": "match", "reason": "匹配",
+                        "caveats": ["优先英语六级"],
+                        "flags": ["需留意：疑似中介/劳务派遣", "薪资含销售提成"],
+                    }},
+                }):
+            response = self._post_ai_screen(scrape_task_id)
+            task_id = response.get_json()["task_id"]
+            finished = _wait_for_pipeline_task(self.client, task_id)
+
+        self.assertEqual(finished["status"], "completed", finished)
+        job = next(j for j in finished["result"]["jobs"] if j["job_id"] == "job-1")
+        self.assertEqual(job["verdict"], "match")
+        # flags 并入软性要求提醒列表（排在原 caveats 之后）
+        self.assertEqual(
+            job["caveats"],
+            ["优先英语六级", "需留意：疑似中介/劳务派遣", "薪资含销售提成"])
 
     def test_main_jd_hard_stop_persists_each_job_reason_before_return(self):
         scrape_task_id = "main-jd-hard-stop-source"

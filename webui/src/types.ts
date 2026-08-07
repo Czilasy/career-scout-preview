@@ -251,6 +251,8 @@ export type ExecutionSelection = "stable" | "balanced" | "extreme" | "custom";
 export type SystemExecutionMode = Exclude<ExecutionSelection, "custom">;
 
 export interface ExecutionSettings {
+  /** 每组合翻页数：不属于速度配置快照（FR-009），但需随自定义配置持久化。 */
+  pages: number;
   inter_combo_delay: number;
   detail_batch_size: number;
   detail_interval: number;

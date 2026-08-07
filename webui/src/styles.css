@@ -981,6 +981,16 @@ button:disabled {
   min-height: 0;
   position: relative;
 }
+/* 收起态也保持绝对定位：内容永不参与行高计算。
+   若收起瞬间脱离 absolute 回普通流，内容高度会先把面板撑高再被
+   0fr 动画压回去（先变长再收拢的闪跳）。 */
+.advanced-panel .collapsible-body .collapsible-inner {
+  position: absolute;
+  inset: 0;
+}
+/* 展开态盒内滚动。特异性（0,4,0）必须压过通用规则
+   .collapsible-body.open .collapsible-inner 的 overflow: visible（0,3,0），
+   否则高级设置内容溢出面板、与下方界面重叠。 */
 .advanced-panel .collapsible-body.open .collapsible-inner {
   position: absolute;
   inset: 0;
@@ -1680,6 +1690,158 @@ button:disabled {
 }
 .recrawl-inline .task-progress {
   min-width: 200px;
+}
+/* 列表头部工具按钮（筛选 / 排序）：小图标，占用条件选中/非默认排序时补文字标签 */
+.job-list-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.list-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--hair);
+  border-radius: 7px;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--panel-2);
+  cursor: pointer;
+  transition: border-color .15s ease, color .15s ease, background .15s ease;
+}
+.list-tool-btn:hover {
+  border-color: var(--brand);
+  color: var(--brand-ink);
+}
+.list-tool-btn.active {
+  border-color: var(--brand);
+  color: var(--brand-ink);
+  background: var(--brand-wash);
+}
+.list-tool-btn:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+.list-tool-label {
+  white-space: nowrap;
+}
+/* 窄屏（≤390px）时按钮退化为纯图标：文字隐藏，仅保留数字徽标（contracts §5）。 */
+.list-tool-badge {
+  display: none;
+}
+@media (max-width: 390px) {
+  .list-tool-label {
+    display: none;
+  }
+  .list-tool-badge {
+    display: inline-grid;
+    place-items: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--brand);
+    color: var(--on-bright-bg, #04241e);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+  }
+}
+/* 筛选 / 排序浮层：fixed 定位（打开时按锚点计算），不占布局空间。
+   磨砂 100%：完全不透明面板底，背后文字绝不透出。 */
+.filter-popover,
+.sort-popover {
+  position: fixed;
+  z-index: 900;
+  width: min(380px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--panel);
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  box-shadow: var(--shadow);
+  color: var(--ink-1);
+  font-size: 13px;
+}
+.sort-popover {
+  width: min(220px, calc(100vw - 24px));
+  padding: 6px;
+  overflow: visible;
+}
+.popover-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px 10px;
+}
+.popover-group {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.popover-group-label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .02em;
+}
+.popover-group .choice-chip {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 11px;
+  font-size: 12px;
+}
+.popover-group-note {
+  margin: 7px 0 0;
+  color: var(--ink-3);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.popover-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--hair);
+}
+.sort-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--ink-2);
+  font-size: 13px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background .15s ease, color .15s ease;
+}
+.sort-option:hover {
+  background: var(--hover-row);
+  color: var(--brand-ink);
+}
+.sort-option.selected {
+  color: var(--brand-ink);
+  font-weight: 600;
+  background: var(--brand-wash);
+}
+.sort-option:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
 }.job-list {
   display: grid;
   align-content: start;
@@ -2460,16 +2622,10 @@ body,
   outline-offset: 2px;
 }
 
-/* 任务运行中平台切换锁定：按钮降透明且不可点，旁边给出原因提示。 */
+/* 任务运行中平台切换锁定：按钮降透明且不可点（title 提示保留）。 */
 .platform-segment-btn:disabled {
   opacity: .55;
   cursor: not-allowed;
-}
-.platform-lock-hint {
-  color: var(--text-soft);
-  font-size: 12px;
-  margin-left: 10px;
-  white-space: nowrap;
 }
 
 /* 高级执行设置里智联串行模式下不生效的参数标注。 */

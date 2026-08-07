@@ -3588,7 +3588,9 @@ def create_app(config=None):
             jd_failures: dict[str, dict[str, str]] = {}
             if survivors:
                 emit(stage="ensure_chrome", message="启动调试浏览器，准备抓取 JD…")
-                chrome_ok, chrome_err = ensure_chrome_ready(frozen_cdp_port)
+                chrome_ok, chrome_err = ensure_chrome_ready(
+                    frozen_cdp_port, minimize_after_launch=True,
+                )
                 if not chrome_ok:
                     reason = f"调试浏览器未就绪（{chrome_err}），请处理后继续"
                     _save_jd_checkpoint(jd_path, jd_map)
@@ -3732,7 +3734,9 @@ def create_app(config=None):
                     job["verdict"] = "uncertain"
                     job["verdict_reason"] = "未填写求职画像，跳过 AI 精筛"
                 match_count = 0
-                emit(stage="screen_b", current=len(jobs_with_jd), total=len(jobs_with_jd),
+                # 跳过精筛：一条未判，进度必须从 0 起（写 len(jobs_with_jd)
+                # 会造成 30/30 + 100% 假进度，且 task-state 的 max() 会钉死它）
+                emit(stage="screen_b", current=0, total=len(jobs_with_jd),
                      message="未填写求职画像，已跳过 AI 精筛")
             else:
                 if _stop_requested():
@@ -3842,7 +3846,11 @@ def create_app(config=None):
                     if v:
                         job["verdict"] = v["verdict"]
                         job["verdict_reason"] = v["reason"]
-                        job["caveats"] = v.get("caveats", [])
+                        # flags（岗位靠谱程度提醒）并入软性要求提醒列表
+                        job["caveats"] = [
+                            *(v.get("caveats") or []),
+                            *(v.get("flags") or []),
+                        ]
                     else:
                         # 未抓到 JD 的岗位无法精筛，标记待定（不红不绿）
                         job["verdict"] = "uncertain"
@@ -5900,7 +5908,8 @@ def create_app(config=None):
         if source_run_id and parent_run is not None:
             _activate_run_browser(parent_run)
         chrome_ok, chrome_err = ensure_chrome_ready(
-            frozen_cdp_port if frozen_platform == "zhilian" else None
+            frozen_cdp_port if frozen_platform == "zhilian" else None,
+            minimize_after_launch=True,
         )
         if not chrome_ok:
             return jsonify({"ok": False,
@@ -6152,7 +6161,7 @@ def create_app(config=None):
                 "message": "智联补抓必须携带 source_run_id，不能按 URL 猜测身份",
             }), 409
 
-        chrome_ok, chrome_err = ensure_chrome_ready()
+        chrome_ok, chrome_err = ensure_chrome_ready(minimize_after_launch=True)
         if not chrome_ok:
             return jsonify({"error": f"CDP Chrome 未运行：{chrome_err}",
                             "error_code": "cdp_not_ready"}), 503
@@ -6659,7 +6668,9 @@ def create_app(config=None):
             fetched_jd: dict = {}
             detail_jobs: list = []
             if no_jd:
-                chrome_ok, chrome_err = ensure_chrome_ready(frozen_cdp_port)
+                chrome_ok, chrome_err = ensure_chrome_ready(
+                    frozen_cdp_port, minimize_after_launch=True,
+                )
                 if chrome_ok:
                     source = _make_cdp_source(
                         platform=frozen_platform,
@@ -7176,7 +7187,14 @@ def create_app(config=None):
         fail_count = pending
         # success_count 必须单调且实时：live_current（条数语义）与 DB 计数
         # 取最大值，保证智联详情逐条推进、跨阶段切换不回退。
-        success_count = max(match + mismatch, processed, live_current)
+        # 精筛阶段（ai_fine/screen_b）的 match+mismatch 仍是粗筛/详情阶段的
+        # 累计值，混入会把成功数钉死在上一阶段完成数（假 30/30 + 100% 干等）；
+        # 该阶段成功数只算精筛自己的进度：processed 在精筛开始时已重置为
+        # 已判定数，live_current 是精筛实时推送的 current。
+        if stage in ("ai_fine", "screen_b"):
+            success_count = max(processed, live_current)
+        else:
+            success_count = max(match + mismatch, processed, live_current)
         completed_count = min(stage_total, success_count + fail_count)
         unstarted = max(0, stage_total - completed_count)
         overall_percent = (

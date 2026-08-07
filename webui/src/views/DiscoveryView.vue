@@ -25,7 +25,6 @@ import TaskProgress from "../components/TaskProgress.vue";
 import { ApiError, apiRequest, errorMessage, settingsApi } from "../api";
 import { setThemePlatform } from "../composables/useTheme";
 import {
-  backfillJobPlatform,
   buildSearchScriptParams,
   createCityCatalogLoader,
   createPlatformState,
@@ -234,6 +233,9 @@ const pipelineResult = ref<PipelineResult | null>(null);
 const pipelineResultRunId = ref("");
 // 结果页平台筛选（全部/BOSS/智联）：纯展示层过滤，不改草稿/任务身份（不变式 1）。
 const resultPlatformFilter = ref<"all" | "boss" | "zhilian">("all");
+// specs/004：结果加载代次。pipelineResult 被新 run 结果替换时递增，
+// JobWorkspace 据此重置列表筛选/排序（切分类/切平台不重置，contracts §6 D3）。
+const resultEpoch = ref(0);
 // 合并载入时每个平台各自的结果来源 run：单平台视图下“全部重抓”/导出用对应 run。
 const resultRunIds = ref<{ boss: string; zhilian: string }>({ boss: "", zhilian: "" });
 const activeCategory = ref<ResultCategory>("matched");
@@ -857,7 +859,7 @@ async function loadAdvancedSettings() {
 }
 
 const SPEED_FIELDS = [
-  "inter_combo_delay", "detail_batch_size", "detail_interval",
+  "pages", "inter_combo_delay", "detail_batch_size", "detail_interval",
   "detail_reset_every", "detail_batch_cooldown",
   "detail_tab_pool_size", "screen_batch_size",
   "screen_concurrency", "match_batch_size", "match_concurrency",
@@ -1163,9 +1165,10 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
         );
       } else {
         screenBusy.value = false;
-        // 实时任务结果防御性回填平台身份：内存结果可能缺 job.platform
-        //（抓取脚本产物不带），缺了结果页平台筛选会把全部岗位过滤成 0。
-        setPipelineResult(backfillJobPlatform(data.result || {}, data.platform));
+        // 实时路径与刷新路径统一：任务完成后拉双平台合并结果（R2），
+        // 避免只 set 单平台结果导致结果页切平台显示 0。
+        const fetched = await fetchMergedLatestResult();
+        if (fetched) setPipelineResult(fetched.merged);
         activeStep.value = "results";
         notify(
           data.status === "completed_with_pending"
@@ -1238,6 +1241,8 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
 
 function setPipelineResult(result: PipelineResult) {
   pipelineResult.value = result;
+  // specs/004：新 run 结果替换完成 → 递增 resultEpoch，通知 JobWorkspace 重置筛选/排序。
+  resultEpoch.value += 1;
   const sourceRunId = (result as Record<string, unknown>).source_run_id;
   if (typeof sourceRunId === "string") pipelineResultRunId.value = sourceRunId;
   analysisReady.value = true;
@@ -1251,6 +1256,60 @@ function setPipelineResult(result: PipelineResult) {
 
 async function loadLatestResult() {
   if (pausedRunId.value || interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
+  const fetched = await fetchMergedLatestResult();
+  if (!fetched) return;
+  const { merged, newer } = fetched;
+  pipelineResultRunId.value = newer.data.source_run_id || "";
+  setPipelineResult(merged);
+  const ps = (newer.data.result as Record<string, unknown>).profile_summary;
+  if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
+  const snapshotStatus = newer.data.status === "completed_with_pending" ? "completed_with_pending" : "completed";
+  scrapeSnapshot.value = {
+    status: snapshotStatus, stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
+    started_at: newer.data.started_at,
+    finished_at: newer.data.finished_at,
+  };
+  screenSnapshot.value = {
+    status: snapshotStatus, stage: "done", progress: { message: "上次 AI 筛选已完成" }, logs: [],
+    started_at: newer.data.started_at,
+    finished_at: newer.data.finished_at,
+  };
+  const execConfig = newer.data.execution_config || {};
+  scrapeSnapshot.value.execution_config = execConfig;
+  screenSnapshot.value.execution_config = execConfig;
+  screenSnapshot.value.kept_count = Number(merged.total_kept || 0);
+  screenSnapshot.value.dropped_count = Number(merged.total_dropped || 0);
+  const sourceTotal = Number(merged.total_scraped || 0);
+  const stageTotal = snapshotStatus === "completed_with_pending"
+    ? Number(merged.total_kept || 0)
+    : sourceTotal;
+  scrapeSnapshot.value.total = stageTotal || sourceTotal;
+  scrapeSnapshot.value.source_total = sourceTotal;
+  screenSnapshot.value.total = stageTotal || sourceTotal;
+  screenSnapshot.value.source_total = sourceTotal;
+  const uncertainCount = (merged.jobs || []).filter((job) => job.verdict !== "match" && job.verdict !== "not_match" && job.verdict !== "mismatch").length;
+  screenSnapshot.value.pending_count = snapshotStatus === "completed_with_pending" ? uncertainCount : 0;
+}
+
+// 双平台合并加载：拉两个平台的 /api/latest-pipeline-result 并合并。
+// 刷新路径（loadLatestResult）与实时任务完成路径（pollTask）共用，
+// 保证两条路径行为一致（R2：实时路径只 set 单平台结果导致切平台显示 0）。
+interface MergedLatestResult {
+  merged: PipelineResult;
+  newer: {
+    platform: "boss" | "zhilian";
+    data: {
+      source_run_id?: string;
+      status?: string;
+      started_at?: number;
+      finished_at?: number;
+      execution_config?: Record<string, unknown> | null;
+      result?: PipelineResult | null;
+    };
+  };
+}
+
+async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
   try {
     // 分别拉两个平台各自的最近结果，合并展示（后端 T409 按平台查询）。
     const base = props.profileId ? `&profile_id=${encodeURIComponent(props.profileId)}` : "";
@@ -1264,13 +1323,13 @@ async function loadLatestResult() {
       execution_config?: Record<string, unknown> | null;
     }>(`/api/latest-pipeline-result?platform=${platform}${base}`).catch(() => null);
     const [bossData, zhilianData] = await Promise.all([fetchOne("boss"), fetchOne("zhilian")]);
-    if (pausedRunId.value || interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
+    if (pausedRunId.value || interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return null;
 
     const parts = [
       bossData?.has_result && bossData.result ? { platform: "boss" as const, data: bossData } : null,
       zhilianData?.has_result && zhilianData.result ? { platform: "zhilian" as const, data: zhilianData } : null,
     ].filter(Boolean) as { platform: "boss" | "zhilian"; data: NonNullable<typeof bossData> }[];
-    if (!parts.length) return;
+    if (!parts.length) return null;
 
     // 每个岗位标记来源 run（单岗位补抓/单 JD 动作需要定位来源）。
     for (const part of parts) {
@@ -1303,38 +1362,10 @@ async function loadLatestResult() {
       total_kept: sum("total_kept"),
       total_dropped: sum("total_dropped"),
     };
-    pipelineResultRunId.value = newer.data.source_run_id || "";
-    setPipelineResult(merged);
-    const ps = (newer.data.result as Record<string, unknown>).profile_summary;
-    if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
-    const snapshotStatus = newer.data.status === "completed_with_pending" ? "completed_with_pending" : "completed";
-    scrapeSnapshot.value = {
-      status: snapshotStatus, stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
-      started_at: newer.data.started_at,
-      finished_at: newer.data.finished_at,
-    };
-    screenSnapshot.value = {
-      status: snapshotStatus, stage: "done", progress: { message: "上次 AI 筛选已完成" }, logs: [],
-      started_at: newer.data.started_at,
-      finished_at: newer.data.finished_at,
-    };
-    const execConfig = newer.data.execution_config || {};
-    scrapeSnapshot.value.execution_config = execConfig;
-    screenSnapshot.value.execution_config = execConfig;
-    screenSnapshot.value.kept_count = Number(merged.total_kept || 0);
-    screenSnapshot.value.dropped_count = Number(merged.total_dropped || 0);
-    const sourceTotal = Number(merged.total_scraped || 0);
-    const stageTotal = snapshotStatus === "completed_with_pending"
-      ? Number(merged.total_kept || 0)
-      : sourceTotal;
-    scrapeSnapshot.value.total = stageTotal || sourceTotal;
-    scrapeSnapshot.value.source_total = sourceTotal;
-    screenSnapshot.value.total = stageTotal || sourceTotal;
-    screenSnapshot.value.source_total = sourceTotal;
-    const uncertainCount = (merged.jobs || []).filter((job) => job.verdict !== "match" && job.verdict !== "not_match" && job.verdict !== "mismatch").length;
-    screenSnapshot.value.pending_count = snapshotStatus === "completed_with_pending" ? uncertainCount : 0;
+    return { merged, newer };
   } catch (error) {
     notify(errorMessage(error, "上次结果暂时无法恢复"), "warning");
+    return null;
   }
 }
 
@@ -1808,7 +1839,6 @@ watch(roundStatusPayload, (payload) => {
         :title="scopeLocked ? '任务进行中，平台已锁定' : undefined"
         @click="setDraftPlatform(platform)"
       >{{ platform === 'boss' ? 'BOSS' : '智联' }}</button>
-      <span v-if="scopeLocked" class="platform-lock-hint" role="status">任务进行中，平台已锁定</span>
     </div>
     <StepNavigator
       :steps="steps"
@@ -2163,6 +2193,7 @@ watch(roundStatusPayload, (payload) => {
           :empty-message="currentEmptyMessage"
           :defer-mobile-detail="Boolean(recrawlSnapshot && recrawlSnapshot.status === 'paused')"
           :platform-filter="resultPlatformFilter"
+          :result-epoch="resultEpoch"
           @update:platform-filter="(value) => { resultPlatformFilter = value; }"
         >
           <template #heading-actions>
