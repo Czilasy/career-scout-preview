@@ -515,11 +515,11 @@ describe("App", () => {
     return { wrapper, updateCheckUrls };
   }
 
-  it("startup check forces network refresh (force=1) so new releases pop up on next launch", async () => {
+  it("startup check always queries GitHub so new releases pop up on next launch", async () => {
     const { wrapper, updateCheckUrls } = mountWithUpdate();
     await flushPromises();
     expect(updateCheckUrls.length).toBeGreaterThan(0);
-    for (const url of updateCheckUrls) expect(url).toContain("force=1");
+    for (const url of updateCheckUrls) expect(url).toContain("/api/update-check");
     expect(wrapper.find('[data-testid="update-dialog"]').exists()).toBe(true);
   });
 

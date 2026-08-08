@@ -3,10 +3,9 @@
 
 流程（quitAndInstall 模式，对齐 Electron autoUpdater 四阶段）：
 
-1. ``check_for_update``：查 GitHub Releases API（latest），与当前版本
-   比较；结果缓存 ``~/.career-scout/update_check.json`` 24h（GitHub
-   API 匿名限流 60 次/小时/IP，不做后台轮询）。启动检查走 ``force``
-   （绕过缓存，网络失败回退缓存），发布新版本后下次打开软件必查必弹。
+1. ``check_for_update``：每次实时查 GitHub Releases API（latest），与
+   当前版本比较；更新检查缓存已关闭，启动和手动检查都会拿到最新发布。
+   ``force``/``state_dir`` 参数保留兼容，不再影响行为。
 2. ``UpdateDownloader.download_async``：后台线程流式下载对应平台资产
    （exe/dmg）到 ``~/.career-scout/downloads/``，进度可查。
 3. ``verify_downloaded``：SHA256 校验（Release 必须附 ``.sha256``
@@ -41,8 +40,6 @@ DEFAULT_STATE_DIR = Path(
     os.environ.get("BOSS_WEBUI_STATE_DIR")
     or os.path.expanduser("~/.career-scout")
 )
-CACHE_FILENAME = "update_check.json"
-CACHE_TTL_SECONDS = 24 * 3600
 DOWNLOAD_TIMEOUT = 10
 _CHUNK_SIZE = 256 * 1024
 # 下载 URL 仅信任 GitHub 官方域，防重定向到任意地址
@@ -108,7 +105,7 @@ class UpdateInfo:
     asset_size: int = 0
     sha256_url: str = ""
     reason: str = ""  # ok=False / 无对应资产时的原因码
-    checked_at: float = 0.0  # 本次检查依据的数据时间（缓存命中时为缓存写入时间）
+    checked_at: float = 0.0  # 本次实时检查完成时间
 
     def to_dict(self) -> dict:
         return {
@@ -148,38 +145,8 @@ def _select_assets(assets: list[dict], update_platform: str) -> tuple[UpdateAsse
 
 
 # ---------------------------------------------------------------------------
-# 检查更新（带 24h 文件缓存）
+# 检查更新（不落盘缓存，每次实时请求 GitHub）
 # ---------------------------------------------------------------------------
-def _cache_path(state_dir: Path | str | None = None) -> Path:
-    base = Path(state_dir) if state_dir else DEFAULT_STATE_DIR
-    return base / CACHE_FILENAME
-
-
-def _read_cache(state_dir: Path | str | None = None) -> dict | None:
-    try:
-        data = json.loads(_cache_path(state_dir).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    try:
-        checked_at = float(data.get("checked_at", 0))
-    except (TypeError, ValueError):
-        return None
-    if time.time() - checked_at > CACHE_TTL_SECONDS:
-        return None
-    return data
-
-
-def _write_cache(payload: dict, state_dir: Path | str | None = None) -> None:
-    path = _cache_path(state_dir)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    except OSError:
-        pass
-
-
 def check_for_update(
     current_version: str,
     *,
@@ -189,21 +156,14 @@ def check_for_update(
 ) -> UpdateInfo:
     """查 GitHub latest release 并与当前版本比较。
 
-    - 24h 内缓存命中且非 force → 直接返回缓存（不计限流）；
-    - force（启动检查）→ 绕过缓存强制网络查，保证发布新版本后下次
-      打开软件必弹；网络失败时回退上次有效缓存，无缓存才静默降级；
-    - 网络/API 失败且无缓存 → ``ok=False, reason="check_failed"``（静默降级）；
+    - 更新检查缓存已关闭：每次调用都实时请求 GitHub latest release；
+      ``force``/``state_dir`` 参数保留兼容，不再影响行为；
+    - 网络/API 失败 → ``ok=False, reason="check_failed"``（启动检查静默降级，
+      手动检查由前端提示）；
     - 当前平台无对应资产 → ``has_update=True`` 但 ``reason="no_asset"``，
       前端引导去 Release 页手动下载。
     """
     update_platform = detect_update_platform()
-    if not force:
-        cached = _read_cache(state_dir)
-        if cached and cached.get("api"):
-            return _build_info(
-                cached["api"], current_version, update_platform,
-                checked_at=float(cached.get("checked_at") or 0.0),
-            )
     getter = fetcher or (lambda: requests.get(
         GITHUB_LATEST_URL, timeout=DOWNLOAD_TIMEOUT,
         headers={"Accept": "application/vnd.github+json"},
@@ -214,20 +174,9 @@ def check_for_update(
         if not isinstance(payload, dict) or "tag_name" not in payload:
             return UpdateInfo(ok=False, current=current_version, reason="check_failed")
     except Exception:
-        # force 模式（启动检查）网络失败时回退上次有效缓存：仍能提示已
-        # 发布的新版本，且不打扰用户；无缓存才静默降级。
-        if force:
-            cached = _read_cache(state_dir)
-            if cached and cached.get("api"):
-                return _build_info(
-                    cached["api"], current_version, update_platform,
-                    checked_at=float(cached.get("checked_at") or 0.0),
-                )
         return UpdateInfo(ok=False, current=current_version, reason="check_failed")
 
-    checked_at = time.time()
-    _write_cache({"checked_at": checked_at, "api": payload}, state_dir)
-    return _build_info(payload, current_version, update_platform, checked_at=checked_at)
+    return _build_info(payload, current_version, update_platform, checked_at=time.time())
 
 
 def _build_info(
@@ -332,7 +281,53 @@ class UpdateDownloader:
         self._state_dir = Path(state_dir) if state_dir else DEFAULT_STATE_DIR
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._last_info: UpdateInfo | None = None
+        self._target: Path | None = None
+        self._expected_sha: str | None = None
         self.state = DownloadState()
+
+    def recover_ready(self, info: UpdateInfo | None = None) -> bool:
+        """复用磁盘上已下载并通过 SHA256 校验的完整安装包。
+
+        下载状态只存在内存里，应用重启后会回到 idle；这里根据最新
+        ``UpdateInfo`` 检查 ``downloads/`` 中是否已有完整包，校验通过后
+        直接恢复为 ready，避免再次下载时 Windows 报目标文件已存在。
+        """
+        if info is None:
+            with self._lock:
+                info = self._last_info
+        if info is None or not info.asset_url or not info.asset_name:
+            return False
+        with self._lock:
+            self._last_info = info
+            if self.state.status in ("downloading", "verifying"):
+                return False
+        target = self.download_dir / info.asset_name
+        if not target.is_file():
+            return False
+        expected = (
+            fetch_expected_sha256(info.sha256_url) if info.sha256_url else None
+        )
+        try:
+            digest = compute_sha256(target)
+            size = target.stat().st_size
+        except OSError:
+            return False
+        if not expected or digest != expected.lower():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            return False
+        with self._lock:
+            if self.state.status in ("downloading", "verifying"):
+                return False
+            self._target = target
+            self._expected_sha = expected.lower()
+            self.state = DownloadState(
+                status="ready", received=size, total=size, path=str(target),
+            )
+        return True
 
     def status(self) -> dict:
         with self._lock:
@@ -350,6 +345,7 @@ class UpdateDownloader:
             if not info.asset_url or not _is_allowed_download_url(info.asset_url):
                 self.state = DownloadState(status="failed", error="invalid_download_url")
                 return False
+            self._last_info = info
             self.state = DownloadState(status="downloading", total=info.asset_size)
             self._expected_sha = expected_sha256
             self._target = self.download_dir / info.asset_name
@@ -377,7 +373,7 @@ class UpdateDownloader:
                             received += len(chunk)
                             with self._lock:
                                 self.state.received = received
-            tmp.rename(self._target)
+            tmp.replace(self._target)
         except Exception as exc:
             with self._lock:
                 self.state = DownloadState(status="failed", error=f"download_failed: {exc}")

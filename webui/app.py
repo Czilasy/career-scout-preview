@@ -7032,18 +7032,22 @@ def create_app(config=None):
 
     @app.route("/api/update-check", methods=["GET"])
     def update_check():
-        force = request.args.get("force", "").lower() in ("1", "true", "yes")
         info = _updater_mod.check_for_update(
-            _product_version, force=force,
+            _product_version,
             state_dir=None if app.config.get("TESTING") else _updater_mod.DEFAULT_STATE_DIR,
         )
-        return jsonify(_update_env_payload(info.to_dict()))
+        payload = _update_env_payload(info.to_dict())
+        # 跨重启后内存状态是 idle：先尝试把磁盘上已下载并通过校验的
+        # 完整安装包恢复为 ready，弹窗打开时可直接重启更新。
+        if payload.get("installable") and info.has_update:
+            app.config["UPDATER"].recover_ready(info)
+        return jsonify(payload)
 
     @app.route("/api/update-download", methods=["POST"])
     def update_download():
         """启动后台下载；仅接受带 sha256 资产的更新（无哈希拒绝）。"""
         info = _updater_mod.check_for_update(
-            _product_version, force=False,
+            _product_version,
             state_dir=None if app.config.get("TESTING") else _updater_mod.DEFAULT_STATE_DIR,
         )
         if not info.has_update:
@@ -7055,7 +7059,10 @@ def create_app(config=None):
         if not info.sha256_url:
             return jsonify({"ok": False, "error_code": "no_sha256",
                             "user_message": "该版本未提供校验文件，为安全起见请到 Release 页手动下载"}), 422
-        started = app.config["UPDATER"].start(info)
+        updater = app.config["UPDATER"]
+        if updater.recover_ready(info):
+            return jsonify({"ok": True, "already": True, **updater.status()})
+        started = updater.start(info)
         if not started:
             status = app.config["UPDATER"].status()
             if status["status"] in ("downloading", "verifying", "ready"):
@@ -7066,6 +7073,7 @@ def create_app(config=None):
 
     @app.route("/api/update-status", methods=["GET"])
     def update_status():
+        app.config["UPDATER"].recover_ready()
         return jsonify({"ok": True, **app.config["UPDATER"].status()})
 
     @app.route("/api/update-restart", methods=["POST"])

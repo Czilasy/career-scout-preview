@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """应用内更新器测试（webui/updater.py）。
 
-覆盖：版本比较、资产选择、检查更新（含 24h 缓存）、SHA256 解析与
-校验、替换脚本生成、下载器 URL 白名单拒绝。网络一律用替身，不联网。
+覆盖：版本比较、资产选择、检查更新（缓存已关闭，每次实时请求）、
+SHA256 解析与校验、下载状态恢复、替换脚本生成、下载器 URL 白名单拒绝。
+网络一律用替身，不联网。
 """
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -76,6 +78,24 @@ class _FakeResponse:
         return self._payload
 
 
+class _FakeDownloadResponse:
+    def __init__(self, content):
+        self._content = content
+        self.headers = {"Content-Length": str(len(content))}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size):
+        yield self._content
+
+
 class CheckUpdateTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -127,7 +147,7 @@ class CheckUpdateTests(unittest.TestCase):
         self.assertFalse(info.ok)
         self.assertEqual(info.reason, "check_failed")
 
-    def test_cache_prevents_second_fetch_within_ttl(self):
+    def test_every_check_fetches_live_without_cache(self):
         calls = []
 
         def fetch():
@@ -137,37 +157,9 @@ class CheckUpdateTests(unittest.TestCase):
         with patch.object(updater, "detect_update_platform", return_value="windows"):
             updater.check_for_update("2.4.0", state_dir=self.state_dir, fetcher=fetch)
             info = updater.check_for_update("2.4.0", state_dir=self.state_dir, fetcher=fetch)
-        self.assertEqual(len(calls), 1, "24h 内第二次检查应命中缓存")
+        self.assertEqual(len(calls), 2, "缓存已关闭，每次检查都应实时请求 GitHub")
         self.assertTrue(info.has_update)
-
-    def test_force_bypasses_cache(self):
-        calls = []
-
-        def fetch():
-            calls.append(1)
-            return _FakeResponse(self._api_payload())
-
-        with patch.object(updater, "detect_update_platform", return_value="windows"):
-            updater.check_for_update("2.4.0", state_dir=self.state_dir, fetcher=fetch)
-            updater.check_for_update("2.4.0", state_dir=self.state_dir, force=True, fetcher=fetch)
-        self.assertEqual(len(calls), 2)
-
-    def test_force_failure_falls_back_to_cache(self):
-        def broken():
-            raise OSError("network down")
-
-        with patch.object(updater, "detect_update_platform", return_value="windows"):
-            updater.check_for_update(
-                "2.4.0", state_dir=self.state_dir,
-                fetcher=lambda: _FakeResponse(self._api_payload()),
-            )
-            info = updater.check_for_update(
-                "2.4.0", state_dir=self.state_dir, force=True, fetcher=broken,
-            )
-        # 启动检查（force）断网时回退上次有效缓存，仍能提示已发布的新版本
-        self.assertTrue(info.ok)
-        self.assertTrue(info.has_update)
-        self.assertEqual(info.latest, "9.9.9")
+        self.assertFalse((self.state_dir / "update_check.json").exists())
 
     def test_force_failure_without_cache_degrades_silently(self):
         def broken():
@@ -237,6 +229,73 @@ class DownloaderTests(unittest.TestCase):
         d.state.status = "downloading"
         info = updater.UpdateInfo(asset_url="https://github.com/x.exe")
         self.assertFalse(d.start(info))
+
+    def test_download_run_overwrites_existing_target(self):
+        d = updater.UpdateDownloader(state_dir=tempfile.mkdtemp())
+        info = updater.UpdateInfo(
+            asset_name="CareerScout-v2.5.0.exe",
+            asset_url="https://github.com/x/x.exe",
+            sha256_url="https://github.com/x/x.sha256",
+        )
+        target = d.download_dir / info.asset_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"old")
+        content = b"career-scout"
+        d._target = target
+        d._expected_sha = hashlib.sha256(content).hexdigest()
+        d.state.total = len(content)
+        with patch.object(updater.requests, "get",
+                          return_value=_FakeDownloadResponse(content)):
+            d._run(info)
+        self.assertEqual(d.status()["status"], "ready")
+        self.assertEqual(target.read_bytes(), content)
+
+
+class DownloaderRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.downloader = updater.UpdateDownloader(state_dir=Path(self._tmp.name))
+        self.info = updater.UpdateInfo(
+            asset_name="CareerScout-v2.5.0.exe",
+            asset_url="https://github.com/Czilasy/career-scout-preview/releases/download/v2.5.0/CareerScout-v2.5.0.exe",
+            sha256_url="https://github.com/Czilasy/career-scout-preview/releases/download/v2.5.0/CareerScout-v2.5.0.exe.sha256",
+        )
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _target(self):
+        return self.downloader.download_dir / self.info.asset_name
+
+    def test_recover_ready_accepts_verified_existing_file(self):
+        target = self._target()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"career-scout")
+        digest = hashlib.sha256(b"career-scout").hexdigest()
+        with patch.object(updater, "fetch_expected_sha256", return_value=digest):
+            self.assertTrue(self.downloader.recover_ready(self.info))
+        status = self.downloader.status()
+        self.assertEqual(status["status"], "ready")
+        self.assertEqual(status["path"], str(target))
+        self.assertEqual(status["received"], 12)
+
+    def test_recover_ready_rejects_missing_file(self):
+        with patch.object(updater, "fetch_expected_sha256", return_value="a" * 64):
+            self.assertFalse(self.downloader.recover_ready(self.info))
+
+    def test_recover_ready_deletes_mismatched_file(self):
+        target = self._target()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"tampered")
+        with patch.object(updater, "fetch_expected_sha256", return_value="a" * 64):
+            self.assertFalse(self.downloader.recover_ready(self.info))
+        self.assertFalse(target.exists())
+
+    def test_recover_ready_skips_active_download(self):
+        self.downloader.state.status = "downloading"
+        with patch.object(updater, "fetch_expected_sha256", return_value="a" * 64):
+            self.assertFalse(self.downloader.recover_ready(self.info))
+        self.assertEqual(self.downloader.status()["status"], "downloading")
 
 
 class UpdaterScriptTests(unittest.TestCase):

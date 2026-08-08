@@ -120,7 +120,7 @@ npm run build
 
 ## 应用内更新（v2.5.0 起）
 
-桌面版内置检查更新：启动时查 GitHub latest release（24h 缓存），
+桌面版内置检查更新：启动时实时查 GitHub latest release（更新检查缓存已关闭），
 发现新版顶栏提示 → 应用内下载（进度条 + SHA256 强制校验）→
 点「立即重启完成更新」自动替换并拉起新版（quitAndInstall 模式）。
 

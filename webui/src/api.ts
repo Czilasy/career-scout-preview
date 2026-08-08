@@ -199,10 +199,8 @@ export interface UpdateProgress {
 }
 
 export const updateApi = {
-  check(force = false) {
-    return apiRequest<UpdateCheckResult>(
-      `/api/update-check${force ? "?force=1" : ""}`,
-    );
+  check() {
+    return apiRequest<UpdateCheckResult>("/api/update-check");
   },
   download() {
     return apiRequest<UpdateProgress>("/api/update-download", { method: "POST" });

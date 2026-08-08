@@ -125,7 +125,7 @@ onMounted(async () => {
       : profiles.value[0]?.id || "";
     // 顶栏收藏徽标随首屏加载展示，不必等用户先打开过面板。
     void loadFavorites();
-    // 检查更新：仅桌面版后台静默执行，失败不打扰（后端 24h 缓存）
+    // 检查更新：仅桌面版后台静默执行，失败不打扰（更新缓存已关闭，始终实时检查）
     if (updatesEnabled.value) void checkAppUpdate();
   } catch (error) {
     showNotice({ message: errorMessage(error, "WebUI 初始化失败"), tone: "error" });
@@ -152,9 +152,9 @@ function ignoredUpdateVersion(): string {
 
 async function checkAppUpdate() {
   try {
-    // force=1 绕过后端 24h 缓存：发布新版本后用户下次打开软件必弹。
-    // 网络失败时后端回退上次有效缓存；无缓存/限流仍静默，更新不是关键路径。
-    const result = await updateApi.check(true);
+    // 更新检查缓存已关闭：每次启动都会实时请求 GitHub，发布新版本后下次必弹。
+    // 网络失败仍静默，更新提示不是关键路径。
+    const result = await updateApi.check();
     if (result?.ok && result.has_update) {
       updateInfo.value = result;
       // 首次发现新版本自动弹出；用户忽略过该版本则只保留红点入口。
@@ -179,10 +179,10 @@ function ignoreThisVersion() {
   updateDialogOpen.value = false;
 }
 
-// 手动检查更新：绕过 24h 缓存（force=1），无更新时给出明确反馈。
+// 手动检查更新：始终实时请求 GitHub latest release，无更新时给出明确反馈。
 async function manualCheckUpdate() {
   try {
-    const result = await updateApi.check(true);
+    const result = await updateApi.check();
     if (result?.ok && result.has_update) {
       updateInfo.value = result;
       updateDialogOpen.value = true;
