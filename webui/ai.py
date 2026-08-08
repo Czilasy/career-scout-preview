@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import subprocess
 import time
 import uuid
@@ -275,6 +276,7 @@ def _windows_schannel_post(
             capture_output=True,
             timeout=max(1, int(timeout_seconds)) + 10,
             check=False,
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
         )
     except subprocess.TimeoutExpired:
         raise requests.Timeout("Schannel fallback timed out") from None
@@ -893,19 +895,29 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
 UNIFIED_SEARCH_FIELDS = ("keyword", "city", "salary", "experience", "degree", "industry", "scale", "stage")
 
 
-def _build_field_options_prompt() -> str:
-    """Build a prompt fragment listing all valid values for each filter field."""
+
+RESUME_SENTINEL_LABELS = frozenset({"不限", "全部"})
+
+def _resume_platform_registry(platform: str):
+    """读取平台注册项；缺失时由调用方映射为 platform_schema_unavailable。"""
+    from webui.platforms import get_platform
+    return get_platform(platform)
+
+
+def _build_field_options_prompt(platform: str) -> str:
+    """按平台 schema 构建简历分析提示词：列出当前平台允许的标签与稳定代码。"""
+    reg = _resume_platform_registry(platform)
+    schema = reg.filter_schema
     lines = []
     lines.append("keyword: 候选搜索关键词数组,约10个,覆盖不同岗位方向,格式 [{\"word\":\"Python后端\",\"recommended\":true},...],其中2-3个 recommended=true")
-    lines.append(f"city: 城市名,必须是以下之一: {', '.join(list(boss.CITY_MAP.keys())[:50])}...等")
-    lines.append(f"salary: 薪资段代码,可选值: {json.dumps(boss.SALARY_MAP, ensure_ascii=False)}")
-    lines.append(f"experience: 经验要求代码,可选值: {json.dumps(boss.EXPERIENCE_MAP, ensure_ascii=False)}")
-    lines.append(f"degree: 学历代码,可选值: {json.dumps(boss.DEGREE_MAP, ensure_ascii=False)}")
-    lines.append(f"industry: 行业代码,可选值: {json.dumps(boss.INDUSTRY_MAP, ensure_ascii=False)}")
-    lines.append(f"scale: 公司规模代码,可选值: {json.dumps(boss.SCALE_MAP, ensure_ascii=False)}")
-    lines.append(f"stage: 融资阶段代码,可选值: {json.dumps(boss.STAGE_MAP, ensure_ascii=False)}")
+    city_names = [e.name for e in reg.city_catalog.entries]
+    lines.append(f"city: 城市名,必须是以下之一: {', '.join(city_names[:80])}...等")
+    for field in schema.fields:
+        options = {
+            opt.label: opt.value for opt in field.options if opt.label not in RESUME_SENTINEL_LABELS
+        }
+        lines.append(f"{field.key}: {field.label}可选值(JSON对象,标签=代码): {json.dumps(options, ensure_ascii=False)}")
     return "\n".join(lines)
-
 
 def _resume_bytes_to_text(file_bytes: bytes, fmt: str) -> str:
     """Convert resume file bytes to plain text for transport to the AI API.
@@ -933,16 +945,16 @@ def _resume_bytes_to_text(file_bytes: bytes, fmt: str) -> str:
 
 def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
                              api_key: str, model: str = "",
-                             timeout: int = DEFAULT_TIMEOUT) -> dict:
+                             platform: str = "boss", timeout: int = DEFAULT_TIMEOUT) -> dict:
     """Convert a resume (TXT/PDF/DOCX) to text and extract unified search fields.
 
     The resume is converted to plain text (transport preparation only), then
     sent directly as the user message.  The AI reads the content and outputs
     fields that map 1:1 to the scraper's CLI parameters.
 
-    Returns a dict with keys: keyword, city, salary, experience, degree,
-    industry, scale, stage.  Each value is validated against the script's
-    enum maps; invalid values are coerced to empty string.
+    Returns a dict with keyword/city plus the platform schema's filter fields.
+    Each value is projected to the platform's stable codes; invalid values
+    are dropped.
 
     Raises :class:`AISecurityError` on transport/auth/parse failures.
     """
@@ -950,7 +962,7 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
     if not resume_text:
         raise ValueError("简历内容为空")
 
-    field_options = _build_field_options_prompt()
+    field_options = _build_field_options_prompt(platform)
     system_prompt = (
         "你是简历分析助手。阅读用户的简历内容，提取求职搜索参数。\n"
         "严格按以下字段输出JSON，每个字段的值必须是对应可选值之一：\n"
@@ -963,9 +975,9 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
         "- experience: 从工作年限/毕业时间推断\n"
         "- degree: 从最高学历推断\n"
         "- industry: 从行业经历/求职意向推断\n"
-        "- scale/stage: 从简历中对公司规模的偏好推断，无法确定则留空字符串\n"
+        "- 平台 schema 中的筛选字段（含融资阶段/公司性质等专属字段）：从简历推断，无法确定则留空字符串\n"
         "- 无法从简历确定的字段一律返回空字符串，禁止编造\n"
-        "- 代码值必须精确匹配可选值中的代码(如'405'而非'10-20K')\n"
+        "- 每个筛选字段输出可选值中的标签或代码均可；最终会被映射为平台稳定代码\n"
         "- profile_summary: 用2-3句话概括候选人画像，须包含：工作年限/应届与否、"
         "求职类型(全职/实习)、目标岗位方向、核心技能。供后续判断岗位是否匹配时使用，"
         "要具体、贴合简历，不要空话套话"
@@ -977,21 +989,19 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
     ]
 
     data = call_ai(endpoint_url, api_key, messages, timeout=timeout, model=model)
-    result = _validate_unified_fields(data)
+    result = _validate_unified_fields(data, platform)
     # profile_summary 是自由文本，不参与枚举校验，验证后附加返回
     summary = data.get("profile_summary", "") if isinstance(data, dict) else ""
     result["profile_summary"] = str(summary).strip()
     return result
 
 
-def _validate_unified_fields(data) -> dict:
-    """Validate AI/user fields against the script's enum maps.
+def _validate_unified_fields(data, platform: str = "boss") -> dict:
+    """Validate AI/user fields against the requested platform schema.
 
-    Supports multi-select: ``city`` is split on Chinese/English commas and
-    each city is validated; enum fields accept a single value or a list and
-    return a validated list of codes.  Invalid values are dropped so the
-    downstream script simply skips them.  ``keyword`` stays a free-text
-    string.
+    Supports multi-select: ``city`` is validated against the platform city
+    catalog; filter fields accept a stable code or Chinese label and return
+    the platform's stable codes.  Invalid and sentinel values are dropped.
     """
     if not isinstance(data, dict):
         raise AISecurityError(ERROR_INVALID)
@@ -1025,26 +1035,31 @@ def _validate_unified_fields(data) -> dict:
         city_parts = [str(c).strip() for c in city]
     else:
         city_parts = str(city).replace("，", ",").split(",")
-    cities = [c.strip() for c in city_parts if c.strip() in boss.CITY_MAP]
+    reg = _resume_platform_registry(platform)
+    cities = [
+        c.strip() for c in city_parts if reg.city_catalog.find(c.strip())
+    ]
     result["city"] = cities
 
-    # Enum code fields: accept single value or list, validate each code
-    enum_fields = {
-        "salary": boss.SALARY_MAP,
-        "experience": boss.EXPERIENCE_MAP,
-        "degree": boss.DEGREE_MAP,
-        "industry": boss.INDUSTRY_MAP,
-        "scale": boss.SCALE_MAP,
-        "stage": boss.STAGE_MAP,
-    }
-    for field, mapping in enum_fields.items():
-        val = data.get(field, "")
+    # Filter fields: accept stable code or Chinese label, map to platform code.
+    for field in reg.filter_schema.fields:
+        val = data.get(field.key, "")
         if isinstance(val, list):
             parts = [str(v).strip() for v in val]
         else:
             parts = [str(val).strip()] if str(val).strip() else []
-        valid_codes = set(mapping.values())
-        result[field] = [v for v in parts if v in valid_codes]
+        label_to_code = {
+            opt.label: opt.value for opt in field.options
+            if opt.label not in RESUME_SENTINEL_LABELS
+        }
+        code_set = set(label_to_code.values())
+        mapped = []
+        for part in parts:
+            if part in code_set:
+                mapped.append(part)
+            elif part in label_to_code:
+                mapped.append(label_to_code[part])
+        result[field.key] = mapped
 
     return result
 

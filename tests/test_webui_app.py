@@ -4947,6 +4947,78 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         data = resp.get_json()
         self.assertEqual(data.get("error_code"), "platform_validation_failed")
 
+    def test_analyze_resume_boss_projects_stage_and_common_fields(self):
+        """BOSS 简历分析返回 stage 语义，不出现 company_nature。"""
+        import io
+        from webui import app as app_module
+        fields = {
+            "keyword": [{"word": "Python 后端", "recommended": True}],
+            "city": ["上海"], "salary": ["406"], "experience": ["105"],
+            "degree": ["203"], "industry": ["1001"], "scale": ["303"],
+            "stage": ["804"], "profile_summary": "3年Python后端", "company_nature": ["1"],
+        }
+        store = self.app.config["TASK_STORE"]
+        with mock.patch.object(store, "get_ai_settings", return_value={
+            "is_configured": True, "endpoint_url": "https://api.example.com", "model": "test",
+        }), mock.patch.object(store, "get_credential_ref", return_value="ref"), \
+                mock.patch.object(app_module.ai_service, "retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.analyze_resume_to_fields", return_value=fields):
+            resp = self.client.post(
+                "/api/analyze-resume",
+                data={"file": (io.BytesIO(b"resume"), "resume.txt"), "platform": "boss"},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["platform"], "boss")
+        self.assertNotIn("company_nature", data["fields"])
+        self.assertEqual(data["fields"]["stage"], ["804"])
+        self.assertEqual(data["semantic"]["stage"], ["B轮"])
+        self.assertEqual(data["semantic"]["experience"], ["3-5年"])
+        self.assertNotIn("company_nature", data["semantic"])
+
+    def test_analyze_resume_zhilian_projects_company_nature_and_drops_stage(self):
+        """智联简历分析返回 company_nature 语义，不出现 stage。"""
+        import io
+        from webui import app as app_module
+        fields = {
+            "keyword": [{"word": "Python 后端", "recommended": True}],
+            "city": ["上海"], "salary": [], "experience": ["0305"], "degree": ["4"],
+            "industry": [], "scale": [], "company_nature": ["1"], "stage": ["804"],
+            "profile_summary": "3年Python后端",
+        }
+        store = self.app.config["TASK_STORE"]
+        with mock.patch.object(store, "get_ai_settings", return_value={
+            "is_configured": True, "endpoint_url": "https://api.example.com", "model": "test",
+        }), mock.patch.object(store, "get_credential_ref", return_value="ref"), \
+                mock.patch.object(app_module.ai_service, "retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.analyze_resume_to_fields", return_value=fields):
+            resp = self.client.post(
+                "/api/analyze-resume",
+                data={"file": (io.BytesIO(b"resume"), "resume.txt"), "platform": "zhilian"},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["platform"], "zhilian")
+        self.assertNotIn("stage", data["fields"])
+        self.assertEqual(data["fields"]["company_nature"], ["1"])
+        self.assertEqual(data["semantic"]["company_nature"], ["国企"])
+        self.assertNotIn("stage", data["semantic"])
+
+    def test_analyze_resume_unknown_platform_returns_400(self):
+        """简历分析未知平台在调用 AI 前返回 platform_validation_failed。"""
+        import io
+        with mock.patch("webui.ai.analyze_resume_to_fields") as analyze:
+            resp = self.client.post(
+                "/api/analyze-resume",
+                data={"file": (io.BytesIO(b"resume"), "resume.txt"), "platform": "unknown"},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.get_json().get("error_code"), "platform_validation_failed")
+        analyze.assert_not_called()
+
     # -- /api/filter-labels -------------------------------------------
 
     def test_filter_labels_without_platform_keeps_legacy_shape(self):

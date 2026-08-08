@@ -8,6 +8,7 @@ import {
   filterPipelineResultByPlatform,
   normalizeScopePreview,
   partitionPipelineResult,
+  projectResumeSuggestionToSchema,
   recoverSelectionSettings,
   type PipelineResult,
 } from "../discovery";
@@ -79,6 +80,25 @@ describe("discovery helpers", () => {
     };
 
     expect(normalizeScopePreview(response)).toEqual(response.scope);
+  });
+
+  it("projects resume semantic labels into the target platform schema", () => {
+    const zhilianSchema: PlatformFilterSchema = {
+      ok: true, platform: "zhilian", schema_version: 2, enabled_for_new_tasks: true,
+      fields: [
+        { key: "experience", label: "经验要求", multiple: true, options: [{ value: "0305", label: "3-5年" }] },
+        { key: "company_nature", label: "公司性质", multiple: true, options: [{ value: "1", label: "国企" }] },
+      ],
+    };
+    const projected = projectResumeSuggestionToSchema(
+      { experience: ["3-5年"], company_nature: ["国企"], stage: ["B轮"] },
+      zhilianSchema,
+    );
+    expect(projected).toEqual({
+      experience: ["0305"],
+      company_nature: ["1"],
+    });
+    expect(projected.stage).toBeUndefined();
   });
 
   it("restores all execution custom fields including pages", () => {

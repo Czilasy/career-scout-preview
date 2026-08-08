@@ -71,7 +71,7 @@ describe("DiscoveryView paused AI recovery", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
 
-    expect(wrapper.get('[aria-expanded]').attributes("aria-expanded")).toBe("false");
+    expect(wrapper.get('[aria-expanded]').attributes("aria-expanded")).toBe("true");
     const resumeButton = wrapper.get('[data-testid="resume-ai-screen"]');
     expect(resumeButton.attributes("disabled")).toBeUndefined();
     expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("AI 接口限流");
@@ -280,6 +280,26 @@ describe("TaskProgress canonical terminal states", () => {
 describe("TaskProgress smooth progression and grouped counts", () => {
   afterEach(() => vi.useRealTimers());
 
+  it("shows a spinning circle while running and stops at a terminal state", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: {
+          status: "running",
+          progress: { stage: "searching", current: 1, total: 5 },
+        },
+      },
+    });
+    expect(wrapper.find(".task-status .spin").exists()).toBe(true);
+
+    await wrapper.setProps({
+      snapshot: { status: "completed", progress: { stage: "done", overall_percent: 100 } },
+    });
+    await flushPromises();
+    expect(wrapper.find(".task-status .spin").exists()).toBe(false);
+  });
+
   it("creeps forward during fetch_jd plateau even when real counts stay still", async () => {
     // 第二版逐帧驱动：mock Date + requestAnimationFrame + setInterval，让 RAF 在假时间线里跑
     vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
@@ -314,7 +334,7 @@ describe("TaskProgress smooth progression and grouped counts", () => {
     expect(after).toBeGreaterThan(before);
   });
 
-  it("stays below stage end after exceeding estimated duration", async () => {
+  it("keeps moving after work-unit estimated duration is exceeded", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
     const baseTime = new Date("2026-08-03T00:00:00.000Z").getTime();
     vi.setSystemTime(baseTime);
@@ -335,13 +355,18 @@ describe("TaskProgress smooth progression and grouped counts", () => {
     });
     await flushPromises();
 
-    // 推进 310 秒（超过 fetch_jd 预估时长 300 秒）：真实计数没变，百分比不应到达阶段 end 65，
-    // 最多停在软上限附近（fetch_jd 软上限 = 24 + (65-24) × 0.88 ≈ 60）
+    // 57 个岗位按工作量换算 fetch_jd 预估约 134 秒；310 秒后真实计数仍没变，
+    // 进度必须继续微动且不到完成 100%。
     vi.advanceTimersByTime(310_000);
     await flushPromises();
 
-    const pct = Number(wrapper.get(".task-percentage").text().replace("%", ""));
-    expect(pct).toBeLessThan(65);
+    const before = Number(wrapper.get(".task-percentage").text().replace("%", ""));
+
+    vi.advanceTimersByTime(10_000);
+    await flushPromises();
+    const after = Number(wrapper.get(".task-percentage").text().replace("%", ""));
+    expect(after).toBeGreaterThan(before);
+    expect(after).toBeLessThan(100);
   });
 
   it("chases to stage end when real counts complete", async () => {
@@ -399,6 +424,27 @@ describe("TaskProgress smooth progression and grouped counts", () => {
     });
     // 区间 10→90，1/5 已完成 → 26%，不能因为 combo_done 被当非进度阶段而停在 10%。
     expect(wrapper.get(".task-percentage").text()).toBe("26%");
+  });
+
+  it("derives scrape counts from completed combinations instead of screen counters", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: {
+          status: "running",
+          total: 2,
+          success_count: 0,
+          unstarted_count: 2,
+          progress: { stage: "searching", current: 2, total: 2 },
+        },
+      },
+    });
+
+    const text = wrapper.get('[data-testid="task-counts"]').text();
+    expect(text).toContain("已完成 1 / 2");
+    expect(text).toContain("进行中 1");
+    expect(text).toContain("未开始 0");
+    expect(text).not.toContain("已完成 0 / 2");
   });
 
   it("falls back to snapshot stage when progress payload omits stage", () => {

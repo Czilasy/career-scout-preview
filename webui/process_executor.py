@@ -145,6 +145,7 @@ class ScraperExecutor:
                 subprocess.run(
                     ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
                     timeout=5, check=False,
                 )
             except (subprocess.TimeoutExpired, OSError):

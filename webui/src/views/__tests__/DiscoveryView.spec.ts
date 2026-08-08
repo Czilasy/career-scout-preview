@@ -1322,7 +1322,7 @@ describe("DiscoveryView", () => {
     }
   });
 
-  it("search panels are collapsed by default, toggle together, and collapse on start", async () => {
+  it("search panels are expanded by default, toggle together, and collapse on start", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
@@ -1355,21 +1355,21 @@ describe("DiscoveryView", () => {
     const keywordCard = ".search-layout > .collapsible-card:first-child";
     const advancedCard = ".advanced-panel";
 
-    // ① 默认收拢
-    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(false);
-    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(false);
-
-    // ② 点任意卡头：两卡联动展开
-    await wrapper.get(`${keywordCard} .collapsible-header`).trigger("click");
-    await flushPromises();
+    // ① 默认展开
     expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(true);
     expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(true);
 
-    // ③ 点另一卡头：两卡联动收起
-    await wrapper.get(`${advancedCard} .collapsible-header`).trigger("click");
+    // ② 点任意卡头：两卡联动收起
+    await wrapper.get(`${keywordCard} .collapsible-header`).trigger("click");
     await flushPromises();
     expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(false);
     expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(false);
+
+    // ③ 点另一卡头：两卡联动展开
+    await wrapper.get(`${advancedCard} .collapsible-header`).trigger("click");
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(true);
+    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(true);
 
     // ④ 重新展开、配置关键词城市、开始抓取：自动收拢
     await wrapper.get(`${keywordCard} .collapsible-header`).trigger("click");
@@ -1383,6 +1383,271 @@ describe("DiscoveryView", () => {
     expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(false);
     expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(false);
 
+    vi.unstubAllGlobals();
+  });
+  it("B008: opens screen filter card without a result and collapses after AI screening starts", async () => {
+    const settings = {
+      pages: 3, inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+      detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+      screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({ ok: true, scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:b008" }, deduplicated: { keywords: ["python"], cities: ["上海"] } });
+      }
+      if (url.endsWith("/api/execute-search")) return response({ ok: true, task_id: "scrape-b008" });
+      if (url.includes("/api/task-state/scrape-b008")) return response({ status: "completed", progress: {}, logs: [] });
+      if (url.endsWith("/api/ai-screen")) return new Promise<Response>(() => { /* noop */ });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
+    await flushPromises();
+    const screenCard = ".workflow-stack > .collapsible-card";
+    expect(wrapper.find(`${screenCard} .collapsible-body.open`).exists()).toBe(true);
+    await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find(`${screenCard} .collapsible-body.open`).exists()).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it("B008: keeps screen filter card collapsed when returning from an existing result page", async () => {
+    const settings = {
+      pages: 3, inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+      detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+      screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) {
+        return response({
+          ok: true, has_result: true, source_run_id: "run-b008", status: "completed",
+          result: { jobs: [{ job_id: "j-1", title: "岗位", company: "公司", verdict: "match" }], total_kept: 1, total_dropped: 0 },
+        });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("广泛抓取"))!.trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
+    await flushPromises();
+    const screenCard = ".workflow-stack > .collapsible-card";
+    expect(wrapper.find(`${screenCard} .collapsible-body.open`).exists()).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it("B009/B011: re-projects resume suggestions to zhilian and renders Chinese chips", async () => {
+    const settings = {
+      pages: 3, inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+      detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+      screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+    };
+    const bossSchemaRich = {
+      ok: true, platform: "boss", schema_version: 1, enabled_for_new_tasks: true,
+      fields: [
+        { key: "experience", label: "经验要求", multiple: true, options: [{ value: "105", label: "3-5年" }] },
+        { key: "stage", label: "融资阶段", multiple: true, options: [{ value: "804", label: "B轮" }] },
+      ],
+    };
+    const zhilianSchemaRich = {
+      ok: true, platform: "zhilian", schema_version: 2, enabled_for_new_tasks: true,
+      fields: [
+        { key: "experience", label: "经验要求", multiple: true, options: [{ value: "0305", label: "3-5年" }] },
+        { key: "company_nature", label: "公司性质", multiple: true, options: [{ value: "1", label: "国企" }] },
+      ],
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) {
+        return response(url.includes("platform=zhilian") ? zhilianSchemaRich : bossSchemaRich);
+      }
+      if (url.includes("/api/options")) {
+        const platform = url.includes("platform=zhilian") ? "zhilian" : "boss";
+        return response({ ok: true, platform, city_mapping_version: 1, cities: [] });
+      }
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/analyze-resume")) {
+        return response({
+          ok: true, platform: "boss", filter_schema_version: 1,
+          fields: { keyword: [{ word: "Python 后端", recommended: true }], city: ["上海"], experience: ["105"], stage: ["804"], company_nature: ["1"], profile_summary: "3年Python后端" },
+          semantic: { experience: ["3-5年"], stage: ["B轮"], company_nature: ["国企"] },
+          labels: {},
+        });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({ ok: true, scope: { keywords: ["Python 后端"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:zhilian-b009" }, deduplicated: { keywords: ["python 后端"], cities: ["上海"] } });
+      }
+      if (url.endsWith("/api/execute-search")) {
+        const body = JSON.parse(String(init?.body));
+        expect(body.platform).toBe("zhilian");
+        expect(body.scope_digest).toBe("sha256:zhilian-b009");
+        return response({ ok: true, task_id: "scrape-zhilian-b009" });
+      }
+      if (url.includes("/api/task-state/scrape-zhilian-b009")) return response({ status: "completed", progress: {}, logs: [] });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    const file = new File(["resume"], "resume.txt", { type: "text/plain" });
+    Object.defineProperty(wrapper.get('[data-testid="resume-input"]').element, "files", { value: [file], configurable: true });
+    await wrapper.get('[data-testid="resume-input"]').trigger("change");
+    await wrapper.get('[data-testid="resume-consent"]').setValue(true);
+    await wrapper.get('[data-testid="analyze-resume"]').trigger("click");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="platform-segment-zhilian"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
+    await flushPromises();
+    const chipsText = wrapper.get(".summary-chips").text();
+    expect(wrapper.get('[data-testid="platform-segment-boss"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("disabled")).toBeDefined();
+    expect(chipsText).toContain("经验要求: 3-5年");
+    expect(chipsText).toContain("公司性质: 国企");
+    expect(chipsText).not.toContain("融资阶段");
+    expect(chipsText).not.toContain("105");
+    expect(chipsText).not.toContain("0305");
+    vi.unstubAllGlobals();
+  });
+
+  it("B007: confirms before discarding a completed scrape that has not entered AI screening", async () => {
+    const settings = {
+      pages: 3, inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+      detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+      screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+    };
+    let scrapeCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        const body = JSON.parse(String(init?.body));
+        const digest = body.platform === "zhilian" ? "sha256:zhilian-fresh" : "sha256:boss-round";
+        return response({ ok: true, scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: digest }, deduplicated: { keywords: ["python"], cities: ["上海"] } });
+      }
+      if (url.endsWith("/api/execute-search")) {
+        scrapeCount += 1;
+        const body = JSON.parse(String(init?.body));
+        if (scrapeCount === 1) {
+          expect(body.platform).toBe("boss");
+          expect(body.scope_digest).toBe("sha256:boss-round");
+          return response({ ok: true, task_id: "scrape-boss-round" });
+        }
+        expect(body.platform).toBe("zhilian");
+        expect(body.scope_digest).toBe("sha256:zhilian-fresh");
+        return response({ ok: true, task_id: "scrape-zhilian-fresh" });
+      }
+      if (url.includes("/api/task-state/scrape-boss-round")) return response({ status: "completed", progress: {}, logs: [] });
+      if (url.includes("/api/task-state/scrape-zhilian-fresh")) return response({ status: "completed", progress: {}, logs: [] });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="platform-segment-zhilian"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="platform-switch-confirm"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="cancel-platform-switch"]').trigger("click");
+    expect(wrapper.find('[data-testid="platform-switch-confirm"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="platform-segment-zhilian"]').trigger("click");
+    await wrapper.get('[data-testid="confirm-platform-switch"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="platform-current-zhilian"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(true);
+    expect(scrapeCount).toBe(2);
+    vi.unstubAllGlobals();
+  });
+
+  it("B007: locks platform switching on the results page", async () => {
+    const settings = {
+      pages: 3, inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+      detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+      screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) {
+        return response({ ok: true, has_result: true, source_run_id: "run-results", status: "completed", result: { jobs: [], total_kept: 0, total_dropped: 0 } });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("查看结果"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="platform-segment-boss"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("disabled")).toBeDefined();
     vi.unstubAllGlobals();
   });
 

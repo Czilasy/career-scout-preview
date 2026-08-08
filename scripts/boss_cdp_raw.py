@@ -19,7 +19,7 @@ BOSS直聘职位抓取 + 分析 — 纯 CDP raw protocol
   uv run python3 scripts/boss_cdp_raw.py --version
 """
 
-__version__ = "2.8.3"
+__version__ = "2.8.4"
 
 import json
 import time
@@ -3033,6 +3033,7 @@ def iter_chrome_process_commands():
             r = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps_script],
                 capture_output=True, encoding="utf-8", errors="replace", timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except Exception:
             return []
@@ -3111,7 +3112,10 @@ def terminate_process(pid, force=False):
         cmd = ["taskkill", "/PID", str(pid), "/T"]
         if force:
             cmd.append("/F")
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
         return
     os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
 

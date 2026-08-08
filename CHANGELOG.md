@@ -2,6 +2,12 @@
 
 本文件记录 Career Scout 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.8.4] - 2026-08-08
+
+修复：
+- 修复抓取组合进度与实际执行状态不一致的问题
+- 切换平台前提示未进行 AI 筛选的抓取任务不会保存
+
 ## [2.8.3] - 2026-08-08
 
 修复：

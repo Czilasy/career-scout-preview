@@ -884,6 +884,8 @@ class ChromeSetupTests(unittest.TestCase):
 
     def test_windows_process_parsing_matches_user_data_dir_and_cdp_port(self):
         module = load_module()
+        if not hasattr(module.subprocess, "CREATE_NO_WINDOW"):
+            self.skipTest("仅 Windows 有 CREATE_NO_WINDOW 语义")
         ps_json = json.dumps([{
             "ProcessId": 456,
             "CommandLine": (

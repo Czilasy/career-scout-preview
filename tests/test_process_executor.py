@@ -206,6 +206,24 @@ class CancelProcessTreeTests(unittest.TestCase):
         self.assertTrue(flags & _sp.CREATE_NO_WINDOW,
                         "必须抑制控制台窗口（0x08000000）")
 
+    def test_windows_taskkill_suppresses_console_window(self):
+        """Windows 整树终止 taskkill 必须带 CREATE_NO_WINDOW（不闪空白 CMD）。"""
+        if os.name != "nt":
+            self.skipTest("仅 Windows 有 creationflags 语义")
+        import subprocess as _sp
+
+        process = unittest.mock.Mock()
+        process.pid = 12345
+        process.poll.return_value = None
+        process.wait.return_value = None
+        process.kill.return_value = None
+        with unittest.mock.patch("webui.process_executor.subprocess.run") as run:
+            ScraperExecutor._terminate_tree(process)
+        self.assertEqual(run.call_args.args[0][0], "taskkill")
+        flags = int(run.call_args.kwargs.get("creationflags", 0))
+        self.assertTrue(flags & _sp.CREATE_NO_WINDOW,
+                        "taskkill 必须抑制控制台窗口（0x08000000）")
+
 
 if __name__ == "__main__":
     unittest.main()

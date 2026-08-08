@@ -33,6 +33,7 @@ import {
   filterPipelineResultByPlatform,
   normalizeScopePreview,
   partitionPipelineResult,
+  projectResumeSuggestionToSchema,
 } from "../discovery";
 import type { PipelineResult } from "../discovery";
 import type {
@@ -56,6 +57,9 @@ interface AnalyzeResponse {
   ok: boolean;
   fields: Record<string, unknown>;
   labels: Record<string, FieldLabel>;
+  platform?: Platform;
+  filter_schema_version?: number;
+  semantic?: Record<string, string[]>;
 }
 
 interface TaskSnapshot {
@@ -148,15 +152,47 @@ const cityCatalogBusy = ref(false);
 const draftPlatformDisabled = computed(() => Boolean(
   schemaRef.value && schemaRef.value.platform === draftPlatform.value && schemaRef.value.enabled_for_new_tasks === false,
 ));
+const pendingPlatformSwitch = ref<Platform | null>(null);
 function setDraftPlatform(platform: Platform) {
   if (platformState.draft === platform) return;
   platformState.setDraftPlatform(platform);
   draftPlatform.value = platform;
   // 同步主题品牌色到新平台（boss 青 / 智联蓝）。
   setThemePlatform(platform);
+  // B007：切平台视为新草稿，清掉旧 run 身份与 scope 快照；双平台结果保留。
+  scopePreview.value = null;
+  scopePreviewBusy.value = false;
+  scrapeTaskId.value = "";
+  scrapeCompleted.value = false;
+  scrapeSnapshot.value = null;
+  screenTaskId.value = "";
+  screenSnapshot.value = null;
+  interruptedRunId.value = "";
+  restoredTaskHint.value = "";
   // 切换草稿平台后按新平台重新加载 schema / 城市；旧请求被 loader 内部取消丢弃。
   void loadFilterLabels();
   void loadCityCatalog();
+}
+
+function requestDraftPlatform(platform: Platform) {
+  if (platformState.draft === platform) return;
+  // 已抓完但尚未生成第四页结果的轮次只存在临时抓取上下文，切换会清掉它。
+  // 先征得确认，取消时不改变草稿平台或任何任务状态。
+  if (scrapeCompleted.value && !resultLoaded.value && !screenBusy.value) {
+    pendingPlatformSwitch.value = platform;
+    return;
+  }
+  setDraftPlatform(platform);
+}
+
+function cancelPlatformSwitch() {
+  pendingPlatformSwitch.value = null;
+}
+
+function confirmPlatformSwitch() {
+  const platform = pendingPlatformSwitch.value;
+  pendingPlatformSwitch.value = null;
+  if (platform) setDraftPlatform(platform);
 }
 
 const steps = [
@@ -209,6 +245,9 @@ const filterValues = ref<Record<Platform, Record<string, string[]>>>({
   zhilian: {},
 });
 const profileSummary = ref("");
+// B009：保存最近一次简历分析的中文语义，切平台时按新 schema 重投影。
+const resumeAnalysis = ref<AnalyzeResponse | null>(null);
+const appliedResumePlatforms = ref<Set<Platform>>(new Set());
 const scrapeTaskId = ref("");
 const scrapeBusy = ref(false);
 const scrapeSnapshot = ref<TaskSnapshot | null>(null);
@@ -306,7 +345,8 @@ const searchPanelsOpen = ref(false);
 let pollTimer: number | undefined;
 
 const scopeLocked = computed(() => Boolean(
-  scrapeBusy.value || screenBusy.value || recrawlBusy.value || pausedRunId.value,
+  scrapeBusy.value || screenBusy.value || recrawlBusy.value || pausedRunId.value
+  || activeStep.value === "screen" || activeStep.value === "results",
 ));
 
 const enabledSteps = computed<StepId[]>(() => {
@@ -368,18 +408,23 @@ const screenSummaryChips = computed(() => {
   filterGroups.value.forEach((group) => {
     const values = drafts[group.key] || [];
     if (!values.length) return;
-    const labels = values.map((code) => {
-      const option = group.options.find(([, optCode]) => optCode === code);
-      return option ? option[0] : code;
-    });
+    // B011：未知值不显示数字编号，直接省略该胶囊内容。
+    const labels = values
+      .map((code) => group.options.find(([, optCode]) => optCode === code)?.[0])
+      .filter((label): label is string => Boolean(label));
+    if (!labels.length) return;
     chips.push({ label: group.label, value: labels.join(" / ") });
   });
   return chips;
 });
 watch(
-  [selectedKeywords, cityText, () => advancedSettings.value.pages],
+  [selectedKeywords, cityText, () => advancedSettings.value.pages, () => draftPlatform.value],
   () => { if (!scopeLocked.value) void refreshScopePreview(); },
   { deep: true },
+);
+watch(
+  [draftPlatform, schemaRef],
+  () => applyResumeAnalysisToCurrentSchema(),
 );
 // 分类基于当前平台过滤后的结果：页签计数跟随筛选联动。
 // 过滤逻辑抽到 discovery.ts 纯函数（filterPipelineResultByPlatform），
@@ -493,8 +538,7 @@ async function restoreRunningTask() {
       scrapeCompleted.value = Boolean(data.scrape_completed);
       screenTaskId.value = data.task_id;
       analysisReady.value = true;
-      screenPanelOpen.value = false;
-      activeStep.value = "screen";
+      enterScreenStep();
       const savedFilters = data.frozen_filters || {};
       // T509：写入任务平台对应的草稿槽（platform-schema.md L157），
       // 不再用草稿平台槽 — 否则 zhilian 任务恢复后 filters 落到 boss 槽会被 boss schema 拒绝。
@@ -521,8 +565,7 @@ async function restoreRunningTask() {
         scrapeTaskId.value = data.scrape_task_id || "";
         scrapeCompleted.value = Boolean(data.scrape_completed);
         screenTaskId.value = data.task_id;
-        screenPanelOpen.value = false;
-        activeStep.value = "screen";
+        enterScreenStep();
         // T509：paused screen 任务也投影冻结筛选快照（platform-schema.md L157）
         const savedFilters = data.frozen_filters || {};
         const drafts = filterValues.value[filterPlatform];
@@ -699,8 +742,21 @@ function notify(message: string, tone: Notice["tone"] = "info") {
   emit("notify", { message, tone });
 }
 
+function enterSearchStep() {
+  searchPanelsOpen.value = true;
+  activeStep.value = "search";
+}
+
+function enterScreenStep() {
+  screenPanelOpen.value = !resultLoaded.value;
+  activeStep.value = "screen";
+}
+
 function selectStep(step: string) {
-  if (enabledSteps.value.includes(step as StepId)) activeStep.value = step as StepId;
+  if (!enabledSteps.value.includes(step as StepId)) return;
+  if (step === "search") enterSearchStep();
+  else if (step === "screen") enterScreenStep();
+  else activeStep.value = step as StepId;
 }
 
 function chooseFile(event: Event) {
@@ -711,6 +767,29 @@ function chooseFile(event: Event) {
 function handleDrop(event: DragEvent) {
   dragActive.value = false;
   selectedFile.value = event.dataTransfer?.files?.[0] || null;
+}
+
+function applyResumeAnalysisToCurrentSchema() {
+  const analysis = resumeAnalysis.value;
+  const schema = schemaRef.value;
+  if (!analysis || !schema || schema.platform !== draftPlatform.value) return;
+  if (appliedResumePlatforms.value.has(draftPlatform.value)) return;
+  const semantic = analysis.semantic;
+  const projected = semantic
+    ? projectResumeSuggestionToSchema(semantic, schema)
+    : {};
+  if (!semantic) {
+    // 旧响应兜底：直接按当前 schema 校验 code。
+    for (const field of schema.fields) {
+      const value = analysis.fields[field.key];
+      const codes = (Array.isArray(value) ? value : value ? [value] : [])
+        .map(String)
+        .filter((code) => code !== "0" && field.options.some((opt) => opt.value === code));
+      if (codes.length) projected[field.key] = codes;
+    }
+  }
+  filterValues.value[draftPlatform.value] = projected;
+  appliedResumePlatforms.value = new Set([...appliedResumePlatforms.value, draftPlatform.value]);
 }
 
 function initializeFromAnalysis(data: AnalyzeResponse) {
@@ -735,18 +814,11 @@ function initializeFromAnalysis(data: AnalyzeResponse) {
   // T507：按当前已加载 schema 投影筛选建议（platform-schema.md L147）。
   // 只接受 schema 允许的字段；boss.stage 与 zhilian.company_nature 因 schema 不同不会串用。
   // 若 schema 未加载（如刚切平台尚未响应），保留空草稿，不投影。
-  const drafts = filterValues.value[draftPlatform.value];
-  for (const key of Object.keys(drafts)) delete drafts[key];
-  const schema = schemaRef.value;
-  if (schema) {
-    for (const field of schema.fields) {
-      const value = fields[field.key];
-      const codes = (Array.isArray(value) ? value : value ? [value] : [])
-        .map(String)
-        .filter((item) => item !== "0");
-      if (codes.length) drafts[field.key] = codes;
-    }
-  }
+  // B009：保存中文语义，切平台时按新 schema 重新投影，不静默丢字段。
+  resumeAnalysis.value = data;
+  appliedResumePlatforms.value = new Set();
+  filterValues.value = { boss: {}, zhilian: {} };
+  applyResumeAnalysisToCurrentSchema();
   profileSummary.value = String(fields.profile_summary || "");
 }
 
@@ -763,6 +835,9 @@ async function analyzeResume() {
   try {
     const form = new FormData();
     form.append("file", selectedFile.value);
+    form.append("platform", draftPlatform.value);
+    resumeAnalysis.value = null;
+    appliedResumePlatforms.value = new Set();
     const data = await apiRequest<AnalyzeResponse>("/api/analyze-resume", {
       method: "POST",
       body: form,
@@ -789,7 +864,7 @@ async function analyzeResume() {
     resultLoaded.value = false;
     pipelineResult.value = null;
     rejectedIds.value = new Set();
-    activeStep.value = "search";
+    enterSearchStep();
     notify("简历分析完成，请确认关键词与城市", "success");
   } catch (error) {
     notify(errorMessage(error, "简历分析失败"), "error");
@@ -1446,6 +1521,8 @@ function resetWorkflow() {
   customCity.value = "";
   // T506：重置两个平台的筛选草稿
   filterValues.value = { boss: {}, zhilian: {} };
+  resumeAnalysis.value = null;
+  appliedResumePlatforms.value = new Set();
   profileSummary.value = "";
   scrapeBusy.value = false;
   screenBusy.value = false;
@@ -1837,7 +1914,7 @@ watch(roundStatusPayload, (payload) => {
         :data-testid="`platform-segment-${platform}`"
         :disabled="scopeLocked"
         :title="scopeLocked ? '任务进行中，平台已锁定' : undefined"
-        @click="setDraftPlatform(platform)"
+        @click="requestDraftPlatform(platform)"
       >{{ platform === 'boss' ? 'BOSS' : '智联' }}</button>
     </div>
     <StepNavigator
@@ -1917,7 +1994,7 @@ watch(roundStatusPayload, (payload) => {
           <button
             class="button ghost wide-button"
             type="button"
-            @click="analysisReady = true; activeStep = 'search'"
+            @click="analysisReady = true; enterSearchStep()"
           >
             跳过简历，直接手动搜索
           </button>
@@ -2075,7 +2152,7 @@ watch(roundStatusPayload, (payload) => {
           <button v-if="interruptedRunId" class="button danger" type="button" data-testid="finish-interrupted-scrape" @click="finishPausedTask(interruptedRunId)">
             结束并保存结果
           </button>
-          <button v-if="scrapeCompleted" class="button secondary" type="button" data-testid="continue-to-screen" @click="activeStep = 'screen'">
+          <button v-if="scrapeCompleted" class="button secondary" type="button" data-testid="continue-to-screen" @click="enterScreenStep()">
             继续确认筛选条件
           </button>
         </div>
@@ -2235,6 +2312,24 @@ watch(roundStatusPayload, (payload) => {
         </JobWorkspace>
       </section>
     </section>
+
+    <Transition name="dialog">
+      <div
+        v-if="pendingPlatformSwitch"
+        class="dialog-backdrop"
+        data-testid="platform-switch-confirm"
+        @click.self="cancelPlatformSwitch"
+      >
+        <section class="dialog-panel platform-switch-dialog" role="dialog" aria-modal="true" aria-label="确认切换平台">
+          <h2>确认切换平台</h2>
+          <p>上一轮任务还未进行 AI 筛选。切换平台后，该轮抓取结果不会保存，是否继续切换？</p>
+          <div class="dialog-actions">
+            <button class="button secondary" type="button" data-testid="cancel-platform-switch" @click="cancelPlatformSwitch">继续留在当前平台</button>
+            <button class="button danger" type="button" data-testid="confirm-platform-switch" @click="confirmPlatformSwitch">仍然切换</button>
+          </div>
+        </section>
+      </div>
+    </Transition>
 
     <!-- 岗位轨迹浮窗：居中弹窗，内容为原生命周期卡片全部能力 -->
     <Transition name="dialog">

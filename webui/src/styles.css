@@ -994,6 +994,13 @@ button:disabled {
   position: absolute;
   inset: 0;
 }
+/* 收起态必须真正隐藏内容：flex 撑高 + absolute 定位会让内容继续可见，
+   滚动回顶后仍需整块不可见，避免底部残留一截。 */
+.advanced-panel .collapsible-body:not(.open) .collapsible-inner {
+  visibility: hidden;
+  overflow: hidden;
+  pointer-events: none;
+}
 /* 展开态盒内滚动。特异性（0,4,0）必须压过通用规则
    .collapsible-body.open .collapsible-inner 的 overflow: visible（0,3,0），
    否则高级设置内容溢出面板、与下方界面重叠。 */
@@ -2181,6 +2188,25 @@ button:disabled {
 .dialog-panel.lifecycle-dialog {
   padding: 20px 24px;
 }
+.platform-switch-dialog {
+  width: min(100%, 480px);
+  padding: 22px;
+}
+.platform-switch-dialog h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.platform-switch-dialog p {
+  margin: 12px 0 20px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .lifecycle-dialog-header {
   display: flex;
   align-items: center;
@@ -2943,7 +2969,7 @@ body,
     transform: translateX(100%);
   }
 }
-.task-status svg {
+.task-status svg:not(.spin) {
   animation: icon-pop .2s ease both;
 }
 @keyframes icon-pop {

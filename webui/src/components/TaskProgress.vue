@@ -186,23 +186,27 @@ const SCREEN_WEIGHTS: Record<string, [number, number]> = {
 // 重阶段区间大、预估时长长，进度条走得慢；轻阶段区间小、走得快。
 // 0 表示该阶段不参与时间爬升（静态等待或瞬态）。
 // waiting（防限流等待）必须配时长，否则等待阶段会停住——它是平台期最长的地方。
-const STAGE_DURATIONS: Record<string, number> = {
-  // SCREEN 流程
+// 固定基础设施阶段时长（秒）：没有组合数/岗位数可换算的阶段。
+const FIXED_STAGE_DURATIONS: Record<string, number> = {
   resume: 0,
-  screen_a: 90,        // AI 粗筛约 90 秒
   screen_a_done: 0,
-  ensure_chrome: 15,   // 启动浏览器约 15 秒
-  fetch_jd: 300,       // 抓 JD 约 300 秒
-  screen_b: 360,       // AI 精筛约 360 秒
-  // SCRAPE 流程
-  preflight: 5,
-  searching: 120,      // 列表抓取约 120 秒
+  ensure_chrome: 15,
+  preflight: 8,
   combo_done: 0,
   combo_failed: 0,
-  waiting: 120,        // 防限流等待约 120 秒（平台期最长，必须配时长）
   risk_warning: 0,
   closing_chrome: 10,
   done: 0,
+};
+
+// 有工作量可换算的阶段：perUnit 秒/单位，base 秒兜底。
+// 预估时长按组合数/岗位数换算，不使用固定墙钟值。
+const WORK_STAGE_DURATIONS: Record<string, { perUnit: number; base: number }> = {
+  screen_a: { perUnit: 1.5, base: 15 },
+  fetch_jd: { perUnit: 5, base: 15 },
+  screen_b: { perUnit: 5, base: 30 },
+  searching: { perUnit: 20, base: 20 },
+  waiting: { perUnit: 2, base: 8 },
 };
 
 const progress = computed(() => props.snapshot?.progress || {});
@@ -216,6 +220,19 @@ const stageRange = computed<[number, number] | undefined>(() => {
   return stage.value ? weights[stage.value] : undefined;
 });
 const stageEnd = computed(() => stageRange.value?.[1] ?? 100);
+
+// 阶段预估时长按当前工作量换算：progress.total 在抓取阶段是组合数，
+// 在筛选阶段是岗位数；waiting 优先使用后端给出的真实等待秒数。
+const stageDurationSeconds = computed(() => {
+  if (stage.value === "waiting") {
+    const wait = Number(progress.value.wait_seconds || 0);
+    if (wait > 0) return wait + 3;
+  }
+  const spec = WORK_STAGE_DURATIONS[stage.value];
+  const workUnits = Number(progress.value.total || props.snapshot?.total || 0);
+  if (spec) return Math.max(spec.base, spec.perUnit * Math.max(1, workUnits));
+  return FIXED_STAGE_DURATIONS[stage.value] ?? 0;
+});
 
 // current/total 语义因阶段而异：searching/waiting/combo_* 是关键词维度（第几个关键词），
 // 不是岗位进度，不能拿来做阶段内插值——否则关键词一开始 current 就 = total，
@@ -260,14 +277,13 @@ const PLATFORM_PAUSE_PROB = 0.002;        // 平台期每帧随机插入停顿�
 const PLATFORM_PAUSE_MIN_MS = 350;        // 平台期随机停顿下限
 const PLATFORM_PAUSE_MAX_MS = 900;        // 平台期随机停顿上限
 const FRAME_MS = 16;                      // requestAnimationFrame 假定帧间隔
-const MICRO_OVER_RATIO_PER_SEC = 0.008;   // 超过预估时长后，每秒再爬区间宽度的 0.8%
-const MICRO_OVER_MAX_RATIO = 0.04;        // 超过后最多再爬区间宽度的 4%，避免接近阶段 end
+const MICRO_OVER_RATIO_PER_SEC = 0.004;   // 超过预估时长后，每秒再爬区间宽度的 0.4%
 
 // 环境爬升每帧步长（%）= 软上限宽度 ÷ 预估时长 × 帧间隔。与 ambientTargetAt 涨幅同步。
 const ambientSpeedPerFrame = computed(() => {
   const range = stageRange.value;
   if (!range) return 0;
-  const duration = STAGE_DURATIONS[stage.value] ?? 0;
+  const duration = stageDurationSeconds.value;
   if (duration <= 0) return 0; // 与 ambientTargetAt 对齐：无预估时长的阶段不爬升
   const width = range[1] - range[0];
   const normalPerFrame = (width * SOFT_CAP_RATIO) / (duration * 1000) * FRAME_MS;
@@ -292,16 +308,16 @@ function ambientTargetAt(now: number): number {
   const width = end - start;
   if (width <= 0) return start;
   const enterTime = stageEnterTimes.value[stage.value];
-  const duration = STAGE_DURATIONS[stage.value] ?? 0;
+  const duration = stageDurationSeconds.value;
   if (!enterTime || duration <= 0) return start;
   const elapsedMs = Math.max(0, now - enterTime);
   const durationMs = duration * 1000;
   if (elapsedMs <= durationMs) {
     return start + width * SOFT_CAP_RATIO * (elapsedMs / durationMs);
   }
-  // 超过预估时长后不硬停：以极慢速度继续爬到软上限附近，避免平台期长时间冻结。
+  // 超过预估时长后不硬停：以极慢速度继续朝阶段终点微动，避免平台期长时间冻结。
   const overshootSec = (elapsedMs - durationMs) / 1000;
-  const micro = Math.min(width * MICRO_OVER_MAX_RATIO, overshootSec * MICRO_OVER_RATIO_PER_SEC * width);
+  const micro = overshootSec * MICRO_OVER_RATIO_PER_SEC * width;
   return Math.min(end, start + width * SOFT_CAP_RATIO + micro);
 }
 
@@ -475,6 +491,26 @@ const successCount = computed(() => Number(props.snapshot?.success_count || 0));
 const failCount = computed(() => Number(props.snapshot?.fail_count || 0));
 const unstartedCount = computed(() => Number(props.snapshot?.unstarted_count || 0));
 const totalCount = computed(() => Number(props.snapshot?.total || 0));
+// 抓取进度的 current/total 是组合维度；后端的 success/unstarted 是 AI 筛选维度，
+// 因此抓取时必须从组合事件本身派生，避免显示“正在第 2/2 组，但已完成 0、未开始 2”。
+const scrapeCountState = computed(() => {
+  const comboTotal = totalCount.value || total.value;
+  if (props.kind !== "scrape" || comboTotal <= 0) {
+    return { completed: successCount.value, running: 0, unstarted: unstartedCount.value };
+  }
+  const comboCurrent = Math.min(comboTotal, Math.max(0, current.value));
+  if (stage.value === "combo_done") {
+    return { completed: comboCurrent, running: 0, unstarted: Math.max(0, comboTotal - comboCurrent) };
+  }
+  if (["searching", "waiting"].includes(stage.value) && comboCurrent > 0) {
+    const completed = Math.max(0, comboCurrent - 1);
+    return { completed, running: 1, unstarted: Math.max(0, comboTotal - completed - 1) };
+  }
+  return { completed: 0, running: 0, unstarted: comboTotal };
+});
+const currentCompletedCount = computed(() => scrapeCountState.value.completed);
+const currentRunningCount = computed(() => scrapeCountState.value.running);
+const currentUnstartedCount = computed(() => scrapeCountState.value.unstarted);
 const sourceTotal = computed(() => Number(props.snapshot?.source_total || 0));
 const pendingCount = computed(() => Number(props.snapshot?.pending_count || 0));
 const keptCount = computed(() => Number(props.snapshot?.kept_count || 0));
@@ -546,8 +582,9 @@ const timeLabel = computed(() => {
       <div class="count-group count-current">
         <span class="count-label">当前</span>
         <span class="count-row">
-          <span class="count-chip success">已完成 {{ successCount }} / {{ totalCount }}</span>
-          <span class="count-chip unstarted">未开始 {{ unstartedCount }}</span>
+          <span class="count-chip success">已完成 {{ currentCompletedCount }} / {{ totalCount }}</span>
+          <span v-if="currentRunningCount" class="count-chip running">进行中 {{ currentRunningCount }}</span>
+          <span class="count-chip unstarted">未开始 {{ currentUnstartedCount }}</span>
         </span>
       </div>
       <div v-if="showPending" class="count-group count-pending">

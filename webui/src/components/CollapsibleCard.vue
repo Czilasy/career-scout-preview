@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ChevronDown } from "@lucide/vue";
+import { ref, watch } from "vue";
 
 const props = defineProps<{
   title: string;
@@ -16,6 +17,12 @@ function toggle() {
   if (props.static) return;
   emit("update:modelValue", !props.modelValue);
 }
+
+// 收起前把内部滚动位置归零，避免高级执行设置收拢后仍露出一截底部内容。
+const innerEl = ref<HTMLElement | null>(null);
+watch(() => props.modelValue, (open) => {
+  if (!open && innerEl.value) innerEl.value.scrollTop = 0;
+});
 </script>
 
 <template>
@@ -39,7 +46,7 @@ function toggle() {
       <slot name="actions" />
     </div>
     <div class="collapsible-body" :class="{ open: modelValue || static }">
-      <div class="collapsible-inner">
+      <div class="collapsible-inner" ref="innerEl">
         <div class="collapsible-content">
           <slot />
         </div>

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import copy
+import os
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -644,11 +645,63 @@ class WindowsSchannelFallbackTests(unittest.TestCase):
             mock_run.call_args.kwargs["input"].decode("utf-8")
         )
         self.assertEqual(stdin_payload["api_key"], secret)
+        if os.name == "nt":
+            import subprocess as _sp
+            flags = int(mock_run.call_args.kwargs.get("creationflags", 0))
+            self.assertTrue(flags & _sp.CREATE_NO_WINDOW,
+                            "Schannel fallback 必须抑制 PowerShell 控制台窗口")
 
 
 # ---------------------------------------------------------------------------
 # rank_jds — batch limits and unknown job_id rejection
 # ---------------------------------------------------------------------------
+
+class ResumePlatformProjectionTests(unittest.TestCase):
+    """简历分析按平台 schema 投影：BOSS stage / 智联 company_nature。"""
+
+    def test_boss_accepts_stage_and_drops_company_nature(self):
+        from webui.ai import _validate_unified_fields
+        fields = _validate_unified_fields({
+            "keyword": ["Python"], "city": "上海",
+            "salary": "20-50K", "experience": "3-5年", "degree": "本科",
+            "industry": "互联网", "scale": "100-499人", "stage": "B轮",
+            "company_nature": "国企",
+        }, "boss")
+        self.assertEqual(fields["stage"], ["804"])
+        self.assertEqual(fields["experience"], ["105"])
+        self.assertNotIn("company_nature", fields)
+
+    def test_zhilian_accepts_company_nature_and_drops_stage(self):
+        from webui.ai import _validate_unified_fields
+        fields = _validate_unified_fields({
+            "keyword": ["Python"], "city": "上海",
+            "experience": "3-5年", "degree": "本科", "company_nature": "国企",
+            "stage": "B轮", "salary": "not-a-real-salary",
+        }, "zhilian")
+        self.assertEqual(fields["experience"], ["0305"])
+        self.assertEqual(fields["degree"], ["4"])
+        self.assertEqual(fields["company_nature"], ["1"])
+        self.assertNotIn("stage", fields)
+        self.assertEqual(fields["salary"], [])
+
+    def test_sentinel_and_invalid_values_are_dropped(self):
+        from webui.ai import _validate_unified_fields
+        fields = _validate_unified_fields({
+            "keyword": ["Python"], "city": ["上海", "不存在城市"],
+            "experience": ["不限", "3-5年", "999"], "stage": ["0", "B轮", "bad"],
+        }, "boss")
+        self.assertEqual(fields["city"], ["上海"])
+        self.assertEqual(fields["experience"], ["105"])
+        self.assertEqual(fields["stage"], ["804"])
+
+    def test_prompt_lists_platform_specific_filter_fields(self):
+        from webui.ai import _build_field_options_prompt
+        boss_prompt = _build_field_options_prompt("boss")
+        self.assertIn("stage", boss_prompt)
+        self.assertNotIn("company_nature", boss_prompt)
+        zhilian_prompt = _build_field_options_prompt("zhilian")
+        self.assertIn("company_nature", zhilian_prompt)
+        self.assertNotIn("stage", zhilian_prompt)
 
 class RankJdsTests(unittest.TestCase):
     """JD ranking with batch limits and unknown job_id rejection."""

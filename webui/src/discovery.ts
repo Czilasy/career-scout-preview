@@ -112,6 +112,23 @@ export function normalizeScopePreview(response: ScopePreviewResponse): FrozenSea
   };
 }
 
+export function projectResumeSuggestionToSchema(
+  semantic: Record<string, string[]>,
+  schema: PlatformFilterSchema,
+): Record<string, string[]> {
+  const projected: Record<string, string[]> = {};
+  for (const field of schema.fields) {
+    const labels = semantic[field.key] || [];
+    const selected: string[] = [];
+    for (const label of labels) {
+      const option = field.options.find((opt) => opt.label === label);
+      if (option) selected.push(option.value);
+    }
+    if (selected.length) projected[field.key] = selected;
+  }
+  return projected;
+}
+
 export function recoverSelectionSettings(
   state: AdvancedSettingsState,
   selection: ExecutionSelection,

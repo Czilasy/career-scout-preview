@@ -3998,6 +3998,9 @@ def create_app(config=None):
         """
         from webui.resume import validate_format, validate_size
         from webui.ai import analyze_resume_to_fields, AISecurityError, user_facing_error
+        from webui.platforms import (
+            UnknownPlatformError, PlatformNotRegisteredError, validate_platform_key, get_platform,
+        )
 
         file = request.files.get("file")
         if not file or not file.filename:
@@ -4013,6 +4016,16 @@ def create_app(config=None):
             validate_size(file_bytes)
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
+
+        platform_raw = request.form.get("platform") or "boss"
+        try:
+            platform = validate_platform_key(platform_raw)
+        except UnknownPlatformError:
+            return jsonify({"ok": False, "error_code": "platform_validation_failed", "error": "不支持的招聘平台"}), 400
+        try:
+            reg = get_platform(platform)
+        except PlatformNotRegisteredError:
+            return jsonify({"ok": False, "error_code": "platform_schema_unavailable", "error": "平台 schema 不可用"}), 503
 
         # Get AI credentials
         settings = store.get_ai_settings()
@@ -4031,6 +4044,7 @@ def create_app(config=None):
                 endpoint_url=settings.get("endpoint_url", ""),
                 api_key=api_key,
                 model=settings.get("model", ""),
+                platform=platform,
             )
         except AISecurityError as exc:
             return jsonify({"ok": False, "error": user_facing_error(exc.error_code)}), 502
@@ -4038,18 +4052,39 @@ def create_app(config=None):
             return jsonify({"ok": False, "error": str(exc)}), 400
 
         # Return fields with human-readable labels for confirmation UI
+        schema = reg.filter_schema
+        schema_keys = {field.key for field in schema.fields}
+        fields = {
+            key: value for key, value in fields.items()
+            if key in ("keyword", "city", "profile_summary") or key in schema_keys
+        }
         field_labels = {
             "keyword": ("搜索关键词", fields["keyword"], "keyword_chips"),
             "city": ("城市", fields["city"], "city"),
-            "salary": ("薪资范围", fields["salary"], boss.SALARY_MAP),
-            "experience": ("经验要求", fields["experience"], boss.EXPERIENCE_MAP),
-            "degree": ("学历", fields["degree"], boss.DEGREE_MAP),
-            "industry": ("行业", fields["industry"], boss.INDUSTRY_MAP),
-            "scale": ("公司规模", fields["scale"], boss.SCALE_MAP),
-            "stage": ("融资阶段", fields["stage"], boss.STAGE_MAP),
         }
+        semantic: dict[str, list[str]] = {
+            "keyword": [
+                str(item.get("word", "")) if isinstance(item, dict) else str(item)
+                for item in fields.get("keyword", []) if item
+            ],
+            "city": list(fields.get("city", [])),
+        }
+        for field in schema.fields:
+            values = fields.get(field.key) or []
+            labels = [field.label_for(v) for v in values if field.label_for(v)]
+            semantic[field.key] = labels
+            field_labels[field.key] = (
+                field.label, values, {opt.label: opt.value for opt in field.options},
+            )
 
-        return jsonify({"ok": True, "fields": fields, "labels": field_labels})
+        return jsonify({
+            "ok": True,
+            "platform": platform,
+            "filter_schema_version": schema.schema_version,
+            "fields": fields,
+            "semantic": semantic,
+            "labels": field_labels,
+        })
 
     @app.route("/api/confirm-fields", methods=["POST"])
     def confirm_fields():
