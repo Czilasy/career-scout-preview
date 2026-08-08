@@ -497,21 +497,34 @@ describe("App", () => {
   function mountWithUpdate(overrides: { ignored?: string } = {}) {
     localStorage.clear();
     if (overrides.ignored) localStorage.setItem("career-scout-ignored-update", overrides.ignored);
+    const updateCheckUrls: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/api/session")) {
         return response({ status: "ok", build_hash: expectedBackendBuildHash, runtime_mode: "exe" });
       }
-      if (url.includes("/api/update-check")) return updateResponse();
+      if (url.includes("/api/update-check")) {
+        updateCheckUrls.push(url);
+        return updateResponse();
+      }
       if (url.endsWith("/api/profiles")) return response({ profiles: [] });
       return baseAppResponse(url) ?? response({});
     });
     vi.stubGlobal("fetch", fetchMock);
-    return mount(App);
+    const wrapper = mount(App);
+    return { wrapper, updateCheckUrls };
   }
 
+  it("startup check forces network refresh (force=1) so new releases pop up on next launch", async () => {
+    const { wrapper, updateCheckUrls } = mountWithUpdate();
+    await flushPromises();
+    expect(updateCheckUrls.length).toBeGreaterThan(0);
+    for (const url of updateCheckUrls) expect(url).toContain("force=1");
+    expect(wrapper.find('[data-testid="update-dialog"]').exists()).toBe(true);
+  });
+
   it("auto-opens update dialog and shows brand dot on first discovery", async () => {
-    const wrapper = mountWithUpdate();
+    const { wrapper } = mountWithUpdate();
     await flushPromises();
     expect(wrapper.find('[data-testid="update-dialog"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="brand-update-dot"]').exists()).toBe(true);
@@ -519,14 +532,14 @@ describe("App", () => {
   });
 
   it("does not auto-open dialog for ignored version but keeps brand dot", async () => {
-    const wrapper = mountWithUpdate({ ignored: "2.6.0" });
+    const { wrapper } = mountWithUpdate({ ignored: "2.6.0" });
     await flushPromises();
     expect(wrapper.find('[data-testid="update-dialog"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="brand-update-dot"]').exists()).toBe(true);
   });
 
   it("closes dialog and records version when ignoring", async () => {
-    const wrapper = mountWithUpdate();
+    const { wrapper } = mountWithUpdate();
     await flushPromises();
     expect(wrapper.find('[data-testid="update-dialog"]').exists()).toBe(true);
     await wrapper.get('[data-testid="update-ignore"]').trigger("click");

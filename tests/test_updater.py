@@ -152,6 +152,33 @@ class CheckUpdateTests(unittest.TestCase):
             updater.check_for_update("2.4.0", state_dir=self.state_dir, force=True, fetcher=fetch)
         self.assertEqual(len(calls), 2)
 
+    def test_force_failure_falls_back_to_cache(self):
+        def broken():
+            raise OSError("network down")
+
+        with patch.object(updater, "detect_update_platform", return_value="windows"):
+            updater.check_for_update(
+                "2.4.0", state_dir=self.state_dir,
+                fetcher=lambda: _FakeResponse(self._api_payload()),
+            )
+            info = updater.check_for_update(
+                "2.4.0", state_dir=self.state_dir, force=True, fetcher=broken,
+            )
+        # 启动检查（force）断网时回退上次有效缓存，仍能提示已发布的新版本
+        self.assertTrue(info.ok)
+        self.assertTrue(info.has_update)
+        self.assertEqual(info.latest, "9.9.9")
+
+    def test_force_failure_without_cache_degrades_silently(self):
+        def broken():
+            raise OSError("network down")
+
+        info = updater.check_for_update(
+            "2.4.0", state_dir=self.state_dir, force=True, fetcher=broken,
+        )
+        self.assertFalse(info.ok)
+        self.assertEqual(info.reason, "check_failed")
+
     def test_no_sha256_asset_flags_reason(self):
         assets = [{"name": "CareerScout-v9.9.9.exe",
                    "browser_download_url": "https://github.com/d.exe", "size": 5}]

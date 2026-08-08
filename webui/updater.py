@@ -5,7 +5,8 @@
 
 1. ``check_for_update``：查 GitHub Releases API（latest），与当前版本
    比较；结果缓存 ``~/.career-scout/update_check.json`` 24h（GitHub
-   API 匿名限流 60 次/小时/IP，不做后台轮询）。
+   API 匿名限流 60 次/小时/IP，不做后台轮询）。启动检查走 ``force``
+   （绕过缓存，网络失败回退缓存），发布新版本后下次打开软件必查必弹。
 2. ``UpdateDownloader.download_async``：后台线程流式下载对应平台资产
    （exe/dmg）到 ``~/.career-scout/downloads/``，进度可查。
 3. ``verify_downloaded``：SHA256 校验（Release 必须附 ``.sha256``
@@ -189,7 +190,9 @@ def check_for_update(
     """查 GitHub latest release 并与当前版本比较。
 
     - 24h 内缓存命中且非 force → 直接返回缓存（不计限流）；
-    - 网络/API 失败 → ``ok=False, reason="check_failed"``（静默降级）；
+    - force（启动检查）→ 绕过缓存强制网络查，保证发布新版本后下次
+      打开软件必弹；网络失败时回退上次有效缓存，无缓存才静默降级；
+    - 网络/API 失败且无缓存 → ``ok=False, reason="check_failed"``（静默降级）；
     - 当前平台无对应资产 → ``has_update=True`` 但 ``reason="no_asset"``，
       前端引导去 Release 页手动下载。
     """
@@ -211,6 +214,15 @@ def check_for_update(
         if not isinstance(payload, dict) or "tag_name" not in payload:
             return UpdateInfo(ok=False, current=current_version, reason="check_failed")
     except Exception:
+        # force 模式（启动检查）网络失败时回退上次有效缓存：仍能提示已
+        # 发布的新版本，且不打扰用户；无缓存才静默降级。
+        if force:
+            cached = _read_cache(state_dir)
+            if cached and cached.get("api"):
+                return _build_info(
+                    cached["api"], current_version, update_platform,
+                    checked_at=float(cached.get("checked_at") or 0.0),
+                )
         return UpdateInfo(ok=False, current=current_version, reason="check_failed")
 
     checked_at = time.time()

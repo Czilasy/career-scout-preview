@@ -152,7 +152,9 @@ function ignoredUpdateVersion(): string {
 
 async function checkAppUpdate() {
   try {
-    const result = await updateApi.check();
+    // force=1 绕过后端 24h 缓存：发布新版本后用户下次打开软件必弹。
+    // 网络失败时后端回退上次有效缓存；无缓存/限流仍静默，更新不是关键路径。
+    const result = await updateApi.check(true);
     if (result?.ok && result.has_update) {
       updateInfo.value = result;
       // 首次发现新版本自动弹出；用户忽略过该版本则只保留红点入口。
