@@ -96,9 +96,6 @@ async function mountOpen(fetchMock: (input: RequestInfo | URL, init?: RequestIni
   await flushPromises();
   await wrapper.setProps({ open: true });
   await flushPromises();
-  // 逐项点亮动画：等待所有 setTimeout 完成后再断言真实状态。
-  await new Promise((resolve) => setTimeout(resolve, 1200));
-  await flushPromises();
   return wrapper;
 }
 
@@ -135,6 +132,45 @@ describe("EnvCheckDialog", () => {
     expect(wrapper.get('[data-testid="env-check-time"]').text()).toContain("上次检查");
   });
 
+  it("shows every real status at once without staged pending marks", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/env-check") return response(envPayload);
+      if (url === "/api/browser-accounts") return response({ accounts: [] });
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    expect(wrapper.text()).not.toContain("⏳");
+    expect(wrapper.find('.env-check-mark[data-state="pending"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="env-item-browsers"]').text()).toContain("✅");
+    expect(wrapper.get('[data-testid="env-item-cdp"]').text()).toContain("❌");
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  it("cancel on the in-app cooldown confirm performs no action", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/env-check") return response(envPayload);
+      if (url === "/api/browser-accounts") return response({ accounts: [{ id: "a", name: "账号 A" }] });
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    await wrapper.get('[data-testid="env-cooldowns"]').find("button").trigger("click");
+    await wrapper.get('[data-testid="cooldown-confirm-cancel"]').trigger("click");
+    await flushPromises();
+
+    const clearCall = fetchMock.mock.calls.some(([input]) => String(input) === "/api/cooldown/clear");
+    expect(clearCall).toBe(false);
+    expect(wrapper.find('[data-testid="env-cooldowns"]').exists()).toBe(true);
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
   it("shows cooldown records with clear button", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -153,7 +189,7 @@ describe("EnvCheckDialog", () => {
   });
 
   it("clears a cooldown after confirm and removes the row", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const confirmSpy = vi.spyOn(window, "confirm");
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/env-check") return response(envPayload);
@@ -165,6 +201,9 @@ describe("EnvCheckDialog", () => {
     const wrapper = await mountOpen(fetchMock);
 
     await wrapper.get('[data-testid="env-cooldowns"]').find("button").trigger("click");
+    expect(wrapper.find('[data-testid="cooldown-confirm-ok"]').exists()).toBe(true);
+    await flushPromises();
+    await wrapper.get('[data-testid="cooldown-confirm-ok"]').trigger("click");
     await flushPromises();
 
     const clearCall = fetchMock.mock.calls.find(([input]) => String(input) === "/api/cooldown/clear");
@@ -174,6 +213,7 @@ describe("EnvCheckDialog", () => {
       platform: "boss",
     });
     expect(wrapper.find('[data-testid="env-cooldowns"]').exists()).toBe(false);
+    expect(confirmSpy).not.toHaveBeenCalled();
   });
 
   it("emits open-browser-accounts when clicking the login guidance fix", async () => {

@@ -189,7 +189,7 @@ describe("DiscoveryView", () => {
           platform: "boss",
           scrape_task_id: "scrape-1", scrape_completed: true,
           frozen_filters: { salary: ["406"], experience: [] },
-          profile_summary: "后端工程师",
+          profile_summary: "3年Python后端工程师候选人",
         });
       }
       if (url.includes("/api/latest-pipeline-result")) {
@@ -243,7 +243,7 @@ describe("DiscoveryView", () => {
     expect(JSON.parse(aiCall![1]!.body as string)).toMatchObject({
       scrape_task_id: "scrape-1",
       screening_fields: { salary: ["406"], experience: [] },
-      profile_summary: "后端工程师",
+      profile_summary: "3年Python后端工程师候选人",
       // T508：提交当前平台 schema 版本（不发 platform，父 run 已冻结）
       filter_schema_version: 3,
     });
@@ -1167,6 +1167,49 @@ describe("DiscoveryView", () => {
     });
   }
 
+  it("B031: one-click button leads scrape and auto AI screening with consumed marker", async () => {
+    const fetchMock = oneClickBase({
+      "/api/execute-search": (url, init) => {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          platform: "boss",
+          auto_screen: true,
+          auto_screen_fields: { salary: ["406"], stage: ["804"] },
+          auto_screen_profile: "3年Python后端候选人",
+        });
+        return response({ ok: true, task_id: "one-scrape" });
+      },
+      "/api/task-state/one-scrape": () => response({ status: "completed", progress: {}, logs: [], platform: "boss", scraped_count: 1 }),
+      "/api/ai-screen": (url, init) => {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          consume_auto_screen: true,
+          screening_fields: { salary: ["406"], stage: ["804"] },
+          profile_summary: "3年Python后端候选人",
+        });
+        return response({ ok: true, task_id: "one-screen" });
+      },
+      "/api/task-state/one-screen": () => response({ status: "completed", progress: {}, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await oneClickSearch(wrapper);
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(true);
+    const buttons = wrapper.findAll('.one-click-filter-groups button');
+    await buttons.find((b) => b.text() === "20-50K")!.trigger("click");
+    await buttons.find((b) => b.text() === "B轮")!.trigger("click");
+    await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
+    await flushPromises();
+
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(1);
+    expect(wrapper.find(".results-stage").exists()).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
   async function mountAtResults(fetchMock: ReturnType<typeof vi.fn>) {
     vi.stubGlobal("fetch", fetchMock);
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
@@ -1416,6 +1459,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
     await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
     await wrapper.get('[data-testid="add-keyword"]').trigger("click");
     await wrapper.get('[data-testid="custom-city"]').setValue("上海");
     await wrapper.get('[data-testid="add-city"]').trigger("click");
@@ -1718,6 +1762,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
     await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
     await wrapper.get('[data-testid="add-keyword"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
@@ -1880,7 +1925,7 @@ describe("DiscoveryView", () => {
           started_at: 1000, finished_at: 2000,
           result: {
             jobs: [{ job_id: "j1", platform: "boss", verdict: "uncertain", verdict_reason: "待确认" }],
-            total_kept: 1, total_dropped: 0, profile_summary: "画像",
+            total_kept: 1, total_dropped: 0, profile_summary: "3年Python后端候选人",
           },
         });
       }
@@ -1973,5 +2018,341 @@ describe("DiscoveryView", () => {
     expect(viewportScript).toContain("(390, 844)");
     expect(viewportScript).toContain("recrawl-uncertain");
     expect(viewportScript).toContain("overlap");
+  });
+
+  // ---------- B031/B032：一键筛选并 AI 优化 ----------
+
+  function oneClickSchema() {
+    return {
+      ok: true, platform: "boss", schema_version: 9, enabled_for_new_tasks: true,
+      fields: [
+        { key: "salary", label: "薪资范围", multiple: true, options: [
+          { value: "0", label: "不限" },
+          { value: "406", label: "20-50K" },
+          { value: "807", label: "50-100K" },
+        ] },
+        { key: "stage", label: "融资阶段", multiple: false, options: [{ value: "804", label: "B轮" }] },
+      ],
+    };
+  }
+
+  async function oneClickSearch(wrapper: ReturnType<typeof mount>) {
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
+  }
+
+  function oneClickBase(overrides: Record<string, (url: string, init?: RequestInit) => Promise<Response> | Response> = {}) {
+    return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (overrides[url]) return overrides[url](url, init);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(oneClickSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({ ok: true, scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:one" }, deduplicated: {} });
+      }
+      return response({});
+    });
+  }
+
+  it("B031: empty search scope does not open the dialog", async () => {
+    const fetchMock = oneClickBase();
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="one-click-confirm"]').exists()).toBe(false);
+    const notices = wrapper.emitted("notify")?.flat() as Array<{ message: string }>;
+    expect(notices.some((n) => n.message.includes("请先到第二步补齐关键词和城市"))).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("B032: profile under 10 blocks one-click and 10 chars with spaces passes", async () => {
+    const fetchMock = oneClickBase();
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await oneClickSearch(wrapper);
+    await wrapper.get('.profile-summary-input').setValue("太短");
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="one-click-confirm"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="profile-inline-error"]').text()).toContain("至少 10 个字");
+    expect(wrapper.get('.profile-summary-input').attributes("aria-invalid")).toBe("true");
+
+    await wrapper.get('.profile-summary-input').setValue("  3年Python后端  ");
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="one-click-confirm"]').exists()).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("B032: start AI screen is blocked by a short profile while start scrape is not", async () => {
+    const fetchMock = oneClickBase({
+      "/api/execute-search": () => response({ ok: true, task_id: "scrape-short" }),
+      "/api/task-state/scrape-short": () => response({ status: "completed", progress: {}, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await oneClickSearch(wrapper);
+    await wrapper.get('.profile-summary-input').setValue("短画像");
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/execute-search"))).toBe(true);
+    await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
+    await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(0);
+    vi.unstubAllGlobals();
+  });
+
+  it("B031: old result shows replacement hint in the dialog", async () => {
+    const fetchMock = oneClickBase();
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/latest-pipeline-result")) {
+        if (url.includes("platform=zhilian")) return response({ ok: true, has_result: false });
+        return response({
+          ok: true, has_result: true, source_run_id: "old-run", platform: "boss",
+          result: { jobs: [{ job_id: "old-1", title: "旧岗位" }], total_kept: 1, total_dropped: 0, profile_summary: "3年Python后端候选人" },
+        });
+      }
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/filter-labels")) return response(oneClickSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      if (url.endsWith("/api/search-scope/preview")) return response({ ok: true, scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:one" }, deduplicated: {} });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("广泛抓取"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="one-click-old-result-hint"]').text()).toContain("将开始新一轮");
+    vi.unstubAllGlobals();
+  });
+
+  it("B031: running or paused tasks disable the one-click button", async () => {
+    const fetchMock = oneClickBase({
+      "/api/latest-running-task": () => response({
+        ok: true, has_task: true, task_id: "running-scrape", kind: "scrape", status: "running",
+        platform: "boss", progress: {}, logs: [], error: "",
+      }),
+      "/api/task-state/running-scrape": () => response({ status: "running", progress: {}, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("广泛抓取"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="start-one-click"]').attributes("disabled")).toBeDefined();
+    vi.unstubAllGlobals();
+  });
+
+  it("B031: refresh restores completed scrape and auto-consumes the marker", async () => {
+    const fetchMock = oneClickBase({
+      "/api/latest-running-task": () => response({
+        ok: true, has_task: true, task_id: "scrape-restored", kind: "scrape", status: "completed",
+        platform: "boss", auto_screen: true, scrape_task_id: "scrape-restored", scrape_completed: true,
+        auto_screen_fields: { salary: ["406"] }, profile_summary: "3年Python后端候选人",
+        progress: {}, logs: [], error: "",
+      }),
+      "/api/ai-screen": (url, init) => {
+        expect(JSON.parse(String(init?.body))).toMatchObject({ consume_auto_screen: true, screening_fields: { salary: ["406"] }, profile_summary: "3年Python后端候选人" });
+        return response({ ok: true, task_id: "screen-restored" });
+      },
+      "/api/task-state/screen-restored": () => response({ status: "completed", progress: {}, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    const aiCall = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/ai-screen"));
+    expect(aiCall).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/execute-search")).length).toBe(0);
+    vi.unstubAllGlobals();
+  });
+
+  it("B031: cancelled or failed scrape does not auto-continue", async () => {
+    let mode = "cancelled";
+    const fetchMock = oneClickBase({
+      "/api/execute-search": () => response({ ok: true, task_id: "one-scrape" }),
+      "/api/task-state/one-scrape": () => response({ status: mode, progress: {}, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await oneClickSearch(wrapper);
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(0);
+
+    mode = "failed";
+    const wrapper2 = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await oneClickSearch(wrapper2);
+    await wrapper2.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await wrapper2.get('[data-testid="start-one-click"]').trigger("click");
+    await wrapper2.get('[data-testid="one-click-confirm"]').trigger("click");
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(0);
+    vi.unstubAllGlobals();
+  });
+
+  it("B031: AI screen failure consumes frontend intent without retry", async () => {
+    let aiCalls = 0;
+    const fetchMock = oneClickBase({
+      "/api/execute-search": () => response({ ok: true, task_id: "one-scrape" }),
+      "/api/task-state/one-scrape": () => response({ status: "completed", progress: {}, logs: [] }),
+      "/api/ai-screen": () => { aiCalls += 1; return response({ ok: false, error: "ai_screen_failed" }, 500); },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await oneClickSearch(wrapper);
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
+    await flushPromises();
+    expect(aiCalls).toBe(1);
+    await flushPromises();
+    expect(aiCalls).toBe(1);
+    vi.unstubAllGlobals();
+  });
+
+  it("B031: pause keeps the marker and resume continues automatically", async () => {
+    const fetchMock = oneClickBase({
+      "/api/execute-search": () => response({ ok: true, task_id: "one-scrape" }),
+      "/api/task-state/one-scrape": () => response({ status: "paused", progress: {}, logs: [], error: "风控暂停" }),
+      "/api/task/continue/one-scrape": () => response({ ok: true, task_id: "one-scrape-2" }),
+      "/api/task-state/one-scrape-2": () => response({ status: "completed", progress: {}, logs: [] }),
+      "/api/ai-screen": () => response({ ok: true, task_id: "one-screen" }),
+      "/api/task-state/one-screen": () => response({ status: "completed", progress: {}, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await oneClickSearch(wrapper);
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(0);
+    await wrapper.get('[data-testid="continue-scrape"]').trigger("click");
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(1);
+    vi.unstubAllGlobals();
+  });
+
+  it("B031: an in-session pause disables the one-click button", async () => {
+    const fetchMock = oneClickBase({
+      "/api/execute-search": () => response({ ok: true, task_id: "one-scrape" }),
+      "/api/task-state/one-scrape": () => response({ status: "paused", progress: {}, logs: [], error: "风控暂停" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await oneClickSearch(wrapper);
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="start-one-click"]').attributes("disabled")).toBeDefined();
+    vi.unstubAllGlobals();
+  });
+
+  it("B031: refresh during a running one-click scrape still auto-continues", async () => {
+    const fetchMock = oneClickBase({
+      "/api/latest-running-task": () => response({
+        ok: true, has_task: true, task_id: "running-scrape", kind: "scrape", status: "running",
+        platform: "boss", auto_screen: true, auto_screen_fields: { salary: ["406"] },
+        profile_summary: "3年Python后端候选人", progress: {}, logs: [], error: "",
+      }),
+      "/api/task-state/running-scrape": () => response({ status: "completed", progress: {}, logs: [], scraped_count: 1, platform: "boss" }),
+      "/api/ai-screen": (url, init) => {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          consume_auto_screen: true,
+          screening_fields: { salary: ["406"] },
+          profile_summary: "3年Python后端候选人",
+        });
+        return response({ ok: true, task_id: "one-screen" });
+      },
+      "/api/task-state/one-screen": () => response({ status: "completed", progress: {}, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(1);
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/execute-search")).length).toBe(0);
+    vi.unstubAllGlobals();
+  });
+
+  it("B031: refresh restores paused one-click scrape and resume auto-continues", async () => {
+    const fetchMock = oneClickBase({
+      "/api/latest-running-task": () => response({
+        ok: true, has_task: true, task_id: "paused-scrape", kind: "scrape", status: "paused",
+        platform: "boss", auto_screen: true, auto_screen_fields: { salary: ["406"] },
+        profile_summary: "3年Python后端候选人", progress: {}, logs: [], error: "风控暂停",
+        pause_info: { error_code: "captcha_required", error_reason: "风控暂停" },
+      }),
+      "/api/task-state/paused-scrape": () => response({ status: "paused", progress: {}, logs: [], error: "风控暂停" }),
+      "/api/task/continue/paused-scrape": () => response({ ok: true, task_id: "resumed-scrape" }),
+      "/api/task-state/resumed-scrape": () => response({ status: "completed", progress: {}, logs: [], scraped_count: 1 }),
+      "/api/ai-screen": (url, init) => {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          consume_auto_screen: true,
+          screening_fields: { salary: ["406"] },
+          profile_summary: "3年Python后端候选人",
+        });
+        return response({ ok: true, task_id: "one-screen" });
+      },
+      "/api/task-state/one-screen": () => response({ status: "completed", progress: {}, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    expect(wrapper.get('[data-testid="start-one-click"]').attributes("disabled")).toBeDefined();
+    await wrapper.get('[data-testid="continue-scrape"]').trigger("click");
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(1);
+    vi.unstubAllGlobals();
+  });
+
+  it("B031: completed scrape with zero jobs does not auto-continue", async () => {
+    const fetchMock = oneClickBase({
+      "/api/execute-search": () => response({ ok: true, task_id: "one-scrape" }),
+      "/api/task-state/one-scrape": () => response({ status: "completed", progress: {}, logs: [], scraped_count: 0 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await oneClickSearch(wrapper);
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(0);
+    vi.unstubAllGlobals();
   });
 });

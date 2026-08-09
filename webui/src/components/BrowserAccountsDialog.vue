@@ -51,6 +51,7 @@ const newName = ref("");
 const localNotice = ref<Notice | null>(null);
 // 切换账号/打开窗口后缓存已失效或待重探的账号：徽章显示「待刷新」。
 const pendingRefresh = ref<Set<string>>(new Set());
+const pendingDelete = ref<BrowserAccount | null>(null);
 
 watch(() => props.open, (open) => {
   if (open) {
@@ -267,16 +268,23 @@ function formatDeleteError(error: unknown): string {
   return bits.length ? `${base}（${bits.join("；")}）` : base;
 }
 
-async function removeAccount(id: string) {
+// 删除账号：先打开应用内确认弹窗，确认后才执行删除（D5）。
+function removeAccount(id: string) {
   const account = accounts.value.find((item) => item.id === id);
   if (!account) return;
-  if (!window.confirm(`删除「${displayName(account)}」？该账号的自动化浏览器资料不会被删除，但将无法再选择。`)) return;
-  busyAccount.value = id;
+  pendingDelete.value = account;
+}
+
+async function confirmRemoveAccount() {
+  const account = pendingDelete.value;
+  if (!account || busyAccount.value) return;
+  pendingDelete.value = null;
+  busyAccount.value = account.id;
   try {
-    await apiRequest(`/api/browser-accounts/${encodeURIComponent(id)}`, {
+    await apiRequest(`/api/browser-accounts/${encodeURIComponent(account.id)}`, {
       method: "DELETE",
     });
-    if (activeAccount.value === id) activeAccount.value = "a";
+    if (activeAccount.value === account.id) activeAccount.value = "a";
     setLocalNotice({ message: "账号已删除", tone: "success" });
     await loadAccounts();
   } catch (error) {
@@ -402,6 +410,33 @@ async function removeAccount(id: string) {
     >
       {{ localNotice.message }}
     </div>
+  </BaseDialog>
+
+  <BaseDialog
+    id="delete-account-confirm"
+    :open="Boolean(pendingDelete)"
+    title="删除账号"
+    size="sm"
+    @close="pendingDelete = null"
+  >
+    <p class="browser-account-confirm-text">
+      删除「{{ pendingDelete ? displayName(pendingDelete) : '' }}」？该账号的自动化浏览器资料不会被删除，但将无法再选择。
+    </p>
+    <template #footer>
+      <button
+        type="button"
+        class="button secondary"
+        data-testid="delete-account-cancel"
+        @click="pendingDelete = null"
+      >取消</button>
+      <button
+        type="button"
+        class="button danger"
+        data-testid="delete-account-confirm"
+        :disabled="Boolean(busyAccount)"
+        @click="confirmRemoveAccount"
+      >确认删除</button>
+    </template>
   </BaseDialog>
 </template>
 

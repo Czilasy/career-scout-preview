@@ -69,6 +69,26 @@ describe("App", () => {
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
   });
 
+  it("updates the document title by platform and page state", async () => {
+    document.title = "";
+    const wrapper = mount(App);
+    await flushPromises();
+    expect(document.title).toBe("Career Scout 工作台");
+
+    wrapper.findComponent(DiscoveryView).vm.$emit("round-status", { platform: "boss", phase: "scraping", judged: 0 });
+    await flushPromises();
+    expect(document.title).toBe("Career Scout · BOSS工作台");
+
+    wrapper.findComponent(DiscoveryView).vm.$emit("round-status", { platform: "zhilian", phase: "screening", judged: 0 });
+    await flushPromises();
+    expect(document.title).toBe("Career Scout · 智联工作台");
+
+    wrapper.findComponent(DiscoveryView).vm.$emit("round-status", { platform: "zhilian", phase: "judged", judged: 3 });
+    await flushPromises();
+    expect(document.title).toBe("Career Scout · 职位工作台");
+    expect(document.title).not.toContain("BOSS 工作台");
+  });
+
   it("shows a persistent inline notice when the model list is empty", async () => {
     vi.useFakeTimers();
     const wrapper = mount(App);

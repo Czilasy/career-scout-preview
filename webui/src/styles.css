@@ -1112,7 +1112,17 @@ button:disabled {
   resize: none;
   min-height: 96px;
   line-height: 1.5;
-}.advanced-panel .button.secondary {
+}
+.profile-summary-input.profile-invalid {
+  border-color: var(--reject);
+  box-shadow: 0 0 0 3px var(--reject-wash);
+}
+.profile-inline-error {
+  margin: 6px 0 0;
+  color: var(--reject-deep);
+  font-size: 12px;
+}
+.advanced-panel .button.secondary {
   margin-top: 0;
 }.account-segments {
   display: inline-flex;
@@ -1241,7 +1251,27 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 180px;
-}.workflow-actions {
+}
+.one-click-cta {
+  min-height: 50px;
+  padding: 0 22px;
+  font-size: 15px;
+}
+.one-click-secondary-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
+.one-click-secondary-actions .button {
+  min-height: 34px;
+  padding: 0 13px;
+  font-size: 13px;
+  gap: 6px;
+}
+.workflow-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;

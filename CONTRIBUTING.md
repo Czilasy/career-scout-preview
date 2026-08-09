@@ -39,6 +39,8 @@ npm run build
 - 后端测试：`python -m unittest discover -s tests`，全部使用 mock，不得依赖真实 Chrome、真实账号或网络。
 - 前端测试：`cd webui && npm test`。
 - PR 必须附带覆盖改动的测试；修复 bug 的 PR 必须先添加能复现该 bug 的失败测试。
+- CI 门禁：push 到任意远程分支或发起 PR 时，`.github/workflows/ci.yml` 自动运行后端与前端测试，任一失败即标记未通过并阻断合并。
+- 本地后端测试建议使用 `uv run python -m unittest discover -s tests`，与 CI 保持一致。
 
 ## PR 流程
 

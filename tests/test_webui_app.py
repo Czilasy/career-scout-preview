@@ -6426,5 +6426,231 @@ class MakeCdpSourceRuntimeModeTests(unittest.TestCase):
         self.assertFalse(getattr(source, "in_process", False))
 
 
+
+
+class AutoScreenChainTests(unittest.TestCase):
+    """B031 一键链路 auto_screen 标记：创建/返回/消费/清除。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _preview(self):
+        return self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+
+    def _start_auto_search(self, task_id_hint=None):
+        preview = self._preview()
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit"):
+            resp = self.client.post("/api/execute-search", json={
+                "platform": "boss",
+                "script_params": {
+                    "keyword": "Python",
+                    "city": ["上海"],
+                    "pages": 1,
+                },
+                "scope_digest": preview["scope_digest"],
+                "auto_screen": True,
+                "auto_screen_fields": {"salary": ["406"]},
+                "auto_screen_profile": "Python 后端候选人",
+            })
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        return resp.get_json()["task_id"]
+
+    def _seed_succeeded_scrape(self, run_id, auto_screen=True):
+        jobs = [
+            {"job_id": "j1", "platform_job_id": "j1", "title": "岗位1",
+             "source_url": "https://zhipin.example/j1.html"},
+        ]
+        self.store.create_screening_run(
+            run_id,
+            source_count=1,
+            execution_params={
+                "platform": "boss",
+                "auto_screen": bool(auto_screen),
+                "auto_screen_fields": {"salary": ["406"]},
+                "auto_screen_profile": "Python 后端候选人",
+            },
+        )
+        self.store.save_scrape_combo_result(run_id, "kw|city", jobs, ["kw|city"])
+        self.store.update_screening_run(run_id, status="running", current_stage="scrape")
+        self.store.update_screening_run(run_id, status="succeeded", current_stage="scrape")
+        return jobs
+
+    def test_execute_search_persists_auto_screen_flag(self):
+        task_id = self._start_auto_search()
+        run = self.store.get_screening_run(task_id)
+        params = run["execution_params"]
+        self.assertTrue(params["auto_screen"])
+        self.assertEqual(params["auto_screen_fields"], {"salary": ["406"]})
+        self.assertEqual(params["auto_screen_profile"], "Python 后端候选人")
+        task = self.app.config["PIPELINE_TASKS"][task_id]
+        self.assertTrue(task["auto_screen"])
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        self.assertTrue(data["auto_screen"])
+        self.assertEqual(data["auto_screen_fields"], {"salary": ["406"]})
+        self.assertEqual(data["auto_screen_profile"], "Python 后端候选人")
+
+    def test_execute_search_rejects_invalid_auto_screen_fields(self):
+        preview = self._preview()
+        resp = self.client.post("/api/execute-search", json={
+            "platform": "boss",
+            "script_params": {"keyword": "Python", "city": ["上海"], "pages": 1},
+            "scope_digest": preview["scope_digest"],
+            "auto_screen": True,
+            "auto_screen_fields": ["salary"],
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.get_json()["error"], "auto_screen_fields 必须是对象")
+
+    def test_ai_screen_consumes_flag_before_validation(self):
+        run_id = "auto-consume-fail"
+        self._seed_succeeded_scrape(run_id)
+        resp = self.client.post("/api/ai-screen", json={
+            "screening_fields": "bad",
+            "consume_auto_screen": True,
+            "scrape_task_id": run_id,
+        })
+        self.assertEqual(resp.status_code, 400)
+        run = self.store.get_screening_run(run_id)
+        self.assertFalse(run["execution_params"]["auto_screen"])
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertFalse(data["has_task"])
+
+    def test_latest_running_task_restores_completed_auto_screen(self):
+        run_id = "auto-refresh"
+        self._seed_succeeded_scrape(run_id)
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["status"], "completed")
+        self.assertTrue(data["auto_screen"])
+        self.assertEqual(data["scrape_task_id"], run_id)
+        self.assertEqual(data["frozen_filters"], {"salary": ["406"]})
+        self.assertEqual(data["profile_summary"], "Python 后端候选人")
+        self.assertEqual(data["scraped_count"], 1)
+        # 消费后刷新不再恢复自动接续。
+        self.client.post("/api/ai-screen", json={
+            "screening_fields": "bad",
+            "consume_auto_screen": True,
+            "scrape_task_id": run_id,
+        })
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertFalse(data["has_task"])
+
+    def test_execute_search_cancel_clears_flag(self):
+        task_id = self._start_auto_search()
+        resp = self.client.post(f"/api/execute-search/{task_id}/cancel")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertFalse(self.store.get_screening_run(task_id)["execution_params"]["auto_screen"])
+        self.assertFalse(self.app.config["PIPELINE_TASKS"][task_id]["auto_screen"])
+
+    def test_task_cancel_clears_flag(self):
+        run_id = "auto-cancel"
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={"platform": "boss", "auto_screen": True},
+        )
+        self.store.update_screening_run(run_id, status="running")
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running", "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None, "finished_at": None,
+            "stop_event": threading.Event(), "platform": "boss", "auto_screen": True,
+        }
+        resp = self.client.post(f"/api/task/cancel/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertFalse(self.store.get_screening_run(run_id)["execution_params"]["auto_screen"])
+
+    def test_task_finish_clears_flag(self):
+        run_id = "auto-finish"
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={"platform": "boss", "auto_screen": True},
+        )
+        jobs = [
+            {"job_id": "j1", "platform_job_id": "j1", "title": "岗位1",
+             "source_url": "https://zhipin.example/j1.html"},
+        ]
+        self.store.save_scrape_combo_result(run_id, "kw|city", jobs, ["kw|city"])
+        self.store.update_screening_run(run_id, status="running", current_stage="scrape")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="操作频繁",
+        )
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertFalse(self.store.get_screening_run(run_id)["execution_params"]["auto_screen"])
+
+    def test_paused_run_preserves_flag(self):
+        run_id = "auto-paused"
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={"platform": "boss", "auto_screen": True},
+        )
+        self.store.update_screening_run(run_id, status="running", current_stage="scrape")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="captcha_required", error_reason="验证码",
+        )
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["status"], "paused")
+        self.assertTrue(data["auto_screen"])
+
+    def test_task_state_returns_auto_screen_with_memory_priority(self):
+        run_id = "auto-state"
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={"platform": "boss", "auto_screen": True},
+        )
+        self.store.update_screening_run(run_id, status="running")
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+        self.assertTrue(data["auto_screen"])
+        # 内存任务优先：内存 False 时覆盖 DB True。
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running", "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None, "finished_at": None,
+            "stop_event": threading.Event(), "platform": "boss", "auto_screen": False,
+        }
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+        self.assertFalse(data["auto_screen"])
+
+    def test_latest_running_task_skips_zero_job_auto_screen(self):
+        run_id = "auto-zero"
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={"platform": "boss", "auto_screen": True},
+        )
+        self.store.update_screening_run(run_id, status="running", current_stage="scrape")
+        self.store.update_screening_run(run_id, status="succeeded", current_stage="scrape")
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertFalse(data["has_task"])
+
 if __name__ == "__main__":
+
     unittest.main()

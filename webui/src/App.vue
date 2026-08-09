@@ -33,6 +33,17 @@ const roundStatusText = computed(() => {
   return `${roundStatus.value.judged} 个岗位已判定`;
 });
 
+// 页面标题随平台与页面状态变化；结果/双平台场景使用通用标题，不出现平台独占文案。
+const pageTitle = computed(() => {
+  if (roundStatus.value?.phase === "judged") return "Career Scout · 职位工作台";
+  if (roundStatus.value?.phase === "scraping" || roundStatus.value?.phase === "screening") {
+    const label = roundStatus.value.platform === "zhilian" ? "智联" : "BOSS";
+    return `Career Scout · ${label}工作台`;
+  }
+  return "Career Scout 工作台";
+});
+watch(pageTitle, (title) => { document.title = title; }, { immediate: true });
+
 const aiSettingsOpen = ref(false);
 const browserAccountsOpen = ref(false);
 const envCheckOpen = ref(false);
@@ -115,6 +126,7 @@ async function removeFavorite(job: Record<string, unknown>) {
 
 onMounted(async () => {
   try {
+    document.title = pageTitle.value;
     await initializeSession();
     runtimeMode.value = currentRuntimeMode() === "exe" ? "exe" : "source";
     const profileData = await apiRequest<{ profiles?: CandidateProfile[] }>("/api/profiles");

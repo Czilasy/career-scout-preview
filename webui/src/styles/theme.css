@@ -9,14 +9,14 @@
  * ========================================================================= */
 
 /* ---- 字体 ---- */
-@import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Archivo:ital,wght@1,700;1,800&display=swap");
 
 :root {
   /* 字体族令牌 */
-  --font-display: "Sora", -apple-system, "Segoe UI", sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
   --font-body: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
     "Microsoft YaHei", "Segoe UI", sans-serif;
-  --font-brand: "Archivo", var(--font-display);
+  --font-brand: var(--font-display);
 
   /* 默认 = boss 浅色（首屏未挂 data-theme/data-platform 时的兜底） */
   --brand: #00beab;
@@ -270,7 +270,7 @@ body.dialog-open {
 }
 
 /* ===========================================================================
- * 数字 / Sora 应用位（全局工具类）
+ * 数字 / 展示字体应用位（全局工具类）
  * ========================================================================= */
 .font-display {
   font-family: var(--font-display);

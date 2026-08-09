@@ -2748,6 +2748,7 @@ def create_app(config=None):
             },
             "error": "", "started_at": None, "finished_at": None,
             "stop_event": threading.Event(),
+            "auto_screen": bool((source_run.get("execution_params") or {}).get("auto_screen")),
         }
         with _pipeline_lock:
             _pipeline_tasks[scrape_task_id] = snapshot
@@ -2765,6 +2766,30 @@ def create_app(config=None):
         except _OPERATIONAL_ERRORS:
             return False
         return bool(source_run and source_run.get("status") == "succeeded")
+
+    def _clear_auto_screen(task_id: str) -> None:
+        """清除一键链路的 auto_screen 标记（内存与 DB execution_params）。"""
+        with _pipeline_lock:
+            task = _pipeline_tasks.get(task_id)
+            if task is not None:
+                task["auto_screen"] = False
+        try:
+            run = store.get_screening_run(task_id)
+        except _OPERATIONAL_ERRORS:
+            return
+        if run is None:
+            return
+        params = dict(run.get("execution_params") or {})
+        if params.get("auto_screen"):
+            params["auto_screen"] = False
+            try:
+                store.update_screening_execution_params(task_id, params)
+            except _OPERATIONAL_ERRORS:
+                pass
+
+    def _consume_auto_screen(task_id: str) -> None:
+        """AI 筛选入口消费标记；调用后刷新不再自动重试。"""
+        _clear_auto_screen(task_id)
 
     def _check_resume_block(run: dict) -> tuple[bool, str, str]:
         """Verify the paused dependency before submitting resumed work."""
@@ -3201,6 +3226,10 @@ def create_app(config=None):
                                 error_reason=err_msg,
                                 total_scraped=int(result.get("total_scraped") or 0),
                             )
+            with _pipeline_lock:
+                _terminal_status = (_pipeline_tasks.get(task_id) or {}).get("status")
+            if _terminal_status in ("cancelled", "failed"):
+                _clear_auto_screen(task_id)
             _schedule_pipeline_task_cleanup(task_id)
             _release_worker_resume_claims(_pipeline_tasks.get(task_id))
         except Exception as exc:
@@ -4183,6 +4212,10 @@ def create_app(config=None):
                             else f"{error_message}；状态保存失败：{persistence_error}"
                         )
             _schedule_pipeline_task_cleanup(task_id)
+            with _pipeline_lock:
+                _terminal_status = (_pipeline_tasks.get(task_id) or {}).get("status")
+            if _terminal_status in ("cancelled", "failed"):
+                _clear_auto_screen(task_id)
             _release_worker_resume_claims(_pipeline_tasks.get(task_id))
         except Exception as exc:
             error_message = f"AI 筛选异常：{type(exc).__name__}"
@@ -4924,6 +4957,14 @@ def create_app(config=None):
         if not script_params.get("keyword") or not script_params.get("city"):
             return jsonify({"ok": False, "error": "缺少关键词或城市"}), 400
 
+        # B031: 一键链路标记；auto_screen_fields/profile 只作为刷新恢复快照，
+        # 不进 script_params，不触碰搜索请求的 AI filters 校验。
+        auto_screen = bool(body.get("auto_screen"))
+        auto_screen_fields = body.get("auto_screen_fields") if auto_screen else {}
+        if auto_screen and not isinstance(auto_screen_fields, dict):
+            return jsonify({"ok": False, "error": "auto_screen_fields 必须是对象"}), 400
+        auto_screen_profile = str(body.get("auto_screen_profile") or "") if auto_screen else ""
+
         # T402: 平台键校验（先于任何副作用）
         platform_raw = body.get("platform") or "boss"
         try:
@@ -5100,6 +5141,7 @@ def create_app(config=None):
             task["cdp_port"] = login_space.cdp_port
             task["profile_key"] = login_space.profile_key
             task["task_input_digest"] = task_input_digest
+            task["auto_screen"] = auto_screen
         # T402: 搜索 run 的 frozen_filters 为空，筛选快照为空
         store.create_screening_run(
             task_id,
@@ -5116,6 +5158,9 @@ def create_app(config=None):
                 "execution_config": execution_config.to_dict(),
                 "resolved_cities": resolved_cities,
                 "frozen_scope": frozen_scope.to_dict(),
+                "auto_screen": auto_screen,
+                "auto_screen_fields": auto_screen_fields,
+                "auto_screen_profile": auto_screen_profile,
             },
             backend_version=_backend_version,
         )
@@ -5255,6 +5300,7 @@ def create_app(config=None):
             task["cdp_port"] = db_ep.get("cdp_port")
             task["profile_key"] = db_ep.get("profile_key")
             task["task_input_digest"] = db_ep.get("task_input_digest")
+            task["auto_screen"] = bool(db_ep.get("auto_screen"))
         start_gate = threading.Event()
         abort_start = threading.Event()
 
@@ -5319,6 +5365,7 @@ def create_app(config=None):
             close_debug_chrome()
         except Exception:
             pass
+        _clear_auto_screen(task_id)
         # T412 契约 http-api.md L223-229：DB run 存在时以 DB platform 为权威；
         # 仅 DB 创建前内存窗口用注册 task 的不可变平台快照。
         if not cancel_platform:
@@ -5391,6 +5438,9 @@ def create_app(config=None):
         scrape_task_id = str(body.get("scrape_task_id") or "").strip()
         request_platform = str(body.get("platform") or "").strip() or None
         filter_schema_version = body.get("filter_schema_version")
+        # B031: 一键自动接续在进入现有校验前消费标记，失败也不会刷新重试。
+        if bool(body.get("consume_auto_screen")) and scrape_task_id:
+            _consume_auto_screen(scrape_task_id)
         if not isinstance(screening_fields, dict):
             return jsonify({"ok": False, "error": "无效的筛选字段"}), 400
         if not scrape_task_id:
@@ -5729,6 +5779,10 @@ def create_app(config=None):
         from webui.pipeline_exec import failed_code_label
         with _pipeline_lock:
             for task_id, task in reversed(list(_pipeline_tasks.items())):
+                try:
+                    _mem_db_ep = ((store.get_screening_run(task_id) or {}).get("execution_params") or {})
+                except _OPERATIONAL_ERRORS:
+                    _mem_db_ep = {}
                 if task["status"] in ("running", "queued"):
                     return jsonify({
                         "ok": True,
@@ -5747,6 +5801,9 @@ def create_app(config=None):
                         # 注册时冻结值，不得因缺平台补成 BOSS。
                         "platform": task.get("platform"),
                         "task_input_digest": task.get("task_input_digest"),
+                        "auto_screen": bool(task.get("auto_screen") or _mem_db_ep.get("auto_screen")),
+                        "auto_screen_fields": _mem_db_ep.get("auto_screen_fields") or {},
+                        "auto_screen_profile": str(_mem_db_ep.get("auto_screen_profile") or ""),
                     })
         # 2. DB 中最近 paused（服务重启后恢复暂停态，FR-028）
         try:
@@ -5813,6 +5870,9 @@ def create_app(config=None):
                 "source": "database",
                 "scrape_task_id": execution_params.get("scrape_task_id"),
                 "scrape_completed": _scrape_completed_for_run(execution_params),
+                "auto_screen": bool(execution_params.get("auto_screen")),
+                "auto_screen_fields": execution_params.get("auto_screen_fields") or {},
+                "auto_screen_profile": str(execution_params.get("auto_screen_profile") or ""),
                 "source_run_id": execution_params.get("source_run_id"),
                 "checkpoint_stage": prow["current_stage"],
                 # T409 契约 http-api.md L200-202：DB paused 从 screening_runs
@@ -5861,6 +5921,7 @@ def create_app(config=None):
                 "source_run_id": (run.get("execution_params") or {}).get("source_run_id"),
                 "scrape_task_id": (run.get("execution_params") or {}).get("scrape_task_id"),
                 "scrape_completed": _scrape_completed_for_run(run.get("execution_params") or {}),
+                "auto_screen": bool((run.get("execution_params") or {}).get("auto_screen")),
                 "frozen_filters": run.get("frozen_filters") or {},
                 "profile_summary": str((run.get("execution_params") or {}).get("profile_summary") or ""),
                 # T409 契约 http-api.md L200-202：DB interrupted 从
@@ -5869,6 +5930,52 @@ def create_app(config=None):
                 "task_input_digest": run.get("task_input_digest"),
                 "scraped_count": interrupted_scraped_count,
                 "source_total": int(run.get("source_count") or 0),
+            })
+        # 3.5 已完成抓取 + auto_screen 未消费：刷新后自动接 AI 筛选。
+        try:
+            with store._connection() as conn:
+                auto_rows = conn.execute(
+                    "SELECT id, platform, current_stage, source_count, "
+                    "execution_params_json, updated_at "
+                    "FROM screening_runs WHERE status = 'succeeded' "
+                    "AND current_stage = 'scrape' "
+                    "ORDER BY updated_at DESC LIMIT 20"
+                ).fetchall()
+        except (sqlite3.Error, RuntimeError):
+            auto_rows = []
+        for auto_row in auto_rows:
+            if _has_newer_saved_result_than(auto_row["updated_at"]):
+                continue
+            try:
+                auto_params = json.loads(auto_row["execution_params_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                auto_params = {}
+            if not bool(auto_params.get("auto_screen")):
+                continue
+            auto_scraped_count = store.count_scrape_run_jobs(auto_row["id"])
+            if auto_scraped_count <= 0:
+                continue
+            return jsonify({
+                "ok": True,
+                "has_task": True,
+                "task_id": auto_row["id"],
+                "kind": "scrape",
+                "status": "completed",
+                "stage": "scrape",
+                "progress": {"message": "抓取已完成，等待 AI 筛选"},
+                "logs": [],
+                "error": "",
+                "resumable": False,
+                "source": "database",
+                "auto_screen": True,
+                "scrape_task_id": auto_row["id"],
+                "scrape_completed": True,
+                "frozen_filters": auto_params.get("auto_screen_fields") or {},
+                "profile_summary": str(auto_params.get("auto_screen_profile") or ""),
+                "platform": auto_row["platform"],
+                "task_input_digest": auto_params.get("task_input_digest"),
+                "scraped_count": auto_scraped_count,
+                "source_total": int(auto_row["source_count"] or 0),
             })
         # 4. failed 抓取兜底：有已持久化岗位的任务刷新后可恢复显示真实数量。
         try:
@@ -5916,6 +6023,7 @@ def create_app(config=None):
                 "resumable": True,
                 "source": "database",
                 "scrape_task_id": failed_run["id"],
+                "auto_screen": bool(failed_params.get("auto_screen")),
                 "platform": failed_run.get("platform"),
                 "task_input_digest": failed_run.get("task_input_digest"),
                 "scraped_count": failed_scraped_count,
@@ -7509,6 +7617,7 @@ def create_app(config=None):
                     "result": task.get("result"),
                     "started_at": task.get("started_at"),
                     "finished_at": task.get("finished_at"),
+                    "auto_screen": task.get("auto_screen"),
                 }
             else:
                 live = None
@@ -7667,6 +7776,7 @@ def create_app(config=None):
             # T405: 平台身份与 source outcomes 汇总
             "platform": (run or {}).get("platform") or (live or {}).get("platform"),
             "task_input_digest": (run or {}).get("task_input_digest"),
+            "auto_screen": bool((live or {}).get("auto_screen", exec_params.get("auto_screen"))),
             "source_summary": source_summary,
             "source_outcomes": source_outcomes,
             **(
@@ -7922,6 +8032,10 @@ def create_app(config=None):
                     if run is not None else "cancelled"
                 )
                 current["error"] = "用户已取消"
+        _parent_scrape = str(((run or {}).get("execution_params") or {}).get("scrape_task_id") or "")
+        _clear_auto_screen(run_id)
+        if _parent_scrape and _parent_scrape != run_id:
+            _clear_auto_screen(_parent_scrape)
         if task is not None:
             try:
                 from webui.pipeline_exec import close_debug_chrome
@@ -8098,6 +8212,9 @@ def create_app(config=None):
             }), 409
         except KeyError:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
+        _clear_auto_screen(run_id)
+        if scrape_task_id and scrape_task_id != run_id:
+            _clear_auto_screen(scrape_task_id)
         result = _build_partial_pipeline_result(
             source_jobs, verdicts, pending_rows, jd_map,
             profile_summary,

@@ -192,6 +192,8 @@ export interface TaskSnapshot {
   scope_digest?: string;
   source_summary?: Record<string, unknown> | null;
   source_outcomes?: Array<Record<string, unknown>> | null;
+  /** 一键链路标记：抓取任务完成后前端自动接续 AI 筛选。 */
+  auto_screen?: boolean;
 }
 
 export interface CandidateProfile {

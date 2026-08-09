@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Bookmark,
   Check,
@@ -8,6 +8,7 @@ import {
   Filter,
   History,
   LoaderCircle,
+  Play,
   RotateCcw,
   Search,
   SlidersHorizontal,
@@ -20,6 +21,7 @@ import CollapsibleCard from "../components/CollapsibleCard.vue";
 import ExecutionModeSelector from "../components/ExecutionModeSelector.vue";
 import JobLifecycleActions from "../components/JobLifecycleActions.vue";
 import JobWorkspace from "../components/JobWorkspace.vue";
+import OneClickScreenDialog, { type OneClickFilterGroup } from "../components/OneClickScreenDialog.vue";
 import StepNavigator from "../components/StepNavigator.vue";
 import TaskProgress from "../components/TaskProgress.vue";
 import { ApiError, apiRequest, errorMessage, settingsApi } from "../api";
@@ -85,6 +87,8 @@ interface TaskSnapshot {
   scraped_count?: number;
   // T510：任务自身平台，供 TaskProgress 展示真实平台徽章（http-api.md L201）
   platform?: Platform;
+  /** 一键链路标记：抓取任务完成后前端自动接续 AI 筛选。 */
+  auto_screen?: boolean;
 }
 
 
@@ -171,6 +175,8 @@ function setDraftPlatform(platform: Platform) {
   interruptedRunId.value = "";
   restoredTaskHint.value = "";
   // 切换草稿平台后按新平台重新加载 schema / 城市；旧请求被 loader 内部取消丢弃。
+  oneClickOpen.value = false;
+  autoScreenArmed.value = false;
   void loadFilterLabels();
   void loadCityCatalog();
 }
@@ -344,6 +350,21 @@ function clampAdvanced(field: string) {
   if (next !== raw) advancedSettings.value[field] = next;
 }
 const screenPanelOpen = ref(true);
+const oneClickOpen = ref(false);
+const oneClickGroups = computed<OneClickFilterGroup[]>(() => filterGroups.value);
+const hasOldResult = computed(() => resultLoaded.value && Boolean(pipelineResult.value));
+const autoScreenArmed = ref(false);
+const autoScreenFields = ref<Record<string, string[]>>({});
+const autoScreenProfile = ref("");
+const profileError = ref("");
+const profileInputEl = ref<HTMLTextAreaElement | null>(null);
+const oneClickDisabled = computed(() => Boolean(
+  draftPlatformDisabled.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value
+  || pausedRunId.value || interruptedRunId.value
+  || scrapeSnapshot.value?.status === "paused"
+  || screenSnapshot.value?.status === "paused"
+  || recrawlSnapshot.value?.status === "paused",
+));
 // 步骤 2 两个面板（关键词配置 / 高级执行设置）共用同一受控状态：
 // 默认收拢、手动展开/收起联动（一个 ref 天然同步两卡）；开始抓取后自动收拢。
 const searchPanelsOpen = ref(false);
@@ -498,6 +519,8 @@ async function restoreRunningTask() {
       source_total?: number;
       frozen_filters?: Record<string, unknown>;
       profile_summary?: string;
+      auto_screen?: boolean;
+      auto_screen_fields?: Record<string, unknown>;
     }>("/api/latest-running-task");
     if (!data.has_task || !data.task_id) return;
     // T509：先设置任务自身平台，再加载对应 schema/城市（platform-schema.md L157）。
@@ -530,6 +553,27 @@ async function restoreRunningTask() {
     const kind: "scrape" | "screen" | "recrawl" = data.kind === "scrape"
       ? "scrape"
       : data.kind === "recrawl" ? "recrawl" : "screen";
+    if (kind === "scrape" && isCompletedTaskStatus(data.status) && data.auto_screen) {
+      scrapeTaskId.value = data.scrape_task_id || data.task_id;
+      scrapeCompleted.value = true;
+      analysisReady.value = true;
+      const savedFilters = data.auto_screen_fields || data.frozen_filters || {};
+      const drafts = filterValues.value[filterPlatform];
+      for (const key of Object.keys(drafts)) delete drafts[key];
+      Object.assign(
+        drafts,
+        Object.fromEntries(
+          Object.entries(savedFilters)
+            .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
+            .map(([key, value]) => [key, value as string[]]),
+        ),
+      );
+      profileSummary.value = data.profile_summary || "";
+      enterScreenStep();
+      restoredTaskHint.value = "检测到一键任务已抓取完成，正在自动接续 AI 筛选";
+      void startAiScreen({ consumeAutoScreen: true, fields: drafts, profile: profileSummary.value });
+      return;
+    }
     if (data.status === "interrupted") {
       // 服务重启打断的任务：工作线程已死不能 poll；提示用户重开（后端会自动接着上次进度）
       interruptedRunId.value = data.task_id;
@@ -593,6 +637,26 @@ async function restoreRunningTask() {
       analysisReady.value = true;
       if (kind === "scrape") {
         activeStep.value = "search";
+        autoScreenArmed.value = Boolean(data.auto_screen);
+        if (data.auto_screen_fields) {
+          const autoDrafts = filterValues.value[filterPlatform];
+          for (const key of Object.keys(autoDrafts)) delete autoDrafts[key];
+          Object.assign(
+            autoDrafts,
+            Object.fromEntries(
+              Object.entries(data.auto_screen_fields)
+                .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
+                .map(([key, value]) => [key, value as string[]]),
+            ),
+          );
+          autoScreenFields.value = Object.fromEntries(
+            Object.entries(data.auto_screen_fields)
+              .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
+              .map(([key, value]) => [key, value as string[]]),
+          );
+        }
+        profileSummary.value = data.profile_summary || "";
+        autoScreenProfile.value = data.profile_summary || "";
       } else if (kind === "screen") {
         scrapeTaskId.value = data.scrape_task_id || "";
         scrapeCompleted.value = Boolean(data.scrape_completed);
@@ -629,6 +693,17 @@ async function restoreRunningTask() {
       scrapeBusy.value = true;
       scrapeSnapshot.value = snapshot;
       restoredTaskHint.value = "检测到抓取任务仍在后台运行，已自动接回";
+      autoScreenArmed.value = Boolean(data.auto_screen);
+      if (data.auto_screen_fields) {
+        autoScreenFields.value = Object.fromEntries(
+          Object.entries(data.auto_screen_fields)
+            .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
+            .map(([key, value]) => [key, value as string[]]),
+        );
+      }
+      const restoredProfile = data.profile_summary || "";
+      profileSummary.value = restoredProfile;
+      autoScreenProfile.value = restoredProfile;
       void pollTask(data.task_id, "scrape");
     } else if (kind === "screen") {
       screenTaskId.value = data.task_id;
@@ -895,6 +970,8 @@ async function analyzeResume() {
     interruptedRunId.value = "";
     restoredTaskHint.value = "";
     scopePreview.value = null;
+    autoScreenArmed.value = false;
+    oneClickOpen.value = false;
     scopePreviewBusy.value = false;
     activeCategory.value = "matched";
     initializeFromAnalysis(data);
@@ -1026,6 +1103,55 @@ async function selectExecutionMode(selection: ExecutionSelection) {
   }
 }
 
+interface OneClickLaunch {
+ autoScreen?: boolean;
+ fields?: Record<string, string[]>;
+ profile?: string;
+}
+
+function validateProfileForScreen(): boolean {
+ if (profileSummary.value.trim().length < 10) {
+   profileError.value = "求职画像至少 10 个字（不含首尾空格）";
+   void nextTick(() => profileInputEl.value?.focus());
+   return false;
+ }
+ profileError.value = "";
+ return true;
+}
+
+function handleProfileInput() {
+ if (profileError.value && profileSummary.value.trim().length >= 10) profileError.value = "";
+}
+
+function handleProfileBlur() {
+ if (profileSummary.value.trim().length < 10) {
+   profileError.value = "求职画像至少 10 个字（不含首尾空格）";
+ } else {
+   profileError.value = "";
+ }
+}
+
+function openOneClick() {
+ profileError.value = "";
+ if (!selectedKeywords.value.length || !cityList.value.length) {
+   enterSearchStep();
+   notify("请先到第二步补齐关键词和城市", "warning");
+   return;
+ }
+ if (!validateProfileForScreen()) {
+   notify("求职画像至少 10 个字（不含首尾空格）", "warning");
+   return;
+ }
+ oneClickOpen.value = true;
+}
+
+function confirmOneClick(fields: Record<string, string[]>) {
+ oneClickOpen.value = false;
+ filterValues.value[draftPlatform.value] = fields;
+ void startScrape({ autoScreen: true, fields, profile: profileSummary.value });
+}
+
+
 async function saveAdvancedSettings() {
   advancedBusy.value = true;
   try {
@@ -1040,7 +1166,7 @@ async function saveAdvancedSettings() {
   }
 }
 
-async function startScrape() {
+async function startScrape(options: OneClickLaunch = {}) {
   const scriptParams = buildSearchScriptParams(selectedKeywords.value, effectiveSearchCities.value);
   if (!scriptParams.keyword || !scriptParams.city.length) {
     notify("请确认至少一个关键词和一个城市", "warning");
@@ -1049,6 +1175,10 @@ async function startScrape() {
   const preview = scopePreview.value || await refreshScopePreview();
   if (!preview) return;
   // 开始抓取后自动收拢两个配置面板（用户可随时手动展开查看）。
+  autoScreenArmed.value = Boolean(options.autoScreen);
+  autoScreenFields.value = options.fields || {};
+  autoScreenProfile.value = options.profile || "";
+  profileError.value = "";
   searchPanelsOpen.value = false;
   scrapeBusy.value = true;
   scrapeCompleted.value = false;
@@ -1061,7 +1191,16 @@ async function startScrape() {
   try {
     const data = await apiRequest<{ task_id: string }>("/api/execute-search", {
       method: "POST",
-      json: { platform: draftPlatform.value, script_params: scriptParams, scope_digest: preview.scope_digest },
+      json: {
+        platform: draftPlatform.value,
+        script_params: scriptParams,
+        scope_digest: preview.scope_digest,
+        ...(options.autoScreen ? {
+          auto_screen: true,
+          auto_screen_fields: options.fields || {},
+          auto_screen_profile: options.profile || "",
+        } : {}),
+      },
     });
     scrapeTaskId.value = data.task_id;
     await pollTask(data.task_id, "scrape");
@@ -1086,6 +1225,7 @@ async function cancelScrape() {
     });
     // 后端会立刻关浏览器并标 cancelled；这里直接复位，不等下一次轮询
     scrapeBusy.value = false;
+    autoScreenArmed.value = false;
     restoredTaskHint.value = "";
     scrapeSnapshot.value = { status: "cancelled", progress: { message: "已停止抓取" }, logs: [], error: "" };
     interruptedRunId.value = "";
@@ -1119,7 +1259,16 @@ async function continueScrape() {
   }
 }
 
-async function startAiScreen() {
+interface AiScreenLaunch {
+ consumeAutoScreen?: boolean;
+ fields?: Record<string, string[]>;
+ profile?: string;
+}
+
+
+async function startAiScreen(options: AiScreenLaunch = {}) {
+
+
   if (!scrapeCompleted.value || !scrapeTaskId.value) {
     if (!scrapeCompleted.value) {
       notify("请先完成本轮抓取，再开始 AI 筛选", "warning");
@@ -1129,6 +1278,14 @@ async function startAiScreen() {
     }
     return;
   }
+  if (!validateProfileForScreen()) {
+    notify("求职画像至少 10 个字（不含首尾空格）", "warning");
+    return;
+  }
+  const consumeAutoScreen = Boolean(options.consumeAutoScreen || autoScreenArmed.value);
+  autoScreenArmed.value = false;
+  const screenFields = options.fields || filterValues.value[draftPlatform.value];
+  const screenProfile = options.profile ?? profileSummary.value;
   screenPanelOpen.value = false;
   screenBusy.value = true;
   pausedRunId.value = ""; // 切片7：清掉 DB paused 标记，进入内存工作模式
@@ -1141,10 +1298,11 @@ async function startAiScreen() {
       json: {
         // T506/T508：只提交当前草稿平台的筛选草稿 + schema 版本。
         // 不发 platform（父 run 已冻结平台，后端从父 run 读）；不发 BOSS 的 stage 给智联 run。
-        screening_fields: filterValues.value[draftPlatform.value],
+        screening_fields: screenFields,
         filter_schema_version: schemaRef.value?.schema_version ?? null,
-        profile_summary: profileSummary.value,
+        profile_summary: screenProfile,
         scrape_task_id: scrapeTaskId.value,
+        ...(consumeAutoScreen ? { consume_auto_screen: true } : {}),
       },
     });
     screenTaskId.value = data.task_id;
@@ -1197,6 +1355,7 @@ async function cancelAiScreen() {
     });
     // 后端会标 cancelled；这里直接复位，不等下一次轮询
     screenBusy.value = false;
+    autoScreenArmed.value = false;
     restoredTaskHint.value = "";
     interruptedRunId.value = "";
     screenSnapshot.value = { status: "cancelled", progress: { message: "已停止筛选" }, logs: [], error: "" };
@@ -1220,6 +1379,7 @@ async function cancelPausedTask(runId: string) {
     restoredTaskHint.value = "";
     pausedRunId.value = "";
     interruptedRunId.value = "";
+    autoScreenArmed.value = false;
     if (scrapeSnapshot.value) scrapeSnapshot.value = { status: "cancelled", progress: { message: "已取消任务" }, logs: [], error: "" };
     if (screenSnapshot.value) screenSnapshot.value = { status: "cancelled", progress: { message: "已取消任务" }, logs: [], error: "" };
     notify("已取消任务，已有结果保留", "warning");
@@ -1245,6 +1405,7 @@ async function finishPausedTask(runId: string) {
     restoredTaskHint.value = "";
     pausedRunId.value = "";
     interruptedRunId.value = "";
+    autoScreenArmed.value = false;
     finishedPartial.value = true;
     const totalScraped = Number(data.result?.total_scraped ?? 0);
     const finished: TaskSnapshot = {
@@ -1290,6 +1451,9 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
     if (isCompletedTaskStatus(data.status)) {
       pollRetryCount = 0;
       restoredTaskHint.value = "";
+      const hasJobs = typeof data.scraped_count === "number" ? data.scraped_count > 0 : true;
+      const shouldAutoScreen = kind === "scrape" && (autoScreenArmed.value || data.auto_screen === true) && hasJobs;
+      autoScreenArmed.value = false;
       if (kind === "scrape") {
         scrapeBusy.value = false;
         scrapeCompleted.value = true;
@@ -1299,6 +1463,10 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
             : "抓取完成，请继续确认 AI 筛选条件",
           data.status === "completed_with_pending" ? "warning" : "success",
         );
+        if (shouldAutoScreen) {
+          enterScreenStep();
+          await startAiScreen({ consumeAutoScreen: true, fields: autoScreenFields.value, profile: autoScreenProfile.value });
+        }
       } else {
         screenBusy.value = false;
         // 实时路径与刷新路径统一：任务完成后拉双平台合并结果（R2），
@@ -1593,6 +1761,9 @@ function resetWorkflow() {
   scopePreview.value = null;
   scopePreviewBusy.value = false;
   keywords.value = [];
+  autoScreenArmed.value = false;
+  oneClickOpen.value = false;
+  profileError.value = "";
   selectedKeywords.value = [];
   customKeyword.value = "";
   cityText.value = "";
@@ -2140,7 +2311,21 @@ watch(roundStatusPayload, (payload) => {
           </div>
           <label class="field-label">
             <span>求职画像（用于 AI 精筛）<small v-if="!profileSummary">　未填写将跳过精筛</small></span>
-            <textarea v-model="profileSummary" rows="4" :disabled="scopeLocked" class="profile-summary-input" placeholder="上传简历后自动生成；也可手动填写，如：3年Python后端，熟悉FastAPI/Redis，期望AI应用开发方向"></textarea>
+            <textarea
+              v-model="profileSummary"
+              ref="profileInputEl"
+              rows="4"
+              :disabled="scopeLocked"
+              class="profile-summary-input"
+              :class="{ 'profile-invalid': profileError }"
+              :aria-invalid="profileError ? 'true' : undefined"
+              placeholder="上传简历后自动生成；也可手动填写，如：3年Python后端，熟悉FastAPI/Redis，期望AI应用开发方向"
+              @input="handleProfileInput"
+              @blur="handleProfileBlur"
+            ></textarea>
+            <p v-if="profileError" class="profile-inline-error" data-testid="profile-inline-error" role="status">
+              {{ profileError }}
+            </p>
           </label>
         </CollapsibleCard>
 
@@ -2218,10 +2403,14 @@ watch(roundStatusPayload, (payload) => {
           <p v-if="draftPlatformDisabled" class="platform-disabled-notice" data-testid="platform-disabled-notice" role="status">
             当前平台（{{ draftPlatform === 'boss' ? 'BOSS' : '智联' }}）已禁用新建任务，请切换到可用平台。
           </p>
-          <button class="button primary" type="button" data-testid="start-scrape" :disabled="draftPlatformDisabled" @click="scrapeBusy ? cancelScrape() : startScrape()">
-            <Search v-if="!scrapeBusy" :size="18" aria-hidden="true" />
-            <Square v-else :size="18" aria-hidden="true" />{{ scrapeBusy ? "停止抓取" : "开始抓取" }}
+          <button class="button primary one-click-cta" type="button" data-testid="start-one-click" :disabled="oneClickDisabled" @click="openOneClick">
+            <Play :size="20" aria-hidden="true" />开始筛选并 AI 优化
           </button>
+          <div class="one-click-secondary-actions">
+            <button class="button primary" type="button" data-testid="start-scrape" :disabled="draftPlatformDisabled" @click="scrapeBusy ? cancelScrape() : startScrape()">
+              <Search v-if="!scrapeBusy" :size="18" aria-hidden="true" />
+              <Square v-else :size="18" aria-hidden="true" />{{ scrapeBusy ? "停止抓取" : "开始抓取" }}
+            </button>
           <button v-if="scrapeSnapshot && scrapeSnapshot.status === 'paused' && scrapeTaskId"
                   class="button secondary" type="button" data-testid="continue-scrape"
                   :disabled="scrapeBusy" @click="continueScrape()">
@@ -2254,6 +2443,7 @@ watch(roundStatusPayload, (payload) => {
           <button v-if="finishedPartial" class="button primary" type="button" data-testid="continue-ai-after-finish" @click="enterScreenStep()">
             继续 AI 筛选
           </button>
+          </div>
         </div>
       </section>
 
@@ -2482,5 +2672,15 @@ watch(roundStatusPayload, (payload) => {
       </section>
       </div>
     </Transition>
+
+    <OneClickScreenDialog
+      :open="oneClickOpen"
+      :platform="draftPlatform"
+      :groups="oneClickGroups"
+      v-model="filterValues[draftPlatform]"
+      :has-old-result="hasOldResult"
+      @close="oneClickOpen = false"
+      @confirm="confirmOneClick"
+    />
   </main>
 </template>

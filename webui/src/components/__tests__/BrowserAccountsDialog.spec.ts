@@ -266,14 +266,15 @@ describe("BrowserAccountsDialog", () => {
       }
       return response({ init });
     });
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const confirmSpy = vi.spyOn(window, "confirm");
 
     const wrapper = await mountOpen(fetchMock);
 
     await findButton(wrapper, "删除").trigger("click");
+    await findButton(wrapper, "确认删除").trigger("click");
     await flushPromises();
 
-    expect(confirmSpy).toHaveBeenCalled();
+    expect(confirmSpy).not.toHaveBeenCalled();
     const notice = wrapper.get('.browser-account-notice[data-tone="error"]');
     // 主文案 + 双平台占用细节（http-api.md L328/L332）
     expect(notice.text()).toContain("该账号在两个平台均被占用，无法删除");
@@ -299,14 +300,43 @@ describe("BrowserAccountsDialog", () => {
       }
       return response({ init });
     });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const confirmSpy = vi.spyOn(window, "confirm");
 
     const wrapper = await mountOpen(fetchMock);
 
     await findButton(wrapper, "删除").trigger("click");
+    await findButton(wrapper, "确认删除").trigger("click");
     await flushPromises();
 
     const notice = wrapper.get('.browser-account-notice[data-tone="error"]');
     expect(notice.text()).toContain("当前有任务运行，无法删除账号");
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+
+  it("cancel on the in-app delete confirm performs no action", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/browser-accounts") {
+        return response({ accounts: [bossOnlyAccount], active_account: "a" });
+      }
+      if (url.endsWith("/api/browser-accounts/b") && init?.method === "DELETE") {
+        return response({ ok: true });
+      }
+      return response({ init });
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    await findButton(wrapper, "删除").trigger("click");
+    expect(wrapper.find('[data-testid="delete-account-confirm"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="delete-account-cancel"]').trigger("click");
+    await flushPromises();
+
+    const deleteCall = fetchMock.mock.calls.some(([url, init]) => String(url).endsWith("/api/browser-accounts/b") && init?.method === "DELETE");
+    expect(deleteCall).toBe(false);
+    expect(wrapper.find('[data-testid="delete-account-confirm"]').exists()).toBe(false);
+    expect(confirmSpy).not.toHaveBeenCalled();
   });
 });

@@ -54,10 +54,9 @@ const checkedAt = ref<number | null>(null);
 // 响应缺失 runtime_mode 时默认 "source"，保证源码模式零回归（合同 §2.3、§4）。
 const runtimeMode = ref<"source" | "exe">("source");
 const localNotice = ref<Notice | null>(null);
-// 逐项点亮的动画进度：加载完成后按顺序把每项从 ⏳ 翻到真实状态。
-const litOrder = ref<string[]>([]);
 const busyAction = ref(""); // 正在执行的修复动作 id，避免重复点击
 const accountNames = ref<Record<string, string>>({});
+const pendingCooldown = ref<CooldownRecord | null>(null);
 
 const PLATFORM_LABELS: Record<string, string> = {
   boss: "BOSS",
@@ -81,7 +80,6 @@ watch(() => props.open, (open) => {
     void loadAccounts();
     void runCheck();
   } else {
-    litOrder.value = [];
     busyAction.value = "";
   }
 });
@@ -99,28 +97,8 @@ async function loadAccounts() {
   }
 }
 
-// 逐项异步点亮：全部 ⏳ → 按组内顺序逐个翻到真实状态，模拟逐项检查完成。
-function animateItems(items: CheckItem[]) {
-  const all: string[] = [];
-  for (const group of groups.value) {
-    for (const item of group.items) all.push(`${group.id}:${item.id}`);
-  }
-  litOrder.value = [];
-  const reveal = (index: number) => {
-    if (index >= all.length) return;
-    litOrder.value = [...litOrder.value, all[index]];
-    window.setTimeout(() => reveal(index + 1), 130);
-  };
-  reveal(0);
-}
-
-function isLit(groupId: string, itemId: string): boolean {
-  return litOrder.value.includes(`${groupId}:${itemId}`);
-}
-
 async function runCheck() {
   loading.value = true;
-  litOrder.value = [];
   try {
     const data = await apiRequest<EnvCheckResponse>("/api/env-check");
     groups.value = data.groups || [];
@@ -128,7 +106,6 @@ async function runCheck() {
     activeAccount.value = data.active_account || "";
     checkedAt.value = data.checked_at || null;
     runtimeMode.value = data.runtime_mode === "exe" ? "exe" : "source";
-    animateItems(data.groups?.flatMap((g) => g.items) || []);
   } catch (error) {
     setLocalNotice({ message: errorMessage(error, "环境检查失败"), tone: "error" });
   } finally {
@@ -189,13 +166,15 @@ async function runFix(item: CheckItem) {
   }
 }
 
-// 手动解除冷却：二次确认弹窗，只清 cooldown 不碰登录态缓存（D6）。
-async function clearCooldown(record: CooldownRecord) {
-  const label = accountNames.value[record.account_id] || record.account_id;
-  const platform = PLATFORM_LABELS[record.platform] || record.platform;
-  if (!window.confirm(`解除「${label}」的${platform}风控冷却？解除后仍建议等待风控缓解后再跑任务。`)) {
-    return;
-  }
+// 手动解除冷却：先打开应用内确认弹窗，只清 cooldown 不碰登录态缓存（D6）。
+function clearCooldown(record: CooldownRecord) {
+  pendingCooldown.value = record;
+}
+
+async function confirmClearCooldown() {
+  const record = pendingCooldown.value;
+  if (!record || busyAction.value) return;
+  pendingCooldown.value = null;
   busyAction.value = `clear:${record.account_id}:${record.platform}`;
   try {
     await apiRequest("/api/cooldown/clear", {
@@ -256,11 +235,10 @@ async function clearCooldown(record: CooldownRecord) {
           >
             <span
               class="env-check-mark"
-              :data-state="isLit(group.id, item.id) ? item.status : 'pending'"
+              :data-state="item.status"
               aria-hidden="true"
             >
-              <template v-if="!isLit(group.id, item.id)">⏳</template>
-              <template v-else-if="item.status === 'ok'">✅</template>
+              <template v-if="item.status === 'ok'">✅</template>
               <template v-else-if="item.status === 'fail'">❌</template>
               <template v-else>⏭️</template>
             </span>
@@ -269,7 +247,7 @@ async function clearCooldown(record: CooldownRecord) {
               <p class="env-check-item-detail">{{ item.detail }}</p>
             </div>
             <button
-              v-if="isLit(group.id, item.id) && item.status === 'fail' && fixAction(item)"
+              v-if="item.status === 'fail' && fixAction(item)"
               type="button"
               class="button secondary small env-check-fix"
               :disabled="Boolean(busyAction)"
@@ -336,6 +314,7 @@ async function clearCooldown(record: CooldownRecord) {
       </ul>
     </section>
 
+
     <div
       v-if="localNotice"
       class="env-check-notice"
@@ -345,6 +324,33 @@ async function clearCooldown(record: CooldownRecord) {
     >
       {{ localNotice.message }}
     </div>
+  </BaseDialog>
+
+  <BaseDialog
+    id="cooldown-confirm"
+    :open="Boolean(pendingCooldown)"
+    title="解除风控冷却"
+    size="sm"
+    @close="pendingCooldown = null"
+  >
+    <p class="env-check-confirm-text">
+      解除「{{ pendingCooldown ? (accountNames[pendingCooldown.account_id] || pendingCooldown.account_id) : '' }}」的{{ pendingCooldown ? (PLATFORM_LABELS[pendingCooldown.platform] || pendingCooldown.platform) : '' }}风控冷却？解除后仍建议等待风控缓解后再跑任务。
+    </p>
+    <template #footer>
+      <button
+        type="button"
+        class="button secondary"
+        data-testid="cooldown-confirm-cancel"
+        @click="pendingCooldown = null"
+      >取消</button>
+      <button
+        type="button"
+        class="button danger"
+        data-testid="cooldown-confirm-ok"
+        :disabled="Boolean(busyAction)"
+        @click="confirmClearCooldown"
+      >确认解除</button>
+    </template>
   </BaseDialog>
 </template>
 
