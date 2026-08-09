@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 from webui.app import create_app
+from webui import ai as ai_service
 
 
 class WorkbenchAPITestBase(unittest.TestCase):
@@ -85,6 +86,69 @@ class AISettingsTests(WorkbenchAPITestBase):
         self.assertFalse(data["ok"])
         self.assertEqual(data["warning_codes"], ["auth_failed"])
         self.assertEqual(data["transport"], "failed")
+
+    def test_test_connection_returns_chinese_user_message_without_code(self):
+        with mock.patch("webui.ai.store_api_key", return_value="cred-ref"):
+            self.client.put("/api/ai-settings", json={
+                "endpoint_url": "https://api.example.com/v1",
+                "api_key": "sk-secret",
+            })
+        with mock.patch("webui.ai.retrieve_api_key", return_value="sk-secret"), \
+             mock.patch("webui.ai.test_connection", return_value={
+                 "ok": False, "transport": "failed", "generation": "failed",
+                 "candidate_contract": "manual_required",
+                 "warning_codes": ["auth_failed"],
+             }):
+            resp = self.client.post("/api/ai-settings/test")
+        data = resp.get_json()
+        self.assertEqual(data["user_message"], "API 密钥无效或已过期，请检查 AI 设置")
+        self.assertNotIn("auth_failed", data["user_message"])
+
+    def test_test_connection_unknown_code_falls_back_to_pure_chinese(self):
+        with mock.patch("webui.ai.store_api_key", return_value="cred-ref"):
+            self.client.put("/api/ai-settings", json={
+                "endpoint_url": "https://api.example.com/v1",
+                "api_key": "sk-secret",
+            })
+        with mock.patch("webui.ai.retrieve_api_key", return_value="sk-secret"), \
+             mock.patch("webui.ai.test_connection", return_value={
+                 "ok": False, "transport": "failed", "generation": "failed",
+                 "candidate_contract": "manual_required",
+                 "warning_codes": ["mystery_code"],
+             }):
+            resp = self.client.post("/api/ai-settings/test")
+        data = resp.get_json()
+        self.assertEqual(data["user_message"], "AI 服务调用失败，请检查设置后重试")
+        self.assertNotIn("mystery_code", data["user_message"])
+
+    def test_models_failure_returns_chinese_user_message_without_code(self):
+        with mock.patch("webui.ai.store_api_key", return_value="cred-ref"):
+            self.client.put("/api/ai-settings", json={
+                "endpoint_url": "https://api.example.com/v1",
+                "api_key": "sk-secret",
+            })
+        with mock.patch("webui.ai.retrieve_api_key", return_value="sk-secret"), \
+             mock.patch("webui.ai.list_models",
+                          side_effect=ai_service.AISecurityError("network_error")):
+            resp = self.client.post("/api/ai-settings/models")
+        self.assertEqual(resp.status_code, 502)
+        data = resp.get_json()
+        self.assertEqual(data["user_message"], "无法连接 AI 服务，请检查网络与地址配置")
+        self.assertNotIn("network_error", data["user_message"])
+
+    def test_models_unknown_code_falls_back_to_pure_chinese(self):
+        with mock.patch("webui.ai.store_api_key", return_value="cred-ref"):
+            self.client.put("/api/ai-settings", json={
+                "endpoint_url": "https://api.example.com/v1",
+                "api_key": "sk-secret",
+            })
+        with mock.patch("webui.ai.retrieve_api_key", return_value="sk-secret"), \
+             mock.patch("webui.ai.list_models",
+                          side_effect=ai_service.AISecurityError("mystery_code")):
+            resp = self.client.post("/api/ai-settings/models")
+        data = resp.get_json()
+        self.assertEqual(data["user_message"], "AI 服务调用失败，请检查设置后重试")
+        self.assertNotIn("mystery_code", data["user_message"])
 
 
 class ProfileTests(WorkbenchAPITestBase):

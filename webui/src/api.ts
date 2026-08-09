@@ -146,6 +146,12 @@ export function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+export function userFacingMessage(error: unknown, fallback: string): string {
+  return error instanceof ApiError && typeof error.payload.user_message === "string" && error.payload.user_message
+    ? error.payload.user_message
+    : fallback;
+}
+
 export const settingsApi = {
   previewScope(payload: ScopePreviewRequest) {
     return apiRequest<ScopePreviewResponse>("/api/search-scope/preview", {

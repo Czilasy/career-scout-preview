@@ -267,15 +267,17 @@ def _cdp_data_dir() -> str:
 # 进度百分比与阶段文案
 # ---------------------------------------------------------------------------
 _SCRAPE_STAGE_WEIGHTS: dict[str, tuple[int, int]] = {
-    "ensure_chrome": (0, 5),
-    "preflight": (5, 10),
-    "searching": (10, 90),
-    "combo_done": (10, 90),
-    "combo_failed": (10, 90),
-    "waiting": (10, 90),
-    "risk_warning": (90, 95),
-    "closing_chrome": (95, 100),
+    "ensure_chrome": (1, 1),
+    "preflight": (1, 1),
+    "searching": (0, 100),
+    "combo_done": (0, 100),
+    "combo_failed": (0, 100),
+    "waiting": (0, 100),
+    "risk_warning": (0, 100),
+    "closing_chrome": (0, 100),
     "done": (100, 100),
+    "cancelled": (0, 0),
+    "hard_stop": (0, 100),
 }
 
 _SCRAPE_STAGE_MESSAGES: dict[str, str] = {
@@ -471,7 +473,10 @@ def _classify_detail_batch_exception(exc: Exception) -> str:
 
 
 def _scrape_overall_percent(stage: str, current: int, total: int) -> int:
-    """把抓取 pipeline 的当前阶段映射到整体百分比（0-100）。"""
+    """把抓取 pipeline 的当前阶段映射到整体百分比（0-100）。
+
+    ``current`` 必须是已确认真实完成的组合数；准备阶段最多象征 1%，
+    搜索/等待/失败/收尾只反映已完成的真实组合，不使用时间或阶段权重假爬。"""
     start, end = _SCRAPE_STAGE_WEIGHTS.get(stage, (0, 100))
     if total <= 0:
         return start
@@ -888,7 +893,8 @@ def run_search(params: dict, source, *, pages: int = 3,
 
     for idx, combo in enumerate(combos):
         if stop_event is not None and stop_event.is_set():
-            emit(stage="cancelled", message="运行已取消")
+            emit(stage="cancelled", current=len(completed_combos), total=len(combos),
+                 message="运行已取消")
             break
 
         kw = combo["keyword"]
@@ -900,7 +906,7 @@ def run_search(params: dict, source, *, pages: int = 3,
             completed_combos.append(combo_key)
             continue
 
-        emit(stage="searching", current=idx + 1, total=len(combos),
+        emit(stage="searching", current=len(completed_combos), total=len(combos),
              keyword=kw, city=city,
              message=f"正在搜索 [{idx + 1}/{len(combos)}] {kw} · {city}")
 
@@ -939,7 +945,7 @@ def run_search(params: dict, source, *, pages: int = 3,
             # 系统性阻断（验证码/登录失效/IP风控/CDP不可用）：立即停止，不继续跑其他组合
             if outcome.failed_code in _HARD_STOP_CODES:
                 label = failed_code_label(outcome.failed_code, platform)
-                emit(stage="hard_stop", current=idx + 1, total=len(combos),
+                emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
                      keyword=kw, city=city, failed_code=outcome.failed_code,
                      message=f"系统性阻断：{label}，任务暂停")
                 return {"ok": False, "jobs": list(merged.values()),
@@ -954,7 +960,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                 _reason = outcome.safe_log.split("reason=", 1)[1]
             detail = f"（{_reason}）" if _reason else ""
             label = failed_code_label(outcome.failed_code, platform)
-            emit(stage="combo_failed", current=idx + 1, total=len(combos),
+            emit(stage="combo_failed", current=len(completed_combos), total=len(combos),
                  keyword=kw, city=city, failed_code=outcome.failed_code,
                  message=f"组合失败：{label}{detail}")
         else:
@@ -969,7 +975,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                     on_combo_done(combo_key, list(outcome.jobs), list(completed_combos), outcome=outcome)
                 except _PIPELINE_OPERATION_ERRORS as exc:
                     emit(
-                        stage="hard_stop", current=idx + 1, total=len(combos),
+                        stage="hard_stop", current=len(completed_combos), total=len(combos),
                         keyword=kw, city=city, failed_code="internal_error",
                         message="组合结果持久化失败，任务暂停",
                     )
@@ -984,7 +990,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                         "hard_stop_code": "internal_error",
                         "error": f"组合结果持久化失败（{type(exc).__name__}），任务已暂停",
                     }
-            emit(stage="combo_done", current=idx + 1, total=len(combos),
+            emit(stage="combo_done", current=len(completed_combos), total=len(combos),
                  keyword=kw, city=city, scraped=len(outcome.jobs),
                  merged=len(merged),
                  message=f"完成 {kw} · {city}：本页 {len(outcome.jobs)} 条，累计去重 {len(merged)} 条")
@@ -1003,7 +1009,7 @@ def run_search(params: dict, source, *, pages: int = 3,
             if stop_event is not None and stop_event.is_set():
                 break
             delay = random.uniform(*_delay_range)
-            emit(stage="waiting", current=idx + 1, total=len(combos),
+            emit(stage="waiting", current=len(completed_combos), total=len(combos),
                  wait_seconds=int(delay),
                  message=f"防限流等待 {delay:.0f}s 后搜索下一个组合…")
             _t0_wait = time.time()
@@ -1023,7 +1029,7 @@ def run_search(params: dict, source, *, pages: int = 3,
     # 哨兵第三层：所有非跳过组合全失败 → 中性提示，不冒充风控
     ran_combos = len(combos) - len(_skip)
     if failed_combos > 0 and total_scraped == 0 and ran_combos > 0:
-        emit(stage="risk_warning",
+        emit(stage="risk_warning", current=len(completed_combos), total=len(combos),
              message="所有组合均失败，请检查浏览器登录、网络或平台提示后重试。")
         return {"ok": False, "jobs": [], "total_scraped": 0,
                 "total_matched": 0, "combinations": len(combos),
@@ -1032,7 +1038,8 @@ def run_search(params: dict, source, *, pages: int = 3,
 
     # 有数据才关浏览器（任务完成）；全失败则保留窗口供用户排查/重试。
     if total_scraped > 0 and close_chrome_on_success:
-        emit(stage="closing_chrome", message="正在关闭调试浏览器…")
+        emit(stage="closing_chrome", current=len(completed_combos), total=len(combos),
+             message="正在关闭调试浏览器…")
         close_debug_chrome(cdp_port)
     emit(stage="done", total_scraped=total_scraped, total_matched=len(all_jobs),
          message=f"完成：抓取 {total_scraped} 条，去重 {len(all_jobs)} 条")

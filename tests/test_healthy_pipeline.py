@@ -1068,7 +1068,8 @@ class Slice7And9ApiTests(unittest.TestCase):
         self.assertEqual(data["fail_count"], 38)
         self.assertEqual(data["unstarted_count"], 608)
         self.assertEqual(data["total"], 1408)
-        self.assertEqual(data["progress"]["overall_percent"], 56.8)
+        # jd_detail 权重段 25-75：800/1408 完成 → 25+floor(50*800/1408)=53
+        self.assertEqual(data["progress"]["overall_percent"], 53)
 
     def test_task_state_merges_live_progress_logs_and_result(self):
         """统一状态接口必须覆盖运行中内存快照与最终结果。"""
@@ -4455,6 +4456,131 @@ class Slice13ComboDoneHardStopTests(unittest.TestCase):
 # ===========================================================================
 # SPEC011 T005 — 冻结配置摘要一致性 RED 测试
 # ===========================================================================
+
+class Spec006ProgressSemanticsTests(unittest.TestCase):
+    """B011：进度百分比只由真实完成事件推进。"""
+
+    def test_scrape_overall_percent_uses_real_completed_combos(self):
+        from webui import pipeline_exec as pe
+
+        self.assertEqual(pe._scrape_overall_percent("ensure_chrome", 0, 10), 1)
+        self.assertEqual(pe._scrape_overall_percent("preflight", 0, 10), 1)
+        self.assertEqual(pe._scrape_overall_percent("searching", 0, 10), 0)
+        self.assertEqual(pe._scrape_overall_percent("searching", 1, 10), 10)
+        self.assertEqual(pe._scrape_overall_percent("combo_done", 1, 10), 10)
+        self.assertEqual(pe._scrape_overall_percent("combo_done", 2, 10), 20)
+        self.assertEqual(pe._scrape_overall_percent("waiting", 1, 10), 10)
+        self.assertEqual(pe._scrape_overall_percent("combo_failed", 1, 10), 10)
+        self.assertEqual(pe._scrape_overall_percent("risk_warning", 0, 10), 0)
+        self.assertEqual(pe._scrape_overall_percent("closing_chrome", 10, 10), 100)
+        self.assertEqual(pe._scrape_overall_percent("done", 0, 10), 100)
+        self.assertEqual(pe._scrape_overall_percent("cancelled", 3, 10), 0)
+
+    def test_screen_overall_percent_uses_25_50_25_weights(self):
+        from webui.app import _screen_overall_percent
+
+        self.assertEqual(_screen_overall_percent("screen_a", 0, 10), 0)
+        self.assertEqual(_screen_overall_percent("screen_a", 10, 10), 25)
+        self.assertEqual(_screen_overall_percent("screen_a_done", 0, 10), 25)
+        self.assertEqual(_screen_overall_percent("ensure_chrome", 0, 10), 25)
+        self.assertEqual(_screen_overall_percent("fetch_jd", 0, 10), 25)
+        self.assertEqual(_screen_overall_percent("fetch_jd", 10, 10), 75)
+        self.assertEqual(_screen_overall_percent("screen_b", 0, 10), 75)
+        self.assertEqual(_screen_overall_percent("screen_b", 10, 10), 100)
+        self.assertEqual(_screen_overall_percent("done", 0, 10), 100)
+
+    def test_screen_overall_percent_never_rounds_to_100_before_done(self):
+        from webui.app import _screen_overall_percent
+
+        self.assertEqual(_screen_overall_percent("ai_rough", 10, 10), 25)
+        self.assertEqual(_screen_overall_percent("jd_detail", 10, 10), 75)
+        self.assertEqual(_screen_overall_percent("ai_fine", 10, 10), 100)
+        self.assertEqual(_screen_overall_percent("screen_b", 98, 100), 99)
+        self.assertEqual(_screen_overall_percent("screen_b", 100, 100), 100)
+        self.assertEqual(_screen_overall_percent("fetch_jd", 98, 100), 74)
+
+    def test_recrawl_overall_percent_uses_60_40_weights(self):
+        from webui.app import _recrawl_overall_percent
+
+        self.assertEqual(_recrawl_overall_percent("fetch_jd", 0, 10), 0)
+        self.assertEqual(_recrawl_overall_percent("fetch_jd", 10, 10), 60)
+        self.assertEqual(_recrawl_overall_percent("recrawl_fetch_jd", 5, 10), 30)
+        self.assertEqual(_recrawl_overall_percent("recrawl_jd", 5, 10), 30)
+        self.assertEqual(_recrawl_overall_percent("screen_b", 0, 10), 60)
+        self.assertEqual(_recrawl_overall_percent("screen_b", 98, 100), 99)
+        self.assertEqual(_recrawl_overall_percent("screen_b", 100, 100), 100)
+        self.assertEqual(_recrawl_overall_percent("recrawl_ai", 5, 10), 80)
+        self.assertEqual(_recrawl_overall_percent("done", 0, 10), 100)
+
+    def test_run_search_emits_real_completed_combo_percent(self):
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        class TwoComboSource:
+            platform = "boss"
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+            def fetch_list(self, plan_item):
+                return SourceOutcome.success(jobs=[{
+                    "job_id": f"job-{plan_item['keyword']}",
+                    "title": plan_item["keyword"],
+                }])
+
+        events = []
+        with mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
+             mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            run_search(
+                {"keyword": "前端,后端", "city": ["上海"]},
+                TwoComboSource(), pages=1, sleeper=lambda _seconds: None,
+                progress=events.append, close_chrome_on_success=False,
+            )
+        by_stage = {}
+        for event in events:
+            by_stage.setdefault(event["stage"], []).append(event["overall_percent"])
+        self.assertEqual(by_stage["searching"][0], 0)
+        self.assertEqual(by_stage["combo_done"][0], 50)
+        self.assertEqual(by_stage["waiting"][0], 50)
+        self.assertEqual(by_stage["searching"][1], 50)
+        self.assertEqual(by_stage["combo_done"][1], 100)
+        self.assertEqual(by_stage["done"][-1], 100)
+
+    def test_run_search_combo_failure_does_not_advance_percent(self):
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        class MixedSource:
+            platform = "boss"
+
+            def __init__(self):
+                self.calls = 0
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+            def fetch_list(self, _plan_item):
+                self.calls += 1
+                if self.calls == 1:
+                    return SourceOutcome.failure(
+                        failed_code="source_unknown_error", safe_log="普通失败",
+                    )
+                return SourceOutcome.success(jobs=[{"job_id": "j2", "title": "后端"}])
+
+        events = []
+        with mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
+             mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            run_search(
+                {"keyword": "前端,后端", "city": ["上海"]},
+                MixedSource(), pages=1, sleeper=lambda _seconds: None,
+                progress=events.append, close_chrome_on_success=False,
+            )
+        failed_events = [event for event in events if event["stage"] == "combo_failed"]
+        done_events = [event for event in events if event["stage"] == "done"]
+        self.assertEqual(failed_events[0]["overall_percent"], 0)
+        self.assertEqual(done_events[-1]["overall_percent"], 100)
+
+
 class FrozenConfigDigestTests(unittest.TestCase):
     """SPEC011 T005: 证明 list/detail/rough/fine/recrawl 阶段使用同一冻结配置摘要。
 

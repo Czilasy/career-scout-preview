@@ -277,7 +277,7 @@ describe("TaskProgress canonical terminal states", () => {
   });
 });
 
-describe("TaskProgress smooth progression and grouped counts", () => {
+describe("TaskProgress real progress engine and grouped counts", () => {
   afterEach(() => vi.useRealTimers());
 
   it("shows a spinning circle while running and stops at a terminal state", async () => {
@@ -287,7 +287,7 @@ describe("TaskProgress smooth progression and grouped counts", () => {
         kind: "scrape",
         snapshot: {
           status: "running",
-          progress: { stage: "searching", current: 1, total: 5 },
+          progress: { stage: "searching", current: 1, total: 5, overall_percent: 20 },
         },
       },
     });
@@ -300,8 +300,7 @@ describe("TaskProgress smooth progression and grouped counts", () => {
     expect(wrapper.find(".task-status .spin").exists()).toBe(false);
   });
 
-  it("creeps forward during fetch_jd plateau even when real counts stay still", async () => {
-    // 第二版逐帧驱动：mock Date + requestAnimationFrame + setInterval，让 RAF 在假时间线里跑
+  it("does not creep while the real anchor stays still", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
     const baseTime = new Date("2026-08-03T00:00:00.000Z").getTime();
     vi.setSystemTime(baseTime);
@@ -311,119 +310,194 @@ describe("TaskProgress smooth progression and grouped counts", () => {
         kind: "screen",
         snapshot: {
           status: "running",
-          progress: { stage: "fetch_jd", current: 0, total: 57 },
+          progress: { stage: "fetch_jd", current: 0, total: 57, overall_percent: 20 },
           total: 57,
-          success_count: 0,
-          fail_count: 0,
-          unstarted_count: 57,
           started_at: baseTime,
         },
       },
     });
     await flushPromises();
-
-    const before = Number(wrapper.get(".task-percentage").text().replace("%", ""));
-
-    // 推进 10 秒：RAF 逐帧触发，环境爬升分量驱动百分比持续前进（真实计数 current 始终 0）
-    for (let i = 0; i < 10; i++) {
-      vi.advanceTimersByTime(1000);
-      await flushPromises();
-    }
-
-    const after = Number(wrapper.get(".task-percentage").text().replace("%", ""));
-    expect(after).toBeGreaterThan(before);
-  });
-
-  it("keeps moving after work-unit estimated duration is exceeded", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
-    const baseTime = new Date("2026-08-03T00:00:00.000Z").getTime();
-    vi.setSystemTime(baseTime);
-
-    const wrapper = mount(TaskProgress, {
-      props: {
-        kind: "screen",
-        snapshot: {
-          status: "running",
-          progress: { stage: "fetch_jd", current: 0, total: 57 },
-          total: 57,
-          success_count: 0,
-          fail_count: 0,
-          unstarted_count: 57,
-          started_at: baseTime,
-        },
-      },
-    });
+    // 先让显示值追上真实锚点
+    vi.advanceTimersByTime(2_000);
     await flushPromises();
+    expect(wrapper.get(".task-percentage").text()).toBe("20%");
 
-    // 57 个岗位按工作量换算 fetch_jd 预估约 134 秒；310 秒后真实计数仍没变，
-    // 进度必须继续微动且不到完成 100%。
-    vi.advanceTimersByTime(310_000);
-    await flushPromises();
-
-    const before = Number(wrapper.get(".task-percentage").text().replace("%", ""));
-
+    // 真实锚点不变时，再走 10 秒也必须保持 20%，不得时间假爬
     vi.advanceTimersByTime(10_000);
     await flushPromises();
-    const after = Number(wrapper.get(".task-percentage").text().replace("%", ""));
-    expect(after).toBeGreaterThan(before);
-    expect(after).toBeLessThan(100);
+    expect(wrapper.get(".task-percentage").text()).toBe("20%");
   });
 
-  it("chases to stage end when real counts complete", async () => {
+  it("never exceeds the backend anchor while chasing", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
-    const baseTime = new Date("2026-08-03T00:00:00.000Z").getTime();
+    const baseTime = new Date("2026-08-03T01:00:00.000Z").getTime();
     vi.setSystemTime(baseTime);
 
-    const wrapper = mount(TaskProgress, {
-      props: {
-        kind: "screen",
-        snapshot: {
-          status: "running",
-          progress: { stage: "fetch_jd", current: 0, total: 57 },
-          total: 57,
-          success_count: 0,
-          fail_count: 0,
-          unstarted_count: 57,
-          started_at: baseTime,
-        },
-      },
-    });
-    await flushPromises();
-
-    // 真实计数完成：current=57/57，真实锚点跳到 65（fetch_jd 区间 end），进度条快速追上去
-    await wrapper.setProps({
-      snapshot: {
-        status: "running",
-        progress: { stage: "fetch_jd", current: 57, total: 57 },
-        total: 57,
-        success_count: 57,
-        fail_count: 0,
-        unstarted_count: 0,
-        started_at: baseTime,
-      },
-    });
-    await flushPromises();
-    // 推进 5 秒：追赶期 600ms + 平台期继续追剩余 + 余量覆盖随机停顿
-    vi.advanceTimersByTime(5_000);
-    await flushPromises();
-
-    const pct = Number(wrapper.get(".task-percentage").text().replace("%", ""));
-    expect(pct).toBeGreaterThanOrEqual(64); // 接近阶段 end 65
-  });
-
-  it("uses combo_done as a real progress anchor after each completed combo", () => {
-    vi.useFakeTimers();
     const wrapper = mount(TaskProgress, {
       props: {
         kind: "scrape",
         snapshot: {
           status: "running",
-          progress: { stage: "combo_done", current: 1, total: 5 },
+          progress: { stage: "searching", current: 1, total: 10, overall_percent: 10 },
+          total: 10,
+          started_at: baseTime,
         },
       },
     });
-    // 区间 10→90，1/5 已完成 → 26%，不能因为 combo_done 被当非进度阶段而停在 10%。
-    expect(wrapper.get(".task-percentage").text()).toBe("26%");
+    await flushPromises();
+    vi.advanceTimersByTime(10_000);
+    await flushPromises();
+    const pct = Number(wrapper.get(".task-percentage").text().replace("%", ""));
+    expect(pct).toBeLessThanOrEqual(10);
+  });
+
+  it("advances only when the backend anchor moves for 10 groups", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
+    const baseTime = new Date("2026-08-03T02:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: {
+          status: "running",
+          progress: { stage: "searching", current: 0, total: 10, overall_percent: 1 },
+          total: 10,
+          started_at: baseTime,
+        },
+      },
+    });
+    await flushPromises();
+    vi.advanceTimersByTime(3_000);
+    await flushPromises();
+    const before = Number(wrapper.get(".task-percentage").text().replace("%", ""));
+    expect(before).toBeLessThanOrEqual(10);
+
+    // 第 1 组真实完成：锚点从 1% 到 10%，允许追到 10%，但第 2 组完成前不得超过 10%。
+    await wrapper.setProps({
+      snapshot: {
+        status: "running",
+        progress: { stage: "searching", current: 1, total: 10, overall_percent: 10 },
+        total: 10,
+        started_at: baseTime,
+      },
+    });
+    await flushPromises();
+    vi.advanceTimersByTime(3_000);
+    await flushPromises();
+    const firstDone = Number(wrapper.get(".task-percentage").text().replace("%", ""));
+    expect(firstDone).toBe(10);
+
+    vi.advanceTimersByTime(5_000);
+    await flushPromises();
+    expect(Number(wrapper.get(".task-percentage").text().replace("%", ""))).toBe(10);
+  });
+
+  it("freezes at the real value while paused", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
+    const baseTime = new Date("2026-08-03T03:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: {
+          status: "running",
+          progress: { stage: "fetch_jd", current: 30, total: 57, overall_percent: 51 },
+          started_at: baseTime,
+        },
+      },
+    });
+    await flushPromises();
+    vi.advanceTimersByTime(2_000);
+    await flushPromises();
+
+    await wrapper.setProps({
+      snapshot: {
+        status: "paused",
+        progress: { stage: "fetch_jd", current: 30, total: 57, overall_percent: 51 },
+        started_at: baseTime,
+      },
+    });
+    await flushPromises();
+    expect(wrapper.get(".task-percentage").text()).toBe("51%");
+    vi.advanceTimersByTime(10_000);
+    await flushPromises();
+    expect(wrapper.get(".task-percentage").text()).toBe("51%");
+  });
+
+  it("shows the current real value on failure and 100 on completion", () => {
+    const failed = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: { status: "failed", progress: { overall_percent: 20 } },
+      },
+    });
+    expect(failed.get(".task-percentage").text()).toBe("20%");
+
+    const done = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: { status: "completed", progress: { stage: "done", overall_percent: 20 } },
+      },
+    });
+    expect(done.get(".task-percentage").text()).toBe("100%");
+  });
+
+  it("uses backend overall_percent instead of stage weights for screen phases", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: {
+          status: "running",
+          progress: { stage: "fetch_jd", current: 0, total: 57, overall_percent: 37 },
+        },
+      },
+    });
+    expect(wrapper.get(".task-percentage").text()).toBe("37%");
+  });
+
+  it("falls back to raw current/total when overall_percent is missing", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: {
+          status: "running",
+          progress: { stage: "fetch_jd", current: 0, total: 57 },
+        },
+      },
+    });
+    expect(wrapper.get(".task-percentage").text()).toBe("0%");
+  });
+
+  it("maps known internal stages to Chinese and hides raw stage text", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: {
+          status: "running",
+          stage: "waiting",
+          progress: { stage: "waiting", overall_percent: 10 },
+        },
+      },
+    });
+    expect(wrapper.get(".task-stage").text()).toContain("防限流等待");
+    expect(wrapper.text()).not.toContain("waiting");
+  });
+
+  it("shows Chinese fallback for unknown stages", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: {
+          status: "running",
+          stage: "mystery_stage",
+          progress: { stage: "mystery_stage" },
+        },
+      },
+    });
+    expect(wrapper.get(".task-stage").text()).toContain("处理中");
+    expect(wrapper.text()).not.toContain("mystery_stage");
   });
 
   it("derives scrape counts from completed combinations instead of screen counters", () => {
@@ -435,7 +509,7 @@ describe("TaskProgress smooth progression and grouped counts", () => {
           total: 2,
           success_count: 0,
           unstarted_count: 2,
-          progress: { stage: "searching", current: 2, total: 2 },
+          progress: { stage: "searching", current: 1, total: 2, overall_percent: 50 },
         },
       },
     });
@@ -447,52 +521,9 @@ describe("TaskProgress smooth progression and grouped counts", () => {
     expect(text).not.toContain("已完成 0 / 2");
   });
 
-  it("falls back to snapshot stage when progress payload omits stage", () => {
-    vi.useFakeTimers();
-    const wrapper = mount(TaskProgress, {
-      props: {
-        kind: "screen",
-        snapshot: {
-          status: "running",
-          stage: "fetch_jd",
-          progress: { current: 0, total: 57 },
-        },
-      },
-    });
-    expect(wrapper.get(".task-percentage").text()).toBe("24%");
-  });
-
-  it("keeps creeping after estimated stage duration is exceeded", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
-    const baseTime = new Date("2026-08-03T01:00:00.000Z").getTime();
-    vi.setSystemTime(baseTime);
-
-    const wrapper = mount(TaskProgress, {
-      props: {
-        kind: "screen",
-        snapshot: {
-          status: "running",
-          progress: { stage: "fetch_jd", current: 0, total: 57 },
-          started_at: baseTime,
-        },
-      },
-    });
-    await flushPromises();
-
-    vi.advanceTimersByTime(300_000);
-    await flushPromises();
-    const atCap = Number(wrapper.get(".task-percentage").text().replace("%", ""));
-
-    // 超过预估时长后继续极慢微动：再走 10 秒应高于软上限位置，而不是冻结。
-    vi.advanceTimersByTime(10_000);
-    await flushPromises();
-    const after = Number(wrapper.get(".task-percentage").text().replace("%", ""));
-    expect(after).toBeGreaterThan(atCap);
-  });
-
   it("resets display for a new run that stays in the same stage", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
-    const baseTime = new Date("2026-08-03T02:00:00.000Z").getTime();
+    const baseTime = new Date("2026-08-03T04:00:00.000Z").getTime();
     vi.setSystemTime(baseTime);
 
     const wrapper = mount(TaskProgress, {
@@ -500,24 +531,25 @@ describe("TaskProgress smooth progression and grouped counts", () => {
         kind: "screen",
         snapshot: {
           status: "running",
-          progress: { stage: "fetch_jd", current: 57, total: 57 },
+          progress: { stage: "fetch_jd", current: 57, total: 57, overall_percent: 75 },
           started_at: baseTime,
         },
       },
     });
     await flushPromises();
-    expect(wrapper.get(".task-percentage").text()).toBe("65%");
+    vi.advanceTimersByTime(2_000);
+    await flushPromises();
+    expect(wrapper.get(".task-percentage").text()).toBe("75%");
 
-    // 同一 stage 的新 run（started_at 变化）：显示值回到 24，而不是沿用上一轮的 65。
     await wrapper.setProps({
       snapshot: {
         status: "running",
-        progress: { stage: "fetch_jd", current: 0, total: 57 },
-        started_at: baseTime + 1000,
+        progress: { stage: "fetch_jd", current: 0, total: 57, overall_percent: 25 },
+        started_at: baseTime + 1_000,
       },
     });
     await flushPromises();
-    expect(wrapper.get(".task-percentage").text()).toBe("24%");
+    expect(wrapper.get(".task-percentage").text()).toBe("25%");
   });
 
   it("groups counts into 已完成 X / Y and 保留 N · 淘汰 M, drops 共/失败 0", () => {
@@ -526,7 +558,7 @@ describe("TaskProgress smooth progression and grouped counts", () => {
         kind: "screen",
         snapshot: {
           status: "running",
-          progress: { stage: "fetch_jd", current: 30, total: 57 },
+          progress: { stage: "fetch_jd", current: 30, total: 57, overall_percent: 51 },
           total: 57,
           source_total: 90,
           success_count: 30,

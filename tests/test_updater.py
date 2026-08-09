@@ -250,6 +250,20 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(d.status()["status"], "ready")
         self.assertEqual(target.read_bytes(), content)
 
+    def test_download_exception_stores_stable_code_and_logs_original(self):
+        d = updater.UpdateDownloader(state_dir=tempfile.mkdtemp())
+        info = updater.UpdateInfo(asset_url="https://github.com/x/x.exe")
+        d._target = d.download_dir / "x.exe"
+        with self.assertLogs("webui.updater", level="ERROR") as logs, \
+             patch.object(updater.requests, "get",
+                          side_effect=OSError("connection reset by peer")):
+            d._run(info)
+        status = d.status()
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["error"], "download_failed")
+        self.assertNotIn("connection reset", status["error"])
+        self.assertTrue(any("connection reset by peer" in line for line in logs.output))
+
 
 class DownloaderRecoveryTests(unittest.TestCase):
     def setUp(self):

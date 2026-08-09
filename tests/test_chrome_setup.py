@@ -1581,6 +1581,20 @@ class VersionConsistencyTests(unittest.TestCase):
         self.assertEqual(script_ver, readme_ver,
                          f"脚本({script_ver}) 与 README.md({readme_ver}) 版本不一致")
 
+    def test_readme_desktop_first_run_guide_covers_prerequisites_and_version(self):
+        readme = self._read_text("README.md")
+        desktop = readme.split("## 桌面版", 1)[1].split("## 快速开始", 1)[0]
+        for required in (
+            "Chrome", "Edge", "WebView2", "首次启动偏慢",
+            "~/.career-scout", "macOS Gatekeeper", "常见排错", "杀毒软件误报",
+        ):
+            self.assertIn(required, desktop, f"README 桌面版缺少：{required}")
+        pyproject = self._read_text("pyproject.toml")
+        m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
+        self.assertIsNotNone(m, "pyproject.toml 未找到 version 字段")
+        self.assertIn(f"v{m.group(1)}", desktop)
+        self.assertNotIn("v2.8.2", desktop)
+
 
 class ProjectScopeTests(unittest.TestCase):
     """项目边界守卫：只保留抓取和聚合分析，不内置简历匹配打分。"""

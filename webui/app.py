@@ -1041,6 +1041,52 @@ def _pipeline_identity_payload(job: dict) -> dict:
         payload["job_id"] = job.get("stored_job_id") or job.get("job_id")
     return payload
 
+_SCREEN_STAGE_WEIGHTS: dict[str, tuple[int, int]] = {
+    "resume": (0, 0),
+    "screen_a": (0, 25),
+    "ai_rough": (0, 25),
+    "screen_a_done": (25, 25),
+    "ensure_chrome": (25, 25),
+    "fetch_jd": (25, 75),
+    "jd_detail": (25, 75),
+    "screen_b": (75, 100),
+    "ai_fine": (75, 100),
+    "done": (100, 100),
+}
+
+_RECRAWL_STAGE_WEIGHTS: dict[str, tuple[int, int]] = {
+    "fetch_jd": (0, 60),
+    "recrawl_fetch_jd": (0, 60),
+    "recrawl_jd": (0, 60),
+    "screen_b": (60, 100),
+    "recrawl_ai": (60, 100),
+    "done": (100, 100),
+}
+
+
+def _weighted_progress_percent(
+    weights: dict[str, tuple[int, int]], stage: str, current: int, total: int,
+) -> int:
+    """按阶段权重与真实完成量插值，向下取整且不越过阶段终点。"""
+    start, end = weights.get(stage, (0, 100))
+    if total <= 0:
+        return start
+    ratio = min(1.0, max(0.0, current / total))
+    return min(end, int(start + (end - start) * ratio))
+
+
+def _screen_overall_percent(stage: str, current: int, total: int) -> int:
+    """把 AI 筛选 pipeline 的当前阶段映射到整体百分比（0-100）。
+
+    权重固定为初筛 25%、抓 JD 50%、精筛 25%；只按真实完成条数插值，
+    不引入时间或阶段预估爬升。"""
+    return _weighted_progress_percent(_SCREEN_STAGE_WEIGHTS, stage, current, total)
+
+
+def _recrawl_overall_percent(stage: str, current: int, total: int) -> int:
+    """重抓只有 JD 补抓与 AI 重判两段：0-60 与 60-100。"""
+    return _weighted_progress_percent(_RECRAWL_STAGE_WEIGHTS, stage, current, total)
+
 
 def create_app(config=None):
     # Vue/Vite owns the /static namespace. Disable Flask's implicit static
@@ -1860,7 +1906,12 @@ def create_app(config=None):
         new_status = "ready" if capability["ok"] else "failed"
         error_code = capability["warning_codes"][0] if not capability["ok"] and capability["warning_codes"] else None
         store.update_ai_status(new_status, last_error_code=error_code)
-        return jsonify(capability)
+        payload = dict(capability)
+        if not capability.get("ok") and error_code:
+            payload["user_message"] = ai_service.user_facing_error(error_code)
+        else:
+            payload["user_message"] = ""
+        return jsonify(payload)
 
     @app.route("/api/ai-settings/models", methods=["POST"])
     def ai_settings_models():
@@ -1876,7 +1927,12 @@ def create_app(config=None):
         except ai_service.AISecurityError as exc:
             # 语义修正：AISecurityError 是失败，不应返回 200。
             # 前端 fetchModels 通过 response.ok 判断，502 不影响行为。
-            return jsonify({"ok": False, "error_code": exc.error_code, "models": []}), 502
+            return jsonify({
+                "ok": False,
+                "error_code": exc.error_code,
+                "user_message": ai_service.user_facing_error(exc.error_code),
+                "models": [],
+            }), 502
         return jsonify({"ok": True, "models": models})
 
     @app.route("/api/profiles", methods=["GET", "POST"])
@@ -2518,16 +2574,6 @@ def create_app(config=None):
     # -----------------------------------------------------------------------
     # AI 筛选阶段百分比与文案
     # -----------------------------------------------------------------------
-    _SCREEN_STAGE_WEIGHTS: dict[str, tuple[int, int]] = {
-        "resume": (0, 0),
-        "screen_a": (0, 35),
-        "screen_a_done": (35, 35),
-        "ensure_chrome": (35, 40),
-        "fetch_jd": (40, 75),
-        "screen_b": (75, 100),
-        "done": (100, 100),
-    }
-
     _SCREEN_STAGE_MESSAGES: dict[str, str] = {
         "resume": "正在恢复上次进度…",
         "screen_a": "AI 粗筛中…",
@@ -2544,15 +2590,6 @@ def create_app(config=None):
         "fetch_jd": "jd_detail",
         "screen_b": "ai_fine",
     }
-
-    def _screen_overall_percent(stage: str, current: int, total: int) -> int:
-        """把 AI 筛选 pipeline 的当前阶段映射到整体百分比（0-100）。"""
-        start, end = _SCREEN_STAGE_WEIGHTS.get(stage, (0, 100))
-        if total <= 0:
-            return start
-        ratio = min(1.0, max(0.0, current / total))
-        return min(100, round(start + (end - start) * ratio))
-
 
     def _account_for_run(run=None) -> str:
         """Resolve the browser account for a run or the current advanced setting."""
@@ -5641,7 +5678,7 @@ def create_app(config=None):
         3. DB 中最近 interrupted 筛选（服务重启打断的工作线程）
         4. 无任务
         """
-        from webui.pipeline_exec import failed_code_label
+        from webui.pipeline_exec import _scrape_overall_percent, failed_code_label
         with _pipeline_lock:
             for task_id, task in reversed(list(_pipeline_tasks.items())):
                 if task["status"] in ("running", "queued"):
@@ -5652,6 +5689,7 @@ def create_app(config=None):
                         "kind": task.get("kind", ""),
                         "status": task["status"],
                         "progress": task["progress"],
+                        "stage": task.get("stage") or (task.get("progress") or {}).get("stage", ""),
                         "logs": list(task["logs"][-LOG_TAIL_LINES:]),
                         "error": task["error"],
                         "started_at": task.get("started_at"),
@@ -6797,11 +6835,7 @@ def create_app(config=None):
             stage = str(kw.get("stage", ""))
             current = int(kw.get("current") or 0)
             total = int(kw.get("total") or 0)
-            # 重抓只有两阶段，不复用主筛选的权重（那个 0-40% 留给粗筛了）
-            _RECRRAWL_WEIGHTS = {"fetch_jd": (0, 60), "screen_b": (60, 100), "done": (100, 100)}
-            start, end = _RECRRAWL_WEIGHTS.get(stage, (0, 100))
-            ratio = min(1.0, max(0.0, current / total)) if total > 0 else 0.0
-            kw["overall_percent"] = min(100, round(start + (end - start) * ratio))
+            kw["overall_percent"] = _recrawl_overall_percent(stage, current, total)
             if not kw.get("message"):
                 kw["message"] = _SCREEN_STAGE_MESSAGES.get(stage, "")
             event_stage = _EVENT_STAGE_NAMES.get(stage)
@@ -7307,7 +7341,7 @@ def create_app(config=None):
             if status["status"] in ("downloading", "verifying", "ready"):
                 return jsonify({"ok": True, "already": True, **status})
             return jsonify({"ok": False, "error_code": "download_start_failed",
-                            "user_message": status.get("error") or "下载启动失败"}), 500
+                            "user_message": "下载启动失败，请稍后重试；若仍失败请到 Release 页手动下载"}), 500
         return jsonify({"ok": True, **app.config["UPDATER"].status()})
 
     @app.route("/api/update-status", methods=["GET"])
@@ -7362,8 +7396,9 @@ def create_app(config=None):
                     start_new_session=True,
                 )
         except OSError as exc:
+            app.logger.exception("更新重启脚本启动失败：%s", exc)
             return jsonify({"ok": False, "error_code": "updater_launch_failed",
-                            "user_message": f"更新脚本启动失败：{exc}"}), 500
+                            "user_message": "更新脚本启动失败，请关闭软件后手动下载更新"}), 500
         return jsonify({"ok": True, "user_message": "即将重启完成更新"})
 
     # 主题偏好（明暗）：存 ~/.career-scout/theme.json。
@@ -7402,7 +7437,7 @@ def create_app(config=None):
         unstarted_count/total/pause_info(含 error_code/error_reason)。
         前端 3 个 snapshot 统一从此接口拉取。
         """
-        from webui.pipeline_exec import failed_code_label
+        from webui.pipeline_exec import _scrape_overall_percent, failed_code_label
 
         with _pipeline_lock:
             task = _pipeline_tasks.get(run_id)
@@ -7466,6 +7501,11 @@ def create_app(config=None):
             or live_progress.get("stage")
             or "unknown"
         )
+        progress_kind = live_kind or (
+            "recrawl" if str(stage).startswith("recrawl_")
+            else "scrape" if str(stage) == "scrape"
+            else "ai_screen"
+        )
         # processed_count 只记录已成功完成的当前阶段工作单元；pending
         # 是已失败并进入待确认的独立工作单元，两者不能互相扣减。
         # JD 详情/精筛阶段只处理粗筛保留的岗位；原始列表里的 dropped
@@ -7487,10 +7527,18 @@ def create_app(config=None):
             success_count = max(match + mismatch, processed, live_current)
         completed_count = min(stage_total, success_count + fail_count)
         unstarted = max(0, stage_total - completed_count)
-        overall_percent = (
-            round(completed_count / stage_total * 100, 1)
-            if stage_total > 0 else 0
-        )
+        if progress_kind == "recrawl":
+            overall_percent = _recrawl_overall_percent(
+                stage, completed_count, stage_total,
+            )
+        elif progress_kind == "ai_screen":
+            overall_percent = _screen_overall_percent(
+                stage, completed_count, stage_total,
+            )
+        else:
+            overall_percent = _scrape_overall_percent(
+                stage, completed_count, stage_total,
+            )
         progress = dict(live_progress)
         progress.setdefault("overall_percent", overall_percent)
         progress.setdefault("current", success_count if jd_stage else completed_count)

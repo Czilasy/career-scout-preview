@@ -95,7 +95,7 @@ ERROR_USER_MESSAGES = {
 
 def user_facing_error(error_code: str) -> str:
     """Return a user-friendly Chinese message for a safe error code."""
-    return ERROR_USER_MESSAGES.get(error_code, f"AI 调用失败（{error_code}）")
+    return ERROR_USER_MESSAGES.get(error_code, "AI 服务调用失败，请检查设置后重试")
 
 
 # 切片6：systemic 错误码集合（命中即应暂停整任务，FR-020/SC-006/SC-007）

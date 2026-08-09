@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ChevronDown } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
-import { apiRequest, errorMessage } from "../api";
+import { apiRequest, userFacingMessage } from "../api";
 import type { Notice } from "../types";
 
 const props = defineProps<{ open: boolean }>();
@@ -67,7 +67,7 @@ async function loadSettings() {
     maskedKey.value = String(data.masked_key || "");
     apiKey.value = "";
   } catch (error) {
-    setLocalNotice({ message: errorMessage(error, "AI 设置加载失败"), tone: "error" });
+    setLocalNotice({ message: userFacingMessage(error, "AI 设置加载失败"), tone: "error" });
   } finally {
     busy.value = "";
   }
@@ -83,7 +83,7 @@ async function saveSettings() {
     setLocalNotice({ message: "AI 设置已保存", tone: "success" });
     await loadSettings();
   } catch (error) {
-    setLocalNotice({ message: errorMessage(error, "AI 设置保存失败"), tone: "error" });
+    setLocalNotice({ message: userFacingMessage(error, "AI 设置保存失败"), tone: "error" });
   } finally {
     busy.value = "";
   }
@@ -94,7 +94,7 @@ async function fetchModels() {
   clearLocalNotice();
   try {
     // 用当前对话框里填的值测，不必先保存。apiKey 为空时后端用已保存 key 兜底。
-    const data = await apiRequest<{ ok?: boolean; models?: string[]; error_code?: string }>(
+    const data = await apiRequest<{ ok?: boolean; models?: string[]; error_code?: string; user_message?: string }>(
       "/api/ai-settings/models",
       {
         method: "POST",
@@ -108,13 +108,13 @@ async function fetchModels() {
     models.value = data.models || [];
     if (models.value.length) {
       setLocalNotice({ message: `已拉取 ${models.value.length} 个模型`, tone: "success" });
-    } else if (data.error_code) {
-      setLocalNotice({ message: `模型列表拉取失败（${data.error_code}）`, tone: "error" });
+    } else if (data.ok === false) {
+      setLocalNotice({ message: data.user_message || "模型列表拉取失败，请检查 AI 设置后重试", tone: "error" });
     } else {
       setLocalNotice({ message: "服务未返回模型列表", tone: "warning" });
     }
   } catch (error) {
-    setLocalNotice({ message: errorMessage(error, "模型列表拉取失败"), tone: "error" });
+    setLocalNotice({ message: userFacingMessage(error, "模型列表拉取失败，请检查 AI 设置后重试"), tone: "error" });
   } finally {
     busy.value = "";
   }
@@ -125,7 +125,7 @@ async function testConnection() {
   clearLocalNotice();
   try {
     // 用当前对话框里填的值测，不必先保存。
-    const data = await apiRequest<{ ok?: boolean; warning_codes?: string[] }>(
+    const data = await apiRequest<{ ok?: boolean; warning_codes?: string[]; user_message?: string }>(
       "/api/ai-settings/test",
       {
         method: "POST",
@@ -137,16 +137,12 @@ async function testConnection() {
       },
     );
     if (data.ok) {
-      const warnings = data.warning_codes && data.warning_codes.length
-        ? `（${data.warning_codes.join(", ")}）`
-        : "";
-      setLocalNotice({ message: `AI 服务连接成功${warnings}`, tone: "success" });
+      setLocalNotice({ message: "AI 服务连接成功", tone: "success" });
     } else {
-      const code = data.warning_codes && data.warning_codes[0] ? data.warning_codes[0] : "未知错误";
-      setLocalNotice({ message: `AI 服务连接失败（${code}）`, tone: "error" });
+      setLocalNotice({ message: data.user_message || "AI 服务连接失败，请检查 AI 设置后重试", tone: "error" });
     }
   } catch (error) {
-    setLocalNotice({ message: errorMessage(error, "AI 服务连接失败"), tone: "error" });
+    setLocalNotice({ message: userFacingMessage(error, "AI 服务连接失败，请检查 AI 设置后重试"), tone: "error" });
   } finally {
     busy.value = "";
   }

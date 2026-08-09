@@ -4,6 +4,8 @@
 源码模式（`python webui/app.py`）不受影响，桌面版是新增的发行路径。
 本目录是打包发布操作手册；发布卫生规则以根目录 `AGENTS.md` 为准。
 
+用户首次运行指引（Chrome/Edge、WebView2、首次启动解压延迟、macOS Gatekeeper、数据目录与常见排错）以根目录 `README.md`「桌面版」为准，本手册不重复维护用户指引。
+
 ## 文件说明
 
 | 文件 | 作用 |
@@ -156,18 +158,7 @@ npm run build
 
 ### 用户首次打开（未签名应用）
 
-dmg 未做代码签名与公证（Apple Developer 账号收费，开源工具暂不做）。
-首次打开会被 Gatekeeper 拦截，两种解法：
-
-1. 访达中**右键** `CareerScout.app` → 打开 → 弹窗中再点“打开”；
-2. 或终端执行：
-
-   ```bash
-   xattr -d com.apple.quarantine /Applications/CareerScout.app
-   ```
-
-前置条件与 Windows 版一致：装有 Chrome（或 Edge）并完成 BOSS/智联登录；
-数据目录 `~/.career-scout` 与源码版互通。
+macOS 首次打开被 Gatekeeper 拦截时的处理方式、前置条件与数据目录，见根目录 `README.md`「桌面版」章节；本手册只保留构建与发布所需信息。
 
 ## 免责声明
 

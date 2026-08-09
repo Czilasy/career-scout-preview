@@ -10,10 +10,10 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { Download, Rocket } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
 import {
-  errorMessage,
   openExternalLink,
   quitDesktopApp,
   updateApi,
+  userFacingMessage,
   type UpdateCheckResult,
   type UpdateProgress,
 } from "../api";
@@ -85,7 +85,7 @@ async function startDownload() {
       stopPolling();
     }
   } catch (err) {
-    error.value = errorMessage(err, "下载启动失败");
+    error.value = userFacingMessage(err, "下载失败，请检查网络或磁盘空间后重试");
   } finally {
     busy.value = false;
   }
@@ -105,7 +105,7 @@ async function restartAndUpdate() {
       notice.value = "未能自动退出，请手动关闭软件窗口；更新将在此后自动完成。";
     }
   } catch (err) {
-    error.value = errorMessage(err, "重启更新失败");
+    error.value = userFacingMessage(err, "重启更新失败，请关闭软件后手动下载更新");
     restarting.value = false;
   }
 }
@@ -115,7 +115,10 @@ function failureMessage(code: string | undefined): string {
     case "sha256_mismatch": return "更新包校验失败（SHA256 不匹配），已丢弃，请重试下载。";
     case "sha256_unavailable": return "无法获取校验文件，为安全起见已中止，请到 Release 页手动下载。";
     case "invalid_download_url": return "下载地址不合法，请到 Release 页手动下载。";
-    default: return code ? `下载失败：${code}` : "下载失败，请重试。";
+    case "download_failed": return "下载失败，请检查网络或磁盘空间后重试；仍失败请到 Release 页手动下载。";
+    case "updater_launch_failed": return "更新脚本启动失败，请关闭软件后到 Release 页手动下载更新。";
+    case "download_start_failed": return "下载启动失败，请稍后重试；仍失败请到 Release 页手动下载。";
+    default: return "更新失败，请重试；若仍失败请到 Release 页手动下载。";
   }
 }
 

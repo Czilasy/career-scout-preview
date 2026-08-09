@@ -79,17 +79,12 @@ const finishedAt = ref<number | null>(null);
 const tickTok = ref(0); // 触发运行中秒数刷新
 let intervalId: number | undefined;
 
-// 记录每个阶段进入时间（epoch 毫秒），用于平台期匀速爬升。
-// 任务重置时清空；新阶段首次出现时由 watch(stage) 记录。
-const stageEnterTimes = ref<Record<string, number>>({});
-
-// 进度条显示值；新任务开始时重置到真实锚点，避免同阶段新 run 沿用旧位置。
+// 进度条显示值；只向后端真实锚点平滑追赶，任何时刻不超前。
 const displayPercent = ref(0);
 
 function resetTimer() {
   startedAt.value = null;
   finishedAt.value = null;
-  stageEnterTimes.value = {};
 }
 
 watch(
@@ -104,14 +99,9 @@ watch(
       || (prev && isTerminalStatus(prev.status) && !isTerminalStatus(next.status))
     ));
     if (next && isNewRun) {
-      // 优先用后端真实时间戳；老后端没带则退化成本地时钟（组件重建后不再归零）
       startedAt.value = nextStarted ?? Date.now();
       finishedAt.value = typeof next.finished_at === "number" ? next.finished_at : null;
-      // 新任务：清空阶段进入时间表，并立即记录当前阶段。
-      // 同一 stage 续跑（如继续抓 JD）时 watch(stage) 不会触发，必须在这里重建时间。
-      const initialStage = String(next.progress?.stage || next.stage || "");
-      stageEnterTimes.value = initialStage ? { [initialStage]: Date.now() } : {};
-      // 新 run 不沿用旧任务的显示位置；同步清零后立即回到当前阶段真实锚点。
+      // 新 run 不沿用旧任务的显示位置；同步清零后立即回到当前真实锚点。
       displayPercent.value = 0;
       queueMicrotask(() => { displayPercent.value = realAnchor.value; });
     }
@@ -135,7 +125,6 @@ watch(
         intervalId = undefined;
       }
     } else if (next && startedAt.value !== null && finishedAt.value === null && intervalId === undefined) {
-      // 运行中：确保 interval 在跑（覆盖 immediate 首触发 / 组件重新挂载的场景）
       intervalId = window.setInterval(() => { tickTok.value++; }, 1000);
     }
   },
@@ -159,268 +148,67 @@ function formatDuration(ms: number): string {
 
 const elapsedLabel = computed(() => formatDuration(elapsedMs.value));
 
-// 每个阶段映射到 [该阶段起始百分比, 该阶段结束百分比]
-// 阶段内的 current/total 会在该区间内线性插值。
-const SCRAPE_WEIGHTS: Record<string, [number, number]> = {
-  ensure_chrome: [0, 5],
-  preflight: [5, 10],
-  searching: [10, 90],
-  combo_done: [10, 90],
-  combo_failed: [10, 90],
-  waiting: [10, 90],
-  risk_warning: [90, 95],
-  closing_chrome: [95, 100],
-  done: [100, 100],
-};
-
-const SCREEN_WEIGHTS: Record<string, [number, number]> = {
-  resume: [0, 2],
-  screen_a: [2, 20],
-  screen_a_done: [20, 20],
-  ensure_chrome: [20, 24],
-  fetch_jd: [24, 65],
-  screen_b: [65, 100],
-  done: [100, 100],
-};
-
-// 阶段节奏表：每个阶段预估时长（秒），用于环境爬升分量。
-// 重阶段区间大、预估时长长，进度条走得慢；轻阶段区间小、走得快。
-// 0 表示该阶段不参与时间爬升（静态等待或瞬态）。
-// waiting（防限流等待）必须配时长，否则等待阶段会停住——它是平台期最长的地方。
-// 固定基础设施阶段时长（秒）：没有组合数/岗位数可换算的阶段。
-const FIXED_STAGE_DURATIONS: Record<string, number> = {
-  resume: 0,
-  screen_a_done: 0,
-  ensure_chrome: 15,
-  preflight: 8,
-  combo_done: 0,
-  combo_failed: 0,
-  risk_warning: 0,
-  closing_chrome: 10,
-  done: 0,
-};
-
-// 有工作量可换算的阶段：perUnit 秒/单位，base 秒兜底。
-// 预估时长按组合数/岗位数换算，不使用固定墙钟值。
-const WORK_STAGE_DURATIONS: Record<string, { perUnit: number; base: number }> = {
-  screen_a: { perUnit: 1.5, base: 15 },
-  fetch_jd: { perUnit: 5, base: 15 },
-  screen_b: { perUnit: 5, base: 30 },
-  searching: { perUnit: 20, base: 20 },
-  waiting: { perUnit: 2, base: 8 },
-};
-
-const progress = computed(() => props.snapshot?.progress || {});
+const rawProgress = computed(() => props.snapshot?.progress);
+const progress = computed<Record<string, unknown>>(() => {
+  const raw = rawProgress.value;
+  return raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+});
+// 兼容旧快照把 progress 直接写成数字百分比（老 /api/task-state 形状）。
+const progressPercent = computed(() => {
+  const raw = rawProgress.value;
+  if (typeof raw === "number") return raw;
+  const overall = (raw as Record<string, unknown> | undefined)?.overall_percent;
+  return typeof overall === "number" ? overall : Number.NaN;
+});
 const current = computed(() => Number(progress.value.current || 0));
 const total = computed(() => Number(progress.value.total || 0));
 const stage = computed(() => String(progress.value.stage || props.snapshot?.stage || ""));
 
-// 当前阶段对应的权重区间；无 stage 时返回 undefined。
-const stageRange = computed<[number, number] | undefined>(() => {
-  const weights = props.kind === "screen" ? SCREEN_WEIGHTS : SCRAPE_WEIGHTS;
-  return stage.value ? weights[stage.value] : undefined;
-});
-const stageEnd = computed(() => stageRange.value?.[1] ?? 100);
-
-// 阶段预估时长按当前工作量换算：progress.total 在抓取阶段是组合数，
-// 在筛选阶段是岗位数；waiting 优先使用后端给出的真实等待秒数。
-const stageDurationSeconds = computed(() => {
-  if (stage.value === "waiting") {
-    const wait = Number(progress.value.wait_seconds || 0);
-    if (wait > 0) return wait + 3;
-  }
-  const spec = WORK_STAGE_DURATIONS[stage.value];
-  const workUnits = Number(progress.value.total || props.snapshot?.total || 0);
-  if (spec) return Math.max(spec.base, spec.perUnit * Math.max(1, workUnits));
-  return FIXED_STAGE_DURATIONS[stage.value] ?? 0;
-});
-
-// current/total 语义因阶段而异：searching/waiting/combo_* 是关键词维度（第几个关键词），
-// 不是岗位进度，不能拿来做阶段内插值——否则关键词一开始 current 就 = total，
-// 进度条会瞬间跳到阶段末尾。这类阶段只返回起点，进度交给 ambientTargetAt 时间爬升。
-// combo_done 是组合抓取完成后的真实事件，current 是已完成组合数，应作为真实锚点。
-// searching/waiting 的 current 是“当前第几个关键词”或等待前计数，不代表已完成进度。
-const NON_PROGRESS_STAGES = new Set(["searching", "waiting", "combo_failed"]);
-
-// 真实锚点：stage + current/total 在阶段区间内插值。
-// 只在批处理完成时（current/total 变化）变化；暂停态直接用它定格。
-// 终态返回 100。无 stage 时用后端 overall_percent 兜底（旧接口）。
+// 真实锚点：后端 overall_percent 是唯一权威值；旧接口/测试快照缺省时
+// 回退到 current/total 的真实完成比例，不再使用阶段权重或时间预估。
 const realAnchor = computed(() => {
   if (isCompletedStatus(props.snapshot?.status)) return 100;
-  // 暂停态：后端 overall_percent 是权威定格值，优先使用，避免 stage 兜底后误用阶段起点。
-  if (props.snapshot?.status === "paused") {
-    const overall = Number(progress.value.overall_percent);
-    if (!Number.isNaN(overall)) return Math.min(100, overall);
+  const overall = progressPercent.value;
+  if (!Number.isNaN(overall) && overall >= 0) {
+    return Math.min(100, Math.max(0, overall));
   }
-  const range = stageRange.value;
-  if (!range) {
-    const overall = Number(progress.value.overall_percent);
-    if (!Number.isNaN(overall)) return Math.min(100, overall);
-    return total.value > 0 ? Math.min(100, (current.value * 100) / total.value) : 0;
+  if (["failed", "cancelled"].includes(props.snapshot?.status || "")) return 0;
+  if (total.value > 0) {
+    return Math.min(100, Math.max(0, (current.value * 100) / total.value));
   }
-  const [start, end] = range;
-  // 关键词/等待类阶段：current/total 不代表岗位进度，只返回起点
-  if (NON_PROGRESS_STAGES.has(stage.value)) return start;
-  if (total.value <= 0) return start;
-  const ratio = Math.min(1, Math.max(0, current.value / total.value));
-  return start + (end - start) * ratio;
+  return 0;
 });
 
-// 挂载时以当前阶段真实锚点为初始显示值；后续新 run 由 snapshot watcher 重置。
 displayPercent.value = realAnchor.value;
 
-// 软上限常量：环境爬升最多到 阶段起点 + 区间宽度 × SOFT_CAP_RATIO
-const SOFT_CAP_RATIO = 0.88;
-const CHASE_WINDOW_MS = 600;              // 真实事件后 600ms 内快速追赶
-const REAL_CHANGE_THRESHOLD = 0.5;        // 真实锚点增加超过 0.5% 视为真实事件
-const PLATFORM_EPSILON = 0.002;           // 平台期 delta 低于此值视为已追上，不动
-const PLATFORM_PAUSE_PROB = 0.002;        // 平台期每帧随机插入停顿的概率
-const PLATFORM_PAUSE_MIN_MS = 350;        // 平台期随机停顿下限
-const PLATFORM_PAUSE_MAX_MS = 900;        // 平台期随机停顿上限
-const FRAME_MS = 16;                      // requestAnimationFrame 假定帧间隔
-const MICRO_OVER_RATIO_PER_SEC = 0.004;   // 超过预估时长后，每秒再爬区间宽度的 0.4%
-
-// 环境爬升每帧步长（%）= 软上限宽度 ÷ 预估时长 × 帧间隔。与 ambientTargetAt 涨幅同步。
-const ambientSpeedPerFrame = computed(() => {
-  const range = stageRange.value;
-  if (!range) return 0;
-  const duration = stageDurationSeconds.value;
-  if (duration <= 0) return 0; // 与 ambientTargetAt 对齐：无预估时长的阶段不爬升
-  const width = range[1] - range[0];
-  const normalPerFrame = (width * SOFT_CAP_RATIO) / (duration * 1000) * FRAME_MS;
-  // 超过预估时长后的微动速度也要让 display 追得上 ambientTargetAt。
-  const microPerFrame = width * MICRO_OVER_RATIO_PER_SEC * (FRAME_MS / 1000);
-  return Math.max(normalPerFrame, microPerFrame);
-});
-
-// 逐帧动画状态（非响应式，只在 tick 内部用）
 let rafId: number | undefined;
-let lastRealAnchor = realAnchor.value;   // 上次真实锚点值，用于检测变化 >0.5%
-let lastRealChangeAt = 0;                 // 最近一次真实锚点明显变化的时间戳
-let holdUntil = 0;                        // 短停顿结束时间戳；期间 displayPercent 不动
-
-
-// 环境爬升目标：由阶段进入时间和预估时长驱动，平台期即使 current/total 没变也持续爬。
-// 软上限 = 阶段起点 + 区间宽度 × 0.88；超过预估时长后继续极慢微动，避免长时间冻结。
-function ambientTargetAt(now: number): number {
-  const range = stageRange.value;
-  if (!range) return 0;
-  const [start, end] = range;
-  const width = end - start;
-  if (width <= 0) return start;
-  const enterTime = stageEnterTimes.value[stage.value];
-  const duration = stageDurationSeconds.value;
-  if (!enterTime || duration <= 0) return start;
-  const elapsedMs = Math.max(0, now - enterTime);
-  const durationMs = duration * 1000;
-  if (elapsedMs <= durationMs) {
-    return start + width * SOFT_CAP_RATIO * (elapsedMs / durationMs);
-  }
-  // 超过预估时长后不硬停：以极慢速度继续朝阶段终点微动，避免平台期长时间冻结。
-  const overshootSec = (elapsedMs - durationMs) / 1000;
-  const micro = overshootSec * MICRO_OVER_RATIO_PER_SEC * width;
-  return Math.min(end, start + width * SOFT_CAP_RATIO + micro);
-}
-
-// 阶段首次出现时记录进入时间；同阶段多次推送不覆盖。
-// immediate 保证组件挂载时如果已有 stage，也会记录，用于环境爬升。
-// stage 切换时重置追赶/停顿状态，避免上一阶段的 holdUntil/lastRealChangeAt 污染新阶段。
-watch(stage, (next, prev) => {
-  if (!next) return;
-  // 同阶段新 run 由 snapshot watcher 重建时间表；这里负责正常进入、重入和缺失兜底。
-  if (next !== prev || !stageEnterTimes.value[next]) {
-    stageEnterTimes.value = { ...stageEnterTimes.value, [next]: Date.now() };
-  }
-  // 阶段切换：重置追赶/停顿状态，保留 displayPercent（不归零，新阶段起点高于显示值就继续追）
-  if (next !== prev) {
-    lastRealAnchor = realAnchor.value;
-    lastRealChangeAt = 0;
-    holdUntil = 0;
-  }
-}, { immediate: true });
 
 function tick() {
-  const now = Date.now();
   const status = props.snapshot?.status;
 
-  // 终态：追到 100 后停 RAF
-  if (isCompletedStatus(status)) {
-    const delta = 100 - displayPercent.value;
-    if (Math.abs(delta) < 0.1) {
-      displayPercent.value = 100;
-      rafId = undefined;
-      return;
-    }
-    displayPercent.value += Math.sign(delta) * Math.min(Math.abs(delta), 0.5);
-    rafId = requestAnimationFrame(tick);
-    return;
-  }
-
-  // 暂停态：定格在真实锚点，停 RAF（恢复时由 watch(status) 重新启动）
-  if (status === "paused") {
+  // 暂停/终态：直接定格真实锚点，不再逐帧追赶。
+  if (status === "paused" || isTerminalStatus(status)) {
     displayPercent.value = realAnchor.value;
     rafId = undefined;
     return;
   }
 
-  // 运行态：逐帧实时计算 target = max(realAnchor, ambient)，不超过阶段 end
-  const ambient = ambientTargetAt(now);
-  const target = Math.min(stageEnd.value, Math.max(realAnchor.value, ambient));
-  const delta = target - displayPercent.value;
-
-  // 真实事件刚发生（CHASE_WINDOW_MS 内）：快速追赶，大步走
-  if (lastRealChangeAt > 0 && now - lastRealChangeAt < CHASE_WINDOW_MS) {
-    if (delta > 0) {
-      const speed = Math.min(1.0, 0.05 + Math.abs(delta) * 0.12);
-      displayPercent.value += Math.min(Math.abs(delta), speed);
-    }
+  // 运行态：只向真实锚点平滑追赶，真实值不变时显示值也保持不变。
+  const delta = realAnchor.value - displayPercent.value;
+  if (delta > 0.01) {
+    displayPercent.value += Math.min(delta, Math.max(0.5, delta * 0.2));
+    rafId = requestAnimationFrame(tick);
+  } else {
+    displayPercent.value = realAnchor.value;
+    rafId = undefined;
   }
-  // 短停顿期：不动（追赶完成后的"消化"停顿，或平台期随机插入的停顿）
-  else if (now < holdUntil) {
-    // no-op
-  }
-  // 平台期：按阶段节奏慢爬，只前进不后退
-  else if (delta > PLATFORM_EPSILON) {
-    const realLead = realAnchor.value - displayPercent.value;
-    let step: number;
-    if (realLead > PLATFORM_EPSILON) {
-      // 真实锚点领先（追赶期 600ms 未追完）：继续较快追赶，避免大跳变后卡在半路
-      step = Math.min(realLead, 0.05);
-    } else {
-      // 追 ambient：按环境爬升速率慢爬，与软上限涨幅同步
-      step = Math.min(delta, Math.max(ambientSpeedPerFrame.value, 0.001));
-    }
-    displayPercent.value += step;
-
-    // 平台期随机插入短停顿（模拟处理卡顿），约 PLATFORM_PAUSE_PROB/帧概率
-    if (Math.random() < PLATFORM_PAUSE_PROB) {
-      holdUntil = now + PLATFORM_PAUSE_MIN_MS + Math.random() * (PLATFORM_PAUSE_MAX_MS - PLATFORM_PAUSE_MIN_MS);
-    }
-  }
-
-  rafId = requestAnimationFrame(tick);
 }
 
-// 真实锚点变化检测：增加超过 REAL_CHANGE_THRESHOLD 视为真实事件，记 lastRealChangeAt，
-// 并在追赶窗口（CHASE_WINDOW_MS）结束后随机停顿 400-1000ms 模拟"处理完成后的消化"。
-// 注意：holdUntil 必须排在 chase 窗口之后，否则 chase 分支优先级更高会吃掉停顿。
-watch(realAnchor, (next, prev) => {
-  if (next - prev > REAL_CHANGE_THRESHOLD) {
-    lastRealChangeAt = Date.now();
-    holdUntil = lastRealChangeAt + CHASE_WINDOW_MS + 400 + Math.random() * 600;
-  }
-  lastRealAnchor = next;
-});
-
 // 状态变化：paused/终态停 RAF；恢复运行时重启 RAF。
-// immediate：组件挂载时若已是 running 态，立即启动 RAF（第一版靠 watch(rawPercentage) 触发，已删）。
 watch(() => props.snapshot?.status, (status) => {
   if (status === "paused" || isTerminalStatus(status)) {
     if (rafId !== undefined) cancelAnimationFrame(rafId);
     rafId = undefined;
-    // paused 与终态都必须把显示值校正到真实锚点：后端常在几毫秒内先后推送
-    // stage=done 和 status=done，轮询一次性收到两者时 RAF 被立即取消，
-    // 不校正就会把进度条永久冻结在最后一帧（如抓取完成卡在 9x%）。
     displayPercent.value = realAnchor.value;
     return;
   }
@@ -429,8 +217,19 @@ watch(() => props.snapshot?.status, (status) => {
   }
 }, { immediate: true });
 
+// 真实锚点变化后若动画已停，重新启动追赶，保证新事件推进仍被显示。
+watch(realAnchor, () => {
+  const status = props.snapshot?.status;
+  if (status === "paused" || isTerminalStatus(status)) {
+    if (rafId !== undefined) cancelAnimationFrame(rafId);
+    rafId = undefined;
+    displayPercent.value = realAnchor.value;
+    return;
+  }
+  if (rafId === undefined) rafId = requestAnimationFrame(tick);
+});
+
 onBeforeUnmount(() => {
-  // 集中清理：用时计时的 interval + 进度条的 RAF，避免分散漏清理
   if (intervalId !== undefined) clearInterval(intervalId);
   if (rafId !== undefined) cancelAnimationFrame(rafId);
 });
@@ -447,36 +246,45 @@ const statusLabel = computed(() => {
   return "运行中";
 });
 
-// T510：任务自身平台徽章（http-api.md L201）。仅当 snapshot.platform 存在时显示；
-// 草稿平台切换不影响此处 — 这里展示的是任务自身平台，与 .platform-segment 草稿徽章独立。
 const platformLabel = computed(() => {
   if (!props.snapshot?.platform) return "";
   return props.snapshot.platform === "boss" ? "BOSS" : "智联";
 });
 
-// 切片7：阶段中文标签（FR-037/SC-006）
+// 阶段中文标签：所有已知内部阶段都映射为中文，未知阶段使用中文兜底，
+// 任何路径都不再把原始英文 stage 直接渲染到界面。
 const STAGE_LABELS: Record<string, string> = {
   scrape: "列表抓取",
   ensure_chrome: "启动浏览器",
   preflight: "登录检查",
   searching: "列表抓取",
+  combo_done: "列表抓取",
+  combo_failed: "组合失败",
+  waiting: "防限流等待",
+  risk_warning: "风险提示",
+  closing_chrome: "关闭浏览器",
+  hard_stop: "任务已暂停",
   jd_detail: "JD 详情抓取",
   fetch_jd: "JD 详情抓取",
   ai_rough: "AI 粗筛",
   screen_a: "AI 粗筛",
+  screen_a_done: "粗筛完成",
   ai_fine: "AI 精筛",
   screen_b: "AI 精筛",
   recrawl_submit: "提交重抓",
   recrawl_fetch_jd: "重抓 JD 详情",
   recrawl_jd: "重抓 JD 详情",
   recrawl_ai: "AI 重新判定",
+  resume: "恢复进度",
   done: "已完成",
+  cancelled: "已停止",
+  unknown: "处理中",
 };
 
 const stageLabel = computed(() => {
-  const stage = props.snapshot?.stage || String(progress.value.stage || "");
-  if (!stage) return "";
-  return STAGE_LABELS[stage] || stage;
+  const raw = props.snapshot?.stage || String(progress.value.stage || "");
+  if (!raw) return "";
+  return STAGE_LABELS[raw] || "处理中";
 });
 
 // 切片7：具体暂停原因（SC-006）。优先 pause_info.error_reason，其次 error 字段
@@ -498,8 +306,8 @@ const successCount = computed(() => Number(props.snapshot?.success_count || 0));
 const failCount = computed(() => Number(props.snapshot?.fail_count || 0));
 const unstartedCount = computed(() => Number(props.snapshot?.unstarted_count || 0));
 const totalCount = computed(() => Number(props.snapshot?.total || 0));
-// 抓取进度的 current/total 是组合维度；后端的 success/unstarted 是 AI 筛选维度，
-// 因此抓取时必须从组合事件本身派生，避免显示“正在第 2/2 组，但已完成 0、未开始 2”。
+// 抓取进度的 current/total 是真实已完成的组合数；后端的 success/unstarted 是
+// AI 筛选维度，因此抓取时必须从组合事件本身派生，避免把岗位计数混进组合画面。
 const scrapeCountState = computed(() => {
   const comboTotal = totalCount.value || total.value;
   if (props.kind !== "scrape" || comboTotal <= 0) {
@@ -509,9 +317,13 @@ const scrapeCountState = computed(() => {
   if (stage.value === "combo_done") {
     return { completed: comboCurrent, running: 0, unstarted: Math.max(0, comboTotal - comboCurrent) };
   }
-  if (["searching", "waiting"].includes(stage.value) && comboCurrent > 0) {
-    const completed = Math.max(0, comboCurrent - 1);
-    return { completed, running: 1, unstarted: Math.max(0, comboTotal - completed - 1) };
+  if (["searching", "waiting"].includes(stage.value)) {
+    const completed = Math.min(comboTotal, comboCurrent);
+    const running = completed < comboTotal ? 1 : 0;
+    return { completed, running, unstarted: Math.max(0, comboTotal - completed - running) };
+  }
+  if (stage.value === "combo_failed") {
+    return { completed: comboCurrent, running: 0, unstarted: Math.max(0, comboTotal - comboCurrent) };
   }
   return { completed: 0, running: 0, unstarted: comboTotal };
 });
@@ -532,7 +344,6 @@ const showRoughCounts = computed(() =>
 const showPending = computed(() => pendingCount.value > 0);
 // 失败：失败 > 0 且没有待确认时才显示（待确认是 fail 的子集，互斥显示避免重复）。
 const showFailCount = computed(() => failCount.value > 0 && pendingCount.value === 0);
-
 
 // 终态显示绝对用时；运行中显示"已用 X 秒"
 const timeLabel = computed(() => {

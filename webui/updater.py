@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import json
 import os
 import platform
@@ -33,6 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 GITHUB_REPO = "Czilasy/career-scout-preview"
 GITHUB_LATEST_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -375,8 +378,9 @@ class UpdateDownloader:
                                 self.state.received = received
             tmp.replace(self._target)
         except Exception as exc:
+            logger.exception("应用内更新下载失败：%s", exc)
             with self._lock:
-                self.state = DownloadState(status="failed", error=f"download_failed: {exc}")
+                self.state = DownloadState(status="failed", error="download_failed")
             return
 
         # SHA256 校验（强制）：无期望值时现取 .sha256；任何一步失败都拒绝

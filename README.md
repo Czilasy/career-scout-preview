@@ -22,10 +22,31 @@ Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的多平台职位
 
 Windows 与 macOS 用户可直接使用桌面版，无需安装 Python 或 Node.js：
 
-- 最新正式版：v2.8.2
-- Windows 安装包：`CareerScout-v2.8.2.exe`，下载后双击运行
-- macOS 安装包：`CareerScout-v2.8.2.dmg`，首次打开时右键选择“打开”
+- 最新正式版：v2.8.5
+- Windows 安装包：`CareerScout-v2.8.5.exe`，下载后双击运行
+- macOS 安装包：`CareerScout-v2.8.5.dmg`，首次打开见下方 Gatekeeper 说明
 - 应用内更新（桌面版）：启动时自动检查新版本，可一键下载、校验并重启完成更新
+
+### 首次运行准备
+
+- **浏览器**：请先安装 Chrome 或 Edge；桌面版使用独立的专用 Chrome profile，不复制主浏览器 Cookie。首次使用请在专用 Chrome/浏览器账号中完成一次 BOSS 直聘 / 智联招聘登录，登录态会持久化保存。登录方式与源码版一致，见下方“启动专用 Chrome 并登录”与“浏览器账号”说明。
+- **Windows WebView2**：Windows 11 预装 WebView2；Windows 10 如果缺失，桌面版可能无法显示界面，请到 Microsoft 官方页面安装 WebView2 运行时（[developer.microsoft.com/microsoft-edge/webview2](https://developer.microsoft.com/microsoft-edge/webview2/)）。
+- **首次启动偏慢**：Windows 安装包为单文件解压模式，首次启动会先解压，等待时间较长属于正常现象，请勿在界面出现前关闭窗口。
+- **数据目录**：所有本地数据（任务、结果、浏览器账号资料、更新包等）保存在 `~/.career-scout`，卸载或删除软件不会自动清空该目录。
+
+### macOS Gatekeeper
+
+macOS 安装包未签名，首次打开可能被 Gatekeeper 拦截，两种处理方式任选其一：
+
+1. 在访达中**右键** `CareerScout.app` → 选择“打开” → 弹窗中再次点“打开”；
+2. 或把应用拖入“应用程序”后，在终端执行 `xattr -d com.apple.quarantine /Applications/CareerScout.app` 再打开。
+
+### 常见排错
+
+- **杀毒软件误报**：PyInstaller 单文件产物可能被部分杀软误报，这是构建方式的外部特性，不影响源码安全性；可在 VirusTotal 校验自行构建产物，或改用源码模式运行。
+- **界面空白或提示 WebView2**：确认已安装 WebView2 运行时并重启桌面版。
+- **首次启动很久没反应**：多为 onefile 解压延迟，等待 1-2 分钟；若超过数分钟仍无界面，查看 `~/.career-scout/desktop.log`。
+- **登录态失效或触发验证码**：在调试浏览器中重新登录对应平台后继续任务；具体说明见“运行可靠性”。
 
 源码模式（`python webui/app.py`）不显示应用内更新提示；用 `git pull` 更新代码后重启 Web 工作台即可。
 

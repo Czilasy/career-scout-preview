@@ -396,6 +396,48 @@ class WebUIAppTests(unittest.TestCase):
         self.assertFalse(obsolete_page.exists())
 
 
+class UpdateRestartFailureTests(unittest.TestCase):
+    def test_launch_failure_returns_chinese_message_and_hides_exception(self):
+        from webui import updater as updater_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            app = create_app({
+                "TESTING": True,
+                "START_TASKS": False,
+                "RUNTIME_MODE": "exe",
+                "RESULT_DIR": str(root / "results"),
+                "DB_PATH": str(root / "state" / "webui.db"),
+                "PYTHON_EXECUTABLE": sys.executable,
+            })
+            client = app.test_client()
+            session = client.get("/api/session")
+            client.environ_base["HTTP_X_BOSS_TOKEN"] = session.get_json()["token"]
+            installer = root / "CareerScout-v2.8.5.exe"
+            installer.write_bytes(b"payload")
+            app.config["UPDATER"].state = updater_mod.DownloadState(
+                status="ready", path=str(installer),
+            )
+            with mock.patch.object(
+                updater_mod, "current_install_target",
+                return_value=root / "CareerScout.exe",
+            ), mock.patch.object(
+                updater_mod, "build_updater_script",
+                return_value=("python", root / "update_apply.ps1"),
+            ), mock.patch(
+                "subprocess.Popen", side_effect=OSError("launch boom"),
+            ):
+                resp = client.post("/api/update-restart")
+            self.assertEqual(resp.status_code, 500)
+            data = resp.get_json()
+            self.assertEqual(data["error_code"], "updater_launch_failed")
+            self.assertEqual(
+                data["user_message"],
+                "更新脚本启动失败，请关闭软件后手动下载更新",
+            )
+            self.assertNotIn("OSError", data["user_message"])
+            self.assertNotIn("launch boom", data["user_message"])
+
+
 class SearchScopePreviewTests(unittest.TestCase):
     """SPEC011 T004: 后端权威范围预览端点测试。"""
 
@@ -902,6 +944,80 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(data["unstarted_count"], 0)
         self.assertEqual(data["total"], 246)
         self.assertEqual(data["source_total"], 311)
+
+    def test_task_state_fallback_matches_screen_stage_weights(self):
+        """DB-only task-state 兜底百分比必须与 emit 权重一致且不提前到 100。"""
+        cases = [
+            ("screen_a", 50, 100, 12),
+            ("fetch_jd", 10, 100, 30),
+            ("screen_b", 98, 100, 99),
+            ("screen_b", 100, 100, 100),
+        ]
+        for index, (stage, processed, total, expected) in enumerate(cases):
+            run_id = f"state-weight-{stage}-{index}"
+            self.store.create_screening_run(run_id, source_count=total)
+            self.store.update_screening_run(
+                run_id, status="running", current_stage=stage,
+                processed_count=processed, total_kept=total,
+            )
+            data = self.client.get(f"/api/task-state/{run_id}").get_json()
+            self.assertEqual(data["progress"]["overall_percent"], expected)
+
+    def test_task_state_uses_recrawl_weights_for_live_and_db_fallback(self):
+        """重抓 task-state 使用 60/40 权重，实时与 DB 兜底一致。"""
+        run_id = "state-recrawl-db"
+        self.store.create_screening_run(run_id, source_count=100)
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="recrawl_fetch_jd",
+            processed_count=50,
+        )
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+        self.assertEqual(data["progress"]["overall_percent"], 30)
+
+        live_id = "state-recrawl-live"
+        self.store.create_screening_run(live_id, source_count=100)
+        self.store.update_screening_run(
+            live_id, status="running", current_stage="screen_b",
+            processed_count=50, total_kept=100,
+        )
+        self.app.config["PIPELINE_TASKS"][live_id] = {
+            "kind": "recrawl", "status": "running", "stage": "screen_b",
+            "progress": {"stage": "screen_b", "current": 50, "total": 100},
+            "logs": [], "result": None, "error": "", "started_at": None,
+            "finished_at": None, "stop_event": threading.Event(),
+        }
+        data = self.client.get(f"/api/task-state/{live_id}").get_json()
+        self.assertEqual(data["progress"]["overall_percent"], 80)
+
+    def test_latest_running_task_memory_branch_returns_stage(self):
+        """刷新接回内存运行任务时，stage 必须随快照返回。"""
+        tasks = self.app.config["PIPELINE_TASKS"]
+        tasks["mem-stage-task"] = {
+            "kind": "scrape",
+            "status": "running",
+            "stage": "risk_warning",
+            "progress": {
+                "stage": "searching", "current": 2, "total": 10,
+                "overall_percent": 20,
+            },
+            "logs": [], "error": "", "started_at": 1000, "finished_at": None,
+            "platform": "boss", "task_input_digest": "digest-1",
+        }
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["stage"], "risk_warning")
+        self.assertEqual(data["progress"]["overall_percent"], 20)
+
+    def test_latest_running_task_memory_branch_falls_back_to_progress_stage(self):
+        tasks = self.app.config["PIPELINE_TASKS"]
+        tasks["mem-stage-fallback"] = {
+            "kind": "ai_screen",
+            "status": "queued",
+            "progress": {"stage": "combo_done", "overall_percent": 10},
+            "logs": [], "error": "", "started_at": 1000, "finished_at": None,
+        }
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertEqual(data["stage"], "combo_done")
 
     def test_latest_running_task_skips_stale_paused_when_newer_result_saved(self):
         """已有更新的完成结果时，旧 paused 任务不再抢占刷新后的恢复提示。"""
