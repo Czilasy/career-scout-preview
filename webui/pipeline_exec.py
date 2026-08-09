@@ -26,6 +26,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from scripts import boss_cdp_raw as boss
+from webui.source import PageEventPersistenceError
 
 
 _PIPELINE_OPERATION_ERRORS = (
@@ -38,6 +39,8 @@ _PIPELINE_OPERATION_ERRORS = (
     ConnectionError,
     TimeoutError,
 )
+
+
 
 # ---------------------------------------------------------------------------
 # 高级设置（用户可通过前端调整，持久化到 JSON）
@@ -484,6 +487,27 @@ def _scrape_overall_percent(stage: str, current: int, total: int) -> int:
     return min(100, round(start + (end - start) * ratio))
 
 
+def _scrape_page_overall_percent(
+    stage: str, current: int, total: int, page_progress: float | None = None,
+) -> int:
+    """按页级真实进度计算抓取整体百分比。
+
+    ``page_progress`` 为当前组合已翻页比例（0-1）；列表阶段最多占 90%，
+    剩余 10% 只由 closing_chrome/done 推进，避免任何阶段提前 100%。"""
+    if stage in ("done", "closing_chrome"):
+        return 100
+    if stage == "cancelled":
+        return 0
+    if total <= 0:
+        return 0
+    if page_progress is None:
+        return _scrape_overall_percent(stage, current, total)
+    completed = min(1.0, max(0.0, current / total))
+    page_share = (1.0 / total) * min(1.0, max(0.0, page_progress))
+    ratio = completed + page_share
+    return min(90, round(ratio * 90))
+
+
 # ---------------------------------------------------------------------------
 # Auto-launch the debug Chrome (self-contained execution)
 # ---------------------------------------------------------------------------
@@ -803,6 +827,9 @@ def run_search(params: dict, source, *, pages: int = 3,
                on_combo_done=None,
                execution_config=None,
                measurement_callback=None,
+               on_page_completed=None,
+               resume_pages: dict[str, int] | None = None,
+               resume_jobs: dict[str, list[dict]] | None = None,
                close_chrome_on_success: bool = True) -> dict:
     """Execute the multi-search pipeline and return merged, filtered jobs.
 
@@ -815,6 +842,11 @@ def run_search(params: dict, source, *, pages: int = 3,
     断点续抓时跳过这些组合不重复抓。
     ``on_combo_done``: 可选持久化回调，收到 ``(combo_key, jobs,
     completed_combos)``。回调失败表示进度无法安全保存，流程立即硬停止。
+    ``on_page_completed``: 可选页级持久化回调，收到结构化页级事件。
+    回调失败表示页级快照无法安全保存，流程立即硬停止。
+    ``resume_pages``: 可选映射 ``{combo_key: 恢复起始页}``，用于断点续抓
+    从已持久化的页级 checkpoint 继续。
+    ``resume_jobs``: 可选映射 ``{combo_key: 已持久化岗位}``，恢复时补齐快照。
 
     ``execution_config``: SPEC011 T006 — 可选的不可变 ExecutionConfigSnapshot。
     提供时使用冻结的 ``inter_combo_delay``，不读取 advanced_settings.json。
@@ -844,6 +876,13 @@ def run_search(params: dict, source, *, pages: int = 3,
         current = int(kw.get("current") or 0)
         total = int(kw.get("total") or 0)
         kw["overall_percent"] = _scrape_overall_percent(stage, current, total)
+        page_progress = kw.pop("page_progress", None)
+        if page_progress is not None:
+            kw["overall_percent"] = _scrape_page_overall_percent(
+                stage, current, total, float(page_progress),
+            )
+        else:
+            kw["overall_percent"] = _scrape_overall_percent(stage, current, total)
         # 调用方传了具体 message（如"完成：抓取 X 条"）就优先用；没传才回退默认文案
         if not kw.get("message"):
             kw["message"] = _SCRAPE_STAGE_MESSAGES.get(stage, "")
@@ -906,6 +945,8 @@ def run_search(params: dict, source, *, pages: int = 3,
             completed_combos.append(combo_key)
             continue
 
+        resume_page = max(1, int((resume_pages or {}).get(combo_key, 1)))
+
         emit(stage="searching", current=len(completed_combos), total=len(combos),
              keyword=kw, city=city,
              message=f"正在搜索 [{idx + 1}/{len(combos)}] {kw} · {city}")
@@ -924,23 +965,88 @@ def run_search(params: dict, source, *, pages: int = 3,
                 "platform": "zhilian",
                 "keyword": kw,
                 "city": city_snapshot,
+                "combo_key": combo_key,
                 "target_pages": pages,
                 "input_hash": _zhilian_input_hash({
                     "platform": "zhilian", "keyword": kw,
                     "city": city_snapshot, "target_pages": pages,
                 }),
                 "list_output_path": _combo_output_path(artifact_dir, kw, city),
+                "start_page": resume_page,
+                "existing_jobs": list((resume_jobs or {}).get(combo_key) or []),
             }
         else:
             plan_item = {
                 "keyword": kw,
                 "city": city,
                 "source_filters": {},  # broad search; multi-select applied as post-filter
+                "combo_key": combo_key,
                 "target_pages": pages,
                 "input_hash": _combo_hash(kw, city, pages),
                 "list_output_path": _combo_output_path(artifact_dir, kw, city),
+                "start_page": resume_page,
             }
-        outcome = source.fetch_list(plan_item)
+        last_page_ratio = 0.0
+        page_progress_seen = False
+
+        def _page_completed(event: dict):
+            nonlocal last_page_ratio, page_progress_seen
+            page_progress_seen = True
+            event = dict(event or {})
+            event.setdefault("combo_key", combo_key)
+            event.setdefault("keyword", kw)
+            event.setdefault("city", city)
+            page = max(0, int(event.get("page") or 0))
+            target = max(1, int(event.get("target_pages") or pages))
+            last_page_ratio = min(1.0, max(0.0, page / target))
+            if on_page_completed is not None:
+                try:
+                    on_page_completed(event)
+                except PageEventPersistenceError:
+                    emit(
+                        stage="hard_stop", current=len(completed_combos), total=len(combos),
+                        keyword=kw, city=city, failed_code="internal_error",
+                        message="页级快照持久化失败，任务暂停",
+                    )
+                    raise
+                except _PIPELINE_OPERATION_ERRORS as exc:
+                    emit(
+                        stage="hard_stop", current=len(completed_combos), total=len(combos),
+                        keyword=kw, city=city, failed_code="internal_error",
+                        message="页级快照持久化失败，任务暂停",
+                    )
+                    raise PageEventPersistenceError(str(exc)) from exc
+            emit(
+                stage="page_done", current=len(completed_combos), total=len(combos),
+                page=page, target_pages=target, page_progress=last_page_ratio,
+                keyword=kw, city=city, scraped=int(event.get("jobs_count") or 0),
+                message=(f"正在搜索 {kw} · {city}：第 {max(1, page)}/{target} 页，"
+                         f"已抓 {int(event.get('jobs_count') or 0)} 条"),
+            )
+
+        try:
+            outcome = source.fetch_list(plan_item, on_page_completed=_page_completed)
+        except PageEventPersistenceError as exc:
+            return {
+                "ok": False, "jobs": list(merged.values()),
+                "total_scraped": total_scraped, "total_matched": len(merged),
+                "combinations": len(combos), "completed_combos": completed_combos,
+                "hard_stop": True, "hard_stop_code": "internal_error",
+                "error": f"页级快照持久化失败（{type(exc.__cause__).__name__}），任务已暂停",
+            }
+        except _PIPELINE_OPERATION_ERRORS as exc:
+            emit(
+                stage="hard_stop", current=len(completed_combos), total=len(combos),
+                keyword=kw, city=city, failed_code="internal_error",
+                message="抓取执行失败，任务暂停",
+            )
+            return {
+                "ok": False, "jobs": list(merged.values()),
+                "total_scraped": total_scraped, "total_matched": len(merged),
+                "combinations": len(combos), "completed_combos": completed_combos,
+                "hard_stop": True, "hard_stop_code": "internal_error",
+                "error": f"抓取执行失败（{type(exc).__name__}），任务已暂停",
+            }
         if not outcome.ok:
             # 系统性阻断（验证码/登录失效/IP风控/CDP不可用）：立即停止，不继续跑其他组合
             if outcome.failed_code in _HARD_STOP_CODES:
@@ -962,6 +1068,7 @@ def run_search(params: dict, source, *, pages: int = 3,
             label = failed_code_label(outcome.failed_code, platform)
             emit(stage="combo_failed", current=len(completed_combos), total=len(combos),
                  keyword=kw, city=city, failed_code=outcome.failed_code,
+                 **({"page_progress": last_page_ratio} if page_progress_seen else {}),
                  message=f"组合失败：{label}{detail}")
         else:
             total_scraped += len(outcome.jobs)
@@ -992,6 +1099,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                     }
             emit(stage="combo_done", current=len(completed_combos), total=len(combos),
                  keyword=kw, city=city, scraped=len(outcome.jobs),
+                 **({"page_progress": 0} if page_progress_seen else {}),
                  merged=len(merged),
                  message=f"完成 {kw} · {city}：本页 {len(outcome.jobs)} 条，累计去重 {len(merged)} 条")
             # T018: 记录 batch 事件（combo 输入输出数量）
@@ -1010,6 +1118,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                 break
             delay = random.uniform(*_delay_range)
             emit(stage="waiting", current=len(completed_combos), total=len(combos),
+                 **({"page_progress": 0} if page_progress_seen else {}),
                  wait_seconds=int(delay),
                  message=f"防限流等待 {delay:.0f}s 后搜索下一个组合…")
             _t0_wait = time.time()

@@ -1482,7 +1482,8 @@ def load_existing_details(input_path=None, detail_output=None, result_dir=DEFAUL
 # ============================================================
 def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 cdp_port=DEFAULT_CDP_PORT, fmt="json", allow_dom_fallback=False,
-                start_page=1, *, cancel_event=None, on_poll=None):
+                start_page=1, *, cancel_event=None, on_poll=None,
+                combo_key=None, on_page_completed=None, list_events_output=None):
     city_name, city_code = resolve_city(city_input)
     cdp = CDPSession(cdp_port)
     all_jobs = []
@@ -1585,6 +1586,38 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             }, sid)
 
     consecutive_empty = 0
+    events_handle = None
+    if list_events_output:
+        try:
+            os.makedirs(os.path.dirname(list_events_output) or ".", exist_ok=True)
+            events_handle = open(list_events_output, "w", encoding="utf-8")
+        except OSError as exc:
+            print(f"⚠️ 无法写入列表事件文件 ({list_events_output}): {exc}")
+            events_handle = None
+
+    def _emit_page(page, delta, has_more, resume_page, *, snapshot=None):
+        """每完成一页发出结构化事件，供 WebUI 页级持久化/进度使用。"""
+        event = {
+            "kind": "page_completed",
+            "combo_key": combo_key or f"{keyword}|{city_name}",
+            "keyword": keyword,
+            "city": city_name,
+            "page": int(page),
+            "target_pages": int(max_pages),
+            "jobs_delta": int(delta),
+            "jobs_count": len(all_jobs),
+            "has_more": bool(has_more),
+            "resume_page": int(resume_page),
+            "last_completed_page": int(last_completed_page),
+        }
+        if on_page_completed is not None:
+            cb_event = dict(event)
+            if snapshot is not None:
+                cb_event["jobs_snapshot"] = list(snapshot)
+            on_page_completed(cb_event)
+        if events_handle is not None:
+            events_handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+            events_handle.flush()
     legit_empty_streak = 0  # API 正常应答但无职位的连续空页数（非风控信号）
     prev_has_more = None  # 上一页 API 返回的 hasMore（None=未知）
     try:
@@ -1641,6 +1674,8 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                         "scraped_at": datetime.now().isoformat(),
                         "last_completed_page": last_completed_page,
                     }, all_jobs)
+                _emit_page(
+                    last_completed_page, 0, True, pg, snapshot=all_jobs)
                 raise risk
 
             # DOM 提取的薪资可能是加密字体，默认禁用；只有显式允许时才降级。
@@ -1680,6 +1715,8 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                         "scraped_at": datetime.now().isoformat(),
                         "last_completed_page": last_completed_page,
                     }, all_jobs)
+                _emit_page(pg, 0, bool(prev_has_more) if prev_has_more is not None else True,
+                            pg + 1, snapshot=all_jobs)
 
                 # --- 哨兵第二层：用 hasMore 精确判断空页原因 ---
                 # 上一页 API 说"没有更多了" → 空页是正常的"翻完了"
@@ -1741,6 +1778,8 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                     "scraped_at": datetime.now().isoformat(),
                     "last_completed_page": last_completed_page,
                 }, all_jobs)
+            _emit_page(pg, new, bool(prev_has_more) if prev_has_more is not None else True,
+                        pg + 1, snapshot=all_jobs)
 
             if pg < max_pages:
                 d = random.uniform(30, 38)
@@ -1762,6 +1801,11 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
     finally:
         cdp.send("Target.closeTarget", {"targetId": tid})
         cdp.close()
+        if events_handle is not None:
+            try:
+                events_handle.close()
+            except OSError:
+                pass
 
     print(f"\n{'='*60}")
     print(f"完成: {len(all_jobs)} 条")
@@ -3410,6 +3454,9 @@ def run_search_programmatic(
     on_log=None,
     on_poll=None,
     cancel_event=None,
+    combo_key=None,
+    on_page_completed=None,
+    list_events_output=None,
 ) -> dict:
     """EXE 模式搜索全流程（列表 + 可选详情 + 可选分析/合并）。
 
@@ -3458,6 +3505,9 @@ def run_search_programmatic(
                 allow_dom_fallback=allow_dom_fallback,
                 start_page=start_page,
                 cancel_event=cancel_event, on_poll=on_poll,
+                combo_key=combo_key,
+                on_page_completed=on_page_completed,
+                list_events_output=list_events_output,
             )
 
             # 合并外部文件
@@ -3722,6 +3772,10 @@ def main():
                    help="详情 terminal safe event 输出路径 (JSONL；每行一个事件，"
                         "仅含 kind/status/job_id/duration_ms/safe_code，"
                         "供 source 批量解析；不传则不写事件文件)")
+    p.add_argument("--list-events-output", default=None,
+                   help="列表页完成事件输出路径 (JSONL；供 WebUI 页级进度/快照使用)")
+    p.add_argument("--combo-key", default=None,
+                   help="组合键（keyword|city），用于页级事件身份；不传则内部推导")
     p.add_argument("--analysis", action="store_true", help="输出分析报告")
     p.add_argument("--input", default=None, help="从已有 JSON 文件读取（跳过抓取）")
     p.add_argument("--allow-dom-fallback", action="store_true",
@@ -3833,6 +3887,8 @@ def main():
             cdp_port=args.cdp_port, fmt=args.format,
             allow_dom_fallback=args.allow_dom_fallback,
             start_page=args.start_page,
+            combo_key=args.combo_key,
+            list_events_output=args.list_events_output,
         )
 
     # 合并外部文件

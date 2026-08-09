@@ -40,6 +40,10 @@ boss.require_runtime_dependencies("requests")
 # Typed source outcomes
 # ---------------------------------------------------------------------------
 
+class PageEventPersistenceError(RuntimeError):
+    """编排层页级快照持久化失败时抛出，source 不得吞掉。"""
+
+
 
 class SourceOutcome:
     """Typed result from a list/detail fetch.
@@ -274,13 +278,15 @@ class JobSource(Protocol):
         """
         ...
 
-    def fetch_list(self, plan_item: dict) -> SourceOutcome:
+    def fetch_list(
+        self, plan_item: dict, *, on_page_completed: Callable[[dict], None] | None = None,
+    ) -> SourceOutcome:
         """抓取一个搜索组合的岗位列表页。
 
         plan_item 必须包含 platform、keyword、city（含平台码和映射版本）、
         target_pages、input_hash 和 list_output_path。输入不得出现
         source_filters、AI 筛选字段、融资阶段或公司性质。
-        """
+        on_page_completed：每完成一页回调结构化页级事件（含岗位快照）。"""
         ...
 
     def fetch_detail(
@@ -370,6 +376,7 @@ class BossCdpSource:
         # 库式调用，不 spawn 子进程；其余行为零改动。
         self.in_process = bool(in_process)
         self._runner = runner or self._default_run
+        self._use_default_runner = runner is None
 
     # ------------------------------------------------------------------
     # Public API
@@ -446,12 +453,14 @@ class BossCdpSource:
             safe_log="boss_login_required",
         )
 
-    def fetch_list(self, plan_item: dict) -> SourceOutcome:
+    def fetch_list(
+        self, plan_item: dict, *, on_page_completed: Callable[[dict], None] | None = None,
+    ) -> SourceOutcome:
         """Fetch a job list for one search plan item.
 
         ``plan_item`` must contain ``keyword``, ``city``, ``source_filters``,
         ``input_hash``, and optionally ``target_pages``.
-        """
+        ``on_page_completed``：每完成一页回调结构化页级事件（含岗位快照）。"""
         if not isinstance(plan_item, dict):
             return SourceOutcome.failure(
                 failed_code="source_invalid_output",
@@ -466,6 +475,7 @@ class BossCdpSource:
                 safe_log=f"plan_item_missing_fields keyword={bool(keyword)} hash={bool(expected_hash)}",
             )
         target_pages = max(1, int(plan_item.get("target_pages") or 1))
+        start_page = max(1, int(plan_item.get("start_page") or 1))
         raw_filters = plan_item.get("source_filters") or {}
         if not isinstance(raw_filters, dict):
             raw_filters = {}
@@ -483,7 +493,54 @@ class BossCdpSource:
             return SourceOutcome.failure(
                 failed_code="source_invalid_output", safe_log="list_output_path_invalid",
             )
-        command = self._build_list_command(keyword, city, target_pages, source_filters, str(output_path))
+        combo_key = str(plan_item.get("combo_key") or "") or f"{keyword}|{city}"
+        page_events_path = f"{str(output_path)}.page-events.jsonl"
+        try:
+            Path(page_events_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(page_events_path).write_text("", encoding="utf-8")
+        except OSError:
+            page_events_path = ""
+
+        seen_page_events = 0
+
+        def _drain_page_events():
+            nonlocal seen_page_events
+            if not page_events_path or on_page_completed is None:
+                return
+            path = Path(page_events_path)
+            if not path.is_file() or path.stat().st_size > self.max_artifact_bytes:
+                return
+            try:
+                with path.open(encoding="utf-8") as handle:
+                    lines = handle.readlines()
+            except OSError:
+                return
+            for line in lines[seen_page_events:]:
+                line = line.strip()
+                if not line:
+                    seen_page_events += 1
+                    continue
+                try:
+                    event = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    break  # 可能读到写入中的半行，下一轮再试
+                if not isinstance(event, dict):
+                    seen_page_events += 1
+                    continue
+                event["combo_key"] = combo_key
+                jobs = self._read_jobs(str(output_path)) or []
+                event["jobs_snapshot"] = [_normalize_job_fields(j) for j in jobs]
+                try:
+                    on_page_completed(event)
+                except Exception:
+                    raise
+                seen_page_events += 1
+
+        command = self._build_list_command(
+            keyword, city, target_pages, source_filters, str(output_path),
+            combo_key=combo_key, list_events_output=page_events_path or None,
+            start_page=start_page,
+        )
         safe_log = f"list keyword_present=1 city_present={bool(city)} pages={target_pages}"
         if self.breaker.is_open():
             return SourceOutcome.failure(
@@ -491,13 +548,18 @@ class BossCdpSource:
                 safe_log=f"{safe_log} breaker_open",
             )
         try:
-            returncode, captured = self._run_command(command, self.timeout_seconds)
+            returncode, captured = self._run_command(
+                command, self.timeout_seconds,
+                on_poll=_drain_page_events if not self.in_process else None,
+                on_page_completed=on_page_completed,
+            )
         except subprocess.TimeoutExpired:
             return SourceOutcome.failure(failed_code="source_timeout", safe_log=f"{safe_log} timeout={self.timeout_seconds}")
         except FileNotFoundError:
             return SourceOutcome.failure(failed_code="source_unreachable", safe_log=f"{safe_log} scraper_not_found")
         except OSError as exc:
             return SourceOutcome.failure(failed_code="source_unreachable", safe_log=f"{safe_log} os_error_type={type(exc).__name__}")
+        _drain_page_events()
         if returncode != 0:
             failed_code = _classify_failed_code(returncode, captured)
             self.breaker.record_signal(failed_code)
@@ -1048,6 +1110,9 @@ class BossCdpSource:
         target_pages: int,
         source_filters: dict,
         output_path: str,
+        combo_key: str = "",
+        list_events_output: str | None = None,
+        start_page: int = 1,
     ) -> list[str]:
         command = [
             self.python_executable,
@@ -1059,6 +1124,12 @@ class BossCdpSource:
             "--output", output_path,
             "--no-detail",  # list fetch never pulls detail; orchestrator does that
         ]
+        if start_page and int(start_page) > 1:
+            command.extend(["--start-page", str(int(start_page))])
+        if combo_key:
+            command.extend(["--combo-key", str(combo_key)])
+        if list_events_output:
+            command.extend(["--list-events-output", str(list_events_output)])
         for name in SCRAPER_FILTER_FIELDS:
             value = (source_filters or {}).get(name)
             if value:
@@ -1119,15 +1190,11 @@ class BossCdpSource:
     # Subprocess + artifact reading
     # ------------------------------------------------------------------
 
-    def _default_run(self, command: list[str], timeout: int) -> tuple[int, str]:
-        """Run the scraper subprocess and capture stdout+stderr (combined).
-
-        Returns ``(returncode, captured_output)``. Captured output is for
-        diagnostic only; never persisted to the database in raw form.
-        """
+    def _default_run(self, command: list[str], timeout: int, *, on_poll=None) -> tuple[int, str]:
         result = self._executor.execute(
             command, timeout_seconds=timeout, cwd=self.cwd, env=self.env,
             cancel_event=self.cancel_event,
+            on_poll=on_poll,
         )
         if result.failure_code == "process_timeout":
             raise subprocess.TimeoutExpired(command, timeout)
@@ -1146,38 +1213,18 @@ class BossCdpSource:
         "close-chrome", "setup-chrome", "stop-chrome", "smoke-test",
     })
 
-    def _run_command(self, command: list[str], timeout: int) -> tuple[int, str]:
-        """按 in_process 模式分派执行器。
-
-        - ``in_process=False``（默认）：走 ``_runner``（子进程路径，零改动）。
-        - ``in_process=True``：走 ``_run_in_process``（argv 翻译为库式调用）。
-        """
+    def _run_command(
+        self, command: list[str], timeout: int, *, on_poll=None, on_page_completed=None,
+    ) -> tuple[int, str]:
         if self.in_process:
-            return self._run_in_process(command, timeout)
+            return self._run_in_process(command, timeout, on_page_completed=on_page_completed)
+        if self._use_default_runner:
+            return self._runner(command, timeout, on_poll=on_poll)
         return self._runner(command, timeout)
 
-    def _run_in_process(self, command: list[str], timeout: int) -> tuple[int, str]:
-        """in_process argv 翻译执行器（合同 inprocess-runner §4.3）。
-
-        解析本类构建的三类命令（list/detail/detail_batch）并翻译为
-        ``run_search_programmatic`` / ``scrape_details`` 库式调用。无法翻译
-        的命令（如 ``--setup-chrome``）返回 ``(127, "untranslatable_command")``，
-        调用方按失败处理，不崩溃。
-
-        超时语义与子进程路径对齐：``timeout`` 秒未完成 → 请求协作取消，
-        再等待收尾；仍不退出则抛 ``subprocess.TimeoutExpired``，调用方
-        （fetch_*）按既有 ``except subprocess.TimeoutExpired`` 分类为
-        ``source_timeout``。成功时返回 ``(0, output_tail)``，captured
-        内容与子进程模式等价（截断到 executor 的输出上限）。
-
-        异常映射（合同 §3，与子进程退出码语义等价）：
-
-        - ``CDPUnavailableError`` → ``(2, str(exc))`` → source_cdp_unavailable
-        - ``LoginRequiredError`` → ``(1, "登录态失效: ...")`` → source_login_required
-        - ``RiskControlError`` → ``(10, exc.reason)`` → 按 reason 分类
-        - ``SearchCancelled`` → ``(-1, "cancelled")``
-        - 其他 → ``(-1, str(exc))``
-        """
+    def _run_in_process(
+        self, command: list[str], timeout: int, *, on_page_completed=None,
+    ) -> tuple[int, str]:
         try:
             parsed = self._translate_argv(command)
         except ValueError as exc:
@@ -1186,6 +1233,8 @@ class BossCdpSource:
             return (-1, str(exc))
         if parsed is None:
             return (127, "untranslatable_command")
+        if parsed.get("kind") == "list" and on_page_completed is not None:
+            parsed["params"]["on_page_completed"] = on_page_completed
         try:
             completed, payload = run_with_deadline(
                 lambda: self._run_in_process_impl(parsed),
@@ -1202,6 +1251,8 @@ class BossCdpSource:
             return (1, f"登录态失效: {exc}")
         except boss.RiskControlError as exc:
             return (10, exc.reason)
+        except PageEventPersistenceError:
+            raise
         except Exception as exc:
             return (-1, str(exc))
         if not completed:
@@ -1276,6 +1327,9 @@ class BossCdpSource:
             "detail": False,
             "filters": filters,
             "cancel_event": self.cancel_event,
+            "combo_key": str(flags.get("combo-key", "") or "") or None,
+            "list_events_output": str(flags.get("list-events-output", "") or "") or None,
+            "start_page": max(1, int(flags.get("start-page", "1") or "1")),
         }
         return {"kind": "list", "params": params}
 
@@ -1445,7 +1499,9 @@ class FakeJobSource:
             safe_log=f"fake preflight platform={self.platform} port={self.cdp_port} ready=1",
         )
 
-    def fetch_list(self, plan_item: dict) -> SourceOutcome:
+    def fetch_list(
+        self, plan_item: dict, *, on_page_completed: Callable[[dict], None] | None = None,
+    ) -> SourceOutcome:
         if not isinstance(plan_item, dict):
             return SourceOutcome.failure(
                 failed_code="source_invalid_output",
@@ -1477,6 +1533,22 @@ class FakeJobSource:
                 failed_code="source_input_drift",
                 safe_log="fake list input_hash_mismatch",
             )
+        target_pages = max(1, int(plan_item.get("target_pages") or 1))
+        if on_page_completed is not None:
+            on_page_completed({
+                "kind": "page_completed",
+                "combo_key": str(plan_item.get("combo_key") or "") or f"{keyword}|{city}",
+                "keyword": keyword,
+                "city": city,
+                "page": target_pages,
+                "target_pages": target_pages,
+                "jobs_delta": len(jobs),
+                "jobs_count": len(jobs),
+                "has_more": False,
+                "resume_page": target_pages + 1,
+                "last_completed_page": target_pages,
+                "jobs_snapshot": list(jobs),
+            })
         return SourceOutcome.success(
             jobs=list(jobs),
             safe_log=f"fake list keyword_present=1 city_present={bool(city)} job_count={len(jobs)}",
@@ -2066,12 +2138,14 @@ class ZhilianCdpSource:
     # ------------------------------------------------------------------
     # T306: fetch_list 输入校验
     # ------------------------------------------------------------------
-    def fetch_list(self, plan_item: dict) -> SourceOutcome:
+    def fetch_list(
+        self, plan_item: dict, *, on_page_completed: Callable[[dict], None] | None = None,
+    ) -> SourceOutcome:
         """抓取智联岗位列表页。
 
         只接收关键词、规范城市解析快照和页数；真实 API 结果统一字段。
         runner 返回 empty signal 时必须携带 empty_evidence，否则按失败处理。
-        """
+        ``on_page_completed``：每完成一页回调结构化页级事件。"""
         ok, reason = _validate_zhilian_plan_item(plan_item)
         if not ok:
             return SourceOutcome.failure(
@@ -2085,6 +2159,8 @@ class ZhilianCdpSource:
         try:
             runner_item = dict(plan_item)
             runner_item["cdp_port"] = self.cdp_port
+            runner_item["combo_key"] = str(plan_item.get("combo_key") or "") or ""
+            runner_item["on_page_completed"] = on_page_completed
             runner_result = self._list_runner(runner_item)
             if isinstance(runner_result, tuple) and len(runner_result) == 2:
                 signal, jobs = runner_result
@@ -2446,7 +2522,10 @@ def _default_zhilian_list_runner(plan_item: dict) -> tuple[str, list[dict], dict
         from scripts import zhilian_cdp_raw as zha
     except ImportError:
         return "unreachable", [], None
-    result = zha.fetch_list(plan_item)
+    result = zha.fetch_list(
+        plan_item,
+        on_page_completed=plan_item.get("on_page_completed"),
+    )
     if len(result) == 2:
         signal, jobs = result
         evidence = None

@@ -1734,6 +1734,21 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         self.assertIn("in_process", sig.parameters)
         self.assertFalse(sig.parameters["in_process"].default)
 
+    def test_default_runner_forwards_on_poll_to_executor(self):
+        """子进程模式默认 runner 必须把 on_poll 传给执行器，页事件才能实时转发。"""
+        from webui.process_executor import ExecutionResult
+        source = self._make_source(in_process=False)
+        captured = {}
+        poll = lambda: None
+
+        def fake_execute(command, **kwargs):
+            captured.update(kwargs)
+            return ExecutionResult(0, "")
+
+        with mock.patch.object(source._executor, "execute", side_effect=fake_execute):
+            source._run_command(["python", "x"], 30, on_poll=poll)
+        self.assertIs(captured.get("on_poll"), poll)
+
     # ---- list-only 翻译 ---------------------------------------------
 
     def test_list_only_translates_to_programmatic(self):
@@ -1804,6 +1819,66 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
             source.fetch_list(plan_item)
 
         self.assertEqual(captured["filters"], filters)
+
+    def test_list_only_translates_start_page(self):
+        """断点续抓的 start_page 必须翻译给 run_search_programmatic。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_start.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海",
+            "source_filters": {}, "target_pages": 10, "start_page": 4,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 10,
+            }),
+            "list_output_path": list_path,
+        }
+        captured = {}
+
+        def fake_run(**kwargs):
+            captured.update(kwargs)
+            self._write_json(kwargs["output_path"], {"jobs": []})
+            return {"list_data": {"jobs": []}, "details": None}
+
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic", side_effect=fake_run):
+            source.fetch_list(plan_item)
+        self.assertEqual(captured["start_page"], 4)
+
+    def test_list_only_forwards_page_completed_callback(self):
+        """in-process 列表抓取把页级事件直接转发给调用方。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_pages.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海",
+            "source_filters": {}, "target_pages": 2,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 2,
+            }),
+            "list_output_path": list_path,
+        }
+        events = []
+
+        def fake_run(**kwargs):
+            self._write_json(kwargs["output_path"], {
+                "jobs": [{"encrypt_job_id": "j1", "job_link": "https://zhipin.example/1"}]})
+            if kwargs.get("on_page_completed"):
+                kwargs["on_page_completed"]({
+                    "kind": "page_completed", "combo_key": "AI|上海",
+                    "keyword": "AI", "city": "上海", "page": 1, "target_pages": 2,
+                    "jobs_delta": 1, "jobs_count": 1, "has_more": True,
+                    "resume_page": 2, "last_completed_page": 1,
+                    "jobs_snapshot": [{"job_id": "j1"}],
+                })
+            return {"list_data": {"jobs": []}, "details": None}
+
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic", side_effect=fake_run):
+            outcome = source.fetch_list(plan_item, on_page_completed=events.append)
+
+        self.assertTrue(outcome.ok)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["page"], 1)
+        self.assertEqual(events[0]["jobs_count"], 1)
 
     # ---- detail-only 翻译 -------------------------------------------
 

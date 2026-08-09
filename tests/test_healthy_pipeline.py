@@ -998,6 +998,27 @@ class Slice7And9ApiTests(unittest.TestCase):
         self.assertIn("unstarted_count", data)
         self.assertIn("total", data)
 
+    def test_task_state_recovers_page_progress_after_restart(self):
+        """服务重启后从 scrape_page_progress 恢复单组合页级进度。"""
+        run_id = "page-state-run"
+        self.store.create_screening_run(run_id, source_count=1)
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape")
+        self.store.save_scrape_page_progress(
+            run_id, "Python|北京",
+            {"combo_key": "Python|北京", "page": 2, "target_pages": 10,
+             "resume_page": 3, "has_more": True, "jobs_count": 1,
+             "jobs_snapshot": [{"platform_job_id": "j1", "title": "岗"}]},
+        )
+        resp = self.client.get(f"/api/task-state/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        data = resp.get_json()
+        self.assertEqual(data["progress"]["page"], 2)
+        self.assertEqual(data["progress"]["target_pages"], 10)
+        self.assertEqual(data["progress"]["resume_page"], 3)
+        self.assertEqual(data["scraped_count"], 1)
+        self.assertEqual(data["progress"]["overall_percent"], 18)
+
     def test_task_state_fine_stage_ignores_prior_stage_match_mismatch(self):
         """精筛阶段 success_count 不得沿用粗筛/详情阶段的 match+mismatch 累计。
 
@@ -2414,6 +2435,72 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
         self.assertEqual(
             self.store.get_screening_run(task_id)["error_code"], "user_finished")
 
+    def test_finish_running_single_combo_with_page_snapshot_succeeds(self):
+        """单组合未完成但已有页级岗位快照时，结束并保存不得再 409。"""
+        task_id = "single-combo-page-finish"
+        self.store.create_screening_run(task_id, source_count=1)
+        self.store.save_scrape_page_progress(
+            task_id, "Python|北京",
+            {"combo_key": "Python|北京", "page": 2, "target_pages": 10,
+             "resume_page": 3, "has_more": True, "jobs_count": 1,
+             "jobs_snapshot": [
+                 {"platform_job_id": "j1", "job_id": "j1", "title": "工程师",
+                  "source_url": "https://zhipin.example/j1"},
+             ]},
+        )
+        self.store.update_screening_run(
+            task_id, status="running", current_stage="scrape")
+        finished = self.client.post(f"/api/task/finish/{task_id}", headers=self.headers)
+        self.assertEqual(finished.status_code, 200, finished.get_json())
+        payload = finished.get_json()
+        self.assertEqual(payload["result"]["total_scraped"], 1)
+        self.assertEqual(
+            self.store.get_screening_run(task_id)["error_code"], "user_finished")
+
+    def test_finish_waits_for_in_flight_page_save_without_deadlock(self):
+        """结束保存时若页级落库正在写，应等待锁释放而非重复 acquire。"""
+        task_id = "finish-waits-page-flush"
+        self.store.create_screening_run(task_id, source_count=1)
+        self.store.save_scrape_page_progress(
+            task_id, "Python|北京",
+            {"combo_key": "Python|北京", "page": 1, "target_pages": 10,
+             "resume_page": 2, "has_more": True, "jobs_count": 1,
+             "jobs_snapshot": [
+                 {"platform_job_id": "j1", "job_id": "j1", "title": "工程师",
+                  "source_url": "https://zhipin.example/j1"},
+             ]},
+        )
+        self.store.update_screening_run(
+            task_id, status="running", current_stage="scrape")
+        flush_lock = threading.Lock()
+        release_holder = threading.Event()
+        holder_done = threading.Event()
+
+        def hold_flush_lock():
+            flush_lock.acquire()
+            release_holder.wait(timeout=5)
+            flush_lock.release()
+            holder_done.set()
+
+        threading.Thread(target=hold_flush_lock, daemon=True).start()
+        threading.Timer(1.0, release_holder.set).start()
+        time.sleep(0.1)
+        self.app.config["PIPELINE_TASKS"][task_id] = {
+            "kind": "scrape", "status": "running", "progress": {},
+            "logs": [], "result": None, "error": "",
+            "stop_event": threading.Event(), "page_flush_lock": flush_lock,
+            "page_persist_seq": 1, "last_page_snapshot_at": time.time(),
+        }
+        started = time.monotonic()
+        with mock.patch(
+                "webui.pipeline_exec.close_debug_chrome", return_value=True):
+            finished = self.client.post(f"/api/task/finish/{task_id}", headers=self.headers)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(finished.status_code, 200, finished.get_json())
+        self.assertLess(elapsed, 3.0, "重复 acquire 会导致结束保存额外阻塞超时")
+        self.assertTrue(holder_done.wait(timeout=5))
+
     def test_finish_running_then_worker_cannot_overwrite_user_finished(self):
         task_id = "running-finish-guard"
         jobs = [
@@ -3582,7 +3669,7 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
             def preflight(self):
                 return SourceOutcome.success()
 
-            def fetch_list(self, plan_item):
+            def fetch_list(self, plan_item, *, on_page_completed=None):
                 self.fetch_calls.append(plan_item)
                 return SourceOutcome.failure(
                     failed_code="source_verification_required",
@@ -3611,7 +3698,7 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
             platform = "boss"
             def preflight(self):
                 return SourceOutcome.success()
-            def fetch_list(self, plan_item):
+            def fetch_list(self, plan_item, *, on_page_completed=None):
                 return SourceOutcome.failure(
                     failed_code="source_unknown_error", safe_log="普通文案",
                 )
@@ -4384,7 +4471,7 @@ class Slice13ComboDoneHardStopTests(unittest.TestCase):
             def preflight(self):
                 return SourceOutcome.success()
 
-            def fetch_list(self, _plan_item):
+            def fetch_list(self, _plan_item, *, on_page_completed=None):
                 return SourceOutcome.success(jobs=[{
                     "job_id": "j1", "title": "工程师", "company": "公司A",
                     "salary": "15-25K", "source_url": "https://example.com/j1",
@@ -4426,7 +4513,7 @@ class Slice13ComboDoneHardStopTests(unittest.TestCase):
             def preflight(self):
                 return SourceOutcome.success()
 
-            def fetch_list(self, _plan_item):
+            def fetch_list(self, _plan_item, *, on_page_completed=None):
                 return SourceOutcome.success(
                     jobs=[{"job_id": "j1", "title": "t1"}])
 
@@ -4522,7 +4609,7 @@ class Spec006ProgressSemanticsTests(unittest.TestCase):
             def preflight(self):
                 return SourceOutcome.success()
 
-            def fetch_list(self, plan_item):
+            def fetch_list(self, plan_item, *, on_page_completed=None):
                 return SourceOutcome.success(jobs=[{
                     "job_id": f"job-{plan_item['keyword']}",
                     "title": plan_item["keyword"],
@@ -4559,7 +4646,7 @@ class Spec006ProgressSemanticsTests(unittest.TestCase):
             def preflight(self):
                 return SourceOutcome.success()
 
-            def fetch_list(self, _plan_item):
+            def fetch_list(self, _plan_item, *, on_page_completed=None):
                 self.calls += 1
                 if self.calls == 1:
                     return SourceOutcome.failure(
@@ -4579,6 +4666,74 @@ class Spec006ProgressSemanticsTests(unittest.TestCase):
         done_events = [event for event in events if event["stage"] == "done"]
         self.assertEqual(failed_events[0]["overall_percent"], 0)
         self.assertEqual(done_events[-1]["overall_percent"], 100)
+
+    def test_run_search_emits_page_level_percent_and_message(self):
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        class PageSource:
+            platform = "boss"
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+            def fetch_list(self, plan_item, *, on_page_completed=None):
+                if on_page_completed is not None:
+                    on_page_completed({
+                        "kind": "page_completed", "combo_key": "Python|北京",
+                        "keyword": "Python", "city": "北京", "page": 2,
+                        "target_pages": 10, "jobs_delta": 15, "jobs_count": 30,
+                        "has_more": True, "resume_page": 3, "last_completed_page": 2,
+                    })
+                return SourceOutcome.success(
+                    jobs=[{"job_id": "j1", "title": "工程师"}])
+
+        events = []
+        with mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
+             mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            run_search(
+                {"keyword": "Python", "city": ["北京"]},
+                PageSource(), pages=10, sleeper=lambda _seconds: None,
+                progress=events.append, close_chrome_on_success=False,
+            )
+        page_events = [event for event in events if event["stage"] == "page_done"]
+        self.assertEqual(len(page_events), 1)
+        self.assertEqual(page_events[0]["overall_percent"], 18)
+        self.assertEqual(page_events[0]["page"], 2)
+        self.assertEqual(page_events[0]["target_pages"], 10)
+        self.assertIn("第 2/10 页", page_events[0]["message"])
+
+    def test_run_search_page_persistence_failure_hard_stops(self):
+        from webui.pipeline_exec import run_search
+        from webui.source import PageEventPersistenceError, SourceOutcome
+
+        class PageFailSource:
+            platform = "boss"
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+            def fetch_list(self, plan_item, *, on_page_completed=None):
+                if on_page_completed is not None:
+                    on_page_completed({
+                        "kind": "page_completed", "combo_key": "Python|北京",
+                        "page": 1, "target_pages": 10, "jobs_count": 0,
+                    })
+                return SourceOutcome.success(jobs=[{"job_id": "j1"}])
+
+        def fail_persist(_event):
+            raise PageEventPersistenceError("disk full")
+
+        with mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
+             mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            result = run_search(
+                {"keyword": "Python", "city": ["北京"]},
+                PageFailSource(), pages=10, sleeper=lambda _seconds: None,
+                on_page_completed=fail_persist, close_chrome_on_success=False,
+            )
+        self.assertTrue(result["hard_stop"])
+        self.assertEqual(result["hard_stop_code"], "internal_error")
+        self.assertIn("页级快照持久化失败", result["error"])
 
 
 class FrozenConfigDigestTests(unittest.TestCase):

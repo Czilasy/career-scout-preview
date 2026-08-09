@@ -1858,7 +1858,7 @@ class RunSearchAllFailTests(unittest.TestCase):
         class _FailSource:
             def preflight(self):
                 return SourceOutcome.success(jobs=[], safe_log="ok", input_hash="")
-            def fetch_list(self, plan_item):
+            def fetch_list(self, plan_item, *, on_page_completed=None):
                 return SourceOutcome.failure(
                     failed_code="source_verification_required",
                     safe_log="list returncode=10 reason=验证码",
@@ -1885,7 +1885,7 @@ class RunSearchAllFailTests(unittest.TestCase):
         class _MixedSource:
             def preflight(self):
                 return SourceOutcome.success(jobs=[], safe_log="ok", input_hash="")
-            def fetch_list(self, plan_item):
+            def fetch_list(self, plan_item, *, on_page_completed=None):
                 call_count[0] += 1
                 if call_count[0] == 1:
                     return SourceOutcome.failure(

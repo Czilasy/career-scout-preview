@@ -330,6 +330,12 @@ const scrapeCountState = computed(() => {
 const currentCompletedCount = computed(() => scrapeCountState.value.completed);
 const currentRunningCount = computed(() => scrapeCountState.value.running);
 const currentUnstartedCount = computed(() => scrapeCountState.value.unstarted);
+const pageInfo = computed(() => {
+  const page = Number(progress.value.page || 0);
+  const target = Number(progress.value.target_pages || 0);
+  if (page <= 0 || target <= 0) return { show: false, page: 0, target: 0 };
+  return { show: true, page, target };
+});
 const sourceTotal = computed(() => Number(props.snapshot?.source_total || 0));
 const pendingCount = computed(() => Number(props.snapshot?.pending_count || 0));
 const keptCount = computed(() => Number(props.snapshot?.kept_count || 0));
@@ -408,6 +414,10 @@ const timeLabel = computed(() => {
           <span v-if="currentRunningCount" class="count-chip running">进行中 {{ currentRunningCount }}</span>
           <span class="count-chip unstarted">未开始 {{ currentUnstartedCount }}</span>
         </span>
+      </div>
+      <div v-if="props.kind === 'scrape' && pageInfo.show" class="count-group count-page">
+        <span class="count-label">页</span>
+        <span class="count-chip page" data-testid="page-progress">第 {{ pageInfo.page }} / {{ pageInfo.target }} 页</span>
       </div>
       <div v-if="showPending" class="count-group count-pending">
         <span class="count-label">待确认</span>

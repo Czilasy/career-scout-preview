@@ -2933,6 +2933,9 @@ def create_app(config=None):
                 task["config_digest"] = execution_config.config_digest
             if frozen_scope is not None:
                 task["scope_digest"] = frozen_scope.scope_digest
+            task.setdefault("page_flush_lock", threading.Lock())
+            task.setdefault("page_persist_seq", 0)
+            task.setdefault("last_page_snapshot_at", 0)
         if _is_user_finished(task_id):
             with _pipeline_lock:
                 current = _pipeline_tasks.get(task_id)
@@ -3062,6 +3065,48 @@ def create_app(config=None):
                     for job in jobs if isinstance(job, dict)
                 ])
 
+            def on_page_completed(event):
+                """每完成一页原子保存岗位快照与页级 checkpoint。"""
+                lock = None
+                with _pipeline_lock:
+                    task_ref = _pipeline_tasks.get(task_id)
+                    if task_ref is not None:
+                        lock = task_ref.get("page_flush_lock")
+                if lock is not None:
+                    lock.acquire()
+                try:
+                    store.save_scrape_page_progress(
+                        task_id, str(event.get("combo_key") or ""), event)
+                finally:
+                    if lock is not None:
+                        lock.release()
+                with _pipeline_lock:
+                    task_ref = _pipeline_tasks.get(task_id)
+                    if task_ref is not None:
+                        task_ref["last_page_snapshot_at"] = time.time()
+                        task_ref["page_persist_seq"] = int(
+                            task_ref.get("page_persist_seq") or 0) + 1
+                        task_ref["last_page_progress"] = dict(event)
+
+            try:
+                page_rows = store.load_scrape_page_progress(task_id)
+            except _OPERATIONAL_ERRORS:
+                page_rows = []
+            skip_set = set(skip_combos or [])
+            resume_pages = {
+                row["combo_key"]: row["resume_page"]
+                for row in page_rows if row["combo_key"] not in skip_set
+            }
+            resume_jobs = {}
+            for row in page_rows:
+                if row["combo_key"] in skip_set:
+                    continue
+                try:
+                    resume_jobs[row["combo_key"]] = store.load_scrape_run_jobs(
+                        task_id, combo_key=row["combo_key"])
+                except _OPERATIONAL_ERRORS:
+                    resume_jobs[row["combo_key"]] = []
+
             result = run_search(
                 script_params, source,
                 pages=(
@@ -3073,6 +3118,9 @@ def create_app(config=None):
                 skip_combos=skip_combos,
                 on_combo_done=on_combo_done,
                 execution_config=execution_config,
+                on_page_completed=on_page_completed,
+                resume_pages=resume_pages,
+                resume_jobs=resume_jobs,
             )
             # 断点续抓：合并旧结果（按 job_id 去重）
             if old_jobs and result.get("ok"):
@@ -5678,7 +5726,7 @@ def create_app(config=None):
         3. DB 中最近 interrupted 筛选（服务重启打断的工作线程）
         4. 无任务
         """
-        from webui.pipeline_exec import _scrape_overall_percent, failed_code_label
+        from webui.pipeline_exec import failed_code_label
         with _pipeline_lock:
             for task_id, task in reversed(list(_pipeline_tasks.items())):
                 if task["status"] in ("running", "queued"):
@@ -7437,7 +7485,9 @@ def create_app(config=None):
         unstarted_count/total/pause_info(含 error_code/error_reason)。
         前端 3 个 snapshot 统一从此接口拉取。
         """
-        from webui.pipeline_exec import _scrape_overall_percent, failed_code_label
+        from webui.pipeline_exec import (
+            _scrape_overall_percent, _scrape_page_overall_percent, failed_code_label,
+        )
 
         with _pipeline_lock:
             task = _pipeline_tasks.get(run_id)
@@ -7540,6 +7590,23 @@ def create_app(config=None):
                 stage, completed_count, stage_total,
             )
         progress = dict(live_progress)
+        page_rows = []
+        try:
+            page_rows = store.load_scrape_page_progress(scraped_count_source)
+        except _OPERATIONAL_ERRORS:
+            page_rows = []
+        if page_rows:
+            latest_page = page_rows[0]
+            progress.setdefault("page", latest_page["completed_pages"])
+            progress.setdefault("target_pages", latest_page["target_pages"])
+            progress.setdefault("resume_page", latest_page["resume_page"])
+            progress.setdefault("has_more", bool(latest_page["has_more"]))
+            progress.setdefault("scraped", latest_page["jobs_count"])
+            if "overall_percent" not in progress:
+                page_ratio = min(
+                    1.0, latest_page["completed_pages"] / max(1, latest_page["target_pages"]))
+                progress["overall_percent"] = _scrape_page_overall_percent(
+                    stage, completed_count, stage_total, page_ratio)
         progress.setdefault("overall_percent", overall_percent)
         progress.setdefault("current", success_count if jd_stage else completed_count)
         progress.setdefault("total", stage_total)
@@ -7929,6 +7996,33 @@ def create_app(config=None):
         source_payload = None
         source_dropped = []
         source_total_scraped = None
+        # 先发停止信号并等待当前页原子落库稳定，再从页级快照生成部分结果。
+        flush_run_id = scrape_task_id or (
+            run_id if str(run.get("current_stage") or "") == "scrape" else ""
+        )
+        if flush_run_id:
+            with _pipeline_lock:
+                task = _pipeline_tasks.get(flush_run_id)
+                stop_event = task.get("stop_event") if task is not None else None
+                flush_lock = task.get("page_flush_lock") if task is not None else None
+            if stop_event is not None:
+                stop_event.set()
+            if flush_lock is not None:
+                stable_since = time.monotonic()
+                last_seq = None
+                flush_deadline = time.monotonic() + 3.0
+                while time.monotonic() < flush_deadline:
+                    with _pipeline_lock:
+                        task = _pipeline_tasks.get(flush_run_id)
+                        seq = int((task or {}).get("page_persist_seq") or 0) if task is not None else 0
+                    if seq != last_seq:
+                        last_seq = seq
+                        stable_since = time.monotonic()
+                    elif time.monotonic() - stable_since >= 0.2:
+                        break
+                    time.sleep(0.05)
+                if flush_lock.acquire(timeout=3.0):
+                    flush_lock.release()
         if scrape_task_id:
             try:
                 source_jobs = store.load_scrape_run_jobs(scrape_task_id)

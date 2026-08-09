@@ -570,6 +570,8 @@ class TaskStore:
             self._migration_027()
         if current < 28:
             self._migration_028()
+        if current < 29:
+            self._migration_029()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -2862,6 +2864,7 @@ class TaskStore:
                 "screening_pending_results",
                 "pipeline_checkpoints",
                 "scrape_run_jobs",
+                "scrape_page_progress",
             ):
                 conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
             conn.execute("DELETE FROM screening_runs WHERE id = ?", (run_id,))
@@ -2887,6 +2890,7 @@ class TaskStore:
                 "screening_pending_results",
                 "pipeline_checkpoints",
                 "scrape_run_jobs",
+                "scrape_page_progress",
             ):
                 conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (str(run_id),))
             conn.execute("DELETE FROM screening_runs WHERE id = ?", (str(run_id),))
@@ -3236,6 +3240,36 @@ class TaskStore:
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
                 "VALUES (28, ?, 'job lifecycle events, command receipts and reminders')",
+                (_now(),),
+            )
+
+    def _migration_029(self):
+        """Persist per-page scrape progress with an atomic jobs snapshot.
+
+        单组合未完成前，每完成一页把岗位快照写入 scrape_run_jobs，并记录
+        当前页/恢复页；两写在同一个事务里，失败整笔回滚。
+        """
+        with self._connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scrape_page_progress (
+                    run_id TEXT NOT NULL,
+                    combo_key TEXT NOT NULL,
+                    completed_pages INTEGER NOT NULL,
+                    target_pages INTEGER NOT NULL,
+                    resume_page INTEGER NOT NULL,
+                    has_more INTEGER NOT NULL DEFAULT 1,
+                    jobs_count INTEGER NOT NULL DEFAULT 0,
+                    last_completed_page INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, combo_key),
+                    FOREIGN KEY (run_id) REFERENCES screening_runs(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (29, ?, 'scrape page progress checkpoints')",
                 (_now(),),
             )
 
@@ -4546,6 +4580,93 @@ class TaskStore:
                     ts,
                 ),
             )
+            conn.execute(
+                "DELETE FROM scrape_page_progress WHERE run_id = ? AND combo_key = ?",
+                (str(run_id), str(combo_key)),
+            )
+
+    def save_scrape_page_progress(self, run_id, combo_key, progress_event):
+        """Atomically persist one completed page and its jobs snapshot.
+
+        ``progress_event`` 必须携带 page/target_pages/resume_page/jobs_snapshot
+        等结构化页级事实；岗位快照与页级 checkpoint 同事务提交，失败回滚。
+        """
+        event = dict(progress_event or {})
+        combo_key = str(event.get("combo_key") or combo_key or "").strip()
+        if not combo_key:
+            raise ValueError("combo_key required")
+        snapshot = event.get("jobs_snapshot") or []
+        page = max(0, int(event.get("page") or 0))
+        target = max(1, int(event.get("target_pages") or 1))
+        resume = max(1, int(event.get("resume_page") or page + 1))
+        last_page = max(0, int(event.get("last_completed_page") or page))
+        jobs_count = max(0, int(event.get("jobs_count") or len(snapshot) or 0))
+        has_more = 1 if bool(event.get("has_more", True)) else 0
+        ts = _now()
+        with self._connection() as conn:
+            self._assert_recovery_writes_allowed(conn)
+            for job in snapshot:
+                if not isinstance(job, dict):
+                    continue
+                job_id = str(
+                    job.get("platform_job_id") or job.get("job_id") or job.get("source_url") or ""
+                ).strip()
+                if not job_id:
+                    continue
+                conn.execute(
+                    "INSERT INTO scrape_run_jobs "
+                    "(run_id, platform_job_id, combo_key, job_payload_json, scraped_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET "
+                    " combo_key = excluded.combo_key, "
+                    " job_payload_json = excluded.job_payload_json, "
+                    " scraped_at = excluded.scraped_at",
+                    (
+                        str(run_id), job_id, combo_key,
+                        json.dumps(job, ensure_ascii=False), ts,
+                    ),
+                )
+            conn.execute(
+                "INSERT INTO scrape_page_progress "
+                "(run_id, combo_key, completed_pages, target_pages, resume_page, has_more, jobs_count, last_completed_page, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(run_id, combo_key) DO UPDATE SET "
+                " completed_pages = excluded.completed_pages, "
+                " target_pages = excluded.target_pages, "
+                " resume_page = excluded.resume_page, "
+                " has_more = excluded.has_more, "
+                " jobs_count = excluded.jobs_count, "
+                " last_completed_page = excluded.last_completed_page, "
+                " updated_at = excluded.updated_at",
+                (
+                    str(run_id), combo_key, page, target, resume, has_more,
+                    jobs_count, last_page, ts,
+                ),
+            )
+
+    def load_scrape_page_progress(self, run_id):
+        """Load persisted per-page scrape checkpoints, newest first."""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT run_id, combo_key, completed_pages, target_pages, "
+                "resume_page, has_more, jobs_count, last_completed_page, updated_at "
+                "FROM scrape_page_progress WHERE run_id = ? "
+                "ORDER BY updated_at DESC, combo_key ASC", (str(run_id),),
+            ).fetchall()
+        return [
+            {
+                "run_id": row["run_id"],
+                "combo_key": row["combo_key"],
+                "completed_pages": int(row["completed_pages"]),
+                "target_pages": int(row["target_pages"]),
+                "resume_page": int(row["resume_page"]),
+                "has_more": bool(row["has_more"]),
+                "jobs_count": int(row["jobs_count"]),
+                "last_completed_page": int(row["last_completed_page"]),
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
 
     def save_recrawl_jd_and_checkpoint(
             self, source_run_id, recrawl_run_id, jd_by_job, completed_job_ids):
@@ -4573,13 +4694,19 @@ class TaskStore:
                 ),
             )
 
-    def load_scrape_run_jobs(self, run_id):
-        """Load the complete persisted job payload for a scrape run."""
+    def load_scrape_run_jobs(self, run_id, combo_key=None):
+        """Load persisted job payloads for a scrape run, optionally one combo."""
+        params: list = [str(run_id)]
+        combo_filter = ""
+        if combo_key:
+            combo_filter = " AND combo_key = ?"
+            params.append(str(combo_key))
         with self._connection() as conn:
             rows = conn.execute(
                 "SELECT job_payload_json FROM scrape_run_jobs "
-                "WHERE run_id = ? ORDER BY scraped_at ASC, platform_job_id ASC",
-                (str(run_id),),
+                f"WHERE run_id = ?{combo_filter} "
+                "ORDER BY scraped_at ASC, platform_job_id ASC",
+                tuple(params),
             ).fetchall()
         jobs = []
         for row in rows:

@@ -64,6 +64,99 @@ class TaskStoreTests(unittest.TestCase):
             self.store.get_task("missing")
 
 
+class ScrapePageProgressTests(unittest.TestCase):
+    """页级 checkpoint：岗位快照与页进度同事务原子落库。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db_path = pathlib.Path(self.temp.name) / "state" / "webui.db"
+        self.store = TaskStore(self.db_path)
+        self.store.create_screening_run("page-run", source_count=1)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_save_page_progress_persists_jobs_and_checkpoint_atomically(self):
+        event = {
+            "kind": "page_completed",
+            "combo_key": "Python|北京",
+            "page": 2,
+            "target_pages": 10,
+            "resume_page": 3,
+            "has_more": True,
+            "jobs_count": 1,
+            "jobs_snapshot": [{"platform_job_id": "j1", "title": "工程师"}],
+        }
+        self.store.save_scrape_page_progress("page-run", "Python|北京", event)
+
+        self.assertEqual(self.store.count_scrape_run_jobs("page-run"), 1)
+        jobs = self.store.load_scrape_run_jobs("page-run", combo_key="Python|北京")
+        self.assertEqual(jobs[0]["platform_job_id"], "j1")
+        rows = self.store.load_scrape_page_progress("page-run")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["completed_pages"], 2)
+        self.assertEqual(rows[0]["target_pages"], 10)
+        self.assertEqual(rows[0]["resume_page"], 3)
+
+    def test_page_progress_update_is_idempotent_and_overwrites_snapshot(self):
+        first = {
+            "combo_key": "Python|北京", "page": 1, "target_pages": 10,
+            "resume_page": 2, "has_more": True, "jobs_count": 1,
+            "jobs_snapshot": [{"platform_job_id": "j1", "title": "一"}],
+        }
+        second = {
+            "combo_key": "Python|北京", "page": 3, "target_pages": 10,
+            "resume_page": 4, "has_more": True, "jobs_count": 2,
+            "jobs_snapshot": [
+                {"platform_job_id": "j1", "title": "一"},
+                {"platform_job_id": "j2", "title": "二"},
+            ],
+        }
+        self.store.save_scrape_page_progress("page-run", "Python|北京", first)
+        self.store.save_scrape_page_progress("page-run", "Python|北京", second)
+
+        self.assertEqual(self.store.count_scrape_run_jobs("page-run"), 2)
+        rows = self.store.load_scrape_page_progress("page-run")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["completed_pages"], 3)
+        self.assertEqual(rows[0]["resume_page"], 4)
+
+    def test_combo_done_clears_page_checkpoint_but_keeps_jobs(self):
+        self.store.save_scrape_page_progress(
+            "page-run", "Python|北京",
+            {"combo_key": "Python|北京", "page": 10, "target_pages": 10,
+             "resume_page": 11, "has_more": False, "jobs_count": 1,
+             "jobs_snapshot": [{"platform_job_id": "j1"}]},
+        )
+        self.store.save_scrape_combo_result(
+            "page-run", "Python|北京",
+            [{"platform_job_id": "j1", "title": "工程师"}],
+            ["Python|北京"],
+        )
+
+        self.assertEqual(self.store.load_scrape_page_progress("page-run"), [])
+        self.assertEqual(self.store.count_scrape_run_jobs("page-run"), 1)
+
+    def test_load_scrape_run_jobs_can_filter_by_combo(self):
+        self.store.save_scrape_page_progress(
+            "page-run", "Python|北京",
+            {"combo_key": "Python|北京", "page": 1, "target_pages": 2,
+             "resume_page": 2, "jobs_count": 1,
+             "jobs_snapshot": [{"platform_job_id": "p1"}]},
+        )
+        self.store.save_scrape_page_progress(
+            "page-run", "后端|上海",
+            {"combo_key": "后端|上海", "page": 1, "target_pages": 2,
+             "resume_page": 2, "jobs_count": 1,
+             "jobs_snapshot": [{"platform_job_id": "b1"}]},
+        )
+
+        self.assertEqual(
+            [j["platform_job_id"] for j in self.store.load_scrape_run_jobs(
+                "page-run", combo_key="Python|北京")], ["p1"])
+        self.assertEqual(self.store.count_scrape_run_jobs("page-run"), 2)
+
+
 class Migration28SchemaTests(unittest.TestCase):
     """Task 001 migration 28 contract tests."""
 
@@ -88,7 +181,8 @@ class Migration28SchemaTests(unittest.TestCase):
                     pass
 
     def _build_v27_database(self):
-        with patch.object(TaskStore, "_migration_028", return_value=None):
+        with patch.object(TaskStore, "_migration_028", return_value=None), \
+                patch.object(TaskStore, "_migration_029", return_value=None):
             store = TaskStore(self.db_path)
         self.assertEqual(store.schema_version(), 27)
         return store
@@ -125,8 +219,7 @@ class Migration28SchemaTests(unittest.TestCase):
     def test_migration_28_is_idempotent_and_new_history_tables_enforce_foreign_keys(self):
         store = TaskStore(self.db_path)
         reopened = TaskStore(self.db_path)
-
-        self.assertEqual(reopened.schema_version(), 28)
+        self.assertGreaterEqual(reopened.schema_version(), 28)
         with reopened._connection() as conn:
             migration_count = conn.execute(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version=28"
@@ -138,7 +231,7 @@ class Migration28SchemaTests(unittest.TestCase):
                     (_now(),),
                 )
 
-        self.assertEqual(store.schema_version(), 28)
+        self.assertGreaterEqual(store.schema_version(), 28)
         self.assertEqual(migration_count, 1)
 
     def test_migration_27_to_28_keeps_existing_rows_and_creates_no_history(self):

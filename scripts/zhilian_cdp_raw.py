@@ -352,12 +352,15 @@ def preflight(cdp_port: int = DEFAULT_CDP_PORT) -> str | None:
             pass
 
 
-def fetch_list(plan_item: dict) -> tuple[str | None, list[dict], dict | None]:
-    """抓取智联岗位列表；返回 (signal, jobs, empty_evidence)。"""
+def fetch_list(plan_item: dict, *, on_page_completed=None) -> tuple[str | None, list[dict], dict | None]:
+    """抓取智联岗位列表；返回 (signal, jobs, empty_evidence)。
+
+    ``on_page_completed`` 每完成一页回调一次结构化页级事件。"""
     city = plan_item.get("city") or {}
     keyword = str(plan_item.get("keyword") or "").strip()
     city_code = str(city.get("platform_code") or "").strip()
     target_pages = int(plan_item.get("target_pages") or 1)
+    start_page = max(1, int(plan_item.get("start_page") or 1))
     if not keyword or not city_code:
         return "invalid_output", [], None
 
@@ -368,8 +371,11 @@ def fetch_list(plan_item: dict) -> tuple[str | None, list[dict], dict | None]:
 
     try:
         merged: dict[str, dict] = {}
+        for job in plan_item.get("existing_jobs") or []:
+            if isinstance(job, dict) and job.get("platform_job_id"):
+                merged[job["platform_job_id"]] = job
         api_city = _api_city_code(city_code)
-        for page_index in range(1, max(1, target_pages) + 1):
+        for page_index in range(start_page, max(1, target_pages) + 1):
             value = _evaluate(ws, _search_fetch_expression(keyword, api_city, page_index))
             if not isinstance(value, dict) or value.get("error"):
                 return "invalid_output", [], None
@@ -378,6 +384,21 @@ def fetch_list(plan_item: dict) -> tuple[str | None, list[dict], dict | None]:
                 jid = job.get("platform_job_id")
                 if jid:
                     merged[jid] = job
+            if on_page_completed is not None:
+                on_page_completed({
+                    "kind": "page_completed",
+                    "combo_key": str(plan_item.get("combo_key") or "") or f"{keyword}|{city.get('name') or city_code}",
+                    "keyword": keyword,
+                    "city": city.get("name") or city_code,
+                    "page": page_index,
+                    "target_pages": target_pages,
+                    "jobs_delta": len(jobs),
+                    "jobs_count": len(merged),
+                    "has_more": bool(value.get("jobs")) and not bool(value.get("isEndPage")),
+                    "resume_page": page_index + 1,
+                    "last_completed_page": page_index,
+                    "jobs_snapshot": list(merged.values()),
+                })
             if value.get("isEndPage") or not value.get("jobs"):
                 break
             time.sleep(random.uniform(0.8, 1.6))

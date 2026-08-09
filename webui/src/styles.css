@@ -1401,6 +1401,7 @@ button:disabled {
 }
 .count-chip.source { color: var(--brand-ink); background: var(--brand-wash); border-color: var(--brand-edge); }
 .count-chip.scraped { color: var(--brand-ink); background: var(--brand-wash); border-color: var(--brand-edge); }
+.count-chip.page { color: var(--brand-ink); background: var(--brand-wash); border-color: var(--brand-edge); }
 .count-chip.pending { color: var(--unsure-deep); background: var(--unsure-wash); border-color: var(--unsure-edge); }
 .count-sep { color: var(--muted); font-weight: 600; }
 .version-footer {
