@@ -466,6 +466,10 @@ const STAGE_LABELS: Record<string, string> = {
   screen_a: "AI 粗筛",
   ai_fine: "AI 精筛",
   screen_b: "AI 精筛",
+  recrawl_submit: "提交重抓",
+  recrawl_fetch_jd: "重抓 JD 详情",
+  recrawl_jd: "重抓 JD 详情",
+  recrawl_ai: "AI 重新判定",
   done: "已完成",
 };
 

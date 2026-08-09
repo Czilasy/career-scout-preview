@@ -1719,7 +1719,7 @@ button:disabled {
 .recrawl-guide button:disabled { opacity: .55; cursor: not-allowed; }
 .recrawl-banner {
   display: flex;
-  flex-direction: column;
+  flex-flow: row wrap;
   gap: 8px;
   padding: 10px 0;
 }

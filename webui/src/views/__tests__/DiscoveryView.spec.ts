@@ -1963,6 +1963,8 @@ describe("DiscoveryView", () => {
     const headingBlock = css.match(/\.job-list-heading\s*\{[^}]*\}/s)?.[0] || "";
     expect(segmentBlock).not.toContain("position: absolute");
     expect(headingBlock).toContain("flex-wrap: wrap");
+    const recrawlBannerBlock = css.match(/\.recrawl-banner\s*\{[^}]*\}/s)?.[0] || "";
+    expect(recrawlBannerBlock).toContain("flex-flow: row wrap");
     const resultsStageBlock = css.match(/\.results-stage\s*\{[^}]*\}/s)?.[0] || "";
     expect(resultsStageBlock).toContain("grid-template-columns: minmax(0, 1fr)");
     const viewportScript = readFileSync(
