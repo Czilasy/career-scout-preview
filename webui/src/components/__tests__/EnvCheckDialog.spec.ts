@@ -38,7 +38,7 @@ const envPayload = {
   ],
   active_account: "a",
   cooldowns: [
-    { account_id: "a", platform: "boss", until: 9999999999, until_text: "08-08 12:00", reason: "操作频繁" },
+    { account_id: "a", platform: "boss", until: 9999999999, until_text: "08-08 12:00", reason: "操作频繁", from_run: "run-123" },
   ],
   checked_at: 1785940000,
 };
@@ -148,6 +148,7 @@ describe("EnvCheckDialog", () => {
     const cooldown = wrapper.get('[data-testid="env-cooldowns"]');
     expect(cooldown.text()).toContain("账号 A");
     expect(cooldown.text()).toContain("建议等待至 08-08 12:00");
+    expect(wrapper.get('[data-testid="cooldown-from-run"]').text()).toContain("run-123");
     expect(cooldown.find("button").text()).toContain("解除冷却");
   });
 

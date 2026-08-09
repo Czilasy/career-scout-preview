@@ -442,6 +442,18 @@ class ZhilianCdpSourcePreflightTests(_LoginCacheIsolated):
         outcome = source.preflight()
         self.assertEqual(outcome.failed_code, "source_rate_limited")
 
+    def test_preflight_rate_limited_records_run_id(self):
+        with mock.patch("webui.source._record_risk_signals") as rec:
+            source = ZhilianCdpSource(
+                browser_account="a", cdp_port=9223, run_id="run-z",
+                preflight_runner=lambda port: _fake_preflight(signal="rate_limited"),
+            )
+            outcome = source.preflight()
+        self.assertEqual(outcome.failed_code, "source_rate_limited")
+        rec.assert_called_once()
+        self.assertEqual(rec.call_args.args[:3], ("a", "zhilian", "source_rate_limited"))
+        self.assertEqual(rec.call_args.kwargs["run_id"], "run-z")
+
     def test_preflight_blocked_returns_source_blocked(self):
         source = ZhilianCdpSource(
             browser_account="a", cdp_port=9223,
@@ -1932,6 +1944,28 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.failed_code, "source_rate_limited")
 
+    def test_risk_control_records_run_id_and_platform(self):
+        """高置信 BOSS 风控写冷却时带真实 run_id 与平台。"""
+        source = self._make_source(run_id="run-b", browser_account="a")
+        list_path = str(self.artifact_root / "list_risk_run.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+        err = _boss_for_inprocess.RiskControlError("操作频繁，请稍后再试", page=1)
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic", side_effect=err), \
+                mock.patch("webui.source._record_risk_signals") as rec:
+            outcome = source.fetch_list(plan_item)
+        self.assertEqual(outcome.failed_code, "source_rate_limited")
+        rec.assert_called_once()
+        self.assertEqual(rec.call_args.args[:3], ("a", "boss", "source_rate_limited"))
+        self.assertEqual(rec.call_args.kwargs["run_id"], "run-b")
+
     # ---- 无法翻译命令 -----------------------------------------------
 
     def test_untranslatable_command_returns_failure(self):
@@ -2028,6 +2062,44 @@ class NormalizeJobFieldsWelfareTests(unittest.TestCase):
         job = {"welfare": "双休", "boss_name": "Corp"}
         _normalize_job_fields(job)
         self.assertNotIn("extra", job)
+
+
+class RiskSignalClassificationTests(unittest.TestCase):
+    """B027/B013：普通词不判风控，高置信才暂停并写冷却。"""
+
+    def test_exit_10_common_words_are_not_risk(self):
+        from webui.source import _classify_failed_code
+        for sample in ("登录解锁更多职位", "频繁更新职位", "冻结岗位"):
+            self.assertEqual(
+                _classify_failed_code(10, sample), "source_unknown_error")
+
+    def test_exit_10_high_confidence_rate_limit(self):
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(10, "操作频繁，请稍后再试"), "source_rate_limited")
+        self.assertEqual(
+            _classify_failed_code(10, "HTTP 429 Too Many Requests"), "source_rate_limited")
+        for sample in (
+            "列表接口返回 HTTP 403（被风控拦截）",
+            "列表接口返回 HTTP 412", "列表接口返回 HTTP 418",
+        ):
+            self.assertEqual(_classify_failed_code(10, sample), "source_rate_limited")
+        self.assertEqual(
+            _classify_failed_code(10, "账号将于 2099-08-05 18:30 解封"), "source_rate_limited")
+
+    def test_record_risk_signals_only_writes_for_high_confidence(self):
+        from webui.source import _record_risk_signals
+        with mock.patch("scripts.login_state_cache.write_login_state") as write_state, \
+                mock.patch("webui.cooldown.mark_cooldown") as mark_cd:
+            _record_risk_signals(
+                "acc", "boss", "source_blocked", "登录解锁更多职位", "run-1")
+            write_state.assert_not_called()
+            mark_cd.assert_not_called()
+            _record_risk_signals(
+                "acc", "boss", "source_rate_limited", "操作频繁", "run-2")
+            write_state.assert_called_once_with("acc", "boss", "restricted")
+            mark_cd.assert_called_once()
+            self.assertEqual(mark_cd.call_args.kwargs["from_run"], "run-2")
 
 
 if __name__ == "__main__":

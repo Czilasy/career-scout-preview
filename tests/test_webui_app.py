@@ -635,6 +635,50 @@ class PipelineFeedbackRegressionTests(unittest.TestCase):
         self.assertEqual(submit.call_args.args[-2], "scrape-finished")
         self.assertEqual(submit.call_args.args[-1], "")  # 无上次进度则不续跑
 
+    def test_ai_screen_restores_user_finished_parent_from_db(self):
+        store = self.app.config["TASK_STORE"]
+        scrape_id = "user-finished-parent"
+        jobs = [
+            {"job_id": "j1", "platform_job_id": "j1", "title": "岗位",
+             "source_url": "https://zhipin.example/j1.html"},
+        ]
+        store.create_screening_run(scrape_id, source_count=1, execution_params={
+            "platform": "boss",
+            "execution_config": {
+                "schema_version": 1, "inter_combo_delay": 10,
+                "detail_batch_size": 15, "detail_interval": 2,
+                "detail_reset_every": 4, "detail_batch_cooldown": 5,
+                "detail_tab_pool_size": 5, "screen_batch_size": 50,
+                "screen_concurrency": 5, "match_batch_size": 4,
+                "match_concurrency": 10, "config_digest": "cfg",
+            },
+            "frozen_scope": {
+                "schema_version": 1, "platform": "boss",
+                "keywords": ["前端"], "scope_kind": "cities",
+                "cities": ["上海"], "pages_per_combination": 3,
+                "combination_count": 1, "planned_pages": 3,
+                "task_size": "small", "scope_digest": "scope",
+            },
+        })
+        store.save_scrape_combo_result(scrape_id, "kw|city", jobs, ["kw|city"])
+        store.update_screening_run(scrape_id, status="running", current_stage="scrape")
+        store.update_screening_run(
+            scrape_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="操作频繁",
+        )
+        finish = self.client.post(f"/api/task/finish/{scrape_id}")
+        self.assertEqual(finish.status_code, 200, finish.get_json())
+        with mock.patch.object(
+            self.app.config["PIPELINE_EXECUTOR"], "submit",
+        ) as submit:
+            accepted = self.client.post("/api/ai-screen", json={
+                "screening_fields": {"salary": ["406"]},
+                "profile_summary": "Python 后端",
+                "scrape_task_id": scrape_id,
+            })
+        self.assertEqual(accepted.status_code, 200, accepted.get_json())
+        self.assertEqual(submit.call_args.args[-2], scrape_id)
+
 
 class SourceErrorClassificationTests(unittest.TestCase):
     """退出码 + 关键词 → 具体 failed_code 分类。"""
@@ -660,6 +704,22 @@ class SourceErrorClassificationTests(unittest.TestCase):
             "source_rate_limited",
         )
 
+    def test_exit_10_http_403_412_418_returns_rate_limited(self):
+        from webui.source import _classify_failed_code
+        for sample in (
+            "列表接口返回 HTTP 403（被风控拦截）",
+            "列表接口返回 HTTP 412", "列表接口返回 HTTP 418",
+        ):
+            self.assertEqual(
+                _classify_failed_code(10, sample), "source_rate_limited")
+
+    def test_exit_10_unlock_time_returns_rate_limited(self):
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(10, "账号将于 2099-08-05 18:30 解封"),
+            "source_rate_limited",
+        )
+
     def test_exit_10_with_rate_limit_chinese_returns_rate_limited(self):
         from webui.source import _classify_failed_code
         self.assertEqual(
@@ -667,11 +727,11 @@ class SourceErrorClassificationTests(unittest.TestCase):
             "source_rate_limited",
         )
 
-    def test_exit_10_generic_returns_blocked(self):
+    def test_exit_10_generic_returns_unknown_error(self):
         from webui.source import _classify_failed_code
         self.assertEqual(
             _classify_failed_code(10, "连续空页"),
-            "source_blocked",
+            "source_unknown_error",
         )
 
     def test_exit_1_with_login_keyword_returns_login_required(self):
@@ -681,11 +741,11 @@ class SourceErrorClassificationTests(unittest.TestCase):
             "source_login_required",
         )
 
-    def test_exit_1_generic_returns_blocked(self):
+    def test_exit_1_generic_returns_unknown_error(self):
         from webui.source import _classify_failed_code
         self.assertEqual(
             _classify_failed_code(1, "环境异常"),
-            "source_blocked",
+            "source_unknown_error",
         )
 
     def test_exit_2_returns_cdp_unavailable(self):
@@ -695,11 +755,11 @@ class SourceErrorClassificationTests(unittest.TestCase):
             "source_cdp_unavailable",
         )
 
-    def test_unknown_exit_code_returns_blocked(self):
+    def test_unknown_exit_code_returns_unknown_error(self):
         from webui.source import _classify_failed_code
         self.assertEqual(
             _classify_failed_code(99, "unknown"),
-            "source_blocked",
+            "source_unknown_error",
         )
 
     def test_rate_limit_text_wins_over_verification_keywords(self):
@@ -724,6 +784,27 @@ class SourceErrorClassificationTests(unittest.TestCase):
             _classify_scrape_block("请完成滑块验证后再继续"),
             "captcha_required",
         )
+
+    def test_scrape_block_http_status_and_unlock_time(self):
+        from webui.app import _classify_scrape_block
+        for sample in (
+            "列表接口返回 HTTP 403（被风控拦截）", "HTTP 412", "HTTP 418",
+            "账号将于 2099-08-05 18:30 解封",
+        ):
+            self.assertEqual(
+                _classify_scrape_block(sample), "source_rate_limited")
+
+    def test_scrape_block_common_words_do_not_pause(self):
+        from webui.app import _classify_scrape_block
+        for sample in ("登录解锁更多职位", "频繁更新职位", "冻结岗位"):
+            self.assertEqual(_classify_scrape_block(sample), "")
+
+    def test_failed_code_label_zhilian_login_has_no_boss(self):
+        from webui.pipeline_exec import failed_code_label, taxonomy_reason
+        self.assertEqual(
+            failed_code_label("source_login_required", "zhilian"), "智联登录已失效")
+        self.assertNotIn("BOSS", failed_code_label("login_expired", "zhilian"))
+        self.assertIn("智联", taxonomy_reason("login_expired", "zhilian"))
 
 
 class TaskFinishAndCountRegressionTests(unittest.TestCase):
@@ -895,7 +976,7 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
             run_id, status="cancelled", error_reason="用户已停止筛选")
         resp = self.client.post(f"/api/task/finish/{run_id}")
         self.assertEqual(resp.status_code, 409)
-        self.assertEqual(resp.get_json()["error"], "not_paused")
+        self.assertEqual(resp.get_json()["error"], "interrupted_not_restartable")
 
     def test_finish_paused_scrape_run_saves_partial_snapshot(self):
         """列表抓取阶段暂停的任务也能结束并保存已抓岗位。"""
@@ -919,6 +1000,186 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(data["result"]["total_kept"], 2)
         latest = self.client.get("/api/latest-pipeline-result").get_json()
         self.assertEqual(latest["status"], "completed_with_pending")
+
+    def _seed_scrape_run(self, run_id, count, status, platform="boss",
+                        error_code=None, error_reason=None):
+        jobs = [
+            {"job_id": f"j{i}", "platform_job_id": f"j{i}", "title": f"岗位{i}",
+             "source_url": f"https://{platform}.example/j{i}.html"}
+            for i in range(count)
+        ]
+        self.store.create_screening_run(
+            run_id, source_count=count,
+            execution_params={"platform": platform},
+        )
+        self.store.save_scrape_combo_result(run_id, "kw|city", jobs, ["kw|city"])
+        self.store.update_screening_run(run_id, status="running", current_stage="scrape")
+        if status == "interrupted":
+            self.store.update_screening_run(
+                run_id, status="interrupted", current_stage="scrape",
+                error_code=error_code or "restart",
+                error_reason=error_reason or "服务重启中断",
+            )
+            self.store.save_interruption_kind(run_id, "process_restart")
+        else:
+            self.store.update_screening_run(
+                run_id, status=status, current_stage="scrape",
+                error_code=error_code, error_reason=error_reason,
+            )
+        return jobs
+
+    def test_latest_running_task_restores_failed_scrape_with_real_count(self):
+        self._seed_scrape_run(
+            "recover-failed", 1280, "failed", platform="boss",
+            error_code="scrape_failed", error_reason="列表抓取失败",
+        )
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["kind"], "scrape")
+        self.assertEqual(data["status"], "failed")
+        self.assertEqual(data["scraped_count"], 1280)
+        self.assertEqual(data["source_total"], 1280)
+        self.assertEqual(data["platform"], "boss")
+        self.assertEqual(data["scrape_task_id"], "recover-failed")
+
+    def test_latest_running_task_restores_paused_and_interrupted_counts(self):
+        self._seed_scrape_run(
+            "recover-paused", 12, "paused", platform="boss",
+            error_code="captcha_required", error_reason="验证码",
+        )
+        paused = self.client.get("/api/latest-running-task").get_json()
+        self.assertEqual(paused["status"], "paused")
+        self.assertEqual(paused["scraped_count"], 12)
+
+    def test_latest_running_task_zhilian_pause_reason_has_no_boss_fallback(self):
+        self._seed_scrape_run(
+            "recover-zhilian-pause", 3, "paused", platform="zhilian",
+            error_code="source_login_required", error_reason="",
+        )
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertEqual(data["pause_info"]["error_reason"], "智联登录已失效")
+        self.assertNotIn("BOSS", data["progress"]["message"])
+
+    def test_latest_running_task_restores_interrupted_count(self):
+        self._seed_scrape_run(
+            "recover-interrupted", 8, "interrupted", platform="zhilian",
+        )
+        interrupted = self.client.get("/api/latest-running-task").get_json()
+        self.assertEqual(interrupted["status"], "interrupted")
+        self.assertEqual(interrupted["scraped_count"], 8)
+        self.assertEqual(interrupted["platform"], "zhilian")
+
+    def test_latest_running_task_skips_failed_when_newer_result_saved(self):
+        self._seed_scrape_run("recover-stale-failed", 5, "failed")
+        self.store.save_pipeline_result({
+            "jobs": [], "dropped": [], "total_scraped": 5, "total_kept": 0,
+            "total_dropped": 5, "profile_summary": "",
+        }, {})
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertFalse(data["has_task"])
+
+    def test_latest_running_task_true_zero_jobs_still_zero(self):
+        run_id = "recover-zero"
+        self.store.create_screening_run(run_id, source_count=0)
+        self.store.update_screening_run(run_id, status="running", current_stage="scrape")
+        self.store.update_screening_run(run_id, status="failed", current_stage="scrape")
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertFalse(data["has_task"])
+
+    def test_finish_failed_scrape_run_saves_partial_snapshot(self):
+        self._seed_scrape_run(
+            "finish-failed-scrape", 3, "failed", platform="zhilian",
+            error_code="scrape_failed", error_reason="列表抓取失败",
+        )
+        resp = self.client.post("/api/task/finish/finish-failed-scrape")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        data = resp.get_json()
+        self.assertEqual(data["status"], "completed_with_pending")
+        self.assertEqual(data["platform"], "zhilian")
+        self.assertEqual(data["result"]["total_scraped"], 3)
+        finished = self.store.get_screening_run("finish-failed-scrape")
+        self.assertEqual(finished["status"], "interrupted")
+        self.assertEqual(finished["error_code"], "user_finished")
+
+    def test_finish_running_scrape_run_saves_partial_snapshot(self):
+        self._seed_scrape_run("finish-running-scrape", 4, "running")
+        resp = self.client.post("/api/task/finish/finish-running-scrape")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        data = resp.get_json()
+        self.assertEqual(data["result"]["total_scraped"], 4)
+        self.assertEqual(len(data["result"]["jobs"]), 4)
+        finished = self.store.get_screening_run("finish-running-scrape")
+        self.assertEqual(finished["error_code"], "user_finished")
+
+    def test_finish_without_snapshot_does_not_mark_user_finished(self):
+        run_id = "finish-no-snapshot"
+        self.store.create_screening_run(run_id, source_count=0)
+        self.store.update_screening_run(run_id, status="running", current_stage="scrape")
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "missing_scrape_snapshot")
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["status"], "running")
+
+    def test_finish_twice_returns_explicit_conflict(self):
+        self._seed_scrape_run("finish-twice", 2, "paused")
+        first = self.client.post("/api/task/finish/finish-twice")
+        self.assertEqual(first.status_code, 200)
+        second = self.client.post("/api/task/finish/finish-twice")
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.get_json()["error"], "already_finished")
+
+    def test_cancel_after_finish_returns_friendly_conflict(self):
+        """用户已结束保存的任务再点取消，返回明确冲突而不改写终态。"""
+        self._seed_scrape_run("finish-cancel-guard", 2, "paused")
+        first = self.client.post("/api/task/finish/finish-cancel-guard")
+        self.assertEqual(first.status_code, 200)
+        resp = self.client.post("/api/task/cancel/finish-cancel-guard")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "already_finished")
+        run = self.store.get_screening_run("finish-cancel-guard")
+        self.assertEqual(run["status"], "interrupted")
+        self.assertEqual(run["error_code"], "user_finished")
+
+    def test_latest_pipeline_result_returns_parent_scrape_task_id(self):
+        self._seed_scrape_run("finish-parent-link", 2, "paused", platform="boss")
+        resp = self.client.post("/api/task/finish/finish-parent-link")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        latest = self.client.get("/api/latest-pipeline-result").get_json()
+        self.assertEqual(latest["scrape_task_id"], "finish-parent-link")
+        self.assertEqual(latest["platform"], "boss")
+
+    def test_finish_partial_jobs_and_dropped_carry_platform(self):
+        self._seed_scrape_run(
+            "finish-zhilian-partial", 3, "paused", platform="zhilian",
+            error_code="source_rate_limited", error_reason="操作频繁",
+        )
+        self.store.save_screening_verdicts("finish-zhilian-partial", {
+            "j0": {"verdict": "dropped", "reason": "粗筛移除"},
+        })
+        resp = self.client.post("/api/task/finish/finish-zhilian-partial")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        result = resp.get_json()["result"]
+        self.assertTrue(result["jobs"])
+        self.assertTrue(result["dropped"])
+        for job in result["jobs"]:
+            self.assertEqual(job["platform"], "zhilian")
+        for job in result["dropped"]:
+            self.assertEqual(job["platform"], "zhilian")
+
+    def test_task_state_zhilian_pause_info_has_no_boss_text(self):
+        run_id = "zhilian-pause-info"
+        self.store.create_screening_run(
+            run_id, source_count=1, execution_params={"platform": "zhilian"},
+        )
+        self.store.update_screening_run(run_id, status="running", current_stage="scrape")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="source_login_required", error_reason="",
+        )
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+        self.assertIn("智联", data["pause_info"]["error_reason"])
+        self.assertNotIn("BOSS", data["pause_info"]["error_reason"])
 
     def test_finish_normalizes_mismatch_verdict(self):
         """partial 快照把历史 mismatch 归一为 not_match，避免待确认计数膨胀。"""
@@ -1023,9 +1284,11 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
     def test_finish_rejects_non_paused_run(self):
         run_id = "finish-not-paused"
         self.store.create_screening_run(run_id, source_count=1)
+        self.store.update_screening_run(
+            run_id, status="succeeded", current_stage="done")
         resp = self.client.post(f"/api/task/finish/{run_id}")
         self.assertEqual(resp.status_code, 409)
-        self.assertEqual(resp.get_json()["error"], "not_paused")
+        self.assertEqual(resp.get_json()["error"], "already_terminal")
 
     def _save_zhilian_pipeline_result(self):
         return self.store.save_pipeline_result({
@@ -5977,6 +6240,21 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
         webview2_item = next(item for item in local_items if item["id"] == "webview2")
         self.assertEqual(webview2_item["status"], "fail")
         self.assertIn("WebView2", webview2_item.get("fix") or "")
+
+    def test_env_check_cooldown_includes_from_run(self):
+        app, client = self._make_app("source")
+        cooldowns = {
+            "acc1": {
+                "boss": {
+                    "until": 1893456000, "reason": "操作频繁", "from_run": "run-abc",
+                },
+            },
+        }
+        with mock.patch("webui.app.boss.collect_check_items",
+                        return_value=self._fake_check_items()), \
+                mock.patch("webui.cooldown.all_cooldowns", return_value=cooldowns):
+            payload = client.get("/api/env-check").get_json()
+        self.assertEqual(payload["cooldowns"][0]["from_run"], "run-abc")
 
 
 class MakeCdpSourceRuntimeModeTests(unittest.TestCase):

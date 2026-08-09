@@ -265,8 +265,8 @@ class TaskRunnerInProcessTests(unittest.TestCase):
         self.assertEqual(task.get("returncode"), 10)
         self.assertIn("source_verification_required", task.get("error") or "")
 
-    def test_risk_control_generic_maps_to_source_blocked(self):
-        """T027: RiskControlError(reason 无特定关键词) → source_blocked。"""
+    def test_risk_control_http_403_maps_to_rate_limited(self):
+        """T027: RiskControlError(HTTP 403) → source_rate_limited。"""
         self._create_scrape_task("t9", detail=False)
         err = boss.RiskControlError("HTTP 403 blocked", page=1, scraped_count=0)
         with mock.patch.object(boss, "run_search_programmatic", side_effect=err):
@@ -274,7 +274,18 @@ class TaskRunnerInProcessTests(unittest.TestCase):
         task = self.store.get_task("t9")
         self.assertEqual(task["status"], "failed")
         self.assertEqual(task.get("returncode"), 10)
-        self.assertIn("source_blocked", task.get("error") or "")
+        self.assertIn("source_rate_limited", task.get("error") or "")
+
+    def test_risk_control_generic_maps_to_unknown_error(self):
+        """T027: 无高置信特征的 RiskControlError → source_unknown_error。"""
+        self._create_scrape_task("t9b", detail=False)
+        err = boss.RiskControlError("unknown reason", page=1, scraped_count=0)
+        with mock.patch.object(boss, "run_search_programmatic", side_effect=err):
+            self.runner._execute("t9b")
+        task = self.store.get_task("t9b")
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(task.get("returncode"), 10)
+        self.assertIn("source_unknown_error", task.get("error") or "")
 
     def test_search_cancelled_maps_to_interrupted(self):
         """T027: SearchCancelled → interrupted，不落失败码。"""
@@ -580,6 +591,23 @@ class RiskControlClassifierTests(unittest.TestCase):
                 _classify_risk_control_reason(text), "source_rate_limited", text,
             )
 
+    def test_http_status_and_unlock_time_aligned(self):
+        from webui.app import _classify_risk_control_reason
+        for text in (
+            "列表接口返回 HTTP 403（被风控拦截）", "HTTP 412", "HTTP 418",
+            "账号将于 2099-08-05 18:30 解封",
+        ):
+            self.assertEqual(
+                _classify_risk_control_reason(text), "source_rate_limited", text,
+            )
+
+    def test_common_words_are_not_rate_limited(self):
+        from webui.app import _classify_risk_control_reason
+        for text in ("登录解锁更多职位", "频繁更新职位", "冻结岗位"):
+            self.assertEqual(
+                _classify_risk_control_reason(text), "source_unknown_error", text,
+            )
+
     def test_verification_keywords_aligned(self):
         from webui.app import _classify_risk_control_reason
 
@@ -596,11 +624,11 @@ class RiskControlClassifierTests(unittest.TestCase):
                 _classify_risk_control_reason(text), "source_login_required", text,
             )
 
-    def test_unmatched_reason_maps_to_source_blocked(self):
+    def test_unmatched_reason_maps_to_unknown_error(self):
         from webui.app import _classify_risk_control_reason
 
-        self.assertEqual(_classify_risk_control_reason(""), "source_blocked")
-        self.assertEqual(_classify_risk_control_reason("unknown reason"), "source_blocked")
+        self.assertEqual(_classify_risk_control_reason(""), "source_unknown_error")
+        self.assertEqual(_classify_risk_control_reason("unknown reason"), "source_unknown_error")
 
 
 # ===========================================================================

@@ -26,6 +26,7 @@ interface CooldownRecord {
   until: number;
   until_text: string;
   reason: string;
+  from_run?: string;
 }
 
 interface EnvCheckResponse {
@@ -321,6 +322,7 @@ async function clearCooldown(record: CooldownRecord) {
             </strong>
             <p>建议等待至 {{ record.until_text }} 后重试</p>
             <p v-if="record.reason" class="env-check-cooldown-reason">{{ record.reason }}</p>
+            <p v-if="record.from_run" class="env-check-cooldown-source" data-testid="cooldown-from-run">来源任务：{{ record.from_run }}</p>
           </div>
           <button
             type="button"
@@ -473,6 +475,10 @@ async function clearCooldown(record: CooldownRecord) {
 }
 .env-check-cooldown-reason {
   opacity: 0.85;
+}
+.env-check-cooldown-source {
+  opacity: 0.75;
+  font-size: 11px;
 }
 .env-check-notice {
   margin-top: 14px;

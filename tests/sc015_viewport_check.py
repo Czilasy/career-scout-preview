@@ -12,13 +12,15 @@ import websocket
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:5050"
-VIEWPORTS = ((375, 812), (768, 1024), (1440, 900))
+VIEWPORTS = ((375, 812), (390, 844), (768, 1024), (1440, 900))
 CONTINUE_SELECTOR = (
     '[data-testid="continue-scrape"],'
     '[data-testid="resume-ai-screen"],'
     '[data-testid="resume-recrawl"]'
 )
 PENDING_ROW_SELECTOR = '[data-testid="job-row"]'
+RECRAWL_SELECTOR = '[data-testid="recrawl-uncertain"]'
+PLATFORM_FILTER_SELECTOR = '[data-testid="result-platform-filter"]'
 
 
 def parse_args(argv=None):
@@ -92,6 +94,35 @@ def test_viewport(ws_url, width, height, base_url):
       && rect.width > 0 && rect.height > 0 && inViewport && unobscured;
     return {exists: true, visible, text: element.textContent?.trim() || ""};
   };
+  const layoutEvidence = () => {
+    const recrawlEl = document.querySelector(__RECRAWL_SELECTOR__);
+    const sliderEl = document.querySelector(__PLATFORM_FILTER_SELECTOR__);
+    const rectOf = (el) => {
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return {left: r.left, right: r.right, top: r.top, bottom: r.bottom,
+              width: r.width, height: r.height};
+    };
+    const recrawlRect = rectOf(recrawlEl);
+    const sliderRect = rectOf(sliderEl);
+    const inViewport = (r) => r && r.left >= 0 && r.top >= 0
+      && r.right <= window.innerWidth && r.bottom <= window.innerHeight;
+    const visible = (el, r) => Boolean(el && r && inViewport(r)
+      && getComputedStyle(el).display !== "none"
+      && getComputedStyle(el).visibility !== "hidden"
+      && Number.parseFloat(getComputedStyle(el).opacity || "1") > 0);
+    const overlap = Boolean(recrawlRect && sliderRect
+      && !(recrawlRect.right <= sliderRect.left
+        || sliderRect.right <= recrawlRect.left
+        || recrawlRect.bottom <= sliderRect.top
+        || sliderRect.bottom <= recrawlRect.top));
+    const clipped = Boolean(recrawlEl && recrawlEl.scrollWidth > recrawlEl.clientWidth + 1);
+    return {
+      recrawlButton: recrawlEl ? (visible(recrawlEl, recrawlRect) ? "visible" : "hidden") : "missing",
+      platformSlider: sliderEl ? (visible(sliderEl, sliderRect) ? "visible" : "hidden") : "missing",
+      overlap, recrawlTextClipped: clipped,
+    };
+  };
   const task = inspect('.task-progress');
   const pause = inspect('[data-testid="pause-reason"]');
   const continuation = inspect(__CONTINUE_SELECTOR__);
@@ -111,6 +142,16 @@ def test_viewport(ws_url, width, height, base_url):
       pending = inspect('.verdict-reason p');
     }
   }
+  const scrollTo = async (selector) => {
+    const element = document.querySelector(selector);
+    if (element) {
+      element.scrollIntoView({block: "center", inline: "nearest"});
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+  };
+  await scrollTo(__RECRAWL_SELECTOR__);
+  await scrollTo(__PLATFORM_FILTER_SELECTOR__);
+  const layout = layoutEvidence();
   const shell = document.querySelector('.view-shell');
   return JSON.stringify({
     clientWidth: document.documentElement.clientWidth,
@@ -127,12 +168,20 @@ def test_viewport(ws_url, width, height, base_url):
     continueButtonVisible: continuation.visible,
     pendingReason: pending.text,
     pendingReasonVisible: pending.visible,
+    recrawlButton: layout.recrawlButton,
+    platformSlider: layout.platformSlider,
+    overlap: layout.overlap,
+    recrawlTextClipped: layout.recrawlTextClipped,
   });
 })()
 """.strip().replace(
             "__CONTINUE_SELECTOR__", json.dumps(CONTINUE_SELECTOR)
         ).replace(
             "__PENDING_ROW_SELECTOR__", json.dumps(PENDING_ROW_SELECTOR)
+        ).replace(
+            "__RECRAWL_SELECTOR__", json.dumps(RECRAWL_SELECTOR)
+        ).replace(
+            "__PLATFORM_FILTER_SELECTOR__", json.dumps(PLATFORM_FILTER_SELECTOR)
         )
         response = _cdp_request(ws, 3, "Runtime.evaluate", {
             "expression": js, "awaitPromise": True,
@@ -184,6 +233,14 @@ def validate_viewport_result(result, width, base_url):
         or result.get("pendingReasonVisible") is not True
     ):
         failures.append("待确认原因不可见")
+    if result.get("recrawlButton") != "visible":
+        failures.append("全部重抓入口不可见")
+    if result.get("platformSlider") != "visible":
+        failures.append("平台筛选滑块不可见")
+    if result.get("overlap"):
+        failures.append("平台筛选滑块与全部重抓按钮重叠")
+    if result.get("recrawlTextClipped"):
+        failures.append("全部重抓按钮文字截断")
     if failures:
         raise AssertionError("；".join(failures))
 

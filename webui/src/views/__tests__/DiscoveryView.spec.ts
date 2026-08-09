@@ -1,6 +1,8 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import DiscoveryView from "../DiscoveryView.vue";
 import { expectedBackendBuildHash, setBuildIdentity } from "../../api";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -1778,5 +1780,196 @@ describe("DiscoveryView", () => {
     expect(body.settings.screen_batch_size).toBe(50);
 
     vi.unstubAllGlobals();
+  });
+
+  it("B027: failed scrape restores real count and can finish without jumping to results", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) {
+        return response({
+          ok: true, has_task: true, task_id: "scrape-failed-1", kind: "scrape",
+          status: "failed", platform: "boss", scraped_count: 1280, source_total: 3000,
+          progress: { message: "抓取失败" }, logs: [], error: "列表抓取失败",
+          pause_info: { error_code: "scrape_failed", error_reason: "列表抓取失败" },
+        });
+      }
+      if (url.includes("/api/task/finish/scrape-failed-1")) {
+        return response({
+          ok: true, run_id: "scrape-failed-1", snapshot_run_id: "snap-1",
+          platform: "boss", status: "completed_with_pending", scrape_task_id: "scrape-failed-1",
+          result: {
+            jobs: [{ job_id: "j1", platform: "boss", verdict: "uncertain", verdict_reason: "提前结束" }],
+            dropped: [], total_scraped: 1280, total_kept: 1280, total_dropped: 0,
+          },
+        });
+      }
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    expect(wrapper.get('[data-testid="scraped-count"]').text()).toContain("1280");
+    await wrapper.get('[data-testid="finish-active-scrape"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".results-stage").exists()).toBe(false);
+    expect(wrapper.find('[data-testid="view-partial-results"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="continue-ai-after-finish"]').exists()).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("B027: running AI screen can finish and save without jumping to results", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) {
+        return response({
+          ok: true, has_task: true, task_id: "screen-running-1", kind: "ai_screen",
+          status: "running", platform: "boss", scrape_task_id: "scrape-parent",
+          scrape_completed: true, progress: { message: "AI 筛选中" }, logs: [], error: "",
+        });
+      }
+      if (url.includes("/api/task-state/screen-running-1")) {
+        return response({ status: "running", progress: { message: "AI 筛选中" }, logs: [] });
+      }
+      if (url.includes("/api/task/finish/screen-running-1")) {
+        return response({
+          ok: true, run_id: "screen-running-1", snapshot_run_id: "snap-screen",
+          platform: "boss", status: "completed_with_pending", scrape_task_id: "scrape-parent",
+          result: {
+            jobs: [{ job_id: "s1", platform: "boss", verdict: "uncertain" }],
+            dropped: [], total_scraped: 1, total_kept: 1, total_dropped: 0,
+          },
+        });
+      }
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="finish-active-screen"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="finish-active-screen"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".results-stage").exists()).toBe(false);
+    expect(wrapper.find('[data-testid="view-partial-results-screen"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="continue-ai-after-finish-screen"]').exists()).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("B027: latest result restores scrape task id and AI screen uses it", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) {
+        if (url.includes("platform=zhilian")) return response({ ok: true, has_result: false });
+        return response({
+          ok: true, has_result: true, source_run_id: "run-boss", platform: "boss",
+          scrape_task_id: "scrape-parent", status: "completed_with_pending",
+          started_at: 1000, finished_at: 2000,
+          result: {
+            jobs: [{ job_id: "j1", platform: "boss", verdict: "uncertain", verdict_reason: "待确认" }],
+            total_kept: 1, total_dropped: 0, profile_summary: "画像",
+          },
+        });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/ai-screen")) return response({ ok: true, task_id: "screen-1" });
+      if (url.includes("/api/task-state/screen-1")) return response({ status: "completed", progress: {}, logs: [] });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
+    await flushPromises();
+    const aiCall = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/ai-screen"));
+    expect(aiCall).toBeTruthy();
+    expect(JSON.parse(String(aiCall![1]!.body))).toMatchObject({ scrape_task_id: "scrape-parent" });
+    vi.unstubAllGlobals();
+  });
+
+  it("B030: all view guides platform selection and single platform recrawls by its own run", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) {
+        if (url.includes("platform=zhilian")) {
+          return response({
+            ok: true, has_result: true, source_run_id: "run-zhilian", platform: "zhilian",
+            scrape_task_id: "scrape-z", started_at: 1000,
+            result: { jobs: [{ job_id: "z1", platform: "zhilian", verdict: "uncertain", verdict_reason: "待确认" }], total_kept: 1, total_dropped: 0 },
+          });
+        }
+        return response({
+          ok: true, has_result: true, source_run_id: "run-boss", platform: "boss",
+          scrape_task_id: "scrape-b", started_at: 2000,
+          result: { jobs: [{ job_id: "b1", platform: "boss", verdict: "uncertain", verdict_reason: "待确认" }], total_kept: 1, total_dropped: 0 },
+        });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/pipeline/recrawl")) return response({ ok: true, task_id: "recrawl-1" }, 202);
+      if (url.includes("/api/task-state/recrawl-1")) return response({ status: "completed", progress: {}, logs: [] });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("查看结果"))!.trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("待确认"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="recrawl-uncertain"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="recrawl-uncertain"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="recrawl-platform-guide"]').text()).toContain("BOSS 1 · 智联 1");
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/pipeline/recrawl")).length).toBe(0);
+    await wrapper.get('[data-testid="recrawl-choose-boss"]').trigger("click");
+    await flushPromises();
+    const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/pipeline/recrawl"));
+    expect(call).toBeTruthy();
+    expect(JSON.parse(String(call![1]!.body))).toMatchObject({ source_run_id: "run-boss", job_ids: ["b1"] });
+    await wrapper.get('[data-testid="result-platform-filter-zhilian"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="recrawl-uncertain"]').exists()).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("B030: heading CSS keeps platform slider in flow at all widths", () => {
+    const css = readFileSync(path.join(__dirname, "../../styles.css"), "utf8");
+    const segmentBlock = css.match(/\.result-platform-segment\s*\{[^}]*\}/s)?.[0] || "";
+    const headingBlock = css.match(/\.job-list-heading\s*\{[^}]*\}/s)?.[0] || "";
+    expect(segmentBlock).not.toContain("position: absolute");
+    expect(headingBlock).toContain("flex-wrap: wrap");
+    const resultsStageBlock = css.match(/\.results-stage\s*\{[^}]*\}/s)?.[0] || "";
+    expect(resultsStageBlock).toContain("grid-template-columns: minmax(0, 1fr)");
+    const viewportScript = readFileSync(
+      path.join(__dirname, "../../../../tests/sc015_viewport_check.py"), "utf8",
+    );
+    expect(viewportScript).toContain("(390, 844)");
+    expect(viewportScript).toContain("recrawl-uncertain");
+    expect(viewportScript).toContain("overlap");
   });
 });

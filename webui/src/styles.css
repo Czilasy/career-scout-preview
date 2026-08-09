@@ -1400,6 +1400,7 @@ button:disabled {
   border-color: var(--brand-edge);
 }
 .count-chip.source { color: var(--brand-ink); background: var(--brand-wash); border-color: var(--brand-edge); }
+.count-chip.scraped { color: var(--brand-ink); background: var(--brand-wash); border-color: var(--brand-edge); }
 .count-chip.pending { color: var(--unsure-deep); background: var(--unsure-wash); border-color: var(--unsure-edge); }
 .count-sep { color: var(--muted); font-weight: 600; }
 .version-footer {
@@ -1426,6 +1427,7 @@ button:disabled {
 @keyframes spin {to { transform: rotate(360deg); }
 }.results-stage {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }.run-actions {
   display: flex;
@@ -1565,9 +1567,10 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  position: relative;
-  min-height: 44px;
-  padding: 0 18px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-height: 52px;
+  padding: 8px 14px;
   border-bottom: 1px solid var(--hair);
   color: var(--ink-2);
   font-size: 13px;
@@ -1580,13 +1583,17 @@ button:disabled {
 .job-list-heading-right {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
 }
 /* 结果页平台筛选滑块：居中嵌入列表头部（左右两侧 space-between 不受影响）。 */
+/* 结果页平台筛选滑块：随头部流式布局，避免绝对定位压住右侧重抓按钮（B030）。 */
 .result-platform-segment {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+  position: static;
+  transform: none;
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -1677,6 +1684,39 @@ button:disabled {
     padding: 8px 14px;
   }
 }
+.recrawl-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.recrawl-guide {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--unsure-edge, var(--hair));
+  border-radius: 8px;
+  background: var(--unsure-wash);
+}
+.recrawl-guide-title {
+  margin: 0;
+  font-weight: 700;
+  color: var(--unsure-deep);
+}
+.recrawl-guide-counts {
+  margin: 0;
+  color: var(--unsure-deep);
+  font-size: 13px;
+}
+.recrawl-guide-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+.recrawl-guide button:disabled { opacity: .55; cursor: not-allowed; }
 .recrawl-banner {
   display: flex;
   flex-direction: column;

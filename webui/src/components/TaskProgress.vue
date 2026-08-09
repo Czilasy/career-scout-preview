@@ -27,6 +27,7 @@ interface TaskSnapshot {
   pause_info?: PauseInfo | null;
   pending_count?: number;
   source_total?: number;
+  scraped_count?: number;
   execution_config?: Record<string, unknown> | null;
   // T510：任务自身平台，用于在 header 展示真实平台徽章（http-api.md L201）。
   // 由父组件从 /api/latest-running-task 或 /api/task-state 透传；草稿平台切换不影响此处。
@@ -483,9 +484,11 @@ const pauseReason = computed(() => {
 });
 
 // 切片7：完整计数画面（FR-037）。total>0 时才显示
+const scrapedCount = computed(() => Number(props.snapshot?.scraped_count || 0));
 const showCounts = computed(() => {
   const t = Number(props.snapshot?.total || 0);
-  return t > 0 && !["done", "completed"].includes(props.snapshot?.status || "");
+  if (["done", "completed"].includes(props.snapshot?.status || "")) return false;
+  return t > 0 || sourceTotal.value > 0 || scrapedCount.value > 0;
 });
 const successCount = computed(() => Number(props.snapshot?.success_count || 0));
 const failCount = computed(() => Number(props.snapshot?.fail_count || 0));
@@ -567,6 +570,10 @@ const timeLabel = computed(() => {
     <p v-else class="task-message">{{ snapshot.error || message }}</p>
     <!-- 切片7：完整计数画面（FR-037）。按语义分组：来源 / 粗筛 / 当前阶段 / 待确认 / 失败 -->
     <div v-if="showCounts" class="task-counts" data-testid="task-counts">
+      <div v-if="scrapedCount > 0" class="count-group count-scraped">
+        <span class="count-label">已抓</span>
+        <span class="count-chip scraped" data-testid="scraped-count">{{ scrapedCount }} 个岗位</span>
+      </div>
       <div v-if="showSourceCounts" class="count-group count-source">
         <span class="count-label">来源</span>
         <span class="count-chip source">列表 {{ sourceTotal }}</span>

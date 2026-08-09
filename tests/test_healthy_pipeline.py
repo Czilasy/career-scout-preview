@@ -16,7 +16,10 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 from webui.app import create_app
-from webui.store import TaskStore, RUN_STATUSES, RUN_TRANSITIONS, SYSTEMIC_BLOCK_CODES
+from webui.store import (
+    DiscoveryStoreConflictError,
+    TaskStore, RUN_STATUSES, RUN_TRANSITIONS, SYSTEMIC_BLOCK_CODES,
+)
 
 
 _SCRIPT_PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "boss_cdp_raw.py"
@@ -2372,6 +2375,60 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
         self.assertEqual(response.get_json()["resumed_from"], task_id)
         submit.assert_called_once()
 
+    def test_resume_then_fail_then_finish_not_blocked_by_resume_claim(self):
+        task_id = "resume-fail-finish"
+        jobs = [
+            {"job_id": "j1", "platform_job_id": "j1", "title": "岗位",
+             "source_url": "https://zhipin.example/j1.html"},
+        ]
+        self.store.create_screening_run(
+            task_id, source_count=1,
+            execution_params={"script_params": {"keyword": "前端", "city": ["上海"]}},
+        )
+        self.store.save_scrape_combo_result(task_id, "kw|city", jobs, ["kw|city"])
+        _pause_run(
+            self.store, task_id, current_stage="scrape",
+            error_code="captcha_required",
+        )
+        self.app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
+
+        def failed_search(*_args, **_kwargs):
+            return {
+                "ok": False, "jobs": [], "total_scraped": 0,
+                "total_matched": 0, "combinations": 1,
+                "completed_combos": [], "error": "再次失败",
+            }
+
+        with mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
+                mock.patch("webui.pipeline_exec.run_search", side_effect=failed_search):
+            resumed = self.client.post(
+                f"/api/task/continue/{task_id}", headers=self.headers,
+            )
+            self.assertEqual(resumed.status_code, 200, resumed.get_json())
+            _wait_for_pipeline_task(self.client, task_id)
+        self.assertEqual(self.store.get_screening_run(task_id)["status"], "failed")
+        finished = self.client.post(f"/api/task/finish/{task_id}", headers=self.headers)
+        self.assertEqual(finished.status_code, 200, finished.get_json())
+        self.assertEqual(finished.get_json()["result"]["total_scraped"], 1)
+        self.assertEqual(
+            self.store.get_screening_run(task_id)["error_code"], "user_finished")
+
+    def test_finish_running_then_worker_cannot_overwrite_user_finished(self):
+        task_id = "running-finish-guard"
+        jobs = [
+            {"job_id": "j1", "platform_job_id": "j1", "title": "岗位",
+             "source_url": "https://zhipin.example/j1.html"},
+        ]
+        self.store.create_screening_run(task_id, source_count=1)
+        self.store.save_scrape_combo_result(task_id, "kw|city", jobs, ["kw|city"])
+        self.store.update_screening_run(task_id, status="running", current_stage="scrape")
+        finished = self.client.post(f"/api/task/finish/{task_id}", headers=self.headers)
+        self.assertEqual(finished.status_code, 200, finished.get_json())
+        with self.assertRaises(DiscoveryStoreConflictError):
+            self.store.update_screening_run(task_id, status="succeeded")
+        self.assertEqual(
+            self.store.get_screening_run(task_id)["error_code"], "user_finished")
+
     def test_concurrent_unified_scrape_continue_claims_run_once(self):
         task_id = "concurrent-unified-scrape"
         self.store.create_screening_run(
@@ -3543,6 +3600,31 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
         self.assertTrue(result.get("hard_stop"), result)
         self.assertEqual(result.get("hard_stop_code"), "source_verification_required")
         self.assertEqual(len(source.fetch_calls), 1, source.fetch_calls)
+
+    def test_first_combo_generic_failure_does_not_hard_stop(self):
+        """普通失败不得暂停，也不得展示风控/受限文案。"""
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        class GenericFailureSource:
+            platform = "boss"
+            def preflight(self):
+                return SourceOutcome.success()
+            def fetch_list(self, plan_item):
+                return SourceOutcome.failure(
+                    failed_code="source_unknown_error", safe_log="普通文案",
+                )
+
+        with mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")):
+            result = run_search(
+                {"keyword": "前端", "city": ["上海"]},
+                GenericFailureSource(),
+                pages=1,
+                sleeper=lambda _seconds: None,
+            )
+        self.assertFalse(result.get("hard_stop"), result)
+        self.assertNotIn("风控", result.get("error", ""))
+        self.assertNotIn("IP", result.get("error", ""))
 
     def test_scrape_success_persists_terminal_status_and_combo_progress(self):
         app, temp = _make_app()

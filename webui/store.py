@@ -2496,7 +2496,7 @@ class TaskStore:
 
     def save_pipeline_result(self, result: dict, script_params: dict, *,
                              started_at=None, finished_at=None, execution_config=None,
-                             status: str = "done") -> str:
+                             status: str = "done", execution_params: dict | None = None) -> str:
         """Persist a complete or partial pipeline run result to the database.
 
         Creates a screening_runs row and one screening_results row per job
@@ -2520,6 +2520,16 @@ class TaskStore:
         ]
         if status == "done" and pending_jobs:
             status = "partial"
+        script_params = dict(script_params or {})
+        extra_params = dict(execution_params or {})
+        if extra_params:
+            for key in ("platform", "scrape_task_id"):
+                value = extra_params.get(key)
+                if value is not None and not script_params.get(key):
+                    script_params[key] = value
+        execution_json = {"execution_config": execution_config or {}}
+        if extra_params:
+            execution_json.update(extra_params)
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
             conn.execute(
@@ -2542,9 +2552,7 @@ class TaskStore:
                     match_count + mismatch_count,
                     now, now, started_at, finished_at,
                     json.dumps(script_params, ensure_ascii=False),
-                    json.dumps(
-                        {"execution_config": execution_config or {}}, ensure_ascii=False
-                    ),
+                    json.dumps(execution_json, ensure_ascii=False),
                     result.get("profile_summary", ""),
                     result.get("total_scraped", 0),
                     result.get("total_kept", 0),
@@ -2696,6 +2704,7 @@ class TaskStore:
             "script_params": script_params,
             "status": "completed_with_pending" if run.get("status") == "partial" else "completed",
             "execution_config": execution_params.get("execution_config") or {},
+            "scrape_task_id": str(execution_params.get("scrape_task_id") or ""),
             "result": result,
         }
 
@@ -2808,6 +2817,7 @@ class TaskStore:
                 else "completed"
             ),
             "execution_config": execution_params.get("execution_config") or {},
+            "scrape_task_id": str(execution_params.get("scrape_task_id") or ""),
             "result": result,
         }
 
@@ -4268,11 +4278,17 @@ class TaskStore:
             self._assert_recovery_writes_allowed(conn)
             if status is not None:
                 current = conn.execute(
-                    "SELECT status FROM screening_runs WHERE id = ?", (str(run_id),)
+                    "SELECT status, error_code FROM screening_runs WHERE id = ?", (str(run_id),)
                 ).fetchone()
                 if current is None:
                     raise KeyError(run_id)
                 cur_status = current["status"]
+                if (
+                    cur_status == "interrupted"
+                    and current["error_code"] == "user_finished"
+                    and status != "interrupted"
+                ):
+                    raise DiscoveryStoreConflictError("user_finished")
                 if (
                     status != cur_status
                     and status not in RUN_TRANSITIONS.get(cur_status, set())
@@ -4281,6 +4297,43 @@ class TaskStore:
             conn.execute(
                 f"UPDATE screening_runs SET {', '.join(sets)} WHERE id = ?", params
             )
+
+    def finish_screening_run(self, run_id):
+        """原子标记用户主动结束并保存（interrupted + user_finished）。
+
+        允许 queued/running/paused/failed 以及 interrupted(process_restart/
+        operator_stop) 进入该终态；user_cancelled 与 succeeded/partial 拒绝改写。
+        """
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._assert_recovery_writes_allowed(conn)
+            row = conn.execute(
+                "SELECT status, error_code, interruption_kind FROM screening_runs "
+                "WHERE id = ?", (str(run_id),),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            cur_status = row["status"]
+            interruption_kind = row["interruption_kind"] or ""
+            if cur_status == "interrupted" and interruption_kind == "user_cancelled":
+                raise DiscoveryStoreConflictError("user_cancelled")
+            if cur_status == "interrupted" and row["error_code"] == "user_finished":
+                raise DiscoveryStoreConflictError("already_finished")
+            if cur_status in ("succeeded", "partial"):
+                raise DiscoveryStoreConflictError("already_terminal")
+            if cur_status == "interrupted" and interruption_kind not in (
+                "process_restart", "operator_stop"
+            ):
+                raise DiscoveryStoreConflictError("interrupted_not_restartable")
+            conn.execute(
+                "UPDATE screening_runs SET status = 'interrupted', "
+                "error_code = 'user_finished', error_reason = ?, "
+                "interruption_kind = 'user_cancelled', current_stage = 'done', "
+                "updated_at = ? WHERE id = ?",
+                ("用户提前结束，已保存部分结果", ts, str(run_id)),
+            )
+        return self.get_screening_run(run_id)
 
     def update_screening_execution_params(self, run_id, params: dict) -> None:
         """Replace the JSON execution params for a screening run."""
@@ -4537,6 +4590,14 @@ class TaskStore:
             if isinstance(payload, dict):
                 jobs.append(payload)
         return jobs
+
+    def count_scrape_run_jobs(self, run_id) -> int:
+        """已持久化抓取岗位数（scrape_run_jobs 行数），是恢复计数的权威来源。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM scrape_run_jobs WHERE run_id = ?", (str(run_id),)
+            ).fetchone()
+        return int(row["n"] or 0) if row is not None else 0
 
     def save_checkpoint(self, run_id, stage, keys):
         """保存某阶段的已完成 key 列表。同 (run_id, stage) 覆盖。"""

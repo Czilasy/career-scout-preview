@@ -280,12 +280,12 @@ _SCRAPE_STAGE_WEIGHTS: dict[str, tuple[int, int]] = {
 
 _SCRAPE_STAGE_MESSAGES: dict[str, str] = {
     "ensure_chrome": "检查并启动调试浏览器…",
-    "preflight": "检查 BOSS 登录状态…",
+    "preflight": "检查平台登录状态…",
     "searching": "列表页抓取中…",
     "combo_done": "列表页抓取中…",
     "combo_failed": "部分组合抓取失败，继续中…",
     "waiting": "防限流等待中…",
-    "risk_warning": "所有组合均失败，建议手动过验证码…",
+    "risk_warning": "所有组合均失败，请检查登录、网络或平台提示…",
     "closing_chrome": "正在关闭调试浏览器…",
     "done": "抓取完成",
     "cancelled": "运行已取消",
@@ -298,6 +298,7 @@ _FAILED_CODE_LABELS: dict[str, str] = {
     "source_verification_required": "触发验证码/滑块",
     "source_rate_limited": "账号/操作频繁被限流",
     "source_blocked": "IP 级风控拦截",
+    "source_unknown_error": "未知抓取错误",
     "source_timeout": "抓取超时",
     "source_unreachable": "抓取脚本不可用",
     # 010 healthy-pipeline 新增（与 ERROR_TAXONOMY 对齐）
@@ -413,6 +414,37 @@ ERROR_TAXONOMY: dict[str, dict] = {
         "resume_condition": "需人工排查日志",
     },
 }
+
+# 平台专属文案覆盖（B013）：默认字典兼容 BOSS 语义，智联只覆盖登录类文案，
+# 避免智联任务任何路径出现“BOSS 登录”等 BOSS 专属内容。
+_PLATFORM_LABEL_OVERRIDES: dict[str, dict[str, str]] = {
+    "zhilian": {
+        "source_login_required": "智联登录已失效",
+        "login_expired": "智联登录已失效，需重新登录",
+    },
+}
+_PLATFORM_TAXONOMY_OVERRIDES: dict[str, dict[str, str]] = {
+    "zhilian": {
+        "source_login_required": "智联登录已失效，需重新登录",
+        "login_expired": "智联登录已失效，需重新登录",
+    },
+}
+
+def failed_code_label(code: str, platform: str = "") -> str:
+    """按平台返回 failed_code 的用户可读文案。"""
+    override = _PLATFORM_LABEL_OVERRIDES.get(str(platform or ""), {}).get(code)
+    if override:
+        return override
+    return _FAILED_CODE_LABELS.get(code, code or "")
+
+def taxonomy_reason(code: str, platform: str = "", fallback: str = "任务被阻断") -> str:
+    """按平台返回 ERROR_TAXONOMY.reason，缺失时用 fallback。"""
+    override = _PLATFORM_TAXONOMY_OVERRIDES.get(str(platform or ""), {}).get(code)
+    if override:
+        return override
+    taxonomy = ERROR_TAXONOMY.get(code, {})
+    return str(taxonomy.get("reason") or fallback)
+
 
 
 # 硬停止码（命中即暂停整个任务）—— 与 store.SYSTEMIC_BLOCK_CODES 对齐
@@ -906,7 +938,7 @@ def run_search(params: dict, source, *, pages: int = 3,
         if not outcome.ok:
             # 系统性阻断（验证码/登录失效/IP风控/CDP不可用）：立即停止，不继续跑其他组合
             if outcome.failed_code in _HARD_STOP_CODES:
-                label = _FAILED_CODE_LABELS.get(outcome.failed_code, outcome.failed_code)
+                label = failed_code_label(outcome.failed_code, platform)
                 emit(stage="hard_stop", current=idx + 1, total=len(combos),
                      keyword=kw, city=city, failed_code=outcome.failed_code,
                      message=f"系统性阻断：{label}，任务暂停")
@@ -921,7 +953,7 @@ def run_search(params: dict, source, *, pages: int = 3,
             if outcome.safe_log and "reason=" in outcome.safe_log:
                 _reason = outcome.safe_log.split("reason=", 1)[1]
             detail = f"（{_reason}）" if _reason else ""
-            label = _FAILED_CODE_LABELS.get(outcome.failed_code, outcome.failed_code)
+            label = failed_code_label(outcome.failed_code, platform)
             emit(stage="combo_failed", current=idx + 1, total=len(combos),
                  keyword=kw, city=city, failed_code=outcome.failed_code,
                  message=f"组合失败：{label}{detail}")
@@ -988,15 +1020,15 @@ def run_search(params: dict, source, *, pages: int = 3,
     # 广搜策略：不做本地硬筛选，全量返回，筛选交给后续 AI 步骤。
     all_jobs = list(merged.values())
 
-    # 哨兵第三层：所有非跳过组合全失败 → 大概率 IP 级风控
+    # 哨兵第三层：所有非跳过组合全失败 → 中性提示，不冒充风控
     ran_combos = len(combos) - len(_skip)
     if failed_combos > 0 and total_scraped == 0 and ran_combos > 0:
         emit(stage="risk_warning",
-             message="所有组合均失败，大概率是 IP 级风控限制。建议：打开 Chrome 手动过一次验证码，或等 30 分钟后再试。")
+             message="所有组合均失败，请检查浏览器登录、网络或平台提示后重试。")
         return {"ok": False, "jobs": [], "total_scraped": 0,
                 "total_matched": 0, "combinations": len(combos),
                 "completed_combos": completed_combos,
-                "error": "所有搜索组合均失败，大概率 IP 级风控。建议手动过一次验证码或等 30 分钟后重试"}
+                "error": "所有搜索组合均失败，请检查浏览器登录、网络或平台提示后重试"}
 
     # 有数据才关浏览器（任务完成）；全失败则保留窗口供用户排查/重试。
     if total_scraped > 0 and close_chrome_on_success:
@@ -1167,17 +1199,17 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 hard_stop_code = outcome.failed_code
             if not jd and batch_exception_code:
                 jd_fail_by_idx[idx] = batch_exception_code
-                jd_fail_reason_by_idx[idx] = ERROR_TAXONOMY.get(
-                    batch_exception_code, {}
-                ).get(
-                    "reason",
-                    _FAILED_CODE_LABELS.get(batch_exception_code, "抓取失败"),
+                jd_fail_reason_by_idx[idx] = taxonomy_reason(
+                    batch_exception_code, getattr(source, "platform", ""),
+                    fallback="抓取失败",
                 )
             elif not jd and outcome is not None and outcome.failed_code:
                 jd_fail_by_idx[idx] = outcome.failed_code
                 jd_fail_reason_by_idx[idx] = (
                     outcome.failed_reason
-                    or _FAILED_CODE_LABELS.get(outcome.failed_code, "岗位详情抓取失败")
+                    or failed_code_label(
+                        outcome.failed_code, getattr(source, "platform", "")
+                    ) or "岗位详情抓取失败"
                 )
             jd_by_idx[idx] = jd
             if jd:

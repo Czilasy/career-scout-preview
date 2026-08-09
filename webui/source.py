@@ -347,6 +347,7 @@ class BossCdpSource:
         breaker: SourceCircuitBreaker | None = None,
         browser_account: str | None = None,
         in_process: bool = False,
+        run_id: str = "",
     ):
         self.python_executable = python_executable or sys.executable or "python"
         self.cwd = Path(cwd) if cwd else PROJECT_ROOT
@@ -363,6 +364,7 @@ class BossCdpSource:
         self.browser_account = (
             str(browser_account).strip() if browser_account else None
         )
+        self.run_id = str(run_id or "").strip()
         # in_process 模式（合同 inprocess-runner §4.3）：True 时内部执行器把
         # 本类构建的 argv 翻译为 run_search_programmatic / scrape_details
         # 库式调用，不 spawn 子进程；其余行为零改动。
@@ -500,7 +502,8 @@ class BossCdpSource:
             failed_code = _classify_failed_code(returncode, captured)
             self.breaker.record_signal(failed_code)
             reason = _exit_reason(returncode, captured)
-            _record_risk_signals(self.browser_account, "boss", failed_code, captured)
+            _record_risk_signals(self.browser_account, self.platform, failed_code, captured,
+                                run_id=self.run_id)
             return SourceOutcome.failure(
                 failed_code=failed_code,
                 safe_log=f"{safe_log} returncode={returncode} reason={reason}",
@@ -608,7 +611,8 @@ class BossCdpSource:
         if returncode != 0:
             failed_code = _classify_failed_code(returncode, captured)
             self.breaker.record_signal(failed_code)
-            _record_risk_signals(self.browser_account, "boss", failed_code, captured)
+            _record_risk_signals(self.browser_account, self.platform, failed_code, captured,
+                                run_id=self.run_id)
             return SourceOutcome.failure(
                 failed_code=failed_code,
                 safe_log=f"{safe_log} returncode={returncode} stderr_tail_safe={_safe_tail(captured)}",
@@ -1647,11 +1651,26 @@ _EXIT_REASONS = {
 }
 
 # 退出码 + 输出关键词 → 具体 failed_code（不再一律 source_blocked）
-_VERIFICATION_KEYWORDS = ("验证码", "滑块", "captcha", "slider", "verify")
+_VERIFICATION_KEYWORDS = ("验证码", "滑块", "滑动验证", "captcha", "slider")
 _RATE_LIMIT_KEYWORDS = (
-    "429", "限流", "rate limit", "too many", "频繁", "稍后再试",
-    "解锁", "冻结", "访问受限", "异常流量", "账号受限",
+    "429", "http 403", "http 412", "http 418",
+    "403 forbidden", "412 precondition", "418 im a teapot",
+    "操作频繁", "频繁访问", "访问频繁", "稍后再试", "访问受限", "异常流量", "账号受限", "限流",
+    "rate limit", "too many",
 )
+
+
+def _has_unlock_signal(text: str) -> bool:
+    """高置信解封时间信号：完整未来时间点或明确解封/解锁时间文案。"""
+    if not text:
+        return False
+    try:
+        if boss.parse_unlock_time(text) is not None:
+            return True
+    except Exception:
+        pass
+    lowered = str(text).lower()
+    return any(kw in lowered for kw in ("解封时间", "解封后", "解封于", "解锁时间"))
 
 
 def _classify_failed_code(returncode: int, captured: str) -> str:
@@ -1668,14 +1687,16 @@ def _classify_failed_code(returncode: int, captured: str) -> str:
     if returncode == 1:
         if any(kw in text for kw in ("登录", "login", "cookie")):
             return "source_login_required"
-        return "source_blocked"
+        return "source_unknown_error"
     if returncode == 10:
+        if _has_unlock_signal(captured):
+            return "source_rate_limited"
         if any(kw in text for kw in _RATE_LIMIT_KEYWORDS):
             return "source_rate_limited"
         if any(kw in text for kw in _VERIFICATION_KEYWORDS):
             return "source_verification_required"
-        return "source_blocked"
-    return "source_blocked"
+        return "source_unknown_error"
+    return "source_unknown_error"
 
 
 def _record_risk_signals(account, platform, failed_code, captured, run_id=""):
@@ -1691,7 +1712,9 @@ def _record_risk_signals(account, platform, failed_code, captured, run_id=""):
         return
     from scripts.login_state_cache import write_login_state
     from webui.cooldown import mark_cooldown
-    if failed_code in ("source_blocked", "source_rate_limited", "source_verification_required"):
+    # 只有高置信风控（限流/验证码）才写 restricted 缓存与冷却；通用 source_blocked
+    # 不写持久副作用，避免正常失败把账号误标成受限（B027 回归）。
+    if failed_code in ("source_rate_limited", "source_verification_required"):
         write_login_state(account, platform, "restricted")
         hint = boss.extract_block_hint(captured) if captured else ""
         mark_cooldown(account, platform, hint or failed_code, from_run=run_id)
@@ -1928,6 +1951,7 @@ class ZhilianCdpSource:
         list_runner: Callable[[dict], tuple[str, list[dict]]] | None = None,
         detail_runner: Callable[[dict], tuple[str, dict]] | None = None,
         batch_detail_runner: Callable[[dict], tuple[list[tuple[str, dict]], str | None]] | None = None,
+        run_id: str = "",
     ):
         if not browser_account or not str(browser_account).strip():
             raise ValueError("browser_account 必须非空")
@@ -1949,12 +1973,22 @@ class ZhilianCdpSource:
         self.cdp_port = int(cdp_port)
         self.profile_key = expected_profile_key
         self.breaker = breaker or SourceCircuitBreaker()
+        self.run_id = str(run_id or "").strip()
         # runner 注入：默认调用 zhilian_cdp_raw 的真实函数；测试通过替身绕过真实 CDP。
         # 测试通过注入替身绕过真实 CDP 调用。
         self._preflight_runner = preflight_runner or _default_zhilian_preflight_runner
         self._list_runner = list_runner or _default_zhilian_list_runner
         self._detail_runner = detail_runner or _default_zhilian_detail_runner
         self._batch_detail_runner = batch_detail_runner or _default_zhilian_batch_detail_runner
+
+    def _record_risk_signal(self, failed_code: str, reason: str = "") -> None:
+        """高置信智联风控信号写 restricted 缓存与冷却，来源带 run_id。"""
+        if failed_code not in ("source_rate_limited", "source_verification_required"):
+            return
+        _record_risk_signals(
+            self.browser_account, self.platform, failed_code,
+            reason or _zhilian_failed_reason(failed_code), run_id=self.run_id,
+        )
 
     # ------------------------------------------------------------------
     # T301: 平台禁用门禁（新任务创建前由编排层调用）
@@ -2019,6 +2053,7 @@ class ZhilianCdpSource:
         # 平台级 signal 推进熔断器（login/verification/rate_limited/blocked）。
         if failed_code in SourceCircuitBreaker.SIGNAL_CODES:
             self.breaker.record_signal(failed_code)
+        self._record_risk_signal(failed_code, _zhilian_failed_reason(failed_code))
         return SourceOutcome.failure(
             failed_code=failed_code,
             safe_log=_zhilian_safe_log(
@@ -2097,6 +2132,7 @@ class ZhilianCdpSource:
             failed_code = "source_unknown_error"
         if failed_code in SourceCircuitBreaker.SIGNAL_CODES:
             self.breaker.record_signal(failed_code)
+        self._record_risk_signal(failed_code, _zhilian_failed_reason(failed_code))
         return SourceOutcome.failure(
             failed_code=failed_code,
             safe_log=_zhilian_safe_log(
@@ -2153,6 +2189,7 @@ class ZhilianCdpSource:
             failed_code = "source_unknown_error"
         if failed_code in SourceCircuitBreaker.SIGNAL_CODES:
             self.breaker.record_signal(failed_code)
+        self._record_risk_signal(failed_code, _zhilian_failed_reason(failed_code))
         return SourceOutcome.failure(
             failed_code=failed_code,
             safe_log=_zhilian_safe_log(
@@ -2327,6 +2364,7 @@ class ZhilianCdpSource:
             )
         except Exception:
             per_item, degrade_signal = [], "unreachable"
+        recorded_batch_signals: set[str] = set()
         for idx, (i, key) in enumerate(valid):
             signal, detail = per_item[idx] if idx < len(per_item) else ("skipped", {})
             signal = str(signal or "invalid_output")
@@ -2360,6 +2398,9 @@ class ZhilianCdpSource:
                 failed_code = _ZHILIAN_DETAIL_SIGNAL_MAP.get(signal, "source_unknown_error")
                 if failed_code in SourceCircuitBreaker.SIGNAL_CODES:
                     self.breaker.record_signal(failed_code)
+                if failed_code not in recorded_batch_signals:
+                    recorded_batch_signals.add(failed_code)
+                    self._record_risk_signal(failed_code, _zhilian_failed_reason(failed_code))
                 results[key] = SourceOutcome.failure(
                     failed_code=failed_code,
                     safe_log=_zhilian_safe_log(
