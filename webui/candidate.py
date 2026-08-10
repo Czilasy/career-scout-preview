@@ -8,11 +8,10 @@ persisted or returned to the browser.
 
 from __future__ import annotations
 
-import re
-import json
-from typing import Iterable
 import copy
+import re
 import unicodedata
+from collections.abc import Iterable
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -55,6 +54,13 @@ CANDIDATE_ANALYSIS_V3_CONTRACT = {
  "warning":{"code":{"type":"string"},"path":{"type":"string"}}
 }
 
+_FIELD_CLIENT_REF = ".client_ref"
+_FIELD_CONFIDENCE = ".confidence"
+_FIELD_EVIDENCE_REFS = ".evidence_refs"
+_TITLE_BACKEND_ENGINEER = "后端开发工程师"
+_TITLE_DATA_ENGINEER = "数据工程师"
+
+
 def build_empty_candidate_analysis():
     def empty(spec):
         if "empty" in spec: return copy.deepcopy(spec["empty"])
@@ -91,9 +97,7 @@ def normalize_candidate_analysis(data, resume_text):
             continue
         if key not in data:
             _warn(warnings,"missing_required", key)
-        elif spec.get("type") == "list" and not isinstance(data[key], list):
-            _warn(warnings, "invalid_type", key)
-        elif spec.get("type") == "object" and not isinstance(data[key], dict):
+        elif spec.get("type") == "list" and not isinstance(data[key], list) or spec.get("type") == "object" and not isinstance(data[key], dict):
             _warn(warnings, "invalid_type", key)
     raw = data.get("summary", {})
     if isinstance(raw, dict):
@@ -151,7 +155,7 @@ def normalize_candidate_analysis(data, resume_text):
             ref, typ, quote, assertion = item.get("client_ref"), item.get("type"), item.get("source_quote"), item.get("assertion_type")
             ref_spec = CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["client_ref"]
             if not isinstance(ref, str) or not ref: raise ValueError("missing_required")
-            if len(ref) > ref_spec["max_length"]: _warn(warnings,"invalid_type",p+".client_ref"); raise ValueError("invalid_type")
+            if len(ref) > ref_spec["max_length"]: _warn(warnings,"invalid_type",p+_FIELD_CLIENT_REF); raise ValueError("invalid_type")
             if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["type"]["enum"] or assertion not in CANDIDATE_ANALYSIS_V3_CONTRACT["evidence"]["assertion_type"]["enum"]: raise ValueError("invalid_enum")
             if not isinstance(quote, str) or not quote:
                 raise ValueError("invalid_evidence" if "source_quote" in item else "missing_required")
@@ -167,9 +171,9 @@ def normalize_candidate_analysis(data, resume_text):
             if _is_sensitive(normalized):
                 raise ValueError("sensitive_value")
             if isinstance(item.get("confidence"), bool) or not isinstance(item.get("confidence"), int):
-                _warn(warnings,"invalid_type",p+".confidence"); continue
+                _warn(warnings,"invalid_type",p+_FIELD_CONFIDENCE); continue
             try: conf = _confidence(item.get("confidence"))
-            except ValueError: _warn(warnings,"invalid_type",p+".confidence"); continue
+            except ValueError: _warn(warnings,"invalid_type",p+_FIELD_CONFIDENCE); continue
             if _is_sensitive(quote): raise ValueError("sensitive_value")
             quote = canonicalize_resume_text_v3(quote)
             try:
@@ -181,7 +185,7 @@ def normalize_candidate_analysis(data, resume_text):
             if not loc: raise ValueError("invalid_evidence")
             if len(quote) < 4 and canonical.count(quote) > 1: raise ValueError("invalid_evidence")
             if ref in refs:
-                _warn(warnings, "reference_invalid", p+".client_ref")
+                _warn(warnings, "reference_invalid", p+_FIELD_CLIENT_REF)
                 raise ValueError("invalid_evidence")
             refs.add(ref); out["evidence"].append({"client_ref": ref, "type": typ, "normalized_value": normalized, "source_quote": quote, "source_locator": loc, "safe_excerpt": redact_pii(quote), "assertion_type": assertion, "confidence": conf})
         except ValueError as e: _warn(warnings, str(e), p)
@@ -201,7 +205,7 @@ def normalize_candidate_analysis(data, resume_text):
         for fld in ("client_ref","name","rationale"):
             spec = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"][fld]; value = item.get(fld, spec["empty"])
             if fld == "client_ref" and (not isinstance(value, str) or not value):
-                _warn(warnings,"missing_required",p+".client_ref")
+                _warn(warnings,"missing_required",p+_FIELD_CLIENT_REF)
                 value = spec["empty"]; scalar_valid = False
             elif not isinstance(value, str) or len(value) > spec["max_length"]:
                 if fld in item: _warn(warnings,"invalid_type",p+"."+fld)
@@ -217,7 +221,7 @@ def normalize_candidate_analysis(data, resume_text):
                 else: _warn(warnings,"invalid_type",f"{p}.gaps[{j}]"); gaps_valid=False
         if "confidence" in item:
             if isinstance(item["confidence"], bool) or not isinstance(item["confidence"], int) or not 0 <= item["confidence"] <= 100:
-                _warn(warnings,"invalid_type",p+".confidence")
+                _warn(warnings,"invalid_type",p+_FIELD_CONFIDENCE)
         if "default_enabled" in item and not isinstance(item["default_enabled"], bool): _warn(warnings,"invalid_type",p+".default_enabled")
         typ=item.get("type"); terms=item.get("search_terms", []); erefs=item.get("evidence_refs", [])
         if typ not in CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["type"]["enum"]: _warn(warnings,"invalid_enum",p+".type"); continue
@@ -232,14 +236,14 @@ def normalize_candidate_analysis(data, resume_text):
                     else: _warn(warnings,"invalid_type",f"{p}.search_terms[{j}]")
         valid_refs=[]; lost_ref=False
         if "evidence_refs" not in item:
-            _warn(warnings, "missing_required", p+".evidence_refs"); lost_ref = True; erefs = []
+            _warn(warnings, "missing_required", p+_FIELD_EVIDENCE_REFS); lost_ref = True; erefs = []
         if not isinstance(erefs, list) or not all(isinstance(x, str) for x in erefs):
-            _warn(warnings,"invalid_type", p + ".evidence_refs"); erefs = []; lost_ref = True
+            _warn(warnings,"invalid_type", p + _FIELD_EVIDENCE_REFS); erefs = []; lost_ref = True
         for r in erefs:
             if r in valid_refs:
-                _warn(warnings, "reference_invalid", p+".evidence_refs"); lost_ref=True
+                _warn(warnings, "reference_invalid", p+_FIELD_EVIDENCE_REFS); lost_ref=True
             elif r in refs: valid_refs.append(r)
-            elif r not in refs: _warn(warnings,"reference_invalid",p+".evidence_refs"); lost_ref=True
+            elif r not in refs: _warn(warnings,"reference_invalid",p+_FIELD_EVIDENCE_REFS); lost_ref=True
         max_terms = CANDIDATE_ANALYSIS_V3_CONTRACT["direction"]["search_terms"]["max"]
         executable = 1 <= len(terms) <= max_terms and not lost_ref and gaps_valid and scalar_valid
         confirmable_direction_exists = confirmable_direction_exists or 1 <= len(terms) <= max_terms
@@ -278,7 +282,12 @@ def normalize_candidate_analysis(data, resume_text):
         _warn(warnings, "missing_required", "evidence")
         out["quality"]["status"] = "manual_required"
     else:
-        out["quality"]["status"] = "manual_required" if not executable else ("partial" if warnings else "complete")
+        if not executable:
+            out["quality"]["status"] = "manual_required"
+        elif warnings:
+            out["quality"]["status"] = "partial"
+        else:
+            out["quality"]["status"] = "complete"
     return out
 
 
@@ -652,13 +661,13 @@ def normalize_evidence(raw_evidence: Iterable[dict], resume_text: str) -> list[d
 # Synonymous direction names that should be merged into a single canonical
 # direction. Keys and values are lower-cased for comparison.
 _SYNONYMOUS_DIRECTIONS = {
-    "后端开发": "后端开发工程师",
-    "backend": "后端开发工程师",
-    "backend engineer": "后端开发工程师",
+    "后端开发": _TITLE_BACKEND_ENGINEER,
+    "backend": _TITLE_BACKEND_ENGINEER,
+    "backend engineer": _TITLE_BACKEND_ENGINEER,
     "前端开发": "前端开发工程师",
     "frontend": "前端开发工程师",
-    "数据工程师": "数据工程师",
-    "data engineer": "数据工程师",
+    _TITLE_DATA_ENGINEER: _TITLE_DATA_ENGINEER,
+    "data engineer": _TITLE_DATA_ENGINEER,
     "风控算法": "风控算法工程师",
     "推荐算法": "推荐算法工程师",
 }

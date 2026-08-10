@@ -12,10 +12,8 @@ import secrets
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
 
 from webui.store import TaskStore
-
 
 # Allowlisted event types for the measurement sink (data-model.md 2.9).
 ALLOWED_EVENT_TYPES = frozenset({
@@ -45,6 +43,9 @@ ALLOWED_METADATA_KEYS = frozenset({
 _PROCESS_OWNER_TOKENS: dict[str, str] = {}
 
 
+_SHA256_PREFIX = "sha256:"
+
+
 def sha256_path(path: str | Path) -> str:
     """Return a stable SHA-256 digest for one file or directory.
 
@@ -62,7 +63,7 @@ def sha256_path(path: str | Path) -> str:
         return digest.hexdigest()
 
     if target.is_file():
-        return "sha256:" + file_digest(target)
+        return _SHA256_PREFIX + file_digest(target)
     if not target.is_dir():
         raise FileNotFoundError(target)
 
@@ -77,7 +78,7 @@ def sha256_path(path: str | Path) -> str:
         digest.update(b"\0")
         digest.update(file_digest(file_path).encode("ascii"))
         digest.update(b"\n")
-    return "sha256:" + digest.hexdigest()
+    return _SHA256_PREFIX + digest.hexdigest()
 
 
 class MeasurementSink:
@@ -92,9 +93,9 @@ class MeasurementSink:
     JD body are forbidden — the sink strips/ rejects them before persisting.
     """
 
-    __slots__ = ("_controller", "_round_id", "_monotonic_base")
+    __slots__ = ("_controller", "_monotonic_base", "_round_id")
 
-    def __init__(self, controller: "TuningController", round_id: str):
+    def __init__(self, controller: TuningController, round_id: str):
         self._controller = controller
         self._round_id = round_id
         self._monotonic_base = time.monotonic()
@@ -183,6 +184,7 @@ class TuningController:
         workloads: list[dict] | None = None,
     ) -> dict:
         """创建 draft 状态的实验。不启动压力工作（FR-042）。"""
+        del workloads  # 旧版兼容参数；输入冻结走 create_experiment_with_input
         return self._store.create_tuning_experiment(
             spec_version=spec_version, source_scope=source_scope,
         )
@@ -224,7 +226,8 @@ class TuningController:
         见 data-model.md 第 230 行。
         """
         from webui.platforms import (
-            get_platform, is_known_platform_key, validate_platform_key,
+            get_platform,
+            validate_platform_key,
         )
         platform = source_scope.get("platform", "boss")
         validate_platform_key(platform)
@@ -352,6 +355,7 @@ class TuningController:
         self, *, experiment_id: str, matrix: dict,
     ) -> str:
         """应用完整模式版本。不覆盖最近自定义配置（FR-066）。"""
+        del experiment_id  # 旧版兼容参数；完整模式版本不挂实验
         version_id = self._store.create_mode_version(
             matrix=matrix, manual_ranges={},
         )
@@ -670,7 +674,7 @@ class TuningController:
             {k: v for k, v in manifest.items() if k != "manifest_digest"},
             ensure_ascii=False, sort_keys=True,
         )
-        recomputed = "sha256:" + hashlib.sha256(
+        recomputed = _SHA256_PREFIX + hashlib.sha256(
             canonical.encode("utf-8")
         ).hexdigest()
         if recomputed != manifest_record["manifest_digest"]:
@@ -735,7 +739,7 @@ class TuningController:
             raise ValueError("artifact 路径越过实验根目录")
         if not absolute.is_file():
             raise ValueError(f"artifact 文件不存在: {artifact_path}")
-        recomputed = "sha256:" + hashlib.sha256(
+        recomputed = _SHA256_PREFIX + hashlib.sha256(
             absolute.read_bytes()
         ).hexdigest()
         if recomputed != stored_digest:
@@ -920,7 +924,8 @@ class TuningController:
         见 tasks007.md T615：禁用平台不签发或执行新的 source round。
         """
         from webui.platforms import (
-            get_platform_or_none, is_known_platform_key,
+            get_platform_or_none,
+            is_known_platform_key,
         )
         if not is_known_platform_key(platform):
             raise ValueError(
@@ -996,7 +1001,6 @@ class TuningController:
     def _save_round_metrics(self, round_id: str, metrics: dict) -> None:
         """保存轮次指标到数据库。"""
         metrics_json = json.dumps(metrics, ensure_ascii=False, sort_keys=True)
-        now = self._store._now() if hasattr(self._store, '_now') else None
         with self._store._connection() as conn:
             conn.execute(
                 "UPDATE tuning_rounds SET metrics_json = ? WHERE id = ?",
@@ -1065,7 +1069,7 @@ class TuningController:
             counts = ev.get("counts") or {}
             error_code = ev.get("error_code")
 
-            # 总耗时 = 所有事件时长之和（工作+等待+重试）
+            # 总耗时是所有事件时长之和（工作、等待、重试）
             total_duration_ms += dur
             stage_durations_ms[stage] = stage_durations_ms.get(stage, 0) + dur
 
@@ -1100,9 +1104,8 @@ class TuningController:
                     success_count += 1
                 elif status in ("failed", "unavailable", "uncertain"):
                     failed_count += 1
-            elif ev_type == "stage":
-                if "input_count" in counts:
-                    input_count = max(input_count, int(counts["input_count"]))
+            elif ev_type == "stage" and "input_count" in counts:
+                input_count = max(input_count, int(counts["input_count"]))
 
         # 如果 input_count 已知，missing = input - terminal
         missing_count = 0
@@ -1228,7 +1231,7 @@ class TuningController:
             for v in verdicts:
                 verdict_counts[v] = verdict_counts.get(v, 0) + 1
             consensus = max(verdict_counts, key=verdict_counts.get)
-            # 稳定性 = 与共识一致的重复次数 / 总重复次数
+            # 稳定性是与共识一致的重复次数占总重复次数的比例
             agreement = verdict_counts[consensus]
             stability = agreement / repetition_count
             per_item_stability[idx] = stability
@@ -1692,7 +1695,7 @@ class TuningController:
              if k != "manifest_digest"},
             ensure_ascii=False, sort_keys=True,
         )
-        manifest_digest = "sha256:" + hashlib.sha256(
+        manifest_digest = _SHA256_PREFIX + hashlib.sha256(
             canonical.encode("utf-8")
         ).hexdigest()
         # 渲染路径
@@ -1746,7 +1749,7 @@ class TuningController:
              if key != "manifest_digest"},
             ensure_ascii=False, sort_keys=True,
         )
-        digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        digest = _SHA256_PREFIX + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         if digest != record["manifest_digest"]:
             raise ValueError("manifest 摘要与签发记录不一致")
         return self._store.start_task_manifest_atomic(
@@ -2072,8 +2075,8 @@ class TuningController:
     #         收敛检查和剩余时间预测 (FR-013~020/055, plan.md §4) -------------
 
     def validate_dynamic_step(
-        self, *, current_value: int | float, proposed_value: int | float,
-        step_size: int | float, boundary: tuple[int | float, int | float],
+        self, *, current_value: float, proposed_value: float,
+        step_size: float, boundary: tuple[int | float, int | float],
     ) -> bool:
         """FR-013/FR-014: 校验动态步长是否合法。
 
@@ -2176,6 +2179,7 @@ class TuningController:
         - median 相同：tail 更小 → promising；tail 相同：retry 更少 → promising。
         - 无父候选 → promising（首个候选，无比较基准）。
         """
+        del reason_evidence  # 兼容参数；路由层直接持久化证据
         candidate = self._store.get_tuning_candidate(candidate_id)
         parent_id = candidate.get("parent_candidate_id")
         if not parent_id:
@@ -2503,7 +2507,7 @@ class RoundAdapter:
         "end_to_end": frozenset(),        # 端到端不复用
     }
 
-    def __init__(self, controller: "TuningController"):
+    def __init__(self, controller: TuningController):
         self._controller = controller
 
     def validate_stage_input_reuse(

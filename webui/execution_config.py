@@ -238,7 +238,7 @@ class ExecutionConfigSnapshot:
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
 
     @classmethod
-    def create(cls, values: dict[str, Any]) -> "ExecutionConfigSnapshot":
+    def create(cls, values: dict[str, Any]) -> ExecutionConfigSnapshot:
         """从原始字段值创建快照，执行物理校验。"""
         return cls(values)
 
@@ -261,7 +261,7 @@ class ExecutionConfigSnapshot:
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ExecutionConfigSnapshot":
+    def from_dict(cls, data: dict[str, Any]) -> ExecutionConfigSnapshot:
         """从字典恢复快照，校验摘要一致性。"""
         fields: dict[str, Any] = {}
         for field_name in SPEED_FIELDS:
@@ -502,7 +502,7 @@ class FrozenTaskScope:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "FrozenTaskScope":
+    def from_dict(cls, data: dict[str, Any]) -> FrozenTaskScope:
         expected_digest = data.get("scope_digest")
         scope = cls(
             keywords=list(data.get("keywords", [])),

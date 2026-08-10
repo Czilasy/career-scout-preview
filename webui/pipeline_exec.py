@@ -70,6 +70,11 @@ _ADVANCED_DEFAULTS = {
 }
 
 
+_MSG_CDP_UNAVAILABLE = "连不上调试浏览器"
+_MSG_IP_RISK_CONTROL = "IP 级风控拦截"
+_MSG_ZHILIAN_LOGIN_REQUIRED = "智联登录已失效，需重新登录"
+
+
 def load_advanced_settings(path: str | os.PathLike[str] | None = None) -> dict:
     """读取高级设置，缺字段用默认值补全。"""
     settings_path = Path(path) if path is not None else ADVANCED_SETTINGS_PATH
@@ -298,11 +303,11 @@ _SCRAPE_STAGE_MESSAGES: dict[str, str] = {
 
 # failed_code → 用户可读中文（进度条状态文案用）
 _FAILED_CODE_LABELS: dict[str, str] = {
-    "source_cdp_unavailable": "连不上调试浏览器",
+    "source_cdp_unavailable": _MSG_CDP_UNAVAILABLE,
     "source_login_required": "BOSS 登录已失效",
     "source_verification_required": "触发验证码/滑块",
     "source_rate_limited": "账号/操作频繁被限流",
-    "source_blocked": "IP 级风控拦截",
+    "source_blocked": _MSG_IP_RISK_CONTROL,
     "source_unknown_error": "未知抓取错误",
     "source_timeout": "抓取超时",
     "source_unreachable": "抓取脚本不可用",
@@ -313,8 +318,8 @@ _FAILED_CODE_LABELS: dict[str, str] = {
     "ai_quota_exhausted": "AI 额度已耗尽",
     "ai_key_invalid": "AI 密钥失效或鉴权失败",
     "ai_network_error": "AI 网络或服务故障",
-    "ip_risk_control": "IP 级风控拦截",
-    "cdp_unavailable": "连不上调试浏览器",
+    "ip_risk_control": _MSG_IP_RISK_CONTROL,
+    "cdp_unavailable": _MSG_CDP_UNAVAILABLE,
     "job_offline": "岗位已下架",
     "detail_timeout": "单岗位详情抓取超时",
     "detail_invalid": "详情结构无效（登录墙/导航壳/空壳）",
@@ -373,14 +378,14 @@ ERROR_TAXONOMY: dict[str, dict] = {
         "impact": "systemic",
         "blocking": True,
         "retryable": True,
-        "reason": "IP 级风控拦截",
+        "reason": _MSG_IP_RISK_CONTROL,
         "resume_condition": "更换网络或等待后点继续",
     },
     "cdp_unavailable": {
         "impact": "systemic",
         "blocking": True,
         "retryable": True,
-        "reason": "连不上调试浏览器",
+        "reason": _MSG_CDP_UNAVAILABLE,
         "resume_condition": "启动 Chrome 调试端口后点继续",
     },
     "job_offline": {
@@ -425,13 +430,13 @@ ERROR_TAXONOMY: dict[str, dict] = {
 _PLATFORM_LABEL_OVERRIDES: dict[str, dict[str, str]] = {
     "zhilian": {
         "source_login_required": "智联登录已失效",
-        "login_expired": "智联登录已失效，需重新登录",
+        "login_expired": _MSG_ZHILIAN_LOGIN_REQUIRED,
     },
 }
 _PLATFORM_TAXONOMY_OVERRIDES: dict[str, dict[str, str]] = {
     "zhilian": {
-        "source_login_required": "智联登录已失效，需重新登录",
-        "login_expired": "智联登录已失效，需重新登录",
+        "source_login_required": _MSG_ZHILIAN_LOGIN_REQUIRED,
+        "login_expired": _MSG_ZHILIAN_LOGIN_REQUIRED,
     },
 }
 
@@ -989,7 +994,7 @@ def run_search(params: dict, source, *, pages: int = 3,
         last_page_ratio = 0.0
         page_progress_seen = False
 
-        def _page_completed(event: dict):
+        def _page_completed(event: dict, combo_key=combo_key, kw=kw, city=city):
             nonlocal last_page_ratio, page_progress_seen
             page_progress_seen = True
             event = dict(event or {})

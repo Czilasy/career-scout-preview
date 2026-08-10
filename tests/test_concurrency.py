@@ -13,11 +13,9 @@
 
 from __future__ import annotations
 
-import sqlite3
 import tempfile
 import threading
 import unittest
-from collections import Counter
 
 from webui.store import TaskStore
 

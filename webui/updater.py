@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """应用内更新器（检查 / 下载 / 校验 / 替换脚本生成）。
 
 流程（quitAndInstall 模式，对齐 Electron autoUpdater 四阶段）：
@@ -23,8 +22,8 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 import json
+import logging
 import os
 import platform
 import re
@@ -56,6 +55,9 @@ _ALLOWED_DOWNLOAD_HOSTS = (
 # ---------------------------------------------------------------------------
 # 版本比较
 # ---------------------------------------------------------------------------
+_BAT_EXIT_ONE = "  exit 1"
+
+
 def parse_version(text: str) -> tuple[int, ...]:
     """``"v2.4.0"`` → ``(2, 4, 0)``；非法段按 0，取前三段。"""
     cleaned = str(text or "").strip().lstrip("vV")
@@ -107,7 +109,7 @@ class UpdateInfo:
     asset_url: str = ""
     asset_size: int = 0
     sha256_url: str = ""
-    reason: str = ""  # ok=False / 无对应资产时的原因码
+    reason: str = ""  # 失败原因或缺少对应资产时的原因码
     checked_at: float = 0.0  # 本次实时检查完成时间
 
     def to_dict(self) -> dict:
@@ -166,6 +168,7 @@ def check_for_update(
     - 当前平台无对应资产 → ``has_update=True`` 但 ``reason="no_asset"``，
       前端引导去 Release 页手动下载。
     """
+    del force, state_dir  # 缓存已关闭，保留兼容签名
     update_platform = detect_update_platform()
     getter = fetcher or (lambda: requests.get(
         GITHUB_LATEST_URL, timeout=DOWNLOAD_TIMEOUT,
@@ -487,7 +490,7 @@ def build_updater_script(
             "# 新版就位：优先落到带新版本号的文件名；失败保留旧版退出",
             "if (-not (Test-Path -LiteralPath $installer)) {",
             "  Log \"installer missing: $installer\"",
-            "  exit 1",
+            _BAT_EXIT_ONE,
             "}",
             "try {",
             "  if ($newTarget -eq $target) {",
@@ -504,17 +507,17 @@ def build_updater_script(
             "  }",
             "} catch {",
             "  Log \"install failed: $($_.Exception.Message)\"",
-            "  exit 1",
+            _BAT_EXIT_ONE,
             "}",
             "if (-not (Test-Path -LiteralPath $newTarget)) {",
             "  Log 'install failed: new target missing'",
-            "  exit 1",
+            _BAT_EXIT_ONE,
             "}",
             "",
             "# 拉起新版本",
             "try { Start-Process -FilePath $newTarget } catch {",
             "  Log \"launch failed: $($_.Exception.Message)\"",
-            "  exit 1",
+            _BAT_EXIT_ONE,
             "}",
             "Log \"update_apply done: $newTarget\"",
             "exit 0",
@@ -542,14 +545,14 @@ def build_updater_script(
         'hdiutil attach "$INSTALLER" -nobrowse -readonly -mountpoint "$MOUNT" >/dev/null 2>&1',
         'if [ ! -d "$MOUNT/CareerScout.app" ]; then',
         '  hdiutil detach "$MOUNT" >/dev/null 2>&1',
-        "  exit 1",
+        _BAT_EXIT_ONE,
         "fi",
         # 原子替换：旧版先改名备份，新版就位失败则回滚
         'if [ -d "$TARGET" ]; then mv "$TARGET" "$TARGET.old"; fi',
         'if ! cp -R "$MOUNT/CareerScout.app" "$(dirname "$TARGET")/"; then',
         '  [ -d "$TARGET.old" ] && mv "$TARGET.old" "$TARGET"',
         '  hdiutil detach "$MOUNT" >/dev/null 2>&1',
-        "  exit 1",
+        _BAT_EXIT_ONE,
         "fi",
         'rm -rf "$TARGET.old"',
         'hdiutil detach "$MOUNT" >/dev/null 2>&1',

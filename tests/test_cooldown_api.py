@@ -9,7 +9,6 @@
 
 import pathlib
 import tempfile
-import time
 import unittest
 
 from webui import cooldown as cd

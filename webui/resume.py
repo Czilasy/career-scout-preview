@@ -108,6 +108,7 @@ def save_resume(profile_id, file_bytes, filename, fmt, resume_dir, store) -> dic
 
     Returns the resume record produced by the store.
     """
+    del fmt  # 扩展名从 filename 推导；保留参数兼容调用方
     validated_fmt = validate_format(filename)
     validate_size(file_bytes)
     file_id = uuid.uuid4().hex

@@ -6,6 +6,12 @@
 
 - 本地开发设计新东西前，先查看 `roadmap/` 下本地参考文档（如 `REFERENCE_GET_JOBS.md`；该目录仅本地存在且已 `.gitignore`，公开仓库不含）。有可借鉴零件就借鉴，没有现成方案再自由发挥。
 
+## 功能开发流程与架构边界
+
+- 用户述说完需求后，先完成 grill-me 边界质询并冻结需求；冻结后进入完整 Spec Kit 流程：`speckit-constitution → speckit-clarify（按需）→ speckit-specify → speckit-plan → speckit-tasks → speckit-implement → speckit-converge`。
+- 项目架构原则、文件边界与职责分层以 `.specify/memory/constitution.md` 为准；Plan/Tasks 必须写明允许修改、禁止修改、新增文件和引用方向。
+- 已有超大文件（如 `webui/app.py`、`webui/store.py`、`scripts/boss_cdp_raw.py`）在未拆完前，普通功能不得继续向其中追加新逻辑；拆分必须单独建立 Spec。
+
 ## 提交与推送
 
 - 提交或推送前先运行：`uv run python -m unittest tests.test_repo_hygiene`，失败禁止提交和推送。

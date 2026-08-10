@@ -359,6 +359,7 @@ def validate_search_request(raw, *, platform: str | None = None):
     ``platform`` 参数保留为后续 T011 平台感知校验的入口；当前仅做
     透传到基础校验（BOSS 兼容），不改变拒绝行为。
     """
+    del platform  # 保留为 T011 入口；当前透传基础校验
     raw = raw or {}
     # 1. 拒绝非空 AI filters（零副作用，先于任何写入操作）。
     offending = []

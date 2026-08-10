@@ -8,7 +8,6 @@
 """
 
 import importlib.util
-import json
 import pathlib
 import sys
 import tempfile
@@ -180,7 +179,7 @@ class CollectCheckItemsTests(unittest.TestCase):
         self.assertIn("登录", by_id["boss_login"]["fix"])
 
     def test_missing_browser_fails_with_hint(self):
-        module = load_module()
+        load_module()
         module2 = load_module()
         with mock.patch.object(module2, "require_runtime_dependencies", return_value=True), \
                 mock.patch.object(module2, "detect_chromium_browsers",

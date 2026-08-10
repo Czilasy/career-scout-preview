@@ -164,7 +164,7 @@ describe("T029 生命周期 state/action/event 类型与错误映射", () => {
   });
 
   it("action allowlist 与冻结合同一致", () => {
-    expect([...JOB_FEEDBACK_ACTIONS].sort()).toEqual([
+    expect([...JOB_FEEDBACK_ACTIONS].sort((a, b) => a.localeCompare(b))).toEqual([
       "correct_applied_at",
       "correct_status",
       "follow_up",

@@ -12,58 +12,58 @@
 """
 from __future__ import annotations
 
-import hashlib
 import json
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 __all__ = [
-    "KNOWN_PLATFORM_KEYS",
-    "DEFAULT_PLATFORM",
-    "BOSS_DEFAULT_CDP_PORT",
-    "ZHILIAN_DEFAULT_CDP_PORT",
-    "BOSS_FILTER_SCHEMA_VERSION",
     "BOSS_CITY_MAPPING_VERSION",
-    "ZHILIAN_FILTER_SCHEMA_VERSION",
+    "BOSS_DEFAULT_CDP_PORT",
+    "BOSS_FILTER_SCHEMA_VERSION",
+    "BOSS_PLATFORM",
+    "DEFAULT_PLATFORM",
+    "KNOWN_PLATFORM_KEYS",
+    "ZHILIAN_AVAILABILITY_REASON",
     "ZHILIAN_CITY_MAPPING_VERSION",
+    "ZHILIAN_DEFAULT_CDP_PORT",
+    "ZHILIAN_FILTER_SCHEMA_VERSION",
     "ZHILIAN_NATIONWIDE_CODE",
     "ZHILIAN_NATIONWIDE_NAME",
-    "ZHILIAN_AVAILABILITY_REASON",
-    "FilterOption",
-    "FilterField",
-    "PlatformFilterSchema",
     "CityEntry",
-    "PlatformCityCatalog",
+    "FilterField",
+    "FilterOption",
     "LoginSpace",
-    "PlatformRegistry",
-    "PlatformError",
-    "UnknownPlatformError",
-    "PlatformNotRegisteredError",
+    "PlatformCityCatalog",
     "PlatformDisabledError",
-    "is_known_platform_key",
-    "validate_platform_key",
+    "PlatformError",
+    "PlatformFilterSchema",
+    "PlatformNotRegisteredError",
+    "PlatformRegistry",
+    "UnknownPlatformError",
+    "boss_city_catalog",
+    "boss_filter_schema",
+    "build_filter_snapshot",
+    "check_browser_account_activate",
+    "check_browser_account_delete",
+    "check_login_space_conflict",
+    "check_platform_fixture_integrity",
+    "derive_zhilian_profile_dir",
     "get_platform",
     "get_platform_or_none",
-    "list_platforms",
+    "is_known_platform_key",
     "list_platform_keys",
-    "resolve_platform_or_default",
+    "list_platforms",
     "normalize_job_url",
-    "resolve_login_space",
-    "check_platform_fixture_integrity",
-    "resolve_platform_city",
-    "derive_zhilian_profile_dir",
-    "check_login_space_conflict",
-    "check_browser_account_delete",
-    "check_browser_account_activate",
     "project_filter_schema",
-    "validate_filter_values",
-    "build_filter_snapshot",
-    "boss_filter_schema",
-    "boss_city_catalog",
-    "BOSS_PLATFORM",
     "register_platform",
+    "resolve_login_space",
+    "resolve_platform_city",
+    "resolve_platform_or_default",
+    "validate_filter_values",
+    "validate_platform_key",
 ]
 
 
@@ -111,6 +111,10 @@ _ZHILIAN_ALLOWED_HOSTS = frozenset({
 # ---------------------------------------------------------------------------
 # 异常
 # ---------------------------------------------------------------------------
+
+_MSG_BROWSER_ACCOUNT_REQUIRED = "browser_account 不能为空"
+_MSG_BOSS_PROFILE_DIR_REQUIRED = "boss_profile_dir 不能为空"
+
 
 class PlatformError(ValueError):
     """平台注册或校验相关错误的基类。"""
@@ -371,6 +375,7 @@ def normalize_zhilian_job_url(raw: str) -> str:
 
 
 import re as _re
+
 _ZHILIAN_JOB_PATH_RE = _re.compile(r"^/jobdetail/[A-Za-z0-9_-]+\.htm$")
 _ZHILIAN_JOB_SOURCE_PATH_RE = _re.compile(r"^/([A-Za-z0-9_-]+)\.htm$")
 _ZHILIAN_DETAIL_PATTERN = "https://www.zhaopin.com/jobdetail/{job_id}.htm"
@@ -385,9 +390,9 @@ def resolve_boss_login_space(
 ) -> LoginSpace:
     """BOSS 登录空间：复用现有账号 profile_dir，端口 9222。"""
     if not browser_account:
-        raise ValueError("browser_account 不能为空")
+        raise ValueError(_MSG_BROWSER_ACCOUNT_REQUIRED)
     if not boss_profile_dir:
-        raise ValueError("boss_profile_dir 不能为空")
+        raise ValueError(_MSG_BOSS_PROFILE_DIR_REQUIRED)
     return LoginSpace(
         platform="boss",
         browser_account=browser_account,
@@ -401,9 +406,9 @@ def resolve_zhilian_login_space(
 ) -> LoginSpace:
     """智联登录空间：profile_dir = boss_profile_dir + '.zhilian'，端口 9223。"""
     if not browser_account:
-        raise ValueError("browser_account 不能为空")
+        raise ValueError(_MSG_BROWSER_ACCOUNT_REQUIRED)
     if not boss_profile_dir:
-        raise ValueError("boss_profile_dir 不能为空")
+        raise ValueError(_MSG_BOSS_PROFILE_DIR_REQUIRED)
     return LoginSpace(
         platform="zhilian",
         browser_account=browser_account,
@@ -595,7 +600,7 @@ def derive_zhilian_profile_dir(boss_profile_dir: str) -> str:
     目录隔离。绝对路径只在后端运行时存在，不写数据库、日志或用户 API。
     """
     if not boss_profile_dir:
-        raise ValueError("boss_profile_dir 不能为空")
+        raise ValueError(_MSG_BOSS_PROFILE_DIR_REQUIRED)
     return str(boss_profile_dir).rstrip("/\\") + ".zhilian"
 
 
@@ -627,7 +632,7 @@ def check_login_space_conflict(
     """
     validate_platform_key(platform)
     if not browser_account:
-        raise ValueError("browser_account 不能为空")
+        raise ValueError(_MSG_BROWSER_ACCOUNT_REQUIRED)
 
     if platform == "boss":
         expected = str(boss_profile_dir)
@@ -670,7 +675,7 @@ def check_browser_account_delete(
     任一命中即阻断删除，不先删除其中一个目录。
     """
     if not browser_account:
-        raise ValueError("browser_account 不能为空")
+        raise ValueError(_MSG_BROWSER_ACCOUNT_REQUIRED)
 
     for lock in running_locks:
         if lock.get("account") == browser_account:
@@ -697,6 +702,7 @@ def check_browser_account_activate(
     ``activate`` 只改草稿（设置当前活跃账号），不启动 Chrome、不切换
     profile、不触碰端口。只验证账号存在，不检查运行锁或端口占用。
     """
+    del browser_account  # 调用方已校验账号；这里只做存在性门禁
     if not account_exists:
         return False, "account_not_found"
     return True, ""
@@ -742,14 +748,10 @@ def validate_filter_values(
             f"filter_schema_version_mismatch: 期望 {schema.schema_version}, "
             f"实际 {schema_version}"
         )
+
     if not isinstance(screening_fields, dict):
         raise ValueError("screening_fields 必须为对象")
 
-    allowed_exclusive: tuple[str, ...] = ()
-    if platform == "boss":
-        allowed_exclusive = _BOSS_EXCLUSIVE_FIELDS
-    elif platform == "zhilian":
-        allowed_exclusive = _ZHILIAN_EXCLUSIVE_FIELDS
 
     normalized: dict[str, list[str]] = {}
     for key, raw_value in screening_fields.items():
@@ -975,7 +977,7 @@ def _initialize_boss_from_runtime() -> None:
                 if isinstance(name, str) and isinstance(code, str):
                     nationwide_name = name
                     nationwide_code = code
-    except (OSError, json.JSONDecodeError, ValueError):
+    except (OSError, ValueError):
         pass
     _register_boss(
         filter_maps,
@@ -1174,7 +1176,7 @@ def _build_zhilian_city_catalog() -> PlatformCityCatalog:
                 platform_code=code,
                 mapping_version=ZHILIAN_CITY_MAPPING_VERSION,
             ))
-    except (OSError, json.JSONDecodeError, ValueError):
+    except (OSError, ValueError):
         pass
     return PlatformCityCatalog(
         platform="zhilian",

@@ -47,3 +47,8 @@ force-include = { "data/city_codes.json" = "data/city_codes.json" }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.15.4",
+]

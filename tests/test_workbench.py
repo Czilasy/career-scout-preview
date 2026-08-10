@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from tests.test_workbench_fixtures import sample_job, sample_jobs, sample_detail
+from tests.test_workbench_fixtures import sample_job, sample_detail
 
 
 class LinkNormalizationTests(unittest.TestCase):

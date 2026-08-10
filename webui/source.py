@@ -11,18 +11,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import subprocess
 import sys
 import threading
 import time
-import random
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from scripts import boss_cdp_raw as boss
 from webui.process_executor import ScraperExecutor, run_with_deadline
 from webui.workbench import normalize_job_link
-
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
@@ -65,9 +65,15 @@ class SourceOutcome:
     """
 
     __slots__ = (
-        "ok", "jobs", "detail", "empty_result", "empty_evidence",
-        "failed_code", "safe_log", "input_hash",
+        "detail",
+        "empty_evidence",
+        "empty_result",
+        "failed_code",
         "failed_reason",
+        "input_hash",
+        "jobs",
+        "ok",
+        "safe_log",
     )
 
     def __init__(
@@ -94,11 +100,11 @@ class SourceOutcome:
         self.failed_reason = failed_reason
 
     @classmethod
-    def success(cls, *, jobs: list[dict] | None = None, detail: dict | None = None, safe_log: str = "", input_hash: str | None = None) -> "SourceOutcome":
+    def success(cls, *, jobs: list[dict] | None = None, detail: dict | None = None, safe_log: str = "", input_hash: str | None = None) -> SourceOutcome:
         return cls(ok=True, jobs=jobs, detail=detail, safe_log=safe_log, input_hash=input_hash)
 
     @classmethod
-    def empty_success(cls, *, empty_evidence: dict, safe_log: str = "", input_hash: str | None = None) -> "SourceOutcome":
+    def empty_success(cls, *, empty_evidence: dict, safe_log: str = "", input_hash: str | None = None) -> SourceOutcome:
         """真实空结果：ok=True, jobs=[], empty_result=True, empty_evidence 必填。
 
         empty_evidence 必须包含 ``kind``、``fixture_version`` 和 ``marker``；
@@ -115,7 +121,7 @@ class SourceOutcome:
         )
 
     @classmethod
-    def failure(cls, *, failed_code: str, safe_log: str = "", failed_reason: str = "") -> "SourceOutcome":
+    def failure(cls, *, failed_code: str, safe_log: str = "", failed_reason: str = "") -> SourceOutcome:
         return cls(ok=False, failed_code=failed_code, safe_log=safe_log,
                     failed_reason=failed_reason)
 
@@ -215,7 +221,7 @@ class SourceCircuitBreaker:
         self._consecutive = 0
         self._last_signal = None
 
-    def is_open(self, *, now: float | None = None) -> bool:
+    def is_open(self) -> bool:
         """True if the breaker is open (no new source job should start)."""
         return self._opened_at is not None
 
@@ -494,7 +500,7 @@ class BossCdpSource:
                 failed_code="source_invalid_output", safe_log="list_output_path_invalid",
             )
         combo_key = str(plan_item.get("combo_key") or "") or f"{keyword}|{city}"
-        page_events_path = f"{str(output_path)}.page-events.jsonl"
+        page_events_path = f"{output_path!s}.page-events.jsonl"
         try:
             Path(page_events_path).parent.mkdir(parents=True, exist_ok=True)
             Path(page_events_path).write_text("", encoding="utf-8")
@@ -530,10 +536,7 @@ class BossCdpSource:
                 event["combo_key"] = combo_key
                 jobs = self._read_jobs(str(output_path)) or []
                 event["jobs_snapshot"] = [_normalize_job_fields(j) for j in jobs]
-                try:
-                    on_page_completed(event)
-                except Exception:
-                    raise
+                on_page_completed(event)
                 seen_page_events += 1
 
         command = self._build_list_command(
@@ -911,7 +914,7 @@ class BossCdpSource:
         parsed_events = self._read_events_file(events_output_path)
         matched_event_by_url: dict[str, dict] = {}
         for event in parsed_events:
-            ok, reason = self._validate_detail_event(event, expected_urls)
+            ok, _ = self._validate_detail_event(event, expected_urls)
             if not ok:
                 continue  # rejected events are silently dropped
             # First valid event for a given job wins; later duplicates are
@@ -1062,7 +1065,7 @@ class BossCdpSource:
                         continue
                     try:
                         events.append(json.loads(line))
-                    except (json.JSONDecodeError, ValueError):
+                    except ValueError:
                         events.append(None)
         except OSError:
             return []
@@ -1290,15 +1293,12 @@ class BossCdpSource:
                 i += 1
                 continue
             flag = token[2:]
-            if flag in self._IN_PROCESS_BOOL_FLAGS:
+            if flag in self._IN_PROCESS_BOOL_FLAGS or i + 1 >= len(command):
                 flags[flag] = True
                 i += 1
-            elif i + 1 < len(command):
+            else:
                 flags[flag] = command[i + 1]
                 i += 2
-            else:
-                flags[flag] = True
-                i += 1
 
         # setup-chrome / stop-chrome / smoke-test 等不可翻译
         if any(k in flags for k in ("setup-chrome", "stop-chrome", "smoke-test")):
@@ -1556,6 +1556,7 @@ class FakeJobSource:
         )
 
     def fetch_detail(self, job: dict, *, detail_output_path: str | None = None) -> SourceOutcome:
+        del detail_output_path  # 测试替身不写盘，签名与真实 source 对齐
         if not isinstance(job, dict):
             return SourceOutcome.failure(
                 failed_code="source_invalid_output",
@@ -1572,7 +1573,7 @@ class FakeJobSource:
         if job_id in self.detail_failures:
             return SourceOutcome.failure(
                 failed_code="source_blocked",
-                safe_log=f"fake detail job_id_present=1 blocked=1",
+                safe_log="fake detail job_id_present=1 blocked=1",
             )
         detail = self.detail_jobs.get(job_id, {})
         return SourceOutcome.success(detail=detail, safe_log=f"fake detail job_id_present=1 fields={sorted(detail.keys())[:3]}")
@@ -1587,6 +1588,7 @@ class FakeJobSource:
         单岗位失败不抛出；每个输入恰有一个终态 outcome。
         ``on_item_done``：每条处理后回调已完成条数（与 ZhilianCdpSource 对齐）。
         """
+        del detail_output_path  # 测试替身不写盘，签名与真实 source 对齐
         results: dict[str, SourceOutcome] = {}
         for i, job in enumerate(jobs):
             if not isinstance(job, dict):
@@ -2600,12 +2602,12 @@ def _zhilian_failed_reason(failed_code: str) -> str:
 
 
 __all__ = [
+    "SAFE_FAILURE_CODES",
+    "ZHILIAN_DEFAULT_CDP_PORT",
     "BossCdpSource",
     "FakeJobSource",
     "JobSource",
-    "SourceOutcome",
     "SourceCircuitBreaker",
-    "SAFE_FAILURE_CODES",
+    "SourceOutcome",
     "ZhilianCdpSource",
-    "ZHILIAN_DEFAULT_CDP_PORT",
 ]

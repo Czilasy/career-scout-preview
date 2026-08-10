@@ -1749,7 +1749,6 @@ class AdvancedConfigStateStoreTests(unittest.TestCase):
         """旧 advanced_settings.json 一次性导入。"""
         # 写一个旧 JSON 文件
         import json
-        import os
         legacy_path = pathlib.Path(self.temp.name) / "advanced_settings.json"
         legacy_config = {
             "pages": 2,
@@ -1905,7 +1904,7 @@ class ExperimentConfigIsolationStoreTests(unittest.TestCase):
 
     def test_recover_tuning_experiment_does_not_touch_user_config(self):
         """SC-014: 重启恢复不修改 advanced_config_state。"""
-        experiment = self.store.create_tuning_experiment(
+        self.store.create_tuning_experiment(
             spec_version="011-deep-configuration-probing",
             source_scope={
                 "keywords": ["AI应用开发"],

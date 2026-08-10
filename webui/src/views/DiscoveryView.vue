@@ -129,9 +129,9 @@ async function showLoginGuide(platform: Platform) {
     const active = data.active_account || "a";
     const account = (data.accounts || []).find((item) => item.id === active);
     // 内置 ~/.career-scout/chrome-profile 账号在 UI 上固定叫「默认账号」（D7）。
-    loginGuide.value.accountName = account
-      ? (account.id === "a" ? "默认账号" : account.name)
-      : active;
+    let accountName = active;
+    if (account) accountName = account.id === "a" ? "默认账号" : account.name;
+    loginGuide.value.accountName = accountName;
   } catch {
     // 账号名只是引导文案辅助，拉不到就显示通用文案。
   }
@@ -550,9 +550,9 @@ async function restoreRunningTask() {
       // T510：快照携带任务平台，供 TaskProgress 展示真实平台徽章
       platform: taskPlatform,
     };
-    const kind: "scrape" | "screen" | "recrawl" = data.kind === "scrape"
-      ? "scrape"
-      : data.kind === "recrawl" ? "recrawl" : "screen";
+    let kind: "scrape" | "screen" | "recrawl" = "screen";
+    if (data.kind === "scrape") kind = "scrape";
+    else if (data.kind === "recrawl") kind = "recrawl";
     if (kind === "scrape" && isCompletedTaskStatus(data.status) && data.auto_screen) {
       scrapeTaskId.value = data.scrape_task_id || data.task_id;
       scrapeCompleted.value = true;
@@ -894,7 +894,10 @@ function applyResumeAnalysisToCurrentSchema() {
     // 旧响应兜底：直接按当前 schema 校验 code。
     for (const field of schema.fields) {
       const value = analysis.fields[field.key];
-      const codes = (Array.isArray(value) ? value : value ? [value] : [])
+      let codesRaw: unknown[] = [];
+      if (Array.isArray(value)) codesRaw = value;
+      else if (value) codesRaw = [value];
+      const codes = codesRaw
         .map(String)
         .filter((code) => code !== "0" && field.options.some((opt) => opt.value === code));
       if (codes.length) projected[field.key] = codes;
@@ -1462,14 +1465,18 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       if (kind === "scrape") {
         scrapeBusy.value = false;
         scrapeCompleted.value = true;
+        let noticeMessage: string;
+        if (shouldAutoScreen) {
+          noticeMessage = data.status === "completed_with_pending"
+            ? "抓取完成，正在自动开始 AI 筛选，部分岗位待确认"
+            : "抓取完成，正在自动开始 AI 筛选";
+        } else {
+          noticeMessage = data.status === "completed_with_pending"
+            ? "抓取完成，但有待确认，请继续检查筛选条件"
+            : "抓取完成，请继续确认 AI 筛选条件";
+        }
         notify(
-          shouldAutoScreen
-            ? data.status === "completed_with_pending"
-              ? "抓取完成，正在自动开始 AI 筛选，部分岗位待确认"
-              : "抓取完成，正在自动开始 AI 筛选"
-            : data.status === "completed_with_pending"
-              ? "抓取完成，但有待确认，请继续检查筛选条件"
-              : "抓取完成，请继续确认 AI 筛选条件",
+          noticeMessage,
           data.status === "completed_with_pending" ? "warning" : "success",
         );
         if (shouldAutoScreen) {
@@ -1574,9 +1581,11 @@ function setPipelineResult(result: PipelineResult) {
   scrapeCompleted.value = true;
   resultLoaded.value = true;
   const groups = partitionPipelineResult(result);
-  activeCategory.value = groups.matched.length ? "matched"
-    : groups.uncertain.length ? "uncertain"
-      : groups.unmatched.length ? "unmatched" : "dropped";
+  let nextCategory: "matched" | "uncertain" | "unmatched" | "dropped" = "dropped";
+  if (groups.matched.length) nextCategory = "matched";
+  else if (groups.uncertain.length) nextCategory = "uncertain";
+  else if (groups.unmatched.length) nextCategory = "unmatched";
+  activeCategory.value = nextCategory;
 }
 
 async function loadLatestResult() {
@@ -1675,9 +1684,10 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
       }
     }
     // 以更新时间较新的一份为主干（profile_summary / 状态投影 / 默认 run）。
-    const newer = parts.length === 1
-      ? parts[0]
-      : (Number(parts[0].data.started_at || 0) >= Number(parts[1].data.started_at || 0) ? parts[0] : parts[1]);
+    let newer = parts[0];
+    if (parts.length > 1 && Number(parts[1].data.started_at || 0) > Number(parts[0].data.started_at || 0)) {
+      newer = parts[1];
+    }
 
     const sum = (key: "total_scraped" | "total_matched" | "total_kept" | "total_dropped") =>
       parts.reduce((acc, part) => acc + Number((part.data.result as Record<string, unknown> | undefined)?.[key] || 0), 0);

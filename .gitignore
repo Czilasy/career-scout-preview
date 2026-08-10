@@ -35,8 +35,10 @@ node_modules/
 *.tar.gz
 
 # Test and tool caches
+.scannerwork/
 .coverage
 .coverage.*
+coverage.xml
 htmlcov/
 .pytest_cache/
 .hypothesis/

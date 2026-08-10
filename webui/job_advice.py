@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any
+from collections.abc import Callable, Mapping
 
 from webui.ai import AISecurityError, call_ai, is_ai_available
 

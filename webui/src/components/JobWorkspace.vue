@@ -89,7 +89,6 @@ watch([filterState, sortKey], () => {
   if (!userSelectedDetail.value) {
     localSelectedId.value = firstId;
   } else if (!workspaceJobs.value.some((job) => jobKey(job) === localSelectedId.value)) {
-    localSelectedId.value = firstId;
   }
 }, { deep: true });
 

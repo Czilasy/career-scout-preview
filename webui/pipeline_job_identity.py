@@ -34,7 +34,8 @@ the real app assembly lands in Task 008.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Protocol
+from collections.abc import Callable, Mapping
 
 from webui.platforms import (
     PlatformError,
@@ -70,6 +71,10 @@ _DISPLAY_TEXT_FIELDS = (
 # ---------------------------------------------------------------------------
 # Domain errors (codes frozen by contracts/http-api.md)
 # ---------------------------------------------------------------------------
+
+_MSG_PAYLOAD_NOT_OBJECT = "岗位身份载荷必须为对象"
+_MSG_PLATFORM_URL_MISMATCH = "岗位规范链接与平台不匹配"
+
 
 class JobIdentityError(ValueError):
     """Base class for authoritative job identity failures."""
@@ -188,7 +193,7 @@ def normalize_display_fields(raw: Mapping[str, Any] | None) -> JobDisplay:
     raw = raw or {}
     if not isinstance(raw, Mapping):
         raise JobIdentityIncompleteError(
-            "岗位身份载荷必须为对象", details={"invalid_fields": ["payload"]},
+            _MSG_PAYLOAD_NOT_OBJECT, details={"invalid_fields": ["payload"]},
         )
     values: dict[str, str] = {}
     for key in _DISPLAY_TEXT_FIELDS:
@@ -215,7 +220,7 @@ def parse_identity_payload(payload: Any) -> JobIdentityRequest:
     """
     if not isinstance(payload, Mapping):
         raise JobIdentityIncompleteError(
-            "岗位身份载荷必须为对象", details={"missing_fields": list(_TRIPLE_FIELDS)},
+            _MSG_PAYLOAD_NOT_OBJECT, details={"missing_fields": list(_TRIPLE_FIELDS)},
         )
     invalid: list[str] = []
     cleaned = {
@@ -260,12 +265,12 @@ def _normalize_canonical_url(platform: str, canonical_url: str) -> str:
         normalized = normalize_job_url(platform, canonical_url)
     except PlatformError as exc:
         raise PlatformUrlMismatchError(
-            "岗位规范链接与平台不匹配",
+            _MSG_PLATFORM_URL_MISMATCH,
             details={"platform": platform},
         ) from exc
     if not normalized:
         raise PlatformUrlMismatchError(
-            "岗位规范链接与平台不匹配",
+            _MSG_PLATFORM_URL_MISMATCH,
             details={"platform": platform, "canonical_url": canonical_url},
         )
     return normalized
@@ -274,7 +279,7 @@ def _normalize_canonical_url(platform: str, canonical_url: str) -> str:
 def _raise_store_error(result: Mapping[str, Any]) -> None:
     error_code = result.get("error_code") or "job_identity_conflict"
     if error_code == PlatformUrlMismatchError.code:
-        raise PlatformUrlMismatchError("岗位规范链接与平台不匹配")
+        raise PlatformUrlMismatchError(_MSG_PLATFORM_URL_MISMATCH)
     if error_code == JobIdentityIncompleteError.code:
         raise JobIdentityIncompleteError("岗位身份不完整")
     raise JobIdentityConflictError(
@@ -407,7 +412,7 @@ def resolve_job_identity(
     """
     if not isinstance(request, JobIdentityRequest):
         raise JobIdentityIncompleteError(
-            "岗位身份载荷必须为对象", details={"missing_fields": list(_TRIPLE_FIELDS)},
+            _MSG_PAYLOAD_NOT_OBJECT, details={"missing_fields": list(_TRIPLE_FIELDS)},
         )
     if request.job_id not in (None, ""):
         return _resolve_by_internal_id(conn, request)

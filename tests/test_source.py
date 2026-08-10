@@ -318,7 +318,7 @@ class BossCdpSourcePlatformTests(unittest.TestCase):
 # outcome 合同表达。真实页面 marker 检测、字段归一化、空结果判定保持占位，
 # 在 marker 核验后才解锁（T305/T307/T308/T310/T311 真实分支）。
 # ===========================================================================
-from webui.source import ZhilianCdpSource  # noqa: E402
+from webui.source import ZhilianCdpSource
 
 
 class ZhilianCdpSourceConstructionTests(unittest.TestCase):
@@ -1692,9 +1692,9 @@ def _zhilian_input_hash(payload: dict) -> str:
 # scrape_details），不经过 argv 文本往返；其余行为（SourceOutcome、事件校验、
 # 熔断器、输入 hash、产物读取）零改动。无法翻译的命令返回失败 outcome。
 # ===========================================================================
-import json as _json_for_inprocess  # noqa: E402
-from scripts import boss_cdp_raw as _boss_for_inprocess  # noqa: E402
-from webui.source import _input_hash as _boss_input_hash  # noqa: E402
+import json as _json_for_inprocess
+from scripts import boss_cdp_raw as _boss_for_inprocess
+from webui.source import _input_hash as _boss_input_hash
 
 
 class BossCdpSourceInProcessTests(unittest.TestCase):
@@ -1727,7 +1727,7 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
 
     def test_constructor_accepts_in_process_false(self):
         """in_process 参数默认 False。"""
-        source = BossCdpSource.__new__(BossCdpSource)
+        BossCdpSource.__new__(BossCdpSource)
         # 只验证签名接受参数，不触发依赖加载
         import inspect
         sig = inspect.signature(BossCdpSource.__init__)

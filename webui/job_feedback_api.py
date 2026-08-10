@@ -61,6 +61,10 @@ _ERROR_STATUS = {
 }
 
 
+_MSG_PROFILE_ID_REQUIRED = "profile_id 不能为空"
+_MSG_PROFILE_OR_JOB_NOT_FOUND = "画像或岗位不存在"
+
+
 def _error(code: str, user_message: str, details: dict | None = None):
     """Stable error body; never leaks SQL, paths, keys or tracebacks."""
     status = _ERROR_STATUS.get(code, 500)
@@ -146,18 +150,18 @@ def create_job_feedback_blueprint(
         try:
             profile_id = (request.args.get("profile_id") or "").strip()
             if not profile_id:
-                return _error("invalid_request", "profile_id 不能为空")
+                return _error("invalid_request", _MSG_PROFILE_ID_REQUIRED)
             try:
                 store.get_profile(profile_id)
             except KeyError:
-                return _error("not_found", "画像或岗位不存在")
+                return _error("not_found", _MSG_PROFILE_OR_JOB_NOT_FOUND)
 
             job_id = (request.args.get("job_id") or "").strip()
             if job_id:
                 try:
                     store.get_job(job_id)
                 except KeyError:
-                    return _error("not_found", "画像或岗位不存在")
+                    return _error("not_found", _MSG_PROFILE_OR_JOB_NOT_FOUND)
             else:
                 platform = (request.args.get("platform") or "").strip()
                 platform_job_id = (request.args.get("platform_job_id") or "").strip()
@@ -190,7 +194,7 @@ def create_job_feedback_blueprint(
                 return _error("invalid_request", "请求体必须为 JSON 对象")
             profile_id = raw.get("profile_id")
             if profile_id in (None, ""):
-                return _error("invalid_request", "profile_id 不能为空")
+                return _error("invalid_request", _MSG_PROFILE_ID_REQUIRED)
             result = service.execute_action(
                 request_id=raw.get("request_id"),
                 profile_id=profile_id,
@@ -242,7 +246,7 @@ def create_job_feedback_blueprint(
         try:
             profile_id = (request.args.get("profile_id") or "").strip()
             if not profile_id:
-                return _error("invalid_request", "profile_id 不能为空")
+                return _error("invalid_request", _MSG_PROFILE_ID_REQUIRED)
             total = service.count_reminders(profile_id)
             return jsonify({
                 "ok": True,
@@ -260,7 +264,7 @@ def create_job_feedback_blueprint(
         try:
             profile_id = (request.args.get("profile_id") or "").strip()
             if not profile_id:
-                return _error("invalid_request", "profile_id 不能为空")
+                return _error("invalid_request", _MSG_PROFILE_ID_REQUIRED)
             try:
                 limit = _parse_int(request.args.get("limit"), 100)
             except ValueError:
@@ -281,7 +285,7 @@ def create_job_feedback_blueprint(
                 store.get_profile(profile_id)
                 job_row = store.get_job(job_id)
             except KeyError:
-                return _error("not_found", "画像或岗位不存在")
+                return _error("not_found", _MSG_PROFILE_OR_JOB_NOT_FOUND)
             try:
                 state = service.get_state(profile_id, job_id)
             except JobFeedbackError as exc:

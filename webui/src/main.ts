@@ -54,7 +54,7 @@ function initTooltips() {
   };
 
   const findTip = (node: EventTarget | null): HTMLElement | null =>
-    node instanceof Element ? (node.closest(".tip[data-tip]") as HTMLElement | null) : null;
+    node instanceof Element ? node.closest(".tip[data-tip]") : null;
 
   document.addEventListener("mouseover", (e) => {
     const tip = findTip(e.target);

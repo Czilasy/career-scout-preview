@@ -21,6 +21,11 @@ PENDING_646 = 646
 TOTAL_ANOMALY = 696
 
 
+_SQL_VERDICTS_BY_RUN = "SELECT platform_job_id, verdict FROM screening_results WHERE run_id = ?"
+_DB_FILENAME = "webui.db"
+_SQL_VERDICT_JOB_IDS = "SELECT platform_job_id FROM screening_results "
+
+
 def _now() -> str:
     return datetime.now().astimezone().isoformat()
 
@@ -102,7 +107,7 @@ def _identify_rough_50_json_split(conn, rough_run_id: str) -> dict:
 
 def _identify_fine_50_uncertain(conn, fine_run_id: str) -> dict:
     rows = conn.execute(
-        "SELECT platform_job_id, verdict FROM screening_results WHERE run_id = ?",
+        _SQL_VERDICTS_BY_RUN,
         (fine_run_id,),
     ).fetchall()
     count = 0
@@ -131,7 +136,7 @@ def _identify_fine_50_uncertain(conn, fine_run_id: str) -> dict:
 def _identify_pending_646(conn, rough_run_id: str, fine_run_id: str) -> dict:
     rough_ids = {
         row["platform_job_id"] for row in conn.execute(
-            "SELECT platform_job_id FROM screening_results "
+            _SQL_VERDICT_JOB_IDS +
             "WHERE run_id = ? AND verdict = 'uncertain'", (rough_run_id,),
         ).fetchall()
     }
@@ -311,11 +316,11 @@ def _is_verified_committed_recovery_audit(store, audit_row) -> bool:
         return False
     source_fingerprint = str(manifest.get("source_fingerprint") or "")
     expected_key = hashlib.sha256(
-        f"{source_fingerprint}|{ROUGH_RUN_ID}|{FINE_RUN_ID}".encode("utf-8")
+        f"{source_fingerprint}|{ROUGH_RUN_ID}|{FINE_RUN_ID}".encode()
     ).hexdigest()
     if not source_fingerprint or expected_key != recovery_key:
         return False
-    backup_path = manifest_path.parent / "webui.db"
+    backup_path = manifest_path.parent / _DB_FILENAME
     expected_sha256 = str(manifest.get("backup_sha256") or "")
     return (
         backup_path.is_file()
@@ -330,7 +335,7 @@ def _committed_metadata_repair_error(
     recovery_key = str(manifest.get("recovery_key") or "")
     source_fingerprint = str(manifest.get("source_fingerprint") or "")
     expected_key = hashlib.sha256(
-        f"{source_fingerprint}|{ROUGH_RUN_ID}|{FINE_RUN_ID}".encode("utf-8")
+        f"{source_fingerprint}|{ROUGH_RUN_ID}|{FINE_RUN_ID}".encode()
     ).hexdigest()
     if (
         manifest.get("status") != "committed"
@@ -351,7 +356,7 @@ def _committed_metadata_repair_error(
         or not stats.get("parent_backup_id")
     ):
         return "invalid_repair_audit"
-    backup_path = manifest_path.parent / "webui.db"
+    backup_path = manifest_path.parent / _DB_FILENAME
     if (
         not backup_path.is_file()
         or not manifest.get("backup_sha256")
@@ -374,7 +379,7 @@ def prepare_recovery(store) -> dict:
     backup_id = uuid.uuid4().hex
     manifest_path = _manifest_path(store, backup_id)
     manifest_path.parent.mkdir(parents=True, exist_ok=False)
-    backup_path = manifest_path.parent / "webui.db"
+    backup_path = manifest_path.parent / _DB_FILENAME
 
     source = store._connect()
     target = sqlite3.connect(str(backup_path))
@@ -390,7 +395,7 @@ def prepare_recovery(store) -> dict:
 
     backup_sha256 = _sha256_file(backup_path)
     recovery_key = hashlib.sha256(
-        f"{source_fingerprint}|{ROUGH_RUN_ID}|{FINE_RUN_ID}".encode("utf-8")
+        f"{source_fingerprint}|{ROUGH_RUN_ID}|{FINE_RUN_ID}".encode()
     ).hexdigest()
     manifest = {
         "backup_id": backup_id,
@@ -452,7 +457,7 @@ def _apply_action_1(conn) -> int:
 
 def _apply_action_2(conn) -> int:
     rows = conn.execute(
-        "SELECT platform_job_id, verdict FROM screening_results WHERE run_id = ?",
+        _SQL_VERDICTS_BY_RUN,
         (FINE_RUN_ID,),
     ).fetchall()
     changed = 0
@@ -473,7 +478,7 @@ def _apply_action_2(conn) -> int:
 
 def _apply_action_4(conn) -> int:
     rows = conn.execute(
-        "SELECT platform_job_id FROM screening_results "
+        _SQL_VERDICT_JOB_IDS +
         "WHERE run_id = ? AND verdict = 'uncertain' "
         "AND platform_job_id NOT IN (SELECT platform_job_id FROM screening_results WHERE run_id = ?)",
         (ROUGH_RUN_ID, FINE_RUN_ID),
@@ -518,7 +523,7 @@ def _recovery_integrity_snapshot(conn) -> dict:
 def _expected_fine_pending_ids(conn) -> set[str]:
     pending_ids = set()
     rows = conn.execute(
-        "SELECT platform_job_id, verdict FROM screening_results WHERE run_id = ?",
+        _SQL_VERDICTS_BY_RUN,
         (FINE_RUN_ID,),
     ).fetchall()
     for row in rows:
@@ -535,7 +540,7 @@ def _check_post_recovery_gate(conn, before: dict, stats: dict) -> dict:
     after = _recovery_integrity_snapshot(conn)
     expected_rough = {
         row["platform_job_id"] for row in conn.execute(
-            "SELECT platform_job_id FROM screening_results "
+            _SQL_VERDICT_JOB_IDS +
             "WHERE run_id = ? AND verdict = 'uncertain' "
             "AND platform_job_id NOT IN (SELECT platform_job_id FROM screening_results WHERE run_id = ?)",
             (ROUGH_RUN_ID, FINE_RUN_ID),
@@ -652,14 +657,14 @@ def execute_recovery(backup_id: str, *, store) -> dict:
     recovery_key = str(manifest.get("recovery_key") or "")
     source_fingerprint = str(manifest.get("source_fingerprint") or "")
     expected_recovery_key = hashlib.sha256(
-        f"{source_fingerprint}|{ROUGH_RUN_ID}|{FINE_RUN_ID}".encode("utf-8")
+        f"{source_fingerprint}|{ROUGH_RUN_ID}|{FINE_RUN_ID}".encode()
     ).hexdigest()
     if not source_fingerprint or recovery_key != expected_recovery_key:
         return {"ok": False, "error": "invalid_manifest", "written": False}
 
     # 即使 recovery_key 已提交，幂等返回也必须先复核本次 backup_id
     # 指向的服务端 manifest 和数据库备份；不能只信一条 audit 行。
-    backup_path = manifest_path.parent / "webui.db"
+    backup_path = manifest_path.parent / _DB_FILENAME
     if not backup_path.exists() or _sha256_file(backup_path) != manifest.get("backup_sha256"):
         return {"ok": False, "error": "backup_hash_mismatch", "written": False}
 
@@ -827,7 +832,7 @@ def repair_committed_pending_metadata(backup_id: str, *, store) -> dict:
             "written": False, "backup_id": backup_id,
         }
 
-    backup_path = manifest_path.parent / "webui.db"
+    backup_path = manifest_path.parent / _DB_FILENAME
     if not backup_path.exists() or _sha256_file(backup_path) != manifest.get("backup_sha256"):
         return {"ok": False, "error": "backup_hash_mismatch", "written": False}
 
@@ -876,7 +881,7 @@ def repair_committed_pending_metadata(backup_id: str, *, store) -> dict:
 
             expected_ids = {
                 row["platform_job_id"] for row in conn.execute(
-                    "SELECT platform_job_id FROM screening_results "
+                    _SQL_VERDICT_JOB_IDS +
                     "WHERE run_id = ? AND verdict = 'uncertain' "
                     "AND platform_job_id NOT IN (SELECT platform_job_id FROM screening_results WHERE run_id = ?)",
                     (ROUGH_RUN_ID, FINE_RUN_ID),

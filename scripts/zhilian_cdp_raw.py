@@ -43,13 +43,17 @@ _ZHILIAN_SEARCH_PROBE_URL = "https://www.zhaopin.com/sou/"
 _ZHILIAN_SEARCH_API = "https://fe-api.zhaopin.com/c/i/search/positions"
 _ZHILIAN_DETAIL_PATTERN = "https://www.zhaopin.com/jobdetail/{job_id}.htm"
 
+_ZHILIAN_PASSPORT_HOST = "passport.zhaopin.com"
+_LOCATION_HREF_JS = "location.href"
+_BODY_TEXT_JS = "document.body ? document.body.innerText.slice(0,3000) : ''"
+
 # 真实页面文本 marker（2026-08-04 核验；只保存脱敏 marker，不保存页面正文）。
 # 2026-08-07 收紧：移除 "verify"/"captcha"/"稍后再试" 等泛词——正常页面
 # 文案（按钮、提示、广告位）可能包含这些词，导致误判风控（账号被错误标记
 # restricted 并写入 4h 冷却）。现在只保留高置信度的完整短语。
 _LOGIN_MARKERS = (
     "请登录", "登录后查看", "扫码登录", "账号登录", "立即登录",
-    "passport.zhaopin.com",
+    _ZHILIAN_PASSPORT_HOST,
 )
 _VERIFY_MARKERS = (
     "EdgeOne", "人机验证", "安全验证", "请完成验证", "拖动滑块",
@@ -66,6 +70,7 @@ _EMPTY_MARKERS = (
     "很抱歉，您搜索的职位找不到！",
     "换个条件试试吧",
 )
+
 
 
 def _http_json(port: int, path: str, *, method: str = "GET") -> Any:
@@ -158,12 +163,12 @@ def _risk_signal(text: str, url: str = "") -> str | None:
         return "rate_limited"
     if any(m.lower() in low for m in _BLOCK_MARKERS):
         return "blocked"
-    if any(m.lower() in low for m in _LOGIN_MARKERS) or "passport.zhaopin.com" in url:
+    if any(m.lower() in low for m in _LOGIN_MARKERS) or _ZHILIAN_PASSPORT_HOST in url:
         return "login_required"
     return None
 
 
-def _normalize_job(item: dict, *, city_code: str) -> dict:
+def _normalize_job(item: dict) -> dict:
     job_id = str(item.get("number") or item.get("positionId") or "").strip()
     title = str(item.get("name") or "").strip()
     company = str(item.get("companyName") or "").strip()
@@ -290,7 +295,7 @@ def check_login_state_tri(cdp_port: int = DEFAULT_CDP_PORT) -> str:
         if not loaded:
             return "unknown"
         body = str(_evaluate(ws, "document.body.innerText.slice(0, 6000)") or "")
-        url = str(_evaluate(ws, "location.href") or "")
+        url = str(_evaluate(ws, _LOCATION_HREF_JS) or "")
     except Exception:
         return "unknown"
     finally:
@@ -299,7 +304,7 @@ def check_login_state_tri(cdp_port: int = DEFAULT_CDP_PORT) -> str:
         except Exception:
             pass
     low = body.lower()
-    if any(m.lower() in low for m in _LOGIN_MARKERS) or "passport.zhaopin.com" in url:
+    if any(m.lower() in low for m in _LOGIN_MARKERS) or _ZHILIAN_PASSPORT_HOST in url:
         return "not_logged_in"
     if any(m.lower() in low for m in _VERIFY_MARKERS) or any(m.lower() in low for m in _RATE_MARKERS):
         return "restricted"
@@ -334,13 +339,16 @@ def preflight(cdp_port: int = DEFAULT_CDP_PORT) -> str | None:
             timeout=30,
         )
         if not ok:
-            body = str(_evaluate(ws, "document.body ? document.body.innerText.slice(0,3000) : ''") or "")
-            signal = _risk_signal(body, str(_evaluate(ws, "location.href") or ""))
+            body = str(_evaluate(ws, _BODY_TEXT_JS) or "")
+            signal = _risk_signal(body, str(_evaluate(ws, _LOCATION_HREF_JS) or ""))
             return signal or "login_required"
-        body = str(_evaluate(ws, "document.body ? document.body.innerText.slice(0,3000) : ''") or "")
-        signal = _risk_signal(body, str(_evaluate(ws, "location.href") or ""))
-        return "verification" if signal == "verification" else ("rate_limited" if signal == "rate_limited"
-               else ("blocked" if signal == "blocked" else "ok"))
+        body = str(_evaluate(ws, _BODY_TEXT_JS) or "")
+        signal = _risk_signal(body, str(_evaluate(ws, _LOCATION_HREF_JS) or ""))
+        return {
+            "verification": "verification",
+            "rate_limited": "rate_limited",
+            "blocked": "blocked",
+        }.get(signal, "ok")
     except TimeoutError:
         return "timeout"
     except Exception:
@@ -379,7 +387,7 @@ def fetch_list(plan_item: dict, *, on_page_completed=None) -> tuple[str | None, 
             value = _evaluate(ws, _search_fetch_expression(keyword, api_city, page_index))
             if not isinstance(value, dict) or value.get("error"):
                 return "invalid_output", [], None
-            jobs = [_normalize_job(item, city_code=city_code) for item in value.get("jobs") or []]
+            jobs = [_normalize_job(item) for item in value.get("jobs") or []]
             for job in jobs:
                 jid = job.get("platform_job_id")
                 if jid:
@@ -485,8 +493,8 @@ def _scrape_detail_on_ws(
         sleeper=sleeper,
     )
     if not ready:
-        body = str(_evaluate(ws, "document.body ? document.body.innerText.slice(0,3000) : ''") or "")
-        signal = _risk_signal(body, str(_evaluate(ws, "location.href") or ""))
+        body = str(_evaluate(ws, _BODY_TEXT_JS) or "")
+        signal = _risk_signal(body, str(_evaluate(ws, _LOCATION_HREF_JS) or ""))
         return signal or "not_found", {}
     value = _evaluate(ws, (
         "(()=>{const s=window.__INITIAL_STATE__||{};"
@@ -531,7 +539,7 @@ def _scrape_detail_on_ws(
 
 
 def fetch_detail(job: dict, *, detail_output_path: str | None = None) -> tuple[str | None, dict]:
-    """抓取智联单岗位详情；返回 (signal, detail)。"""
+    del detail_output_path  # 兼容 source 接口；智联 in-process 直接返回结果
     job_id = str(job.get("platform_job_id") or "").strip()
     canonical = str(job.get("canonical_url") or _canonical_job_url(job_id)).strip()
     if not job_id or not canonical:
@@ -748,6 +756,7 @@ def scrape_details_batch(list_data, max_details=None, output_path=None,
     结果，不写盘、不产出事件文件（与 ``fetch_detail`` 现状一致）。单条失败
     不中断整体；平台级 signal 触发全体停工，已抓结果保留。
     """
+    del output_path, event_callback  # 兼容参数：直接返回结果，不写盘、不产出事件文件
     import queue as _queue_mod
     import threading
 

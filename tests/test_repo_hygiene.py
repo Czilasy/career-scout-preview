@@ -190,9 +190,7 @@ class RepoHygieneTests(unittest.TestCase):
         bad = []
         for rel in paths:
             path = pathlib.PurePosixPath(rel)
-            if any(part in forbidden_dir_parts for part in path.parts):
-                bad.append(rel)
-            elif path.name in forbidden_names or path.name.endswith(forbidden_suffixes):
+            if any(part in forbidden_dir_parts for part in path.parts) or path.name in forbidden_names or path.name.endswith(forbidden_suffixes):
                 bad.append(rel)
         self.assertEqual(bad, [])
 

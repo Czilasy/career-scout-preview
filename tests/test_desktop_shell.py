@@ -756,7 +756,7 @@ class ShellOrchestrationTests(unittest.TestCase):
         self.assertEqual(len(received), 1)
         cfg = received[0]
         self.assertEqual(cfg["RUNTIME_MODE"], "exe")
-        self.assertEqual(cfg["START_TASKS"], True)
+        self.assertTrue(cfg["START_TASKS"])
         self.assertIn("PYTHON_EXECUTABLE", cfg)
 
     def test_closing_saves_window_state(self):

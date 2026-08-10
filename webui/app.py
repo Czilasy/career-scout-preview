@@ -8,13 +8,13 @@ import hashlib
 import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
 import threading
-import uuid
-import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
@@ -24,6 +24,9 @@ from urllib.parse import urlparse
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 FRONTEND_DIST = HERE / "dist"
+
+
+_ZHILIAN_HOST_TOKEN = "zhaopin.com"
 
 
 def _resolve_python_executable() -> str:
@@ -54,7 +57,15 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from scripts import boss_cdp_raw as boss
 from scripts import job_summary
-from webui.constants import CLEANUP_EXPIRED_DAYS, FEEDBACK_THRESHOLD, LIST_LIMIT, LOG_TAIL_LINES
+from webui import ai as ai_service
+from webui import desktop_runtime
+from webui import resume as resume_service
+from webui.constants import (
+    CLEANUP_EXPIRED_DAYS,
+    FEEDBACK_THRESHOLD,
+    LIST_LIMIT,
+    LOG_TAIL_LINES,
+)
 from webui.core import (
     LegacyPlatformNotSupportedError,
     build_filter_options,
@@ -63,22 +74,7 @@ from webui.core import (
     normalize_profile,
     validate_search_params,
 )
-from webui.platforms import UnknownPlatformError
-from webui.store import DiscoveryStoreConflictError, SYSTEMIC_BLOCK_CODES, TaskStore
-from webui.workbench import (
-    allocate_detail_budget,
-    MAX_DETAIL_BUDGET,
-    normalize_job_link,
-    normalize_job_link_for_platform,
-    select_keywords,
-    project_card,
-    merge_profile_fields,
-)
-from webui.source import BossCdpSource as _BossCdpSource
-from webui.process_executor import ArtifactSpec, ScraperExecutor, run_with_deadline
-from webui import desktop_runtime
-from webui import resume as resume_service
-from webui import ai as ai_service
+
 # Task 008：生命周期/提醒/事件/建议的命令服务与路由注册器（Task 001/005），
 # 以及 pipeline 权威岗位身份解析（Task 003）。app.py 只做装配，不复制规则。
 from webui.job_feedback import JobFeedbackError, JobFeedbackService
@@ -89,6 +85,30 @@ from webui.pipeline_job_identity import (
     parse_identity_payload,
     resolve_job_identity,
 )
+from webui.platforms import UnknownPlatformError
+from webui.process_executor import ScraperExecutor
+from webui.source import BossCdpSource as _BossCdpSource
+from webui.store import SYSTEMIC_BLOCK_CODES, DiscoveryStoreConflictError, TaskStore
+from webui.workbench import (
+    merge_profile_fields,
+    normalize_job_link,
+    normalize_job_link_for_platform,
+    project_card,
+    select_keywords,
+)
+
+_MSG_USER_FINISHED = "用户已结束任务"
+_MSG_UNSUPPORTED_PLATFORM = "不支持的招聘平台"
+_MSG_BOSS_LOGIN_STATUS = "BOSS 登录状态"
+_MSG_TASK_NOT_FOUND = "任务不存在"
+_MSG_TASK_ALREADY_RUNNING = "该任务正在继续，请勿重复点击"
+_MSG_ACCOUNT_NOT_FOUND = "账号不存在"
+_MSG_EXPERIMENT_NOT_FOUND = "实验不存在"
+_MSG_MANIFEST_NOT_FOUND = "任务单不存在"
+_MSG_USER_STOPPED_SCRAPE = "用户已停止抓取"
+_MSG_USER_STOPPED_SCREEN = "用户已停止筛选"
+_MSG_PROFILE_NOT_FOUND = "画像不存在"
+_MSG_PROFILE_ID_REQUIRED = "profile_id 不能为空"
 
 
 _OPERATIONAL_ERRORS = (
@@ -102,834 +122,22 @@ _OPERATIONAL_ERRORS = (
 )
 
 
-_SCRAPE_BLOCK_PATTERNS = (
-    ("login_expired", (
-        "登录已失效", "登录过期", "未登录", "登 录 失效", "登 录 已失效", "请先登录", "wt2", "login expired",
-    )),
-    ("source_rate_limited", (
-        "操作频繁", "频繁访问", "访问频繁", "稍后再试", "访问受限", "异常流量", "账号受限", "限流",
-        "rate limit", "too many", "429", "http 403", "http 412", "http 418",
-        "403 forbidden", "412 precondition", "418 im a teapot",
-    )),
-    ("captcha_required", ("验证码", "滑块", "滑动验证", "captcha", "geetest")),
-    ("ip_risk_control", ("IP 级风控", "ip risk")),
-    ("cdp_unavailable", ("CDP", "调试浏览器", "chrome not ready")),
+from webui.task_runners import (
+    _FINE_VERDICTS,
+    DEFAULT_STATE_DIR,
+    SCRAPER,
+    TaskRunner,
+    WorkbenchRunner,
+    _classify_scrape_block,
+    _env,
+    _iso_epoch_ms,
+    _mask_key,
+    _request_hostname,
+    _resume_dropped_from_verdicts,
+    _split_resume_verdicts,
+    _task_payload,
+    _theme_path,
 )
-
-
-def _has_unlock_signal(text: str) -> bool:
-    """高置信解封时间信号：完整未来时间点或明确解封/解锁时间文案。"""
-    if not text:
-        return False
-    try:
-        if boss.parse_unlock_time(text) is not None:
-            return True
-    except Exception:
-        pass
-    lowered = str(text).lower()
-    return any(kw in lowered for kw in ("解封时间", "解封后", "解封于", "解锁时间"))
-
-
-def _classify_scrape_block(err_msg: str) -> str:
-    """把 run_search 返回的 error 字符串映射到 SYSTEMIC_BLOCK_CODES。
-
-    命中返回对应码（如 'source_rate_limited'），未命中返回空串（表示真失败，
-    不应暂停）。限流优先于验证码，避免“频繁 + 滑块”文案被误显示为验证码。
-    """
-    if not err_msg:
-        return ""
-    if _has_unlock_signal(err_msg):
-        return "source_rate_limited"
-    text = err_msg.lower()
-    for code, keywords in _SCRAPE_BLOCK_PATTERNS:
-        for kw in keywords:
-            if kw.lower() in text:
-                return code
-    return ""
-
-
-# 风控异常 reason → 安全失败码（合同 inprocess-runner §3）。
-# 顺序敏感：限流优先于验证码（与 _classify_scrape_block 一致），避免
-# "频繁 + 滑块" 文案被误判为验证码。
-# 关键词集与 webui/source.py 的 _RATE_LIMIT_KEYWORDS / _VERIFICATION_KEYWORDS
-# 及下方 _SCRAPE_BLOCK_PATTERNS 保持同步，避免两种模式下同一文案分类不一致。
-_RISK_CONTROL_REASON_PATTERNS = (
-    ("source_login_required", (
-        "登录已失效", "登录过期", "未登录", "登 录 失效", "登 录 已失效", "请先登录", "wt2", "401", "login expired",
-    )),
-    ("source_rate_limited", (
-        "操作频繁", "频繁访问", "访问频繁", "稍后再试", "访问受限", "异常流量", "账号受限", "限流",
-        "rate limit", "too many", "429", "http 403", "http 412", "http 418",
-        "403 forbidden", "412 precondition", "418 im a teapot",
-    )),
-    ("source_verification_required", (
-        "验证码", "滑块", "滑动验证", "captcha", "slider", "geetest",
-    )),
-)
-
-
-def _classify_risk_control_reason(reason: str) -> str:
-    """把 RiskControlError.reason 文本映射到安全失败码；未命中返回 source_unknown_error。
-
-    用于 in_process 模式异常映射（合同 §3 表 RiskControlError 行）。
-    子进程模式按退出码 10 单独分类，不走本函数。
-    """
-    if not reason:
-        return "source_unknown_error"
-    if _has_unlock_signal(reason):
-        return "source_rate_limited"
-    text = str(reason).lower()
-    for code, keywords in _RISK_CONTROL_REASON_PATTERNS:
-        for kw in keywords:
-            if kw.lower() in text:
-                return code
-    return "source_unknown_error"
-
-
-class _StdoutToLogBuffer(boss._ThreadAwareStdout):
-    """捕获任务线程 print 输出并按行转发到 store.append_log（合同 §2.2）。
-
-    供 setup_chrome 等「无 on_log 参数的库式函数」使用：以 buffer 自身
-    作上下文管理器（带守卫恢复）把既有 print 按行转发，不修改既有
-    print 语句；其他线程的输出转发回真 stdout，避免日志串线。
-    行格式与子进程模式 stdout 完全一致。
-    """
-
-    def __init__(self, store, task_id):
-        super().__init__()
-        self._store = store
-        self._task_id = task_id
-        self._buf = []
-
-    def write(self, text):
-        if not text:
-            return 0
-        if threading.get_ident() != self._tid:
-            if self._fallback is not None:
-                try:
-                    self._fallback.write(text)
-                except Exception:
-                    pass
-            return len(text)
-        parts = text.splitlines(keepends=True)
-        for part in parts:
-            self._buf.append(part)
-            if part.endswith("\n") or part.endswith("\r"):
-                line = "".join(self._buf).rstrip("\r\n")
-                if line.strip():
-                    self._store.append_log(self._task_id, line)
-                self._buf = []
-        return len(text)
-
-    def flush(self):
-        if threading.get_ident() != self._tid:
-            super().flush()
-            return
-        if self._buf:
-            line = "".join(self._buf).rstrip("\r\n")
-            if line.strip():
-                self._store.append_log(self._task_id, line)
-            self._buf = []
-
-
-SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
-DEFAULT_STATE_DIR = Path(
-    os.environ.get("CAREER_SCOUT_STATE_DIR")
-    or os.environ.get("BOSS_WEBUI_STATE_DIR")
-    or os.path.expanduser("~/.career-scout/webui")
-)
-
-
-def _theme_path() -> Path:
-    """主题偏好文件：与登录态/冷却等同级放 ~/.career-scout/theme.json。
-
-    不用 DEFAULT_STATE_DIR（webui 子目录）：主题属于用户偏好，与桌面窗口
-    状态（desktop_window.json）同级，便于用户直接查看与备份。
-    """
-    return Path(os.path.expanduser("~/.career-scout")) / "theme.json"
-
-
-_FINE_VERDICTS = frozenset({"match", "not_match", "mismatch", "uncertain"})
-
-
-def _split_resume_verdicts(verdicts: dict) -> tuple[dict, dict]:
-    """Split stored verdicts into fine-screen and rough-screen verdicts."""
-    fine = {}
-    rough = {}
-    for job_id, verdict in (verdicts or {}).items():
-        value = verdict if isinstance(verdict, dict) else {"verdict": str(verdict)}
-        target = fine if str(value.get("verdict") or "") in _FINE_VERDICTS else rough
-        target[str(job_id)] = value
-    return fine, rough
-
-
-def _resume_dropped_from_verdicts(raw_jobs, verdicts: dict) -> list[dict]:
-    """Reconstruct previously dropped jobs when a resume skips rough screening."""
-    dropped = []
-    for job in raw_jobs or []:
-        if not isinstance(job, dict):
-            continue
-        jid = str(job.get("job_id") or "")
-        verdict = verdicts.get(jid) or {}
-        if isinstance(verdict, dict) and str(verdict.get("verdict") or "") == "dropped":
-            dropped.append({
-                "job_id": jid,
-                "title": job.get("title") or "",
-                "reason": verdict.get("reason") or "粗筛移除",
-                "canonical_url": job.get("source_url") or job.get("job_link") or "",
-            })
-    return dropped
-
-
-def _iso_epoch_ms(value):
-    """Convert an ISO timestamp string (or epoch ms int) to epoch milliseconds."""
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    try:
-        parsed = datetime.fromisoformat(str(value))
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
-    return int(parsed.timestamp() * 1000)
-
-
-def _optional_positive_int(value, field, *, maximum=None):
-    """Parse a user-controlled optional execution limit without coercion surprises."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError(f"{field} 必须是正整数")
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"{field} 必须是正整数") from None
-    if str(value).strip() != str(parsed) or parsed < 1:
-        raise ValueError(f"{field} 必须是正整数")
-    if maximum is not None and parsed > maximum:
-        raise ValueError(f"{field} 不能超过 {maximum}")
-    return parsed
-
-
-def _env():
-    environment = os.environ.copy()
-    environment["PYTHONUTF8"] = "1"
-    environment["PYTHONIOENCODING"] = "utf-8"
-    return environment
-
-
-def _read_json(path, default):
-    path = Path(path) if path else None
-    if not path or not path.is_file():
-        return default
-    try:
-        with path.open(encoding="utf-8") as handle:
-            return json.load(handle)
-    except (json.JSONDecodeError, OSError):
-        return default
-
-
-def _request_hostname(host):
-    host = str(host or "").lower()
-    if host.startswith("[") and "]" in host:
-        return host[1:host.index("]")]
-    return host.split(":", 1)[0]
-
-
-def _task_payload(store, task_id):
-    task = store.get_task(task_id)
-    list_payload = _read_json(task.get("output_path"), {})
-    if not isinstance(list_payload, dict):
-        list_payload = {}
-    jobs = list_payload.get("jobs") if isinstance(list_payload.get("jobs"), list) else []
-    details = _read_json(task.get("detail_output_path"), [])
-    if not isinstance(details, list):
-        details = []
-    return task, list_payload, jobs, details
-
-
-def _mask_key(key: str) -> str:
-    """打码 API key：保留前4后4字符，中间星号。短 key 全星号。"""
-    if not key:
-        return ""
-    if len(key) <= 8:
-        return "*" * len(key)
-    return key[:4] + "*" * (len(key) - 8) + key[-4:]
-
-
-class TaskRunner:
-    """Run scraper commands sequentially while persisting state and output."""
-
-    def __init__(self, store, result_dir, python_executable, start_tasks=True,
-                 execution_mode="subprocess", in_process_timeout=600):
-        self.store = store
-        self.result_dir = Path(result_dir)
-        self.python_executable = str(python_executable)
-        self.start_tasks = bool(start_tasks)
-        self.execution_mode = execution_mode
-        # in-process 模式硬超时（秒），与子进程模式 timeout_seconds=600 对齐
-        self.in_process_timeout = max(1.0, float(in_process_timeout))
-        self._processes = {}
-        self._cancel_events = {}
-        self._process_lock = threading.Lock()
-        self.process_executor = ScraperExecutor()
-        self.result_dir.mkdir(parents=True, exist_ok=True)
-        self.executor = (
-            ThreadPoolExecutor(max_workers=1, thread_name_prefix="boss-task")
-            if self.start_tasks else None
-        )
-
-    def create_scrape(self, search, profile):
-        task_id = uuid.uuid4().hex[:12]
-        output_path = self.result_dir / f"boss_jobs_{task_id}.json"
-        detail_path = self.result_dir / f"boss_details_{task_id}.json"
-        task = self.store.create_task(
-            task_id,
-            "scrape",
-            {"search": search, "profile": profile},
-            output_path=str(output_path),
-            detail_output_path=str(detail_path),
-        )
-        self._submit(task_id)
-        return task
-
-    def create_setup_chrome(self):
-        task_id = f"setup-{uuid.uuid4().hex[:8]}"
-        task = self.store.create_task(task_id, "setup_chrome", {})
-        self._submit(task_id)
-        return task
-
-    def _submit(self, task_id):
-        if self.executor:
-            self.executor.submit(self._execute, task_id)
-
-    def cancel(self, task_id):
-        task = self.store.get_task(task_id)
-        if task["status"] not in {"queued", "running"}:
-            raise ValueError(f"只能取消等待中或运行中的任务，当前状态: {task['status']}")
-        with self._process_lock:
-            process = self._processes.get(task_id)
-            cancel_event = self._cancel_events.get(task_id)
-        if cancel_event is not None:
-            cancel_event.set()
-        if process is not None:
-            process.terminate()
-        self.store.append_log(task_id, "用户取消任务")
-        try:
-            return self.store.update_task(task_id, "interrupted", error="用户取消任务")
-        except ValueError:
-            # in_process 模式下，_execute 的 SearchCancelled 路径可能已抢先
-            # 改为 interrupted（cancel_event set → run_search_programmatic 抛
-            # SearchCancelled → _run_in_process 返回 interrupted → _execute 改
-            # 状态）。此时状态已是终态，返回当前快照而非抛异常。
-            return self.store.get_task(task_id)
-
-    def retry(self, task_id):
-        task = self.store.get_task(task_id)
-        if task["status"] not in {"failed", "interrupted", "succeeded"}:
-            raise ValueError(f"当前任务尚未结束，不能重试: {task['status']}")
-        if task["kind"] == "setup_chrome":
-            return self.create_setup_chrome()
-        return self.create_scrape(task["params"]["search"], task["params"].get("profile", {}))
-
-    def build_command(self, task):
-        if task["kind"] == "setup_chrome":
-            return [self.python_executable, str(SCRAPER), "--setup-chrome"]
-        search = task["params"]["search"]
-        command = [
-            self.python_executable,
-            str(SCRAPER),
-            "--keyword", search["keyword"],
-            "--city", search["city"],
-            "--pages", str(search["pages"]),
-            "--output", task["output_path"],
-            "--detail-output", task["detail_output_path"],
-        ]
-        if not search["detail"]:
-            command.append("--no-detail")
-        if search["analysis"]:
-            command.append("--analysis")
-        if search["format"] == "csv":
-            command.extend(["--format", "csv"])
-        for name, value in search["filters"].items():
-            command.extend([f"--{name}", value])
-        return command
-
-    def validate_artifacts(self, task):
-        if task["kind"] != "scrape":
-            return
-        output_path = Path(task.get("output_path") or "")
-        if task["id"] not in output_path.stem or not output_path.is_file():
-            raise ValueError("列表产物不存在或不属于当前任务")
-        try:
-            with output_path.open(encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except (json.JSONDecodeError, OSError) as exc:
-            raise ValueError(f"列表产物解析失败: {exc}") from exc
-        jobs = payload.get("jobs") if isinstance(payload, dict) else None
-        if not isinstance(jobs, list):
-            raise ValueError("列表产物缺少 jobs 列表")
-        search = task["params"].get("search", {})
-        if search.get("detail") and jobs:
-            detail_path = Path(task.get("detail_output_path") or "")
-            if task["id"] not in detail_path.stem or not detail_path.is_file():
-                raise ValueError("详情产物不存在或不属于当前任务")
-            try:
-                with detail_path.open(encoding="utf-8") as handle:
-                    details = json.load(handle)
-            except (json.JSONDecodeError, OSError) as exc:
-                raise ValueError(f"详情产物解析失败: {exc}") from exc
-            if not isinstance(details, list):
-                raise ValueError("详情产物必须是 JSON list")
-
-    def _execute(self, task_id):
-        try:
-            if self.store.get_task(task_id)["status"] != "queued":
-                return
-            self.store.update_task(task_id, "running")
-            task = self.store.get_task(task_id)
-            self.store.append_log(task_id, "任务开始")
-            cancel_event = threading.Event()
-            with self._process_lock:
-                self._cancel_events[task_id] = cancel_event
-            if self.execution_mode == "in_process":
-                outcome = self._run_in_process(task_id, task, cancel_event)
-            else:
-                command = self.build_command(task)
-                artifacts = []
-                if task["kind"] == "scrape":
-                    artifacts = [
-                        ArtifactSpec(task["output_path"], root=self.result_dir),
-                        ArtifactSpec(task["detail_output_path"], root=self.result_dir, required=False),
-                    ]
-                result = self.process_executor.execute(
-                    command, timeout_seconds=600, cwd=PROJECT_ROOT, env=_env(),
-                    cancel_event=cancel_event, artifacts=artifacts,
-                    on_output=lambda chunk: [
-                        self.store.append_log(task_id, line)
-                        for line in chunk.splitlines() if line.strip()
-                    ],
-                )
-                outcome = (
-                    "succeeded" if result.ok else "failed",
-                    result.returncode if result.returncode is not None else -1,
-                    result.failure_code or "process_failed",
-                    "",
-                )
-            # SearchCancelled → interrupted（cancel() 可能已改状态，也可能尚未）
-            if outcome[0] == "interrupted":
-                try:
-                    if self.store.get_task(task_id)["status"] in {"queued", "running"}:
-                        self.store.update_task(task_id, "interrupted", error="用户取消任务")
-                except ValueError:
-                    pass  # cancel() 已抢先改为 interrupted
-                return
-            if self.store.get_task(task_id)["status"] == "interrupted":
-                return
-            if outcome[0] == "succeeded":
-                self.validate_artifacts(task)
-                self.store.append_log(task_id, "任务完成")
-                self.store.update_task(task_id, "succeeded", returncode=0)
-            else:
-                message = f"抓取执行失败: {outcome[2] or 'process_failed'}"
-                self.store.append_log(task_id, message)
-                self.store.update_task(
-                    task_id, "failed", returncode=outcome[1], error=message,
-                )
-        except Exception as exc:
-            try:
-                self.store.append_log(task_id, f"任务失败：{exc}")
-                self.store.update_task(task_id, "failed", returncode=-1, error=str(exc))
-            except (KeyError, ValueError) as persist_exc:
-                try:
-                    current = self.store.get_task(task_id)
-                except KeyError as lookup_exc:
-                    raise RuntimeError(
-                        "task_failure_persistence_failed"
-                    ) from lookup_exc
-                if current.get("status") not in {
-                    "succeeded", "failed", "interrupted",
-                }:
-                    raise RuntimeError(
-                        "task_failure_persistence_failed"
-                    ) from persist_exc
-                # A concurrent cancellation/completion already committed a terminal
-                # state. Preserve that durable winner instead of overwriting it.
-        finally:
-            with self._process_lock:
-                self._processes.pop(task_id, None)
-                self._cancel_events.pop(task_id, None)
-
-    # ------------------------------------------------------------------
-    # in_process 模式执行（合同 inprocess-runner §4.1）
-    # ------------------------------------------------------------------
-
-    def _run_in_process(self, task_id, task, cancel_event):
-        """in_process 模式执行：调用 boss 库式函数，异常按 §3 映射表冻结。
-
-        带硬超时（``in_process_timeout``，默认 600s，与子进程模式对齐）：
-        超时 → 置 cancel_event 请求协作停止，仍不退出则按
-        ``process_timeout`` 失败（后台线程自生自灭，调用方已按失败处理）。
-
-        返回 ``(status, returncode, failure_code, output_tail)``；
-        ``status`` ∈ ``{"succeeded", "failed", "interrupted"}``。
-        """
-        try:
-            completed, payload = run_with_deadline(
-                lambda: self._run_in_process_impl(task_id, task, cancel_event),
-                timeout_seconds=self.in_process_timeout,
-                cancel_event=cancel_event,
-            )
-        except boss.SearchCancelled:
-            return ("interrupted", -1, None, "")
-        except boss.CDPUnavailableError as exc:
-            return ("failed", 2, "source_cdp_unavailable", str(exc))
-        except boss.LoginRequiredError as exc:
-            return ("failed", 1, "source_login_required", str(exc))
-        except boss.RiskControlError as exc:
-            failed_code = _classify_risk_control_reason(exc.reason)
-            return ("failed", 10, failed_code, exc.reason)
-        except Exception as exc:
-            return ("failed", -1, "process_failed", str(exc))
-        if not completed:
-            # 与子进程模式 process_executor 的 process_timeout 语义对齐
-            return ("failed", -1, "process_timeout", str(payload))
-        return payload
-
-    def _run_in_process_impl(self, task_id, task, cancel_event):
-        """in-process 实际执行体（在 run_with_deadline 的 worker 线程中）。"""
-        if task["kind"] == "setup_chrome":
-            returncode = self._run_setup_chrome_in_process(task_id, cancel_event)
-            if returncode == 0:
-                return ("succeeded", 0, None, "")
-            return ("failed", returncode, "process_failed", "")
-
-        search = task["params"]["search"]
-        boss.run_search_programmatic(
-            keyword=search["keyword"],
-            city=search["city"],
-            pages=int(search["pages"]),
-            cdp_port=boss.DEFAULT_CDP_PORT,
-            output_path=task["output_path"],
-            detail_output_path=task["detail_output_path"],
-            detail=bool(search["detail"]),
-            analysis=bool(search.get("analysis")),
-            fmt=search.get("format", "json"),
-            filters=dict(search.get("filters") or {}),
-            on_log=lambda line: self.store.append_log(task_id, line),
-            cancel_event=cancel_event,
-        )
-        return ("succeeded", 0, None, "")
-
-    def _run_setup_chrome_in_process(self, task_id, cancel_event):
-        """in_process 模式 setup_chrome：调用 boss.run_setup_chrome 库式函数。
-
-        run_setup_chrome 无 cancel_event/on_log 参数；用线程感知 buffer
-        把既有 print 按行转发到 store.append_log，cancel_event 仅在调用
-        前后检查（mid-execution 不可中断，setup_chrome 通常短时）。
-        """
-        if cancel_event.is_set():
-            return 1
-        buffer = _StdoutToLogBuffer(self.store, task_id)
-        with buffer:
-            returncode = boss.run_setup_chrome(cdp_port=boss.DEFAULT_CDP_PORT)
-        return returncode
-
-
-class WorkbenchRunner(TaskRunner):
-    """T007: parent search run + child queries with budget and state machine.
-
-    Reuses TaskRunner infrastructure (process pool, result dir, python
-    executable) and adds the workbench-specific run orchestration:
-    a parent search_run owns N child run_queries, each with its own
-    detail budget slice.  The parent status is derived from child states.
-    """
-
-    def create_search_run(self, profile_id, *, keywords, confirmed_fields, mode="ai"):
-        """Create parent run + child queries for up to 3 keywords.
-
-        Keywords are already resolved by the caller (manual + AI merge).
-        Budget is split evenly across queries with remainder to the first.
-        """
-        keywords = [str(k).strip() for k in (keywords or []) if str(k).strip()]
-        if not keywords:
-            raise ValueError("至少需要一个关键词才能创建搜索运行")
-        if len(keywords) > 3:
-            keywords = keywords[:3]
-
-        profile_snapshot = dict(confirmed_fields or {})
-        run = self.store.create_search_run(
-            profile_id, profile_snapshot, mode, total_detail_budget=MAX_DETAIL_BUDGET,
-        )
-        run_id = run["id"]
-
-        budgets = allocate_detail_budget(len(keywords), MAX_DETAIL_BUDGET)
-        for ordinal, (keyword, budget) in enumerate(zip(keywords, budgets)):
-            list_path = str(self.result_dir / f"list_{run_id}_{ordinal}.json")
-            detail_path = str(self.result_dir / f"detail_{run_id}_{ordinal}.json")
-            frozen_query = {
-                "keyword": keyword, "city": profile_snapshot.get("city", ""),
-                "filters": {key: profile_snapshot[key] for key in ("scale", "stage", "salary", "experience", "degree", "industry") if profile_snapshot.get(key)},
-            }
-            self.store.create_run_query(
-                run_id, ordinal, frozen_query, list_path, detail_path, int(budget),
-            )
-        if self.executor:
-            self.executor.submit(self._execute_search_run, run_id)
-        return self.store.get_search_run(run_id)
-
-    def _query_command(self, query):
-        """Build one bounded invocation of the existing CDP scraper."""
-        frozen = query["frozen_query"]
-        command = [
-            self.python_executable, str(SCRAPER),
-            "--keyword", str(frozen["keyword"]),
-            "--city", str(frozen["city"]),
-            "--output", query["list_output_path"],
-            "--detail-output", query["detail_output_path"],
-            "--max-details", str(query["detail_budget"]),
-        ]
-        for name, value in frozen.get("filters", {}).items():
-            command.extend([f"--{name}", str(value)])
-        return command
-
-    def _read_query_artifacts(self, run_id, query):
-        """Read only this run's declared JSON artifacts after checking their paths."""
-        root = self.result_dir.resolve()
-        paths = [Path(query["list_output_path"]), Path(query["detail_output_path"])]
-        for path in paths:
-            try:
-                resolved = path.resolve()
-            except OSError as exc:
-                raise ValueError("搜索产物路径无效") from exc
-            if root not in resolved.parents or run_id not in resolved.name or not resolved.is_file():
-                raise ValueError("搜索产物不存在或不属于当前运行")
-        payload = _read_json(paths[0], {})
-        details = _read_json(paths[1], [])
-        if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list) or not isinstance(details, list):
-            raise ValueError("搜索产物格式无效")
-        return payload["jobs"], details
-
-    def _persist_complete_jobs(self, run, query, jobs, details, seen_detail_ids=None):
-        """Persist valid completed JDs; the database unique URL enforces run-wide dedupe."""
-        seen_detail_ids = seen_detail_ids if seen_detail_ids is not None else set()
-        detail_by_id = {
-            str(item.get("job_id") or ""): item
-            for item in details
-            if isinstance(item, dict) and item.get("jd") and str(item.get("job_id") or "") not in seen_detail_ids
-        }
-        count = 0
-        persisted_jobs = []
-        for raw in jobs:
-            if count >= int(query["detail_budget"]):
-                break
-            if not isinstance(raw, dict):
-                continue
-            detail = detail_by_id.get(str(raw.get("job_id") or ""))
-            if not detail:
-                continue
-            excluded = [str(term).lower() for term in run["profile_snapshot"].get("excluded_terms", []) if str(term).strip()]
-            searchable = " ".join([str(raw.get("title") or ""), str(raw.get("boss_name") or ""), str(detail.get("jd") or "")]).lower()
-            if any(term in searchable for term in excluded):
-                continue
-            source_url = str(raw.get("job_link") or detail.get("job_link") or "")
-            canonical_url = normalize_job_link(source_url)
-            if not canonical_url:
-                continue
-            job = self.store.save_job(
-                canonical_url, source_url,
-                str(raw.get("title") or ""), str(raw.get("boss_name") or raw.get("company") or ""),
-                str(raw.get("salary") or ""), str(raw.get("location") or ""), str(detail.get("jd") or ""),
-            )
-            self.store.link_profile_job(run["profile_id"], job["id"], run["id"], run["id"])
-            self.store.append_search_event(run["id"], "job_completed", {"job_id": job["id"]})
-            persisted_jobs.append(job)
-            seen_detail_ids.add(str(raw.get("job_id") or ""))
-            count += 1
-        settings = self.store.get_ai_settings()
-        if persisted_jobs and settings.get("is_configured"):
-            credential_ref = self.store.get_credential_ref()
-            api_key = ai_service.retrieve_api_key(credential_ref) if credential_ref else ""
-            if api_key:
-                try:
-                    ranked_ids = ai_service.rank_jds(
-                        run["profile_snapshot"],
-                        [{"job_id": job["id"], "title": job["title"], "jd": job["jd"]} for job in persisted_jobs],
-                        settings["endpoint_url"], api_key, settings.get("model", ""),
-                    )
-                    for rank, job_id in enumerate(ranked_ids):
-                        self.store.link_profile_job(run["profile_id"], job_id, run["id"], run["id"], ai_rank=rank)
-                except (ai_service.AISecurityError, ValueError):
-                    # Ranking is optional: valid complete JDs still stream when AI fails.
-                    pass
-        return count
-
-    def _stream_new_details(self, run_id, query, seen_detail_ids):
-        """Read the scraper's atomic detail file while its process is still alive."""
-        try:
-            jobs, details = self._read_query_artifacts(run_id, query)
-        except ValueError:
-            return 0
-        run = self.store.get_search_run(run_id)
-        remaining = max(0, MAX_DETAIL_BUDGET - int(run["completed_jd_count"]))
-        if not remaining:
-            return 0
-        original_budget = query["detail_budget"]
-        query = dict(query)
-        query["detail_budget"] = min(int(original_budget), remaining)
-        return self._persist_complete_jobs(run, query, jobs, details, seen_detail_ids)
-
-    def _execute_search_run(self, run_id):
-        """Execute child queries sequentially and persist only validated complete JDs."""
-        run = self.store.get_search_run(run_id)
-        if run["status"] != "queued":
-            return
-        self.store.update_search_run(run_id, status="running")
-        for query in self.store.list_run_queries(run_id):
-            if self.store.get_search_run(run_id)["status"] == "interrupted":
-                return
-            self.store.update_run_query(query["id"], status="running")
-            try:
-                cancel_event = threading.Event()
-                with self._process_lock:
-                    self._cancel_events[run_id] = cancel_event
-                seen_detail_ids = set()
-
-                def stream_progress():
-                    persisted = self._stream_new_details(run_id, query, seen_detail_ids)
-                    if persisted:
-                        current = self.store.get_search_run(run_id)
-                        self.store.update_search_run(
-                            run_id, completed_jd_count=current["completed_jd_count"] + persisted,
-                        )
-                if self.execution_mode == "in_process":
-                    query_outcome = self._run_query_in_process(
-                        run_id, query, cancel_event, stream_progress,
-                    )
-                    if query_outcome[0] != "succeeded":
-                        raise ValueError(query_outcome[2] or "抓取器执行失败")
-                else:
-                    result = self.process_executor.execute(
-                        self._query_command(query), timeout_seconds=600,
-                        cwd=PROJECT_ROOT, env=_env(), cancel_event=cancel_event,
-                        on_poll=stream_progress,
-                        artifacts=[
-                            ArtifactSpec(query["list_output_path"], root=self.result_dir),
-                            ArtifactSpec(query["detail_output_path"], root=self.result_dir, required=False),
-                        ],
-                    )
-                    if not result.ok:
-                        raise ValueError(result.failure_code or "抓取器执行失败")
-                jobs, details = self._read_query_artifacts(run_id, query)
-                persisted = self._stream_new_details(run_id, query, seen_detail_ids)
-                self.store.update_run_query(query["id"], status="succeeded", counts={"completed_jd": persisted})
-                current = self.store.get_search_run(run_id)
-                self.store.update_search_run(
-                    run_id,
-                    discovered_count=current["discovered_count"] + len(jobs),
-                    completed_jd_count=current["completed_jd_count"] + persisted,
-                )
-            except (OSError, ValueError, json.JSONDecodeError):
-                self.store.update_run_query(query["id"], status="failed", error_code="scrape_failed")
-            finally:
-                with self._process_lock:
-                    self._processes.pop(run_id, None)
-                    self._cancel_events.pop(run_id, None)
-        if self.store.get_search_run(run_id)["status"] != "interrupted":
-            self._finalize_run(run_id)
-        self.store.cleanup_expired_jobs(days=CLEANUP_EXPIRED_DAYS)
-
-    def _run_query_in_process(self, run_id, query, cancel_event, stream_progress):
-        """in_process 模式执行单个 child query（合同 inprocess-runner §4.2）。
-
-        把 ``_query_command`` 产出的 argv 翻译为 ``run_search_programmatic``
-        直传参数；``on_poll`` 透传以保留增量入库语义；异常按 §3 映射表冻结。
-        带硬超时（``in_process_timeout``），超时 → 协作取消 → 仍不退出
-        则按 ``process_timeout`` 失败（与子进程模式语义对齐）。
-
-        返回 ``(status, returncode, failure_code, output_tail)``；
-        ``status`` ∈ ``{"succeeded", "failed", "interrupted"}``。
-        """
-        frozen = query["frozen_query"]
-        try:
-            if cancel_event.is_set():
-                return ("interrupted", -1, None, "")
-            completed, payload = run_with_deadline(
-                lambda: self._run_query_in_process_impl(
-                    run_id, query, cancel_event, stream_progress,
-                ),
-                timeout_seconds=self.in_process_timeout,
-                cancel_event=cancel_event,
-            )
-        except boss.SearchCancelled:
-            return ("interrupted", -1, None, "")
-        except boss.CDPUnavailableError as exc:
-            return ("failed", 2, "source_cdp_unavailable", str(exc))
-        except boss.LoginRequiredError as exc:
-            return ("failed", 1, "source_login_required", str(exc))
-        except boss.RiskControlError as exc:
-            return ("failed", 10, _classify_risk_control_reason(exc.reason), exc.reason)
-        except Exception as exc:
-            return ("failed", -1, "process_failed", str(exc))
-        if not completed:
-            return ("failed", -1, "process_timeout", str(payload))
-        return payload
-
-    def _run_query_in_process_impl(self, run_id, query, cancel_event, stream_progress):
-        """in-process 实际执行体（在 run_with_deadline 的 worker 线程中）。"""
-        frozen = query["frozen_query"]
-        boss.run_search_programmatic(
-            keyword=str(frozen["keyword"]),
-            city=str(frozen["city"]),
-            pages=1,
-            cdp_port=boss.DEFAULT_CDP_PORT,
-            output_path=query["list_output_path"],
-            detail_output_path=query["detail_output_path"],
-            detail=True,
-            max_details=int(query["detail_budget"]),
-            filters=dict(frozen.get("filters") or {}),
-            on_log=lambda line: self.store.append_log(run_id, line),
-            on_poll=stream_progress,
-            cancel_event=cancel_event,
-        )
-        return ("succeeded", 0, None, "")
-
-    def _finalize_run(self, run_id):
-        """Promote parent run to succeeded/partial/failed based on child states."""
-        run = self.store.get_search_run(run_id)
-        if run["status"] == "queued":
-            self.store.update_search_run(run_id, status="running")
-        queries = self.store.list_run_queries(run_id)
-        if not queries:
-            self.store.update_search_run(run_id, status="failed", error_code="no_queries")
-            return self.store.get_search_run(run_id)
-
-        states = [q["status"] for q in queries]
-        succeeded = sum(1 for s in states if s == "succeeded")
-        failed = sum(1 for s in states if s == "failed")
-        if succeeded == len(queries):
-            new_status = "succeeded"
-        elif failed == len(queries):
-            new_status = "failed"
-        else:
-            new_status = "partial"
-        return self.store.update_search_run(run_id, status=new_status)
-
-    def cancel_search_run(self, run_id):
-        """Mark parent run interrupted; already-written jobs are preserved."""
-        run = self.store.get_search_run(run_id)
-        if run["status"] not in {"queued", "running"}:
-            raise ValueError(f"只能取消等待中或运行中的运行，当前状态: {run['status']}")
-        with self._process_lock:
-            process = self._processes.get(run_id)
-            cancel_event = self._cancel_events.get(run_id)
-        if cancel_event is not None:
-            cancel_event.set()
-        if process is not None:
-            process.terminate()
-        return self.store.update_search_run(run_id, status="interrupted")
 
 
 def _run_to_task_status(db_status: str) -> str:
@@ -964,6 +172,14 @@ def _public_task_status(status: str, interruption_kind: str | None = None) -> st
         return "interrupted"
     return mapping.get(status, status or "failed")
 
+
+def _pipeline_kind_for_stage(stage: str) -> str:
+    """把 screening run 阶段映射为对外 pipeline kind。"""
+    if str(stage).startswith("recrawl_"):
+        return "recrawl"
+    if str(stage) == "scrape":
+        return "scrape"
+    return "ai_screen"
 
 # ---------------------------------------------------------------------------
 # Task 008 集成胶合：legacy PATCH 原子性与 pipeline 身份映射。
@@ -1288,7 +504,7 @@ def create_app(config=None):
         if isinstance(error, UnknownPlatformError):
             return jsonify({
                 "error_code": "platform_validation_failed",
-                "user_message": "不支持的招聘平台",
+                "user_message": _MSG_UNSUPPORTED_PLATFORM,
             }), 400
         if str(error).startswith("city_mapping_missing"):
             return jsonify({
@@ -1318,7 +534,7 @@ def create_app(config=None):
     def handle_key_error(error):
         return jsonify({
             "error_code": "not_found",
-            "user_message": "任务不存在",
+            "user_message": _MSG_TASK_NOT_FOUND,
         }), 404
 
     @app.route("/")
@@ -1349,7 +565,7 @@ def create_app(config=None):
         platforms.py 的 list_platforms() 已在 tasks003 测过投影函数；
         本路由只负责 HTTP 暴露，不返回 profile 路径或路径摘要。
         """
-        from webui.platforms import list_platforms, DEFAULT_PLATFORM
+        from webui.platforms import DEFAULT_PLATFORM, list_platforms
         platforms = [
             {
                 "key": reg.key,
@@ -1383,7 +599,9 @@ def create_app(config=None):
             return jsonify({"filters": build_filter_options(), "cities": cities})
         # 新平台感知形状
         from webui.platforms import (
-            validate_platform_key, UnknownPlatformError, get_platform_or_none,
+            UnknownPlatformError,
+            get_platform_or_none,
+            validate_platform_key,
         )
         try:
             validate_platform_key(platform_raw)
@@ -1391,7 +609,7 @@ def create_app(config=None):
             return jsonify({
                 "ok": False,
                 "error_code": "platform_validation_failed",
-                "user_message": "不支持的招聘平台",
+                "user_message": _MSG_UNSUPPORTED_PLATFORM,
             }), 400
         reg = get_platform_or_none(platform_raw)
         if reg is None:
@@ -1459,8 +677,10 @@ def create_app(config=None):
             }})
         # 新平台感知形状：复用 platforms.project_filter_schema
         from webui.platforms import (
-            project_filter_schema, validate_platform_key, UnknownPlatformError,
+            UnknownPlatformError,
             get_platform_or_none,
+            project_filter_schema,
+            validate_platform_key,
         )
         try:
             validate_platform_key(platform_raw)
@@ -1468,7 +688,7 @@ def create_app(config=None):
             return jsonify({
                 "ok": False,
                 "error_code": "platform_validation_failed",
-                "user_message": "不支持的招聘平台",
+                "user_message": _MSG_UNSUPPORTED_PLATFORM,
             }), 400
         if get_platform_or_none(platform_raw) is None:
             return jsonify({
@@ -1507,7 +727,7 @@ def create_app(config=None):
             return jsonify({
                 "ok": False,
                 "error_code": "platform_validation_failed",
-                "user_message": "不支持的招聘平台",
+                "user_message": _MSG_UNSUPPORTED_PLATFORM,
                 "platform": check_platform,
             }), 400
         if check_platform != "boss":
@@ -1590,18 +810,18 @@ def create_app(config=None):
             from scripts.login_state_cache import read_cached_state
             cached = read_cached_state(account, "boss")
             if cached == "logged_in":
-                boss_login = {"id": "boss_login", "name": "BOSS 登录状态",
+                boss_login = {"id": "boss_login", "name": _MSG_BOSS_LOGIN_STATUS,
                               "status": "ok", "detail": "已登录（缓存）", "fix": None}
             elif cached == "restricted":
-                boss_login = {"id": "boss_login", "name": "BOSS 登录状态",
+                boss_login = {"id": "boss_login", "name": _MSG_BOSS_LOGIN_STATUS,
                               "status": "fail", "detail": _restricted_cache_detail(account),
                               "fix": None}
             elif cached == "not_logged_in":
-                boss_login = {"id": "boss_login", "name": "BOSS 登录状态",
+                boss_login = {"id": "boss_login", "name": _MSG_BOSS_LOGIN_STATUS,
                               "status": "fail", "detail": "未登录（缓存） — 请打开该账号的 BOSS 窗口登录",
                               "fix": "打开账号浏览器登录"}
             elif cached == "unknown":
-                boss_login = {"id": "boss_login", "name": "BOSS 登录状态",
+                boss_login = {"id": "boss_login", "name": _MSG_BOSS_LOGIN_STATUS,
                               "status": "skip", "detail": "状态未知（缓存） — CDP 不可用，稍后重试", "fix": None}
         browser_items = [by_id["browsers"], by_id["cdp"], boss_login]
 
@@ -2020,7 +1240,7 @@ def create_app(config=None):
                     )
                     store.save_resume_suggestions(record["id"], ai_suggestion)
                     store.update_ai_status("ready")
-                except Exception as exc:
+                except Exception:
                     store.update_ai_status("failed", last_error_code="parse_failed")
                     ai_suggestion = {"error": "AI 解析失败，请手动填写"}
         # Merge AI suggestion into confirmed_fields (manual wins)
@@ -2052,7 +1272,7 @@ def create_app(config=None):
         legacy_platform_guard(raw.get("platform"))
         profile_id = raw.get("profile_id")
         if not profile_id:
-            raise ValueError("profile_id 不能为空")
+            raise ValueError(_MSG_PROFILE_ID_REQUIRED)
         profile = store.get_profile(profile_id)
         confirmed_fields = profile.get("confirmed_fields") or {}
         manual_keywords = raw.get("manual_keywords") or []
@@ -2176,10 +1396,7 @@ def create_app(config=None):
 
     @app.route("/api/feedback/<feedback_id>/revoke", methods=["POST"])
     def revoke_feedback(feedback_id):
-        try:
-            fb = store.get_feedback(feedback_id)
-        except KeyError:
-            raise
+        fb = store.get_feedback(feedback_id)
         already_revoked = bool(fb.get("revoked_at"))
         store.revoke_feedback(feedback_id)
         if fb["action"] == "not_interested" and not already_revoked:
@@ -2207,7 +1424,7 @@ def create_app(config=None):
     def list_profile_jobs():
         profile_id = request.args.get("profile_id")
         if not profile_id:
-            raise ValueError("profile_id 不能为空")
+            raise ValueError(_MSG_PROFILE_ID_REQUIRED)
         status = request.args.get("status")
         run_id = request.args.get("run_id")
         jobs = store.list_profile_jobs(profile_id, status=status, run_id=run_id)
@@ -2428,7 +1645,7 @@ def create_app(config=None):
 
     app.config["RUN_TUNING_MANIFEST_CHILD"] = _run_tuning_manifest_child
 
-    def _new_pipeline_task(task_id, kind, *, source_task_id=None):
+    def _new_pipeline_task(kind, *, source_task_id=None):
         task = {
             "kind": kind,
             "status": "queued",
@@ -2436,7 +1653,7 @@ def create_app(config=None):
             "logs": [],
             "result": None,
             "error": "",
-            # 计时：任务创建即记开始，终态时补结束（前端计时器从快照读取，
+            # 任务创建即记开始，终态时补结束（前端计时器从快照读取，
             # 不再依赖组件存活期间的本地时钟，组件销毁重建/刷新后不再归零）。
             "started_at": int(time.time() * 1000),
             "finished_at": None,
@@ -2451,7 +1668,7 @@ def create_app(config=None):
 
     def _register_pipeline_task(task_id, kind, *, source_task_id=None):
         task = _new_pipeline_task(
-            task_id, kind, source_task_id=source_task_id
+            kind, source_task_id=source_task_id
         )
         with _pipeline_lock:
             _pipeline_tasks[task_id] = task
@@ -2467,7 +1684,7 @@ def create_app(config=None):
                     and existing.get("status") in ("queued", "running")
                 ):
                     return None, existing_id
-            task = _new_pipeline_task(task_id, "recrawl")
+            task = _new_pipeline_task("recrawl")
             task["source_run_id"] = source_run_id
             _pipeline_tasks[task_id] = task
             return task, None
@@ -2505,7 +1722,7 @@ def create_app(config=None):
                 "queued", "running",
             ):
                 return None, previous
-            task = _new_pipeline_task(task_id, kind)
+            task = _new_pipeline_task(kind)
             _pipeline_tasks[task_id] = task
             return task, previous
 
@@ -2713,7 +1930,7 @@ def create_app(config=None):
         if profile_dir:
             platform = str(task.get("platform") or "boss")
             from webui.platforms import resolve_login_space
-            space = resolve_login_space(platform, account or "a", boss_profile_dir=profile_dir)
+            _ = resolve_login_space(platform, account or "a", boss_profile_dir=profile_dir)
             from webui.platforms import derive_zhilian_profile_dir
             set_active_cdp_data_dir(profile_dir if platform == "boss" else derive_zhilian_profile_dir(profile_dir))
         else:
@@ -2888,7 +2105,11 @@ def create_app(config=None):
             task_run_id: str, jobs: list[dict], *, stage: str,
             source_run_id: str = "", platform: str = "") -> None:
         """Persist per-job JD failures before a systemic pause returns."""
-        from webui.pipeline_exec import ERROR_TAXONOMY, taxonomy_reason, failed_code_label
+        from webui.pipeline_exec import (
+            ERROR_TAXONOMY,
+            failed_code_label,
+            taxonomy_reason,
+        )
 
         target_run_ids = [str(task_run_id)]
         if source_run_id and str(source_run_id) not in target_run_ids:
@@ -2966,7 +2187,7 @@ def create_app(config=None):
                 current = _pipeline_tasks.get(task_id)
                 if current is not None:
                     current["status"] = "cancelled"
-                    current["error"] = "用户已结束任务"
+                    current["error"] = _MSG_USER_FINISHED
             _release_worker_resume_claims(_pipeline_tasks.get(task_id))
             return
         _activate_task_browser(task_id)
@@ -3177,11 +2398,11 @@ def create_app(config=None):
                     # 不标 failed（不是出错）也不标 done（不是正常完成）。
                     if stop_event is not None and stop_event.is_set():
                         task["status"] = "cancelled"
-                        task["error"] = "用户已停止抓取"
+                        task["error"] = _MSG_USER_STOPPED_SCRAPE
                         _write_run_unless_finished(
                             task_id, status="cancelled", current_stage="scrape",
                             processed_count=len(result.get("completed_combos") or []),
-                            error_reason="用户已停止抓取",
+                            error_reason=_MSG_USER_STOPPED_SCRAPE,
                         )
                     elif result.get("ok"):
                         task["status"] = "done"
@@ -3249,7 +2470,7 @@ def create_app(config=None):
                 stop_event = task.get("stop_event") if task is not None else None
             cancelled = stop_event is not None and stop_event.is_set()
             error_message = (
-                "用户已停止抓取" if cancelled
+                _MSG_USER_STOPPED_SCRAPE if cancelled
                 else f"执行异常：{type(exc).__name__}"
             )
             persistence_error = None
@@ -3269,7 +2490,7 @@ def create_app(config=None):
                 if task is not None:
                     if _is_user_finished(task_id):
                         task["status"] = "cancelled"
-                        task["error"] = "用户已结束任务"
+                        task["error"] = _MSG_USER_FINISHED
                     else:
                         task["status"] = (
                             "cancelled" if cancelled and persistence_error is None else "failed"
@@ -3416,21 +2637,6 @@ def create_app(config=None):
         except OSError:
             pass
 
-    def _cleanup_stale_jd_checkpoints(result_dir, *, max_age_days=30):
-        """兜底清理超龄 JD 断点文件（任务异常残留/文件漏删），启动时跑一次。"""
-        try:
-            cutoff = time.time() - max_age_days * 86400
-            for name in os.listdir(result_dir):
-                if not (name.startswith("ai_screen_jd_") and name.endswith(".json")):
-                    continue
-                full = os.path.join(result_dir, name)
-                try:
-                    if os.path.getmtime(full) < cutoff:
-                        os.unlink(full)
-                except OSError:
-                    continue
-        except OSError:
-            pass
 
     def _run_ai_screen_task(task_id, screening_fields, profile_summary,
                             scrape_task_id, resume_from_run_id=""):
@@ -3443,11 +2649,13 @@ def create_app(config=None):
         screening_results 判定）：进程重启或失败后，同一抓取任务再次发起
         筛选且条件一致时自动接着上次进度（``resume_from_run_id``）。
         """
+        from webui.ai import match_jds, screen_jobs
         from webui.pipeline_exec import (
-            ensure_chrome_ready, close_debug_chrome, fetch_job_details,
-            failed_code_label, taxonomy_reason,
+            close_debug_chrome,
+            ensure_chrome_ready,
+            failed_code_label,
+            fetch_job_details,
         )
-        from webui.ai import screen_jobs, match_jds
 
         with _pipeline_lock:
             task = _pipeline_tasks.get(task_id)
@@ -3512,13 +2720,13 @@ def create_app(config=None):
         def _mark_cancelled():
             """用户取消：标 cancelled（不覆盖为 done/failed），落清理定时。"""
             _write_run_unless_finished(
-                task_id, status="cancelled", error_reason="用户已停止筛选"
+                task_id, status="cancelled", error_reason=_MSG_USER_STOPPED_SCREEN
             )
             with _pipeline_lock:
                 t = _pipeline_tasks.get(task_id)
                 if t is not None:
                     t["status"] = "cancelled"
-                    t["error"] = "用户已停止筛选"
+                    t["error"] = _MSG_USER_STOPPED_SCREEN
                     _release_worker_resume_claims(t)
             _schedule_pipeline_task_cleanup(task_id)
 
@@ -3561,7 +2769,8 @@ def create_app(config=None):
                 or (source_run or {}).get("task_input_digest")
             )
             from webui.execution_config import (
-                ExecutionConfigSnapshot, FrozenTaskScope,
+                ExecutionConfigSnapshot,
+                FrozenTaskScope,
             )
             try:
                 execution_config = ExecutionConfigSnapshot.from_dict(
@@ -3754,7 +2963,9 @@ def create_app(config=None):
             except (ai_service.AISecurityError, ai_service.AICheckpointError) as _ai_exc:
                 # AISecurityError（systemic）：暂停整任务，保存 checkpoint
                 from webui.ai import (
-                    map_ai_error_to_block_code, AISecurityError, AICheckpointError,
+                    AICheckpointError,
+                    AISecurityError,
+                    map_ai_error_to_block_code,
                 )
                 _block_code = ""
                 if isinstance(_ai_exc, AICheckpointError):
@@ -4042,7 +3253,7 @@ def create_app(config=None):
                         execution_config=execution_config)
                 except ai_service.AISecurityError as _ai_exc:
                     # 切片6：systemic 错误暂停整任务（不批量变 uncertain 后完成）
-                    from webui.ai import map_ai_error_to_block_code, AISecurityError
+                    from webui.ai import AISecurityError, map_ai_error_to_block_code
                     if isinstance(_ai_exc, AISecurityError):
                         _block_code = map_ai_error_to_block_code(_ai_exc.error_code)
                         if _block_code:
@@ -4215,7 +3426,7 @@ def create_app(config=None):
                 if task is not None:
                     if _is_user_finished(task_id):
                         task["status"] = "cancelled"
-                        task["error"] = "用户已结束任务"
+                        task["error"] = _MSG_USER_FINISHED
                     else:
                         task["status"] = "failed"
                         task["error"] = (
@@ -4228,7 +3439,7 @@ def create_app(config=None):
             if _terminal_status in ("cancelled", "failed"):
                 _clear_auto_screen(task_id)
             _release_worker_resume_claims(_pipeline_tasks.get(task_id))
-        except Exception as exc:
+        except Exception:
             error_message = ai_service.user_facing_error("internal_error")
             persistence_error = None
             try:
@@ -4243,7 +3454,7 @@ def create_app(config=None):
                 if task is not None:
                     if _is_user_finished(task_id):
                         task["status"] = "cancelled"
-                        task["error"] = "用户已结束任务"
+                        task["error"] = _MSG_USER_FINISHED
                     else:
                         task["status"] = "failed"
                         task["error"] = (
@@ -4260,11 +3471,18 @@ def create_app(config=None):
         Accepts multipart form with 'file' field (PDF/DOCX/TXT).
         Returns JSON with the unified schema fields for user confirmation.
         """
-        from webui.resume import validate_format, validate_size
-        from webui.ai import analyze_resume_to_fields, AISecurityError, user_facing_error
-        from webui.platforms import (
-            UnknownPlatformError, PlatformNotRegisteredError, validate_platform_key, get_platform,
+        from webui.ai import (
+            AISecurityError,
+            analyze_resume_to_fields,
+            user_facing_error,
         )
+        from webui.platforms import (
+            PlatformNotRegisteredError,
+            UnknownPlatformError,
+            get_platform,
+            validate_platform_key,
+        )
+        from webui.resume import validate_format, validate_size
 
         file = request.files.get("file")
         if not file or not file.filename:
@@ -4285,7 +3503,7 @@ def create_app(config=None):
         try:
             platform = validate_platform_key(platform_raw)
         except UnknownPlatformError:
-            return jsonify({"ok": False, "error_code": "platform_validation_failed", "error": "不支持的招聘平台"}), 400
+            return jsonify({"ok": False, "error_code": "platform_validation_failed", "error": _MSG_UNSUPPORTED_PLATFORM}), 400
         try:
             reg = get_platform(platform)
         except PlatformNotRegisteredError:
@@ -4357,7 +3575,7 @@ def create_app(config=None):
         Accepts JSON body with the unified fields (user may have edited them).
         Validates all values and returns ready-to-execute script parameters.
         """
-        from webui.ai import _validate_unified_fields, UNIFIED_SEARCH_FIELDS
+        from webui.ai import _validate_unified_fields
 
         body = request.get_json(silent=True)
         if isinstance(body, dict):
@@ -4400,8 +3618,8 @@ def create_app(config=None):
         保留 ``settings`` 字段用于迁移兼容，同时返回 selection、last_custom、
         mode_version 等版本化状态。
         """
-        from webui.pipeline_exec import _ADVANCED_DEFAULTS
         from webui.execution_config import CONFIG_SCHEMA_VERSION
+        from webui.pipeline_exec import _ADVANCED_DEFAULTS
         state = store.get_advanced_config_state()
         active_version = None
         previous_version = None
@@ -4444,8 +3662,8 @@ def create_app(config=None):
     @app.route("/api/advanced-settings", methods=["POST"])
     def save_advanced_settings_endpoint():
         """SPEC011 T009: 兼容旧 POST 保存，同时写入 store 的自定义配置。"""
-        from webui.pipeline_exec import _ADVANCED_DEFAULTS
         from webui.execution_config import DEFAULT_DETAIL_TAB_POOL_SIZE, SPEED_FIELDS
+        from webui.pipeline_exec import _ADVANCED_DEFAULTS
         body = request.get_json(silent=True) or {}
         settings = body.get("settings")
         if not isinstance(settings, dict):
@@ -4572,7 +3790,7 @@ def create_app(config=None):
         from webui.pipeline_exec import load_browser_accounts
         accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
         if str(account_id) not in accounts:
-            return jsonify({"ok": False, "error": "账号不存在"}), 404
+            return jsonify({"ok": False, "error": _MSG_ACCOUNT_NOT_FOUND}), 404
         settings = _load_legacy_advanced_settings()
         settings["browser_account"] = str(account_id)
         _save_legacy_advanced_settings(settings)
@@ -4581,22 +3799,26 @@ def create_app(config=None):
     @app.route("/api/browser-accounts/<account_id>/open", methods=["POST"])
     def open_browser_account(account_id):
         from webui.pipeline_exec import (
-            ensure_chrome_ready, load_browser_accounts, set_active_cdp_data_dir,
+            ensure_chrome_ready,
+            load_browser_accounts,
+            set_active_cdp_data_dir,
         )
         accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
         account = accounts.get(str(account_id))
         if account is None:
-            return jsonify({"ok": False, "error": "账号不存在"}), 404
+            return jsonify({"ok": False, "error": _MSG_ACCOUNT_NOT_FOUND}), 404
         body = request.get_json(silent=True) or {}
         platform = str(body.get("platform") or "boss").strip()
         from webui.platforms import (
-            derive_zhilian_profile_dir, get_platform_or_none, resolve_login_space,
+            derive_zhilian_profile_dir,
+            get_platform_or_none,
+            resolve_login_space,
         )
         reg = get_platform_or_none(platform)
         if reg is None:
             return jsonify({
                 "ok": False, "error_code": "platform_validation_failed",
-                "user_message": "不支持的招聘平台", "platform": platform,
+                "user_message": _MSG_UNSUPPORTED_PLATFORM, "platform": platform,
             }), 400
         boss_profile_dir = str(account.get("profile_dir") or "")
         if not boss_profile_dir:
@@ -4676,7 +3898,7 @@ def create_app(config=None):
         accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
         account = accounts.get(str(account_id))
         if account is None:
-            return jsonify({"ok": False, "error": "账号不存在"}), 404
+            return jsonify({"ok": False, "error": _MSG_ACCOUNT_NOT_FOUND}), 404
         from webui.platforms import derive_zhilian_profile_dir, get_platform_or_none
         zhilian_reg = get_platform_or_none("zhilian")
         zhilian_port = int(zhilian_reg.default_cdp_port) if zhilian_reg else 9223
@@ -4726,7 +3948,7 @@ def create_app(config=None):
                 str(account_id), path=app.config["BROWSER_ACCOUNTS_PATH"],
             )
         except KeyError:
-            return jsonify({"ok": False, "error": "账号不存在"}), 404
+            return jsonify({"ok": False, "error": _MSG_ACCOUNT_NOT_FOUND}), 404
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 409
         except (OSError, RuntimeError):
@@ -4866,9 +4088,11 @@ def create_app(config=None):
         不改变任务工作量字段；仅返回规范化后的 scope 和去重信息。
         对应 HTTP API POST /api/search-scope/preview。
         """
-        from webui.execution_config import preview_scope, CityValidationError
+        from webui.execution_config import CityValidationError, preview_scope
         from webui.platforms import (
-            get_platform_or_none, validate_platform_key, UnknownPlatformError,
+            UnknownPlatformError,
+            get_platform_or_none,
+            validate_platform_key,
         )
 
         body = request.get_json(silent=True) or {}
@@ -4881,7 +4105,7 @@ def create_app(config=None):
             return jsonify({
                 "ok": False,
                 "error_code": "platform_validation_failed",
-                "user_message": "不支持的招聘平台",
+                "user_message": _MSG_UNSUPPORTED_PLATFORM,
             }), 400
         reg = get_platform_or_none(platform_raw)
         if reg is None:
@@ -4951,15 +4175,19 @@ def create_app(config=None):
         SPEC011 T015: 实验租约持有时拒绝启动（FR-035）。
         tasks005 T402: 冻结单一平台和完整 runtime，搜索 run 筛选快照为空。
         """
+        from webui.core import _AI_FILTER_KEYS, _is_non_empty_filter_value
         from webui.execution_config import (
-            ExecutionConfigSnapshot, FrozenTaskScope, preview_scope,
-        )
-        from webui.platforms import (
-            get_platform_or_none, validate_platform_key, UnknownPlatformError,
-            resolve_login_space,
+            ExecutionConfigSnapshot,
+            FrozenTaskScope,
+            preview_scope,
         )
         from webui.pipeline_exec import resolve_browser_account
-        from webui.core import _AI_FILTER_KEYS, _is_non_empty_filter_value
+        from webui.platforms import (
+            UnknownPlatformError,
+            get_platform_or_none,
+            resolve_login_space,
+            validate_platform_key,
+        )
 
         body = request.get_json(silent=True) or {}
         script_params = body.get("script_params") or body
@@ -4984,7 +4212,7 @@ def create_app(config=None):
             return jsonify({
                 "ok": False,
                 "error_code": "platform_validation_failed",
-                "user_message": "不支持的招聘平台",
+                "user_message": _MSG_UNSUPPORTED_PLATFORM,
             }), 400
         reg = get_platform_or_none(platform_raw)
         if reg is None:
@@ -5285,7 +4513,7 @@ def create_app(config=None):
         if not _claim_resume(old_task_id):
             return jsonify({
                 "ok": False, "error": "already_running",
-                "message": "该任务正在继续，请勿重复点击",
+                "message": _MSG_TASK_ALREADY_RUNNING,
             }), 409
         task_id = old_task_id
         claimed_task, previous_task = _claim_pipeline_task_id(task_id, "scrape")
@@ -5293,7 +4521,7 @@ def create_app(config=None):
             _release_resume_claim(old_task_id)
             return jsonify({
                 "ok": False, "error": "already_running",
-                "message": "该任务正在继续，请勿重复点击",
+                "message": _MSG_TASK_ALREADY_RUNNING,
             }), 409
         # 把续抓信息存进 task，_run_pipeline_task 会读取
         # T403: 从 DB 恢复冻结 runtime（platform/cdp_port/profile_key/
@@ -5355,11 +4583,10 @@ def create_app(config=None):
         task 标 cancelled。run_search 会因浏览器被关而退出，_run_pipeline_task
         看到 stop_event.is_set() 后标 cancelled 而非 failed/done。
         """
-        from webui.pipeline_exec import failed_code_label
         with _pipeline_lock:
             task = _pipeline_tasks.get(task_id)
             if task is None:
-                return jsonify({"ok": False, "error": "任务不存在"}), 404
+                return jsonify({"ok": False, "error": _MSG_TASK_NOT_FOUND}), 404
             if task["status"] not in ("queued", "running"):
                 return jsonify({"ok": False, "error": f"任务已结束，无法取消（当前状态：{task['status']}）"}), 400
             stop_event = task.get("stop_event")
@@ -5367,7 +4594,7 @@ def create_app(config=None):
                 stop_event.set()
             # 立刻标记 cancelled，让前端轮询马上看到状态变化
             task["status"] = "cancelled"
-            task["error"] = "用户已停止抓取"
+            task["error"] = _MSG_USER_STOPPED_SCRAPE
             task["logs"].append("用户取消任务")
             cancel_platform = task.get("platform")
         # 关浏览器放到锁外，避免持锁时间过长。best-effort，失败不阻塞取消。
@@ -5402,7 +4629,7 @@ def create_app(config=None):
         with _pipeline_lock:
             task = _pipeline_tasks.get(task_id)
             if task is None:
-                return jsonify({"ok": False, "error": "任务不存在"}), 404
+                return jsonify({"ok": False, "error": _MSG_TASK_NOT_FOUND}), 404
             if task.get("kind") != "ai_screen":
                 return jsonify({"ok": False, "error": "不是 AI 筛选任务"}), 409
             if task["status"] not in ("queued", "running"):
@@ -5412,7 +4639,7 @@ def create_app(config=None):
                 stop_event.set()
             # 立刻标记 cancelled，让前端轮询马上看到状态变化
             task["status"] = "cancelled"
-            task["error"] = "用户已停止筛选"
+            task["error"] = _MSG_USER_STOPPED_SCREEN
             task["logs"].append("用户取消任务")
             cancel_platform = task.get("platform")
         # 关浏览器放到锁外（仅抓 JD 阶段有意义），best-effort，失败不阻塞取消。
@@ -5491,12 +4718,12 @@ def create_app(config=None):
             }), 409
         # T407: 校验 filter_schema_version
         parent_schema = parent_identity.get("filter_schema_version") if parent_identity else None
-        if filter_schema_version is not None and parent_schema is not None:
-            if int(filter_schema_version) != int(parent_schema):
-                return jsonify({
+        if (filter_schema_version is not None and parent_schema is not None
+                and int(filter_schema_version) != int(parent_schema)):
+            return jsonify({
                     "ok": False, "error": "filter_schema_version_mismatch",
                     "message": "筛选 schema 版本与父 run 不一致",
-                }), 409
+            }), 409
         # 平台禁用检查
         from webui.platforms import get_platform_or_none
         platform_info = get_platform_or_none(parent_platform)
@@ -5563,7 +4790,7 @@ def create_app(config=None):
             if not _claim_resume(resume_from_run_id):
                 return jsonify({
                     "ok": False, "error": "already_running",
-                    "message": "该任务正在继续，请勿重复点击",
+                    "message": _MSG_TASK_ALREADY_RUNNING,
                 }), 409
             claimed_old_resume = True
         claimed_task, previous_task = _claim_pipeline_task_id(task_id, "ai_screen")
@@ -5728,7 +4955,7 @@ def create_app(config=None):
         with _pipeline_lock:
             task = _pipeline_tasks.get(task_id)
             if task is None:
-                return jsonify({"ok": False, "error": "任务不存在"}), 404
+                return jsonify({"ok": False, "error": _MSG_TASK_NOT_FOUND}), 404
             # T405: 内存 task 与 DB run 身份一致性校验
             db_run, conflict = _check_run_identity_conflict(task_id, task)
             if conflict is not None:
@@ -5841,11 +5068,7 @@ def create_app(config=None):
                 or prow["error_code"]
                 or "任务已暂停"
             )
-            paused_kind = (
-                "recrawl" if str(prow["current_stage"] or "").startswith("recrawl_")
-                else "scrape" if prow["current_stage"] == "scrape"
-                else "ai_screen"
-            )
+            paused_kind = _pipeline_kind_for_stage(prow["current_stage"] or "")
             paused_source_task_id = (
                 str(execution_params.get("scrape_task_id") or "") or prow["id"]
             )
@@ -5916,11 +5139,7 @@ def create_app(config=None):
                 "ok": True,
                 "has_task": True,
                 "task_id": run["id"],
-                "kind": (
-                    "recrawl" if str(run.get("current_stage") or "").startswith("recrawl_")
-                    else "scrape" if run.get("current_stage") == "scrape"
-                    else "ai_screen"
-                ),
+                "kind": _pipeline_kind_for_stage(run.get("current_stage") or ""),
                 "status": "interrupted",
                 "progress": {"message": "上次 AI 筛选因服务重启被中断"},
                 "logs": [],
@@ -6144,13 +5363,9 @@ def create_app(config=None):
                         url = normalize_job_link(
                             item.get("source_url") or item.get("job_link") or ""
                         )
-                        if url and url in interested_urls:
+                        if (url and url in interested_urls) or (interested_slugs and str(item.get("job_id", "")) in interested_slugs):
                             item["_marked"] = "interested"
-                        elif interested_slugs and str(item.get("job_id", "")) in interested_slugs:
-                            item["_marked"] = "interested"
-                        if url and url in applied_urls:
-                            item["_applied"] = True
-                        elif applied_slugs and str(item.get("job_id", "")) in applied_slugs:
+                        if (url and url in applied_urls) or (applied_slugs and str(item.get("job_id", "")) in applied_slugs):
                             item["_applied"] = True
 
         return jsonify({
@@ -6196,7 +5411,7 @@ def create_app(config=None):
                 run = None
             if run is None:
                 return jsonify({
-                    "error_code": "not_found", "user_message": "任务不存在",
+                    "error_code": "not_found", "user_message": _MSG_TASK_NOT_FOUND,
                 }), 404
             if run["status"] not in ("done", "succeeded", "partial"):
                 return jsonify({
@@ -6337,7 +5552,7 @@ def create_app(config=None):
                 except _OPERATIONAL_ERRORS:
                     pass
         else:
-            if "zhaopin.com" in raw_source_url.lower():
+            if _ZHILIAN_HOST_TOKEN in raw_source_url.lower():
                 return jsonify({
                     "ok": False, "error": "run_identity_conflict",
                     "error_code": "run_identity_conflict",
@@ -6349,7 +5564,7 @@ def create_app(config=None):
         if not source_url:
             return jsonify({"ok": False, "error": "缺少合法 source_url"}), 400
         # 校验 URL 与平台一致性
-        if frozen_platform == "zhilian" and "zhaopin.com" not in source_url.lower():
+        if frozen_platform == "zhilian" and _ZHILIAN_HOST_TOKEN not in source_url.lower():
             return jsonify({"ok": False, "error": "platform_url_mismatch",
                            "message": "智联岗位 URL 必须包含 zhaopin.com"}), 422
         if frozen_platform == "zhilian" and not (
@@ -6428,11 +5643,11 @@ def create_app(config=None):
         profile_id = raw.get("profile_id")
         job = raw.get("job") or {}
         if not profile_id:
-            raise ValueError("profile_id 不能为空")
+            raise ValueError(_MSG_PROFILE_ID_REQUIRED)
         try:
             store.get_profile(profile_id)
         except KeyError:
-            return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
+            return jsonify({"error_code": "not_found", "user_message": _MSG_PROFILE_NOT_FOUND}), 404
         try:
             resolved = _resolve_pipeline_job_identity(job)
         except JobIdentityError as exc:
@@ -6450,11 +5665,11 @@ def create_app(config=None):
         profile_id = raw.get("profile_id")
         job = raw.get("job") or {}
         if not profile_id:
-            raise ValueError("profile_id 不能为空")
+            raise ValueError(_MSG_PROFILE_ID_REQUIRED)
         try:
             store.get_profile(profile_id)
         except KeyError:
-            return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
+            return jsonify({"error_code": "not_found", "user_message": _MSG_PROFILE_NOT_FOUND}), 404
         try:
             resolved = _resolve_pipeline_job_identity(job)
         except JobIdentityError as exc:
@@ -6478,7 +5693,7 @@ def create_app(config=None):
         try:
             store.get_profile(profile_id)
         except KeyError:
-            return jsonify({"error_code": "not_found", "user_message": "画像不存在"}), 404
+            return jsonify({"error_code": "not_found", "user_message": _MSG_PROFILE_NOT_FOUND}), 404
         try:
             resolved = _resolve_pipeline_job_identity(job)
         except JobIdentityError as exc:
@@ -6609,7 +5824,7 @@ def create_app(config=None):
             return jsonify({"ok": False, "error": "缺少 source_url 或 job_link",
                             "job_id": job_id}), 400
 
-        if "zhaopin.com" in raw_source_url.lower():
+        if _ZHILIAN_HOST_TOKEN in raw_source_url.lower():
             return jsonify({
                 "ok": False, "error": "run_identity_conflict",
                 "error_code": "run_identity_conflict",
@@ -6943,11 +6158,13 @@ def create_app(config=None):
         暂停时写入 store（用 task_id 作为 run_id 占位），保存 checkpoint，
         服务重启后用户可点继续从 checkpoint 恢复。
         """
-        from webui.pipeline_exec import (
-            ensure_chrome_ready, close_debug_chrome, fetch_job_details, load_advanced_settings,
-            failed_code_label, taxonomy_reason,
-        )
         from webui.ai import match_jds
+        from webui.pipeline_exec import (
+            close_debug_chrome,
+            ensure_chrome_ready,
+            failed_code_label,
+            fetch_job_details,
+        )
 
         # 画像兜底：前端刷新后传空，从落盘结果里恢复（跟本轮抓取绑定，下轮覆盖）
         if not profile_summary.strip():
@@ -7289,7 +6506,10 @@ def create_app(config=None):
                                             model=model, raise_on_systemic=True)
                         except ai_service.AISecurityError as _ai_exc:
                             # 切片8：systemic 错误暂停（不批量变 uncertain 后完成）
-                            from webui.ai import map_ai_error_to_block_code, AISecurityError
+                            from webui.ai import (
+                                AISecurityError,
+                                map_ai_error_to_block_code,
+                            )
                             if isinstance(_ai_exc, AISecurityError):
                                 _block_code = map_ai_error_to_block_code(_ai_exc.error_code)
                                 if _block_code:
@@ -7390,7 +6610,7 @@ def create_app(config=None):
                 if t is not None:
                     if _is_user_finished(task_id):
                         t["status"] = "cancelled"
-                        t["error"] = "用户已结束任务"
+                        t["error"] = _MSG_USER_FINISHED
                     else:
                         t["status"] = "failed"
                         t["error"] = (
@@ -7406,7 +6626,6 @@ def create_app(config=None):
     # ===================================================================
 
     import hashlib as _hashlib_mod
-    import time as _time_mod
 
     # FR-039：后端版本标识（启动时计算，继续任务时校验）
     try:
@@ -7605,7 +6824,9 @@ def create_app(config=None):
         前端 3 个 snapshot 统一从此接口拉取。
         """
         from webui.pipeline_exec import (
-            _scrape_overall_percent, _scrape_page_overall_percent, failed_code_label,
+            _scrape_overall_percent,
+            _scrape_page_overall_percent,
+            failed_code_label,
         )
 
         with _pipeline_lock:
@@ -7671,11 +6892,7 @@ def create_app(config=None):
             or live_progress.get("stage")
             or "unknown"
         )
-        progress_kind = live_kind or (
-            "recrawl" if str(stage).startswith("recrawl_")
-            else "scrape" if str(stage) == "scrape"
-            else "ai_screen"
-        )
+        progress_kind = live_kind or _pipeline_kind_for_stage(stage)
         # processed_count 只记录已成功完成的当前阶段工作单元；pending
         # 是已失败并进入待确认的独立工作单元，两者不能互相扣减。
         # JD 详情/精筛阶段只处理粗筛保留的岗位；原始列表里的 dropped
@@ -7884,7 +7101,7 @@ def create_app(config=None):
             return jsonify({
                 "ok": False,
                 "error": "already_running",
-                "message": "该任务正在继续，请勿重复点击",
+                "message": _MSG_TASK_ALREADY_RUNNING,
             }), 409
 
         # 服务重启后内存来源丢失：从逐组合持久化结果重建只读来源快照。
@@ -7908,7 +7125,7 @@ def create_app(config=None):
             return jsonify({
                 "ok": False,
                 "error": "already_running",
-                "message": "该任务正在继续，请勿重复点击",
+                "message": _MSG_TASK_ALREADY_RUNNING,
             }), 409
         claimed_task["source_task_id"] = scrape_task_id
         claimed_task["browser_account"] = _account_for_run(run)
@@ -8190,11 +7407,11 @@ def create_app(config=None):
             if source_payload is None:
                 source_payload = store.load_latest_pipeline_result(source_run_id)
             profile_summary = str(((source_payload or {}).get("result") or {}).get("profile_summary") or "")
-        parent_scrape_task_id = (
-            scrape_task_id
-            if scrape_task_id
-            else run_id if str(run.get("current_stage") or "") == "scrape" else ""
-        )
+        parent_scrape_task_id = scrape_task_id
+        if not parent_scrape_task_id:
+            parent_scrape_task_id = (
+                run_id if str(run.get("current_stage") or "") == "scrape" else ""
+            )
         # 快照可构建性校验完成后，才停止后台工作并原子标记 user_finished；
         # 无快照时保持原状态，避免把任务永久写成无法恢复的终态（B027）。
         with _pipeline_lock:
@@ -8276,7 +7493,11 @@ def create_app(config=None):
         """FR-041：历史恢复只读预演接口。run_id 参数仅作占位，
         实际预演两个历史 run（15847d27 + e6250f0e）。
         """
-        from webui.historical_recovery import preview_recovery, ROUGH_RUN_ID, FINE_RUN_ID
+        from webui.historical_recovery import (
+            FINE_RUN_ID,
+            ROUGH_RUN_ID,
+            preview_recovery,
+        )
         try:
             result = preview_recovery(
                 store,
@@ -8389,7 +7610,7 @@ def create_app(config=None):
         except (KeyError, ValueError):
             return jsonify({
                 "ok": False, "error_code": "experiment_not_found",
-                "error": "实验不存在",
+                "error": _MSG_EXPERIMENT_NOT_FOUND,
             }), 404
         from webui.tuning import TuningController
         controller = TuningController(store)
@@ -8439,7 +7660,7 @@ def create_app(config=None):
         except (KeyError, ValueError):
             return jsonify({
                 "ok": False, "error_code": "experiment_not_found",
-                "error": "实验不存在",
+                "error": _MSG_EXPERIMENT_NOT_FOUND,
             }), 404
         from webui.tuning import TuningController
         controller = TuningController(store)
@@ -8468,7 +7689,7 @@ def create_app(config=None):
         except (KeyError, ValueError):
             return jsonify({
                 "ok": False, "error_code": "experiment_not_found",
-                "error": "实验不存在",
+                "error": _MSG_EXPERIMENT_NOT_FOUND,
             }), 404
         if exp["status"] != "draft":
             return jsonify({
@@ -8503,7 +7724,7 @@ def create_app(config=None):
         except (KeyError, ValueError):
             return jsonify({
                 "ok": False, "error_code": "experiment_not_found",
-                "error": "实验不存在",
+                "error": _MSG_EXPERIMENT_NOT_FOUND,
             }), 404
         if exp["status"] != "blocked":
             return jsonify({
@@ -8536,7 +7757,7 @@ def create_app(config=None):
         except (KeyError, ValueError):
             return jsonify({
                 "ok": False, "error_code": "experiment_not_found",
-                "error": "实验不存在",
+                "error": _MSG_EXPERIMENT_NOT_FOUND,
             }), 404
         return jsonify({"ok": True, **result}), 200
 
@@ -8560,7 +7781,7 @@ def create_app(config=None):
         except KeyError:
             return jsonify({
                 "ok": False, "error_code": "experiment_not_found",
-                "error": "实验不存在",
+                "error": _MSG_EXPERIMENT_NOT_FOUND,
             }), 404
         except ValueError as exc:
             return jsonify({
@@ -8591,7 +7812,7 @@ def create_app(config=None):
         except (KeyError, ValueError):
             return jsonify({
                 "ok": False, "error_code": "experiment_not_found",
-                "error": "实验不存在",
+                "error": _MSG_EXPERIMENT_NOT_FOUND,
             }), 404
         if exp["status"] != "awaiting_instruction":
             return jsonify({
@@ -8618,7 +7839,7 @@ def create_app(config=None):
         except (KeyError, ValueError):
             return jsonify({
                 "ok": False, "error_code": "manifest_not_found",
-                "error": "任务单不存在",
+                "error": _MSG_MANIFEST_NOT_FOUND,
             }), 404
         # 不返回凭据/敏感字段
         safe_manifest = dict(record["manifest"])
@@ -8648,7 +7869,7 @@ def create_app(config=None):
         except (KeyError, ValueError):
             return jsonify({
                 "ok": False, "error_code": "manifest_not_found",
-                "error": "任务单不存在",
+                "error": _MSG_MANIFEST_NOT_FOUND,
             }), 404
         controller = TuningController(store)
         try:
@@ -8716,11 +7937,11 @@ def create_app(config=None):
 
         body = request.get_json(silent=True) or {}
         try:
-            record = store.get_task_manifest(manifest_id)
+            _ = store.get_task_manifest(manifest_id)
         except (KeyError, ValueError):
             return jsonify({
                 "ok": False, "error_code": "manifest_not_found",
-                "error": "任务单不存在",
+                "error": _MSG_MANIFEST_NOT_FOUND,
             }), 404
         try:
             saved = TuningController(store).accept_report(
@@ -8748,7 +7969,7 @@ def create_app(config=None):
         from webui.tuning import TuningController
 
         try:
-            round_rec = store.get_tuning_round(round_id)
+            _ = store.get_tuning_round(round_id)
         except (KeyError, ValueError):
             return jsonify({
                 "ok": False, "error_code": "round_not_found",
@@ -8805,11 +8026,11 @@ def create_app(config=None):
             }), 422
         # 校验实验存在
         try:
-            exp = store.get_tuning_experiment(experiment_id)
+            _ = store.get_tuning_experiment(experiment_id)
         except (KeyError, ValueError):
             return jsonify({
                 "ok": False, "error_code": "experiment_not_found",
-                "error": "实验不存在",
+                "error": _MSG_EXPERIMENT_NOT_FOUND,
             }), 404
         # 校验候选存在且属于该实验
         try:

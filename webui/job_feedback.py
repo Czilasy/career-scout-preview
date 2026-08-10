@@ -36,6 +36,11 @@ _RFC3339_RE = re.compile(
 )
 
 
+_MSG_APPLIED_AT_INVALID = "时间不可解析或缺少时区"
+_MSG_PLATFORM_URL_MISMATCH = "岗位规范链接与平台不匹配"
+_MSG_JOB_NOT_FOUND = "岗位不存在"
+
+
 class JobFeedbackError(ValueError):
     """Stable domain error that can be mapped to the HTTP contract."""
 
@@ -64,16 +69,16 @@ def _utc_now(value: datetime | str | None = None) -> datetime:
 def parse_rfc3339_utc(value: str) -> datetime:
     """Parse an explicit-offset RFC 3339 timestamp and return UTC."""
     if not isinstance(value, str) or not value.strip():
-        raise JobFeedbackError("applied_at_invalid", "时间不可解析或缺少时区")
+        raise JobFeedbackError("applied_at_invalid", _MSG_APPLIED_AT_INVALID)
     text = value.strip()
     if not _RFC3339_RE.fullmatch(text):
-        raise JobFeedbackError("applied_at_invalid", "时间不可解析或缺少时区")
+        raise JobFeedbackError("applied_at_invalid", _MSG_APPLIED_AT_INVALID)
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
         parsed = datetime.fromisoformat(text)
     except (TypeError, ValueError) as exc:
-        raise JobFeedbackError("applied_at_invalid", "时间不可解析或缺少时区") from exc
+        raise JobFeedbackError("applied_at_invalid", _MSG_APPLIED_AT_INVALID) from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise JobFeedbackError("applied_at_invalid", "时间必须包含时区")
     return parsed.astimezone(UTC)
@@ -174,9 +179,9 @@ class JobFeedbackService:
                 try:
                     canonical_url = normalize_job_url(platform, str(job["canonical_url"]))
                 except PlatformError as exc:
-                    raise JobFeedbackError("platform_url_mismatch", "岗位规范链接与平台不匹配") from exc
+                    raise JobFeedbackError("platform_url_mismatch", _MSG_PLATFORM_URL_MISMATCH) from exc
                 if not canonical_url:
-                    raise JobFeedbackError("platform_url_mismatch", "岗位规范链接与平台不匹配")
+                    raise JobFeedbackError("platform_url_mismatch", _MSG_PLATFORM_URL_MISMATCH)
                 return _Identity("job_id_with_triple", {
                     "job_id": str(job_id),
                     "platform": platform,
@@ -190,9 +195,9 @@ class JobFeedbackService:
         try:
             canonical_url = normalize_job_url(platform, str(job["canonical_url"]))
         except PlatformError as exc:
-            raise JobFeedbackError("platform_url_mismatch", "岗位规范链接与平台不匹配") from exc
+            raise JobFeedbackError("platform_url_mismatch", _MSG_PLATFORM_URL_MISMATCH) from exc
         if not canonical_url:
-            raise JobFeedbackError("platform_url_mismatch", "岗位规范链接与平台不匹配")
+            raise JobFeedbackError("platform_url_mismatch", _MSG_PLATFORM_URL_MISMATCH)
         return _Identity("triple", {
             "platform": platform,
             "platform_job_id": str(job["platform_job_id"]),
@@ -225,7 +230,7 @@ class JobFeedbackService:
         if identity.kind in ("job_id", "job_id_with_triple"):
             row = conn.execute("SELECT * FROM jobs WHERE id=?", (identity.value["job_id"],)).fetchone()
             if row is None:
-                raise JobFeedbackError("job_not_found", "岗位不存在")
+                raise JobFeedbackError("job_not_found", _MSG_JOB_NOT_FOUND)
             if identity.kind == "job_id_with_triple":
                 stored_identity = (
                     str(row["platform"]), str(row["platform_job_id"]),
@@ -311,7 +316,7 @@ class JobFeedbackService:
         with self.store._connection() as conn:
             self._profile_exists(conn, str(profile_id))
             if conn.execute("SELECT 1 FROM jobs WHERE id=?", (str(job_id),)).fetchone() is None:
-                raise JobFeedbackError("job_not_found", "岗位不存在")
+                raise JobFeedbackError("job_not_found", _MSG_JOB_NOT_FOUND)
             row = self._read_profile_job(conn, str(profile_id), str(job_id))
             return self._state_from_row(conn, row, current_now)
 
@@ -453,7 +458,7 @@ class JobFeedbackService:
         with self.store._connection() as conn:
             self._profile_exists(conn, str(profile_id))
             if conn.execute("SELECT 1 FROM jobs WHERE id=?", (str(job_id),)).fetchone() is None:
-                raise JobFeedbackError("job_not_found", "岗位不存在")
+                raise JobFeedbackError("job_not_found", _MSG_JOB_NOT_FOUND)
             rows = conn.execute(
                 "SELECT sequence, id, action, from_status, to_status, from_applied_at, to_applied_at, "
                 "from_last_follow_up_at, to_last_follow_up_at, occurred_at FROM profile_job_events "

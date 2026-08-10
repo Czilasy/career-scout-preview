@@ -584,7 +584,7 @@ class RiskControlClassifierTests(unittest.TestCase):
     """_classify_risk_control_reason 对对齐后的词表命中正确。"""
 
     def test_rate_limit_keywords_aligned(self):
-        from webui.app import _classify_risk_control_reason
+        from webui.task_runners import _classify_risk_control_reason
 
         for text in ("访问受限", "检测到异常流量", "操作频繁", "账号受限", "429 too many"):
             self.assertEqual(
@@ -592,7 +592,7 @@ class RiskControlClassifierTests(unittest.TestCase):
             )
 
     def test_http_status_and_unlock_time_aligned(self):
-        from webui.app import _classify_risk_control_reason
+        from webui.task_runners import _classify_risk_control_reason
         for text in (
             "列表接口返回 HTTP 403（被风控拦截）", "HTTP 412", "HTTP 418",
             "账号将于 2099-08-05 18:30 解封",
@@ -602,14 +602,14 @@ class RiskControlClassifierTests(unittest.TestCase):
             )
 
     def test_common_words_are_not_rate_limited(self):
-        from webui.app import _classify_risk_control_reason
+        from webui.task_runners import _classify_risk_control_reason
         for text in ("登录解锁更多职位", "频繁更新职位", "冻结岗位"):
             self.assertEqual(
                 _classify_risk_control_reason(text), "source_unknown_error", text,
             )
 
     def test_verification_keywords_aligned(self):
-        from webui.app import _classify_risk_control_reason
+        from webui.task_runners import _classify_risk_control_reason
 
         for text in ("需要滑动滑块验证", "出现 captcha", "slider verify", "geetest 校验"):
             self.assertEqual(
@@ -617,7 +617,7 @@ class RiskControlClassifierTests(unittest.TestCase):
             )
 
     def test_login_keywords_aligned(self):
-        from webui.app import _classify_risk_control_reason
+        from webui.task_runners import _classify_risk_control_reason
 
         for text in ("请先登录", "未登录", "登 录 失效", "wt2 参数错误", "401 unauthorized"):
             self.assertEqual(
@@ -625,7 +625,7 @@ class RiskControlClassifierTests(unittest.TestCase):
             )
 
     def test_unmatched_reason_maps_to_unknown_error(self):
-        from webui.app import _classify_risk_control_reason
+        from webui.task_runners import _classify_risk_control_reason
 
         self.assertEqual(_classify_risk_control_reason(""), "source_unknown_error")
         self.assertEqual(_classify_risk_control_reason("unknown reason"), "source_unknown_error")

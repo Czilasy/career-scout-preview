@@ -3,13 +3,8 @@
 覆盖 FR-001 ~ FR-009 与 data-model.md 中的 ExecutionConfigSnapshot / FrozenTaskScope。
 这些测试在 T002 实现 webui/execution_config.py 之前应当全部失败（RED）。
 """
-import copy
-import hashlib
 import json
-import tempfile
 import unittest
-from pathlib import Path
-from unittest import mock
 
 from webui import execution_config
 

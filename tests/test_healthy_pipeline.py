@@ -18,7 +18,7 @@ from unittest import mock
 from webui.app import create_app
 from webui.store import (
     DiscoveryStoreConflictError,
-    TaskStore, RUN_STATUSES, RUN_TRANSITIONS, SYSTEMIC_BLOCK_CODES,
+    RUN_STATUSES, RUN_TRANSITIONS, SYSTEMIC_BLOCK_CODES,
 )
 
 
@@ -308,7 +308,6 @@ class Slice3ErrorClassificationTests(unittest.TestCase):
 
     def test_ai_rate_limit_classified_as_systemic_block(self):
         """AI 限流必须归类为系统性阻断，命中即暂停（SC-006）。"""
-        from webui.store import SYSTEMIC_BLOCK_CODES
         self.assertIn("ai_rate_limited", SYSTEMIC_BLOCK_CODES)
         self.assertIn("ai_quota_exhausted", SYSTEMIC_BLOCK_CODES)
         self.assertIn("ai_key_invalid", SYSTEMIC_BLOCK_CODES)
@@ -322,7 +321,6 @@ class Slice3ErrorClassificationTests(unittest.TestCase):
         self.assertIn("detail_invalid", INDEPENDENT_FAILURE_CODES)
         self.assertIn("ai_missing_job", INDEPENDENT_FAILURE_CODES)
         # 独立失败码不能同时是系统性阻断码
-        from webui.store import SYSTEMIC_BLOCK_CODES
         self.assertFalse(
             INDEPENDENT_FAILURE_CODES & SYSTEMIC_BLOCK_CODES,
             "独立失败码与系统性阻断码不得重叠"
@@ -517,7 +515,7 @@ class Slice5ShortJDTests(unittest.TestCase):
         self.assertEqual(len(jd_text), 119, f"测试数据应为 119 字，实际 {len(jd_text)} 字")
         result = self.module.extract_job_description({"jd": jd_text, "page_text": ""})
         # 含语义标记必须通过（不论长度）
-        self.assertTrue(len(result) > 0)
+        self.assertGreater(len(result), 0)
 
     def test_short_operational_duties_without_marker_keywords_are_accepted(self):
         jd_text = "维护服务器，排查线上故障，轮值响应告警。"
@@ -3175,7 +3173,6 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
 
     def test_classify_scrape_block_recognizes_systemic_keywords(self):
         """_classify_scrape_block 把阻断关键字映射到 SYSTEMIC_BLOCK_CODES。"""
-        from webui.app import create_app as _create_app
         app, temp = _make_app()
         try:
             # create_app 内部定义了 _classify_scrape_block，通过视图函数闭包无法直接访问。
@@ -3277,7 +3274,7 @@ class Slice6AiPauseTests(unittest.TestCase):
 
     def test_screen_jobs_raises_on_systemic_when_strict(self):
         """screen_jobs(raise_on_systemic=True) 命中限流立即抛 AISecurityError。"""
-        from webui.ai import screen_jobs, AISecurityError, ERROR_RATE_LIMIT, call_ai
+        from webui.ai import screen_jobs, AISecurityError, ERROR_RATE_LIMIT
         jobs = [{"job_id": "1", "title": "前端", "salary": "15-25K",
                  "location": "上海", "job_labels": "本科", "company_scale": "100-499"}]
         criteria = {"profile_summary": "前端工程师", "city": ["上海"], "degree": ["本科"]}
@@ -3290,7 +3287,7 @@ class Slice6AiPauseTests(unittest.TestCase):
 
     def test_match_jds_raises_on_systemic_when_strict(self):
         """match_jds(raise_on_systemic=True) 命中额度耗尽立即抛 AISecurityError。"""
-        from webui.ai import match_jds, AISecurityError, ERROR_QUOTA_EXHAUSTED, call_ai
+        from webui.ai import match_jds, AISecurityError, ERROR_QUOTA_EXHAUSTED
         jobs = [{"job_id": "1", "title": "前端", "salary": "15-25K",
                  "location": "上海", "jd": "岗位职责：前端开发"}]
         with mock.patch("webui.ai.call_ai",
@@ -4783,7 +4780,7 @@ class FrozenConfigDigestTests(unittest.TestCase):
         from webui.execution_config import ExecutionConfigSnapshot
         from webui import pipeline_exec
 
-        config = ExecutionConfigSnapshot.create({
+        ExecutionConfigSnapshot.create({
             "inter_combo_delay": 10.0,
             "detail_batch_size": 15,
             "detail_interval": 2.0,

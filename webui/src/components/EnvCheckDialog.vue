@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Activity, ExternalLink, RefreshCw, ShieldAlert, Wrench } from "@lucide/vue";
+import { Activity, RefreshCw, ShieldAlert, Wrench } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
 import { apiRequest, errorMessage } from "../api";
 import type { Notice } from "../types";

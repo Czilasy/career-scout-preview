@@ -11,7 +11,6 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
-import requests
 
 from webui.app import create_app
 
@@ -3575,7 +3574,7 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
     def test_preview_disabled_platform_returns_503(self):
         """智联 enabled_for_new_tasks=False → 503 platform_disabled。"""
         from unittest import mock
-        from webui.platforms import get_platform, get_platform_or_none
+        from webui.platforms import get_platform_or_none
         def _disabled(platform_raw):
             if platform_raw == "zhilian":
                 return mock.Mock(enabled_for_new_tasks=False, availability_reason="disabled for test")
@@ -3664,7 +3663,7 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
 
     def test_execute_search_disabled_platform_returns_503(self):
         """智联禁用 → execute-search 返回 503 platform_disabled，不创建 run。"""
-        from webui.platforms import get_platform, get_platform_or_none
+        from webui.platforms import get_platform_or_none
         def _disabled(platform_raw):
             if platform_raw == "zhilian":
                 return mock.Mock(enabled_for_new_tasks=False, availability_reason="disabled for test")
@@ -3797,7 +3796,6 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         profile_key，传给 BossCdpSource 构造函数。不读当前 UI、活动
         账号或默认端口。
         """
-        import time as _time
         preview = self.client.post("/api/search-scope/preview", json={
             "platform": "boss",
             "keywords": ["Python"],
@@ -4711,7 +4709,6 @@ class PlatformAwareTaskStateTests(unittest.TestCase):
 
     def test_task_state_returns_platform(self):
         """T414: api_task_state 返回目标 run 真实平台。"""
-        from webui.store import TaskStore
         run_id = "test_ts_platform"
         with self.store._connection() as conn:
             conn.execute(

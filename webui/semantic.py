@@ -28,6 +28,9 @@ MIN_DIMENSION_SCORE = 50
 MIN_MATCH_SCORE = 70
 
 
+_SCORE_SCHEMA = "integer 0-100"
+
+
 def _pending(stage: str) -> dict:
     return {
         "verdict": "pending",
@@ -42,12 +45,12 @@ def build_semantic_prompt(resume_text: str, jd_text: str) -> str:
     """Build the fixed-dimension JSON contract sent to the configured AI."""
     contract = {
         "dimensions": {
-            name: {"score": "integer 0-100", "reason": "brief evidence"}
+            name: {"score": _SCORE_SCHEMA, "reason": "brief evidence"}
             for name in DIMENSIONS
         },
-        "match_score": "integer 0-100",
+        "match_score": _SCORE_SCHEMA,
         "verdict": "match | mismatch | uncertain",
-        "confidence": "integer 0-100",
+        "confidence": _SCORE_SCHEMA,
     }
     return (
         "Compare the resume and job description only on the four fixed dimensions. "

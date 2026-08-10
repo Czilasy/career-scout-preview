@@ -2231,7 +2231,7 @@ describe("DiscoveryView", () => {
       "/api/task-state/screen-restored": () => response({ status: "completed", progress: {}, logs: [] }),
     });
     vi.stubGlobal("fetch", fetchMock);
-    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
     const aiCall = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/ai-screen"));
     expect(aiCall).toBeTruthy();
@@ -2348,7 +2348,7 @@ describe("DiscoveryView", () => {
       "/api/task-state/one-screen": () => response({ status: "completed", progress: {}, logs: [] }),
     });
     vi.stubGlobal("fetch", fetchMock);
-    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
     expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(1);
     expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/execute-search")).length).toBe(0);

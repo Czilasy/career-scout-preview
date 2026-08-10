@@ -14,7 +14,9 @@ const backendFiles = [
 ].sort((left: string, right: string) => {
   const a = relative(projectRoot, left).replaceAll("\\", "/");
   const b = relative(projectRoot, right).replaceAll("\\", "/");
-  return a < b ? -1 : a > b ? 1 : 0;
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
 });
 
 function collectFiles(dir: string): string[] {
@@ -40,7 +42,11 @@ function sourceDigest(files: string[], root: string): string {
   const digest = createHash("sha256");
   const ordered: { path: string; name: string }[] = files
     .map((path) => ({ path, name: relative(root, path).replaceAll("\\", "/") }))
-    .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    .sort((left, right) => {
+      if (left.name < right.name) return -1;
+      if (left.name > right.name) return 1;
+      return 0;
+    });
   for (const { path, name } of ordered) {
     digest.update(name, "utf8");
     digest.update(Buffer.from([0]));

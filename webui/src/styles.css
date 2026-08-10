@@ -31,9 +31,11 @@ body,
   min-width: 320px;
   min-height: 100%;
   margin: 0;
+/* 主题切换时主要面板颜色柔和过渡 */
 }body {
   min-height: 100vh;
   background: var(--bg);
+  transition: background-color .22s ease;
 }body.dialog-open {
   overflow: hidden;
 }button,
@@ -98,6 +100,7 @@ input {
   min-height: 44px;
   color: var(--ink-1);
   text-decoration: none;
+  position: relative;
 }.brand-mark {
   width: 30px;
   height: 30px;
@@ -114,9 +117,6 @@ input {
   font-style: normal;
 }
 /* 更新红点：新版本存在时挂在项目名右上角；点击项目名打开更新弹窗 */
-.brand {
-  position: relative;
-}
 .brand-update-dot {
   position: absolute;
   top: 6px;
@@ -128,6 +128,7 @@ input {
   border: 1.5px solid var(--panel, #fff);
   box-shadow: 0 0 0 1px rgba(229, 72, 77, 0.35);
   pointer-events: none;
+  animation: dot-pulse 2.2s ease-in-out infinite;
 }
 /* 本轮状态胶囊：仅有轮次/任务上下文时渲染（App.vue v-if） */
 .round-pill {
@@ -251,6 +252,7 @@ input {
   border-color: var(--match-edge);
   color: var(--match-deep);
   background: var(--match-wash);
+/* 徽标出现：轻微弹入 */
 }.fav-badge {
   display: inline-grid;
   place-items: center;
@@ -261,6 +263,7 @@ input {
   font-style: normal;
   color: var(--panel);
   background: var(--brand-strong);
+  animation: badge-pop .18s ease both;
 }.fav-drawer-backdrop {
   position: fixed;
   inset: 0;
@@ -437,6 +440,7 @@ button:disabled {
   box-shadow: var(--shadow);
   transform: translateX(-50%);
   font-size: 14px;
+  animation: notice-in .22s ease both;
 }.notice-bar[data-tone="success"] svg { color: var(--match); }.notice-bar[data-tone="warning"] svg { color: var(--unsure); }.notice-bar[data-tone="error"] svg { color: var(--reject); }.notice-bar[data-tone="info"] svg { color: var(--brand-strong); }.notice-bar[data-tone="success"] { border-color: var(--match-edge); }.notice-bar[data-tone="warning"] { border-color: var(--unsure-edge); }.notice-bar[data-tone="error"] { border-color: var(--reject-edge); }.notice-bar[data-tone="info"] { border-color: var(--brand-edge); }.app-content {
   min-height: calc(100vh - 60px);
 }.view-shell {
@@ -968,13 +972,12 @@ button:disabled {
   letter-spacing: .04em;
 }.search-col .city-chips-row {
   margin: 0 0 4px;
-}.advanced-panel.collapsible-card {
-  padding: 0;
-  overflow: visible;
 }
 /* 高级设置框高度跟随左栏关键词卡：内容脱离行高计算（绝对定位），
    超出时在框内滚动，不撑高整页（此卡常驻展开，不受折叠动画影响）。 */
 .advanced-panel.collapsible-card {
+  padding: 0;
+  overflow: visible;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1373,8 +1376,15 @@ button:disabled {
 .task-elapsed { color: var(--ink-3); font-weight: 500; margin-right: auto; }
 .task-percentage { color: var(--ink-1); font-family: var(--font-display); font-size: 15px; font-weight: 800; }
 .progress-track { height: 7px; margin: 9px 0 0; overflow: hidden; border-radius: 4px; background: var(--hair-2); }
-.progress-track span { display: block; height: 100%; border-radius: inherit;
-  background: linear-gradient(90deg, var(--brand) 0%, var(--brand-strong) 100%); transition: none; }
+.progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--brand) 0%, var(--brand-strong) 100%);
+  transition: none;
+  position: relative;
+  overflow: hidden;
+}
 .task-progress[data-blocked="true"] .progress-track span { background: var(--reject); }
 .task-progress > p { margin: 8px 0 0; color: var(--ink-2); font-size: 13px; line-height: 1.5; }
 .task-pause-reason { display: flex; align-items: center; gap: 6px; color: var(--unsure); font-weight: 600; }
@@ -1456,10 +1466,12 @@ button:disabled {
 }
 
 @keyframes spin {to { transform: rotate(360deg); }
+/* 结果页：只淡入不位移，保证内部 fixed 浮层以视口定位 */
 }.results-stage {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 12px;
+  animation: stage-fade .22s ease both;
 }.run-actions {
   display: flex;
   gap: 8px;
@@ -1718,7 +1730,7 @@ button:disabled {
 .recrawl-inline {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 .recrawl-guide {
   display: flex;
@@ -1759,11 +1771,6 @@ button:disabled {
 }
 .recrawl-banner .button {
   align-self: flex-start;
-}
-.recrawl-inline {
-  display: flex;
-  align-items: center;
-  gap: 10px;
 }
 .recrawl-inline .button {
   min-height: 28px;
@@ -1930,6 +1937,7 @@ button:disabled {
   display: grid;
   align-content: start;
   grid-auto-rows: minmax(72px, max-content);
+/* 岗位行选中过渡：高亮条与底色柔和变化 */
 }.job-row {
   display: flex;
   align-items: center;
@@ -1944,7 +1952,7 @@ button:disabled {
   text-align: left;
   background: transparent;
   cursor: pointer;
-  transition: background .15s ease;
+  transition: background .15s ease, box-shadow .15s ease;
 }.job-row:hover {
   background: var(--hover-row);
 }.job-row.selected {
@@ -2023,6 +2031,7 @@ button:disabled {
 .back-to-top:hover {
   background: var(--surface-3);
   transform: translateY(-2px);
+/* 岗位详情面板：打开时淡入 */
 }.job-detail-pane {
   min-width: 0;
   display: flex;
@@ -2031,6 +2040,7 @@ button:disabled {
   border: 1px solid var(--hair);
   border-radius: 12px;
   background: var(--panel);
+  animation: panel-in .22s ease both;
 }.job-detail-header {
   display: flex;
   align-items: flex-start;
@@ -2099,15 +2109,20 @@ button:disabled {
 }.status-pill[data-verdict="uncertain"] {
   color: #fff;
   background: var(--unsure);
+/* T511：JobWorkspace 岗位平台徽章。 */
 }.platform-pill {
+  display: inline-flex;
+  align-items: center;
   margin-left: 0;
-  padding: 4px 10px;
+  padding: 2px 8px;
   border: 1px solid var(--brand-edge);
-  border-radius: 6px;
+  border-radius: 999px;
   font-family: var(--font-display);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 600;
   letter-spacing: .05em;
+  line-height: 1.4;
+  white-space: nowrap;
   color: var(--brand-ink);
   background: var(--brand-wash);
 }.job-detail-facts {
@@ -2530,7 +2545,6 @@ body,
   }.stage-header {
     min-height: 48px;
     margin-bottom: 12px;
-  }.stage-header {
     align-items: flex-start;
     gap: 12px;
   }.stage-header .button {
@@ -2775,20 +2789,6 @@ body,
   background: var(--brand-wash);
 }
 
-/* T511：JobWorkspace 岗位平台徽章。 */
-.platform-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.4;
-  white-space: nowrap;
-  color: var(--brand-ink);
-  background: var(--brand-wash);
-  border: 1px solid var(--brand-edge);
-}
 
 /* T511：JobWorkspace extra 区块（公司性质/规模/融资阶段等额外字段）。
    每个字段渲染为独立 chip：标签次级色 + 值主体加粗，形成可辨识的信息层级。 */
@@ -2979,10 +2979,6 @@ body,
 .empty-panel {
   animation: stage-in .22s ease both;
 }
-/* 结果页：只淡入不位移，保证内部 fixed 浮层以视口定位 */
-.results-stage {
-  animation: stage-fade .22s ease both;
-}
 @keyframes stage-fade {
   from {
     opacity: 0;
@@ -3002,10 +2998,6 @@ body,
   }
 }
 
-/* 岗位详情面板：打开时淡入 */
-.job-detail-pane {
-  animation: panel-in .22s ease both;
-}
 @keyframes panel-in {
   from {
     opacity: 0;
@@ -3017,10 +3009,6 @@ body,
   }
 }
 
-/* 徽标出现：轻微弹入 */
-.fav-badge {
-  animation: badge-pop .18s ease both;
-}
 @keyframes badge-pop {
   0% {
     opacity: 0;
@@ -3036,10 +3024,6 @@ body,
   }
 }
 
-/* 更新红点：低强度呼吸 */
-.brand-update-dot {
-  animation: dot-pulse 2.2s ease-in-out infinite;
-}
 @keyframes dot-pulse {
   0%,
   100% {
@@ -3051,10 +3035,6 @@ body,
 }
 
 /* 任务进度条：缓慢扫光；状态图标切换弹入 */
-.progress-track span {
-  position: relative;
-  overflow: hidden;
-}
 .progress-track span::after {
   content: "";
   position: absolute;
@@ -3118,10 +3098,6 @@ body,
   }
 }
 
-/* 全局通知条：顶部轻落入位 */
-.notice-bar {
-  animation: notice-in .22s ease both;
-}
 @keyframes notice-in {
   from {
     opacity: 0;
@@ -3133,15 +3109,7 @@ body,
   }
 }
 
-/* 岗位行选中过渡：高亮条与底色柔和变化 */
-.job-row {
-  transition: background .15s ease, box-shadow .15s ease;
-}
 
-/* 主题切换时主要面板颜色柔和过渡 */
-body {
-  transition: background-color .22s ease;
-}
 .app-header,
 .content-card,
 .workflow-stack,

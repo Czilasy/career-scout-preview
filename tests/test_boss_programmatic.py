@@ -12,7 +12,6 @@
 """
 
 import importlib.util
-import io
 import json
 import os
 import pathlib
@@ -309,7 +308,7 @@ class LogForwardingTests(unittest.TestCase):
             result = self.module.run_search_programmatic(
                 keyword="Java", city="上海", pages=1, detail=False,
             )
-            self.assertEqual(result["details"], None)
+            self.assertIsNone(result["details"])
 
     def test_risk_control_report_forwarded_via_on_log(self):
         """RiskControlError 抛出前，print_risk_control_report 文本经 on_log 转发。"""

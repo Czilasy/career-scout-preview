@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 from webui import semantic
 
@@ -57,7 +57,7 @@ class ValidateSemanticOutputTests(unittest.TestCase):
     def test_valid_high_confidence_match_returns_match(self):
         out = semantic.validate_semantic_output(self._valid_raw())
         self.assertEqual(out["verdict"], "match")
-        self.assertEqual(out["failure_stage"], None)
+        self.assertIsNone(out["failure_stage"])
         self.assertEqual(out["confidence"], 85)
 
     def test_valid_high_confidence_mismatch_returns_mismatch(self):
@@ -105,7 +105,7 @@ class ValidateSemanticOutputTests(unittest.TestCase):
         raw["dimensions"]["skill_coverage"]["score"] = 30  # < 50
         out = semantic.validate_semantic_output(raw)
         self.assertEqual(out["verdict"], "mismatch")
-        self.assertEqual(out["failure_stage"], None)
+        self.assertIsNone(out["failure_stage"])
 
 
 class AssessSemanticSimilarityFormalTests(unittest.TestCase):
@@ -117,7 +117,7 @@ class AssessSemanticSimilarityFormalTests(unittest.TestCase):
             "resume", "jd", ai_available=False,
         )
         self.assertEqual(out["verdict"], "match")
-        self.assertEqual(out.get("failure_stage"), None)
+        self.assertIsNone(out.get("failure_stage"))
 
     def test_ai_match_high_confidence_returns_match(self):
         valid = {
@@ -130,7 +130,7 @@ class AssessSemanticSimilarityFormalTests(unittest.TestCase):
         )
         self.assertEqual(out["verdict"], "match")
         self.assertEqual(out["confidence"], 85)
-        self.assertEqual(out["failure_stage"], None)
+        self.assertIsNone(out["failure_stage"])
 
     def test_ai_timeout_returns_pending(self):
         call_fn = MagicMock(side_effect=TimeoutError("ai timeout"))

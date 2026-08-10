@@ -8,7 +8,6 @@ decides task status.
 
 from __future__ import annotations
 
-import copy
 import json
 import os
 import subprocess
@@ -17,19 +16,10 @@ import uuid
 from collections.abc import Mapping
 from urllib.parse import urlparse
 
-import requests
 import keyring
+import requests
 
 from scripts import boss_cdp_raw as boss
-from webui.candidate import (
-    canonicalize_resume_text_v2,
-    redact_pii,
-    resolve_evidence_quote,
-    CANDIDATE_ANALYSIS_V3_CONTRACT,
-    build_empty_candidate_analysis,
-    normalize_candidate_analysis,
-)
-
 
 KEYRING_SERVICE = "boss-workbench"
 DEFAULT_TIMEOUT = 300
@@ -60,6 +50,11 @@ RATE_LIMIT_BACKOFF_SECONDS = (5,)
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 SERVER_ERROR_BACKOFF_SECONDS = (3,)
 NETWORK_BACKOFF_SECONDS = (3,)
+
+
+_CHAT_COMPLETIONS_PATH = "/chat/completions"
+_MODELS_PATH = "/models"
+_AI_CHECKPOINT_FAILED = "AI batch checkpoint failed"
 
 
 class AISecurityError(Exception):
@@ -223,9 +218,9 @@ def _chat_completions_url(endpoint_url: str) -> str:
     url = (endpoint_url or "").rstrip("/")
     if not url:
         return url
-    if url.endswith("/chat/completions"):
+    if url.endswith(_CHAT_COMPLETIONS_PATH):
         return url
-    return url + "/chat/completions"
+    return url + _CHAT_COMPLETIONS_PATH
 
 
 _SCHANNEL_POST_SCRIPT = r"""
@@ -282,7 +277,7 @@ def _windows_schannel_post(
         )
     except subprocess.TimeoutExpired:
         raise requests.Timeout("Schannel fallback timed out") from None
-    except (FileNotFoundError, OSError):
+    except OSError:
         raise requests.ConnectionError("Schannel fallback unavailable") from None
     if completed.returncode != 0:
         raise requests.ConnectionError("Schannel fallback failed")
@@ -331,11 +326,11 @@ def list_models(endpoint_url: str, api_key: str) -> list[str]:
     base = (endpoint_url or "").rstrip("/")
     if not base:
         raise AISecurityError(ERROR_NETWORK)
-    if not base.endswith("/models"):
-        if base.endswith("/chat/completions"):
-            base = base[: -len("/chat/completions")] + "/models"
+    if not base.endswith(_MODELS_PATH):
+        if base.endswith(_CHAT_COMPLETIONS_PATH):
+            base = base[: -len(_CHAT_COMPLETIONS_PATH)] + _MODELS_PATH
         else:
-            base = base + "/models"
+            base = base + _MODELS_PATH
     try:
         response = requests.get(
             base,
@@ -469,7 +464,7 @@ def _extract_provider_error(response) -> dict:
     """
     try:
         body = response.json()
-    except (ValueError, Exception):
+    except Exception:
         return {}
     if not isinstance(body, dict):
         return {}
@@ -556,7 +551,7 @@ def _read_stream(response) -> tuple[str, str]:
             break
         try:
             chunk = json.loads(data_str)
-        except (json.JSONDecodeError, ValueError):
+        except ValueError:
             continue
         choices = chunk.get("choices")
         if not choices or not isinstance(choices, list):
@@ -932,12 +927,14 @@ def _resume_bytes_to_text(file_bytes: bytes, fmt: str) -> str:
         return file_bytes.decode("utf-8", errors="replace")
     if fmt == "pdf":
         import io
+
         from pypdf import PdfReader
 
         reader = PdfReader(io.BytesIO(file_bytes))
         return "\n".join((page.extract_text() or "") for page in reader.pages)
     if fmt == "docx":
         import io
+
         from docx import Document
 
         doc = Document(io.BytesIO(file_bytes))
@@ -1326,7 +1323,7 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 try:
                     on_batch_done(dict(b_verdicts), list(completed_ids))
                 except Exception as exc:
-                    raise AICheckpointError("AI batch checkpoint failed") from exc
+                    raise AICheckpointError(_AI_CHECKPOINT_FAILED) from exc
             processed += len(batch)
             if progress is not None:
                 try:
@@ -1364,7 +1361,7 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                     try:
                         on_batch_done(dict(b_verdicts), completed_snapshot)
                     except Exception as exc:
-                        raise AICheckpointError("AI batch checkpoint failed") from exc
+                        raise AICheckpointError(_AI_CHECKPOINT_FAILED) from exc
                 _safe_progress(len(futures[fut]))
 
     kept = [str(j.get("job_id", "")) for j in jobs
@@ -1607,7 +1604,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 try:
                     on_batch_done(dict(batch_verdicts), list(verdicts.keys()))
                 except Exception as exc:
-                    raise AICheckpointError("AI batch checkpoint failed") from exc
+                    raise AICheckpointError(_AI_CHECKPOINT_FAILED) from exc
             processed += len(batch)
             if progress is not None:
                 try:
@@ -1645,7 +1642,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                     try:
                         on_batch_done(dict(batch_verdicts), completed_snapshot)
                     except Exception as exc:
-                        raise AICheckpointError("AI batch checkpoint failed") from exc
+                        raise AICheckpointError(_AI_CHECKPOINT_FAILED) from exc
                 _safe_progress(len(futures[fut]))
 
     # 末尾补一轮：传输层失败的批次统一重试一次（网络抖动恢复后大概率成功）
@@ -1663,7 +1660,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             _emit_retry_event(
                 measurement_callback, "fine", 0, metadata=retry_metadata,
             )
-            batch_verdicts, still_failed = _match_one_batch(
+            batch_verdicts, _ = _match_one_batch(
                 batch, allow_transport_terminal=True)
             # 无论完全恢复还是部分恢复，都以最终尝试的逐项结果为准。
             verdicts.update(batch_verdicts)
@@ -1671,7 +1668,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 try:
                     on_batch_done(dict(batch_verdicts), list(verdicts.keys()))
                 except Exception as exc:
-                    raise AICheckpointError("AI batch checkpoint failed") from exc
+                    raise AICheckpointError(_AI_CHECKPOINT_FAILED) from exc
 
     return {"verdicts": verdicts}
 

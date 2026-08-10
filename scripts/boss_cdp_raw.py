@@ -21,27 +21,30 @@ BOSS直聘职位抓取 + 分析 — 纯 CDP raw protocol
 
 __version__ = "2.8.5"
 
-import json
-import time
-import random
-import sys
 import argparse
-import os
-import re
-import hashlib
 import csv
 import glob
-import platform
-import subprocess
-import shutil
-import signal
+import hashlib
+import json
 import logging
 import ntpath
+import os
+import platform
+import random
+import re
+import shutil
+import signal
+import subprocess
+import sys
 import threading
-from datetime import datetime
+import time
 from collections import Counter
-from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
+from datetime import datetime
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
+
+
+_VISIBILITY_STATE_JS = "Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});"
 
 
 def configure_stdio():
@@ -75,6 +78,19 @@ MAX_API_REQUESTS = 500  # 单次最大 API 请求数
 
 BROWSER_NOT_FOUND_HINT = "请安装 Chrome 或使用系统自带 Edge"
 
+CHROME_EXE = "chrome.exe"
+EDGE_EXE = "msedge.exe"
+CDP_CMD_PAGE_NAVIGATE = "Page.navigate"
+CDP_CMD_CREATE_TARGET = "Target.createTarget"
+CDP_CMD_ATTACH_TARGET = "Target.attachToTarget"
+CDP_CMD_ADD_SCRIPT_ON_NEW_DOC = "Page.addScriptToEvaluateOnNewDocument"
+CDP_CMD_CLOSE_TARGET = "Target.closeTarget"
+CDP_ABOUT_BLANK = "about:blank"
+HIDDEN_DEFINE_JS = "Object.defineProperty(document, 'hidden', {get: () => false});"
+MSG_BOSS_LOGIN_STATUS = "BOSS 登录状态"
+MSG_DEDICATED_BROWSER_STARTED = "专用浏览器已启动"
+MSG_USER_CANCELLED_SCRAPE = "用户取消抓取"
+
 
 def detect_chromium_browsers():
     """探测本机 Chromium 系浏览器（Chrome / Edge），返回结构化结果。
@@ -90,12 +106,12 @@ def detect_chromium_browsers():
     found = {"chrome": None, "edge": None}
     if system == "Windows":
         candidates = (
-            ("chrome", "LOCALAPPDATA", "Google", "Chrome", "Application", "chrome.exe"),
-            ("chrome", "PROGRAMFILES", "Google", "Chrome", "Application", "chrome.exe"),
-            ("chrome", "PROGRAMFILES(X86)", "Google", "Chrome", "Application", "chrome.exe"),
-            ("edge", "PROGRAMFILES", "Microsoft", "Edge", "Application", "msedge.exe"),
-            ("edge", "PROGRAMFILES(X86)", "Microsoft", "Edge", "Application", "msedge.exe"),
-            ("edge", "LOCALAPPDATA", "Microsoft", "Edge", "Application", "msedge.exe"),
+            ("chrome", "LOCALAPPDATA", "Google", "Chrome", "Application", CHROME_EXE),
+            ("chrome", "PROGRAMFILES", "Google", "Chrome", "Application", CHROME_EXE),
+            ("chrome", "PROGRAMFILES(X86)", "Google", "Chrome", "Application", CHROME_EXE),
+            ("edge", "PROGRAMFILES", "Microsoft", "Edge", "Application", EDGE_EXE),
+            ("edge", "PROGRAMFILES(X86)", "Microsoft", "Edge", "Application", EDGE_EXE),
+            ("edge", "LOCALAPPDATA", "Microsoft", "Edge", "Application", EDGE_EXE),
         )
         for kind, env_name, *parts in candidates:
             if found[kind]:
@@ -271,7 +287,7 @@ def load_local_city_map():
             for name, code in raw.items():
                 if name and code is not None:
                     name_to_code[str(name)] = str(code)
-    except (OSError, json.JSONDecodeError, ValueError) as e:
+    except (OSError, ValueError) as e:
         log.debug(f"读取本地城市码表失败: {e}")
     code_to_name = {code: name for name, code in name_to_code.items()}
     _local_city_map_cache = name_to_code, code_to_name
@@ -346,7 +362,7 @@ class CDPSession:
                 "请先运行 --setup-chrome 启动带调试端口的 Chrome，并登录 BOSS直聘；\n"
                 "Chrome 关了调试端口就没了，需要重新启动。"
             ) from e
-        except (KeyError, ValueError, json.JSONDecodeError) as e:
+        except (KeyError, ValueError) as e:
             raise CDPUnavailableError(
                 f"端口 {cdp_port} 上的服务不是 Chrome 调试端口（返回内容无法识别）。\n"
                 "请用 --setup-chrome 启动专用 Chrome，不要占用该端口。"
@@ -400,7 +416,7 @@ class CDPSession:
 
             try:
                 r = json.loads(raw)
-            except (json.JSONDecodeError, ValueError):
+            except ValueError:
                 log.debug(f"跳过非 JSON 消息: {raw[:100]}")
                 continue
 
@@ -572,7 +588,7 @@ class SearchCancelled(RuntimeError):
     WorkbenchRunner）将其映射为「用户取消」中断，不落失败码。
     """
 
-    def __init__(self, message="用户取消抓取"):
+    def __init__(self, message=MSG_USER_CANCELLED_SCRAPE):
         super().__init__(message)
 
 
@@ -689,7 +705,7 @@ def _looks_like_detail_shell(jd: str) -> bool:
     return bool(tokens) and all(token in shell_tokens for token in tokens)
 
 
-def extract_job_description(extracted, min_length=0):
+def extract_job_description(extracted):
     """Return validated JD text without BOSS page chrome.
 
     `page_text` is diagnostic input only. It is never persisted unless it has
@@ -793,7 +809,7 @@ def load_live_city_maps(timeout=10):
                 code = item.get("code")
                 if name and code is not None:
                     name_to_code.setdefault(name, str(code))
-    except (OSError, json.JSONDecodeError, ValueError) as e:
+    except (OSError, ValueError) as e:
         log.debug(f"加载 BOSS 城市映射失败，使用内置城市映射: {e}")
 
     code_to_name = {code: name for name, code in name_to_code.items()}
@@ -919,7 +935,7 @@ def probe_login_state_tri(cdp, sid):
         return "not_logged_in"
     try:
         payload = json.loads(val) if isinstance(val, str) else val
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         return "not_logged_in"
     status = 0
     text = ""
@@ -936,7 +952,7 @@ def probe_login_state_tri(cdp, sid):
         return "restricted"
     try:
         data = json.loads(text) if isinstance(text, str) else text
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         return "not_logged_in"
     return "logged_in" if is_logged_in_search_response(data) else "not_logged_in"
 
@@ -962,30 +978,30 @@ def check_login_state_tri(cdp_port=DEFAULT_CDP_PORT):
     """
     try:
         cdp = CDPSession(cdp_port)
-        # background=True：后台创建标签页，不抢占前台焦点，避免检测登录时弹窗
-        r = cdp.send("Target.createTarget", {"url": "about:blank", "background": True})
+        # 后台创建标签页，不抢占前台焦点，避免检测登录时弹窗
+        r = cdp.send(CDP_CMD_CREATE_TARGET, {"url": CDP_ABOUT_BLANK, "background": True})
         tid = r["result"]["targetId"]
-        r = cdp.send("Target.attachToTarget", {"targetId": tid, "flatten": True})
+        r = cdp.send(CDP_CMD_ATTACH_TARGET, {"targetId": tid, "flatten": True})
         sid = r["result"]["sessionId"]
 
         # background 标签页 document.hidden=true、visibilityState=hidden，
         # BOSS直聘据此判定为非真人浏览。导航前注入覆盖可见性属性为 visible。
-        cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+        cdp.send(CDP_CMD_ADD_SCRIPT_ON_NEW_DOC, {
             "source": (
-                "Object.defineProperty(document, 'hidden', {get: () => false});"
-                "Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});"
-                "Object.defineProperty(document, 'webkitHidden', {get: () => false});"
+                HIDDEN_DEFINE_JS +
+                _VISIBILITY_STATE_JS +
+                "Object.defineProperty(document, \'webkitHidden\', {get: () => false});"
                 "Object.defineProperty(document, 'webkitVisibilityState', {get: () => 'visible'});"
             )
         }, sid)
 
         # 先导航到 BOSS直聘，确保 cookie 域名正确
-        cdp.send("Page.navigate", {"url": "https://www.zhipin.com/"}, sid)
+        cdp.send(CDP_CMD_PAGE_NAVIGATE, {"url": "https://www.zhipin.com/"}, sid)
         time.sleep(4)
 
         state = probe_login_state_tri(cdp, sid)
 
-        cdp.send("Target.closeTarget", {"targetId": tid})
+        cdp.send(CDP_CMD_CLOSE_TARGET, {"targetId": tid})
         cdp.close()
 
         return state
@@ -1003,9 +1019,9 @@ def wait_for_login(cdp_port=DEFAULT_CDP_PORT, timeout=DEFAULT_LOGIN_TIMEOUT, int
     下次探测重新判定，避免沿用登录前的旧状态。
     """
     cdp = CDPSession(cdp_port)
-    r = cdp.send("Target.createTarget", {"url": "https://www.zhipin.com/web/user/"})
+    r = cdp.send(CDP_CMD_CREATE_TARGET, {"url": "https://www.zhipin.com/web/user/"})
     tid = r["result"]["targetId"]
-    r = cdp.send("Target.attachToTarget", {"targetId": tid, "flatten": True})
+    r = cdp.send(CDP_CMD_ATTACH_TARGET, {"targetId": tid, "flatten": True})
     sid = r["result"]["sessionId"]
 
     deadline = time.time() + timeout
@@ -1030,7 +1046,7 @@ def wait_for_login(cdp_port=DEFAULT_CDP_PORT, timeout=DEFAULT_LOGIN_TIMEOUT, int
         return False
     finally:
         if logged_in:
-            cdp.send("Target.closeTarget", {"targetId": tid})
+            cdp.send(CDP_CMD_CLOSE_TARGET, {"targetId": tid})
         cdp.close()
 
 
@@ -1107,7 +1123,7 @@ def flush_jobs(path, meta, jobs):
                 old = json.load(f)
             existing_jobs = old.get("jobs", [])
             seen_ids = {j.get("job_id", "") for j in existing_jobs}
-        except (json.JSONDecodeError, OSError, ValueError):
+        except (OSError, ValueError):
             pass
     for j in jobs:
         if j.get("job_id") not in seen_ids:
@@ -1134,7 +1150,7 @@ def merge_jobs(external_path, new_jobs):
     try:
         with open(external_path, "r", encoding="utf-8") as f:
             old_data = json.load(f)
-    except (json.JSONDecodeError, OSError, ValueError) as e:
+    except (OSError, ValueError) as e:
         log.warning(f"无法加载合并文件 {external_path}: {e}")
         return new_jobs
 
@@ -1171,7 +1187,7 @@ def merge_details(external_path, new_details):
     try:
         with open(external_path, "r", encoding="utf-8") as f:
             old_data = json.load(f)
-    except (json.JSONDecodeError, OSError, ValueError) as e:
+    except (OSError, ValueError) as e:
         log.warning(f"无法加载合并详情文件 {external_path}: {e}")
         return new_details
 
@@ -1221,7 +1237,7 @@ def parse_api_jobs_eval_value(value):
         return []
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
-    except (json.JSONDecodeError, ValueError, TypeError):
+    except (ValueError, TypeError):
         return []
     if not isinstance(parsed, list):
         return []
@@ -1269,7 +1285,7 @@ def diagnose_api_jobs_eval_value(value):
         return [], {"kind": "empty_response"}, None
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
-    except (json.JSONDecodeError, ValueError, TypeError):
+    except (ValueError, TypeError):
         return [], {"kind": "empty_response"}, None
 
     # 新格式：{"jobs": [...], "hasMore": bool, "totalCount": int}
@@ -1401,7 +1417,7 @@ def check_list_risk(diagnosis, *, page, consecutive_empty, scraped_count,
                     page=page, scraped_count=scraped_count,
                     output_path=output_path, resume_page=resume_page)
         if kind in ("parse_failed", "unexpected_shape", "js_exception"):
-            # 结构对不上：可能是页面未就绪（可疑），连续出现才算实锤，
+            # 结构对不上时可能是页面未就绪（可疑），连续出现才算实锤，
             # 由调用方按连续空页阈值统一处置（本次先按空页计数）。
             pass
     if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES:
@@ -1472,7 +1488,7 @@ def load_existing_details(input_path=None, detail_output=None, result_dir=DEFAUL
             if isinstance(details, list):
                 print(f"加载详情文件: {path}")
                 return details
-        except (json.JSONDecodeError, OSError, ValueError) as e:
+        except (OSError, ValueError) as e:
             log.warning(f"无法加载详情文件 {path}: {e}")
     return None
 
@@ -1505,7 +1521,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 last_completed_page = int(
                     checkpoint.get("last_completed_page", last_completed_page)
                 )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except (OSError, ValueError, TypeError):
             all_jobs = []
             seen = set()
 
@@ -1536,26 +1552,26 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             if v == filters["industry"]:
                 filter_desc.append(f"行业={k}")
 
-    print(f"=== BOSS直聘抓取 ===")
+    print("=== BOSS直聘抓取 ===")
     print(f"关键词: {keyword} | 城市: {city_name} | 页数: {max_pages}")
     if filter_desc:
         print(f"筛选: {' | '.join(filter_desc)}")
     print()
 
-    # background=True：后台创建标签页，不抢占前台焦点，避免抓取时反复弹窗
+    # 后台创建标签页，不抢占前台焦点，避免抓取时反复弹窗
     # （否则最小化的 Chrome 窗口会被新标签页唤起并放大到前台）
-    r = cdp.send("Target.createTarget", {"url": "about:blank", "background": True})
+    r = cdp.send(CDP_CMD_CREATE_TARGET, {"url": CDP_ABOUT_BLANK, "background": True})
     tid = r["result"]["targetId"]
-    r = cdp.send("Target.attachToTarget", {"targetId": tid, "flatten": True})
+    r = cdp.send(CDP_CMD_ATTACH_TARGET, {"targetId": tid, "flatten": True})
     sid = r["result"]["sessionId"]
 
     # background 标签页 document.hidden=true、visibilityState=hidden，
     # BOSS直聘据此判定为非真人浏览。导航前注入覆盖可见性属性为 visible。
-    cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+    cdp.send(CDP_CMD_ADD_SCRIPT_ON_NEW_DOC, {
         "source": (
-            "Object.defineProperty(document, 'hidden', {get: () => false});"
-            "Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});"
-            "Object.defineProperty(document, 'webkitHidden', {get: () => false});"
+            HIDDEN_DEFINE_JS +
+            _VISIBILITY_STATE_JS +
+            "Object.defineProperty(document, \'webkitHidden\', {get: () => false});"
             "Object.defineProperty(document, 'webkitVisibilityState', {get: () => 'visible'});"
         )
     }, sid)
@@ -1563,7 +1579,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
     def human_scroll(cdp, sid):
         """模拟人类滚动: 随机次数、随机距离、随机停顿，偶尔回滚一点"""
         total_scrolls = random.randint(3, 6)
-        for i in range(total_scrolls):
+        for _ in range(total_scrolls):
             # 大部分往下滚，偶尔往上回滚一点（模拟阅读回看）
             if random.random() < 0.15:
                 delta = -random.randint(50, 150)
@@ -1625,7 +1641,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             # programmatic 取消/轮询检查点（与 scrape_details 逐岗位检查点同语义）；
             # CLI 不传 cancel_event/on_poll，行为与现状完全一致。
             if cancel_event is not None and cancel_event.is_set():
-                raise SearchCancelled("用户取消抓取")
+                raise SearchCancelled(MSG_USER_CANCELLED_SCRAPE)
             if on_poll is not None:
                 on_poll()
             print(f"--- [{pg}/{max_pages} 页, {len(all_jobs)} 条已抓] ---")
@@ -1636,7 +1652,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             # 使 10 页 300 条全量抓取成为可能。
             if (pg - start_page) % 4 == 0:
                 url = build_search_url(keyword, city_code, pg, filters)
-                cdp.send("Page.navigate", {"url": url}, sid)
+                cdp.send(CDP_CMD_PAGE_NAVIGATE, {"url": url}, sid)
                 time.sleep(random.uniform(6, 10))
                 human_scroll(cdp, sid)
                 human_mouse_jitter(cdp, sid)
@@ -1683,15 +1699,15 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 log.warning("⚠️ API 获取失败，回退到 DOM 提取（此方式已弃用，数据可能不完整）")
                 if pg > 1:
                     url = build_search_url(keyword, city_code, pg, filters)
-                    cdp.send("Page.navigate", {"url": url}, sid)
+                    cdp.send(CDP_CMD_PAGE_NAVIGATE, {"url": url}, sid)
                     time.sleep(random.uniform(4, 8))
                     human_scroll(cdp, sid)
                 val = cdp.eval_js(EXTRACT_LIST_JS, sid)
                 if val:
                     try:
                         jobs = json.loads(val) if isinstance(val, str) else val
-                    except (json.JSONDecodeError, ValueError):
-                        print(f"  ⚠️ JSON 解析失败")
+                    except ValueError:
+                        print("  ⚠️ JSON 解析失败")
                         jobs = []
             elif not jobs:
                 log.warning("⚠️ API 未返回职位数据，已跳过 DOM fallback；如需强制降级可加 --allow-dom-fallback")
@@ -1799,7 +1815,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
         print(f"\n⚠️ {e}")
         raise
     finally:
-        cdp.send("Target.closeTarget", {"targetId": tid})
+        cdp.send(CDP_CMD_CLOSE_TARGET, {"targetId": tid})
         cdp.close()
         if events_handle is not None:
             try:
@@ -1968,27 +1984,27 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
 
     incr_request()
 
-    # background=True：后台创建标签页，不抢占前台焦点，避免抓取时反复弹窗
-    r = ws.send("Target.createTarget", {"url": "about:blank", "background": True})
+    # 后台创建标签页，不抢占前台焦点，避免抓取时反复弹窗
+    r = ws.send(CDP_CMD_CREATE_TARGET, {"url": CDP_ABOUT_BLANK, "background": True})
     tid = r["result"]["targetId"]
-    r = ws.send("Target.attachToTarget", {"targetId": tid, "flatten": True})
+    r = ws.send(CDP_CMD_ATTACH_TARGET, {"targetId": tid, "flatten": True})
     sid = r["result"]["sessionId"]
 
     # background 标签页 document.hidden=true、visibilityState=hidden，
     # BOSS直聘据此判定为非真人浏览而拒绝渲染/重定向到登录页。
     # 在导航前注入，覆盖可见性属性为 visible，骗过 visibility 反爬。
-    ws.send("Page.addScriptToEvaluateOnNewDocument", {
+    ws.send(CDP_CMD_ADD_SCRIPT_ON_NEW_DOC, {
         "source": (
-            "Object.defineProperty(document, 'hidden', {get: () => false});"
-            "Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});"
-            "Object.defineProperty(document, 'webkitHidden', {get: () => false});"
+            HIDDEN_DEFINE_JS +
+            _VISIBILITY_STATE_JS +
+            "Object.defineProperty(document, \'webkitHidden\', {get: () => false});"
             "Object.defineProperty(document, 'webkitVisibilityState', {get: () => 'visible'});"
         )
     }, sid)
 
     detail_url = build_detail_url(job)
-    ws.send("Page.navigate", {"url": detail_url}, sid)
-    print(f"  加载页面...")
+    ws.send(CDP_CMD_PAGE_NAVIGATE, {"url": detail_url}, sid)
+    print("  加载页面...")
 
     started_at = time.time()
     _wait_for_detail_readiness(
@@ -1998,11 +2014,11 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
         max_retries=max_readiness_retries,
     )
 
-    print(f"  提取 JD...")
+    print("  提取 JD...")
     val = ws.eval_js(EXTRACT_DETAIL_JS, sid)
     try:
         d = json.loads(val) if isinstance(val, str) else {"jd": "", "tags": []}
-    except (json.JSONDecodeError, ValueError, TypeError):
+    except (ValueError, TypeError):
         d = {"jd": "", "tags": []}
 
     skip_gap = False
@@ -2010,7 +2026,7 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
         try:
             d["jd"] = extract_job_description(d)
         except DetailLoginRequiredError as exc:
-            ws.send("Target.closeTarget", {"targetId": tid})
+            ws.send(CDP_CMD_CLOSE_TARGET, {"targetId": tid})
             _emit_detail_safe_event(
                 event_callback, job, "unavailable",
                 "source_login_required", started_at,
@@ -2036,7 +2052,7 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
             ) from exc
         except DetailExtractionError as exc:
             print(f"  跳过无效详情页: {exc}")
-            ws.send("Target.closeTarget", {"targetId": tid})
+            ws.send(CDP_CMD_CLOSE_TARGET, {"targetId": tid})
             _emit_detail_safe_event(
                 event_callback, job, "failed",
                 "source_invalid_output", started_at,
@@ -2055,7 +2071,7 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
             write_json_atomic(output_path, results)
 
-        ws.send("Target.closeTarget", {"targetId": tid})
+        ws.send(CDP_CMD_CLOSE_TARGET, {"targetId": tid})
         _emit_detail_safe_event(
             event_callback, job, "completed", "ok", started_at,
         )
@@ -2094,7 +2110,7 @@ def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
         incr_request()
 
     detail_url = build_detail_url(job)
-    ws.send("Page.navigate", {"url": detail_url}, sid)
+    ws.send(CDP_CMD_PAGE_NAVIGATE, {"url": detail_url}, sid)
     print(f"[{tab_label}]   加载页面...")
 
     started_at = time.time()
@@ -2109,18 +2125,18 @@ def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
     val = ws.eval_js(EXTRACT_DETAIL_JS, sid)
     try:
         d = json.loads(val) if isinstance(val, str) else {"jd": "", "tags": []}
-    except (json.JSONDecodeError, ValueError, TypeError):
+    except (ValueError, TypeError):
         d = {"jd": "", "tags": []}
 
     try:
         d["jd"] = extract_job_description(d)
-    except DetailLoginRequiredError as exc:
+    except DetailLoginRequiredError:
         _emit_detail_safe_event(
             event_callback, job, "unavailable", "source_login_required", started_at,
         )
         print(f"[{tab_label}]   ⚠ 登录墙，触发降级")
         return "login_required"
-    except DetailVerificationRequiredError as exc:
+    except DetailVerificationRequiredError:
         _emit_detail_safe_event(
             event_callback, job, "failed", "source_verification_required", started_at,
         )
@@ -2164,7 +2180,7 @@ def _reset_detail_session(ws, sid, sleeper, tab_label):
     让 BOSS 的 session 级请求计数归零，避免连续自动化访问触发拦截。
     """
     print(f"[{tab_label}] ⟳ session 重置：导航回首页...")
-    ws.send("Page.navigate", {"url": "https://www.zhipin.com/"}, sid)
+    ws.send(CDP_CMD_PAGE_NAVIGATE, {"url": "https://www.zhipin.com/"}, sid)
     sleeper(random.uniform(5, 8), label="session_reset_wait")
     # 模拟真人滚动
     ws.eval_js("window.scrollBy(0, 300); void(0);", sid)
@@ -2192,15 +2208,15 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
     keep_tab_open = False  # 限流停工时限流页留在屏幕上，不关闭
     try:
         # 建池：createTarget + attach + visibility 注入（后台反爬）
-        r = ws.send("Target.createTarget", {"url": "about:blank", "background": True})
+        r = ws.send(CDP_CMD_CREATE_TARGET, {"url": CDP_ABOUT_BLANK, "background": True})
         tid = r["result"]["targetId"]
-        r = ws.send("Target.attachToTarget", {"targetId": tid, "flatten": True})
+        r = ws.send(CDP_CMD_ATTACH_TARGET, {"targetId": tid, "flatten": True})
         sid = r["result"]["sessionId"]
-        ws.send("Page.addScriptToEvaluateOnNewDocument", {
+        ws.send(CDP_CMD_ADD_SCRIPT_ON_NEW_DOC, {
             "source": (
-                "Object.defineProperty(document, 'hidden', {get: () => false});"
-                "Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});"
-                "Object.defineProperty(document, 'webkitHidden', {get: () => false});"
+                HIDDEN_DEFINE_JS +
+                _VISIBILITY_STATE_JS +
+                "Object.defineProperty(document, \'webkitHidden\', {get: () => false});"
                 "Object.defineProperty(document, 'webkitVisibilityState', {get: () => 'visible'});"
             )
         }, sid)
@@ -2261,7 +2277,7 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
         # 结束一次性关 tab + 关会话（限流停工时限流页保留不关）
         if tid is not None and not keep_tab_open:
             try:
-                ws.send("Target.closeTarget", {"targetId": tid})
+                ws.send(CDP_CMD_CLOSE_TARGET, {"targetId": tid})
             except Exception:
                 pass
         ws.close()
@@ -2356,8 +2372,8 @@ def scrape_details(list_data, max_details=None, output_path=None,
     if enable_parallel and total > 0:
         # spec 007 ⑧：常驻 tab 池并行抓取
         print(f"\n=== 抓取岗位详情 ({total} 个, {tab_pool_size} tab 并行) ===\n")
-        import threading
         import queue as _queue_mod
+        import threading
         results_lock = threading.Lock()
         degrade_event = threading.Event()
         # 降级原因共享标记：区分登录墙降级与账号限流停工（限流需退出码 10）
@@ -2402,7 +2418,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
         # programmatic 取消：线程退出后 flush 已抓 results 并抛 SearchCancelled
         if cancel_event is not None and cancel_event.is_set():
             write_json_atomic(output_path, results)
-            raise SearchCancelled("用户取消抓取")
+            raise SearchCancelled(MSG_USER_CANCELLED_SCRAPE)
         if degrade_reason.get("reason") == "rate_limited":
             # 账号限流：醒目报错 + 退出码 10（webui 据此分类
             # source_rate_limited 并停掉整个任务）；限流页已留在屏幕上。
@@ -2428,7 +2444,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
                     # CLI 不传 cancel_event/on_poll，行为与现状完全一致。
                     if cancel_event is not None and cancel_event.is_set():
                         write_json_atomic(output_path, results)
-                        raise SearchCancelled("用户取消抓取")
+                        raise SearchCancelled(MSG_USER_CANCELLED_SCRAPE)
                     if on_poll is not None:
                         on_poll()
                     is_last_in_run = global_idx == total - 1
@@ -2539,13 +2555,11 @@ def analyze(list_data, details=None, search_keyword=""):
     print(f"{'='*60}")
 
     # 1. 薪资分析
-    print(f"\n--- 薪资分布 ---")
+    print("\n--- 薪资分布 ---")
     salary_ranges = Counter()
     for j in jobs:
         s = j.get("salary", "")
-        if "K" in s:
-            salary_ranges[s] += 1
-        elif "元/天" in s:
+        if "K" in s or "元/天" in s:
             salary_ranges[s] += 1
         else:
             salary_ranges["未标注"] += 1
@@ -2554,7 +2568,7 @@ def analyze(list_data, details=None, search_keyword=""):
         print(f"  {s:<20} {c:>3}  {bar}")
 
     # 2. 经验要求
-    print(f"\n--- 经验要求 ---")
+    print("\n--- 经验要求 ---")
     exp_count = Counter()
     for j in jobs:
         tags = j.get("tags", "")
@@ -2565,7 +2579,7 @@ def analyze(list_data, details=None, search_keyword=""):
         print(f"  {e:<15} {c}")
 
     # 3. 学历要求
-    print(f"\n--- 学历要求 ---")
+    print("\n--- 学历要求 ---")
     edu_count = Counter()
     for j in jobs:
         tags = j.get("tags", "")
@@ -2576,7 +2590,7 @@ def analyze(list_data, details=None, search_keyword=""):
         print(f"  {e:<10} {c}")
 
     # 4. 地区分布
-    print(f"\n--- 地区分布 ---")
+    print("\n--- 地区分布 ---")
     loc_count = Counter()
     for j in jobs:
         loc = j.get("location", "")
@@ -2590,7 +2604,7 @@ def analyze(list_data, details=None, search_keyword=""):
         print(f"  {l:<15} {c}")
 
     # 5. 公司分布
-    print(f"\n--- 高频公司 ---")
+    print("\n--- 高频公司 ---")
     company_count = Counter()
     for j in jobs:
         c = j.get("boss_name", "")
@@ -2602,7 +2616,7 @@ def analyze(list_data, details=None, search_keyword=""):
     # 6. 详情页的技能标签（如有）
     body_freq = Counter()
     if details:
-        print(f"\n--- 技能要求频次（来自 JD 标签）---")
+        print("\n--- 技能要求频次（来自 JD 标签）---")
         skill_freq = Counter()
         for d in details:
             for tag in d.get("skill_tags", []):
@@ -2612,7 +2626,7 @@ def analyze(list_data, details=None, search_keyword=""):
             print(f"  {s:<20} {c:>3}/{len(details)}  {bar}")
 
         # 7. JD 正文关键词（动态提取）
-        print(f"\n--- JD 正文高频技术词 ---")
+        print("\n--- JD 正文高频技术词 ---")
         tech_terms = extract_tech_terms_from_jds(details, search_keyword)
         for d in details:
             jd_lower = d.get("jd", "").lower()
@@ -2625,7 +2639,7 @@ def analyze(list_data, details=None, search_keyword=""):
             print(f"  {t:<20} {c:>3}/{len(details)} ({pct:.0f}%)  {bar}")
 
     # 8. 简历建议
-    print(f"\n--- 简历建议 ---")
+    print("\n--- 简历建议 ---")
     if details and body_freq:
         noise_list = {'BOSS直聘', 'boss', 'BOSS', '来自BOSS直聘', '金', '金币'}
         top_skills = [s for s, _ in Counter(
@@ -2654,7 +2668,7 @@ def parse_jobs_eval_value(value):
         return []
     try:
         parsed = json.loads(value) if isinstance(value, str) else value
-    except (json.JSONDecodeError, ValueError, TypeError):
+    except (ValueError, TypeError):
         return []
     return parsed if isinstance(parsed, list) else []
 
@@ -2682,9 +2696,9 @@ def run_smoke_test(cdp_port=DEFAULT_CDP_PORT):
         cdp = CDPSession(cdp_port)
         city_name, city_code = resolve_city(DEFAULT_CITY_INPUT)
         search_url = build_search_url(LOGIN_PROBE_QUERY, city_code, 1, {})
-        r = cdp.send("Target.createTarget", {"url": search_url})
+        r = cdp.send(CDP_CMD_CREATE_TARGET, {"url": search_url})
         tid = r["result"]["targetId"]
-        r = cdp.send("Target.attachToTarget", {"targetId": tid, "flatten": True})
+        r = cdp.send(CDP_CMD_ATTACH_TARGET, {"targetId": tid, "flatten": True})
         sid = r["result"]["sessionId"]
 
         print(f"打开 BOSS 搜索页: {LOGIN_PROBE_QUERY} @ {city_name}")
@@ -2692,7 +2706,7 @@ def run_smoke_test(cdp_port=DEFAULT_CDP_PORT):
         api_url = f"{API_JOB_LIST_PATH}?{urlencode({'scene': '1', 'query': LOGIN_PROBE_QUERY, 'city': city_code, 'page': 1, 'pageSize': 5})}"
         api_js = FETCH_API_JS_TEMPLATE.replace("__API_URL__", api_url)
         jobs = parse_jobs_eval_value(cdp.eval_js(api_js, sid))
-        cdp.send("Target.closeTarget", {"targetId": tid})
+        cdp.send(CDP_CMD_CLOSE_TARGET, {"targetId": tid})
         cdp.close()
 
         if has_usable_smoke_jobs(jobs):
@@ -2765,7 +2779,7 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
     # 检查 3: CDP 端口连通性（专用浏览器是否已启动）
     cdp_status = "skip"
     if requests is None:
-        append("cdp", "专用浏览器已启动", "skip",
+        append("cdp", MSG_DEDICATED_BROWSER_STARTED, "skip",
                f"跳过 — 缺少 requests（无法探测 127.0.0.1:{cdp_port}）")
     else:
         try:
@@ -2773,36 +2787,36 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
             data = resp.json()
             browser = data.get("Browser", "未知")
             cdp_status = "ok"
-            append("cdp", "专用浏览器已启动", "ok",
+            append("cdp", MSG_DEDICATED_BROWSER_STARTED, "ok",
                    f"CDP 端口 {cdp_port} 就绪 — {browser}")
         except (requests.ConnectionError, requests.Timeout):
             cdp_status = "fail"
-            append("cdp", "专用浏览器已启动", "fail",
+            append("cdp", MSG_DEDICATED_BROWSER_STARTED, "fail",
                    f"无法连接 127.0.0.1:{cdp_port}（启动任务时会自动拉起浏览器）")
         except (json.JSONDecodeError, KeyError) as e:
             cdp_status = "fail"
-            append("cdp", "专用浏览器已启动", "fail",
+            append("cdp", MSG_DEDICATED_BROWSER_STARTED, "fail",
                    f"CDP 响应异常: {e}")
 
     # 检查 4: BOSS 登录状态（三态）
     if not deps_ok or cdp_status != "ok":
-        append("boss_login", "BOSS 登录状态", "skip",
+        append("boss_login", MSG_BOSS_LOGIN_STATUS, "skip",
                "跳过 — 浏览器未就绪，无法探测登录态")
     else:
         try:
             state = check_login_state_tri(cdp_port)
             if state == "logged_in":
-                append("boss_login", "BOSS 登录状态", "ok",
+                append("boss_login", MSG_BOSS_LOGIN_STATUS, "ok",
                        "已登录（接口返回明文薪资）")
             elif state == "restricted":
-                append("boss_login", "BOSS 登录状态", "fail",
+                append("boss_login", MSG_BOSS_LOGIN_STATUS, "fail",
                        "受限中 — 账号或 IP 命中风控，建议等待后重试")
             else:
-                append("boss_login", "BOSS 登录状态", "fail",
+                append("boss_login", MSG_BOSS_LOGIN_STATUS, "fail",
                        "未登录 — 请先在专用浏览器中登录 zhipin.com",
                        "打开专用浏览器登录: python3 scripts/boss_cdp_raw.py --setup-chrome")
         except Exception as e:
-            append("boss_login", "BOSS 登录状态", "fail",
+            append("boss_login", MSG_BOSS_LOGIN_STATUS, "fail",
                    f"检测失败: {e}")
 
     return items, all_pass
@@ -3047,7 +3061,7 @@ def is_chrome_command(command):
         "google chrome",
         "google-chrome",
         "chromium",
-        "chrome.exe",
+        CHROME_EXE,
     ))
 
 
@@ -3085,7 +3099,7 @@ def iter_chrome_process_commands():
             return []
         try:
             data = json.loads(r.stdout)
-        except (json.JSONDecodeError, ValueError):
+        except ValueError:
             return []
         if isinstance(data, dict):
             data = [data]
@@ -3364,7 +3378,7 @@ def run_setup_chrome(cdp_port=DEFAULT_CDP_PORT, copy_login_state=False,
                 return 0 if wait_for_login(cdp_port, timeout=login_timeout) else 1
             return 0
         print(f"\n❌ 端口 {cdp_port} 已被其他 Chrome CDP profile 占用")
-        print(f"   请关闭旧 CDP Chrome，或改用 --cdp-port 指定其他端口")
+        print("   请关闭旧 CDP Chrome，或改用 --cdp-port 指定其他端口")
         return 1
 
     stopped = stop_cdp_chrome(cdp_data_dir)
@@ -3392,10 +3406,10 @@ def run_setup_chrome(cdp_port=DEFAULT_CDP_PORT, copy_login_state=False,
         if not wait_for_login(cdp_port, timeout=login_timeout):
             return 1
     print()
-    print(f"示例:")
-    print(f"  uv run python3 scripts/boss_cdp_raw.py --keyword \"AI Agent\" --city 上海 --pages 3")
-    print(f"  uv run python3 scripts/boss_cdp_raw.py --check")
-    print(f"  uv run python3 scripts/boss_cdp_raw.py --stop-chrome   # 抓完关闭专用 Chrome")
+    print("示例:")
+    print("  uv run python3 scripts/boss_cdp_raw.py --keyword \"AI Agent\" --city 上海 --pages 3")
+    print("  uv run python3 scripts/boss_cdp_raw.py --check")
+    print("  uv run python3 scripts/boss_cdp_raw.py --stop-chrome   # 抓完关闭专用 Chrome")
     print()
     return 0
 
@@ -3593,7 +3607,7 @@ def run_search_programmatic(
                 if stopped:
                     print(f"\n🧹 已按 close_chrome 关闭 BOSS 专用 Chrome 进程：{stopped} 个")
                 else:
-                    print(f"\nℹ️  close_chrome 未发现运行中的 BOSS 专用 Chrome 进程")
+                    print("\nℹ️  close_chrome 未发现运行中的 BOSS 专用 Chrome 进程")
 
             return {"list_data": list_data, "details": details}
         except RiskControlError as e:
@@ -3878,7 +3892,7 @@ def main():
         print("检测登录状态...")
         if not check_login_state(args.cdp_port):
             print("❌ 未检测到 BOSS直聘登录状态。请先在 Chrome 中登录 zhipin.com。")
-            print(f"   可运行 --check 检查环境，或 --setup-chrome 启动 Chrome。")
+            print("   可运行 --check 检查环境，或 --setup-chrome 启动 Chrome。")
             sys.exit(1)
         print("✅ 已登录\n")
 
@@ -3980,7 +3994,7 @@ def main():
         if stopped:
             print(f"\n🧹 已按 --close-chrome 关闭 BOSS 专用 Chrome 进程：{stopped} 个")
         else:
-            print(f"\nℹ️  --close-chrome 未发现运行中的 BOSS 专用 Chrome 进程")
+            print("\nℹ️  --close-chrome 未发现运行中的 BOSS 专用 Chrome 进程")
 
 
 def print_risk_control_report(err):

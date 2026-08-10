@@ -6,8 +6,6 @@ import unittest
 import ast
 import inspect
 import copy
-import json
-from pathlib import Path
 from unittest import mock
 
 from webui import candidate

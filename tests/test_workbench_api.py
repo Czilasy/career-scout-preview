@@ -6,7 +6,6 @@ runs, feedback, history and cleanup.
 """
 
 import io
-import json
 import pathlib
 import sys
 import tempfile
@@ -328,7 +327,7 @@ class SearchRunTests(WorkbenchAPITestBase):
             self.client.put("/api/ai-settings", json={
                 "endpoint_url": "https://api.example.com/v1", "api_key": "secret",
             })
-        resume = io.BytesIO("上海 Python 后端".encode("utf-8"))
+        resume = io.BytesIO("上海 Python 后端".encode())
         parsed = {
             "profile_name": "P", "city": "上海", "roles": ["Python"], "skills": [],
             "keywords": ["Python 后端"], "suggestions": [],

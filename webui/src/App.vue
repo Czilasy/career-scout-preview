@@ -240,7 +240,9 @@ function selectProfile(profileId: string) {
 function showNotice(next: Notice) {
   if (noticeTimer) window.clearTimeout(noticeTimer);
   notice.value = next;
-  const delay = next.tone === "error" ? 8000 : next.tone === "warning" ? 5000 : 3000;
+  let delay = 3000;
+  if (next.tone === "error") delay = 8000;
+  else if (next.tone === "warning") delay = 5000;
   noticeTimer = window.setTimeout(() => {
     notice.value = null;
     noticeTimer = undefined;

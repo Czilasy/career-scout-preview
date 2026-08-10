@@ -8,7 +8,6 @@ Uses shared fixtures from tests/test_workbench_fixtures.py.
 from __future__ import annotations
 
 import json
-import copy
 import os
 import unittest
 from unittest.mock import patch, MagicMock
@@ -1828,8 +1827,8 @@ class AIMeasurementEventTests(unittest.TestCase):
                 measurement_callback=capture,
             )
 
-        event_types = [e["event_type"] for e in events]
-        self.assertTrue(len(events) > 0, "match_jds 必须发射测量事件")
+        [e["event_type"] for e in events]
+        self.assertGreater(len(events), 0, "match_jds 必须发射测量事件")
 
     def test_match_jds_terminal_events_use_global_indices_across_batches(self):
         """精筛分批后终态索引仍对应原始输入，不能在每批从零开始。"""

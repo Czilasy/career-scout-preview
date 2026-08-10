@@ -295,7 +295,7 @@ describe("T056/T057 身份 payload 与主命令矩阵", () => {
     await flushPromises();
     expect(readWrapper.find('[data-testid="lca-action-mark_read"]').exists()).toBe(false);
     expect(readWrapper.find('[data-testid="lca-action-mark_applied"]').exists()).toBe(true);
-    await readWrapper.unmount();
+    readWrapper.unmount();
 
     installFetch([stateHandler(snapshot(4, "applied"))]);
     const appliedWrapper = mountComponent();
@@ -303,7 +303,7 @@ describe("T056/T057 身份 payload 与主命令矩阵", () => {
     expect(appliedWrapper.find('[data-testid="lca-action-follow_up"]').exists()).toBe(true);
     expect(appliedWrapper.find('[data-testid="lca-action-mark_stale"]').exists()).toBe(true);
     expect(appliedWrapper.find('[data-testid="lca-action-mark_applied"]').exists()).toBe(false);
-    await appliedWrapper.unmount();
+    appliedWrapper.unmount();
 
     installFetch([stateHandler(snapshot(4, "stale"))]);
     const staleWrapper = mountComponent();

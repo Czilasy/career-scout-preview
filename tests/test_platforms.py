@@ -18,18 +18,14 @@ from __future__ import annotations
 
 import unittest
 
-from webui import platforms
 from webui.platforms import (
     BOSS_CITY_MAPPING_VERSION,
     BOSS_DEFAULT_CDP_PORT,
     BOSS_FILTER_SCHEMA_VERSION,
     DEFAULT_PLATFORM,
     KNOWN_PLATFORM_KEYS,
-    PlatformDisabledError,
-    PlatformNotRegisteredError,
     PlatformRegistry,
     UnknownPlatformError,
-    ZHILIAN_AVAILABILITY_REASON,
     ZHILIAN_CITY_MAPPING_VERSION,
     ZHILIAN_DEFAULT_CDP_PORT,
     ZHILIAN_FILTER_SCHEMA_VERSION,
@@ -42,7 +38,6 @@ from webui.platforms import (
     check_platform_fixture_integrity,
     derive_zhilian_profile_dir,
     get_platform,
-    get_platform_or_none,
     is_known_platform_key,
     list_platform_keys,
     list_platforms,

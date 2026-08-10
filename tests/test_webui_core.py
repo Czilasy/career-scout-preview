@@ -278,7 +278,6 @@ class LegacyPlatformGuardTests(unittest.TestCase):
 
     def test_guard_is_alias_of_parse(self):
         from webui.core import (
-            parse_legacy_platform,
             legacy_platform_guard,
             LegacyPlatformNotSupportedError,
         )

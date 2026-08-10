@@ -3,7 +3,6 @@ import pathlib
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 from webui.app import TaskRunner, WorkbenchRunner
 from webui.core import normalize_profile, validate_search_params

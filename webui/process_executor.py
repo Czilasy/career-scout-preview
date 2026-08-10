@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
 
 
 @dataclass(frozen=True)
@@ -67,7 +67,7 @@ class ScraperExecutor:
             "text": False,
         }
         if os.name == "nt":
-            # CREATE_NO_WINDOW：桌面壳是无控制台窗口程序，不带此标志时
+            # 桌面壳是无控制台窗口程序，不带 CREATE_NO_WINDOW 时
             # 抓取子进程会各自弹出一个空白控制台窗口（开始/结束各闪一次）。
             popen_kwargs["creationflags"] = (
                 subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
@@ -77,7 +77,7 @@ class ScraperExecutor:
 
         try:
             process = subprocess.Popen(command, **popen_kwargs)
-        except (FileNotFoundError, OSError):
+        except OSError:
             return ExecutionResult(None, "", "process_unreachable")
 
         output = bytearray()
@@ -201,7 +201,7 @@ def run_with_deadline(fn, *, timeout_seconds, cancel_event=None, grace_seconds=3
     def _worker() -> None:
         try:
             box["value"] = fn()
-        except BaseException as exc:  # noqa: BLE001 - 原样传递给调用方
+        except BaseException as exc:
             box["error"] = exc
 
     worker = threading.Thread(target=_worker, name="in-process-deadline", daemon=True)

@@ -59,6 +59,7 @@ describe("platform types baseline (T501)", () => {
         },
       ],
     };
+    expectTypeOf(schema).toMatchTypeOf<PlatformFilterSchema>();
     expectTypeOf<PlatformFilterSchema["fields"][number]>().toMatchTypeOf<FilterField>();
     expectTypeOf<FilterField["options"][number]>().toMatchTypeOf<FilterOption>();
   });
@@ -70,6 +71,7 @@ describe("platform types baseline (T501)", () => {
       city_mapping_version: 1,
       cities: [{ label: "上海", value: "上海" }],
     };
+    expectTypeOf(catalog).toMatchTypeOf<PlatformCityCatalog>();
     expectTypeOf<PlatformCityCatalog["cities"][number]>().toMatchTypeOf<CityEntry>();
   });
 
@@ -121,7 +123,7 @@ describe("platform types baseline (T501)", () => {
     };
     expectTypeOf<TaskSnapshot["platform"]>().toEqualTypeOf<Platform | undefined>();
     expectTypeOf<TaskSnapshot["task_input_digest"]>().toEqualTypeOf<string | undefined>();
-    void snapshot;
+    expectTypeOf(snapshot).toMatchTypeOf<TaskSnapshot>();
   });
 
   it("shapes the frozen AI filter snapshot stored on runs", () => {

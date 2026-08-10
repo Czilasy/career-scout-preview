@@ -377,7 +377,7 @@ def main(argv=None):
     try:
         jobs, metadata = load_jobs_file(input_path)
         details = load_details_for_input(input_path, args.details, args.result_dir)
-    except (OSError, json.JSONDecodeError, ValueError) as e:
+    except (OSError, ValueError) as e:
         print(f"无法加载输入文件: {e}")
         return 1
     keyword = args.keyword if args.keyword is not None else metadata.get("keyword", "")

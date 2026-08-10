@@ -31,7 +31,6 @@ from webui.job_advice import (
     ADVICE_ACTIONS,
     ADVICE_SOURCES,
     JobAdviceInput,
-    JobAdviceResult,
     generate_advice,
 )
 from webui.job_feedback import JobFeedbackService
