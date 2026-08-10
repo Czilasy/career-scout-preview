@@ -1331,6 +1331,24 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
             source["execution_params"]["execution_config"]["config_digest"],
         )
 
+    def test_main_ai_without_configuration_uses_chinese_error(self):
+        """无 AI 配置时失败文案必须是中文，不能暴露 RuntimeError。"""
+        scrape_task_id = "main-ai-no-config-source"
+        jobs = [{"job_id": "job-1", "title": "后端工程师"}]
+        self._install_scrape_source(scrape_task_id, jobs)
+        self.store.save_ai_settings("", "", status="unconfigured")
+        response = self._post_ai_screen(scrape_task_id)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        task_id = response.get_json()["task_id"]
+        finished = _wait_for_pipeline_task(self.client, task_id)
+        self.assertEqual(finished["status"], "failed", finished)
+        self.assertIn("AI 未配置", str(finished.get("error") or ""))
+        self.assertNotIn("RuntimeError", str(finished.get("error") or ""))
+        run = self.store.get_screening_run(task_id)
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["error_code"], "ai_not_configured")
+        self.assertEqual(run["error_reason"], "AI 未配置，请先设置 API 地址和密钥")
+
     def test_main_ai_chrome_not_ready_pauses_with_cdp_reason(self):
         """主 AI 的 JD 阶段遇到 Chrome 阻断必须可继续暂停。"""
         scrape_task_id = "main-ai-cdp-source"
@@ -3889,6 +3907,14 @@ class Slice9ResumeAfterRestartConservationTests(unittest.TestCase):
             self.assertEqual(len(jobs), 2)
             self.assertEqual(next(j for j in jobs if j["job_id"] == "old-1"), old_jobs[0])
             self.assertEqual(captured_resume["skip_combos"], {"前端|上海"})
+            self.assertEqual(finished["result"]["total_scraped"], 2)
+            self.assertEqual(finished["result"]["total_matched"], 2)
+            self.assertEqual(finished["progress"]["total_scraped"], 2)
+            self.assertEqual(finished["progress"]["total_matched"], 2)
+            self.assertIn("抓取 2 条，去重 2 条", finished["progress"]["message"])
+            self.assertEqual(
+                app_b.config["TASK_STORE"].get_screening_run(
+                    new_task_id)["total_scraped"], 2)
         finally:
             if app_a is not None:
                 self._shutdown(app_a)

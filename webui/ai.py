@@ -46,6 +46,7 @@ ERROR_NETWORK = "network_error"
 ERROR_INVALID = "invalid_response"
 ERROR_RATE_LIMIT = "rate_limited"
 ERROR_TRUNCATED = "truncated"
+ERROR_NOT_CONFIGURED = "ai_not_configured"
 ERROR_QUOTA_EXHAUSTED = "quota_exhausted"
 ERROR_SERVER = "server_error"
 
@@ -88,6 +89,7 @@ ERROR_USER_MESSAGES = {
     ERROR_INVALID: "AI 返回了无法解析的内容，请重试",
     ERROR_RATE_LIMIT: "AI 服务限流（免费额度），请稍候再试",
     ERROR_TRUNCATED: "AI 返回内容被截断，请重试（可减小单批数量）",
+    ERROR_NOT_CONFIGURED: "AI 未配置，请先设置 API 地址和密钥",
     ERROR_QUOTA_EXHAUSTED: "AI 额度已用完，请明天再试或更换 API 密钥",
     ERROR_SERVER: "AI 服务暂时不可用，请稍后重试",
 }

@@ -3148,6 +3148,7 @@ def create_app(config=None):
                 resume_jobs=resume_jobs,
             )
             # 断点续抓：合并旧结果（按 job_id 去重）
+            merged_total = None
             if old_jobs and result.get("ok"):
                 existing_ids = {j.get("job_id") or j.get("source_url") or ""
                                 for j in result["jobs"]}
@@ -3156,12 +3157,22 @@ def create_app(config=None):
                     if jid and jid not in existing_ids:
                         result["jobs"].append(job)
                         existing_ids.add(jid)
-                result["total_matched"] = len(result["jobs"])
+                merged_total = len(result["jobs"])
+                result["total_matched"] = merged_total
+                result["total_scraped"] = merged_total
             with _pipeline_lock:
                 task = _pipeline_tasks.get(task_id)
                 if task is not None:
                     task["result"] = result
                     task["error"] = result.get("error", "")
+                    if merged_total is not None:
+                        progress = dict(task.get("progress") or {})
+                        progress["total_scraped"] = merged_total
+                        progress["message"] = (
+                            f"完成：抓取 {merged_total} 条，去重 {merged_total} 条"
+                        )
+                        progress["total_matched"] = merged_total
+                        task["progress"] = progress
                     # 用户点过停止：无论 run_search 返回 ok 与否，都标 cancelled，
                     # 不标 failed（不是出错）也不标 done（不是正常完成）。
                     if stop_event is not None and stop_event.is_set():
@@ -3683,8 +3694,8 @@ def create_app(config=None):
             api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
             endpoint = settings.get("endpoint_url", "")
             model = settings.get("model", "")
-            if not api_key or not endpoint:
-                raise RuntimeError("ai_not_configured")
+            if not ai_service.is_ai_available(settings, cred_ref, api_key) or not endpoint:
+                raise ai_service.AISecurityError(ai_service.ERROR_NOT_CONFIGURED)
 
             criteria = dict(screening_fields or {})
             criteria["profile_summary"] = profile_summary or ""
@@ -4218,7 +4229,7 @@ def create_app(config=None):
                 _clear_auto_screen(task_id)
             _release_worker_resume_claims(_pipeline_tasks.get(task_id))
         except Exception as exc:
-            error_message = f"AI 筛选异常：{type(exc).__name__}"
+            error_message = ai_service.user_facing_error("internal_error")
             persistence_error = None
             try:
                 _write_run_unless_finished(
