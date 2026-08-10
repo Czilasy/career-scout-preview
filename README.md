@@ -165,6 +165,7 @@ python webui/app.py
 ```text
 scripts/boss_cdp_raw.py      # BOSS CLI 抓取主入口
 scripts/job_summary.py       # 抓取结果 → 求职摘要与提示词
+scripts/release_check.ps1    # 发布收口验证（卫生、diff、前端同步、产物）
 data/city_codes.json         # BOSS 城市码表
 data/zhilian_city_codes.json # 智联城市码表
 webui/                       # Flask 后端 + Vue 3 前端源码
@@ -193,6 +194,8 @@ npm run build
 ```
 
 修改前端源码后必须重新构建并提交 `webui/dist`，否则 Web 工作台可能使用旧构建产物。
+
+发布收口默认不跑全量测试，只执行卫生测试、hooks、`git diff --check`、`git status` 与前端同步检查。构建完成后可用 `scripts/release_check.ps1 -Version <版本> -RequireArtifact` 做收口验证。
 
 想参与贡献请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)；发现安全问题请阅读 [SECURITY.md](./SECURITY.md)。
 

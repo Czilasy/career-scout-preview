@@ -1,5 +1,6 @@
 #!/bin/sh
 # Push 前自动运行仓库卫生、待推送差异、提交身份和前端构建同步检查。
+# 发布收口请复用 scripts/release_check.ps1；本钩子不运行全量测试。
 # 启用：git config core.hooksPath hooks
 set -e
 

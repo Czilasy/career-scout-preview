@@ -97,6 +97,8 @@ npm run build
 ## Release 发布流程
 
 1. **本地构建 Windows EXE**：执行 `pwsh packaging/build_exe.ps1`，确认 `.release/` 下产物可双击启动。
+> 发布收口默认不跑全量测试；使用 `scripts/release_check.ps1` 做卫生、diff、前端同步与产物验证。
+
    **macOS DMG 无需本地构建**：推 tag 后 GitHub Actions 自动构建（见下节）。
 2. **计算 SHA256**：
 

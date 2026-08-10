@@ -1,5 +1,6 @@
 #!/bin/sh
 # 提交前自动运行仓库卫生测试，失败则阻断提交。
+# 发布收口请复用 scripts/release_check.ps1；本钩子只做最小提交门禁。
 # 启用：git config core.hooksPath hooks
 set -e
 

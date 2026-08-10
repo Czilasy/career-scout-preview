@@ -24,6 +24,17 @@
 - `hooks/pre-push`：卫生测试 + 待推送差异 + 提交身份 + 前端 dist 同步检查，失败阻断推送；前端检查只查不建，dist 不一致先手动构建并提交。
 - 启用方式：`git config core.hooksPath hooks`；卫生测试校验该配置已启用。
 
+## 收口任务验证与命令边界
+- 提交、推送、打包、发布、删旧产物等收口任务默认只运行：`uv run python -m unittest tests.test_repo_hygiene`、hooks、`git diff --check`、`git status`、`scripts/release_check.ps1`（若已生成）。
+- 收口任务默认不跑全量后端测试、全量前端测试或额外 `npm run build`；只有用户明确要求“全量/全部测试/完整验证”时才执行。
+- 命令意图映射：
+  - “提交push” = commit + push；不含创建 Release、推 tag、上传资产。
+  - “构建/打包” = 构建本地 EXE/DMG 与 SHA256；不含 GitHub Release。
+  - “删旧版/删除旧构建” = 只删除 `.release/` 内非当前版本产物；不删除源码、历史记录或 `.release` 目录本身。
+  - “发布/上传/推 tag/创建 Release” = 外部发布动作，必须单独明确授权。
+- 用户明确指定版本号时直接采用；低于当前版本时说明应用内更新影响即可，不阻塞执行。
+- 版本提升优先使用 `scripts/bump_version.py`；用户指定任意版本时使用 `--set <version>`。
+
 ## 文件边界
 
 - 不提交真实 Key、Cookie、密码、本地绝对路径、旧账号名或旧项目名。
@@ -36,7 +47,7 @@
 
 ## 版本与发布
 
-- 版本提升必须用 `scripts/bump_version.py`，同步：`pyproject.toml`、`webui/package.json`、`webui/package-lock.json`、`uv.lock`、`scripts/boss_cdp_raw.py`、`tests/test_desktop_shell.py`、`README.md` 标题，并生成 CHANGELOG 条目。
+- 版本提升必须用 `scripts/bump_version.py`（`patch|minor|major` 或用户指定 `--set x.y.z`），同步：`pyproject.toml`、`webui/package.json`、`webui/package-lock.json`、`uv.lock`、`scripts/boss_cdp_raw.py`、`tests/test_desktop_shell.py`、`README.md` 标题，并生成 CHANGELOG 条目。
 - 语义：patch=bug 修复/文案/样式等小改动；minor=新功能且向后兼容；major=重构/大功能/里程碑。
 - 构建产物命名 `CareerScout-v<version>.*`；`.release/` 已有同名产物时，`packaging/build_exe.ps1` 必须显式传 `-Force` 才允许覆盖。
 - 上传 Windows EXE 后必须推送 `v*` tag，触发 `.github/workflows/release-macos.yml` 构建 dmg；发布后核对该 tag 的 Release 上 EXE、DMG 及各自 `.sha256` 均已挂载。

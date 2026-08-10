@@ -6,6 +6,8 @@
     python scripts/bump_version.py minor [-m "新增平台筛选"]
     python scripts/bump_version.py major [-m "2.0 大版本"]
     python scripts/bump_version.py --check
+    python scripts/bump_version.py --set 1.7.10 [-m "纪念版"] [--allow-downgrade]
+    python scripts/bump_version.py --check [--expect 1.7.10]
 
 规则（见根目录 AGENTS.md「版本与发布」）：
 
@@ -168,16 +170,35 @@ def main() -> int:
     parser.add_argument("part", nargs="?", choices=("patch", "minor", "major"), help="递增类型")
     parser.add_argument("-m", "--message", default="常规发布", help="CHANGELOG 条目描述（一行）")
     parser.add_argument("--check", action="store_true", help="只校验版本一致性，不修改文件")
+    parser.add_argument("--set", dest="exact_version", metavar="VERSION", help="直接设置版本号，例如 1.7.10")
+    parser.add_argument("--allow-downgrade", action="store_true", help="允许设置低于当前版本的显式版本号（纪念性版本）")
+    parser.add_argument("--expect", metavar="VERSION", help="与 --check 一起使用，按指定版本校验文件一致性")
     args = parser.parse_args()
 
     current = read_current_version()
     if args.check:
-        return check_versions(current)
-    if args.part is None:
-        parser.error("需要 part（patch/minor/major）或 --check")
+        expected = args.expect or current
+        if args.expect and not re.fullmatch(r"\d+\.\d+\.\d+", args.expect):
+            parser.error(f"版本号格式无效: {args.expect}")
+        return check_versions(expected)
+    if args.expect:
+        parser.error("--expect 只能与 --check 一起使用")
+    if args.part is None and args.exact_version is None:
+        parser.error("需要 part（patch/minor/major）、--set VERSION 或 --check")
+    if args.part and args.exact_version:
+        parser.error("--set 与 part 不能同时使用")
 
-    next_version = bump(current, args.part)
-    print(f"{current} -> {next_version}")
+    if args.exact_version:
+        if not re.fullmatch(r"\d+\.\d+\.\d+", args.exact_version):
+            parser.error(f"版本号格式无效: {args.exact_version}")
+        next_version = args.exact_version
+        if args.allow_downgrade:
+            print(f"{current} -> {next_version}（显式指定，允许降级）")
+        else:
+            print(f"{current} -> {next_version}（显式指定）")
+    else:
+        next_version = bump(current, args.part)
+        print(f"{current} -> {next_version}")
     for path, pattern in VERSION_PATTERNS:
         _replace_single(path, pattern, next_version)
     _update_package_lock(next_version)
