@@ -136,6 +136,9 @@ spec011-*.yaml
 .devlog/
 .specify/
 
+# Per-machine implementation batch records
+specs/**/batch-record.md
+
 # Local design exploration drafts (not project code)
 design/
 

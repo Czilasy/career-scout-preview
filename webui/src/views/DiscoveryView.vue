@@ -358,13 +358,16 @@ const autoScreenFields = ref<Record<string, string[]>>({});
 const autoScreenProfile = ref("");
 const profileError = ref("");
 const profileInputEl = ref<HTMLTextAreaElement | null>(null);
-const oneClickDisabled = computed(() => Boolean(
-  draftPlatformDisabled.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value
+
+// 任意 pipeline 任务占用中（运行/暂停/待恢复）都禁止再启动新任务。
+const pipelineBusy = computed(() => Boolean(
+  scrapeBusy.value || screenBusy.value || recrawlBusy.value
   || pausedRunId.value || interruptedRunId.value
   || scrapeSnapshot.value?.status === "paused"
   || screenSnapshot.value?.status === "paused"
   || recrawlSnapshot.value?.status === "paused",
 ));
+const oneClickDisabled = computed(() => Boolean(draftPlatformDisabled.value || pipelineBusy.value));
 // 步骤 2 两个面板（关键词配置 / 高级执行设置）共用同一受控状态：
 // 默认收拢、手动展开/收起联动（一个 ref 天然同步两卡）；开始抓取后自动收拢。
 const searchPanelsOpen = ref(false);
@@ -1140,9 +1143,13 @@ function handleProfileBlur() {
 }
 
 function openOneClick() {
+  if (pipelineBusy.value) {
+    notify("当前已有任务在运行或暂停，请先处理完再开始新任务", "warning");
+    return;
+  }
  profileError.value = "";
  if (!selectedKeywords.value.length || !cityList.value.length) {
-   enterSearchStep();
+    enterSearchStep();
    notify("请先到第二步补齐关键词和城市", "warning");
    return;
  }
@@ -1175,6 +1182,10 @@ async function saveAdvancedSettings() {
 }
 
 async function startScrape(options: OneClickLaunch = {}) {
+  if (pipelineBusy.value) {
+    notify("当前已有任务在运行或暂停，请先处理完再开始新任务", "warning");
+    return;
+  }
   const scriptParams = buildSearchScriptParams(selectedKeywords.value, effectiveSearchCities.value);
   if (!scriptParams.keyword || !scriptParams.city.length) {
     notify("请确认至少一个关键词和一个城市", "warning");
@@ -1277,6 +1288,11 @@ interface AiScreenLaunch {
 async function startAiScreen(options: AiScreenLaunch = {}) {
 
 
+  // 抓取/重抓占用时不允许再开一轮 AI 筛选；中断/暂停的 AI 续跑仍可进入。
+  if (scrapeBusy.value || recrawlBusy.value || scrapeSnapshot.value?.status === "paused") {
+    notify("当前已有任务在运行或暂停，请先处理完再开始新任务", "warning");
+    return;
+  }
   if (!scrapeCompleted.value || !scrapeTaskId.value) {
     if (!scrapeCompleted.value) {
       notify("请先完成本轮抓取，再开始 AI 筛选", "warning");
@@ -2438,7 +2454,7 @@ watch(roundStatusPayload, (payload) => {
             <Play :size="20" aria-hidden="true" />开始筛选并 AI 优化
           </button>
           <div class="one-click-secondary-actions">
-            <button class="button primary" type="button" data-testid="start-scrape" :disabled="draftPlatformDisabled" @click="scrapeBusy ? cancelScrape() : startScrape()">
+            <button class="button primary" type="button" data-testid="start-scrape" :disabled="draftPlatformDisabled || pipelineBusy" @click="scrapeBusy ? cancelScrape() : startScrape()">
               <Search v-if="!scrapeBusy" :size="18" aria-hidden="true" />
               <Square v-else :size="18" aria-hidden="true" />{{ scrapeBusy ? "停止抓取" : "单独抓取" }}
             </button>

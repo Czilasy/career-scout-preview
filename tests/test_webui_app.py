@@ -6526,6 +6526,39 @@ class AutoScreenChainTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.get_json()["error"], "auto_screen_fields 必须是对象")
 
+    def test_execute_search_rejects_when_ai_screen_running(self):
+        """AI 筛选占用浏览器时，不能再启动新的抓取任务。"""
+        preview = self._preview()
+        self.app.config["PIPELINE_TASKS"]["running-ai-screen"] = {
+            "kind": "ai_screen", "status": "running", "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None, "finished_at": None,
+            "stop_event": threading.Event(), "platform": "boss",
+        }
+        resp = self.client.post("/api/execute-search", json={
+            "platform": "boss",
+            "script_params": {"keyword": "Python", "city": ["上海"], "pages": 1},
+            "scope_digest": preview["scope_digest"],
+        })
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "browser_busy")
+
+    def test_ai_screen_rejects_when_scrape_running(self):
+        """抓取任务运行时，不能对另一来源启动 AI 筛选。"""
+        source_id = "busy-scrape-source"
+        self._seed_succeeded_scrape(source_id)
+        self.app.config["PIPELINE_TASKS"]["running-scrape"] = {
+            "kind": "scrape", "status": "running", "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None, "finished_at": None,
+            "stop_event": threading.Event(), "platform": "boss",
+        }
+        resp = self.client.post("/api/ai-screen", json={
+            "screening_fields": {"salary": ["406"]},
+            "profile_summary": "Python 后端候选人",
+            "scrape_task_id": source_id,
+        })
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "browser_busy")
+
     def test_ai_screen_consumes_flag_before_validation(self):
         run_id = "auto-consume-fail"
         self._seed_succeeded_scrape(run_id)

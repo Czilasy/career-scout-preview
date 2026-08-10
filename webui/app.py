@@ -3727,6 +3727,14 @@ def create_app(config=None):
 
     def _browser_busy() -> bool:
         return _browser_lock()[0] is not None
+
+    def _has_active_pipeline_task() -> bool:
+        """Only in-memory running/queued tasks block new task starts."""
+        with _pipeline_lock:
+            return any(
+                task.get("status") in ("queued", "running")
+                for task in _pipeline_tasks.values()
+            )
     def _project_browser_accounts(accounts: dict) -> list[dict]:
         """Project accounts to the non-sensitive API shape (http-api.md L319)."""
         from webui.platforms import get_platform, list_platform_keys
@@ -4239,6 +4247,13 @@ def create_app(config=None):
         if not ok:
             return err_resp
 
+        # 逻辑隔离：同一时间只允许一个 pipeline 任务占用浏览器（B031 回归）。
+        if _browser_busy():
+            return jsonify({
+                "ok": False, "error": "browser_busy",
+                "message": "当前已有任务在运行或暂停，请先等待、继续或结束任务后再开始新任务",
+            }), 409
+
         requested_digest = str(body.get("scope_digest") or "")
         scope_payload = scope_previews.get(requested_digest) if requested_digest else None
         if requested_digest and scope_payload is None:
@@ -4741,6 +4756,14 @@ def create_app(config=None):
                         "message": "同一抓取任务已有 AI 筛选在运行",
                     }), 409
         task_id = uuid.uuid4().hex
+
+        # 逻辑隔离：AI 筛选也不能与其它 pipeline 任务（抓取/重抓/暂停）并发。
+        if _has_active_pipeline_task():
+            return jsonify({
+                "ok": False, "error": "browser_busy",
+                "message": "当前已有任务在运行或暂停，请先等待、继续或结束任务后再开始新任务",
+            }), 409
+
         # paused 就地继续；服务重启打断的 interrupted（error_code=restart）
         # 也可以被“重新开始 AI 筛选”继承断点，但保留旧 run 的终态记录。
         resume_from_run_id = ""

@@ -2402,4 +2402,25 @@ describe("DiscoveryView", () => {
     expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(0);
     vi.unstubAllGlobals();
   });
+
+  it("B031: running AI screen disables new scrape and one-click from search step", async () => {
+    const fetchMock = oneClickBase({
+      "/api/execute-search": () => response({ ok: true, task_id: "one-scrape" }),
+      "/api/task-state/one-scrape": () => response({ status: "completed", progress: {}, logs: [], scraped_count: 1 }),
+      "/api/ai-screen": () => new Promise<Response>(() => { /* noop */ }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await oneClickSearch(wrapper);
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("广泛抓取"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="start-scrape"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="start-one-click"]').attributes("disabled")).toBeDefined();
+    vi.unstubAllGlobals();
+  });
 });

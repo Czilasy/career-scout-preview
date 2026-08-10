@@ -2,7 +2,10 @@
 
 本文件记录 Career Scout 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.7.10] - 2026-08-10
+
+修复：
+- 同一时间只允许一个抓取或 AI 筛选任务占用浏览器，避免任务互相抢占
 
 增加：
 - 第二步新增“开始筛选并 AI 优化”一键入口，确认筛选条件后自动完成抓取与 AI 筛选
