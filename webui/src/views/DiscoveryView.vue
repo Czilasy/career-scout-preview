@@ -995,6 +995,11 @@ function toggleKeyword(word: string) {
     : [...selectedKeywords.value, word];
 }
 
+function removeKeyword(word: string) {
+  keywords.value = keywords.value.filter((item) => item.word !== word);
+  selectedKeywords.value = selectedKeywords.value.filter((item) => item !== word);
+}
+
 function addCustomKeyword() {
   const word = customKeyword.value.trim().replace(/[，,]+$/, "");
   if (!word) return;
@@ -1458,9 +1463,13 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
         scrapeBusy.value = false;
         scrapeCompleted.value = true;
         notify(
-          data.status === "completed_with_pending"
-            ? "抓取完成，但有待确认，请继续检查筛选条件"
-            : "抓取完成，请继续确认 AI 筛选条件",
+          shouldAutoScreen
+            ? data.status === "completed_with_pending"
+              ? "抓取完成，正在自动开始 AI 筛选，部分岗位待确认"
+              : "抓取完成，正在自动开始 AI 筛选"
+            : data.status === "completed_with_pending"
+              ? "抓取完成，但有待确认，请继续检查筛选条件"
+              : "抓取完成，请继续确认 AI 筛选条件",
           data.status === "completed_with_pending" ? "warning" : "success",
         );
         if (shouldAutoScreen) {
@@ -2273,19 +2282,31 @@ watch(roundStatusPayload, (payload) => {
             <div class="search-col">
               <p class="search-col-title">关键词 × 城市</p>
               <div class="chip-grid" aria-label="搜索关键词和城市">
-                <button
+                <span
                   v-for="keyword in keywords"
                   :key="keyword.word"
-                  class="choice-chip"
-                  :class="{ selected: selectedKeywords.includes(keyword.word), recommended: keyword.recommended }"
-                  type="button"
-                  data-testid="keyword-chip"
-                  :disabled="scopeLocked"
-                  :aria-pressed="selectedKeywords.includes(keyword.word)"
-                  @click="toggleKeyword(keyword.word)"
+                  class="keyword-chip"
+                  :class="{ selected: selectedKeywords.includes(keyword.word), recommended: keyword.recommended, locked: scopeLocked }"
                 >
-                  {{ keyword.word }}<small v-if="keyword.recommended">推荐</small>
-                </button>
+                  <button
+                    class="keyword-chip-label"
+                    type="button"
+                    data-testid="keyword-chip"
+                    :disabled="scopeLocked"
+                    :aria-pressed="selectedKeywords.includes(keyword.word)"
+                    @click="toggleKeyword(keyword.word)"
+                  >
+                    {{ keyword.word }}<small v-if="keyword.recommended">推荐</small>
+                  </button>
+                  <button
+                    type="button"
+                    class="keyword-chip-remove"
+                    data-testid="remove-keyword"
+                    :aria-label="'删除关键词 ' + keyword.word"
+                    :disabled="scopeLocked"
+                    @click="removeKeyword(keyword.word)"
+                  >×</button>
+                </span>
                 <span v-for="city in cityList" :key="city" class="city-chip">
                   {{ city }}
                   <button type="button" class="city-chip-remove" aria-label="删除城市" :disabled="scopeLocked" @click="removeCity(city)">×</button>
@@ -2409,7 +2430,7 @@ watch(roundStatusPayload, (payload) => {
           <div class="one-click-secondary-actions">
             <button class="button primary" type="button" data-testid="start-scrape" :disabled="draftPlatformDisabled" @click="scrapeBusy ? cancelScrape() : startScrape()">
               <Search v-if="!scrapeBusy" :size="18" aria-hidden="true" />
-              <Square v-else :size="18" aria-hidden="true" />{{ scrapeBusy ? "停止抓取" : "开始抓取" }}
+              <Square v-else :size="18" aria-hidden="true" />{{ scrapeBusy ? "停止抓取" : "单独抓取" }}
             </button>
           <button v-if="scrapeSnapshot && scrapeSnapshot.status === 'paused' && scrapeTaskId"
                   class="button secondary" type="button" data-testid="continue-scrape"

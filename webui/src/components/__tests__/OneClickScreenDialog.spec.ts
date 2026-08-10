@@ -44,6 +44,7 @@ describe("OneClickScreenDialog", () => {
     const wrapper = mountOpen({ hasOldResult: true });
     await nextTick();
 
+    expect(wrapper.get('[role="dialog"]').classes()).toContain("dialog-lg");
     expect(wrapper.get('[data-testid="one-click-old-result-hint"]').text())
       .toContain("将开始新一轮，当前结果会被替换");
     expect(chip(wrapper, "20-50K").attributes("aria-pressed")).toBe("true");

@@ -72,7 +72,7 @@ function confirm() {
     :open="open"
     title="开始筛选并 AI 优化"
     description="确认筛选条件后，将先抓取岗位，再自动进行 AI 筛选。"
-    size="md"
+    size="lg"
     @close="$emit('close')"
   >
     <p
@@ -149,9 +149,6 @@ function confirm() {
 .one-click-filter-groups {
   display: grid;
   gap: 14px;
-  max-height: min(48vh, 440px);
-  overflow-y: auto;
-  padding-right: 4px;
 }
 .one-click-filter-group {
   margin: 0;
