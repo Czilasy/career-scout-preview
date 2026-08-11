@@ -470,6 +470,8 @@ button:disabled {
   align-items: center;
   gap: 10px;
   flex: 0 0 auto;
+  min-width: 0;
+  flex-wrap: wrap;
 }.stage-header h1 {
   margin: 4px 0 0;
   font-size: clamp(24px, 2.6vw, 30px);
@@ -2547,6 +2549,7 @@ body,
     margin-bottom: 12px;
     align-items: flex-start;
     gap: 12px;
+    flex-wrap: wrap;
   }.stage-header .button {
     flex: 0 0 44px;
     width: 44px;
@@ -2557,6 +2560,9 @@ body,
     font-size: 0;
   }.stage-header .button svg {
     color: var(--text);
+  }.stage-actions {
+    justify-content: flex-end;
+    flex-basis: 100%;
   }.upload-layout {
     grid-template-columns: 1fr;
     gap: 28px;

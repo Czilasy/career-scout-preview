@@ -30,6 +30,7 @@ from webui.store_helpers import (
     _uuid,
 )
 from webui.store_migrations import MigrationBackupError, StoreMigrationsMixin
+from webui.store_result_history_mixin import ResultHistoryStoreMixin
 
 _BEGIN_IMMEDIATE = "BEGIN IMMEDIATE"
 _SHA256_PREFIX = "sha256:"
@@ -120,7 +121,7 @@ MAX_DETAIL_BUDGET = 60
 _INITIALIZE_LOCK = threading.RLock()
 
 
-class TaskStore(StoreMigrationsMixin):
+class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
     def __init__(self, db_path):
         self.db_path = os.path.abspath(os.fspath(db_path))
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
@@ -897,6 +898,7 @@ class TaskStore(StoreMigrationsMixin):
                 run = conn.execute(
                     "SELECT * FROM screening_runs WHERE status IN ('done', 'partial') "
                     "AND record_kind = 'result_snapshot' "
+                    "AND archived_at IS NULL "
                     "ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 ).fetchone()
             if run is None:
@@ -1003,6 +1005,7 @@ class TaskStore(StoreMigrationsMixin):
             row = conn.execute(
                 "SELECT id FROM screening_runs WHERE status IN ('done', 'partial') "
                 "AND record_kind = 'result_snapshot' "
+                "AND archived_at IS NULL "
                 "ORDER BY created_at DESC LIMIT 1",
             ).fetchone()
         return row["id"] if row else None
@@ -1017,6 +1020,7 @@ class TaskStore(StoreMigrationsMixin):
             run = conn.execute(
                 "SELECT * FROM screening_runs WHERE platform=? AND "
                 "status IN ('done', 'partial') AND record_kind = 'result_snapshot' "
+                "AND archived_at IS NULL "
                 "ORDER BY created_at DESC LIMIT 1",
                 (str(platform),),
             ).fetchone()
@@ -1064,6 +1068,7 @@ class TaskStore(StoreMigrationsMixin):
             row = conn.execute(
                 "SELECT created_at FROM screening_runs "
                 "WHERE status IN ('done', 'partial') AND record_kind = 'result_snapshot' "
+                "AND archived_at IS NULL "
                 "ORDER BY created_at DESC LIMIT 1",
             ).fetchone()
         return row["created_at"] if row is not None else None
@@ -1077,59 +1082,6 @@ class TaskStore(StoreMigrationsMixin):
                 (jd, str(run_id), str(job_id)),
             )
 
-    def clear_latest_pipeline_result(self) -> bool:
-        """Delete the most recent result_snapshot and its cascade data.
-
-        重新上传简历时调用：只清结果存档，不动 process_log 和进行中的任务。
-        """
-        with self._connection() as conn:
-            self._assert_recovery_writes_allowed(conn)
-            run = conn.execute(
-                "SELECT id FROM screening_runs WHERE status IN ('done', 'partial') "
-                "AND record_kind = 'result_snapshot' "
-                "ORDER BY created_at DESC LIMIT 1",
-            ).fetchone()
-            if run is None:
-                return False
-            run_id = str(run["id"])
-            # 先删 tasks 占位行，让 task_logs 经外键级联一起清掉
-            conn.execute("DELETE FROM tasks WHERE id = ?", (run_id,))
-            for table in (
-                "screening_results",
-                "screening_pending_results",
-                "pipeline_checkpoints",
-                "scrape_run_jobs",
-                "scrape_page_progress",
-            ):
-                conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
-            conn.execute("DELETE FROM screening_runs WHERE id = ?", (run_id,))
-            return True
-
-    def clear_pipeline_result(self, run_id: str) -> bool:
-        """T418: 删除指定 run 的结果存档，保留 source attempts 和审计记录。
-
-        不删除 screening_source_attempts、jobs、profile_jobs、feedback_events
-        或其他 run 的数据。
-        """
-        with self._connection() as conn:
-            self._assert_recovery_writes_allowed(conn)
-            run = conn.execute(
-                "SELECT id FROM screening_runs WHERE id=? AND record_kind='result_snapshot'",
-                (str(run_id),),
-            ).fetchone()
-            if run is None:
-                return False
-            conn.execute("DELETE FROM tasks WHERE id = ?", (str(run_id),))
-            for table in (
-                "screening_results",
-                "screening_pending_results",
-                "pipeline_checkpoints",
-                "scrape_run_jobs",
-                "scrape_page_progress",
-            ):
-                conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (str(run_id),))
-            conn.execute("DELETE FROM screening_runs WHERE id = ?", (str(run_id),))
-            return True
 
     # -- T112: Job 双索引冲突算法 upsert ---------------------------------
 

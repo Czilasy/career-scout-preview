@@ -157,6 +157,8 @@ def _wait_expression(
 
 def _risk_signal(text: str, url: str = "") -> str | None:
     low = text.lower()
+    if url.startswith("chrome-error://chromewebdata/") or url.startswith("data:text/html,chromewebdata"):
+        return "unreachable"
     if any(m.lower() in low for m in _VERIFY_MARKERS):
         return "verification"
     if any(m.lower() in low for m in _RATE_MARKERS):

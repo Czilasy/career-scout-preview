@@ -48,6 +48,8 @@ describe("App", () => {
     const wrapper = mount(App);
     await flushPromises();
 
+    await wrapper.get('[data-testid="settings-trigger"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[data-testid="ai-settings-trigger"]').trigger("click");
     const dialog = wrapper.get('[role="dialog"]');
     expect(dialog.attributes("aria-modal")).toBe("true");
@@ -60,6 +62,8 @@ describe("App", () => {
     const wrapper = mount(App);
     await flushPromises();
 
+    await wrapper.get('[data-testid="settings-trigger"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[data-testid="browser-accounts-trigger"]').trigger("click");
     const dialog = wrapper.get('[role="dialog"]');
     expect(dialog.text()).toContain("账号");
@@ -89,11 +93,62 @@ describe("App", () => {
     expect(document.title).not.toContain("BOSS 工作台");
   });
 
+  it("B035: aligns judged platform name and count with the view scope", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const pillText = () => wrapper.get('[data-testid="round-status-pill"]').text();
+    const view = wrapper.findComponent(DiscoveryView);
+
+    view.vm.$emit("round-status", { platform: "boss", phase: "judged", judged: 5, scope: "all" });
+    await flushPromises();
+    expect(pillText()).toContain("全部");
+    expect(pillText()).toContain("5 个岗位已判定");
+    expect(pillText()).not.toContain("BOSS · 5");
+
+    view.vm.$emit("round-status", { platform: "boss", phase: "judged", judged: 2, scope: "boss" });
+    await flushPromises();
+    expect(pillText()).toContain("BOSS · 2 个岗位已判定");
+
+    view.vm.$emit("round-status", { platform: "zhilian", phase: "judged", judged: 3, scope: "history" });
+    await flushPromises();
+    expect(pillText()).toContain("历史轮次");
+    expect(pillText()).toContain("智联 · 3 个岗位已判定");
+  });
+
+  it("opens the history drawer from the top bar", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get('[data-testid="history-trigger"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="history-drawer"]').exists()).toBe(true);
+  });
+
+  it("keeps history and favorites drawers mutually exclusive", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const historyTrigger = wrapper.get('[data-testid="history-trigger"]');
+    // 历史抽屉状态是模块级单例，前面用例可能已把它打开；先确保从关闭态开始。
+    if (wrapper.find('[data-testid="history-drawer"]').exists()) {
+      await historyTrigger.trigger("click");
+      await flushPromises();
+    }
+    await wrapper.get('[data-testid="history-trigger"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="history-drawer"]').exists()).toBe(true);
+
+    await wrapper.get('.favorites-trigger').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="history-drawer"]').exists()).toBe(false);
+    expect(wrapper.find('[role="dialog"][aria-label="我的收藏"]').exists()).toBe(true);
+  });
+
   it("shows a persistent inline notice when the model list is empty", async () => {
     vi.useFakeTimers();
     const wrapper = mount(App);
     await flushPromises();
 
+    await wrapper.get('[data-testid="settings-trigger"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[data-testid="ai-settings-trigger"]').trigger("click");
     await flushPromises();
     await wrapper.get('[aria-label="拉取可用模型"]').trigger("click");
@@ -109,7 +164,7 @@ describe("App", () => {
     expect(wrapper.find('.ai-local-notice').exists()).toBe(true);
 
     // 关闭对话框后清空
-    await wrapper.get('[role="dialog"]').trigger("keydown", { key: "Escape" });
+    await wrapper.get('[aria-label="关闭AI 设置"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('.ai-local-notice').exists()).toBe(false);
     wrapper.unmount();
@@ -548,7 +603,8 @@ describe("App", () => {
     await flushPromises();
     expect(wrapper.find('[data-testid="update-dialog"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="brand-update-dot"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="update-trigger"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="settings-update-badge"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="update-trigger"]').exists()).toBe(false);
   });
 
   it("does not auto-open dialog for ignored version but keeps brand dot", async () => {
@@ -590,8 +646,10 @@ describe("App", () => {
 
     expect(updateCalls).toBe(0);
     expect(wrapper.find('[data-testid="update-trigger"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="manual-update-check"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="brand-update-dot"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="settings-trigger"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="manual-update-check"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="github-link"]').exists()).toBe(true);
   });
 });

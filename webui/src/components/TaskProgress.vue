@@ -246,6 +246,20 @@ const statusLabel = computed(() => {
   return "运行中";
 });
 
+// 无障碍播报只包含状态/阶段/关键计数，百分比、用时与进度文案不参与，
+// 因此每秒 tick 不会触发 aria-live 重复播报。
+const announcementText = computed(() => {
+  const parts: string[] = [statusLabel.value];
+  if (stageLabel.value && stageLabel.value !== "处理中") parts.push(stageLabel.value);
+  if (scrapedCount.value > 0) parts.push(`已抓取 ${scrapedCount.value} 个岗位`);
+  if (currentCompletedCount.value > 0) parts.push(`已完成 ${currentCompletedCount.value}`);
+  if (keptCount.value > 0) parts.push(`保留 ${keptCount.value}`);
+  if (droppedCount.value > 0) parts.push(`淘汰 ${droppedCount.value}`);
+  if (pendingCount.value > 0) parts.push(`待确认 ${pendingCount.value}`);
+  if (failCount.value > 0) parts.push(`失败 ${failCount.value}`);
+  return parts.join("，");
+});
+
 const platformLabel = computed(() => {
   if (!props.snapshot?.platform) return "";
   return props.snapshot.platform === "boss" ? "BOSS" : "智联";
@@ -361,7 +375,8 @@ const timeLabel = computed(() => {
 </script>
 
 <template>
-  <section v-if="snapshot" class="task-progress" aria-live="polite" :data-blocked="blocked || undefined">
+  <section v-if="snapshot" class="task-progress" :data-blocked="blocked || undefined">
+    <p class="sr-only" aria-live="polite" data-testid="task-progress-announcement">{{ announcementText }}</p>
     <header>
       <span class="task-status" :data-status="snapshot.status || 'running'">
         <CircleCheck v-if="isCompletedStatus(snapshot.status)" :size="17" aria-hidden="true" />

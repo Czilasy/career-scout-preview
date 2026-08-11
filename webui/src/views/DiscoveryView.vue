@@ -21,10 +21,12 @@ import CollapsibleCard from "../components/CollapsibleCard.vue";
 import ExecutionModeSelector from "../components/ExecutionModeSelector.vue";
 import JobLifecycleActions from "../components/JobLifecycleActions.vue";
 import JobWorkspace from "../components/JobWorkspace.vue";
+import HistoryRoundProfile from "../components/HistoryRoundProfile.vue";
+import ResultHistoryDrawer from "../components/ResultHistoryDrawer.vue";
 import OneClickScreenDialog, { type OneClickFilterGroup } from "../components/OneClickScreenDialog.vue";
 import StepNavigator from "../components/StepNavigator.vue";
 import TaskProgress from "../components/TaskProgress.vue";
-import { ApiError, apiRequest, errorMessage, settingsApi } from "../api";
+import { ApiError, apiRequest, errorMessage, settingsApi, userFacingMessage } from "../api";
 import { setThemePlatform } from "../composables/useTheme";
 import {
   buildSearchScriptParams,
@@ -37,7 +39,10 @@ import {
   partitionPipelineResult,
   projectResumeSuggestionToSchema,
 } from "../discovery";
-import type { PipelineResult } from "../discovery";
+import { historyStatusLabel } from "../discovery";
+import type { PipelineResult, RoundStatusPayload } from "../discovery";
+import { useResultHistory } from "../composables/resultHistory";
+import type { HistoryRoundDetail } from "../composables/resultHistory";
 import type {
   AdvancedSettingsState,
   CandidateProfile,
@@ -99,7 +104,7 @@ const emit = defineEmits<{
   // Task 009：详情生命周期 action 成功后上抛，App 刷新当前 profile 提醒。
   "job-feedback-changed": [payload: { profileId: string; jobId: string }];
   // 顶栏本轮状态胶囊：纯展示数据，空闲时上抛 null（不新增任何请求）。
-  "round-status": [payload: { platform: Platform; phase: "scraping" | "screening" | "judged"; judged: number } | null];
+  "round-status": [payload: RoundStatusPayload | null];
   // D7：岗位发现流程检测未登录，引导用户去账号面板打开浏览器窗口登录。
   "open-browser-accounts": [];
 }>();
@@ -288,6 +293,32 @@ const resultPlatformFilter = ref<"all" | "boss" | "zhilian">("all");
 const resultEpoch = ref(0);
 // 合并载入时每个平台各自的结果来源 run：单平台视图下“全部重抓”/导出用对应 run。
 const resultRunIds = ref<{ boss: string; zhilian: string }>({ boss: "", zhilian: "" });
+// 历史轮次：抽屉状态由独立 composable 持有，历史模式状态留在本视图。
+const historyStore = useResultHistory();
+const {
+  open: historyOpen,
+  items: historyItems,
+  loading: historyLoading,
+  error: historyError,
+  deleting: historyDeleting,
+  deleteTarget: historyDeleteTarget,
+  detail: historyDetail,
+  show: showHistory,
+  hide: hideHistory,
+  openRound: openHistoryRound,
+  backToLatest: historyBackToLatest,
+  confirmDelete: confirmHistoryDelete,
+  cancelDelete: cancelHistoryDelete,
+  deleteRound: deleteHistoryRound,
+  archiveLatest: archiveHistoryLatest,
+} = historyStore;
+const historyRound = ref<{ runId: string; platform: Platform; status: string; jobCount: number } | null>(null);
+const platformBeforeHistory = ref<Platform | null>(null);
+const historyMode = computed(() => Boolean(historyRound.value));
+const historyStatusText = computed(() => historyRound.value
+  ? historyStatusLabel(historyRound.value.status, historyRound.value.jobCount)
+  : "");
+const historyProfileText = computed(() => String(historyDetail.value?.result?.profile_summary || ""));
 const activeCategory = ref<ResultCategory>("matched");
 const rejectedIds = ref(new Set<string>());
 const feedbackBusyIds = ref(new Set<string>());
@@ -375,10 +406,12 @@ let pollTimer: number | undefined;
 
 const scopeLocked = computed(() => Boolean(
   scrapeBusy.value || screenBusy.value || recrawlBusy.value || pausedRunId.value
-  || activeStep.value === "screen" || activeStep.value === "results",
+  || activeStep.value === "screen" || activeStep.value === "results"
+  || historyMode.value,
 ));
 
 const enabledSteps = computed<StepId[]>(() => {
+  if (historyMode.value) return ["results"];
   const enabled: StepId[] = ["upload"];
   if (analysisReady.value) enabled.push("search");
   if (scrapeCompleted.value) enabled.push("screen");
@@ -696,6 +729,7 @@ async function restoreRunningTask() {
       scrapeBusy.value = true;
       scrapeSnapshot.value = snapshot;
       restoredTaskHint.value = "检测到抓取任务仍在后台运行，已自动接回";
+      activeStep.value = "search";
       autoScreenArmed.value = Boolean(data.auto_screen);
       if (data.auto_screen_fields) {
         autoScreenFields.value = Object.fromEntries(
@@ -715,6 +749,8 @@ async function restoreRunningTask() {
       screenBusy.value = true;
       screenSnapshot.value = snapshot;
       restoredTaskHint.value = "检测到 AI 筛选任务仍在后台运行，已自动接回";
+      analysisReady.value = true;
+      enterScreenStep();
       void pollTask(data.task_id, "screen");
     } else {
       recrawlTaskId.value = data.task_id;
@@ -868,6 +904,10 @@ function enterScreenStep() {
 }
 
 function selectStep(step: string) {
+  if (historyMode.value && step !== "results") {
+    notify("历史轮次不可改写，请先回到最新", "warning");
+    return;
+  }
   if (!enabledSteps.value.includes(step as StepId)) return;
   if (step === "search") enterSearchStep();
   else if (step === "screen") enterScreenStep();
@@ -951,6 +991,7 @@ async function analyzeResume() {
   }
   uploadBusy.value = true;
   try {
+    if (!(await clearLatestResult())) return;
     const form = new FormData();
     form.append("file", selectedFile.value);
     form.append("platform", draftPlatform.value);
@@ -960,7 +1001,8 @@ async function analyzeResume() {
       method: "POST",
       body: form,
     });
-    await clearLatestResult();
+    historyRound.value = null;
+    historyBackToLatest();
     scrapeTaskId.value = "";
     screenTaskId.value = "";
     recrawlTaskId.value = "";
@@ -1182,6 +1224,10 @@ async function saveAdvancedSettings() {
 }
 
 async function startScrape(options: OneClickLaunch = {}) {
+  if (historyMode.value) {
+    notify("历史轮次不可改写，请先回到最新", "warning");
+    return;
+  }
   if (pipelineBusy.value) {
     notify("当前已有任务在运行或暂停，请先处理完再开始新任务", "warning");
     return;
@@ -1257,6 +1303,7 @@ async function cancelScrape() {
 }
 
 async function continueScrape() {
+  if (historyMode.value) return;
   if (!scrapeTaskId.value || scrapeBusy.value) return;
   scrapeBusy.value = true;
   scrapeCompleted.value = false;
@@ -1286,6 +1333,10 @@ interface AiScreenLaunch {
 
 
 async function startAiScreen(options: AiScreenLaunch = {}) {
+  if (historyMode.value) {
+    notify("历史轮次不可改写，请先回到最新", "warning");
+    return;
+  }
 
 
   // 抓取/重抓占用时不允许再开一轮 AI 筛选；中断/暂停的 AI 续跑仍可进入。
@@ -1343,6 +1394,7 @@ async function startAiScreen(options: AiScreenLaunch = {}) {
 }
 
 async function continueAiScreen() {
+  if (historyMode.value) return;
   const runId = pausedRunId.value || screenTaskId.value;
   if (!runId || screenBusy.value) return;
   screenBusy.value = true;
@@ -1576,6 +1628,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
 }
 
 function setPipelineResult(result: PipelineResult) {
+  if (historyMode.value) return;
   pipelineResult.value = result;
   // 后端权威优先；即时 finish 响应或旧快照缺 platform 时按结果级平台回填。
   const platform = (result as PipelineResult & { platform?: string }).platform || "";
@@ -1725,13 +1778,83 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
 
 async function clearLatestResult() {
   try {
-    await apiRequest<{ ok?: boolean; cleared?: boolean }>("/api/reset-latest-result", {
-      method: "POST",
-    });
-  } catch {
-    // 清理失败不阻断新流程；前端状态已经先清空
+    await archiveHistoryLatest();
+    return true;
+  } catch (error) {
+    notify(userFacingMessage(error, "归档旧结果失败，已停止开始新一轮"), "error");
+    return false;
   }
 }
+
+function openHistoryDrawer() {
+  showHistory();
+}
+
+function toggleHistoryDrawer() {
+  if (historyOpen.value) hideHistory();
+  else showHistory();
+}
+
+function closeHistoryDrawer() {
+  if (historyOpen.value) hideHistory();
+}
+
+function enterHistoryRound(detail: HistoryRoundDetail) {
+  // 首次进入历史时记住进入前的草稿平台，返回最新时还原。
+  if (!historyRound.value) platformBeforeHistory.value = platformState.draft;
+  // 先退出历史模式，再装载新轮详情；同一时刻只有一个历史轮处于激活态。
+  historyRound.value = null;
+  setPipelineResult(detail.result || {});
+  pipelineResultRunId.value = detail.source_run_id || "";
+  resultRunIds.value[detail.platform] = detail.source_run_id || "";
+  resultPlatformFilter.value = detail.platform;
+  // 历史轮次与顶部平台开关/品牌色绑定：BOSS 历史进 BOSS 模式，智联历史进智联模式。
+  platformState.setDraftPlatform(detail.platform);
+  draftPlatform.value = detail.platform;
+  setThemePlatform(detail.platform);
+  activeStep.value = "results";
+  historyRound.value = {
+    runId: detail.source_run_id || "",
+    platform: detail.platform,
+    status: detail.status,
+    jobCount: Number(detail.result?.total_kept || (detail.result?.jobs || []).length || 0),
+  };
+}
+
+async function returnToLatest() {
+  const restorePlatform = platformBeforeHistory.value;
+  platformBeforeHistory.value = null;
+  historyRound.value = null;
+  historyBackToLatest();
+  resultPlatformFilter.value = "all";
+  pipelineResult.value = null;
+  pipelineResultRunId.value = "";
+  resultLoaded.value = false;
+  resultRunIds.value = { boss: "", zhilian: "" };
+  resultEpoch.value += 1;
+  if (restorePlatform) {
+    platformState.setDraftPlatform(restorePlatform);
+    draftPlatform.value = restorePlatform;
+    setThemePlatform(restorePlatform);
+  }
+  activeStep.value = "results";
+  await loadLatestResult();
+}
+
+function onResultPlatformFilterChange(value: "all" | "boss" | "zhilian") {
+  if (historyMode.value) return;
+  resultPlatformFilter.value = value;
+}
+
+watch(historyDetail, (detail, prev) => {
+  if (detail) {
+    enterHistoryRound(detail);
+  } else if (prev && historyRound.value) {
+    void returnToLatest();
+  }
+});
+
+defineExpose({ openHistoryDrawer, toggleHistoryDrawer, closeHistoryDrawer });
 
 async function exportResultCsv() {
   if (exportBusy.value) return;
@@ -1768,7 +1891,8 @@ async function exportResultCsv() {
   }
 }
 
-function resetWorkflow() {
+async function resetWorkflow() {
+  if (!(await clearLatestResult())) return;
   if (pollTimer) window.clearTimeout(pollTimer);
   activeStep.value = "upload";
   analysisReady.value = false;
@@ -1808,12 +1932,13 @@ function resetWorkflow() {
   resumeAnalysis.value = null;
   appliedResumePlatforms.value = new Set();
   profileSummary.value = "";
+  historyRound.value = null;
+  historyBackToLatest();
   scrapeBusy.value = false;
   screenBusy.value = false;
   recrawlBusy.value = false;
   recrawlRetryCount = 0;
   screenPanelOpen.value = true;
-  void clearLatestResult();
 }
 
 function jobId(job: JobItem): string {
@@ -1907,6 +2032,7 @@ async function toggleRejected(job: JobItem) {
 }
 
 async function retryJd(job: JobItem) {
+  if (historyMode.value) return;
   const id = jobId(job);
   if (!id || jdBusyIds.value.has(id)) return;
   withBusy(jdBusyIds, id, true);
@@ -1958,6 +2084,10 @@ async function retryJd(job: JobItem) {
 // 待确认项「全部重抓」：缺 JD 的补 CDP 抓取，有 JD 的用画像重跑 AI 精筛。
 // 复用现有轮询机制显示进度（已完成 X / 共 N），结果原地合并进当前结果，保留当前 tab。
 async function recrawlUncertain(platformOverride?: "boss" | "zhilian") {
+  if (historyMode.value) {
+    notify("历史轮次不可改写，请先回到最新", "warning");
+    return;
+  }
   const ids = groups.value.uncertain.map((job) => jobId(job)).filter(Boolean);
   if (!ids.length) {
     notify("没有待确认的岗位", "info");
@@ -2165,12 +2295,20 @@ const roundStatusPayload = computed(() => {
   const platform: Platform = scrapeSnapshot.value?.platform
     || screenSnapshot.value?.platform
     || draftPlatform.value;
-  if (scrapeBusy.value || recrawlBusy.value) return { platform, phase: "scraping" as const, judged: 0 };
-  if (screenBusy.value) return { platform, phase: "screening" as const, judged: 0 };
+  if (historyRound.value) {
+    const g = groups.value;
+    const judged = g.matched.length + g.unmatched.length + g.uncertain.length + g.dropped.length;
+    return { platform: historyRound.value.platform, phase: "judged" as const, judged, scope: "history" as const };
+  }
+  if (scrapeBusy.value || recrawlBusy.value) {
+    return { platform, phase: "scraping" as const, judged: 0, scope: platform };
+  }
+  if (screenBusy.value) return { platform, phase: "screening" as const, judged: 0, scope: platform };
   if (resultLoaded.value && pipelineResult.value) {
     const g = groups.value;
     const judged = g.matched.length + g.unmatched.length + g.uncertain.length + g.dropped.length;
-    return { platform, phase: "judged" as const, judged };
+    const scope = resultPlatformFilter.value === "all" ? "all" as const : resultPlatformFilter.value;
+    return { platform, phase: "judged" as const, judged, scope };
   }
   return null;
 });
@@ -2227,6 +2365,13 @@ watch(roundStatusPayload, (payload) => {
           <p>{{ currentCopy.description }}</p>
         </div>
         <div v-if="activeStep === 'results'" class="stage-actions">
+          <span v-if="historyMode" class="history-round-marker" data-testid="history-round-marker">
+            <History :size="17" aria-hidden="true" />历史轮次 · {{ historyStatusText }}
+          </span>
+          <HistoryRoundProfile v-if="historyMode" :profile-text="historyProfileText" />
+          <button v-if="historyMode" class="button secondary" type="button" data-testid="back-to-latest" @click="returnToLatest">
+            <RotateCcw :size="17" aria-hidden="true" />回到最新
+          </button>
           <button
             class="button secondary"
             type="button"
@@ -2577,6 +2722,9 @@ watch(roundStatusPayload, (payload) => {
         }"
       >
         <div class="command-band">
+        <div v-if="!historyMode && !resultLoaded" class="latest-empty" data-testid="latest-result-empty">
+          暂无结果：开始新一轮并将最新结果保存后，这里会显示最新轮次。
+        </div>
           <div class="result-tabs" role="tablist" aria-label="AI 筛选结果分类">
             <button
               v-for="tab in resultTabs"
@@ -2589,10 +2737,10 @@ watch(roundStatusPayload, (payload) => {
             ><span class="vtab-dot" aria-hidden="true"></span>{{ tab.label }}<span class="vtab-count">{{ tab.count }}</span></button>
           </div>
           <span class="command-note" aria-hidden="true">判定依据：你的简历关键词 · 两阶段判断</span>
-          <button v-if="scrapeTaskId" class="button secondary small" type="button" data-testid="continue-ai-from-results" @click="enterScreenStep()">继续 AI 筛选</button>
+          <button v-if="!historyMode && scrapeTaskId" class="button secondary small" type="button" data-testid="continue-ai-from-results" @click="enterScreenStep()">继续 AI 筛选</button>
         </div>
 
-        <div v-if="recrawlPlatformGuide" class="recrawl-guide" data-testid="recrawl-platform-guide" role="dialog" aria-label="选择重抓平台">
+        <div v-if="!historyMode && recrawlPlatformGuide" class="recrawl-guide" data-testid="recrawl-platform-guide" role="dialog" aria-label="选择重抓平台">
           <p class="recrawl-guide-title">选择要重抓的平台</p>
           <p class="recrawl-guide-counts">BOSS {{ recrawlPlatformGuide.boss }} · 智联 {{ recrawlPlatformGuide.zhilian }}</p>
           <div class="recrawl-guide-actions">
@@ -2602,7 +2750,7 @@ watch(roundStatusPayload, (payload) => {
           </div>
         </div>
 
-        <div v-if="activeCategory === 'uncertain' && (recrawlSnapshot || interruptedRunId)" class="recrawl-banner">
+        <div v-if="!historyMode && activeCategory === 'uncertain' && (recrawlSnapshot || interruptedRunId)" class="recrawl-banner">
           <TaskProgress :snapshot="recrawlSnapshot" kind="screen" />
           <button v-if="recrawlSnapshot && recrawlSnapshot.status === 'paused'"
                   class="button primary" type="button" data-testid="resume-recrawl"
@@ -2628,12 +2776,12 @@ watch(roundStatusPayload, (payload) => {
           :jobs="currentJobs"
           :empty-message="currentEmptyMessage"
           :defer-mobile-detail="Boolean(recrawlSnapshot && recrawlSnapshot.status === 'paused')"
-          :platform-filter="resultPlatformFilter"
+          :platform-filter="historyMode ? '' : resultPlatformFilter"
           :result-epoch="resultEpoch"
-          @update:platform-filter="(value) => { resultPlatformFilter = value; }"
+          @update:platform-filter="onResultPlatformFilterChange"
         >
           <template #heading-actions>
-            <div v-if="activeCategory === 'uncertain'" class="recrawl-inline">
+            <div v-if="!historyMode && activeCategory === 'uncertain'" class="recrawl-inline">
               <button
                 class="button secondary small"
                 type="button"
@@ -2655,7 +2803,7 @@ watch(roundStatusPayload, (payload) => {
               <button class="button danger" type="button" :disabled="feedbackBusyIds.has(jobId(job))" @click="toggleRejected(job)">
                 {{ rejectedIds.has(jobId(job)) ? "撤销不感兴趣" : "不感兴趣" }}
               </button>
-              <button v-if="!job.jd" class="button secondary" type="button" :disabled="jdBusyIds.has(jobId(job))" @click="retryJd(job)">
+              <button v-if="!historyMode && !job.jd" class="button secondary" type="button" :disabled="jdBusyIds.has(jobId(job))" @click="retryJd(job)">
                 <FileText :size="17" aria-hidden="true" />{{ jdBusyIds.has(jobId(job)) ? "补抓中…" : "补抓 JD" }}
               </button>
               <button
@@ -2689,6 +2837,20 @@ watch(roundStatusPayload, (payload) => {
         </section>
       </div>
     </Transition>
+
+    <ResultHistoryDrawer
+      :open="historyOpen"
+      :items="historyItems"
+      :loading="historyLoading"
+      :error="historyError"
+      :deleting="historyDeleting"
+      :delete-target="historyDeleteTarget"
+      @close="hideHistory"
+      @open-round="openHistoryRound"
+      @confirm-delete="confirmHistoryDelete"
+      @cancel-delete="cancelHistoryDelete"
+      @delete-round="deleteHistoryRound"
+    />
 
     <!-- 岗位轨迹浮窗：居中弹窗，内容为原生命周期卡片全部能力 -->
     <Transition name="dialog">
@@ -2731,3 +2893,28 @@ watch(roundStatusPayload, (payload) => {
     />
   </main>
 </template>
+
+<style scoped>
+.history-round-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text-soft);
+  font-size: 0.86rem;
+}
+
+.latest-empty {
+  margin: 0 0 16px;
+  padding: 18px;
+  border: 1px dashed var(--hair-2);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text-soft);
+  text-align: center;
+}
+</style>

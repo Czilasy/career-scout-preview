@@ -416,7 +416,7 @@ describe("DiscoveryView", () => {
     expect(wrapper.get('[data-testid="keyword-chip"]').attributes("aria-pressed")).toBe("true");
     expect(wrapper.get('[data-testid="start-scrape"]').text()).toContain("单独抓取");
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/reset-latest-result",
+      "/api/result-history/archive-latest",
       expect.objectContaining({ method: "POST" }),
     );
     expect(wrapper.find('[data-testid="start-ai-screen"]').exists()).toBe(false);
@@ -432,6 +432,61 @@ describe("DiscoveryView", () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith("/api/search-progress")))
       .toBe(false);
 
+    vi.unstubAllGlobals();
+  });
+
+  it("stops analyze-resume when archiving old results fails", async () => {
+    const analyzeCalls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/latest-pipeline-result")) {
+        return response({ ok: true, has_result: false });
+      }
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({
+          ok: true,
+          settings: {
+            pages: 3,
+            inter_combo_delay: 30,
+            detail_batch_size: 5,
+            screen_batch_size: 50,
+            screen_concurrency: 1,
+            match_batch_size: 4,
+            match_concurrency: 1,
+          },
+          defaults: {},
+        });
+      }
+      if (url.endsWith("/api/result-history/archive-latest")) {
+        return response({ ok: false, error: "persistence_failed" }, 500);
+      }
+      if (url.endsWith("/api/analyze-resume")) {
+        analyzeCalls.push(url);
+        return response({ ok: true, fields: { keyword: [], city: [], profile_summary: "" }, labels: {} });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    const file = new File(["resume"], "resume.txt", { type: "text/plain" });
+    Object.defineProperty(wrapper.get('[data-testid="resume-input"]').element, "files", {
+      value: [file],
+      configurable: true,
+    });
+    await wrapper.get('[data-testid="resume-input"]').trigger("change");
+    await wrapper.get('[data-testid="resume-consent"]').setValue(true);
+    await wrapper.get('[data-testid="analyze-resume"]').trigger("click");
+    await flushPromises();
+
+    expect(analyzeCalls).toHaveLength(0);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/result-history/archive-latest",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const notices = wrapper.emitted("notify")?.flat() as Array<{ message: string }>;
+    expect(notices.some((n) => n.message.includes("归档旧结果失败"))).toBe(true);
     vi.unstubAllGlobals();
   });
 
@@ -677,8 +732,10 @@ describe("DiscoveryView", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
 
-    // 任务被接回后 activeStep 仍是 upload；草稿平台分段控件在所有步骤都常驻顶部。
+    // 任务被接回后直接进入搜索步，进度播报区随搜索步挂载；草稿平台分段控件在所有步骤都常驻顶部。
     expect(wrapper.find('[data-testid="platform-current-boss"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="custom-keyword"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="task-progress-announcement"]').exists()).toBe(true);
 
     // 任务运行中平台切换被锁定（平台互切锁定）：按钮禁用、点击不生效，
     // 任务快照与 schema 不被改写。
@@ -2421,6 +2478,39 @@ describe("DiscoveryView", () => {
     await flushPromises();
     expect(wrapper.get('[data-testid="start-scrape"]').attributes("disabled")).toBeDefined();
     expect(wrapper.get('[data-testid="start-one-click"]').attributes("disabled")).toBeDefined();
+    vi.unstubAllGlobals();
+  });
+
+  it("B031: refresh restores a running scrape on the search step with announcement", async () => {
+    const fetchMock = oneClickBase({
+      "/api/latest-running-task": () => response({
+        ok: true, has_task: true, task_id: "running-scrape", kind: "scrape", status: "running",
+        platform: "boss", progress: { message: "运行中，列表抓取" }, logs: [], error: "",
+      }),
+      "/api/task-state/running-scrape": () => response({ status: "running", progress: { message: "运行中，列表抓取" }, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    expect(wrapper.find('[data-testid="custom-keyword"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="task-progress-announcement"]').text()).toContain("运行中");
+    vi.unstubAllGlobals();
+  });
+
+  it("B031: refresh restores a running AI screen on the screen step with announcement", async () => {
+    const fetchMock = oneClickBase({
+      "/api/latest-running-task": () => response({
+        ok: true, has_task: true, task_id: "screen-running-1", kind: "ai_screen", status: "running",
+        platform: "boss", scrape_task_id: "scrape-parent", scrape_completed: true,
+        progress: { message: "AI 筛选中" }, logs: [], error: "",
+      }),
+      "/api/task-state/screen-running-1": () => response({ status: "running", progress: { message: "AI 筛选中" }, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    expect(wrapper.find('[data-testid="start-ai-screen"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="task-progress-announcement"]').text()).toContain("运行中");
     vi.unstubAllGlobals();
   });
 });

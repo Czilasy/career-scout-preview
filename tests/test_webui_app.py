@@ -4828,6 +4828,48 @@ class PlatformAwareCancelTests(unittest.TestCase):
         self.assertIsNotNone(run)
         self.assertEqual(run["status"], "interrupted")
 
+    def test_cancel_with_jobs_saves_cancelled_history_round(self):
+        """FR-019: 取消结束但已有岗位时必须保存 result_snapshot。"""
+        run_id = "cancel-with-jobs-history"
+        jobs = [
+            {"job_id": "j1", "platform_job_id": "j1", "title": "岗位1",
+             "source_url": "https://zhipin.example/j1.html"},
+            {"job_id": "j2", "platform_job_id": "j2", "title": "岗位2",
+             "source_url": "https://zhipin.example/j2.html"},
+        ]
+        self.store.create_screening_run(
+            run_id, source_count=len(jobs),
+            execution_params={"platform": "boss"},
+        )
+        self.store.save_scrape_combo_result(run_id, "kw|city", jobs, ["kw|city"])
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape")
+
+        resp = self.client.post(f"/api/task/cancel/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        items = self.store.list_history_rounds("boss")
+        self.assertEqual(len(items), 1)
+        snapshot = self.store.get_screening_run(items[0]["id"])
+        self.assertEqual(snapshot["record_kind"], "result_snapshot")
+        self.assertEqual(snapshot["status"], "cancelled")
+        self.assertEqual(snapshot["total_kept"], 2)
+        self.assertEqual(
+            (snapshot["execution_params"] or {}).get("scrape_task_id"), run_id)
+
+    def test_cancel_without_jobs_does_not_create_history(self):
+        """FR-019: 没有岗位产出的取消不进入历史。"""
+        run_id = "cancel-no-jobs-history"
+        self.store.create_screening_run(
+            run_id, source_count=0,
+            execution_params={"platform": "boss"},
+        )
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape")
+
+        resp = self.client.post(f"/api/task/cancel/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(self.store.list_history_rounds("boss"), [])
+
 
 class PlatformAwareFinishTests(unittest.TestCase):
     """T416: 提前结束的平台感知。"""
@@ -4987,7 +5029,7 @@ class DraftSwitchTargetRunConservationTests(unittest.TestCase):
         except (PermissionError, OSError):
             pass
 
-    def _seed_paused_zhilian_run(self, run_id="draft-switch-zhilian", status="paused"):
+    def _seed_paused_zhilian_run(self, run_id="draft-switch-zhilian", status="paused", record_kind="process_log"):
         """种入一个 zhilian run，模拟目标 run 已创建。"""
         with self.store._connection() as conn:
             conn.execute(
@@ -5020,6 +5062,11 @@ class DraftSwitchTargetRunConservationTests(unittest.TestCase):
         """T712: 创建 zhilian run → 草稿切到 boss → reset 仍校验原 run 平台。"""
         # reset 要求 run 状态为 succeeded/partial/failed
         run_id = self._seed_paused_zhilian_run(status="succeeded")
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET record_kind = 'result_snapshot' WHERE id = ?",
+                (run_id,),
+            )
         # reset 请求带 platform=boss（模拟草稿切到 boss），应与 run.platform=zhilian 冲突
         resp = self.client.post("/api/reset-latest-result", json={
             "run_id": run_id,

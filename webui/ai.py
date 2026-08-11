@@ -20,6 +20,7 @@ import keyring
 import requests
 
 from scripts import boss_cdp_raw as boss
+from webui.ai_retry import effective_retry_plan
 
 KEYRING_SERVICE = "boss-workbench"
 DEFAULT_TIMEOUT = 300
@@ -755,11 +756,12 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
                 },
             )
 
-        # Tuning manifest 明确授权时按规范化 error_code 单独计预算；
-        # 普通调用保持原有固定 RATE_LIMIT_ATTEMPTS 行为。
+        # 默认路径使用统一 3 次/30 秒策略；调优 manifest 仍按 error_code 预算。
+        retry_plan = effective_retry_plan(retry_limits)
         if retry_limits is None:
-            if attempt >= RATE_LIMIT_ATTEMPTS - 1:
+            if attempt >= int(retry_plan["max_attempts"]) - 1:
                 break
+            delay = float(retry_plan["delay_seconds"])
         else:
             retry_error_code = (
                 last_error.error_code if last_error is not None else ERROR_NETWORK
@@ -774,14 +776,14 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
             if used_retries >= allowed_retries:
                 break
             retry_counts[retry_error_code] = used_retries + 1
-        if response is None:
-            delay = NETWORK_BACKOFF_SECONDS[min(attempt, len(NETWORK_BACKOFF_SECONDS) - 1)]
-        elif response.status_code == 429:
-            delay = RATE_LIMIT_BACKOFF_SECONDS[min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)]
-        else:
-            delay = SERVER_ERROR_BACKOFF_SECONDS[min(attempt, len(SERVER_ERROR_BACKOFF_SECONDS) - 1)]
-        if waited + delay > budget:
-            break  # 退避等待累计已逼近单次 timeout，不再拖延
+            if response is None:
+                delay = NETWORK_BACKOFF_SECONDS[min(attempt, len(NETWORK_BACKOFF_SECONDS) - 1)]
+            elif response.status_code == 429:
+                delay = RATE_LIMIT_BACKOFF_SECONDS[min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)]
+            else:
+                delay = SERVER_ERROR_BACKOFF_SECONDS[min(attempt, len(SERVER_ERROR_BACKOFF_SECONDS) - 1)]
+            if waited + delay > budget:
+                break  # 调优路径保留原 timeout 预算保护
         time.sleep(delay)
         waited += delay
         _emit_retry_event(

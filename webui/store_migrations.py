@@ -101,6 +101,8 @@ class StoreMigrationsMixin:
             self._migration_028()
         if current < 29:
             self._migration_029()
+        if current < 30:
+            self._migration_030()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -2036,6 +2038,18 @@ class StoreMigrationsMixin:
                 (_now(),),
             )
 
+
+    def _migration_030(self):
+        """Add archived_at to result snapshots for multi-round history."""
+        with self._connection() as conn:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(screening_runs)")}
+            if "archived_at" not in cols:
+                conn.execute("ALTER TABLE screening_runs ADD COLUMN archived_at TEXT")
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (30, ?, 'multi-round history archived_at')",
+                (_now(),),
+            )
     # -- migration 27 helpers ---------------------------------------------
 
     @staticmethod

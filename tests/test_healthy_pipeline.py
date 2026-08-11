@@ -1309,6 +1309,91 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(run["mismatch_count"], 0)
         self.assertEqual(run["pending_count"], 1)
 
+    def test_failure_before_screening_does_not_create_history_snapshot(self):
+        scrape_task_id = "pre-screen-failure-source"
+        jobs = [{"job_id": "job-1", "title": "后端工程师"}]
+        self._install_scrape_source(scrape_task_id, jobs)
+        self.store.save_scrape_combo_result(scrape_task_id, "kw|city", jobs, ["kw|city"])
+
+        def fail_before_screening(*_args, **_kwargs):
+            raise RuntimeError("boom before screening")
+
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.screen_jobs", side_effect=fail_before_screening):
+            response = self._post_ai_screen(scrape_task_id)
+            task_id = response.get_json()["task_id"]
+            finished = _wait_for_pipeline_task(self.client, task_id)
+
+        self.assertEqual(finished["status"], "failed", finished)
+        self.assertEqual(self.store.list_history_rounds(), [])
+
+    def test_failure_after_rough_verdicts_saves_failed_history_snapshot(self):
+        scrape_task_id = "rough-verdict-failure-source"
+        jobs = [{"job_id": "job-1", "title": "后端工程师"}]
+        self._install_scrape_source(scrape_task_id, jobs)
+        self.store.save_scrape_combo_result(scrape_task_id, "kw|city", jobs, ["kw|city"])
+
+        def fail_after_rough_batch(todo, *_args, on_batch_done=None, **_kwargs):
+            if on_batch_done:
+                job_ids = [str(job["job_id"]) for job in todo]
+                on_batch_done({job_id: "kept" for job_id in job_ids}, job_ids)
+            raise RuntimeError("boom after rough")
+
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.screen_jobs", side_effect=fail_after_rough_batch):
+            response = self._post_ai_screen(scrape_task_id)
+            task_id = response.get_json()["task_id"]
+            finished = _wait_for_pipeline_task(self.client, task_id)
+
+        self.assertEqual(finished["status"], "failed", finished)
+        items = self.store.list_history_rounds()
+        self.assertGreater(len(self.store.load_scrape_run_jobs(scrape_task_id)), 0)
+        self.assertNotEqual(self.store.load_screening_verdicts(task_id), {})
+        events = self.store.list_task_events(task_id)
+        self.assertTrue(any(event["type"] == "history_snapshot" for event in events))
+        self.assertEqual(len(items), 1)
+        self.assertEqual(self.store.get_screening_run(items[0]["id"])["status"], "failed")
+        self.assertEqual(items[0]["total_kept"], 1)
+
+    def test_terminal_failure_after_snapshot_does_not_duplicate_history(self):
+        scrape_task_id = "post-snapshot-failure-source"
+        jobs = [{"job_id": "job-1", "title": "后端工程师"}]
+        self._install_scrape_source(scrape_task_id, jobs)
+
+        def matched(chunk, *_args, **_kwargs):
+            return {"verdicts": {
+                str(job["job_id"]): {
+                    "verdict": "match", "reason": "匹配", "caveats": [],
+                }
+                for job in chunk
+            }}
+
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.screen_jobs", return_value={
+                    "kept": [job["job_id"] for job in jobs], "dropped": [],
+                }), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
+                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch("webui.pipeline_exec.fetch_job_details", return_value={
+                    "jobs": [{**jobs[0], "jd": "负责后端开发"}],
+                    "hard_stop": False, "hard_stop_code": None,
+                    "stopped": False, "fetched": 1,
+                }), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"), \
+                mock.patch("webui.ai.match_jds", side_effect=matched), \
+                mock.patch.object(
+                    self.store, "finalize_run_status",
+                    side_effect=RuntimeError("terminal write failed"),
+                ):
+            response = self._post_ai_screen(scrape_task_id)
+            task_id = response.get_json()["task_id"]
+            finished = _wait_for_pipeline_task(self.client, task_id)
+
+        self.assertEqual(finished["status"], "failed", finished)
+        items = self.store.list_history_rounds()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(self.store.get_screening_run(items[0]["id"])["status"], "done")
+
     def test_main_ai_uses_source_frozen_execution_config(self):
         scrape_task_id = "frozen-config-source"
         jobs = [{"job_id": "job-1", "title": "后端工程师"}]

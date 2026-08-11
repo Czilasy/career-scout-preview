@@ -182,7 +182,8 @@ class Migration28SchemaTests(unittest.TestCase):
 
     def _build_v27_database(self):
         with patch.object(TaskStore, "_migration_028", return_value=None), \
-                patch.object(TaskStore, "_migration_029", return_value=None):
+                patch.object(TaskStore, "_migration_029", return_value=None), \
+                patch.object(TaskStore, "_migration_030", return_value=None):
             store = TaskStore(self.db_path)
         self.assertEqual(store.schema_version(), 27)
         return store
@@ -1462,19 +1463,6 @@ class ScreeningRunStoreTests(unittest.TestCase):
         self.assertEqual(loaded["status"], "completed_with_pending")
         self.assertEqual(self.store.get_latest_done_run_id(), run_id)
 
-    def test_clear_latest_pipeline_result_clears_partial_snapshot(self):
-        result = {
-            "jobs": [
-                {"job_id": "p1", "verdict": "uncertain", "verdict_reason": "待确认"},
-            ],
-            "dropped": [], "total_scraped": 1, "total_kept": 1,
-            "total_matched": 0, "total_dropped": 0,
-        }
-        run_id = self.store.save_pipeline_result(result, {})
-        self.assertEqual(self.store.get_screening_run(run_id)["status"], "partial")
-        self.assertTrue(self.store.clear_latest_pipeline_result())
-        self.assertIsNone(self.store.load_latest_pipeline_result())
-        self.assertIsNone(self.store.get_latest_done_run_id())
 
     def test_load_latest_pipeline_result_skips_process_log(self):
         """load_latest_pipeline_result 只能返回 result_snapshot，跳过 process_log。"""
@@ -1503,55 +1491,6 @@ class ScreeningRunStoreTests(unittest.TestCase):
         self.assertIsNone(loaded["result"]["jobs"][0]["job_id"])
 
 
-    def test_clear_latest_pipeline_result_removes_only_latest_snapshot(self):
-        """重新上传简历时只清理最新结果存档，保留更早的 result_snapshot。"""
-        older = {
-            "ok": True,
-            "jobs": [{"job_id": "old", "verdict": "match", "title": "旧结果"}],
-            "dropped": [],
-            "total_scraped": 1,
-            "total_kept": 1,
-            "total_matched": 1,
-            "total_dropped": 0,
-            "profile_summary": "画像1",
-        }
-        newer = {
-            "ok": True,
-            "jobs": [{"job_id": "new", "verdict": "match", "title": "新结果"}],
-            "dropped": [],
-            "total_scraped": 1,
-            "total_kept": 1,
-            "total_matched": 1,
-            "total_dropped": 0,
-            "profile_summary": "画像2",
-        }
-        older_id = self.store.save_pipeline_result(older, {"screening": {}})
-        newer_id = self.store.save_pipeline_result(newer, {"screening": {}})
-        with self.store._connection() as conn:
-            conn.execute(
-                "UPDATE screening_runs SET created_at = ? WHERE id = ?",
-                ("2026-01-01T00:00:00+08:00", older_id),
-            )
-            conn.execute(
-                "UPDATE screening_runs SET created_at = ? WHERE id = ?",
-                ("2026-01-02T00:00:00+08:00", newer_id),
-            )
-
-        self.assertTrue(self.store.clear_latest_pipeline_result())
-        loaded = self.store.load_latest_pipeline_result()
-        self.assertIsNotNone(loaded)
-        self.assertEqual(loaded["run_id"], older_id)
-        self.assertEqual(loaded["result"]["jobs"][0]["platform_job_id"], "old")
-        self.assertIsNone(loaded["result"]["jobs"][0]["job_id"])
-        with self.store._connection() as conn:
-            rows = conn.execute(
-                "SELECT COUNT(*) AS n FROM screening_results WHERE run_id = ?", (newer_id,),
-            ).fetchone()
-            self.assertEqual(rows["n"], 0)
-
-        self.assertTrue(self.store.clear_latest_pipeline_result())
-        self.assertIsNone(self.store.load_latest_pipeline_result())
-        self.assertFalse(self.store.clear_latest_pipeline_result())
 
 
 class AdvancedConfigStateStoreTests(unittest.TestCase):

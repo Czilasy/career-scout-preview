@@ -32,6 +32,27 @@ export interface PipelineGroups {
 
 export type ResultPlatformFilter = "all" | "boss" | "zhilian";
 
+export type RoundStatusPhase = "scraping" | "screening" | "judged";
+export type RoundStatusScope = "all" | "boss" | "zhilian" | "history";
+export interface RoundStatusPayload {
+  platform: Platform;
+  phase: RoundStatusPhase;
+  judged: number;
+  scope: RoundStatusScope;
+}
+
+export function roundScopeLabel(scope: RoundStatusScope, platform: Platform): string {
+  if (scope === "all") return "全部";
+  if (scope === "history") return "历史轮次";
+  return platform === "boss" ? "BOSS" : "智联";
+}
+
+export function historyStatusLabel(status: string, jobCount: number): string {
+  const normalized = String(status || "").toLowerCase();
+  if (["done", "succeeded", "completed"].includes(normalized)) return "完成";
+  if (["partial", "completed_with_pending"].includes(normalized)) return "部分结果";
+  return `失败但有 ${jobCount} 个岗位`;
+}
 /** 纯展示层平台过滤：按 job.platform 过滤 jobs/dropped；"all" 原样返回。
  *
  * 依赖后端保证每个岗位带 platform 身份（实时任务结果按任务平台回填、

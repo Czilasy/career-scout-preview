@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Activity, Bell, Bot, Moon, Rocket, Star, Sun, UserRound, X } from "@lucide/vue";
+import { Bell, History, Moon, Settings, Star, Sun, X } from "@lucide/vue";
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
 import BrowserAccountsDialog from "./components/BrowserAccountsDialog.vue";
 import EnvCheckDialog from "./components/EnvCheckDialog.vue";
 import NoticeBar from "./components/NoticeBar.vue";
 import ReminderDrawer from "./components/ReminderDrawer.vue";
 import UpdateDialog from "./components/UpdateDialog.vue";
+import AppSettingsMenu from "./components/AppSettingsMenu.vue";
 import DiscoveryView from "./views/DiscoveryView.vue";
 import { apiRequest, currentRuntimeMode, errorMessage, GITHUB_REPO_URL, initializeSession, openExternalLink, updateApi, type UpdateCheckResult } from "./api";
 import { getJobReminderCount } from "./jobFeedback";
+import type { RoundStatusPayload } from "./discovery";
 import { useTheme } from "./composables/useTheme";
 import type { CandidateProfile, Notice } from "./types";
 
@@ -23,14 +25,25 @@ const themeToggleLabel = computed(() =>
 // 顶栏本轮状态胶囊：纯展示。数据来自 DiscoveryView 上抛的 round-status，
 // 空闲（无任务上下文且无结果）时不渲染。
 // ---------------------------------------------------------------------------
-const roundStatus = ref<{ platform: "boss" | "zhilian"; phase: string; judged: number } | null>(null);
+const roundStatus = ref<RoundStatusPayload | null>(null);
 const roundStatusRunning = computed(() =>
   roundStatus.value?.phase === "scraping" || roundStatus.value?.phase === "screening");
+const roundPillLabel = computed(() => {
+  const status = roundStatus.value;
+  if (!status) return "";
+  if (status.scope === "all") return "全部";
+  if (status.scope === "history") return "历史轮次";
+  return status.platform === "boss" ? "BOSS" : "智联";
+});
 const roundStatusText = computed(() => {
   if (!roundStatus.value) return "";
-  if (roundStatus.value.phase === "scraping") return "抓取进行中";
-  if (roundStatus.value.phase === "screening") return "筛选进行中";
-  return `${roundStatus.value.judged} 个岗位已判定`;
+  const status = roundStatus.value;
+  if (status.phase === "scraping") return "抓取进行中";
+  if (status.phase === "screening") return "筛选进行中";
+  const platform = status.platform === "zhilian" ? "智联" : "BOSS";
+  if (status.scope === "all") return `${status.judged} 个岗位已判定`;
+  if (status.scope === "history") return `${platform} · ${status.judged} 个岗位已判定`;
+  return `${platform} · ${status.judged} 个岗位已判定`;
 });
 
 // 页面标题随平台与页面状态变化；结果/双平台场景使用通用标题，不出现平台独占文案。
@@ -47,6 +60,40 @@ watch(pageTitle, (title) => { document.title = title; }, { immediate: true });
 const aiSettingsOpen = ref(false);
 const browserAccountsOpen = ref(false);
 const envCheckOpen = ref(false);
+const settingsMenuOpen = ref(false);
+const discoveryRef = ref<{
+  openHistoryDrawer: () => void;
+  toggleHistoryDrawer: () => void;
+  closeHistoryDrawer: () => void;
+} | null>(null);
+
+function toggleHistoryDrawer() {
+  // 与收藏/提醒互斥：打开历史时收起另外两个抽屉。
+  favoritesOpen.value = false;
+  reminderDrawerOpen.value = false;
+  discoveryRef.value?.toggleHistoryDrawer?.();
+}
+
+function closeHistoryDrawer() {
+  discoveryRef.value?.closeHistoryDrawer?.();
+}
+
+function openAiSettingsFromMenu() {
+  settingsMenuOpen.value = false;
+  aiSettingsOpen.value = true;
+}
+function openBrowserAccountsFromMenu() {
+  settingsMenuOpen.value = false;
+  browserAccountsOpen.value = true;
+}
+function openEnvCheckFromMenu() {
+  settingsMenuOpen.value = false;
+  envCheckOpen.value = true;
+}
+function manualUpdateFromMenu() {
+  settingsMenuOpen.value = false;
+  void manualCheckUpdate();
+}
 const profiles = ref<CandidateProfile[]>([]);
 const currentProfileId = ref("");
 const notice = ref<Notice | null>(null);
@@ -73,6 +120,7 @@ function toggleFavorites() {
     favoritesOpen.value = true;
     // 两个抽屉互斥：打开收藏时收起提醒，避免叠加导致点空白“回落到收藏”。
     reminderDrawerOpen.value = false;
+    closeHistoryDrawer();
     void loadFavorites();
   }
 }
@@ -309,6 +357,7 @@ function toggleReminderDrawer() {
   reminderDrawerOpen.value = true;
   // 两个抽屉互斥：打开提醒时收起收藏。
   favoritesOpen.value = false;
+  closeHistoryDrawer();
 }
 
 // 抽屉触发按钮：鼠标左键“按下”即展开/收起，不等松开；
@@ -368,7 +417,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
 
       <div v-if="roundStatus" class="round-pill" data-testid="round-status-pill">
         <span v-if="roundStatusRunning" class="live" aria-hidden="true"></span>
-        <span class="pf">{{ roundStatus.platform === 'boss' ? 'BOSS' : '智联' }}</span>
+        <span class="pf">{{ roundPillLabel }}</span>
         <span class="sep" aria-hidden="true"></span>
         <span class="round-status-text">{{ roundStatusText }}</span>
       </div>
@@ -406,69 +455,31 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           <em v-if="favorites.length" class="fav-badge">{{ favorites.length }}</em>
         </button>
         <button
-          class="button secondary browser-accounts-trigger"
+          class="button secondary history-trigger"
           type="button"
-          data-testid="browser-accounts-trigger"
-          aria-label="管理自动化浏览器账号"
-          title="浏览器账号"
-          @click="browserAccountsOpen = true"
+          data-testid="history-trigger"
+          aria-label="历史轮次"
+          title="历史轮次"
+          @mousedown="handleDrawerTrigger(toggleHistoryDrawer, $event)"
+          @click="handleDrawerTrigger(toggleHistoryDrawer, $event)"
         >
-          <UserRound :size="18" aria-hidden="true" /><span>浏览器账号</span>
+          <History :size="18" aria-hidden="true" /><span>历史</span>
         </button>
         <button
-          class="button secondary env-check-trigger"
+          class="icon-button settings-trigger"
           type="button"
-          data-testid="env-check-trigger"
-          aria-label="环境检查"
-          title="环境检查"
-          @click="envCheckOpen = true"
+          data-testid="settings-trigger"
+          aria-label="设置"
+          title="设置"
+          @click="settingsMenuOpen = !settingsMenuOpen"
         >
-          <Activity :size="18" aria-hidden="true" /><span>环境检查</span>
-        </button>
-        <button
-          class="button secondary ai-settings-trigger"
-          type="button"
-          data-testid="ai-settings-trigger"
-          aria-label="打开 AI 设置"
-          title="AI 设置"
-          @click="aiSettingsOpen = true"
-        >
-          <Bot :size="18" aria-hidden="true" /><span>AI 设置</span>
-        </button>
-        <button
-          v-if="updatesEnabled && updateInfo"
-          class="button secondary update-trigger"
-          type="button"
-          data-testid="update-trigger"
-          :aria-label="`发现新版本 v${updateInfo.latest}`"
-          :title="`发现新版本 v${updateInfo.latest}，点击更新`"
-          @click="updateDialogOpen = true"
-        >
-          <Rocket :size="18" aria-hidden="true" /><span>新版本 v{{ updateInfo.latest }}</span>
-        </button>
-        <button
-          v-else-if="updatesEnabled"
-          class="icon-button manual-update-check"
-          type="button"
-          data-testid="manual-update-check"
-          aria-label="检查更新"
-          title="检查更新"
-          @click="manualCheckUpdate"
-        >
-          <Rocket :size="18" aria-hidden="true" />
-        </button>
-        <button
-          class="icon-button github-link"
-          type="button"
-          data-testid="github-link"
-          aria-label="在浏览器中打开 GitHub 仓库"
-          title="GitHub 仓库"
-          @click="openGitHub"
-        >
-          <!-- lucide 新版移除品牌图标，GitHub 标用内联 SVG（octicon mark-github） -->
-          <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
-          </svg>
+          <Settings :size="18" aria-hidden="true" />
+          <em
+            v-if="updatesEnabled && updateInfo"
+            class="settings-update-badge"
+            data-testid="settings-update-badge"
+            aria-hidden="true"
+          ></em>
         </button>
         <button
           class="icon-button theme-toggle"
@@ -557,6 +568,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
     <div class="app-content">
       <DiscoveryView
         :profile-id="currentProfileId"
+        ref="discoveryRef"
         @notify="showNotice"
         @profile-created="acceptCreatedProfile"
         @job-feedback-changed="handleJobFeedbackChanged"
@@ -585,5 +597,32 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
       @close="updateDialogOpen = false"
       @ignore="ignoreThisVersion"
     />
+    <AppSettingsMenu
+      :open="settingsMenuOpen"
+      :has-update="Boolean(updatesEnabled && updateInfo)"
+      :update-version="updateInfo?.latest || ''"
+      @close="settingsMenuOpen = false"
+      @open-ai-settings="openAiSettingsFromMenu"
+      @open-browser-accounts="openBrowserAccountsFromMenu"
+      @open-env-check="openEnvCheckFromMenu"
+      @manual-update-check="manualUpdateFromMenu"
+      @open-github="openGitHub"
+    />
   </div>
 </template>
+
+<style scoped>
+.settings-trigger {
+  position: relative;
+}
+
+.settings-update-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+</style>

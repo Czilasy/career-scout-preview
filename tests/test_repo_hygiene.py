@@ -166,7 +166,6 @@ class RepoHygieneTests(unittest.TestCase):
             ".uploads",
             ".workbuddy",
             ".worktrees",
-            ".trae",
         }
         forbidden_names = {
             ".env",

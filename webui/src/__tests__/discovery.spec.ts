@@ -10,6 +10,8 @@ import {
   partitionPipelineResult,
   projectResumeSuggestionToSchema,
   recoverSelectionSettings,
+  historyStatusLabel,
+  roundScopeLabel,
   type PipelineResult,
 } from "../discovery";
 import type {
@@ -494,5 +496,24 @@ describe("platform schema race (T504)", () => {
     const r2 = await loader.load("zhilian", () => Promise.resolve(makeSchema("zhilian")));
     expect(r2).toBe(true);
     expect(loader.loadedPlatform).toBe("zhilian");
+  });
+});
+
+describe("history status mapping", () => {
+  it("maps machine statuses to user-facing Chinese labels", () => {
+    expect(historyStatusLabel("done", 5)).toBe("完成");
+    expect(historyStatusLabel("completed", 5)).toBe("完成");
+    expect(historyStatusLabel("partial", 5)).toBe("部分结果");
+    expect(historyStatusLabel("completed_with_pending", 5)).toBe("部分结果");
+    expect(historyStatusLabel("failed", 3)).toBe("失败但有 3 个岗位");
+    expect(historyStatusLabel("interrupted", 2)).toBe("失败但有 2 个岗位");
+    expect(historyStatusLabel("cancelled", 1)).toBe("失败但有 1 个岗位");
+  });
+
+  it("labels round scopes without exposing platform names in all/history scopes", () => {
+    expect(roundScopeLabel("all", "boss")).toBe("全部");
+    expect(roundScopeLabel("history", "zhilian")).toBe("历史轮次");
+    expect(roundScopeLabel("boss", "boss")).toBe("BOSS");
+    expect(roundScopeLabel("zhilian", "zhilian")).toBe("智联");
   });
 });

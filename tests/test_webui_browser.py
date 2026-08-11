@@ -62,11 +62,11 @@ class VueBrowserContractTests(unittest.TestCase):
         self.assertIn("previousFocus", DIALOG)
 
     def test_ai_settings_is_reachable_on_narrow_screens(self):
-        self.assertIn('data-testid="ai-settings-trigger"', APP)
-        self.assertIn(".ai-settings-trigger", CSS)
-        mobile = CSS.split("@media (max-width: 760px)")[-1]
-        self.assertIn(".ai-settings-trigger", mobile)
-        self.assertNotRegex(mobile, r"\.ai-settings-trigger\s*\{[^}]*display:\s*none")
+        self.assertIn('data-testid="settings-trigger"', APP)
+        settings_menu = (SRC / "components" / "AppSettingsMenu.vue").read_text(encoding="utf-8")
+        self.assertIn('data-testid="ai-settings-trigger"', settings_menu)
+        self.assertIn("@media (max-width: 720px)", settings_menu)
+        self.assertIn("width: min(230px, calc(100vw - 16px))", settings_menu)
 
     def test_profile_switcher_is_reachable_on_narrow_screens(self):
         mobile = CSS.split("@media (max-width: 760px)")[-1]

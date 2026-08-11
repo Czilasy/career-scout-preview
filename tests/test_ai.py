@@ -336,7 +336,7 @@ class CallAITests(unittest.TestCase):
         call_count = [0]
         def fake_time():
             call_count[0] += 1
-            return 0.0 if call_count[0] == 1 else float(STREAM_TOTAL_TIMEOUT + 1)
+            return 0.0 if call_count[0] % 2 == 1 else float(STREAM_TOTAL_TIMEOUT + 1)
 
         with patch("webui.ai.time.time", side_effect=fake_time), \
              patch("webui.ai.RATE_LIMIT_ATTEMPTS", 1):
@@ -345,6 +345,10 @@ class CallAITests(unittest.TestCase):
                         [{"role": "user", "content": "hi"}])
 
         self.assertEqual(ctx.exception.error_code, "timeout")
+        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(_mock_sleep.call_args_list, [
+            unittest.mock.call(30.0), unittest.mock.call(30.0),
+        ])
 
     @patch("webui.ai.requests.post")
     def test_auth_failure_raises_safe_error(self, mock_post):
@@ -375,7 +379,7 @@ class CallAITests(unittest.TestCase):
 
         # 500 系先退避重试，耗尽后报 server_error（区别于"返回无效"）
         self.assertEqual(ctx.exception.error_code, "server_error")
-        self.assertEqual(mock_post.call_count, 2)
+        self.assertEqual(mock_post.call_count, 3)
 
     @patch("webui.ai.requests.post")
     def test_malformed_response_body_raises_invalid_response(self, mock_post):
@@ -437,8 +441,9 @@ class CallAITests(unittest.TestCase):
         self.assertEqual(result["profile_name"], expected["profile_name"])
         mock_fallback.assert_called_once()
 
+    @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_error_does_not_leak_api_key(self, mock_post):
+    def test_error_does_not_leak_api_key(self, mock_post, _mock_sleep):
         from webui.ai import call_ai, AISecurityError
 
         api_key = "sk-super-secret-key-12345"
@@ -470,8 +475,9 @@ class CallAITests(unittest.TestCase):
 
         self.assertNotIn(api_key, str(ctx.exception))
 
+    @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_exception_context_suppressed_to_prevent_traceback_leak(self, mock_post):
+    def test_exception_context_suppressed_to_prevent_traceback_leak(self, mock_post, _mock_sleep):
         from webui.ai import call_ai, AISecurityError
 
         api_key = "sk-super-secret-key-12345"
@@ -1341,7 +1347,7 @@ class CallAIRetryTests(unittest.TestCase):
                     [{"role": "user", "content": "hi"}])
 
         self.assertEqual(ctx.exception.error_code, "rate_limited")
-        self.assertEqual(mock_post.call_count, 2)
+        self.assertEqual(mock_post.call_count, 3)
 
     @patch("webui.ai.requests.post")
     def test_truncated_finish_reason_length(self, mock_post):
@@ -1439,7 +1445,7 @@ class CallAIRetryTests(unittest.TestCase):
 
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_backoff_budget_only_counts_wait_time(self, mock_post, mock_sleep):
+    def test_default_retry_wait_ignores_single_timeout_budget(self, mock_post, mock_sleep):
         from webui.ai import AISecurityError, call_ai
 
         response = MagicMock()
@@ -1452,9 +1458,11 @@ class CallAIRetryTests(unittest.TestCase):
                     [{"role": "user", "content": "hi"}], timeout=10)
 
         self.assertEqual(ctx.exception.error_code, "rate_limited")
-        # 预算=10s 且只计退避等待：5s 可执行（5≤10），下一档 15s 被拒（5+15>10）
-        self.assertEqual(mock_post.call_count, 2)
-        mock_sleep.assert_called_once_with(5)
+        # 默认策略固定 3 次/30 秒，不受单次 timeout=10 预算截断
+        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(mock_sleep.call_args_list, [
+            unittest.mock.call(30.0), unittest.mock.call(30.0),
+        ])
 
 
 class MatchJdsResumeAndTruncationTests(unittest.TestCase):
