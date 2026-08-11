@@ -499,6 +499,15 @@ describe("platform schema race (T504)", () => {
   });
 });
 
+describe("historyStatusLabel (B038)", () => {
+  it("maps scraped_only to 已抓取，未筛选 and keeps existing labels", () => {
+    expect(historyStatusLabel("scraped_only", 3)).toBe("已抓取，未筛选");
+    expect(historyStatusLabel("done", 3)).toBe("完成");
+    expect(historyStatusLabel("partial", 3)).toBe("部分结果");
+    expect(historyStatusLabel("failed", 3)).toBe("失败但有 3 个岗位");
+  });
+});
+
 describe("history status mapping", () => {
   it("maps machine statuses to user-facing Chinese labels", () => {
     expect(historyStatusLabel("done", 5)).toBe("完成");

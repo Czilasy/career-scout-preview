@@ -41,6 +41,8 @@ const roundStatusText = computed(() => {
   if (status.phase === "scraping") return "抓取进行中";
   if (status.phase === "screening") return "筛选进行中";
   const platform = status.platform === "zhilian" ? "智联" : "BOSS";
+  // B038：未筛选轮顶栏显示"已抓取 N 个岗位"，不显示"已判定 N"。
+  if (status.phase === "scraped") return `已抓取 ${status.judged} 个岗位`;
   if (status.scope === "all") return `${status.judged} 个岗位已判定`;
   if (status.scope === "history") return `${platform} · ${status.judged} 个岗位已判定`;
   return `${platform} · ${status.judged} 个岗位已判定`;

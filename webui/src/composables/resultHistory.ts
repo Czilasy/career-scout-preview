@@ -27,6 +27,8 @@ export interface HistoryRoundDetail {
   source_run_id: string;
   platform: Platform;
   status: string;
+  /** B038：未筛选轮补筛需要父抓取任务 id（来自 execution_params）。 */
+  scrape_task_id?: string;
   saved_at?: string;
   started_at?: number | null;
   finished_at?: number | null;

@@ -91,6 +91,7 @@ from webui.source import BossCdpSource as _BossCdpSource
 from webui.store import SYSTEMIC_BLOCK_CODES, DiscoveryStoreConflictError, TaskStore
 from webui.result_history import ResultHistoryService
 from webui.result_history_api import register_result_history_routes
+from webui.scrape_only import save_scrape_snapshot, save_screen_result
 from webui.workbench import (
     merge_profile_fields,
     normalize_job_link,
@@ -3558,15 +3559,15 @@ def create_app(config=None):
                     },
                 ))
             store.append_task_events(task_id, job_events)
-            source_run_id = store.save_pipeline_result(
-                result, {"screening": screening_fields, "platform": frozen_platform},
+            # B038: 命中已保存的未筛选轮则原地升级（同一 run_id），否则新建。
+            source_run_id = save_screen_result(
+                store, result, {"screening": screening_fields, "platform": frozen_platform},
+                scrape_task_id=scrape_task_id,
+                status="done",
+                execution_config=execution_config.to_dict(),
+                platform=frozen_platform,
                 started_at=task.get("started_at"),
                 finished_at=int(time.time() * 1000),
-                execution_config=execution_config.to_dict(),
-                execution_params={
-                    "platform": frozen_platform,
-                    "scrape_task_id": scrape_task_id,
-                },
             )
             result["source_run_id"] = source_run_id
             _prune_history_best_effort()
@@ -4675,6 +4676,89 @@ def create_app(config=None):
             "task_size": frozen_scope.task_size,
             "browser_account": browser_account,
         })
+
+    @app.route("/api/scrape-result-save", methods=["POST"])
+    def scrape_result_save():
+        """B038: 把已完成的抓取任务固化为"已抓取，未筛选"历史轮。
+
+        任务本身已自然完成，这里只固化快照（status=scraped_only），
+        不终结任务、不跑 AI；0 岗位时不落库。
+        """
+        body = request.get_json(silent=True) or {}
+        task_id = str(body.get("task_id") or "").strip()
+        if not task_id:
+            return jsonify({
+                "ok": False, "error": "missing_task_id",
+                "message": "缺少 task_id",
+            }), 400
+        source_snapshot = _ensure_scrape_source(task_id)
+        if source_snapshot is None:
+            # 区分三类：任务不存在 / 任务未完成 / 任务完成但 0 岗位。
+            try:
+                existing = store.get_screening_run(task_id)
+            except _OPERATIONAL_ERRORS:
+                existing = None
+            if existing is None:
+                return jsonify({
+                    "ok": False, "error": "scrape_task_not_found",
+                    "message": "抓取任务不存在",
+                }), 404
+            run_status = str(existing.get("status") or "")
+            if run_status not in ("succeeded", "partial", "failed", "interrupted"):
+                return jsonify({
+                    "ok": False, "error": "scrape_not_completed",
+                    "message": "抓取任务尚未成功完成",
+                }), 409
+            # 已完成的 0 岗位任务：不进历史，前端仍展示 0。
+            return jsonify({"ok": True, "saved": False, "run_id": task_id})
+        if source_snapshot.get("kind") != "scrape" or source_snapshot.get("status") != "done":
+            return jsonify({
+                "ok": False, "error": "scrape_not_completed",
+                "message": "抓取任务尚未成功完成",
+            }), 409
+        source_result = source_snapshot.get("result") or {}
+        source_jobs = source_result.get("jobs") or []
+        # 平台身份优先取冻结的 run checkpoint（与 ai_screen 同一口径）。
+        try:
+            parent_identity = store.get_run_checkpoint_identity(task_id)
+        except _OPERATIONAL_ERRORS:
+            parent_identity = None
+        platform = str(
+            (parent_identity or {}).get("platform")
+            or source_snapshot.get("platform")
+            or source_result.get("platform")
+            or "boss"
+        )
+        profile_summary = str(body.get("profile_summary") or "")
+        raw_facts = body.get("profile_facts")
+        profile_facts = raw_facts if isinstance(raw_facts, dict) else None
+        execution_config = source_snapshot.get("execution_config") or {}
+        run_row = {}
+        try:
+            run_row = store.get_screening_run(task_id) or {}
+            params = run_row.get("execution_params") or {}
+            if not execution_config:
+                execution_config = params.get("execution_config") or {}
+        except _OPERATIONAL_ERRORS:
+            params = {}
+        # 搜索参数（关键词/城市）来自 run 冻结的 script_params；
+        # 缺失时退化为仅平台，历史列表关键词摘要能正常展示。
+        script_params = params.get("script_params") or {}
+        if isinstance(script_params, dict) and "platform" not in script_params:
+            script_params = {**script_params, "platform": platform}
+        outcome = save_scrape_snapshot(
+            store,
+            source_jobs,
+            platform=platform,
+            scrape_task_id=task_id,
+            profile_summary=profile_summary,
+            profile_facts=profile_facts,
+            execution_config=execution_config,
+            script_params=script_params,
+            started_at=run_row.get("started_at"),
+            finished_at=run_row.get("finished_at"),
+        )
+        return jsonify({"ok": True, **outcome})
 
     @app.route("/api/execute-search/continue/<old_task_id>", methods=["POST"])
     def continue_execute_search(old_task_id, _block_checked=False):

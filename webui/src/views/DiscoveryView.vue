@@ -317,6 +317,10 @@ const {
 const historyRound = ref<{ runId: string; platform: Platform; status: string; jobCount: number } | null>(null);
 const platformBeforeHistory = ref<Platform | null>(null);
 const historyMode = computed(() => Boolean(historyRound.value));
+// B038：当前展示轮的次级状态。'' = 无轮 / 'scraped_only' = 已抓取未筛选 /
+// 其它 = AI 筛选轮。驱动 04 页"待筛选"单列表模式，岗位 verdict 本身保持无判定。
+const currentRoundStatus = ref("");
+const isScrapedOnly = computed(() => currentRoundStatus.value === "scraped_only");
 const historyStatusText = computed(() => historyRound.value
   ? historyStatusLabel(historyRound.value.status, historyRound.value.jobCount)
   : "");
@@ -505,19 +509,31 @@ const uncertainByPlatform = computed(() => {
     zhilian: jobs.filter((job) => job.platform === "zhilian").length,
   };
 });
-const resultTabs = computed(() => [
-  { id: "matched" as const, label: "匹配", count: groups.value.matched.length },
-  { id: "unmatched" as const, label: "不匹配", count: groups.value.unmatched.length },
-  { id: "uncertain" as const, label: "待确认", count: groups.value.uncertain.length },
-  { id: "dropped" as const, label: "已筛除", count: groups.value.dropped.length },
-]);
-const currentJobs = computed(() => groups.value[activeCategory.value]);
-const currentEmptyMessage = computed(() => ({
-  matched: "没有明确匹配的岗位",
-  unmatched: "没有明确不匹配的岗位",
-  uncertain: "没有需要人工确认的岗位",
-  dropped: "没有在粗筛阶段被移除的岗位",
-})[activeCategory.value]);
+const resultTabs = computed(() => {
+  if (isScrapedOnly.value) {
+    // B038：未筛选轮只展示单"待筛选"列表，不经过 verdict 分类。
+    const total = (filteredPipelineResult.value.jobs || []).length;
+    return [{ id: "matched" as const, label: "待筛选", count: total }];
+  }
+  return [
+    { id: "matched" as const, label: "匹配", count: groups.value.matched.length },
+    { id: "unmatched" as const, label: "不匹配", count: groups.value.unmatched.length },
+    { id: "uncertain" as const, label: "待确认", count: groups.value.uncertain.length },
+    { id: "dropped" as const, label: "已筛除", count: groups.value.dropped.length },
+  ];
+});
+const currentJobs = computed(() => {
+  if (isScrapedOnly.value) return filteredPipelineResult.value.jobs || [];
+  return groups.value[activeCategory.value];
+});
+const currentEmptyMessage = computed(() => isScrapedOnly.value
+  ? "没有待筛选的岗位"
+  : ({
+    matched: "没有明确匹配的岗位",
+    unmatched: "没有明确不匹配的岗位",
+    uncertain: "没有需要人工确认的岗位",
+    dropped: "没有在粗筛阶段被移除的岗位",
+  } as Record<ResultCategory, string>)[activeCategory.value]);
 
 onMounted(() => {
   void loadAdvancedSettings();
@@ -1039,6 +1055,7 @@ async function analyzeResume() {
     autoScreenArmed.value = false;
     oneClickOpen.value = false;
     scopePreviewBusy.value = false;
+    currentRoundStatus.value = "";
     activeCategory.value = "matched";
     initializeFromAnalysis(data);
     analysisReady.value = true;
@@ -1524,10 +1541,59 @@ async function finishPausedTask(runId: string) {
     }
     scrapeCompleted.value = true;
     resultLoaded.value = true;
-    // 不强制跳结果页：由“查看结果/继续 AI 筛选”入口决定下一步。
+    currentRoundStatus.value = "screened";
+    // 不强制跳结果页：由"查看结果/继续 AI 筛选"入口决定下一步。
     notify("任务已结束，已完成结果已保存", "success");
   } catch (error) {
     notify(errorMessage(error, "结束任务失败"), "error");
+  }
+}
+
+// B038：抓取完成后跳过 AI，把本轮固化为"已抓取，未筛选"轮并进入 04 页。
+async function viewScrapedOnly() {
+  if (!scrapeTaskId.value) return;
+  const emptyResult = (): PipelineResult => ({
+    ok: true, jobs: [], dropped: [],
+    total_scraped: 0, total_kept: 0, total_matched: 0, total_dropped: 0,
+    profile_summary: profileSummary.value, error: "",
+  });
+  const snap = scrapeSnapshot.value;
+  // 计数拿不到时按"有岗位"处理（与 pollTask 的保守策略一致）：
+  // 后端对 0 岗位会返回 saved:false，前端兜底显示 0，不会漏保存。
+  const scrapedCount = Number(
+    snap?.scraped_count ?? snap?.source_total ?? snap?.result?.total_scraped ?? -1,
+  );
+  if (scrapedCount === 0) {
+    // 0 岗位：不保存历史轮，仍进入 04 页显示 0。
+    setPipelineResult(emptyResult());
+    currentRoundStatus.value = "scraped_only";
+    activeCategory.value = "matched";
+    activeStep.value = "results";
+    notify("本轮没有抓到岗位，可回到第二步重新抓取", "warning");
+    return;
+  }
+  try {
+    const data = await apiRequest<{
+      saved?: boolean; run_id?: string; result?: PipelineResult;
+    }>("/api/scrape-result-save", {
+      method: "POST",
+      json: {
+        task_id: scrapeTaskId.value,
+        profile_summary: profileSummary.value,
+        profile_facts: profileFacts.value,
+      },
+    });
+    if (data.saved && data.result) setPipelineResult(data.result);
+    else {
+      // 后端防御：计数不一致时的 0 岗位兜底。
+      setPipelineResult(emptyResult());
+    }
+    currentRoundStatus.value = "scraped_only";
+    activeCategory.value = "matched";
+    activeStep.value = "results";
+    notify("已保存本轮抓取结果（已抓取，未筛选）", "success");
+  } catch (error) {
+    notify(errorMessage(error, "保存结果失败"), "error");
   }
 }
 
@@ -1577,7 +1643,11 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
         // 实时路径与刷新路径统一：任务完成后拉双平台合并结果（R2），
         // 避免只 set 单平台结果导致结果页切平台显示 0。
         const fetched = await fetchMergedLatestResult();
-        if (fetched) setPipelineResult(fetched.merged);
+        if (fetched) {
+          setPipelineResult(fetched.merged);
+          currentRoundStatus.value = fetched.newer.data.status === "scraped_only" ? "scraped_only" : "screened";
+          if (isScrapedOnly.value) activeCategory.value = "matched";
+        }
         activeStep.value = "results";
         notify(
           data.status === "completed_with_pending"
@@ -1686,6 +1756,9 @@ async function loadLatestResult() {
   pipelineResultRunId.value = newer.data.source_run_id || "";
   if (newer.data.scrape_task_id) scrapeTaskId.value = newer.data.scrape_task_id;
   setPipelineResult(merged);
+  // B038：最新轮可能是"已抓取，未筛选"，原样透传驱动展示模式。
+  currentRoundStatus.value = newer.data.status === "scraped_only" ? "scraped_only" : "screened";
+  if (isScrapedOnly.value) activeCategory.value = "matched";
   const ps = (newer.data.result as Record<string, unknown>).profile_summary;
   if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
   const pfacts = (newer.data.result as Record<string, unknown>).profile_facts;
@@ -1842,6 +1915,9 @@ function enterHistoryRound(detail: HistoryRoundDetail) {
     status: detail.status,
     jobCount: Number(detail.result?.total_kept || (detail.result?.jobs || []).length || 0),
   };
+  // B038：历史轮原始状态透传，scraped_only 轮进入"待筛选"展示模式。
+  currentRoundStatus.value = detail.status;
+  if (isScrapedOnly.value) activeCategory.value = "matched";
 }
 
 async function returnToLatest() {
@@ -1855,6 +1931,7 @@ async function returnToLatest() {
   resultLoaded.value = false;
   resultRunIds.value = { boss: "", zhilian: "" };
   resultEpoch.value += 1;
+  currentRoundStatus.value = "";
   if (restorePlatform) {
     platformState.setDraftPlatform(restorePlatform);
     draftPlatform.value = restorePlatform;
@@ -1862,6 +1939,52 @@ async function returnToLatest() {
   }
   activeStep.value = "results";
   await loadLatestResult();
+}
+
+// B038：历史未筛选轮补筛——退出历史模式，挂载父抓取任务与画像后
+// 复用现有"开始 AI 筛选"全流程；后端把结果升级回同一轮次。
+async function startScreenFromHistory() {
+  const detail = historyDetail.value;
+  if (!detail) return;
+  const taskId = String(detail.scrape_task_id || "");
+  if (!taskId) {
+    notify("该轮缺少抓取任务来源，无法发起 AI 筛选；请重新抓取", "warning");
+    return;
+  }
+  if (pipelineBusy.value) {
+    notify("当前已有任务在运行或暂停，请先处理完再开始新任务", "warning");
+    return;
+  }
+  // 退出历史模式（historyRound 置空不触发 returnToLatest 的加载）。
+  platformBeforeHistory.value = null;
+  historyRound.value = null;
+  resultPlatformFilter.value = "all";
+  pipelineResult.value = null;
+  pipelineResultRunId.value = "";
+  resultLoaded.value = false;
+  resultRunIds.value = { boss: "", zhilian: "" };
+  resultEpoch.value += 1;
+  currentRoundStatus.value = "";
+  platformState.setDraftPlatform(detail.platform);
+  draftPlatform.value = detail.platform;
+  setThemePlatform(detail.platform);
+  // 等待目标平台 schema/城市加载完成，避免步骤 3 提交旧平台的
+  // filter_schema_version 触发后端 409（platform-schema.md L157）。
+  await Promise.all([
+    loadFilterLabels(detail.platform),
+    loadCityCatalog(detail.platform),
+  ]);
+  // 挂载父抓取任务：AI 筛选从该任务读取同一来源岗位，不重新抓取。
+  scrapeTaskId.value = taskId;
+  scrapeCompleted.value = true;
+  profileSummary.value = String(detail.result?.profile_summary || "");
+  const pfacts = (detail.result as PipelineResult & { profile_facts?: unknown }).profile_facts;
+  profileFacts.value = (pfacts && typeof pfacts === "object"
+    ? pfacts as Record<string, unknown> : {});
+  filterValues.value[detail.platform] = {};
+  activeCategory.value = "matched";
+  enterScreenStep();
+  notify("已载入该轮岗位，确认筛选条件后开始 AI 筛选", "info");
 }
 
 function onResultPlatformFilterChange(value: "all" | "boss" | "zhilian") {
@@ -1940,6 +2063,7 @@ async function resetWorkflow() {
   pausedRunId.value = "";
   interruptedRunId.value = "";
   restoredTaskHint.value = "";
+  currentRoundStatus.value = "";
   scopePreview.value = null;
   scopePreviewBusy.value = false;
   keywords.value = [];
@@ -2325,6 +2449,9 @@ const roundStatusPayload = computed(() => {
     || screenSnapshot.value?.platform
     || draftPlatform.value;
   if (historyRound.value) {
+    if (isScrapedOnly.value) {
+      return { platform: historyRound.value.platform, phase: "scraped" as const, judged: historyRound.value.jobCount, scope: "history" as const };
+    }
     const g = groups.value;
     const judged = g.matched.length + g.unmatched.length + g.uncertain.length + g.dropped.length;
     return { platform: historyRound.value.platform, phase: "judged" as const, judged, scope: "history" as const };
@@ -2334,9 +2461,13 @@ const roundStatusPayload = computed(() => {
   }
   if (screenBusy.value) return { platform, phase: "screening" as const, judged: 0, scope: platform };
   if (resultLoaded.value && pipelineResult.value) {
+    const scope = resultPlatformFilter.value === "all" ? "all" as const : resultPlatformFilter.value;
+    if (isScrapedOnly.value) {
+      const total = (filteredPipelineResult.value.jobs || []).length;
+      return { platform, phase: "scraped" as const, judged: total, scope };
+    }
     const g = groups.value;
     const judged = g.matched.length + g.unmatched.length + g.uncertain.length + g.dropped.length;
-    const scope = resultPlatformFilter.value === "all" ? "all" as const : resultPlatformFilter.value;
     return { platform, phase: "judged" as const, judged, scope };
   }
   return null;
@@ -2397,7 +2528,10 @@ watch(roundStatusPayload, (payload) => {
           <span v-if="historyMode" class="history-round-marker" data-testid="history-round-marker">
             <History :size="17" aria-hidden="true" />历史轮次 · {{ historyStatusText }}
           </span>
-          <HistoryRoundProfile v-if="historyMode" :profile-text="historyProfileText" />
+          <HistoryRoundProfile v-if="historyMode && !isScrapedOnly" :profile-text="historyProfileText" />
+          <button v-if="historyMode && isScrapedOnly" class="button primary" type="button" data-testid="screen-from-history" @click="startScreenFromHistory">
+            开始 AI 筛选
+          </button>
           <button v-if="historyMode" class="button secondary" type="button" data-testid="back-to-latest" @click="returnToLatest">
             <RotateCcw :size="17" aria-hidden="true" />回到最新
           </button>
@@ -2656,7 +2790,10 @@ watch(roundStatusPayload, (payload) => {
             结束并保存结果
           </button>
           <button v-if="scrapeCompleted" class="button secondary" type="button" data-testid="continue-to-screen" @click="enterScreenStep()">
-            继续确认筛选条件
+            进行确认AI筛选条件
+          </button>
+          <button v-if="scrapeCompleted && !resultLoaded && !screenBusy" class="button primary" type="button" data-testid="view-scraped-only" @click="viewScrapedOnly">
+            直接查看结果
           </button>
           <button v-if="finishedPartial" class="button secondary" type="button" data-testid="view-partial-results" @click="activeStep = 'results'">
             查看结果
@@ -2766,7 +2903,7 @@ watch(roundStatusPayload, (payload) => {
               @click="activeCategory = tab.id"
             ><span class="vtab-dot" aria-hidden="true"></span>{{ tab.label }}<span class="vtab-count">{{ tab.count }}</span></button>
           </div>
-          <span class="command-note" aria-hidden="true">判定依据：你的简历关键词 · 两阶段判断</span>
+          <span v-if="!isScrapedOnly" class="command-note" aria-hidden="true">判定依据：你的简历关键词 · 两阶段判断</span>
           <button v-if="!historyMode && scrapeTaskId" class="button secondary small" type="button" data-testid="continue-ai-from-results" @click="enterScreenStep()">继续 AI 筛选</button>
         </div>
 
@@ -2811,7 +2948,7 @@ watch(roundStatusPayload, (payload) => {
           @update:platform-filter="onResultPlatformFilterChange"
         >
           <template #heading-actions>
-            <div v-if="!historyMode && activeCategory === 'uncertain'" class="recrawl-inline">
+            <div v-if="!historyMode && !isScrapedOnly && activeCategory === 'uncertain'" class="recrawl-inline">
               <button
                 class="button secondary small"
                 type="button"
@@ -2833,7 +2970,7 @@ watch(roundStatusPayload, (payload) => {
               <button class="button danger" type="button" :disabled="feedbackBusyIds.has(jobId(job))" @click="toggleRejected(job)">
                 {{ rejectedIds.has(jobId(job)) ? "撤销不感兴趣" : "不感兴趣" }}
               </button>
-              <button v-if="!historyMode && !job.jd" class="button secondary" type="button" :disabled="jdBusyIds.has(jobId(job))" @click="retryJd(job)">
+              <button v-if="!historyMode && !isScrapedOnly && !job.jd" class="button secondary" type="button" :disabled="jdBusyIds.has(jobId(job))" @click="retryJd(job)">
                 <FileText :size="17" aria-hidden="true" />{{ jdBusyIds.has(jobId(job)) ? "补抓中…" : "补抓 JD" }}
               </button>
               <button

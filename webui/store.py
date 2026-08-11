@@ -31,6 +31,7 @@ from webui.store_helpers import (
 )
 from webui.store_migrations import MigrationBackupError, StoreMigrationsMixin
 from webui.store_result_history_mixin import ResultHistoryStoreMixin
+from webui.store_scrape_only_mixin import ScrapeOnlyStoreMixin
 
 _BEGIN_IMMEDIATE = "BEGIN IMMEDIATE"
 _SHA256_PREFIX = "sha256:"
@@ -121,7 +122,7 @@ MAX_DETAIL_BUDGET = 60
 _INITIALIZE_LOCK = threading.RLock()
 
 
-class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
+class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMixin):
     def __init__(self, db_path):
         self.db_path = os.path.abspath(os.fspath(db_path))
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
@@ -904,7 +905,7 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
                 ).fetchone()
             else:
                 run = conn.execute(
-                    "SELECT * FROM screening_runs WHERE status IN ('done', 'partial') "
+                    "SELECT * FROM screening_runs WHERE status IN ('done', 'partial', 'scraped_only') "
                     "AND record_kind = 'result_snapshot' "
                     "AND archived_at IS NULL "
                     "ORDER BY created_at DESC, rowid DESC LIMIT 1",
@@ -951,7 +952,11 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
             "started_at": run.get("started_at"),
             "finished_at": run.get("finished_at"),
             "script_params": script_params,
-            "status": "completed_with_pending" if run.get("status") == "partial" else "completed",
+            "status": (
+                "scraped_only" if run.get("status") == "scraped_only"
+                else "completed_with_pending" if run.get("status") == "partial"
+                else "completed"
+            ),
             "execution_config": execution_params.get("execution_config") or {},
             "scrape_task_id": str(execution_params.get("scrape_task_id") or ""),
             "result": result,
@@ -1029,7 +1034,7 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
         with self._connection() as conn:
             run = conn.execute(
                 "SELECT * FROM screening_runs WHERE platform=? AND "
-                "status IN ('done', 'partial') AND record_kind = 'result_snapshot' "
+                "status IN ('done', 'partial', 'scraped_only') AND record_kind = 'result_snapshot' "
                 "AND archived_at IS NULL "
                 "ORDER BY created_at DESC LIMIT 1",
                 (str(platform),),
@@ -1066,7 +1071,8 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
             "finished_at": run.get("finished_at"),
             "script_params": script_params,
             "status": (
-                "completed_with_pending" if run.get("status") == "partial"
+                "scraped_only" if run.get("status") == "scraped_only"
+                else "completed_with_pending" if run.get("status") == "partial"
                 else "completed"
             ),
             "execution_config": execution_params.get("execution_config") or {},

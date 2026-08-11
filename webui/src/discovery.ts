@@ -32,7 +32,7 @@ export interface PipelineGroups {
 
 export type ResultPlatformFilter = "all" | "boss" | "zhilian";
 
-export type RoundStatusPhase = "scraping" | "screening" | "judged";
+export type RoundStatusPhase = "scraping" | "screening" | "judged" | "scraped";
 export type RoundStatusScope = "all" | "boss" | "zhilian" | "history";
 export interface RoundStatusPayload {
   platform: Platform;
@@ -49,6 +49,7 @@ export function roundScopeLabel(scope: RoundStatusScope, platform: Platform): st
 
 export function historyStatusLabel(status: string, jobCount: number): string {
   const normalized = String(status || "").toLowerCase();
+  if (["scraped_only"].includes(normalized)) return "已抓取，未筛选";
   if (["done", "succeeded", "completed"].includes(normalized)) return "完成";
   if (["partial", "completed_with_pending"].includes(normalized)) return "部分结果";
   return `失败但有 ${jobCount} 个岗位`;

@@ -113,6 +113,12 @@ describe("App", () => {
     await flushPromises();
     expect(pillText()).toContain("历史轮次");
     expect(pillText()).toContain("智联 · 3 个岗位已判定");
+
+    // B038：未筛选轮顶栏显示"已抓取 N 个岗位"，不显示"已判定 N"。
+    view.vm.$emit("round-status", { platform: "boss", phase: "scraped", judged: 4, scope: "boss" });
+    await flushPromises();
+    expect(pillText()).toContain("已抓取 4 个岗位");
+    expect(pillText()).not.toContain("已判定");
   });
 
   it("opens the history drawer from the top bar", async () => {
