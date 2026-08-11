@@ -27,6 +27,7 @@ from types import MappingProxyType
 
 from scripts import boss_cdp_raw as boss
 from webui.source import PageEventPersistenceError
+from webui.browser_recovery import BrowserRecovery
 
 
 _PIPELINE_OPERATION_ERRORS = (
@@ -1004,6 +1005,14 @@ def run_search(params: dict, source, *, pages: int = 3,
             page = max(0, int(event.get("page") or 0))
             target = max(1, int(event.get("target_pages") or pages))
             last_page_ratio = min(1.0, max(0.0, page / target))
+            # 断点续抓：页级事件推进本组合的恢复起点与已抓岗位快照，
+            # 浏览器失联自动重启后从断点继续，不重抓已完成页。
+            if resume_pages is not None:
+                resume_pages[combo_key] = max(1, int(event.get("resume_page") or page + 1))
+            if resume_jobs is not None:
+                snapshot = event.get("jobs_snapshot")
+                if isinstance(snapshot, list):
+                    resume_jobs[combo_key] = list(snapshot)
             if on_page_completed is not None:
                 try:
                     on_page_completed(event)
@@ -1029,8 +1038,21 @@ def run_search(params: dict, source, *, pages: int = 3,
                          f"已抓 {int(event.get('jobs_count') or 0)} 条"),
             )
 
+        recovery = BrowserRecovery(
+            cdp_port=cdp_port,
+            platform=platform,
+            on_restart=lambda: emit(
+                stage="ensure_chrome", current=len(completed_combos), total=len(combos),
+                keyword=kw, city=city,
+                message="检测到浏览器失联，正在自动重启并续抓…",
+            ),
+        )
+
+        def _fetch_list_once():
+            return source.fetch_list(plan_item, on_page_completed=_page_completed)
+
         try:
-            outcome = source.fetch_list(plan_item, on_page_completed=_page_completed)
+            outcome = _fetch_list_once()
         except PageEventPersistenceError as exc:
             return {
                 "ok": False, "jobs": list(merged.values()),
@@ -1052,6 +1074,58 @@ def run_search(params: dict, source, *, pages: int = 3,
                 "hard_stop": True, "hard_stop_code": "internal_error",
                 "error": f"抓取执行失败（{type(exc).__name__}），任务已暂停",
             }
+        if not outcome.ok and recovery.is_browser_lost(outcome.failed_code):
+            restart_ok, restart_err = recovery.try_restart()
+            if restart_ok:
+                resume_page = max(1, int((resume_pages or {}).get(combo_key, 1)))
+                plan_item["start_page"] = resume_page
+                if platform == "zhilian":
+                    plan_item["existing_jobs"] = list((resume_jobs or {}).get(combo_key) or [])
+                try:
+                    outcome = _fetch_list_once()
+                except PageEventPersistenceError as exc:
+                    return {
+                        "ok": False, "jobs": list(merged.values()),
+                        "total_scraped": total_scraped, "total_matched": len(merged),
+                        "combinations": len(combos), "completed_combos": completed_combos,
+                        "hard_stop": True, "hard_stop_code": "internal_error",
+                        "error": f"页级快照持久化失败（{type(exc.__cause__).__name__}），任务已暂停",
+                    }
+                except _PIPELINE_OPERATION_ERRORS as exc:
+                    emit(
+                        stage="hard_stop", current=len(completed_combos), total=len(combos),
+                        keyword=kw, city=city, failed_code="internal_error",
+                        message="抓取执行失败，任务暂停",
+                    )
+                    return {
+                        "ok": False, "jobs": list(merged.values()),
+                        "total_scraped": total_scraped, "total_matched": len(merged),
+                        "combinations": len(combos), "completed_combos": completed_combos,
+                        "hard_stop": True, "hard_stop_code": "internal_error",
+                        "error": f"抓取执行失败（{type(exc).__name__}），任务已暂停",
+                    }
+                if outcome.ok:
+                    recovery.mark_progress()
+                elif recovery.is_browser_lost(outcome.failed_code):
+                    label = failed_code_label(outcome.failed_code, platform)
+                    emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
+                         keyword=kw, city=city, failed_code=outcome.failed_code,
+                         message=f"自动重启后仍失联：{label}，任务暂停")
+                    return {"ok": False, "jobs": list(merged.values()),
+                            "total_scraped": total_scraped, "total_matched": len(merged),
+                            "combinations": len(combos), "completed_combos": completed_combos,
+                            "hard_stop": True, "hard_stop_code": outcome.failed_code,
+                            "error": f"自动重启后仍失联：{label}，任务暂停"}
+            else:
+                label = failed_code_label("source_cdp_unavailable", platform)
+                emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
+                     keyword=kw, city=city, failed_code="source_cdp_unavailable",
+                     message=f"调试浏览器自动重启失败：{restart_err}")
+                return {"ok": False, "jobs": list(merged.values()),
+                        "total_scraped": total_scraped, "total_matched": len(merged),
+                        "combinations": len(combos), "completed_combos": completed_combos,
+                        "hard_stop": True, "hard_stop_code": "source_cdp_unavailable",
+                        "error": f"调试浏览器自动重启失败：{restart_err}，任务暂停"}
         if not outcome.ok:
             # 系统性阻断（验证码/登录失效/IP风控/CDP不可用）：立即停止，不继续跑其他组合
             if outcome.failed_code in _HARD_STOP_CODES:
@@ -1282,24 +1356,91 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             except Exception:
                 pass
 
-        try:
-            outcomes = source.fetch_details_batch(
-                batch_jobs,
-                detail_output_path=batch_path,
-                max_batch_size=BATCH_SIZE,
-                gap_min=_detail_interval,
-                gap_max=_detail_interval + 7,
-                reset_every=_detail_reset_every,
-                tab_pool_size=_detail_tab_pool_size,
-                on_item_done=_item_progress,
-            )
-        except _PIPELINE_OPERATION_ERRORS as exc:
-            # 批调用本身抛错时没有逐岗位 outcome 可供后续分类；这属于源/编排
-            # 级故障，不能伪装成一批空结果继续推进。
-            batch_exception_code = _classify_detail_batch_exception(exc)
+        recovery = BrowserRecovery(
+            cdp_port=getattr(source, "cdp_port", None),
+            platform=getattr(source, "platform", ""),
+        )
+
+        def _fetch_batch(job_list, output_path, *, with_progress=True):
+            try:
+                results = source.fetch_details_batch(
+                    job_list,
+                    detail_output_path=output_path,
+                    max_batch_size=BATCH_SIZE,
+                    gap_min=_detail_interval,
+                    gap_max=_detail_interval + 7,
+                    reset_every=_detail_reset_every,
+                    tab_pool_size=_detail_tab_pool_size,
+                    on_item_done=_item_progress if with_progress else None,
+                )
+                return results, None
+            except _PIPELINE_OPERATION_ERRORS as exc:
+                # 批调用本身抛错时没有逐岗位 outcome 可供后续分类；这属于源/编排
+                # 级故障，不能伪装成一批空结果继续推进。
+                return {}, _classify_detail_batch_exception(exc)
+
+        outcomes, batch_exception_code = _fetch_batch(batch_jobs, batch_path)
+        if batch_exception_code is not None and not recovery.is_browser_lost(batch_exception_code):
             hard_stop = True
             hard_stop_code = batch_exception_code
-            outcomes = {}
+        _cdp_lost = (
+            recovery.is_browser_lost(batch_exception_code)
+            or any(
+                outcome is not None and recovery.is_browser_lost(outcome.failed_code)
+                for outcome in outcomes.values()
+            )
+        )
+        _other_hard = (
+            batch_exception_code in _jd_hard_stop_codes
+            and not recovery.is_browser_lost(batch_exception_code)
+        ) or any(
+            outcome is not None
+            and outcome.failed_code in _jd_hard_stop_codes
+            and not recovery.is_browser_lost(outcome.failed_code)
+            for outcome in outcomes.values()
+        )
+        if _cdp_lost and not _other_hard:
+            retry_entries = (
+                list(batch)
+                if batch_exception_code
+                else [
+                    entry for entry in batch
+                    if (outcome := outcomes.get(entry[1])) is not None
+                    and recovery.is_browser_lost(outcome.failed_code)
+                ]
+            )
+            if retry_entries:
+                restart_ok, restart_err = recovery.try_restart()
+                if restart_ok:
+                    retry_jobs = [entry[2] for entry in retry_entries]
+                    retry_outcomes, retry_exception = _fetch_batch(
+                        retry_jobs, batch_path, with_progress=False,
+                    )
+                    outcomes.update(retry_outcomes)
+                    if retry_exception is None:
+                        batch_exception_code = None
+                    else:
+                        batch_exception_code = retry_exception
+                    remaining_hard = [
+                        outcome.failed_code
+                        for outcome in outcomes.values()
+                        if outcome is not None
+                        and outcome.failed_code in _jd_hard_stop_codes
+                    ]
+                    if batch_exception_code is not None or remaining_hard:
+                        # 自动重启后的重试仍异常（含 cdp_unavailable）或仍命中
+                        # 源级硬信号：同一失联事件不再循环重启，直接暂停。
+                        hard_stop = True
+                        hard_stop_code = (
+                            batch_exception_code
+                            if batch_exception_code is not None
+                            else remaining_hard[0]
+                        )
+                    else:
+                        recovery.mark_progress()
+                else:
+                    hard_stop = True
+                    hard_stop_code = "source_cdp_unavailable"
         # T018: 记录 request 事件（批次请求时长）
         if measurement_callback is not None:
             try:
@@ -1588,6 +1729,9 @@ class TuningRoundRunner:
             criteria = quality_context.get("screening_fields")
             if not isinstance(criteria, dict):
                 raise ValueError("AI 粗筛缺少冻结 criteria")
+            # B033：粗筛输入补求职画像全文（放宽规则以画像表述为准）
+            criteria = dict(criteria)
+            criteria["profile_summary"] = quality_context.get("profile_summary") or ""
             endpoint, api_key, model = self._ai_settings()
             retry_limits = self._retry_limits_from_manifest(manifest)
             rough = screen_jobs(
@@ -1620,6 +1764,8 @@ class TuningRoundRunner:
                 measurement_input_count=base_input_count,
                 missing_result_retry_budget=missing_retry_budget,
                 retry_limits=self._retry_limits_from_manifest(manifest),
+                criteria=quality_context.get("screening_fields"),
+                profile_facts=quality_context.get("profile_facts"),
             )
             return {"round_kind": kind, "jobs": jobs, **fine}
         raise ValueError(f"轮次 {kind} 未产生结果")

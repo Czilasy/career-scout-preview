@@ -257,6 +257,8 @@ const filterValues = ref<Record<Platform, Record<string, string[]>>>({
   zhilian: {},
 });
 const profileSummary = ref("");
+// B033：画像事实（隐藏层）随简历分析产生，随筛选任务透传后端落库，界面不展示。
+const profileFacts = ref<Record<string, unknown>>({});
 // B009：保存最近一次简历分析的中文语义，切平台时按新 schema 重投影。
 const resumeAnalysis = ref<AnalyzeResponse | null>(null);
 const appliedResumePlatforms = ref<Set<Platform>>(new Set());
@@ -555,6 +557,7 @@ async function restoreRunningTask() {
       source_total?: number;
       frozen_filters?: Record<string, unknown>;
       profile_summary?: string;
+      profile_facts?: Record<string, unknown>;
       auto_screen?: boolean;
       auto_screen_fields?: Record<string, unknown>;
     }>("/api/latest-running-task");
@@ -605,6 +608,8 @@ async function restoreRunningTask() {
         ),
       );
       profileSummary.value = data.profile_summary || "";
+      profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
+        ? (data.profile_facts as Record<string, unknown>) : {};
       enterScreenStep();
       restoredTaskHint.value = "检测到一键任务已抓取完成，正在自动接续 AI 筛选";
       void startAiScreen({ consumeAutoScreen: true, fields: drafts, profile: profileSummary.value });
@@ -653,6 +658,8 @@ async function restoreRunningTask() {
         ),
       );
       profileSummary.value = data.profile_summary || "";
+      profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
+        ? (data.profile_facts as Record<string, unknown>) : {};
       return;
     }
     // 切片7：paused 状态从 DB 恢复（无内存工作线程，不能 poll）
@@ -692,6 +699,8 @@ async function restoreRunningTask() {
           );
         }
         profileSummary.value = data.profile_summary || "";
+      profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
+        ? (data.profile_facts as Record<string, unknown>) : {};
         autoScreenProfile.value = data.profile_summary || "";
       } else if (kind === "screen") {
         scrapeTaskId.value = data.scrape_task_id || "";
@@ -711,6 +720,8 @@ async function restoreRunningTask() {
           ),
         );
         profileSummary.value = data.profile_summary || "";
+      profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
+        ? (data.profile_facts as Record<string, unknown>) : {};
       } else {
         recrawlTaskId.value = data.task_id;
         resultLoaded.value = true;
@@ -740,6 +751,8 @@ async function restoreRunningTask() {
       }
       const restoredProfile = data.profile_summary || "";
       profileSummary.value = restoredProfile;
+      profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
+        ? (data.profile_facts as Record<string, unknown>) : {};
       autoScreenProfile.value = restoredProfile;
       void pollTask(data.task_id, "scrape");
     } else if (kind === "screen") {
@@ -894,12 +907,14 @@ function notify(message: string, tone: Notice["tone"] = "info") {
 }
 
 function enterSearchStep() {
-  searchPanelsOpen.value = true;
+  // B040：抓取运行中切回步骤 2 时保持配置卡收拢。
+  searchPanelsOpen.value = !scrapeBusy.value;
   activeStep.value = "search";
 }
 
 function enterScreenStep() {
-  screenPanelOpen.value = !resultLoaded.value;
+  // B040：AI 筛选运行中切回步骤 3 时保持配置卡收拢。
+  screenPanelOpen.value = !resultLoaded.value && !screenBusy.value;
   activeStep.value = "screen";
 }
 
@@ -978,6 +993,9 @@ function initializeFromAnalysis(data: AnalyzeResponse) {
   filterValues.value = { boss: {}, zhilian: {} };
   applyResumeAnalysisToCurrentSchema();
   profileSummary.value = String(fields.profile_summary || "");
+  const pfacts = (fields as Record<string, unknown>).profile_facts;
+  profileFacts.value = (pfacts && typeof pfacts === "object"
+    ? pfacts as Record<string, unknown> : {});
 }
 
 async function analyzeResume() {
@@ -1264,6 +1282,8 @@ async function startScrape(options: OneClickLaunch = {}) {
           auto_screen: true,
           auto_screen_fields: options.fields || {},
           auto_screen_profile: options.profile || "",
+          // B033：一键自动筛选同样冻结画像事实快照，刷新后接续不丢三通道输入
+          auto_screen_facts: profileFacts.value,
         } : {}),
       },
     });
@@ -1376,6 +1396,7 @@ async function startAiScreen(options: AiScreenLaunch = {}) {
         screening_fields: screenFields,
         filter_schema_version: schemaRef.value?.schema_version ?? null,
         profile_summary: screenProfile,
+        profile_facts: profileFacts.value,
         scrape_task_id: scrapeTaskId.value,
         ...(consumeAutoScreen ? { consume_auto_screen: true } : {}),
       },
@@ -1667,6 +1688,8 @@ async function loadLatestResult() {
   setPipelineResult(merged);
   const ps = (newer.data.result as Record<string, unknown>).profile_summary;
   if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
+  const pfacts = (newer.data.result as Record<string, unknown>).profile_facts;
+  if (pfacts && typeof pfacts === "object") profileFacts.value = pfacts as Record<string, unknown>;
   const snapshotStatus = newer.data.status === "completed_with_pending" ? "completed_with_pending" : "completed";
   scrapeSnapshot.value = {
     status: snapshotStatus, stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
@@ -1932,6 +1955,7 @@ async function resetWorkflow() {
   resumeAnalysis.value = null;
   appliedResumePlatforms.value = new Set();
   profileSummary.value = "";
+  profileFacts.value = {};
   historyRound.value = null;
   historyBackToLatest();
   scrapeBusy.value = false;
@@ -2043,6 +2067,7 @@ async function retryJd(job: JobItem) {
       verdict?: string;
       verdict_reason?: string;
       caveats?: string[];
+      flags?: JobItem["flags"];
     }>(
       `/api/pipeline/jobs/${encodeURIComponent(id)}/jd`, {
       method: "POST",
@@ -2051,6 +2076,7 @@ async function retryJd(job: JobItem) {
         source_run_id: job._result_run_id || pipelineResultRunId.value,
         source_url: job.source_url || job.job_link || job.canonical_url,
         profile_summary: profileSummary.value,
+        profile_facts: profileFacts.value,
       },
     });
     if (data.task_id) {
@@ -2070,6 +2096,7 @@ async function retryJd(job: JobItem) {
       job.verdict = data.verdict as JobItem["verdict"];
       job.verdict_reason = data.verdict_reason || "";
       job.caveats = data.caveats || [];
+      job.flags = data.flags || [];
       notify(`JD 已补抓，AI 判定：${data.verdict === "match" ? "匹配" : "不匹配"}`, "success");
     } else {
       notify("JD 已补抓（AI 未判定，可点全部重抓触发精筛）", "success");
@@ -2117,6 +2144,7 @@ async function recrawlUncertain(platformOverride?: "boss" | "zhilian") {
         source_run_id: resultRunIds.value[filter] || pipelineResultRunId.value,
         job_ids: ids,
         profile_summary: profileSummary.value,
+        profile_facts: profileFacts.value,
       },
     });
     recrawlTaskId.value = data.task_id;
@@ -2237,6 +2265,7 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
     if (typeof map.verdict !== "undefined") job.verdict = map.verdict as JobItem["verdict"];
     if (typeof map.verdict_reason !== "undefined") job.verdict_reason = String(map.verdict_reason ?? "");
     if (Array.isArray(map.caveats)) job.caveats = map.caveats as string[];
+    if (Array.isArray(map.flags)) job.flags = map.flags as JobItem["flags"];
   }
 }
 
@@ -2719,6 +2748,7 @@ watch(roundStatusPayload, (payload) => {
         class="results-stage"
         :class="{
           'has-recrawl-banner': activeCategory === 'uncertain' && recrawlSnapshot,
+          'has-recrawl-guide': activeCategory === 'uncertain' && recrawlPlatformGuide,
         }"
       >
         <div class="command-band">

@@ -1276,6 +1276,8 @@ describe("DiscoveryView", () => {
           auto_screen: true,
           auto_screen_fields: { salary: ["406"], stage: ["804"] },
           auto_screen_profile: "3年Python后端候选人",
+          // B033：一键任务冻结画像事实快照（来自简历分析）
+          auto_screen_facts: { core_skills: ["Python"], job_type: "全职" },
         });
         return response({ ok: true, task_id: "one-scrape" });
       },
@@ -1285,6 +1287,8 @@ describe("DiscoveryView", () => {
           consume_auto_screen: true,
           screening_fields: { salary: ["406"], stage: ["804"] },
           profile_summary: "3年Python后端候选人",
+          // B033：筛选请求透传画像事实（来自简历分析）
+          profile_facts: { core_skills: ["Python"], job_type: "全职" },
         });
         return response({ ok: true, task_id: "one-screen" });
       },
@@ -1294,14 +1298,22 @@ describe("DiscoveryView", () => {
 
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
-    await oneClickSearch(wrapper);
-    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    // 先上传简历分析（B033：画像事实随分析进入前端状态，一键链路带值透传）
+    const file = new File(["resume"], "resume.txt", { type: "text/plain" });
+    Object.defineProperty(wrapper.get('[data-testid="resume-input"]').element, "files", {
+      value: [file],
+      configurable: true,
+    });
+    await wrapper.get('[data-testid="resume-input"]').trigger("change");
+    await wrapper.get('[data-testid="resume-consent"]').setValue(true);
+    await wrapper.get('[data-testid="analyze-resume"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[data-testid="start-one-click"]').trigger("click");
     await flushPromises();
 
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true);
     const buttons = wrapper.findAll('.one-click-filter-groups button');
-    await buttons.find((b) => b.text() === "20-50K")!.trigger("click");
+    // 简历分析已投影 salary=20-50K（选中态），只补选 B轮
     await buttons.find((b) => b.text() === "B轮")!.trigger("click");
     await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
     await flushPromises();
@@ -1532,6 +1544,97 @@ describe("DiscoveryView", () => {
     expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(false);
     expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(false);
 
+    vi.unstubAllGlobals();
+  });
+  it("B040: search drawers stay collapsed when returning to step 2 while scraping", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({ ok: true, scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:b040-search" }, deduplicated: { keywords: ["python"], cities: ["上海"] } });
+      }
+      if (url.endsWith("/api/execute-search")) return new Promise<Response>(() => { /* keep running */ });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    const keywordCard = ".search-layout > .collapsible-card:first-child";
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(false);
+
+    await wrapper.findAll("button").find((b) => b.text().includes("上传简历"))!.trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("广泛抓取"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(false);
+    expect(wrapper.find(".advanced-panel .collapsible-body.open").exists()).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it("B040: screen card stays collapsed when returning to step 3 while AI screening", async () => {
+    const settings = {
+      pages: 3, inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+      detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+      screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({ ok: true, scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:b040-screen" }, deduplicated: { keywords: ["python"], cities: ["上海"] } });
+      }
+      if (url.endsWith("/api/execute-search")) return response({ ok: true, task_id: "scrape-b040-screen" });
+      if (url.includes("/api/task-state/scrape-b040-screen")) return response({ status: "completed", progress: {}, logs: [] });
+      if (url.endsWith("/api/ai-screen")) return new Promise<Response>(() => { /* keep running */ });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
+    await flushPromises();
+    const screenCard = ".workflow-stack > .collapsible-card";
+    expect(wrapper.find(`${screenCard} .collapsible-body.open`).exists()).toBe(true);
+    await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find(`${screenCard} .collapsible-body.open`).exists()).toBe(false);
+
+    await wrapper.findAll("button").find((b) => b.text().includes("上传简历"))!.trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find(`${screenCard} .collapsible-body.open`).exists()).toBe(false);
     vi.unstubAllGlobals();
   });
   it("B008: opens screen filter card without a result and collapses after AI screening starts", async () => {
@@ -2094,9 +2197,11 @@ describe("DiscoveryView", () => {
     await flushPromises();
     expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="recrawl-platform-guide"]').text()).toContain("BOSS 1 · 智联 1");
+    expect(wrapper.find(".results-stage").classes()).toContain("has-recrawl-guide");
     expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/pipeline/recrawl")).length).toBe(0);
     await wrapper.get('[data-testid="recrawl-choose-boss"]').trigger("click");
     await flushPromises();
+    expect(wrapper.find(".results-stage").classes()).not.toContain("has-recrawl-guide");
     const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/pipeline/recrawl"));
     expect(call).toBeTruthy();
     expect(JSON.parse(String(call![1]!.body))).toMatchObject({ source_run_id: "run-boss", job_ids: ["b1"] });
@@ -2116,6 +2221,8 @@ describe("DiscoveryView", () => {
     expect(recrawlBannerBlock).toContain("flex-flow: row wrap");
     const resultsStageBlock = css.match(/\.results-stage\s*\{[^}]*\}/s)?.[0] || "";
     expect(resultsStageBlock).toContain("grid-template-columns: minmax(0, 1fr)");
+    const guideStageBlock = css.match(/\.results-stage\.has-recrawl-guide\s*\{[^}]*\}/s)?.[0] || "";
+    expect(guideStageBlock).toContain("grid-template-rows: auto auto minmax(0, 1fr)");
     const viewportScript = readFileSync(
       path.join(__dirname, "../../../../tests/sc015_viewport_check.py"), "utf8",
     );
@@ -2162,6 +2269,25 @@ describe("DiscoveryView", () => {
       }
       if (url.endsWith("/api/search-scope/preview")) {
         return response({ ok: true, scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:one" }, deduplicated: {} });
+      }
+      if (url.endsWith("/api/analyze-resume")) {
+        // B033：简历分析响应携带画像事实（后端契约已由 test_webui_app 覆盖）
+        return response({
+          ok: true,
+          fields: {
+            keyword: [{ word: "Python 后端", recommended: true }],
+            city: ["上海"],
+            salary: ["406"],
+            experience: [],
+            degree: [],
+            industry: [],
+            scale: [],
+            stage: [],
+            profile_summary: "3年Python后端候选人",
+            profile_facts: { core_skills: ["Python"], job_type: "全职" },
+          },
+          labels: {},
+        });
       }
       return response({});
     });
@@ -2511,6 +2637,70 @@ describe("DiscoveryView", () => {
     await flushPromises();
     expect(wrapper.find('[data-testid="start-ai-screen"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="task-progress-announcement"]').text()).toContain("运行中");
+    vi.unstubAllGlobals();
+  });
+
+  it("B033: recrawl updates merge flags back into current results", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) {
+        if (url.includes("platform=zhilian")) {
+          return response({ ok: true, has_result: false });
+        }
+        return response({
+          ok: true, has_result: true, source_run_id: "run-boss", platform: "boss",
+          scrape_task_id: "scrape-b", started_at: 1000, status: "completed",
+          result: {
+            jobs: [{ job_id: "b1", platform: "boss", verdict: "uncertain", verdict_reason: "待确认" }],
+            total_kept: 1, total_dropped: 0, profile_summary: "画像",
+          },
+        });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/pipeline/recrawl")) return response({ ok: true, task_id: "recrawl-1" }, 202);
+      if (url.includes("/api/task-state/recrawl-1")) {
+        return response({
+          status: "completed", progress: { message: "完成" }, logs: [],
+          result: {
+            updates: {
+              b1: {
+                verdict: "not_match",
+                verdict_reason: "疑似骗局：要求先交培训费",
+                caveats: [],
+                flags: [{ code: "C1", level: "high", reason: "要求先交培训费" }],
+              },
+            },
+          },
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    // 进入结果页的待确认 tab，发起重抓
+    await wrapper.findAll("button").find((b) => b!.text().includes("查看结果"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="recrawl-uncertain"]').exists()).toBe(true);
+    await wrapper.findAll("button").find((b) => b!.text().includes("待确认"))!.trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="recrawl-uncertain"]').trigger("click");
+    await flushPromises();
+    // “全部”视图先引导选平台，再发起重抓
+    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="recrawl-choose-boss"]').trigger("click");
+    await flushPromises();
+    // 重抓完成：岗位判定与 flags 原地合并（not_match 移入“不匹配”分组）
+    await wrapper.findAll("button").find((b) => b!.text().includes("不匹配"))!.trigger("click");
+    await flushPromises();
+    const rows = wrapper.findAll('[data-testid="job-row"]');
+    expect(rows.length).toBeGreaterThan(0);
+    expect(wrapper.get('[data-testid="job-detail"]').text()).toContain("疑似骗局：要求先交培训费");
     vi.unstubAllGlobals();
   });
 });

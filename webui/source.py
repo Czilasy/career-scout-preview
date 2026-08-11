@@ -563,6 +563,13 @@ class BossCdpSource:
         except OSError as exc:
             return SourceOutcome.failure(failed_code="source_unreachable", safe_log=f"{safe_log} os_error_type={type(exc).__name__}")
         _drain_page_events()
+        # 空批次判定：退出码 0 + 0 结果 + 0 事件 = 浏览器/CDP 失联，
+        # 不降级成 source_invalid_output 或普通空成功。
+        page_events = (
+            self._read_events_file(page_events_path)
+            if page_events_path else []
+        )
+        lost_empty_batch = not page_events
         if returncode != 0:
             failed_code = _classify_failed_code(returncode, captured)
             self.breaker.record_signal(failed_code)
@@ -575,6 +582,12 @@ class BossCdpSource:
             )
         jobs = self._read_jobs(str(output_path))
         if jobs is None:
+            if lost_empty_batch:
+                self.breaker.record_signal("source_cdp_unavailable")
+                return SourceOutcome.failure(
+                    failed_code="source_cdp_unavailable",
+                    safe_log=f"{safe_log} empty_batch_no_events_cdp_lost",
+                )
             return SourceOutcome.failure(
                 failed_code="source_invalid_output",
                 safe_log=f"{safe_log} output_not_json",
@@ -602,6 +615,12 @@ class BossCdpSource:
         # every job's source_url and job_id appear empty, causing fetch_detail
         # to fail with source_invalid_output and detail_count stays at 0.
         normalized_jobs = [_normalize_job_fields(j) for j in jobs]
+        if lost_empty_batch and not normalized_jobs:
+            self.breaker.record_signal("source_cdp_unavailable")
+            return SourceOutcome.failure(
+                failed_code="source_cdp_unavailable",
+                safe_log=f"{safe_log} empty_batch_no_events_cdp_lost",
+            )
         self.breaker.record_success()
         if normalized_jobs:
             _record_success_signal(self.browser_account, "boss")
@@ -932,6 +951,19 @@ class BossCdpSource:
 
         # 7. Read the combined detail JSON and index by job_link/source_url.
         details_by_url = self._read_combined_details(detail_output_path)
+        if returncode == 0 and not parsed_events and not details_by_url:
+            for job_id in expected_urls_by_job_id:
+                results[job_id] = SourceOutcome.failure(
+                    failed_code="source_cdp_unavailable",
+                    safe_log=f"{safe_log} empty_batch_no_events_cdp_lost",
+                )
+            self.breaker.record_signal("source_cdp_unavailable")
+            if on_item_done is not None:
+                try:
+                    on_item_done(len(jobs))
+                except Exception:
+                    pass
+            return results
 
         # 8. Build per-job outcomes from the matched event + detail record.
         for job_id, source_url in expected_urls_by_job_id.items():

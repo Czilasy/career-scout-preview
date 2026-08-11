@@ -768,6 +768,11 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
         execution_json = {"execution_config": execution_config or {}}
         if extra_params:
             execution_json.update(extra_params)
+        profile_facts = result.get("profile_facts")
+        profile_facts_json = (
+            json.dumps(profile_facts, ensure_ascii=False, sort_keys=True)
+            if profile_facts is not None else None
+        )
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
             conn.execute(
@@ -775,9 +780,10 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
                 "(id, platform, frozen_filters_json, status, source_count, match_count, mismatch_count, "
                 " pending_count, processed_count, created_at, updated_at, started_at, "
                 " finished_at, search_params_json, execution_params_json, "
-                " profile_summary, total_scraped, total_kept, total_dropped, record_kind) "
+                " profile_summary, total_scraped, total_kept, total_dropped, record_kind, "
+                " profile_facts_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "'result_snapshot')",
+                "'result_snapshot', ?)",
                 (
                     run_id,
                     str(script_params.get("platform") or result.get("platform") or "boss"),
@@ -795,6 +801,7 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
                     result.get("total_scraped", 0),
                     result.get("total_kept", 0),
                     result.get("total_dropped", len(dropped)),
+                    profile_facts_json,
                 ),
             )
             # Insert kept jobs
@@ -803,9 +810,9 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
                 conn.execute(
                     "INSERT OR REPLACE INTO screening_results "
                     "(id, run_id, platform, platform_job_id, job_id, verdict, created_at, title, company, salary, "
-                    " location, tags, jd, source_url, verdict_reason, caveats_json, is_dropped, "
+                    " location, tags, jd, source_url, verdict_reason, caveats_json, flags_json, is_dropped, "
                     " experience, degree, extra_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
                     (
                         str(uuid.uuid4()), run_id, platform,
                         str(job.get("platform_job_id") or job.get("job_id") or ""),
@@ -821,6 +828,7 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
                         job.get("canonical_url") or job.get("source_url") or "",
                         job.get("verdict_reason", ""),
                         json.dumps(job.get("caveats") or [], ensure_ascii=False),
+                        json.dumps(job.get("flags") or [], ensure_ascii=False),
                         job.get("experience", ""),
                         job.get("degree", ""),
                         json.dumps(job.get("extra") or {}, ensure_ascii=False, sort_keys=True),
@@ -932,6 +940,8 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
             "total_matched": run.get("match_count", 0),
             "total_dropped": run.get("total_dropped", len(dropped)),
             "profile_summary": run.get("profile_summary", ""),
+            # B033：画像事实快照随结果透传（刷新恢复、补筛复用快照的读取源）
+            "profile_facts": _decode_json(run.get("profile_facts_json"), None),
             "error": "",
         }
         return {
@@ -1044,6 +1054,8 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
             "total_matched": run.get("match_count", 0),
             "total_dropped": run.get("total_dropped", len(dropped)),
             "profile_summary": run.get("profile_summary", ""),
+            # B033：画像事实快照随结果透传（刷新恢复、补筛复用快照的读取源）
+            "profile_facts": _decode_json(run.get("profile_facts_json"), None),
             "error": "",
         }
         return {
@@ -1924,6 +1936,11 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
         run_id 直接用任务 id，便于与内存任务/前端轮询对齐。
         """
         ts = _now()
+        profile_facts = (execution_params or {}).get("profile_facts")
+        profile_facts_json = (
+            json.dumps(profile_facts, ensure_ascii=False, sort_keys=True)
+            if profile_facts is not None else None
+        )
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
             conn.execute(
@@ -1931,8 +1948,8 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
                 "(id, platform, frozen_filters_json, status, source_count, match_count, mismatch_count, "
                 "created_at, updated_at, started_at, error_code, resume_id, pending_count, "
                 "processed_count, source_cursor, parse_failure_count, parse_failures_json, "
-                "profile_id, execution_params_json, record_kind, backend_version) "
-                "VALUES (?, ?, ?, 'queued', ?, 0, 0, ?, ?, ?, NULL, NULL, 0, 0, 0, 0, '{}', ?, ?, 'process_log', ?)",
+                "profile_id, execution_params_json, record_kind, backend_version, profile_facts_json) "
+                "VALUES (?, ?, ?, 'queued', ?, 0, 0, ?, ?, ?, NULL, NULL, 0, 0, 0, 0, '{}', ?, ?, 'process_log', ?, ?)",
                 (
                     str(run_id),
                     str((execution_params or {}).get("platform") or "boss"),
@@ -1941,6 +1958,7 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
                     str(profile_id) if profile_id else None,
                     json.dumps(execution_params or {}, ensure_ascii=False),
                     str(backend_version) if backend_version else None,
+                    profile_facts_json,
                 ),
             )
         return self.get_screening_run(run_id)
@@ -2624,22 +2642,26 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
                     verdict_value = str(verdict.get("verdict") or "")
                     reason = str(verdict.get("reason") or "")
                     caveats = verdict.get("caveats") if isinstance(verdict.get("caveats"), list) else []
+                    flags = verdict.get("flags") if isinstance(verdict.get("flags"), list) else []
                 else:
                     verdict_value = str(verdict or "")
                     reason = ""
                     caveats = []
+                    flags = []
                 conn.execute(
                     "INSERT INTO screening_results "
-                    "(id, run_id, platform_job_id, verdict, verdict_reason, caveats_json, is_dropped, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                    "(id, run_id, platform_job_id, verdict, verdict_reason, caveats_json, flags_json, is_dropped, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET "
                     " verdict = excluded.verdict, "
                     " verdict_reason = excluded.verdict_reason, "
                     " caveats_json = excluded.caveats_json, "
+                    " flags_json = excluded.flags_json, "
                     " is_dropped = excluded.is_dropped",
                     (
                         _uuid(), str(run_id), str(job_id), verdict_value, reason,
                         json.dumps(caveats, ensure_ascii=False),
+                        json.dumps(flags, ensure_ascii=False),
                         1 if verdict_value == "dropped" else 0, ts,
                     ),
                 )
@@ -2681,7 +2703,7 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
         """
         with self._connection() as conn:
             rows = conn.execute(
-                "SELECT platform_job_id, verdict, verdict_reason, caveats_json "
+                "SELECT platform_job_id, verdict, verdict_reason, caveats_json, flags_json "
                 "FROM screening_results WHERE run_id = ?",
                 (str(run_id),),
             ).fetchall()
@@ -2694,19 +2716,31 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
             except (json.JSONDecodeError, TypeError):
                 caveats = []
             try:
+                flags = json.loads(row["flags_json"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                flags = []
+            try:
                 value = json.loads(v)
                 if isinstance(value, dict):
                     if not value.get("reason"):
                         value["reason"] = reason
                     if "caveats" not in value:
                         value["caveats"] = caveats
+                    if "flags" not in value:
+                        value["flags"] = flags
                     out[str(row["platform_job_id"])] = value
                 else:
-                    out[str(row["platform_job_id"])] = {"verdict": str(value), "reason": reason, "caveats": caveats}
+                    out[str(row["platform_job_id"])] = {
+                        "verdict": str(value), "reason": reason,
+                        "caveats": caveats, "flags": flags,
+                    }
             except (json.JSONDecodeError, TypeError):
                 # 纯字符串 verdict（如 match/not_match/uncertain/dropped）
                 if v:
-                    out[str(row["platform_job_id"])] = {"verdict": v, "reason": reason, "caveats": caveats}
+                    out[str(row["platform_job_id"])] = {
+                        "verdict": v, "reason": reason,
+                        "caveats": caveats, "flags": flags,
+                    }
         return out
 
     def load_screening_pending(self, run_id):
@@ -2757,6 +2791,11 @@ class TaskStore(ResultHistoryStoreMixin, StoreMigrationsMixin):
             "total_dropped": row["total_dropped"],
             "search_params": json.loads(row["search_params_json"] or "{}"),
             "profile_summary": row["profile_summary"],
+            "profile_facts": (
+                json.loads(row["profile_facts_json"])
+                if "profile_facts_json" in keys and row["profile_facts_json"]
+                else None
+            ),
             # FR-005/FR-037 新增字段（migration_020 加的列）
             "current_stage": row["current_stage"] if "current_stage" in keys else None,
             "error_reason": row["error_reason"] if "error_reason" in keys else None,

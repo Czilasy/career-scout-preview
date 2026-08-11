@@ -420,12 +420,14 @@ def create_app(config=None):
             profile_summary = str(
                 params.get("profile_summary") or run.get("profile_summary") or ""
             )
+            profile_facts = params.get("profile_facts") or None
             result = _build_partial_pipeline_result(
                 source_jobs, verdicts, pending_rows, jd_map,
                 profile_summary,
                 source_dropped=source_dropped,
                 total_scraped=total_scraped,
                 platform=platform,
+                profile_facts=profile_facts,
             )
             if not result.get("jobs") and not result.get("dropped"):
                 return None
@@ -2622,7 +2624,8 @@ def create_app(config=None):
 
     def _build_partial_pipeline_result(
             source_jobs, verdicts, pending_rows, jd_map, profile_summary,
-            source_dropped=None, total_scraped=None, platform=""):
+            source_dropped=None, total_scraped=None, platform="",
+            profile_facts=None):
         """Build a displayable result snapshot from persisted partial work."""
         pending_reasons = {}
         pending_codes = {}
@@ -2657,6 +2660,10 @@ def create_app(config=None):
                 vobj.get("caveats") if isinstance(vobj.get("caveats"), list)
                 else (job.get("caveats") if isinstance(job.get("caveats"), list) else [])
             )
+            flags = (
+                vobj.get("flags") if isinstance(vobj.get("flags"), list)
+                else (job.get("flags") if isinstance(job.get("flags"), list) else [])
+            )
             if verdict in ("match", "not_match", "mismatch"):
                 final_verdict = "not_match" if verdict == "mismatch" else verdict
                 final_reason = reason
@@ -2684,6 +2691,7 @@ def create_app(config=None):
                 "verdict": final_verdict,
                 "verdict_reason": final_reason,
                 "caveats": caveats,
+                "flags": flags,
                 "failed_code": pending_codes.get(jid) or "",
             })
         dropped_ids = {str(item.get("platform_job_id") or item.get("job_id") or "") for item in dropped}
@@ -2713,6 +2721,7 @@ def create_app(config=None):
             "total_matched": sum(1 for j in jobs if j.get("verdict") == "match"),
             "total_dropped": len(dropped),
             "profile_summary": profile_summary or "",
+            "profile_facts": profile_facts,
             "error": "",
         }
 
@@ -2740,7 +2749,8 @@ def create_app(config=None):
 
 
     def _run_ai_screen_task(task_id, screening_fields, profile_summary,
-                            scrape_task_id, resume_from_run_id=""):
+                            scrape_task_id, resume_from_run_id="",
+                            profile_facts=None):
         """AI 筛选任务：StageA 字段粗筛 → 批量抓 JD → StageB JD 精筛。
 
         读取最近一次原始抓取结果，两段式 AI 筛选后把带 verdict 的最终结果
@@ -2780,6 +2790,17 @@ def create_app(config=None):
             stop_event = task.get("stop_event")
             if resume_from_run_id and not task.get("resumed_from"):
                 task["resumed_from"] = resume_from_run_id
+
+        # B033：续跑时画像事实以该轮快照为准；请求未携带（前端恢复失败、
+        # 空对象等）时回退 execution_params 中的快照值，避免三通道退化。
+        if resume_from_run_id and not profile_facts:
+            try:
+                _prev_run = store.get_screening_run(resume_from_run_id)
+                _prev_params = (_prev_run or {}).get("execution_params") or {}
+                if not profile_facts:
+                    profile_facts = _prev_params.get("profile_facts")
+            except _OPERATIONAL_ERRORS:
+                pass
 
         _activate_task_browser(task_id)
 
@@ -2976,6 +2997,7 @@ def create_app(config=None):
                     source_count=len(source_result.get("jobs") or []),
                     execution_params={"scrape_task_id": scrape_task_id,
                                       "profile_summary": profile_summary or "",
+                                      "profile_facts": profile_facts,
                                       "browser_account": frozen_browser_account or _account_for_run(),
                                       "execution_config": execution_config.to_dict(),
                                       "frozen_scope": frozen_scope.to_dict(),
@@ -3036,6 +3058,7 @@ def create_app(config=None):
                     execution_params={
                         "scrape_task_id": scrape_task_id,
                         "profile_summary": profile_summary,
+                        "profile_facts": profile_facts,
                         "browser_account": frozen_browser_account or _account_for_run(),
                         "execution_config": execution_config.to_dict(),
                         "frozen_scope": frozen_scope.to_dict(),
@@ -3430,6 +3453,7 @@ def create_app(config=None):
                     match_result = match_jds(
                         todo_match, profile_summary, endpoint, api_key,
                         model=model, raise_on_systemic=True,
+                        criteria=criteria, profile_facts=profile_facts,
                         progress=_fine_progress,
                         on_batch_done=_fine_batch_done,
                         execution_config=execution_config)
@@ -3478,11 +3502,9 @@ def create_app(config=None):
                     if v:
                         job["verdict"] = v["verdict"]
                         job["verdict_reason"] = v["reason"]
-                        # flags（岗位靠谱程度提醒）并入软性要求提醒列表
-                        job["caveats"] = [
-                            *(v.get("caveats") or []),
-                            *(v.get("flags") or []),
-                        ]
+                        # flags（靠谱判定）独立透传前端；中危降级项已并入 caveats
+                        job["caveats"] = v.get("caveats") or []
+                        job["flags"] = v.get("flags") or []
                     else:
                         # 未抓到 JD 的岗位无法精筛，标记待定（不红不绿）
                         job["verdict"] = "uncertain"
@@ -3516,6 +3538,7 @@ def create_app(config=None):
                 "total_matched": match_count,
                 "total_dropped": len(dropped),
                 "profile_summary": profile_summary,
+                "profile_facts": profile_facts,
                 "error": "",
             }
             job_events = []
@@ -3735,7 +3758,8 @@ def create_app(config=None):
         schema_keys = {field.key for field in schema.fields}
         fields = {
             key: value for key, value in fields.items()
-            if key in ("keyword", "city", "profile_summary") or key in schema_keys
+            if key in ("keyword", "city", "profile_summary", "profile_facts")
+            or key in schema_keys
         }
         field_labels = {
             "keyword": ("搜索关键词", fields["keyword"], "keyword_chips"),
@@ -4408,6 +4432,11 @@ def create_app(config=None):
         if auto_screen and not isinstance(auto_screen_fields, dict):
             return jsonify({"ok": False, "error": "auto_screen_fields 必须是对象"}), 400
         auto_screen_profile = str(body.get("auto_screen_profile") or "") if auto_screen else ""
+        auto_screen_facts = (
+            body.get("auto_screen_facts")
+            if auto_screen and isinstance(body.get("auto_screen_facts"), dict)
+            else None
+        )
 
         # T402: 平台键校验（先于任何副作用）
         platform_raw = body.get("platform") or "boss"
@@ -4612,6 +4641,7 @@ def create_app(config=None):
                 "auto_screen": auto_screen,
                 "auto_screen_fields": auto_screen_fields,
                 "auto_screen_profile": auto_screen_profile,
+                "auto_screen_facts": auto_screen_facts,
             },
             backend_version=_backend_version,
         )
@@ -4885,6 +4915,7 @@ def create_app(config=None):
         body = request.get_json(silent=True) or {}
         screening_fields = body.get("screening_fields") or {}
         profile_summary = str(body.get("profile_summary") or "")
+        profile_facts = body.get("profile_facts")
         scrape_task_id = str(body.get("scrape_task_id") or "").strip()
         request_platform = str(body.get("platform") or "").strip() or None
         filter_schema_version = body.get("filter_schema_version")
@@ -4981,11 +5012,12 @@ def create_app(config=None):
             prev_params = prev.get("execution_params") or {}
             same_fields = prev.get("frozen_filters") == screening_fields
             same_profile = str(prev_params.get("profile_summary", "")) == profile_summary
+            same_facts = str(prev_params.get("profile_facts") or "") == str(profile_facts or "")
             restart_interrupted = (
                 prev["status"] == "interrupted"
                 and str(prev.get("error_code") or "") == "restart"
             )
-            if same_fields and same_profile and (
+            if same_fields and same_profile and same_facts and (
                     prev["status"] == "paused" or restart_interrupted):
                 resume_from_run_id = prev["id"]
         if resume_from_run_id and prev is not None and prev["status"] == "paused":
@@ -5057,6 +5089,7 @@ def create_app(config=None):
                         "filter_schema_version": filter_schema_version,
                         "screening_fields": screening_fields,
                         "profile_summary": profile_summary,
+                        "profile_facts": profile_facts,
                         "scrape_task_id": scrape_task_id,
                         "browser_account": claimed_task.get("browser_account"),
                         "task_input_digest": ai_digest,
@@ -5081,6 +5114,7 @@ def create_app(config=None):
             _pipeline_executor.submit(
                 _run_ai_screen_task, task_id, screening_fields,
                 profile_summary, scrape_task_id, resume_from_run_id,
+                profile_facts,
             )
         except RuntimeError:
             _release_pipeline_claim(task_id, claimed_task, previous_task)
@@ -5327,6 +5361,8 @@ def create_app(config=None):
                 "auto_screen": bool(execution_params.get("auto_screen")),
                 "auto_screen_fields": execution_params.get("auto_screen_fields") or {},
                 "auto_screen_profile": str(execution_params.get("auto_screen_profile") or ""),
+                "profile_summary": str(execution_params.get("profile_summary") or ""),
+                "profile_facts": execution_params.get("profile_facts"),
                 "source_run_id": execution_params.get("source_run_id"),
                 "checkpoint_stage": prow["current_stage"],
                 # T409 契约 http-api.md L200-202：DB paused 从 screening_runs
@@ -5374,6 +5410,7 @@ def create_app(config=None):
                 "auto_screen": bool((run.get("execution_params") or {}).get("auto_screen")),
                 "frozen_filters": run.get("frozen_filters") or {},
                 "profile_summary": str((run.get("execution_params") or {}).get("profile_summary") or ""),
+                "profile_facts": (run.get("execution_params") or {}).get("profile_facts"),
                 # T409 契约 http-api.md L200-202：DB interrupted 从
                 # screening_runs 读取 platform/task_input_digest。
                 "platform": run.get("platform"),
@@ -5422,6 +5459,7 @@ def create_app(config=None):
                 "scrape_completed": True,
                 "frozen_filters": auto_params.get("auto_screen_fields") or {},
                 "profile_summary": str(auto_params.get("auto_screen_profile") or ""),
+                "profile_facts": auto_params.get("auto_screen_facts"),
                 "platform": auto_row["platform"],
                 "task_input_digest": auto_params.get("task_input_digest"),
                 "scraped_count": auto_scraped_count,
@@ -5612,6 +5650,7 @@ def create_app(config=None):
                 "jobs": jobs,
                 "dropped": result.get("dropped", []),
                 "profile_summary": result.get("profile_summary", ""),
+                "profile_facts": result.get("profile_facts"),
             },
         })
 
@@ -5982,6 +6021,7 @@ def create_app(config=None):
                 _pipeline_tasks[task_id]["browser_account"] = parent_browser_account or _account_for_run()
                 _pipeline_tasks[task_id]["task_input_digest"] = parent_task_input_digest
             profile_summary = str(raw.get("profile_summary") or "")
+            profile_facts = raw.get("profile_facts") or None
             store.create_screening_run(
                 task_id,
                 source_count=1,
@@ -5989,6 +6029,7 @@ def create_app(config=None):
                     "source_run_id": source_run_id,
                     "job_ids": [str(job_id)],
                     "profile_summary": profile_summary,
+                    "profile_facts": profile_facts,
                     "single_retry": True,
                     "browser_account": _pipeline_tasks[task_id]["browser_account"],
                     "platform": parent_platform,
@@ -6010,7 +6051,7 @@ def create_app(config=None):
             try:
                 _pipeline_executor.submit(
                     _run_recrawl_task, task_id, [str(job_id)], profile_summary,
-                    source_run_id,
+                    source_run_id, None, profile_facts,
                 )
             except RuntimeError as exc:
                 reason = f"后台任务提交失败：{type(exc).__name__}"
@@ -6106,6 +6147,7 @@ def create_app(config=None):
 
                 # 单条 AI 精筛：有画像 + AI 已配置 → 判定后回写
                 profile_summary = str(result.get("profile_summary", "")).strip()
+                profile_facts = result.get("profile_facts")
                 settings = store.get_ai_settings()
                 cred_ref = store.get_credential_ref()
                 api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
@@ -6122,7 +6164,10 @@ def create_app(config=None):
                     try:
                         res = match_jds(
                             [job_for_ai], profile_summary, endpoint_url, api_key,
-                            model=settings.get("model", ""))
+                            model=settings.get("model", ""),
+                            criteria=(payload.get("script_params") or {}).get("screening"),
+                            profile_facts=profile_facts,
+                        )
                     except ai_service.AISecurityError as ai_exc:
                         # JD 已可靠落库；外部 AI 阻断保留具体原因，但不能吞掉
                         # 后续的本地 verdict 持久化异常。
@@ -6138,6 +6183,7 @@ def create_app(config=None):
                                 "verdict": v.get("verdict"),
                                 "verdict_reason": v.get("reason"),
                                 "caveats": v.get("caveats", []),
+                                "flags": v.get("flags", []),
                             }
                             if run_id:
                                 store.save_screening_verdicts(run_id, {job_id: v})
@@ -6159,6 +6205,7 @@ def create_app(config=None):
         raw = request.get_json(silent=True) or {}
         job_ids = raw.get("job_ids")
         profile_summary = str(raw.get("profile_summary") or "")
+        profile_facts = raw.get("profile_facts") or None
         source_run_id = str(
             raw.get("source_run_id") or store.get_latest_done_run_id() or ""
         ).strip()
@@ -6231,6 +6278,7 @@ def create_app(config=None):
                     "source_run_id": source_run_id,
                     "job_ids": [str(x) for x in job_ids],
                     "profile_summary": profile_summary,
+                    "profile_facts": profile_facts,
                     "browser_account": claimed_task["browser_account"],
                     "platform": parent_platform,
                     "cdp_port": parent_cdp_port,
@@ -6256,7 +6304,7 @@ def create_app(config=None):
         try:
             _pipeline_executor.submit(
                 _run_recrawl_task, task_id, [str(x) for x in job_ids],
-                profile_summary, source_run_id,
+                profile_summary, source_run_id, None, profile_facts,
             )
         except RuntimeError as exc:
             try:
@@ -6308,6 +6356,7 @@ def create_app(config=None):
         source_run_id = str(params.get("source_run_id") or "")
         job_ids = [str(job_id) for job_id in (params.get("job_ids") or [])]
         profile_summary = str(params.get("profile_summary") or "")
+        profile_facts = params.get("profile_facts") or None
         checkpoint_stage = "recrawl_ai" if stage == "recrawl_ai" else "recrawl_jd"
         completed_job_ids = store.load_checkpoint(task_id, checkpoint_stage)
         if not job_ids:
@@ -6342,7 +6391,7 @@ def create_app(config=None):
             })
             _pipeline_executor.submit(
                 _run_recrawl_task, task_id, job_ids, profile_summary,
-                source_run_id, completed_job_ids,
+                source_run_id, completed_job_ids, profile_facts,
             )
         except _OPERATIONAL_ERRORS as exc:
             try:
@@ -6372,7 +6421,7 @@ def create_app(config=None):
         })
 
     def _run_recrawl_task(task_id, job_ids, profile_summary, source_run_id="",
-                          completed_job_ids=None):
+                          completed_job_ids=None, profile_facts=None):
         """批量重抓后台任务：补 JD + 重判，进度与结果通过 _pipeline_tasks 暴露。
 
         切片8：``source_run_id`` 用于持久化（recrawl task_id 不是 screening_runs 行）。
@@ -6393,6 +6442,9 @@ def create_app(config=None):
             if payload:
                 profile_summary = str(
                     (payload.get("result") or {}).get("profile_summary", "")
+                )
+                profile_facts = (
+                    (payload.get("result") or {}).get("profile_facts") or None
                 )
 
         with _pipeline_lock:
@@ -6718,13 +6770,29 @@ def create_app(config=None):
                         if str(job.get("job_id", "")) not in recrawl_completed_ids
                     ]
                     _recrawl_ai_pause = False
+                    # 三通道：从源 run 快照取筛选条件与画像事实（老轮无画像事实则退化）
+                    recrawl_criteria = {}
+                    try:
+                        _src_run = store.get_screening_run(run_id)
+                        _frozen = (_src_run or {}).get("frozen_filters") or {}
+                        if isinstance(_frozen, dict):
+                            recrawl_criteria = {
+                                k: v for k, v in _frozen.items()
+                                if k != "profile_summary"
+                            }
+                    except _OPERATIONAL_ERRORS:
+                        recrawl_criteria = {}
                     for start in range(0, len(to_judge), match_batch):
                         if _stop_requested():
                             break
                         chunk = to_judge[start:start + match_batch]
                         try:
-                            res = match_jds(chunk, profile_summary, endpoint, api_key,
-                                            model=model, raise_on_systemic=True)
+                            res = match_jds(
+                                chunk, profile_summary, endpoint, api_key,
+                                model=model, raise_on_systemic=True,
+                                criteria=recrawl_criteria,
+                                profile_facts=profile_facts,
+                            )
                         except ai_service.AISecurityError as _ai_exc:
                             # 切片8：systemic 错误暂停（不批量变 uncertain 后完成）
                             from webui.ai import (
@@ -7333,6 +7401,7 @@ def create_app(config=None):
         params = run.get("execution_params") or {}
         scrape_task_id = str(params.get("scrape_task_id") or "")
         profile_summary = str(params.get("profile_summary") or "")
+        profile_facts = params.get("profile_facts") or None
         if not scrape_task_id:
             return jsonify({"ok": False, "error": "missing_scrape_task_id"}), 409
         source_jobs = store.load_scrape_run_jobs(scrape_task_id)
@@ -7394,7 +7463,7 @@ def create_app(config=None):
 
         def run_after_claim_commits(
                 task_id, frozen_filters, frozen_profile, source_task_id,
-                resume_from_run_id):
+                resume_from_run_id, frozen_facts):
             start_gate.wait()
             if not abort_start.is_set():
                 _run_ai_screen_task(
@@ -7403,6 +7472,7 @@ def create_app(config=None):
                     frozen_profile,
                     source_task_id,
                     resume_from_run_id,
+                    frozen_facts,
                 )
 
         try:
@@ -7413,6 +7483,7 @@ def create_app(config=None):
                 profile_summary,
                 scrape_task_id,
                 run_id,
+                profile_facts,
             )
             store.append_task_event(run_id, "resume", {
                 "backend_version": _backend_version,

@@ -2207,6 +2207,45 @@ button:disabled {
   border-radius: 1px;
   transform: rotate(45deg);
   background: var(--unsure);
+}
+/* B033：靠谱判定 flags —— 高危红字（盒子背景/边框不变）、中危黄进软性盒子 */
+.verdict-reason.flag-danger strong,
+.verdict-reason.flag-danger p {
+  color: var(--danger);
+}
+.verdict-reason .flag-reason,
+.caveats-list .flag-reason {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+.verdict-reason .flag-icon,
+.caveats-list .flag-icon {
+  font-style: normal;
+  font-weight: 700;
+}
+.verdict-reason .flag-icon {
+  color: var(--danger);
+}
+.caveats-list .flag-reason .flag-icon {
+  color: var(--unsure);
+}
+.caveats-list.flag-unsure ul {
+  color: var(--unsure-deep);
+}
+/* 岗位条标题前 ⚠ 标记：高危红 / 中危黄，无 flags 不渲染 */
+.job-row-flag {
+  flex: 0 0 auto;
+  font-size: 13px;
+  line-height: 1;
+  font-style: normal;
+  font-weight: 700;
+}
+.job-row-flag.high {
+  color: var(--danger);
+}
+.job-row-flag.medium {
+  color: var(--unsure);
 }.jd-content {
   padding: 12px 28px 16px;
   border-bottom: 1px solid var(--hair-2);
@@ -2428,7 +2467,8 @@ body,
     grid-template-rows: auto minmax(0, 1fr);
     min-height: 0;
     flex: 1;
-  }.results-view .results-stage.has-recrawl-banner {
+  }.results-view .results-stage.has-recrawl-banner,
+.results-view .results-stage.has-recrawl-guide {
     grid-template-rows: auto auto minmax(0, 1fr);
   }.results-view .job-workspace,
 .results-view .empty-panel {

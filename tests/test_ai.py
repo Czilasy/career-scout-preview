@@ -1589,7 +1589,7 @@ class MatchJdsResumeAndTruncationTests(unittest.TestCase):
 
 
 class MatchJdsFlagsTests(unittest.TestCase):
-    """精筛 flags（岗位靠谱程度提醒）：解析进 verdict、保守过滤、缺字段容错。"""
+    """精筛 flags（B033 靠谱判定）：结构化解析、分级判定、高危强制 not_match。"""
 
     def _jobs(self, n):
         return [{
@@ -1600,25 +1600,75 @@ class MatchJdsFlagsTests(unittest.TestCase):
             "jd": "负责后端开发",
         } for i in range(n)]
 
-    def test_flags_parsed_into_verdict(self):
-        """命中 2 个及以上特征的 flags 原样并入 verdict（供调用方合并进 caveats）。"""
+    def test_high_flag_forces_not_match_with_prefix(self):
+        """命中高危特征：即使 match=true 也强制 not_match，reason 以\"疑似骗局：\"开头。"""
         from webui.ai import match_jds
 
         with patch("webui.ai.call_ai", return_value={
             "results": [{
-                "i": 0, "match": True, "reason": "合适",
-                "caveats": ["优先英语六级"],
-                "flags": ["需留意：疑似中介/劳务派遣", "薪资含销售提成"],
+                "i": 0, "match": True, "reason": "技能契合",
+                "caveats": [],
+                "flags": [{"code": "C1", "level": "high", "reason": "要求先交培训费"}],
             }]
         }):
             result = match_jds(self._jobs(1), "画像", "https://x", "key", batch_size=10)
 
         verdict = result["verdicts"]["job-000"]
-        self.assertEqual(
-            verdict["flags"],
-            ["需留意：疑似中介/劳务派遣", "薪资含销售提成"])
-        # caveats 原样保留，flags 独立字段，由调用方决定合并
-        self.assertEqual(verdict["caveats"], ["优先英语六级"])
+        self.assertEqual(verdict["verdict"], "not_match")
+        self.assertTrue(verdict["reason"].startswith("疑似骗局："))
+        self.assertEqual(verdict["flags"][0]["level"], "high")
+
+    def test_high_flag_without_reason_gets_default_prefix(self):
+        """高危命中但 AI 未写 reason：reason 补为\"疑似骗局：命中高危可疑特征\"。"""
+        from webui.ai import match_jds
+
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{
+                "i": 0, "match": False, "reason": "",
+                "flags": [{"code": "E1", "level": "high", "reason": "标题与JD不符"}],
+            }]
+        }):
+            result = match_jds(self._jobs(1), "画像", "https://x", "key", batch_size=10)
+
+        verdict = result["verdicts"]["job-000"]
+        self.assertEqual(verdict["verdict"], "not_match")
+        self.assertTrue(verdict["reason"].startswith("疑似骗局："))
+
+    def test_single_medium_flag_degrades_to_caveats(self):
+        """仅命中 1 条中危：不输出 flags，降级为 caveats 文本。"""
+        from webui.ai import match_jds
+
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{
+                "i": 0, "match": True, "reason": "合适",
+                "flags": [{"code": "B1", "level": "medium", "reason": "标题含无责底薪"}],
+            }]
+        }):
+            result = match_jds(self._jobs(1), "画像", "https://x", "key", batch_size=10)
+
+        verdict = result["verdicts"]["job-000"]
+        self.assertEqual(verdict["flags"], [])
+        self.assertTrue(any("需留意" in c for c in verdict["caveats"]))
+
+    def test_two_medium_flags_are_output(self):
+        """命中 ≥2 条中危：输出 flags，不改 match 判定。"""
+        from webui.ai import match_jds
+
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{
+                "i": 0, "match": True, "reason": "合适",
+                "flags": [
+                    {"code": "B1", "level": "medium", "reason": "标题含无责底薪"},
+                    {"code": "F3", "level": "medium", "reason": "试用期未写明"},
+                ],
+            }]
+        }):
+            result = match_jds(self._jobs(1), "画像", "https://x", "key", batch_size=10)
+
+        verdict = result["verdicts"]["job-000"]
+        self.assertEqual(verdict["verdict"], "match")
+        self.assertEqual(len(verdict["flags"]), 2)
+        self.assertTrue(all(f["level"] == "medium" for f in verdict["flags"]))
 
     def test_flags_missing_field_does_not_break(self):
         """老模型不输出 flags 字段：不报错，flags 为空列表。"""
@@ -1631,33 +1681,26 @@ class MatchJdsFlagsTests(unittest.TestCase):
 
         self.assertEqual(result["verdicts"]["job-000"]["flags"], [])
 
-    def test_flags_fewer_than_conservative_threshold_are_filtered(self):
-        """少于保守阈值（默认 2 条）的 flags 视为低置信提醒，不输出。"""
+    def test_dirty_flag_items_are_dropped(self):
+        """旧字符串格式/非法 level/空 reason 的 flags 项丢弃，合法项保留。"""
         from webui.ai import match_jds
 
         with patch("webui.ai.call_ai", return_value={
             "results": [{
                 "i": 0, "match": True, "reason": "合适",
-                "flags": ["需留意：疑似中介/劳务派遣"],
+                "flags": [
+                    "需留意：疑似中介",  # 旧字符串格式
+                    {"code": "X1", "level": "weird", "reason": "非法级别"},
+                    {"code": "A1", "level": "medium", "reason": ""},  # 空 reason
+                    {"code": "F1", "level": "high", "reason": "JD留个人微信"},
+                ],
             }]
         }):
             result = match_jds(self._jobs(1), "画像", "https://x", "key", batch_size=10)
 
-        self.assertEqual(result["verdicts"]["job-000"]["flags"], [])
-
-    def test_flags_truncated_to_three(self):
-        """flags 最多保留 3 条（prompt 承诺 0~3 条，超限截断兜底）。"""
-        from webui.ai import match_jds
-
-        with patch("webui.ai.call_ai", return_value={
-            "results": [{
-                "i": 0, "match": True, "reason": "合适",
-                "flags": ["提醒一", "提醒二", "提醒三", "提醒四"],
-            }]
-        }):
-            result = match_jds(self._jobs(1), "画像", "https://x", "key", batch_size=10)
-
-        self.assertEqual(result["verdicts"]["job-000"]["flags"], ["提醒一", "提醒二", "提醒三"])
+        verdict = result["verdicts"]["job-000"]
+        self.assertEqual([f["code"] for f in verdict["flags"]], ["F1"])
+        self.assertEqual(verdict["verdict"], "not_match")
 
 
 class ScreenJobsTruncationTests(unittest.TestCase):
@@ -1700,9 +1743,9 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
         prompt = call.call_args.args[2][0]["content"]
         self.assertIn("判定从宽", prompt)
         self.assertIn("客服、讲师、销售、运营、内容/漫剧制作", prompt)
-        self.assertIn("非开发类别本身不得作为 match=false 的理由", prompt)
-        self.assertIn("经验年限、学历这类硬性条件不满足时仍然排除", prompt)
-        self.assertIn("拿不准时判 match=true", prompt)
+        self.assertIn("本身不得作为 match=false 的理由", prompt)
+        self.assertIn("硬性条件不满足时排除", prompt)
+        self.assertIn("宁可保留给用户人工确认", prompt)
 
     def test_screen_jobs_system_prompt_ignores_job_category_for_dropping(self):
         from webui.ai import screen_jobs
@@ -1714,6 +1757,220 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
         prompt = call.call_args.args[2][0]["content"]
         self.assertIn("岗位名称或类别（如客服、讲师、销售、内容制作、运营等）不得单独作为剔除理由", prompt)
         self.assertIn("粗筛只依据硬性字段", prompt)
+
+    def test_screen_jobs_prompt_has_profile_widening_rule(self):
+        """初筛 prompt 含求职画像放宽规则（B033，初筛判定逻辑本体不动）。"""
+        from webui.ai import screen_jobs
+
+        jobs = [{"job_id": "job-001", "title": "教学讲师", "salary": "10-15K", "location": "东莞"}]
+        with patch("webui.ai.call_ai", return_value={"dropped": []}) as call:
+            screen_jobs(
+                jobs,
+                {"profile_summary": "3年经验，东莞、深圳都可以", "city": ["东莞"]},
+                "https://x", "key", batch_size=1)
+
+        prompt = call.call_args.args[2][0]["content"]
+        self.assertIn("求职画像放宽", prompt)
+        self.assertIn("以画像表述为准放宽对应判断", prompt)
+        self.assertIn("候选人画像：3年经验，东莞、深圳都可以", prompt)
+
+    def test_match_jds_prompt_three_channels(self):
+        """精筛 prompt 三通道：求职意愿 > 筛选条件 > 画像事实；未体现不得推断。"""
+        from webui.ai import match_jds
+
+        jobs = [{"job_id": "job-001", "title": "AI教学", "jd": "负责AI课程教学"}]
+        criteria = {"city": ["东莞"], "degree": ["4"], "salary": ["406"]}
+        facts = {
+            "core_skills": ["Python"],
+            "projects": [{"name": "订单系统", "role": "后端"}],
+            "job_type": "全职",
+            "languages": ["英语"],
+        }
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{"i": 0, "match": True, "reason": "合适", "caveats": []}]
+        }) as call:
+            match_jds(
+                jobs, "3年Python后端，AI相关行业都可以", "https://x", "key",
+                batch_size=1, criteria=criteria, profile_facts=facts)
+
+        prompt = call.call_args.args[2][0]["content"]
+        self.assertIn("【第一层·求职意愿】", prompt)
+        self.assertIn("AI相关行业都可以", prompt)
+        self.assertIn("【第二层·筛选条件】", prompt)
+        self.assertIn("【第三层·画像事实】", prompt)
+        self.assertIn("核心技能：Python", prompt)
+        self.assertIn("未体现/缺失的维度不得推断", prompt)
+        self.assertIn("以意愿为准", prompt)
+        # 特征清单已并入 prompt，且 flags 为必填字段
+        self.assertIn("岗位靠谱判定", prompt)
+        self.assertIn("C1（高危）培训收费", prompt)
+        self.assertIn("flags 为必填字段，无命中输出空数组", prompt)
+        self.assertIn("疑似骗局：", prompt)
+
+    def test_match_jds_prompt_without_facts_falls_back(self):
+        """老轮无画像事实/筛选条件：退化两通道，不报错。"""
+        from webui.ai import match_jds
+
+        jobs = [{"job_id": "job-001", "title": "后端", "jd": "负责后端"}]
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{"i": 0, "match": True, "reason": "合适", "caveats": []}]
+        }) as call:
+            match_jds(jobs, "画像", "https://x", "key", batch_size=1)
+
+        prompt = call.call_args.args[2][0]["content"]
+        self.assertIn("（无画像事实，按未体现处理）", prompt)
+        self.assertIn("（无明确标准，宽松判断）", prompt)
+
+
+class FlagFeaturesTests(unittest.TestCase):
+    """flag_features 特征清单与分级判定边界（B033 T004 Checkpoint）。"""
+
+    def test_feature_list_has_20_items_with_valid_levels(self):
+        from webui.flag_features import FLAG_FEATURES, VALID_FLAG_LEVELS
+        self.assertEqual(len(FLAG_FEATURES), 20)
+        codes = [f["code"] for f in FLAG_FEATURES]
+        self.assertEqual(len(set(codes)), 20)  # code 唯一
+        for item in FLAG_FEATURES:
+            self.assertIn(item["level"], VALID_FLAG_LEVELS)
+            self.assertTrue(item["name"])
+            self.assertTrue(item["basis"])
+
+    def test_single_medium_degrades_to_caveats(self):
+        from webui.flag_features import clean_flags, decide_flags
+        flags = clean_flags([{"code": "B1", "level": "medium", "reason": "标题含无责底薪"}])
+        self.assertEqual(decide_flags(flags), {
+            "flags": [], "caveats": ["需留意：销售话术标题：标题含无责底薪"]})
+
+    def test_two_medium_output_flags(self):
+        from webui.flag_features import clean_flags, decide_flags
+        flags = clean_flags([
+            {"code": "B1", "level": "medium", "reason": "a"},
+            {"code": "F3", "level": "medium", "reason": "b"},
+        ])
+        decided = decide_flags(flags)
+        self.assertEqual(len(decided["flags"]), 2)
+        self.assertEqual(decided["caveats"], [])
+
+    def test_one_high_output_flags(self):
+        from webui.flag_features import clean_flags, decide_flags
+        flags = clean_flags([{"code": "C1", "level": "high", "reason": "收培训费"}])
+        decided = decide_flags(flags)
+        self.assertEqual(len(decided["flags"]), 1)
+        self.assertEqual(decided["caveats"], [])
+
+    def test_empty_input(self):
+        from webui.flag_features import clean_flags, decide_flags
+        self.assertEqual(decide_flags(clean_flags([])), {"flags": [], "caveats": []})
+        self.assertEqual(decide_flags(clean_flags(None)), {"flags": [], "caveats": []})
+
+    def test_clean_flags_drops_invalid_items(self):
+        from webui.flag_features import clean_flags
+        cleaned = clean_flags([
+            "旧格式文本",
+            {"code": "X", "level": "weird", "reason": "非法级别"},
+            {"code": "X", "level": "medium", "reason": ""},
+            {"code": "F1", "level": "high", "reason": "留个人微信"},
+            {"code": "UNKNOWN", "level": "medium", "reason": "清单外但结构合法"},
+        ])
+        self.assertEqual([f["code"] for f in cleaned], ["F1", "UNKNOWN"])
+
+    def test_prompt_text_renders_all_features(self):
+        from webui.flag_features import build_features_prompt_text
+        text = build_features_prompt_text()
+        self.assertEqual(text.count("\n- "), 19)
+        self.assertIn("C1（高危）培训收费", text)
+        self.assertIn("A1（中危）劳务派遣/外包包装", text)
+        self.assertNotIn("常年挂着", text)
+
+
+class ProfileFactsTests(unittest.TestCase):
+    """画像事实提取与宽松验证（B033 T005/T006）。"""
+
+    def test_validate_profile_facts_keeps_valid_items(self):
+        from webui.ai import _validate_profile_facts
+        facts = _validate_profile_facts({
+            "core_skills": ["Python", "Django"],
+            "projects": [{"name": "订单系统", "role": "后端", "stack": "Django", "summary": "订单模块"}],
+            "job_type": "全职",
+            "languages": ["英语"],
+        })
+        self.assertEqual(facts["core_skills"], ["Python", "Django"])
+        self.assertEqual(facts["projects"][0]["name"], "订单系统")
+        self.assertEqual(facts["job_type"], "全职")
+        self.assertEqual(facts["languages"], ["英语"])
+
+    def test_validate_profile_facts_drops_invalid_items(self):
+        from webui.ai import _validate_profile_facts
+        facts = _validate_profile_facts({
+            "core_skills": ["Python", 123, "", "  "],
+            "projects": [
+                {"name": "好项目", "role": "后端"},
+                {"stack": "无name的项目"},
+                "不是对象",
+            ],
+            "job_type": "不限",  # 非法枚举
+            "languages": [None, "英语"],
+        })
+        self.assertEqual(facts["core_skills"], ["Python"])
+        self.assertEqual([p["name"] for p in facts["projects"]], ["好项目"])
+        self.assertNotIn("job_type", facts)
+        self.assertEqual(facts["languages"], ["英语"])
+
+    def test_validate_profile_facts_missing_fields(self):
+        from webui.ai import _validate_profile_facts
+        self.assertEqual(_validate_profile_facts(None), {})
+        self.assertEqual(_validate_profile_facts("not-a-dict"), {})
+        facts = _validate_profile_facts({"job_type": "未体现"})
+        self.assertEqual(facts, {"job_type": "未体现"})
+
+    def test_analyze_resume_extracts_profile_facts(self):
+        from webui.ai import analyze_resume_to_fields
+
+        payload = {
+            "keyword": [{"word": "Python", "recommended": True}],
+            "city": "上海",
+            "profile_summary": "3年Python后端经验，本科学历，期望上海15-25K，技能Python/Django，做过后端订单系统。",
+            "profile_facts": {
+                "core_skills": ["Python", "Django"],
+                "projects": [{"name": "订单系统", "role": "后端开发"}],
+                "job_type": "全职",
+                "languages": ["英语"],
+            },
+        }
+        with patch("webui.ai.call_ai", return_value=payload), \
+                patch("webui.ai._resume_bytes_to_text", return_value="3年Python后端"):
+            result = analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
+
+        self.assertEqual(result["profile_facts"]["core_skills"], ["Python", "Django"])
+        self.assertEqual(result["profile_facts"]["job_type"], "全职")
+
+    def test_analyze_resume_missing_profile_facts(self):
+        """老端点不返回 profile_facts：返回空 dict，不报错。"""
+        from webui.ai import analyze_resume_to_fields
+
+        payload = {"keyword": [{"word": "Python", "recommended": True}],
+                   "city": "上海", "profile_summary": "3年Python后端"}
+        with patch("webui.ai.call_ai", return_value=payload), \
+                patch("webui.ai._resume_bytes_to_text", return_value="3年Python后端"):
+            result = analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
+
+        self.assertEqual(result["profile_facts"], {})
+
+    def test_analyze_resume_prompt_contains_facts_rules(self):
+        from webui.ai import analyze_resume_to_fields
+
+        with patch("webui.ai.call_ai", return_value={
+            "keyword": [], "city": "", "profile_summary": "s",
+        }) as call, patch("webui.ai._resume_bytes_to_text", return_value="简历"):
+            analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
+
+        prompt = call.call_args.args[2][0]["content"]
+        self.assertIn("profile_facts", prompt)
+        self.assertIn("core_skills", prompt)
+        self.assertIn("job_type", prompt)
+        self.assertIn("未体现", prompt)
+        self.assertIn("3-5句", prompt)
+        self.assertIn("禁止评价性概括", prompt)
 
 
 class AIMeasurementEventTests(unittest.TestCase):

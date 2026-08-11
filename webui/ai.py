@@ -21,6 +21,11 @@ import requests
 
 from scripts import boss_cdp_raw as boss
 from webui.ai_retry import effective_retry_plan
+from webui.flag_features import (
+    build_features_prompt_text,
+    clean_flags,
+    decide_flags,
+)
 
 KEYRING_SERVICE = "boss-workbench"
 DEFAULT_TIMEOUT = 300
@@ -981,7 +986,23 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
         "- 每个筛选字段输出可选值中的标签或代码均可；最终会被映射为平台稳定代码\n"
         "- profile_summary: 用2-3句话概括候选人画像，须包含：工作年限/应届与否、"
         "求职类型(全职/实习)、目标岗位方向、核心技能。供后续判断岗位是否匹配时使用，"
-        "要具体、贴合简历，不要空话套话"
+        "要具体、贴合简历，不要空话套话\n"
+        "- profile_facts: 从简历提取不可推断的画像事实（隐藏层，供后续精筛对照硬性条件），输出JSON对象：\n"
+        "  {\"core_skills\":[\"Python\",\"Django\"],\"projects\":[{\"name\":\"xx系统\",\"role\":\"后端开发\",\"stack\":\"Python/Django\",\"summary\":\"负责订单模块\"}],\"job_type\":\"全职|实习|兼职|未体现\",\"languages\":[\"英语\"]}\n"
+        "- profile_facts 规则：core_skills 只列简历明确列出的技能（最多10个）；"
+        "languages 只列简历明确的语言能力（无则空数组）；"
+        "projects 只列简历明确的项目/工作经历，每项 name 必填、role/stack/summary 有则填（无项目则空数组）；"
+        "job_type 只能输出 全职/实习/兼职/未体现 之一。"
+        "简历未体现的字段一律输出\"未体现\"或空数组，禁止推断、补全或编造（如学历、薪资、年限简历未写就不得猜测）\n"
+        "- profile_summary: 用3-5句事实清单式概括候选人画像，每句必须是简历可核实的事实，"
+        "禁止评价性概括（如\"能独立完成\"\"学习能力强\"等空话）："
+        "第一句写工作年限（精确到\"X年\"或\"应届\"，无法确定写\"年限未体现\"）；"
+        "第二句写学历（无法确定写\"学历未体现\"）；"
+        "第三句写期望城市与期望薪资（无法确定写\"未体现\"）；"
+        "第四句写核心技能（只列简历明确的技能）；"
+        "第五句写代表项目/经历事实（无则写\"无明确项目经历\"）。"
+        "简历中有明确求职意愿扩展表述（如\"AI相关行业都可以\"）时并入对应句。"
+        "总计3-5句，以事实为单位，具体、贴合简历，不要空话套话\n"
     )
 
     messages = [
@@ -994,7 +1015,63 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
     # profile_summary 是自由文本，不参与枚举校验，验证后附加返回
     summary = data.get("profile_summary", "") if isinstance(data, dict) else ""
     result["profile_summary"] = str(summary).strip()
+    # profile_facts 隐藏画像事实：宽松验证，无效项丢弃不阻塞整体
+    result["profile_facts"] = _validate_profile_facts(
+        data.get("profile_facts") if isinstance(data, dict) else None
+    )
     return result
+
+
+# 画像事实 job_type 四值枚举（与精筛 prompt 契约一致）
+_PROFILE_FACT_JOB_TYPES = ("全职", "实习", "兼职", "未体现")
+
+
+def _validate_profile_facts(data) -> dict:
+    """宽松验证 AI 提取的画像事实：类型 + 长度，无效项丢弃不阻塞。
+
+    契约字段：core_skills[] / projects[{name,role,stack,summary}] /
+    job_type(四值) / languages[]。缺失字段不写入（调用方按\"未体现\"
+    语义处理）；列表只保留非空字符串，超长截断。
+    """
+    if not isinstance(data, dict):
+        return {}
+    facts: dict = {}
+
+    skills = data.get("core_skills")
+    if isinstance(skills, list):
+        cleaned = [str(s).strip() for s in skills
+                   if isinstance(s, str) and s.strip()]
+        if cleaned:
+            facts["core_skills"] = cleaned[:10]
+
+    projects = data.get("projects")
+    if isinstance(projects, list):
+        cleaned = []
+        for project in projects:
+            if not isinstance(project, dict):
+                continue
+            item = {}
+            for key in ("name", "role", "stack", "summary"):
+                value = project.get(key)
+                if isinstance(value, str) and value.strip():
+                    item[key] = value.strip()
+            if item.get("name"):
+                cleaned.append(item)
+        if cleaned:
+            facts["projects"] = cleaned[:10]
+
+    job_type = data.get("job_type")
+    if isinstance(job_type, str) and job_type.strip() in _PROFILE_FACT_JOB_TYPES:
+        facts["job_type"] = job_type.strip()
+
+    languages = data.get("languages")
+    if isinstance(languages, list):
+        cleaned = [str(lang).strip() for lang in languages
+                   if isinstance(lang, str) and lang.strip()]
+        if cleaned:
+            facts["languages"] = cleaned[:10]
+
+    return facts
 
 
 def _validate_unified_fields(data, platform: str = "boss") -> dict:
@@ -1076,10 +1153,8 @@ SCREEN_BATCH_SIZE = 50   # Stage A 每批送 AI 的岗位数（默认值，可�
 SCREEN_CONCURRENCY = 1   # Stage A 并发批次数（默认值，可被高级设置覆盖）
 MATCH_BATCH_SIZE = 4     # Stage B 每批送 AI 的岗位数（默认值，可被高级设置覆盖）
 MATCH_CONCURRENCY = 1    # Stage B 并发批次数（默认值，可被高级设置覆盖）
-# 岗位靠谱程度 flags 保守阈值：只有同时命中可疑特征达到该数量的岗位才输出提醒。
-# 默认 2（保守开）：prompt 要求模型"命中 2 个及以上特征才输出"，
-# 解析端再兜底过滤少于该条数的输出，防止低置信提醒混入 caveats。
-FLAGS_MIN_HITS = 2
+# 岗位靠谱判定（B033）：特征清单与分级规则在 webui/flag_features.py，
+# 高危≥1 或 中危≥2 → 输出 flags；中危仅 1 条 → 降级 caveats。本模块不再持有阈值。
 
 
 def _adv_setting(key, default):
@@ -1123,6 +1198,40 @@ def _build_criteria_description(criteria):
             if names:
                 lines.append(f"{label}：" + "、".join(names))
     return "\n".join(lines) if lines else "（无明确标准，宽松判断）"
+
+
+def _build_profile_facts_description(profile_facts) -> str:
+    """把画像事实 dict 转成精筛 prompt 自然语言段落（缺失维度不输出）。"""
+    if not isinstance(profile_facts, dict) or not profile_facts:
+        return "（无画像事实，按未体现处理）"
+    lines = []
+    skills = profile_facts.get("core_skills")
+    if skills:
+        lines.append("核心技能：" + "、".join(str(s) for s in skills))
+    projects = profile_facts.get("projects")
+    if projects:
+        parts = []
+        for project in projects[:3]:
+            name = str(project.get("name") or "未命名项目")
+            role = str(project.get("role") or "").strip()
+            stack = str(project.get("stack") or "").strip()
+            summary = str(project.get("summary") or "").strip()
+            detail = name
+            if role:
+                detail += f"（{role}）"
+            if stack:
+                detail += f"，技术栈：{stack}"
+            if summary:
+                detail += f"，{summary}"
+            parts.append(detail)
+        lines.append("项目经历：" + "；".join(parts))
+    job_type = profile_facts.get("job_type")
+    if job_type:
+        lines.append(f"求职类型：{job_type}")
+    languages = profile_facts.get("languages")
+    if languages:
+        lines.append("语言能力：" + "、".join(str(l) for l in languages))
+    return "\n".join(lines) if lines else "（无画像事实，按未体现处理）"
 
 
 def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
@@ -1208,6 +1317,9 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         "岗位下界≤候选人上界时保留（如岗位3-5年、候选人1-3年，给边界机会）\n"
         "- 岗位名称或类别（如客服、讲师、销售、内容制作、运营等）不得单独作为剔除理由；"
         "粗筛只依据硬性字段（学历、经验、城市、薪资、全职/实习）\n"
+        "- 求职画像放宽：候选人画像（profile_summary）中明确表达放宽的维度"
+        "（如\"东莞、深圳都可以\"\"不限\"\"接受兼职\"等）以画像表述为准放宽对应判断；"
+        "画像未涉及的维度仍按上述规则判断\n"
         "- 只排除【明显】不符合的；拿不准一律保留（宁可多留，不可错杀）\n\n"
         "输入格式：每行一个岗位，``序号. 标题 | 薪资 | 城市 | 学历 | 规模``。\n"
         "输出格式：只列出【要剔除】的岗位序号与理由，未列出的默认保留。严格输出JSON：\n"
@@ -1372,6 +1484,7 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
 
 
 def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
+              criteria=None, profile_facts=None,
               batch_size=None, progress=None, completed_verdicts=None,
               concurrency=None, raise_on_systemic=False,
               execution_config=None,
@@ -1381,7 +1494,12 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
 
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
-    返回 {"verdicts": {job_id: {"verdict": "match"/"not_match", "reason"}}}。
+    ``profile_summary``: 求职画像（用户可编辑，三通道中优先级最高）。
+    ``criteria``: 可选，筛选条件 dict（学历/经验/薪资/城市等，作硬性基线）。
+    ``profile_facts``: 可选，画像事实 dict（core_skills/projects/job_type/languages，
+        缺失维度按"未体现"处理，不得推断）。
+    返回 {"verdicts": {job_id: {"verdict": "match"/"not_match", "reason",
+    "caveats", "flags"}}}。
     AI 调用失败或漏回结果的岗位标记为 uncertain，保留给用户人工确认，
     不能把未完成的判定伪装成已匹配。
 
@@ -1446,34 +1564,42 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     )
     missing_retry_budget = [max(0, int(missing_result_retry_budget))]
     summary = (profile_summary or "").strip() or "（无候选人画像）"
+    criteria_desc = ""
+    if criteria:
+        criteria_desc = _build_criteria_description(
+            {k: v for k, v in criteria.items() if k != "profile_summary"}
+        )
+    criteria_desc = criteria_desc or "（无明确标准，宽松判断）"
+    facts_desc = _build_profile_facts_description(profile_facts)
     system_prompt = (
-        "你是求职匹配度评估助手。根据候选人画像，判断每个岗位的JD工作内容是否适合候选人。\n"
-        f"候选人画像：{summary}\n\n"
-        "判断要点：岗位职责与候选人技能/方向的契合度；岗位性质(全职/实习)与候选人诉求是否一致。\n"
-        "match 只看核心能力匹配（岗位职责与技能/方向契合）；"
-        "JD 中'优先/加分/plus/熟悉'类软性要求（如行业经验、英语等级、证书）不得影响 match，"
-        "应写入 caveats 数组（每项一句话，如'优先英语六级，候选人未提供'）。"
-        "只有 JD 明确标注'必须/要求/need'的硬性项且候选人未满足时，才 match=false。\n"
-        "行业经验不足不得作为 match=false 的理由，除非 JD 明确'必须有X行业经验'。\n"
-        "总体原则：判定从宽，宁可保留给用户人工确认，也不要因为岗位类别不完全一致就排除。\n"
-        "- 岗位职责与候选人技能/方向契合 → match=true。\n"
-        "- 匹配度一般的岗位也判 match=true：即使岗位是客服、讲师、销售、运营、内容/漫剧制作等非开发岗，"
-        "只要候选人的技能/经验可迁移或能支撑岗位，也保留为候选，并把差异写入 caveats（如'岗位为客服性质，与开发方向有偏差'）。\n"
-        "- 这里的'岗位性质'只指全职/实习/兼职，不指岗位类别；非开发类别本身不得作为 match=false 的理由。\n"
-        "- match=false 仅限硬性不满足：JD 明确要求学历、经验年限、技术栈或证书且候选人明确不满足；"
-        "经验年限、学历这类硬性条件不满足时仍然排除。\n"
+        "你是求职匹配度评估助手。根据候选人三层信息，判断每个岗位的JD工作内容是否适合候选人。\n"
+        "候选人信息分三层（优先级从高到低）：\n"
+        f"【第一层·求职意愿】候选人求职画像（用户可编辑，最高优先级）：{summary}\n"
+        f"【第二层·筛选条件】硬性条件基线：{criteria_desc}\n"
+        f"【第三层·画像事实】简历提取的客观事实（未列出的维度一律视为未体现）：{facts_desc}\n\n"
+        "判断规则：\n"
+        "- 意愿与基线冲突时以意愿为准；意愿未提及的维度回退用筛选条件与画像事实判断。\n"
+        "- 画像事实未体现/缺失的维度不得推断为满足或违反，更不得编造（如简历没写学历就不能默认本科）。\n"
+        "- 意愿明确扩展方向（如\"AI相关行业都可以\"\"教学、运营都可以\"）时，岗位类别不因画像事实技能未命中而排除，差异写入 caveats。\n"
+        "- 只有 JD 明确标注'必须/要求/need'的硬性项（学历、经验年限、技术栈、证书）且候选人明确不满足时才 match=false；"
+        "经验年限、学历这类硬性条件不满足时排除，不再出现'候选人未知/未体现'式空想理由。\n"
         "- JD 中'优先/加分/plus/熟悉'类软性要求（如行业经验、英语等级、证书）不得影响 match，"
-        "应写入 caveats 数组（每项一句话，如'优先英语六级，候选人未提供'）。"
+        "应写入 caveats 数组（每项一句话，如'优先英语六级，候选人未提供'）。\n"
         "- 行业经验不足不得作为 match=false 的理由，除非 JD 明确'必须有X行业经验'。\n"
-        "- 拿不准时判 match=true 并写入 caveats，交给用户看详情。\n"
+        "- 总体原则：判定从宽，宁可保留给用户人工确认，也不要因为岗位类别不完全一致就排除；"
+        "非开发类别（客服、讲师、销售、运营、内容/漫剧制作等）本身不得作为 match=false 的理由。\n"
         "对每个岗位输出判定。严格输出JSON：\n"
-        '{"results":[{"i":0,"match":true,"reason":"一句话理由","caveats":["软性提醒"],"flags":["需留意：疑似中介/劳务派遣"]},...]}\n'
+        '{"results":[{"i":0,"match":true,"reason":"一句话理由","caveats":["软性提醒"],"flags":[{"code":"A1","level":"medium","reason":"命中证据"}]},...]}\n'
         "i 为岗位序号；match=true 适合，false 不适合；reason 简短（20字内）；caveats 可为空数组。\n"
-        "岗位靠谱程度：顺带判断岗位是否存在可疑特征，如中介/劳务派遣、"
-        "薪资含销售提成、职位描述与标题明显不符、岗位常年挂着等。\n"
-        f"仅当同时命中 {FLAGS_MIN_HITS} 个及以上可疑特征时，才把提醒写入可选字段 "
-        "flags 数组（0~3 条短文本，每条一句话，措辞'需留意'级别，"
-        "如'需留意：疑似中介/劳务派遣'）；命中不足或无法判断时输出空数组或省略该字段。"
+        "岗位靠谱判定：按下列特征清单核对岗位标题与JD正文是否命中可疑特征（\n"
+        f"{build_features_prompt_text()}\n"
+        "）。flags 为必填字段，无命中输出空数组 []，不得省略：\n"
+        "  [{\"code\":\"特征code\",\"level\":\"high或medium\",\"reason\":\"引用标题/JD原文证据\"}]\n"
+        "- level 只能是 high 或 medium；reason 必须引用岗位标题或JD正文的具体证据。\n"
+        "- 命中任一高危（level=high）特征：该岗位强制 match=false，reason 以\"疑似骗局：\"开头并说明命中特征。\n"
+        "- 中危特征逐条如实输出（命中几条输出几条）；拿不准的不要输出。\n"
+        "- 不需要时间维度的特征（如\"岗位挂多久\"）一律不判断。\n"
+        "- 不涉及上述清单的可疑迹象可写入 caveats（措辞\"需留意：…\"）。"
     )
     def _match_one_batch(batch, *, allow_transport_terminal=False):
         """单批精筛，返回 {jid: verdict}。
@@ -1568,15 +1694,22 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 continue
             match = r["match"]
             reason = str(r.get("reason", "")).strip()
-            caveats = [str(c).strip() for c in r.get("caveats") or [] if isinstance(c, str) and c.strip()]
-            # flags 为可选字段（老模型不输出不报错）：清洗后按保守阈值
-            # 过滤——少于 FLAGS_MIN_HITS 条视为低置信提醒，不并入结果。
-            flags = [str(f).strip() for f in r.get("flags") or []
-                     if isinstance(f, str) and f.strip()][:3]
-            if len(flags) < FLAGS_MIN_HITS:
-                flags = []
+            caveats = [str(c).strip() for c in r.get("caveats") or []
+                       if isinstance(c, str) and c.strip()]
+            # flags 结构化解析：清洗（code/level/reason 校验）+ 分级判定
+            # （高危≥1 或 中危≥2 → 输出 flags；中危仅 1 条 → 降级 caveats）
+            decided = decide_flags(clean_flags(r.get("flags")))
+            flags = decided["flags"]
+            caveats.extend(decided["caveats"])
+            verdict = "match" if match else "not_match"
+            # 高危命中强制 not_match，reason 以"疑似骗局："开头
+            if any(f.get("level") == "high" for f in flags):
+                verdict = "not_match"
+                reason = reason or "命中高危可疑特征"
+                if not reason.startswith("疑似骗局："):
+                    reason = "疑似骗局：" + reason
             batch_verdicts[jid] = {
-                "verdict": "match" if match else "not_match",
+                "verdict": verdict,
                 "reason": reason,
                 "caveats": caveats,
                 "flags": flags,

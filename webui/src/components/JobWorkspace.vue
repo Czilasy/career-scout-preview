@@ -268,6 +268,20 @@ const extraLabels = computed(() => {
     }));
 });
 
+// B033：岗位靠谱判定 flags（高危红 / 中危黄）。高危强制 not_match 已由后端保证，
+// 前端只按 level 渲染标记，不依赖 code 映射。
+function flagLevel(job: JobItem): "high" | "medium" | "" {
+  const flags = job.flags;
+  if (!Array.isArray(flags) || !flags.length) return "";
+  if (flags.some((f) => f?.level === "high")) return "high";
+  if (flags.some((f) => f?.level === "medium")) return "medium";
+  return "";
+}
+const highFlags = computed(() =>
+  (selectedJob.value?.flags || []).filter((f) => f?.level === "high"));
+const mediumFlags = computed(() =>
+  (selectedJob.value?.flags || []).filter((f) => f?.level === "medium"));
+
 function verdictLabel(job: JobItem): string {
   if (job.verdict === "match") return "匹配";
   if (job.verdict === "not_match") return "不匹配";
@@ -355,6 +369,12 @@ function clearFilters() {
         >
           <span class="job-row-main">
             <span class="job-row-titleline">
+              <span
+                v-if="flagLevel(job)"
+                class="job-row-flag"
+                :class="flagLevel(job)"
+                aria-hidden="true"
+              >⚠</span>
               <span class="job-row-title">{{ job.title || "未知岗位" }}</span>
               <span
                 v-if="platformLabel(job)"
@@ -442,15 +462,37 @@ function clearFilters() {
         ><span class="job-extra-fact-label">{{ item.label + ": " }}</span><span class="job-extra-fact-value">{{ item.value }}</span></span>
       </div>
 
-      <div v-if="selectedJob.verdict_reason || selectedJob.reason" class="verdict-reason">
+      <div
+        v-if="selectedJob.verdict_reason || selectedJob.reason"
+        class="verdict-reason"
+        :class="{ 'flag-danger': highFlags.length }"
+      >
         <strong><span class="sec-mk" aria-hidden="true"></span>AI 判断说明</strong>
-        <p>{{ selectedJob.verdict_reason || selectedJob.reason }}</p>
+        <p>
+          <span
+            v-for="(f, i) in highFlags"
+            :key="i"
+            class="flag-reason"
+            :data-testid="`flag-high-${i}`"
+          ><span class="flag-icon" aria-hidden="true">⚠</span>{{ f.reason }}</span>
+          {{ selectedJob.verdict_reason || selectedJob.reason }}
+        </p>
       </div>
 
-      <div v-if="selectedJob.caveats && selectedJob.caveats.length" class="caveats-list">
+      <div
+        v-if="(selectedJob.caveats && selectedJob.caveats.length) || mediumFlags.length"
+        class="caveats-list"
+        :class="{ 'flag-unsure': mediumFlags.length }"
+      >
         <strong><span class="sec-mk" aria-hidden="true"></span>软性要求提醒（不影响匹配，自己判断）</strong>
         <ul>
           <li v-for="(c, i) in selectedJob.caveats" :key="i">{{ c }}</li>
+          <li
+            v-for="(f, i) in mediumFlags"
+            :key="'flag-' + i"
+            class="flag-reason"
+            :data-testid="`flag-medium-${i}`"
+          ><span class="flag-icon" aria-hidden="true">⚠</span>{{ f.reason }}</li>
         </ul>
       </div>
 

@@ -183,7 +183,8 @@ class Migration28SchemaTests(unittest.TestCase):
     def _build_v27_database(self):
         with patch.object(TaskStore, "_migration_028", return_value=None), \
                 patch.object(TaskStore, "_migration_029", return_value=None), \
-                patch.object(TaskStore, "_migration_030", return_value=None):
+                patch.object(TaskStore, "_migration_030", return_value=None), \
+                patch.object(TaskStore, "_migration_031", return_value=None):
             store = TaskStore(self.db_path)
         self.assertEqual(store.schema_version(), 27)
         return store
@@ -366,6 +367,112 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertIn("started_at", columns)
         self.assertIn("finished_at", columns)
         self.assertGreaterEqual(store.schema_version(), 26)
+
+    def test_migration_031_adds_profile_facts_and_flags_columns(self):
+        """B033：screening_runs.profile_facts_json + screening_results.flags_json。"""
+        store = TaskStore(self.db_path)
+        with store._connection() as conn:
+            run_columns = {
+                row["name"] for row in conn.execute(
+                    "PRAGMA table_info(screening_runs)"
+                ).fetchall()
+            }
+            result_columns = {
+                row["name"] for row in conn.execute(
+                    "PRAGMA table_info(screening_results)"
+                ).fetchall()
+            }
+        self.assertIn("profile_facts_json", run_columns)
+        self.assertIn("flags_json", result_columns)
+        self.assertGreaterEqual(store.schema_version(), 31)
+
+    def test_save_pipeline_result_persists_facts_and_flags(self):
+        """新轮次：画像事实写入 screening_runs、flags 写入 screening_results，读回一致。"""
+        store = TaskStore(self.db_path)
+        run_id = store.save_pipeline_result(
+            {
+                "jobs": [{
+                    "platform_job_id": "p1",
+                    "title": "后端开发",
+                    "verdict": "match",
+                    "verdict_reason": "合适",
+                    "caveats": ["优先英语"],
+                    "flags": [{"code": "B1", "level": "medium", "reason": "标题含无责底薪"}],
+                }],
+                "dropped": [],
+                "total_scraped": 1,
+                "total_kept": 1,
+                "total_dropped": 0,
+                "profile_summary": "3年Python后端",
+                "profile_facts": {
+                    "core_skills": ["Python"],
+                    "job_type": "全职",
+                },
+            },
+            {"screening": {}, "platform": "boss"},
+        )
+        payload = store.load_latest_pipeline_result(run_id)
+        self.assertIsNotNone(payload)
+        self.assertEqual(
+            (payload or {}).get("result", {}).get("profile_facts"),
+            {"core_skills": ["Python"], "job_type": "全职"},
+            "B033：结果快照读取必须透传画像事实（刷新恢复、补筛复用快照的读取源）",
+        )
+        run = store.get_screening_run(run_id)
+        self.assertEqual(
+            run["profile_facts"],
+            {"core_skills": ["Python"], "job_type": "全职"},
+        )
+        jobs = (payload or {}).get("result", {}).get("jobs", [])
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["flags"], [{
+            "code": "B1", "level": "medium", "reason": "标题含无责底薪"}])
+
+    def test_legacy_rows_without_flags_read_back_empty(self):
+        """老轮次 flags_json 为 NULL：读回 flags=[]，无回归。"""
+        store = TaskStore(self.db_path)
+        run_id = store.save_pipeline_result(
+            {
+                "jobs": [{
+                    "platform_job_id": "p1",
+                    "title": "后端开发",
+                    "verdict": "match",
+                    "verdict_reason": "合适",
+                    "caveats": [],
+                }],
+                "dropped": [],
+                "total_scraped": 1,
+                "total_kept": 1,
+                "total_dropped": 0,
+                "profile_summary": "画像",
+            },
+            {"screening": {}, "platform": "boss"},
+        )
+        # 模拟老轮：清空两列（老数据为 NULL）
+        with store._connection() as conn:
+            conn.execute("UPDATE screening_runs SET profile_facts_json = NULL WHERE id = ?", (run_id,))
+            conn.execute("UPDATE screening_results SET flags_json = NULL")
+        payload = store.load_latest_pipeline_result(run_id)
+        jobs = (payload or {}).get("result", {}).get("jobs", [])
+        self.assertEqual(jobs[0]["flags"], [])
+        self.assertIsNone(store.get_screening_run(run_id)["profile_facts"])
+
+    def test_save_screening_verdicts_persists_flags(self):
+        """每批精筛落盘：flags_json 与 caveats 同路径写入。"""
+        store = TaskStore(self.db_path)
+        run_id = store.create_screening_run("run-x")["id"]
+        store.save_screening_verdicts(run_id, {
+            "job-1": {
+                "verdict": "not_match",
+                "reason": "疑似骗局：要求先交培训费",
+                "caveats": [],
+                "flags": [{"code": "C1", "level": "high", "reason": "要求先交培训费"}],
+            }
+        })
+        verdicts = store.load_screening_verdicts(run_id)
+        self.assertEqual(verdicts["job-1"]["verdict"], "not_match")
+        self.assertEqual(verdicts["job-1"]["flags"], [{
+            "code": "C1", "level": "high", "reason": "要求先交培训费"}])
 
 
 class MigrationBootstrapBackupTests(unittest.TestCase):

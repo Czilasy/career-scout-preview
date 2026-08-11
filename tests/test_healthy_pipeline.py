@@ -363,19 +363,118 @@ class JDBatchExceptionClassificationTests(unittest.TestCase):
         from webui.pipeline_exec import fetch_job_details
 
         class DisconnectedSource:
+            def __init__(self):
+                self.calls = 0
+
             def fetch_details_batch(self, *_args, **_kwargs):
+                self.calls += 1
                 raise RuntimeError("CDP websocket disconnected")
 
-        with tempfile.TemporaryDirectory() as artifact_dir:
+        source = DisconnectedSource()
+        with tempfile.TemporaryDirectory() as artifact_dir, mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ):
             result = fetch_job_details(
                 [{"job_id": "j1", "jd": ""}],
-                DisconnectedSource(),
+                source,
                 artifact_dir=artifact_dir,
             )
 
         self.assertTrue(result["hard_stop"], result)
         self.assertEqual(result["hard_stop_code"], "cdp_unavailable")
         self.assertEqual(result["jobs"][0]["jd_failed_code"], "cdp_unavailable")
+        self.assertEqual(source.calls, 2, "同一失联事件只自动重启一次，随后必须暂停")
+
+    def test_cdp_disconnect_restart_success_resumes_same_batch(self):
+        from webui.pipeline_exec import fetch_job_details
+        from webui.source import SourceOutcome
+
+        class RecoverableSource:
+            def __init__(self):
+                self.calls = 0
+                self.jobs_seen = []
+
+            def fetch_details_batch(self, jobs, **_kwargs):
+                self.calls += 1
+                self.jobs_seen.append([job["job_id"] for job in jobs])
+                if self.calls == 1:
+                    raise RuntimeError("CDP websocket disconnected")
+                return {
+                    job["job_id"]: SourceOutcome.success(detail={"jd": "职责"})
+                    for job in jobs
+                }
+
+        source = RecoverableSource()
+        with tempfile.TemporaryDirectory() as artifact_dir, mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ):
+            result = fetch_job_details(
+                [{"job_id": "j1", "jd": ""}], source, artifact_dir=artifact_dir
+            )
+
+        self.assertFalse(result["hard_stop"], result)
+        self.assertEqual(result["fetched"], 1)
+        self.assertEqual(result["jobs"][0]["jd"], "职责")
+        self.assertEqual(source.calls, 2)
+        self.assertEqual(source.jobs_seen, [["j1"], ["j1"]])
+
+    def test_cdp_disconnect_restart_failure_pauses(self):
+        from webui.pipeline_exec import fetch_job_details
+
+        class AlwaysLostSource:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch_details_batch(self, *_args, **_kwargs):
+                self.calls += 1
+                raise RuntimeError("CDP websocket disconnected")
+
+        source = AlwaysLostSource()
+        with tempfile.TemporaryDirectory() as artifact_dir, mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(False, "launch failed")
+        ):
+            result = fetch_job_details(
+                [{"job_id": "j1", "jd": ""}], source, artifact_dir=artifact_dir
+            )
+
+        self.assertTrue(result["hard_stop"], result)
+        self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
+        self.assertEqual(source.calls, 1, "自动启动失败必须直接暂停，不重复启动")
+
+    def test_partial_cdp_loss_retries_only_lost_entries(self):
+        from webui.pipeline_exec import fetch_job_details
+        from webui.source import SourceOutcome
+
+        class PartialLostSource:
+            def __init__(self):
+                self.calls = 0
+                self.jobs_seen = []
+
+            def fetch_details_batch(self, jobs, **_kwargs):
+                self.calls += 1
+                self.jobs_seen.append([job["job_id"] for job in jobs])
+                results = {}
+                for job in jobs:
+                    if self.calls == 1 and job["job_id"] == "j2":
+                        results[job["job_id"]] = SourceOutcome.failure(
+                            failed_code="source_cdp_unavailable", safe_log="lost")
+                    else:
+                        results[job["job_id"]] = SourceOutcome.success(
+                            detail={"jd": f"jd-{job['job_id']}"})
+                return results
+
+        source = PartialLostSource()
+        jobs = [{"job_id": "j1", "jd": ""}, {"job_id": "j2", "jd": ""}]
+        with tempfile.TemporaryDirectory() as artifact_dir, mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ):
+            result = fetch_job_details(jobs, source, artifact_dir=artifact_dir)
+
+        self.assertFalse(result["hard_stop"], result)
+        self.assertEqual(result["fetched"], 2)
+        self.assertEqual(result["jobs"][1]["jd"], "jd-j2")
+        self.assertEqual(source.calls, 2)
+        self.assertEqual(source.jobs_seen[1], ["j2"], "只重试失联条目")
 
     def test_unexpected_batch_exception_is_not_returned_as_empty_success(self):
         from webui.pipeline_exec import fetch_job_details
@@ -434,12 +533,14 @@ class JDBatchExceptionClassificationTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as artifact_dir, mock.patch(
             "webui.pipeline_exec.load_advanced_settings", return_value=settings
-        ), mock.patch("webui.pipeline_exec.time.sleep"):
+        ), mock.patch("webui.pipeline_exec.time.sleep"), mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ):
             result = fetch_job_details(jobs, source, artifact_dir=artifact_dir)
 
         self.assertTrue(result["hard_stop"], result)
         self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
-        self.assertEqual(source.calls, 1, "CDP 断开后不得启动下一批 JD")
+        self.assertEqual(source.calls, 2, "自动重启一次后仍失联，必须暂停且不得启动下一批 JD")
 
     def test_captcha_required_outcome_stops_before_next_batch(self):
         from webui.pipeline_exec import fetch_job_details
@@ -1956,8 +2057,8 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(response.get_json()["error"], "non_pending_job_ids")
         submit.assert_not_called()
 
-    def test_ai_fine_flags_merged_into_job_caveats(self):
-        """精筛 flags（岗位靠谱程度提醒）合并进结果 job 的 caveats 列表。"""
+    def test_ai_fine_flags_independent_field_in_job(self):
+        """精筛 flags（B033 靠谱判定）独立写入结果 job 的 flags 字段，不进 caveats。"""
         scrape_task_id = "fine-flags-source"
         self._install_scrape_source(scrape_task_id, [{
             "job_id": "job-1", "title": "后端工程师",
@@ -1979,7 +2080,10 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "verdicts": {"job-1": {
                         "verdict": "match", "reason": "匹配",
                         "caveats": ["优先英语六级"],
-                        "flags": ["需留意：疑似中介/劳务派遣", "薪资含销售提成"],
+                        "flags": [
+                            {"code": "B1", "level": "medium", "reason": "标题含无责底薪"},
+                            {"code": "F3", "level": "medium", "reason": "试用期未写明"},
+                        ],
                     }},
                 }):
             response = self._post_ai_screen(scrape_task_id)
@@ -1989,10 +2093,10 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(finished["status"], "completed", finished)
         job = next(j for j in finished["result"]["jobs"] if j["job_id"] == "job-1")
         self.assertEqual(job["verdict"], "match")
-        # flags 并入软性要求提醒列表（排在原 caveats 之后）
-        self.assertEqual(
-            job["caveats"],
-            ["优先英语六级", "需留意：疑似中介/劳务派遣", "薪资含销售提成"])
+        # flags 独立字段透传前端（详情页高危红/中危黄），不并入 caveats
+        self.assertEqual(job["caveats"], ["优先英语六级"])
+        self.assertEqual(len(job["flags"]), 2)
+        self.assertTrue(all(f["level"] == "medium" for f in job["flags"]))
 
     def test_main_jd_hard_stop_persists_each_job_reason_before_return(self):
         scrape_task_id = "main-jd-hard-stop-source"
@@ -2876,7 +2980,9 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertFalse(response.get_json()["resuming"])
-        self.assertEqual(submit.call_args.args[-1], "")
+        # _run_ai_screen_task(task_id, screening_fields, profile_summary,
+        # scrape_task_id, resume_from_run_id, profile_facts)
+        self.assertEqual(submit.call_args.args[5], "")
 
     def test_new_ai_screen_inherits_restart_interrupted_checkpoint(self):
         """服务重启打断的 interrupted（error_code=restart）可被重新开始继承断点。"""
@@ -2914,7 +3020,9 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertTrue(response.get_json()["resuming"])
         self.assertNotEqual(response.get_json()["task_id"], interrupted_run_id)
-        self.assertEqual(submit.call_args.args[-1], interrupted_run_id)
+        # _run_ai_screen_task(task_id, screening_fields, profile_summary,
+        # scrape_task_id, resume_from_run_id, profile_facts)
+        self.assertEqual(submit.call_args.args[5], interrupted_run_id)
         self.assertEqual(
             self.store.get_screening_run(interrupted_run_id)["status"], "interrupted")
 
@@ -2953,7 +3061,9 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertTrue(response.get_json()["resuming"])
-        self.assertEqual(submit.call_args.args[-1], interrupted_run_id)
+        # _run_ai_screen_task(task_id, screening_fields, profile_summary,
+        # scrape_task_id, resume_from_run_id, profile_facts)
+        self.assertEqual(submit.call_args.args[5], interrupted_run_id)
         self.assertIn(scrape_task_id, self.app.config["PIPELINE_TASKS"])
         self.assertEqual(
             self.store.get_screening_run(interrupted_run_id)["status"], "interrupted")
@@ -3018,7 +3128,9 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
             first = self.client.post("/api/ai-screen", json=payload, headers=self.headers)
             self.assertEqual(first.status_code, 200, first.get_json())
             self.assertTrue(first.get_json()["resuming"])
-            self.assertEqual(submit.call_args.args[-1], interrupted_run_id)
+            # _run_ai_screen_task(task_id, screening_fields, profile_summary,
+            # scrape_task_id, resume_from_run_id, profile_facts)
+            self.assertEqual(submit.call_args.args[5], interrupted_run_id)
             self.assertEqual(
                 self.store.get_screening_run(interrupted_run_id)["error_code"], "resumed")
             self.assertIsNone(self.store.latest_interrupted_screening_run())
@@ -3813,6 +3925,118 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
         self.assertFalse(result.get("hard_stop"), result)
         self.assertNotIn("风控", result.get("error", ""))
         self.assertNotIn("IP", result.get("error", ""))
+
+    def test_list_cdp_lost_restarts_and_resumes_current_combo(self):
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        class RecoverableListSource:
+            platform = "boss"
+
+            def __init__(self):
+                self.calls = 0
+                self.plan_items = []
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+            def fetch_list(self, plan_item, *, on_page_completed=None):
+                self.calls += 1
+                self.plan_items.append(dict(plan_item))
+                if self.calls == 1:
+                    if on_page_completed is not None:
+                        on_page_completed({
+                            "kind": "page_completed", "combo_key": "前端|上海",
+                            "keyword": "前端", "city": "上海", "page": 1,
+                            "target_pages": 2, "jobs_delta": 1, "jobs_count": 1,
+                            "has_more": True, "resume_page": 2, "last_completed_page": 1,
+                            "jobs_snapshot": [{"job_id": "j1", "title": "旧岗位"}],
+                        })
+                    return SourceOutcome.failure(
+                        failed_code="source_cdp_unavailable", safe_log="lost")
+                return SourceOutcome.success(
+                    jobs=[{"job_id": "j2", "title": "新岗位"}])
+
+        source = RecoverableListSource()
+        resume_pages = {}
+        resume_jobs = {}
+        with mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ), mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            result = run_search(
+                {"keyword": "前端", "city": ["上海"]}, source, pages=2,
+                sleeper=lambda _seconds: None, resume_pages=resume_pages,
+                resume_jobs=resume_jobs,
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(source.calls, 2)
+        self.assertEqual(source.plan_items[1]["start_page"], 2)
+        self.assertEqual(resume_pages["前端|上海"], 2)
+        self.assertEqual(resume_jobs["前端|上海"][0]["job_id"], "j1")
+
+    def test_list_cdp_lost_restart_failure_pauses(self):
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        class AlwaysLostListSource:
+            platform = "boss"
+
+            def __init__(self):
+                self.calls = 0
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+            def fetch_list(self, _plan_item, *, on_page_completed=None):
+                self.calls += 1
+                return SourceOutcome.failure(
+                    failed_code="source_cdp_unavailable", safe_log="lost")
+
+        source = AlwaysLostListSource()
+        with mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready",
+            side_effect=[(True, ""), (False, "launch failed")]
+        ), mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            result = run_search(
+                {"keyword": "前端", "city": ["上海"]}, source, pages=1,
+                sleeper=lambda _seconds: None,
+            )
+
+        self.assertTrue(result["hard_stop"], result)
+        self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
+        self.assertEqual(source.calls, 1)
+
+    def test_list_cdp_lost_restart_success_still_lost_pauses(self):
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        class StillLostListSource:
+            platform = "boss"
+
+            def __init__(self):
+                self.calls = 0
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+            def fetch_list(self, _plan_item, *, on_page_completed=None):
+                self.calls += 1
+                return SourceOutcome.failure(
+                    failed_code="source_cdp_unavailable", safe_log="lost")
+
+        source = StillLostListSource()
+        with mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ), mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            result = run_search(
+                {"keyword": "前端", "city": ["上海"]}, source, pages=1,
+                sleeper=lambda _seconds: None,
+            )
+
+        self.assertTrue(result["hard_stop"], result)
+        self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
+        self.assertEqual(source.calls, 2, "自动重启一次后仍失联，必须暂停且不循环")
 
     def test_scrape_success_persists_terminal_status_and_combo_progress(self):
         app, temp = _make_app()

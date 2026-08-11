@@ -578,4 +578,61 @@ describe("JobWorkspace", () => {
     expect(wrapper.get('[data-testid="job-detail"]').text()).toContain("初级前端");
     expect(wrapper.findAll('[data-testid="job-row"]')[0].classes()).toContain("selected");
   });
+
+  it("B033: high flag marks detail box red and shows ⚠ before reason", () => {
+    const flagged = [{
+      job_id: "job-h",
+      title: "高薪岗位",
+      company: "某公司",
+      salary: "20-30K",
+      location: "上海",
+      jd: "岗位描述",
+      verdict: "not_match",
+      verdict_reason: "疑似骗局：要求先交培训费",
+      flags: [{ code: "C1", level: "high", reason: "要求先交培训费" }],
+    }] as JobItem[];
+    const wrapper = mount(JobWorkspace, { props: { jobs: flagged, emptyMessage: "暂无" } });
+    const box = wrapper.get(".verdict-reason");
+    expect(box.classes()).toContain("flag-danger");
+    expect(box.text()).toContain("⚠");
+    expect(box.text()).toContain("要求先交培训费");
+    expect(wrapper.findAll('[data-testid^="flag-high-"]')).toHaveLength(1);
+    // 岗位条标题前 ⚠（红色）
+    expect(wrapper.get(".job-row-flag").classes()).toContain("high");
+  });
+
+  it("B033: medium flags render in soft-requirements box with yellow ⚠ and no row mark conflict", () => {
+    const flagged = [{
+      job_id: "job-m",
+      title: "销售岗",
+      company: "某公司",
+      salary: "8-12K",
+      location: "上海",
+      jd: "岗位描述",
+      verdict: "match",
+      verdict_reason: "合适",
+      caveats: ["优先英语六级"],
+      flags: [
+        { code: "B1", level: "medium", reason: "标题含无责底薪" },
+        { code: "F3", level: "medium", reason: "试用期未写明" },
+      ],
+    }] as JobItem[];
+    const wrapper = mount(JobWorkspace, { props: { jobs: flagged, emptyMessage: "暂无" } });
+    const box = wrapper.get(".caveats-list");
+    expect(box.classes()).toContain("flag-unsure");
+    expect(box.text()).toContain("标题含无责底薪");
+    expect(wrapper.findAll('[data-testid^="flag-medium-"]')).toHaveLength(2);
+    // 岗位条 ⚠ 为黄色（medium）
+    expect(wrapper.get(".job-row-flag").classes()).toContain("medium");
+    // AI 判断说明盒子不高危标红
+    expect(wrapper.get(".verdict-reason").classes()).not.toContain("flag-danger");
+  });
+
+  it("B033: jobs without flags render no ⚠ mark anywhere", () => {
+    const plainJobs = [{ ...jobs[0], verdict_reason: "技能契合" }] as JobItem[];
+    const wrapper = mount(JobWorkspace, { props: { jobs: plainJobs, emptyMessage: "暂无" } });
+    expect(wrapper.find(".job-row-flag").exists()).toBe(false);
+    expect(wrapper.find(".flag-reason").exists()).toBe(false);
+    expect(wrapper.get(".verdict-reason").classes()).not.toContain("flag-danger");
+  });
 });

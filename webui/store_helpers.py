@@ -99,6 +99,7 @@ def _build_pipeline_result_rows(rows: list) -> tuple[list, list]:
             verdict = raw_verdict
             verdict_reason = row.get("verdict_reason") or ""
             caveats = _decode_json(row.get("caveats_json"), [])
+            flags = _decode_json(row.get("flags_json"), [])
             try:
                 parsed = json.loads(raw_verdict)
                 if isinstance(parsed, dict):
@@ -106,6 +107,8 @@ def _build_pipeline_result_rows(rows: list) -> tuple[list, list]:
                     verdict_reason = str(parsed.get("reason") or verdict_reason)
                     if isinstance(parsed.get("caveats"), list):
                         caveats = parsed["caveats"]
+                    if isinstance(parsed.get("flags"), list):
+                        flags = parsed["flags"]
             except (json.JSONDecodeError, TypeError):
                 pass
             jobs.append({
@@ -126,6 +129,7 @@ def _build_pipeline_result_rows(rows: list) -> tuple[list, list]:
                 "verdict": verdict,
                 "verdict_reason": verdict_reason,
                 "caveats": caveats,
+                "flags": flags,
             })
     return jobs, dropped
 

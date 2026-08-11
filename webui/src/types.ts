@@ -228,6 +228,8 @@ export interface JobItem {
   verdict?: "match" | "not_match" | "uncertain" | string;
   verdict_reason?: string;
   caveats?: string[];
+  /** 岗位靠谱判定（B033）：code/level/reason 结构化 flags，高危红 / 中危黄。 */
+  flags?: { code: string; level: "high" | "medium"; reason: string }[];
   reason?: string;
   interest_state?: string;
   reject_state?: string;

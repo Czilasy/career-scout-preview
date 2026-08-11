@@ -672,9 +672,11 @@ class PipelineFeedbackRegressionTests(unittest.TestCase):
 
         self.assertEqual(accepted.status_code, 200)
         submit.assert_called_once()
-        # 任务函数签名末两位是 (scrape_task_id, resume_from_run_id)
-        self.assertEqual(submit.call_args.args[-2], "scrape-finished")
-        self.assertEqual(submit.call_args.args[-1], "")  # 无上次进度则不续跑
+        # _run_ai_screen_task(task_id, screening_fields, profile_summary,
+        # scrape_task_id, resume_from_run_id, profile_facts)
+        # submit 的 args[0] 是函数本身
+        self.assertEqual(submit.call_args.args[4], "scrape-finished")
+        self.assertEqual(submit.call_args.args[5], "")  # 无上次进度则不续跑
 
     def test_ai_screen_restores_user_finished_parent_from_db(self):
         store = self.app.config["TASK_STORE"]
@@ -718,7 +720,7 @@ class PipelineFeedbackRegressionTests(unittest.TestCase):
                 "scrape_task_id": scrape_id,
             })
         self.assertEqual(accepted.status_code, 200, accepted.get_json())
-        self.assertEqual(submit.call_args.args[-2], scrape_id)
+        self.assertEqual(submit.call_args.args[4], scrape_id)
 
 
 class SourceErrorClassificationTests(unittest.TestCase):
@@ -5400,6 +5402,38 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         self.assertEqual(data["semantic"]["experience"], ["3-5年"])
         self.assertNotIn("company_nature", data["semantic"])
 
+    def test_analyze_resume_passes_through_profile_facts(self):
+        """B033：简历分析响应透传 profile_facts（画像事实链路源头）。"""
+        import io
+        from webui import app as app_module
+        facts = {
+            "core_skills": ["Python", "Django"],
+            "projects": [{"name": "订单系统", "role": "后端开发"}],
+            "job_type": "全职",
+            "languages": ["英语"],
+        }
+        fields = {
+            "keyword": [{"word": "Python 后端", "recommended": True}],
+            "city": ["上海"], "salary": ["406"], "experience": ["105"],
+            "degree": ["203"], "industry": ["1001"], "scale": ["303"],
+            "stage": ["804"], "profile_summary": "3年Python后端",
+            "profile_facts": facts,
+        }
+        store = self.app.config["TASK_STORE"]
+        with mock.patch.object(store, "get_ai_settings", return_value={
+            "is_configured": True, "endpoint_url": "https://api.example.com", "model": "test",
+        }), mock.patch.object(store, "get_credential_ref", return_value="ref"), \
+                mock.patch.object(app_module.ai_service, "retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.analyze_resume_to_fields", return_value=fields):
+            resp = self.client.post(
+                "/api/analyze-resume",
+                data={"file": (io.BytesIO(b"resume"), "resume.txt"), "platform": "boss"},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["fields"]["profile_facts"], facts)
+
     def test_analyze_resume_zhilian_projects_company_nature_and_drops_stage(self):
         """智联简历分析返回 company_nature 语义，不出现 stage。"""
         import io
@@ -6522,6 +6556,7 @@ class AutoScreenChainTests(unittest.TestCase):
                 "auto_screen": True,
                 "auto_screen_fields": {"salary": ["406"]},
                 "auto_screen_profile": "Python 后端候选人",
+                "auto_screen_facts": {"core_skills": ["Python"], "job_type": "全职"},
             })
         self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
         return resp.get_json()["task_id"]
@@ -6539,6 +6574,7 @@ class AutoScreenChainTests(unittest.TestCase):
                 "auto_screen": bool(auto_screen),
                 "auto_screen_fields": {"salary": ["406"]},
                 "auto_screen_profile": "Python 后端候选人",
+                "auto_screen_facts": {"core_skills": ["Python"], "job_type": "全职"},
             },
         )
         self.store.save_scrape_combo_result(run_id, "kw|city", jobs, ["kw|city"])
@@ -6553,6 +6589,11 @@ class AutoScreenChainTests(unittest.TestCase):
         self.assertTrue(params["auto_screen"])
         self.assertEqual(params["auto_screen_fields"], {"salary": ["406"]})
         self.assertEqual(params["auto_screen_profile"], "Python 后端候选人")
+        self.assertEqual(
+            params["auto_screen_facts"],
+            {"core_skills": ["Python"], "job_type": "全职"},
+            "B033：一键任务必须冻结画像事实快照，供刷新后自动接续",
+        )
         task = self.app.config["PIPELINE_TASKS"][task_id]
         self.assertTrue(task["auto_screen"])
         data = self.client.get("/api/latest-running-task").get_json()
@@ -6630,6 +6671,11 @@ class AutoScreenChainTests(unittest.TestCase):
         self.assertEqual(data["scrape_task_id"], run_id)
         self.assertEqual(data["frozen_filters"], {"salary": ["406"]})
         self.assertEqual(data["profile_summary"], "Python 后端候选人")
+        self.assertEqual(
+            data["profile_facts"],
+            {"core_skills": ["Python"], "job_type": "全职"},
+            "B033：auto_screen 恢复分支必须透传画像事实快照",
+        )
         self.assertEqual(data["scraped_count"], 1)
         # 消费后刷新不再恢复自动接续。
         self.client.post("/api/ai-screen", json={
@@ -6639,6 +6685,33 @@ class AutoScreenChainTests(unittest.TestCase):
         })
         data = self.client.get("/api/latest-running-task").get_json()
         self.assertFalse(data["has_task"])
+
+    def test_latest_running_task_paused_returns_profile_fields(self):
+        """B033：paused 分支恢复时必须返回画像文本与画像事实快照。"""
+        run_id = "paused-screen"
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={
+                "platform": "boss",
+                "scrape_task_id": "scrape-parent",
+                "profile_summary": "3年Python后端",
+                "profile_facts": {"core_skills": ["Python"], "job_type": "全职"},
+            },
+        )
+        self.store.update_screening_run(run_id, status="running")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="ai_rough",
+            error_code="source_blocked", error_reason="验证码",
+        )
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["status"], "paused")
+        self.assertEqual(data["profile_summary"], "3年Python后端")
+        self.assertEqual(
+            data["profile_facts"],
+            {"core_skills": ["Python"], "job_type": "全职"},
+            "B033：paused 恢复分支必须透传画像事实，否则续跑退化为两通道",
+        )
 
     def test_execute_search_cancel_clears_flag(self):
         task_id = self._start_auto_search()

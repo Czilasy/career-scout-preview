@@ -273,6 +273,7 @@ const STAGE_LABELS: Record<string, string> = {
   preflight: "登录检查",
   searching: "列表抓取",
   combo_done: "列表抓取",
+  page_done: "列表抓取",
   combo_failed: "组合失败",
   waiting: "防限流等待",
   risk_warning: "风险提示",
@@ -331,7 +332,7 @@ const scrapeCountState = computed(() => {
   if (stage.value === "combo_done") {
     return { completed: comboCurrent, running: 0, unstarted: Math.max(0, comboTotal - comboCurrent) };
   }
-  if (["searching", "waiting"].includes(stage.value)) {
+  if (["searching", "waiting", "page_done"].includes(stage.value)) {
     const completed = Math.min(comboTotal, comboCurrent);
     const running = completed < comboTotal ? 1 : 0;
     return { completed, running, unstarted: Math.max(0, comboTotal - completed - running) };

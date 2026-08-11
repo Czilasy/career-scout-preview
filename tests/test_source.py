@@ -1960,6 +1960,92 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertTrue(all(o.ok for o in results.values()))
 
+    def test_list_empty_without_events_maps_to_cdp_lost(self):
+        """退出码 0 + 0 结果 + 0 事件：列表阶段视为浏览器/CDP 失联。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_empty_lost.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+
+        def fake_run(**kwargs):
+            self._write_json(kwargs["output_path"], {"jobs": []})
+            return {"list_data": {"jobs": []}, "details": None}
+
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic",
+                               side_effect=fake_run), \
+                mock.patch.object(source.breaker, "record_signal") as m_signal:
+            outcome = source.fetch_list(plan_item)
+
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_cdp_unavailable")
+        self.assertIn("empty_batch_no_events_cdp_lost", outcome.safe_log)
+        m_signal.assert_called_once_with("source_cdp_unavailable")
+
+    def test_list_empty_with_page_event_remains_success(self):
+        """有页级事件佐证的真实空结果不被误判为浏览器失联。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_empty_ok.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+
+        def fake_run(**kwargs):
+            self._write_json(kwargs["output_path"], {"jobs": []})
+            events_path = kwargs.get("list_events_output")
+            if events_path:
+                pathlib.Path(events_path).write_text(
+                    _json_for_inprocess.dumps({
+                        "kind": "page_completed", "combo_key": "AI|上海",
+                        "keyword": "AI", "city": "上海", "page": 1,
+                        "target_pages": 1, "jobs_delta": 0, "jobs_count": 0,
+                        "has_more": False, "resume_page": 2, "last_completed_page": 1,
+                    }) + "\n", encoding="utf-8")
+            return {"list_data": {"jobs": []}, "details": None}
+
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic",
+                               side_effect=fake_run):
+            outcome = source.fetch_list(plan_item)
+
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.jobs, [])
+
+    def test_detail_batch_empty_without_events_maps_to_cdp_lost(self):
+        """JD 批次退出码 0 + 0 结果 + 0 事件：统一映射 source_cdp_unavailable。"""
+        source = self._make_source()
+        detail_path = str(self.artifact_root / "batch_empty_lost.json")
+        jobs = [
+            {"job_id": "j1", "source_url": "https://www.zhipin.com/job/1",
+             "job_link": "https://www.zhipin.com/job/1"},
+        ]
+
+        def fake_scrape_details(*_args, **_kwargs):
+            self._write_json(_kwargs["output_path"], [])
+            return []
+
+        with mock.patch.object(_boss_for_inprocess, "scrape_details",
+                               side_effect=fake_scrape_details), \
+                mock.patch.object(source.breaker, "record_signal") as m_signal:
+            results = source.fetch_details_batch(jobs, detail_output_path=detail_path)
+
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results["j1"].ok)
+        self.assertEqual(results["j1"].failed_code, "source_cdp_unavailable")
+        self.assertIn("empty_batch_no_events_cdp_lost", results["j1"].safe_log)
+        m_signal.assert_called_once_with("source_cdp_unavailable")
+
     # ---- 异常映射 ----------------------------------------------------
 
     def test_cdp_unavailable_maps_to_returncode_2(self):

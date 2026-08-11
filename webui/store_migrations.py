@@ -103,6 +103,8 @@ class StoreMigrationsMixin:
             self._migration_029()
         if current < 30:
             self._migration_030()
+        if current < 31:
+            self._migration_031()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -2050,6 +2052,34 @@ class StoreMigrationsMixin:
                 "VALUES (30, ?, 'multi-round history archived_at')",
                 (_now(),),
             )
+
+    def _migration_031(self):
+        """Add hidden profile facts and structured screening flags (B033).
+
+        - screening_runs.profile_facts_json: 简历画像事实快照（隐藏层，精筛三通道输入）
+        - screening_results.flags_json: 岗位靠谱判定结构化 flags（[{code,level,reason}]）
+
+        两列均可空；存量行保持 NULL = 老轮次/无 flags，不做数据回填。
+        """
+        with self._connection() as conn:
+            run_cols = {row["name"] for row in conn.execute(_SQL_SCREENING_RUN_COLUMNS)}
+            if "profile_facts_json" not in run_cols:
+                conn.execute(
+                    "ALTER TABLE screening_runs ADD COLUMN profile_facts_json TEXT"
+                )
+            res_cols = {row["name"] for row in conn.execute(
+                "PRAGMA table_info(screening_results)"
+            )}
+            if "flags_json" not in res_cols:
+                conn.execute(
+                    "ALTER TABLE screening_results ADD COLUMN flags_json TEXT"
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (31, ?, 'profile facts and structured screening flags')",
+                (_now(),),
+            )
+
     # -- migration 27 helpers ---------------------------------------------
 
     @staticmethod
