@@ -256,7 +256,7 @@ class ScrapeOnlyStoreMixin:
                 "(id, run_id, platform, platform_job_id, job_id, verdict, created_at, title, company, salary, "
                 " location, tags, jd, source_url, verdict_reason, caveats_json, flags_json, is_dropped, "
                 " experience, degree, extra_json) "
-                "VALUES (?, ?, ?, ?, ?, 'dropped', ?, ?, ?, ?, ?, ?, '', ?, ?, '[]', 1, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, 'dropped', ?, ?, ?, ?, ?, ?, '', ?, ?, '[]', '[]', 1, ?, ?, ?)",
                 (
                     str(uuid.uuid4()), str(run_id), platform,
                     str(job.get("platform_job_id") or job.get("job_id") or ""),

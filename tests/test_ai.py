@@ -1741,10 +1741,11 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
             match_jds(jobs, "AI应用开发", "https://x", "key", batch_size=1)
 
         prompt = call.call_args.args[2][0]["content"]
-        self.assertIn("判定从宽", prompt)
+        self.assertIn("匹配从宽", prompt)
+        self.assertIn("判断是参考不是法律", prompt)
         self.assertIn("客服、讲师、销售、运营、内容/漫剧制作", prompt)
         self.assertIn("本身不得作为 match=false 的理由", prompt)
-        self.assertIn("硬性条件不满足时排除", prompt)
+        self.assertIn("硬性项明确达不到才排除", prompt)
         self.assertIn("宁可保留给用户人工确认", prompt)
 
     def test_screen_jobs_system_prompt_ignores_job_category_for_dropping(self):
@@ -1756,7 +1757,8 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
 
         prompt = call.call_args.args[2][0]["content"]
         self.assertIn("岗位名称或类别（如客服、讲师、销售、内容制作、运营等）不得单独作为剔除理由", prompt)
-        self.assertIn("粗筛只依据硬性字段", prompt)
+        self.assertIn("字段为空或未列出 = 不限", prompt)
+        self.assertIn("不得按该维度剔除", prompt)
 
     def test_screen_jobs_prompt_has_profile_widening_rule(self):
         """初筛 prompt 含求职画像放宽规则（B033，初筛判定逻辑本体不动）。"""
@@ -1772,7 +1774,7 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
         prompt = call.call_args.args[2][0]["content"]
         self.assertIn("求职画像放宽", prompt)
         self.assertIn("以画像表述为准放宽对应判断", prompt)
-        self.assertIn("候选人画像：3年经验，东莞、深圳都可以", prompt)
+        self.assertIn("候选人画像（仅用于放宽，不作为硬条件）：3年经验，东莞、深圳都可以", prompt)
 
     def test_match_jds_prompt_three_channels(self):
         """精筛 prompt 三通道：求职意愿 > 筛选条件 > 画像事实；未体现不得推断。"""
@@ -1799,7 +1801,7 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
         self.assertIn("【第二层·筛选条件】", prompt)
         self.assertIn("【第三层·画像事实】", prompt)
         self.assertIn("核心技能：Python", prompt)
-        self.assertIn("未体现/缺失的维度不得推断", prompt)
+        self.assertIn("默认匹配，不得写'候选人未知'", prompt)
         self.assertIn("以意愿为准", prompt)
         # 特征清单已并入 prompt，且 flags 为必填字段
         self.assertIn("岗位靠谱判定", prompt)
@@ -1969,8 +1971,13 @@ class ProfileFactsTests(unittest.TestCase):
         self.assertIn("core_skills", prompt)
         self.assertIn("job_type", prompt)
         self.assertIn("未体现", prompt)
-        self.assertIn("3-5句", prompt)
-        self.assertIn("禁止评价性概括", prompt)
+        self.assertIn("自然语言", prompt)
+        self.assertIn("简历里明确写了就填，没写的字段留空", prompt)
+        self.assertIn("简历写了什么就写什么，没写的不补", prompt)
+        self.assertIn("projects 只列简历明确的项目/工作经历", prompt)
+        self.assertNotIn("事实清单式", prompt)
+        self.assertNotIn("第一句写工作年限", prompt)
+        self.assertNotIn("禁止评价性概括", prompt)
 
 
 class AIMeasurementEventTests(unittest.TestCase):

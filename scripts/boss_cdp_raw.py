@@ -3090,6 +3090,7 @@ def iter_chrome_process_commands():
         try:
             r = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps_script],
+                stdin=subprocess.DEVNULL,
                 capture_output=True, encoding="utf-8", errors="replace", timeout=5,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
@@ -3117,7 +3118,7 @@ def iter_chrome_process_commands():
         return processes
 
     try:
-        r = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
     except Exception:
         return []
 
@@ -3171,7 +3172,7 @@ def terminate_process(pid, force=False):
         if force:
             cmd.append("/F")
         subprocess.run(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+            cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return
@@ -3319,6 +3320,7 @@ def launch_chrome(cmd):
     except Exception:
         stderr_fh = subprocess.DEVNULL
     kwargs = {
+        "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
         "stderr": stderr_fh,
     }

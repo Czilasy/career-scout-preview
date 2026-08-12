@@ -41,7 +41,7 @@
 
 **Purpose**: AI 分析一次产出筛选条件 + 画像事实 + 求职画像。
 
-- [ ] T005 [P] 修改 `webui/ai.py` 的 `analyze_resume_to_fields`：system prompt 增加画像事实提取规则（core_skills 列表 / projects[{name,role,stack,summary}] / job_type 四值 / languages 列表，缺失标"未体现"，禁止推断编造）；求职画像生成规则升级为 3-5 句事实清单式（工作年限精确化、学历、期望城市/薪资、核心技能、项目事实，禁止"能独立完成"类评价性概括）
+- [ ] T005 [P] 修改 `webui/ai.py` 的 `analyze_resume_to_fields`：system prompt 增加画像事实提取规则（core_skills 列表 / projects[{name,role,stack,summary}] / job_type 四值 / languages 列表，缺失标"未体现"，禁止推断编造）；求职画像生成规则保持自然语言，3-5 句仅作为长度上限，不按固定字段逐句填写、不写成事实清单；结构化字段一律由隐藏的画像事实承担
 - [ ] T006 修改 `webui/ai.py`：新增 `_validate_profile_facts` 宽松验证（类型 + 长度 + job_type 四值枚举；无效项丢弃不阻塞），`analyze_resume_to_fields` 返回值增加 `profile_facts` 字段
 
 **Checkpoint**: 构造含/不含学历薪资的简历文本，验证画像事实提取与"未体现"标注、宽松验证丢弃无效项。
@@ -73,7 +73,7 @@
 
 **Purpose**: 全链路覆盖与门禁。
 
-- [ ] T016 后端测试：`tests/test_ai.py` 增加画像事实提取/宽松验证/求职画像规则、精筛三通道 prompt 契约、flags 分级判定（含高危强制 not_match、中危降级 caveats、必填字段缺失容错）；`tests/test_workbench_api.py`（若 API 透传 flags）与迁移相关测试
+- [ ] T016 后端测试：`tests/test_ai.py` 增加画像事实提取/宽松验证/自然语言求职画像 prompt 契约（断言不出现"事实清单式"与固定逐句字段）、精筛三通道 prompt 契约（含老轮无画像事实退化）、flags 分级判定（含高危强制 not_match、中危降级 caveats、必填字段缺失容错）；`tests/test_workbench_api.py`（若 API 透传 flags）与迁移相关测试
 - [ ] T017 前端测试：`webui/src/components/__tests__/JobWorkspace.spec.ts` 覆盖详情红/黄渲染与岗位条 ⚠；`webui/src/views/__tests__/DiscoveryView.spec.ts` 覆盖 flags 回写合并
 - [ ] T018 收尾：`uv run python -m unittest tests.test_repo_hygiene`、后端聚焦测试、前端测试、`npm run build` 全绿；检查 `git status` 无意外文件；README 若有用户可感知能力变化同步更新
 

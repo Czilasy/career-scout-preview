@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 import warnings
+import unittest.mock
 
 from webui.process_executor import ArtifactSpec, ScraperExecutor
 
@@ -23,6 +24,55 @@ class ScraperExecutorTests(unittest.TestCase):
         self.assertTrue(result.ok)
         resource_warnings = [w for w in caught if issubclass(w.category, ResourceWarning)]
         self.assertEqual(resource_warnings, [])
+
+    def test_execute_forces_devnull_stdin(self):
+        import subprocess as _sp
+        captured: dict = {}
+        original_popen = _sp.Popen
+
+        def fake_popen(command, **kwargs):
+            captured.update(kwargs)
+            return original_popen([sys.executable, "-c", "pass"], **kwargs)
+
+        with unittest.mock.patch("subprocess.Popen", fake_popen):
+            result = ScraperExecutor().execute(
+                [sys.executable, "-c", "pass"], timeout_seconds=5,
+            )
+        self.assertTrue(result.ok)
+        self.assertIs(captured.get("stdin"), _sp.DEVNULL)
+
+    def test_non_console_parent_venv_child_does_not_hang(self):
+        """Windows 回归：无控制台父进程启动 venv Python 不得因 stdin 假死。
+
+        此前 process_executor 未传 stdin，桌面壳（无控制台）启动抓取子进程时
+        Python 解释器启动阶段会阻塞在读 stdin，任务停在 0%。
+        """
+        if os.name != "nt":
+            self.skipTest("仅 Windows 有非控制台 stdin 语义")
+        import subprocess as _sp
+        project_root = pathlib.Path(__file__).resolve().parents[1]
+        venv_python = project_root / ".venv" / "Scripts" / "python.exe"
+        if not venv_python.is_file():
+            self.skipTest("项目 .venv/Scripts/python.exe 不存在")
+        program = (
+            "import sys\n"
+            "from webui.process_executor import ScraperExecutor\n"
+            f"result = ScraperExecutor().execute([{str(venv_python)!r}, '-c', 'print(123)'], timeout_seconds=10)\n"
+            "print('RESULT', result.returncode, result.failure_code, result.output_tail.replace(chr(10), '|'))\n"
+        )
+        proc = _sp.run(
+            [str(venv_python), "-c", program],
+            stdin=_sp.DEVNULL,
+            stdout=_sp.PIPE,
+            stderr=_sp.STDOUT,
+            text=True,
+            cwd=project_root,
+            creationflags=_sp.CREATE_NEW_PROCESS_GROUP | _sp.CREATE_NO_WINDOW,
+            timeout=15,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("RESULT 0 None", proc.stdout, proc.stdout)
+        self.assertIn("123", proc.stdout, proc.stdout)
 
     def test_success_returns_bounded_output_and_valid_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -7142,6 +7142,7 @@ def create_app(config=None):
                     ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
                      "-ExecutionPolicy", "Bypass", "-File", str(script)],
                     cwd=str(_updater_mod.DEFAULT_STATE_DIR),
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     # CREATE_NO_WINDOW：绝不弹 cmd/powershell 黑窗
                     creationflags=subprocess.CREATE_NO_WINDOW
@@ -7151,6 +7152,7 @@ def create_app(config=None):
                 subprocess.Popen(
                     [runner, str(script)],
                     cwd=str(_updater_mod.DEFAULT_STATE_DIR),
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     start_new_session=True,
                 )

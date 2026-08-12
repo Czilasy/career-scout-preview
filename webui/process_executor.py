@@ -62,6 +62,7 @@ class ScraperExecutor:
         popen_kwargs = {
             "cwd": os.fspath(cwd) if cwd is not None else None,
             "env": env,
+            "stdin": subprocess.DEVNULL,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.STDOUT,
             "text": False,
@@ -144,6 +145,7 @@ class ScraperExecutor:
             try:
                 subprocess.run(
                     ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                     timeout=5, check=False,

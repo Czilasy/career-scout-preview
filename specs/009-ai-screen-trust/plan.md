@@ -43,7 +43,7 @@
 *GATE: Must be completed before `/speckit-tasks`. User confirmed 2026-08-11 after review.*
 
 - **Allowed files**:
-  - `webui/ai.py`：简历分析 prompt 增加画像事实提取与求职画像规则升级（3-5 句、事实清单化、缺失显式标注）；`match_jds` 增加 criteria/profile_facts 参数并重构精筛 prompt（三通道 + 靠谱判定段落）；flags 解析改为必填 + 分级判定（高危≥1 / 中危≥2，废弃 `FLAGS_MIN_HITS`）；`screen_jobs` prompt 增加求职画像放宽规则（输入加 data 文本）。
+  - `webui/ai.py`：简历分析 prompt 增加画像事实提取与求职画像规则升级（自然语言，3-5 句仅长度上限，不固定字段、不事实清单化、缺失显式标注）；`match_jds` 增加 criteria/profile_facts 参数并重构精筛 prompt（三通道 + 靠谱判定段落）；flags 解析改为必填 + 分级判定（高危≥1 / 中危≥2，废弃 `FLAGS_MIN_HITS`）；`screen_jobs` prompt 增加求职画像放宽规则（输入加 data 文本）。
   - `webui/pipeline_exec.py`：仅 `match_jds` 调用处传 criteria（复用 `_build_criteria_description`）与 profile_facts；`screen_jobs` 调用处传求职画像文本；不做其它改动。
   - `webui/store_migrations.py`：仅新增 migration 031（两个列）。
   - `webui/store.py`：仅 screening_runs/screening_results 的 INSERT 增加新列写入、读取路径增加 flags 字段；不新增业务方法。

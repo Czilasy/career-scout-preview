@@ -166,6 +166,37 @@ class ScrapeOnlyStoreTests(unittest.TestCase):
         )
         self.assertIsNone(self.store.get_screening_run("missing-run"))
 
+    def test_upgrade_scraped_run_with_dropped_jobs_rewrites_history(self):
+        run_id = self.store.save_scraped_only_snapshot(
+            {"ok": True, "jobs": _scrape_jobs(2), "dropped": [], "total_scraped": 2},
+            {"platform": "boss"}, scrape_task_id="scrape-1", platform="boss",
+        )
+        jobs = _screened_jobs(1)
+        jobs[0]["verdict"] = "match"
+        dropped = _scrape_jobs(2)[1:]
+        dropped[0]["reason"] = "粗筛淘汰"
+        self.store.upgrade_scraped_run(
+            run_id,
+            {
+                "ok": True, "jobs": jobs, "dropped": dropped,
+                "total_scraped": 2, "total_kept": 1, "total_dropped": 1,
+            },
+            {"platform": "boss"}, status="done", platform="boss",
+        )
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["status"], "done")
+        self.assertEqual(run["match_count"], 1)
+        self.assertEqual(run["total_dropped"], 1)
+        self.assertEqual([r["id"] for r in self.store.list_history_rounds("boss")], [run_id])
+
+        with self.store._connection() as conn:
+            rows = conn.execute(
+                "SELECT verdict, is_dropped FROM screening_results WHERE run_id = ?", (run_id,),
+            ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertIn({"verdict": "match", "is_dropped": 0}, [dict(r) for r in rows])
+        self.assertIn({"verdict": "dropped", "is_dropped": 1}, [dict(r) for r in rows])
+
     # -- 最新轮白名单 ----------------------------------------------------
 
     def test_scraped_only_is_latest_result_with_raw_status(self):
