@@ -1729,24 +1729,28 @@ class ScreenJobsTruncationTests(unittest.TestCase):
 
 
 class AIScreeningPromptPolicyTests(unittest.TestCase):
-    """粗筛/精筛提示词必须保持“从宽保留、硬性条件才排除”的策略。"""
+    """粗筛/精筛提示词：候选人方向为锚，硬性条件才排除，显式放宽才覆盖默认。"""
 
-    def test_match_jds_system_prompt_keeps_near_match_job_categories(self):
+    def test_match_jds_system_prompt_uses_candidate_direction_as_anchor(self):
+        """精筛以候选人主业方向为锚：跨链路默认不匹配，显式放宽才覆盖。"""
         from webui.ai import match_jds
 
         jobs = [{"job_id": "job-001", "title": "AI产品客户成功", "jd": "服务AI客户"}]
         with patch("webui.ai.call_ai", return_value={
             "results": [{"i": 0, "match": True, "reason": "技能可迁移", "caveats": []}]
         }) as call:
-            match_jds(jobs, "AI应用开发", "https://x", "key", batch_size=1)
+            match_jds(jobs, "AI应用开发，只找正儿八经的应用开发", "https://x", "key", batch_size=1)
 
         prompt = call.call_args.args[2][0]["content"]
-        self.assertIn("匹配从宽", prompt)
         self.assertIn("判断是参考不是法律", prompt)
-        self.assertIn("客服、讲师、销售、运营、内容/漫剧制作", prompt)
-        self.assertIn("本身不得作为 match=false 的理由", prompt)
-        self.assertIn("硬性项明确达不到才排除", prompt)
-        self.assertIn("宁可保留给用户人工确认", prompt)
+        self.assertIn("匹配从宽只适用于候选人没有约束的维度", prompt)
+        self.assertIn("以候选人自己的主业方向为锚", prompt)
+        self.assertIn("明显跨链路的岗位默认 match=false", prompt)
+        self.assertIn("用户明确写'不限/都可以/接受xx'", prompt)
+        self.assertIn("以 JD 主责为准", prompt)
+        self.assertIn("不得把 AI 已识别出的方向冲突、硬性不满足只写进 caveats 后仍判 match", prompt)
+        self.assertNotIn("本身不得作为 match=false 的理由", prompt)
+        self.assertNotIn("行业、类别、技能不完全一致不排除", prompt)
 
     def test_screen_jobs_system_prompt_ignores_job_category_for_dropping(self):
         from webui.ai import screen_jobs
