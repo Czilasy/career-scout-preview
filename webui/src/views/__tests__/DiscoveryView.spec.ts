@@ -157,6 +157,7 @@ describe("DiscoveryView", () => {
     expect((pages.element as HTMLInputElement).value).toBe("3");
     expect((wrapper.get('[data-testid="detail-batch-size"]').element as HTMLInputElement).value).toBe("6");
 
+    await confirmProfile(wrapper, "3年Python后端候选人");
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
     expect(wrapper.get('[data-testid="custom-keyword"]').attributes()).toHaveProperty("disabled");
@@ -232,6 +233,7 @@ describe("DiscoveryView", () => {
 
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
+    await confirmProfileFromScreen(wrapper);
     const start = wrapper.get('[data-testid="start-ai-screen"]');
     expect(start.attributes("disabled")).toBeUndefined();
     expect(wrapper.find(".task-progress").exists()).toBe(false);
@@ -421,6 +423,7 @@ describe("DiscoveryView", () => {
     );
     expect(wrapper.find('[data-testid="start-ai-screen"]').exists()).toBe(false);
 
+    await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
 
@@ -968,6 +971,7 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="custom-city"]').setValue("上海");
     await wrapper.get('[data-testid="add-city"]').trigger("click");
     await flushPromises();
+    await confirmProfile(wrapper, "3年Python后端候选人");
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
 
@@ -1013,6 +1017,7 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="custom-city"]').setValue("上海");
     await wrapper.get('[data-testid="add-city"]').trigger("click");
     await flushPromises();
+    await confirmProfile(wrapper, "3年Python后端候选人");
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
 
@@ -1308,6 +1313,7 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="resume-consent"]').setValue(true);
     await wrapper.get('[data-testid="analyze-resume"]').trigger("click");
     await flushPromises();
+    await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-one-click"]').trigger("click");
     await flushPromises();
 
@@ -1572,6 +1578,7 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="custom-city"]').setValue("上海");
     await wrapper.get('[data-testid="add-city"]').trigger("click");
     await flushPromises();
+    await confirmProfile(wrapper, "3年Python后端候选人");
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
     const keywordCard = ".search-layout > .collapsible-card:first-child";
@@ -1620,6 +1627,7 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="custom-city"]').setValue("上海");
     await wrapper.get('[data-testid="add-city"]').trigger("click");
     await flushPromises();
+    await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
@@ -1671,6 +1679,7 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="custom-city"]').setValue("上海");
     await wrapper.get('[data-testid="add-city"]').trigger("click");
     await flushPromises();
+    await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
@@ -1785,6 +1794,7 @@ describe("DiscoveryView", () => {
 
     await wrapper.get('[data-testid="platform-segment-zhilian"]').trigger("click");
     await flushPromises();
+    await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
@@ -1847,6 +1857,7 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="custom-city"]').setValue("上海");
     await wrapper.get('[data-testid="add-city"]').trigger("click");
     await flushPromises();
+    await confirmProfile(wrapper, "3年Python后端候选人");
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="continue-to-screen"]').exists()).toBe(true);
@@ -1972,6 +1983,7 @@ describe("DiscoveryView", () => {
     await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
     await wrapper.get('[data-testid="add-keyword"]').trigger("click");
     await flushPromises();
+    await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
@@ -2150,6 +2162,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
     await flushPromises();
+    await confirmProfileFromScreen(wrapper);
     await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
     await flushPromises();
     const aiCall = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/ai-screen"));
@@ -2256,6 +2269,24 @@ describe("DiscoveryView", () => {
     await flushPromises();
   }
 
+  async function confirmProfile(wrapper: ReturnType<typeof mount>, text?: string) {
+    const input = wrapper.find('.profile-summary-input');
+    if (text !== undefined && input.exists()) {
+      await input.setValue(text);
+    }
+    const confirm = wrapper.find('[data-testid="profile-confirm"]');
+    if (confirm.exists()) await confirm.trigger("click");
+    await flushPromises();
+  }
+
+  async function confirmProfileFromScreen(wrapper: ReturnType<typeof mount>) {
+    await wrapper.findAll("button").find((b) => b.text().includes("广泛抓取"))!.trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="profile-confirm"]').trigger("click");
+    await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
+    await flushPromises();
+  }
+
   function oneClickBase(overrides: Record<string, (url: string, init?: RequestInit) => Promise<Response> | Response> = {}) {
     return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -2323,29 +2354,87 @@ describe("DiscoveryView", () => {
     expect(wrapper.get('.profile-summary-input').attributes("aria-invalid")).toBe("true");
 
     await wrapper.get('.profile-summary-input').setValue("  3年Python后端  ");
+    await wrapper.get('[data-testid="profile-confirm"]').trigger("click");
     await wrapper.get('[data-testid="start-one-click"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="one-click-confirm"]').exists()).toBe(true);
     vi.unstubAllGlobals();
   });
 
-  it("B032: start AI screen is blocked by a short profile while start scrape is not", async () => {
+  it("B032: short or unconfirmed profile blocks task entries and edits require re-confirmation", async () => {
     const fetchMock = oneClickBase({
       "/api/execute-search": () => response({ ok: true, task_id: "scrape-short" }),
       "/api/task-state/scrape-short": () => response({ status: "completed", progress: {}, logs: [] }),
+      "/api/ai-screen": () => response({ ok: true, task_id: "screen-short" }),
+      "/api/task-state/screen-short": () => response({ status: "completed", progress: {}, logs: [] }),
     });
     vi.stubGlobal("fetch", fetchMock);
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
     await oneClickSearch(wrapper);
+
     await wrapper.get('.profile-summary-input').setValue("短画像");
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/execute-search"))).toBe(false);
+
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/execute-search"))).toBe(false);
+
+    await wrapper.get('[data-testid="profile-confirm"]').trigger("click");
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/execute-search"))).toBe(true);
+
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("广泛抓取"))!.trigger("click");
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人（已调整）");
+    await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
     await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
     await flushPromises();
     expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(0);
+
+    await wrapper.findAll("button").find((b) => b.text().includes("广泛抓取"))!.trigger("click");
+    await wrapper.get('[data-testid="profile-confirm"]').trigger("click");
+    await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
+    await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
+    await flushPromises();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/ai-screen")).length).toBe(1);
+    vi.unstubAllGlobals();
+  });
+
+  it("B041: profile confirm button is red by default, turns gray on confirm, and resets on edit", async () => {
+    const fetchMock = oneClickBase();
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await oneClickSearch(wrapper);
+
+    const confirmBtn = wrapper.get('[data-testid="profile-confirm"]');
+    expect(confirmBtn.attributes("data-tip")).toContain("确认后 AI 精筛按当前画像判断");
+    expect(confirmBtn.classes()).not.toContain("confirmed");
+    expect(confirmBtn.attributes("aria-pressed")).toBe("false");
+    expect(wrapper.find(".profile-empty-hint").exists()).toBe(true);
+
+    await wrapper.get('.profile-summary-input').setValue("太短");
+    await confirmBtn.trigger("click");
+    await flushPromises();
+    expect(confirmBtn.classes()).not.toContain("confirmed");
+    expect(wrapper.get('[data-testid="profile-inline-error"]').text()).toContain("至少 10 个字");
+
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await confirmBtn.trigger("click");
+    await flushPromises();
+    expect(confirmBtn.classes()).toContain("confirmed");
+    expect(confirmBtn.attributes("aria-pressed")).toBe("true");
+
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人（调整）");
+    await flushPromises();
+    expect(confirmBtn.classes()).not.toContain("confirmed");
+    expect(confirmBtn.attributes("aria-pressed")).toBe("false");
     vi.unstubAllGlobals();
   });
 
@@ -2376,6 +2465,7 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="custom-city"]').setValue("上海");
     await wrapper.get('[data-testid="add-city"]').trigger("click");
     await flushPromises();
+    await confirmProfile(wrapper, "3年Python后端候选人");
     await wrapper.get('[data-testid="start-one-click"]').trigger("click");
     await flushPromises();
     expect(wrapper.get('[data-testid="one-click-old-result-hint"]').text()).toContain("将开始新一轮");
@@ -2433,6 +2523,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await oneClickSearch(wrapper);
     await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-one-click"]').trigger("click");
     await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
     await flushPromises();
@@ -2443,6 +2534,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await oneClickSearch(wrapper2);
     await wrapper2.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await confirmProfile(wrapper2);
     await wrapper2.get('[data-testid="start-one-click"]').trigger("click");
     await wrapper2.get('[data-testid="one-click-confirm"]').trigger("click");
     await flushPromises();
@@ -2462,6 +2554,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await oneClickSearch(wrapper);
     await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-one-click"]').trigger("click");
     await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
     await flushPromises();
@@ -2485,6 +2578,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await oneClickSearch(wrapper);
     await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-one-click"]').trigger("click");
     await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
     await flushPromises();
@@ -2505,6 +2599,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await oneClickSearch(wrapper);
     await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-one-click"]').trigger("click");
     await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
     await flushPromises();
@@ -2579,6 +2674,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await oneClickSearch(wrapper);
     await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-one-click"]').trigger("click");
     await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
     await flushPromises();
@@ -2597,6 +2693,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await oneClickSearch(wrapper);
     await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-one-click"]').trigger("click");
     await wrapper.get('[data-testid="one-click-confirm"]').trigger("click");
     await flushPromises();

@@ -1827,6 +1827,25 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
         self.assertIn("（无画像事实，按未体现处理）", prompt)
         self.assertIn("（无明确标准，宽松判断）", prompt)
 
+    def test_match_jds_prompt_marks_unconfirmed_preferences(self):
+        """精筛信息包对未确认的求职偏好显式标记，不静默默认匹配。"""
+        from webui.ai import match_jds
+
+        jobs = [{"job_id": "job-001", "title": "后端", "jd": "负责后端"}]
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{"i": 0, "match": True, "reason": "合适", "caveats": []}]
+        }) as call:
+            match_jds(jobs, "3年Python后端", "https://x", "key", batch_size=1)
+
+        prompt = call.call_args.args[2][0]["content"]
+        self.assertIn("【第四层·未确认偏好】", prompt)
+        self.assertIn("标记为未填写/未确认", prompt)
+        self.assertIn("只找全职，兼职/外包/按单结算不考虑", prompt)
+        self.assertIn("不接受996", prompt)
+        self.assertIn("不得当作默认匹配", prompt)
+        self.assertIn("求职类型未确认，JD 为兼职", prompt)
+        self.assertIn("默认匹配，不得写'候选人未知'", prompt)
+
 
 class FlagFeaturesTests(unittest.TestCase):
     """flag_features 特征清单与分级判定边界（B033 T004 Checkpoint）。"""
@@ -1929,6 +1948,13 @@ class ProfileFactsTests(unittest.TestCase):
         facts = _validate_profile_facts({"job_type": "未体现"})
         self.assertEqual(facts, {"job_type": "未体现"})
 
+    def test_validate_profile_facts_keeps_explicit_degree_only(self):
+        from webui.ai import _validate_profile_facts
+        facts = _validate_profile_facts({"degree": "本科"})
+        self.assertEqual(facts["degree"], "本科")
+        self.assertNotIn("degree", _validate_profile_facts({"degree": ""}))
+        self.assertNotIn("degree", _validate_profile_facts({"degree": 123}))
+
     def test_analyze_resume_extracts_profile_facts(self):
         from webui.ai import analyze_resume_to_fields
 
@@ -1982,6 +2008,28 @@ class ProfileFactsTests(unittest.TestCase):
         self.assertNotIn("事实清单式", prompt)
         self.assertNotIn("第一句写工作年限", prompt)
         self.assertNotIn("禁止评价性概括", prompt)
+
+    def test_analyze_resume_prompt_contains_preference_fill_rules(self):
+        """简历分析提示词包含偷偷塞字偏好规则与 5-10 句扩写约束。"""
+        from webui.ai import analyze_resume_to_fields
+
+        with patch("webui.ai.call_ai", return_value={
+            "keyword": [], "city": "", "profile_summary": "s",
+        }) as call, patch("webui.ai._resume_bytes_to_text", return_value="简历"):
+            analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
+
+        prompt = call.call_args.args[2][0]["content"]
+        self.assertIn("最终总共5-10句", prompt)
+        self.assertIn("随机挑1-3个自然补充", prompt)
+        self.assertIn("不一次全塞", prompt)
+        self.assertIn("只找全职，兼职/外包/按单结算不考虑", prompt)
+        self.assertIn("双休", prompt)
+        self.assertIn("远程全职可接受", prompt)
+        self.assertIn("不接受996", prompt)
+        self.assertIn("画像里已有该偏好就不重复", prompt)
+        self.assertIn("degree", prompt)
+        self.assertIn("项目经历只写项目方向、个人角色和所用技术栈", prompt)
+        self.assertIn("summary 可写职责、实现方式和量化成果", prompt)
 
 
 class AIMeasurementEventTests(unittest.TestCase):

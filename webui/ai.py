@@ -975,9 +975,14 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
         f"{field_options}\n\n"
         "另外输出两部分：\n"
         "- profile_facts: 简历里明确写出的客观事实（隐藏，不展示给用户），输出JSON对象：\n"
-        "  {\"core_skills\":[\"Python\",\"Django\"],\"projects\":[{\"name\":\"xx系统\",\"role\":\"后端开发\",\"stack\":\"Python/Django\",\"summary\":\"负责订单模块\"}],\"job_type\":\"全职|实习|兼职|未体现\",\"languages\":[\"英语\"]}\n"
-        "  core_skills 只列简历明确列出的技能（最多10个）；languages 只列简历明确的语言能力（无则空数组）；projects 只列简历明确的项目/工作经历，每项 name 必填、role/stack/summary 有则填（无项目则空数组）；job_type 只能输出 全职/实习/兼职/未体现 之一；简历没写的输出\"未体现\"或空数组，禁止推断、补全或编造\n"
-        "- profile_summary: 用自然语言写一段求职画像（给用户看、可编辑），像人写的段落，不列字段；可写求职方向、期望城市/薪资、求职类型、核心技能、项目经历和放宽意愿；简历写了什么就写什么，没写的不补\n"
+        "  {\"core_skills\":[\"Python\",\"Django\"],\"projects\":[{\"name\":\"xx系统\",\"role\":\"后端开发\",\"stack\":\"Python/Django\",\"summary\":\"负责订单模块\"}],\"job_type\":\"全职|实习|兼职|未体现\",\"degree\":\"本科\",\"languages\":[\"英语\"]}\n"
+        "  core_skills 只列简历明确列出的技能（最多10个）；languages 只列简历明确的语言能力（无则空数组）；projects 只列简历明确的项目/工作经历，每项 name 必填，role/stack/summary 有则填（无项目则空数组），summary 可写职责、实现方式和量化成果，但必须是简历明确写出的内容；job_type 只能输出 全职/实习/兼职/未体现 之一；degree 只填简历明确写出的最高学历（如\"本科\"），没明确写出就省略；简历没写的输出\"未体现\"或空数组，禁止推断、补全或编造\n"
+        "- profile_summary: 用自然语言写一段求职画像（给用户看、可编辑），像人写的段落，不列字段，不要出现'系统建议/自动补充'等说明性标记；先用3-5句话写求职方向、期望城市/薪资、求职类型、核心技能、项目经历和放宽意愿（简历写了什么就写什么，没写的不补）；项目经历只写项目方向、个人角色和所用技术栈，一句话概括即可，不写实现过程、量化指标或细节，详细项目事实放 profile_facts.projects；若简历体现了以下偏好且画像里还没有，用候选说法随机挑1-3个自然补充，不一次全塞，最终总共5-10句，说法、顺序、数量随机且自然：\n"
+        "  - 求职类型：只找全职，兼职/外包/按单结算不考虑；远程全职可接受\n"
+        "  - 双休：期望双休\n"
+        "  - 远程全职可接受：接受远程全职\n"
+        "  - 加班强度：不接受996\n"
+        "  画像里已有该偏好就不重复；简历没体现的不补；简历推断内容（如学历层次）可写进画像自然语言或 profile_facts，不确定时不得写成事实\n"
     )
 
     messages = [
@@ -1005,7 +1010,7 @@ def _validate_profile_facts(data) -> dict:
     """宽松验证 AI 提取的画像事实：类型 + 长度，无效项丢弃不阻塞。
 
     契约字段：core_skills[] / projects[{name,role,stack,summary}] /
-    job_type(四值) / languages[]。缺失字段不写入（调用方按\"未体现\"
+    job_type(四值) / degree(str) / languages[]。缺失字段不写入（调用方按\"未体现\"
     语义处理）；列表只保留非空字符串，超长截断。
     """
     if not isinstance(data, dict):
@@ -1038,6 +1043,10 @@ def _validate_profile_facts(data) -> dict:
     job_type = data.get("job_type")
     if isinstance(job_type, str) and job_type.strip() in _PROFILE_FACT_JOB_TYPES:
         facts["job_type"] = job_type.strip()
+
+    degree = data.get("degree")
+    if isinstance(degree, str) and degree.strip():
+        facts["degree"] = degree.strip()
 
     languages = data.get("languages")
     if isinstance(languages, list):
@@ -1203,6 +1212,9 @@ def _build_profile_facts_description(profile_facts) -> str:
     job_type = profile_facts.get("job_type")
     if job_type:
         lines.append(f"求职类型：{job_type}")
+    degree = profile_facts.get("degree")
+    if degree:
+        lines.append(f"学历：{degree}")
     languages = profile_facts.get("languages")
     if languages:
         lines.append("语言能力：" + "、".join(str(l) for l in languages))
@@ -1547,6 +1559,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         f"【第一层·求职意愿】候选人求职画像（用户可编辑，最高优先级）：{summary}\n"
         f"【第二层·筛选条件】用户确认的筛选条件：{criteria_desc}\n"
         f"【第三层·画像事实】简历提取的客观事实（未列出的维度一律视为未体现）：{facts_desc}\n\n"
+        f"【第四层·未确认偏好】以下重要偏好若未在以上三层明确说明，一律标记为未填写/未确认：求职类型（只找全职，兼职/外包/按单结算不考虑；远程全职可接受）、双休、远程全职、加班强度（不接受996）。\n\n"
         "判断规则：\n"
         "- 判断是参考不是法律：匹配从宽只适用于候选人没有约束的维度；候选人画像、筛选条件或画像事实已明确的维度，冲突即判 match=false，不再放宽。\n"
         "- 以候选人自己的主业方向为锚：画像明确写了方向（如开发、运营、设计、产品、销售、培训等），岗位属于同一职业链路才可 match；明显跨链路的岗位默认 match=false。\n"
@@ -1554,6 +1567,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         "- 用户明确写'不限/都可以/接受xx'时，按用户意愿放宽，覆盖默认不匹配。\n"
         "- 岗位类别不能只按标题判断，以 JD 主责为准；混合岗（如售前、解决方案）按主责归入对应链路。\n"
         "- 意愿与基线冲突时以意愿为准；意愿未提及的维度回退用筛选条件与画像事实判断；包里没有的维度（如薪资未填、学历未体现）默认匹配，不得写'候选人未知'。\n"
+        "- 对【第四层·未确认偏好】标记的维度：JD 有明确要求而候选人未确认时，不得当作默认匹配，不得写'候选人可接受'，必须把'未填写/未确认'写入 caveats（如'求职类型未确认，JD 为兼职'）让用户自行确认；候选人明确写'不限/都可以/接受xx'时按意愿放宽。\n"
         "- 城市由抓取阶段已保证，不再作为不匹配理由。\n"
         "- 只有 JD 明确写'必须/要求'且候选人在包里明确达不到时才 match=false；学历、经验这类硬性项明确达不到才排除，拿不准一律保留，不再出现'候选人未知/未体现'式空想理由。\n"
         "- JD 中'优先/加分/plus/熟悉/了解'类软性要求（如行业经验、英语等级、证书、技能未列出）不得影响 match，应写入 caveats 数组（每项一句话，如'优先英语六级，候选人未提供'）；除非该维度是用户已确认的硬约束。\n"

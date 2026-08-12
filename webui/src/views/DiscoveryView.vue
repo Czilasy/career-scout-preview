@@ -395,6 +395,7 @@ const autoScreenFields = ref<Record<string, string[]>>({});
 const autoScreenProfile = ref("");
 const profileError = ref("");
 const profileInputEl = ref<HTMLTextAreaElement | null>(null);
+const profileConfirmed = ref(false);
 
 // 任意 pipeline 任务占用中（运行/暂停/待恢复）都禁止再启动新任务。
 const pipelineBusy = computed(() => Boolean(
@@ -1212,11 +1213,56 @@ function handleProfileInput() {
 }
 
 function handleProfileBlur() {
- if (profileSummary.value.trim().length < 10) {
-   profileError.value = "求职画像至少 10 个字（不含首尾空格）";
- } else {
-   profileError.value = "";
- }
+  if (profileSummary.value.trim().length < 10) {
+    profileError.value = "求职画像至少 10 个字（不含首尾空格）";
+  } else {
+    profileError.value = "";
+  }
+}
+
+watch(profileSummary, () => {
+  profileConfirmed.value = false;
+});
+
+function confirmProfile() {
+  if (profileConfirmed.value) return;
+  if (!validateProfileForScreen()) {
+    notify("求职画像至少 10 个字（不含首尾空格）", "warning");
+    return;
+  }
+  profileConfirmed.value = true;
+}
+
+function requireProfileConfirmed(): boolean {
+  if (profileConfirmed.value) return true;
+  notify("确认后 AI 精筛按当前画像判断，修改画像需重新确认", "warning");
+  return false;
+}
+
+function handleStartScrapeClick() {
+  if (scrapeBusy.value) {
+    void cancelScrape();
+    return;
+  }
+  if (!validateProfileForScreen()) {
+    notify("求职画像至少 10 个字（不含首尾空格）", "warning");
+    return;
+  }
+  if (!requireProfileConfirmed()) return;
+  void startScrape();
+}
+
+function handleStartAiScreenClick() {
+  if (screenBusy.value) {
+    void cancelAiScreen();
+    return;
+  }
+  if (!validateProfileForScreen()) {
+    notify("求职画像至少 10 个字（不含首尾空格）", "warning");
+    return;
+  }
+  if (!requireProfileConfirmed()) return;
+  void startAiScreen();
 }
 
 function openOneClick() {
@@ -1234,6 +1280,7 @@ function openOneClick() {
    notify("求职画像至少 10 个字（不含首尾空格）", "warning");
    return;
  }
+ if (!requireProfileConfirmed()) return;
  oneClickOpen.value = true;
 }
 
@@ -2665,7 +2712,18 @@ watch(roundStatusPayload, (payload) => {
             </div>
           </div>
           <label class="field-label">
-            <span>求职画像（用于 AI 精筛）<small v-if="!profileSummary">　未填写将跳过精筛</small></span>
+            <span class="profile-label-row">
+              <span>求职画像（用于 AI 精筛）<small v-if="!profileSummary" class="profile-empty-hint">　未填写将跳过精筛</small></span>
+              <button
+                type="button"
+                class="profile-confirm-btn tip"
+                data-testid="profile-confirm"
+                :class="{ confirmed: profileConfirmed }"
+                :data-tip="'确认后 AI 精筛按当前画像判断，修改画像需重新确认'"
+                :aria-pressed="profileConfirmed"
+                @click.prevent.stop="confirmProfile"
+              >我已确认</button>
+            </span>
             <textarea
               v-model="profileSummary"
               ref="profileInputEl"
@@ -2762,7 +2820,7 @@ watch(roundStatusPayload, (payload) => {
             <Play :size="20" aria-hidden="true" />开始筛选并 AI 优化
           </button>
           <div class="one-click-secondary-actions">
-            <button class="button primary" type="button" data-testid="start-scrape" :disabled="draftPlatformDisabled || pipelineBusy" @click="scrapeBusy ? cancelScrape() : startScrape()">
+            <button class="button primary" type="button" data-testid="start-scrape" :disabled="draftPlatformDisabled || pipelineBusy" @click="handleStartScrapeClick">
               <Search v-if="!scrapeBusy" :size="18" aria-hidden="true" />
               <Square v-else :size="18" aria-hidden="true" />{{ scrapeBusy ? "停止抓取" : "单独抓取" }}
             </button>
@@ -2818,7 +2876,7 @@ watch(roundStatusPayload, (payload) => {
           </template>
           <template #actions>
             <div class="workflow-actions screen-card-actions">
-              <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="draftPlatformDisabled || (!screenBusy && !scrapeCompleted)" @click="screenBusy ? cancelAiScreen() : startAiScreen()">
+              <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="draftPlatformDisabled || (!screenBusy && !scrapeCompleted)" @click="handleStartAiScreenClick">
                 <Square v-if="screenBusy" :size="15" aria-hidden="true" />
                 <Sparkles v-else :size="15" aria-hidden="true" />{{ screenBusy ? "停止筛选" : "开始 AI 筛选" }}
               </button>
