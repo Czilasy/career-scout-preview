@@ -20,6 +20,7 @@ import keyring
 import requests
 
 from scripts import boss_cdp_raw as boss
+from webui.core import salary_monthly_bounds
 from webui.ai_retry import effective_retry_plan
 from webui.flag_features import (
     build_features_prompt_text,
@@ -1221,6 +1222,42 @@ def _build_profile_facts_description(profile_facts) -> str:
     return "\n".join(lines) if lines else "（无画像事实，按未体现处理）"
 
 
+def _salary_selected_bounds(selected_codes):
+    """把已选薪资码映射为 (low, high) 月薪区间；high=None 表示无上限。"""
+    bounds = []
+    for label, code in boss.SALARY_MAP.items():
+        if code not in selected_codes or label == "不限":
+            continue
+        if label == "3K以下":
+            bounds.append((0.0, 3.0))
+        elif label == "3-5K":
+            bounds.append((3.0, 5.0))
+        elif label == "5-10K":
+            bounds.append((5.0, 10.0))
+        elif label == "10-20K":
+            bounds.append((10.0, 20.0))
+        elif label == "20-50K":
+            bounds.append((20.0, 50.0))
+        elif label == "50K以上":
+            bounds.append((50.0, None))
+    return bounds
+
+
+def _salary_hard_mismatch(salary_text, selected_codes):
+    """薪资筛选是硬规则：已知薪资与全部已选区间都无重叠时返回 True。"""
+    if not selected_codes:
+        return False
+    job_bounds = salary_monthly_bounds(salary_text)
+    if job_bounds is None:
+        return False  # 面议/无法解析：不按硬规则误杀，交给 AI 判断
+    job_low, job_high = job_bounds
+    for band_low, band_high in _salary_selected_bounds(selected_codes):
+        upper = band_high if band_high is not None else float("inf")
+        if job_low < upper and job_high >= band_low:
+            return False
+    return True
+
+
 def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 batch_size=None, progress=None,
                 concurrency=None, raise_on_systemic=False,
@@ -1299,7 +1336,7 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         "- 学历：仅当学历已确认且岗位要求高于候选人时排除；候选人学历不低于岗位要求即保留\n"
         "- 求职类型：仅当岗位标题明确写'实习'且候选人画像明确写'全职'时，视为明显不符合；拿不准一律保留\n"
         "- 城市不判断（抓取阶段已保证城市）\n"
-        "- 薪资：仅当薪资已确认且岗位薪资明显低于期望时排除；'元/天'的实习计价综合判断\n"
+        "- 薪资：筛选区间为硬规则，岗位薪资与已选区间无重叠（高于或低于）即排除；'元/天'的实习计价综合判断\n"
         "- 经验：仅当经验已确认且岗位经验下界高于候选人上界时排除；岗位下界≤候选人上界时保留\n"
         "- 岗位名称或类别（如客服、讲师、销售、内容制作、运营等）不得单独作为剔除理由\n"
         "- 求职画像放宽：候选人画像中明确表达放宽的维度（如\"东莞、深圳都可以\"\"不限\"\"接受兼职\"等）以画像表述为准放宽对应判断\n"
@@ -1484,6 +1521,8 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     "caveats", "flags"}}}。
     AI 调用失败或漏回结果的岗位标记为 uncertain，保留给用户人工确认，
     不能把未完成的判定伪装成已匹配。
+    传输层失败的批次不额外整批重试，失败项直接按 uncertain 落库，
+    用户可在结果页对 uncertain 岗位补抓/重判。
 
     ``completed_verdicts``: 可选，已完成的判定 {job_id: verdict}（断点续筛）。
     这些岗位跳过不重复调用 AI，原样并入返回；默认 None 时行为与之前一致。
@@ -1518,10 +1557,6 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     import threading
     terminal_lock = threading.Lock()
     emitted_terminal_indices: set[int] = set()
-    failed_batch_metadata: dict[tuple[str, ...], dict] = {}
-
-    def _batch_key(batch: list[dict]) -> tuple[str, ...]:
-        return tuple(str(job.get("job_id", "")) for job in batch)
 
     def _emit_final_terminal(job: dict, fallback: int, status: str) -> None:
         item_index = _measurement_item_index(job, fallback, measurement_indices)
@@ -1544,6 +1579,22 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         int(measurement_input_count)
         if measurement_input_count is not None else len(jobs_with_jd)
     )
+    # 薪资筛选条件是硬规则：与已选区间无重叠的岗位直接 not_match，不交给 AI 各批自判。
+    salary_codes = [str(c) for c in (criteria or {}).get("salary") or []]
+    if salary_codes:
+        _salary_kept = []
+        for _idx, _job in enumerate(jobs_with_jd):
+            if _salary_hard_mismatch(_job.get("salary"), salary_codes):
+                _reason = f"薪资{_job.get('salary', '')}不在筛选范围"
+                verdicts[str(_job.get("job_id", ""))] = {
+                    "verdict": "not_match", "reason": _reason,
+                }
+                _emit_final_terminal(_job, _idx, "not_match")
+            else:
+                _salary_kept.append(_job)
+        jobs_with_jd = _salary_kept
+        if not jobs_with_jd:
+            return {"verdicts": verdicts}
     missing_retry_budget = [max(0, int(missing_result_retry_budget))]
     summary = (profile_summary or "").strip() or "（无候选人画像）"
     criteria_desc = ""
@@ -1569,6 +1620,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         "- 意愿与基线冲突时以意愿为准；意愿未提及的维度回退用筛选条件与画像事实判断；包里没有的维度（如薪资未填、学历未体现）默认匹配，不得写'候选人未知'。\n"
         "- 对【第四层·未确认偏好】标记的维度：JD 有明确要求而候选人未确认时，不得当作默认匹配，不得写'候选人可接受'，必须把'未填写/未确认'写入 caveats（如'求职类型未确认，JD 为兼职'）让用户自行确认；候选人明确写'不限/都可以/接受xx'时按意愿放宽。\n"
         "- 城市由抓取阶段已保证，不再作为不匹配理由。\n"
+        "- 薪资筛选区间已由系统硬性核对，本阶段只保留与已选区间有重叠的岗位；禁止再以'薪资超出/低于期望'判不匹配，薪资构成风险写入 caveats。\n"
         "- 只有 JD 明确写'必须/要求'且候选人在包里明确达不到时才 match=false；学历、经验这类硬性项明确达不到才排除，拿不准一律保留，不再出现'候选人未知/未体现'式空想理由。\n"
         "- JD 中'优先/加分/plus/熟悉/了解'类软性要求（如行业经验、英语等级、证书、技能未列出）不得影响 match，应写入 caveats 数组（每项一句话，如'优先英语六级，候选人未提供'）；除非该维度是用户已确认的硬约束。\n"
         "- 不得把 AI 已识别出的方向冲突、硬性不满足只写进 caveats 后仍判 match；这类冲突必须反映到 match=false。\n"
@@ -1585,14 +1637,14 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         "- 不需要时间维度的特征（如\"岗位挂多久\"）一律不判断。\n"
         "- 不涉及上述清单的可疑迹象可写入 caveats（措辞\"需留意：…\"）。"
     )
-    def _match_one_batch(batch, *, allow_transport_terminal=False):
+    def _match_one_batch(batch):
         """单批精筛，返回 {jid: verdict}。
 
         返回被截断（ERROR_TRUNCATED）时拆半重跑，还截断就继续拆到单条；
         单条仍失败才标 uncertain（不伪装成已匹配）。
 
-        返回 (verdicts_dict, transport_failed)：transport_failed=True 表示
-        整批因网络/超时/限流失败（可末尾补一轮），区别于 AI 返回了但漏了某条。
+        整批因网络/超时/限流失败时，本批每项直接标 uncertain 并发终态，
+        不再末尾补一轮；用户可在结果页对 uncertain 岗位重抓。
         """
         batch_desc = [
             {
@@ -1608,7 +1660,6 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(batch_desc, ensure_ascii=False)},
         ]
-        transport_failed = False
         fail_reason = ""
         _t0 = time.time()
         _req_error_code = None
@@ -1635,18 +1686,12 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                     metadata={"truncated_split": 1},
                 )
                 mid = len(batch) // 2
-                sub, f1 = _match_one_batch(
-                    batch[:mid], allow_transport_terminal=allow_transport_terminal)
-                sub2, f2 = _match_one_batch(
-                    batch[mid:], allow_transport_terminal=allow_transport_terminal)
-                sub.update(sub2)
-                return sub, f1 or f2
+                sub = _match_one_batch(batch[:mid])
+                sub.update(_match_one_batch(batch[mid:]))
+                return sub
             _req_error_code = exc.error_code
             by_i = None
-            transport_failed = True
             fail_reason = user_facing_error(exc.error_code)
-            with terminal_lock:
-                failed_batch_metadata[_batch_key(batch)] = dict(exc.diagnostics)
         batch_verdicts = {}
         for idx, job in enumerate(batch):
             jid = str(job.get("job_id", ""))
@@ -1655,20 +1700,15 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                     "verdict": "uncertain",
                     "reason": f"{fail_reason}，待人工确认" if fail_reason else "AI 精筛失败，待人工确认",
                 }
-                if allow_transport_terminal:
-                    _emit_final_terminal(job, idx, "uncertain")
+                _emit_final_terminal(job, idx, "uncertain")
                 continue
             r = by_i.get(idx)
             if not isinstance(r, dict) or not isinstance(r.get("match"), bool):
                 if missing_retry_budget[0] > 0:
                     missing_retry_budget[0] -= 1
                     _emit_retry_event(measurement_callback, "fine", 0)
-                    retried, retry_failed = _match_one_batch(
-                        [job],
-                        allow_transport_terminal=allow_transport_terminal,
-                    )
+                    retried = _match_one_batch([job])
                     batch_verdicts.update(retried)
-                    transport_failed = transport_failed or retry_failed
                     continue
                 batch_verdicts[jid] = {
                     "verdict": "uncertain",
@@ -1703,22 +1743,18 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                           input_count=len(batch),
                           output_count=len(batch_verdicts),
                           error_code=_req_error_code)
-        return batch_verdicts, transport_failed
+        return batch_verdicts
 
     batches = []
     for start in range(0, len(jobs_with_jd), batch_size):
         batches.append(jobs_with_jd[start:start + batch_size])
 
-    failed_batches = []  # 传输层失败的批次，末尾补一轮
-
     if concurrency <= 1 or len(batches) <= 1:
         # 串行（默认，免费端点并发=1）
         processed = 0
         for batch in batches:
-            batch_verdicts, transport_failed = _match_one_batch(batch)
+            batch_verdicts = _match_one_batch(batch)
             verdicts.update(batch_verdicts)
-            if transport_failed:
-                failed_batches.append(batch)
             if on_batch_done is not None:
                 try:
                     on_batch_done(dict(batch_verdicts), list(verdicts.keys()))
@@ -1751,11 +1787,9 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = {pool.submit(_match_one_batch, batch): batch for batch in batches}
             for fut in as_completed(futures):
-                batch_verdicts, transport_failed = fut.result()
+                batch_verdicts = fut.result()
                 with lock:
                     verdicts.update(batch_verdicts)
-                    if transport_failed:
-                        failed_batches.append(futures[fut])
                     completed_snapshot = list(verdicts.keys())
                 if on_batch_done is not None:
                     try:
@@ -1764,30 +1798,6 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                         raise AICheckpointError(_AI_CHECKPOINT_FAILED) from exc
                 _safe_progress(len(futures[fut]))
 
-    # 末尾补一轮：传输层失败的批次统一重试一次（网络抖动恢复后大概率成功）
-    if failed_batches:
-        for batch in failed_batches:
-            with terminal_lock:
-                failure_metadata = dict(
-                    failed_batch_metadata.get(_batch_key(batch), {})
-                )
-            retry_metadata = {"retry_decision": "batch_final_retry"}
-            if failure_metadata.get("correlation_id"):
-                retry_metadata["correlation_id"] = failure_metadata[
-                    "correlation_id"
-                ]
-            _emit_retry_event(
-                measurement_callback, "fine", 0, metadata=retry_metadata,
-            )
-            batch_verdicts, _ = _match_one_batch(
-                batch, allow_transport_terminal=True)
-            # 无论完全恢复还是部分恢复，都以最终尝试的逐项结果为准。
-            verdicts.update(batch_verdicts)
-            if on_batch_done is not None:
-                try:
-                    on_batch_done(dict(batch_verdicts), list(verdicts.keys()))
-                except Exception as exc:
-                    raise AICheckpointError(_AI_CHECKPOINT_FAILED) from exc
 
     return {"verdicts": verdicts}
 

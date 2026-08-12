@@ -1294,9 +1294,6 @@ button:disabled {
   color: var(--muted);
   font-size: 11px;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 180px;
 }
 .one-click-cta {
   min-height: 50px;

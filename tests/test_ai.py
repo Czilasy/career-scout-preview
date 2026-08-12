@@ -1068,8 +1068,8 @@ class MatchJdsFailurePolicyTests(unittest.TestCase):
         self.assertEqual(verdict["verdict"], "uncertain")
         self.assertIn("待人工确认", verdict["reason"])
 
-    def test_transport_failure_retry_emits_only_final_terminals(self):
-        """失败批次只记录 attempt，终态必须等补重试结束后各发一次。"""
+    def test_transport_failure_emits_uncertain_terminals_without_batch_retry(self):
+        """传输失败批次直接按 uncertain 落库并发终态，不再末尾补一轮。"""
         from webui.ai import AISecurityError, ERROR_NETWORK, match_jds
 
         jobs = [
@@ -1083,15 +1083,9 @@ class MatchJdsFailurePolicyTests(unittest.TestCase):
 
         with patch(
             "webui.ai.call_ai",
-            side_effect=[
-                AISecurityError(ERROR_NETWORK),
-                {"results": [
-                    {"i": i, "match": False, "reason": "不匹配"}
-                    for i in range(4)
-                ]},
-            ],
+            side_effect=AISecurityError(ERROR_NETWORK),
         ):
-            match_jds(
+            result = match_jds(
                 jobs, "画像", "https://x", "key", batch_size=4,
                 concurrency=1, measurement_callback=capture,
             )
@@ -1099,13 +1093,14 @@ class MatchJdsFailurePolicyTests(unittest.TestCase):
         terminals = [e for e in events if e["event_type"] == "item_terminal"]
         retries = [e for e in events if e["event_type"] == "retry"]
         self.assertEqual(len(terminals), 4)
-        self.assertEqual(len(retries), 1)
-        self.assertEqual(
-            retries[0]["metadata"]["retry_decision"], "batch_final_retry"
-        )
+        self.assertEqual(retries, [])
         self.assertEqual(
             sorted(e["counts"]["item_index"] for e in terminals),
             [0, 1, 2, 3],
+        )
+        self.assertEqual(
+            [result["verdicts"][f"job-{i}"]["verdict"] for i in range(4)],
+            ["uncertain"] * 4,
         )
 
     def test_systemic_failure_emits_one_terminal_per_remaining_item(self):
@@ -1133,7 +1128,7 @@ class MatchJdsFailurePolicyTests(unittest.TestCase):
             sorted(e["counts"]["item_index"] for e in terminals), [0, 1, 2]
         )
 
-    def test_partial_final_retry_keeps_verdicts_and_terminals_consistent(self):
+    def test_transport_failure_does_not_spend_missing_result_retry_budget(self):
         from webui.ai import AISecurityError, ERROR_NETWORK, match_jds
 
         jobs = [
@@ -1157,13 +1152,52 @@ class MatchJdsFailurePolicyTests(unittest.TestCase):
                 missing_result_retry_budget=1,
             )
 
-        self.assertEqual(result["verdicts"]["j0"]["verdict"], "match")
+        self.assertEqual(result["verdicts"]["j0"]["verdict"], "uncertain")
         self.assertEqual(result["verdicts"]["j1"]["verdict"], "uncertain")
         terminals = [e for e in events if e["event_type"] == "item_terminal"]
         self.assertEqual(
             sorted(e["counts"]["item_index"] for e in terminals), [0, 1]
         )
 
+    def test_salary_hard_rule_filters_out_of_range_without_ai(self):
+        from webui.ai import match_jds
+
+        jobs = [
+            {"job_id": "out", "title": "高薪岗", "salary": "22-30K", "jd": "JD"},
+            {"job_id": "overlap", "title": "重叠岗", "salary": "15-25K", "jd": "JD"},
+            {"job_id": "daily", "title": "日薪实习", "salary": "400-500元/天", "jd": "JD"},
+            {"job_id": "unknown", "title": "面议岗", "salary": "面议", "jd": "JD"},
+        ]
+        criteria = {"salary": ["403", "404", "405"]}  # 3-5K/5-10K/10-20K
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "匹配"},
+            {"i": 1, "match": True, "reason": "匹配"},
+            {"i": 2, "match": True, "reason": "匹配"},
+        ]}) as call:
+            result = match_jds(
+                jobs, "画像", "https://x", "key",
+                batch_size=10, concurrency=1, criteria=criteria,
+            )
+
+        self.assertEqual(result["verdicts"]["out"]["verdict"], "not_match")
+        self.assertIn("不在筛选范围", result["verdicts"]["out"]["reason"])
+        self.assertEqual(result["verdicts"]["overlap"]["verdict"], "match")
+        self.assertEqual(result["verdicts"]["daily"]["verdict"], "match")
+        self.assertEqual(result["verdicts"]["unknown"]["verdict"], "match")
+        self.assertEqual(call.call_count, 1)
+
+    def test_salary_hard_rule_all_out_of_range_skips_ai(self):
+        from webui.ai import match_jds
+
+        jobs = [{"job_id": "j1", "title": "高薪岗", "salary": "30-40K", "jd": "JD"}]
+        with patch("webui.ai.call_ai") as call:
+            result = match_jds(
+                jobs, "画像", "https://x", "key",
+                batch_size=10, concurrency=1, criteria={"salary": ["403"]},
+            )
+
+        self.assertEqual(result["verdicts"]["j1"]["verdict"], "not_match")
+        call.assert_not_called()
 
 class CallAIRetryTests(unittest.TestCase):
     """call_ai 重试扩展：5xx/超时/网络可重试，配额撞墙立即停，截断单独识别。"""
@@ -1265,7 +1299,7 @@ class CallAIRetryTests(unittest.TestCase):
                 mock_sleep.assert_not_called()
 
     @patch("webui.ai.call_ai")
-    def test_strict_tuning_transport_failure_does_not_enter_batch_final_retry(
+    def test_strict_tuning_transport_failure_does_not_retry_batch(
         self, mock_call_ai,
     ):
         from webui.ai import AISecurityError, ERROR_NETWORK, match_jds
@@ -1813,6 +1847,21 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
         self.assertIn("flags 为必填字段，无命中输出空数组", prompt)
         self.assertIn("疑似骗局：", prompt)
 
+    def test_match_jds_prompt_salary_filter_is_hard_rule(self):
+        """薪资筛选是硬规则，精筛 prompt 明确禁止 AI 再按薪资范围互相矛盾地拒绝。"""
+        from webui.ai import match_jds
+
+        jobs = [{"job_id": "job-001", "title": "后端", "salary": "15-25K", "jd": "负责后端"}]
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "合适", "caveats": []}
+        ]}) as call:
+            match_jds(
+                jobs, "画像", "https://x", "key", batch_size=1,
+                criteria={"salary": ["405"]})
+
+        prompt = call.call_args.args[2][0]["content"]
+        self.assertIn("薪资筛选区间已由系统硬性核对", prompt)
+
     def test_match_jds_prompt_without_facts_falls_back(self):
         """老轮无画像事实/筛选条件：退化两通道，不报错。"""
         from webui.ai import match_jds
@@ -1865,6 +1914,21 @@ class FlagFeaturesTests(unittest.TestCase):
         flags = clean_flags([{"code": "B1", "level": "medium", "reason": "标题含无责底薪"}])
         self.assertEqual(decide_flags(flags), {
             "flags": [], "caveats": ["需留意：销售话术标题：标题含无责底薪"]})
+
+    def test_d2_day_rate_is_medium_not_high(self):
+        from webui.flag_features import FLAG_FEATURES_BY_CODE
+        d2 = FLAG_FEATURES_BY_CODE["D2"]
+        self.assertEqual(d2["level"], "medium")
+        self.assertIn("元/天", d2["basis"])
+        self.assertIn("不单独作为异常", d2["basis"])
+
+    def test_clean_flags_downgrades_d2_day_rate_to_medium(self):
+        from webui.flag_features import clean_flags, decide_flags
+        flags = clean_flags([{"code": "D2", "level": "high", "reason": "薪资450-600元/天"}])
+        self.assertEqual(flags[0]["level"], "medium")
+        decided = decide_flags(flags)
+        self.assertEqual(decided["flags"], [])
+        self.assertEqual(len(decided["caveats"]), 1)
 
     def test_two_medium_output_flags(self):
         from webui.flag_features import clean_flags, decide_flags

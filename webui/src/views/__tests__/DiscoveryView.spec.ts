@@ -1810,6 +1810,15 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
+  it("B011: summary chips keep full text without hard width or ellipsis", () => {
+    const css = readFileSync(path.join(__dirname, "../../styles.css"), "utf8");
+    const chipBlock = css.match(/\.summary-chip\s*\{[^}]*\}/s)?.[0] || "";
+    expect(chipBlock).toContain("white-space: nowrap");
+    expect(chipBlock).not.toContain("max-width: 180px");
+    expect(chipBlock).not.toContain("text-overflow: ellipsis");
+    expect(chipBlock).not.toContain("overflow: hidden");
+  });
+
   it("B007: confirms before discarding a completed scrape that has not entered AI screening", async () => {
     const settings = {
       pages: 3, inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,

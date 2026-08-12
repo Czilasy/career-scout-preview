@@ -48,8 +48,8 @@ FLAG_FEATURES: list[dict] = [
     # -- D 薪资雇佣关系 --
     {"code": "D1", "level": "high", "name": "门槛极低薪资极高",
      "basis": "零经验/无学历要求却承诺远高于市场水平的薪资"},
-    {"code": "D2", "level": "high", "name": "薪资单位异常",
-     "basis": "薪资按\"元/天\"\"元/单\"\"元/件\"等非常规单位计量"},
+    {"code": "D2", "level": "medium", "name": "薪资单位异常",
+     "basis": "薪资按\"元/单\"\"元/件\"等计酬且未说明底薪/结算；\"元/天\"的实习或兼职计价不单独作为异常"},
     {"code": "D3", "level": "high", "name": "无底薪纯提成",
      "basis": "JD 明确无底薪、收入完全依赖成单"},
 
@@ -110,6 +110,10 @@ def clean_flags(raw) -> list[dict]:
         if not reason:
             continue
         code = str(item.get("code") or "").strip() or "UNKNOWN"
+        # D2 日薪/按天证据降级：实习或兼职按日计薪不单独作为高危骗局。
+        if (code == "D2" and level == "high"
+                and any(token in reason for token in ("元/天", "日薪", "按天", "按日"))):
+            level = "medium"
         cleaned.append({"code": code, "level": level, "reason": reason})
     return cleaned
 
