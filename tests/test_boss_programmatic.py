@@ -543,6 +543,17 @@ class ExceptionMappingTests(unittest.TestCase):
                     keyword="Java", city="上海", pages=1,
                 )
 
+    def test_skip_login_check_skips_login_probe(self):
+        """skip_login_check=True 时不调用 check_login_state，直接进 scrape_list。"""
+        with mock.patch.object(self.module, "check_login_state") as m_check, \
+                mock.patch.object(self.module, "scrape_list", return_value={"jobs": []}) as m_list, \
+                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+            self.module.run_search_programmatic(
+                keyword="Java", city="上海", pages=1, skip_login_check=True,
+            )
+        m_check.assert_not_called()
+        m_list.assert_called_once()
+
     def test_cdp_unavailable_propagated(self):
         """scrape_list 抛 CDPUnavailableError 时原样传播。"""
         err = self.module.CDPUnavailableError("cdp down")

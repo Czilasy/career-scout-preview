@@ -92,11 +92,10 @@ watch(
   (next, prev) => {
     const nextStarted = typeof next?.started_at === "number" ? next.started_at : null;
     const prevStarted = typeof prev?.started_at === "number" ? prev.started_at : null;
-    // 新任务：首次出现、后端时间戳变化，或终态后重新开始运行时，重置计时
+    // 新任务：首次出现或后端时间戳变化时重置计时；暂停/中断续跑沿用原 started_at 不清零
     const isNewRun = Boolean(next && (
       !prev
       || (nextStarted !== null && nextStarted !== prevStarted)
-      || (prev && isTerminalStatus(prev.status) && !isTerminalStatus(next.status))
     ));
     if (next && isNewRun) {
       startedAt.value = nextStarted ?? Date.now();

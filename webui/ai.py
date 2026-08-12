@@ -915,8 +915,7 @@ def _build_field_options_prompt(platform: str) -> str:
     schema = reg.filter_schema
     lines = []
     lines.append("keyword: 候选搜索关键词数组,约10个,覆盖不同岗位方向,格式 [{\"word\":\"Python后端\",\"recommended\":true},...],其中2-3个 recommended=true")
-    city_names = [e.name for e in reg.city_catalog.entries]
-    lines.append(f"city: 城市名,必须是以下之一: {', '.join(city_names[:80])}...等")
+    lines.append("city: 不输出城市，城市由用户自行选择；未选择时默认全国")
     for field in schema.fields:
         options = {
             opt.label: opt.value for opt in field.options if opt.label not in RESUME_SENTINEL_LABELS
@@ -993,6 +992,8 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
 
     data = call_ai(endpoint_url, api_key, messages, timeout=timeout, model=model)
     result = _validate_unified_fields(data, platform)
+    # 城市不由 AI 管理：用户未选择时由执行层按全国兜底。
+    result["city"] = []
     # profile_summary 是自由文本，不参与枚举校验，验证后附加返回
     summary = data.get("profile_summary", "") if isinstance(data, dict) else ""
     result["profile_summary"] = str(summary).strip()
@@ -1258,6 +1259,113 @@ def _salary_hard_mismatch(salary_text, selected_codes):
     return True
 
 
+_FILTER_FIELD_LABELS = {
+    "experience": "经验",
+    "degree": "学历",
+    "scale": "公司规模",
+    "stage": "融资阶段",
+    "industry": "行业",
+}
+
+# BOSS 列表经验标签有时合并为"在校/应届"，对应在校生+应届生两个码。
+_COMBINED_EXPERIENCE_CODES = {
+    "在校/应届": ("108", "102"),
+}
+
+
+def _job_filter_tag_text(job):
+    """合并 tags/job_labels 等列表标签字段，便于解析结构化经验/学历。"""
+    return " | ".join(
+        str(value).strip() for value in (
+            job.get("tags"), job.get("job_labels"),
+            job.get("jobExperience"), job.get("jobDegree"),
+            job.get("tags_list"),
+        ) if str(value or "").strip()
+    )
+
+
+def _job_experience_codes(job):
+    """从列表标签提取经验码；"在校/应届"按在校生+应届生处理。"""
+    codes = set()
+    for part in _job_filter_tag_text(job).split("|"):
+        token = part.strip()
+        if token in boss.EXPERIENCE_MAP:
+            codes.add(boss.EXPERIENCE_MAP[token])
+        elif token in _COMBINED_EXPERIENCE_CODES:
+            codes.update(_COMBINED_EXPERIENCE_CODES[token])
+    return codes
+
+
+def _job_degree_codes(job):
+    """从列表标签提取学历码。"""
+    codes = set()
+    for part in _job_filter_tag_text(job).split("|"):
+        token = part.strip()
+        if token in boss.DEGREE_MAP:
+            codes.add(boss.DEGREE_MAP[token])
+    return codes
+
+
+def _job_scale_codes(job):
+    code = boss.SCALE_MAP.get((job.get("company_scale") or "").strip())
+    return {code} if code else set()
+
+
+def _job_stage_codes(job):
+    code = boss.STAGE_MAP.get((job.get("company_stage") or "").strip())
+    return {code} if code else set()
+
+
+def _job_industry_codes(job):
+    industry = (job.get("company_industry") or "").strip()
+    if industry in boss.INDUSTRY_MAP:
+        return {boss.INDUSTRY_MAP[industry]}
+    for name, code in boss.INDUSTRY_MAP.items():
+        if name and name in industry:
+            return {code}
+    return set()
+
+
+_FILTER_CODE_READERS = {
+    "experience": _job_experience_codes,
+    "degree": _job_degree_codes,
+    "scale": _job_scale_codes,
+    "stage": _job_stage_codes,
+    "industry": _job_industry_codes,
+}
+
+
+def _job_value_label(job, field):
+    """取岗位在该筛选字段上的可读值，用于剔除理由。"""
+    if field in ("experience", "degree"):
+        mapping = boss.EXPERIENCE_MAP if field == "experience" else boss.DEGREE_MAP
+        codes = _job_experience_codes(job) if field == "experience" else _job_degree_codes(job)
+        parts = []
+        for token in (part.strip() for part in _job_filter_tag_text(job).split("|")):
+            is_combined_exp = field == "experience" and token in _COMBINED_EXPERIENCE_CODES
+            if is_combined_exp or mapping.get(token) in codes:
+                parts.append(token)
+        return "、".join(dict.fromkeys(parts))
+    return str(job.get(f"company_{field}") or "").strip()
+
+
+def _job_criteria_hard_mismatch(job, criteria):
+    """已选筛选字段与岗位明确值冲突时返回 (field, reason)，未知/未选字段不误杀。"""
+    if not isinstance(criteria, dict):
+        return None, ""
+    for field, reader in _FILTER_CODE_READERS.items():
+        selected = {str(c) for c in criteria.get(field) or []}
+        if not selected or "0" in selected:
+            continue
+        job_codes = reader(job)
+        if job_codes and not (job_codes & selected):
+            return field, f"{_FILTER_FIELD_LABELS[field]}{_job_value_label(job, field)}不在筛选范围"
+    salary_codes = {str(c) for c in criteria.get("salary") or []}
+    if salary_codes and _salary_hard_mismatch(job.get("salary"), salary_codes):
+        return "salary", f"薪资{job.get('salary', '')}不在筛选范围"
+    return None, ""
+
+
 def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 batch_size=None, progress=None,
                 concurrency=None, raise_on_systemic=False,
@@ -1324,6 +1432,34 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         job for job in jobs
         if str(job.get("job_id", "")) not in completed_ids
     ]
+    hard_dropped = []
+    for _idx, job in enumerate(jobs_to_process):
+        _field, _reason = _job_criteria_hard_mismatch(job, criteria)
+        if not _field:
+            continue
+        _job_id = str(job.get("job_id", ""))
+        hard_dropped.append({
+            "job_id": _job_id,
+            "title": job.get("title", ""),
+            "reason": _reason,
+            "canonical_url": job.get("canonical_url", "")
+            or job.get("source_url", "") or job.get("url", ""),
+        })
+        verdicts[_job_id] = {"verdict": "dropped", "reason": _reason}
+        if measurement_callback is not None:
+            _emit_item_terminal_event(
+                measurement_callback, "rough",
+                item_index=_measurement_item_index(job, _idx, measurement_indices),
+                status="dropped",
+                input_count=terminal_input_count,
+            )
+    if hard_dropped:
+        dropped.extend(hard_dropped)
+        _hard_ids = {item["job_id"] for item in hard_dropped}
+        jobs_to_process = [
+            job for job in jobs_to_process
+            if str(job.get("job_id", "")) not in _hard_ids
+        ]
     if not jobs:
         return {"kept": kept, "dropped": dropped, "verdicts": verdicts}
 
@@ -1333,11 +1469,12 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         f"{criteria_desc}\n\n"
         "判断规则（务必按常理，不要死板）：\n"
         "- 字段为空或未列出 = 不限，不得按该维度剔除；候选人画像只用于放宽，不能用来新增硬条件\n"
-        "- 学历：仅当学历已确认且岗位要求高于候选人时排除；候选人学历不低于岗位要求即保留\n"
+        "- 学历：已选学历为硬约束，岗位标签明确要求高于已选学历（如已选大专/本科而岗位硕士/博士）即剔除；未标学历保留\n"
         "- 求职类型：仅当岗位标题明确写'实习'且候选人画像明确写'全职'时，视为明显不符合；拿不准一律保留\n"
         "- 城市不判断（抓取阶段已保证城市）\n"
         "- 薪资：筛选区间为硬规则，岗位薪资与已选区间无重叠（高于或低于）即排除；'元/天'的实习计价综合判断\n"
-        "- 经验：仅当经验已确认且岗位经验下界高于候选人上界时排除；岗位下界≤候选人上界时保留\n"
+        "- 经验：已选经验为硬约束，岗位标签明确经验下界高于已选范围（如已选1-3年而岗位3-5年）即剔除；未标经验保留\n"
+        "- 已选择的筛选字段是硬约束：岗位标签明确列出的经验/学历/薪资/规模/融资/行业与已选条件冲突时，必须剔除；未选择或岗位未标明的字段不剔除\n"
         "- 岗位名称或类别（如客服、讲师、销售、内容制作、运营等）不得单独作为剔除理由\n"
         "- 求职画像放宽：候选人画像中明确表达放宽的维度（如\"东莞、深圳都可以\"\"不限\"\"接受兼职\"等）以画像表述为准放宽对应判断\n"
         "- 只排除【明显】不符合的；拿不准一律保留（宁可多留，不可错杀）\n\n"
@@ -1513,7 +1650,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
 
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
-    ``profile_summary``: 求职画像（用户可编辑，三通道中优先级最高）。
+    ``profile_summary``: 求职画像（用户可编辑，优先级低于已选六类字段，只能放宽未选择维度）。
     ``criteria``: 可选，筛选条件 dict（学历/经验/薪资/城市等，作硬性基线）。
     ``profile_facts``: 可选，画像事实 dict（core_skills/projects/job_type/languages，
         缺失维度按"未体现"处理，不得推断）。
@@ -1579,22 +1716,21 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         int(measurement_input_count)
         if measurement_input_count is not None else len(jobs_with_jd)
     )
-    # 薪资筛选条件是硬规则：与已选区间无重叠的岗位直接 not_match，不交给 AI 各批自判。
-    salary_codes = [str(c) for c in (criteria or {}).get("salary") or []]
-    if salary_codes:
-        _salary_kept = []
-        for _idx, _job in enumerate(jobs_with_jd):
-            if _salary_hard_mismatch(_job.get("salary"), salary_codes):
-                _reason = f"薪资{_job.get('salary', '')}不在筛选范围"
-                verdicts[str(_job.get("job_id", ""))] = {
-                    "verdict": "not_match", "reason": _reason,
-                }
-                _emit_final_terminal(_job, _idx, "not_match")
-            else:
-                _salary_kept.append(_job)
-        jobs_with_jd = _salary_kept
-        if not jobs_with_jd:
-            return {"verdicts": verdicts}
+    # 已选筛选字段是硬约束：结构化标签/JD 明确值与筛选条件冲突时直接 not_match，
+    # 不交给 AI 各批自判；字段未知或未标明的岗位保留给 AI 判断。
+    _hard_kept = []
+    for _idx, _job in enumerate(jobs_with_jd):
+        _field, _reason = _job_criteria_hard_mismatch(_job, criteria)
+        if _field:
+            verdicts[str(_job.get("job_id", ""))] = {
+                "verdict": "not_match", "reason": _reason,
+            }
+            _emit_final_terminal(_job, _idx, "not_match")
+        else:
+            _hard_kept.append(_job)
+    jobs_with_jd = _hard_kept
+    if not jobs_with_jd:
+        return {"verdicts": verdicts}
     missing_retry_budget = [max(0, int(missing_result_retry_budget))]
     summary = (profile_summary or "").strip() or "（无候选人画像）"
     criteria_desc = ""
@@ -1607,21 +1743,25 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     system_prompt = (
         "你是求职匹配度评估助手。根据候选人的完整信息包，判断每个岗位的JD工作内容是否适合候选人。\n"
         "候选人信息包（同一轮流程内所有判断共用，优先级从高到低）：\n"
-        f"【第一层·求职意愿】候选人求职画像（用户可编辑，最高优先级）：{summary}\n"
-        f"【第二层·筛选条件】用户确认的筛选条件：{criteria_desc}\n"
-        f"【第三层·画像事实】简历提取的客观事实（未列出的维度一律视为未体现）：{facts_desc}\n\n"
-        f"【第四层·未确认偏好】以下重要偏好若未在以上三层明确说明，一律标记为未填写/未确认：求职类型（只找全职，兼职/外包/按单结算不考虑；远程全职可接受）、双休、远程全职、加班强度（不接受996）。\n\n"
+        f"【第一层·筛选条件】用户已选择的六类字段（薪资/经验/学历/规模/融资/行业），最高优先级，绝对硬约束：{criteria_desc}\n"
+        f"【第二层·求职画像】候选人求职画像（用户可编辑，只能放宽未选择的维度，不能推翻已选字段）：{summary}\n"
+        f"【第三层·隐藏画像字段】简历提取的客观事实（未列出的维度一律视为未体现，不得推断）：{facts_desc}\n\n"
+        f"【第四层·未确认偏好】以下重要偏好若未在以上三层明确说明，一律标记为未填写/未确认：求职类型（只找全职，兼职/外包/按单结算不考虑；远程全职可接受）、实习、双休、远程全职、加班强度（不接受996）。\n\n"
         "判断规则：\n"
-        "- 判断是参考不是法律：匹配从宽只适用于候选人没有约束的维度；候选人画像、筛选条件或画像事实已明确的维度，冲突即判 match=false，不再放宽。\n"
+        "- JD 正文硬要求优先于标题和标签：任职要求/岗位要求里出现'必须/必须具备/要求'且带明确数值或条件（如'3年以上''5年经验''硕士''统招本科'），与第一层已选字段冲突时直接 match=false，即使标题、标签看起来匹配也不能翻案。示例：岗位标签'1-3年 | 本科'，JD 写'必须具备 Python 3年以上生产环境开发经验'，已选经验 1-3年，则必须 match=false。\n"
+        "- 已确认的筛选条件（薪资/经验/学历/规模/融资/行业）是硬约束：岗位结构化标签或 JD 明确写'必须/要求/限'的硬性要求与已选条件冲突时，必须 match=false，不得只写 caveats 后仍判 match；JD 中'优先/加分/熟悉/了解'类软性要求不受此限。\n"
+        "- 判断是参考不是法律：匹配从宽只适用于候选人没有约束的维度；第一层已选字段冲突即 match=false，画像和隐藏画像字段不得推翻；画像只能放宽未选择的维度。\n"
         "- 以候选人自己的主业方向为锚：画像明确写了方向（如开发、运营、设计、产品、销售、培训等），岗位属于同一职业链路才可 match；明显跨链路的岗位默认 match=false。\n"
         "- 画像未明确写方向时，从核心技能和经历判断主业；岗位明显不属于该链路且候选人能力支撑不了，默认 match=false。\n"
         "- 用户明确写'不限/都可以/接受xx'时，按用户意愿放宽，覆盖默认不匹配。\n"
         "- 岗位类别不能只按标题判断，以 JD 主责为准；混合岗（如售前、解决方案）按主责归入对应链路。\n"
         "- 意愿与基线冲突时以意愿为准；意愿未提及的维度回退用筛选条件与画像事实判断；包里没有的维度（如薪资未填、学历未体现）默认匹配，不得写'候选人未知'。\n"
         "- 对【第四层·未确认偏好】标记的维度：JD 有明确要求而候选人未确认时，不得当作默认匹配，不得写'候选人可接受'，必须把'未填写/未确认'写入 caveats（如'求职类型未确认，JD 为兼职'）让用户自行确认；候选人明确写'不限/都可以/接受xx'时按意愿放宽。\n"
+        "- JD 明确写硬性条件（如'统招公办本科''本科及以上''双证齐全''全日制'）而候选人信息未确认是否满足时，必须写入 caveats，不得当作满足、不得留空。\n"
+        "- JD 经验要求与已选区间只是部分重叠（如已选'1-3年'，JD 写'2-3年及以上'）时，不得直接当符合，必须把经验边界写入 caveats 由用户确认。\n"
         "- 城市由抓取阶段已保证，不再作为不匹配理由。\n"
         "- 薪资筛选区间已由系统硬性核对，本阶段只保留与已选区间有重叠的岗位；禁止再以'薪资超出/低于期望'判不匹配，薪资构成风险写入 caveats。\n"
-        "- 只有 JD 明确写'必须/要求'且候选人在包里明确达不到时才 match=false；学历、经验这类硬性项明确达不到才排除，拿不准一律保留，不再出现'候选人未知/未体现'式空想理由。\n"
+        "- 对已确认筛选字段：结构化标签或 JD 明确写'必须/要求/限'的硬性要求与已选条件冲突即 match=false，不以'候选人包里未体现'为由降级为 caveat；未选择或岗位未标明的维度才拿不准保留。\n"
         "- JD 中'优先/加分/plus/熟悉/了解'类软性要求（如行业经验、英语等级、证书、技能未列出）不得影响 match，应写入 caveats 数组（每项一句话，如'优先英语六级，候选人未提供'）；除非该维度是用户已确认的硬约束。\n"
         "- 不得把 AI 已识别出的方向冲突、硬性不满足只写进 caveats 后仍判 match；这类冲突必须反映到 match=false。\n"
         "对每个岗位输出判定。严格输出JSON：\n"
@@ -1652,6 +1792,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 "title": job.get("title", ""),
                 "salary": job.get("salary", ""),
                 "location": job.get("location", ""),
+                "tags": job.get("tags") or job.get("job_labels") or job.get("tags_list") or "",
                 "jd": str(job.get("jd", ""))[:1500],
             }
             for idx, job in enumerate(batch)

@@ -1818,7 +1818,7 @@ def create_app(config=None):
             "required_action": "等待实验结束或取消实验后再启动普通任务",
         }), 409)
 
-    def _claim_pipeline_task_id(task_id, kind):
+    def _claim_pipeline_task_id(task_id, kind, *, started_at=None):
         """Atomically reserve a concrete task id for continuation."""
         with _pipeline_lock:
             previous = _pipeline_tasks.get(task_id)
@@ -1827,6 +1827,11 @@ def create_app(config=None):
             ):
                 return None, previous
             task = _new_pipeline_task(kind)
+            preserved_started_at = started_at
+            if preserved_started_at is None and previous is not None:
+                preserved_started_at = previous.get("started_at")
+            if preserved_started_at is not None:
+                task["started_at"] = int(preserved_started_at)
             _pipeline_tasks[task_id] = task
             return task, previous
 
@@ -3749,6 +3754,8 @@ def create_app(config=None):
                 model=settings.get("model", ""),
                 platform=platform,
             )
+            # 城市由用户选择，AI 分析结果不代填；未选择时默认全国。
+            fields["city"] = []
         except AISecurityError as exc:
             return jsonify({"ok": False, "error": user_facing_error(exc.error_code)}), 502
         except ValueError as exc:
@@ -4842,7 +4849,10 @@ def create_app(config=None):
                 "message": _MSG_TASK_ALREADY_RUNNING,
             }), 409
         task_id = old_task_id
-        claimed_task, previous_task = _claim_pipeline_task_id(task_id, "scrape")
+        claimed_task, previous_task = _claim_pipeline_task_id(
+            task_id, "scrape",
+            started_at=_iso_epoch_ms((db_run or {}).get("started_at")),
+        )
         if claimed_task is None:
             _release_resume_claim(old_task_id)
             return jsonify({
@@ -5129,7 +5139,13 @@ def create_app(config=None):
                     "message": _MSG_TASK_ALREADY_RUNNING,
                 }), 409
             claimed_old_resume = True
-        claimed_task, previous_task = _claim_pipeline_task_id(task_id, "ai_screen")
+        claimed_task, previous_task = _claim_pipeline_task_id(
+            task_id, "ai_screen",
+            started_at=(
+                _iso_epoch_ms((prev or {}).get("started_at"))
+                if resume_from_run_id and prev is not None else None
+            ),
+        )
         if claimed_task is None:
             if (resume_from_run_id and prev is not None
                     and prev["status"] == "paused"):
@@ -5475,13 +5491,20 @@ def create_app(config=None):
                 str(interrupted_params.get("scrape_task_id") or "") or run["id"]
             )
             interrupted_scraped_count = store.count_scrape_run_jobs(interrupted_source_task_id)
+            interrupted_kind = _pipeline_kind_for_stage(run.get("current_stage") or "")
+            if interrupted_kind == "scrape":
+                interrupted_message = "上次抓取因服务重启被中断；已抓数据已保存"
+            elif interrupted_kind == "recrawl":
+                interrupted_message = "上次补抓因服务重启被中断；可结束保存已有结果"
+            else:
+                interrupted_message = "上次 AI 筛选因服务重启被中断"
             return jsonify({
                 "ok": True,
                 "has_task": True,
                 "task_id": run["id"],
                 "kind": _pipeline_kind_for_stage(run.get("current_stage") or ""),
                 "status": "interrupted",
-                "progress": {"message": "上次 AI 筛选因服务重启被中断"},
+                "progress": {"message": interrupted_message},
                 "logs": [],
                 "error": "",
                 "started_at": _iso_epoch_ms(run.get("started_at")),
@@ -6447,7 +6470,8 @@ def create_app(config=None):
             return jsonify({"ok": False, "error": "missing_job_ids"}), 409
 
         claimed_task, previous_task = _claim_pipeline_task_id(
-            task_id, "recrawl"
+            task_id, "recrawl",
+            started_at=_iso_epoch_ms(run.get("started_at")),
         )
         if claimed_task is None:
             return jsonify({"ok": False, "error": "already_running"}), 409
@@ -7335,6 +7359,9 @@ def create_app(config=None):
                     error_code, str((run or {}).get("platform") or (live or {}).get("platform") or "")
                 ) or error_code or "",
             }
+        if effective_status == "interrupted":
+            progress.setdefault(
+                "message", "任务因服务重启被中断，已保存进度")
         started_at = _iso_epoch_ms((live or {}).get("started_at"))
         if started_at is None:
             started_at = _iso_epoch_ms((run or {}).get("started_at"))
@@ -7520,7 +7547,10 @@ def create_app(config=None):
             }
 
         task_id = run_id
-        claimed_task, previous_task = _claim_pipeline_task_id(task_id, "ai_screen")
+        claimed_task, previous_task = _claim_pipeline_task_id(
+            task_id, "ai_screen",
+            started_at=_iso_epoch_ms(run.get("started_at")),
+        )
         if claimed_task is None:
             _release_resume_claim(run_id)
             return jsonify({

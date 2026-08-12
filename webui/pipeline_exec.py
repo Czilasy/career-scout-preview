@@ -1132,6 +1132,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                 label = failed_code_label(outcome.failed_code, platform)
                 emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
                      keyword=kw, city=city, failed_code=outcome.failed_code,
+                     combo_key=combo_key,
                      message=f"系统性阻断：{label}，任务暂停")
                 return {"ok": False, "jobs": list(merged.values()),
                         "total_scraped": total_scraped, "total_matched": len(merged),

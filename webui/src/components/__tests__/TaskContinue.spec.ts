@@ -252,6 +252,32 @@ describe("TaskProgress canonical terminal states", () => {
     vi.useRealTimers();
   });
 
+  it("keeps elapsed time when a paused task resumes with the same started_at", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
+    const baseTime = new Date("2026-08-01T00:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime + 60_000);
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "scrape",
+        snapshot: {
+          status: "paused",
+          progress: { stage: "searching", overall_percent: 20 },
+          started_at: baseTime,
+        },
+      },
+    });
+
+    await wrapper.setProps({
+      snapshot: {
+        status: "running",
+        progress: { stage: "searching", overall_percent: 20 },
+        started_at: baseTime,
+      },
+    });
+    expect(wrapper.get(".task-elapsed").text()).toContain("已用 1分00秒");
+    vi.useRealTimers();
+  });
+
   it("does not render execution batch summary", () => {
     const wrapper = mount(TaskProgress, {
       props: {

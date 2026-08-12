@@ -424,6 +424,9 @@ describe("DiscoveryView", () => {
     expect(wrapper.find('[data-testid="start-ai-screen"]').exists()).toBe(false);
 
     await confirmProfile(wrapper);
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
 
@@ -535,6 +538,49 @@ describe("DiscoveryView", () => {
     const previewCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/search-scope/preview"));
     expect(previewCall).toBeTruthy();
     expect(JSON.parse(String(previewCall?.[1]?.body))).toMatchObject({ scope_kind: "nationwide", cities: [] });
+    vi.unstubAllGlobals();
+  });
+
+  it("resume analysis never prefills a city for the user", async () => {
+    const settings = {
+      pages: 3, inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+      detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+      screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.endsWith("/api/latest-running-task")) return response({ task: null });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/analyze-resume")) {
+        return response({
+          ok: true,
+          fields: {
+            keyword: [{ word: "Python 后端", recommended: true }],
+            city: ["上海"],
+            profile_summary: "3年Python后端",
+          },
+          labels: { city: ["城市", ["上海"], "city"] },
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    const file = new File(["resume"], "resume.txt", { type: "text/plain" });
+    Object.defineProperty(wrapper.get('[data-testid="resume-input"]').element, "files", { value: [file], configurable: true });
+    await wrapper.get('[data-testid="resume-input"]').trigger("change");
+    await wrapper.get('[data-testid="resume-consent"]').setValue(true);
+    await wrapper.get('[data-testid="analyze-resume"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find(".city-chip").exists()).toBe(false);
+    expect((wrapper.get('[data-testid="custom-city"]').element as HTMLInputElement).value).toBe("");
     vi.unstubAllGlobals();
   });
 
@@ -1314,6 +1360,9 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="analyze-resume"]').trigger("click");
     await flushPromises();
     await confirmProfile(wrapper);
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[data-testid="start-one-click"]').trigger("click");
     await flushPromises();
 
@@ -1795,6 +1844,9 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="platform-segment-zhilian"]').trigger("click");
     await flushPromises();
     await confirmProfile(wrapper);
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");

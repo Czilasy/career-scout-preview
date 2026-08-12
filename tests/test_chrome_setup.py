@@ -821,11 +821,17 @@ class ChromeSetupTests(unittest.TestCase):
             module, "操作频繁，请稍后再试", status=429)
         self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "restricted")
 
-    def test_probe_tri_state_empty_probe_is_not_logged_in(self):
+    def test_probe_tri_state_not_logged_in_on_401(self):
+        module = load_module()
+        cdp = mock.Mock()
+        cdp.eval_js.return_value = self._probe_payload(module, "", status=401)
+        self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "not_logged_in")
+
+    def test_probe_tri_state_empty_probe_is_unknown(self):
         module = load_module()
         cdp = mock.Mock()
         cdp.eval_js.return_value = ""
-        self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "not_logged_in")
+        self.assertEqual(module.probe_login_state_tri(cdp, "sid"), "unknown")
 
     def test_check_login_state_unknown_on_cdp_failure(self):
         module = load_module()

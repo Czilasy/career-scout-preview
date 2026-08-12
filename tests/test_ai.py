@@ -1199,6 +1199,71 @@ class MatchJdsFailurePolicyTests(unittest.TestCase):
         self.assertEqual(result["verdicts"]["j1"]["verdict"], "not_match")
         call.assert_not_called()
 
+    def test_structured_experience_degree_hard_filter_without_ai(self):
+        """已选经验/学历是硬约束：结构化标签冲突直接 not_match，不交给 AI 自判。"""
+        from webui.ai import match_jds
+
+        jobs = [
+            {"job_id": "exp3", "title": "3年岗", "salary": "10-15K",
+             "tags": "3-5年 | 本科", "jd": "JD"},
+            {"job_id": "master", "title": "硕士岗", "salary": "10-15K",
+             "tags": "1-3年 | 硕士", "jd": "JD"},
+            {"job_id": "ok", "title": "合适岗", "salary": "10-15K",
+             "tags": "1-3年 | 本科", "jd": "JD"},
+            {"job_id": "unknown", "title": "未标岗", "salary": "10-15K",
+             "tags": "", "jd": "JD"},
+        ]
+        criteria = {"experience": ["101", "103", "104"], "degree": ["202", "203"]}
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "合适"},
+            {"i": 1, "match": True, "reason": "合适"},
+        ]}) as call:
+            result = match_jds(
+                jobs, "画像", "https://x", "key",
+                batch_size=10, concurrency=1, criteria=criteria,
+            )
+
+        self.assertEqual(result["verdicts"]["exp3"]["verdict"], "not_match")
+        self.assertIn("经验", result["verdicts"]["exp3"]["reason"])
+        self.assertEqual(result["verdicts"]["master"]["verdict"], "not_match")
+        self.assertIn("学历", result["verdicts"]["master"]["reason"])
+        self.assertEqual(result["verdicts"]["ok"]["verdict"], "match")
+        self.assertEqual(result["verdicts"]["unknown"]["verdict"], "match")
+        self.assertEqual(call.call_count, 1)
+
+    def test_combined_school_freshman_experience_label_is_hard_filtered(self):
+        """BOSS 的"在校/应届"合并标签：未选在校/应届时按硬冲突剔除。"""
+        from webui.ai import match_jds
+
+        jobs = [{"job_id": "campus", "title": "在校/应届岗", "salary": "10-15K",
+                "tags": "在校/应届 | 本科", "jd": "JD"}]
+        with patch("webui.ai.call_ai") as call:
+            result = match_jds(
+                jobs, "画像", "https://x", "key", batch_size=10, concurrency=1,
+                criteria={"experience": ["101", "103", "104"],
+                          "degree": ["202", "203"]},
+            )
+
+        self.assertEqual(result["verdicts"]["campus"]["verdict"], "not_match")
+        call.assert_not_called()
+
+    def test_combined_experience_label_kept_when_school_selected(self):
+        """选了在校生时，"在校/应届"合并标签不得被硬筛误杀。"""
+        from webui.ai import match_jds
+
+        jobs = [{"job_id": "campus", "title": "在校/应届岗", "salary": "10-15K",
+                "tags": "在校/应届 | 本科", "jd": "JD"}]
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "合适"},
+        ]}) as call:
+            result = match_jds(
+                jobs, "画像", "https://x", "key", batch_size=10, concurrency=1,
+                criteria={"experience": ["108"], "degree": ["203"]},
+            )
+
+        self.assertEqual(result["verdicts"]["campus"]["verdict"], "match")
+        self.assertEqual(call.call_count, 1)
+
 class CallAIRetryTests(unittest.TestCase):
     """call_ai 重试扩展：5xx/超时/网络可重试，配额撞墙立即停，截断单独识别。"""
 
@@ -1761,6 +1826,27 @@ class ScreenJobsTruncationTests(unittest.TestCase):
         self.assertEqual(sorted(result["kept"]), ["j0", "j1", "j2"])
         self.assertEqual(result["dropped"], [])
 
+    def test_screen_jobs_hard_drops_conflicts_before_ai(self):
+        """粗筛阶段结构化硬筛先于 AI：经验/学历冲突直接剔除。"""
+        from webui.ai import screen_jobs
+
+        jobs = [
+            {"job_id": "exp3", "title": "3年岗", "salary": "10-15K",
+             "job_labels": "3-5年 | 本科"},
+            {"job_id": "master", "title": "硕士岗", "salary": "10-15K",
+             "job_labels": "1-3年 | 硕士"},
+            {"job_id": "ok", "title": "合适岗", "salary": "10-15K",
+             "job_labels": "1-3年 | 本科"},
+        ]
+        criteria = {"experience": ["101", "103", "104"], "degree": ["202", "203"]}
+        with patch("webui.ai.call_ai", return_value={"dropped": []}) as call:
+            result = screen_jobs(
+                jobs, criteria, "https://x", "key", batch_size=1)
+
+        self.assertEqual([d["job_id"] for d in result["dropped"]], ["exp3", "master"])
+        self.assertEqual(result["kept"], ["ok"])
+        call.assert_called_once()
+
 
 class AIScreeningPromptPolicyTests(unittest.TestCase):
     """粗筛/精筛提示词：候选人方向为锚，硬性条件才排除，显式放宽才覆盖默认。"""
@@ -1815,7 +1901,7 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
         self.assertIn("候选人画像（仅用于放宽，不作为硬条件）：3年经验，东莞、深圳都可以", prompt)
 
     def test_match_jds_prompt_three_channels(self):
-        """精筛 prompt 三通道：求职意愿 > 筛选条件 > 画像事实；未体现不得推断。"""
+        """精筛 prompt 层级：六类字段 > 求职画像 > 隐藏画像字段；未体现不得推断。"""
         from webui.ai import match_jds
 
         jobs = [{"job_id": "job-001", "title": "AI教学", "jd": "负责AI课程教学"}]
@@ -1834,10 +1920,11 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
                 batch_size=1, criteria=criteria, profile_facts=facts)
 
         prompt = call.call_args.args[2][0]["content"]
-        self.assertIn("【第一层·求职意愿】", prompt)
+        self.assertIn("【第一层·筛选条件】", prompt)
+        self.assertIn("最高优先级，绝对硬约束", prompt)
         self.assertIn("AI相关行业都可以", prompt)
-        self.assertIn("【第二层·筛选条件】", prompt)
-        self.assertIn("【第三层·画像事实】", prompt)
+        self.assertIn("【第二层·求职画像】", prompt)
+        self.assertIn("【第三层·隐藏画像字段】", prompt)
         self.assertIn("核心技能：Python", prompt)
         self.assertIn("默认匹配，不得写'候选人未知'", prompt)
         self.assertIn("以意愿为准", prompt)
@@ -1861,6 +1948,36 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
 
         prompt = call.call_args.args[2][0]["content"]
         self.assertIn("薪资筛选区间已由系统硬性核对", prompt)
+
+    def test_match_jds_prompt_marks_selected_filters_as_hard(self):
+        """已选筛选条件在精筛 prompt 中明确为硬约束。"""
+        from webui.ai import match_jds
+
+        jobs = [{"job_id": "job-001", "title": "后端", "salary": "15-25K", "jd": "负责后端"}]
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "合适", "caveats": []}
+        ]}) as call:
+            match_jds(
+                jobs, "画像", "https://x", "key", batch_size=1,
+                criteria={"salary": ["405"], "experience": ["104"], "degree": ["203"]})
+
+        prompt = call.call_args.args[2][0]["content"]
+        self.assertIn("已确认的筛选条件（薪资/经验/学历/规模/融资/行业）是硬约束", prompt)
+        self.assertIn("不得只写 caveats 后仍判 match", prompt)
+
+    def test_match_jds_prompt_includes_structured_tags(self):
+        """精筛输入必须带结构化标签，AI 才能看见经验/学历字段。"""
+        from webui.ai import match_jds
+
+        jobs = [{"job_id": "job-001", "title": "后端", "salary": "15-25K",
+                "location": "东莞", "tags": "1-3年 | 本科", "jd": "负责后端"}]
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "合适", "caveats": []}
+        ]}) as call:
+            match_jds(jobs, "画像", "https://x", "key", batch_size=1)
+
+        user_content = call.call_args.args[2][1]["content"]
+        self.assertIn("1-3年 | 本科", user_content)
 
     def test_match_jds_prompt_without_facts_falls_back(self):
         """老轮无画像事实/筛选条件：退化两通道，不报错。"""
@@ -1894,6 +2011,24 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
         self.assertIn("不得当作默认匹配", prompt)
         self.assertIn("求职类型未确认，JD 为兼职", prompt)
         self.assertIn("默认匹配，不得写'候选人未知'", prompt)
+
+    def test_match_jds_prompt_jd_hard_requirement_example(self):
+        """精筛 prompt 明确 JD 正文硬要求优先于标题/标签，并给出漏判示例。"""
+        from webui.ai import match_jds
+
+        jobs = [{"job_id": "job-001", "title": "AI工程师", "salary": "15-18K", "jd": "负责AI开发"}]
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "合适", "caveats": []}
+        ]}) as call:
+            match_jds(jobs, "3年Python后端", "https://x", "key", batch_size=1,
+                      criteria={"experience": ["104"]})
+
+        prompt = call.call_args.args[2][0]["content"]
+        self.assertIn("JD 正文硬要求优先于标题和标签", prompt)
+        self.assertIn("必须具备 Python 3年以上生产环境开发经验", prompt)
+        self.assertIn("统招公办本科", prompt)
+        self.assertIn("2-3年及以上", prompt)
+        self.assertIn("、实习、双休", prompt)
 
 
 class FlagFeaturesTests(unittest.TestCase):
@@ -2052,6 +2187,21 @@ class ProfileFactsTests(unittest.TestCase):
 
         self.assertEqual(result["profile_facts"], {})
 
+    def test_analyze_resume_does_not_return_ai_city(self):
+        """AI 不代填城市；用户未选择时由执行层按全国兜底。"""
+        from webui.ai import analyze_resume_to_fields
+
+        payload = {
+            "keyword": [{"word": "Python", "recommended": True}],
+            "city": "全国",
+            "profile_summary": "Python 后端",
+        }
+        with patch("webui.ai.call_ai", return_value=payload), \
+                patch("webui.ai._resume_bytes_to_text", return_value="Python 后端"):
+            result = analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
+
+        self.assertEqual(result["city"], [])
+
     def test_analyze_resume_prompt_contains_facts_rules(self):
         from webui.ai import analyze_resume_to_fields
 
@@ -2067,6 +2217,7 @@ class ProfileFactsTests(unittest.TestCase):
         self.assertIn("未体现", prompt)
         self.assertIn("自然语言", prompt)
         self.assertIn("简历里明确写了就填，没写的字段留空", prompt)
+        self.assertIn("不输出城市", prompt)
         self.assertIn("简历写了什么就写什么，没写的不补", prompt)
         self.assertIn("projects 只列简历明确的项目/工作经历", prompt)
         self.assertNotIn("事实清单式", prompt)

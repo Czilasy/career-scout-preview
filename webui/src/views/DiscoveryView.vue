@@ -998,9 +998,8 @@ function initializeFromAnalysis(data: AnalyzeResponse) {
     .filter((item) => item.word);
   const recommended = keywords.value.filter((item) => item.recommended).map((item) => item.word);
   selectedKeywords.value = recommended.length ? recommended : keywords.value.map((item) => item.word);
-  cityText.value = Array.isArray(fields.city)
-    ? fields.city.map(String).join(", ")
-    : String(fields.city || "");
+  // 城市由用户选择，AI 不代填；未选择时默认全国。
+  cityText.value = "";
   // T507：按当前已加载 schema 投影筛选建议（platform-schema.md L147）。
   // 只接受 schema 允许的字段；boss.stage 与 zhilian.company_nature 因 schema 不同不会串用。
   // 若 schema 未加载（如刚切平台尚未响应），保留空草稿，不投影。
@@ -1732,6 +1731,28 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       }
       return;
     }
+    if (data.status === "interrupted") {
+      // 服务重启打断：工作线程已死，不能继续轮询；停止 busy 并回到可操作的中断态。
+      pollRetryCount = 0;
+      interruptedRunId.value = taskId;
+      if (kind === "scrape") {
+        scrapeBusy.value = false;
+        scrapeTaskId.value = taskId;
+        analysisReady.value = true;
+        activeStep.value = "search";
+        restoredTaskHint.value = "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取";
+      } else {
+        screenBusy.value = false;
+        screenTaskId.value = taskId;
+        analysisReady.value = true;
+        enterScreenStep();
+        restoredTaskHint.value = "上次 AI 筛选因服务重启被中断；重新开始 AI 筛选会接着上次进度，不重复消耗";
+      }
+      data.progress = { ...(data.progress || {}), message: "任务因服务重启被中断，已保存进度" };
+      if (kind === "scrape") scrapeSnapshot.value = data;
+      else screenSnapshot.value = data;
+      return;
+    }
     pollTimer = window.setTimeout(() => void pollTask(taskId, kind), 1800);
   } catch (error) {
     pollRetryCount += 1;
@@ -2400,6 +2421,16 @@ async function pollRecrawl(taskId: string) {
       recrawlBusy.value = false;
       notify(data.error || "重抓失败", "error");
       window.setTimeout(() => { recrawlSnapshot.value = null; }, 5000);
+      return;
+    }
+    if (data.status === "interrupted") {
+      recrawlRetryCount = 0;
+      recrawlBusy.value = false;
+      interruptedRunId.value = taskId;
+      recrawlTaskId.value = taskId;
+      restoredTaskHint.value = "上次补抓因服务重启被中断；可结束保存已有结果";
+      data.progress = { ...(data.progress || {}), message: "任务因服务重启被中断，已保存进度" };
+      recrawlSnapshot.value = data;
       return;
     }
     pollTimer = window.setTimeout(() => void pollRecrawl(taskId), 1800);

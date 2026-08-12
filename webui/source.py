@@ -31,6 +31,9 @@ SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
 # Valid filter fields passable to the scraper CLI (excludes city which is positional).
 SCRAPER_FILTER_FIELDS = ("salary", "experience", "degree", "industry", "scale", "stage")
 
+# BOSS 预检真实探测第一次被判 restricted 时，等待该时长后重试一次。
+PREFLIGHT_RETRY_DELAY_SECONDS = 10.0
+
 # The scraper loads optional dependencies lazily for its CLI.  The web adapter
 # needs requests available before tests and preflight can patch/use it.
 boss.require_runtime_dependencies("requests")
@@ -394,6 +397,7 @@ class BossCdpSource:
         登录探测走缓存优先（D3）：账号 × 平台 15 分钟 TTL 内命中直接复用，
         不反复触发搜索 API；CDP 连通性检查保持轻量每次都做。
         """
+        cache_note = ""
         if boss.requests is None:
             return SourceOutcome.failure(
                 failed_code="source_unreachable",
@@ -438,25 +442,37 @@ class BossCdpSource:
                     safe_log="boss_login_restricted cache=hit",
                 )
             if cached == "not_logged_in":
-                return SourceOutcome.failure(
-                    failed_code="source_login_required",
-                    safe_log="boss_login_required cache=hit",
-                )
+                cache_note = " cache=not_logged_in_ignored"
+            elif cached == "unknown":
+                cache_note = " cache=unknown_ignored"
 
         state = boss.check_login_state_tri(self.cdp_port)
+        if state == "unknown":
+            state = boss.check_login_state_tri(self.cdp_port)
+        retry_note = ""
+        if state == "restricted":
+            time.sleep(PREFLIGHT_RETRY_DELAY_SECONDS)
+            retry_note = " retry=1"
+            state = boss.check_login_state_tri(self.cdp_port)
+            if state == "unknown":
+                state = boss.check_login_state_tri(self.cdp_port)
         if self.browser_account:
             from scripts.login_state_cache import write_login_state
             write_login_state(self.browser_account, "boss", state)
         if state == "logged_in":
-            return SourceOutcome.success(safe_log="source_ready")
+            return SourceOutcome.success(safe_log=f"source_ready{cache_note}{retry_note}")
         if state == "restricted":
             return SourceOutcome.failure(
                 failed_code="source_blocked",
-                safe_log="boss_login_restricted",
+                safe_log=f"boss_login_restricted{cache_note}{retry_note}",
             )
-        return SourceOutcome.failure(
-            failed_code="source_login_required",
-            safe_log="boss_login_required",
+        if state == "not_logged_in":
+            return SourceOutcome.failure(
+                failed_code="source_login_required",
+                safe_log=f"boss_login_required{cache_note}{retry_note}",
+            )
+        return SourceOutcome.success(
+            safe_log=f"boss_login_probe_unknown{retry_note or ' retry=1'} proceed=1",
         )
 
     def fetch_list(
@@ -544,7 +560,7 @@ class BossCdpSource:
             combo_key=combo_key, list_events_output=page_events_path or None,
             start_page=start_page,
         )
-        safe_log = f"list keyword_present=1 city_present={bool(city)} pages={target_pages}"
+        safe_log = f"list combo_key_present=1 keyword_present=1 city_present={bool(city)} pages={target_pages}"
         if self.breaker.is_open():
             return SourceOutcome.failure(
                 failed_code="source_blocked",
@@ -1158,6 +1174,7 @@ class BossCdpSource:
             "--pages", str(int(target_pages)),
             "--output", output_path,
             "--no-detail",  # list fetch never pulls detail; orchestrator does that
+            "--skip-login-check",  # 任务级 preflight 已探测，组合级不再重复
         ]
         if start_page and int(start_page) > 1:
             command.extend(["--start-page", str(int(start_page))])
@@ -1246,6 +1263,7 @@ class BossCdpSource:
     _IN_PROCESS_BOOL_FLAGS = frozenset({
         "no-detail", "detail", "enable-parallel", "analysis",
         "close-chrome", "setup-chrome", "stop-chrome", "smoke-test",
+        "skip-login-check",
     })
 
     def _run_command(
@@ -1357,6 +1375,7 @@ class BossCdpSource:
             "cdp_port": int(flags.get("cdp-port", str(self.cdp_port))),
             "output_path": str(flags.get("output", "")),
             "detail": False,
+            "skip_login_check": bool(flags.get("skip-login-check", False)),
             "filters": filters,
             "cancel_event": self.cancel_event,
             "combo_key": str(flags.get("combo-key", "") or "") or None,
@@ -1764,6 +1783,10 @@ _RATE_LIMIT_KEYWORDS = (
     "操作频繁", "频繁访问", "访问频繁", "稍后再试", "访问受限", "异常流量", "账号受限", "限流",
     "rate limit", "too many",
 )
+_LOGIN_REQUIRED_KEYWORDS = (
+    "401", "登录态失效", "登录失效", "登录已失效", "请先登录", "未登录",
+    "cookie 失效", "cookie已失效",
+)
 
 
 def _has_unlock_signal(text: str) -> bool:
@@ -1795,6 +1818,8 @@ def _classify_failed_code(returncode: int, captured: str) -> str:
             return "source_login_required"
         return "source_unknown_error"
     if returncode == 10:
+        if any(kw in text for kw in _LOGIN_REQUIRED_KEYWORDS):
+            return "source_login_required"
         if _has_unlock_signal(captured):
             return "source_rate_limited"
         if any(kw in text for kw in _RATE_LIMIT_KEYWORDS):

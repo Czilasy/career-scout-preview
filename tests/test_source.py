@@ -16,6 +16,7 @@ from webui.source import (
     BossCdpSource,
     FakeJobSource,
     JobSource,
+    PREFLIGHT_RETRY_DELAY_SECONDS,
     SAFE_FAILURE_CODES,
     SourceCircuitBreaker,
     SourceOutcome,
@@ -1787,6 +1788,7 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         self.assertEqual(captured["city"], "上海")
         self.assertEqual(captured["pages"], 1)
         self.assertFalse(captured["detail"])
+        self.assertTrue(captured["skip_login_check"])
         self.assertEqual(captured["output_path"], list_path)
         # jobs 被归一化（encrypt_job_id → job_id）
         self.assertEqual(len(outcome.jobs), 1)
@@ -2248,6 +2250,14 @@ class RiskSignalClassificationTests(unittest.TestCase):
         self.assertEqual(
             _classify_failed_code(10, "账号将于 2099-08-05 18:30 解封"), "source_rate_limited")
 
+    def test_exit_10_login_required_maps_to_login_required(self):
+        from webui.source import _classify_failed_code
+        for sample in (
+            "列表接口返回 HTTP 401（登录态失效）",
+            "列表接口提示请先登录", "登录已失效，请重新登录",
+        ):
+            self.assertEqual(_classify_failed_code(10, sample), "source_login_required")
+
     def test_record_risk_signals_only_writes_for_high_confidence(self):
         from webui.source import _record_risk_signals
         with mock.patch("scripts.login_state_cache.write_login_state") as write_state, \
@@ -2261,6 +2271,101 @@ class RiskSignalClassificationTests(unittest.TestCase):
             write_state.assert_called_once_with("acc", "boss", "restricted")
             mark_cd.assert_called_once()
             self.assertEqual(mark_cd.call_args.kwargs["from_run"], "run-2")
+
+
+class BossCdpSourcePreflightTests(_LoginCacheIsolated):
+    """BOSS preflight：不信任 not_logged_in 缓存，unknown 重试一次后放行。"""
+
+    def _source(self):
+        return BossCdpSource(browser_account="a", cdp_port=9222)
+
+    def _mock_cdp_ok(self):
+        from scripts import boss_cdp_raw as boss
+        resp = mock.Mock()
+        resp.status_code = 200
+        resp.json.return_value = {"Browser": "Chrome"}
+        return mock.patch.object(boss.requests, "get", return_value=resp)
+
+    def test_cached_not_logged_in_is_reprobed(self):
+        from scripts import boss_cdp_raw as boss
+        from scripts import login_state_cache as cache
+        cache.write_login_state("a", "boss", "not_logged_in")
+        source = self._source()
+        with self._mock_cdp_ok(), \
+                mock.patch.object(boss, "check_login_state_tri", return_value="logged_in") as m:
+            outcome = source.preflight()
+        self.assertTrue(outcome.ok)
+        m.assert_called_once()
+        self.assertIn("not_logged_in_ignored", outcome.safe_log)
+
+    def test_cached_restricted_still_blocks(self):
+        from scripts import boss_cdp_raw as boss
+        from scripts import login_state_cache as cache
+        cache.write_login_state("a", "boss", "restricted")
+        source = self._source()
+        with self._mock_cdp_ok(), \
+                mock.patch.object(boss, "check_login_state_tri") as m:
+            outcome = source.preflight()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_blocked")
+        m.assert_not_called()
+
+    def test_unknown_probe_retries_once_then_proceeds(self):
+        from scripts import boss_cdp_raw as boss
+        source = self._source()
+        with self._mock_cdp_ok(), \
+                mock.patch.object(boss, "check_login_state_tri", return_value="unknown") as m:
+            outcome = source.preflight()
+        self.assertTrue(outcome.ok)
+        self.assertEqual(m.call_count, 2)
+        self.assertIn("probe_unknown", outcome.safe_log)
+
+    def test_unknown_then_logged_in_succeeds(self):
+        from scripts import boss_cdp_raw as boss
+        source = self._source()
+        with self._mock_cdp_ok(), \
+                mock.patch.object(boss, "check_login_state_tri",
+                    side_effect=["unknown", "logged_in"]) as m:
+            outcome = source.preflight()
+        self.assertTrue(outcome.ok)
+        self.assertEqual(m.call_count, 2)
+
+    def test_restricted_then_logged_in_retries_after_delay(self):
+        from scripts import boss_cdp_raw as boss
+        from scripts import login_state_cache as cache
+        source = self._source()
+        with self._mock_cdp_ok(), \
+                mock.patch.object(boss, "check_login_state_tri",
+                    side_effect=["restricted", "logged_in"]) as m, \
+                mock.patch("webui.source.time.sleep") as sleep:
+            outcome = source.preflight()
+        self.assertTrue(outcome.ok)
+        self.assertEqual(m.call_count, 2)
+        sleep.assert_called_once_with(PREFLIGHT_RETRY_DELAY_SECONDS)
+        self.assertEqual(cache.read_cached_state("a", "boss"), "logged_in")
+
+    def test_restricted_twice_returns_source_blocked(self):
+        from scripts import boss_cdp_raw as boss
+        source = self._source()
+        with self._mock_cdp_ok(), \
+                mock.patch.object(boss, "check_login_state_tri",
+                    side_effect=["restricted", "restricted"]) as m, \
+                mock.patch("webui.source.time.sleep") as sleep:
+            outcome = source.preflight()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_blocked")
+        self.assertEqual(m.call_count, 2)
+        sleep.assert_called_once_with(PREFLIGHT_RETRY_DELAY_SECONDS)
+        self.assertIn("retry=1", outcome.safe_log)
+
+    def test_real_not_logged_in_fails_login_required(self):
+        from scripts import boss_cdp_raw as boss
+        source = self._source()
+        with self._mock_cdp_ok(), \
+                mock.patch.object(boss, "check_login_state_tri", return_value="not_logged_in"):
+            outcome = source.preflight()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_login_required")
 
 
 if __name__ == "__main__":

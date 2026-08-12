@@ -909,12 +909,14 @@ def probe_login_state(cdp, sid):
 
 
 def probe_login_state_tri(cdp, sid):
-    """单次搜索 API 探测，返回三态: "logged_in" | "not_logged_in" | "restricted"。
+    """单次搜索 API 探测，返回四态: "logged_in" | "not_logged_in" | "restricted" | "unknown"。
 
     判定顺序：
-    - 受限中: HTTP 4xx/429，或响应文本命中风控特征词（RISK_CONTROL_KEYWORDS）
+    - HTTP 401: 明确登录失效 → not_logged_in
+    - 受限中: 其余 HTTP 4xx/429，或响应文本命中风控特征词（RISK_CONTROL_KEYWORDS）
     - 已登录: code==0 且 jobList 含明文 salaryDesc（is_logged_in_search_response）
-    - 未登录: 其余情况（含解析失败、空响应、无明文工资）
+    - 未登录: 结构完整但无明文工资
+    - 未知: 空响应、JSON 解析失败或结构异常（不直接当成未登录）
 
     相比旧版 3 关键词 × 3 城市共 9 次请求，这里固定单关键词单城市只发 1 次。
     """
@@ -932,11 +934,11 @@ def probe_login_state_tri(cdp, sid):
     """
     val = cdp.eval_js(js, sid)
     if not val:
-        return "not_logged_in"
+        return "unknown"
     try:
         payload = json.loads(val) if isinstance(val, str) else val
     except ValueError:
-        return "not_logged_in"
+        return "unknown"
     status = 0
     text = ""
     if isinstance(payload, dict):
@@ -947,13 +949,13 @@ def probe_login_state_tri(cdp, sid):
     else:
         text = json.dumps(payload, ensure_ascii=False)
     if status in (401, 403, 412, 418, 429):
-        return "restricted"
+        return "not_logged_in" if status == 401 else "restricted"
     if looks_like_risk_control(text):
         return "restricted"
     try:
         data = json.loads(text) if isinstance(text, str) else text
     except ValueError:
-        return "not_logged_in"
+        return "unknown"
     return "logged_in" if is_logged_in_search_response(data) else "not_logged_in"
 
 
@@ -3473,6 +3475,7 @@ def run_search_programmatic(
     combo_key=None,
     on_page_completed=None,
     list_events_output=None,
+    skip_login_check: bool = False,
 ) -> dict:
     """EXE 模式搜索全流程（列表 + 可选详情 + 可选分析/合并）。
 
@@ -3485,6 +3488,8 @@ def run_search_programmatic(
       on_log=None 时输出走原 stdout（等价 CLI）。
     - cancel_event 置位时 scrape_list/scrape_details 抛 SearchCancelled，
       已写产物保留；None 时行为与现状完全一致。
+    - skip_login_check=True 时跳过组合级登录探测；任务编排层应在任务开始时
+      已执行过 preflight（真实 401/登录墙仍由列表接口失败映射）。
     """
     import contextlib
 
@@ -3508,12 +3513,17 @@ def run_search_programmatic(
     with redirect:
         try:
             # 登录状态检测
-            print("检测登录状态...")
-            if not check_login_state(cdp_port):
-                print("❌ 未检测到 BOSS直聘登录状态。请先在 Chrome 中登录 zhipin.com。")
-                print("   可运行 --check 检查环境，或 --setup-chrome 启动 Chrome。")
-                raise LoginRequiredError("未检测到 BOSS直聘登录状态")
-            print("✅ 已登录\n")
+            # 登录状态检测：任务编排层预检通过后可用 --skip-login-check 跳过，
+            # 避免每个搜索组合重复探测导致空响应/解析抖动被误判成登录失效。
+            if not skip_login_check:
+                print("检测登录状态...")
+                if not check_login_state(cdp_port):
+                    print("❌ 未检测到 BOSS直聘登录状态。请先在 Chrome 中登录 zhipin.com。")
+                    print("   可运行 --check 检查环境，或 --setup-chrome 启动 Chrome。")
+                    raise LoginRequiredError("未检测到 BOSS直聘登录状态")
+                print("✅ 已登录\n")
+            else:
+                print("跳过登录状态检测（任务预检已处理）")
 
             list_data = scrape_list(
                 keyword, city, pages, filters, output_path,
@@ -3792,6 +3802,8 @@ def main():
                    help="列表页完成事件输出路径 (JSONL；供 WebUI 页级进度/快照使用)")
     p.add_argument("--combo-key", default=None,
                    help="组合键（keyword|city），用于页级事件身份；不传则内部推导")
+    p.add_argument("--skip-login-check", action="store_true",
+                   help="跳过组合级登录探测（任务编排层已做过 preflight 时使用）")
     p.add_argument("--analysis", action="store_true", help="输出分析报告")
     p.add_argument("--input", default=None, help="从已有 JSON 文件读取（跳过抓取）")
     p.add_argument("--allow-dom-fallback", action="store_true",
@@ -3891,12 +3903,16 @@ def main():
         print(f"从文件加载 {len(list_data.get('jobs',[]))} 条: {args.input}")
     else:
         # 登录状态检测
-        print("检测登录状态...")
-        if not check_login_state(args.cdp_port):
-            print("❌ 未检测到 BOSS直聘登录状态。请先在 Chrome 中登录 zhipin.com。")
-            print("   可运行 --check 检查环境，或 --setup-chrome 启动 Chrome。")
-            sys.exit(1)
-        print("✅ 已登录\n")
+        # 登录状态检测：--skip-login-check 仅用于任务编排层已做 preflight 的调用
+        if not args.skip_login_check:
+            print("检测登录状态...")
+            if not check_login_state(args.cdp_port):
+                print("❌ 未检测到 BOSS直聘登录状态。请先在 Chrome 中登录 zhipin.com。")
+                print("   可运行 --check 检查环境，或 --setup-chrome 启动 Chrome。")
+                sys.exit(1)
+            print("✅ 已登录\n")
+        else:
+            print("跳过登录状态检测（任务预检已处理）")
 
         list_data = scrape_list(
             args.keyword, args.city, args.pages, filters, args.output,

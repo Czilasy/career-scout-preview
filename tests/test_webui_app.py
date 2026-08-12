@@ -13,6 +13,7 @@ from unittest import mock
 
 
 from webui.app import create_app
+from webui.task_runners import _iso_epoch_ms
 
 
 def _tuning_quality_context():
@@ -1185,6 +1186,8 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(interrupted["status"], "interrupted")
         self.assertEqual(interrupted["scraped_count"], 8)
         self.assertEqual(interrupted["platform"], "zhilian")
+        self.assertEqual(interrupted["kind"], "scrape")
+        self.assertIn("上次抓取", interrupted["progress"]["message"])
 
     def test_latest_running_task_skips_failed_when_newer_result_saved(self):
         self._seed_scrape_run("recover-stale-failed", 5, "failed")
@@ -3895,6 +3898,12 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
                         "续抓后 task 必须有冻结 profile_key")
         self.assertTrue(task.get("task_input_digest"),
                         "续抓后 task 必须有冻结 task_input_digest")
+        db_started = _iso_epoch_ms(
+            store.get_screening_run(task_id).get("started_at"))
+        self.assertEqual(
+            task.get("started_at"), db_started,
+            "续抓必须沿用原任务 started_at，前端计时不清零",
+        )
 
     # -- T404: source attempt before combo result -----------------------
 
@@ -4615,6 +4624,16 @@ class StatusMappingTests(unittest.TestCase):
         data = resp.get_json()
         self.assertEqual(data.get("status"), "cancelled")
         self.assertEqual(data.get("db_status"), "interrupted")
+
+    def test_task_state_restart_interrupted_carries_message(self):
+        """服务重启中断的任务不应显示默认“正在准备任务”。"""
+        run_id = "interrupt-msg"
+        self._create_run(run_id, "interrupted")
+        self.store.save_interruption_kind(run_id, "process_restart")
+        data = self.client.get("/api/task-state/interrupt-msg").get_json()
+        self.assertEqual(data.get("status"), "interrupted")
+        self.assertIn("message", data.get("progress") or {})
+        self.assertNotEqual(data["progress"]["message"], "正在准备任务")
 
     # -- T412: continue 一致性校验 + 原子 claim --------------------------
 
@@ -5396,6 +5415,8 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json()
         self.assertEqual(data["platform"], "boss")
+        self.assertEqual(data["fields"]["city"], [])
+        self.assertEqual(data["semantic"]["city"], [])
         self.assertNotIn("company_nature", data["fields"])
         self.assertEqual(data["fields"]["stage"], ["804"])
         self.assertEqual(data["semantic"]["stage"], ["B轮"])
