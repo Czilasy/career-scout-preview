@@ -1349,18 +1349,37 @@ def _job_value_label(job, field):
     return str(job.get(f"company_{field}") or "").strip()
 
 
+_FILTER_CODE_MAPS = {
+    "experience": boss.EXPERIENCE_MAP,
+    "degree": boss.DEGREE_MAP,
+    "scale": boss.SCALE_MAP,
+    "stage": boss.STAGE_MAP,
+    "industry": boss.INDUSTRY_MAP,
+}
+
+
+def _criteria_codes(values, mapping):
+    """把已选筛选值统一成内部代码，中文标签也兼容。"""
+    codes = set()
+    for value in values or []:
+        text = str(value).strip()
+        if text:
+            codes.add(str(mapping.get(text, text)))
+    return codes
+
+
 def _job_criteria_hard_mismatch(job, criteria):
     """已选筛选字段与岗位明确值冲突时返回 (field, reason)，未知/未选字段不误杀。"""
     if not isinstance(criteria, dict):
         return None, ""
     for field, reader in _FILTER_CODE_READERS.items():
-        selected = {str(c) for c in criteria.get(field) or []}
+        selected = _criteria_codes(criteria.get(field), _FILTER_CODE_MAPS[field])
         if not selected or "0" in selected:
             continue
         job_codes = reader(job)
         if job_codes and not (job_codes & selected):
             return field, f"{_FILTER_FIELD_LABELS[field]}{_job_value_label(job, field)}不在筛选范围"
-    salary_codes = {str(c) for c in criteria.get("salary") or []}
+    salary_codes = _criteria_codes(criteria.get("salary"), boss.SALARY_MAP)
     if salary_codes and _salary_hard_mismatch(job.get("salary"), salary_codes):
         return "salary", f"薪资{job.get('salary', '')}不在筛选范围"
     return None, ""

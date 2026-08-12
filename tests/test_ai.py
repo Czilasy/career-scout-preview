@@ -1847,6 +1847,19 @@ class ScreenJobsTruncationTests(unittest.TestCase):
         self.assertEqual(result["kept"], ["ok"])
         call.assert_called_once()
 
+    def test_screen_jobs_accepts_label_criteria_without_hard_dropping(self):
+        """硬筛兼容中文标签筛选值：匹配岗位不得被误杀。"""
+        from webui.ai import screen_jobs
+
+        jobs = [{"job_id": "ok", "title": "合适岗", "salary": "15-25K",
+                "job_labels": "本科"}]
+        with patch("webui.ai.call_ai", return_value={"dropped": []}) as call:
+            result = screen_jobs(
+                jobs, {"degree": ["本科"]}, "https://x", "key", batch_size=1)
+
+        self.assertEqual(result["kept"], ["ok"])
+        call.assert_called_once()
+
 
 class AIScreeningPromptPolicyTests(unittest.TestCase):
     """粗筛/精筛提示词：候选人方向为锚，硬性条件才排除，显式放宽才覆盖默认。"""
