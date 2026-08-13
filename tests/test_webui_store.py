@@ -63,6 +63,12 @@ class TaskStoreTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             self.store.get_task("missing")
 
+    def test_db_meta_marker_exists(self):
+        meta = self.store.get_db_meta()
+        self.assertIsNotNone(meta)
+        self.assertIn(meta["env"], ("live", "test"))
+        self.assertTrue(meta["updated_at"])
+
 
 class ScrapePageProgressTests(unittest.TestCase):
     """页级 checkpoint：岗位快照与页进度同事务原子落库。"""
@@ -1450,6 +1456,19 @@ class ScreeningRunStoreTests(unittest.TestCase):
         self.assertEqual(counts["mismatch_count"], 1)
         self.assertEqual(counts["total_kept"], 3)
         self.assertEqual(counts["total_dropped"], 1)
+
+    def test_insert_pending_result_persists_zhilian_platform(self):
+        """回归：智联 pending 必须保留 zhilian 平台身份，不得回退成 boss。"""
+        run_id = "pending-platform-zhilian"
+        self.store.create_screening_run(run_id, source_count=1)
+        self.store.insert_pending_result(
+            run_id, "z1", failure_stage="jd_detail",
+            failed_code="source_blocked", platform="zhilian",
+            ai_payload_json={"reason": "测试"},
+        )
+        row = self.store.get_pending_result(run_id, "z1")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["platform"], "zhilian")
 
     def test_latest_screening_run_for_source_matches_execution_params(self):
         self.store.create_screening_run(

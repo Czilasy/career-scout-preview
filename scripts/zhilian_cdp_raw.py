@@ -46,11 +46,18 @@ _ZHILIAN_DETAIL_PATTERN = "https://www.zhaopin.com/jobdetail/{job_id}.htm"
 _ZHILIAN_PASSPORT_HOST = "passport.zhaopin.com"
 _LOCATION_HREF_JS = "location.href"
 _BODY_TEXT_JS = "document.body ? document.body.innerText.slice(0,3000) : ''"
+_DETAIL_READY_JS = (
+    "(window.__INITIAL_STATE__ && window.__INITIAL_STATE__.jobDetail "
+    "&& ((window.__INITIAL_STATE__.jobDetail.detailedPosition||{}).jobDesc || "
+    "document.body.innerText.includes('职位描述')))"
+)
 
 # 真实页面文本 marker（2026-08-04 核验；只保存脱敏 marker，不保存页面正文）。
 # 2026-08-07 收紧：移除 "verify"/"captcha"/"稍后再试" 等泛词——正常页面
 # 文案（按钮、提示、广告位）可能包含这些词，导致误判风控（账号被错误标记
 # restricted 并写入 4h 冷却）。现在只保留高置信度的完整短语。
+# 2026-08-13 再收紧：裸数字/英文泛词（429/403/forbidden/无法访问）会命中
+# 正常详情页正文（公司排名、门牌号、英文条款），不再单独判风控。
 _LOGIN_MARKERS = (
     "请登录", "登录后查看", "扫码登录", "账号登录", "立即登录",
     _ZHILIAN_PASSPORT_HOST,
@@ -60,11 +67,11 @@ _VERIFY_MARKERS = (
 )
 _RATE_MARKERS = (
     "访问过于频繁", "请求过于频繁", "操作频繁",
-    "429", "too many requests",
+    "too many requests",
 )
 _BLOCK_MARKERS = (
-    "访问被拒绝", "禁止访问", "无法访问", "已被封禁",
-    "403", "forbidden",
+    "访问被拒绝", "禁止访问", "已被封禁",
+    "403 forbidden", "http 403", "error 403",
 )
 _EMPTY_MARKERS = (
     "很抱歉，您搜索的职位找不到！",
@@ -488,12 +495,22 @@ def _scrape_detail_on_ws(
     _navigate(ws, canonical)
     ready = _wait_expression(
         ws,
-        "(window.__INITIAL_STATE__ && window.__INITIAL_STATE__.jobDetail "
-        "&& ((window.__INITIAL_STATE__.jobDetail.detailedPosition||{}).jobDesc || "
-        "document.body.innerText.includes('职位描述')))",
+        _DETAIL_READY_JS,
         timeout=30,
         sleeper=sleeper,
     )
+    if not ready:
+        if sleeper is not None:
+            sleeper(random.uniform(2, 4), label="detail_retry_wait")
+        else:
+            time.sleep(random.uniform(2, 4))
+        _navigate(ws, canonical)
+        ready = _wait_expression(
+            ws,
+            _DETAIL_READY_JS,
+            timeout=25,
+            sleeper=sleeper,
+        )
     if not ready:
         body = str(_evaluate(ws, _BODY_TEXT_JS) or "")
         signal = _risk_signal(body, str(_evaluate(ws, _LOCATION_HREF_JS) or ""))

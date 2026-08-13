@@ -1303,6 +1303,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     jd_by_idx = {}
     jd_fail_by_idx: dict[int, str] = {}
     jd_fail_reason_by_idx: dict[int, str] = {}
+    jd_fail_evidence_by_idx: dict[int, str] = {}
     done = 0
     fetched = 0
     hard_stop = False
@@ -1474,6 +1475,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                         outcome.failed_code, getattr(source, "platform", "")
                     ) or "岗位详情抓取失败"
                 )
+                jd_fail_evidence_by_idx[idx] = str(getattr(outcome, "safe_log", "") or "")
             jd_by_idx[idx] = jd
             if jd:
                 fetched += 1
@@ -1516,6 +1518,9 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         if not e["jd"] and idx in jd_fail_by_idx:
             e["jd_failed_code"] = jd_fail_by_idx[idx]
             e["jd_failed_reason"] = jd_fail_reason_by_idx[idx]
+            evidence = jd_fail_evidence_by_idx.get(idx, "")
+            if evidence:
+                e["jd_failed_evidence"] = evidence
         enriched.append(e)
     return {"jobs": enriched, "hard_stop": hard_stop,
             "hard_stop_code": hard_stop_code,

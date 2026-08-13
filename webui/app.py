@@ -2256,15 +2256,18 @@ def create_app(config=None):
                     ai_payload_json={
                         "reason": reason,
                         "evidence": failed_code,
+                        "evidence_detail": str(job.get("jd_failed_evidence") or ""),
                         "next_action": "retry_jd",
                     },
                     failed_code=failed_code,
+                    platform=platform,
                 )
             events.append(("job_fail", {
                 "stage": stage,
                 "job_id": job_id,
                 "failed_code": failed_code,
                 "reason": reason,
+                "evidence_detail": str(job.get("jd_failed_evidence") or ""),
             }))
         if events:
             store.append_task_events(task_run_id, events)

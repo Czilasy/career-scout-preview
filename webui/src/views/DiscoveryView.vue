@@ -243,6 +243,7 @@ const selectedFile = ref<File | null>(null);
 const aiConsent = ref(false);
 const dragActive = ref(false);
 const uploadBusy = ref(false);
+const resumeError = ref("");
 const keywords = ref<Array<{ word: string; recommended: boolean }>>([]);
 const selectedKeywords = ref<string[]>([]);
 const customKeyword = ref("");
@@ -362,6 +363,19 @@ const advancedRanges = ref<Record<string, [number, number]>>({
   match_concurrency: [1, 10],
 });
 const pagesValue = computed(() => Number(advancedSettings.value.pages || 3));
+const executionModeLabels: Record<ExecutionSelection, string> = {
+  stable: "稳定",
+  balanced: "平衡",
+  extreme: "极限",
+  custom: "自定义",
+};
+const executionModeSummary = computed(() => {
+  const delay = Number(advancedSettings.value.inter_combo_delay || 0);
+  const batch = Number(advancedSettings.value.detail_batch_size || 0);
+  const screen = Number(advancedSettings.value.screen_concurrency || 0);
+  const match = Number(advancedSettings.value.match_concurrency || 0);
+  return `当前模式：${executionModeLabels[executionSelection.value] || "自定义"} · 组合延迟 ${delay} 秒 · 详情每批 ${batch} 个 · 粗筛 ${screen} 路并发 · 精筛 ${match} 路并发`;
+});
 function mergeManualRanges(raw: AdvancedSettingsState["manual_ranges"] | undefined) {
   if (!raw) return;
   for (const [field, value] of Object.entries(raw)) {
@@ -375,7 +389,6 @@ function advancedRange(field: string): [number, number] {
   return advancedRanges.value[field] || [0, Number.MAX_SAFE_INTEGER];
 }
 function clampAdvanced(field: string) {
-  if (field !== "pages") executionSelection.value = "custom";
   const raw = advancedSettings.value[field];
   if (typeof raw !== "number" || Number.isNaN(raw)) return;
   const range = advancedRanges.value[field];
@@ -1015,6 +1028,7 @@ function initializeFromAnalysis(data: AnalyzeResponse) {
 }
 
 async function analyzeResume() {
+  resumeError.value = "";
   if (!selectedFile.value) {
     notify("请先选择简历文件", "warning");
     return;
@@ -1066,6 +1080,7 @@ async function analyzeResume() {
     enterSearchStep();
     notify("简历分析完成，请确认关键词与城市", "success");
   } catch (error) {
+    resumeError.value = "失败，点击重试";
     notify(errorMessage(error, "简历分析失败"), "error");
   } finally {
     uploadBusy.value = false;
@@ -2664,12 +2679,13 @@ watch(roundStatusPayload, (payload) => {
           </label>
           <button
             class="button primary wide-button"
+            :class="{ danger: !!resumeError && !uploadBusy }"
             type="button"
             data-testid="analyze-resume"
             :disabled="uploadBusy"
             @click="analyzeResume"
           >
-            <Sparkles :size="18" aria-hidden="true" />{{ uploadBusy ? "分析中…" : "上传并分析" }}
+            <Sparkles :size="18" aria-hidden="true" />{{ uploadBusy ? "分析中…" : resumeError ? "失败，点击重试" : "上传并分析" }}
           </button>
           <button
             class="button ghost wide-button"
@@ -2789,6 +2805,7 @@ watch(roundStatusPayload, (payload) => {
             :disabled="!scopePreview"
             @update:model-value="selectExecutionMode"
           />
+          <p class="adv-mode-summary" data-testid="adv-mode-summary">{{ executionModeSummary }}</p>
           <div class="adv-fields">
           <div class="adv-group">
             <p class="adv-group-title">列表抓取</p>
@@ -3151,6 +3168,17 @@ watch(roundStatusPayload, (payload) => {
 </template>
 
 <style scoped>
+.adv-mode-summary {
+  margin: -6px 0 14px;
+  padding: 9px 11px;
+  border: 1px solid var(--hair-2);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .history-round-marker {
   display: inline-flex;
   align-items: center;

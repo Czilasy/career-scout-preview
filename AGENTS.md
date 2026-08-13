@@ -12,6 +12,12 @@
 - 项目架构原则、文件边界与职责分层以 `.specify/memory/constitution.md` 为准；Plan/Tasks 必须写明允许修改、禁止修改、新增文件和引用方向。
 - 已有超大文件（如 `webui/app.py`、`webui/store.py`、`scripts/boss_cdp_raw.py`）在未拆完前，普通功能不得继续向其中追加新逻辑；拆分必须单独建立 Spec。
 
+## DB 标识与查库
+
+- 每个 Career Scout 数据库都应有一行 `db_meta(id=1)`，`env` 只允许 `live` 或 `test`。
+- 用户说“查最新流程/最新数据”时，先运行 `uv run python scripts/db_info.py`（或 `--db` 指定库）确认 `env` 和最新 run，再查询；不要默认项目内 `.webui-state` 为正式数据。
+- 正式运行库在用户数据目录 `~/.career-scout/webui/webui.db`；`.webui-state` 和临时目录里的库都是测试/隔离库。
+
 ## 提交与推送
 
 - 提交或推送前先运行：`uv run python -m unittest tests.test_repo_hygiene`，失败禁止提交和推送。

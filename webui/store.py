@@ -119,6 +119,19 @@ PROFILE_JOB_STATUSES = {"new", "interested", "read", "applied", "stale", "delete
 AI_STATUS_VALUES = {"unconfigured", "testing", "ready", "failed"}
 RESUME_FORMATS = {"txt", "pdf", "docx"}
 MAX_DETAIL_BUDGET = 60
+
+
+def _db_env(db_path) -> str:
+    """Infer a lightweight live/test marker from env or path for db_meta."""
+    explicit = os.environ.get("CAREER_SCOUT_ENV", "").strip().lower()
+    if explicit in ("live", "test", "dev"):
+        return "live" if explicit == "live" else "test"
+    normalized = os.fspath(db_path).replace("\\", "/")
+    if ".webui-state" in normalized or "/test/" in normalized or "-test." in normalized:
+        return "test"
+    return "live"
+
+
 _INITIALIZE_LOCK = threading.RLock()
 
 
@@ -355,7 +368,22 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
                     value_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS db_meta (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    env TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
+            )
+            now = _now()
+            connection.execute(
+                "INSERT OR IGNORE INTO db_meta (id, env, created_at, updated_at) "
+                "VALUES (1, ?, ?, ?)",
+                (_db_env(self.db_path), now, now),
+            )
+            connection.execute(
+                "UPDATE db_meta SET updated_at = ? WHERE id = 1", (now,),
             )
             connection.execute(
                 "UPDATE tasks SET status = 'interrupted', error = ?, updated_at = ? "
@@ -366,6 +394,14 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
     # -- migrations --------------------------------------------------------
 
     # -- SPEC011 advanced config state -----------------------------------
+
+    def get_db_meta(self) -> dict | None:
+        """Return the lightweight live/test marker row for this database."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT env, created_at, updated_at FROM db_meta WHERE id = 1"
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def get_advanced_config_state(self) -> dict:
         """返回当前高级配置状态：selection、custom config、mode version。"""
@@ -2181,7 +2217,7 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
 
     def insert_pending_result(self, run_id, job_id, *, failure_stage, retryable=True,
                               attempts=1, origin_zone="match", ai_payload_json=None,
-                              failed_code=None):
+                              failed_code=None, platform="boss"):
         """登记一条待确认岗位（独立失败）。同一 (run_id, job_id) 重复写则更新。
 
         FR-040：必须带具体 failed_code，禁止仅用"未抓到 JD"等模糊描述。
@@ -2194,10 +2230,11 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
             self._assert_recovery_writes_allowed(conn)
             conn.execute(
                 "INSERT INTO screening_pending_results "
-                "(id, run_id, platform_job_id, failure_stage, retryable, attempts, last_failed_at, "
+                "(id, run_id, platform, platform_job_id, failure_stage, retryable, attempts, last_failed_at, "
                 " origin_zone, ai_payload_json, created_at, failed_code) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET "
+                " platform = excluded.platform, "
                 " failure_stage = excluded.failure_stage, "
                 " retryable = excluded.retryable, "
                 " attempts = excluded.attempts, "
@@ -2206,7 +2243,7 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
                 " ai_payload_json = excluded.ai_payload_json, "
                 " failed_code = excluded.failed_code",
                 (
-                    _uuid(), str(run_id), str(job_id), str(failure_stage),
+                    _uuid(), str(run_id), str(platform), str(job_id), str(failure_stage),
                     1 if retryable else 0, int(attempts), ts,
                     str(origin_zone),
                     json.dumps(ai_payload_json or {}, ensure_ascii=False),
@@ -2271,6 +2308,7 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
             "id": row["id"],
             "run_id": row["run_id"],
             "job_id": row["platform_job_id"],
+            "platform": row["platform"],
             "failure_stage": row["failure_stage"],
             "retryable": bool(row["retryable"]),
             "attempts": int(row["attempts"]),
@@ -2643,6 +2681,11 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
         ts = _now()
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
+            run_row = conn.execute(
+                "SELECT platform FROM screening_runs WHERE id = ?",
+                (str(run_id),),
+            ).fetchone()
+            platform = str(run_row["platform"] or "boss") if run_row is not None else "boss"
             for job_id, verdict in verdicts.items():
                 if isinstance(verdict, dict):
                     verdict_value = str(verdict.get("verdict") or "")
@@ -2656,16 +2699,17 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
                     flags = []
                 conn.execute(
                     "INSERT INTO screening_results "
-                    "(id, run_id, platform_job_id, verdict, verdict_reason, caveats_json, flags_json, is_dropped, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "(id, run_id, platform, platform_job_id, verdict, verdict_reason, caveats_json, flags_json, is_dropped, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET "
+                    " platform = excluded.platform, "
                     " verdict = excluded.verdict, "
                     " verdict_reason = excluded.verdict_reason, "
                     " caveats_json = excluded.caveats_json, "
                     " flags_json = excluded.flags_json, "
                     " is_dropped = excluded.is_dropped",
                     (
-                        _uuid(), str(run_id), str(job_id), verdict_value, reason,
+                        _uuid(), str(run_id), platform, str(job_id), verdict_value, reason,
                         json.dumps(caveats, ensure_ascii=False),
                         json.dumps(flags, ensure_ascii=False),
                         1 if verdict_value == "dropped" else 0, ts,
@@ -2678,13 +2722,18 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
         ts = _now()
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
+            run_row = conn.execute(
+                "SELECT platform FROM screening_runs WHERE id = ?",
+                (str(run_id),),
+            ).fetchone()
+            platform = str(run_row["platform"] or "boss") if run_row is not None else "boss"
             for job_id, verdict in (verdicts or {}).items():
                 conn.execute(
                     "INSERT INTO screening_results "
-                    "(id, run_id, platform_job_id, verdict, created_at) VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET verdict = excluded.verdict",
+                    "(id, run_id, platform, platform_job_id, verdict, created_at) VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(run_id, platform_job_id) DO UPDATE SET platform = excluded.platform, verdict = excluded.verdict",
                     (
-                        _uuid(), str(run_id), str(job_id),
+                        _uuid(), str(run_id), platform, str(job_id),
                         json.dumps(verdict, ensure_ascii=False), ts,
                     ),
                 )

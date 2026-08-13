@@ -542,6 +542,33 @@ class JDBatchExceptionClassificationTests(unittest.TestCase):
         self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
         self.assertEqual(source.calls, 2, "自动重启一次后仍失联，必须暂停且不得启动下一批 JD")
 
+    def test_detail_failure_carries_safe_log_evidence(self):
+        """回归：JD 失败必须携带 source 的脱敏证据，不能只剩笼统错误码。"""
+        from webui.pipeline_exec import fetch_job_details
+        from webui.source import SourceOutcome
+
+        class BlockedSource:
+            def fetch_details_batch(self, jobs, **_kwargs):
+                return {
+                    job["job_id"]: SourceOutcome.failure(
+                        failed_code="source_blocked",
+                        safe_log="platform=zhilian stage=batch failed_code=source_blocked signal=blocked",
+                        failed_reason="智联平台封禁或阻断",
+                    )
+                    for job in jobs
+                }
+
+        with tempfile.TemporaryDirectory() as artifact_dir, mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ):
+            result = fetch_job_details(
+                [{"job_id": "j1", "jd": ""}], BlockedSource(), artifact_dir=artifact_dir,
+            )
+
+        job = result["jobs"][0]
+        self.assertEqual(job["jd_failed_code"], "source_blocked")
+        self.assertIn("signal=blocked", job.get("jd_failed_evidence", ""))
+
     def test_captcha_required_outcome_stops_before_next_batch(self):
         from webui.pipeline_exec import fetch_job_details
         from webui.source import SourceOutcome
