@@ -22,6 +22,7 @@ from typing import Any
 
 from webui.constants import CLEANUP_EXPIRED_DAYS
 from webui.store_helpers import (
+    latest_screening_run_for_source,
     _CST,
     _build_pipeline_result_rows,
     _decode_json,
@@ -2648,23 +2649,12 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
         return events
 
     def latest_screening_run_for_source(self, source_task_id, *, statuses=None):
-        """找同一抓取任务最近一次 AI 筛选 run（供断点续筛）。
-
-        数据量小（本地单用户），直接取最近 50 条在 Python 侧按
-        execution_params.scrape_task_id 过滤。
-        """
+        """找同一抓取任务最近一次 AI 筛选 run（供断点续筛）。"""
         with self._connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM screening_runs ORDER BY created_at DESC LIMIT 50"
-            ).fetchall()
-        for row in rows:
-            run = self._screening_run_row(row)
-            params = run.get("execution_params") or {}
-            if str(params.get("scrape_task_id", "")) != str(source_task_id):
-                continue
-            if statuses is None or run["status"] in statuses:
-                return run
-        return None
+            row = latest_screening_run_for_source(
+                conn, source_task_id, statuses=statuses,
+            )
+        return self._screening_run_row(row) if row is not None else None
 
     def latest_interrupted_screening_run(self):
         """进程重启后被标记 interrupted 的最近一次筛选（供恢复提示）。"""

@@ -1717,6 +1717,34 @@ class MatchJdsFlagsTests(unittest.TestCase):
         self.assertTrue(verdict["reason"].startswith("疑似骗局："))
         self.assertEqual(verdict["flags"][0]["level"], "high")
 
+    def test_high_flag_terminal_event_uses_final_not_match_status(self):
+        """高危命中后终态事件与最终 verdict 一致，不再上报原始 AI match。"""
+        from webui.ai import match_jds
+
+        events = []
+
+        def capture(event_type, **kwargs):
+            events.append((event_type, kwargs))
+
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{
+                "i": 0, "match": True, "reason": "技能契合",
+                "caveats": [],
+                "flags": [{"code": "C1", "level": "high", "reason": "要求先交培训费"}],
+            }]
+        }):
+            result = match_jds(
+                self._jobs(1), "画像", "https://x", "key",
+                batch_size=10, measurement_callback=capture,
+            )
+
+        self.assertEqual(result["verdicts"]["job-000"]["verdict"], "not_match")
+        terminals = [
+            kwargs["counts"].get("status")
+            for event_type, kwargs in events if event_type == "item_terminal"
+        ]
+        self.assertEqual(terminals, ["not_match"])
+
     def test_high_flag_without_reason_gets_default_prefix(self):
         """高危命中但 AI 未写 reason：reason 补为\"疑似骗局：命中高危可疑特征\"。"""
         from webui.ai import match_jds

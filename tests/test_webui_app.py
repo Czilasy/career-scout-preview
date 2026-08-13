@@ -187,6 +187,30 @@ class WebUIAppTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(anonymous.get(path).status_code, 403)
 
+    def test_sensitive_get_routes_require_session_token(self):
+        anonymous = self.app.test_client()
+        anonymous.environ_base.pop("HTTP_X_BOSS_TOKEN", None)
+        for path in (
+            "/api/favorites",
+            "/api/profile",
+            "/api/profiles",
+            "/api/latest-pipeline-result",
+            "/api/search-progress/missing",
+            "/api/update-status",
+            "/api/check",
+            "/api/env-check",
+            "/api/job-reminders/count",
+            "/api/job-reminders",
+            "/api/result-history",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(anonymous.get(path).status_code, 403)
+
+    def test_update_status_does_not_expose_download_path(self):
+        response = self.client.get("/api/update-status")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json().get("path"), "")
+
     def test_check_uses_returncode_not_log_keywords(self):
         completed = type("Completed", (), {
             "returncode": 1,

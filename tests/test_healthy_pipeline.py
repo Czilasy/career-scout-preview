@@ -57,7 +57,14 @@ def _make_app():
     return app, temp
 
 
-def _wait_for_pipeline_task(client, task_id, timeout=3.0):
+def _authed_test_client(app):
+    """Return a Flask test client pre-authenticated for local API calls."""
+    client = app.test_client()
+    client.environ_base["HTTP_X_BOSS_TOKEN"] = app.config["API_TOKEN"]
+    return client
+
+
+def _wait_for_pipeline_task(client, task_id, timeout=8.0):
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
@@ -1057,7 +1064,7 @@ class Slice7And9ApiTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
-        self.client = self.app.test_client()
+        self.client = _authed_test_client(self.app)
         self.store = self.app.config["TASK_STORE"]
         # POST 请求需要本地会话令牌（protect_local_api 钩子）
         self.token = self.app.config["API_TOKEN"]
@@ -1090,7 +1097,7 @@ class Slice7And9ApiTests(unittest.TestCase):
 
         root = pathlib.Path(__file__).resolve().parents[1]
         files = sorted(
-            [*root.joinpath("webui").glob("*.py"), root / "scripts" / "boss_cdp_raw.py"],
+            [*root.joinpath("webui").glob("*.py"), root / "scripts" / "boss_cdp_raw.py", root / "scripts" / "zhilian_cdp_raw.py"],
             key=lambda path: path.relative_to(root).as_posix(),
         )
         digest = hashlib.sha256()
@@ -1329,7 +1336,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
-        self.client = self.app.test_client()
+        self.client = _authed_test_client(self.app)
         self.store = self.app.config["TASK_STORE"]
         self.headers = {"X-Boss-Token": self.app.config["API_TOKEN"]}
 
@@ -2508,7 +2515,7 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
-        self.client = self.app.test_client()
+        self.client = _authed_test_client(self.app)
         self.store = self.app.config["TASK_STORE"]
         self.headers = {"X-Boss-Token": self.app.config["API_TOKEN"]}
         self.source_run_id = self.store.save_pipeline_result({
@@ -2771,7 +2778,7 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
             return result
 
         def post_continue():
-            with self.app.test_client() as client:
+            with _authed_test_client(self.app) as client:
                 return client.post(
                     f"/api/task/continue/{task_id}", headers=self.headers,
                 ).status_code
@@ -2839,7 +2846,7 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
             return result
 
         def post_continue():
-            with self.app.test_client() as client:
+            with _authed_test_client(self.app) as client:
                 return client.post(
                     f"/api/task/continue/{task_id}", headers=self.headers,
                 ).status_code
@@ -2886,7 +2893,7 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
             return result
 
         def post_continue():
-            with self.app.test_client() as client:
+            with _authed_test_client(self.app) as client:
                 return client.post(
                     f"/api/task/continue/{task_id}", headers=self.headers,
                 ).status_code
@@ -3195,7 +3202,7 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
             return result
 
         def post_screen():
-            with self.app.test_client() as client:
+            with _authed_test_client(self.app) as client:
                 return client.post(
                     "/api/ai-screen",
                     json={
@@ -3243,7 +3250,7 @@ class ConvergenceRecoveryHttpTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
-        self.client = self.app.test_client()
+        self.client = _authed_test_client(self.app)
         self.store = self.app.config["TASK_STORE"]
         self.headers = {"X-Boss-Token": self.app.config["API_TOKEN"]}
 
@@ -3302,7 +3309,7 @@ class ConvergenceTaskEventSequenceTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
-        self.client = self.app.test_client()
+        self.client = _authed_test_client(self.app)
         self.store = self.app.config["TASK_STORE"]
         self.headers = {"X-Boss-Token": self.app.config["API_TOKEN"]}
 
@@ -3361,7 +3368,7 @@ class ConvergenceBuildIdentityTests(unittest.TestCase):
             "DB_PATH": str(root / "state" / "webui.db"),
             "PYTHON_EXECUTABLE": sys.executable,
         })
-        self.client = self.app.test_client()
+        self.client = _authed_test_client(self.app)
         self.token = self.app.config["API_TOKEN"]
         self.build_hash = self.client.get("/api/version").get_json()["build_hash"]
 
@@ -3424,7 +3431,7 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
         """列表任务构造 CDP source 失败时也必须持久化为可继续暂停。"""
         app, temp = _make_app()
         try:
-            client = app.test_client()
+            client = _authed_test_client(app)
             token = app.config["API_TOKEN"]
             with mock.patch("webui.app._BossCdpSource", return_value=None):
                 response = client.post(
@@ -3450,7 +3457,7 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
         """服务重启后 continue 从 DB checkpoint 恢复 completed_combos（FR-020/FR-023）。"""
         app, temp = _make_app()
         try:
-            client = app.test_client()
+            client = _authed_test_client(app)
             token = app.config["API_TOKEN"]
             store = app.config["TASK_STORE"]
             old_id = "scrape-old"
@@ -3543,7 +3550,7 @@ class Slice8RecrawlTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
-        self.client = self.app.test_client()
+        self.client = _authed_test_client(self.app)
         self.token = self.app.config["API_TOKEN"]
         self.store = self.app.config["TASK_STORE"]
         self.app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
@@ -3801,7 +3808,7 @@ class Slice8RecrawlTests(unittest.TestCase):
             return real_uuid4()
 
         def post_recrawl():
-            with self.app.test_client() as client:
+            with _authed_test_client(self.app) as client:
                 return client.post(
                     "/api/pipeline/recrawl",
                     json={"source_run_id": self.run_id},
@@ -3829,7 +3836,7 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
-        self.client = self.app.test_client()
+        self.client = _authed_test_client(self.app)
         self.token = self.app.config["API_TOKEN"]
         self.store = self.app.config["TASK_STORE"]
 
@@ -4068,7 +4075,7 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
     def test_scrape_success_persists_terminal_status_and_combo_progress(self):
         app, temp = _make_app()
         try:
-            client = app.test_client()
+            client = _authed_test_client(app)
             with mock.patch("webui.pipeline_exec.run_search", return_value={
                 "ok": True,
                 "jobs": [{"job_id": "j1", "title": "前端"}],
@@ -4101,7 +4108,7 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
     def test_scrape_failure_persists_failed_reason(self):
         app, temp = _make_app()
         try:
-            client = app.test_client()
+            client = _authed_test_client(app)
             with mock.patch("webui.pipeline_exec.run_search", return_value={
                 "ok": False, "jobs": [], "total_scraped": 0,
                 "total_matched": 0, "combinations": 1,
@@ -4182,7 +4189,7 @@ class Slice9ResumeAfterRestartConservationTests(unittest.TestCase):
         captured_resume = {}
         try:
             app_a = create_app(self._app_config(root, db_path, "results-a"))
-            client_a = app_a.test_client()
+            client_a = _authed_test_client(app_a)
 
             def paused_search(*_args, **kwargs):
                 callback = kwargs.get("on_combo_done")
@@ -4209,7 +4216,7 @@ class Slice9ResumeAfterRestartConservationTests(unittest.TestCase):
 
             app_b = create_app(self._app_config(root, db_path, "results-b"))
             app_b.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
-            client_b = app_b.test_client()
+            client_b = _authed_test_client(app_b)
 
             def resumed_search(*_args, **kwargs):
                 captured_resume["skip_combos"] = set(kwargs.get("skip_combos") or set())
@@ -4261,7 +4268,7 @@ class Slice10AiResumeAfterRefreshTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
-        self.client = self.app.test_client()
+        self.client = _authed_test_client(self.app)
         self.token = self.app.config["API_TOKEN"]
         self.store = self.app.config["TASK_STORE"]
 
@@ -4399,7 +4406,7 @@ class Slice11RecrawlResumeTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
-        self.client = self.app.test_client()
+        self.client = _authed_test_client(self.app)
         self.token = self.app.config["API_TOKEN"]
         self.store = self.app.config["TASK_STORE"]
         self.app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
@@ -5104,7 +5111,7 @@ class FrozenConfigDigestTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
-        self.client = self.app.test_client()
+        self.client = _authed_test_client(self.app)
         token = self.client.get("/api/session").get_json()["token"]
         self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
 
@@ -5336,7 +5343,7 @@ class TuningLeaseOrdinaryTaskConflictTests(unittest.TestCase):
 
     def setUp(self):
         self.app, self.temp = _make_app()
-        self.client = self.app.test_client()
+        self.client = _authed_test_client(self.app)
         token = self.client.get("/api/session").get_json()["token"]
         self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
         self.store = self.app.config["TASK_STORE"]

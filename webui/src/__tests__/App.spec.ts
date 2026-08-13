@@ -658,4 +658,33 @@ describe("App", () => {
     expect(wrapper.find('[data-testid="manual-update-check"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="github-link"]').exists()).toBe(true);
   });
+
+  it("falls back to # when a favorite link fails the URL allowlist", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/favorites")) {
+        return response({
+          items: [{
+            job_id: "internal-unsafe",
+            profile_id: "p1",
+            platform: "boss",
+            title: "危险链接岗位",
+            company: "甲公司",
+            salary: "20-30K",
+            location: "上海",
+            job_link: "https://user:pass@evil.example.com/job",
+          }],
+          count: 1,
+        });
+      }
+      return baseAppResponse(url) ?? response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(App);
+    await flushPromises();
+    await wrapper.get(".favorites-trigger").trigger("click");
+    await flushPromises();
+    expect(wrapper.get(".fav-card-main").attributes("href")).toBe("#");
+  });
 });

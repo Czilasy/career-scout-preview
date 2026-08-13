@@ -13,6 +13,25 @@ _CST = timezone(timedelta(hours=8))  # 东八区
 def _now():
     return datetime.now(_CST).isoformat()
 
+def latest_screening_run_for_source(conn, source_task_id, *, statuses=None):
+    """Return the newest screening_runs row linked to a scrape task."""
+    source_task_id = str(source_task_id or "")
+    if not source_task_id:
+        return None
+    params: list = [source_task_id]
+    status_sql = ""
+    if statuses:
+        status_values = [str(status) for status in statuses]
+        placeholders = ",".join("?" * len(status_values))
+        status_sql = f" AND status IN ({placeholders})"
+        params.extend(status_values)
+    return conn.execute(
+        "SELECT * FROM screening_runs "
+        "WHERE json_extract(execution_params_json, '$.scrape_task_id') = ?"
+        + status_sql
+        + " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        tuple(params),
+    ).fetchone()
 
 def _to_iso_timestamp(value):
     """Normalize epoch milliseconds or ISO text to local ISO text."""

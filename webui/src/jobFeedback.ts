@@ -317,6 +317,9 @@ export function safeCanonicalUrl(platform: Platform, rawUrl: string | null | und
   } catch {
     return null;
   }
+  if (parsed.username || parsed.password) return null;
+  const port = parsed.port;
+  if (port && port !== "443") return null;
   const host = parsed.hostname.toLowerCase();
   if (platform === "zhilian") {
     // 智联：host 恰为 zhaopin.com / www.zhaopin.com；path 为 jobdetail/<id>.htm；

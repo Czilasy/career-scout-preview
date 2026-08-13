@@ -219,6 +219,9 @@ function jobUrl(job: JobItem): string {
   try {
     const parsed = new URL(raw);
     const host = parsed.hostname.toLowerCase();
+    if (parsed.username || parsed.password) return "";
+    const port = parsed.port;
+    if (port && port !== "443") return "";
     if (job.platform === "zhilian") {
       // 智联：host 恰为 zhaopin.com 或 www.zhaopin.com；
       // path 符合 jobdetail/<id>.htm；http 升级为 https；移除 query 和 fragment。

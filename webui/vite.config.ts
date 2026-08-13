@@ -11,6 +11,7 @@ const backendFiles = [
     .filter((name) => name.endsWith(".py"))
     .map((name) => join(projectRoot, "webui", name)),
   join(projectRoot, "scripts", "boss_cdp_raw.py"),
+  join(projectRoot, "scripts", "zhilian_cdp_raw.py"),
 ].sort((left: string, right: string) => {
   const a = relative(projectRoot, left).replaceAll("\\", "/");
   const b = relative(projectRoot, right).replaceAll("\\", "/");

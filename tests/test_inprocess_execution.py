@@ -517,6 +517,26 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("fake progress line", captured)
 
+    def test_generic_exception_message_does_not_leak_absolute_path(self):
+        """未识别异常返回通用文案，不把绝对路径带进错误输出。"""
+        output_path = self.root / "out.json"
+        command = [
+            sys.executable, str(self.source.scraper_path),
+            "--cdp-port", "9222",
+            "--keyword", "AI", "--city", "_", "--pages", "1",
+            "--output", str(output_path),
+            "--no-detail",
+        ]
+
+        with mock.patch.object(
+            boss, "run_search_programmatic",
+            side_effect=RuntimeError(r"C:\secret\browser\path"),
+        ):
+            code, captured = self.source._run_in_process(command, 5)
+        self.assertEqual(code, -1)
+        self.assertEqual(captured, "抓取执行失败")
+        self.assertNotIn("secret", captured)
+
     def test_timeout_raises_timeout_expired(self):
         """超时 → subprocess.TimeoutExpired（fetch_* 据此分类为 source_timeout）。"""
         output_path = self.root / "out.json"

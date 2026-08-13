@@ -14,7 +14,7 @@ import json
 import uuid
 from typing import Any
 
-from webui.store_helpers import _now, _to_iso_timestamp
+from webui.store_helpers import _now, _to_iso_timestamp, latest_screening_run_for_source
 
 _RECORD_SNAPSHOT = "result_snapshot"
 _STATUS_SCRAPED_ONLY = "scraped_only"
@@ -96,28 +96,14 @@ class ScrapeOnlyStoreMixin:
     # ------------------------------------------------------------------
 
     def latest_scraped_only_for_source(self, source_task_id: str) -> dict[str, Any] | None:
-        """Return the newest ``scraped_only`` snapshot for a scrape task.
-
-        Uses the same "recent 50 rows + Python-side filter" pattern as
-        ``latest_screening_run_for_source``: local single-user data volume
-        is small and the scrape_task_id lives inside execution_params_json.
-        """
-        source_task_id = str(source_task_id or "")
+        """Return the newest ``scraped_only`` snapshot for a scrape task."""
         if not source_task_id:
             return None
         with self._connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM screening_runs ORDER BY created_at DESC LIMIT 50"
-            ).fetchall()
-        for row in rows:
-            run = self._screening_run_row(row)
-            if run.get("status") != _STATUS_SCRAPED_ONLY:
-                continue
-            params = run.get("execution_params") or {}
-            if str(params.get("scrape_task_id", "")) != source_task_id:
-                continue
-            return run
-        return None
+            row = latest_screening_run_for_source(
+                conn, source_task_id, statuses=(_STATUS_SCRAPED_ONLY,),
+            )
+        return self._screening_run_row(row) if row is not None else None
 
     # ------------------------------------------------------------------
     # 升级：AI 筛选完成后把未筛选轮原地升级为完成/部分结果

@@ -327,6 +327,8 @@ def create_app(config=None):
         SESSION_COOKIE_NAME="boss_local_session",
         TRUSTED_HOSTS=["127.0.0.1", "localhost", "::1"],
         RESUME_DIR=str(DEFAULT_STATE_DIR / "resumes"),
+        # 上传前由 Flask 直接拦截超大请求体，避免先把文件读入内存再校验。
+        MAX_CONTENT_LENGTH=11 * 1024 * 1024,
         # 构建身份拦截默认关闭：本地单机工具，防的“旧页面跑新接口”
         # 风险远小于误拦体验；启动时自动重建前端（见下方 sync）+ pre-push
         # 钩子已足够。测试可显式传 REQUIRE_BUILD_IDENTITY=True 验证拦截逻辑。
@@ -560,15 +562,34 @@ def create_app(config=None):
         trusted_hosts = set(app.config["TRUSTED_HOSTS"])
         if _request_hostname(request.host) not in trusted_hosts:
             return jsonify({"error": "拒绝不受信任的 Host"}), 403
-        # T010: resume reads and AI settings reads also require the session
-        # token — they expose private user data even though they are GET.
+        # 本地单用户工具：读取本地任务、画像、收藏、下载状态等 GET 也
+        # 需要会话令牌；仅平台/版本/环境探测等公开端点保持匿名可读。
         path = request.path
         sensitive_get = (
             path.startswith("/api/resumes")
             or path.startswith("/api/ai-settings")
             or path.startswith("/api/advanced-settings")
             or path.startswith("/api/tuning/")
-            or path.startswith("/api/profiles/") and "/resumes" in path
+            or path.startswith("/api/profile")
+            or path.startswith("/api/favorites")
+            or path.startswith("/api/tasks")
+            or path.startswith("/api/results")
+            or path.startswith("/api/search-runs")
+            or path.startswith("/api/profile-jobs")
+            or path.startswith("/api/cleanup-preview")
+            or path.startswith("/api/browser-accounts")
+            or path.startswith("/api/search-progress")
+            or path.startswith("/api/latest-running-task")
+            or path.startswith("/api/latest-pipeline-result")
+            or path.startswith("/api/pipeline-result/export.csv")
+            or path.startswith("/api/update-status")
+            or path.startswith("/api/runs/")
+            or path.startswith("/api/task-state/")
+            or path.startswith("/api/recovery/")
+            or path.startswith("/api/check")
+            or path.startswith("/api/env-check")
+            or path.startswith("/api/job-reminders")
+            or path.startswith("/api/result-history")
         )
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} or (request.method == "GET" and sensitive_get):
             origin = request.headers.get("Origin")
@@ -1142,7 +1163,7 @@ def create_app(config=None):
             row = dict(job)
             for key in ("matched_skills", "missing_skills", "risk_flags"):
                 row[key] = " | ".join(row.get(key) or [])
-            writer.writerow(row)
+            writer.writerow({key: boss.csv_safe_cell(row.get(key, "")) for key in columns})
 
         def _write_section(label, jobs):
             section_row = {column: "" for column in columns}
@@ -1283,15 +1304,79 @@ def create_app(config=None):
         if request.method == "GET":
             return jsonify(store.get_profile(profile_id))
         if request.method == "DELETE":
-            # 先删该画像下的简历物理文件，再删画像行（CASCADE 清关联表）
-            resumes = store.list_resumes(profile_id)
-            for r in resumes:
-                if r.get("deleted_at"):
-                    continue
-                resume_service.delete_resume(
-                    r["id"], store, resume_dir=app.config["RESUME_DIR"],
-                )
-            return jsonify(store.delete_profile(profile_id))
+            # 先把简历文件移到 .trash，DB 删除失败可回滚；DB 删除成功后再
+            # 清理回收文件，避免 DB 失败时原始简历文件已不可恢复。
+            resume_dir = Path(app.config["RESUME_DIR"]).resolve()
+            trash_dir = resume_dir / ".trash"
+            moved: list[tuple[Path, Path]] = []
+            try:
+                for r in store.list_resumes(profile_id):
+                    if r.get("deleted_at"):
+                        continue
+                    try:
+                        storage_path = store.get_resume(r["id"]).get("storage_path") or ""
+                    except KeyError:
+                        continue
+                    if not storage_path:
+                        continue
+                    file_path = (resume_dir / storage_path).resolve()
+                    try:
+                        file_path.relative_to(resume_dir)
+                    except ValueError:
+                        continue
+                    if not file_path.is_file():
+                        continue
+                    trash_dir.mkdir(parents=True, exist_ok=True)
+                    trash_path = trash_dir / f"{file_path.name}.{uuid.uuid4().hex}.trash"
+                    file_path.replace(trash_path)
+                    moved.append((trash_path, file_path))
+            except Exception as exc:
+                for trash_path, original_path in reversed(moved):
+                    try:
+                        if trash_path.exists():
+                            trash_path.replace(original_path)
+                    except OSError:
+                        app.logger.exception("简历文件回滚失败：%s -> %s", trash_path, original_path)
+                app.logger.exception("简历文件清理失败，画像未删除：%s", exc)
+                try:
+                    trash_dir.rmdir()
+                except OSError:
+                    pass
+                return jsonify({
+                    "ok": False,
+                    "error": "简历文件清理失败，画像未删除",
+                    "error_code": "resume_cleanup_failed",
+                }), 500
+            try:
+                result = store.delete_profile(profile_id)
+            except Exception:
+                for trash_path, original_path in reversed(moved):
+                    try:
+                        if trash_path.exists():
+                            trash_path.replace(original_path)
+                    except OSError:
+                        app.logger.exception("DB 删除失败后简历文件回滚失败：%s -> %s", trash_path, original_path)
+                try:
+                    trash_dir.rmdir()
+                except OSError:
+                    pass
+                raise
+            cleanup_warning = False
+            for trash_path, _original in moved:
+                try:
+                    if trash_path.exists():
+                        trash_path.unlink()
+                except OSError:
+                    cleanup_warning = True
+                    app.logger.warning("画像已删除，但回收文件清理失败：%s", trash_path)
+            if cleanup_warning:
+                result["cleanup_warning"] = True
+            else:
+                try:
+                    trash_dir.rmdir()
+                except OSError:
+                    pass
+            return jsonify(result)
         raw = request.get_json(silent=True) or {}
         name = raw.get("name")
         confirmed_fields = raw.get("confirmed_fields")
@@ -5898,7 +5983,9 @@ def create_app(config=None):
             section_row["title"] = label
             writer.writerow(section_row)
             for row in rows:
-                writer.writerow(row)
+                writer.writerow({
+                    key: boss.csv_safe_cell(row.get(key, "")) for key in columns
+                })
 
         matched_rows = [
             {
@@ -7137,7 +7224,8 @@ def create_app(config=None):
     try:
         _backend_version = "011-ui-fixes"
         _backend_files = sorted(
-            [*Path(__file__).resolve().parent.glob("*.py"), SCRAPER.resolve()],
+            [*Path(__file__).resolve().parent.glob("*.py"), SCRAPER.resolve(),
+             (PROJECT_ROOT / "scripts" / "zhilian_cdp_raw.py").resolve()],
             key=lambda path: path.relative_to(PROJECT_ROOT).as_posix(),
         )
         _build_digest = _hashlib_mod.sha256()
@@ -7239,7 +7327,9 @@ def create_app(config=None):
     @app.route("/api/update-status", methods=["GET"])
     def update_status():
         app.config["UPDATER"].recover_ready()
-        return jsonify({"ok": True, **app.config["UPDATER"].status()})
+        status = app.config["UPDATER"].status()
+        status["path"] = ""  # 本地下载路径不返回给前端
+        return jsonify({"ok": True, **status})
 
     @app.route("/api/update-restart", methods=["POST"])
     def update_restart():

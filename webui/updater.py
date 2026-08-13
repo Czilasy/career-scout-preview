@@ -246,16 +246,20 @@ def _is_allowed_download_url(url: str) -> bool:
         parsed = urlparse(url)
     except ValueError:
         return False
-    if parsed.scheme != "https":
-        return False
-    host = (parsed.hostname or "").lower()
-    return any(host == h or host.endswith("." + h) for h in _ALLOWED_DOWNLOAD_HOSTS)
+    from webui.url_safety import is_safe_https_authority
+
+    return is_safe_https_authority(
+        parsed, allowed_hosts=_ALLOWED_DOWNLOAD_HOSTS, allow_subdomains=True
+    )
 
 
-def fetch_expected_sha256(sha256_url: str, timeout: int = DOWNLOAD_TIMEOUT) -> str | None:
+def fetch_expected_sha256(
+    sha256_url: str, expected_name: str = "", timeout: int = DOWNLOAD_TIMEOUT,
+) -> str | None:
     """下载 ``.sha256`` 文件并解析出哈希值；失败返回 None。
 
     兼容两种格式：纯哈希一行 / ``<hash>  <filename>``（sha256sum 输出）。
+    带文件名时要求与 ``expected_name`` 一致，防止校验到其它资产。
     """
     if not sha256_url or not _is_allowed_download_url(sha256_url):
         return None
@@ -265,10 +269,17 @@ def fetch_expected_sha256(sha256_url: str, timeout: int = DOWNLOAD_TIMEOUT) -> s
         text = resp.text.strip()
     except Exception:
         return None
+    from pathlib import Path as _Path
+
     for line in text.splitlines():
-        m = re.match(r"^([0-9a-fA-F]{64})", line.strip())
-        if m:
-            return m.group(1).lower()
+        m = re.match(r"^([0-9a-fA-F]{64})(?:\s+\*?(.+))?$", line.strip())
+        if not m:
+            continue
+        listed_name = (m.group(2) or "").strip()
+        if expected_name and listed_name:
+            if _Path(listed_name).name != expected_name:
+                continue
+        return m.group(1).lower()
     return None
 
 
@@ -312,7 +323,8 @@ class UpdateDownloader:
         if not target.is_file():
             return False
         expected = (
-            fetch_expected_sha256(info.sha256_url) if info.sha256_url else None
+            fetch_expected_sha256(info.sha256_url, info.asset_name)
+            if info.sha256_url else None
         )
         try:
             digest = compute_sha256(target)
@@ -390,7 +402,8 @@ class UpdateDownloader:
         with self._lock:
             self.state.status = "verifying"
         expected = self._expected_sha or (
-            fetch_expected_sha256(info.sha256_url) if info.sha256_url else None
+            fetch_expected_sha256(info.sha256_url, info.asset_name)
+            if info.sha256_url else None
         )
         if not expected:
             with self._lock:
@@ -416,6 +429,16 @@ class UpdateDownloader:
 # ---------------------------------------------------------------------------
 # 替换脚本（"身后脚本"：等主进程退出后替换并重启）
 # ---------------------------------------------------------------------------
+
+def _ps_single_quote(value: Path | str) -> str:
+    """PowerShell 单引号字面量：路径内的单引号翻倍，避免注入脚本。"""
+    return "'" + str(value).replace("'", "''") + "'"
+
+def _sh_single_quote(value: Path | str) -> str:
+    """POSIX shell 单引号字面量：单引号以 '\'' 闭合，避免注入脚本。"""
+    return "'" + str(value).replace("'", "'\\''") + "'"
+
+
 def _versioned_new_target(installer: Path, target: Path) -> Path:
     """新版就位路径：目标目录下带新版本号的文件名。
 
@@ -460,15 +483,15 @@ def build_updater_script(
         # 脚本，路径含非 ASCII 字符时会乱码导致替换失败
         content = "\n".join([
             "$ErrorActionPreference = 'Stop'",
-            f"$logFile = '{base / 'update_apply.log'}'",
+            f"$logFile = {_ps_single_quote(base / 'update_apply.log')}",
             "function Log($msg) {",
             "  try { Add-Content -LiteralPath $logFile -Encoding UTF8 -Value (",
             "    '[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg) } catch {}",
             "}",
             "Log 'update_apply start'",
-            f"$installer = '{installer}'",
-            f"$target = '{target}'",
-            f"$newTarget = '{new_target}'",
+            f"$installer = {_ps_single_quote(installer)}",
+            f"$target = {_ps_single_quote(target)}",
+            f"$newTarget = {_ps_single_quote(new_target)}",
             f"$waitPid = {pid}",
             "",
             "# 等主进程退出，最多 30 秒；超时强杀，避免无限等待导致更新卡死",
@@ -527,13 +550,13 @@ def build_updater_script(
 
     # macOS：installer 是 .dmg；target 是 CareerScout.app 目录
     script = base / "update_apply.sh"
-    mount_point = "/tmp/career-scout-update-mount"
     content = "\n".join([
         "#!/bin/bash",
         "set -u",
-        f'INSTALLER="{installer}"',
-        f'TARGET="{target}"',
-        f'MOUNT="{mount_point}"',
+        f"INSTALLER={_sh_single_quote(installer)}",
+        f"TARGET={_sh_single_quote(target)}",
+        "MOUNT=\"$(mktemp -d \"${TMPDIR:-/tmp}/career-scout-update.XXXXXX\")\"",
+        "trap 'rm -rf \"$MOUNT\"' EXIT",
         # 等主进程退出，最多 30 秒；超时强杀，避免无限等待导致更新卡死
         "i=0",
         f"while kill -0 {pid} 2>/dev/null; do",

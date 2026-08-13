@@ -502,6 +502,8 @@ describe("T034 岗位身份与平台安全 URL", () => {
       .toBe("https://www.zhipin.com/job_detail/abc.html");
     expect(safeCanonicalUrl("boss", "http://www.zhipin.com/job_detail/abc.html")).toBeNull();
     expect(safeCanonicalUrl("boss", "https://www.zhaopin.com/jobdetail/abc.htm")).toBeNull();
+    expect(safeCanonicalUrl("boss", "https://user:pass@www.zhipin.com/job_detail/abc.html")).toBeNull();
+    expect(safeCanonicalUrl("boss", "https://www.zhipin.com:8443/job_detail/abc.html")).toBeNull();
 
     // 智联：zhaopin 域名 + /jobdetail/<id>.htm；query/fragment 被剥离。
     expect(safeCanonicalUrl("zhilian", "https://www.zhaopin.com/jobdetail/abc.htm?utm=x#y"))

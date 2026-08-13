@@ -27,6 +27,17 @@ class LinkNormalizationTests(unittest.TestCase):
 
         self.assertEqual(normalize_job_link("http://www.zhipin.com/job_detail/x.html"), "")
 
+    def test_rejects_userinfo_and_non_443_port(self):
+        from webui.workbench import normalize_job_link
+
+        self.assertEqual(
+            normalize_job_link("https://user:pass@www.zhipin.com/job_detail/x.html"), "")
+        self.assertEqual(
+            normalize_job_link("https://www.zhipin.com:8443/job_detail/x.html"), "")
+        self.assertEqual(
+            normalize_job_link("https://www.zhipin.com:443/job_detail/x.html"),
+            "https://www.zhipin.com:443/job_detail/x.html")
+
     def test_rejects_non_zhipin_domain(self):
         from webui.workbench import normalize_job_link
 

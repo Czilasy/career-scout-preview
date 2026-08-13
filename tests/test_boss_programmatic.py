@@ -698,5 +698,24 @@ class DetailRateLimitFalsePositiveTests(unittest.TestCase):
             self.module.extract_job_description({"jd": "", "page_text": page_text})
 
 
+class CsvFormulaInjectionTests(unittest.TestCase):
+    """CSV 导出对表格公式前缀转义，防止打开文件时执行公式。"""
+
+    def setUp(self):
+        self.module = load_module()
+
+    def test_csv_safe_cell_prefixes_formula_characters(self):
+        cases = [
+            ("=SUM(A1)", "'=SUM(A1)"),
+            ("+123", "'+123"),
+            ("-123", "'-123"),
+            ("@import", "'@import"),
+            ("normal", "normal"),
+            (None, ""),
+            (123, "123"),
+        ]
+        for value, expected in cases:
+            self.assertEqual(self.module.csv_safe_cell(value), expected)
+
 if __name__ == "__main__":
     unittest.main()

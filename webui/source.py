@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import random
 import subprocess
@@ -23,6 +24,8 @@ from typing import Any, Protocol, runtime_checkable
 from scripts import boss_cdp_raw as boss
 from webui.process_executor import ScraperExecutor, run_with_deadline
 from webui.workbench import normalize_job_link
+
+logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
@@ -1308,8 +1311,9 @@ class BossCdpSource:
             return (10, exc.reason)
         except PageEventPersistenceError:
             raise
-        except Exception as exc:
-            return (-1, str(exc))
+        except Exception:
+            logger.exception("in-process 抓取执行失败（已对外脱敏）")
+            return (-1, "抓取执行失败")
         if not completed:
             # 与 _default_run 的 TimeoutExpired 语义一致 → source_timeout
             raise subprocess.TimeoutExpired(command, timeout)
@@ -1448,9 +1452,9 @@ class BossCdpSource:
             with open(input_path, encoding="utf-8") as handle:
                 payload = json.load(handle)
         except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"无法读取详情输入文件 {input_path}: {exc}") from exc
+            raise ValueError("无法读取详情输入文件") from exc
         if not isinstance(payload, dict):
-            raise ValueError(f"详情输入文件格式非法（应为对象）: {input_path}")
+            raise ValueError("详情输入文件格式非法（应为对象）")
         return payload
 
     def _artifact_path_allowed(self, raw_path: str) -> bool:

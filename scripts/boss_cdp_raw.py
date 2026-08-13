@@ -1067,6 +1067,14 @@ DETAIL_CSV_COLUMNS = [
 ]
 
 
+def csv_safe_cell(value):
+    """Prefix spreadsheet formula characters to prevent CSV formula injection."""
+    text = "" if value is None else str(value)
+    if text and text[0] in ("=", "+", "-", "@"):
+        return "'" + text
+    return text
+
+
 def write_csv(csv_path, jobs):
     """将 jobs 列表写入 CSV 文件"""
     os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
@@ -1075,7 +1083,7 @@ def write_csv(csv_path, jobs):
         writer.writeheader()
         for j in jobs:
             # 确保每列都有值
-            row = {col: j.get(col, "") for col in CSV_COLUMNS}
+            row = {col: csv_safe_cell(j.get(col, "")) for col in CSV_COLUMNS}
             writer.writerow(row)
     print(f"CSV 已保存: {csv_path}")
 
@@ -1090,7 +1098,7 @@ def write_detail_csv(csv_path, details):
             row = {col: d.get(col, "") for col in DETAIL_CSV_COLUMNS}
             if isinstance(row.get("skill_tags"), list):
                 row["skill_tags"] = " | ".join(row["skill_tags"])
-            writer.writerow(row)
+            writer.writerow({col: csv_safe_cell(row.get(col, "")) for col in DETAIL_CSV_COLUMNS})
     print(f"详情 CSV 已保存: {csv_path}")
 
 
@@ -3064,6 +3072,9 @@ def is_chrome_command(command):
         "google-chrome",
         "chromium",
         CHROME_EXE,
+        "microsoft edge",
+        "msedge",
+        EDGE_EXE,
     ))
 
 
@@ -3086,7 +3097,7 @@ def iter_chrome_process_commands():
     if platform.system() == "Windows":
         ps_script = (
             "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-            "Get-CimInstance Win32_Process -Filter \"name = 'chrome.exe'\" | "
+            "Get-CimInstance Win32_Process -Filter \"name = 'chrome.exe' or name = 'msedge.exe'\" | "
             "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
         )
         try:

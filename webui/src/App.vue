@@ -10,7 +10,7 @@ import UpdateDialog from "./components/UpdateDialog.vue";
 import AppSettingsMenu from "./components/AppSettingsMenu.vue";
 import DiscoveryView from "./views/DiscoveryView.vue";
 import { apiRequest, currentRuntimeMode, errorMessage, GITHUB_REPO_URL, initializeSession, openExternalLink, updateApi, type UpdateCheckResult } from "./api";
-import { getJobReminderCount } from "./jobFeedback";
+import { getJobReminderCount, safeCanonicalUrl } from "./jobFeedback";
 import type { RoundStatusPayload } from "./discovery";
 import { useTheme } from "./composables/useTheme";
 import type { CandidateProfile, Notice } from "./types";
@@ -113,6 +113,12 @@ async function loadFavorites() {
   } catch {
     favorites.value = [];
   }
+}
+
+function favoriteJobUrl(job: Record<string, unknown>): string {
+  const raw = String(job.job_link || job.canonical_url || "");
+  const platform = job.platform === "zhilian" ? "zhilian" : "boss";
+  return safeCanonicalUrl(platform, raw) || "#";
 }
 
 function toggleFavorites() {
@@ -535,7 +541,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           >
             <a
               class="fav-card-main"
-              :href="String(job.job_link || '#')"
+              :href="favoriteJobUrl(job)"
               target="_blank"
               rel="noopener"
             >

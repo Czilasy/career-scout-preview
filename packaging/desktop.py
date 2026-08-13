@@ -463,14 +463,14 @@ def is_allowed_external_url(url):
     """https + 白名单域名（含子域）才放行；其余一律拒绝。"""
     try:
         from urllib.parse import urlparse
+        from webui.url_safety import is_safe_https_authority
 
         parsed = urlparse(str(url or ""))
     except ValueError:
         return False
-    if parsed.scheme != "https":
-        return False
-    host = (parsed.hostname or "").lower()
-    return any(host == h or host.endswith("." + h) for h in EXTERNAL_LINK_HOSTS)
+    return is_safe_https_authority(
+        parsed, allowed_hosts=EXTERNAL_LINK_HOSTS, allow_subdomains=True
+    )
 
 
 class DesktopJsApi:

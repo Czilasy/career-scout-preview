@@ -198,6 +198,27 @@ class Sha256Tests(unittest.TestCase):
                 updater.fetch_expected_sha256("https://github.com/a.sha256"), digest
             )
 
+    def test_fetch_expected_sha256_rejects_mismatched_asset_name(self):
+        digest = "b" * 64
+
+        class Resp:
+            text = f"{digest}  CareerScout-v9.9.9.exe\n"
+
+            def raise_for_status(self):
+                pass
+
+        with patch.object(updater.requests, "get", return_value=Resp()):
+            self.assertIsNone(updater.fetch_expected_sha256(
+                "https://github.com/a.sha256", expected_name="CareerScout-v2.5.0.exe",
+            ))
+            self.assertEqual(
+                updater.fetch_expected_sha256(
+                    "https://github.com/a.sha256",
+                    expected_name="CareerScout-v9.9.9.exe",
+                ),
+                digest,
+            )
+
     def test_fetch_rejects_non_github_url(self):
         self.assertIsNone(updater.fetch_expected_sha256("https://evil.com/a.sha256"))
 
@@ -360,6 +381,19 @@ class UpdaterScriptTests(unittest.TestCase):
         text = script.read_text(encoding="utf-8-sig")
         # 无法解析版本号：保持覆盖旧文件行为，不引入重命名
         self.assertIn(f"$newTarget = '{self.dir / 'CareerScout.exe'}'", text)
+
+    def test_macos_script_uses_temp_mount_and_cleans_up(self):
+        with patch.object(updater.platform, "system", return_value="Darwin"):
+            _, script = updater.build_updater_script(
+                installer_path=self.dir / "new.dmg",
+                install_target=Path("/Applications/CareerScout.app"),
+                pid=777,
+                script_dir=self.dir,
+            )
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("mktemp -d", text)
+        self.assertIn("trap 'rm -rf \"$MOUNT\"' EXIT", text)
+        self.assertNotIn("/tmp/career-scout-update-mount", text)
 
     def test_clean_download_dir_keeps_recent_complete_files(self):
         downloads = self.dir / "downloads"

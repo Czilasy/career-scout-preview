@@ -1900,7 +1900,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 "caveats": caveats,
                 "flags": flags,
             }
-            _emit_final_terminal(job, idx, "match" if match else "not_match")
+            _emit_final_terminal(job, idx, verdict)
         _emit_batch_event(measurement_callback, "fine",
                           input_count=len(batch),
                           output_count=len(batch_verdicts),

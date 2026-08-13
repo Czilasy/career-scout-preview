@@ -19,11 +19,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
+ZHILIAN_SCRAPER = PROJECT_ROOT / "scripts" / "zhilian_cdp_raw.py"
 STATE_FILE = HERE / "dist" / "build-state.json"
 
 
 def _backend_files() -> list[Path]:
-    files = [*HERE.glob("*.py"), SCRAPER]
+    files = [*HERE.glob("*.py"), SCRAPER, ZHILIAN_SCRAPER]
     return sorted(files, key=lambda path: path.relative_to(PROJECT_ROOT).as_posix())
 
 

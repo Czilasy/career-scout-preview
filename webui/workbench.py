@@ -8,7 +8,8 @@ Flask layer and tests rely on.
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse, urlunparse
+
+from webui.url_safety import clean_https_url, is_safe_https_authority, parse_https_url
 
 
 # Only HTTPS and *.zhipin.com are accepted for job links.
@@ -31,24 +32,16 @@ def normalize_job_link(raw: str) -> str:
     保留为 BOSS 兼容入口；平台感知调用方应使用
     :func:`normalize_job_link_for_platform`。
     """
-    if not raw or not isinstance(raw, str):
+    parsed = parse_https_url(raw)
+    if parsed is None:
         return ""
-    text = raw.strip()
-    if not text:
-        return ""
-    try:
-        parsed = urlparse(text)
-    except ValueError:
-        return ""
-    host = (parsed.hostname or "").lower()
-    if parsed.scheme != "https":
-        return ""
-    if host not in ALLOWED_JOB_HOSTS and not host.endswith(".zhipin.com"):
+    if not is_safe_https_authority(
+        parsed, allowed_hosts=ALLOWED_JOB_HOSTS, allow_subdomains=True
+    ):
         return ""
     # Re-emit only scheme + host + path, dropping query and fragment so the
     # frontend never opens a URL carrying attacker-controlled params.
-    cleaned = parsed._replace(query="", fragment="")
-    return urlunparse(cleaned)
+    return clean_https_url(parsed)
 
 
 def normalize_job_link_for_platform(raw: str, *, platform: str | None = None) -> str:

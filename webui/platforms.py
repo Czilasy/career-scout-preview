@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+from webui.url_safety import clean_https_url, is_safe_https_authority, parse_https_url
+
 __all__ = [
     "BOSS_CITY_MAPPING_VERSION",
     "BOSS_DEFAULT_CDP_PORT",
@@ -320,22 +322,14 @@ def _clean_url(raw: str) -> str:
 
 def normalize_boss_job_url(raw: str) -> str:
     """BOSS 岗位链接规范化：仅 HTTPS + *.zhipin.com，剥离 query/fragment。"""
-    if not raw or not isinstance(raw, str):
+    parsed = parse_https_url(raw)
+    if parsed is None:
         return ""
-    text = raw.strip()
-    if not text:
+    if not is_safe_https_authority(
+        parsed, allowed_hosts=_BOSS_ALLOWED_HOSTS, allow_subdomains=True
+    ):
         return ""
-    try:
-        parsed = urlparse(text)
-    except ValueError:
-        return ""
-    if parsed.scheme != "https":
-        return ""
-    host = (parsed.hostname or "").lower()
-    if host not in _BOSS_ALLOWED_HOSTS and not host.endswith(".zhipin.com"):
-        return ""
-    cleaned = parsed._replace(query="", fragment="")
-    return urlunparse(cleaned)
+    return clean_https_url(parsed)
 
 
 def normalize_zhilian_job_url(raw: str) -> str:
@@ -360,6 +354,10 @@ def normalize_zhilian_job_url(raw: str) -> str:
     elif scheme != "https":
         return ""
     host = (parsed.hostname or "").lower()
+    if not is_safe_https_authority(
+        parsed, allowed_hosts=_ZHILIAN_ALLOWED_HOSTS
+    ):
+        return ""
     if host not in _ZHILIAN_ALLOWED_HOSTS:
         return ""
     path = parsed.path or ""

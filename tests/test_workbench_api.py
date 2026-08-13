@@ -257,6 +257,109 @@ class ResumeUploadTests(WorkbenchAPITestBase):
         self.assertIsNone(resume["content_hash"])
         self.assertIsNone(resume["original_filename"])
 
+    def test_delete_profile_removes_resume_file(self):
+        pid = self._make_profile()
+        with mock.patch("webui.ai.parse_resume", return_value={
+            "profile_name": "张三", "city": "上海",
+            "roles": ["Python"], "skills": ["Python"],
+            "keywords": [], "suggestions": [],
+        }):
+            resp = self._upload_txt(pid)
+        resume_id = resp.get_json()["resume_id"]
+        store = self.app.config["TASK_STORE"]
+        storage_path = store.get_resume(resume_id)["storage_path"]
+        file_path = self.resume_dir / storage_path
+        self.assertTrue(file_path.is_file())
+
+        resp = self.client.delete(f"/api/profiles/{pid}")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(file_path.exists())
+
+    def test_delete_profile_rolls_back_when_file_move_fails(self):
+        pid = self._make_profile()
+        with mock.patch("webui.ai.parse_resume", return_value={
+            "profile_name": "张三", "city": "上海",
+            "roles": ["Python"], "skills": ["Python"],
+            "keywords": [], "suggestions": [],
+        }):
+            resp = self._upload_txt(pid)
+        resume_id = resp.get_json()["resume_id"]
+        store = self.app.config["TASK_STORE"]
+        storage_path = store.get_resume(resume_id)["storage_path"]
+        file_path = self.resume_dir / storage_path
+
+        with mock.patch("pathlib.Path.replace", side_effect=OSError("denied")):
+            resp = self.client.delete(f"/api/profiles/{pid}")
+
+        self.assertEqual(resp.status_code, 500)
+        self.assertEqual(resp.get_json().get("error_code"), "resume_cleanup_failed")
+        self.assertEqual(store.get_profile(pid)["id"], pid)
+        self.assertTrue(file_path.is_file())
+
+    def test_delete_profile_rolls_back_on_non_os_error_during_move(self):
+        pid = self._make_profile()
+        store = self.app.config["TASK_STORE"]
+        file_a = self.resume_dir / "a.txt"
+        file_b = self.resume_dir / "b.txt"
+        file_a.write_text("a", encoding="utf-8")
+        file_b.write_text("b", encoding="utf-8")
+        store.save_resume(pid, "a.txt", "txt", "a", "hash-a", original_filename="a.txt")
+        store.save_resume(pid, "b.txt", "txt", "b", "hash-b", original_filename="b.txt")
+
+        real_get = store.get_resume
+        calls = {"n": 0}
+
+        def fake_get(resume_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_get(resume_id)
+            raise RuntimeError("db boom")
+
+        with mock.patch.object(store, "get_resume", side_effect=fake_get):
+            resp = self.client.delete(f"/api/profiles/{pid}")
+
+        self.assertEqual(resp.status_code, 500)
+        self.assertEqual(resp.get_json().get("error_code"), "resume_cleanup_failed")
+        self.assertEqual(store.get_profile(pid)["id"], pid)
+        self.assertTrue(file_a.exists())
+        self.assertTrue(file_b.exists())
+        trash_dir = self.resume_dir / ".trash"
+        self.assertFalse(trash_dir.exists() or list(trash_dir.glob("*")))
+
+    def test_delete_profile_rolls_back_when_db_delete_fails(self):
+        pid = self._make_profile()
+        store = self.app.config["TASK_STORE"]
+        file_path = self.resume_dir / "db.txt"
+        file_path.write_text("db", encoding="utf-8")
+        store.save_resume(pid, "db.txt", "txt", "db", "hash-db", original_filename="db.txt")
+
+        with mock.patch.object(store, "delete_profile", side_effect=RuntimeError("db fail")):
+            with self.assertRaises(RuntimeError):
+                self.client.delete(f"/api/profiles/{pid}")
+
+        self.assertEqual(store.get_profile(pid)["id"], pid)
+        self.assertTrue(file_path.exists())
+        trash_dir = self.resume_dir / ".trash"
+        self.assertFalse(trash_dir.exists() or list(trash_dir.glob("*")))
+
+    def test_delete_profile_reports_cleanup_warning_when_trash_unlink_fails(self):
+        pid = self._make_profile()
+        store = self.app.config["TASK_STORE"]
+        file_path = self.resume_dir / "warn.txt"
+        file_path.write_text("warn", encoding="utf-8")
+        store.save_resume(pid, "warn.txt", "txt", "warn", "hash-warn", original_filename="warn.txt")
+
+        with mock.patch("pathlib.Path.unlink", side_effect=OSError("denied")):
+            resp = self.client.delete(f"/api/profiles/{pid}")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json().get("cleanup_warning"))
+        self.assertFalse(file_path.exists())
+        trash_dir = self.resume_dir / ".trash"
+        trash_files = list(trash_dir.glob("*")) if trash_dir.exists() else []
+        self.assertEqual(len(trash_files), 1)
+
     def test_anonymous_resume_read_rejected(self):
         pid = self._make_profile()
         resp = self._anon().get(f"/api/profiles/{pid}/resumes")
