@@ -21,8 +21,6 @@ LOGGER_NAME = "career_scout"
 DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_BACKUP_COUNT = 10
 
-_configured = False
-
 _task_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "career_scout_task_id", default=""
 )
@@ -82,7 +80,6 @@ def configure_logging(
 ) -> logging.Logger:
     """Configure the named rotating file logger once per process."""
     logger = logging.getLogger(LOGGER_NAME)
-    global _configured
     if logger.handlers and not force:
         return logger
 
@@ -113,7 +110,6 @@ def configure_logging(
             except Exception:
                 pass
     logger.addHandler(handler)
-    _configured = True
     return logger
 
 
@@ -133,7 +129,7 @@ def bind_task_context(
 
 def is_configured() -> bool:
     """Return whether the local file logger has been configured."""
-    return _configured
+    return bool(logging.getLogger(LOGGER_NAME).handlers)
 
 def get_logger(name: str = LOGGER_NAME) -> logging.Logger:
     """Return a child logger of the configured local logger."""

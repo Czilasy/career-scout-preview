@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { CircleCheck, CircleX, LoaderCircle, Octagon, PauseCircle } from "@lucide/vue";
+import { apiRequest } from "../api";
 import type { Platform } from "../types";
 
 interface PauseInfo {
@@ -329,8 +330,43 @@ const diagnosticText = computed(() => {
 });
 
 async function copyDiagnostics() {
+  let text = diagnosticText.value;
+  if (props.taskId) {
+    try {
+      const data = await apiRequest<{
+        correlation_id?: string;
+        events?: Array<{ type?: string; payload?: Record<string, unknown> }>;
+      }>(`/api/runs/${encodeURIComponent(props.taskId)}/diagnostics`);
+      const events = (data.events || []).slice(-5).map((event) => {
+        return `- ${event.type || "event"}: ${JSON.stringify(event.payload || {})}`;
+      });
+      text = [
+        ...diagnosticText.value.split("\n"),
+        `关联 ID：${data.correlation_id || "-"}`,
+        "最近事件：",
+        ...(events.length ? events : ["-"]),
+      ].join("\n");
+    } catch {
+      // 诊断接口不可用时回退基础信息
+    }
+  }
+  await copyText(text);
+}
+
+async function copyText(text: string) {
   try {
-    await navigator.clipboard.writeText(diagnosticText.value);
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
     copied.value = true;
     window.setTimeout(() => { copied.value = false; }, 2000);
   } catch {
@@ -434,7 +470,7 @@ const timeLabel = computed(() => {
     </p>
     <p v-else class="task-message">{{ snapshot.error || message }}</p>
     <div v-if="failureVisible" class="task-diagnostics" data-testid="task-diagnostics">
-      <span class="diag-code" data-testid="diagnostic-code">{{ snapshot.pause_info?.error_code || "internal_error" }}</span>
+      <span class="diag-code" data-testid="diagnostic-code">{{ snapshot.pause_info?.error_code || "-" }}</span>
       <button type="button" class="diag-copy" data-testid="copy-diagnostics" @click="copyDiagnostics">
         {{ copied ? "已复制" : "复制诊断信息" }}
       </button>

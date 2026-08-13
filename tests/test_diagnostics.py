@@ -45,6 +45,22 @@ class DiagnosticsUnitTests(unittest.TestCase):
         )
         self.assertIsNone(result)
 
+    def test_record_failure_includes_sanitized_exception_message(self):
+        store = _FakeStore()
+        try:
+            raise RuntimeError("boom sk-abcdef1234567890")
+        except RuntimeError as exc:
+            payload = record_failure(
+                store, "run-1", stage="scrape",
+                error_code="internal_error", reason="boom",
+                exception=exc, include_traceback=True,
+            )
+        self.assertIsNotNone(payload)
+        diagnostics = payload["diagnostics"]
+        self.assertEqual(diagnostics["exception_type"], "RuntimeError")
+        self.assertIn("boom", diagnostics["exception_message"])
+        self.assertNotIn("sk-abcdef1234567890", diagnostics["exception_message"])
+
     def test_build_diagnostic_payload_keeps_only_tail_events(self):
         events = [{"seq": i, "type": "failure"} for i in range(25)]
         payload = build_diagnostic_payload(
@@ -98,6 +114,15 @@ class DiagnosticsApiTests(unittest.TestCase):
         self.assertEqual(data["correlation_id"], "corr-1")
         self.assertEqual(len(data["events"]), 1)
         self.assertEqual(data["events"][0]["type"], "failure")
+
+    def test_diagnostics_defaults_correlation_id_to_run_id(self):
+        store = self.app.config["TASK_STORE"]
+        store.create_screening_run(
+            "run-corr", frozen_filters={}, backend_version="test",
+        )
+        data = self.client.get("/api/runs/run-corr/diagnostics").get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["correlation_id"], "run-corr")
 
     def test_diagnostics_returns_404_for_unknown_run(self):
         resp = self.client.get("/api/runs/nope/diagnostics")

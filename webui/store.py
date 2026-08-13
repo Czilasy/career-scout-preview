@@ -1977,6 +1977,8 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
         表是 migration_004/007/010 建好的（此前无写入方），本方法是启用入口。
         run_id 直接用任务 id，便于与内存任务/前端轮询对齐。
         """
+        execution_params = dict(execution_params or {})
+        execution_params.setdefault("correlation_id", str(run_id))
         ts = _now()
         profile_facts = (execution_params or {}).get("profile_facts")
         profile_facts_json = (

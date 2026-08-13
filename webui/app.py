@@ -1881,6 +1881,20 @@ def create_app(config=None):
         except DiscoveryStoreConflictError:
             return False
 
+    def _record_pause_failure(task_id, stage, code, reason, *, processed=0, total=0,
+                              extra=None, exception=None, include_traceback=False):
+        """Write the durable failure event for systemic pause paths."""
+        diagnostics = {"stage": stage, "processed": int(processed), "total": int(total)}
+        if extra:
+            diagnostics.update(extra)
+        record_failure(
+            store, task_id, stage=stage,
+            error_code=code or "internal_error",
+            reason=reason or code or "任务被阻断",
+            correlation_id=task_id, diagnostics=diagnostics,
+            exception=exception, include_traceback=include_traceback,
+        )
+
     def _release_worker_resume_claims(task):
         """worker 终态/暂停时释放续跑接管标记（B027 卡死点）。"""
         with _pipeline_lock:
@@ -2377,6 +2391,10 @@ def create_app(config=None):
                     "code": "cdp_unavailable",
                     "completed_combos": len(completed),
                 })
+                _record_pause_failure(
+                    task_id, "scrape", "cdp_unavailable", reason,
+                    processed=len(completed), total=len(completed),
+                )
                 with _pipeline_lock:
                     task = _pipeline_tasks.get(task_id)
                     if task is not None:
@@ -2555,6 +2573,11 @@ def create_app(config=None):
                                 task_id, "pause",
                                 {"stage": "scrape", "code": _pause_code,
                                  "completed_combos": len(completed)})
+                            _record_pause_failure(
+                                task_id, "scrape", _pause_code, err_msg,
+                                processed=len(completed),
+                                total=int(result.get("combinations") or 0),
+                            )
                             task["status"] = "paused"
                             task["error"] = (
                                 f"列表抓取被阻断（{_pause_code}）："
@@ -2594,7 +2617,7 @@ def create_app(config=None):
                     store, task_id, stage="scrape",
                     error_code="internal_error", reason=error_message,
                     correlation_id=task_id,
-                    diagnostics={"exception_type": type(exc).__name__},
+                    diagnostics={}, exception=exc, include_traceback=True,
                 )
             persistence_error = None
             try:
@@ -3044,6 +3067,13 @@ def create_app(config=None):
                     {"stage": "scrape", "code": _hs_code,
                      "completed_combos": len(_completed_combos),
                      "total_combos": source_result.get("combinations") or 0})
+                _record_pause_failure(
+                    task_id, "scrape", _hs_code,
+                    str(source_result.get("error") or "") or
+                    f"列表抓取被阻断（{_hs_code}）",
+                    processed=len(_completed_combos),
+                    total=int(source_result.get("combinations") or 0),
+                )
                 with _pipeline_lock:
                     t = _pipeline_tasks.get(task_id)
                     if t is not None:
@@ -3211,6 +3241,12 @@ def create_app(config=None):
                         task_id, "pause",
                         {"stage": "ai_rough", "code": _block_code,
                          "processed": len(_done_keys), "total": len(raw_jobs)})
+                    _record_pause_failure(
+                        task_id, "ai_rough", _block_code,
+                        failed_code_label(_block_code, frozen_platform) or _block_code,
+                        processed=len(_done_keys), total=len(raw_jobs),
+                        exception=_ai_exc,
+                    )
                     with _pipeline_lock:
                         t = _pipeline_tasks.get(task_id)
                         if t is not None:
@@ -3276,6 +3312,10 @@ def create_app(config=None):
                         "stage": "jd_detail", "code": "cdp_unavailable",
                         "processed": len(jd_map), "total": len(survivors),
                     })
+                    _record_pause_failure(
+                        task_id, "jd_detail", "cdp_unavailable", reason,
+                        processed=len(jd_map), total=len(survivors),
+                    )
                     with _pipeline_lock:
                         t = _pipeline_tasks.get(task_id)
                         if t is not None:
@@ -3305,6 +3345,10 @@ def create_app(config=None):
                         "stage": "jd_detail", "code": "cdp_unavailable",
                         "processed": len(jd_map), "total": len(survivors),
                     })
+                    _record_pause_failure(
+                        task_id, "jd_detail", "cdp_unavailable", reason,
+                        processed=len(jd_map), total=len(survivors),
+                    )
                     with _pipeline_lock:
                         t = _pipeline_tasks.get(task_id)
                         if t is not None:
@@ -3376,6 +3420,10 @@ def create_app(config=None):
                             task_id, status="paused", error_code=_hs_code,
                             current_stage="jd_detail",
                             processed_count=len(jd_map), error_reason=_hs_reason,
+                        )
+                        _record_pause_failure(
+                            task_id, "jd_detail", _hs_code, _hs_reason,
+                            processed=len(jd_map), total=len(survivors),
                         )
                         with _pipeline_lock:
                             t = _pipeline_tasks.get(task_id)
@@ -3496,6 +3544,12 @@ def create_app(config=None):
                                 {"stage": "ai_fine", "code": _block_code,
                                  "processed": len(done_verdicts),
                                  "total": len(jobs_with_jd)})
+                            _record_pause_failure(
+                                task_id, "ai_fine", _block_code,
+                                failed_code_label(_block_code, frozen_platform) or _block_code,
+                                processed=len(done_verdicts),
+                                total=len(jobs_with_jd), exception=_ai_exc,
+                            )
                             with _pipeline_lock:
                                 t = _pipeline_tasks.get(task_id)
                                 if t is not None:
@@ -3653,12 +3707,14 @@ def create_app(config=None):
             _try_save_failure_snapshot(
                 "cancelled" if _is_user_finished(task_id) else "failed")
             error_message = ai_service.user_facing_error(exc.error_code)
-            record_failure(
-                store, task_id, stage="ai_screen",
-                error_code=exc.error_code, reason=error_message,
-                correlation_id=task_id,
-                diagnostics=dict(getattr(exc, "diagnostics", None) or {}),
-            )
+            if not _is_user_finished(task_id):
+                record_failure(
+                    store, task_id, stage="ai_screen",
+                    error_code=exc.error_code, reason=error_message,
+                    correlation_id=task_id,
+                    diagnostics=dict(getattr(exc, "diagnostics", None) or {}),
+                    exception=exc,
+                )
             persistence_error = None
             try:
                 _write_run_unless_finished(
@@ -3689,12 +3745,13 @@ def create_app(config=None):
             _try_save_failure_snapshot(
                 "cancelled" if _is_user_finished(task_id) else "failed")
             error_message = ai_service.user_facing_error("internal_error")
-            record_failure(
-                store, task_id, stage="ai_screen",
-                error_code="internal_error", reason=error_message,
-                correlation_id=task_id,
-                diagnostics={"exception_type": type(exc).__name__},
-            )
+            if not _is_user_finished(task_id):
+                record_failure(
+                    store, task_id, stage="ai_screen",
+                    error_code="internal_error", reason=error_message,
+                    correlation_id=task_id, diagnostics={},
+                    exception=exc, include_traceback=True,
+                )
             persistence_error = None
             try:
                 _write_run_unless_finished(
@@ -6692,6 +6749,10 @@ def create_app(config=None):
                     "total": len(no_jd),
                 },
             )
+            _record_pause_failure(
+                task_id, "recrawl_fetch_jd", code, reason,
+                processed=len(completed), total=len(no_jd),
+            )
             publish_recrawl_updates()
             with _pipeline_lock:
                 current = _pipeline_tasks.get(task_id)
@@ -6817,6 +6878,10 @@ def create_app(config=None):
                                 task_id, "pause",
                                 {"stage": "recrawl_fetch_jd", "code": _hs_code,
                                  "fetched": len(fetched_jd), "total": len(no_jd)})
+                            _record_pause_failure(
+                                task_id, "recrawl_fetch_jd", _hs_code, _hs_reason,
+                                processed=len(completed_jd_ids), total=len(no_jd),
+                            )
                             with _pipeline_lock:
                                 t = _pipeline_tasks.get(task_id)
                                 if t is not None:
@@ -6877,6 +6942,10 @@ def create_app(config=None):
                     "stage": "recrawl_ai", "code": "ai_key_invalid",
                     "processed": 0, "total": total,
                 })
+                _record_pause_failure(
+                    task_id, "recrawl_ai", "ai_key_invalid", reason,
+                    processed=0, total=total,
+                )
                 with _pipeline_lock:
                     t = _pipeline_tasks.get(task_id)
                     if t is not None:
@@ -6951,6 +7020,11 @@ def create_app(config=None):
                                         {"stage": "recrawl_ai", "code": _block_code,
                                          "processed": len(recrawl_completed_ids),
                                          "total": len(targets)})
+                                    _record_pause_failure(
+                                        task_id, "recrawl_ai", _block_code, _block_code,
+                                        processed=len(recrawl_completed_ids),
+                                        total=len(targets), exception=_ai_exc,
+                                    )
                                     with _pipeline_lock:
                                         t = _pipeline_tasks.get(task_id)
                                         if t is not None:
@@ -7020,12 +7094,13 @@ def create_app(config=None):
             _release_worker_resume_claims(_pipeline_tasks.get(task_id))
         except Exception as exc:
             error_message = f"重抓异常：{type(exc).__name__}"
-            record_failure(
-                store, task_id, stage="recrawl",
-                error_code="internal_error", reason=error_message,
-                correlation_id=task_id,
-                diagnostics={"exception_type": type(exc).__name__},
-            )
+            if not _is_user_finished(task_id):
+                record_failure(
+                    store, task_id, stage="recrawl",
+                    error_code="internal_error", reason=error_message,
+                    correlation_id=task_id, diagnostics={},
+                    exception=exc, include_traceback=True,
+                )
             persistence_error = None
             try:
                 run = store.get_screening_run(task_id)

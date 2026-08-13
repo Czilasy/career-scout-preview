@@ -8,6 +8,7 @@ resume text and JD bodies must never be passed here.
 from __future__ import annotations
 
 import json
+import traceback
 from typing import Any
 
 from webui.logging_setup import bind_task_context, get_logger, redact
@@ -25,6 +26,8 @@ def record_failure(
     reason: str,
     correlation_id: str = "",
     diagnostics: dict[str, Any] | None = None,
+    exception: BaseException | None = None,
+    include_traceback: bool = False,
 ) -> dict[str, Any] | None:
     """Log and persist one structured failure event.
 
@@ -32,16 +35,28 @@ def record_failure(
     is unavailable.  Logging is always attempted first.
     """
     safe_diagnostics = _safe_diagnostics(diagnostics)
+    traceback_text = ""
+    if exception is not None:
+        safe_diagnostics.setdefault("exception_type", type(exception).__name__)
+        safe_diagnostics.setdefault(
+            "exception_message", redact(str(exception))[:2000])
+        if include_traceback:
+            traceback_text = redact(
+                "".join(traceback.format_exception(
+                    type(exception), exception, exception.__traceback__
+                ))
+            )[:8000]
     if is_configured():
         with bind_task_context(task_id, correlation_id):
             _log.error(
-                "failure stage=%s error_code=%s reason=%s diagnostics=%s",
+                "failure stage=%s error_code=%s reason=%s diagnostics=%s%s",
                 stage,
                 error_code,
                 reason,
                 json.dumps(
                     safe_diagnostics, ensure_ascii=False, default=str, sort_keys=True
                 ),
+                f"\ntraceback:\n{traceback_text}" if traceback_text else "",
             )
     payload = {
         "stage": stage,

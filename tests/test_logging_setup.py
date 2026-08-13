@@ -9,6 +9,7 @@ from webui.logging_setup import (
     get_logger,
     redact,
 )
+from webui.logging_setup import is_configured
 
 
 class LoggingSetupTests(unittest.TestCase):
@@ -58,6 +59,13 @@ class LoggingSetupTests(unittest.TestCase):
         self.assertNotIn("sk-abcdef1234567890", result)
         self.assertNotIn("abc.def", result)
         self.assertIn("[REDACTED]", result)
+
+    def test_is_configured_reflects_actual_handlers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            configure_logging(tmp, force=True)
+            self.assertTrue(is_configured())
+            self._close_logger()
+            self.assertFalse(is_configured())
 
 
 if __name__ == "__main__":

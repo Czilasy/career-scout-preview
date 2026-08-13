@@ -244,10 +244,12 @@ def _optional_positive_int(value, field, *, maximum=None):
     return parsed
 
 
-def _env():
+def _env(correlation_id: str = ""):
     environment = os.environ.copy()
     environment["PYTHONUTF8"] = "1"
     environment["PYTHONIOENCODING"] = "utf-8"
+    if correlation_id:
+        environment["CAREER_SCOUT_CORRELATION_ID"] = str(correlation_id)
     return environment
 
 
@@ -436,7 +438,8 @@ class TaskRunner:
                         ArtifactSpec(task["detail_output_path"], root=self.result_dir, required=False),
                     ]
                 result = self.process_executor.execute(
-                    command, timeout_seconds=600, cwd=PROJECT_ROOT, env=_env(),
+                    command, timeout_seconds=600, cwd=PROJECT_ROOT,
+                    env=_env(correlation_id=task_id),
                     cancel_event=cancel_event, artifacts=artifacts,
                     on_output=lambda chunk: [
                         self.store.append_log(task_id, line)
@@ -744,7 +747,8 @@ class WorkbenchRunner(TaskRunner):
                 else:
                     result = self.process_executor.execute(
                         self._query_command(query), timeout_seconds=600,
-                        cwd=PROJECT_ROOT, env=_env(), cancel_event=cancel_event,
+                        cwd=PROJECT_ROOT, env=_env(correlation_id=run_id),
+                        cancel_event=cancel_event,
                         on_poll=stream_progress,
                         artifacts=[
                             ArtifactSpec(query["list_output_path"], root=self.result_dir),
