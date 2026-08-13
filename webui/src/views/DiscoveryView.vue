@@ -2839,7 +2839,7 @@ watch(roundStatusPayload, (payload) => {
           </div>
         </CollapsibleCard>
 
-        <TaskProgress :snapshot="scrapeSnapshot" kind="scrape" />
+        <TaskProgress :snapshot="scrapeSnapshot" kind="scrape" :task-id="scrapeTaskId" />
         <div
           v-if="loginGuide.visible"
           class="login-guide"
@@ -2983,7 +2983,7 @@ watch(roundStatusPayload, (payload) => {
           </div>
         </CollapsibleCard>
 
-        <TaskProgress :snapshot="screenSnapshot" kind="screen" />
+        <TaskProgress :snapshot="screenSnapshot" kind="screen" :task-id="screenTaskId" />
       </section>
 
       <section
@@ -3024,7 +3024,7 @@ watch(roundStatusPayload, (payload) => {
         </div>
 
         <div v-if="!historyMode && activeCategory === 'uncertain' && (recrawlSnapshot || interruptedRunId)" class="recrawl-banner">
-          <TaskProgress :snapshot="recrawlSnapshot" kind="screen" />
+          <TaskProgress :snapshot="recrawlSnapshot" kind="screen" :task-id="recrawlTaskId" />
           <button v-if="recrawlSnapshot && recrawlSnapshot.status === 'paused'"
                   class="button primary" type="button" data-testid="resume-recrawl"
                   :disabled="recrawlBusy" @click="continueRecrawl()">

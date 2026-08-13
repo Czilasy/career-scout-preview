@@ -37,6 +37,7 @@ interface TaskSnapshot {
 const props = defineProps<{
   snapshot: TaskSnapshot | null;
   kind?: "scrape" | "screen" | "";
+  taskId?: string;
 }>();
 
 const COMPLETED_STATUSES = new Set(["done", "completed", "completed_with_pending"]);
@@ -77,6 +78,7 @@ function isTerminalStatus(status?: string) {
 const startedAt = ref<number | null>(null);
 const finishedAt = ref<number | null>(null);
 const tickTok = ref(0); // 触发运行中秒数刷新
+const copied = ref(false);
 let intervalId: number | undefined;
 
 // 进度条显示值；只向后端真实锚点平滑追赶，任何时刻不超前。
@@ -309,6 +311,33 @@ const pauseReason = computed(() => {
   return props.snapshot?.error || "任务已暂停，请处理后点继续";
 });
 
+const failureVisible = computed(() => {
+  const status = props.snapshot?.status;
+  return status === "failed" || status === "paused";
+});
+
+const diagnosticText = computed(() => {
+  const pi = props.snapshot?.pause_info;
+  return [
+    `任务 ID：${props.taskId || "-"}`,
+    `平台：${platformLabel.value || "-"}`,
+    `状态：${statusLabel.value}`,
+    `阶段：${stageLabel.value || "-"}`,
+    `错误码：${pi?.error_code || "-"}`,
+    `原因：${pi?.error_reason || props.snapshot?.error || "-"}`,
+  ].join("\n");
+});
+
+async function copyDiagnostics() {
+  try {
+    await navigator.clipboard.writeText(diagnosticText.value);
+    copied.value = true;
+    window.setTimeout(() => { copied.value = false; }, 2000);
+  } catch {
+    /* 剪贴板不可用时保持静默 */
+  }
+}
+
 // 切片7：完整计数画面（FR-037）。total>0 时才显示
 const scrapedCount = computed(() => Number(props.snapshot?.scraped_count || 0));
 const showCounts = computed(() => {
@@ -404,6 +433,12 @@ const timeLabel = computed(() => {
       <PauseCircle :size="14" aria-hidden="true" />{{ pauseReason }}
     </p>
     <p v-else class="task-message">{{ snapshot.error || message }}</p>
+    <div v-if="failureVisible" class="task-diagnostics" data-testid="task-diagnostics">
+      <span class="diag-code" data-testid="diagnostic-code">{{ snapshot.pause_info?.error_code || "internal_error" }}</span>
+      <button type="button" class="diag-copy" data-testid="copy-diagnostics" @click="copyDiagnostics">
+        {{ copied ? "已复制" : "复制诊断信息" }}
+      </button>
+    </div>
     <!-- 切片7：完整计数画面（FR-037）。按语义分组：来源 / 粗筛 / 当前阶段 / 待确认 / 失败 -->
     <div v-if="showCounts" class="task-counts" data-testid="task-counts">
       <div v-if="scrapedCount > 0" class="count-group count-scraped">
@@ -445,3 +480,30 @@ const timeLabel = computed(() => {
     </div>
   </section>
 </template>
+
+<style scoped>
+.task-diagnostics {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--hair-2, #d8dee3);
+  border-radius: 7px;
+  background: var(--panel-2, #f5f7f8);
+  font-size: 12px;
+}
+.diag-code {
+  color: var(--ink-3, #64707a);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.diag-copy {
+  padding: 4px 9px;
+  border: 1px solid var(--hair-2, #d8dee3);
+  border-radius: 6px;
+  background: var(--panel-1, #ffffff);
+  color: var(--ink-2, #2b343c);
+  cursor: pointer;
+}
+</style>

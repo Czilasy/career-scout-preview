@@ -380,6 +380,8 @@ class BossCdpSource:
             str(browser_account).strip() if browser_account else None
         )
         self.run_id = str(run_id or "").strip()
+        if self.run_id and "CAREER_SCOUT_CORRELATION_ID" not in self.env:
+            self.env = {**self.env, "CAREER_SCOUT_CORRELATION_ID": self.run_id}
         # in_process 模式（合同 inprocess-runner §4.3）：True 时内部执行器把
         # 本类构建的 argv 翻译为 run_search_programmatic / scrape_details
         # 库式调用，不 spawn 子进程；其余行为零改动。

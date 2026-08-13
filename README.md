@@ -160,6 +160,12 @@ python webui/app.py
 - **高级设置与调优实验**：可调整列表抓取、JD 抓取和 AI 筛选参数；提供实验与验证框架。
 - **历史恢复**：可预演、准备并执行历史任务恢复；旧数据缺少具体失败原因时会明确标注，不猜造分类。
 
+### 日志与排障
+
+- 本地运行日志：`~/.career-scout/logs/career-scout.log`，滚动保留，包含任务 ID、阶段、错误码和诊断信息。
+- 失败/暂停的任务可在界面复制诊断信息；诊断不包含 API Key、Cookie、简历原文或 JD 正文。
+- 反馈问题时，把“复制诊断信息”的内容连同日志文件片段一起提供。
+
 ## 隐私与安全边界
 
 - 职位数据、简历和 AI Key 只在本地处理；AI Key 通过系统凭据库保存（Windows Credential Manager / macOS Keychain / Linux Secret Service），不写入 SQLite、日志或导出文件。

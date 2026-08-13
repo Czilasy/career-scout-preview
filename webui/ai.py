@@ -579,7 +579,8 @@ def _read_stream(response) -> tuple[str, str]:
 def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFAULT_TIMEOUT,
             temperature: float = 0.3, model: str = "", *,
             measurement_callback=None, measurement_stage: str = "ai",
-            retry_limits: Mapping[str, int] | None = None) -> dict:
+            retry_limits: Mapping[str, int] | None = None,
+            correlation_id: str = "") -> dict:
     """Call an OpenAI-compatible chat completions endpoint and return parsed JSON.
 
     使用流式（stream=True）模式：AI 每生成几个字就推送一小段，本地实时接收。
@@ -605,19 +606,16 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
     }
     # (连接超时, 读取超时)：连接 15s 内必须建立；建立后每 20s 内必须收到数据
     stream_timeout = (CONNECTION_TIMEOUT, STREAM_IDLE_TIMEOUT)
-    correlation_id = uuid.uuid4().hex
+    correlation_id = correlation_id or uuid.uuid4().hex
 
     def emit_attempt(attempt_index: int, started_at: float, *,
                      error_code: str | None = None,
                      metadata: dict | None = None):
-        if measurement_callback is None:
-            if metadata is not None:
-                metadata.setdefault("correlation_id", correlation_id)
-                metadata.setdefault("attempt_index", attempt_index)
-            return
         if metadata is not None:
             metadata.setdefault("correlation_id", correlation_id)
             metadata.setdefault("attempt_index", attempt_index)
+        if measurement_callback is None:
+            return
         details = {
             "correlation_id": correlation_id,
             "attempt_index": attempt_index,
@@ -1391,7 +1389,8 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 completed_verdicts=None, on_batch_done=None,
                 execution_config=None,
                 measurement_callback=None, emit_kept_terminal=True,
-                measurement_input_count=None, retry_limits=None):
+                measurement_input_count=None, retry_limits=None,
+                correlation_id: str = ""):
     """Stage A 粗筛：AI 逐条核对岗位列表字段，移除"明显"不符合的。
 
     ``jobs``: 脚本抓回的岗位列表（仅列表字段，无 JD）。
@@ -1547,6 +1546,7 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 measurement_callback=measurement_callback,
                 measurement_stage="rough",
                 retry_limits=retry_limits,
+                correlation_id=correlation_id,
             )
             dropped_list = data.get("dropped", []) if isinstance(data, dict) else []
             by_i = {r.get("i"): r for r in dropped_list if isinstance(r, dict)}
@@ -1665,7 +1665,8 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
               execution_config=None,
               on_batch_done=None,
               measurement_callback=None, measurement_input_count=None,
-              missing_result_retry_budget=0, retry_limits=None):
+              missing_result_retry_budget=0, retry_limits=None,
+              correlation_id: str = ""):
     """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
 
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
@@ -1829,6 +1830,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 measurement_callback=measurement_callback,
                 measurement_stage="fine",
                 retry_limits=retry_limits,
+                correlation_id=correlation_id,
             )
             results = data.get("results", []) if isinstance(data, dict) else []
             by_i = {r.get("i"): r for r in results if isinstance(r, dict)}

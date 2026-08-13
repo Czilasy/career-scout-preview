@@ -80,6 +80,7 @@ from webui.core import (
 from webui.job_feedback import JobFeedbackError, JobFeedbackService
 from webui.job_feedback_api import _ERROR_STATUS as _FEEDBACK_ERROR_STATUS
 from webui.job_feedback_api import register_job_feedback_routes
+from webui.diagnostics import build_diagnostic_payload, record_failure
 from webui.pipeline_job_identity import (
     JobIdentityError,
     parse_identity_payload,
@@ -88,6 +89,7 @@ from webui.pipeline_job_identity import (
 from webui.platforms import UnknownPlatformError
 from webui.process_executor import ScraperExecutor
 from webui.source import BossCdpSource as _BossCdpSource
+from webui.logging_setup import configure_logging
 from webui.store import SYSTEMIC_BLOCK_CODES, DiscoveryStoreConflictError, TaskStore
 from webui.result_history import ResultHistoryService
 from webui.result_history_api import register_result_history_routes
@@ -358,6 +360,8 @@ def create_app(config=None):
 
     store = TaskStore(app.config["DB_PATH"])
     history_service = ResultHistoryService(store)
+    if not app.config.get("TESTING"):
+        configure_logging()
 
     def _prune_history_best_effort():
         try:
@@ -2585,6 +2589,13 @@ def create_app(config=None):
                 _MSG_USER_STOPPED_SCRAPE if cancelled
                 else f"执行异常：{type(exc).__name__}"
             )
+            if not cancelled:
+                record_failure(
+                    store, task_id, stage="scrape",
+                    error_code="internal_error", reason=error_message,
+                    correlation_id=task_id,
+                    diagnostics={"exception_type": type(exc).__name__},
+                )
             persistence_error = None
             try:
                 run = store.get_screening_run(task_id)
@@ -3173,7 +3184,8 @@ def create_app(config=None):
                                             model=model, progress=_a_progress,
                                             raise_on_systemic=True,
                                             on_batch_done=_rough_batch_done,
-                                            execution_config=execution_config)
+                                            execution_config=execution_config,
+                                            correlation_id=task_id)
             except (ai_service.AISecurityError, ai_service.AICheckpointError) as _ai_exc:
                 # AISecurityError（systemic）：暂停整任务，保存 checkpoint
                 from webui.ai import (
@@ -3465,7 +3477,8 @@ def create_app(config=None):
                         criteria=criteria, profile_facts=profile_facts,
                         progress=_fine_progress,
                         on_batch_done=_fine_batch_done,
-                        execution_config=execution_config)
+                        execution_config=execution_config,
+                        correlation_id=task_id)
                 except ai_service.AISecurityError as _ai_exc:
                     # 切片6：systemic 错误暂停整任务（不批量变 uncertain 后完成）
                     from webui.ai import AISecurityError, map_ai_error_to_block_code
@@ -3640,6 +3653,12 @@ def create_app(config=None):
             _try_save_failure_snapshot(
                 "cancelled" if _is_user_finished(task_id) else "failed")
             error_message = ai_service.user_facing_error(exc.error_code)
+            record_failure(
+                store, task_id, stage="ai_screen",
+                error_code=exc.error_code, reason=error_message,
+                correlation_id=task_id,
+                diagnostics=dict(getattr(exc, "diagnostics", None) or {}),
+            )
             persistence_error = None
             try:
                 _write_run_unless_finished(
@@ -3666,10 +3685,16 @@ def create_app(config=None):
             if _terminal_status in ("cancelled", "failed"):
                 _clear_auto_screen(task_id)
             _release_worker_resume_claims(_pipeline_tasks.get(task_id))
-        except Exception:
+        except Exception as exc:
             _try_save_failure_snapshot(
                 "cancelled" if _is_user_finished(task_id) else "failed")
             error_message = ai_service.user_facing_error("internal_error")
+            record_failure(
+                store, task_id, stage="ai_screen",
+                error_code="internal_error", reason=error_message,
+                correlation_id=task_id,
+                diagnostics={"exception_type": type(exc).__name__},
+            )
             persistence_error = None
             try:
                 _write_run_unless_finished(
@@ -6995,6 +7020,12 @@ def create_app(config=None):
             _release_worker_resume_claims(_pipeline_tasks.get(task_id))
         except Exception as exc:
             error_message = f"重抓异常：{type(exc).__name__}"
+            record_failure(
+                store, task_id, stage="recrawl",
+                error_code="internal_error", reason=error_message,
+                correlation_id=task_id,
+                diagnostics={"exception_type": type(exc).__name__},
+            )
             persistence_error = None
             try:
                 run = store.get_screening_run(task_id)
@@ -7216,6 +7247,36 @@ def create_app(config=None):
         except OSError:
             return jsonify({"ok": False, "error": "theme 写入失败"}), 500
         return jsonify({"ok": True, "mode": mode})
+
+    @app.route("/api/runs/<run_id>/diagnostics")
+    def run_diagnostics(run_id: str):
+        """Return a safe diagnostic summary for a pipeline run."""
+        try:
+            run = store.get_screening_run(run_id)
+        except _OPERATIONAL_ERRORS:
+            run = None
+        if run is None:
+            return jsonify({
+                "ok": False, "error_code": "not_found",
+                "user_message": _MSG_TASK_NOT_FOUND,
+            }), 404
+        try:
+            events = store.list_task_events(run_id)
+        except _OPERATIONAL_ERRORS:
+            events = []
+        params = run.get("execution_params") or {}
+        correlation_id = str(params.get("correlation_id") or "")
+        correlation_id = correlation_id or run_id
+        from webui.pipeline_exec import taxonomy_reason
+        code = str(run.get("error_code") or "")
+        next_action = taxonomy_reason(
+            code, str(run.get("platform") or ""), fallback=""
+        ) if code else ""
+        payload = build_diagnostic_payload(
+            run_id=run_id, run=run, events=events,
+            correlation_id=correlation_id, next_action=next_action,
+        )
+        return jsonify({"ok": True, **payload})
 
     @app.route("/api/task-state/<run_id>", methods=["GET"])
     def api_task_state(run_id: str):

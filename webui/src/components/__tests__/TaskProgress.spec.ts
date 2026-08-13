@@ -44,3 +44,23 @@ describe("TaskProgress accessibility announcement", () => {
     wrapper.unmount();
   });
 });
+
+describe("TaskProgress diagnostics", () => {
+  it("shows error code and copy button for failed state", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "failed",
+          error: "boom",
+          pause_info: { error_code: "internal_error", error_reason: "boom" },
+        }) as never,
+        kind: "screen",
+        taskId: "run-1",
+      },
+    });
+    expect(wrapper.find("[data-testid='task-diagnostics']").exists()).toBe(true);
+    expect(wrapper.get("[data-testid='diagnostic-code']").text()).toBe("internal_error");
+    expect(wrapper.get("[data-testid='copy-diagnostics']").text()).toContain("复制诊断信息");
+    wrapper.unmount();
+  });
+});
