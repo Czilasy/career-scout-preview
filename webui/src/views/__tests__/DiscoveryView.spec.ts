@@ -2411,6 +2411,16 @@ describe("DiscoveryView", () => {
     expect(wrapper.get('[data-testid="recrawl-platform-guide"]').text()).toContain("BOSS 1 · 智联 1");
     expect(wrapper.find(".results-stage").classes()).toContain("has-recrawl-guide");
     expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/pipeline/recrawl")).length).toBe(0);
+    await wrapper.findAll("button").find((b) => b.text().includes("匹配"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(false);
+    expect(wrapper.find(".results-stage").classes()).not.toContain("has-recrawl-guide");
+    await wrapper.findAll("button").find((b) => b.text().includes("待确认"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="recrawl-uncertain"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(true);
     await wrapper.get('[data-testid="recrawl-choose-boss"]').trigger("click");
     await flushPromises();
     expect(wrapper.find(".results-stage").classes()).not.toContain("has-recrawl-guide");

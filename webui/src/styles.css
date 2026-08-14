@@ -1779,18 +1779,18 @@ button:disabled {
   gap: 10px;
   margin: 0 0 12px;
   padding: 10px 14px;
-  border: 1px solid var(--unsure-edge, var(--hair));
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--unsure-wash);
+  background: var(--panel-2);
 }
 .recrawl-guide-title {
   margin: 0;
   font-weight: 700;
-  color: var(--unsure-deep);
+  color: var(--ink-1);
 }
 .recrawl-guide-counts {
   margin: 0;
-  color: var(--unsure-deep);
+  color: var(--ink-2);
   font-size: 13px;
 }
 .recrawl-guide-actions {
@@ -2371,6 +2371,20 @@ button:disabled {
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
+}
+.dialog-panel.national-scope-dialog {
+  width: min(100%, 440px);
+  padding: 22px;
+  border-color: var(--unsure-edge);
+}
+.national-scope-dialog h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.national-scope-dialog p {
+  margin: 12px 0 20px;
+  color: var(--muted);
+  line-height: 1.6;
 }
 .lifecycle-dialog-header {
   display: flex;

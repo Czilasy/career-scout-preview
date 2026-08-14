@@ -2100,6 +2100,10 @@ function onResultPlatformFilterChange(value: "all" | "boss" | "zhilian") {
   resultPlatformFilter.value = value;
 }
 
+watch(activeCategory, (next, prev) => {
+  if (prev === "uncertain" && next !== "uncertain") recrawlPlatformGuide.value = null;
+});
+
 watch(historyDetail, (detail, prev) => {
   if (detail) {
     enterHistoryRound(detail);
@@ -3038,7 +3042,7 @@ watch(roundStatusPayload, (payload) => {
           <button v-if="!historyMode && scrapeTaskId" class="button secondary small" type="button" data-testid="continue-ai-from-results" @click="enterScreenStep()">继续 AI 筛选</button>
         </div>
 
-        <div v-if="!historyMode && recrawlPlatformGuide" class="recrawl-guide" data-testid="recrawl-platform-guide" role="dialog" aria-label="选择重抓平台">
+        <div v-if="!historyMode && activeCategory === 'uncertain' && recrawlPlatformGuide" class="recrawl-guide" data-testid="recrawl-platform-guide" role="dialog" aria-label="选择重抓平台">
           <p class="recrawl-guide-title">选择要重抓的平台</p>
           <p class="recrawl-guide-counts">BOSS {{ recrawlPlatformGuide.boss }} · 智联 {{ recrawlPlatformGuide.zhilian }}</p>
           <div class="recrawl-guide-actions">
@@ -3125,7 +3129,7 @@ watch(roundStatusPayload, (payload) => {
         data-testid="national-scope-confirm"
         @click.self="cancelNationalScope"
       >
-        <section class="dialog-panel" role="dialog" aria-modal="true" aria-label="未填写城市">
+        <section class="dialog-panel national-scope-dialog" role="dialog" aria-modal="true" aria-label="未填写城市">
           <h2>未填写城市</h2>
           <p>未填写城市，将按全国范围抓取，是否继续？</p>
           <div class="dialog-actions">
