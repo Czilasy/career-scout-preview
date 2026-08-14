@@ -243,6 +243,19 @@ class TaskRunnerInProcessTests(unittest.TestCase):
         self.assertEqual(task.get("returncode"), 1)
         self.assertIn("source_login_required", task.get("error") or "")
 
+    def test_request_limit_exceeded_maps_to_source_request_limit_exceeded(self):
+        """B053: RequestLimitExceededError → returncode=11, failure_code=source_request_limit_exceeded。"""
+        self._create_scrape_task("t11", detail=False)
+        with mock.patch.object(
+            boss, "run_search_programmatic",
+            side_effect=boss.RequestLimitExceededError("limit hit"),
+        ):
+            self.runner._execute("t11")
+        task = self.store.get_task("t11")
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(task.get("returncode"), 11)
+        self.assertIn("source_request_limit_exceeded", task.get("error") or "")
+
     def test_risk_control_rate_limited_maps_correctly(self):
         """T027: RiskControlError(reason 含限流关键词) → source_rate_limited。"""
         self._create_scrape_task("t7", detail=False)

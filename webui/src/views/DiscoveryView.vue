@@ -1455,6 +1455,12 @@ interface AiScreenLaunch {
 }
 
 
+// 结束并保存结果后的“继续 AI 筛选”：先进入筛选步骤，再真正发起续跑/新筛选。
+function continueAiAfterFinish() {
+  enterScreenStep();
+  void startAiScreen();
+}
+
 async function startAiScreen(options: AiScreenLaunch = {}) {
   if (historyMode.value) {
     notify("历史轮次不可改写，请先回到最新", "warning");
@@ -1624,6 +1630,15 @@ async function finishPausedTask(runId: string) {
       if (!result.platform && data.platform) result.platform = data.platform;
       setPipelineResult(result);
       if (data.snapshot_run_id) pipelineResultRunId.value = data.snapshot_run_id;
+      // 保存结果后恢复画像，保证“继续 AI 筛选”能真正发起而不被画像校验拦下。
+      const savedProfile = (result as Record<string, unknown>).profile_summary;
+      if (typeof savedProfile === "string" && savedProfile.trim()) {
+        profileSummary.value = savedProfile;
+      }
+      const savedFacts = (result as Record<string, unknown>).profile_facts;
+      if (savedFacts && typeof savedFacts === "object") {
+        profileFacts.value = savedFacts as Record<string, unknown>;
+      }
     }
     scrapeCompleted.value = true;
     resultLoaded.value = true;
@@ -2933,7 +2948,7 @@ watch(roundStatusPayload, (payload) => {
           <button v-if="finishedPartial" class="button secondary" type="button" data-testid="view-partial-results" @click="activeStep = 'results'">
             查看结果
           </button>
-          <button v-if="finishedPartial" class="button primary" type="button" data-testid="continue-ai-after-finish" @click="enterScreenStep()">
+          <button v-if="finishedPartial" class="button primary" type="button" data-testid="continue-ai-after-finish" @click="continueAiAfterFinish()">
             继续 AI 筛选
           </button>
           </div>
@@ -2966,7 +2981,7 @@ watch(roundStatusPayload, (payload) => {
                 结束并保存结果
               </button>
               <button v-if="finishedPartial" class="button secondary" type="button" data-testid="view-partial-results-screen" @click="activeStep = 'results'">查看结果</button>
-              <button v-if="finishedPartial" class="button primary" type="button" data-testid="continue-ai-after-finish-screen" @click="enterScreenStep()">继续 AI 筛选</button>
+              <button v-if="finishedPartial" class="button primary" type="button" data-testid="continue-ai-after-finish-screen" @click="continueAiAfterFinish()">继续 AI 筛选</button>
               <button v-if="screenSnapshot && screenSnapshot.status === 'paused'"
                       class="button secondary" type="button" data-testid="resume-ai-screen"
                       :disabled="screenBusy" @click="continueAiScreen()">

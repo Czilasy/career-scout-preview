@@ -1195,6 +1195,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         "source_rate_limited",
         "source_blocked",
         "source_cdp_unavailable",
+        "source_request_limit_exceeded",
     })
     for batch_start in range(0, len(indexed_jobs), BATCH_SIZE):
         if stop_event is not None and stop_event.is_set():

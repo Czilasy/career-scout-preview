@@ -19,6 +19,7 @@ describe("errorCodes mirror (B043)", () => {
       "source_login_required",
       "source_blocked",
       "source_invalid_output",
+      "source_request_limit_exceeded",
     ]) {
       expect(codeSet.has(code)).toBe(true);
     }

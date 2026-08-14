@@ -74,7 +74,7 @@ CITY_GROUP_URL = "https://www.zhipin.com/wapi/zpCommon/data/cityGroup.json"
 
 # 请求频率保护
 MAX_PAGES = 10          # 单次最大页数
-MAX_API_REQUESTS = 500  # 单次最大 API 请求数
+MAX_API_REQUESTS = 999  # 单次抓取运行最大 API 请求数（B053：按运行隔离，不跨轮累计）
 
 BROWSER_NOT_FOUND_HINT = "请安装 Chrome 或使用系统自带 Edge"
 
@@ -175,7 +175,11 @@ LOGIN_PROBE_PAGE_SIZE = 10
 DEFAULT_LOGIN_TIMEOUT = 300
 
 # 全局请求计数器
-_request_counter = 0
+# 运行级请求计数器（B053）：in-process 模式下多轮任务共处同一进程，必须按单次抓取运行隔离；
+# worker 线程通过锁共享同一计数对象。
+_request_counter = None
+_request_counter_lock = threading.Lock()
+_run_active = False  # 是否正在 run_search_programmatic 组合运行内
 _live_city_maps_cache = None
 
 logging.basicConfig(
@@ -332,17 +336,32 @@ INDUSTRY_MAP = {
 
 
 # ============================================================
-# 全局请求计数器辅助
+# 运行级请求计数器辅助（B053）
 # ============================================================
-def incr_request():
-    """递增全局请求计数，达到上限时抛出异常"""
-    global _request_counter
-    _request_counter += 1
-    if _request_counter > MAX_API_REQUESTS:
-        raise RuntimeError(f"已达到单次最大请求数 {MAX_API_REQUESTS}，停止抓取")
-    if _request_counter >= MAX_API_REQUESTS * 0.8:
-        log.warning(f"⚠️ 请求次数接近上限: {_request_counter}/{MAX_API_REQUESTS}")
+class RequestLimitExceededError(RuntimeError):
+    """单次抓取运行命中 API 请求上限（B053）。"""
 
+
+def begin_request_run():
+    """开启一次抓取运行的独立请求计数（B053）。"""
+    global _request_counter
+    with _request_counter_lock:
+        _request_counter = 0
+
+
+def incr_request():
+    """递增运行级请求计数，命中上限时抛出显式异常（B053）。"""
+    global _request_counter
+    with _request_counter_lock:
+        if _request_counter is None:
+            _request_counter = 0
+        _request_counter += 1
+        current = _request_counter
+        if current > MAX_API_REQUESTS:
+            raise RequestLimitExceededError(
+                f"已达到单次最大请求数 {MAX_API_REQUESTS}，停止抓取")
+        if current >= MAX_API_REQUESTS * 0.8:
+            log.warning(f"⚠️ 请求次数接近上限: {current}/{MAX_API_REQUESTS}")
 
 # ============================================================
 # CDP 连接
@@ -1510,6 +1529,8 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 cdp_port=DEFAULT_CDP_PORT, fmt="json", allow_dom_fallback=False,
                 start_page=1, *, cancel_event=None, on_poll=None,
                 combo_key=None, on_page_completed=None, list_events_output=None):
+    if not _run_active:
+        begin_request_run()
     city_name, city_code = resolve_city(city_input)
     cdp = CDPSession(cdp_port)
     all_jobs = []
@@ -2205,7 +2226,7 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
                 max_readiness_retries, inter_job_gap_range, stagger_range,
                 tab_id, results_lock, results, output_path, degrade_event,
                 trailing_wait, reset_every=3, degrade_reason=None,
-                cancel_event=None, on_poll=None):
+                cancel_event=None, on_poll=None, worker_errors=None):
     """常驻 tab 工作线程：建池 → 错峰启动 → 循环领任务抓详情 → 补位节奏 → 关池。
 
     spec 007 ⑧：每个 tab 配一条独立工作线程 + 独立 CDP 会话（CDPSession 是
@@ -2283,6 +2304,12 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
                 gap = random.uniform(inter_job_gap_range[0], inter_job_gap_range[1])
                 print(f"[{tab_label}]   等待 {gap:.1f}s 后抓下一个...")
                 sleeper(gap, label="inter_job_gap")
+    except BaseException as exc:
+        if worker_errors is not None:
+            with results_lock:
+                worker_errors.append(exc)
+        else:
+            raise
     finally:
         # 结束一次性关 tab + 关会话（限流停工时限流页保留不关）
         if tid is not None and not keep_tab_open:
@@ -2360,6 +2387,8 @@ def scrape_details(list_data, max_details=None, output_path=None,
     if stg_lo < 0 or stg_hi < stg_lo:
         raise ValueError(f"stagger_range invalid: {stagger_range!r}")
 
+    if not _run_active:
+        begin_request_run()
     raw_jobs = list_data.get("jobs", [])
     if max_details:
         raw_jobs = raw_jobs[:max_details]
@@ -2385,6 +2414,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
         import queue as _queue_mod
         import threading
         results_lock = threading.Lock()
+        worker_errors: list[BaseException] = []
         degrade_event = threading.Event()
         # 降级原因共享标记：区分登录墙降级与账号限流停工（限流需退出码 10）
         degrade_reason: dict[str, str] = {}
@@ -2417,6 +2447,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
                     "reset_every": reset_every,
                     "cancel_event": cancel_event,
                     "on_poll": on_poll,
+                    "worker_errors": worker_errors,
                 },
                 name=f"detail-tab{tab_id + 1}",
                 daemon=True,
@@ -2425,6 +2456,15 @@ def scrape_details(list_data, max_details=None, output_path=None,
             threads.append(t)
         for t in threads:
             t.join()
+        # B050：worker 异常必须透出到主流程，不能静默死亡后把空批次当成功。
+        if worker_errors:
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+            write_json_atomic(output_path, results)
+            limit_error = next(
+                (exc for exc in worker_errors if isinstance(exc, RequestLimitExceededError)),
+                None,
+            )
+            raise limit_error if limit_error is not None else worker_errors[0]
         # programmatic 取消：线程退出后 flush 已抓 results 并抛 SearchCancelled
         if cancel_event is not None and cancel_event.is_set():
             write_json_atomic(output_path, results)
@@ -3502,6 +3542,8 @@ def run_search_programmatic(
     - skip_login_check=True 时跳过组合级登录探测；任务编排层应在任务开始时
       已执行过 preflight（真实 401/登录墙仍由列表接口失败映射）。
     """
+    global _run_active
+    begin_request_run()
     import contextlib
 
     filters = dict(filters or {})
@@ -3521,6 +3563,8 @@ def run_search_programmatic(
     # 上下文管理器，恢复时带守卫，避免并发任务的 redirect 互相覆盖）
     buffer = _LineLogBuffer(on_log) if on_log is not None else None
     redirect = buffer if buffer is not None else contextlib.nullcontext()
+    # 只在真正进入执行上下文后置位，避免早期校验失败把 _run_active 永久留 True。
+    _run_active = True
     with redirect:
         try:
             # 登录状态检测
@@ -3638,6 +3682,7 @@ def run_search_programmatic(
             print_risk_control_report(e)
             raise
         finally:
+            _run_active = False
             if buffer is not None:
                 buffer.flush()
 
@@ -4053,6 +4098,9 @@ if __name__ == "__main__":
     except CDPUnavailableError as e:
         print(f"\n❌ {e}")
         sys.exit(2)
+    except RequestLimitExceededError as e:
+        print(f"\n❌ {e}")
+        sys.exit(11)
     except RiskControlError as e:
         print_risk_control_report(e)
         sys.exit(10)

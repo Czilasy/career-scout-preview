@@ -1201,6 +1201,21 @@ class Slice7And9ApiTests(unittest.TestCase):
         self.assertEqual(data["pause_info"]["error_code"], "captcha_required")
         self.assertIn("验证码", data["pause_info"]["error_reason"])
 
+    def test_task_state_api_failed_with_non_systemic_error_code(self):
+        """B052：失败态非系统性错误码也必须下发 pause_info，供内联展示。"""
+        self.store.update_screening_run(self.run_id, status="running")
+        self.store.update_screening_run(
+            self.run_id, status="failed",
+            error_code="source_invalid_output",
+            error_reason="输入校验失败或页面解析异常")
+
+        resp = self.client.get(f"/api/task-state/{self.run_id}")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["status"], "failed")
+        self.assertEqual(data["pause_info"]["error_code"], "source_invalid_output")
+
     def test_task_state_counts_success_failure_and_unstarted_separately(self):
         """暂停计数满足 success + failure + unstarted = total（SC-006）。"""
         run_id = "test-run-sc006-counts"
@@ -1356,6 +1371,12 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "verdict_reason": "岗位详情请求超时",
                     "jd_failed_code": "detail_timeout",
                     "failed_stage": "jd_detail",
+                },
+                {
+                    "job_id": "uncertain-jd-1", "verdict": "uncertain",
+                    "verdict_reason": "已抓取 JD，精筛未完成",
+                    "jd": "负责后端开发", "failed_code": "ai_missing_job",
+                    "failed_stage": "ai_fine",
                 },
             ],
             "dropped": [{"job_id": "drop-1", "reason": "粗筛移除"}],
@@ -2095,8 +2116,8 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
 
         self.assertEqual(run["match_count"], 1)
         self.assertEqual(run["mismatch_count"], 1)
-        self.assertEqual(run["pending_count"], 1)
-        self.assertEqual(len(pending), 1)
+        self.assertEqual(run["pending_count"], 2)
+        self.assertEqual(len(pending), 2)
         self.assertEqual(pending[0]["job_id"], "pending-1")
         self.assertEqual(pending[0]["failed_code"], "detail_timeout")
         self.assertEqual(pending[0]["failure_stage"], "jd_detail")
@@ -2118,7 +2139,8 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["source_run_id"], run_id)
 
-    def test_recrawl_rejects_non_pending_job_ids(self):
+    def test_recrawl_rejects_final_verdict_job_ids(self):
+        """B051：已有最终判定的 ID 仍返回 non_pending_job_ids。"""
         run_id = self._save_mixed_result()
         executor = self.app.config["PIPELINE_EXECUTOR"]
         with mock.patch.object(executor, "submit") as submit:
@@ -2131,6 +2153,24 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()["error"], "non_pending_job_ids")
         submit.assert_not_called()
+
+    def test_recrawl_accepts_uncertain_jd_from_snapshot(self):
+        """B051：有 JD 但精筛未完成的岗位即使不在待确认表也可全部重抓。"""
+        run_id = self._save_mixed_result()
+        self.store.delete_pending_result(run_id, "uncertain-jd-1")
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit") as submit:
+            response = self.client.post(
+                "/api/pipeline/recrawl",
+                json={"source_run_id": run_id, "job_ids": ["uncertain-jd-1"]},
+                headers=self.headers,
+            )
+
+        self.assertEqual(response.status_code, 202, response.get_json())
+        task_id = response.get_json()["task_id"]
+        run = self.store.get_screening_run(task_id)
+        self.assertEqual(run["execution_params"]["job_ids"], ["uncertain-jd-1"])
+        submit.assert_called_once()
 
     def test_ai_fine_flags_independent_field_in_job(self):
         """精筛 flags（B033 靠谱判定）独立写入结果 job 的 flags 字段，不进 caveats。"""

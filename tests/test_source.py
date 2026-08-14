@@ -2024,8 +2024,8 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         self.assertTrue(outcome.ok)
         self.assertEqual(outcome.jobs, [])
 
-    def test_detail_batch_empty_without_events_maps_to_cdp_lost(self):
-        """JD 批次退出码 0 + 0 结果 + 0 事件：统一映射 source_cdp_unavailable。"""
+    def test_detail_batch_empty_without_events_not_mapped_to_cdp_lost(self):
+        """B050：JD 批次退出码 0 + 0 结果 + 0 事件不再判为浏览器失联。"""
         source = self._make_source()
         detail_path = str(self.artifact_root / "batch_empty_lost.json")
         jobs = [
@@ -2044,9 +2044,59 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
 
         self.assertEqual(len(results), 1)
         self.assertFalse(results["j1"].ok)
-        self.assertEqual(results["j1"].failed_code, "source_cdp_unavailable")
-        self.assertIn("empty_batch_no_events_cdp_lost", results["j1"].safe_log)
-        m_signal.assert_called_once_with("source_cdp_unavailable")
+        self.assertEqual(results["j1"].failed_code, "source_invalid_output")
+        self.assertNotIn("empty_batch_no_events_cdp_lost", results["j1"].safe_log)
+        m_signal.assert_not_called()
+
+    # ---- B050/B053：worker 异常透出与运行级计数隔离 ----------------------
+
+    def test_worker_exception_surfaces_instead_of_empty_success(self):
+        """B050：并行 worker 命中请求上限必须透出，不得返回空成功。"""
+        class FailingSession:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def send(self, *_args, **_kwargs):
+                raise _boss_for_inprocess.RequestLimitExceededError("limit hit")
+
+            def eval_js(self, *_args, **_kwargs):
+                raise AssertionError("unused")
+
+            def close(self):
+                pass
+
+        output = self.artifact_root / "batch_limit.json"
+        with self.assertRaises(_boss_for_inprocess.RequestLimitExceededError):
+            _boss_for_inprocess.scrape_details(
+                {"jobs": [
+                    {"job_link": "https://www.zhipin.com/job/1", "job_id": "j1"},
+                    {"job_link": "https://www.zhipin.com/job/2", "job_id": "j2"},
+                ]},
+                output_path=str(output),
+                cdp_port=9222,
+                enable_parallel=True,
+                tab_pool_size=2,
+                session_factory=FailingSession,
+                sleeper=lambda seconds, label=None: None,
+                inter_job_gap_range=(0, 0),
+                stagger_range=(0, 0),
+            )
+        self.assertEqual(output.read_text(encoding="utf-8"), "[]")
+
+    def test_request_counter_is_isolated_per_run(self):
+        """B053：命中上限后新一轮 begin_request_run 从 0 重新计数。"""
+        with mock.patch.object(_boss_for_inprocess, "MAX_API_REQUESTS", 3):
+            _boss_for_inprocess.begin_request_run()
+            for _ in range(3):
+                _boss_for_inprocess.incr_request()
+            with self.assertRaises(_boss_for_inprocess.RequestLimitExceededError):
+                _boss_for_inprocess.incr_request()
+            _boss_for_inprocess.begin_request_run()
+            _boss_for_inprocess.incr_request()
+            _boss_for_inprocess.incr_request()
+            _boss_for_inprocess.incr_request()
+            with self.assertRaises(_boss_for_inprocess.RequestLimitExceededError):
+                _boss_for_inprocess.incr_request()
 
     # ---- 异常映射 ----------------------------------------------------
 
@@ -2068,6 +2118,51 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
             outcome = source.fetch_list(plan_item)
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.failed_code, "source_cdp_unavailable")
+
+    def test_programmatic_run_resets_counter_between_runs(self):
+        """B053：run_search_programmatic 每轮独立计数，组合流程内不重复重置。"""
+        with mock.patch.object(_boss_for_inprocess, "MAX_API_REQUESTS", 3):
+            output = self.artifact_root / "prog_run.json"
+
+            def fake_list(*_args, **_kwargs):
+                for _ in range(3):
+                    _boss_for_inprocess.incr_request()
+                return {"jobs": [], "total": 0}
+
+            with mock.patch.object(
+                _boss_for_inprocess, "scrape_list", side_effect=fake_list,
+            ), mock.patch.object(
+                _boss_for_inprocess, "check_login_state", return_value=True,
+            ):
+                _boss_for_inprocess.run_search_programmatic(
+                    keyword="AI", city="上海", pages=1,
+                    output_path=str(output), detail=False,
+                )
+                _boss_for_inprocess.run_search_programmatic(
+                    keyword="AI", city="上海", pages=1,
+                    output_path=str(output), detail=False,
+                )
+
+    def test_request_limit_exceeded_maps_to_returncode_11(self):
+        """B053：RequestLimitExceededError → (11, ...) → source_request_limit_exceeded。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_limit.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+        with mock.patch.object(
+            _boss_for_inprocess, "run_search_programmatic",
+            side_effect=_boss_for_inprocess.RequestLimitExceededError("limit hit"),
+        ):
+            outcome = source.fetch_list(plan_item)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_request_limit_exceeded")
 
     def test_login_required_maps_to_returncode_1(self):
         """LoginRequiredError → (1, '登录') → source_login_required。"""

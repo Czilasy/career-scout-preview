@@ -784,7 +784,8 @@ class BossCdpSource:
           with wrong types, event with unknown kind/status, event for a job
           not in the batch, completed event without a matching detail
           record, or detail record missing ``job_link``/``source_url``.
-        - ``source_blocked``: scraper subprocess exited non-zero.
+        - 非零退出：由退出码分类得到对应 source_* 失败码（如
+          ``source_cdp_unavailable``、``source_request_limit_exceeded``）。
         - ``source_timeout``: subprocess exceeded ``timeout_seconds``.
         - ``source_unreachable``: scraper binary not found or OS error.
         - The event's ``safe_code`` is surfaced as ``failed_code`` for
@@ -924,7 +925,7 @@ class BossCdpSource:
             except OSError:
                 pass
 
-        # 5. Subprocess non-zero exit: no partial results from a failed batch.
+        # 5. Subprocess non-zero exit: whole batch failed; partial results are kept in the output file.
         if returncode != 0:
             failed_code = _classify_failed_code(returncode, captured)
             for job_id in expected_urls_by_job_id:
@@ -960,19 +961,6 @@ class BossCdpSource:
 
         # 7. Read the combined detail JSON and index by job_link/source_url.
         details_by_url = self._read_combined_details(detail_output_path)
-        if returncode == 0 and not parsed_events and not details_by_url:
-            for job_id in expected_urls_by_job_id:
-                results[job_id] = SourceOutcome.failure(
-                    failed_code="source_cdp_unavailable",
-                    safe_log=f"{safe_log} empty_batch_no_events_cdp_lost",
-                )
-            self.breaker.record_signal("source_cdp_unavailable")
-            if on_item_done is not None:
-                try:
-                    on_item_done(len(jobs))
-                except Exception:
-                    pass
-            return results
 
         # 8. Build per-job outcomes from the matched event + detail record.
         for job_id, source_url in expected_urls_by_job_id.items():
@@ -1291,6 +1279,8 @@ class BossCdpSource:
             return (-1, "cancelled")
         except boss.CDPUnavailableError as exc:
             return (2, str(exc))
+        except boss.RequestLimitExceededError as exc:
+            return (11, str(exc))
         except boss.LoginRequiredError as exc:
             # captured 含「登录」关键词，_classify_failed_code 据此映射为
             # source_login_required（合同 §3 表 LoginRequiredError 行）
@@ -1803,9 +1793,12 @@ def _classify_failed_code(returncode: int, captured: str) -> str:
       1  — 登录态失效或环境异常
       2  — 连不上调试浏览器（CDPUnavailableError）
       10 — 触发风控/限流（RiskControlError：验证码、连续空页、HTTP 拦截）
+      11 — 单次抓取运行请求数达到上限（RequestLimitExceededError）
     """
     if returncode == 2:
         return "source_cdp_unavailable"
+    if returncode == 11:
+        return "source_request_limit_exceeded"
     text = (captured or "").lower()
     if returncode == 1:
         if any(kw in text for kw in ("登录", "login", "cookie")):

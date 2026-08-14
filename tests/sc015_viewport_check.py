@@ -1,4 +1,8 @@
-"""SC-015 桌面/窄屏真实渲染门禁（默认只检查隔离 WebUI 5050）。"""
+"""SC-015 桌面/窄屏真实渲染门禁（默认只检查隔离 WebUI 5050）。
+
+验收对象是结果页控件，必须配合 `tests/run_isolated_webui.py --fixture recrawl`
+启动种子数据；`--fixture ai` 的暂停 AI 任务停在筛选步骤，不含结果页控件，
+不适用本脚本。"""
 from __future__ import annotations
 
 import argparse
@@ -28,6 +32,8 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--cdp-url", default="http://127.0.0.1:9222/json")
+    parser.add_argument("--fixture", choices=("ai", "recrawl"), default="recrawl",
+                        help="隔离 WebUI 种子类型；SC-015 需要 recrawl（结果页）")
     return parser.parse_args(argv)
 
 
@@ -267,6 +273,11 @@ def run(argv=None):
         urllib.error.URLError, websocket.WebSocketException,
     ) as exc:
         print(f"FAIL SC-015: {type(exc).__name__}: {exc}", file=sys.stderr)
+        if args.fixture != "recrawl":
+            print(
+                "提示：SC-015 验证结果页控件，请用 run_isolated_webui.py --fixture recrawl 启动种子",
+                file=sys.stderr,
+            )
         return 1
 
 

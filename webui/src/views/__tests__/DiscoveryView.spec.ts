@@ -2286,6 +2286,56 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
+  it("B027: continue AI after finish actually starts ai-screen", async () => {
+    const calls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/api/latest-running-task")) {
+        return response({
+          ok: true, has_task: true, task_id: "scrape-failed-1", kind: "scrape",
+          status: "failed", platform: "boss", scraped_count: 1280, source_total: 3000,
+          progress: { message: "抓取失败" }, logs: [], error: "列表抓取失败",
+          pause_info: { error_code: "scrape_failed", error_reason: "列表抓取失败" },
+        });
+      }
+      if (url.includes("/api/task/finish/scrape-failed-1")) {
+        return response({
+          ok: true, run_id: "scrape-failed-1", snapshot_run_id: "snap-1",
+          platform: "boss", status: "completed_with_pending", scrape_task_id: "scrape-failed-1",
+          result: {
+            jobs: [{ job_id: "j1", platform: "boss", verdict: "uncertain", verdict_reason: "提前结束" }],
+            dropped: [], total_scraped: 1280, total_kept: 1280, total_dropped: 0,
+            profile_summary: "3年Python后端候选人",
+          },
+        });
+      }
+      if (url.endsWith("/api/ai-screen")) {
+        return response({ ok: true, task_id: "screen-cont-1" });
+      }
+      if (url.includes("/api/task-state/screen-cont-1")) {
+        return response({ status: "running", progress: { message: "AI 筛选中" }, logs: [] });
+      }
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.get('[data-testid="finish-active-scrape"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="continue-ai-after-finish"]').trigger("click");
+    await flushPromises();
+    expect(calls.some((url) => url.endsWith("/api/ai-screen"))).toBe(true);
+    expect(wrapper.find('[data-testid="start-ai-screen"]').exists()).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
   it("B027: running AI screen can finish and save without jumping to results", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

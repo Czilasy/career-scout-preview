@@ -6505,20 +6505,38 @@ def create_app(config=None):
             return jsonify({"ok": False, "error": "missing_source_run_id"}), 409
         pending_rows = store.list_pending_results(source_run_id)
         pending_ids = {str(item.get("job_id") or "") for item in pending_rows}
-        # FR-023：job_ids 缺省或 "auto" → 从 screening_pending_results 读
+        # B051：重抓目标 = 待确认表 ∪ 结果快照内无最终判定的岗位（含已有 JD
+        # 但精筛未完成的提前结束保存岗位），按 JD 有无由任务内部分流。
+        snapshot_ids = set()
+        try:
+            _snapshot = store.load_latest_pipeline_result(source_run_id)
+            for _job in ((_snapshot or {}).get("result") or {}).get("jobs") or []:
+                if not isinstance(_job, dict):
+                    continue
+                if str(_job.get("verdict") or "") in ("match", "not_match", "mismatch"):
+                    continue
+                _sid = str(
+                    _job.get("platform_job_id") or _job.get("job_id") or ""
+                ).strip()
+                if _sid:
+                    snapshot_ids.add(_sid)
+        except _OPERATIONAL_ERRORS:
+            snapshot_ids = set()
+        recrawlable_ids = pending_ids | snapshot_ids
+        # FR-023：job_ids 缺省或 "auto" → 从可重抓集合读
         if not job_ids or job_ids == "auto":
-            job_ids = sorted(pending_ids)
+            job_ids = sorted(recrawlable_ids)
             if not job_ids:
                 return jsonify({"ok": False, "error": "没有待确认岗位可重抓"}), 400
         if not isinstance(job_ids, list) or not job_ids:
             return jsonify({"ok": False, "error": "缺少 job_ids"}), 400
         requested_ids = {str(job_id) for job_id in job_ids}
-        non_pending = sorted(requested_ids - pending_ids)
+        non_pending = sorted(requested_ids - recrawlable_ids)
         if non_pending:
             return jsonify({
                 "ok": False,
                 "error": "non_pending_job_ids",
-                "message": "只能重抓当前待确认岗位",
+                "message": "只能重抓当前结果中未完成判定的岗位",
                 "job_ids": non_pending,
             }), 409
         job_ids = sorted(requested_ids)
@@ -7594,6 +7612,7 @@ def create_app(config=None):
             (run or {}).get("interruption_kind"),
         )
         if effective_status == "paused" or (
+                effective_status == "failed" and error_code) or (
                 error_code and error_code in SYSTEMIC_BLOCK_CODES):
             pause_info = {
                 "error_code": error_code,

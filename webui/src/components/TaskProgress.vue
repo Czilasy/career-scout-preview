@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { CircleCheck, CircleX, LoaderCircle, Octagon, PauseCircle } from "@lucide/vue";
-import { apiRequest } from "../api";
 import type { Platform } from "../types";
 
 interface PauseInfo {
@@ -79,7 +78,6 @@ function isTerminalStatus(status?: string) {
 const startedAt = ref<number | null>(null);
 const finishedAt = ref<number | null>(null);
 const tickTok = ref(0); // 触发运行中秒数刷新
-const copied = ref(false);
 let intervalId: number | undefined;
 
 // 进度条显示值；只向后端真实锚点平滑追赶，任何时刻不超前。
@@ -304,75 +302,31 @@ const stageLabel = computed(() => {
   return STAGE_LABELS[raw] || "处理中";
 });
 
-// 切片7：具体暂停原因（SC-006）。优先 pause_info.error_reason，其次 error 字段
-const pauseReason = computed(() => {
-  if (props.snapshot?.status !== "paused") return "";
-  const pi = props.snapshot?.pause_info;
-  if (pi?.error_reason) return pi.error_reason;
-  return props.snapshot?.error || "任务已暂停，请处理后点继续";
-});
-
 const failureVisible = computed(() => {
   const status = props.snapshot?.status;
   return status === "failed" || status === "paused";
 });
 
-const diagnosticText = computed(() => {
-  const pi = props.snapshot?.pause_info;
-  return [
-    `任务 ID：${props.taskId || "-"}`,
-    `平台：${platformLabel.value || "-"}`,
-    `状态：${statusLabel.value}`,
-    `阶段：${stageLabel.value || "-"}`,
-    `错误码：${pi?.error_code || "-"}`,
-    `原因：${pi?.error_reason || props.snapshot?.error || "-"}`,
-  ].join("\n");
+// B052：暂停/失败统一内联展示「中文原因 · 错误字段」，错误字段红色。
+const failureLine = computed(() => {
+  const status = props.snapshot?.status;
+  if (status === "paused") {
+    const pi = props.snapshot?.pause_info;
+    return {
+      reason: pi?.error_reason || props.snapshot?.error || "任务已暂停，请处理后点继续",
+      code: pi?.error_code || "",
+    };
+  }
+  if (status === "failed") {
+    const pi = props.snapshot?.pause_info;
+    return {
+      reason: props.snapshot?.error || message.value || "执行失败",
+      code: pi?.error_code || "",
+    };
+  }
+  return { reason: "", code: "" };
 });
 
-async function copyDiagnostics() {
-  let text = diagnosticText.value;
-  if (props.taskId) {
-    try {
-      const data = await apiRequest<{
-        correlation_id?: string;
-        events?: Array<{ type?: string; payload?: Record<string, unknown> }>;
-      }>(`/api/runs/${encodeURIComponent(props.taskId)}/diagnostics`);
-      const events = (data.events || []).slice(-5).map((event) => {
-        return `- ${event.type || "event"}: ${JSON.stringify(event.payload || {})}`;
-      });
-      text = [
-        ...diagnosticText.value.split("\n"),
-        `关联 ID：${data.correlation_id || "-"}`,
-        "最近事件：",
-        ...(events.length ? events : ["-"]),
-      ].join("\n");
-    } catch {
-      // 诊断接口不可用时回退基础信息
-    }
-  }
-  await copyText(text);
-}
-
-async function copyText(text: string) {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      textarea.style.position = "fixed";
-      textarea.style.opacity = "0";
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand("copy");
-      textarea.remove();
-    }
-    copied.value = true;
-    window.setTimeout(() => { copied.value = false; }, 2000);
-  } catch {
-    /* 剪贴板不可用时保持静默 */
-  }
-}
 
 // 切片7：完整计数画面（FR-037）。total>0 时才显示
 const scrapedCount = computed(() => Number(props.snapshot?.scraped_count || 0));
@@ -464,17 +418,12 @@ const timeLabel = computed(() => {
     <div class="progress-track" aria-hidden="true">
       <span :style="{ width: `${percentage}%` }" />
     </div>
-    <!-- 切片7：暂停时显示具体原因（SC-006）；其他状态显示 message/error -->
-    <p v-if="snapshot.status === 'paused'" class="task-message task-pause-reason" data-testid="pause-reason">
-      <PauseCircle :size="14" aria-hidden="true" />{{ pauseReason }}
+    <!-- B052：暂停/失败统一内联原因 + 红色错误字段；无独立诊断盒、无复制按钮 -->
+    <p v-if="failureVisible" class="task-message task-pause-reason" data-testid="pause-reason">
+      <PauseCircle v-if="snapshot.status === 'paused'" :size="14" aria-hidden="true" />
+      {{ failureLine.reason }}<span v-if="failureLine.code" class="error-field" data-testid="error-field"> · {{ failureLine.code }}</span>
     </p>
     <p v-else class="task-message">{{ snapshot.error || message }}</p>
-    <div v-if="failureVisible" class="task-diagnostics" data-testid="task-diagnostics">
-      <span class="diag-code" data-testid="diagnostic-code">{{ snapshot.pause_info?.error_code || "-" }}</span>
-      <button type="button" class="diag-copy" data-testid="copy-diagnostics" @click="copyDiagnostics">
-        {{ copied ? "已复制" : "复制诊断信息" }}
-      </button>
-    </div>
     <!-- 切片7：完整计数画面（FR-037）。按语义分组：来源 / 粗筛 / 当前阶段 / 待确认 / 失败 -->
     <div v-if="showCounts" class="task-counts" data-testid="task-counts">
       <div v-if="scrapedCount > 0" class="count-group count-scraped">
@@ -518,28 +467,8 @@ const timeLabel = computed(() => {
 </template>
 
 <style scoped>
-.task-diagnostics {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin: 4px 0 0;
-  padding: 8px 10px;
-  border: 1px solid var(--hair-2, #d8dee3);
-  border-radius: 7px;
-  background: var(--panel-2, #f5f7f8);
-  font-size: 12px;
-}
-.diag-code {
-  color: var(--ink-3, #64707a);
+.error-field {
+  color: var(--danger);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-}
-.diag-copy {
-  padding: 4px 9px;
-  border: 1px solid var(--hair-2, #d8dee3);
-  border-radius: 6px;
-  background: var(--panel-1, #ffffff);
-  color: var(--ink-2, #2b343c);
-  cursor: pointer;
 }
 </style>

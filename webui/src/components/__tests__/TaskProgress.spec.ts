@@ -46,7 +46,7 @@ describe("TaskProgress accessibility announcement", () => {
 });
 
 describe("TaskProgress diagnostics", () => {
-  it("shows error code and copy button for failed state", () => {
+  it("shows inline Chinese reason plus red error field for failed state", () => {
     const wrapper = mount(TaskProgress, {
       props: {
         snapshot: snapshot({
@@ -55,12 +55,36 @@ describe("TaskProgress diagnostics", () => {
           pause_info: { error_code: "internal_error", error_reason: "boom" },
         }) as never,
         kind: "screen",
-        taskId: "run-1",
       },
     });
-    expect(wrapper.find("[data-testid='task-diagnostics']").exists()).toBe(true);
-    expect(wrapper.get("[data-testid='diagnostic-code']").text()).toBe("internal_error");
-    expect(wrapper.get("[data-testid='copy-diagnostics']").text()).toContain("复制诊断信息");
+    expect(wrapper.get("[data-testid='pause-reason']").text()).toContain("boom · internal_error");
+    expect(wrapper.get("[data-testid='error-field']").text()).toContain("internal_error");
+    expect(wrapper.find("[data-testid='task-diagnostics']").exists()).toBe(false);
+    expect(wrapper.find("[data-testid='copy-diagnostics']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("shows inline reason plus code for paused state", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "paused",
+          error: "captcha", pause_info: { error_code: "captcha_required", error_reason: "触发验证码" },
+        }) as never,
+        kind: "screen",
+      },
+    });
+    expect(wrapper.get("[data-testid='pause-reason']").text()).toContain("触发验证码 · captcha_required");
+    expect(wrapper.find("[data-testid='copy-diagnostics']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("omits empty error field when no code is present", () => {
+    const wrapper = mount(TaskProgress, {
+      props: { snapshot: snapshot({ status: "failed", error: "boom" }) as never, kind: "screen" },
+    });
+    expect(wrapper.get("[data-testid='pause-reason']").text()).toBe("boom");
+    expect(wrapper.find("[data-testid='error-field']").exists()).toBe(false);
     wrapper.unmount();
   });
 });

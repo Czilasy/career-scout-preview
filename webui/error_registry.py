@@ -63,6 +63,13 @@ _SOURCE_CODES: dict[str, dict[str, Any]] = {
         user_message="连不上调试浏览器", impact="systemic",
         resume_condition="启动 Chrome 调试端口后点继续",
     ),
+    "source_request_limit_exceeded": _entry(
+        "source_request_limit_exceeded", "source",
+        blocking=True, retryable=True,
+        user_message="本轮抓取请求数已达上限", impact="systemic",
+        reason="单次抓取运行累计请求超过 999 上限，已停止避免触发平台风控",
+        resume_condition="请求计数已按轮次隔离，下一轮可继续", aliases=(),
+    ),
     "source_login_required": _entry(
         "source_login_required", "source",
         blocking=True, retryable=True,
@@ -325,6 +332,7 @@ SYSTEMIC_BLOCK_CODES = frozenset({
     "ip_risk_control", "cdp_unavailable", "internal_error",
     "source_verification_required", "source_login_required",
     "source_rate_limited", "source_blocked", "source_cdp_unavailable",
+    "source_request_limit_exceeded",
 })
 INDEPENDENT_FAILURE_CODES = frozenset({
     "job_offline", "detail_timeout", "detail_invalid", "ai_missing_job",

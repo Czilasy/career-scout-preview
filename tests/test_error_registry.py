@@ -40,13 +40,14 @@ class ErrorRegistryTests(unittest.TestCase):
                 "ip_risk_control", "cdp_unavailable", "internal_error",
                 "source_verification_required", "source_login_required",
                 "source_rate_limited", "source_blocked", "source_cdp_unavailable",
+                "source_request_limit_exceeded",
             }),
         )
         self.assertEqual(
             INDEPENDENT_FAILURE_CODES,
             frozenset({"job_offline", "detail_timeout", "detail_invalid", "ai_missing_job"}),
         )
-        self.assertEqual(len(SAFE_FAILURE_CODES), 11)
+        self.assertEqual(len(SAFE_FAILURE_CODES), 12)
         self.assertTrue(set(ERROR_TAXONOMY) <= ERROR_CODES)
 
     def test_database_historical_codes_are_known(self):

@@ -522,6 +522,8 @@ class TaskRunner:
             return ("failed", 2, "source_cdp_unavailable", str(exc))
         except boss.LoginRequiredError as exc:
             return ("failed", 1, "source_login_required", str(exc))
+        except boss.RequestLimitExceededError as exc:
+            return ("failed", 11, "source_request_limit_exceeded", str(exc))
         except boss.RiskControlError as exc:
             failed_code = _classify_risk_control_reason(exc.reason)
             return ("failed", 10, failed_code, exc.reason)
@@ -803,6 +805,8 @@ class WorkbenchRunner(TaskRunner):
             return ("failed", 2, "source_cdp_unavailable", str(exc))
         except boss.LoginRequiredError as exc:
             return ("failed", 1, "source_login_required", str(exc))
+        except boss.RequestLimitExceededError as exc:
+            return ("failed", 11, "source_request_limit_exceeded", str(exc))
         except boss.RiskControlError as exc:
             return ("failed", 10, _classify_risk_control_reason(exc.reason), exc.reason)
         except Exception as exc:
