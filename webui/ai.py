@@ -21,7 +21,27 @@ import requests
 
 from scripts import boss_cdp_raw as boss
 from webui.core import salary_monthly_bounds
-from webui.ai_retry import effective_retry_plan
+from webui.ai_retry import (
+    FINE_SINGLE_INVALID_RESPONSE_DELAY_SECONDS,
+    effective_retry_plan,
+    retry_delay_seconds,
+)
+from webui.error_registry import (
+    AI_TAXONOMY_TARGETS,
+    ERROR_AUTH,
+    ERROR_INVALID,
+    ERROR_NETWORK,
+    ERROR_NOT_CONFIGURED,
+    ERROR_QUOTA_EXHAUSTED,
+    ERROR_RATE_LIMIT,
+    ERROR_SERVER,
+    ERROR_TIMEOUT,
+    ERROR_TRUNCATED,
+    ERROR_USER_MESSAGES,
+    SYSTEMIC_AI_ERROR_CODES,
+)
+from webui.error_registry import resolve_code
+from webui.ai_raw_log import record_raw_ai_response
 from webui.flag_features import (
     build_features_prompt_text,
     clean_flags,
@@ -35,17 +55,6 @@ STREAM_IDLE_TIMEOUT = 30  # 流式模式下，连续 N 秒没收到任何数据�
 STREAM_TOTAL_TIMEOUT = 180  # 流式模式下，从请求发出算起的总时长上限（防慢吐丝卡死）
 RANK_BATCH_SIZE = 10
 
-# Safe error classifications returned to callers.  Never include raw
-# exception text, API keys or response bodies.
-ERROR_TIMEOUT = "timeout"
-ERROR_AUTH = "auth_failed"
-ERROR_NETWORK = "network_error"
-ERROR_INVALID = "invalid_response"
-ERROR_RATE_LIMIT = "rate_limited"
-ERROR_TRUNCATED = "truncated"
-ERROR_NOT_CONFIGURED = "ai_not_configured"
-ERROR_QUOTA_EXHAUSTED = "quota_exhausted"
-ERROR_SERVER = "server_error"
 
 # Free-tier endpoints throttle aggressively (HTTP 429).  Retry a few times
 # with increasing backoff so a transient limit doesn't fail the whole step.
@@ -83,35 +92,17 @@ class AICheckpointError(RuntimeError):
     """Raised when a completed AI batch cannot be durably checkpointed."""
 
 
-# 面向用户的错误文案（端点用它替代裸 error_code，给出可操作的提示）
-ERROR_USER_MESSAGES = {
-    ERROR_TIMEOUT: "AI 响应超时，请稍后重试",
-    ERROR_AUTH: "API 密钥无效或已过期，请检查 AI 设置",
-    ERROR_NETWORK: "无法连接 AI 服务，请检查网络与地址配置",
-    ERROR_INVALID: "AI 返回了无法解析的内容，请重试",
-    ERROR_RATE_LIMIT: "AI 服务限流（免费额度），请稍候再试",
-    ERROR_TRUNCATED: "AI 返回内容被截断，请重试（可减小单批数量）",
-    ERROR_NOT_CONFIGURED: "AI 未配置，请先设置 API 地址和密钥",
-    ERROR_QUOTA_EXHAUSTED: "AI 额度已用完，请明天再试或更换 API 密钥",
-    ERROR_SERVER: "AI 服务暂时不可用，请稍后重试",
-}
 
 
 def user_facing_error(error_code: str) -> str:
     """Return a user-friendly Chinese message for a safe error code."""
-    return ERROR_USER_MESSAGES.get(error_code, "AI 服务调用失败，请检查设置后重试")
+    message = ERROR_USER_MESSAGES.get(error_code)
+    if message is None:
+        resolve_code(error_code)  # 未知码可见告警，不改变既有兜底文案
+        return "AI 服务调用失败，请检查设置后重试"
+    return message
 
 
-# 切片6：systemic 错误码集合（命中即应暂停整任务，FR-020/SC-006/SC-007）
-# 与 pipeline_exec.ERROR_TAXONOMY 中 impact=systemic 的 AI 类码对齐
-SYSTEMIC_AI_ERROR_CODES = frozenset({
-    ERROR_RATE_LIMIT,        # ai_rate_limited
-    ERROR_QUOTA_EXHAUSTED,   # ai_quota_exhausted
-    ERROR_AUTH,              # ai_key_invalid
-    ERROR_NETWORK,           # ai_network_error
-    ERROR_TIMEOUT,           # ai_network_error（归一）
-    ERROR_SERVER,            # ai_network_error（归一）
-})
 
 
 def map_ai_error_to_block_code(error_code: str) -> str:
@@ -120,15 +111,7 @@ def map_ai_error_to_block_code(error_code: str) -> str:
     用于 _run_ai_screen_task 暂停时写入 screening_runs.error_code。
     非 systemic 错误返回空串。
     """
-    if error_code == ERROR_RATE_LIMIT:
-        return "ai_rate_limited"
-    if error_code == ERROR_QUOTA_EXHAUSTED:
-        return "ai_quota_exhausted"
-    if error_code == ERROR_AUTH:
-        return "ai_key_invalid"
-    if error_code in (ERROR_NETWORK, ERROR_TIMEOUT, ERROR_SERVER):
-        return "ai_network_error"
-    return ""
+    return AI_TAXONOMY_TARGETS.get(error_code, "")
 
 
 # ---------------------------------------------------------------------------
@@ -591,9 +574,8 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
     The exception never contains the API key, request body or raw response,
     and the original exception is suppressed so tracebacks stay clean.
 
-    重试策略：429 限流 / 5xx 服务端故障 / 超时 / 连接错误都会退避重试；
-    退避等待累计不超过单次 timeout（只计 sleep 等待、不计请求耗时——
-    请求耗时有单次 timeout 兜底，否则慢超时一次就占满预算永远重试不了）。
+    重试策略：429 限流按 5/15/30s 退避，5xx/超时/连接错误按 2/4/8s 退避，
+    每次加抖动；重试之间累计等待不超过 60s（不包含单次请求耗时）。
     配额耗尽（insufficient_quota）救不活，立即抛 ERROR_QUOTA_EXHAUSTED。
     401/403 密钥错与返回格式错不重试，行为与之前一致。
     """
@@ -699,6 +681,7 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
             if response.status_code == 200:
                 try:
                     content, finish_reason = _read_stream(response)
+                    record_raw_ai_response(correlation_id, attempt_index, content)
                     last_error = None
                     break  # 成功拿到内容，退出重试循环
                 except requests.Timeout:
@@ -760,34 +743,37 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
                 },
             )
 
-        # 默认路径使用统一 3 次/30 秒策略；调优 manifest 仍按 error_code 预算。
+        # 默认路径按错误码退避 + 抖动 + 60s 总上限；调优 manifest 仍按 error_code 预算。
         retry_plan = effective_retry_plan(retry_limits)
-        if retry_limits is None:
-            if attempt >= int(retry_plan["max_attempts"]) - 1:
+        retry_error_code = (
+            last_error.error_code if last_error is not None else ERROR_NETWORK
+        )
+        used_retries = retry_counts.get(retry_error_code, 0)
+        if retry_plan["mode"] == "default":
+            policy = retry_plan["policy"].get(retry_error_code)
+            if policy is None or used_retries >= int(policy["max_retries"]):
                 break
-            delay = float(retry_plan["delay_seconds"])
+            retry_counts[retry_error_code] = used_retries + 1
+            delay = retry_delay_seconds(
+                retry_error_code, used_retries, retry_plan)
         else:
-            retry_error_code = (
-                last_error.error_code if last_error is not None else ERROR_NETWORK
-            )
             try:
                 allowed_retries = max(
                     0, int(retry_limits.get(retry_error_code, 0))
                 )
             except (TypeError, ValueError):
                 allowed_retries = 0
-            used_retries = retry_counts.get(retry_error_code, 0)
             if used_retries >= allowed_retries:
                 break
             retry_counts[retry_error_code] = used_retries + 1
             if response is None:
-                delay = NETWORK_BACKOFF_SECONDS[min(attempt, len(NETWORK_BACKOFF_SECONDS) - 1)]
+                delay = float(NETWORK_BACKOFF_SECONDS[min(attempt, len(NETWORK_BACKOFF_SECONDS) - 1)])
             elif response.status_code == 429:
-                delay = RATE_LIMIT_BACKOFF_SECONDS[min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)]
+                delay = float(RATE_LIMIT_BACKOFF_SECONDS[min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)])
             else:
-                delay = SERVER_ERROR_BACKOFF_SECONDS[min(attempt, len(SERVER_ERROR_BACKOFF_SECONDS) - 1)]
-            if waited + delay > budget:
-                break  # 调优路径保留原 timeout 预算保护
+                delay = float(SERVER_ERROR_BACKOFF_SECONDS[min(attempt, len(SERVER_ERROR_BACKOFF_SECONDS) - 1)])
+        if waited + delay > float(retry_plan["total_wait_seconds"]):
+            break  # 总等待上限只计算重试之间的等待
         time.sleep(delay)
         waited += delay
         _emit_retry_event(
@@ -1797,7 +1783,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         "- 不需要时间维度的特征（如\"岗位挂多久\"）一律不判断。\n"
         "- 不涉及上述清单的可疑迹象可写入 caveats（措辞\"需留意：…\"）。"
     )
-    def _match_one_batch(batch):
+    def _match_one_batch(batch, _invalid_retried=False):
         """单批精筛，返回 {jid: verdict}。
 
         返回被截断（ERROR_TRUNCATED）时拆半重跑，还截断就继续拆到单条；
@@ -1848,9 +1834,18 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                     metadata={"truncated_split": 1},
                 )
                 mid = len(batch) // 2
-                sub = _match_one_batch(batch[:mid])
-                sub.update(_match_one_batch(batch[mid:]))
+                sub = _match_one_batch(batch[:mid], _invalid_retried)
+                sub.update(_match_one_batch(batch[mid:], _invalid_retried))
                 return sub
+            if (exc.error_code == ERROR_INVALID and len(batch) == 1
+                    and not _invalid_retried):
+                time.sleep(FINE_SINGLE_INVALID_RESPONSE_DELAY_SECONDS)
+                _emit_retry_event(
+                    measurement_callback, "fine",
+                    int(FINE_SINGLE_INVALID_RESPONSE_DELAY_SECONDS * 1000),
+                    metadata={"invalid_response_retry": 1},
+                )
+                return _match_one_batch(batch, _invalid_retried=True)
             _req_error_code = exc.error_code
             by_i = None
             fail_reason = user_facing_error(exc.error_code)

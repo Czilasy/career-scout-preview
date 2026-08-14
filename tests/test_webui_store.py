@@ -1589,6 +1589,28 @@ class ScreeningRunStoreTests(unittest.TestCase):
         self.assertEqual(loaded["status"], "completed_with_pending")
         self.assertEqual(self.store.get_latest_done_run_id(), run_id)
 
+    def test_save_pipeline_result_persists_jd_failed_evidence(self):
+        result = {
+            "jobs": [
+                {
+                    "job_id": "p1", "verdict": "uncertain",
+                    "verdict_reason": "未抓到 JD",
+                    "jd_failed_code": "source_invalid_output",
+                    "jd_failed_evidence": "platform=zhilian stage=batch signal=invalid",
+                },
+            ],
+            "dropped": [], "total_scraped": 1, "total_kept": 1,
+            "total_matched": 0, "total_dropped": 0,
+        }
+        run_id = self.store.save_pipeline_result(result, {"platform": "zhilian"})
+        pending = self.store.list_pending_results(run_id)
+        self.assertEqual(pending[0]["failed_code"], "source_invalid_output")
+        self.assertEqual(
+            pending[0]["ai_payload"]["evidence_detail"],
+            "platform=zhilian stage=batch signal=invalid",
+        )
+        self.assertEqual(pending[0]["ai_payload"]["reason"], "未抓到 JD")
+
 
     def test_load_latest_pipeline_result_skips_process_log(self):
         """load_latest_pipeline_result 只能返回 result_snapshot，跳过 process_log。"""

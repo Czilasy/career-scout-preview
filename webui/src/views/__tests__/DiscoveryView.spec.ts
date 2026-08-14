@@ -2183,6 +2183,8 @@ describe("DiscoveryView", () => {
     await confirmProfile(wrapper);
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
+    await wrapper.get('[data-testid="confirm-national-scope"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
@@ -2533,6 +2535,91 @@ describe("DiscoveryView", () => {
     expect(wrapper.find('[data-testid="one-click-confirm"]').exists()).toBe(false);
     const notices = wrapper.emitted("notify")?.flat() as Array<{ message: string }>;
     expect(notices.some((n) => n.message.includes("请先到第二步补齐关键词和城市"))).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  async function setKeywordOnly(wrapper: ReturnType<typeof mount>) {
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await flushPromises();
+    await confirmProfile(wrapper, "3年Python后端候选人");
+  }
+
+  it("B042: empty city asks national scope confirm for scrape and submits nationwide", async () => {
+    const fetchMock = oneClickBase({
+      "/api/execute-search": () => response({ ok: true, task_id: "scrape-nation" }),
+      "/api/task-state/scrape-nation": () => response({ status: "completed", progress: {}, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await setKeywordOnly(wrapper);
+
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="national-scope-confirm"]').exists()).toBe(true);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/execute-search"))).toBe(false);
+
+    await wrapper.get('[data-testid="cancel-national-scope"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="national-scope-confirm"]').exists()).toBe(false);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/execute-search"))).toBe(false);
+
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await wrapper.get('[data-testid="confirm-national-scope"]').trigger("click");
+    await flushPromises();
+    const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/execute-search"));
+    expect(call).toBeDefined();
+    const body = JSON.parse(String(call![1]?.body));
+    expect(body.script_params.city).toEqual(["全国"]);
+    expect((wrapper.get('[data-testid="custom-city"]').element as HTMLInputElement).value).toBe("");
+    vi.unstubAllGlobals();
+  });
+
+  it("B042: empty city asks national scope confirm for one-click and continues after confirm", async () => {
+    const fetchMock = oneClickBase();
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await setKeywordOnly(wrapper);
+
+    await wrapper.get('[data-testid="start-one-click"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="national-scope-confirm"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="one-click-confirm"]').exists()).toBe(false);
+
+    await wrapper.get('[data-testid="confirm-national-scope"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="national-scope-confirm"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="one-click-confirm"]').exists()).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("B042: zhilian empty city uses the same national scope confirm", async () => {
+    const fetchMock = oneClickBase({
+      "/api/execute-search": () => response({ ok: true, task_id: "scrape-nation-zhilian" }),
+      "/api/task-state/scrape-nation-zhilian": () => response({ status: "completed", progress: {}, logs: [] }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.get('[data-testid="platform-segment-zhilian"]').trigger("click");
+    await flushPromises();
+    await setKeywordOnly(wrapper);
+
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="national-scope-confirm"]').exists()).toBe(true);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/execute-search"))).toBe(false);
+
+    await wrapper.get('[data-testid="confirm-national-scope"]').trigger("click");
+    await flushPromises();
+    const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/execute-search"));
+    expect(call).toBeDefined();
+    const body = JSON.parse(String(call![1]?.body));
+    expect(body.platform).toBe("zhilian");
+    expect(body.script_params.city).toEqual(["全国"]);
     vi.unstubAllGlobals();
   });
 

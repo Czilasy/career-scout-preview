@@ -24,6 +24,7 @@ from typing import Any, Protocol, runtime_checkable
 from scripts import boss_cdp_raw as boss
 from webui.process_executor import ScraperExecutor, run_with_deadline
 from webui.workbench import normalize_job_link
+from webui.error_registry import SAFE_FAILURE_CODES
 
 logger = logging.getLogger(__name__)
 
@@ -144,19 +145,6 @@ class SourceOutcome:
         }
 
 
-SAFE_FAILURE_CODES = frozenset({
-    "source_cdp_unavailable",
-    "source_login_required",
-    "source_unreachable",
-    "source_blocked",
-    "source_not_found",
-    "source_invalid_output",
-    "source_input_drift",
-    "source_timeout",
-    "source_unknown_error",
-    "source_verification_required",
-    "source_rate_limited",
-})
 
 
 # ---------------------------------------------------------------------------

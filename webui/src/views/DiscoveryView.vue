@@ -38,6 +38,7 @@ import {
   normalizeScopePreview,
   partitionPipelineResult,
   projectResumeSuggestionToSchema,
+  shouldConfirmNationalScope,
 } from "../discovery";
 import { historyStatusLabel } from "../discovery";
 import type { PipelineResult, RoundStatusPayload } from "../discovery";
@@ -163,6 +164,18 @@ const draftPlatformDisabled = computed(() => Boolean(
   schemaRef.value && schemaRef.value.platform === draftPlatform.value && schemaRef.value.enabled_for_new_tasks === false,
 ));
 const pendingPlatformSwitch = ref<Platform | null>(null);
+const nationalScopeConfirm = ref<"scrape" | "one-click" | null>(null);
+
+function confirmNationalScope() {
+  const action = nationalScopeConfirm.value;
+  nationalScopeConfirm.value = null;
+  if (action === "scrape") void startScrape();
+  if (action === "one-click") openOneClickDialog();
+}
+
+function cancelNationalScope() {
+  nationalScopeConfirm.value = null;
+}
 function setDraftPlatform(platform: Platform) {
   if (platformState.draft === platform) return;
   platformState.setDraftPlatform(platform);
@@ -1263,6 +1276,10 @@ function handleStartScrapeClick() {
     return;
   }
   if (!requireProfileConfirmed()) return;
+  if (shouldConfirmNationalScope(selectedKeywords.value, cityList.value)) {
+    nationalScopeConfirm.value = "scrape";
+    return;
+  }
   void startScrape();
 }
 
@@ -1284,18 +1301,26 @@ function openOneClick() {
     notify("当前已有任务在运行或暂停，请先处理完再开始新任务", "warning");
     return;
   }
- profileError.value = "";
- if (!selectedKeywords.value.length || !cityList.value.length) {
+  profileError.value = "";
+  if (!selectedKeywords.value.length) {
     enterSearchStep();
-   notify("请先到第二步补齐关键词和城市", "warning");
-   return;
- }
- if (!validateProfileForScreen()) {
-   notify("求职画像至少 10 个字（不含首尾空格）", "warning");
-   return;
- }
- if (!requireProfileConfirmed()) return;
- oneClickOpen.value = true;
+    notify("请先到第二步补齐关键词和城市", "warning");
+    return;
+  }
+  if (shouldConfirmNationalScope(selectedKeywords.value, cityList.value)) {
+    nationalScopeConfirm.value = "one-click";
+    return;
+  }
+  openOneClickDialog();
+}
+
+function openOneClickDialog() {
+  if (!validateProfileForScreen()) {
+    notify("求职画像至少 10 个字（不含首尾空格）", "warning");
+    return;
+  }
+  if (!requireProfileConfirmed()) return;
+  oneClickOpen.value = true;
 }
 
 function confirmOneClick(fields: Record<string, string[]>) {
@@ -3092,6 +3117,24 @@ watch(roundStatusPayload, (payload) => {
         </JobWorkspace>
       </section>
     </section>
+
+    <Transition name="dialog">
+      <div
+        v-if="nationalScopeConfirm"
+        class="dialog-backdrop"
+        data-testid="national-scope-confirm"
+        @click.self="cancelNationalScope"
+      >
+        <section class="dialog-panel" role="dialog" aria-modal="true" aria-label="未填写城市">
+          <h2>未填写城市</h2>
+          <p>未填写城市，将按全国范围抓取，是否继续？</p>
+          <div class="dialog-actions">
+            <button class="button secondary" type="button" data-testid="cancel-national-scope" @click="cancelNationalScope">取消</button>
+            <button class="button primary" type="button" data-testid="confirm-national-scope" @click="confirmNationalScope">继续按全国抓取</button>
+          </div>
+        </section>
+      </div>
+    </Transition>
 
     <Transition name="dialog">
       <div

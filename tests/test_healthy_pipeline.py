@@ -1444,6 +1444,47 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(run["mismatch_count"], 0)
         self.assertEqual(run["pending_count"], 1)
 
+    def test_main_ai_screen_persists_jd_failed_evidence_to_event_and_pending(self):
+        """正常收尾的 JD 失败也必须保留证据：事件和待确认 payload 都不能为空。"""
+        scrape_task_id = "jd-evidence-source"
+        jobs = [{"job_id": "job-1", "title": "后端工程师"}]
+        self._install_scrape_source(scrape_task_id, jobs)
+        evidence = "platform=zhilian stage=batch failed_code=source_invalid_output signal=invalid"
+        detail_result = {
+            "jobs": [{
+                **jobs[0], "jd": "", "jd_failed_code": "source_invalid_output",
+                "jd_failed_reason": "输入校验失败或页面解析异常",
+                "jd_failed_evidence": evidence,
+            }],
+            "hard_stop": False, "hard_stop_code": None,
+            "stopped": False, "fetched": 0,
+        }
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.screen_jobs", return_value={
+                    "kept": ["job-1"], "dropped": [],
+                }), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
+                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_result), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            response = self._post_ai_screen(scrape_task_id)
+            task_id = response.get_json()["task_id"]
+            _wait_for_pipeline_task(self.client, task_id)
+
+        run = self.store.get_screening_run(task_id)
+        self.assertEqual(run["status"], "partial", run)
+        failures = [
+            event for event in self.store.list_task_events(task_id)
+            if event["type"] == "job_fail"
+        ]
+        self.assertEqual(failures[-1]["payload"]["evidence_detail"], evidence)
+        snapshot = self.store.load_latest_pipeline_result()
+        self.assertIsNotNone(snapshot)
+        pending = self.store.list_pending_results(snapshot["run_id"])
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["failed_code"], "source_invalid_output")
+        self.assertEqual(pending[0]["ai_payload"]["evidence_detail"], evidence)
+
     def test_failure_before_screening_does_not_create_history_snapshot(self):
         scrape_task_id = "pre-screen-failure-source"
         jobs = [{"job_id": "job-1", "title": "后端工程师"}]

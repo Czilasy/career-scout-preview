@@ -30,7 +30,7 @@ _correlation_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 _SENSITIVE_PATTERNS = (
     re.compile(r"(?i)(sk-[a-z0-9]{8,})"),
-    re.compile(r"(?i)(bearer\s+[a-z0-9._~+/=-]+)"),
+    re.compile(r"(?i)(bearer\s*[=:]?\s*[a-z0-9._~+/=-]+)"),
     re.compile(r"(?i)(api[_-]?key\s*[=:]\s*[^\s,;]+)"),
     re.compile(r"(?i)(authorization\s*[=:]\s*[^\s,;]+)"),
     re.compile(r"(?i)(cookie\s*[=:]\s*[^\s,;]+)"),

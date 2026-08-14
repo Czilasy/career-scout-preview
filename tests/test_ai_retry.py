@@ -5,9 +5,11 @@ from unittest.mock import MagicMock, patch
 import requests
 
 from webui.ai_retry import (
-    DEFAULT_AI_RETRY_DELAY_SECONDS,
-    DEFAULT_AI_RETRY_MAX_ATTEMPTS,
+    DEFAULT_AI_RETRY_TOTAL_WAIT_SECONDS,
+    DEFAULT_RETRY_POLICY,
     effective_retry_plan,
+    normalize_retry_policy,
+    retry_delay_seconds,
 )
 
 
@@ -33,21 +35,116 @@ def _mock_status(status, provider_error=None):
 
 
 class AiRetryPlanTests(unittest.TestCase):
-    def test_default_plan_is_three_attempts_with_thirty_seconds(self):
+    def test_default_plan_uses_per_code_policy_and_sixty_second_cap(self):
         plan = effective_retry_plan(None)
-        self.assertEqual(plan["max_attempts"], DEFAULT_AI_RETRY_MAX_ATTEMPTS)
-        self.assertEqual(plan["delay_seconds"], DEFAULT_AI_RETRY_DELAY_SECONDS)
+        self.assertEqual(plan["mode"], "default")
+        self.assertEqual(
+            plan["total_wait_seconds"], DEFAULT_AI_RETRY_TOTAL_WAIT_SECONDS)
+        self.assertEqual(
+            plan["policy"]["network_error"]["max_retries"], 3)
+        self.assertEqual(
+            plan["policy"]["rate_limited"]["max_retries"], 3)
+        # timeout/server_error 在注册表中归入 ai_network_error，保留网络退避。
+        self.assertIn("timeout", plan["policy"])
+        self.assertIn("server_error", plan["policy"])
+
+    def test_default_policy_has_expected_backoffs(self):
+        self.assertEqual(
+            tuple(DEFAULT_RETRY_POLICY["network_error"]["backoff_seconds"]),
+            (2.0, 4.0, 8.0),
+        )
+        self.assertEqual(
+            tuple(DEFAULT_RETRY_POLICY["rate_limited"]["backoff_seconds"]),
+            (5.0, 15.0, 30.0),
+        )
 
     def test_tuning_plan_wins_when_provided(self):
         plan = effective_retry_plan({"network_error": 2})
         self.assertEqual(plan["mode"], "tuning")
         self.assertEqual(plan["retry_limits"], {"network_error": 2})
+        self.assertEqual(
+            plan["total_wait_seconds"], DEFAULT_AI_RETRY_TOTAL_WAIT_SECONDS)
+
+    @patch("webui.ai_retry.random.uniform", return_value=0.0)
+    def test_network_delays_are_2_4_8(self, _mock_uniform):
+        plan = effective_retry_plan(None)
+        self.assertEqual(
+            [retry_delay_seconds("network_error", i, plan) for i in range(3)],
+            [2.0, 4.0, 8.0],
+        )
+
+    @patch("webui.ai_retry.random.uniform", return_value=0.0)
+    def test_rate_limited_delays_are_5_15_30(self, _mock_uniform):
+        plan = effective_retry_plan(None)
+        self.assertEqual(
+            [retry_delay_seconds("rate_limited", i, plan) for i in range(3)],
+            [5.0, 15.0, 30.0],
+        )
+
+    @patch("webui.ai_retry.random.uniform", return_value=0.99)
+    def test_jitter_stays_within_bounds(self, _mock_uniform):
+        plan = effective_retry_plan(None)
+        delay = retry_delay_seconds("network_error", 0, plan)
+        self.assertGreaterEqual(delay, 2.0)
+        self.assertLessEqual(delay, 3.0)
+
+    def test_invalid_response_has_no_transport_delay(self):
+        plan = effective_retry_plan(None)
+        self.assertEqual(retry_delay_seconds("invalid_response", 0, plan), 0.0)
+
+
+class RetryPolicyNormalizationTests(unittest.TestCase):
+    def test_valid_policy_normalized(self):
+        policy = {
+            "network_error": {
+                "max_retries": 2,
+                "backoff_seconds": [1, 2],
+                "jitter_seconds": 0.5,
+            },
+        }
+        normalized = normalize_retry_policy(policy)
+        self.assertEqual(normalized["network_error"]["max_retries"], 2)
+        self.assertEqual(
+            normalized["network_error"]["backoff_seconds"], [1.0, 2.0])
+        self.assertEqual(normalized["network_error"]["jitter_seconds"], 0.5)
+
+    def test_missing_or_empty_policy_returns_none(self):
+        self.assertIsNone(normalize_retry_policy(None))
+        self.assertIsNone(normalize_retry_policy({}))
+
+    def test_legacy_recoverable_codes_shape_normalized(self):
+        normalized = normalize_retry_policy({
+            "recoverable_codes": ["network_error", "rate_limited"],
+            "max_retries": 2,
+        })
+        self.assertEqual(normalized["network_error"]["max_retries"], 2)
+        self.assertEqual(normalized["rate_limited"]["max_retries"], 2)
+
+    def test_scalar_backoff_normalized(self):
+        normalized = normalize_retry_policy({
+            "detail_timeout": {"max_retries": 1, "backoff_seconds": 3},
+        })
+        self.assertEqual(
+            normalized["detail_timeout"]["backoff_seconds"], [3.0])
+
+    def test_invalid_policy_returns_none(self):
+        self.assertIsNone(normalize_retry_policy(
+            {"network_error": {"max_retries": -1}}))
+        self.assertIsNone(normalize_retry_policy(
+            {"network_error": {"max_retries": "x"}}))
+        self.assertIsNone(normalize_retry_policy(
+            {"network_error": {"max_retries": 1, "backoff_seconds": []}}))
+        self.assertIsNone(normalize_retry_policy(
+            {"network_error": {"max_retries": 1, "jitter_seconds": -1}}))
 
 
 class CallAiDefaultRetryTests(unittest.TestCase):
+    @patch("webui.ai_retry.random.uniform", return_value=0.0)
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_two_failures_then_success_uses_third_attempt(self, mock_post, mock_sleep):
+    def test_two_failures_then_success_uses_third_attempt(
+        self, mock_post, mock_sleep, _mock_uniform,
+    ):
         from webui.ai import call_ai
 
         mock_post.side_effect = [
@@ -60,16 +157,18 @@ class CallAiDefaultRetryTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(mock_post.call_count, 3)
         self.assertEqual(mock_sleep.call_args_list, [
-            unittest.mock.call(30.0), unittest.mock.call(30.0),
+            unittest.mock.call(5.0), unittest.mock.call(2.0),
         ])
 
+    @patch("webui.ai_retry.random.uniform", return_value=0.0)
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_three_failures_raise_safe_error(self, mock_post, mock_sleep):
+    def test_three_failures_raise_safe_error(self, mock_post, mock_sleep, _mock_uniform):
         from webui.ai import AISecurityError, call_ai
 
         mock_post.side_effect = [
-            _mock_status(429), _mock_status(500), _mock_status(503),
+            _mock_status(500), _mock_status(500),
+            _mock_status(500), _mock_status(500),
         ]
         with self.assertRaises(AISecurityError) as ctx:
             call_ai(
@@ -77,7 +176,35 @@ class CallAiDefaultRetryTests(unittest.TestCase):
                 [{"role": "user", "content": "hi"}],
             )
         self.assertEqual(ctx.exception.error_code, "server_error")
-        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(mock_post.call_count, 4)
+        self.assertEqual(mock_sleep.call_args_list, [
+            unittest.mock.call(2.0), unittest.mock.call(4.0),
+            unittest.mock.call(8.0),
+        ])
+
+    @patch("webui.ai_retry.random.uniform", return_value=0.0)
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai.requests.post")
+    def test_total_wait_cap_stops_before_overflow(self, mock_post, mock_sleep, _mock_uniform):
+        from webui.ai import AISecurityError, call_ai
+
+        # 5+2+4+8+15=34 秒已等待；下一次 30 秒会超过 60 秒上限，必须停。
+        mock_post.side_effect = [
+            _mock_status(429), _mock_status(500), _mock_status(500),
+            _mock_status(500), _mock_status(429), _mock_status(429),
+        ]
+        with self.assertRaises(AISecurityError) as ctx:
+            call_ai(
+                "https://api.example.com/v1/chat/completions", "key",
+                [{"role": "user", "content": "hi"}],
+            )
+        self.assertEqual(ctx.exception.error_code, "rate_limited")
+        self.assertEqual(mock_post.call_count, 6)
+        self.assertEqual(mock_sleep.call_args_list, [
+            unittest.mock.call(5.0), unittest.mock.call(2.0),
+            unittest.mock.call(4.0), unittest.mock.call(8.0),
+            unittest.mock.call(15.0),
+        ])
 
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
@@ -112,9 +239,12 @@ class CallAiDefaultRetryTests(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 1)
         mock_sleep.assert_not_called()
 
+    @patch("webui.ai_retry.random.uniform", return_value=0.0)
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_network_timeout_is_retried_without_timeout_budget_cap(self, mock_post, mock_sleep):
+    def test_network_timeout_uses_network_backoff(
+        self, mock_post, mock_sleep, _mock_uniform,
+    ):
         from webui.ai import call_ai
 
         mock_post.side_effect = [
@@ -127,7 +257,7 @@ class CallAiDefaultRetryTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(mock_post.call_count, 3)
         self.assertEqual(mock_sleep.call_args_list, [
-            unittest.mock.call(30.0), unittest.mock.call(30.0),
+            unittest.mock.call(2.0), unittest.mock.call(4.0),
         ])
 
 
@@ -145,6 +275,7 @@ class CallAiTuningRetryTests(unittest.TestCase):
                 retry_limits={"network_error": 1},
             )
         self.assertEqual(mock_post.call_count, 2)
+        mock_sleep.assert_called()
 
 
 if __name__ == "__main__":

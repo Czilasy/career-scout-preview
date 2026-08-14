@@ -99,6 +99,16 @@ export function buildSearchScriptParams(keywords: string[], cities: string[]) {
   };
 }
 
+/** B042：关键词有、城市空时两个开始入口需要确认后按全国继续。 */
+export function shouldConfirmNationalScope(
+  keywords: string[],
+  cities: string[],
+): boolean {
+  const hasKeyword = keywords.some((item) => item.trim());
+  const hasCity = cities.some((item) => item.trim());
+  return hasKeyword && !hasCity;
+}
+
 export function partitionPipelineResult(result: PipelineResult): PipelineGroups {
   const groups: PipelineGroups = {
     matched: [],

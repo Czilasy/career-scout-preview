@@ -28,6 +28,12 @@ from types import MappingProxyType
 from scripts import boss_cdp_raw as boss
 from webui.source import PageEventPersistenceError
 from webui.browser_recovery import BrowserRecovery
+from webui.error_registry import (
+    ERROR_TAXONOMY,
+    FAILED_CODE_LABELS as _FAILED_CODE_LABELS,
+    SYSTEMIC_BLOCK_CODES as _HARD_STOP_CODES,
+)
+from webui.error_registry import resolve_code
 
 
 _PIPELINE_OPERATION_ERRORS = (
@@ -302,129 +308,6 @@ _SCRAPE_STAGE_MESSAGES: dict[str, str] = {
     "cancelled": "运行已取消",
 }
 
-# failed_code → 用户可读中文（进度条状态文案用）
-_FAILED_CODE_LABELS: dict[str, str] = {
-    "source_cdp_unavailable": _MSG_CDP_UNAVAILABLE,
-    "source_login_required": "BOSS 登录已失效",
-    "source_verification_required": "触发验证码/滑块",
-    "source_rate_limited": "账号/操作频繁被限流",
-    "source_blocked": _MSG_IP_RISK_CONTROL,
-    "source_unknown_error": "未知抓取错误",
-    "source_timeout": "抓取超时",
-    "source_unreachable": "抓取脚本不可用",
-    # 010 healthy-pipeline 新增（与 ERROR_TAXONOMY 对齐）
-    "captcha_required": "触发验证码/滑块，需手动完成",
-    "login_expired": "BOSS 登录已失效，需重新登录",
-    "ai_rate_limited": "AI 服务限流，请求过于频繁",
-    "ai_quota_exhausted": "AI 额度已耗尽",
-    "ai_key_invalid": "AI 密钥失效或鉴权失败",
-    "ai_network_error": "AI 网络或服务故障",
-    "ip_risk_control": _MSG_IP_RISK_CONTROL,
-    "cdp_unavailable": _MSG_CDP_UNAVAILABLE,
-    "job_offline": "岗位已下架",
-    "detail_timeout": "单岗位详情抓取超时",
-    "detail_invalid": "详情结构无效（登录墙/导航壳/空壳）",
-    "ai_missing_job": "AI 漏回单个岗位判定",
-    "internal_error": "内部状态或持久化错误",
-}
-
-
-# 统一错误分类码表（FR-040/SC-006）—— 13 类错误
-# 每条含：impact（影响范围）/ blocking（是否阻断整任务）/ retryable（是否可重试）/
-# reason（用户可读原因）/ resume_condition（继续条件）
-ERROR_TAXONOMY: dict[str, dict] = {
-    "captcha_required": {
-        "impact": "systemic",
-        "blocking": True,
-        "retryable": True,
-        "reason": "触发验证码/滑块，需手动完成",
-        "resume_condition": "用户完成验证码后点继续",
-    },
-    "login_expired": {
-        "impact": "systemic",
-        "blocking": True,
-        "retryable": True,
-        "reason": "BOSS 登录已失效，需重新登录",
-        "resume_condition": "用户重新登录后点继续",
-    },
-    "ai_rate_limited": {
-        "impact": "systemic",
-        "blocking": True,
-        "retryable": True,
-        "reason": "AI 服务限流，请求过于频繁",
-        "resume_condition": "等待限流解除后点继续",
-    },
-    "ai_quota_exhausted": {
-        "impact": "systemic",
-        "blocking": True,
-        "retryable": False,
-        "reason": "AI 额度已耗尽",
-        "resume_condition": "充值或更换密钥后点继续",
-    },
-    "ai_key_invalid": {
-        "impact": "systemic",
-        "blocking": True,
-        "retryable": False,
-        "reason": "AI 密钥失效或鉴权失败",
-        "resume_condition": "更换有效密钥后点继续",
-    },
-    "ai_network_error": {
-        "impact": "systemic",
-        "blocking": True,
-        "retryable": True,
-        "reason": "AI 网络或服务故障",
-        "resume_condition": "网络恢复后点继续",
-    },
-    "ip_risk_control": {
-        "impact": "systemic",
-        "blocking": True,
-        "retryable": True,
-        "reason": _MSG_IP_RISK_CONTROL,
-        "resume_condition": "更换网络或等待后点继续",
-    },
-    "cdp_unavailable": {
-        "impact": "systemic",
-        "blocking": True,
-        "retryable": True,
-        "reason": _MSG_CDP_UNAVAILABLE,
-        "resume_condition": "启动 Chrome 调试端口后点继续",
-    },
-    "job_offline": {
-        "impact": "independent",
-        "blocking": False,
-        "retryable": False,
-        "reason": "岗位已下架",
-        "resume_condition": "无需继续，该岗位进入待确认",
-    },
-    "detail_timeout": {
-        "impact": "independent",
-        "blocking": False,
-        "retryable": True,
-        "reason": "单岗位详情抓取超时",
-        "resume_condition": "可单条补抓重试",
-    },
-    "detail_invalid": {
-        "impact": "independent",
-        "blocking": False,
-        "retryable": False,
-        "reason": "详情结构无效（登录墙/导航壳/空壳）",
-        "resume_condition": "可单条补抓",
-    },
-    "ai_missing_job": {
-        "impact": "independent",
-        "blocking": False,
-        "retryable": True,
-        "reason": "AI 漏回单个岗位判定",
-        "resume_condition": "可单条补抓重试",
-    },
-    "internal_error": {
-        "impact": "systemic",
-        "blocking": True,
-        "retryable": False,
-        "reason": "内部状态或持久化错误",
-        "resume_condition": "需人工排查日志",
-    },
-}
 
 # 平台专属文案覆盖（B013）：默认字典兼容 BOSS 语义，智联只覆盖登录类文案，
 # 避免智联任务任何路径出现“BOSS 登录”等 BOSS 专属内容。
@@ -446,26 +329,20 @@ def failed_code_label(code: str, platform: str = "") -> str:
     override = _PLATFORM_LABEL_OVERRIDES.get(str(platform or ""), {}).get(code)
     if override:
         return override
-    return _FAILED_CODE_LABELS.get(code, code or "")
+    resolved = resolve_code(code) if code else code
+    return _FAILED_CODE_LABELS.get(resolved, resolved or "")
 
 def taxonomy_reason(code: str, platform: str = "", fallback: str = "任务被阻断") -> str:
     """按平台返回 ERROR_TAXONOMY.reason，缺失时用 fallback。"""
     override = _PLATFORM_TAXONOMY_OVERRIDES.get(str(platform or ""), {}).get(code)
     if override:
         return override
-    taxonomy = ERROR_TAXONOMY.get(code, {})
+    resolved = resolve_code(code) if code else code
+    taxonomy = ERROR_TAXONOMY.get(resolved, {})
     return str(taxonomy.get("reason") or fallback)
 
 
 
-# 硬停止码（命中即暂停整个任务）—— 与 store.SYSTEMIC_BLOCK_CODES 对齐
-_HARD_STOP_CODES: set[str] = {
-    "captcha_required", "login_expired",
-    "ai_rate_limited", "ai_quota_exhausted", "ai_key_invalid", "ai_network_error",
-    "ip_risk_control", "cdp_unavailable", "internal_error",
-    "source_verification_required", "source_login_required",
-    "source_rate_limited", "source_blocked", "source_cdp_unavailable",
-}
 
 
 def _classify_detail_batch_exception(exc: Exception) -> str:
@@ -1641,17 +1518,23 @@ class TuningRoundRunner:
     @staticmethod
     def _retry_limits_from_manifest(manifest: dict):
         """Build the immutable AI transport retry budget authorized by a manifest."""
-        policy = manifest.get("retry_policy") or {}
-        recoverable_codes = policy.get("recoverable_codes") or []
-        try:
-            max_retries = max(0, int(policy.get("max_retries", 0)))
-        except (TypeError, ValueError):
-            max_retries = 0
-        return MappingProxyType({
-            str(code): max_retries
-            for code in recoverable_codes
-            if isinstance(code, str) and code
-        })
+        from webui.ai_retry import normalize_retry_policy
+        policy = normalize_retry_policy(manifest.get("retry_policy"))
+        if not policy:
+            return None
+        from webui.ai_retry import AI_TRANSPORT_RETRY_CODES
+        limits = {
+            str(code): max(0, int(entry.get("max_retries", 0)))
+            for code, entry in policy.items()
+        }
+        # 只把 AI 传输层可覆盖的码传给 call_ai；其余码走各自阶段逻辑。
+        transport_limits = {
+            code: retries for code, retries in limits.items()
+            if code in AI_TRANSPORT_RETRY_CODES
+        }
+        if not transport_limits:
+            return None
+        return MappingProxyType(transport_limits)
 
     def execute(self, manifest: dict, *, measurement_callback=None) -> dict:
         from webui.ai import match_jds, screen_jobs
@@ -1757,12 +1640,15 @@ class TuningRoundRunner:
             if not isinstance(profile_summary, str) or not profile_summary.strip():
                 raise ValueError("AI 精筛缺少冻结 profile_summary")
             endpoint, api_key, model = self._ai_settings()
-            retry_policy = manifest.get("retry_policy") or {}
-            recoverable_codes = set(retry_policy.get("recoverable_codes") or [])
-            missing_retry_budget = (
-                int(retry_policy.get("max_retries", 0))
-                if "ai_missing_job" in recoverable_codes else 0
-            )
+            from webui.ai_retry import normalize_retry_policy
+            normalized_policy = normalize_retry_policy(
+                manifest.get("retry_policy")) or {}
+            missing_entry = normalized_policy.get("ai_missing_job") or {}
+            try:
+                missing_retry_budget = max(
+                    0, int(missing_entry.get("max_retries", 0)))
+            except (TypeError, ValueError):
+                missing_retry_budget = 0
             fine = match_jds(
                 jobs, profile_summary, endpoint, api_key, model=model,
                 raise_on_systemic=True, execution_config=config,

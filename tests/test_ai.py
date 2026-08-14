@@ -339,15 +339,16 @@ class CallAITests(unittest.TestCase):
             return 0.0 if call_count[0] % 2 == 1 else float(STREAM_TOTAL_TIMEOUT + 1)
 
         with patch("webui.ai.time.time", side_effect=fake_time), \
-             patch("webui.ai.RATE_LIMIT_ATTEMPTS", 1):
+             patch("webui.ai_retry.random.uniform", return_value=0.0):
             with self.assertRaises(AISecurityError) as ctx:
                 call_ai("https://api.example.com/v1/chat/completions", "secret-key",
                         [{"role": "user", "content": "hi"}])
 
         self.assertEqual(ctx.exception.error_code, "timeout")
-        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(mock_post.call_count, 4)
         self.assertEqual(_mock_sleep.call_args_list, [
-            unittest.mock.call(30.0), unittest.mock.call(30.0),
+            unittest.mock.call(2.0), unittest.mock.call(4.0),
+            unittest.mock.call(8.0),
         ])
 
     @patch("webui.ai.requests.post")
@@ -379,7 +380,7 @@ class CallAITests(unittest.TestCase):
 
         # 500 系先退避重试，耗尽后报 server_error（区别于"返回无效"）
         self.assertEqual(ctx.exception.error_code, "server_error")
-        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(mock_post.call_count, 4)
 
     @patch("webui.ai.requests.post")
     def test_malformed_response_body_raises_invalid_response(self, mock_post):
@@ -408,6 +409,23 @@ class CallAITests(unittest.TestCase):
                     [{"role": "user", "content": "hi"}])
 
         self.assertEqual(ctx.exception.error_code, "invalid_response")
+
+    @patch("webui.ai.requests.post")
+    def test_empty_response_raw_logged_once(self, mock_post):
+        from webui.ai import AISecurityError, call_ai
+
+        response = MagicMock()
+        response.status_code = 200
+        response.iter_lines.return_value = iter(["data: [DONE]", ""])
+        mock_post.return_value = response
+
+        with patch("webui.ai.record_raw_ai_response") as record:
+            with self.assertRaises(AISecurityError):
+                call_ai(
+                    "https://api.example.com/v1/chat/completions", "secret-key",
+                    [{"role": "user", "content": "hi"}],
+                )
+        self.assertEqual(record.call_count, 1)
 
     @patch("webui.ai.requests.post")
     def test_successful_call_returns_parsed_json(self, mock_post):
@@ -1159,6 +1177,54 @@ class MatchJdsFailurePolicyTests(unittest.TestCase):
             sorted(e["counts"]["item_index"] for e in terminals), [0, 1]
         )
 
+    @patch("webui.ai.time.sleep")
+    def test_single_invalid_response_retries_once_then_matches(self, _mock_sleep):
+        from webui.ai import AISecurityError, ERROR_INVALID, match_jds
+
+        jobs = [{"job_id": "j0", "title": "岗位0", "jd": "JD0"}]
+        responses = [
+            AISecurityError(ERROR_INVALID),
+            {"results": [{"i": 0, "match": True, "reason": "匹配"}]},
+        ]
+        with patch("webui.ai.call_ai", side_effect=responses) as call:
+            result = match_jds(jobs, "画像", "https://x", "key")
+
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(result["verdicts"]["j0"]["verdict"], "match")
+
+    @patch("webui.ai.time.sleep")
+    def test_single_invalid_response_retries_once_then_uncertain(self, _mock_sleep):
+        from webui.ai import AISecurityError, ERROR_INVALID, match_jds
+
+        jobs = [{"job_id": "j0", "title": "岗位0", "jd": "JD0"}]
+        with patch(
+            "webui.ai.call_ai",
+            side_effect=AISecurityError(ERROR_INVALID),
+        ) as call:
+            result = match_jds(jobs, "画像", "https://x", "key")
+
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(result["verdicts"]["j0"]["verdict"], "uncertain")
+        self.assertIn("待人工确认", result["verdicts"]["j0"]["reason"])
+
+    @patch("webui.ai.time.sleep")
+    def test_batch_invalid_response_does_not_retry(self, _mock_sleep):
+        from webui.ai import AISecurityError, ERROR_INVALID, match_jds
+
+        jobs = [
+            {"job_id": "j0", "title": "岗位0", "jd": "JD0"},
+            {"job_id": "j1", "title": "岗位1", "jd": "JD1"},
+        ]
+        with patch(
+            "webui.ai.call_ai",
+            side_effect=AISecurityError(ERROR_INVALID),
+        ) as call:
+            result = match_jds(jobs, "画像", "https://x", "key", batch_size=2)
+
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(result["verdicts"]["j0"]["verdict"], "uncertain")
+        self.assertEqual(result["verdicts"]["j1"]["verdict"], "uncertain")
+
     def test_salary_hard_rule_filters_out_of_range_without_ai(self):
         from webui.ai import match_jds
 
@@ -1446,7 +1512,7 @@ class CallAIRetryTests(unittest.TestCase):
                     [{"role": "user", "content": "hi"}])
 
         self.assertEqual(ctx.exception.error_code, "rate_limited")
-        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(mock_post.call_count, 4)
 
     @patch("webui.ai.requests.post")
     def test_truncated_finish_reason_length(self, mock_post):
@@ -1542,9 +1608,12 @@ class CallAIRetryTests(unittest.TestCase):
                     [{"role": "user", "content": "hi"}]),
             {"x": 2})
 
+    @patch("webui.ai_retry.random.uniform", return_value=0.0)
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_default_retry_wait_ignores_single_timeout_budget(self, mock_post, mock_sleep):
+    def test_default_retry_wait_ignores_single_timeout_budget(
+        self, mock_post, mock_sleep, _mock_uniform,
+    ):
         from webui.ai import AISecurityError, call_ai
 
         response = MagicMock()
@@ -1557,10 +1626,11 @@ class CallAIRetryTests(unittest.TestCase):
                     [{"role": "user", "content": "hi"}], timeout=10)
 
         self.assertEqual(ctx.exception.error_code, "rate_limited")
-        # 默认策略固定 3 次/30 秒，不受单次 timeout=10 预算截断
-        self.assertEqual(mock_post.call_count, 3)
+        # 默认策略按错误码退避，不受单次 timeout=10 预算截断
+        self.assertEqual(mock_post.call_count, 4)
         self.assertEqual(mock_sleep.call_args_list, [
-            unittest.mock.call(30.0), unittest.mock.call(30.0),
+            unittest.mock.call(5.0), unittest.mock.call(15.0),
+            unittest.mock.call(30.0),
         ])
 
 

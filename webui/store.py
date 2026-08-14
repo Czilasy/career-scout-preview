@@ -30,6 +30,7 @@ from webui.store_helpers import (
     _to_iso_timestamp,
     _uuid,
 )
+from webui.error_registry import INDEPENDENT_FAILURE_CODES, SYSTEMIC_BLOCK_CODES
 from webui.store_migrations import MigrationBackupError, StoreMigrationsMixin
 from webui.store_result_history_mixin import ResultHistoryStoreMixin
 from webui.store_scrape_only_mixin import ScrapeOnlyStoreMixin
@@ -99,19 +100,6 @@ TASK_TO_RUN_STATUS = {
 }
 RUN_TO_TASK_STATUS = {v: k for k, v in TASK_TO_RUN_STATUS.items()}
 
-# 系统性阻断码集合（命中即暂停整个任务）
-SYSTEMIC_BLOCK_CODES = {
-    "captcha_required", "login_expired", "ai_rate_limited",
-    "ai_quota_exhausted", "ai_key_invalid", "ai_network_error",
-    "ip_risk_control", "cdp_unavailable", "internal_error",
-    "source_verification_required", "source_login_required",
-    "source_rate_limited", "source_blocked", "source_cdp_unavailable",
-}
-
-# 独立失败码集合（仅该岗位进待确认，不阻断）
-INDEPENDENT_FAILURE_CODES = {
-    "job_offline", "detail_timeout", "detail_invalid", "ai_missing_job",
-}
 
 QUERY_STATUSES = {"queued", "running", "succeeded", "failed", "interrupted"}
 FEEDBACK_ACTIONS = {"interested", "not_interested"}
@@ -907,6 +895,15 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
                     job.get("failed_stage")
                     or ("ai_fine" if job.get("jd") else "jd_detail")
                 )
+                ai_payload = dict(job.get("ai_payload") or {})
+                ai_payload.setdefault(
+                    "reason", str(job.get("verdict_reason") or failed_code))
+                ai_payload.setdefault("evidence", failed_code)
+                ai_payload.setdefault(
+                    "evidence_detail",
+                    str(job.get("jd_failed_evidence") or ""),
+                )
+                ai_payload.setdefault("next_action", "retry_jd")
                 conn.execute(
                     "INSERT INTO screening_pending_results "
                     "(id, run_id, platform, platform_job_id, failure_stage, retryable, attempts, "
@@ -920,7 +917,7 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
                         0 if failed_code == "job_offline" else 1,
                         int(job.get("attempts") or 1), now,
                         str(job.get("origin_zone") or "kept"),
-                        json.dumps(job.get("ai_payload") or {}, ensure_ascii=False),
+                        json.dumps(ai_payload, ensure_ascii=False),
                         now, failed_code,
                     ),
                 )

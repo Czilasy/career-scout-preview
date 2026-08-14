@@ -2048,6 +2048,32 @@ class ManifestReportValidationTests(unittest.TestCase):
                 with self.assertRaises(ValueError, msg=f"缺少 {field} 的 manifest 应被拒绝"):
                     self.controller.issue_manifest(manifest)
 
+    def test_manifest_invalid_retry_policy_rejected(self):
+        """FR-021: retry_policy 与默认策略同构，非法结构在签发时被拒绝。"""
+        invalid_policies = [
+            {"network_error": {"max_retries": -1}},
+            {"network_error": {"max_retries": "x"}},
+            {"network_error": {"max_retries": 1, "backoff_seconds": []}},
+            {"network_error": "retry twice"},
+        ]
+        for policy in invalid_policies:
+            with self.subTest(policy=policy):
+                manifest = self._make_manifest()
+                manifest["retry_policy"] = policy
+                with self.assertRaisesRegex(ValueError, "retry_policy"):
+                    self.controller.issue_manifest(manifest)
+
+    def test_manifest_valid_retry_policy_accepted(self):
+        """FR-021: 合法 retry_policy 可签发。"""
+        manifest = self._make_manifest()
+        manifest["retry_policy"] = {
+            "network_error": {
+                "max_retries": 2, "backoff_seconds": [1, 2],
+            },
+        }
+        issued = self.controller.issue_manifest(manifest)
+        self.assertTrue(issued["manifest_id"])
+
     def test_manifest_missing_execution_config_field_rejected(self):
         """FR-044: execution_config 缺少速度字段之一被拒绝。"""
         config_fields = [
@@ -3034,8 +3060,10 @@ class TuningRoundRunnerTests(unittest.TestCase):
             for kind, stage in (("rough", rough_stage), ("fine", fine_stage)):
                 manifest = self._manifest(kind)
                 manifest["retry_policy"] = {
-                    "recoverable_codes": ["network_error"],
-                    "max_retries": 2,
+                    "network_error": {
+                        "max_retries": 2,
+                        "backoff_seconds": [1, 2],
+                    },
                 }
                 runner.execute(manifest)
                 self.assertEqual(

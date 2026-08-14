@@ -12,6 +12,7 @@ import {
   recoverSelectionSettings,
   historyStatusLabel,
   roundScopeLabel,
+  shouldConfirmNationalScope,
   type PipelineResult,
 } from "../discovery";
 import type {
@@ -48,6 +49,14 @@ describe("discovery helpers", () => {
       city: ["上海", "杭州"],
       filters: {},
     });
+  });
+
+  it("B042: confirms national scope only when keyword exists and city is empty", () => {
+    expect(shouldConfirmNationalScope(["Python"], [])).toBe(true);
+    expect(shouldConfirmNationalScope(["Python"], ["  "])).toBe(true);
+    expect(shouldConfirmNationalScope([], [])).toBe(false);
+    expect(shouldConfirmNationalScope([], ["上海"])).toBe(false);
+    expect(shouldConfirmNationalScope(["Python"], ["上海"])).toBe(false);
   });
 
   it.each([

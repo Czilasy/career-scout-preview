@@ -3476,6 +3476,7 @@ def create_app(config=None):
                             jd_failures[jid] = {
                                 "code": str(j.get("jd_failed_code")),
                                 "reason": str(j.get("jd_failed_reason") or ""),
+                                "evidence": str(j.get("jd_failed_evidence") or ""),
                             }
                     _save_jd_checkpoint(jd_path, jd_map)
                     _write_run_unless_finished(
@@ -3533,6 +3534,7 @@ def create_app(config=None):
                 if not job["jd"] and failure:
                     job["jd_failed_code"] = failure["code"]
                     job["jd_failed_reason"] = failure["reason"]
+                    job["jd_failed_evidence"] = failure.get("evidence", "")
 
             # 5) Stage B：JD 精筛（对比候选人画像）
             jobs_with_jd = [j for j in enriched if str(j.get("jd", "")).strip()]
@@ -3678,6 +3680,12 @@ def create_app(config=None):
                             job["verdict_reason"] = f"未抓到 JD（{label}），无法精筛"
                         else:
                             job["verdict_reason"] = "未抓到 JD，无法精筛"
+                        job["ai_payload"] = {
+                            "reason": str(job.get("verdict_reason") or ""),
+                            "evidence": str(job.get("jd_failed_code") or ""),
+                            "evidence_detail": str(job.get("jd_failed_evidence") or ""),
+                            "next_action": "retry_jd",
+                        }
 
                 match_count = sum(1 for j in enriched if j.get("verdict") == "match")
             if _stop_requested():
@@ -3716,6 +3724,11 @@ def create_app(config=None):
                             job.get("failed_code") or job.get("jd_failed_code")
                         ) if is_failure else None,
                         "reason": job.get("verdict_reason", ""),
+                        **({
+                            "evidence_detail": str(
+                                job.get("jd_failed_evidence") or ""
+                            ),
+                        } if is_failure else {}),
                     },
                 ))
             store.append_task_events(task_id, job_events)

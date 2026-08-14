@@ -2,6 +2,8 @@
 // 平台身份与稳定错误码（contracts/platform-schema.md、http-api.md、job-source.md）
 // ---------------------------------------------------------------------------
 
+import type { ErrorCode } from "./errorCodes";
+
 /** 平台稳定键。注册表权威来源是后端 `webui/platforms.py`。 */
 export type Platform = "boss" | "zhilian";
 
@@ -161,7 +163,7 @@ export interface BrowserAccount {
 
 /** 任务暂停 / 阻断时的稳定错误信息。 */
 export interface TaskPauseInfo {
-  error_code?: PlatformErrorCode | SourceErrorCode | string;
+  error_code?: ErrorCode | string;
   error_reason?: string;
 }
 

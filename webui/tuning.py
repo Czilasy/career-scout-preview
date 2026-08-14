@@ -1508,12 +1508,26 @@ class TuningController:
         "tuning.py", "store.py", "execution_config",
     ]
 
+    @staticmethod
+    def _validate_retry_policy(policy: object) -> None:
+        """FR-021: manifest 重试策略与默认策略同构；缺失/空值视为回退默认。"""
+        if policy is None:
+            return
+        if not isinstance(policy, dict):
+            raise ValueError("retry_policy 必须是对象")
+        if not policy:
+            return
+        from webui.ai_retry import normalize_retry_policy
+        if normalize_retry_policy(policy) is None:
+            raise ValueError("retry_policy 结构与默认重试策略不一致")
+
     def _validate_manifest(self, manifest: dict) -> None:
         """FR-044/045: 校验 manifest 完整性和合法性。"""
         # 1. 必填字段
         missing = self._MANIFEST_REQUIRED_FIELDS - set(manifest.keys())
         if missing:
             raise ValueError(f"manifest 缺少必填字段: {sorted(missing)}")
+        self._validate_retry_policy(manifest.get("retry_policy"))
         # 2. execution_config 必填速度字段
         config = manifest.get("execution_config", {})
         config_missing = self._EXEC_CONFIG_REQUIRED_FIELDS - set(config.keys())
