@@ -157,3 +157,16 @@ def save_screen_result(
 def build_screen_script_params(screening_fields: dict | None, platform: str) -> dict:
     """与现有 AI 保存一致的 script_params 形态（screening + platform）。"""
     return {"screening": dict(screening_fields or {}), "platform": platform}
+
+
+def merge_round_script_params(
+    parent_script_params: dict | None,
+    screening_fields: dict | None,
+    platform: str,
+) -> dict:
+    """合并父抓取 script_params 与 AI 筛选快照参数，保留父轮关键词/城市。"""
+    return {
+        **dict(parent_script_params or {}),
+        "screening": dict(screening_fields or {}),
+        "platform": platform,
+    }

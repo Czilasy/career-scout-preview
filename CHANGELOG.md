@@ -2,6 +2,11 @@
 
 本文件记录 Career Scout 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+优化：
+- 浏览器账号的 BOSS、智联登录窗口改为分别打开，一次只弹一个窗口
+
 ## [1.7.10] - 2026-08-11
 
 修复：

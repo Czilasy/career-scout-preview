@@ -1343,7 +1343,8 @@ class Slice7And9ApiTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertNotIn("/api/execute-search/${encodeURIComponent", source)
         self.assertNotIn("/api/ai-screen/${encodeURIComponent", source)
-        self.assertGreaterEqual(source.count("/api/task/cancel/${encodeURIComponent"), 3)
+        # 013：AI 筛选取消入口已移除，统一取消仅保留抓取/暂停任务路径。
+        self.assertGreaterEqual(source.count("/api/task/cancel/${encodeURIComponent"), 2)
 
 
 class ConvergencePendingPersistenceTests(unittest.TestCase):
@@ -3275,7 +3276,7 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
             self.store, paused_run_id, error_code="ai_rate_limited"
         )
         selected_barrier = threading.Barrier(2)
-        original_latest = self.store.latest_screening_run_for_source
+        original_latest = self.store.latest_screen_runs_for_source
 
         def synchronized_latest(*args, **kwargs):
             result = original_latest(*args, **kwargs)
@@ -3296,7 +3297,7 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
 
         executor = self.app.config["PIPELINE_EXECUTOR"]
         with mock.patch.object(
-            self.store, "latest_screening_run_for_source",
+            self.store, "latest_screen_runs_for_source",
             side_effect=synchronized_latest,
         ), mock.patch.object(executor, "submit") as submit, \
                 ThreadPoolExecutor(max_workers=2) as requests:

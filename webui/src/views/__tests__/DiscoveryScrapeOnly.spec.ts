@@ -171,6 +171,25 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
     expect(scraped?.[0]).toMatchObject({ phase: "scraped", judged: 2 });
   });
 
+  it("04 scraped_only 轮显示“开始 AI 筛选”入口", async () => {
+    const { wrapper } = mountWithFetch({
+      latestBoss: {
+        ok: true, has_result: true, source_run_id: "run-1",
+        status: "scraped_only", scrape_task_id: "scrape-1",
+        result: {
+          ok: true, jobs: jobs(2), dropped: [], total_scraped: 2,
+          total_kept: 2, total_matched: 0, total_dropped: 0, profile_summary: "画像",
+        },
+      },
+    });
+    await flushPromises();
+    await flushPromises();
+    const stepBtn = wrapper.findAll("button").find((b) => b.text().includes("查看结果"));
+    await stepBtn!.trigger("click");
+    await flushPromises();
+    const entry = wrapper.get('[data-testid="continue-ai-from-results"]');
+    expect(entry.text()).toContain("开始 AI 筛选");
+  });
   it("0 岗位：不调用保存接口，04 页显示 0", async () => {
     const { wrapper, fetchMock } = await completedScrape(0);
     await wrapper.get('[data-testid="view-scraped-only"]').trigger("click");

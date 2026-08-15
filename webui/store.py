@@ -34,6 +34,7 @@ from webui.error_registry import INDEPENDENT_FAILURE_CODES, SYSTEMIC_BLOCK_CODES
 from webui.store_migrations import MigrationBackupError, StoreMigrationsMixin
 from webui.store_result_history_mixin import ResultHistoryStoreMixin
 from webui.store_scrape_only_mixin import ScrapeOnlyStoreMixin
+from webui.store_screen_resume_mixin import StoreScreenResumeMixin
 
 _BEGIN_IMMEDIATE = "BEGIN IMMEDIATE"
 _SHA256_PREFIX = "sha256:"
@@ -124,7 +125,7 @@ def _db_env(db_path) -> str:
 _INITIALIZE_LOCK = threading.RLock()
 
 
-class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMixin):
+class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMixin, StoreScreenResumeMixin):
     def __init__(self, db_path):
         self.db_path = os.path.abspath(os.fspath(db_path))
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
@@ -2097,11 +2098,12 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
                 if (
                     cur_status == "interrupted"
                     and current["error_code"] == "user_finished"
-                    and status != "interrupted"
+                    and status not in (None, "interrupted")
                 ):
                     raise DiscoveryStoreConflictError("user_finished")
                 if (
-                    status != cur_status
+                    status is not None
+                    and status != cur_status
                     and status not in RUN_TRANSITIONS.get(cur_status, set())
                 ):
                     raise ValueError(f"运行不能从 {cur_status} 转换到 {status}")

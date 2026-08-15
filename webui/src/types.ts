@@ -198,6 +198,22 @@ export interface TaskSnapshot {
   auto_screen?: boolean;
 }
 
+/** 本轮上下文：后端从父抓取 run 与 AI 筛选 run 合并返回。 */
+export interface RoundContext {
+  platform: Platform;
+  keywords: string[];
+  cities: string[];
+  screening_fields: Record<string, string[]>;
+  profile_summary: string;
+  profile_facts: Record<string, unknown>;
+  scrape_task_id: string;
+  screen_run_id: string;
+  status: string;
+  resumable: boolean;
+  /** 2993 回归：已存在 AI 筛选轮时禁止空条件静默继续。 */
+  has_frozen_filters?: boolean;
+}
+
 export interface CandidateProfile {
   id: string;
   name: string;

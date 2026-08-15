@@ -2966,9 +2966,62 @@ def create_app(config=None):
 
         def _stop_requested():
             return stop_event is not None and stop_event.is_set()
+        def _stop_mode():
+            with _pipeline_lock:
+                t = _pipeline_tasks.get(task_id)
+                if t is None or t.get("stop_event") is None or not t["stop_event"].is_set():
+                    return None
+                return "pause" if t.get("stop_mode") == "pause" else "cancel"
+
+        def _mark_paused():
+            """用户暂停：先保存部分结果快照，再把原 run 写为 paused。"""
+            from webui.screen_flow import build_round_script_params
+            run = store.get_screening_run(task_id) or {}
+            params = dict(run.get("execution_params") or {})
+            platform = str(params.get("platform") or run.get("platform") or frozen_platform or "boss")
+            screening = run.get("frozen_filters") or {}
+            _try_save_failure_snapshot(
+                "partial",
+                script_params_override=build_round_script_params(
+                    store, run, screening, platform),
+                execution_params_override={
+                    "platform": platform,
+                    "scrape_task_id": scrape_task_id,
+                    "screen_run_id": task_id,
+                },
+            )
+            _write_run_unless_finished(
+                task_id, status="paused", error_code="user_paused",
+                error_reason="用户已暂停，结果已保留",
+            )
+            run = store.get_screening_run(task_id) or {}
+            stage = str(run.get("current_stage") or (task.get("progress") or {}).get("stage") or "")
+            store.append_task_event(task_id, "pause", {
+                "stage": stage, "code": "user_paused",
+                "processed": int(run.get("processed_count") or 0),
+                "total": int(run.get("source_count") or 0),
+            })
+            with _pipeline_lock:
+                t = _pipeline_tasks.get(task_id)
+                if t is not None:
+                    t["status"] = "paused"
+                    t["error"] = "任务已暂停，结果已保留"
+                    _release_worker_resume_claims(t)
+
+        def _handle_user_stop():
+            if _stop_mode() == "pause":
+                _mark_paused()
+            else:
+                _mark_cancelled()
 
 
-        def _try_save_failure_snapshot(terminal_status: str) -> str | None:
+
+        def _try_save_failure_snapshot(
+            terminal_status: str,
+            *,
+            script_params_override: dict | None = None,
+            execution_params_override: dict | None = None,
+        ) -> str | None:
             """Save a result snapshot before a failed/cancelled terminal write.
 
             Only runs that already produced jobs or dropped rows become history.
@@ -3025,17 +3078,24 @@ def create_app(config=None):
                         platform=platform,
                     )
                 snapshot_result = result_to_save if in_memory is None else in_memory
+                snapshot_script_params = (
+                    script_params_override
+                    if script_params_override is not None
+                    else {"screening": run.get("frozen_filters") or {}, "platform": platform}
+                )
+                snapshot_execution_params = (
+                    execution_params_override
+                    if execution_params_override is not None
+                    else {"platform": platform, "scrape_task_id": scrape_task_id}
+                )
                 snapshot_id = store.save_pipeline_result(
                     snapshot_result,
-                    {"screening": run.get("frozen_filters") or {}, "platform": platform},
+                    snapshot_script_params,
                     started_at=run.get("started_at") or task.get("started_at"),
                     finished_at=int(time.time() * 1000),
                     execution_config=params.get("execution_config") or {},
                     status=terminal_status,
-                    execution_params={
-                        "platform": platform,
-                        "scrape_task_id": scrape_task_id,
-                    },
+                    execution_params=snapshot_execution_params,
                 )
                 store.append_task_event(task_id, "history_snapshot", {
                     "snapshot_run_id": snapshot_id,
@@ -3221,10 +3281,18 @@ def create_app(config=None):
             resume_verdicts = {}
             resume_jd = {}
             if resume_from_run_id:
-                resume_verdicts = store.load_screening_verdicts(resume_from_run_id)
+                from webui.screen_flow import (
+                    load_resume_jd,
+                    load_resume_verdicts_with_fallback,
+                )
+                resume_verdicts = load_resume_verdicts_with_fallback(
+                    store, resume_from_run_id, frozen_platform,
+                    scrape_task_id, screening_fields, profile_summary,
+                )
                 old_jd_path = _jd_checkpoint_path(
                     app.config["RESULT_DIR"], resume_from_run_id)
                 resume_jd = _load_jd_checkpoint(old_jd_path)
+                resume_jd = load_resume_jd(store, old_jd_path, resume_from_run_id)
                 # 新 run 继承旧 run 时删除旧文件；原 run 就地继续时保留同一断点，
                 # 避免在首次新批次落盘前退出导致已抓 JD 丢失。
                 if resume_from_run_id != task_id:
@@ -3250,7 +3318,7 @@ def create_app(config=None):
             criteria["profile_summary"] = profile_summary or ""
 
             if _stop_requested():
-                _mark_cancelled()
+                _handle_user_stop()
                 return
 
             # 3) Stage A：字段粗筛（移除明显不符，学历向下兼容）
@@ -3301,6 +3369,8 @@ def create_app(config=None):
                                             on_batch_done=_rough_batch_done,
                                             execution_config=execution_config,
                                             correlation_id=task_id)
+                store.save_screening_verdicts(
+                    task_id, screen_result.get("verdicts") or {})
             except (ai_service.AISecurityError, ai_service.AICheckpointError) as _ai_exc:
                 # AISecurityError（systemic）：暂停整任务，保存 checkpoint
                 from webui.ai import (
@@ -3345,7 +3415,7 @@ def create_app(config=None):
                     return
                 raise  # 非 systemic，往上抛
             if _stop_requested():
-                _mark_cancelled()
+                _handle_user_stop()
                 return
             # 合并 resume 已判定的结果（resume 的岗位默认 kept，因为上次没被 drop）
             kept_ids = set(screen_result["kept"]) | {str(j.get("job_id", "")) for j in _rough_kept_from_resume}
@@ -3450,7 +3520,7 @@ def create_app(config=None):
                 for chunk_start in range(0, len(todo_jd), DETAIL_CHUNK):
                     if _stop_requested():
                         close_debug_chrome(frozen_cdp_port)
-                        _mark_cancelled()
+                        _handle_user_stop()
                         return
                     chunk = todo_jd[chunk_start:chunk_start + DETAIL_CHUNK]
                     _jd_base = len(jd_map)
@@ -3524,7 +3594,7 @@ def create_app(config=None):
                         return
                     if detail_result.get("stopped"):
                         close_debug_chrome(frozen_cdp_port)
-                        _mark_cancelled()
+                        _handle_user_stop()
                         return
                 close_debug_chrome(frozen_cdp_port)
             for job in enriched:
@@ -3550,7 +3620,7 @@ def create_app(config=None):
                      message="未填写求职画像，已跳过 AI 精筛")
             else:
                 if _stop_requested():
-                    _mark_cancelled()
+                    _handle_user_stop()
                     return
                 # 分段精筛，每段判定落库（screening_results）+ 更新 processed_count：
                 # 进程崩了已筛的判定不丢，重跑自动跳过。
@@ -3689,7 +3759,7 @@ def create_app(config=None):
 
                 match_count = sum(1 for j in enriched if j.get("verdict") == "match")
             if _stop_requested():
-                _mark_cancelled()
+                _handle_user_stop()
                 return
             # 实时结果必须带平台身份：结果页按 job.platform 做平台筛选，
             # 内存结果缺 platform 会把全部岗位过滤成 0（重启走 DB 恢复才有值）。
@@ -5274,11 +5344,11 @@ def create_app(config=None):
         resume_from_run_id = ""
         prev = None
         try:
-            prev = store.latest_screening_run_for_source(
-                scrape_task_id, statuses=("paused",))
-            if prev is None:
-                prev = store.latest_screening_run_for_source(
-                    scrape_task_id, statuses=("interrupted",))
+            from webui.screen_flow import find_resumable_screen_run
+            prev = find_resumable_screen_run(
+                store, scrape_task_id, screening_fields,
+                profile_summary, profile_facts,
+            )
         except _OPERATIONAL_ERRORS as exc:
             return jsonify({
                 "ok": False,
@@ -5286,17 +5356,7 @@ def create_app(config=None):
                 "detail": type(exc).__name__,
             }), 503
         if prev is not None:
-            prev_params = prev.get("execution_params") or {}
-            same_fields = prev.get("frozen_filters") == screening_fields
-            same_profile = str(prev_params.get("profile_summary", "")) == profile_summary
-            same_facts = str(prev_params.get("profile_facts") or "") == str(profile_facts or "")
-            restart_interrupted = (
-                prev["status"] == "interrupted"
-                and str(prev.get("error_code") or "") == "restart"
-            )
-            if same_fields and same_profile and same_facts and (
-                    prev["status"] == "paused" or restart_interrupted):
-                resume_from_run_id = prev["id"]
+            resume_from_run_id = prev["id"]
         if resume_from_run_id and prev is not None and prev["status"] == "paused":
             # paused run 就地转为 running，保持唯一任务身份和 canonical 状态。
             try:
@@ -5315,7 +5375,7 @@ def create_app(config=None):
             task_id = resume_from_run_id
         claimed_old_resume = False
         if (resume_from_run_id and prev is not None
-                and prev["status"] == "interrupted"):
+                and prev["status"] != "paused"):
             if not _claim_resume(resume_from_run_id):
                 return jsonify({
                     "ok": False, "error": "already_running",
@@ -5537,6 +5597,17 @@ def create_app(config=None):
         # 顺序写入且时间戳相同时也视为“已有更新快照”，避免同微秒下旧任务被误恢复。
         return bool(saved_at and str(saved_at) >= str(timestamp))
 
+    def _round_context_for_run(run):
+        """构建本轮上下文；无法追溯时返回空对象，不伪造。"""
+        if run is None:
+            return {}
+        try:
+            from webui.screen_flow import build_round_context_payload
+            return build_round_context_payload(store, run) or {}
+        except _OPERATIONAL_ERRORS:
+            return {}
+
+
     @app.route("/api/latest-running-task")
     def latest_running_task():
         """返回最近一个仍在运行（running/queued）的 pipeline 任务。
@@ -5655,6 +5726,7 @@ def create_app(config=None):
                 "task_input_digest": paused_run.get("task_input_digest"),
                 "scraped_count": paused_scraped_count,
                 "source_total": int(prow["source_count"] or 0),
+                "round_context": _round_context_for_run(paused_run),
             })
         # 3. DB 中被进程重启打断的筛选。重启后工作线程已死，
         # 不能假装还在跑——如实告诉前端有个可续跑的中断任务。
@@ -5707,6 +5779,7 @@ def create_app(config=None):
                 "task_input_digest": run.get("task_input_digest"),
                 "scraped_count": interrupted_scraped_count,
                 "source_total": int(run.get("source_count") or 0),
+                "round_context": _round_context_for_run(run),
             })
         # 3.5 已完成抓取 + auto_screen 未消费：刷新后自动接 AI 筛选。
         try:
@@ -5859,6 +5932,8 @@ def create_app(config=None):
         result = payload["result"]
         jobs = result.get("jobs", [])
         run_id = payload.get("run_id", "")
+        round_context = _round_context_for_run(
+            store.get_screening_run(run_id) if run_id else None)
         # T409: 汇总 source outcomes
         source_summary, source_outcomes = _build_source_summary_and_outcomes(run_id)
 
@@ -5927,6 +6002,7 @@ def create_app(config=None):
             "started_at": _iso_epoch_ms(payload.get("started_at")),
             "finished_at": _iso_epoch_ms(payload.get("finished_at")),
             "script_params": payload.get("script_params", {}),
+            "round_context": round_context,
             "execution_config": payload.get("execution_config", {}),
             "source_summary": source_summary,
             "source_outcomes": source_outcomes,
@@ -6879,6 +6955,30 @@ def create_app(config=None):
                     current["error"] = reason
             _release_worker_resume_claims(_pipeline_tasks.get(task_id))
 
+        def _stop_mode():
+            with _pipeline_lock:
+                t = _pipeline_tasks.get(task_id)
+                if t is None or t.get("stop_event") is None or not t["stop_event"].is_set():
+                    return None
+                return "pause" if t.get("stop_mode") == "pause" else "cancel"
+
+        def _mark_recrawl_paused(processed=0, stage="recrawl_ai"):
+            """用户暂停重抓：保留 checkpoint 并写为 paused。"""
+            _write_run_unless_finished(
+                task_id, status="paused", error_code="user_paused",
+                current_stage=stage, processed_count=processed,
+                error_reason="用户已暂停重抓，结果已保留",
+            )
+            store.append_task_event(task_id, "pause", {
+                "stage": stage, "code": "user_paused", "processed": processed,
+            })
+            with _pipeline_lock:
+                current = _pipeline_tasks.get(task_id)
+                if current is not None:
+                    current["status"] = "paused"
+                    current["error"] = "重抓已暂停，结果已保留"
+                    _release_worker_resume_claims(current)
+
         updates: dict = {}
 
         def publish_recrawl_updates():
@@ -7010,13 +7110,18 @@ def create_app(config=None):
                             return
                         if detail.get("stopped"):
                             close_debug_chrome(frozen_cdp_port)
-                            with _pipeline_lock:
-                                t = _pipeline_tasks.get(task_id)
-                                if t is not None:
-                                    t["status"] = "cancelled"
-                                    t["error"] = "用户已停止重抓"
-                            _schedule_pipeline_task_cleanup(task_id)
-                            _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                            if _stop_mode() == "pause":
+                                _mark_recrawl_paused(
+                                    processed=len(completed_jd_ids),
+                                    stage="recrawl_fetch_jd")
+                            else:
+                                with _pipeline_lock:
+                                    t = _pipeline_tasks.get(task_id)
+                                    if t is not None:
+                                        t["status"] = "cancelled"
+                                        t["error"] = "用户已停止重抓"
+                                _schedule_pipeline_task_cleanup(task_id)
+                                _release_worker_resume_claims(_pipeline_tasks.get(task_id))
                             return
                         close_debug_chrome(frozen_cdp_port)
                     else:
@@ -7166,6 +7271,12 @@ def create_app(config=None):
                         emit(stage="screen_b", current=len(recrawl_completed_ids), total=total,
                              message=f"AI 重判 {len(recrawl_completed_ids)}/{total}")
                     if _recrawl_ai_pause:
+                        _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                        return
+                    if _stop_mode() == "pause":
+                        _mark_recrawl_paused(
+                            processed=len(recrawl_completed_ids),
+                            stage="recrawl_ai")
                         _release_worker_resume_claims(_pipeline_tasks.get(task_id))
                         return
                     if run_id:
@@ -7896,6 +8007,46 @@ def create_app(config=None):
             "platform": run.get("platform"),
             "task_input_digest": run.get("task_input_digest"),
         })
+
+    @app.route("/api/task/pause/<run_id>", methods=["POST"])
+    def api_task_pause(run_id: str):
+        """013：安全暂停 AI 筛选任务。
+
+        设置内存任务 stop_mode="pause" 并触发停止信号；worker 在安全边界
+        落库后把 DB run 写为 paused，并生成 04 可查看的部分结果快照。
+        """
+        with _pipeline_lock:
+            task = _pipeline_tasks.get(run_id)
+            if task is None:
+                return jsonify({
+                    "ok": False, "error": "run_not_found",
+                    "message": _MSG_TASK_NOT_FOUND,
+                }), 404
+            if task.get("kind") not in ("ai_screen", "recrawl"):
+                return jsonify({
+                    "ok": False, "error": "not_pausable_task",
+                    "message": "只有 AI 筛选或重抓任务可以暂停",
+                }), 409
+            if task["status"] not in ("queued", "running"):
+                return jsonify({
+                    "ok": False, "error": "task_not_active",
+                    "message": f"任务当前状态（{task['status']}）不能暂停",
+                }), 409
+            run = store.get_screening_run(run_id)
+            if run is not None and run.get("status") not in ("queued", "running"):
+                return jsonify({
+                    "ok": False, "error": "task_not_active",
+                    "message": f"任务当前状态（{run.get('status')}）不能暂停",
+                }), 409
+            stop_event = task.get("stop_event")
+            if stop_event is None:
+                return jsonify({
+                    "ok": False, "error": "stop_signal_unavailable",
+                    "message": "任务缺少停止信号，无法暂停",
+                }), 409
+            task["stop_mode"] = "pause"
+            stop_event.set()
+        return jsonify({"ok": True, "run_id": run_id, "status": "pausing"})
 
     @app.route("/api/task/cancel/<run_id>", methods=["POST"])
     def api_task_cancel(run_id: str):

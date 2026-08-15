@@ -1547,6 +1547,234 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertIn("不匹配：", text)
 
 
+class ScreenContinueFlowTests(unittest.TestCase):
+    """013：暂停路由、round_context 透传与续跑候选契约。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _create_completed_scrape_run(self, script_params=None):
+        run_id = f"scrape_{uuid.uuid4().hex[:8]}"
+        self.store.create_screening_run(
+            run_id,
+            frozen_filters={},
+            source_count=2,
+            execution_params={
+                "platform": "boss",
+                "script_params": script_params or {
+                    "keyword": "Python,后端", "city": ["上海"], "pages": 3,
+                },
+                "execution_config": {
+                    "schema_version": 1, "inter_combo_delay": 10,
+                    "detail_batch_size": 15, "detail_interval": 2,
+                    "detail_reset_every": 4, "detail_batch_cooldown": 5,
+                    "detail_tab_pool_size": 5, "screen_batch_size": 50,
+                    "screen_concurrency": 5, "match_batch_size": 4,
+                    "match_concurrency": 10, "config_digest": None,
+                },
+                "frozen_scope": {
+                    "schema_version": 1, "platform": "boss",
+                    "keywords": ["Python"], "scope_kind": "cities",
+                    "cities": ["上海"], "pages_per_combination": 3,
+                    "combination_count": 1, "planned_pages": 3,
+                    "task_size": "small", "scope_digest": None,
+                },
+            },
+            backend_version="test",
+        )
+        self.store.update_screening_run(
+            run_id, status="succeeded", current_stage="done",
+            processed_count=2, match_count=2,
+        )
+        jobs = [
+            {"job_id": "j1", "platform_job_id": "j1", "title": "岗位",
+             "source_url": "https://zhipin.example/j1.html"},
+        ]
+        self.store.save_scrape_combo_result(run_id, "kw|city", jobs, ["kw|city"])
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "done", "progress": {}, "logs": [],
+            "result": {"ok": True, "jobs": jobs, "total_scraped": 1,
+                       "total_matched": 1, "completed_combos": ["kw|city"]},
+            "error": "", "started_at": None, "finished_at": None,
+            "stop_event": threading.Event(), "platform": "boss",
+        }
+        return run_id
+
+    def _seed_ai_run(self, scrape_id, run_id, status="paused",
+                    error_code=None, filters=None):
+        self.store.create_screening_run(
+            run_id,
+            frozen_filters=filters or {"salary": ["20-30K"]},
+            source_count=2,
+            execution_params={
+                "platform": "boss",
+                "scrape_task_id": scrape_id,
+                "profile_summary": "测试画像",
+                "profile_facts": {"years": 3},
+            },
+        )
+        self.store.update_screening_run(run_id, status="running")
+        self.store.update_screening_run(run_id, status=status)
+        if error_code:
+            self.store.update_screening_run(
+                run_id, error_code=error_code, error_reason="用户提前结束")
+
+    def test_pause_route_returns_pausing_and_sets_stop_mode(self):
+        scrape_id = self._create_completed_scrape_run()
+        run_id = "pause-screen-run"
+        self._seed_ai_run(scrape_id, run_id, status="running")
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "ai_screen", "status": "running", "progress": {}, "logs": [],
+            "error": "", "stop_event": threading.Event(), "platform": "boss",
+        }
+        resp = self.client.post(f"/api/task/pause/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["status"], "pausing")
+        task = self.app.config["PIPELINE_TASKS"][run_id]
+        self.assertEqual(task["stop_mode"], "pause")
+        self.assertTrue(task["stop_event"].is_set())
+
+    def test_pause_route_rejects_non_ai_and_terminal(self):
+        run_id = "pause-reject"
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "recrawl", "status": "running", "progress": {}, "logs": [],
+            "error": "", "stop_event": threading.Event(), "platform": "boss",
+        }
+        resp = self.client.post(f"/api/task/pause/{run_id}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["status"], "pausing")
+        self.assertEqual(self.app.config["PIPELINE_TASKS"][run_id]["stop_mode"], "pause")
+
+        done_id = "pause-done"
+        self.app.config["PIPELINE_TASKS"][done_id] = {
+            "kind": "ai_screen", "status": "done", "progress": {}, "logs": [],
+            "error": "", "stop_event": threading.Event(), "platform": "boss",
+        }
+        resp = self.client.post(f"/api/task/pause/{done_id}")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "task_not_active")
+
+    def test_latest_running_task_paused_returns_round_context(self):
+        scrape_id = self._create_completed_scrape_run()
+        run_id = "paused-ctx"
+        self._seed_ai_run(scrape_id, run_id, status="paused")
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        ctx = data["round_context"]
+        self.assertEqual(ctx["keywords"], ["Python", "后端"])
+        self.assertEqual(ctx["cities"], ["上海"])
+        self.assertEqual(ctx["screening_fields"], {"salary": ["20-30K"]})
+        self.assertEqual(ctx["profile_summary"], "测试画像")
+        self.assertEqual(ctx["profile_facts"], {"years": 3})
+        self.assertEqual(ctx["screen_run_id"], run_id)
+        self.assertEqual(ctx["status"], "paused")
+        self.assertTrue(ctx["resumable"])
+
+    def test_latest_pipeline_result_returns_round_context_from_snapshot(self):
+        scrape_id = self._create_completed_scrape_run()
+        run_id = "snapshot-ctx"
+        self._seed_ai_run(scrape_id, run_id, status="paused")
+        self.store.save_pipeline_result(
+            {
+                "ok": True, "jobs": [{"platform_job_id": "j1", "title": "岗位", "verdict": "uncertain"}],
+                "dropped": [], "total_scraped": 1, "total_kept": 1,
+            },
+            {"platform": "boss"},
+            status="partial",
+            execution_params={
+                "platform": "boss", "scrape_task_id": scrape_id,
+                "screen_run_id": run_id,
+            },
+        )
+        data = self.client.get("/api/latest-pipeline-result").get_json()
+        self.assertTrue(data["has_result"])
+        ctx = data["round_context"]
+        self.assertEqual(ctx["screen_run_id"], run_id)
+        self.assertEqual(ctx["status"], "paused")
+        self.assertTrue(ctx["resumable"])
+
+    def test_ai_screen_resumes_failed_partial_and_user_finished(self):
+        cases = [
+            ("failed", "failed", None),
+            ("partial", "partial", None),
+            ("finished", "interrupted", "user_finished"),
+        ]
+        for label, status, error_code in cases:
+            scrape_id = self._create_completed_scrape_run()
+            run_id = f"resume-{label}"
+            self._seed_ai_run(scrape_id, run_id, status=status, error_code=error_code)
+            with mock.patch.object(
+                self.app.config["PIPELINE_EXECUTOR"], "submit",
+                return_value=mock.Mock(),
+            ):
+                resp = self.client.post("/api/ai-screen", json={
+                    "scrape_task_id": scrape_id,
+                    "screening_fields": {"salary": ["20-30K"]},
+                    "profile_summary": "测试画像",
+                    "profile_facts": {"years": 3},
+                    "filter_schema_version": 1,
+                })
+            self.assertEqual(resp.status_code, 200, resp.get_json())
+            data = resp.get_json()
+            self.assertTrue(data["resuming"])
+            self.assertNotEqual(data["task_id"], run_id)
+            self.app.config["PIPELINE_TASKS"].pop(data["task_id"], None)
+
+    def test_worker_pause_writes_paused_and_snapshot(self):
+        from webui import pipeline_exec
+        scrape_id = self._create_completed_scrape_run()
+        captured = []
+        with mock.patch.object(
+            self.app.config["PIPELINE_EXECUTOR"], "submit",
+            side_effect=lambda fn, *args, **kwargs: captured.append((fn, args, kwargs)) or None,
+        ):
+            resp = self.client.post("/api/ai-screen", json={
+                "scrape_task_id": scrape_id,
+                "screening_fields": {"salary": ["20-30K"]},
+                "profile_summary": "测试画像",
+                "profile_facts": {"years": 3},
+                "filter_schema_version": 1,
+            })
+        self.assertEqual(resp.status_code, 200)
+        task_id = resp.get_json()["task_id"]
+        pause_resp = self.client.post(f"/api/task/pause/{task_id}")
+        self.assertEqual(pause_resp.status_code, 200)
+        fn, args, kwargs = captured[0]
+        with mock.patch.object(
+            pipeline_exec, "resolve_browser_account", return_value="",
+        ), mock.patch.object(pipeline_exec, "set_active_cdp_data_dir"):
+            with mock.patch.object(
+                self.store, "get_ai_settings",
+                return_value={"endpoint_url": "http://ai.test", "model": "m", "is_configured": True},
+            ), mock.patch("webui.app.ai_service.is_ai_available", return_value=True):
+                fn(*args, **kwargs)
+        run = self.store.get_screening_run(task_id)
+        self.assertEqual(run["status"], "paused")
+        self.assertEqual(run["error_code"], "user_paused")
+        self.assertEqual(self.app.config["PIPELINE_TASKS"][task_id]["status"], "paused")
+        events = self.store.list_task_events(task_id)
+        self.assertTrue(any(event["type"] == "pause" for event in events))
+
 class ChromeAccountProfileSwitchTests(unittest.TestCase):
     """账号切换时，端口上旧账号的 Chrome 必须被替换而不是复用。"""
 

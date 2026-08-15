@@ -80,11 +80,10 @@ describe("BrowserAccountsDialog", () => {
     expect(wrapper.get('[data-testid="account-state-a-boss"]').text()).toBe("已登录");
     expect(wrapper.get('[data-testid="account-state-a-zhilian"]').text()).toBe("未登录");
 
-    // 单按钮「打开浏览器」（不再有每平台窗口按钮/下拉框）
-    expect(wrapper.get('[data-testid="open-browser-a"]').text()).toContain("打开浏览器");
-    expect(wrapper.find('[data-testid="open-boss-a"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="open-zhilian-a"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="open-platform-a"]').exists()).toBe(false);
+    // 每个平台独立「打开」入口，不再有单按钮一次开全部
+    expect(wrapper.get('[data-testid="open-boss-a"]').text()).toContain("打开");
+    expect(wrapper.get('[data-testid="open-zhilian-a"]').text()).toContain("打开");
+    expect(wrapper.find('[data-testid="open-browser-a"]').exists()).toBe(false);
   });
 
   it("shows the builtin profile account as 默认账号 and marks others as 非当前账号", async () => {
@@ -175,7 +174,7 @@ describe("BrowserAccountsDialog", () => {
     expect(wrapper.get('[data-testid="account-state-b-boss"]').text()).toBe("待刷新");
   });
 
-  it("open-browser button sends one open call per platform in order", async () => {
+  it("open button sends one request for the clicked platform only", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/browser-accounts") {
@@ -189,12 +188,18 @@ describe("BrowserAccountsDialog", () => {
 
     const wrapper = await mountOpen(fetchMock);
 
-    await wrapper.get('[data-testid="open-browser-a"]').trigger("click");
+    await wrapper.get('[data-testid="open-boss-a"]').trigger("click");
     await flushPromises();
 
-    const calls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/browser-accounts/a/open"));
-    expect(calls.length).toBe(2);
+    let calls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/browser-accounts/a/open"));
+    expect(calls.length).toBe(1);
     expect(JSON.parse(String(calls[0]?.[1]?.body))).toEqual({ platform: "boss" });
+
+    await wrapper.get('[data-testid="open-zhilian-a"]').trigger("click");
+    await flushPromises();
+
+    calls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/browser-accounts/a/open"));
+    expect(calls.length).toBe(2);
     expect(JSON.parse(String(calls[1]?.[1]?.body))).toEqual({ platform: "zhilian" });
   });
 
@@ -212,12 +217,35 @@ describe("BrowserAccountsDialog", () => {
 
     const wrapper = await mountOpen(fetchMock);
 
-    await wrapper.get('[data-testid="open-browser-b"]').trigger("click");
+    expect(wrapper.find('[data-testid="open-zhilian-b"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="open-boss-b"]').trigger("click");
     await flushPromises();
 
     const calls = fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/browser-accounts/b/open"));
     expect(calls.length).toBe(1);
     expect(JSON.parse(String(calls[0]?.[1]?.body))).toEqual({ platform: "boss" });
+  });
+
+  it("disables non-locked platform while a paused task locks one platform", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/browser-accounts") {
+        return response({
+          accounts: [dualAccount],
+          active_account: "a",
+          busy: true,
+          busy_kind: "paused",
+          locked_account: "a",
+          locked_platform: "boss",
+        });
+      }
+      return response({ init });
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    expect(wrapper.get('[data-testid="open-boss-a"]').attributes("disabled")).toBeUndefined();
+    expect(wrapper.get('[data-testid="open-zhilian-a"]').attributes("disabled")).toBeDefined();
   });
 
   it("activate does not send a platform in the request body", async () => {

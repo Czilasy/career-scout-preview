@@ -47,6 +47,7 @@ const busyAccount = ref("");
 const serverBusy = ref(false);
 const busyKind = ref("");
 const lockedAccount = ref("");
+const lockedPlatform = ref("");
 const newName = ref("");
 const localNotice = ref<Notice | null>(null);
 // 切换账号/打开窗口后缓存已失效或待重探的账号：徽章显示「待刷新」。
@@ -61,6 +62,7 @@ watch(() => props.open, (open) => {
     serverBusy.value = false;
     busyKind.value = "";
     lockedAccount.value = "";
+    lockedPlatform.value = "";
     void loadAccounts();
   } else {
     localNotice.value = null;
@@ -82,6 +84,7 @@ async function loadAccounts() {
       busy?: boolean;
       busy_kind?: string;
       locked_account?: string;
+      locked_platform?: string;
     }>("/api/browser-accounts");
     accounts.value = data.accounts || [];
     activeAccount.value = data.active_account || "";
@@ -89,6 +92,7 @@ async function loadAccounts() {
     serverBusy.value = Boolean(data.busy);
     busyKind.value = data.busy_kind || "";
     lockedAccount.value = data.locked_account || "";
+    lockedPlatform.value = data.locked_platform || "";
     // 响应里已有新鲜记录（15 分钟 TTL 内）的账号视为已重探，清除待刷新标记。
     const next = new Set<string>();
     for (const id of pendingRefresh.value) {
@@ -116,7 +120,7 @@ async function addAccount() {
       json: { name },
     });
     newName.value = "";
-    setLocalNotice({ message: "账号已添加，可打开浏览器登录", tone: "success" });
+    setLocalNotice({ message: "账号已添加，可分别打开平台浏览器登录", tone: "success" });
     await loadAccounts();
   } catch (error) {
     setLocalNotice({ message: errorMessage(error, "添加账号失败"), tone: "error" });
@@ -144,52 +148,32 @@ async function activateAccount(id: string) {
   }
 }
 
-// 单按钮「打开浏览器」：依次打开该账号所有平台的登录空间（各平台
-// 是独立 profile/端口，会各弹一个 Chrome 窗口）。部分失败不回滚已
-// 成功的，通知里拼接各平台结果。
-async function openAllBrowsers(account: BrowserAccount) {
+// 每个平台一个「打开」入口：只打开该账号指定平台的登录空间
+// （各平台是独立 profile/端口，会各弹一个 Chrome 窗口）。
+async function openPlatform(account: BrowserAccount, platform: Platform) {
   busyAccount.value = account.id;
-  const platforms = platformsOf(account);
-  const okLabels: string[] = [];
-  const failBits: string[] = [];
   try {
-    for (const platform of platforms) {
-      try {
-        const data = await apiRequest<{ message?: string }>(
-          `/api/browser-accounts/${encodeURIComponent(account.id)}/open`,
-          { method: "POST", json: { platform } },
-        );
-        okLabels.push(PLATFORM_LABELS[platform]);
-        void data;
-      } catch (error) {
-        failBits.push(`${PLATFORM_LABELS[platform]}：${errorMessage(error, "打开失败")}`);
-      }
-    }
+    const data = await apiRequest<{ message?: string }>(
+      `/api/browser-accounts/${encodeURIComponent(account.id)}/open`,
+      { method: "POST", json: { platform } },
+    );
+    setLocalNotice({
+      message: data?.message || `已打开 ${PLATFORM_LABELS[platform]} 的自动化浏览器，请登录`,
+      tone: "info",
+    });
     // 打开窗口会失效登录态缓存（后端 D3 信号），标记待刷新等真实探测。
-    if (okLabels.length) {
-      const next = new Set(pendingRefresh.value);
-      next.add(account.id);
-      pendingRefresh.value = next;
-    }
-    if (okLabels.length && !failBits.length) {
-      setLocalNotice({
-        message: platforms.length > 1
-          ? `已打开 ${okLabels.join("、")} 的登录窗口，请分别登录后回来`
-          : `已打开 ${okLabels[0]} 的登录窗口，请登录后回来`,
-        tone: "info",
-      });
-    } else if (okLabels.length) {
-      setLocalNotice({
-        message: `已打开 ${okLabels.join("、")}；${failBits.join("；")}`,
-        tone: "error",
-      });
-    } else {
-      setLocalNotice({ message: failBits.join("；") || "打开浏览器失败", tone: "error" });
-    }
-    await loadAccounts();
+    const next = new Set(pendingRefresh.value);
+    next.add(account.id);
+    pendingRefresh.value = next;
+  } catch (error) {
+    setLocalNotice({
+      message: errorMessage(error, `打开${PLATFORM_LABELS[platform]}失败`),
+      tone: "error",
+    });
   } finally {
     busyAccount.value = "";
   }
+  await loadAccounts();
 }
 
 // D7：徽章三态 + 第四态 unknown + 无记录/过期两种弱状态。
@@ -224,10 +208,12 @@ const lockNotice = computed(() => {
     : "当前有任务运行，请先结束或取消任务后再操作";
 });
 
-function canOpen(id: string): boolean {
+function canOpenPlatform(id: string, platform: Platform): boolean {
   if (busyAccount.value) return false;
   if (!serverBusy.value) return true;
-  return busyKind.value === "paused" && lockedAccount.value === id;
+  return busyKind.value === "paused"
+    && lockedAccount.value === id
+    && (!lockedPlatform.value || lockedPlatform.value === platform);
 }
 
 function canManage(id: string): boolean {
@@ -300,7 +286,7 @@ async function confirmRemoveAccount() {
     id="browser-accounts"
     :open="open"
     title="账号"
-    description="每个账号使用独立的浏览器环境，登录一次后长期有效。任务会使用「当前账号」的登录态抓取。"
+    description="每个账号使用独立的浏览器环境，BOSS 与智联窗口可分别打开；登录一次后长期有效，任务会使用「当前账号」的登录态抓取。"
     size="md"
     @close="$emit('close')"
   >
@@ -340,20 +326,22 @@ async function confirmRemoveAccount() {
               >
                 {{ platformBadge(account, platform).text }}
               </span>
+              <button
+                type="button"
+                class="browser-account-open"
+                :data-testid="`open-${platform}-${account.id}`"
+                :aria-label="`打开${PLATFORM_LABELS[platform]}浏览器`"
+                :title="`打开${PLATFORM_LABELS[platform]}浏览器`"
+                :disabled="!canOpenPlatform(account.id, platform)"
+                @click="openPlatform(account, platform)"
+              >
+                <ExternalLink :size="13" aria-hidden="true" />
+                打开
+              </button>
             </li>
           </ul>
         </div>
         <div class="browser-account-actions">
-          <button
-            type="button"
-            class="button secondary small"
-            :data-testid="`open-browser-${account.id}`"
-            :disabled="!canOpen(account.id)"
-            @click="openAllBrowsers(account)"
-          >
-            <ExternalLink :size="15" aria-hidden="true" />
-            打开浏览器
-          </button>
           <div class="browser-account-icon-actions">
             <button
               v-if="account.id !== activeAccount"
@@ -514,6 +502,30 @@ async function confirmRemoveAccount() {
   font-size: 12px;
   line-height: 1.4;
 }
+.browser-account-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 3px 9px;
+  border: 1px solid var(--brand-edge);
+  border-radius: 6px;
+  color: var(--brand-strong);
+  background: var(--panel);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.browser-account-open:hover:not(:disabled) {
+  color: var(--brand-ink);
+  background: var(--brand-wash);
+}
+.browser-account-open:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 .browser-account-platform-label {
   font-weight: 600;
   color: var(--ink-1);
@@ -553,9 +565,6 @@ async function confirmRemoveAccount() {
   gap: 6px;
   flex: 0 0 auto;
   margin-left: auto;
-}
-.browser-account-actions .button {
-  min-height: 34px;
 }
 .browser-account-icon-actions {
   display: flex;

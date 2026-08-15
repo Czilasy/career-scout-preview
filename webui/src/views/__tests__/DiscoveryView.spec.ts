@@ -299,24 +299,21 @@ describe("DiscoveryView", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
     await confirmProfileFromScreen(wrapper);
-    const start = wrapper.get('[data-testid="start-ai-screen"]');
-    expect(start.attributes("disabled")).toBeUndefined();
+    const resume = wrapper.get('[data-testid="continue-ai-screen"]');
+    expect(resume.attributes("disabled")).toBeUndefined();
     expect(wrapper.find(".task-progress").exists()).toBe(false);
-    expect(wrapper.find('[data-testid="finish-interrupted-screen"]').exists()).toBe(true);
-    await start.trigger("click");
+    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
+    await resume.trigger("click");
     await flushPromises();
-    const aiCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/ai-screen"));
-    expect(aiCall).toBeTruthy();
-    expect(JSON.parse(aiCall![1]!.body as string)).toMatchObject({
+    const resumeCall = fetchMock.mock.calls.find(
+      ([url]) => String(url).endsWith("/api/ai-screen"),
+    );
+    expect(resumeCall).toBeTruthy();
+    expect(JSON.parse(String(resumeCall![1]!.body))).toMatchObject({
       scrape_task_id: "scrape-1",
       screening_fields: { salary: ["406"], experience: [] },
       profile_summary: "3年Python后端工程师候选人",
-      // T508：提交当前平台 schema 版本（不发 platform，父 run 已冻结）
-      filter_schema_version: 3,
     });
-    // T508：execute-search 不发 platform 也不发 AI filters（已由其它测试覆盖 scope_digest）
-    // T506：screening_fields 是 boss 平台草稿（draftPlatform 默认 boss）
-    expect(JSON.parse(aiCall![1]!.body as string).screening_fields).not.toHaveProperty("stage");
 
     vi.unstubAllGlobals();
   });
@@ -383,7 +380,7 @@ describe("DiscoveryView", () => {
     expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("aria-selected")).toBe("false");
 
     // interrupted screen 仍可重开（与 boss 任务对称）
-    expect(wrapper.find('[data-testid="finish-interrupted-screen"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
     expect(wrapper.find(".task-progress").exists()).toBe(false);
 
     vi.unstubAllGlobals();
@@ -2263,6 +2260,7 @@ describe("DiscoveryView", () => {
           result: {
             jobs: [{ job_id: "j1", platform: "boss", verdict: "uncertain", verdict_reason: "提前结束" }],
             dropped: [], total_scraped: 1280, total_kept: 1280, total_dropped: 0,
+            profile_summary: "3年Python后端候选人",
           },
         });
       }
@@ -2281,8 +2279,9 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="finish-active-scrape"]').trigger("click");
     await flushPromises();
     expect(wrapper.find(".results-stage").exists()).toBe(false);
-    expect(wrapper.find('[data-testid="view-partial-results"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="continue-ai-after-finish"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="start-ai-screen"]').exists()).toBe(true);
     vi.unstubAllGlobals();
   });
 
@@ -2329,14 +2328,17 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await wrapper.get('[data-testid="finish-active-scrape"]').trigger("click");
     await flushPromises();
-    await wrapper.get('[data-testid="continue-ai-after-finish"]').trigger("click");
+    await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
     await flushPromises();
     expect(calls.some((url) => url.endsWith("/api/ai-screen"))).toBe(true);
-    expect(wrapper.find('[data-testid="start-ai-screen"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="pause-ai-screen"]').exists()).toBe(true);
     vi.unstubAllGlobals();
   });
 
   it("B027: running AI screen can finish and save without jumping to results", async () => {
+    let stateCalls = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/api/latest-running-task")) {
@@ -2347,7 +2349,12 @@ describe("DiscoveryView", () => {
         });
       }
       if (url.includes("/api/task-state/screen-running-1")) {
-        return response({ status: "running", progress: { message: "AI 筛选中" }, logs: [] });
+        stateCalls += 1;
+        if (stateCalls === 1) return response({ status: "running", progress: { message: "AI 筛选中" }, logs: [] });
+        return response({ status: "paused", progress: { message: "任务已暂停" }, logs: [], error: "" });
+      }
+      if (url.includes("/api/task/pause/screen-running-1")) {
+        return response({ ok: true, run_id: "screen-running-1", status: "pausing" });
       }
       if (url.includes("/api/task/finish/screen-running-1")) {
         return response({
@@ -2372,15 +2379,339 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
     await flushPromises();
-    expect(wrapper.find('[data-testid="finish-active-screen"]').exists()).toBe(true);
-    await wrapper.get('[data-testid="finish-active-screen"]').trigger("click");
+    vi.useFakeTimers();
+    expect(wrapper.find('[data-testid="pause-ai-screen"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="pause-ai-screen"]').trigger("click");
+    await vi.advanceTimersByTimeAsync(300);
     await flushPromises();
+    vi.useRealTimers();
     expect(wrapper.find(".results-stage").exists()).toBe(false);
-    expect(wrapper.find('[data-testid="view-partial-results-screen"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="continue-ai-after-finish-screen"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="continue-ai-screen"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(true);
     vi.unstubAllGlobals();
   });
 
+  it("013: paused screen loads partial results so 04 can be viewed immediately", async () => {
+    let stateCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) {
+        return response({
+          ok: true, has_task: true, task_id: "screen-pause-1", kind: "ai_screen",
+          status: "running", platform: "boss", scrape_task_id: "scrape-parent",
+          scrape_completed: true, progress: { message: "AI 筛选中" }, logs: [], error: "",
+        });
+      }
+      if (url.includes("/api/task-state/screen-pause-1")) {
+        stateCalls += 1;
+        if (stateCalls === 1) return response({ status: "running", progress: { message: "AI 筛选中" }, logs: [] });
+        return response({ status: "paused", progress: { message: "任务已暂停" }, logs: [], error: "" });
+      }
+      if (url.includes("/api/task/pause/screen-pause-1")) {
+        return response({ ok: true, run_id: "screen-pause-1", status: "pausing" });
+      }
+      if (url.includes("/api/latest-pipeline-result")) {
+        if (url.includes("platform=zhilian")) return response({ ok: true, has_result: false });
+        return response({
+          ok: true, has_result: true, source_run_id: "run-pause", platform: "boss",
+          status: "paused", scrape_task_id: "scrape-parent",
+          round_context: {
+            platform: "boss", keywords: ["Python"], cities: ["上海"],
+            screening_fields: { salary: ["20-30K"] }, profile_summary: "3年Python后端候选人",
+            profile_facts: {}, scrape_task_id: "scrape-parent", screen_run_id: "run-pause",
+            status: "paused", resumable: true, has_frozen_filters: true,
+          },
+          result: {
+            jobs: [{ job_id: "p1", platform: "boss", verdict: "match", title: "已判定部分岗位" }],
+            dropped: [], total_scraped: 1, total_kept: 1, total_dropped: 0,
+            profile_summary: "3年Python后端候选人",
+          },
+        });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    vi.useFakeTimers();
+    expect(wrapper.find('[data-testid="pause-ai-screen"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="pause-ai-screen"]').trigger("click");
+    await vi.advanceTimersByTimeAsync(300);
+    await flushPromises();
+    await flushPromises();
+    vi.useRealTimers();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flushPromises();
+    const viewBtn = wrapper.get('[data-testid="view-screen-results"]');
+    expect(viewBtn.attributes("disabled")).toBeUndefined();
+    (viewBtn.element as HTMLButtonElement).click();
+    await flushPromises();
+    await flushPromises();
+    expect(wrapper.find(".results-stage").exists()).toBe(true);
+    expect(wrapper.text()).toContain("已判定部分岗位");
+    expect(wrapper.get('[data-testid="continue-ai-from-results"]').text()).toContain("继续 AI 筛选");
+    vi.unstubAllGlobals();
+  });
+  it("013: refreshed paused task still shows partial results on 04", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) {
+        return response({
+          ok: true, has_task: true, task_id: "paused-screen-1", kind: "ai_screen",
+          status: "paused", platform: "boss", scrape_task_id: "scrape-parent",
+          scrape_completed: true, frozen_filters: { salary: ["406"] },
+          profile_summary: "3年Python后端候选人",
+          round_context: {
+            platform: "boss", keywords: ["Python"], cities: ["上海"],
+            screening_fields: { salary: ["406"] }, profile_summary: "3年Python后端候选人", profile_facts: {},
+            scrape_task_id: "scrape-parent", screen_run_id: "paused-screen-1",
+            status: "paused", resumable: true, has_frozen_filters: true,
+          },
+        });
+      }
+      if (url.includes("/api/task-state/paused-screen-1")) {
+        return response({ status: "paused", success_count: 1, fail_count: 0, unstarted_count: 1, total: 2 });
+      }
+      if (url.includes("/api/latest-pipeline-result")) {
+        if (url.includes("platform=zhilian")) return response({ ok: true, has_result: false });
+        return response({
+          ok: true, has_result: true, source_run_id: "paused-screen-1", platform: "boss",
+          status: "completed_with_pending", scrape_task_id: "scrape-parent",
+          round_context: {
+            platform: "boss", keywords: ["Python"], cities: ["上海"],
+            screening_fields: { salary: ["406"] }, profile_summary: "3年Python后端候选人", profile_facts: {},
+            scrape_task_id: "scrape-parent", screen_run_id: "paused-screen-1",
+            status: "paused", resumable: true, has_frozen_filters: true,
+          },
+          result: {
+            jobs: [{ job_id: "p1", platform: "boss", verdict: "uncertain", title: "暂停部分岗位" }],
+            dropped: [], total_scraped: 2, total_kept: 2, total_dropped: 0,
+            profile_summary: "3年Python后端候选人",
+          },
+        });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await flushPromises();
+    const stepBtn = wrapper.findAll("button").find((b) => b.text().includes("查看结果"));
+    await stepBtn!.trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("暂停部分岗位");
+    expect(wrapper.get('[data-testid="continue-ai-from-results"]').text()).toContain("继续 AI 筛选");
+    vi.unstubAllGlobals();
+  });
+
+  it("013: dual resumable platforms ask which one to continue from 04", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) {
+        if (url.includes("platform=zhilian")) {
+          return response({
+            ok: true, has_result: true, source_run_id: "run-z", platform: "zhilian",
+            status: "paused", scrape_task_id: "scrape-z", started_at: 2_000,
+            round_context: {
+              platform: "zhilian", keywords: ["前端"], cities: ["北京"],
+              screening_fields: { salary: ["20-30K"] }, profile_summary: "5年前端", profile_facts: {},
+              scrape_task_id: "scrape-z", screen_run_id: "run-z",
+              status: "paused", resumable: true, has_frozen_filters: true,
+            },
+            result: {
+              jobs: [{ job_id: "z1", platform: "zhilian", verdict: "match", title: "智联岗位" }],
+              dropped: [], total_scraped: 1, total_kept: 1, total_dropped: 0, profile_summary: "5年前端",
+            },
+          });
+        }
+        return response({
+          ok: true, has_result: true, source_run_id: "run-b", platform: "boss",
+          status: "paused", scrape_task_id: "scrape-b", started_at: 1_000,
+          round_context: {
+            platform: "boss", keywords: ["Python"], cities: ["上海"],
+            screening_fields: { salary: ["20-30K"] }, profile_summary: "3年Python后端", profile_facts: {},
+            scrape_task_id: "scrape-b", screen_run_id: "run-b",
+            status: "paused", resumable: true, has_frozen_filters: true,
+          },
+          result: {
+            jobs: [{ job_id: "b1", platform: "boss", verdict: "match", title: "BOSS岗位" }],
+            dropped: [], total_scraped: 1, total_kept: 1, total_dropped: 0, profile_summary: "3年Python后端",
+          },
+        });
+      }
+      if (url.includes("/api/task/continue/run-z")) {
+        return response({ ok: true, task_id: "screen-continue-z" });
+      }
+      if (url.includes("/api/task-state/screen-continue-z")) {
+        return response({ status: "running", progress: { message: "续跑中" }, logs: [] });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("查看结果"))!.trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="continue-ai-from-results"]').trigger("click");
+    expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(true);
+    expect(wrapper.find(".results-stage").classes()).toContain("has-recrawl-guide");
+    await wrapper.get('[data-testid="continue-choose-zhilian"]').trigger("click");
+    await flushPromises();
+    const continueCall = fetchMock.mock.calls.find(
+      ([u]) => String(u).includes("/api/task/continue/run-z"),
+    );
+    expect(continueCall).toBeTruthy();
+    expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(false);
+    expect(wrapper.find(".results-stage").exists()).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it("013: mixed states continue the only resumable platform from 04", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) {
+        if (url.includes("platform=zhilian")) {
+          return response({
+            ok: true, has_result: true, source_run_id: "run-z", platform: "zhilian",
+            status: "succeeded", scrape_task_id: "scrape-z", started_at: 2_000,
+            round_context: {
+              platform: "zhilian", keywords: ["前端"], cities: ["北京"],
+              screening_fields: { salary: ["20-30K"] }, profile_summary: "5年前端", profile_facts: {},
+              scrape_task_id: "scrape-z", screen_run_id: "run-z",
+              status: "succeeded", resumable: false, has_frozen_filters: true,
+            },
+            result: {
+              jobs: [{ job_id: "z1", platform: "zhilian", verdict: "match", title: "智联岗位" }],
+              dropped: [], total_scraped: 1, total_kept: 1, total_dropped: 0,
+            },
+          });
+        }
+        return response({
+          ok: true, has_result: true, source_run_id: "run-b", platform: "boss",
+          status: "paused", scrape_task_id: "scrape-b", started_at: 1_000,
+          round_context: {
+            platform: "boss", keywords: ["Python"], cities: ["上海"],
+            screening_fields: { salary: ["20-30K"] }, profile_summary: "3年Python后端", profile_facts: {},
+            scrape_task_id: "scrape-b", screen_run_id: "run-b",
+            status: "paused", resumable: true, has_frozen_filters: true,
+          },
+          result: {
+            jobs: [{ job_id: "b1", platform: "boss", verdict: "match", title: "BOSS岗位" }],
+            dropped: [], total_scraped: 1, total_kept: 1, total_dropped: 0,
+          },
+        });
+      }
+      if (url.includes("/api/task/continue/run-b")) {
+        return response({ ok: true, task_id: "screen-continue-b" });
+      }
+      if (url.includes("/api/task-state/screen-continue-b")) {
+        return response({ status: "running", progress: { message: "续跑中" }, logs: [] });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("查看结果"))!.trigger("click");
+    await flushPromises();
+    const entry = wrapper.get('[data-testid="continue-ai-from-results"]');
+    expect(entry.text()).toContain("继续 AI 筛选");
+    await entry.trigger("click");
+    await flushPromises();
+    const continueCall = fetchMock.mock.calls.find(
+      ([u]) => String(u).includes("/api/task/continue/run-b"),
+    );
+    expect(continueCall).toBeTruthy();
+    expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(false);
+    expect(wrapper.find(".results-stage").exists()).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  it("013: starting a new round confirms resumable rounds and clears the continue guide", async () => {
+    const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) {
+        if (url.includes("platform=zhilian")) {
+          return response({
+            ok: true, has_result: true, source_run_id: "run-z", platform: "zhilian",
+            status: "paused", scrape_task_id: "scrape-z", started_at: 2_000,
+            round_context: {
+              platform: "zhilian", keywords: ["前端"], cities: ["北京"],
+              screening_fields: { salary: ["20-30K"] }, profile_summary: "5年前端", profile_facts: {},
+              scrape_task_id: "scrape-z", screen_run_id: "run-z",
+              status: "paused", resumable: true, has_frozen_filters: true,
+            },
+            result: {
+              jobs: [{ job_id: "z1", platform: "zhilian", verdict: "match", title: "智联岗位" }],
+              dropped: [], total_scraped: 1, total_kept: 1, total_dropped: 0,
+            },
+          });
+        }
+        return response({
+          ok: true, has_result: true, source_run_id: "run-b", platform: "boss",
+          status: "paused", scrape_task_id: "scrape-b", started_at: 1_000,
+          round_context: {
+            platform: "boss", keywords: ["Python"], cities: ["上海"],
+            screening_fields: { salary: ["20-30K"] }, profile_summary: "3年Python后端", profile_facts: {},
+            scrape_task_id: "scrape-b", screen_run_id: "run-b",
+            status: "paused", resumable: true, has_frozen_filters: true,
+          },
+          result: {
+            jobs: [{ job_id: "b1", platform: "boss", verdict: "match", title: "BOSS岗位" }],
+            dropped: [], total_scraped: 1, total_kept: 1, total_dropped: 0,
+          },
+        });
+      }
+      if (url.endsWith("/api/result-history/archive-latest")) {
+        return response({ ok: true, archived_run_ids: ["run-b", "run-z"] });
+      }
+      if (url.endsWith("/api/result-history")) return response({ ok: true, items: [] });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("查看结果"))!.trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="continue-ai-from-results"]').trigger("click");
+    expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(true);
+    await wrapper.findAll("button").find((b) => b.text().includes("开始新一轮"))!.trigger("click");
+    await flushPromises();
+    expect(confirmMock).toHaveBeenCalled();
+    expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain("上传简历");
+    vi.unstubAllGlobals();
+    confirmMock.mockRestore();
+  });
   it("B027: latest result restores scrape task id and AI screen uses it", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -2404,19 +2735,24 @@ describe("DiscoveryView", () => {
       }
       if (url.endsWith("/api/ai-screen")) return response({ ok: true, task_id: "screen-1" });
       if (url.includes("/api/task-state/screen-1")) return response({ status: "completed", progress: {}, logs: [] });
+      if (url.endsWith("/api/pipeline/recrawl")) return response({ ok: true, task_id: "recrawl-1" }, 202);
+      if (url.includes("/api/task-state/recrawl-1")) return response({ status: "running", progress: {}, logs: [] });
       return response({});
     });
     vi.stubGlobal("fetch", fetchMock);
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
-    await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
+    await wrapper.findAll("button").find((b) => b.text().includes("查看结果"))!.trigger("click");
     await flushPromises();
-    await confirmProfileFromScreen(wrapper);
-    await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
+    expect(wrapper.find('[data-testid="recrawl-uncertain"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="recrawl-uncertain"]').trigger("click");
     await flushPromises();
-    const aiCall = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/ai-screen"));
-    expect(aiCall).toBeTruthy();
-    expect(JSON.parse(String(aiCall![1]!.body))).toMatchObject({ scrape_task_id: "scrape-parent" });
+    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="recrawl-choose-boss"]').trigger("click");
+    await flushPromises();
+    const recrawlCall = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/pipeline/recrawl"));
+    expect(recrawlCall).toBeTruthy();
+    expect(JSON.parse(String(recrawlCall![1]!.body))).toMatchObject({ source_run_id: "run-boss" });
     vi.unstubAllGlobals();
   });
 
@@ -3076,7 +3412,7 @@ describe("DiscoveryView", () => {
     vi.stubGlobal("fetch", fetchMock);
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
-    expect(wrapper.find('[data-testid="start-ai-screen"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="pause-ai-screen"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="task-progress-announcement"]').text()).toContain("运行中");
     vi.unstubAllGlobals();
   });

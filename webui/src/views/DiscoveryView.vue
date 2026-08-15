@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type Ref } from "vue";
 import {
   Bookmark,
   Check,
@@ -25,9 +25,14 @@ import HistoryRoundProfile from "../components/HistoryRoundProfile.vue";
 import ResultHistoryDrawer from "../components/ResultHistoryDrawer.vue";
 import OneClickScreenDialog, { type OneClickFilterGroup } from "../components/OneClickScreenDialog.vue";
 import StepNavigator from "../components/StepNavigator.vue";
+import ContinuePlatformGuide from "../components/ContinuePlatformGuide.vue";
+import ScreenRoundActions from "../components/ScreenRoundActions.vue";
+import ScreenRecrawlProgress from "../components/ScreenRecrawlProgress.vue";
 import TaskProgress from "../components/TaskProgress.vue";
 import { ApiError, apiRequest, errorMessage, settingsApi, userFacingMessage } from "../api";
 import { setThemePlatform } from "../composables/useTheme";
+import { useScreenRoundFlow } from "../composables/useScreenRoundFlow";
+import { withoutRecrawl } from "../screenFlow";
 import {
   buildSearchScriptParams,
   createCityCatalogLoader,
@@ -55,6 +60,8 @@ import type {
   Platform,
   PlatformCityCatalog,
   PlatformFilterSchema,
+  RoundContext,
+  TaskSnapshot as ApiTaskSnapshot,
 } from "../types";
 
 type StepId = "upload" | "search" | "screen" | "results";
@@ -536,6 +543,41 @@ const uncertainByPlatform = computed(() => {
     zhilian: jobs.filter((job) => job.platform === "zhilian").length,
   };
 });
+const roundFlow = reactive(useScreenRoundFlow({
+  refs: {
+    filterValues,
+    keywords,
+    selectedKeywords,
+    cityText,
+    profileSummary,
+    profileFacts,
+    profileConfirmed,
+    scrapeTaskId,
+    screenTaskId,
+    pausedRunId,
+    interruptedRunId,
+    screenBusy,
+    screenSnapshot: screenSnapshot as unknown as Ref<ApiTaskSnapshot | null>,
+    recrawlBusy,
+    recrawlTaskId,
+    recrawlSnapshot: recrawlSnapshot as unknown as Ref<ApiTaskSnapshot | null>,
+    finishedPartial,
+    activeStep,
+    currentRoundStatus,
+    resultPlatformFilter,
+    uncertainCount: computed(() => groups.value.uncertain.length),
+  },
+  api: {
+    startAiScreen: flowStartAiScreen,
+    continueAiScreen,
+    recrawlUncertain,
+    continueRecrawl,
+    finishPausedTask,
+    resetWorkflow,
+    loadLatestResult,
+    notify,
+  },
+}));
 const resultTabs = computed(() => {
   if (isScrapedOnly.value) {
     // B038：未筛选轮只展示单"待筛选"列表，不经过 verdict 分类。
@@ -567,7 +609,7 @@ onMounted(() => {
   void loadFilterLabels();
   void loadCityCatalog();
   void restoreRunningTask().finally(() => {
-    if (!pausedRunId.value && !scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
+    if (!scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
       void loadLatestResult();
     }
   });
@@ -603,6 +645,7 @@ async function restoreRunningTask() {
       profile_facts?: Record<string, unknown>;
       auto_screen?: boolean;
       auto_screen_fields?: Record<string, unknown>;
+      round_context?: Partial<RoundContext> | null;
     }>("/api/latest-running-task");
     if (!data.has_task || !data.task_id) return;
     // T509：先设置任务自身平台，再加载对应 schema/城市（platform-schema.md L157）。
@@ -703,6 +746,7 @@ async function restoreRunningTask() {
       profileSummary.value = data.profile_summary || "";
       profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
         ? (data.profile_facts as Record<string, unknown>) : {};
+      if (data.round_context) roundFlow.restoreRoundContext(data.round_context);
       return;
     }
     // 切片7：paused 状态从 DB 恢复（无内存工作线程，不能 poll）
@@ -765,6 +809,7 @@ async function restoreRunningTask() {
         profileSummary.value = data.profile_summary || "";
       profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
         ? (data.profile_facts as Record<string, unknown>) : {};
+        if (data.round_context) roundFlow.restoreRoundContext(data.round_context);
       } else {
         recrawlTaskId.value = data.task_id;
         resultLoaded.value = true;
@@ -1248,6 +1293,7 @@ function handleProfileBlur() {
 }
 
 watch(profileSummary, () => {
+  if (roundFlow.suppressProfileWatch) return;
   profileConfirmed.value = false;
 });
 
@@ -1282,18 +1328,13 @@ function handleStartScrapeClick() {
   }
   void startScrape();
 }
-
-function handleStartAiScreenClick() {
-  if (screenBusy.value) {
-    void cancelAiScreen();
-    return;
-  }
+async function flowStartAiScreen(opts?: AiScreenLaunch) {
   if (!validateProfileForScreen()) {
     notify("求职画像至少 10 个字（不含首尾空格）", "warning");
     return;
   }
   if (!requireProfileConfirmed()) return;
-  void startAiScreen();
+  await startAiScreen(opts);
 }
 
 function openOneClick() {
@@ -1453,14 +1494,6 @@ interface AiScreenLaunch {
  fields?: Record<string, string[]>;
  profile?: string;
 }
-
-
-// 结束并保存结果后的“继续 AI 筛选”：先进入筛选步骤，再真正发起续跑/新筛选。
-function continueAiAfterFinish() {
-  enterScreenStep();
-  void startAiScreen();
-}
-
 async function startAiScreen(options: AiScreenLaunch = {}) {
   if (historyMode.value) {
     notify("历史轮次不可改写，请先回到最新", "warning");
@@ -1494,7 +1527,9 @@ async function startAiScreen(options: AiScreenLaunch = {}) {
   screenBusy.value = true;
   pausedRunId.value = ""; // 切片7：清掉 DB paused 标记，进入内存工作模式
   interruptedRunId.value = "";
+  finishedPartial.value = false;
   restoredTaskHint.value = "";
+  roundFlow.clearRoundContext();
   screenSnapshot.value = { status: "running", progress: { message: "正在创建 AI 筛选任务…" }, logs: [] };
   try {
     const data = await apiRequest<{ task_id: string; resuming?: boolean }>("/api/ai-screen", {
@@ -1523,16 +1558,27 @@ async function startAiScreen(options: AiScreenLaunch = {}) {
   }
 }
 
-async function continueAiScreen() {
+async function continueAiScreen(platform?: Platform) {
   if (historyMode.value) return;
-  const runId = pausedRunId.value || screenTaskId.value;
+  const ctx = platform ? roundFlow.roundContexts[platform] : roundFlow.roundContext;
+  const status = String(ctx?.status || screenSnapshot.value?.status || "");
+  const isPausedResume = status === "paused" || (!status && Boolean(pausedRunId.value));
+  activeStep.value = "screen";
+  if (!isPausedResume) {
+    await startAiScreen({
+      fields: ctx?.screening_fields || filterValues.value[draftPlatform.value],
+      profile: ctx?.profile_summary || profileSummary.value,
+    });
+    return;
+  }
+  const runId = pausedRunId.value || ctx?.screen_run_id || screenTaskId.value;
   if (!runId || screenBusy.value) return;
   screenBusy.value = true;
+  finishedPartial.value = false;
   restoredTaskHint.value = "";
+  roundFlow.clearRoundContext();
   interruptedRunId.value = "";
-  screenSnapshot.value = {
-    status: "running", progress: { message: "正在从 AI 断点继续…" }, logs: [],
-  };
+  screenSnapshot.value = { status: "running", progress: { message: "正在从 AI 断点继续…" }, logs: [] };
   try {
     const data = await apiRequest<{ task_id: string }>(
       `/api/task/continue/${encodeURIComponent(runId)}`,
@@ -1550,29 +1596,6 @@ async function continueAiScreen() {
     };
   }
 }
-
-async function cancelAiScreen() {
-  if (!screenTaskId.value) return;
-  // 先停轮询，避免取消后还去拿旧状态
-  if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = undefined; }
-  try {
-    await apiRequest(`/api/task/cancel/${encodeURIComponent(screenTaskId.value)}`, {
-      method: "POST",
-    });
-    // 后端会标 cancelled；这里直接复位，不等下一次轮询
-    screenBusy.value = false;
-    autoScreenArmed.value = false;
-    restoredTaskHint.value = "";
-    interruptedRunId.value = "";
-    screenSnapshot.value = { status: "cancelled", progress: { message: "已停止筛选" }, logs: [], error: "" };
-    notify("已停止筛选", "warning");
-  } catch (error) {
-    // 取消接口失败时不要卡死：恢复轮询让前端看真实状态
-    notify(errorMessage(error, "停止失败，请重试"), "error");
-    await pollTask(screenTaskId.value, "screen");
-  }
-}
-
 // 切片7：统一取消 paused 任务（FR-024）。
 async function cancelPausedTask(runId: string) {
   if (!runId) return;
@@ -1632,12 +1655,19 @@ async function finishPausedTask(runId: string) {
       if (data.snapshot_run_id) pipelineResultRunId.value = data.snapshot_run_id;
       // 保存结果后恢复画像，保证“继续 AI 筛选”能真正发起而不被画像校验拦下。
       const savedProfile = (result as Record<string, unknown>).profile_summary;
-      if (typeof savedProfile === "string" && savedProfile.trim()) {
-        profileSummary.value = savedProfile;
-      }
-      const savedFacts = (result as Record<string, unknown>).profile_facts;
-      if (savedFacts && typeof savedFacts === "object") {
-        profileFacts.value = savedFacts as Record<string, unknown>;
+      roundFlow.suppressProfileWatch = true;
+      try {
+        if (typeof savedProfile === "string" && savedProfile.trim()) {
+          profileSummary.value = savedProfile;
+        }
+        const savedFacts = (result as Record<string, unknown>).profile_facts;
+        if (savedFacts && typeof savedFacts === "object") {
+          profileFacts.value = savedFacts as Record<string, unknown>;
+        }
+        await nextTick();
+        profileConfirmed.value = true;
+      } finally {
+        roundFlow.suppressProfileWatch = false;
       }
     }
     scrapeCompleted.value = true;
@@ -1771,6 +1801,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       pollRetryCount = 0;
       if (kind === "scrape") scrapeBusy.value = false;
       else screenBusy.value = false;
+      if (kind === "screen") void loadLatestResult();
       notify(data.error || "任务已暂停，请处理后点继续", "warning");
       return;
     }
@@ -1872,7 +1903,7 @@ function setPipelineResult(result: PipelineResult) {
 }
 
 async function loadLatestResult() {
-  if (pausedRunId.value || interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
+  if (interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
   const fetched = await fetchMergedLatestResult();
   if (!fetched) return;
   const { merged, newer } = fetched;
@@ -1886,6 +1917,8 @@ async function loadLatestResult() {
   if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
   const pfacts = (newer.data.result as Record<string, unknown>).profile_facts;
   if (pfacts && typeof pfacts === "object") profileFacts.value = pfacts as Record<string, unknown>;
+  if (newer.data.round_context) roundFlow.restoreRoundContext(newer.data.round_context);
+  if (pausedRunId.value) return;
   const snapshotStatus = newer.data.status === "completed_with_pending" ? "completed_with_pending" : "completed";
   scrapeSnapshot.value = {
     status: snapshotStatus, stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
@@ -1929,6 +1962,7 @@ interface MergedLatestResult {
       execution_config?: Record<string, unknown> | null;
       result?: PipelineResult | null;
       scrape_task_id?: string;
+      round_context?: Partial<RoundContext> | null;
     };
   };
 }
@@ -1946,9 +1980,10 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
       finished_at?: number;
       execution_config?: Record<string, unknown> | null;
       scrape_task_id?: string;
+      round_context?: Partial<RoundContext> | null;
     }>(`/api/latest-pipeline-result?platform=${platform}${base}`).catch(() => null);
     const [bossData, zhilianData] = await Promise.all([fetchOne("boss"), fetchOne("zhilian")]);
-    if (pausedRunId.value || interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return null;
+    if (interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return null;
 
     const parts = [
       bossData?.has_result && bossData.result ? { platform: "boss" as const, data: bossData } : null,
@@ -1959,6 +1994,7 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
     // 每个岗位标记来源 run（单岗位补抓/单 JD 动作需要定位来源）。
     for (const part of parts) {
       resultRunIds.value[part.platform] = part.data.source_run_id || "";
+      roundFlow.registerRoundContext(part.platform, part.data.round_context);
       const runId = part.data.source_run_id || "";
       for (const list of [part.data.result?.jobs, part.data.result?.dropped]) {
         if (!Array.isArray(list)) continue;
@@ -2184,6 +2220,7 @@ async function resetWorkflow() {
   resultPlatformFilter.value = "all";
   finishedPartial.value = false;
   recrawlPlatformGuide.value = null;
+  roundFlow.clearRoundContext();
   resultRunIds.value = { boss: "", zhilian: "" };
   activeCategory.value = "matched";
   rejectedIds.value = new Set();
@@ -2412,7 +2449,7 @@ async function recrawlUncertain(platformOverride?: "boss" | "zhilian") {
 function chooseRecrawlPlatform(platform: "boss" | "zhilian") {
   recrawlPlatformGuide.value = null;
   resultPlatformFilter.value = platform;
-  void recrawlUncertain(platform);
+  void roundFlow.startRecrawl(platform);
 }
 
 async function continueRecrawl() {
@@ -2459,6 +2496,7 @@ async function pollRecrawl(taskId: string) {
           : "待确认岗位已重抓完成",
         data.status === "completed_with_pending" ? "warning" : "success",
       );
+      activeStep.value = "results";
       window.setTimeout(() => { recrawlSnapshot.value = null; }, 3000);
       return;
     }
@@ -2681,7 +2719,7 @@ watch(roundStatusPayload, (payload) => {
           >
             <Download :size="17" aria-hidden="true" />{{ exportBusy ? "导出中…" : "导出 CSV" }}
           </button>
-          <button class="button secondary" type="button" @click="resetWorkflow">
+          <button class="button secondary" type="button" @click="roundFlow.confirmNewRound()">
             <RotateCcw :size="17" aria-hidden="true" />开始新一轮
           </button>
         </div>
@@ -2945,12 +2983,6 @@ watch(roundStatusPayload, (payload) => {
           <button v-if="scrapeCompleted && !resultLoaded && !screenBusy" class="button primary" type="button" data-testid="view-scraped-only" @click="viewScrapedOnly">
             直接查看结果
           </button>
-          <button v-if="finishedPartial" class="button secondary" type="button" data-testid="view-partial-results" @click="activeStep = 'results'">
-            查看结果
-          </button>
-          <button v-if="finishedPartial" class="button primary" type="button" data-testid="continue-ai-after-finish" @click="continueAiAfterFinish()">
-            继续 AI 筛选
-          </button>
           </div>
         </div>
       </section>
@@ -2968,35 +3000,19 @@ watch(roundStatusPayload, (payload) => {
           </template>
           <template #actions>
             <div class="workflow-actions screen-card-actions">
-              <button class="button primary" type="button" data-testid="start-ai-screen" :disabled="draftPlatformDisabled || (!screenBusy && !scrapeCompleted)" @click="handleStartAiScreenClick">
-                <Square v-if="screenBusy" :size="15" aria-hidden="true" />
-                <Sparkles v-else :size="15" aria-hidden="true" />{{ screenBusy ? "停止筛选" : "开始 AI 筛选" }}
-              </button>
-              <button v-if="interruptedRunId" class="button danger" type="button" data-testid="finish-interrupted-screen" @click="finishPausedTask(interruptedRunId)">
-                结束并保存结果
-              </button>
-              <button v-if="screenSnapshot && (screenSnapshot.status === 'failed' || screenSnapshot.status === 'running') && screenTaskId"
-                      class="button danger" type="button" data-testid="finish-active-screen"
-                      @click="finishPausedTask(screenTaskId)">
-                结束并保存结果
-              </button>
-              <button v-if="finishedPartial" class="button secondary" type="button" data-testid="view-partial-results-screen" @click="activeStep = 'results'">查看结果</button>
-              <button v-if="finishedPartial" class="button primary" type="button" data-testid="continue-ai-after-finish-screen" @click="continueAiAfterFinish()">继续 AI 筛选</button>
-              <button v-if="screenSnapshot && screenSnapshot.status === 'paused'"
-                      class="button secondary" type="button" data-testid="resume-ai-screen"
-                      :disabled="screenBusy" @click="continueAiScreen()">
-                继续
-              </button>
-              <button v-if="screenSnapshot && screenSnapshot.status === 'paused' && pausedRunId"
-                      class="button danger" type="button" data-testid="cancel-paused-screen"
-                      @click="cancelPausedTask(pausedRunId)">
-                取消任务
-              </button>
-              <button v-if="screenSnapshot && screenSnapshot.status === 'paused' && (pausedRunId || screenTaskId)"
-                      class="button danger" type="button" data-testid="finish-paused-screen"
-                      @click="finishPausedTask(pausedRunId || screenTaskId)">
-                结束并保存结果
-              </button>
+              <ScreenRoundActions
+                :action="withoutRecrawl(roundFlow.screenAction)"
+                :busy="Boolean(roundFlow.busyAction)"
+                :busy-label="roundFlow.busyAction === 'pause' ? '正在暂停…' : roundFlow.busyAction === 'continue' ? '正在继续…' : ''"
+                :disabled="roundFlow.screenAction.kind === 'start' && (draftPlatformDisabled || !scrapeCompleted)"
+                :show-view-results="roundFlow.screenAction.kind === 'continue' && (roundFlow.screenStatus === 'paused' || (roundFlow.screenStatus === 'interrupted' && finishedPartial))"
+                :show-finish-save="roundFlow.screenAction.kind === 'continue' && (roundFlow.screenStatus === 'failed' || (roundFlow.screenStatus === 'interrupted' && !finishedPartial))"
+                @pause="roundFlow.pauseScreen()"
+                @continue="roundFlow.continueScreen()"
+                @start="roundFlow.startScreen()"
+                @view-results="activeStep = 'results'"
+                @finish-save="finishPausedTask(screenTaskId || pausedRunId)"
+              />
             </div>
           </template>
           <div class="filter-groups">
@@ -3008,7 +3024,7 @@ watch(roundStatusPayload, (payload) => {
                   class="choice-chip"
                   :class="{ selected: !(filterValues[draftPlatform][group.key] || []).length }"
                   type="button"
-                  :disabled="screenBusy"
+                  :disabled="Boolean(screenBusy || screenTaskId || pausedRunId || interruptedRunId || finishedPartial)"
                   :aria-pressed="!(filterValues[draftPlatform][group.key] || []).length"
                   @click="filterValues[draftPlatform][group.key] = []"
                 >{{ group.sentinel.label }}</button>
@@ -3018,7 +3034,7 @@ watch(roundStatusPayload, (payload) => {
                   class="choice-chip"
                   :class="{ selected: (filterValues[draftPlatform][group.key] || []).includes(code) }"
                   type="button"
-                  :disabled="screenBusy"
+                  :disabled="Boolean(screenBusy || screenTaskId || pausedRunId || interruptedRunId || finishedPartial)"
                   :aria-pressed="(filterValues[draftPlatform][group.key] || []).includes(code)"
                   @click="toggleFilter(group.key, code)"
                 >{{ label }}</button>
@@ -3028,6 +3044,7 @@ watch(roundStatusPayload, (payload) => {
         </CollapsibleCard>
 
         <TaskProgress :snapshot="screenSnapshot" kind="screen" :task-id="screenTaskId" />
+        <ScreenRecrawlProgress v-if="recrawlSnapshot || recrawlBusy" :snapshot="recrawlSnapshot" :task-id="recrawlTaskId" :action="roundFlow.recrawlAction" :busy="Boolean(roundFlow.busyAction)" :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''" :show-view-results="roundFlow.recrawlAction.kind === 'continue-recrawl' && roundFlow.recrawlStatus === 'paused'" :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || (roundFlow.recrawlAction.kind === 'continue-recrawl' && roundFlow.recrawlStatus !== 'paused')" @pause-recrawl="roundFlow.pauseRecrawl()" @continue-recrawl="roundFlow.continueRecrawl()" @finish-save="roundFlow.finishRecrawl()" @view-results="activeStep = 'results'" />
       </section>
 
       <section
@@ -3035,7 +3052,7 @@ watch(roundStatusPayload, (payload) => {
         class="results-stage"
         :class="{
           'has-recrawl-banner': activeCategory === 'uncertain' && recrawlSnapshot,
-          'has-recrawl-guide': activeCategory === 'uncertain' && recrawlPlatformGuide,
+          'has-recrawl-guide': Boolean(roundFlow.continueGuide) || (activeCategory === 'uncertain' && recrawlPlatformGuide),
         }"
       >
         <div class="command-band">
@@ -3054,9 +3071,13 @@ watch(roundStatusPayload, (payload) => {
             ><span class="vtab-dot" aria-hidden="true"></span>{{ tab.label }}<span class="vtab-count">{{ tab.count }}</span></button>
           </div>
           <span v-if="!isScrapedOnly" class="command-note" aria-hidden="true">判定依据：你的简历关键词 · 两阶段判断</span>
-          <button v-if="!historyMode && scrapeTaskId" class="button secondary small" type="button" data-testid="continue-ai-from-results" @click="enterScreenStep()">继续 AI 筛选</button>
+          <button v-if="!historyMode && scrapeTaskId && (roundFlow.screenAction.kind === 'continue' || roundFlow.screenAction.kind === 'start')"
+                  class="button secondary small" type="button" data-testid="continue-ai-from-results"
+                  @click="roundFlow.screenAction.kind === 'continue' ? roundFlow.continueScreen() : roundFlow.startScreen()">
+            {{ roundFlow.screenAction.label }}
+          </button>
         </div>
-
+        <ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide" :guide="roundFlow.continueGuide" @choose="roundFlow.chooseContinuePlatform" @cancel="roundFlow.cancelContinueGuide" />
         <div v-if="!historyMode && activeCategory === 'uncertain' && recrawlPlatformGuide" class="recrawl-guide" data-testid="recrawl-platform-guide" role="dialog" aria-label="选择重抓平台">
           <p class="recrawl-guide-title">选择要重抓的平台</p>
           <p class="recrawl-guide-counts">BOSS {{ recrawlPlatformGuide.boss }} · 智联 {{ recrawlPlatformGuide.zhilian }}</p>
@@ -3066,29 +3087,6 @@ watch(roundStatusPayload, (payload) => {
             <button type="button" class="button danger small" data-testid="recrawl-guide-cancel" @click="recrawlPlatformGuide = null">取消</button>
           </div>
         </div>
-
-        <div v-if="!historyMode && activeCategory === 'uncertain' && (recrawlSnapshot || interruptedRunId)" class="recrawl-banner">
-          <TaskProgress :snapshot="recrawlSnapshot" kind="screen" :task-id="recrawlTaskId" />
-          <button v-if="recrawlSnapshot && recrawlSnapshot.status === 'paused'"
-                  class="button primary" type="button" data-testid="resume-recrawl"
-                  :disabled="recrawlBusy" @click="continueRecrawl()">
-            继续
-          </button>
-          <button v-if="recrawlSnapshot && recrawlSnapshot.status === 'paused'"
-                  class="button danger" type="button" data-testid="finish-paused-recrawl"
-                  :disabled="recrawlBusy" @click="finishPausedTask(recrawlTaskId || pausedRunId)">
-            结束并保存结果
-          </button>
-          <button v-if="recrawlSnapshot && (recrawlSnapshot.status === 'running' || recrawlSnapshot.status === 'failed') && (recrawlTaskId || pausedRunId)"
-                  class="button danger" type="button" data-testid="finish-active-recrawl"
-                  :disabled="recrawlBusy" @click="finishPausedTask(recrawlTaskId || pausedRunId)">
-            结束并保存结果
-          </button>
-          <button v-if="interruptedRunId" class="button danger" type="button" data-testid="finish-interrupted-recrawl" @click="finishPausedTask(interruptedRunId)">
-            结束并保存结果
-          </button>
-        </div>
-
         <JobWorkspace
           :jobs="currentJobs"
           :empty-message="currentEmptyMessage"
@@ -3104,7 +3102,7 @@ watch(roundStatusPayload, (payload) => {
                 type="button"
                 data-testid="recrawl-uncertain"
                 :disabled="recrawlBusy || !groups.uncertain.length"
-                @click="recrawlUncertain()"
+                @click="roundFlow.startRecrawl(resultPlatformFilter === 'all' ? undefined : resultPlatformFilter)"
               >
                 <RotateCcw v-if="!recrawlBusy" :size="14" aria-hidden="true" />
                 <LoaderCircle v-else class="spin" :size="14" aria-hidden="true" />
