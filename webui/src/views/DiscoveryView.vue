@@ -58,6 +58,7 @@ import type {
   ExecutionSettings,
   FrozenSearchScope,
   JobItem,
+  LocationCondition,
   Notice,
   Platform,
   PlatformCityCatalog,
@@ -705,6 +706,7 @@ async function restoreRunningTask() {
         ? (data.profile_facts as Record<string, unknown>) : {};
       enterScreenStep();
       restoredTaskHint.value = "检测到一键任务已抓取完成，正在自动接续 AI 筛选";
+      if (data.round_context) restoreLocationsFromContext(data.round_context);
       void startAiScreen({ consumeAutoScreen: true, fields: drafts, profile: profileSummary.value });
       return;
     }
@@ -713,6 +715,16 @@ async function restoreRunningTask() {
       scrapeCompleted.value = true;
       analysisReady.value = true;
       activeStep.value = "search";
+      profileSummary.value = data.profile_summary || "";
+      profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
+        ? (data.profile_facts as Record<string, unknown>) : {};
+      scrapeSnapshot.value = {
+        ...snapshot,
+        scraped_count: data.scraped_count,
+        source_total: data.source_total,
+      };
+      if (data.round_context) roundFlow.restoreRoundContext(data.round_context);
+      if (data.round_context) restoreLocationsFromContext(data.round_context);
       restoredTaskHint.value = "检测到已完成的抓取任务，正在恢复结果";
       await loadLatestResult();
       await saveScrapedOnlySnapshot();
@@ -731,6 +743,7 @@ async function restoreRunningTask() {
           scraped_count: data.scraped_count,
           source_total: data.source_total,
         };
+        if (data.round_context) restoreLocationsFromContext(data.round_context);
         return;
       }
       if (data.kind === "recrawl") {
@@ -764,6 +777,7 @@ async function restoreRunningTask() {
       profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
         ? (data.profile_facts as Record<string, unknown>) : {};
       if (data.round_context) roundFlow.restoreRoundContext(data.round_context);
+      restoreLocationsFromContext(data.round_context);
       return;
     }
     // 切片7：paused 状态从 DB 恢复（无内存工作线程，不能 poll）
@@ -777,6 +791,7 @@ async function restoreRunningTask() {
         source_total: data.source_total,
       };
       restoredTaskHint.value = "检测到失败的抓取任务；已抓数据已保存，可结束保存结果或重新开始抓取";
+      if (data.round_context) restoreLocationsFromContext(data.round_context);
       return;
     }
     if (data.status === "paused") {
@@ -806,6 +821,7 @@ async function restoreRunningTask() {
       profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
         ? (data.profile_facts as Record<string, unknown>) : {};
         autoScreenProfile.value = data.profile_summary || "";
+        if (data.round_context) restoreLocationsFromContext(data.round_context);
       } else if (kind === "screen") {
         scrapeTaskId.value = data.scrape_task_id || "";
         scrapeCompleted.value = Boolean(data.scrape_completed);
@@ -827,6 +843,7 @@ async function restoreRunningTask() {
       profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
         ? (data.profile_facts as Record<string, unknown>) : {};
         if (data.round_context) roundFlow.restoreRoundContext(data.round_context);
+        restoreLocationsFromContext(data.round_context);
       } else {
         recrawlTaskId.value = data.task_id;
         resultLoaded.value = true;
@@ -859,6 +876,7 @@ async function restoreRunningTask() {
       profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
         ? (data.profile_facts as Record<string, unknown>) : {};
       autoScreenProfile.value = restoredProfile;
+      if (data.round_context) restoreLocationsFromContext(data.round_context);
       void pollTask(data.task_id, "scrape");
     } else if (kind === "screen") {
       screenTaskId.value = data.task_id;
@@ -870,6 +888,7 @@ async function restoreRunningTask() {
       analysisReady.value = true;
       enterScreenStep();
       void pollTask(data.task_id, "screen");
+      if (data.round_context) restoreLocationsFromContext(data.round_context);
     } else {
       recrawlTaskId.value = data.task_id;
       recrawlBusy.value = true;
@@ -881,6 +900,20 @@ async function restoreRunningTask() {
       void pollRecrawl(data.task_id);
     }
   } catch { /* non-critical: 接不回就当没有 */ }
+}
+
+function restoreLocationsFromContext(ctx?: Partial<RoundContext> | null) {
+  if (!ctx?.locations?.length) return;
+  const grouped = new Map<string, LocationCondition[]>();
+  for (const loc of ctx.locations) {
+    if (!loc?.city_name) continue;
+    const list = grouped.get(loc.city_name) ?? [];
+    list.push(loc);
+    grouped.set(loc.city_name, list);
+  }
+  for (const [city, conditions] of grouped) {
+    locationDraft.setLocations(ctx.platform ?? draftPlatform.value, city, conditions);
+  }
 }
 
 const COMPLETED_TASK_STATUSES = new Set([
@@ -2336,6 +2369,7 @@ async function resetWorkflow() {
   customKeyword.value = "";
   cityText.value = "";
   customCity.value = "";
+  locationDraft.reset();
   // T506：重置两个平台的筛选草稿
   filterValues.value = { boss: {}, zhilian: {} };
   resumeAnalysis.value = null;

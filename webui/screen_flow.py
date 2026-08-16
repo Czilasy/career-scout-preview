@@ -81,6 +81,12 @@ def build_round_script_params(store, run, screening_fields, platform):
         parent_script_params = (parent.get("execution_params") or {}).get(
             "script_params"
         ) or {}
+    else:
+        parent_script_params = (run.get("execution_params") or {}).get(
+            "script_params"
+        ) or {}
+    if not isinstance(parent_script_params, dict):
+        parent_script_params = {}
     return merge_round_script_params(
         parent_script_params,
         screening_fields if screening_fields is not None else run.get("frozen_filters") or {},
@@ -194,6 +200,10 @@ def build_round_context_payload(store, run):
             "cities": _normalize_cities(
                 search.get("city") or search.get("cities")
             ),
+            "locations": (
+                search.get("locations")
+                if isinstance(search.get("locations"), list) else []
+            ),
             "screening_fields": screening or {},
             "profile_summary": str(
                 params.get("profile_summary") or source_run.get("profile_summary") or ""
@@ -223,6 +233,10 @@ def build_round_context_payload(store, run):
         "platform": platform,
         "keywords": _normalize_keywords(parent_script_params.get("keyword")),
         "cities": _normalize_cities(parent_script_params.get("city")),
+        "locations": (
+            parent_script_params.get("locations")
+            if isinstance(parent_script_params.get("locations"), list) else []
+        ),
         "screening_fields": source_run.get("frozen_filters") or {},
         "profile_summary": str(params.get("profile_summary") or ""),
         "profile_facts": params.get("profile_facts") or {},

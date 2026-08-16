@@ -235,6 +235,7 @@ export interface RoundContext {
   platform: Platform;
   keywords: string[];
   cities: string[];
+  locations?: LocationCondition[];
   screening_fields: Record<string, string[]>;
   profile_summary: string;
   profile_facts: Record<string, unknown>;

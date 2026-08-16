@@ -814,7 +814,11 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
                 (
                     run_id,
                     str(script_params.get("platform") or result.get("platform") or "boss"),
-                    json.dumps(script_params, ensure_ascii=False),
+                    json.dumps(
+                        script_params.get("screening")
+                        if isinstance(script_params.get("screening"), dict) else {},
+                        ensure_ascii=False,
+                    ),
                     str(status),
                     result.get("total_scraped", 0),
                     match_count,
@@ -1880,11 +1884,31 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
 
         幂等——若当前不是 deleted（或记录不存在）也不报错。
         """
+        # 从反馈历史恢复删除前的用户意图：已投递优先，其次最近一次未撤销的
+        # “感兴趣”，都没有则回退默认 'new'。
+        previous_status = "new"
+        try:
+            job = self.get_profile_job(profile_id, job_id)
+            if job.get("applied_at"):
+                previous_status = "applied"
+            else:
+                events = self.list_feedback(profile_id, job_id)
+                last_reject_idx = None
+                for idx, event in enumerate(events):
+                    if event["action"] == "not_interested" and not event.get("revoked_at"):
+                        last_reject_idx = idx
+                if last_reject_idx is not None:
+                    for event in reversed(events[:last_reject_idx]):
+                        if event["action"] == "interested" and not event.get("revoked_at"):
+                            previous_status = "interested"
+                            break
+        except KeyError:
+            previous_status = "new"
         with self._connection() as conn:
             conn.execute(
-                "UPDATE profile_jobs SET status = 'new' "
+                "UPDATE profile_jobs SET status = ? "
                 "WHERE profile_id = ? AND job_id = ? AND status = 'deleted'",
-                (str(profile_id), str(job_id)),
+                (previous_status, str(profile_id), str(job_id)),
             )
         try:
             return self.get_profile_job(profile_id, job_id)

@@ -1131,6 +1131,27 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         latest_running = self.client.get("/api/latest-running-task").get_json()
         self.assertFalse(latest_running["has_task"])
 
+    def test_finish_snapshot_preserves_parent_search_params(self):
+        run_id = self._seed_paused_ai_screen()
+        parent = self.store.get_screening_run("finish-scrape-src")
+        ep = dict(parent.get("execution_params") or {})
+        ep["script_params"] = {
+            "keyword": "Python",
+            "city": ["上海"],
+            "locations": [{
+                "platform": "boss", "city_name": "上海",
+                "district_name": "浦东新区", "district_code": "310115",
+            }],
+        }
+        self.store.update_screening_execution_params("finish-scrape-src", ep)
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        latest = self.client.get("/api/latest-pipeline-result").get_json()
+        sp = latest.get("script_params") or {}
+        self.assertEqual(sp.get("keyword"), "Python")
+        self.assertEqual(sp.get("city"), ["上海"])
+        self.assertEqual(sp.get("locations"), ep["script_params"]["locations"])
+
     def test_finish_restart_interrupted_ai_screen_saves_partial_snapshot(self):
         """服务重启中断的任务也能直接结束并保存部分结果，无需先重新开始。"""
         run_id = self._seed_paused_ai_screen()
@@ -1855,6 +1876,20 @@ class ScreenContinueFlowTests(unittest.TestCase):
         self.assertEqual(self.app.config["PIPELINE_TASKS"][task_id]["status"], "paused")
         events = self.store.list_task_events(task_id)
         self.assertTrue(any(event["type"] == "pause" for event in events))
+
+    def test_scrape_result_save_falls_back_to_parent_profile(self):
+        scrape_id = self._create_completed_scrape_run()
+        run = self.store.get_screening_run(scrape_id)
+        ep = dict(run.get("execution_params") or {})
+        ep["profile_summary"] = "测试画像"
+        ep["profile_facts"] = {"years": 3}
+        self.store.update_screening_execution_params(scrape_id, ep)
+        resp = self.client.post("/api/scrape-result-save", json={"task_id": scrape_id})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertTrue(resp.get_json().get("saved"))
+        latest = self.client.get("/api/latest-pipeline-result").get_json()
+        self.assertEqual((latest.get("result") or {}).get("profile_summary"), "测试画像")
+        self.assertEqual((latest.get("result") or {}).get("profile_facts"), {"years": 3})
 
 class ChromeAccountProfileSwitchTests(unittest.TestCase):
     """账号切换时，端口上旧账号的 Chrome 必须被替换而不是复用。"""
@@ -6516,7 +6551,33 @@ class Task008BackendIntegrationTests(unittest.TestCase):
         self.assertEqual(cancelled_reject.status_code, 200)
         self.assertEqual(cancelled_reject.get_json()["job_id"], zl_internal)
         self.assertEqual(self.store.get_profile_job(
-            self.profile_id, zl_internal)["status"], "new")
+            self.profile_id, zl_internal)["status"], "interested")
+
+    def test_cancel_reject_restores_previous_interest(self):
+        job = {
+            "platform": "boss",
+            "platform_job_id": "boss-pid-reject-restore",
+            "title": "Python 后端",
+            "company": "乙公司",
+            "job_link": "https://www.zhipin.com/job_detail/boss-pid-reject-restore.html",
+        }
+        marked = self.client.post("/api/pipeline/jobs/interest", json={
+            "profile_id": self.profile_id, "job": job,
+        })
+        self.assertEqual(marked.status_code, 200)
+        internal = marked.get_json()["job_id"]
+        rejected = self.client.post("/api/pipeline/jobs/reject", json={
+            "profile_id": self.profile_id, "job": job,
+        })
+        self.assertEqual(rejected.status_code, 200)
+        self.assertEqual(self.store.get_profile_job(
+            self.profile_id, internal)["status"], "deleted")
+        cancelled = self.client.post("/api/pipeline/jobs/reject/cancel", json={
+            "profile_id": self.profile_id, "job": job,
+        })
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(self.store.get_profile_job(
+            self.profile_id, internal)["status"], "interested")
 
     def test_cancel_interest_with_internal_id_only_succeeds(self):
         """收藏抽屉取消收藏只传内部 job_id 必须成功（回归）。

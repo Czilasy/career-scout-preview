@@ -3608,4 +3608,58 @@ describe("DiscoveryView", () => {
     expect(wrapper.findAll(".city-chip")).toHaveLength(0);
     vi.unstubAllGlobals();
   });
+
+  it("B054: restores completed scrape locations and profile after refresh", async () => {
+    const settings = {
+      inter_combo_delay: 10,
+      detail_batch_size: 15,
+      detail_interval: 2,
+      detail_reset_every: 4,
+      detail_batch_cooldown: 5,
+      detail_tab_pool_size: 5,
+      screen_batch_size: 50,
+      screen_concurrency: 5,
+      match_batch_size: 4,
+      match_concurrency: 10,
+    };
+    const roundContext = {
+      platform: "boss" as const,
+      keywords: ["Python"],
+      cities: ["上海"],
+      locations: [{ platform: "boss" as const, city_name: "上海", district_name: "浦东新区", district_code: "310115" }],
+      screening_fields: {},
+      profile_summary: "测试画像",
+      profile_facts: { years: 3 },
+      scrape_task_id: "scrape-done",
+      screen_run_id: "",
+      status: "completed",
+      resumable: false,
+      has_frozen_filters: false,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/session")) return response({ token: "test" });
+      if (url.endsWith("/api/latest-running-task")) return response({
+        ok: true, has_task: true, task_id: "scrape-done", kind: "scrape", status: "completed",
+        platform: "boss", scrape_task_id: "scrape-done", scrape_completed: true, auto_screen: false,
+        scraped_count: 1, source_total: 1, profile_summary: "测试画像", profile_facts: { years: 3 },
+        round_context: roundContext, progress: { message: "抓取已完成" }, logs: [], error: "",
+      });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.endsWith("/api/scrape-result-save")) return response({
+        ok: true, saved: true, run_id: "snap",
+        result: { ok: true, jobs: [], dropped: [], total_scraped: 1, total_kept: 1, total_matched: 0, total_dropped: 0, profile_summary: "测试画像", error: "" },
+      });
+      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    expect(wrapper.get('[data-testid="city-chip-toggle"]').text()).toContain("上海 · 浦东新区");
+    expect((wrapper.find(".profile-summary-input").element as HTMLTextAreaElement).value).toContain("测试画像");
+    vi.unstubAllGlobals();
+  });
 });

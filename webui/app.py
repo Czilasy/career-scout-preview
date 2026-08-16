@@ -375,6 +375,7 @@ def create_app(config=None):
 
     def _save_cancelled_history_snapshot(run, task):
         """取消结束但已有岗位时，写终态前保存本轮快照（FR-019）。"""
+        from webui.screen_flow import build_round_script_params
         try:
             if run is None:
                 return None
@@ -442,7 +443,7 @@ def create_app(config=None):
                 return None
             snapshot_id = store.save_pipeline_result(
                 result,
-                {"screening": run.get("frozen_filters") or {}, "platform": platform},
+                build_round_script_params(store, run, run.get("frozen_filters") or {}, platform),
                 started_at=run.get("started_at") or (task or {}).get("started_at"),
                 finished_at=int(time.time() * 1000),
                 execution_config=params.get("execution_config") or {},
@@ -3028,6 +3029,7 @@ def create_app(config=None):
 
             Only runs that already produced jobs or dropped rows become history.
             """
+            from webui.screen_flow import build_round_script_params
             try:
                 if store.history_round_exists(task_id):
                     return None
@@ -3083,7 +3085,7 @@ def create_app(config=None):
                 snapshot_script_params = (
                     script_params_override
                     if script_params_override is not None
-                    else {"screening": run.get("frozen_filters") or {}, "platform": platform}
+                    else build_round_script_params(store, run, run.get("frozen_filters") or {}, platform)
                 )
                 snapshot_execution_params = (
                     execution_params_override
@@ -5047,6 +5049,17 @@ def create_app(config=None):
                 execution_config = params.get("execution_config") or {}
         except _OPERATIONAL_ERRORS:
             params = {}
+        if not profile_summary:
+            profile_summary = str(
+                params.get("profile_summary")
+                or (source_result.get("profile_summary") if isinstance(source_result, dict) else "")
+                or ""
+            )
+        if profile_facts is None:
+            candidate_facts = params.get("profile_facts")
+            if not isinstance(candidate_facts, dict) and isinstance(source_result, dict):
+                candidate_facts = source_result.get("profile_facts")
+            profile_facts = candidate_facts if isinstance(candidate_facts, dict) else None
         # 搜索参数（关键词/城市）来自 run 冻结的 script_params；
         # 缺失时退化为仅平台，历史列表关键词摘要能正常展示。
         script_params = params.get("script_params") or {}
@@ -8452,7 +8465,28 @@ def create_app(config=None):
             close_debug_chrome()
         except (OSError, RuntimeError):
             pass
-        # 先原子标记 user_finished：worker 后续不得再写 DB 终态。
+        result = _build_partial_pipeline_result(
+            source_jobs, verdicts, pending_rows, jd_map,
+            profile_summary,
+            source_dropped=source_dropped,
+            total_scraped=source_total_scraped,
+            platform=platform,
+        )
+        from webui.screen_flow import build_round_script_params
+        snapshot_run_id = store.save_pipeline_result(
+            result,
+            build_round_script_params(store, run, run.get("frozen_filters") or {}, platform),
+            started_at=run.get("started_at"),
+            finished_at=int(time.time() * 1000),
+            execution_config=params.get("execution_config") or {},
+            status="partial",
+            execution_params={
+                "platform": platform,
+                "scrape_task_id": parent_scrape_task_id,
+            },
+        )
+        # 快照先落库，再原子标记 user_finished：保存失败时任务仍可重试，
+        # 不会留下“已结束但无结果”的死状态；worker 已收到停止信号。
         try:
             store.finish_screening_run(run_id)
         except DiscoveryStoreConflictError as exc:
@@ -8469,25 +8503,6 @@ def create_app(config=None):
         _clear_auto_screen(run_id)
         if scrape_task_id and scrape_task_id != run_id:
             _clear_auto_screen(scrape_task_id)
-        result = _build_partial_pipeline_result(
-            source_jobs, verdicts, pending_rows, jd_map,
-            profile_summary,
-            source_dropped=source_dropped,
-            total_scraped=source_total_scraped,
-            platform=platform,
-        )
-        snapshot_run_id = store.save_pipeline_result(
-            result, {"screening": run.get("frozen_filters") or {}, "platform": platform},
-            started_at=run.get("started_at"),
-            finished_at=int(time.time() * 1000),
-            execution_config=params.get("execution_config") or {},
-            status="partial",
-            execution_params={
-                "platform": platform,
-                "scrape_task_id": parent_scrape_task_id,
-            },
-        )
-        # 终态已在 finish_screening_run 原子写入（interrupted/user_finished）。
         _prune_history_best_effort()
         store.append_task_event(run_id, "finish", {
             "snapshot_run_id": snapshot_run_id,

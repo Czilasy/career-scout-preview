@@ -74,7 +74,11 @@ class ScrapeOnlyStoreMixin:
                 (
                     run_id,
                     platform,
-                    json.dumps(script_params, ensure_ascii=False),
+                    json.dumps(
+                        script_params.get("screening")
+                        if isinstance(script_params.get("screening"), dict) else {},
+                        ensure_ascii=False,
+                    ),
                     _STATUS_SCRAPED_ONLY,
                     len(jobs),
                     0, 0, 0, 0,
@@ -202,7 +206,11 @@ class ScrapeOnlyStoreMixin:
                 (
                     str(status),
                     platform,
-                    json.dumps(script_params, ensure_ascii=False),
+                    json.dumps(
+                        script_params.get("screening")
+                        if isinstance(script_params.get("screening"), dict) else {},
+                        ensure_ascii=False,
+                    ),
                     json.dumps(script_params, ensure_ascii=False),
                     json.dumps(execution_json, ensure_ascii=False),
                     match_count,

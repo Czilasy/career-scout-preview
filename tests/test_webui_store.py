@@ -1574,6 +1574,23 @@ class ScreeningRunStoreTests(unittest.TestCase):
         self.assertEqual(loaded["execution_config"]["screen_batch_size"], 50)
         self.assertEqual(loaded["execution_config"]["match_batch_size"], 10)
 
+    def test_save_pipeline_result_stores_only_screening_in_frozen_filters(self):
+        result = {
+            "ok": True,
+            "jobs": [], "dropped": [], "total_scraped": 0, "total_kept": 0,
+            "total_matched": 0, "total_dropped": 0, "profile_summary": "",
+        }
+        run_id = self.store.save_pipeline_result(
+            result,
+            {
+                "keyword": "Python", "city": ["上海"], "platform": "boss",
+                "screening": {"salary": ["20-30K"]},
+            },
+        )
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["frozen_filters"], {"salary": ["20-30K"]})
+        self.assertEqual(run["search_params"].get("keyword"), "Python")
+
     def test_save_pipeline_result_with_pending_jobs_marks_partial(self):
         result = {
             "jobs": [
