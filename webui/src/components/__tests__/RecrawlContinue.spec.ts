@@ -79,7 +79,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
     expect(wrapper.get(".results-stage").classes()).toContain("has-recrawl-banner");
     expect(wrapper.get(".task-stage").text()).toContain("重抓 JD 详情");
     expect(wrapper.get(".task-stage").text()).not.toContain("recrawl_fetch_jd");
-    const resumeButton = wrapper.get('[data-testid="resume-recrawl"]');
+    const resumeButton = wrapper.get('[data-testid="continue-recrawl"]');
     expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("触发验证码");
     await resumeButton.trigger("click");
     await flushPromises();

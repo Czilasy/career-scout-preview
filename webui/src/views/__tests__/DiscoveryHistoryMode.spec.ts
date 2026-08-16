@@ -67,6 +67,7 @@ describe("DiscoveryView history mode", () => {
             total_scraped: 10,
             total_kept: 1,
             total_matched: 1,
+            mismatch_count: 0,
             total_dropped: 9,
             pending_count: 0,
             keyword_summary: "Python 后端 / 上海",

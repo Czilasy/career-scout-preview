@@ -164,20 +164,61 @@ def resolve_snapshot_source_run(store, run):
 
 
 def build_round_context_payload(store, run):
-    """构建前端恢复 02/03 所需的完整本轮上下文。"""
+    """构建前端恢复 02/03 所需的完整本轮上下文。
+
+    无 scrape_task_id 时回退到 run 自身 execution_params.script_params；
+    未筛选/暂停快照轮从自身 search_params_json 恢复关键词与城市。
+    """
+    if run is None:
+        return None
     source_run = resolve_snapshot_source_run(store, run)
-    if source_run is None or source_run.get("record_kind") == "result_snapshot":
+    if source_run is None:
+        source_run = run
+    if source_run is None:
         return None
     params = source_run.get("execution_params") or {}
     scrape_task_id = str(params.get("scrape_task_id") or "")
     platform = str(params.get("platform") or source_run.get("platform") or "")
+    status = source_run.get("status") or ""
+    if source_run.get("record_kind") == "result_snapshot":
+        search = source_run.get("search_params") or {}
+        screening = (
+            search.get("screening")
+            if isinstance(search.get("screening"), dict) else {}
+        )
+        return {
+            "platform": platform,
+            "keywords": _normalize_keywords(
+                search.get("keyword") or search.get("keywords")
+            ),
+            "cities": _normalize_cities(
+                search.get("city") or search.get("cities")
+            ),
+            "screening_fields": screening or {},
+            "profile_summary": str(
+                params.get("profile_summary") or source_run.get("profile_summary") or ""
+            ),
+            "profile_facts": (
+                params.get("profile_facts") or source_run.get("profile_facts") or {}
+            ),
+            "scrape_task_id": scrape_task_id,
+            "screen_run_id": str(
+                params.get("screen_run_id") or source_run.get("id") or ""
+            ),
+            "status": status,
+            "resumable": status in RESUMABLE_STATUSES,
+            "has_frozen_filters": bool(screening),
+        }
     parent_script_params = {}
     if scrape_task_id:
         parent = store.get_screening_run(scrape_task_id) or {}
         parent_script_params = (parent.get("execution_params") or {}).get(
             "script_params"
         ) or {}
-    status = source_run.get("status") or ""
+    else:
+        parent_script_params = params.get("script_params") or {}
+    if not isinstance(parent_script_params, dict):
+        parent_script_params = {}
     return {
         "platform": platform,
         "keywords": _normalize_keywords(parent_script_params.get("keyword")),

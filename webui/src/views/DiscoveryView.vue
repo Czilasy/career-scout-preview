@@ -21,6 +21,7 @@ import CollapsibleCard from "../components/CollapsibleCard.vue";
 import ExecutionModeSelector from "../components/ExecutionModeSelector.vue";
 import JobLifecycleActions from "../components/JobLifecycleActions.vue";
 import JobWorkspace from "../components/JobWorkspace.vue";
+import LocationPicker from "../components/LocationPicker.vue";
 import HistoryRoundProfile from "../components/HistoryRoundProfile.vue";
 import ResultHistoryDrawer from "../components/ResultHistoryDrawer.vue";
 import OneClickScreenDialog, { type OneClickFilterGroup } from "../components/OneClickScreenDialog.vue";
@@ -338,7 +339,7 @@ const {
   confirmDelete: confirmHistoryDelete,
   cancelDelete: cancelHistoryDelete,
   deleteRound: deleteHistoryRound,
-  archiveLatest: archiveHistoryLatest,
+  archiveAllCurrentResults: archiveHistoryLatest,
 } = historyStore;
 const historyRound = ref<{ runId: string; platform: Platform; status: string; jobCount: number } | null>(null);
 const platformBeforeHistory = ref<Platform | null>(null);
@@ -705,6 +706,16 @@ async function restoreRunningTask() {
       enterScreenStep();
       restoredTaskHint.value = "检测到一键任务已抓取完成，正在自动接续 AI 筛选";
       void startAiScreen({ consumeAutoScreen: true, fields: drafts, profile: profileSummary.value });
+      return;
+    }
+    if (kind === "scrape" && isCompletedTaskStatus(data.status) && !data.auto_screen) {
+      scrapeTaskId.value = data.task_id;
+      scrapeCompleted.value = true;
+      analysisReady.value = true;
+      activeStep.value = "search";
+      restoredTaskHint.value = "检测到已完成的抓取任务，正在恢复结果";
+      await loadLatestResult();
+      await saveScrapedOnlySnapshot();
       return;
     }
     if (data.status === "interrupted") {
@@ -1103,6 +1114,7 @@ async function analyzeResume() {
   }
   uploadBusy.value = true;
   try {
+    if (!(await cancelActiveTasksForNewRound())) return;
     if (!(await clearLatestResult())) return;
     const form = new FormData();
     form.append("file", selectedFile.value);
@@ -1435,6 +1447,8 @@ async function startScrape(options: OneClickLaunch = {}) {
         platform: draftPlatform.value,
         script_params: scriptParams,
         scope_digest: preview.scope_digest,
+        profile_summary: profileSummary.value,
+        profile_facts: profileFacts.value,
         ...(options.autoScreen ? {
           auto_screen: true,
           auto_screen_fields: options.fields || {},
@@ -1717,28 +1731,23 @@ async function finishScreenSave() {
   }
 }
 
-// B038：抓取完成后跳过 AI，把本轮固化为"已抓取，未筛选"轮并进入 04 页。
-async function viewScrapedOnly() {
-  if (!scrapeTaskId.value) return;
+// B038：把抓取结果固化为"已抓取，未筛选"轮，供自动保存与手动查看共用。
+async function saveScrapedOnlySnapshot(markViewed = false): Promise<"saved" | "zero" | "failed"> {
+  if (!scrapeTaskId.value) return "failed";
   const emptyResult = (): PipelineResult => ({
     ok: true, jobs: [], dropped: [],
     total_scraped: 0, total_kept: 0, total_matched: 0, total_dropped: 0,
     profile_summary: profileSummary.value, error: "",
   });
   const snap = scrapeSnapshot.value;
-  // 计数拿不到时按"有岗位"处理（与 pollTask 的保守策略一致）：
-  // 后端对 0 岗位会返回 saved:false，前端兜底显示 0，不会漏保存。
   const scrapedCount = Number(
     snap?.scraped_count ?? snap?.source_total ?? snap?.result?.total_scraped ?? -1,
   );
   if (scrapedCount === 0) {
-    // 0 岗位：不保存历史轮，仍进入 04 页显示 0。
     setPipelineResult(emptyResult());
-    currentRoundStatus.value = "scraped_only";
-    activeCategory.value = "matched";
-    activeStep.value = "results";
-    notify("本轮没有抓到岗位，可回到第二步重新抓取", "warning");
-    return;
+    if (!markViewed) resultLoaded.value = false;
+    if (markViewed) currentRoundStatus.value = "scraped_only";
+    return "zero";
   }
   try {
     const data = await apiRequest<{
@@ -1752,17 +1761,25 @@ async function viewScrapedOnly() {
       },
     });
     if (data.saved && data.result) setPipelineResult(data.result);
-    else {
-      // 后端防御：计数不一致时的 0 岗位兜底。
-      setPipelineResult(emptyResult());
-    }
-    currentRoundStatus.value = "scraped_only";
-    activeCategory.value = "matched";
-    activeStep.value = "results";
-    notify("已保存本轮抓取结果（已抓取，未筛选）", "success");
+    else setPipelineResult(emptyResult());
+    if (!markViewed) resultLoaded.value = false;
+    if (markViewed) currentRoundStatus.value = "scraped_only";
+    return "saved";
   } catch (error) {
     notify(errorMessage(error, "保存结果失败"), "error");
+    return "failed";
   }
+}
+
+async function viewScrapedOnly() {
+  const outcome = await saveScrapedOnlySnapshot(true);
+  if (outcome === "failed") return;
+  activeCategory.value = "matched";
+  activeStep.value = "results";
+  notify(
+    outcome === "zero" ? "本轮没有抓到岗位，可回到第二步重新抓取" : "已保存本轮抓取结果（已抓取，未筛选）",
+    outcome === "zero" ? "warning" : "success",
+  );
 }
 
 // 指数退避：7 次 / 64s 上限。前 5 次快速重试（4s→8s→16s→32s→64s），
@@ -1802,6 +1819,10 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
           noticeMessage,
           data.status === "completed_with_pending" ? "warning" : "success",
         );
+        // B038：单独抓取完成即自动保存未筛选轮，刷新后不再依赖手动"直接查看结果"。
+        if (kind === "scrape" && !shouldAutoScreen && hasJobs) {
+          await saveScrapedOnlySnapshot();
+        }
         if (shouldAutoScreen) {
           enterScreenStep();
           await startAiScreen({ consumeAutoScreen: true, fields: autoScreenFields.value, profile: autoScreenProfile.value });
@@ -2068,6 +2089,40 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
   }
 }
 
+async function cancelActiveTasksForNewRound(): Promise<boolean> {
+  const ids = new Set<string>();
+  for (const id of [
+    scrapeTaskId.value, screenTaskId.value, recrawlTaskId.value,
+    pausedRunId.value, interruptedRunId.value,
+  ]) {
+    if (id) ids.add(id);
+  }
+  if (!ids.size) {
+    try {
+      const latest = await apiRequest<{ has_task?: boolean; task_id?: string }>("/api/latest-running-task");
+      if (latest.has_task && latest.task_id) ids.add(latest.task_id);
+    } catch { /* 接回失败不阻断归档 */ }
+  }
+  let cancelled = false;
+  for (const id of ids) {
+    try {
+      await apiRequest(`/api/task/cancel/${encodeURIComponent(id)}`, { method: "POST" });
+      cancelled = true;
+    } catch (error) {
+      const payload = (error as ApiError).payload as { error?: string } | undefined;
+      if (payload?.error && [
+        "already_finished", "run_not_found", "task_not_active", "not_paused",
+      ].includes(payload.error)) {
+        continue;
+      }
+      notify(errorMessage(error, "结束旧任务失败，已停止开始新一轮"), "error");
+      return false;
+    }
+  }
+  if (cancelled) notify("已结束旧任务，开始新一轮", "info");
+  return true;
+}
+
 async function clearLatestResult() {
   try {
     await archiveHistoryLatest();
@@ -2243,6 +2298,7 @@ async function exportResultCsv() {
 }
 
 async function resetWorkflow() {
+  if (!(await cancelActiveTasksForNewRound())) return;
   if (!(await clearLatestResult())) return;
   if (pollTimer) window.clearTimeout(pollTimer);
   activeStep.value = "upload";
@@ -2373,16 +2429,32 @@ async function toggleRejected(job: JobItem) {
   const id = jobId(job);
   if (!id || feedbackBusyIds.value.has(id)) return;
   if (job._marked === "interested") await toggleInterest(job);
-  const next = new Set(rejectedIds.value);
-  if (next.has(id)) {
-    next.delete(id);
-    notify("已撤销不感兴趣", "info");
-  } else {
-    next.add(id);
-    job._marked = null;
-    notify("已标记不感兴趣（仅本轮有效）", "info");
+  withBusy(feedbackBusyIds, id, true);
+  try {
+    const profileId = await ensureFeedbackProfile();
+    const currentlyRejected = rejectedIds.value.has(id) || job._marked === "rejected";
+    await apiRequest(currentlyRejected
+      ? "/api/pipeline/jobs/reject/cancel"
+      : "/api/pipeline/jobs/reject", {
+      method: "POST",
+      json: feedbackPayload(job, profileId),
+    });
+    const next = new Set(rejectedIds.value);
+    if (currentlyRejected) {
+      next.delete(id);
+      job._marked = null;
+      notify("已撤销不感兴趣", "info");
+    } else {
+      next.add(id);
+      job._marked = "rejected";
+      notify("已标记不感兴趣", "info");
+    }
+    rejectedIds.value = next;
+  } catch (error) {
+    notify(errorMessage(error, "不感兴趣状态更新失败"), "error");
+  } finally {
+    withBusy(feedbackBusyIds, id, false);
   }
-  rejectedIds.value = next;
 }
 
 async function retryJd(job: JobItem) {
@@ -2866,10 +2938,16 @@ watch(roundStatusPayload, (payload) => {
                     @click="removeKeyword(keyword.word)"
                   >×</button>
                 </span>
-                <span v-for="city in cityList" :key="city" class="city-chip">
-                  {{ city }}
-                  <button type="button" class="city-chip-remove" aria-label="删除城市" :disabled="scopeLocked" @click="removeCity(city)">×</button>
-                </span>
+                <LocationPicker
+                  v-for="city in cityList"
+                  :key="city"
+                  :city="city"
+                  :platform="draftPlatform"
+                  :model-value="locationDraft.getLocations(draftPlatform, city)"
+                  :disabled="scopeLocked"
+                  @update:model-value="locationDraft.setLocations(draftPlatform, city, $event)"
+                  @remove="removeCity(city)"
+                />
               </div>
               <div class="search-input-grid">
               <div class="inline-input-row">
@@ -2882,7 +2960,7 @@ watch(roundStatusPayload, (payload) => {
               <div class="inline-input-row">
                 <label class="field-label grow">
                   <span>城市</span>
-<input v-model="customCity" data-testid="custom-city" type="text" placeholder="不输入则不指定城市" :disabled="scopeLocked" @keydown.enter.prevent="addCustomCity">
+<input v-model="customCity" data-testid="custom-city" type="text" placeholder="不输入则不指定城市；添加后点击城市按钮可选择区/县" :disabled="scopeLocked" @keydown.enter.prevent="addCustomCity">
                 </label>
                 <button class="button secondary align-end" data-testid="add-city" type="button" :disabled="scopeLocked" @click="addCustomCity">添加</button>
               </div>
@@ -3142,6 +3220,20 @@ watch(roundStatusPayload, (payload) => {
           </button>
         </div>
         <ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide" :guide="roundFlow.continueGuide" @choose="roundFlow.chooseContinuePlatform" @cancel="roundFlow.cancelContinueGuide" />
+        <ScreenRecrawlProgress
+          v-if="recrawlSnapshot || recrawlBusy"
+          :snapshot="recrawlSnapshot"
+          :task-id="recrawlTaskId"
+          :action="roundFlow.recrawlAction"
+          :busy="Boolean(roundFlow.busyAction)"
+          :busy-action="roundFlow.busyAction"
+          :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''"
+          :show-view-results="false"
+          :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || (roundFlow.recrawlAction.kind === 'continue-recrawl' && roundFlow.recrawlStatus !== 'paused')"
+          @pause-recrawl="roundFlow.pauseRecrawl()"
+          @continue-recrawl="roundFlow.continueRecrawl()"
+          @finish-save="roundFlow.finishRecrawl()"
+        />
         <div v-if="!historyMode && activeCategory === 'uncertain' && recrawlPlatformGuide" class="recrawl-guide" data-testid="recrawl-platform-guide" role="dialog" aria-label="选择重抓平台">
           <p class="recrawl-guide-title">选择要重抓的平台</p>
           <p class="recrawl-guide-counts">BOSS {{ recrawlPlatformGuide.boss }} · 智联 {{ recrawlPlatformGuide.zhilian }}</p>
@@ -3183,7 +3275,7 @@ watch(roundStatusPayload, (payload) => {
               </button>
               <button class="button danger" type="button" :disabled="feedbackBusyIds.has(jobId(job))" @click="toggleRejected(job)">
                 <LoaderCircle v-if="feedbackBusyIds.has(jobId(job))" class="spin" :size="17" aria-hidden="true" />
-                {{ feedbackBusyIds.has(jobId(job)) ? "处理中…" : rejectedIds.has(jobId(job)) ? "撤销不感兴趣" : "不感兴趣" }}
+                {{ feedbackBusyIds.has(jobId(job)) ? "处理中…" : (rejectedIds.has(jobId(job)) || job._marked === "rejected") ? "撤销不感兴趣" : "不感兴趣" }}
               </button>
               <button v-if="!historyMode && !isScrapedOnly && !job.jd" class="button secondary" type="button" :disabled="jdBusyIds.has(jobId(job))" @click="retryJd(job)">
                 <LoaderCircle v-if="jdBusyIds.has(jobId(job))" class="spin" :size="17" aria-hidden="true" />

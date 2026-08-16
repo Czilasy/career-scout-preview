@@ -172,6 +172,26 @@ class ScrapeResultSaveApiTests(unittest.TestCase):
         self.assertEqual(run["search_params"].get("keyword"), ["Python"])
         self.assertEqual(run["search_params"].get("city"), ["上海"])
 
+    def test_save_is_idempotent_for_same_source(self):
+        task_id = "scrape-idem"
+        self._seed_scrape_task(task_id, _scrape_jobs(1))
+        first = self.client.post("/api/scrape-result-save", json={"task_id": task_id}).get_json()
+        second = self.client.post("/api/scrape-result-save", json={"task_id": task_id}).get_json()
+        self.assertTrue(first["saved"])
+        self.assertTrue(second["saved"])
+        self.assertEqual(first["run_id"], second["run_id"])
+        self.assertEqual(len(self.store.list_history_rounds("boss")), 1)
+
+    def test_latest_pipeline_result_by_run_id_accepts_scraped_only(self):
+        task_id = "scrape-by-id"
+        self._seed_scrape_task(task_id, _scrape_jobs(1))
+        saved = self.client.post("/api/scrape-result-save", json={"task_id": task_id}).get_json()
+        resp = self.client.get(f"/api/latest-pipeline-result?run_id={saved['run_id']}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["has_result"])
+        self.assertEqual(data["status"], "scraped_only")
+
     def test_save_zero_jobs_returns_saved_false(self):
         task_id = "scrape-empty"
         self._seed_scrape_task(task_id, [])

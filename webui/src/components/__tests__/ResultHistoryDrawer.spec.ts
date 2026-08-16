@@ -16,6 +16,7 @@ function item(overrides: Partial<HistoryRoundItem> = {}): HistoryRoundItem {
     total_scraped: 10,
     total_kept: 4,
     total_matched: 3,
+    mismatch_count: 2,
     total_dropped: 6,
     pending_count: 1,
     keyword_summary: "Python 后端 / 上海",
@@ -78,10 +79,11 @@ describe("ResultHistoryDrawer", () => {
     const wrapper = mountDrawer();
     const meta = wrapper.find('[data-run-id="h1"] [data-testid="history-round-meta"]');
     const metrics = meta.findAll(".history-metric");
-    expect(metrics.map((metric) => metric.attributes("data-tone"))).toEqual(["match", "unsure", "reject"]);
+    expect(metrics.map((metric) => metric.attributes("data-tone"))).toEqual(["match", "mismatch", "unsure", "reject"]);
     expect(metrics[0].text()).toContain("匹配 3");
-    expect(metrics[1].text()).toContain("待确认 1");
-    expect(metrics[2].text()).toContain("剔除 6");
+    expect(metrics[1].text()).toContain("不匹配 2");
+    expect(metrics[2].text()).toContain("待确认 1");
+    expect(metrics[3].text()).toContain("剔除 6");
     expect(meta.text()).not.toContain("·");
   });
 

@@ -151,15 +151,53 @@ class ScrapeOnlyStoreMixin:
             json.dumps(profile_facts, ensure_ascii=False, sort_keys=True)
             if profile_facts else None
         )
+        script_params = dict(script_params or {})
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
+            existing_row = conn.execute(
+                "SELECT search_params_json, execution_params_json FROM screening_runs WHERE id = ?",
+                (str(run_id),),
+            ).fetchone()
+            existing_search = {}
+            parent_script = {}
+            if existing_row is not None:
+                try:
+                    existing_search = json.loads(existing_row["search_params_json"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    existing_search = {}
+                if not isinstance(existing_search, dict):
+                    existing_search = {}
+                try:
+                    existing_exec = json.loads(existing_row["execution_params_json"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    existing_exec = {}
+                if not isinstance(existing_exec, dict):
+                    existing_exec = {}
+                parent_task_id = str(existing_exec.get("scrape_task_id") or scrape_task_id or "")
+                if parent_task_id:
+                    parent_row = conn.execute(
+                        "SELECT execution_params_json FROM screening_runs WHERE id = ?",
+                        (parent_task_id,),
+                    ).fetchone()
+                    if parent_row is not None:
+                        try:
+                            parent_exec = json.loads(parent_row["execution_params_json"] or "{}")
+                        except (json.JSONDecodeError, TypeError):
+                            parent_exec = {}
+                        if not isinstance(parent_exec, dict):
+                            parent_exec = {}
+                        parent_script = parent_exec.get("script_params") or {}
+                        if not isinstance(parent_script, dict):
+                            parent_script = {}
+            script_params = {**parent_script, **existing_search, **script_params}
             cursor = conn.execute(
                 "UPDATE screening_runs SET status = ?, platform = ?, "
                 " frozen_filters_json = ?, search_params_json = ?, "
                 " execution_params_json = ?, match_count = ?, mismatch_count = ?, "
                 " pending_count = ?, processed_count = ?, profile_summary = ?, "
                 " profile_facts_json = ?, total_scraped = ?, total_kept = ?, "
-                " total_dropped = ?, source_count = ?, finished_at = ?, updated_at = ? "
+                " total_dropped = ?, source_count = ?, finished_at = ?, updated_at = ?, "
+                " archived_at = NULL "
                 "WHERE id = ? AND record_kind = 'result_snapshot'",
                 (
                     str(status),

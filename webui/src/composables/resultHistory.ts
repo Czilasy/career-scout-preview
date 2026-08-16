@@ -13,6 +13,7 @@ export interface HistoryRoundItem {
   total_scraped: number;
   total_kept: number;
   total_matched: number;
+  mismatch_count: number;
   total_dropped: number;
   pending_count: number;
   keyword_summary: string;
@@ -152,7 +153,8 @@ async function deleteRound(item: HistoryRoundItem): Promise<void> {
   }
 }
 
-async function archiveLatest(): Promise<string[]> {
+/** 归档所有当前结果（BOSS 与智联），保留为历史轮次。 */
+async function archiveAllCurrentResults(): Promise<string[]> {
   const data = await apiRequest<{ ok: boolean; archived_run_ids?: string[] }>(
     "/api/result-history/archive-latest",
     { method: "POST" },
@@ -172,6 +174,6 @@ export function useResultHistory() {
     confirmDelete,
     cancelDelete,
     deleteRound,
-    archiveLatest,
+    archiveAllCurrentResults,
   };
 }

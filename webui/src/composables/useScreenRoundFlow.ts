@@ -367,7 +367,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       return true;
     }
     const confirmed = window.confirm(
-      "当前仍有可续跑的筛选任务，开始新一轮后断点将不可再续，旧结果仍可查看。确定开始新一轮吗？",
+      "当前仍有可续跑的筛选任务，开始新一轮会先归档 BOSS 和智联当前结果，断点将不可再续。确定开始新一轮吗？",
     );
     if (!confirmed) return false;
     busyAction.value = "new-round";

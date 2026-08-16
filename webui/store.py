@@ -1120,7 +1120,7 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
         with self._connection() as conn:
             row = conn.execute(
                 "SELECT created_at FROM screening_runs "
-                "WHERE status IN ('done', 'partial') AND record_kind = 'result_snapshot' "
+                "WHERE status IN ('done', 'partial', 'scraped_only') AND record_kind = 'result_snapshot' "
                 "AND archived_at IS NULL "
                 "ORDER BY created_at DESC LIMIT 1",
             ).fetchone()
@@ -1875,6 +1875,22 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
         except KeyError:
             return None
 
+    def cancel_screening_reject(self, profile_id, job_id):
+        """撤销不感兴趣标记：把 profile_jobs.status 从 deleted 回退到默认 'new'。
+
+        幂等——若当前不是 deleted（或记录不存在）也不报错。
+        """
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE profile_jobs SET status = 'new' "
+                "WHERE profile_id = ? AND job_id = ? AND status = 'deleted'",
+                (str(profile_id), str(job_id)),
+            )
+        try:
+            return self.get_profile_job(profile_id, job_id)
+        except KeyError:
+            return None
+
     def list_screening_interested(self, profile_id) -> list:
         """返回持久感兴趣区的 profile_jobs 列表（status='interested'）。
 
@@ -2142,7 +2158,7 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
             conn.execute(
                 "UPDATE screening_runs SET status = 'interrupted', "
                 "error_code = 'user_finished', error_reason = ?, "
-                "interruption_kind = 'user_cancelled', current_stage = 'done', "
+                "interruption_kind = 'user_finished', current_stage = 'done', "
                 "updated_at = ? WHERE id = ?",
                 ("用户提前结束，已保存部分结果", ts, str(run_id)),
             )
@@ -2850,6 +2866,7 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
             "platform": row["platform"] if "platform" in keys else None,
             "task_input_digest": row["task_input_digest"] if "task_input_digest" in keys else None,
             "interruption_kind": row["interruption_kind"] if "interruption_kind" in keys else None,
+            "archived_at": row["archived_at"] if "archived_at" in keys else None,
         }
 
     def append_search_event(self, run_id, event_type, payload=None):

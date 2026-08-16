@@ -54,16 +54,39 @@ class ResultHistoryStoreTests(unittest.TestCase):
         self.assertEqual([item["is_latest"] for item in boss_items], [True, False])
         self.assertEqual(boss_items[0]["keyword_summary"], "Java / 上海")
         self.assertEqual(boss_items[0]["profile_summary_preview"], "3年Python后端经验")
+        self.assertEqual(boss_items[0]["mismatch_count"], 0)
 
         zhilian_items = self.service.list_history("zhilian")
         self.assertEqual(len(zhilian_items), 1)
         self.assertTrue(zhilian_items[0]["is_latest"])
 
+    def test_history_detail_returns_parent_source_outcomes(self):
+        parent_id = "scrape-source"
+        self.store.create_screening_run(
+            parent_id, source_count=1, execution_params={"platform": "boss"},
+        )
+        self.store.append_source_attempt(
+            run_id=parent_id, platform="boss", combo_key="k1",
+            attempt_no=1, outcome_kind="non_empty", job_count=2,
+        )
+        run_id = self.store.save_pipeline_result(
+            {
+                "ok": True,
+                "jobs": [{"platform_job_id": "j1", "title": "岗位"}],
+                "dropped": [], "total_scraped": 1, "total_kept": 1,
+            },
+            {"platform": "boss"},
+            execution_params={"platform": "boss", "scrape_task_id": parent_id},
+        )
+        detail = self.service.get_round(run_id)
+        self.assertEqual(detail["source_summary"]["total_combos"], 1)
+        self.assertEqual(detail["source_outcomes"][0]["combo_key"], "k1")
+
     def test_archive_is_idempotent_and_hides_latest_queries(self):
         first = _save_round(self.store, "boss")
-        archived = self.service.archive_latest()
+        archived = self.service.archive_all_current_results()
         self.assertEqual(archived, [first])
-        self.assertEqual(self.service.archive_latest(), [])
+        self.assertEqual(self.service.archive_all_current_results(), [])
         self.assertEqual(self.store.load_latest_pipeline_result_for_platform("boss"), None)
         self.assertEqual(len(self.service.list_history("boss")), 1)
 
@@ -78,7 +101,7 @@ class ResultHistoryStoreTests(unittest.TestCase):
     def test_delete_latest_promotes_most_recent_archive(self):
         _save_round(self.store, "boss", keyword="old-1")
         _save_round(self.store, "boss", keyword="old-2")
-        self.service.archive_latest()
+        self.service.archive_all_current_results()
         newest = _save_round(self.store, "boss", keyword="newest")
 
         self.assertTrue(self.service.delete_round(newest))

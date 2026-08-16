@@ -151,6 +151,44 @@ class ScreenFlowTests(unittest.TestCase):
         ctx = build_round_context_payload(self.store, snapshot)
         self.assertIsNotNone(ctx)
         self.assertEqual(ctx["screen_run_id"], "paused-run")
+
+    def test_build_round_context_from_scraped_only_snapshot(self):
+        run_id = self.store.save_scraped_only_snapshot(
+            {
+                "ok": True,
+                "jobs": [{"platform_job_id": "j1", "title": "岗位"}],
+                "dropped": [], "total_scraped": 1,
+            },
+            {"platform": "boss", "keyword": "Python", "city": ["上海"]},
+            scrape_task_id="scrape-1", platform="boss",
+            profile_summary="3年Python后端", profile_facts=FACTS,
+        )
+        ctx = build_round_context_payload(self.store, self.store.get_screening_run(run_id))
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx["keywords"], ["Python"])
+        self.assertEqual(ctx["cities"], ["上海"])
+        self.assertEqual(ctx["scrape_task_id"], "scrape-1")
+        self.assertEqual(ctx["profile_summary"], "3年Python后端")
+        self.assertEqual(ctx["profile_facts"], FACTS)
+        self.assertFalse(ctx["resumable"])
+
+    def test_build_round_context_paused_scrape_without_scrape_task_id(self):
+        run_id = "paused-scrape"
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={
+                "platform": "boss",
+                "script_params": {"keyword": "Go", "city": ["北京"]},
+            },
+        )
+        self.store.update_screening_run(run_id, status="running")
+        self.store.update_screening_run(run_id, status="paused", current_stage="scrape")
+        ctx = build_round_context_payload(self.store, self.store.get_screening_run(run_id))
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx["keywords"], ["Go"])
+        self.assertEqual(ctx["cities"], ["北京"])
+        self.assertEqual(ctx["scrape_task_id"], "")
+        self.assertTrue(ctx["resumable"])
         self.assertEqual(ctx["status"], "paused")
         self.assertTrue(ctx["resumable"])
 

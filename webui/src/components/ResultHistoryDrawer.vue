@@ -96,6 +96,7 @@ onBeforeUnmount(() => {
 
 const countParts = (item: HistoryRoundItem) => [
   { label: "匹配", value: item.total_matched, tone: "match" },
+  { label: "不匹配", value: item.mismatch_count, tone: "mismatch" },
   { label: "待确认", value: item.pending_count, tone: "unsure" },
   { label: "剔除", value: item.total_dropped, tone: "reject" },
 ] as const;
@@ -479,6 +480,10 @@ const countParts = (item: HistoryRoundItem) => [
 
 .history-metric[data-tone="match"] {
   color: var(--match-deep);
+}
+
+.history-metric[data-tone="mismatch"] {
+  color: var(--unsure-deep);
 }
 
 .history-metric[data-tone="unsure"] {

@@ -19,6 +19,7 @@ function item(overrides: Partial<HistoryRoundItem> = {}): HistoryRoundItem {
     total_scraped: 10,
     total_kept: 4,
     total_matched: 3,
+    mismatch_count: 2,
     total_dropped: 6,
     pending_count: 1,
     keyword_summary: "Python 后端 / 上海",
@@ -145,7 +146,7 @@ describe("useResultHistory", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const history = useResultHistory();
-    const archived = await history.archiveLatest();
+    const archived = await history.archiveAllCurrentResults();
     expect(archived).toEqual(["h1"]);
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/result-history/archive-latest",
@@ -153,10 +154,10 @@ describe("useResultHistory", () => {
     );
   });
 
-  it("archiveLatest rejects when the API fails", async () => {
+  it("archiveAllCurrentResults rejects when the API fails", async () => {
     const fetchMock = vi.fn(async () => response({ ok: false, error: "persistence_failed" }, 500));
     vi.stubGlobal("fetch", fetchMock);
     const history = useResultHistory();
-    await expect(history.archiveLatest()).rejects.toThrow();
+    await expect(history.archiveAllCurrentResults()).rejects.toThrow();
   });
 });

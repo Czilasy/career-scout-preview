@@ -237,6 +237,7 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
           run_id: "run-1", platform: "boss", status: "scraped_only",
           created_at: "2026-08-12T00:00:00", total_scraped: 2, total_kept: 2,
           total_matched: 0, total_dropped: 0, pending_count: 0,
+          mismatch_count: 0,
           keyword_summary: "Python / 上海", profile_summary_preview: "",
           is_latest: true,
         }],

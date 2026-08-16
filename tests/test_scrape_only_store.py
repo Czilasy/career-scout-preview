@@ -198,6 +198,53 @@ class ScrapeOnlyStoreTests(unittest.TestCase):
         self.assertIn({"verdict": "dropped", "is_dropped": 1}, [dict(r) for r in rows])
 
     # -- 最新轮白名单 ----------------------------------------------------
+    def test_upgrade_archived_scraped_run_clears_archived_at(self):
+        run_id = self.store.save_scraped_only_snapshot(
+            {"ok": True, "jobs": _scrape_jobs(1), "dropped": [], "total_scraped": 1},
+            {"platform": "boss"}, scrape_task_id="scrape-1", platform="boss",
+        )
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET archived_at = ? WHERE id = ?",
+                ("2026-08-01T00:00:00+08:00", run_id),
+            )
+        jobs = _screened_jobs(1)
+        jobs[0]["verdict"] = "match"
+        self.store.upgrade_scraped_run(
+            run_id,
+            {"ok": True, "jobs": jobs, "dropped": [], "total_scraped": 1},
+            {"platform": "boss"}, status="done", platform="boss",
+            scrape_task_id="scrape-1",
+        )
+        run = self.store.get_screening_run(run_id)
+        self.assertIsNone(run["archived_at"])
+        payload = self.store.load_latest_pipeline_result_for_platform("boss")
+        self.assertEqual(payload["run_id"], run_id)
+
+    def test_upgrade_scraped_run_preserves_parent_keyword(self):
+        parent_id = "scrape-parent"
+        self.store.create_screening_run(
+            parent_id, source_count=1,
+            execution_params={
+                "platform": "boss",
+                "script_params": {"keyword": "Python", "city": ["上海"]},
+            },
+        )
+        run_id = self.store.save_scraped_only_snapshot(
+            {"ok": True, "jobs": _scrape_jobs(1), "dropped": [], "total_scraped": 1},
+            {"platform": "boss"}, scrape_task_id=parent_id, platform="boss",
+        )
+        self.store.upgrade_scraped_run(
+            run_id,
+            {"ok": True, "jobs": _screened_jobs(1), "dropped": [], "total_scraped": 1},
+            {"platform": "boss", "screening": {"salary": ["20-30K"]}},
+            status="done", platform="boss", scrape_task_id=parent_id,
+        )
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["search_params"].get("keyword"), "Python")
+        self.assertEqual(run["search_params"].get("city"), ["上海"])
+        self.assertEqual(
+            run["search_params"]["screening"]["salary"], ["20-30K"])
 
     def test_scraped_only_is_latest_result_with_raw_status(self):
         run_id = self.store.save_scraped_only_snapshot(

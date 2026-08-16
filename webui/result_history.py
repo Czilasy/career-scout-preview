@@ -67,6 +67,31 @@ def _preview(value: Any) -> str:
         return text
     return text[:_PREVIEW_LENGTH] + "…"
 
+def _build_source_summary_and_outcomes(store, run: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """从结果轮回查父抓取 run 的 source attempts，返回汇总与明细。"""
+    params = run.get("execution_params") or {}
+    parent_id = str(
+        params.get("scrape_task_id") or params.get("source_run_id") or run.get("id") or ""
+    )
+    try:
+        attempts = store.list_latest_source_attempts(parent_id)
+    except Exception:
+        attempts = []
+    outcomes = []
+    counts = {"non_empty": 0, "empty": 0, "failed": 0, "paused": 0}
+    for attempt in attempts:
+        outcomes.append({
+            "combo_key": attempt["combo_key"],
+            "attempt_no": attempt["attempt_no"],
+            "outcome_kind": attempt["outcome_kind"],
+            "job_count": attempt["job_count"],
+            "input_hash": attempt["input_hash"],
+            "error_code": attempt["error_code"],
+        })
+        if attempt["outcome_kind"] in counts:
+            counts[attempt["outcome_kind"]] += 1
+    return {"total_combos": len(outcomes), **counts}, outcomes
+
 
 class ResultHistoryService:
     """Application-level history assembly and lifecycle operations."""
@@ -94,6 +119,7 @@ class ResultHistoryService:
                 "total_scraped": int(row.get("total_scraped") or 0),
                 "total_kept": int(row.get("total_kept") or 0),
                 "total_matched": int(row.get("match_count") or 0),
+                "mismatch_count": int(row.get("mismatch_count") or 0),
                 "total_dropped": int(row.get("total_dropped") or 0),
                 "pending_count": int(row.get("pending_count") or 0),
                 "keyword_summary": _keyword_summary(row),
@@ -114,6 +140,8 @@ class ResultHistoryService:
         if not (result.get("jobs") or result.get("dropped")):
             return None
         raw_status = str(run.get("status") or "done")
+        source_summary, source_outcomes = _build_source_summary_and_outcomes(
+            self.store, run)
         return {
             "ok": True,
             "has_result": True,
@@ -126,12 +154,13 @@ class ResultHistoryService:
             "script_params": payload.get("script_params") or {},
             "execution_config": payload.get("execution_config") or {},
             "scrape_task_id": str(payload.get("scrape_task_id") or ""),
-            "source_summary": {},
-            "source_outcomes": [],
+            "source_summary": source_summary,
+            "source_outcomes": source_outcomes,
             "result": result,
         }
 
-    def archive_latest(self) -> list[str]:
+    def archive_all_current_results(self) -> list[str]:
+        """归档所有当前结果（BOSS 与智联），保留为历史轮次。"""
         return self.store.archive_all_current_results()
 
     def delete_round(self, run_id: str) -> bool:

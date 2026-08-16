@@ -39,9 +39,9 @@ def register_result_history_routes(app, store) -> None:
         return jsonify(payload)
 
     @app.route("/api/result-history/archive-latest", methods=["POST"])
-    def result_history_archive_latest():
+    def result_history_archive_all_current():
         try:
-            run_ids = service.archive_latest()
+            run_ids = service.archive_all_current_results()
         except Exception:
             return _error("persistence_failed", "归档失败", 500)
         return jsonify({"ok": True, "archived_run_ids": run_ids})

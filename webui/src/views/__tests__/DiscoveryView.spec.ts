@@ -454,6 +454,8 @@ describe("DiscoveryView", () => {
           platform: "boss",
           script_params: { keyword: "Python 后端", city: ["上海"], filters: {} },
           scope_digest: "sha256:scope-existing",
+          profile_summary: "Python 后端候选人",
+          profile_facts: {},
         });
         return response({ ok: true, task_id: "scrape-1" });
       }
@@ -3550,6 +3552,7 @@ describe("DiscoveryView", () => {
       if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
       if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
       if (url.endsWith("/api/search-scope/preview")) return response({ ok: true, scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:b054" }, deduplicated: {} });
+      if (url.includes("/api/location-catalog")) return response({ ok: true, platform: "boss", city: "上海", city_code: "101020100", districts: [{ code: "310115", name: "浦东新区", children: [] }] });
       if (url.endsWith("/api/execute-search")) return response({ ok: true, task_id: "b054" });
       if (url.startsWith("/api/task-state/b054")) return response({ status: "completed", progress: {}, logs: [], result: { jobs: [] } });
       return response({});
@@ -3565,14 +3568,19 @@ describe("DiscoveryView", () => {
     await flushPromises();
     const cityChip = wrapper.get(".city-chip");
     expect(cityChip.text()).toContain("上海");
-    expect(wrapper.find('[data-testid="location-panel"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="city-chip-toggle"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="location-panel"]').exists()).toBe(true);
+    await wrapper.get('[data-testid="location-district-310115"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="city-chip-toggle"]').text()).toContain("上海 · 浦东新区");
     await confirmProfile(wrapper, "3年Python后端候选人");
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
     const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/execute-search"));
     expect(call).toBeTruthy();
     const body = JSON.parse(String((call as unknown as [unknown, RequestInit | undefined])[1]?.body));
-    expect(body.script_params.locations).toBeUndefined();
+    expect(body.script_params.locations).toEqual(expect.arrayContaining([expect.objectContaining({ district_code: "310115" })]));
     vi.unstubAllGlobals();
   });
 

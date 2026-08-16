@@ -72,7 +72,7 @@ describe("DiscoveryView paused AI recovery", () => {
     await flushPromises();
 
     expect(wrapper.get('[aria-expanded]').attributes("aria-expanded")).toBe("true");
-    const resumeButton = wrapper.get('[data-testid="resume-ai-screen"]');
+    const resumeButton = wrapper.get('[data-testid="continue-ai-screen"]');
     expect(resumeButton.attributes("disabled")).toBeUndefined();
     expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("AI 接口限流");
     expect(wrapper.get(".task-percentage").text()).toBe("40%");
@@ -159,7 +159,7 @@ describe("DiscoveryView paused AI recovery", () => {
     expect(badge.attributes("data-platform")).toBe("zhilian");
 
     // 点继续：continue 不发 body（不发 platform — 任务平台已冻结，后端从父 run 读）
-    await wrapper.get('[data-testid="resume-ai-screen"]').trigger("click");
+    await wrapper.get('[data-testid="continue-ai-screen"]').trigger("click");
     await flushPromises();
 
     const continueCall = fetchMock.mock.calls.find(

@@ -287,7 +287,7 @@ export interface JobItem {
   failure_stage?: string;
   retryable?: boolean;
   attempts?: number;
-  _marked?: "interested" | null;
+  _marked?: "interested" | "rejected" | null;
   /** 后端按 profile_jobs.applied_at 回填：该岗位是否投递过（仅带 profile_id 查询时返回）。 */
   _applied?: boolean;
   /** 前端合并多平台结果时标记的来源 run（仅前端使用，供单岗位动作定位来源）。 */

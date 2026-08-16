@@ -175,6 +175,8 @@ def _public_task_status(status: str, interruption_kind: str | None = None) -> st
     if status == "interrupted" and interruption_kind in (
             "process_restart", "operator_stop"):
         return "interrupted"
+    if status == "interrupted" and interruption_kind == "user_finished":
+        return "cancelled"
     return mapping.get(status, status or "failed")
 
 
@@ -3803,8 +3805,12 @@ def create_app(config=None):
                 ))
             store.append_task_events(task_id, job_events)
             # B038: 命中已保存的未筛选轮则原地升级（同一 run_id），否则新建。
+            from webui.screen_flow import build_round_script_params
+            ai_run_for_params = store.get_screening_run(task_id) or {}
+            saved_script_params = build_round_script_params(
+                store, ai_run_for_params, screening_fields, frozen_platform)
             source_run_id = save_screen_result(
-                store, result, {"screening": screening_fields, "platform": frozen_platform},
+                store, result, saved_script_params,
                 scrape_task_id=scrape_task_id,
                 status="done",
                 execution_config=execution_config.to_dict(),
@@ -4711,6 +4717,14 @@ def create_app(config=None):
             else None
         )
 
+        # B033/B038：普通抓取也冻结画像，刷新后单独查看结果可恢复三通道输入。
+        profile_summary = str(body.get("profile_summary") or "")
+        raw_profile_facts = body.get("profile_facts")
+        profile_facts = (
+            raw_profile_facts
+            if isinstance(raw_profile_facts, dict) else None
+        )
+
         # T402: 平台键校验（先于任何副作用）
         platform_raw = body.get("platform") or "boss"
         try:
@@ -4933,6 +4947,8 @@ def create_app(config=None):
                 "auto_screen_fields": auto_screen_fields,
                 "auto_screen_profile": auto_screen_profile,
                 "auto_screen_facts": auto_screen_facts,
+                "profile_summary": profile_summary,
+                "profile_facts": profile_facts,
             },
             backend_version=_backend_version,
         )
@@ -5036,6 +5052,17 @@ def create_app(config=None):
         script_params = params.get("script_params") or {}
         if isinstance(script_params, dict) and "platform" not in script_params:
             script_params = {**script_params, "platform": platform}
+        # B038：同一来源已保存未筛选轮时幂等返回，避免轮询/手动入口重复建轮。
+        existing = store.latest_scraped_only_for_source(task_id)
+        if existing is not None:
+            payload = store.load_latest_pipeline_result(str(existing["id"]))
+            if payload is not None:
+                result = dict(payload.get("result") or {})
+                result["source_run_id"] = str(existing["id"])
+                return jsonify({
+                    "ok": True, "saved": True,
+                    "run_id": str(existing["id"]), "result": result,
+                })
         outcome = save_scrape_snapshot(
             store,
             source_jobs,
@@ -5522,8 +5549,18 @@ def create_app(config=None):
         按 combo 最新 attempt 汇总，不从岗位数为零反推 empty。
         返回 (source_summary, source_outcomes)。
         """
+        source_run_id = str(run_id or "")
         try:
-            attempts = store.list_latest_source_attempts(run_id)
+            run = store.get_screening_run(source_run_id)
+            if run is not None and run.get("record_kind") == "result_snapshot":
+                params = run.get("execution_params") or {}
+                source_run_id = str(
+                    params.get("scrape_task_id") or params.get("source_run_id") or source_run_id
+                )
+        except _OPERATIONAL_ERRORS:
+            pass
+        try:
+            attempts = store.list_latest_source_attempts(source_run_id)
         except _OPERATIONAL_ERRORS:
             attempts = []
         outcomes = []
@@ -5659,6 +5696,10 @@ def create_app(config=None):
                     _mem_db_ep = ((store.get_screening_run(task_id) or {}).get("execution_params") or {})
                 except _OPERATIONAL_ERRORS:
                     _mem_db_ep = {}
+                try:
+                    _mem_run = store.get_screening_run(task_id) or {}
+                except _OPERATIONAL_ERRORS:
+                    _mem_run = {}
                 if task["status"] in ("running", "queued"):
                     return jsonify({
                         "ok": True,
@@ -5680,6 +5721,22 @@ def create_app(config=None):
                         "auto_screen": bool(task.get("auto_screen") or _mem_db_ep.get("auto_screen")),
                         "auto_screen_fields": _mem_db_ep.get("auto_screen_fields") or {},
                         "auto_screen_profile": str(_mem_db_ep.get("auto_screen_profile") or ""),
+                        "scrape_task_id": (
+                            _mem_db_ep.get("scrape_task_id")
+                            or (task.get("source_task_id") if task.get("kind") == "ai_screen" else "")
+                        ),
+                        "scrape_completed": _scrape_completed_for_run(_mem_db_ep),
+                        "source_run_id": _mem_db_ep.get("source_run_id"),
+                        "frozen_filters": _mem_run.get("frozen_filters") or _mem_db_ep.get("auto_screen_fields") or {},
+                        "profile_summary": str(
+                            _mem_db_ep.get("profile_summary")
+                            or _mem_db_ep.get("auto_screen_profile") or ""
+                        ),
+                        "profile_facts": (
+                            _mem_db_ep.get("profile_facts")
+                            or _mem_db_ep.get("auto_screen_facts")
+                        ),
+                        "round_context": _round_context_for_run(_mem_run),
                     })
         # 2. DB 中最近 paused（服务重启后恢复暂停态，FR-028）
         try:
@@ -5858,6 +5915,57 @@ def create_app(config=None):
                 "scraped_count": auto_scraped_count,
                 "source_total": int(auto_row["source_count"] or 0),
             })
+        # 3.6 已完成普通抓取：快照未落库时刷新仍可恢复并触发保存。
+        for completed_row in auto_rows:
+            if _has_newer_saved_result_than(completed_row["updated_at"]):
+                continue
+            try:
+                completed_params = json.loads(completed_row["execution_params_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                completed_params = {}
+            if (bool(completed_params.get("auto_screen"))
+                    or completed_params.get("auto_screen_fields")
+                    or completed_params.get("auto_screen_profile")):
+                continue
+            if store.latest_scraped_only_for_source(completed_row["id"]) is not None:
+                continue
+            completed_scraped_count = store.count_scrape_run_jobs(completed_row["id"])
+            if completed_scraped_count <= 0:
+                continue
+            completed_run = store.get_screening_run(completed_row["id"]) or {}
+            return jsonify({
+                "ok": True,
+                "has_task": True,
+                "task_id": completed_row["id"],
+                "kind": "scrape",
+                "status": "completed",
+                "stage": "scrape",
+                "progress": {"message": "抓取已完成，正在恢复结果"},
+                "logs": [],
+                "error": "",
+                "resumable": False,
+                "source": "database",
+                "auto_screen": False,
+                "scrape_task_id": completed_row["id"],
+                "scrape_completed": True,
+                "frozen_filters": (
+                    completed_run.get("frozen_filters")
+                    or completed_params.get("auto_screen_fields") or {}
+                ),
+                "profile_summary": str(
+                    completed_params.get("profile_summary")
+                    or completed_params.get("auto_screen_profile") or ""
+                ),
+                "profile_facts": (
+                    completed_params.get("profile_facts")
+                    or completed_params.get("auto_screen_facts")
+                ),
+                "platform": completed_row["platform"] or completed_run.get("platform"),
+                "task_input_digest": completed_params.get("task_input_digest"),
+                "scraped_count": completed_scraped_count,
+                "source_total": int(completed_row["source_count"] or 0),
+                "round_context": _round_context_for_run(completed_run),
+            })
         # 4. failed 抓取兜底：有已持久化岗位的任务刷新后可恢复显示真实数量。
         try:
             with store._connection() as conn:
@@ -5940,7 +6048,7 @@ def create_app(config=None):
             if run is None:
                 return jsonify({"ok": True, "has_result": False})
             # 只返回已完成或部分完成的结果
-            if run["status"] not in ("succeeded", "partial"):
+            if run["status"] not in ("succeeded", "partial", "scraped_only"):
                 return jsonify({"ok": True, "has_result": False})
             # T409: run_id + platform 必须一致
             if query_platform and query_platform != run.get("platform"):
@@ -6009,7 +6117,14 @@ def create_app(config=None):
                 ]
                 applied_jobs = store.list_jobs_by_ids([pj["job_id"] for pj in applied_pjs])
                 applied_urls, applied_slugs = _collect_url_keys(applied_pjs, applied_jobs)
-                if interested_urls or interested_slugs or applied_urls or applied_slugs:
+                rejected_pjs = store.list_profile_jobs(profile_id, status="deleted")
+                rejected_jobs = store.list_jobs_by_ids([pj["job_id"] for pj in rejected_pjs])
+                rejected_urls, rejected_slugs = _collect_url_keys(
+                    rejected_pjs, rejected_jobs)
+                if (
+                    interested_urls or interested_slugs or applied_urls or applied_slugs
+                    or rejected_urls or rejected_slugs
+                ):
                     for item in jobs:
                         if not isinstance(item, dict):
                             continue
@@ -6018,6 +6133,8 @@ def create_app(config=None):
                         )
                         if (url and url in interested_urls) or (interested_slugs and str(item.get("job_id", "")) in interested_slugs):
                             item["_marked"] = "interested"
+                        elif (url and url in rejected_urls) or (rejected_slugs and str(item.get("job_id", "")) in rejected_slugs):
+                            item["_marked"] = "rejected"
                         if (url and url in applied_urls) or (applied_slugs and str(item.get("job_id", "")) in applied_slugs):
                             item["_applied"] = True
 
@@ -6334,6 +6451,28 @@ def create_app(config=None):
             return _pipeline_identity_error_response(exc)
         store.mark_screening_reject(profile_id, resolved.job_id, run_id=None)
         return jsonify({"reject_state": "rejected", "job_id": resolved.job_id})
+
+    @app.route("/api/pipeline/jobs/reject/cancel", methods=["POST"])
+    def pipeline_cancel_reject():
+        """撤销 pipeline 结果岗位的不感兴趣标记：profile_jobs.status 回退。"""
+        raw = request.get_json(silent=True) or {}
+        profile_id = raw.get("profile_id")
+        job = raw.get("job") or {}
+        if not profile_id or not isinstance(job, dict):
+            return jsonify({"error": "missing profile_id or job"}), 400
+        try:
+            store.get_profile(profile_id)
+        except KeyError:
+            return jsonify({"error_code": "not_found", "user_message": _MSG_PROFILE_NOT_FOUND}), 404
+        try:
+            resolved = _resolve_pipeline_job_identity(job)
+        except JobIdentityError as exc:
+            return _pipeline_identity_error_response(exc)
+        try:
+            store.cancel_screening_reject(profile_id, resolved.job_id)
+        except sqlite3.Error as exc:
+            return jsonify({"error": f"撤销不感兴趣失败: {exc}"}), 500
+        return jsonify({"reject_state": "cancelled", "job_id": resolved.job_id})
 
     @app.route("/api/pipeline/jobs/interest/cancel", methods=["POST"])
     def pipeline_cancel_interest():
@@ -8194,18 +8333,10 @@ def create_app(config=None):
         if run["status"] == "interrupted" and interruption_kind not in (
                 "process_restart", "operator_stop",
         ):
-            if not interruption_kind:
-                # 旧版本用户停止/结束竞态会留下空 kind 的 interrupted，按可收尾处理。
-                try:
-                    store.save_interruption_kind(run_id, "operator_stop")
-                except _OPERATIONAL_ERRORS:
-                    pass
-                interruption_kind = "operator_stop"
-            else:
-                return jsonify({
-                    "ok": False, "error": "interrupted_not_restartable",
-                    "message": "该中断状态不能结束保存",
-                }), 409
+            return jsonify({
+                "ok": False, "error": "interrupted_not_restartable",
+                "message": "该中断状态不能结束保存",
+            }), 409
         if run["status"] in ("succeeded", "partial"):
             return jsonify({
                 "ok": False, "error": "already_terminal",

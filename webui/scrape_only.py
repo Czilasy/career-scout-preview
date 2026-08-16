@@ -126,12 +126,18 @@ def save_screen_result(
         profile_summary = str(result.get("profile_summary") or "")
     if profile_facts is None:
         profile_facts = result.get("profile_facts")
+    merged_script_params = dict(script_params or {})
+    if scrape_task_id:
+        parent = store.get_screening_run(scrape_task_id) or {}
+        parent_script = (parent.get("execution_params") or {}).get("script_params") or {}
+        if isinstance(parent_script, dict):
+            merged_script_params = {**parent_script, **merged_script_params}
     upgraded = store.latest_scraped_only_for_source(scrape_task_id)
     if upgraded is not None:
         return store.upgrade_scraped_run(
             str(upgraded["id"]),
             result,
-            script_params,
+            merged_script_params,
             status=status,
             execution_config=execution_config,
             platform=platform or str(upgraded.get("platform") or "boss"),
@@ -142,7 +148,7 @@ def save_screen_result(
         )
     return store.save_pipeline_result(
         result,
-        script_params,
+        merged_script_params,
         started_at=started_at,
         finished_at=finished_at,
         execution_config=execution_config,

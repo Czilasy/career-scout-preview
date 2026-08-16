@@ -149,6 +149,7 @@ class WebUIAppTests(unittest.TestCase):
         app = create_app({
             "TESTING": False,
             "START_TASKS": False,
+            "RUNTIME_MODE": "exe",
             "RESULT_DIR": str(root / "results"),
             "DB_PATH": str(root / "state" / "webui.db"),
             "RESUME_DIR": str(root / "resumes"),
@@ -1041,6 +1042,41 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(data["stage"], "risk_warning")
         self.assertEqual(data["progress"]["overall_percent"], 20)
 
+    def test_latest_running_task_memory_branch_returns_extended_fields(self):
+        self.store.create_screening_run(
+            "scrape-parent", source_count=1,
+            execution_params={
+                "platform": "boss",
+                "script_params": {"keyword": "Python", "city": ["上海"]},
+            },
+        )
+        self.store.create_screening_run(
+            "mem-ext", source_count=1,
+            frozen_filters={"salary": ["20-30K"]},
+            execution_params={
+                "platform": "boss",
+                "scrape_task_id": "scrape-parent",
+                "profile_summary": "3年Python后端",
+                "profile_facts": {"years": 3},
+            },
+        )
+        self.store.update_screening_run("mem-ext", status="running", current_stage="ai_rough")
+        tasks = self.app.config["PIPELINE_TASKS"]
+        tasks["mem-ext"] = {
+            "kind": "ai_screen", "status": "running", "stage": "ai_rough",
+            "progress": {}, "logs": [], "error": "", "started_at": 1000,
+            "finished_at": None, "platform": "boss",
+        }
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["scrape_task_id"], "scrape-parent")
+        self.assertFalse(data["scrape_completed"])
+        self.assertEqual(data["frozen_filters"], {"salary": ["20-30K"]})
+        self.assertEqual(data["profile_summary"], "3年Python后端")
+        self.assertEqual(data["profile_facts"], {"years": 3})
+        self.assertEqual(data["round_context"]["keywords"], ["Python"])
+        self.assertEqual(data["round_context"]["screen_run_id"], "mem-ext")
+
     def test_latest_running_task_memory_branch_falls_back_to_progress_stage(self):
         tasks = self.app.config["PIPELINE_TASKS"]
         tasks["mem-stage-fallback"] = {
@@ -1113,9 +1149,9 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         finished = self.store.get_screening_run(run_id)
         self.assertEqual(finished["error_code"], "user_finished")
         # finish 表示用户主动结束，kind 必须从 process_restart 改为
-        # user_cancelled，否则公共状态仍显示 interrupted（可恢复），
+        # user_finished，否则公共状态仍显示 interrupted（可恢复），
         # 误导用户以为任务还能继续。
-        self.assertEqual(finished["interruption_kind"], "user_cancelled")
+        self.assertEqual(finished["interruption_kind"], "user_finished")
 
     def test_finish_rejects_user_cancelled_interrupted_run(self):
         run_id = "finish-cancelled-run"
@@ -1191,6 +1227,37 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(data["platform"], "boss")
         self.assertEqual(data["scrape_task_id"], "recover-failed")
 
+    def test_latest_running_task_restores_completed_plain_scrape(self):
+        run_id = "recover-plain-completed"
+        jobs = [{
+            "job_id": "j1", "platform_job_id": "j1", "title": "岗位1",
+            "source_url": "https://zhipin.example/j1.html",
+        }]
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={
+                "platform": "boss",
+                "script_params": {"keyword": "Python", "city": ["上海"]},
+                "profile_summary": "3年Python后端",
+                "profile_facts": {"years": 3},
+            },
+        )
+        self.store.save_scrape_combo_result(run_id, "kw|city", jobs, ["kw|city"])
+        self.store.update_screening_run(run_id, status="running", current_stage="scrape")
+        self.store.update_screening_run(run_id, status="succeeded", current_stage="scrape")
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["status"], "completed")
+        self.assertEqual(data["kind"], "scrape")
+        self.assertEqual(data["scrape_task_id"], run_id)
+        self.assertTrue(data["scrape_completed"])
+        self.assertEqual(data["profile_summary"], "3年Python后端")
+        self.assertEqual(data["profile_facts"], {"years": 3})
+        self.assertEqual(data["round_context"]["keywords"], ["Python"])
+        saved = self.client.post("/api/scrape-result-save", json={"task_id": run_id}).get_json()
+        self.assertTrue(saved["saved"])
+        self.assertFalse(self.client.get("/api/latest-running-task").get_json()["has_task"])
+
     def test_latest_running_task_restores_paused_and_interrupted_counts(self):
         self._seed_scrape_run(
             "recover-paused", 12, "paused", platform="boss",
@@ -1262,15 +1329,22 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         finished = self.store.get_screening_run("finish-running-scrape")
         self.assertEqual(finished["error_code"], "user_finished")
 
-    def test_finish_without_snapshot_does_not_mark_user_finished(self):
+    def test_finish_without_snapshot_saves_empty_result(self):
+        """0 岗位结束保存：允许 finish 并保存空快照，空快照不进历史列表。"""
         run_id = "finish-no-snapshot"
         self.store.create_screening_run(run_id, source_count=0)
         self.store.update_screening_run(run_id, status="running", current_stage="scrape")
         resp = self.client.post(f"/api/task/finish/{run_id}")
-        self.assertEqual(resp.status_code, 409)
-        self.assertEqual(resp.get_json()["error"], "missing_scrape_snapshot")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        data = resp.get_json()
+        self.assertEqual(data["status"], "completed_with_pending")
+        self.assertEqual(data["result"]["total_scraped"], 0)
+        self.assertEqual(len(data["result"]["jobs"]), 0)
         run = self.store.get_screening_run(run_id)
-        self.assertEqual(run["status"], "running")
+        self.assertEqual(run["status"], "interrupted")
+        self.assertEqual(run["error_code"], "user_finished")
+        self.assertEqual(run["interruption_kind"], "user_finished")
+        self.assertEqual(self.store.list_history_rounds(), [])
 
     def test_finish_twice_returns_explicit_conflict(self):
         self._seed_scrape_run("finish-twice", 2, "paused")
@@ -6435,6 +6509,14 @@ class Task008BackendIntegrationTests(unittest.TestCase):
         self.assertEqual(cancelled.get_json()["job_id"], boss_internal)
         self.assertEqual(self.store.get_profile_job(
             self.profile_id, boss_internal)["status"], "new")
+
+        cancelled_reject = self.client.post("/api/pipeline/jobs/reject/cancel",
+                                             json={"profile_id": self.profile_id,
+                                                   "job": zhilian_job})
+        self.assertEqual(cancelled_reject.status_code, 200)
+        self.assertEqual(cancelled_reject.get_json()["job_id"], zl_internal)
+        self.assertEqual(self.store.get_profile_job(
+            self.profile_id, zl_internal)["status"], "new")
 
     def test_cancel_interest_with_internal_id_only_succeeds(self):
         """收藏抽屉取消收藏只传内部 job_id 必须成功（回归）。
