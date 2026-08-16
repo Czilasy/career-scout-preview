@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Bell, History, Moon, Settings, Star, Sun, X } from "@lucide/vue";
+import { Bell, History, LoaderCircle, Moon, Settings, Star, Sun, X } from "@lucide/vue";
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
 import BrowserAccountsDialog from "./components/BrowserAccountsDialog.vue";
 import EnvCheckDialog from "./components/EnvCheckDialog.vue";
@@ -13,6 +13,7 @@ import { apiRequest, currentRuntimeMode, errorMessage, GITHUB_REPO_URL, initiali
 import { getJobReminderCount, safeCanonicalUrl } from "./jobFeedback";
 import type { RoundStatusPayload } from "./discovery";
 import { useTheme } from "./composables/useTheme";
+import { cleanJobLocation } from "./location";
 import type { CandidateProfile, Notice } from "./types";
 
 // 主题切换：mode（明暗）由顶栏按钮触发；platform（boss/智联）由 DiscoveryView 同步。
@@ -63,6 +64,7 @@ const aiSettingsOpen = ref(false);
 const browserAccountsOpen = ref(false);
 const envCheckOpen = ref(false);
 const settingsMenuOpen = ref(false);
+const updateChecking = ref(false);
 const discoveryRef = ref<{
   openHistoryDrawer: () => void;
   toggleHistoryDrawer: () => void;
@@ -103,6 +105,7 @@ let noticeTimer: number | undefined;
 
 const favoritesOpen = ref(false);
 const favorites = ref<Record<string, unknown>[]>([]);
+const favoriteRemovingIds = ref(new Set<string>());
 const favPanelEl = ref<HTMLElement | null>(null);
 const favTriggerEl = ref<HTMLButtonElement | null>(null);
 
@@ -113,6 +116,10 @@ async function loadFavorites() {
   } catch {
     favorites.value = [];
   }
+}
+
+function favoriteMeta(job: Record<string, unknown>): string {
+  return [job.salary || "薪资面议", cleanJobLocation(job.location)].filter(Boolean).join(" · ");
 }
 
 function favoriteJobUrl(job: Record<string, unknown>): string {
@@ -161,6 +168,10 @@ async function removeFavorite(job: Record<string, unknown>) {
   const profileId = String(job.profile_id || "");
   const jobId = String(job.job_id || "");
   if (!profileId || !jobId) return;
+  const key = `${profileId}:${jobId}`;
+  const next = new Set(favoriteRemovingIds.value);
+  next.add(key);
+  favoriteRemovingIds.value = next;
   try {
     await apiRequest("/api/pipeline/jobs/interest/cancel", {
       method: "POST",
@@ -177,6 +188,11 @@ async function removeFavorite(job: Record<string, unknown>) {
     showNotice({ message: "已取消收藏", tone: "info" });
   } catch (error) {
     showNotice({ message: errorMessage(error, "取消收藏失败"), tone: "error" });
+  }
+  finally {
+    const after = new Set(favoriteRemovingIds.value);
+    after.delete(key);
+    favoriteRemovingIds.value = after;
   }
 }
 
@@ -249,6 +265,7 @@ function ignoreThisVersion() {
 
 // 手动检查更新：始终实时请求 GitHub latest release，无更新时给出明确反馈。
 async function manualCheckUpdate() {
+  updateChecking.value = true;
   try {
     const result = await updateApi.check();
     if (result?.ok && result.has_update) {
@@ -259,6 +276,9 @@ async function manualCheckUpdate() {
     }
   } catch {
     showNotice({ message: "检查更新失败，请检查网络后重试", tone: "warning" });
+  }
+  finally {
+    updateChecking.value = false;
   }
 }
 
@@ -546,16 +566,18 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
               rel="noopener"
             >
               <strong class="fav-card-title">{{ job.title || "未知岗位" }}</strong>
-              <span class="fav-card-meta">{{ job.salary || "薪资面议" }} · {{ job.location || "" }}</span>
+              <span class="fav-card-meta">{{ favoriteMeta(job) }}</span>
               <span class="fav-card-company">{{ job.company || "" }}</span>
             </a>
             <button
               type="button"
               class="fav-card-remove"
               aria-label="取消收藏"
+              :disabled="favoriteRemovingIds.has(`${job.profile_id || ''}:${job.job_id || ''}`)"
               @click.stop.prevent="removeFavorite(job)"
             >
-              <X :size="16" aria-hidden="true" />
+              <LoaderCircle v-if="favoriteRemovingIds.has(`${job.profile_id || ''}:${job.job_id || ''}`)" class="spin" :size="16" aria-hidden="true" />
+              <X v-else :size="16" aria-hidden="true" />
             </button>
           </div>
         </div>
@@ -609,6 +631,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
       :open="settingsMenuOpen"
       :has-update="Boolean(updatesEnabled && updateInfo)"
       :update-version="updateInfo?.latest || ''"
+      :checking="updateChecking"
       @close="settingsMenuOpen = false"
       @open-ai-settings="openAiSettingsFromMenu"
       @open-browser-accounts="openBrowserAccountsFromMenu"

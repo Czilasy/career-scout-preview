@@ -63,6 +63,22 @@ describe("ScreenRoundActions", () => {
     expect(wrapper.get('[data-testid="finish-save-results"]').text()).toContain("结束并保存结果");
   });
 
+  it("shows spinner and save label on finish while finish is busy", () => {
+    const wrapper = mount(ScreenRoundActions, {
+      props: {
+        action: action("continue"),
+        busy: true,
+        busyAction: "finish",
+        showFinishSave: true,
+      },
+    });
+    const finish = wrapper.get('[data-testid="finish-save-results"]');
+    expect(finish.attributes("disabled")).toBeDefined();
+    expect(finish.text()).toContain("正在保存…");
+    expect(finish.find(".spin").exists()).toBe(true);
+    expect(wrapper.get('[data-testid="continue-ai-screen"]').text()).not.toContain("正在继续…");
+  });
+
   it("shows busy label and disables the primary button during pause", async () => {
     const wrapper = mount(ScreenRoundActions, {
       props: {

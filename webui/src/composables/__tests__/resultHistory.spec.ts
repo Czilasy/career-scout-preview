@@ -104,6 +104,34 @@ describe("useResultHistory", () => {
     );
   });
 
+  it("removes the deleted round locally and reloads without flashing the loading state", async () => {
+    let resolveList: (value: Response) => void = () => {};
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/result-history/h1") && init?.method === "DELETE") {
+        return response({ ok: true, deleted: true, run_id: "h1" });
+      }
+      if (url.includes("/api/result-history")) {
+        return new Promise<Response>((resolve) => {
+          resolveList = resolve;
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const history = useResultHistory();
+    history.items.value = [item(), item({ run_id: "h2" })];
+    history.loading.value = false;
+    const pending = history.deleteRound(item());
+    await flushPromises();
+    expect(history.items.value.map((round) => round.run_id)).toEqual(["h2"]);
+    expect(history.loading.value).toBe(false);
+    resolveList(response({ ok: true, items: [item({ run_id: "h3" })] }));
+    await pending;
+    await flushPromises();
+    expect(history.items.value.map((round) => round.run_id)).toEqual(["h3"]);
+  });
+
   it("archives current rounds through the history API", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

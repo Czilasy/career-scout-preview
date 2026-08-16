@@ -334,7 +334,12 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
 
   async function continueRecrawl(): Promise<void> {
     if (busyAction.value) return;
-    await deps.api.continueRecrawl();
+    busyAction.value = "continue-recrawl";
+    try {
+      await deps.api.continueRecrawl();
+    } finally {
+      busyAction.value = "";
+    }
   }
 
   async function finishRecrawl(): Promise<void> {
@@ -353,14 +358,24 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       || Boolean(roundContext.value?.resumable)
       || anyResumableTarget.value;
     if (!resumable) {
-      await deps.api.resetWorkflow();
+      busyAction.value = "new-round";
+      try {
+        await deps.api.resetWorkflow();
+      } finally {
+        busyAction.value = "";
+      }
       return true;
     }
     const confirmed = window.confirm(
       "当前仍有可续跑的筛选任务，开始新一轮后断点将不可再续，旧结果仍可查看。确定开始新一轮吗？",
     );
     if (!confirmed) return false;
-    await deps.api.resetWorkflow();
+    busyAction.value = "new-round";
+    try {
+      await deps.api.resetWorkflow();
+    } finally {
+      busyAction.value = "";
+    }
     return true;
   }
 

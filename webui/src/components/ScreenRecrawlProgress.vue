@@ -9,6 +9,7 @@ defineProps<{
   taskId: string;
   action: ScreenPrimaryAction;
   busy: boolean;
+  busyAction?: string;
   busyLabel?: string;
   showViewResults?: boolean;
   showFinishSave?: boolean;
@@ -28,7 +29,9 @@ const emit = defineEmits<{
     <ScreenRoundActions
       :action="action"
       :busy="busy"
+      :busy-action="busyAction"
       :busy-label="busyLabel"
+      :finish-busy="busyAction === 'finish'"
       :show-view-results="showViewResults"
       :show-finish-save="showFinishSave"
       @pause-recrawl="emit('pause-recrawl')"

@@ -2119,6 +2119,25 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.failed_code, "source_cdp_unavailable")
 
+    def test_invalid_start_page_maps_to_returncode_3(self):
+        """start_page 超出 pages → (3, ...) → source_invalid_output，不误判 CDP。"""
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_invalid_start.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic",
+                               side_effect=ValueError("start_page 必须在 1 到 3 之间")):
+            outcome = source.fetch_list(plan_item)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
     def test_programmatic_run_resets_counter_between_runs(self):
         """B053：run_search_programmatic 每轮独立计数，组合流程内不重复重置。"""
         with mock.patch.object(_boss_for_inprocess, "MAX_API_REQUESTS", 3):

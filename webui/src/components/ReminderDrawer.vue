@@ -13,7 +13,8 @@
 // - 不在客户端计算提醒资格/天数；elapsed_days 等全部来自服务端投影。
 // ---------------------------------------------------------------------------
 import { nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
-import { X } from "@lucide/vue";
+import { cleanJobLocation } from "../location";
+import { LoaderCircle, X } from "@lucide/vue";
 import {
   JOB_REMINDER_LIST_LIMIT_MAX,
   JobFeedbackRequestContext,
@@ -354,7 +355,7 @@ onBeforeUnmount(() => {
                 <p v-if="item.company" class="reminder-item-company">{{ item.company }}</p>
                 <p class="reminder-item-meta">
                   <span v-if="item.salary">{{ item.salary }}</span>
-                  <span v-if="item.location">{{ item.location }}</span>
+                  <span v-if="cleanJobLocation(item.location)">{{ cleanJobLocation(item.location) }}</span>
                   <span class="reminder-item-days" data-testid="reminder-days">
                     已 {{ item.elapsed_days }} 天未活动
                   </span>
@@ -382,21 +383,30 @@ onBeforeUnmount(() => {
                     data-testid="btn-follow-up"
                     :disabled="uiFor(item.job_id).busyAction !== ''"
                     @click="runAction(item, 'follow_up')"
-                  >{{ uiFor(item.job_id).busyAction === "follow_up" ? "记录中…" : "记录跟进" }}</button>
+                  >
+                    <LoaderCircle v-if="uiFor(item.job_id).busyAction === 'follow_up'" class="spin" :size="14" aria-hidden="true" />
+                    {{ uiFor(item.job_id).busyAction === "follow_up" ? "记录中…" : "记录跟进" }}
+                  </button>
                   <button
                     class="button secondary"
                     type="button"
                     data-testid="btn-mark-stale"
                     :disabled="uiFor(item.job_id).busyAction !== ''"
                     @click="runAction(item, 'mark_stale')"
-                  >{{ uiFor(item.job_id).busyAction === "mark_stale" ? "标记中…" : "标记已荒废" }}</button>
+                  >
+                    <LoaderCircle v-if="uiFor(item.job_id).busyAction === 'mark_stale'" class="spin" :size="14" aria-hidden="true" />
+                    {{ uiFor(item.job_id).busyAction === "mark_stale" ? "标记中…" : "标记已荒废" }}
+                  </button>
                   <button
                     class="button ghost"
                     type="button"
                     data-testid="btn-advice"
                     :disabled="uiFor(item.job_id).adviceStatus === 'loading'"
                     @click="runAdvice(item)"
-                  >{{ uiFor(item.job_id).adviceStatus === "loading" ? "生成建议中…" : "请求建议" }}</button>
+                  >
+                    <LoaderCircle v-if="uiFor(item.job_id).adviceStatus === 'loading'" class="spin" :size="14" aria-hidden="true" />
+                    {{ uiFor(item.job_id).adviceStatus === "loading" ? "生成建议中…" : "请求建议" }}
+                  </button>
                 </div>
 
                 <p v-if="!item.can_open" class="reminder-link-note">

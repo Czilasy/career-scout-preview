@@ -93,7 +93,7 @@ describe("BrowserAccountsDialog", () => {
         return response({
           accounts: [
             { id: "a", name: "账号A", builtin: true, platforms: { boss: { cdp_port: 9222 } } },
-            { id: "b", name: "账号B", builtin: true, platforms: { boss: { cdp_port: 9222 } } },
+            { id: "b", name: "账号B", builtin: false, platforms: { boss: { cdp_port: 9222 } } },
           ],
           active_account: "a",
         });
@@ -104,10 +104,11 @@ describe("BrowserAccountsDialog", () => {
     const wrapper = await mountOpen(fetchMock);
 
     expect(wrapper.text()).toContain("默认账号");
-    // 内置默认账号没有删除按钮，非当前账号有「非当前账号」标记
+    // 只有默认账号没有删除按钮；账号 B 与自定义账号保留删除入口
     const accountCards = wrapper.findAll(".browser-account-card");
     expect(accountCards[0].find('[data-testid="delete-a"]').exists()).toBe(false);
     expect(accountCards[1].text()).toContain("非当前账号");
+    expect(accountCards[1].find('[data-testid="delete-b"]').exists()).toBe(true);
   });
 
   it("shows 受限中 badge and 待刷新 for expired records", async () => {

@@ -7,9 +7,11 @@ import type {
   Platform,
   PlatformCityCatalog,
   PlatformFilterSchema,
+  LocationCondition,
   ScopePreviewResponse,
   TaskSize,
 } from "./types";
+import { buildLocationPayload } from "./location";
 
 export interface PipelineResult {
   ok?: boolean;
@@ -91,10 +93,11 @@ function uniqueNonEmpty(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
-export function buildSearchScriptParams(keywords: string[], cities: string[]) {
+export function buildSearchScriptParams(keywords: string[], cities: string[], locations: LocationCondition[] = []) {
   return {
     keyword: uniqueNonEmpty(keywords).join(","),
     city: uniqueNonEmpty(cities),
+    ...(locations.length ? { locations: buildLocationPayload(locations) } : {}),
     filters: {},
   };
 }

@@ -268,6 +268,18 @@ describe("useScreenRoundFlow", () => {
     expect(refs.activeStep.value).toBe("screen");
   });
 
+  it("continueRecrawl keeps busyAction while the request is pending", async () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    let observed = "";
+    api.continueRecrawl.mockImplementation(async () => {
+      observed = flow.busyAction.value;
+    });
+    await flow.continueRecrawl();
+    expect(observed).toBe("continue-recrawl");
+    expect(flow.busyAction.value).toBe("");
+  });
+
   it("confirmNewRound resets immediately when nothing is resumable", async () => {
     const { refs, api } = makeDeps();
     const flow = useScreenRoundFlow({ refs, api });

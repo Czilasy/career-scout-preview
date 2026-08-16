@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ChevronDown } from "@lucide/vue";
+import { ChevronDown, LoaderCircle } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
 import { apiRequest, userFacingMessage } from "../api";
 import type { Notice } from "../types";
@@ -215,12 +215,15 @@ function selectModel(item: string) {
       </div>
       <div class="button-row">
         <button class="button primary" type="submit" :disabled="Boolean(busy)">
+          <LoaderCircle v-if="busy === 'save'" class="spin" :size="15" aria-hidden="true" />
           {{ busy === "save" ? "保存中…" : "保存设置" }}
         </button>
         <button class="button secondary" type="button" :disabled="Boolean(busy)" aria-label="拉取可用模型" title="拉取可用模型" @click="fetchModels">
+          <LoaderCircle v-if="busy === 'models'" class="spin" :size="15" aria-hidden="true" />
           {{ busy === "models" ? "拉取中…" : "拉取模型" }}
         </button>
         <button class="button ghost" type="button" :disabled="Boolean(busy)" @click="testConnection">
+          <LoaderCircle v-if="busy === 'test'" class="spin" :size="15" aria-hidden="true" />
           {{ busy === "test" ? "测试中…" : "测试连接" }}
         </button>
       </div>

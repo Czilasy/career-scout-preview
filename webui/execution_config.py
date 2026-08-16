@@ -432,6 +432,7 @@ class FrozenTaskScope:
         "keywords",
         "scope_kind",
         "cities",
+        "locations",
         "pages_per_combination",
         "combination_count",
         "planned_pages",
@@ -451,12 +452,14 @@ class FrozenTaskScope:
         planned_pages: int,
         task_size: str,
         platform: str = "boss",
+        locations: list | None = None,
         scope_digest: str | None = None,
     ):
         object.__setattr__(self, "platform", str(platform))
         object.__setattr__(self, "keywords", tuple(keywords))
         object.__setattr__(self, "scope_kind", scope_kind)
         object.__setattr__(self, "cities", tuple(cities))
+        object.__setattr__(self, "locations", tuple(locations or ()))
         object.__setattr__(self, "pages_per_combination", pages_per_combination)
         object.__setattr__(self, "combination_count", combination_count)
         object.__setattr__(self, "planned_pages", planned_pages)
@@ -485,6 +488,7 @@ class FrozenTaskScope:
             "planned_pages": self.planned_pages,
             "task_size": self.task_size,
         }
+        if self.locations: payload["locations"] = [dict(loc) for loc in self.locations]
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     def to_dict(self) -> dict[str, Any]:
@@ -499,6 +503,7 @@ class FrozenTaskScope:
             "planned_pages": self.planned_pages,
             "task_size": self.task_size,
             "scope_digest": self._scope_digest,
+            **({"locations": [dict(loc) for loc in self.locations]} if self.locations else {}),
         }
 
     @classmethod
@@ -513,6 +518,7 @@ class FrozenTaskScope:
             planned_pages=data["planned_pages"],
             task_size=data["task_size"],
             platform=data.get("platform", "boss"),
+            locations=list(data.get("locations") or []),
             scope_digest=None,
         )
         if expected_digest is not None and expected_digest != scope._scope_digest:
@@ -540,6 +546,7 @@ def normalize_scope(
     scope_kind: str,
     cities: list[str] | None,
     pages_per_combination: int,
+    locations: list | None = None,
     platform: str = "boss",
 ) -> FrozenTaskScope:
     """规范化任务范围，生成不可变 FrozenTaskScope。
@@ -562,6 +569,13 @@ def normalize_scope(
     if not norm_keywords:
         raise ValueError("关键词不能为空")
 
+    if scope_kind == "nationwide" and locations:
+        raise ValueError("全国范围不能与具体地点同时选择")
+    norm_locations: list = []
+    if locations:
+        from webui.location_scope import normalize_locations
+        norm_locations = normalize_locations(norm_platform, locations)
+
     if scope_kind == "nationwide":
         if cities:
             raise ValueError("全国范围不能与具体城市同时选择")
@@ -571,7 +585,9 @@ def normalize_scope(
         norm_cities = validate_cities(cities)
         if not norm_cities:
             raise ValueError("城市范围不能为空")
-        scope_count = len(norm_cities)
+        if norm_locations and any(loc["city_name"] not in norm_cities for loc in norm_locations):
+            raise ValueError("地点条件中的城市不在已确认城市范围")
+        scope_count = len(norm_locations) if norm_locations else len(norm_cities)
 
     combination_count = len(norm_keywords) * scope_count
     planned_pages = combination_count * pages_per_combination
@@ -592,6 +608,7 @@ def normalize_scope(
         planned_pages=planned_pages,
         task_size=task_size,
         platform=norm_platform,
+        locations=norm_locations,
     )
 
 
@@ -604,6 +621,7 @@ def preview_scope(
     scope_kind: str,
     cities: list[str] | None,
     pages_per_combination: int,
+    locations: list | None = None,
     platform: str = "boss",
 ) -> dict[str, Any]:
     """后端权威预览，返回规范化 scope 和去重信息。
@@ -619,6 +637,7 @@ def preview_scope(
         scope_kind=scope_kind,
         cities=cities,
         pages_per_combination=pages_per_combination,
+        locations=locations,
         platform=platform,
     )
 
@@ -636,6 +655,7 @@ def preview_scope(
             "planned_pages": scope.planned_pages,
             "task_size": scope.task_size,
             "scope_digest": scope.scope_digest,
+            **({"locations": [dict(loc) for loc in scope.locations]} if scope.locations else {}),
         },
         "deduplicated": {
             "keywords": dedup_keywords,

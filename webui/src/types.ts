@@ -123,6 +123,38 @@ export interface PlatformCityCatalog {
 }
 
 // ---------------------------------------------------------------------------
+// B054 地点条件与目录
+// ---------------------------------------------------------------------------
+
+/** 单个“城市 + 区”搜索地点条件；BOSS 可带一个商圈/镇。 */
+export interface LocationCondition {
+  platform: Platform;
+  city_name: string;
+  city_code: string;
+  district_name: string;
+  district_code: string;
+  business_name?: string;
+  business_code?: string;
+  label?: string;
+}
+
+/** 区/县或商圈/镇目录条目。 */
+export interface LocationCatalogEntry {
+  code: string;
+  name: string;
+  children?: LocationCatalogEntry[];
+}
+
+/** `GET /api/location-catalog` 响应体。 */
+export interface LocationCatalogResponse {
+  ok: true;
+  platform: Platform;
+  city: string;
+  city_code: string;
+  districts: LocationCatalogEntry[];
+}
+
+// ---------------------------------------------------------------------------
 // AI 筛选冻结快照
 // ---------------------------------------------------------------------------
 
@@ -291,6 +323,7 @@ export interface FrozenSearchScope {
   keywords: string[];
   scope_kind: "cities" | "nationwide";
   cities: string[];
+  locations?: LocationCondition[];
   pages_per_combination: number;
   combination_count: number;
   planned_pages: number;
@@ -303,6 +336,7 @@ export interface ScopePreviewRequest {
   keywords: string[];
   scope_kind: "cities" | "nationwide";
   cities: string[];
+  locations?: LocationCondition[];
   pages_per_combination: number;
 }
 

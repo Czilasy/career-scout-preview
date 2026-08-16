@@ -487,7 +487,7 @@ FETCH_API_JS_TEMPLATE = """
                 title: j.jobName || '',
                 salary: j.salaryDesc || '',
                 salary_source: j.salaryDesc ? 'api' : 'api_empty',
-                location: (j.cityName || '') + '\\u00b7' + (j.areaDistrict || '') + '\\u00b7' + (j.businessDistrict || ''),
+                location: [j.cityName || '', j.areaDistrict || '', j.businessDistrict || ''].filter(function(x){return !!x;}).join('\\u00b7'),
                 tags: [j.jobExperience || '', j.jobDegree || ''].filter(function(t){return t && t !== '\\u4e0d\\u9650';}).join(' | '),
                 boss_name: j.brandName || '',
                 boss_title: j.bossTitle || '',
@@ -541,7 +541,7 @@ EXTRACT_LIST_JS = """
             title: t,
             salary: salaryEl ? salaryEl.innerText.trim() : '',
             salary_source: 'dom_untrusted',
-            location: locEl ? locEl.innerText.trim() : '',
+            location: (locEl ? locEl.innerText.trim() : '').split('\\u00b7').map(function(x){return x.trim();}).filter(function(x){return !!x;}).join('\\u00b7'),
             tags: tags.join(' | '),
             boss_name: bossEl ? bossEl.innerText.trim() : '',
             job_link: jobLink,
@@ -3831,6 +3831,7 @@ def main():
     p.add_argument("--experience", default=None, help="经验要求代码")
     p.add_argument("--degree", default=None, help="学历要求代码")
     p.add_argument("--industry", default=None, help="行业代码")
+    p.add_argument("--multiBusinessDistrict", default=None, help=argparse.SUPPRESS)
 
     # 功能开关
     p.add_argument("--detail", action="store_true", default=True, help="抓取详情页 JD（默认开启）")
@@ -3943,11 +3944,12 @@ def main():
         args.pages = MAX_PAGES
     if args.start_page < 1 or args.start_page > args.pages:
         print(f"❌ start-page 必须在 1 到 {args.pages} 之间")
-        sys.exit(2)
+        # 参数错误用退出码 3，与 CDP 失联(2)区分，避免 WebUI 误报成浏览器问题。
+        sys.exit(3)
 
     # 收集筛选条件
     filters = {}
-    for key in ["scale", "stage", "salary", "experience", "degree", "industry"]:
+    for key in ["scale", "stage", "salary", "experience", "degree", "industry", "multiBusinessDistrict"]:
         val = getattr(args, key)
         if val:
             filters[key] = val

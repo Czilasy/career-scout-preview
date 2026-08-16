@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Activity, Bot, Rocket, UserRound } from "@lucide/vue";
+import { Activity, Bot, LoaderCircle, Rocket, UserRound } from "@lucide/vue";
 
 const props = defineProps<{
   open: boolean;
   hasUpdate: boolean;
   updateVersion: string;
+  checking?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -93,9 +94,12 @@ onBeforeUnmount(() => {
         type="button"
         role="menuitem"
         data-testid="manual-update-check"
+        :disabled="checking"
         @click="emit('manual-update-check')"
       >
-        <Rocket :size="17" aria-hidden="true" /><span>检查更新{{ hasUpdate ? ` · v${updateVersion}` : "" }}</span>
+        <LoaderCircle v-if="checking" class="spin" :size="17" aria-hidden="true" />
+        <Rocket v-else :size="17" aria-hidden="true" />
+        <span>{{ checking ? "检查中…" : `检查更新${hasUpdate ? ` · v${updateVersion}` : ""}` }}</span>
       </button>
       <button
         class="settings-menu-item"

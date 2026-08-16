@@ -4579,6 +4579,7 @@ def create_app(config=None):
         对应 HTTP API POST /api/search-scope/preview。
         """
         from webui.execution_config import CityValidationError, preview_scope
+        from webui.location_catalog import LocationCatalogUnavailable
         from webui.platforms import (
             UnknownPlatformError,
             get_platform_or_none,
@@ -4615,6 +4616,7 @@ def create_app(config=None):
         scope_kind = body.get("scope_kind", "cities")
         cities = body.get("cities", [])
         pages_per_combination = body.get("pages_per_combination", 1)
+        locations = body.get("locations") or []
 
         if not isinstance(keywords, list):
             return jsonify({"ok": False, "error": "keywords 必须是数组"}), 400
@@ -4622,6 +4624,8 @@ def create_app(config=None):
             return jsonify({"ok": False, "error": "scope_kind 必须是 cities 或 nationwide"}), 400
         if not isinstance(cities, list):
             return jsonify({"ok": False, "error": "cities 必须是数组"}), 400
+        if not isinstance(locations, list):
+            return jsonify({"ok": False, "error": "locations 必须是数组"}), 400
 
         if isinstance(pages_per_combination, bool) or not isinstance(
             pages_per_combination, int
@@ -4635,10 +4639,13 @@ def create_app(config=None):
                 scope_kind=scope_kind,
                 cities=cities,
                 pages_per_combination=pages_int,
+                locations=locations,
                 platform=platform_raw,
             )
             scope_previews[result["scope"]["scope_digest"]] = dict(result["scope"])
             return jsonify({"ok": True, **result})
+        except LocationCatalogUnavailable:
+            return jsonify({"ok": False, "error_code": "location_catalog_unavailable", "error": "地点目录暂时不可用，按城市级搜索"}), 503
         except CityValidationError as e:
             return jsonify({
                 "ok": False,
@@ -4666,6 +4673,8 @@ def create_app(config=None):
         tasks005 T402: 冻结单一平台和完整 runtime，搜索 run 筛选快照为空。
         """
         from webui.core import _AI_FILTER_KEYS, _is_non_empty_filter_value
+        from webui.location_catalog import LocationCatalogUnavailable
+        from webui.location_scope import normalize_locations
         from webui.execution_config import (
             ExecutionConfigSnapshot,
             FrozenTaskScope,
@@ -4685,6 +4694,9 @@ def create_app(config=None):
             return jsonify({"ok": False, "error": "无效的请求体"}), 400
         if not script_params.get("keyword") or not script_params.get("city"):
             return jsonify({"ok": False, "error": "缺少关键词或城市"}), 400
+        locations = script_params.get("locations") or []
+        if not isinstance(locations, list):
+            return jsonify({"ok": False, "error": "locations 必须是数组"}), 400
 
         # B031: 一键链路标记；auto_screen_fields/profile 只作为刷新恢复快照，
         # 不进 script_params，不触碰搜索请求的 AI filters 校验。
@@ -4768,8 +4780,11 @@ def create_app(config=None):
                     scope_kind="nationwide" if nationwide else "cities",
                     cities=[] if nationwide else raw_cities,
                     pages_per_combination=script_params.get("pages", 3),
+                    locations=locations,
                     platform=platform_raw,
                 )
+            except LocationCatalogUnavailable:
+                return jsonify({"ok": False, "error_code": "location_catalog_unavailable", "error": "地点目录暂时不可用，按城市级搜索"}), 503
             except (TypeError, ValueError) as exc:
                 return jsonify({
                     "ok": False, "error_code": "scope_validation_failed",
@@ -4821,6 +4836,16 @@ def create_app(config=None):
             ["全国"] if frozen_scope.scope_kind == "nationwide"
             else list(frozen_scope.cities)
         )
+        try:
+            norm_request_locations = normalize_locations(platform_raw, locations)
+        except LocationCatalogUnavailable:
+            return jsonify({"ok": False, "error_code": "location_catalog_unavailable", "error": "地点目录暂时不可用，按城市级搜索"}), 503
+        except ValueError as exc:
+            return jsonify({
+                "ok": False,
+                "error_code": "location_validation_failed",
+                "error": str(exc),
+            }), 422
         # pages 未显式提供时不校验（后端用 scope 冻结值覆盖）
         pages_mismatch = False
         if "pages" in script_params:
@@ -4831,6 +4856,7 @@ def create_app(config=None):
                 pages_mismatch = True
         if (sp_keyword_list != list(frozen_scope.keywords)
                 or list(sp_cities) != scope_cities
+                or list(norm_request_locations) != list(frozen_scope.locations)
                 or pages_mismatch):
             return jsonify({
                 "ok": False,
@@ -4842,6 +4868,10 @@ def create_app(config=None):
         script_params["keyword"] = ",".join(frozen_scope.keywords)
         script_params["city"] = scope_cities
         script_params["pages"] = frozen_scope.pages_per_combination
+        if frozen_scope.locations:
+            script_params["locations"] = list(frozen_scope.locations)
+        else:
+            script_params.pop("locations", None)
 
         # T402: 冻结完整 runtime — 平台登录空间、task_input_digest
         browser_account = _account_for_run()
@@ -8079,6 +8109,7 @@ def create_app(config=None):
                 ):
                     _save_cancelled_history_snapshot(run, task)
                     store.update_screening_run(run_id, status="cancelled")
+                    store.save_interruption_kind(run_id, "user_cancelled")
                     store.append_task_event(run_id, "cancel", {"by": "user"})
             except ValueError as exc:
                 latest = store.get_screening_run(run_id)
@@ -8163,10 +8194,18 @@ def create_app(config=None):
         if run["status"] == "interrupted" and interruption_kind not in (
                 "process_restart", "operator_stop",
         ):
-            return jsonify({
-                "ok": False, "error": "interrupted_not_restartable",
-                "message": "该中断状态不能结束保存",
-            }), 409
+            if not interruption_kind:
+                # 旧版本用户停止/结束竞态会留下空 kind 的 interrupted，按可收尾处理。
+                try:
+                    store.save_interruption_kind(run_id, "operator_stop")
+                except _OPERATIONAL_ERRORS:
+                    pass
+                interruption_kind = "operator_stop"
+            else:
+                return jsonify({
+                    "ok": False, "error": "interrupted_not_restartable",
+                    "message": "该中断状态不能结束保存",
+                }), 409
         if run["status"] in ("succeeded", "partial"):
             return jsonify({
                 "ok": False, "error": "already_terminal",
@@ -8193,6 +8232,12 @@ def create_app(config=None):
         source_payload = None
         source_dropped = []
         source_total_scraped = None
+        # 先落“用户正在收尾”标记：worker 即使抢先写 cancelled，也保留 operator_stop，
+        # 不会变成 finish 无法收尾的空 kind 中断。
+        try:
+            store.save_interruption_kind(run_id, "operator_stop")
+        except _OPERATIONAL_ERRORS:
+            pass
         # 先发停止信号并等待当前页原子落库稳定，再从页级快照生成部分结果。
         flush_run_id = scrape_task_id or (
             run_id if str(run.get("current_stage") or "") == "scrape" else ""
@@ -8252,11 +8297,6 @@ def create_app(config=None):
                 source_jobs = []
             verdicts = store.load_screening_verdicts(run_id)
             pending_rows = store.load_screening_pending(run_id)
-        if not source_jobs:
-            return jsonify({
-                "ok": False, "error": "missing_scrape_snapshot",
-                "message": "抓取岗位快照缺失，无法生成部分结果",
-            }), 409
         profile_summary = str(params.get("profile_summary") or "")
         if not profile_summary and source_run_id:
             if source_payload is None:
@@ -8957,6 +8997,9 @@ def create_app(config=None):
     register_job_feedback_routes(app, store)
 
     register_result_history_routes(app, store)
+
+    from webui.location_api import bp as location_api_bp
+    app.register_blueprint(location_api_bp)
 
     return app
 

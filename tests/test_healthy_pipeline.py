@@ -4154,6 +4154,81 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
         self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
         self.assertEqual(source.calls, 2, "自动重启一次后仍失联，必须暂停且不循环")
 
+    def test_run_search_skips_combo_when_resume_page_past_target(self):
+        """页级 checkpoint 越过目标页数时视为已抓满，不再用非法 start_page 续抓。"""
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        class NoFetchSource:
+            platform = "boss"
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+            def fetch_list(self, *_args, **_kwargs):
+                raise AssertionError("已抓满页数的组合不得再次抓取")
+
+        with mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ), mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            result = run_search(
+                {"keyword": "前端", "city": ["上海"]},
+                NoFetchSource(), pages=2, sleeper=lambda _seconds: None,
+                resume_pages={"前端|上海": 3},
+                resume_jobs={"前端|上海": [{"job_id": "old-1", "title": "旧岗位"}]},
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["completed_combos"], ["前端|上海"])
+
+    def test_list_cdp_lost_after_last_page_retries_with_valid_start_page(self):
+        """最后一页后失联时自动重启不得把 start_page 顶到目标页数之外。"""
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+
+        class LastPageLostSource:
+            platform = "boss"
+
+            def __init__(self):
+                self.calls = 0
+                self.plan_items = []
+
+            def preflight(self):
+                return SourceOutcome.success()
+
+            def fetch_list(self, plan_item, *, on_page_completed=None):
+                self.calls += 1
+                self.plan_items.append(dict(plan_item))
+                if self.calls == 1:
+                    if on_page_completed is not None:
+                        on_page_completed({
+                            "kind": "page_completed", "combo_key": "前端|上海",
+                            "keyword": "前端", "city": "上海", "page": 2,
+                            "target_pages": 2, "jobs_delta": 1, "jobs_count": 1,
+                            "has_more": True, "resume_page": 3,
+                            "last_completed_page": 2,
+                            "jobs_snapshot": [{"job_id": "j1", "title": "旧岗位"}],
+                        })
+                    return SourceOutcome.failure(
+                        failed_code="source_cdp_unavailable", safe_log="lost")
+                return SourceOutcome.success(
+                    jobs=[{"job_id": "j1", "title": "旧岗位"}])
+
+        source = LastPageLostSource()
+        with mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ), mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            result = run_search(
+                {"keyword": "前端", "city": ["上海"]}, source, pages=2,
+                sleeper=lambda _seconds: None,
+                resume_pages={"前端|上海": 2},
+                resume_jobs={"前端|上海": [{"job_id": "j1", "title": "旧岗位"}]},
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(source.calls, 2)
+        self.assertEqual(source.plan_items[1]["start_page"], 2)
+
     def test_scrape_success_persists_terminal_status_and_combo_progress(self):
         app, temp = _make_app()
         try:

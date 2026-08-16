@@ -73,19 +73,26 @@ export function formatHistoryTime(value: string | number | null | undefined): st
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-async function loadHistory(): Promise<void> {
+async function loadHistory(options: { silent?: boolean } = {}): Promise<void> {
   const seq = ++loadSeq;
-  state.loading = true;
-  state.error = "";
+  if (!options.silent) {
+    state.loading = true;
+    state.error = "";
+  }
   try {
     const data = await apiRequest<{ ok: boolean; items?: HistoryRoundItem[] }>("/api/result-history");
     if (seq !== loadSeq) return;
     state.items = data.items || [];
-    state.loading = false;
+    state.error = "";
+    if (!options.silent) {
+      state.loading = false;
+    }
   } catch (error) {
     if (seq !== loadSeq) return;
-    state.loading = false;
-    state.error = error instanceof Error ? error.message : "历史列表读取失败";
+    if (!options.silent) {
+      state.loading = false;
+      state.error = error instanceof Error ? error.message : "历史列表读取失败";
+    }
   }
 }
 
@@ -135,8 +142,9 @@ async function deleteRound(item: HistoryRoundItem): Promise<void> {
     if (state.detail?.source_run_id === item.run_id) {
       state.detail = null;
     }
+    state.items = state.items.filter((round) => round.run_id !== item.run_id);
     state.deleteTarget = null;
-    await loadHistory();
+    await loadHistory({ silent: true });
   } catch (error) {
     state.error = error instanceof Error ? error.message : "删除失败";
   } finally {

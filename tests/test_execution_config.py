@@ -655,3 +655,62 @@ class ModeSelectionDoesNotTouchPagesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+# ===========================================================================
+# B054 地点范围：旧摘要兼容与新地点计数
+# ===========================================================================
+class B054LocationScopeDigestTests(unittest.TestCase):
+    """旧任务无 locations 时摘要不变；新地点任务使用新摘要与组合计数。"""
+
+    def _scope_data(self, locations=None):
+        scope = execution_config.normalize_scope(
+            keywords=["Python"],
+            scope_kind="cities",
+            cities=["上海"],
+            pages_per_combination=1,
+            locations=locations,
+        )
+        return scope.to_dict()
+
+    @staticmethod
+    def _fake_locations(count=3):
+        return [{
+            "platform": "boss",
+            "city_name": "上海",
+            "city_code": "101020100",
+            "district_name": f"区{i}",
+            "district_code": f"{i}",
+            "business_name": "",
+            "business_code": "",
+            "label": f"上海 · 区{i}",
+        } for i in range(count)]
+
+    def test_old_scope_dict_without_locations_round_trips(self):
+        data = self._scope_data()
+        restored = execution_config.FrozenTaskScope.from_dict(data)
+        self.assertEqual(restored.scope_digest, data["scope_digest"])
+        self.assertEqual(restored.locations, ())
+
+    def test_empty_locations_keep_old_digest(self):
+        old = self._scope_data()
+        new = self._scope_data(locations=[])
+        self.assertEqual(old["scope_digest"], new["scope_digest"])
+        self.assertNotIn("locations", old)
+
+    def test_new_locations_change_digest_and_count(self):
+        from unittest import mock
+        with mock.patch(
+            "webui.location_scope.normalize_locations",
+            return_value=self._fake_locations(),
+        ):
+            scope = execution_config.normalize_scope(
+                keywords=["Python"],
+                scope_kind="cities",
+                cities=["上海"],
+                pages_per_combination=3,
+                locations=[{"city_name": "上海"}],
+            )
+        self.assertEqual(scope.combination_count, 3)
+        self.assertEqual(scope.planned_pages, 9)
+        self.assertEqual(len(scope.locations), 3)
+        self.assertNotEqual(scope.scope_digest, self._scope_data()["scope_digest"])

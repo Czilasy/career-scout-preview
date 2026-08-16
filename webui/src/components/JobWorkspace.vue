@@ -11,6 +11,7 @@ import JobListToolbar from "./JobListToolbar.vue";
 import { countActiveFilters, emptyFilterState, filterJobs, sortJobs } from "../listFilter";
 import type { FilterState, SortKey } from "../listFilter";
 import type { JobItem } from "../types";
+import { cleanJobLocation } from "../location";
 
 const props = withDefaults(defineProps<{
   jobs: JobItem[];
@@ -391,7 +392,7 @@ function clearFilters() {
           </span>
           <span class="job-row-meta">
             <strong>{{ job.salary || "薪资面议" }}</strong>
-            <span>{{ job.location || "地点待确认" }}</span>
+            <span>{{ cleanJobLocation(job.location) || "地点待确认" }}</span>
           </span>
 
         </button>
@@ -450,7 +451,7 @@ function clearFilters() {
 
       <div class="job-detail-facts">
         <span><strong>{{ selectedJob.salary || "薪资面议" }}</strong></span>
-        <span><MapPin :size="16" aria-hidden="true" />{{ selectedJob.location || "地点待确认" }}</span>
+        <span><MapPin :size="16" aria-hidden="true" />{{ cleanJobLocation(selectedJob.location) || "地点待确认" }}</span>
         <span><BriefcaseBusiness :size="16" aria-hidden="true" />{{ company(selectedJob) }}</span>
         <span v-if="selectedJob.experience" data-testid="job-experience">{{ selectedJob.experience }}</span>
         <span v-if="selectedJob.degree" data-testid="job-degree">{{ selectedJob.degree }}</span>

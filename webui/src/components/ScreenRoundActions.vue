@@ -5,7 +5,9 @@ import type { ScreenPrimaryAction } from "../screenFlow";
 const props = defineProps<{
   action: ScreenPrimaryAction;
   busy?: boolean;
+  busyAction?: string;
   busyLabel?: string;
+  finishBusy?: boolean;
   showViewResults?: boolean;
   showFinishSave?: boolean;
   disabled?: boolean;
@@ -56,8 +58,13 @@ function emitAction() {
       :disabled="busy || disabled"
       @click="emitAction()"
     >
-      <LoaderCircle v-if="busy" class="spin" :size="15" aria-hidden="true" />
-      {{ busy ? busyLabel || action.label : action.label }}
+      <LoaderCircle
+        v-if="busy && (!busyAction || busyAction === action.kind)"
+        class="spin"
+        :size="15"
+        aria-hidden="true"
+      />
+      {{ busy && (!busyAction || busyAction === action.kind) ? busyLabel || action.label : action.label }}
     </button>
     <button
       v-if="showViewResults"
@@ -77,7 +84,13 @@ function emitAction() {
       :disabled="busy"
       @click="emit('finish-save')"
     >
-      结束并保存结果
+      <LoaderCircle
+        v-if="finishBusy || (busy && busyAction === 'finish')"
+        class="spin"
+        :size="15"
+        aria-hidden="true"
+      />
+      {{ finishBusy || (busy && busyAction === 'finish') ? '正在保存…' : '结束并保存结果' }}
     </button>
   </div>
 </template>

@@ -797,12 +797,16 @@ describe("DiscoveryView", () => {
 
     const pagesLabel = pages.element.parentElement as HTMLElement;
     expect(pagesLabel.querySelector(".hint-warn")).toBeNull();
-    expect(pagesLabel.querySelector("i.tip")?.getAttribute("data-tip")).toContain("BOSS 最多返回 10 页，超出可能无新数据");
+    const tip = pagesLabel.querySelector("i.tip")?.getAttribute("data-tip") || "";
+    expect(tip).toContain("范围 1~10");
+    expect(tip).toContain("BOSS 最多返回 10 页");
+    expect(tip).toContain("超出可能无新数据");
 
     await pages.setValue(3);
     await pages.trigger("change");
     await flushPromises();
     expect(pagesLabel.querySelector("i.tip")?.getAttribute("data-tip")).not.toContain("BOSS 最多返回 10 页");
+    expect(pagesLabel.querySelector("i.tip")?.getAttribute("data-tip")).toContain("范围 1~10");
 
     vi.unstubAllGlobals();
   });
@@ -2285,6 +2289,49 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
+  it("finish save button shows disabled spinner state while the request is pending", async () => {
+    let resolveFinish: (() => void) | undefined;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) {
+        return response({
+          ok: true, has_task: true, task_id: "scrape-failed-1", kind: "scrape",
+          status: "failed", platform: "boss", scraped_count: 1280, source_total: 3000,
+          progress: { message: "抓取失败" }, logs: [], error: "列表抓取失败",
+          pause_info: { error_code: "scrape_failed", error_reason: "列表抓取失败" },
+        });
+      }
+      if (url.includes("/api/task/finish/scrape-failed-1")) {
+        return new Promise<Response>((resolve) => {
+          resolveFinish = () => resolve(response({
+            ok: true, run_id: "scrape-failed-1", snapshot_run_id: "snap-1",
+            platform: "boss", status: "completed_with_pending", scrape_task_id: "scrape-failed-1",
+            result: { jobs: [], dropped: [], total_scraped: 0, total_kept: 0, total_dropped: 0 },
+          }));
+        });
+      }
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    const button = wrapper.get('[data-testid="finish-active-scrape"]');
+    await button.trigger("click");
+    await flushPromises();
+    expect(button.attributes("disabled")).toBeDefined();
+    expect(button.text()).toContain("正在保存…");
+    expect(button.find(".spin").exists()).toBe(true);
+    resolveFinish?.();
+    await flushPromises();
+    vi.unstubAllGlobals();
+  });
+
   it("B027: continue AI after finish actually starts ai-screen", async () => {
     const calls: string[] = [];
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -3478,6 +3525,79 @@ describe("DiscoveryView", () => {
     const rows = wrapper.findAll('[data-testid="job-row"]');
     expect(rows.length).toBeGreaterThan(0);
     expect(wrapper.get('[data-testid="job-detail"]').text()).toContain("疑似骗局：要求先交培训费");
+    vi.unstubAllGlobals();
+  });
+
+  it("B054: city chip shows city only and submit has no locations", async () => {
+    const settings = {
+      inter_combo_delay: 10,
+      detail_batch_size: 15,
+      detail_interval: 2,
+      detail_reset_every: 4,
+      detail_batch_cooldown: 5,
+      detail_tab_pool_size: 5,
+      screen_batch_size: 50,
+      screen_concurrency: 5,
+      match_batch_size: 4,
+      match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/session")) return response({ token: "test" });
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response({ labels: {} });
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      if (url.endsWith("/api/search-scope/preview")) return response({ ok: true, scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:b054" }, deduplicated: {} });
+      if (url.endsWith("/api/execute-search")) return response({ ok: true, task_id: "b054" });
+      if (url.startsWith("/api/task-state/b054")) return response({ status: "completed", progress: {}, logs: [], result: { jobs: [] } });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
+    const cityChip = wrapper.get(".city-chip");
+    expect(cityChip.text()).toContain("上海");
+    expect(wrapper.find('[data-testid="location-panel"]').exists()).toBe(false);
+    await confirmProfile(wrapper, "3年Python后端候选人");
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    const call = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/execute-search"));
+    expect(call).toBeTruthy();
+    const body = JSON.parse(String((call as unknown as [unknown, RequestInit | undefined])[1]?.body));
+    expect(body.script_params.locations).toBeUndefined();
+    vi.unstubAllGlobals();
+  });
+
+  it("B054: removing city removes its chip", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/session")) return response({ token: "test" });
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response({ labels: {} });
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: { inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2, detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5, screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10 }, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("上海");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll(".city-chip")).toHaveLength(1);
+    await wrapper.get(".city-chip-remove").trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll(".city-chip")).toHaveLength(0);
     vi.unstubAllGlobals();
   });
 });

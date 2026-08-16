@@ -13,6 +13,7 @@
 // - 不确定网络重试复用同一 request_id；用户再次确认生成新 request_id。
 // ---------------------------------------------------------------------------
 import { computed, nextTick, ref, watch } from "vue";
+import { LoaderCircle } from "@lucide/vue";
 import type { JobItem } from "../types";
 import {
   JOB_LIFECYCLE_STATUS_LABELS,
@@ -491,7 +492,10 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
           :data-testid="`lca-action-${command.action}`"
           :disabled="busy || loading"
           @click="perform(command.action)"
-        >{{ command.label }}</button>
+        >
+          <LoaderCircle v-if="busy" class="spin" :size="14" aria-hidden="true" />
+          {{ command.label }}
+        </button>
         <button
           class="button ghost lca-btn"
           type="button"
@@ -531,7 +535,8 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
         </p>
         <div class="lca-correction-actions">
           <button class="button primary lca-btn" type="submit" data-testid="lca-correction-submit" :disabled="busy">
-            保存纠正
+            <LoaderCircle v-if="busy" class="spin" :size="14" aria-hidden="true" />
+            {{ busy ? "保存中…" : "保存纠正" }}
           </button>
           <button class="button ghost lca-btn" type="button" data-testid="lca-correction-cancel" @click="closeCorrection">
             取消
@@ -565,7 +570,10 @@ watch([() => props.profileId, jobKey], resetOnJobChange, { immediate: true });
           data-testid="lca-load-more-events"
           :disabled="eventsBusy"
           @click="loadMoreEvents"
-        >{{ eventsBusy ? "加载中…" : "加载更多" }}</button>
+        >
+          <LoaderCircle v-if="eventsBusy" class="spin" :size="14" aria-hidden="true" />
+          {{ eventsBusy ? "加载中…" : "加载更多" }}
+        </button>
       </div>
     </template>
   </section>

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Trash2, X } from "@lucide/vue";
+import { Check, LoaderCircle, Trash2, X } from "@lucide/vue";
 import { formatHistoryTime, type HistoryRoundItem } from "../composables/resultHistory";
+import type { HistoryRoundDetail } from "../composables/resultHistory";
 import { historyStatusLabel } from "../discovery";
 
 const props = defineProps<{
@@ -11,6 +12,7 @@ const props = defineProps<{
   error: string;
   deleting: boolean;
   deleteTarget: HistoryRoundItem | null;
+  detail?: HistoryRoundDetail | null;
 }>();
 
 const emit = defineEmits<{
@@ -175,7 +177,7 @@ const countParts = (item: HistoryRoundItem) => [
               <div
                 v-for="item in platform === 'boss' ? bossItems : zhilianItems"
                 :key="item.run_id"
-                class="history-round-row"
+                :class="['history-round-row', { 'history-round-row--confirming': deleteTarget?.run_id === item.run_id }]"
                 data-testid="history-round-row"
                 :data-run-id="item.run_id"
                 @click="emit('open-round', item.run_id)"
@@ -196,27 +198,35 @@ const countParts = (item: HistoryRoundItem) => [
                   </template>
                 </span>
                 <span class="history-round-keyword">{{ item.keyword_summary || "未记录关键词" }}</span>
+                <Transition name="delete-confirm">
                 <span
                   v-if="deleteTarget?.run_id === item.run_id"
                   class="history-delete-confirm"
                   data-testid="history-delete-confirm"
                   @click.stop
                 >
-                  <span>删除后保留任务日志，确定删除？</span>
+                  <span class="history-delete-title">确认删除</span>
                   <span class="history-delete-actions">
                     <button
-                      class="button danger small"
+                      class="icon-button history-delete-action history-delete-yes"
                       type="button"
                       :disabled="deleting"
+                      aria-label="确认删除该轮次"
                       data-testid="history-delete-confirm-yes"
                       @click.stop="emit('delete-round', item)"
-                    >删除</button>
+                    >
+                      <LoaderCircle v-if="deleting" class="spin" :size="18" aria-hidden="true" />
+                      <Check v-else :size="18" aria-hidden="true" />
+                    </button>
                     <button
-                      class="button secondary small"
+                      class="icon-button history-delete-action history-delete-no"
                       type="button"
+                      aria-label="取消删除"
                       data-testid="history-delete-confirm-no"
                       @click.stop="emit('cancel-delete')"
-                    >取消</button>
+                    >
+                      <X :size="18" aria-hidden="true" />
+                    </button>
                   </span>
                 </span>
                 <span
@@ -234,6 +244,7 @@ const countParts = (item: HistoryRoundItem) => [
                     <Trash2 :size="16" aria-hidden="true" />
                   </button>
                 </span>
+                </Transition>
               </div>
               <p v-if="!platformCounts[platform]" class="history-platform-empty">
                 暂无{{ platformLabel(platform) }}历史轮次
@@ -290,6 +301,7 @@ const countParts = (item: HistoryRoundItem) => [
   color: var(--text-soft);
   font-size: 0.85rem;
 }
+
 
 .history-drawer-body {
   display: flex;
@@ -406,6 +418,7 @@ const countParts = (item: HistoryRoundItem) => [
   font: inherit;
   text-align: left;
   cursor: pointer;
+  overflow: hidden;
   overflow-wrap: anywhere;
 }
 
@@ -413,10 +426,14 @@ const countParts = (item: HistoryRoundItem) => [
   border-color: var(--brand-edge);
 }
 
+.history-round-row--confirming {
+  cursor: default;
+}
+
 .history-round-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 8px;
 }
 
@@ -489,22 +506,105 @@ const countParts = (item: HistoryRoundItem) => [
 }
 
 .history-delete-confirm {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-direction: column;
   align-items: center;
-  justify-content: space-between;
-  padding: 8px;
-  border: 1px solid var(--reject-edge);
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 12px;
   border-radius: 8px;
-  background: var(--reject-wash);
-  font-size: 0.85rem;
+  background: color-mix(in srgb, var(--panel) 58%, transparent);
+  -webkit-backdrop-filter: blur(7px) saturate(1.2);
+  backdrop-filter: blur(7px) saturate(1.2);
+}
+
+.history-delete-title {
+  color: var(--ink-1);
+  font-size: 0.9rem;
+  font-weight: 600;
 }
 
 .history-delete-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.history-delete-action {
+  width: auto;
+  height: auto;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 6px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--ink-3);
+  background: transparent;
+}
+
+.history-delete-action:hover:not(:disabled) {
+  color: var(--ink-1);
+  background: transparent;
+}
+
+.history-delete-action:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--brand) 28%, transparent);
+  outline-offset: 1px;
+}
+
+.history-delete-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.history-delete-yes {
+  color: var(--reject-deep);
+  background: transparent;
+}
+
+.history-delete-yes:hover:not(:disabled) {
+  color: var(--reject);
+  background: transparent;
+}
+
+.history-delete-no:hover:not(:disabled) {
+  color: var(--ink-1);
+  background: transparent;
+}
+
+.delete-confirm-enter-active,
+.delete-confirm-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.delete-confirm-enter-active {
+  transition:
+    opacity 0.22s ease,
+    transform 0.22s ease,
+    -webkit-backdrop-filter 0.28s ease,
+    backdrop-filter 0.28s ease;
+}
+
+.delete-confirm-enter-from,
+.delete-confirm-leave-to {
+  opacity: 0;
+  -webkit-backdrop-filter: blur(0) saturate(1);
+  backdrop-filter: blur(0) saturate(1);
+}
+
+.delete-confirm-enter-from {
+  transform: translateY(4px);
+}
+
+.delete-confirm-leave-active {
+  transition:
+    opacity 0.16s ease,
+    -webkit-backdrop-filter 0.18s ease,
+    backdrop-filter 0.18s ease;
 }
 
 .drawer-enter-active,

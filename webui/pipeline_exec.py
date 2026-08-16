@@ -104,7 +104,10 @@ def save_advanced_settings(
     """持久化高级设置到 JSON 文件。"""
     settings_path = Path(path) if path is not None else ADVANCED_SETTINGS_PATH
     settings_path.parent.mkdir(parents=True, exist_ok=True)
-    clean = {k: v for k, v in settings.items() if k in _ADVANCED_DEFAULTS}
+    # 部分写入（如只保存速度字段）不能覆盖旧文件里未提交的字段（如 browser_account）。
+    merged = dict(load_advanced_settings(settings_path))
+    merged.update({k: v for k, v in settings.items() if k in _ADVANCED_DEFAULTS})
+    clean = {k: v for k, v in merged.items() if k in _ADVANCED_DEFAULTS}
     with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(clean, f, ensure_ascii=False, indent=2)
 
@@ -143,14 +146,14 @@ def _default_browser_accounts() -> dict[str, dict[str, str | bool]]:
     return {
         aid: {
             "id": aid, "name": str(item["name"]), "profile_dir": str(item["profile_dir"]),
-            "builtin": True,
+            "builtin": aid == "a",
         } for aid, item in BROWSER_ACCOUNTS.items()
     }
 
 def load_browser_accounts(path: str | os.PathLike[str] | None = None) -> dict[str, dict[str, str | bool]]:
-    """Load browser accounts, always merging built-in A/B defaults."""
+    """Load browser accounts; the accounts file, when present, is authoritative."""
     accounts_path = Path(path) if path is not None else browser_accounts_path()
-    accounts = _default_browser_accounts()
+    accounts = {}
     try:
         if accounts_path.is_file():
             with open(accounts_path, "r", encoding="utf-8") as f:
@@ -166,10 +169,14 @@ def load_browser_accounts(path: str | os.PathLike[str] | None = None) -> dict[st
                     accounts[str(aid)] = {
                         "id": str(aid), "name": name,
                         "profile_dir": os.path.abspath(os.path.expanduser(profile_dir)),
-                        "builtin": bool(item.get("builtin", str(aid) in ("a", "b"))),
+                        # 只有默认账号不可删；历史文件里账号 b 的 builtin 标记不再沿用。
+                        "builtin": str(aid) == "a",
                     }
+            accounts.setdefault("a", _default_browser_accounts()["a"])
+        else:
+            accounts = _default_browser_accounts()
     except (OSError, json.JSONDecodeError, TypeError):
-        pass
+        accounts = _default_browser_accounts()
     return accounts
 
 def save_browser_accounts(accounts: dict, path: str | os.PathLike[str] | None = None) -> None:
@@ -565,6 +572,9 @@ def expand_combinations(params: dict) -> list[dict]:
     ``filters`` (dict of lists).  Returns one entry per (keyword, city)
     pair, each carrying the full multi-select ``filters`` for post-filtering.
     """
+    if params.get("locations"):
+        from webui.location_scope import expand_location_combinations as _expand_locations
+        return _expand_locations(params)
     keywords = split_keywords(params.get("keyword", ""))
     cities = params.get("city") or []
     if isinstance(cities, str):
@@ -821,7 +831,10 @@ def run_search(params: dict, source, *, pages: int = 3,
 
         kw = combo["keyword"]
         city = combo["city"]
-        combo_key = f"{kw}|{city}"
+        display_city = str(combo.get("display_city") or city)
+        source_filters = dict(combo.get("source_filters") or {})
+        location = combo.get("location") or {}
+        combo_key = str(combo.get("combo_key") or f"{kw}|{city}")
 
         # 断点续抓：跳过已完成的组合
         if combo_key in _skip:
@@ -829,21 +842,31 @@ def run_search(params: dict, source, *, pages: int = 3,
             continue
 
         resume_page = max(1, int((resume_pages or {}).get(combo_key, 1)))
+        if resume_page > pages:
+            # 页级 checkpoint 已越过目标页数：该组合已抓满，不再用非法 start_page 续抓。
+            completed_combos.append(combo_key)
+            continue
 
         emit(stage="searching", current=len(completed_combos), total=len(combos),
-             keyword=kw, city=city,
-             message=f"正在搜索 [{idx + 1}/{len(combos)}] {kw} · {city}")
+             keyword=kw, city=display_city,
+             message=f"正在搜索 [{idx + 1}/{len(combos)}] {kw} · {display_city}")
 
         if platform == "zhilian":
+            from webui.location_scope import build_zhilian_city_snapshot
             from webui.platforms import resolve_platform_city
             from webui.source import _zhilian_input_hash
             city_entry = resolve_platform_city("zhilian", city)
-            city_snapshot = {
-                "name": city_entry.name,
-                "label": city_entry.label,
-                "platform_code": city_entry.platform_code,
-                "mapping_version": city_entry.mapping_version,
-            }
+            if location:
+                city_snapshot = build_zhilian_city_snapshot(location, city_entry)
+                route_city_code = str(location.get("city_code") or city_entry.platform_code)
+            else:
+                city_snapshot = {
+                    "name": city_entry.name,
+                    "label": city_entry.label,
+                    "platform_code": city_entry.platform_code,
+                    "mapping_version": city_entry.mapping_version,
+                }
+                route_city_code = city_entry.platform_code
             plan_item = {
                 "platform": "zhilian",
                 "keyword": kw,
@@ -853,26 +876,28 @@ def run_search(params: dict, source, *, pages: int = 3,
                 "input_hash": _zhilian_input_hash({
                     "platform": "zhilian", "keyword": kw,
                     "city": city_snapshot, "target_pages": pages,
+                    "route_city_code": route_city_code,
                 }),
-                "list_output_path": _combo_output_path(artifact_dir, kw, city),
+                "list_output_path": _combo_output_path(artifact_dir, combo_key),
                 "start_page": resume_page,
                 "existing_jobs": list((resume_jobs or {}).get(combo_key) or []),
+                "route_city_code": route_city_code,
             }
         else:
             plan_item = {
                 "keyword": kw,
                 "city": city,
-                "source_filters": {},  # broad search; multi-select applied as post-filter
+                "source_filters": source_filters,
                 "combo_key": combo_key,
                 "target_pages": pages,
-                "input_hash": _combo_hash(kw, city, pages),
-                "list_output_path": _combo_output_path(artifact_dir, kw, city),
+                "input_hash": _combo_hash(kw, city, pages, source_filters=source_filters),
+                "list_output_path": _combo_output_path(artifact_dir, combo_key),
                 "start_page": resume_page,
             }
         last_page_ratio = 0.0
         page_progress_seen = False
 
-        def _page_completed(event: dict, combo_key=combo_key, kw=kw, city=city):
+        def _page_completed(event: dict, combo_key=combo_key, kw=kw, city=display_city):
             nonlocal last_page_ratio, page_progress_seen
             page_progress_seen = True
             event = dict(event or {})
@@ -896,22 +921,22 @@ def run_search(params: dict, source, *, pages: int = 3,
                 except PageEventPersistenceError:
                     emit(
                         stage="hard_stop", current=len(completed_combos), total=len(combos),
-                        keyword=kw, city=city, failed_code="internal_error",
+                        keyword=kw, city=display_city, failed_code="internal_error",
                         message="页级快照持久化失败，任务暂停",
                     )
                     raise
                 except _PIPELINE_OPERATION_ERRORS as exc:
                     emit(
                         stage="hard_stop", current=len(completed_combos), total=len(combos),
-                        keyword=kw, city=city, failed_code="internal_error",
+                        keyword=kw, city=display_city, failed_code="internal_error",
                         message="页级快照持久化失败，任务暂停",
                     )
                     raise PageEventPersistenceError(str(exc)) from exc
             emit(
                 stage="page_done", current=len(completed_combos), total=len(combos),
                 page=page, target_pages=target, page_progress=last_page_ratio,
-                keyword=kw, city=city, scraped=int(event.get("jobs_count") or 0),
-                message=(f"正在搜索 {kw} · {city}：第 {max(1, page)}/{target} 页，"
+                keyword=kw, city=display_city, scraped=int(event.get("jobs_count") or 0),
+                message=(f"正在搜索 {kw} · {display_city}：第 {max(1, page)}/{target} 页，"
                          f"已抓 {int(event.get('jobs_count') or 0)} 条"),
             )
 
@@ -920,7 +945,7 @@ def run_search(params: dict, source, *, pages: int = 3,
             platform=platform,
             on_restart=lambda: emit(
                 stage="ensure_chrome", current=len(completed_combos), total=len(combos),
-                keyword=kw, city=city,
+                keyword=kw, city=display_city,
                 message="检测到浏览器失联，正在自动重启并续抓…",
             ),
         )
@@ -941,7 +966,7 @@ def run_search(params: dict, source, *, pages: int = 3,
         except _PIPELINE_OPERATION_ERRORS as exc:
             emit(
                 stage="hard_stop", current=len(completed_combos), total=len(combos),
-                keyword=kw, city=city, failed_code="internal_error",
+                keyword=kw, city=display_city, failed_code="internal_error",
                 message="抓取执行失败，任务暂停",
             )
             return {
@@ -955,7 +980,7 @@ def run_search(params: dict, source, *, pages: int = 3,
             restart_ok, restart_err = recovery.try_restart()
             if restart_ok:
                 resume_page = max(1, int((resume_pages or {}).get(combo_key, 1)))
-                plan_item["start_page"] = resume_page
+                plan_item["start_page"] = min(resume_page, pages)
                 if platform == "zhilian":
                     plan_item["existing_jobs"] = list((resume_jobs or {}).get(combo_key) or [])
                 try:
@@ -971,7 +996,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                 except _PIPELINE_OPERATION_ERRORS as exc:
                     emit(
                         stage="hard_stop", current=len(completed_combos), total=len(combos),
-                        keyword=kw, city=city, failed_code="internal_error",
+                        keyword=kw, city=display_city, failed_code="internal_error",
                         message="抓取执行失败，任务暂停",
                     )
                     return {
@@ -986,7 +1011,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                 elif recovery.is_browser_lost(outcome.failed_code):
                     label = failed_code_label(outcome.failed_code, platform)
                     emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
-                         keyword=kw, city=city, failed_code=outcome.failed_code,
+                         keyword=kw, city=display_city, failed_code=outcome.failed_code,
                          message=f"自动重启后仍失联：{label}，任务暂停")
                     return {"ok": False, "jobs": list(merged.values()),
                             "total_scraped": total_scraped, "total_matched": len(merged),
@@ -996,7 +1021,7 @@ def run_search(params: dict, source, *, pages: int = 3,
             else:
                 label = failed_code_label("source_cdp_unavailable", platform)
                 emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
-                     keyword=kw, city=city, failed_code="source_cdp_unavailable",
+                     keyword=kw, city=display_city, failed_code="source_cdp_unavailable",
                      message=f"调试浏览器自动重启失败：{restart_err}")
                 return {"ok": False, "jobs": list(merged.values()),
                         "total_scraped": total_scraped, "total_matched": len(merged),
@@ -1008,7 +1033,7 @@ def run_search(params: dict, source, *, pages: int = 3,
             if outcome.failed_code in _HARD_STOP_CODES:
                 label = failed_code_label(outcome.failed_code, platform)
                 emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
-                     keyword=kw, city=city, failed_code=outcome.failed_code,
+                     keyword=kw, city=display_city, failed_code=outcome.failed_code,
                      combo_key=combo_key,
                      message=f"系统性阻断：{label}，任务暂停")
                 return {"ok": False, "jobs": list(merged.values()),
@@ -1024,7 +1049,7 @@ def run_search(params: dict, source, *, pages: int = 3,
             detail = f"（{_reason}）" if _reason else ""
             label = failed_code_label(outcome.failed_code, platform)
             emit(stage="combo_failed", current=len(completed_combos), total=len(combos),
-                 keyword=kw, city=city, failed_code=outcome.failed_code,
+                 keyword=kw, city=display_city, failed_code=outcome.failed_code,
                  **({"page_progress": last_page_ratio} if page_progress_seen else {}),
                  message=f"组合失败：{label}{detail}")
         else:
@@ -1040,7 +1065,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                 except _PIPELINE_OPERATION_ERRORS as exc:
                     emit(
                         stage="hard_stop", current=len(completed_combos), total=len(combos),
-                        keyword=kw, city=city, failed_code="internal_error",
+                        keyword=kw, city=display_city, failed_code="internal_error",
                         message="组合结果持久化失败，任务暂停",
                     )
                     return {
@@ -1055,10 +1080,10 @@ def run_search(params: dict, source, *, pages: int = 3,
                         "error": f"组合结果持久化失败（{type(exc).__name__}），任务已暂停",
                     }
             emit(stage="combo_done", current=len(completed_combos), total=len(combos),
-                 keyword=kw, city=city, scraped=len(outcome.jobs),
+                 keyword=kw, city=display_city, scraped=len(outcome.jobs),
                  **({"page_progress": 0} if page_progress_seen else {}),
                  merged=len(merged),
-                 message=f"完成 {kw} · {city}：本页 {len(outcome.jobs)} 条，累计去重 {len(merged)} 条")
+                 message=f"完成 {kw} · {display_city}：本页 {len(outcome.jobs)} 条，累计去重 {len(merged)} 条")
             # T018: 记录 batch 事件（combo 输入输出数量）
             if measurement_callback is not None:
                 try:
@@ -1405,15 +1430,16 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             "stopped": stopped, "fetched": fetched}
 
 
-def _combo_hash(keyword: str, city: str, pages: int) -> str:
+def _combo_hash(keyword: str, city: str, pages: int, source_filters: dict | None = None) -> str:
     import hashlib
     import json
+    filters = dict(source_filters or {})
     blob = json.dumps({"keyword": keyword, "city": city, "target_pages": pages,
-                       "source_filters": {}}, ensure_ascii=False, sort_keys=True)
+                       "source_filters": filters}, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def _combo_output_path(artifact_dir, keyword: str, city: str) -> str:
+def _combo_output_path(artifact_dir, combo_key: str) -> str:
     import os
     import re as _re
     if artifact_dir is None:
@@ -1421,9 +1447,8 @@ def _combo_output_path(artifact_dir, keyword: str, city: str) -> str:
     else:
         base = str(artifact_dir)
     os.makedirs(base, exist_ok=True)
-    safe_kw = _re.sub(r"[^\w\u4e00-\u9fff]", "", keyword)[:20] or "kw"
-    safe_city = _re.sub(r"[^\w\u4e00-\u9fff]", "", city)[:10] or "city"
-    return os.path.join(base, f"pipeline_{safe_kw}_{safe_city}_{time.time_ns()}.json")
+    safe = _re.sub(r"[^\w\u4e00-\u9fff]", "", str(combo_key))[:40] or "combo"
+    return os.path.join(base, f"pipeline_{safe}_{time.time_ns()}.json")
 
 
 def get_frozen_artifact_manifest(

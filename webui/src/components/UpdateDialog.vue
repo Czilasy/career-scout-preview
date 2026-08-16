@@ -7,7 +7,7 @@
  * installable=false（源码模式）时只显示说明 + Release 页链接。
  */
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { Download, Rocket } from "@lucide/vue";
+import { Download, LoaderCircle, Rocket } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
 import {
   openExternalLink,
@@ -198,7 +198,8 @@ onBeforeUnmount(stopPolling);
         :disabled="restarting"
         @click="restartAndUpdate"
       >
-        <Rocket :size="16" aria-hidden="true" />
+        <LoaderCircle v-if="restarting" class="spin" :size="16" aria-hidden="true" />
+        <Rocket v-else :size="16" aria-hidden="true" />
         {{ restarting ? "正在退出…" : "立即重启完成更新" }}
       </button>
       <button
@@ -209,7 +210,8 @@ onBeforeUnmount(stopPolling);
         :disabled="busy"
         @click="retry"
       >
-        <Download :size="16" aria-hidden="true" />
+        <LoaderCircle v-if="busy" class="spin" :size="16" aria-hidden="true" />
+        <Download v-else :size="16" aria-hidden="true" />
         {{ phase === 'failed' ? '重试下载' : '下载并安装' }}
       </button>
       <button

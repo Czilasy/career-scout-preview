@@ -34,6 +34,7 @@ SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
 
 # Valid filter fields passable to the scraper CLI (excludes city which is positional).
 SCRAPER_FILTER_FIELDS = ("salary", "experience", "degree", "industry", "scale", "stage")
+SCRAPER_FILTER_FIELDS = ("salary", "experience", "degree", "industry", "scale", "stage", "multiBusinessDistrict")
 
 # BOSS 预检真实探测第一次被判 restricted 时，等待该时长后重试一次。
 PREFLIGHT_RETRY_DELAY_SECONDS = 10.0
@@ -1289,6 +1290,8 @@ class BossCdpSource:
             return (10, exc.reason)
         except PageEventPersistenceError:
             raise
+        except ValueError as exc:
+            return (3, str(exc))
         except Exception:
             logger.exception("in-process 抓取执行失败（已对外脱敏）")
             return (-1, "抓取执行失败")
@@ -1756,6 +1759,7 @@ def _safe_tail(text: str, *, max_chars: int = 300) -> str:
 _EXIT_REASONS = {
     1: "登录态失效或环境异常",
     2: "连不上调试浏览器（Chrome 未启动或端口不通）",
+    3: "抓取参数错误（CLI 参数校验失败）",
     10: "触发风控/限流（验证码、连续空页或 HTTP 拦截）",
 }
 
@@ -1792,11 +1796,14 @@ def _classify_failed_code(returncode: int, captured: str) -> str:
     退出码含义（boss_cdp_raw.py）：
       1  — 登录态失效或环境异常
       2  — 连不上调试浏览器（CDPUnavailableError）
+      3  — 抓取参数错误（CLI 参数校验失败）
       10 — 触发风控/限流（RiskControlError：验证码、连续空页、HTTP 拦截）
       11 — 单次抓取运行请求数达到上限（RequestLimitExceededError）
     """
     if returncode == 2:
         return "source_cdp_unavailable"
+    if returncode == 3:
+        return "source_invalid_output"
     if returncode == 11:
         return "source_request_limit_exceeded"
     text = (captured or "").lower()

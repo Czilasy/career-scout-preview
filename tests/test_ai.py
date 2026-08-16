@@ -2105,7 +2105,7 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
         self.assertIn("（无明确标准，宽松判断）", prompt)
 
     def test_match_jds_prompt_marks_unconfirmed_preferences(self):
-        """精筛信息包对未确认的求职偏好显式标记，不静默默认匹配。"""
+        """精筛信息包把求职类型/实习设为默认硬条件，未确认项才走 caveats。"""
         from webui.ai import match_jds
 
         jobs = [{"job_id": "job-001", "title": "后端", "jd": "负责后端"}]
@@ -2115,13 +2115,17 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
             match_jds(jobs, "3年Python后端", "https://x", "key", batch_size=1)
 
         prompt = call.call_args.args[2][0]["content"]
-        self.assertIn("【第四层·未确认偏好】", prompt)
+        self.assertIn("【第四层·默认偏好】", prompt)
         self.assertIn("标记为未填写/未确认", prompt)
         self.assertIn("只找全职，兼职/外包/按单结算不考虑", prompt)
         self.assertIn("不接受996", prompt)
         self.assertIn("不得当作默认匹配", prompt)
         self.assertIn("求职类型未确认，JD 为兼职", prompt)
         self.assertIn("默认匹配，不得写'候选人未知'", prompt)
+        self.assertIn("实习/兼职与全职冲突", prompt)
+        self.assertIn("计薪与用工形式", prompt)
+        self.assertIn("技术栈硬冲突", prompt)
+        self.assertIn("fulltime_ok", prompt)
 
     def test_match_jds_prompt_jd_hard_requirement_example(self):
         """精筛 prompt 明确 JD 正文硬要求优先于标题/标签，并给出漏判示例。"""

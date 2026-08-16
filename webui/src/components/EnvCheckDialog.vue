@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Activity, RefreshCw, ShieldAlert, Wrench } from "@lucide/vue";
+import { Activity, LoaderCircle, RefreshCw, ShieldAlert, Wrench } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
 import { apiRequest, errorMessage } from "../api";
 import type { Notice } from "../types";
@@ -213,7 +213,8 @@ async function confirmClearCooldown() {
         :disabled="loading"
         @click="runCheck"
       >
-        <RefreshCw :size="15" aria-hidden="true" />
+        <LoaderCircle v-if="loading" class="spin" :size="15" aria-hidden="true" />
+        <RefreshCw v-else :size="15" aria-hidden="true" />
         {{ loading ? "检查中…" : "重新检查" }}
       </button>
     </div>
@@ -253,7 +254,8 @@ async function confirmClearCooldown() {
               :disabled="Boolean(busyAction)"
               @click="runFix(item)"
             >
-              <Wrench :size="13" aria-hidden="true" />
+              <LoaderCircle v-if="busyAction === item.id" class="spin" :size="13" aria-hidden="true" />
+              <Wrench v-else :size="13" aria-hidden="true" />
               {{ fixAction(item)!.label }}
             </button>
           </li>
@@ -266,7 +268,8 @@ async function confirmClearCooldown() {
           :disabled="Boolean(busyAction) || loading"
           @click="testAiConnection"
         >
-          <Activity :size="14" aria-hidden="true" />
+          <LoaderCircle v-if="busyAction === 'ai_test'" class="spin" :size="14" aria-hidden="true" />
+          <Activity v-else :size="14" aria-hidden="true" />
           {{ busyAction === 'ai_test' ? "测试中…" : "测试 AI 连通性" }}
         </button>
       </section>
@@ -308,7 +311,8 @@ async function confirmClearCooldown() {
             :disabled="Boolean(busyAction)"
             @click="clearCooldown(record)"
           >
-            解除冷却
+            <LoaderCircle v-if="busyAction === `clear:${record.account_id}:${record.platform}`" class="spin" :size="13" aria-hidden="true" />
+            {{ busyAction === `clear:${record.account_id}:${record.platform}` ? "解除中…" : "解除冷却" }}
           </button>
         </li>
       </ul>

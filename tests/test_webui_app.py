@@ -823,6 +823,13 @@ class SourceErrorClassificationTests(unittest.TestCase):
             "source_cdp_unavailable",
         )
 
+    def test_exit_3_returns_invalid_output(self):
+        from webui.source import _classify_failed_code
+        self.assertEqual(
+            _classify_failed_code(3, "start-page 必须在 1 到 3 之间"),
+            "source_invalid_output",
+        )
+
     def test_unknown_exit_code_returns_unknown_error(self):
         from webui.source import _classify_failed_code
         self.assertEqual(
@@ -1950,13 +1957,22 @@ class BrowserAccountApiTests(unittest.TestCase):
         builtin = self.client.delete("/api/browser-accounts/a")
         self.assertEqual(builtin.status_code, 409)
         data = self.client.get("/api/browser-accounts").get_json()
-        custom = next(a for a in data["accounts"] if not a["builtin"])
+        custom = next(a for a in data["accounts"] if a["id"] not in ("a", "b"))
         self.client.post(f"/api/browser-accounts/{custom['id']}/activate")
         deleted = self.client.delete(f"/api/browser-accounts/{custom['id']}")
         self.assertEqual(deleted.status_code, 200, deleted.get_json())
         data = self.client.get("/api/browser-accounts").get_json()
         self.assertEqual(data["active_account"], "a")
         self.assertNotIn(custom["id"], [a["id"] for a in data["accounts"]])
+
+    def test_legacy_b_account_is_deletable_and_not_reseeded(self):
+        data = self.client.get("/api/browser-accounts").get_json()
+        b = next(a for a in data["accounts"] if a["id"] == "b")
+        self.assertFalse(b["builtin"])
+        deleted = self.client.delete("/api/browser-accounts/b")
+        self.assertEqual(deleted.status_code, 200, deleted.get_json())
+        data = self.client.get("/api/browser-accounts").get_json()
+        self.assertNotIn("b", [a["id"] for a in data["accounts"]])
 
     def _seed_paused_run(self, account="b", run_id="busy-account-run", platform="boss"):
         self.store.create_screening_run(
@@ -2195,6 +2211,20 @@ class AdvancedSettingsContractTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.get_json())
         return resp.get_json()["scope"]
 
+    def _complete_speed_settings(self):
+        return {
+            "inter_combo_delay": 10.0,
+            "detail_batch_size": 15,
+            "detail_interval": 2.0,
+            "detail_reset_every": 4,
+            "detail_batch_cooldown": 5.0,
+            "detail_tab_pool_size": 5,
+            "screen_batch_size": 50,
+            "screen_concurrency": 5,
+            "match_batch_size": 4,
+            "match_concurrency": 10,
+        }
+
     def test_get_returns_versioned_state(self):
         """GET 返回 selection、settings、config_schema_version。"""
         resp = self.client.get("/api/advanced-settings")
@@ -2270,6 +2300,41 @@ class AdvancedSettingsContractTests(unittest.TestCase):
         self.assertEqual(data["selection"], "custom")
         self.assertIn("config_digest", data)
         self.assertEqual(data["settings"]["detail_tab_pool_size"], 5)
+
+    def test_put_custom_preserves_active_browser_account(self):
+        """保存速度设置后，当前浏览器账号不能被旧 JSON 兼容写覆盖。"""
+        activated = self.client.post("/api/browser-accounts/b/activate")
+        self.assertEqual(activated.status_code, 200, activated.get_json())
+        resp = self.client.put("/api/advanced-settings/custom", json={
+            "settings": self._complete_speed_settings(),
+        })
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        persisted = json.loads(pathlib.Path(
+            self.app.config["ADVANCED_SETTINGS_PATH"]
+        ).read_text(encoding="utf-8"))
+        self.assertEqual(persisted.get("browser_account"), "b")
+        data = self.client.get("/api/advanced-settings").get_json()
+        self.assertEqual(data["settings"]["browser_account"], "b")
+        accounts = self.client.get("/api/browser-accounts").get_json()
+        self.assertEqual(accounts["active_account"], "b")
+
+    def test_select_mode_preserves_active_browser_account(self):
+        """切换执行模式后，当前浏览器账号不能被模式配置覆盖。"""
+        activated = self.client.post("/api/browser-accounts/b/activate")
+        self.assertEqual(activated.status_code, 200, activated.get_json())
+        scope = self._preview_scope(pages=3)
+        resp = self.client.post("/api/advanced-settings/select-mode", json={
+            "mode": "stable", "scope_digest": scope["scope_digest"],
+        })
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        persisted = json.loads(pathlib.Path(
+            self.app.config["ADVANCED_SETTINGS_PATH"]
+        ).read_text(encoding="utf-8"))
+        self.assertEqual(persisted.get("browser_account"), "b")
+        data = self.client.get("/api/advanced-settings").get_json()
+        self.assertEqual(data["settings"]["browser_account"], "b")
+        accounts = self.client.get("/api/browser-accounts").get_json()
+        self.assertEqual(accounts["active_account"], "b")
 
     def test_put_custom_rejects_partial(self):
         """PUT /custom 缺字段返回 400。"""
@@ -7073,6 +7138,140 @@ class AutoScreenChainTests(unittest.TestCase):
         self.store.update_screening_run(run_id, status="succeeded", current_stage="scrape")
         data = self.client.get("/api/latest-running-task").get_json()
         self.assertFalse(data["has_task"])
+
+
+
+class B054LocationApiTests(unittest.TestCase):
+    """B054 地点目录、预览、执行与校验接口。"""
+
+    def setUp(self):
+        import gc
+        gc.collect()
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    @staticmethod
+    def _locations():
+        return [
+            {
+                "platform": "boss",
+                "city_name": "上海",
+                "city_code": "101020100",
+                "district_name": "浦东新区",
+                "district_code": "310115",
+            },
+            {
+                "platform": "boss",
+                "city_name": "上海",
+                "city_code": "101020100",
+                "district_name": "徐汇区",
+                "district_code": "310104",
+            },
+            {
+                "platform": "boss",
+                "city_name": "上海",
+                "city_code": "101020100",
+                "district_name": "黄浦区",
+                "district_code": "310101",
+            },
+        ]
+
+    def test_preview_accepts_locations_and_counts_combos(self):
+        resp = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "locations": self._locations(),
+            "pages_per_combination": 1,
+        })
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertEqual(data["scope"]["combination_count"], 3)
+        self.assertEqual(data["scope"]["planned_pages"], 3)
+        self.assertEqual(len(data["scope"]["locations"]), 3)
+
+    def test_old_preview_without_locations_unchanged(self):
+        resp = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "pages_per_combination": 1,
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("locations", resp.get_json()["scope"])
+
+    def test_execute_freezes_locations_into_script_params(self):
+        preview = self.client.post("/api/search-scope/preview", json={
+            "platform": "boss",
+            "keywords": ["Python"],
+            "scope_kind": "cities",
+            "cities": ["上海"],
+            "locations": self._locations(),
+            "pages_per_combination": 1,
+        }).get_json()["scope"]
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit"):
+            resp = self.client.post("/api/execute-search", json={
+                "platform": "boss",
+                "script_params": {
+                    "keyword": "Python",
+                    "city": ["上海"],
+                    "pages": 1,
+                    "locations": self._locations(),
+                },
+                "scope_digest": preview["scope_digest"],
+            })
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        task_id = resp.get_json()["task_id"]
+        run = self.app.config["TASK_STORE"].get_screening_run(task_id)
+        stored = run["execution_params"]["script_params"]
+        self.assertEqual(len(stored["locations"]), 3)
+        self.assertEqual(stored["locations"][0]["district_name"], "浦东新区")
+
+    def test_location_validate_scope_kind_nationwide_rejects_locations(self):
+        resp = self.client.post("/api/location/validate", json={
+            "platform": "boss",
+            "scope_kind": "nationwide",
+            "locations": self._locations(),
+        })
+        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.get_json()["error_code"], "scope_validation_failed")
+
+    def test_location_catalog_empty_districts_returns_200(self):
+        with mock.patch("webui.location_api.get_districts", return_value=[]):
+            resp = self.client.get("/api/location-catalog?platform=boss&city=上海")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["districts"], [])
+
+    def test_location_catalog_unavailable_returns_503(self):
+        from webui.location_catalog import LocationCatalogUnavailable
+        with mock.patch(
+            "webui.location_api.get_districts",
+            side_effect=LocationCatalogUnavailable("down"),
+        ):
+            resp = self.client.get("/api/location-catalog?platform=boss&city=上海")
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(resp.get_json()["error_code"], "location_catalog_unavailable")
 
 if __name__ == "__main__":
 

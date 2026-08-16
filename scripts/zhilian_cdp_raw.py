@@ -376,6 +376,7 @@ def fetch_list(plan_item: dict, *, on_page_completed=None) -> tuple[str | None, 
     city = plan_item.get("city") or {}
     keyword = str(plan_item.get("keyword") or "").strip()
     city_code = str(city.get("platform_code") or "").strip()
+    route_city_code = str(plan_item.get("route_city_code") or city.get("route_city_code") or "").strip()
     target_pages = int(plan_item.get("target_pages") or 1)
     start_page = max(1, int(plan_item.get("start_page") or 1))
     if not keyword or not city_code:
@@ -422,7 +423,7 @@ def fetch_list(plan_item: dict, *, on_page_completed=None) -> tuple[str | None, 
         if merged:
             return "ok", list(merged.values()), None
         # 真实空结果：必须能由当前页面明确空状态 marker 解释。
-        if _has_empty_marker(ws, city_code, keyword):
+        if _has_empty_marker(ws, route_city_code or city_code, keyword):
             evidence = {
                 "kind": "explicit_empty_state",
                 "fixture_version": "zhilian-list-v1",

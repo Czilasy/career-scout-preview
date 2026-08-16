@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { mount } from "@vue/test-utils";
 import ResultHistoryDrawer from "../ResultHistoryDrawer.vue";
 import type { HistoryRoundItem } from "../../composables/resultHistory";
+import type { HistoryRoundDetail } from "../../composables/resultHistory";
 
 function item(overrides: Partial<HistoryRoundItem> = {}): HistoryRoundItem {
   return {
@@ -64,6 +67,13 @@ describe("ResultHistoryDrawer", () => {
     expect(wrapper.findAll('[data-testid="history-latest-badge"]')).toHaveLength(2);
   });
 
+  it("keeps latest badge immediately after the time", () => {
+    const source = readFileSync(path.join(__dirname, "../../components/ResultHistoryDrawer.vue"), "utf8");
+    const head = source.match(/\.history-round-head\s*\{[^}]*\}/s)?.[0] || "";
+    expect(head).toContain("justify-content: flex-start");
+    expect(head).not.toContain("space-between");
+  });
+
   it("colors the round count parts by status tone", () => {
     const wrapper = mountDrawer();
     const meta = wrapper.find('[data-run-id="h1"] [data-testid="history-round-meta"]');
@@ -96,5 +106,47 @@ describe("ResultHistoryDrawer", () => {
     await wrapper.get('[data-testid="history-delete-confirm-yes"]').trigger("click");
     expect(wrapper.emitted("delete-round")).toHaveLength(1);
     expect(wrapper.emitted("delete-round")![0]).toEqual([expect.objectContaining({ run_id: "h2" })]);
+  });
+
+  it("shows the full-row glass confirm with icon-only actions", () => {
+    const wrapper = mountDrawer({ deleteTarget: item({ run_id: "h2" }) });
+    const confirm = wrapper.get('[data-testid="history-delete-confirm"]');
+    expect(confirm.text()).toContain("确认删除");
+    expect(confirm.text()).not.toContain("删除后保留任务日志");
+    expect(confirm.get('[data-testid="history-delete-confirm-yes"]').find("svg").exists()).toBe(true);
+    expect(confirm.get('[data-testid="history-delete-confirm-no"]').find("svg").exists()).toBe(true);
+  });
+
+  it("does not open a round while the delete confirm overlay is visible", async () => {
+    const wrapper = mountDrawer({ deleteTarget: item({ run_id: "h2" }) });
+    await wrapper.get('[data-testid="history-delete-confirm"]').trigger("click");
+    expect(wrapper.emitted("open-round")).toBeUndefined();
+  });
+
+  it("cancels delete from the x button", async () => {
+    const wrapper = mountDrawer({ deleteTarget: item({ run_id: "h2" }) });
+    await wrapper.get('[data-testid="history-delete-confirm-no"]').trigger("click");
+    expect(wrapper.emitted("cancel-delete")).toHaveLength(1);
+  });
+  it("does not render round location summary", () => {
+    const detail = {
+      ok: true,
+      has_result: true,
+      source_run_id: "h1",
+      platform: "boss",
+      status: "done",
+      script_params: {
+        locations: [{
+          platform: "boss",
+          city_name: "上海",
+          city_code: "101020100",
+          district_name: "浦东新区",
+          district_code: "310115",
+        }],
+      },
+      result: { jobs: [] },
+    } as HistoryRoundDetail;
+    const wrapper = mountDrawer({ detail });
+    expect(wrapper.find('[data-testid="history-detail-location"]').exists()).toBe(false);
   });
 });

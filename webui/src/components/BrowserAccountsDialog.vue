@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Check, ExternalLink, Plus, Trash2, UserRound } from "@lucide/vue";
+import { Check, ExternalLink, LoaderCircle, Plus, Trash2, UserRound } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
 import { ApiError, apiRequest, errorMessage } from "../api";
 import type { BrowserAccount, Notice, Platform } from "../types";
@@ -335,8 +335,9 @@ async function confirmRemoveAccount() {
                 :disabled="!canOpenPlatform(account.id, platform)"
                 @click="openPlatform(account, platform)"
               >
-                <ExternalLink :size="13" aria-hidden="true" />
-                打开
+                <LoaderCircle v-if="busyAccount === account.id" class="spin" :size="13" aria-hidden="true" />
+                <ExternalLink v-else :size="13" aria-hidden="true" />
+                {{ busyAccount === account.id ? "打开中…" : "打开" }}
               </button>
             </li>
           </ul>
@@ -353,7 +354,8 @@ async function confirmRemoveAccount() {
               :disabled="!canManage(account.id)"
               @click="activateAccount(account.id)"
             >
-              <Check :size="17" aria-hidden="true" />
+              <LoaderCircle v-if="busyAccount === account.id" class="spin" :size="17" aria-hidden="true" />
+              <Check v-else :size="17" aria-hidden="true" />
             </button>
             <button
               v-if="!account.builtin"
@@ -385,7 +387,9 @@ async function confirmRemoveAccount() {
         >
       </label>
       <button class="button primary" type="submit" :disabled="busy">
-        <Plus :size="16" aria-hidden="true" />添加账号
+        <LoaderCircle v-if="busy" class="spin" :size="16" aria-hidden="true" />
+        <Plus v-else :size="16" aria-hidden="true" />
+        {{ busy ? "添加中…" : "添加账号" }}
       </button>
     </form>
 
