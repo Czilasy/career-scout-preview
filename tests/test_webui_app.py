@@ -917,7 +917,11 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         run_id = "finish-ai-screen-run"
         self.store.create_screening_run(
             run_id, source_count=930,
-            execution_params={"scrape_task_id": scrape_id, "profile_summary": "测试画像"},
+            execution_params={
+                "scrape_task_id": scrape_id,
+                "profile_summary": "测试画像",
+                "profile_facts": {"core_skills": ["Python"], "job_type": "全职"},
+            },
         )
         self.store.update_screening_run(run_id, status="running")
         self.store.save_screening_verdicts(run_id, {
@@ -1122,9 +1126,17 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(len(data["result"]["dropped"]), 263)
         self.assertEqual(data["result"]["total_scraped"], 930)
         self.assertEqual(data["result"]["total_kept"], 667)
+        self.assertEqual(
+            data["result"]["profile_facts"],
+            {"core_skills": ["Python"], "job_type": "全职"},
+        )
         latest = self.client.get("/api/latest-pipeline-result").get_json()
         self.assertEqual(latest["status"], "completed_with_pending")
         self.assertEqual(latest["source_run_id"], data["snapshot_run_id"])
+        self.assertEqual(
+            latest["result"]["profile_facts"],
+            {"core_skills": ["Python"], "job_type": "全职"},
+        )
         finished = self.store.get_screening_run(run_id)
         self.assertEqual(finished["status"], "interrupted")
         self.assertEqual(finished["error_code"], "user_finished")
@@ -1206,6 +1218,33 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(data["result"]["total_kept"], 2)
         latest = self.client.get("/api/latest-pipeline-result").get_json()
         self.assertEqual(latest["status"], "completed_with_pending")
+
+    def test_finish_paused_scrape_run_preserves_profile_facts(self):
+        """列表抓取提前结束时，快照必须继承父任务的隐藏画像事实。"""
+        run_id = "finish-scrape-facts"
+        jobs = [
+            {"job_id": "s1", "title": "岗位1", "source_url": "https://zhipin.example/s1.html"},
+        ]
+        facts = {"core_skills": ["Python"], "job_type": "全职"}
+        self.store.create_screening_run(
+            run_id, source_count=len(jobs),
+            execution_params={
+                "platform": "boss",
+                "profile_summary": "3年Python后端候选人",
+                "profile_facts": facts,
+            },
+        )
+        self.store.save_scrape_combo_result(run_id, "kw|city", jobs, ["kw|city"])
+        self.store.update_screening_run(run_id, status="running", current_stage="scrape")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="测试限流",
+        )
+        resp = self.client.post(f"/api/task/finish/{run_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["result"]["profile_facts"], facts)
+        latest = self.client.get("/api/latest-pipeline-result").get_json()
+        self.assertEqual(latest["result"]["profile_facts"], facts)
 
     def _seed_scrape_run(self, run_id, count, status, platform="boss",
                         error_code=None, error_reason=None):
@@ -1841,6 +1880,30 @@ class ScreenContinueFlowTests(unittest.TestCase):
             self.assertTrue(data["resuming"])
             self.assertNotEqual(data["task_id"], run_id)
             self.app.config["PIPELINE_TASKS"].pop(data["task_id"], None)
+
+    def test_ai_screen_falls_back_to_parent_profile_facts_when_missing(self):
+        """旧快照漏存画像事实时，AI 筛选从父抓取任务恢复三通道输入。"""
+        scrape_id = self._create_completed_scrape_run()
+        facts = {"core_skills": ["Python"], "job_type": "全职"}
+        run = self.store.get_screening_run(scrape_id)
+        ep = dict(run.get("execution_params") or {})
+        ep["profile_summary"] = "3年Python后端候选人"
+        ep["profile_facts"] = facts
+        self.store.update_screening_execution_params(scrape_id, ep)
+        captured = []
+        with mock.patch.object(
+            self.app.config["PIPELINE_EXECUTOR"], "submit",
+            side_effect=lambda fn, *args, **kwargs: captured.append((fn, args, kwargs)) or None,
+        ):
+            resp = self.client.post("/api/ai-screen", json={
+                "scrape_task_id": scrape_id,
+                "screening_fields": {"salary": ["20-30K"]},
+                "profile_summary": "3年Python后端候选人",
+                "filter_schema_version": 1,
+            })
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        fn, args, kwargs = captured[0]
+        self.assertEqual(args[5], facts)
 
     def test_worker_pause_writes_paused_and_snapshot(self):
         from webui import pipeline_exec

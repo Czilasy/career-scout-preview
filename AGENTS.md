@@ -4,7 +4,7 @@
 
 ## 设计前必读
 
-- 本地开发设计新东西前，先查看 `roadmap/` 下本地参考文档（如 `REFERENCE_GET_JOBS.md`；该目录仅本地存在且已 `.gitignore`，公开仓库不含）。有可借鉴零件就借鉴，没有现成方案再自由发挥。
+- 本地开发设计新东西前，先查看 `roadmap/` 下本地参考文档（如 `REFERENCE_GET_JOBS.md`、`REFERENCE_BOSS_ZHIPIN_SCRAPER.md`；该目录仅本地存在且已 `.gitignore`，公开仓库不含）。有可借鉴零件就借鉴，没有现成方案再自由发挥。
 
 ## 功能开发流程与架构边界
 

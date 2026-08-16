@@ -3322,6 +3322,9 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(response.get_json()["status"], "cancelled")
+        run = self.store.get_screening_run(task_id)
+        self.assertEqual(run["error_code"], "user_cancelled")
+        self.assertEqual(run["error_reason"], "用户已取消")
         events = self.store.list_task_events(task_id)
         self.assertEqual([event["type"] for event in events], ["cancel"])
         self.assertEqual(events[0]["payload"], {"by": "user"})

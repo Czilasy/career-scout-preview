@@ -243,6 +243,7 @@ const statusLabel = computed(() => {
   if (props.snapshot?.status === "failed") return "执行失败";
   if (props.snapshot?.status === "cancelled") return "已停止";
   if (props.snapshot?.status === "paused") return "已暂停";
+  if (props.snapshot?.status === "pausing") return "正在暂停";
   return "运行中";
 });
 

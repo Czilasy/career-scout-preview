@@ -57,7 +57,7 @@ describe("location pure functions", () => {
     expect(locationSummary([
       location(),
       location({ district_name: "徐汇区", district_code: "310104" }),
-    ])).toBe("上海 · 浦东新区、上海 · 徐汇区");
+    ])).toBe("上海 · 浦东新区、徐汇区");
     expect(locationSummary([])).toBe("");
     expect(locationSummary(null)).toBe("");
   });

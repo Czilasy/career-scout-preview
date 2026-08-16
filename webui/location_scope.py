@@ -171,17 +171,26 @@ def expand_location_combinations(params: dict) -> list[dict]:
 
 
 def location_summary(locations: Any) -> str:
-    """多个地点条件的展示摘要，多个用顿号连接。"""
-    if not locations:
+    """多个地点条件的展示摘要，按城市分组去重。"""
+    if not isinstance(locations, list):
         return ""
-    labels = []
+    by_city = {}
     for location in locations:
         if not isinstance(location, dict):
             continue
-        label = _norm(location.get("label") or location_label(location))
-        if label and label not in labels:
-            labels.append(label)
-    return "、".join(labels)
+        city = _norm(location.get("city_name") or "")
+        district = _norm(location.get("district_name") or "")
+        business = _norm(location.get("business_name") or "")
+        if not city or not district:
+            continue
+        part = f"{district} · {business}" if business else district
+        parts = by_city.setdefault(city, [])
+        if part not in parts:
+            parts.append(part)
+    return "、".join(
+        f"{city} · {'、'.join(parts)}"
+        for city, parts in by_city.items()
+    )
 
 
 def scope_old_summary_compat(locations: Any) -> bool:

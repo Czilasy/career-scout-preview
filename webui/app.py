@@ -3391,6 +3391,7 @@ def create_app(config=None):
                     # 暂停状态、真实进度、checkpoint 和事件必须全部可靠落库；
                     # 任一步失败都交给外层 internal_error 路径，不能只改内存。
                     _done_keys = sorted(_rough_completed_ids)
+                    _try_save_failure_snapshot("partial")
                     _write_run_unless_finished(
                         task_id, status="paused", error_code=_block_code,
                         current_stage="ai_rough",
@@ -3459,6 +3460,7 @@ def create_app(config=None):
                 if not chrome_ok:
                     reason = f"调试浏览器未就绪（{chrome_err}），请处理后继续"
                     _save_jd_checkpoint(jd_path, jd_map)
+                    _try_save_failure_snapshot("partial")
                     _write_run_unless_finished(
                         task_id, status="paused", error_code="cdp_unavailable",
                         current_stage="jd_detail", processed_count=len(jd_map),
@@ -3492,6 +3494,7 @@ def create_app(config=None):
                 if source is None:
                     reason = "CDP 抓取源不可用，请确认调试浏览器后继续"
                     _save_jd_checkpoint(jd_path, jd_map)
+                    _try_save_failure_snapshot("partial")
                     _write_run_unless_finished(
                         task_id, status="paused", error_code="cdp_unavailable",
                         current_stage="jd_detail", processed_count=len(jd_map),
@@ -3576,6 +3579,7 @@ def create_app(config=None):
                             stage="jd_detail",
                             platform=frozen_platform,
                         )
+                        _try_save_failure_snapshot("partial")
                         _write_run_unless_finished(
                             task_id, status="paused", error_code=_hs_code,
                             current_stage="jd_detail",
@@ -3694,6 +3698,7 @@ def create_app(config=None):
                     if isinstance(_ai_exc, AISecurityError):
                         _block_code = map_ai_error_to_block_code(_ai_exc.error_code)
                         if _block_code:
+                            _try_save_failure_snapshot("partial")
                             _write_run_unless_finished(
                                 task_id, status="paused", error_code=_block_code,
                                 current_stage="ai_fine",
@@ -5333,6 +5338,8 @@ def create_app(config=None):
         screening_fields = body.get("screening_fields") or {}
         profile_summary = str(body.get("profile_summary") or "")
         profile_facts = body.get("profile_facts")
+        if not isinstance(profile_facts, dict) or not profile_facts:
+            profile_facts = None
         scrape_task_id = str(body.get("scrape_task_id") or "").strip()
         request_platform = str(body.get("platform") or "").strip() or None
         filter_schema_version = body.get("filter_schema_version")
@@ -5413,6 +5420,14 @@ def create_app(config=None):
         # 也可以被“重新开始 AI 筛选”继承断点，但保留旧 run 的终态记录。
         resume_from_run_id = ""
         prev = None
+        if profile_facts is None:
+            try:
+                parent_run = store.get_screening_run(scrape_task_id)
+            except _OPERATIONAL_ERRORS:
+                parent_run = None
+            parent_facts = ((parent_run or {}).get("execution_params") or {}).get("profile_facts")
+            if isinstance(parent_facts, dict) and parent_facts:
+                profile_facts = parent_facts
         try:
             from webui.screen_flow import find_resumable_screen_run
             prev = find_resumable_screen_run(
@@ -8260,7 +8275,11 @@ def create_app(config=None):
                     "succeeded", "partial", "failed", "interrupted",
                 ):
                     _save_cancelled_history_snapshot(run, task)
-                    store.update_screening_run(run_id, status="cancelled")
+                    store.update_screening_run(
+                        run_id, status="cancelled",
+                        error_code="user_cancelled",
+                        error_reason="用户已取消",
+                    )
                     store.save_interruption_kind(run_id, "user_cancelled")
                     store.append_task_event(run_id, "cancel", {"by": "user"})
             except ValueError as exc:
@@ -8451,6 +8470,23 @@ def create_app(config=None):
             parent_scrape_task_id = (
                 run_id if str(run.get("current_stage") or "") == "scrape" else ""
             )
+        profile_facts = params.get("profile_facts")
+        if not isinstance(profile_facts, dict) or not profile_facts:
+            profile_facts = None
+            if scrape_task_id:
+                try:
+                    parent_run = store.get_screening_run(scrape_task_id)
+                except _OPERATIONAL_ERRORS:
+                    parent_run = None
+                parent_facts = ((parent_run or {}).get("execution_params") or {}).get("profile_facts")
+                if isinstance(parent_facts, dict) and parent_facts:
+                    profile_facts = parent_facts
+            if profile_facts is None and source_run_id:
+                if source_payload is None:
+                    source_payload = store.load_latest_pipeline_result(source_run_id)
+                source_facts = ((source_payload or {}).get("result") or {}).get("profile_facts")
+                if isinstance(source_facts, dict) and source_facts:
+                    profile_facts = source_facts
         # 快照可构建性校验完成后，才停止后台工作并原子标记 user_finished；
         # 无快照时保持原状态，避免把任务永久写成无法恢复的终态（B027）。
         with _pipeline_lock:
@@ -8471,6 +8507,7 @@ def create_app(config=None):
             source_dropped=source_dropped,
             total_scraped=source_total_scraped,
             platform=platform,
+            profile_facts=profile_facts,
         )
         from webui.screen_flow import build_round_script_params
         snapshot_run_id = store.save_pipeline_result(

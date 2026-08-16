@@ -43,14 +43,14 @@
 
 ## Phase 3: 用户故事 1 - 暂停后可查看部分结果并从断点继续（P1）
 
-**Goal**: 用户暂停 AI 筛选后，04 立即可查看部分结果，03 只有“继续 AI 筛选 + 查看结果”，04 继续直接续跑。
+**Goal**: 用户暂停 AI 筛选后，04 立即可查看部分结果，03 提供“继续 AI 筛选 + 查看结果 + 结束并保存结果”，04 继续直接续跑。
 
 **Independent Test**: `tests/test_webui_app.py` 覆盖暂停路由与暂停快照；`ScreenRoundActions.spec.ts`、`useScreenRoundFlow.spec.ts`、`DiscoveryView.spec.ts` 覆盖按钮矩阵与续跑调用。
 
 ### Tests for User Story 1
 
 - [ ] T011 [P] [US1] 在 `tests/test_webui_app.py` 新增后端测试：`POST /api/task/pause/<run_id>` 对 AI run 返回 `pausing`；worker 暂停后原 run 为 `paused`、`error_code=user_paused`、verdicts/checkpoints 保留，并生成 `record_kind=result_snapshot` 的 partial 快照。
-- [ ] T012 [P] [US1] 新建 `webui/src/components/__tests__/ScreenRoundActions.spec.ts`：覆盖 AI 运行中只有“暂停筛选”、暂停后只有“继续 AI 筛选 + 查看结果”、点击暂停显示“正在暂停…”并禁用。
+- [ ] T012 [P] [US1] 新建 `webui/src/components/__tests__/ScreenRoundActions.spec.ts`：覆盖 AI 运行中只有“暂停筛选”、暂停后提供“继续 AI 筛选 + 查看结果 + 结束并保存结果”、点击暂停显示“正在暂停…”并禁用。
 - [ ] T013 [P] [US1] 新建 `webui/src/composables/__tests__/useScreenRoundFlow.spec.ts`：覆盖 `pauseScreen()` 调用 `/api/task/pause/<run_id>`、轮询到 paused 后切换动作；`continueScreen()` 恢复上下文并调用续跑接口。
 
 ### Implementation for User Story 1
@@ -158,7 +158,7 @@
 
 1. 完成 Phase 2 基础层。
 2. 完成 US1 暂停/继续主链路。
-3. 独立验证：暂停后 04 有部分结果，03 只有“继续 AI 筛选 + 查看结果”，04 继续直接续跑。
+3. 独立验证：暂停后 04 有部分结果，03 提供“继续 AI 筛选 + 查看结果 + 结束并保存结果”，04 继续直接续跑。
 4. 再增量交付 US2 上下文回显、US3 重抓进度、US4 失败/双平台出口。
 
 ### 增量交付顺序

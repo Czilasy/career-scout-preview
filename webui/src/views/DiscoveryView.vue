@@ -291,6 +291,7 @@ const scrapeTaskId = ref("");
 const scrapeBusy = ref(false);
 const scrapeSnapshot = ref<TaskSnapshot | null>(null);
 const screenBusy = ref(false);
+const pausingScreen = ref(false);
 const screenSnapshot = ref<TaskSnapshot | null>(null);
 const screenTaskId = ref("");
 // 待确认项「全部重抓」状态
@@ -361,6 +362,7 @@ const advancedBusy = ref(false);
 const executionSelection = ref<ExecutionSelection>("custom");
 const scopePreview = ref<FrozenSearchScope | null>(null);
 const scopePreviewBusy = ref(false);
+let scopePreviewReqId = 0;
 const advancedSettings = ref<Record<string, number | string>>({
   pages: 3,
   inter_combo_delay: 10,
@@ -528,7 +530,13 @@ const screenSummaryChips = computed(() => {
   return chips;
 });
 watch(
-  [selectedKeywords, cityText, () => advancedSettings.value.pages, () => draftPlatform.value],
+  [
+    selectedKeywords,
+    cityText,
+    () => advancedSettings.value.pages,
+    () => draftPlatform.value,
+    () => locationDraft.byPlatform,
+  ],
   () => { if (!scopeLocked.value) void refreshScopePreview(); },
   { deep: true },
 );
@@ -565,6 +573,7 @@ const roundFlow = reactive(useScreenRoundFlow({
     pausedRunId,
     interruptedRunId,
     screenBusy,
+    pausingScreen,
     screenSnapshot: screenSnapshot as unknown as Ref<ApiTaskSnapshot | null>,
     recrawlBusy,
     recrawlTaskId,
@@ -1279,6 +1288,7 @@ async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
     scopePreview.value = null;
     return null;
   }
+  const reqId = ++scopePreviewReqId;
   scopePreviewBusy.value = true;
   try {
     const data = await settingsApi.previewScope({
@@ -1289,9 +1299,11 @@ async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
       locations: locationDraft.allLocations(draftPlatform.value, cityList.value),
       pages_per_combination: pagesValue.value,
     });
+    if (reqId !== scopePreviewReqId) return scopePreview.value;
     scopePreview.value = normalizeScopePreview(data);
     return scopePreview.value;
   } catch (error) {
+    if (reqId !== scopePreviewReqId) return scopePreview.value;
     scopePreview.value = null;
     notify(errorMessage(error, "搜索范围校验失败"), "warning");
     return null;
@@ -1301,7 +1313,7 @@ async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
 }
 
 async function selectExecutionMode(selection: ExecutionSelection) {
-  const preview = scopePreview.value || await refreshScopePreview();
+  const preview = await refreshScopePreview();
   if (!preview) return;
   advancedBusy.value = true;
   try {
@@ -1457,7 +1469,7 @@ async function startScrape(options: OneClickLaunch = {}) {
     notify("请确认至少一个关键词和一个城市", "warning");
     return;
   }
-  const preview = scopePreview.value || await refreshScopePreview();
+  const preview = await refreshScopePreview();
   if (!preview) return;
   // 开始抓取后自动收拢两个配置面板（用户可随时手动展开查看）。
   autoScreenArmed.value = Boolean(options.autoScreen);
@@ -1626,7 +1638,7 @@ async function continueAiScreen(platform?: Platform) {
   if (historyMode.value) return;
   const ctx = platform ? roundFlow.roundContexts[platform] : roundFlow.roundContext;
   const status = String(ctx?.status || screenSnapshot.value?.status || "");
-  const isPausedResume = status === "paused" || (!status && Boolean(pausedRunId.value));
+  const isPausedResume = Boolean(pausedRunId.value) || status === "paused";
   activeStep.value = "screen";
   if (!isPausedResume) {
     await startAiScreen({
@@ -1826,6 +1838,19 @@ let pollRetryCount = 0;
 async function pollTask(taskId: string, kind: "scrape" | "screen") {
   try {
     const data = await apiRequest<TaskSnapshot>(`/api/task-state/${encodeURIComponent(taskId)}`);
+    // 暂停请求已发出但后端仍在等当前批次结束：保持“正在暂停”，
+    // 不被旧的运行态轮询覆盖，也不提前进入完成态。
+    if (kind === "screen" && pausingScreen.value && data.status !== "paused"
+        && data.status !== "failed" && data.status !== "cancelled"
+        && data.status !== "interrupted" && !isCompletedTaskStatus(data.status)) {
+      screenSnapshot.value = {
+        ...data,
+        status: "pausing",
+        progress: { ...(data.progress || {}), message: "正在暂停…" },
+      };
+      pollTimer = window.setTimeout(() => void pollTask(taskId, kind), 1800);
+      return;
+    }
     if (kind === "scrape") scrapeSnapshot.value = data;
     else screenSnapshot.value = data;
 
@@ -1862,6 +1887,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
         }
       } else {
         screenBusy.value = false;
+        pausingScreen.value = false;
         // 实时路径与刷新路径统一：任务完成后拉双平台合并结果（R2），
         // 避免只 set 单平台结果导致结果页切平台显示 0。
         const fetched = await fetchMergedLatestResult();
@@ -1885,6 +1911,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       restoredTaskHint.value = "";
       if (kind === "scrape") scrapeBusy.value = false;
       else screenBusy.value = false;
+      if (kind === "screen") pausingScreen.value = false;
       // 不弹 error 通知：cancelScrape 已经弹过了；这里是轮询兜底（如刷新后接回的取消态）
       return;
     }
@@ -1892,7 +1919,11 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       pollRetryCount = 0;
       if (kind === "scrape") scrapeBusy.value = false;
       else screenBusy.value = false;
-      if (kind === "screen") void loadLatestResult();
+      if (kind === "screen") {
+        pausingScreen.value = false;
+        pausedRunId.value = taskId;
+        void loadLatestResult();
+      }
       notify(data.error || "任务已暂停，请处理后点继续", "warning");
       return;
     }
@@ -1901,6 +1932,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       restoredTaskHint.value = "";
       if (kind === "scrape") scrapeBusy.value = false;
       else screenBusy.value = false;
+      if (kind === "screen") pausingScreen.value = false;
       notify(data.error || "任务执行失败", "error");
       // D7：任务因未登录失败时给出账号级登录引导。
       if (kind === "scrape" && isLoginErrorCode(data.pause_info?.error_code)) {
@@ -1921,6 +1953,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       } else {
         screenBusy.value = false;
         screenTaskId.value = taskId;
+        pausingScreen.value = false;
         analysisReady.value = true;
         enterScreenStep();
         restoredTaskHint.value = "上次 AI 筛选因服务重启被中断；重新开始 AI 筛选会接着上次进度，不重复消耗";
@@ -1993,22 +2026,35 @@ function setPipelineResult(result: PipelineResult) {
   activeCategory.value = nextCategory;
 }
 
+function hasLiveTaskState(): boolean {
+  if (pausedRunId.value || interruptedRunId.value) return true;
+  const liveStatuses = new Set(["running", "queued", "paused", "failed", "interrupted"]);
+  for (const snap of [screenSnapshot.value, scrapeSnapshot.value, recrawlSnapshot.value]) {
+    if (snap && liveStatuses.has(String(snap.status))) return true;
+  }
+  return false;
+}
+
 async function loadLatestResult() {
   if (interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
   const fetched = await fetchMergedLatestResult();
   if (!fetched) return;
   const { merged, newer } = fetched;
+  if (hasLiveTaskState() && newer.data.scrape_task_id && scrapeTaskId.value && newer.data.scrape_task_id !== scrapeTaskId.value) return;
+  const live = hasLiveTaskState();
   pipelineResultRunId.value = newer.data.source_run_id || "";
-  if (newer.data.scrape_task_id) scrapeTaskId.value = newer.data.scrape_task_id;
   setPipelineResult(merged);
   // B038：最新轮可能是"已抓取，未筛选"，原样透传驱动展示模式。
   currentRoundStatus.value = newer.data.status === "scraped_only" ? "scraped_only" : "screened";
   if (isScrapedOnly.value) activeCategory.value = "matched";
-  const ps = (newer.data.result as Record<string, unknown>).profile_summary;
-  if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
-  const pfacts = (newer.data.result as Record<string, unknown>).profile_facts;
-  if (pfacts && typeof pfacts === "object") profileFacts.value = pfacts as Record<string, unknown>;
-  if (newer.data.round_context) roundFlow.restoreRoundContext(newer.data.round_context);
+  if (!live) {
+    if (newer.data.scrape_task_id) scrapeTaskId.value = newer.data.scrape_task_id;
+    const ps = (newer.data.result as Record<string, unknown>).profile_summary;
+    if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
+    const pfacts = (newer.data.result as Record<string, unknown>).profile_facts;
+    if (pfacts && typeof pfacts === "object") profileFacts.value = pfacts as Record<string, unknown>;
+    if (newer.data.round_context) roundFlow.restoreRoundContext(newer.data.round_context);
+  }
   if (pausedRunId.value) return;
   const snapshotStatus = newer.data.status === "completed_with_pending" ? "completed_with_pending" : "completed";
   scrapeSnapshot.value = {
@@ -2079,13 +2125,20 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
     const parts = [
       bossData?.has_result && bossData.result ? { platform: "boss" as const, data: bossData } : null,
       zhilianData?.has_result && zhilianData.result ? { platform: "zhilian" as const, data: zhilianData } : null,
-    ].filter(Boolean) as { platform: "boss" | "zhilian"; data: NonNullable<typeof bossData> }[];
+    ].filter((part): part is { platform: "boss" | "zhilian"; data: NonNullable<typeof bossData> } => Boolean(part))
+      .filter((part) => {
+        if (!hasLiveTaskState()) return true;
+        const activeScrapeTaskId = scrapeTaskId.value;
+        return !activeScrapeTaskId || !part.data.scrape_task_id || part.data.scrape_task_id === activeScrapeTaskId;
+      });
     if (!parts.length) return null;
 
     // 每个岗位标记来源 run（单岗位补抓/单 JD 动作需要定位来源）。
     for (const part of parts) {
       resultRunIds.value[part.platform] = part.data.source_run_id || "";
-      roundFlow.registerRoundContext(part.platform, part.data.round_context);
+      if (!hasLiveTaskState()) {
+        roundFlow.registerRoundContext(part.platform, part.data.round_context);
+      }
       const runId = part.data.source_run_id || "";
       for (const list of [part.data.result?.jobs, part.data.result?.dropped]) {
         if (!Array.isArray(list)) continue;
@@ -2381,6 +2434,7 @@ async function resetWorkflow() {
   scrapeBusy.value = false;
   screenBusy.value = false;
   recrawlBusy.value = false;
+  pausingScreen.value = false;
   recrawlRetryCount = 0;
   screenPanelOpen.value = true;
 }
@@ -3180,7 +3234,7 @@ watch(roundStatusPayload, (payload) => {
                 :finish-busy="roundFlow.busyAction === 'finish' || finishSaveBusy"
                 :disabled="roundFlow.screenAction.kind === 'start' && (draftPlatformDisabled || !scrapeCompleted)"
                 :show-view-results="roundFlow.screenAction.kind === 'continue' && (roundFlow.screenStatus === 'paused' || (roundFlow.screenStatus === 'interrupted' && finishedPartial))"
-                :show-finish-save="roundFlow.screenAction.kind === 'continue' && (roundFlow.screenStatus === 'failed' || (roundFlow.screenStatus === 'interrupted' && !finishedPartial))"
+                :show-finish-save="roundFlow.screenAction.kind === 'continue' && (roundFlow.screenStatus === 'paused' || roundFlow.screenStatus === 'failed' || (roundFlow.screenStatus === 'interrupted' && !finishedPartial))"
                 @pause="roundFlow.pauseScreen()"
                 @continue="roundFlow.continueScreen()"
                 @start="roundFlow.startScreen()"

@@ -25,6 +25,7 @@ export interface ScreenRoundFlowDeps {
     pausedRunId: Ref<string>;
     interruptedRunId: Ref<string>;
     screenBusy: Ref<boolean>;
+    pausingScreen: Ref<boolean>;
     screenSnapshot: Ref<TaskSnapshot | null>;
     recrawlBusy: Ref<boolean>;
     recrawlTaskId: Ref<string>;
@@ -204,24 +205,54 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     if (!runId) return;
     busyAction.value = "pause";
     deps.refs.screenBusy.value = true;
-    deps.refs.screenSnapshot.value = snapshotWithProgress(
-      deps.refs.screenSnapshot.value, "正在暂停…",
-    );
+    deps.refs.pausingScreen.value = true;
+    deps.refs.screenSnapshot.value = {
+      ...(deps.refs.screenSnapshot.value || {}),
+      status: "pausing",
+      progress: { ...((deps.refs.screenSnapshot.value || {}).progress || {}), message: "正在暂停…" },
+      error: "",
+    };
     try {
       await apiRequest(`/api/task/pause/${encodeURIComponent(runId)}`, { method: "POST" });
+      let paused = false;
+      let terminalOther = false;
       for (let i = 0; i < 15; i += 1) {
         await delay(300);
         const data = await apiRequest<TaskSnapshot>(
           `/api/task-state/${encodeURIComponent(runId)}`,
         );
-        deps.refs.screenSnapshot.value = data;
-        if (TERMINAL_POLL_STATUSES.has(String(data.status))) break;
+        if (String(data.status) === "paused") {
+          deps.refs.pausedRunId.value = runId;
+          deps.refs.pausingScreen.value = false;
+          deps.refs.screenSnapshot.value = data;
+          paused = true;
+          break;
+        }
+        if (TERMINAL_POLL_STATUSES.has(String(data.status))) {
+          deps.refs.pausingScreen.value = false;
+          deps.refs.screenSnapshot.value = data;
+          terminalOther = true;
+          break;
+        }
+        deps.refs.screenSnapshot.value = {
+          ...data,
+          status: "pausing",
+          progress: { ...(data.progress || {}), message: "正在暂停…" },
+        };
       }
       deps.refs.screenBusy.value = false;
-      await deps.api.loadLatestResult();
-      deps.api.notify("任务已暂停，结果已保留", "success");
+      if (paused) {
+        await deps.api.loadLatestResult();
+        deps.api.notify("任务已暂停，结果已保留", "success");
+      } else {
+        if (!terminalOther) {
+          deps.refs.screenBusy.value = true;
+          deps.api.notify("正在等待当前批次结束，完成后会自动暂停", "warning");
+        }
+      }
     } catch (error) {
       deps.refs.screenBusy.value = false;
+      deps.refs.pausingScreen.value = false;
       deps.api.notify(errorMessage(error, "暂停失败，请重试"), "error");
     } finally {
       busyAction.value = "";

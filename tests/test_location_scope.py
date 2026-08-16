@@ -152,7 +152,7 @@ class ParameterTranslationTests(unittest.TestCase):
             _boss_location(),
             _boss_location("徐汇区", "310104"),
         ]
-        self.assertEqual(location_summary(locations), "上海 · 浦东新区、上海 · 徐汇区")
+        self.assertEqual(location_summary(locations), "上海 · 浦东新区、徐汇区")
 
 
 

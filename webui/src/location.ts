@@ -88,11 +88,21 @@ export function locationCombinationCount(locations: LocationCondition[]): number
 
 export function locationSummary(locations: LocationCondition[] | undefined | null): string {
   if (!Array.isArray(locations)) return "";
-  const labels = locations
-    .filter(hasDistrict)
-    .map((location) => locationLabel(location))
-    .filter((label, index, all) => label && all.indexOf(label) === index);
-  return labels.join("、");
+  const byCity = new Map<string, string[]>();
+  for (const location of locations) {
+    if (!hasDistrict(location)) continue;
+    const city = String(location.city_name || "").trim();
+    const district = String(location.district_name || "").trim();
+    const business = String(location.business_name || "").trim();
+    const part = business ? `${district} · ${business}` : district;
+    if (!city || !part) continue;
+    const list = byCity.get(city) ?? [];
+    if (!list.includes(part)) list.push(part);
+    byCity.set(city, list);
+  }
+  return [...byCity.entries()]
+    .map(([city, parts]) => `${city} · ${parts.join("、")}`)
+    .join("、");
 }
 
 /** 清理岗位地点里的空分隔点，如“上海··/东莞··”只剩“上海/东莞”。 */

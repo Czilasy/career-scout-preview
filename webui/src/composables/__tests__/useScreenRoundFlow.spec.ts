@@ -26,6 +26,7 @@ function makeDeps() {
     pausedRunId: ref(""),
     interruptedRunId: ref(""),
     screenBusy: ref(false),
+    pausingScreen: ref(false),
     screenSnapshot: ref<any>(null),
     recrawlBusy: ref(false),
     recrawlTaskId: ref("recrawl-1"),
@@ -126,6 +127,27 @@ describe("useScreenRoundFlow", () => {
       expect(refs.screenSnapshot.value?.status).toBe("paused");
       expect(api.loadLatestResult).toHaveBeenCalled();
       expect(flow.busyAction.value).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("pauseScreen does not claim success while the worker is still running", async () => {
+    vi.useFakeTimers();
+    try {
+      const { refs, api } = makeDeps();
+      const flow = useScreenRoundFlow({ refs, api });
+      apiRequestMock
+        .mockResolvedValueOnce({ ok: true, run_id: "screen-1", status: "pausing" })
+        .mockResolvedValue({ status: "running", progress: { message: "AI 筛选中" }, logs: [] });
+      const promise = flow.pauseScreen();
+      await vi.advanceTimersByTimeAsync(300 * 16);
+      await flushPromises();
+      await promise;
+      expect(refs.screenBusy.value).toBe(true);
+      expect(refs.pausingScreen.value).toBe(true);
+      expect(refs.screenSnapshot.value?.status).toBe("pausing");
+      expect(api.notify).not.toHaveBeenCalledWith("任务已暂停，结果已保留", "success");
     } finally {
       vi.useRealTimers();
     }
