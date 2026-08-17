@@ -4,7 +4,7 @@ import { apiRequest, errorMessage } from "../api";
 import {
   deriveScreenPrimaryAction,
   continueTargets,
-  isResumableStatus,
+  isRoundClosedSaved,
   normalizeRoundContext,
   roundConditionsRestored,
   type ScreenPrimaryAction,
@@ -80,7 +80,17 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   const suppressProfileWatch = ref(false);
 
   const screenStatus = computed(() => {
-    const ctxStatus = roundContext.value?.status;
+    const ctx = roundContext.value;
+    const ctxStatus = ctx ? String(ctx.status) : "";
+    // 已结束保存：内存 finishedPartial 或持久化 closed round_context 都视为
+    // 阶段性完成（partial），03 不再出现继续/结束动作按钮。
+    const finishedSave = Boolean(deps.refs.finishedPartial.value) && Boolean(
+      deps.refs.screenTaskId.value
+      || deps.refs.pausedRunId.value
+      || deps.refs.interruptedRunId.value
+      || roundContext.value?.screen_run_id,
+    );
+    if (finishedSave || (ctx && isRoundClosedSaved(ctx))) return "partial";
     if (
       ctxStatus
       && ["running", "queued", "paused", "failed", "interrupted", "partial", "succeeded"].includes(ctxStatus)
@@ -92,10 +102,6 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     if (raw === "completed_with_pending") return "partial";
     if (raw === "completed") return "succeeded";
     if (raw === "cancelled") return "interrupted";
-    if (deps.refs.finishedPartial.value && (
-      deps.refs.screenTaskId.value || deps.refs.pausedRunId.value
-      || deps.refs.interruptedRunId.value || roundContext.value?.screen_run_id
-    )) return "interrupted";
     if (deps.refs.interruptedRunId.value) return "interrupted";
     if (deps.refs.pausedRunId.value) return "paused";
     return raw || (deps.refs.screenBusy.value ? "running" : "");
@@ -385,9 +391,16 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   }
 
   async function confirmNewRound(): Promise<boolean> {
-    const resumable = isResumableStatus(screenStatus.value)
-      || Boolean(roundContext.value?.resumable)
-      || anyResumableTarget.value;
+    const snapshotStatus = String(deps.refs.screenSnapshot.value?.status || "");
+    const resumable = Boolean(
+      deps.refs.pausedRunId.value
+      || deps.refs.interruptedRunId.value
+      || deps.refs.screenBusy.value
+      || (!deps.refs.finishedPartial.value
+        && ["paused", "failed", "interrupted"].includes(snapshotStatus))
+      || anyResumableTarget.value
+      || Boolean(roundContext.value?.resumable),
+    );
     if (!resumable) {
       busyAction.value = "new-round";
       try {

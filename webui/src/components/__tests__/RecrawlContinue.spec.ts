@@ -138,7 +138,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
     // “全部重抓”只在单平台视图可见：先切到 BOSS 视图再触发。
     await wrapper.get('[data-testid="result-platform-filter-boss"]').trigger("click");
     await flushPromises();
-    await wrapper.get('[data-testid="recrawl-uncertain"]').trigger("click");
+    await wrapper.get('[data-testid="pending-recrawl"]').trigger("click");
     await flushPromises();
 
     const call = fetchMock.mock.calls.find(([url]) => String(url) === "/api/pipeline/recrawl");

@@ -8,7 +8,6 @@ const props = defineProps<{
   busyAction?: string;
   busyLabel?: string;
   finishBusy?: boolean;
-  showViewResults?: boolean;
   showFinishSave?: boolean;
   disabled?: boolean;
 }>();
@@ -21,7 +20,6 @@ const emit = defineEmits<{
   "pause-recrawl": [];
   "continue-recrawl": [];
   "finish-save": [];
-  "view-results": [];
 }>();
 
 const ACTION_TEST_IDS: Record<string, string> = {
@@ -65,16 +63,6 @@ function emitAction() {
         aria-hidden="true"
       />
       {{ busy && (!busyAction || busyAction === action.kind) ? busyLabel || action.label : action.label }}
-    </button>
-    <button
-      v-if="showViewResults"
-      class="button secondary"
-      type="button"
-      data-testid="view-screen-results"
-      :disabled="busy"
-      @click="emit('view-results')"
-    >
-      查看结果
     </button>
     <button
       v-if="showFinishSave"

@@ -233,6 +233,7 @@ describe("useScreenRoundFlow", () => {
       roundContext({ platform: "zhilian", screen_run_id: "screen-z", status: "succeeded", resumable: false }),
     );
     const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(false);
+    confirmMock.mockClear();
     await flow.confirmNewRound();
     expect(confirmMock).toHaveBeenCalled();
     expect(api.resetWorkflow).not.toHaveBeenCalled();
@@ -338,5 +339,26 @@ describe("useScreenRoundFlow", () => {
     refs.currentRoundStatus.value = "scraped_only";
     expect(flow.screenStatus.value).toBe("scraped_only");
     expect(flow.screenAction.value.kind).toBe("start");
+  });
+
+  it("closed saved round maps screenStatus to partial and keeps recrawl on results", () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    refs.uncertainCount.value = 1;
+    flow.restoreRoundContext(roundContext({ status: "interrupted", resumable: false }));
+    expect(flow.screenStatus.value).toBe("partial");
+    expect(flow.screenAction.value.kind).toBe("recrawl");
+  });
+
+  it("confirmNewRound resets immediately after a closed saved round", async () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    flow.restoreRoundContext(roundContext({ status: "interrupted", resumable: false }));
+    const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(false);
+    confirmMock.mockClear();
+    await flow.confirmNewRound();
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(api.resetWorkflow).toHaveBeenCalled();
+    confirmMock.mockRestore();
   });
 });

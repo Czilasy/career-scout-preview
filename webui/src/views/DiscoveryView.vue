@@ -29,6 +29,7 @@ import StepNavigator from "../components/StepNavigator.vue";
 import ContinuePlatformGuide from "../components/ContinuePlatformGuide.vue";
 import ScreenRoundActions from "../components/ScreenRoundActions.vue";
 import ScreenRecrawlProgress from "../components/ScreenRecrawlProgress.vue";
+import PendingRecrawlCapsule from "../components/PendingRecrawlCapsule.vue";
 import TaskProgress from "../components/TaskProgress.vue";
 import { ApiError, apiRequest, errorMessage, settingsApi, userFacingMessage } from "../api";
 import { setThemePlatform } from "../composables/useTheme";
@@ -292,6 +293,8 @@ const scrapeBusy = ref(false);
 const scrapeSnapshot = ref<TaskSnapshot | null>(null);
 const screenBusy = ref(false);
 const pausingScreen = ref(false);
+const switchAccounts = ref<Array<{ id: string; name: string }>>([]);
+const switchAccountId = ref("");
 const screenSnapshot = ref<TaskSnapshot | null>(null);
 const screenTaskId = ref("");
 // 待确认项「全部重抓」状态
@@ -301,7 +304,7 @@ const recrawlSnapshot = ref<TaskSnapshot | null>(null);
 let recrawlRetryCount = 0;
 const scrapeCompleted = ref(false);
 const resultLoaded = ref(false);
-// 结束保存后的临时入口状态：不自动跳结果页，由用户选择“查看结果/继续 AI 筛选”。
+// 结束保存后的内存关闭标记：与持久化 round_context 一起驱动“本轮已结束保存”态。
 const finishedPartial = ref(false);
 // “全部”视图重抓的平台选择引导：展示各平台待确认数量，数量为 0 的平台禁用。
 const recrawlPlatformGuide = ref<{ boss: number; zhilian: number } | null>(null);
@@ -1542,7 +1545,7 @@ async function cancelScrape() {
   }
 }
 
-async function continueScrape() {
+async function continueScrape(targetAccount?: string) {
   if (historyMode.value) return;
   if (!scrapeTaskId.value || scrapeBusy.value) return;
   scrapeBusy.value = true;
@@ -1554,16 +1557,34 @@ async function continueScrape() {
   try {
     const data = await apiRequest<{ task_id: string; skipped: number; old_jobs: number }>(
       `/api/task/continue/${encodeURIComponent(scrapeTaskId.value)}`,
-      { method: "POST" },
+      { method: "POST", json: targetAccount ? { target_account: targetAccount } : undefined },
     );
     scrapeTaskId.value = data.task_id;
     pollRetryCount = 0;
+    switchAccountId.value = "";
     await pollTask(data.task_id, "scrape");
   } catch (error) {
     scrapeBusy.value = false;
     scrapeSnapshot.value = { status: "failed", progress: {}, logs: [], error: errorMessage(error, "断点续抓启动失败") };
   }
 }
+
+async function loadSwitchAccounts() {
+  try {
+    const data = await apiRequest<{ accounts?: Array<{ id: string; name: string }> }>("/api/browser-accounts");
+    const list = Array.isArray(data.accounts)
+      ? data.accounts.map((a) => ({ id: String(a.id), name: a.id === "a" ? "默认账号" : (a.name || a.id) }))
+      : [];
+    switchAccounts.value = list.filter((a) => a.id);
+  } catch {
+    switchAccounts.value = [];
+  }
+}
+
+watch(
+  () => scrapeSnapshot.value?.status === "paused" && Boolean(scrapeTaskId.value),
+  (visible) => { if (visible) void loadSwitchAccounts(); },
+);
 
 interface AiScreenLaunch {
  consumeAutoScreen?: boolean;
@@ -3172,9 +3193,20 @@ watch(roundStatusPayload, (payload) => {
             <Square v-else :size="18" aria-hidden="true" />
             {{ cancelBusy ? "正在停止…" : scrapeBusy ? "停止抓取" : "单独抓取" }}
           </button>
+          <label v-if="scrapeSnapshot && scrapeSnapshot.status === 'paused' && scrapeTaskId"
+                 class="resume-account-picker" data-testid="scrape-continue-account-picker"
+                 style="display:inline-flex;align-items:center;gap:6px">
+            <span>继续账号</span>
+            <select v-model="switchAccountId" data-testid="scrape-continue-account"
+                    :disabled="scrapeBusy || switchAccounts.length <= 1"
+                    style="min-width:120px">
+              <option value="">使用原账号</option>
+              <option v-for="acc in switchAccounts" :key="acc.id" :value="acc.id">{{ acc.name }}</option>
+            </select>
+          </label>
           <button v-if="scrapeSnapshot && scrapeSnapshot.status === 'paused' && scrapeTaskId"
                   class="button secondary" type="button" data-testid="continue-scrape"
-                  :disabled="scrapeBusy || finishSaveBusy || cancelBusy" @click="continueScrape()">
+                  :disabled="scrapeBusy || finishSaveBusy || cancelBusy" @click="continueScrape(switchAccountId || undefined)">
             <LoaderCircle v-if="scrapeBusy" class="spin" :size="15" aria-hidden="true" />
             {{ scrapeBusy ? "正在继续…" : "从断点继续" }}
           </button>
@@ -3233,12 +3265,10 @@ watch(roundStatusPayload, (payload) => {
                 :busy-label="roundFlow.busyAction === 'pause' ? '正在暂停…' : roundFlow.busyAction === 'continue' ? '正在继续…' : ''"
                 :finish-busy="roundFlow.busyAction === 'finish' || finishSaveBusy"
                 :disabled="roundFlow.screenAction.kind === 'start' && (draftPlatformDisabled || !scrapeCompleted)"
-                :show-view-results="roundFlow.screenAction.kind === 'continue' && (roundFlow.screenStatus === 'paused' || (roundFlow.screenStatus === 'interrupted' && finishedPartial))"
-                :show-finish-save="roundFlow.screenAction.kind === 'continue' && (roundFlow.screenStatus === 'paused' || roundFlow.screenStatus === 'failed' || (roundFlow.screenStatus === 'interrupted' && !finishedPartial))"
+                :show-finish-save="roundFlow.screenAction.kind === 'pause' || roundFlow.screenAction.kind === 'continue'"
                 @pause="roundFlow.pauseScreen()"
                 @continue="roundFlow.continueScreen()"
                 @start="roundFlow.startScreen()"
-                @view-results="activeStep = 'results'"
                 @finish-save="finishScreenSave()"
               />
             </div>
@@ -3271,8 +3301,10 @@ watch(roundStatusPayload, (payload) => {
           </div>
         </CollapsibleCard>
 
+        <ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide" :guide="roundFlow.continueGuide" @choose="roundFlow.chooseContinuePlatform" @cancel="roundFlow.cancelContinueGuide" />
+
         <TaskProgress :snapshot="screenSnapshot" kind="screen" :task-id="screenTaskId" />
-        <ScreenRecrawlProgress v-if="recrawlSnapshot || recrawlBusy" :snapshot="recrawlSnapshot" :task-id="recrawlTaskId" :action="roundFlow.recrawlAction" :busy="Boolean(roundFlow.busyAction)" :busy-action="roundFlow.busyAction" :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''" :show-view-results="roundFlow.recrawlAction.kind === 'continue-recrawl' && roundFlow.recrawlStatus === 'paused'" :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || (roundFlow.recrawlAction.kind === 'continue-recrawl' && roundFlow.recrawlStatus !== 'paused')" @pause-recrawl="roundFlow.pauseRecrawl()" @continue-recrawl="roundFlow.continueRecrawl()" @finish-save="roundFlow.finishRecrawl()" @view-results="activeStep = 'results'" />
+        <ScreenRecrawlProgress v-if="recrawlSnapshot || recrawlBusy" :snapshot="recrawlSnapshot" :task-id="recrawlTaskId" :action="roundFlow.recrawlAction" :busy="Boolean(roundFlow.busyAction)" :busy-action="roundFlow.busyAction" :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''" :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || (roundFlow.recrawlAction.kind === 'continue-recrawl' && roundFlow.recrawlStatus !== 'paused')" @pause-recrawl="roundFlow.pauseRecrawl()" @continue-recrawl="roundFlow.continueRecrawl()" @finish-save="roundFlow.finishRecrawl()" />
       </section>
 
       <section
@@ -3281,8 +3313,15 @@ watch(roundStatusPayload, (payload) => {
         :class="{
           'has-recrawl-banner': activeCategory === 'uncertain' && recrawlSnapshot,
           'has-recrawl-guide': Boolean(roundFlow.continueGuide) || (activeCategory === 'uncertain' && recrawlPlatformGuide),
+          'has-pending-capsule': !historyMode && resultLoaded && !isScrapedOnly && groups.uncertain.length > 0,
         }"
       >
+        <PendingRecrawlCapsule
+          v-if="!historyMode && resultLoaded && !isScrapedOnly"
+          :count="groups.uncertain.length"
+          :busy="recrawlBusy || Boolean(recrawlSnapshot && (recrawlSnapshot.status === 'running' || recrawlSnapshot.status === 'queued'))"
+          @recrawl="roundFlow.startRecrawl(resultPlatformFilter === 'all' ? undefined : resultPlatformFilter)"
+        />
         <div class="command-band">
         <div v-if="!historyMode && !resultLoaded" class="latest-empty" data-testid="latest-result-empty">
           暂无结果：开始新一轮并将最新结果保存后，这里会显示最新轮次。
@@ -3299,13 +3338,6 @@ watch(roundStatusPayload, (payload) => {
             ><span class="vtab-dot" aria-hidden="true"></span>{{ tab.label }}<span class="vtab-count">{{ tab.count }}</span></button>
           </div>
           <span v-if="!isScrapedOnly" class="command-note" aria-hidden="true">判定依据：你的简历关键词 · 两阶段判断</span>
-          <button v-if="!historyMode && scrapeTaskId && (roundFlow.screenAction.kind === 'continue' || roundFlow.screenAction.kind === 'start')"
-                  class="button secondary small" type="button" data-testid="continue-ai-from-results"
-                  :disabled="Boolean(roundFlow.busyAction)"
-                  @click="roundFlow.screenAction.kind === 'continue' ? roundFlow.continueScreen() : roundFlow.startScreen()">
-            <LoaderCircle v-if="roundFlow.busyAction === 'continue' || roundFlow.busyAction === 'start'" class="spin" :size="14" aria-hidden="true" />
-            {{ roundFlow.busyAction === 'continue' || roundFlow.busyAction === 'start' ? "正在继续…" : roundFlow.screenAction.label }}
-          </button>
         </div>
         <ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide" :guide="roundFlow.continueGuide" @choose="roundFlow.chooseContinuePlatform" @cancel="roundFlow.cancelContinueGuide" />
         <ScreenRecrawlProgress
@@ -3316,7 +3348,6 @@ watch(roundStatusPayload, (payload) => {
           :busy="Boolean(roundFlow.busyAction)"
           :busy-action="roundFlow.busyAction"
           :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''"
-          :show-view-results="false"
           :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || (roundFlow.recrawlAction.kind === 'continue-recrawl' && roundFlow.recrawlStatus !== 'paused')"
           @pause-recrawl="roundFlow.pauseRecrawl()"
           @continue-recrawl="roundFlow.continueRecrawl()"
@@ -3339,21 +3370,6 @@ watch(roundStatusPayload, (payload) => {
           :result-epoch="resultEpoch"
           @update:platform-filter="onResultPlatformFilterChange"
         >
-          <template #heading-actions>
-            <div v-if="!historyMode && !isScrapedOnly && activeCategory === 'uncertain'" class="recrawl-inline">
-              <button
-                class="button secondary small"
-                type="button"
-                data-testid="recrawl-uncertain"
-                :disabled="recrawlBusy || !groups.uncertain.length"
-                @click="roundFlow.startRecrawl(resultPlatformFilter === 'all' ? undefined : resultPlatformFilter)"
-              >
-                <RotateCcw v-if="!recrawlBusy" :size="14" aria-hidden="true" />
-                <LoaderCircle v-else class="spin" :size="14" aria-hidden="true" />
-                {{ recrawlBusy ? "重抓中…" : `全部重抓（${groups.uncertain.length}）` }}
-              </button>
-            </div>
-          </template>
           <template #actions="{ job }">
             <template v-if="activeCategory !== 'dropped'">
               <button class="button primary" type="button" :disabled="feedbackBusyIds.has(jobId(job))" @click="toggleInterest(job)">

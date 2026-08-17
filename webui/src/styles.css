@@ -1767,11 +1767,6 @@ button:disabled {
     padding: 8px 14px;
   }
 }
-.recrawl-inline {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
 .recrawl-guide {
   display: flex;
   flex-wrap: wrap;
@@ -1811,16 +1806,6 @@ button:disabled {
 }
 .recrawl-banner .button {
   align-self: flex-start;
-}
-.recrawl-inline .button {
-  min-height: 28px;
-  padding: 0 10px;
-  font-size: 11px;
-  font-weight: 600;
-  gap: 5px;
-}
-.recrawl-inline .task-progress {
-  min-width: 200px;
 }
 /* 列表头部工具按钮（筛选 / 排序）：小图标，占用条件选中/非默认排序时补文字标签 */
 .job-list-tools {
@@ -2521,6 +2506,7 @@ body,
     flex: 1;
   }.results-view .results-stage.has-recrawl-banner,
 .results-view .results-stage.has-recrawl-guide {
+.results-view .results-stage.has-pending-capsule {
     grid-template-rows: auto auto minmax(0, 1fr);
   }.results-view .job-workspace,
 .results-view .empty-panel {

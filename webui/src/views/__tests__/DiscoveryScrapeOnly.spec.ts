@@ -187,8 +187,8 @@ describe("DiscoveryView B038 跳过 AI 直接查看", () => {
     const stepBtn = wrapper.findAll("button").find((b) => b.text().includes("查看结果"));
     await stepBtn!.trigger("click");
     await flushPromises();
-    const entry = wrapper.get('[data-testid="continue-ai-from-results"]');
-    expect(entry.text()).toContain("开始 AI 筛选");
+    expect(wrapper.find('[data-testid="continue-ai-from-results"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
   });
   it("0 岗位：不调用保存接口，04 页显示 0", async () => {
     const { wrapper, fetchMock } = await completedScrape(0);

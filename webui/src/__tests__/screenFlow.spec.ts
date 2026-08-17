@@ -1,6 +1,7 @@
 import {
   continueTargets,
   deriveScreenPrimaryAction,
+  isRoundClosedSaved,
   isResumableStatus,
   normalizeRoundContext,
   primaryActionLabel,
@@ -41,6 +42,14 @@ describe("screenFlow", () => {
     }
     expect(isResumableStatus("succeeded")).toBe(false);
     expect(isResumableStatus("running")).toBe(false);
+  });
+
+  it("isRoundClosedSaved only matches interrupted + non-resumable", () => {
+    expect(isRoundClosedSaved({ status: "interrupted", resumable: false })).toBe(true);
+    expect(isRoundClosedSaved({ status: "interrupted", resumable: true })).toBe(false);
+    expect(isRoundClosedSaved({ status: "paused", resumable: false })).toBe(false);
+    expect(isRoundClosedSaved(null)).toBe(false);
+    expect(isRoundClosedSaved(undefined)).toBe(false);
   });
 
   it("derives AI running as pause", () => {

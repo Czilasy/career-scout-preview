@@ -132,6 +132,20 @@ class ScreenFlowTests(unittest.TestCase):
         self.assertTrue(ctx["resumable"])
         self.assertTrue(ctx["has_frozen_filters"])
 
+    def test_build_round_context_payload_user_finished_is_closed(self):
+        """结束并保存后 round_context 必须持久化为不可续的阶段性完成态。"""
+        _make_ai_run(self.store, "finished-run", status="interrupted")
+        self.store.update_screening_run(
+            "finished-run", error_code="user_finished",
+            error_reason="用户提前结束，已保存部分结果",
+        )
+        ctx = build_round_context_payload(
+            self.store, self.store.get_screening_run("finished-run"),
+        )
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx["status"], "partial")
+        self.assertFalse(ctx["resumable"])
+        self.assertEqual(ctx["screen_run_id"], "finished-run")
     def test_build_round_context_from_snapshot_with_screen_run_id(self):
         _make_ai_run(self.store, "paused-run", status="paused")
         snapshot_id = self.store.save_pipeline_result(

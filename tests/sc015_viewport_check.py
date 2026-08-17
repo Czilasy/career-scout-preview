@@ -23,7 +23,7 @@ CONTINUE_SELECTOR = (
     '[data-testid="resume-recrawl"]'
 )
 PENDING_ROW_SELECTOR = '[data-testid="job-row"]'
-RECRAWL_SELECTOR = '[data-testid="recrawl-uncertain"]'
+RECRAWL_SELECTOR = '[data-testid="pending-recrawl"]'
 PLATFORM_FILTER_SELECTOR = '[data-testid="result-platform-filter"]'
 
 

@@ -1137,6 +1137,9 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
             latest["result"]["profile_facts"],
             {"core_skills": ["Python"], "job_type": "全职"},
         )
+        ctx = latest.get("round_context") or {}
+        self.assertEqual(ctx.get("status"), "partial")
+        self.assertFalse(ctx.get("resumable"))
         finished = self.store.get_screening_run(run_id)
         self.assertEqual(finished["status"], "interrupted")
         self.assertEqual(finished["error_code"], "user_finished")
@@ -1181,6 +1184,9 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(latest["source_run_id"], data["snapshot_run_id"])
         finished = self.store.get_screening_run(run_id)
         self.assertEqual(finished["error_code"], "user_finished")
+        ctx = latest.get("round_context") or {}
+        self.assertEqual(ctx.get("status"), "partial")
+        self.assertFalse(ctx.get("resumable"))
         # finish 表示用户主动结束，kind 必须从 process_restart 改为
         # user_finished，否则公共状态仍显示 interrupted（可恢复），
         # 误导用户以为任务还能继续。

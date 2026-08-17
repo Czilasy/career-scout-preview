@@ -11,7 +11,6 @@ defineProps<{
   busy: boolean;
   busyAction?: string;
   busyLabel?: string;
-  showViewResults?: boolean;
   showFinishSave?: boolean;
 }>();
 
@@ -19,7 +18,6 @@ const emit = defineEmits<{
   "pause-recrawl": [];
   "continue-recrawl": [];
   "finish-save": [];
-  "view-results": [];
 }>();
 </script>
 
@@ -32,12 +30,10 @@ const emit = defineEmits<{
       :busy-action="busyAction"
       :busy-label="busyLabel"
       :finish-busy="busyAction === 'finish'"
-      :show-view-results="showViewResults"
       :show-finish-save="showFinishSave"
       @pause-recrawl="emit('pause-recrawl')"
       @continue-recrawl="emit('continue-recrawl')"
       @finish-save="emit('finish-save')"
-      @view-results="emit('view-results')"
     />
   </div>
 </template>

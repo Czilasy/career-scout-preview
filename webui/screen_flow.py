@@ -186,6 +186,12 @@ def build_round_context_payload(store, run):
     scrape_task_id = str(params.get("scrape_task_id") or "")
     platform = str(params.get("platform") or source_run.get("platform") or "")
     status = source_run.get("status") or ""
+    # 用户主动「结束并保存结果」是持久化终态：快照保留但断点不复活，
+    # 刷新后 03 不得再出现继续/结束按钮（同一抓取源重开筛选时后端仍可接续进度）。
+    closed_saved = bool(
+        status == "interrupted"
+        and source_run.get("error_code") == "user_finished"
+    )
     if source_run.get("record_kind") == "result_snapshot":
         search = source_run.get("search_params") or {}
         screening = (
@@ -215,8 +221,8 @@ def build_round_context_payload(store, run):
             "screen_run_id": str(
                 params.get("screen_run_id") or source_run.get("id") or ""
             ),
-            "status": status,
-            "resumable": status in RESUMABLE_STATUSES,
+            "status": "partial" if closed_saved else status,
+            "resumable": False if closed_saved else status in RESUMABLE_STATUSES,
             "has_frozen_filters": bool(screening),
         }
     parent_script_params = {}
@@ -242,7 +248,7 @@ def build_round_context_payload(store, run):
         "profile_facts": params.get("profile_facts") or {},
         "scrape_task_id": scrape_task_id,
         "screen_run_id": source_run.get("id") or "",
-        "status": status,
-        "resumable": status in RESUMABLE_STATUSES,
+        "status": "partial" if closed_saved else status,
+        "resumable": False if closed_saved else status in RESUMABLE_STATUSES,
         "has_frozen_filters": True,
     }

@@ -26,6 +26,13 @@ export function isResumableStatus(status?: string): boolean {
   return Boolean(status && RESUME_STATUSES.has(status));
 }
 
+/** 用户已「结束并保存结果」的轮次：round_context 持久化为非可续终态。 */
+export function isRoundClosedSaved(
+  ctx: Pick<RoundContext, "status" | "resumable"> | null | undefined,
+): boolean {
+  return Boolean(ctx && ctx.status === "interrupted" && !ctx.resumable);
+}
+
 export function normalizeRoundContext(
   payload: Partial<RoundContext> | null | undefined,
 ): RoundContext | null {

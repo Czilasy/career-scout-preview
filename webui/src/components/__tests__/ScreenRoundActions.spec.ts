@@ -14,53 +14,76 @@ function action(kind: ScreenPrimaryAction["kind"]): ScreenPrimaryAction {
   }
 }
 
-describe("ScreenRoundActions", () => {
-  it("renders only the primary AI action while running", () => {
+const ACTION_IDS = [
+  "pause-ai-screen",
+  "continue-ai-screen",
+  "start-ai-screen",
+  "finish-save-results",
+  "view-screen-results",
+  "pause-recrawl",
+  "continue-recrawl",
+];
+
+function visibleButtons(wrapper: ReturnType<typeof mount>): string[] {
+  return ACTION_IDS
+    .filter((id) => wrapper.find(`[data-testid="${id}"]`).exists())
+    .map((id) => wrapper.get(`[data-testid="${id}"]`).text());
+}
+
+describe("ScreenRoundActions 按钮矩阵", () => {
+  it("运行中：暂停筛选 + 结束并保存结果，最多 2 个动作按钮", () => {
+    const wrapper = mount(ScreenRoundActions, {
+      props: { action: action("pause"), showFinishSave: true },
+    });
+    const buttons = visibleButtons(wrapper);
+    expect(buttons).toHaveLength(2);
+    expect(buttons.join("|")).toContain("暂停筛选");
+    expect(buttons.join("|")).toContain("结束并保存结果");
+    expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(false);
+  });
+
+  it("暂停/失败：继续 AI 筛选 + 结束并保存结果，无查看结果", () => {
+    for (const kind of ["continue"] as const) {
+      const wrapper = mount(ScreenRoundActions, {
+        props: { action: action(kind), showFinishSave: true },
+      });
+      const buttons = visibleButtons(wrapper);
+      expect(buttons).toHaveLength(2);
+      expect(wrapper.get('[data-testid="continue-ai-screen"]').text()).toContain("继续 AI 筛选");
+      expect(wrapper.get('[data-testid="finish-save-results"]').text()).toContain("结束并保存结果");
+      expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(false);
+    }
+  });
+
+  it("结束保存/关闭态：0 个动作按钮", () => {
+    const wrapper = mount(ScreenRoundActions, {
+      props: { action: { kind: "none" }, showFinishSave: false },
+    });
+    expect(wrapper.findAll("button")).toHaveLength(0);
+    expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(false);
+  });
+
+  it("任意给定组合的可见动作按钮不超过 2 个", () => {
+    const cases: Array<{ action: ScreenPrimaryAction; showFinishSave?: boolean }> = [
+      { action: action("pause"), showFinishSave: true },
+      { action: action("continue"), showFinishSave: true },
+      { action: action("start") },
+      { action: { kind: "none" } },
+      { action: action("pause-recrawl"), showFinishSave: true },
+      { action: action("continue-recrawl"), showFinishSave: true },
+    ];
+    for (const props of cases) {
+      const wrapper = mount(ScreenRoundActions, { props });
+      expect(visibleButtons(wrapper).length).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it("renders only the primary AI action while running without finish save", () => {
     const wrapper = mount(ScreenRoundActions, {
       props: { action: action("pause") },
     });
     expect(wrapper.get('[data-testid="pause-ai-screen"]').text()).toContain("暂停筛选");
-    expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(false);
-  });
-
-  it("renders continue plus view results after pause", () => {
-    const wrapper = mount(ScreenRoundActions, {
-      props: {
-        action: action("continue"),
-        showViewResults: true,
-      },
-    });
-    expect(wrapper.get('[data-testid="continue-ai-screen"]').text()).toContain("继续 AI 筛选");
-    expect(wrapper.get('[data-testid="view-screen-results"]').text()).toContain("查看结果");
-  });
-
-  it("emits view-results on click", async () => {
-    const wrapper = mount(ScreenRoundActions, {
-      props: { action: action("continue"), showViewResults: true },
-    });
-    await wrapper.get('[data-testid="view-screen-results"]').trigger("click");
-    expect(wrapper.emitted("view-results")).toHaveLength(1);
-  });
-
-  it("emits view-results after switching from running props", async () => {
-    const wrapper = mount(ScreenRoundActions, {
-      props: { action: action("pause"), busy: true },
-    });
-    await wrapper.setProps({ action: action("continue"), busy: false, showViewResults: true });
-    await wrapper.get('[data-testid="view-screen-results"]').trigger("click");
-    expect(wrapper.emitted("view-results")).toHaveLength(1);
-  });
-
-  it("renders continue plus finish save after failure", () => {
-    const wrapper = mount(ScreenRoundActions, {
-      props: {
-        action: action("continue"),
-        showFinishSave: true,
-      },
-    });
-    expect(wrapper.find('[data-testid="continue-ai-screen"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="finish-save-results"]').text()).toContain("结束并保存结果");
   });
 
   it("shows spinner and save label on finish while finish is busy", () => {
@@ -101,17 +124,7 @@ describe("ScreenRoundActions", () => {
     });
     expect(wrapper.get('[data-testid="pause-recrawl"]').text()).toContain("暂停重抓");
     expect(wrapper.get('[data-testid="finish-save-results"]').text()).toContain("结束并保存结果");
-  });
-
-  it("renders recrawl paused controls with view results", () => {
-    const wrapper = mount(ScreenRoundActions, {
-      props: {
-        action: action("continue-recrawl"),
-        showViewResults: true,
-      },
-    });
-    expect(wrapper.get('[data-testid="continue-recrawl"]').text()).toContain("继续重抓");
-    expect(wrapper.get('[data-testid="view-screen-results"]').text()).toContain("查看结果");
+    expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(false);
   });
 
   it("emits the matching action event on click", async () => {
