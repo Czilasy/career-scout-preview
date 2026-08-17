@@ -334,6 +334,9 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     if (busyAction.value || deps.refs.recrawlBusy.value) return;
     busyAction.value = "recrawl";
     try {
+      // 显式平台（选平台后/单平台视图）：重抓开始即切 03 展示进度。
+      // 无平台（"全部"视图）：由 recrawlUncertain 决定——多平台先弹选择
+      // 引导（留在 04），单平台直接重抓并在内部切 03。
       if (platform) deps.refs.activeStep.value = "screen";
       await deps.api.recrawlUncertain(platform);
     } finally {

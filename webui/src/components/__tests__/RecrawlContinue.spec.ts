@@ -76,7 +76,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
 
-    expect(wrapper.get(".results-stage").classes()).toContain("has-recrawl-banner");
+    // 暂停的重抓任务恢复后进 03 页：进度与继续按钮在 03 展示，04 不再放重抓进度。
     expect(wrapper.get(".task-stage").text()).toContain("重抓 JD 详情");
     expect(wrapper.get(".task-stage").text()).not.toContain("recrawl_fetch_jd");
     const resumeButton = wrapper.get('[data-testid="continue-recrawl"]');

@@ -467,7 +467,8 @@ const enabledSteps = computed<StepId[]>(() => {
   const enabled: StepId[] = ["upload"];
   if (analysisReady.value) enabled.push("search");
   if (scrapeCompleted.value) enabled.push("screen");
-  if (resultLoaded.value) enabled.push("results");
+  // 结果页只在任务真正结束后开放；AI 筛选暂停中任务未结束，04 保持不可进。
+  if (resultLoaded.value && screenSnapshot.value?.status !== "paused") enabled.push("results");
   return enabled;
 });
 const completedSteps = computed<StepId[]>(() => {
@@ -681,7 +682,9 @@ async function restoreRunningTask() {
     // frozen_filters 写入任务平台对应的草稿槽；缺平台时退化到草稿平台（兼容旧 mock）
     const filterPlatform: Platform = taskPlatform ?? draftPlatform.value;
     if (data.kind === "recrawl") {
-      await loadLatestResult();
+      // 重抓任务恢复：先加载结果供 04 查看，但跳过"上次已完成"快照
+      //（03 页应显示重抓自身进度，不伪造完成态）。
+      await loadLatestResult({ skipTerminalSnapshot: true });
     }
     const snapshot: TaskSnapshot = {
       status: data.status || "running",
@@ -857,10 +860,11 @@ async function restoreRunningTask() {
         if (data.round_context) roundFlow.restoreRoundContext(data.round_context);
         restoreLocationsFromContext(data.round_context);
       } else {
+        // 重抓暂停也是任务未结束：进度回 03 页，04 保持结果展示可切。
         recrawlTaskId.value = data.task_id;
         resultLoaded.value = true;
         activeCategory.value = "uncertain";
-        activeStep.value = "results";
+        activeStep.value = "screen";
       }
       // 拉 /api/task-state 拿完整计数画面（success/fail/unstarted/total）
       await enrichPausedSnapshot(data.task_id, snapshot, kind);
@@ -907,7 +911,8 @@ async function restoreRunningTask() {
       recrawlSnapshot.value = snapshot;
       resultLoaded.value = true;
       activeCategory.value = "uncertain";
-      activeStep.value = "results";
+      // 重抓运行中进度在 03 页展示；04 保持结果展示，用户可切回看旧结果。
+      activeStep.value = "screen";
       restoredTaskHint.value = "检测到重抓任务仍在后台运行，已自动接回";
       void pollRecrawl(data.task_id);
     }
@@ -2056,8 +2061,10 @@ function hasLiveTaskState(): boolean {
   return false;
 }
 
-async function loadLatestResult() {
-  if (interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
+async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean }) {
+  // 暂停/中断任务未结束，不得把暂停时保存的安全网快照当作结果加载，
+  // 否则 resultLoaded 被误置 true、04 结果页对用户开放造成「任务还在跑」误解。
+  if (interruptedRunId.value || pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
   const fetched = await fetchMergedLatestResult();
   if (!fetched) return;
   const { merged, newer } = fetched;
@@ -2077,6 +2084,9 @@ async function loadLatestResult() {
     if (newer.data.round_context) roundFlow.restoreRoundContext(newer.data.round_context);
   }
   if (pausedRunId.value) return;
+  // 重抓任务恢复：结果已加载供 04 查看，但 03 页应显示重抓自身进度，
+  // 不伪造"上次已完成"快照。
+  if (opts?.skipTerminalSnapshot) return;
   const snapshotStatus = newer.data.status === "completed_with_pending" ? "completed_with_pending" : "completed";
   scrapeSnapshot.value = {
     status: snapshotStatus, stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
@@ -2593,6 +2603,8 @@ async function retryJd(job: JobItem) {
     if (data.task_id) {
       recrawlBusy.value = true;
       recrawlTaskId.value = data.task_id;
+      // 单条补抓也是重抓任务：进度回 03 页展示。
+      activeStep.value = "screen";
       recrawlSnapshot.value = {
         status: "running",
         progress: { message: "正在补抓这条岗位…" },
@@ -2631,13 +2643,22 @@ async function recrawlUncertain(platformOverride?: "boss" | "zhilian") {
     notify("没有待确认的岗位", "info");
     return;
   }
-  const filter = platformOverride || resultPlatformFilter.value;
-  // “全部”视图不发起混合重抓：先引导选择平台，并展示各平台待确认数量。
+  let filter = platformOverride || resultPlatformFilter.value;
+  // “全部”视图不发起混合重抓：仅当两个平台都有待确认岗位时才引导选择；
+  // 只有一个平台有待确认岗位时直接用该平台，无需用户再选一次。
   if (filter === "all") {
-    recrawlPlatformGuide.value = { ...uncertainByPlatform.value };
-    return;
+    const bossCount = Number(uncertainByPlatform.value.boss || 0);
+    const zhilianCount = Number(uncertainByPlatform.value.zhilian || 0);
+    if (bossCount > 0 && zhilianCount > 0) {
+      recrawlPlatformGuide.value = { ...uncertainByPlatform.value };
+      return;
+    }
+    filter = bossCount > 0 ? "boss" : "zhilian";
   }
   if (recrawlBusy.value) return;
+  // 单平台直接重抓：进度回 03 页展示（“全部”视图单平台场景由 startRecrawl
+  // 以 undefined 调用，这里补切；单平台视图已在 startRecrawl 显式切过）。
+  activeStep.value = "screen";
   recrawlBusy.value = true;
   recrawlPlatformGuide.value = null;
   recrawlSnapshot.value = {
@@ -3311,7 +3332,6 @@ watch(roundStatusPayload, (payload) => {
         v-else
         class="results-stage"
         :class="{
-          'has-recrawl-banner': activeCategory === 'uncertain' && recrawlSnapshot,
           'has-recrawl-guide': Boolean(roundFlow.continueGuide) || (activeCategory === 'uncertain' && recrawlPlatformGuide),
           'has-pending-capsule': !historyMode && resultLoaded && !isScrapedOnly && groups.uncertain.length > 0,
         }"
@@ -3340,19 +3360,6 @@ watch(roundStatusPayload, (payload) => {
           <span v-if="!isScrapedOnly" class="command-note" aria-hidden="true">判定依据：你的简历关键词 · 两阶段判断</span>
         </div>
         <ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide" :guide="roundFlow.continueGuide" @choose="roundFlow.chooseContinuePlatform" @cancel="roundFlow.cancelContinueGuide" />
-        <ScreenRecrawlProgress
-          v-if="recrawlSnapshot || recrawlBusy"
-          :snapshot="recrawlSnapshot"
-          :task-id="recrawlTaskId"
-          :action="roundFlow.recrawlAction"
-          :busy="Boolean(roundFlow.busyAction)"
-          :busy-action="roundFlow.busyAction"
-          :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''"
-          :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || (roundFlow.recrawlAction.kind === 'continue-recrawl' && roundFlow.recrawlStatus !== 'paused')"
-          @pause-recrawl="roundFlow.pauseRecrawl()"
-          @continue-recrawl="roundFlow.continueRecrawl()"
-          @finish-save="roundFlow.finishRecrawl()"
-        />
         <div v-if="!historyMode && activeCategory === 'uncertain' && recrawlPlatformGuide" class="recrawl-guide" data-testid="recrawl-platform-guide" role="dialog" aria-label="选择重抓平台">
           <p class="recrawl-guide-title">选择要重抓的平台</p>
           <p class="recrawl-guide-counts">BOSS {{ recrawlPlatformGuide.boss }} · 智联 {{ recrawlPlatformGuide.zhilian }}</p>

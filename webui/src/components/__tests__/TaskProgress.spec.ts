@@ -1,4 +1,4 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import TaskProgress from "../TaskProgress.vue";
 
 function snapshot(overrides: Record<string, unknown> = {}) {
@@ -85,6 +85,161 @@ describe("TaskProgress diagnostics", () => {
     });
     expect(wrapper.get("[data-testid='pause-reason']").text()).toBe("boom");
     expect(wrapper.find("[data-testid='error-field']").exists()).toBe(false);
+    wrapper.unmount();
+  });
+});
+
+describe("TaskProgress elapsed time: hours and pause-excluded duration", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("formats durations over one hour as X小时Y分Z秒", () => {
+    // 57875s = 16h 4m 35s；旧实现会错误显示成 964分35秒。
+    const finished = 1_000 + 57_875_000;
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: snapshot({
+          status: "completed",
+          progress: { stage: "done", overall_percent: 100 },
+          started_at: 1_000,
+          finished_at: finished,
+        }) as never,
+      },
+    });
+    expect(wrapper.get(".task-elapsed").text()).toContain("用时 16小时4分35秒");
+    wrapper.unmount();
+  });
+
+  it("shows the frozen cumulative elapsed while paused (paused time excluded)", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
+    const baseTime = new Date("2026-08-01T00:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        // active_elapsed_ms=90s：实际运行 90 秒；started_at 到 now 为 10 分钟，
+        // 说明 8.5 分钟处于暂停，暂停时长不得计入。
+        snapshot: snapshot({
+          status: "paused",
+          progress: { stage: "fetch_jd", overall_percent: 40 },
+          started_at: baseTime - 600_000,
+          active_elapsed_ms: 90_000,
+        }) as never,
+      },
+    });
+    expect(wrapper.get(".task-elapsed").text()).toContain("用时 1分30秒");
+    // 暂停状态时间流逝不得回流到"已用"
+    vi.advanceTimersByTime(30_000);
+    await flushPromises();
+    expect(wrapper.get(".task-elapsed").text()).toContain("用时 1分30秒");
+    wrapper.unmount();
+  });
+
+  it("running shows cumulative + current segment via active_elapsed_ms", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
+    const baseTime = new Date("2026-08-01T01:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: snapshot({
+          status: "running",
+          progress: { stage: "fetch_jd", overall_percent: 50 },
+          started_at: baseTime - 600_000,
+          active_elapsed_ms: 90_000,
+        }) as never,
+      },
+    });
+    expect(wrapper.get(".task-elapsed").text()).toContain("已用 1分30秒");
+    vi.advanceTimersByTime(2_000);
+    await flushPromises();
+    expect(wrapper.get(".task-elapsed").text()).toContain("已用 1分32秒");
+    wrapper.unmount();
+  });
+
+  it("rebases active_elapsed_ms when a paused task resumes", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
+    const baseTime = new Date("2026-08-01T02:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: snapshot({
+          status: "paused",
+          progress: { stage: "fetch_jd", overall_percent: 40 },
+          started_at: baseTime - 600_000,
+          active_elapsed_ms: 90_000,
+        }) as never,
+      },
+    });
+    expect(wrapper.get(".task-elapsed").text()).toContain("用时 1分30秒");
+
+    // 续跑：后端 active_elapsed_ms 从定格值继续增长（暂停的 5s 不计入）
+    vi.setSystemTime(baseTime + 5_000);
+    await wrapper.setProps({
+      snapshot: snapshot({
+        status: "running",
+        progress: { stage: "fetch_jd", overall_percent: 45 },
+        started_at: baseTime - 600_000,
+        active_elapsed_ms: 95_000,
+      }) as never,
+    });
+    await flushPromises();
+    expect(wrapper.get(".task-elapsed").text()).toContain("已用 1分35秒");
+    vi.advanceTimersByTime(2_000);
+    await flushPromises();
+    expect(wrapper.get(".task-elapsed").text()).toContain("已用 1分37秒");
+    wrapper.unmount();
+  });
+
+  it("uses the fresh active_elapsed_ms baseline on each poll while running", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date", "requestAnimationFrame", "performance"] });
+    const baseTime = new Date("2026-08-01T03:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: snapshot({
+          status: "running",
+          progress: { stage: "fetch_jd", overall_percent: 50 },
+          started_at: baseTime - 600_000,
+          active_elapsed_ms: 90_000,
+        }) as never,
+      },
+    });
+    expect(wrapper.get(".task-elapsed").text()).toContain("已用 1分30秒");
+
+    // 下一轮轮询：后端按响应时刻重新计算，前端重置基准后不得跳变/重复计段
+    vi.setSystemTime(baseTime + 2_000);
+    await wrapper.setProps({
+      snapshot: snapshot({
+        status: "running",
+        progress: { stage: "fetch_jd", overall_percent: 50 },
+        started_at: baseTime - 600_000,
+        active_elapsed_ms: 93_000,
+      }) as never,
+    });
+    await flushPromises();
+    expect(wrapper.get(".task-elapsed").text()).toContain("已用 1分33秒");
+    vi.advanceTimersByTime(1_000);
+    await flushPromises();
+    expect(wrapper.get(".task-elapsed").text()).toContain("已用 1分34秒");
+    wrapper.unmount();
+  });
+
+  it("falls back to started_at delta when active_elapsed_ms is absent", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: snapshot({
+          status: "completed",
+          progress: { stage: "done", overall_percent: 100 },
+          started_at: 1_000,
+          finished_at: 61_000,
+        }) as never,
+      },
+    });
+    expect(wrapper.get(".task-elapsed").text()).toContain("用时 1分00秒");
     wrapper.unmount();
   });
 });

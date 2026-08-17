@@ -188,6 +188,93 @@ def _pipeline_kind_for_stage(stage: str) -> str:
         return "scrape"
     return "ai_screen"
 
+
+def _active_elapsed_ms(started_at_ms, finished_at_ms, events):
+    """从 pause/resume 事件推导累计实际运行时长（排除暂停），单位毫秒。
+
+    暂停时间不计入"已用"：暂停区间以 task_logs 的 pause/resume 事件为准，
+    未闭合的 pause（任务仍处于暂停态）按暂停持续到截止时刻处理。
+    无 started_at 时返回 None（调用方沿用 started_at 差值回退）；
+    无 pause/resume 事件但有 started_at 时返回跨度（全程实际运行，无暂停）。
+    """
+    if not started_at_ms:
+        return None
+    end_ms = finished_at_ms if finished_at_ms is not None else int(time.time() * 1000)
+    paused_ms = 0
+    pause_start = None
+    for event in events or []:
+        if not isinstance(event, dict):
+            continue
+        at = _iso_epoch_ms(event.get("at"))
+        if at is None:
+            continue
+        if event.get("type") == "pause" and pause_start is None:
+            pause_start = at
+        elif event.get("type") == "resume" and pause_start is not None:
+            paused_ms += max(0, at - pause_start)
+            pause_start = None
+    if pause_start is not None:
+        # 最后一次暂停还没有对应 resume（当前暂停中或事件流未闭合）。
+        paused_ms += max(0, end_ms - pause_start)
+    return max(0, (end_ms - started_at_ms) - paused_ms)
+
+
+def _resolve_run_scope(run, store):
+    """从 run 或其父抓取 run 解析 frozen_scope；都不可用返回 None。
+
+    AI 筛选/抓取 run 自带 frozen_scope；补抓（recrawl）run 没有，从
+    source_run_id 指向的父抓取 run 继承（同一批岗位，规模一致）。
+    """
+    from webui.execution_config import FrozenTaskScope
+    params = run.get("execution_params") or {}
+    candidates = [params.get("frozen_scope")]
+    source_run_id = str(params.get("source_run_id") or "")
+    if source_run_id:
+        try:
+            parent = store.get_screening_run(source_run_id)
+            parent_params = (parent or {}).get("execution_params") or {}
+        except _OPERATIONAL_ERRORS:
+            parent_params = {}
+        candidates.append(parent_params.get("frozen_scope"))
+    for raw in candidates:
+        if not raw:
+            continue
+        try:
+            return FrozenTaskScope.from_dict(raw)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _refresh_paused_run_execution_config(run, store):
+    """按当前 active 配置刷新 paused run 的 execution_config 并写回 DB。
+
+    当前配置来源与新建任务一致：``store.get_advanced_config_state()`` +
+    ``store.select_mode(active_selection, task_size=frozen_scope.task_size)``。
+    pages/frozen_scope 不在 execution_config 中，保持不变。
+    返回新 ExecutionConfigSnapshot；scope 缺失或配置解析失败时返回 None。
+    """
+    from webui.execution_config import ExecutionConfigSnapshot
+    frozen_scope = _resolve_run_scope(run, store)
+    if frozen_scope is None:
+        return None
+    try:
+        state = store.get_advanced_config_state()
+        selected = store.select_mode(
+            state["active_selection"], task_size=frozen_scope.task_size,
+        )
+        config = ExecutionConfigSnapshot.from_dict(selected["config"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    params = run.get("execution_params") or {}
+    new_params = dict(params)
+    new_params["execution_config"] = config.to_dict()
+    try:
+        store.update_screening_execution_params(run.get("id") or run.get("run_id"), new_params)
+    except _OPERATIONAL_ERRORS:
+        return None
+    return config
+
 # ---------------------------------------------------------------------------
 # Task 008 集成胶合：legacy PATCH 原子性与 pipeline 身份映射。
 # 不复制任何 action/时间/提醒规则，规则全部由 JobFeedbackService 与
@@ -2881,7 +2968,7 @@ def create_app(config=None):
 
     def _run_ai_screen_task(task_id, screening_fields, profile_summary,
                             scrape_task_id, resume_from_run_id="",
-                            profile_facts=None):
+                            profile_facts=None, execution_config=None):
         """AI 筛选任务：StageA 字段粗筛 → 批量抓 JD → StageB JD 精筛。
 
         读取最近一次原始抓取结果，两段式 AI 筛选后把带 verdict 的最终结果
@@ -2890,6 +2977,9 @@ def create_app(config=None):
         全程进度落库（screening_runs）+ 中间产物落盘（JD 断点文件 /
         screening_results 判定）：进程重启或失败后，同一抓取任务再次发起
         筛选且条件一致时自动接着上次进度（``resume_from_run_id``）。
+
+        ``execution_config``: 可选 — 续跑（暂停后继续）时由调用方传入本轮
+        刷新后的配置快照；未提供时从父抓取 run 读取冻结配置（新建任务路径）。
         """
         from webui.ai import match_jds, screen_jobs
         from webui.pipeline_exec import (
@@ -3168,9 +3258,11 @@ def create_app(config=None):
                 FrozenTaskScope,
             )
             try:
-                execution_config = ExecutionConfigSnapshot.from_dict(
-                    source_params["execution_config"]
-                )
+                # 续跑优先用 paused run 本轮刷新后的配置；新建路径回退父抓取 run 冻结值。
+                if execution_config is None:
+                    execution_config = ExecutionConfigSnapshot.from_dict(
+                        source_params["execution_config"]
+                    )
                 frozen_scope = FrozenTaskScope.from_dict(
                     source_params["frozen_scope"]
                 )
@@ -3660,10 +3752,13 @@ def create_app(config=None):
                      total=len(jobs_with_jd),
                      message="AI 精筛中（JD 对比简历画像）…")
                 def _fine_progress(cur, tot):
+                    # cur 是 match_jds 本轮已处理数，progress 回调总在 on_batch_done
+                    # 之后，done_verdicts 已包含本批；直接用它做唯一进度源，避免
+                    # 续跑时「恢复判定 + 本轮新增」重复叠加导致显示超前。
                     emit(stage="screen_b",
-                         current=min(len(done_verdicts) + cur, len(jobs_with_jd)),
+                         current=min(len(done_verdicts), len(jobs_with_jd)),
                          total=len(jobs_with_jd),
-                         message=f"AI 精筛 {min(len(done_verdicts) + cur, len(jobs_with_jd))}/{len(jobs_with_jd)}")
+                         message=f"AI 精筛 {min(len(done_verdicts), len(jobs_with_jd))}/{len(jobs_with_jd)}")
 
                 def _fine_batch_done(batch_verdicts, completed_job_ids):
                     nonlocal done_verdicts
@@ -5247,6 +5342,22 @@ def create_app(config=None):
         # T403: 从 DB 恢复冻结 runtime（platform/cdp_port/profile_key/
         # task_input_digest），不读当前 UI 或活动账号
         db_ep = (db_run or {}).get("execution_params") or {}
+        # 高级设置续跑生效：从 DB 读取刷新后的 execution_config/frozen_scope，
+        # 传给 _run_pipeline_task（frozen_scope 保持冻结，只 pages 不变）。
+        from webui.execution_config import (
+            ExecutionConfigSnapshot,
+            FrozenTaskScope,
+        )
+        resume_config = None
+        resume_scope = None
+        try:
+            if db_ep.get("execution_config"):
+                resume_config = ExecutionConfigSnapshot.from_dict(db_ep["execution_config"])
+            if db_ep.get("frozen_scope"):
+                resume_scope = FrozenTaskScope.from_dict(db_ep["frozen_scope"])
+        except (KeyError, TypeError, ValueError):
+            resume_config = None
+            resume_scope = None
         with _pipeline_lock:
             task = _pipeline_tasks[task_id]
             task["skip_combos"] = completed
@@ -5266,7 +5377,7 @@ def create_app(config=None):
         def run_after_claim_commits():
             start_gate.wait()
             if not abort_start.is_set():
-                _run_pipeline_task(task_id, script_params)
+                _run_pipeline_task(task_id, script_params, resume_config, resume_scope)
 
         try:
             future = _pipeline_executor.submit(run_after_claim_commits)
@@ -6992,6 +7103,15 @@ def create_app(config=None):
                 return jsonify({"ok": False, "error": "already_running"}), 409
 
         params = run.get("execution_params") or {}
+        # 高级设置续跑生效：读取刷新后的 execution_config（api_task_continue
+        # 在分发前已按当前 active 配置写回 DB），传给 _run_recrawl_task。
+        from webui.execution_config import ExecutionConfigSnapshot
+        recrawl_config = None
+        try:
+            if params.get("execution_config"):
+                recrawl_config = ExecutionConfigSnapshot.from_dict(params["execution_config"])
+        except (KeyError, TypeError, ValueError):
+            recrawl_config = None
         source_run_id = str(params.get("source_run_id") or "")
         job_ids = [str(job_id) for job_id in (params.get("job_ids") or [])]
         profile_summary = str(params.get("profile_summary") or "")
@@ -7032,6 +7152,7 @@ def create_app(config=None):
             _pipeline_executor.submit(
                 _run_recrawl_task, task_id, job_ids, profile_summary,
                 source_run_id, completed_job_ids, profile_facts,
+                recrawl_config,
             )
         except _OPERATIONAL_ERRORS as exc:
             try:
@@ -7061,12 +7182,16 @@ def create_app(config=None):
         })
 
     def _run_recrawl_task(task_id, job_ids, profile_summary, source_run_id="",
-                          completed_job_ids=None, profile_facts=None):
+                          completed_job_ids=None, profile_facts=None,
+                          execution_config=None):
         """批量重抓后台任务：补 JD + 重判，进度与结果通过 _pipeline_tasks 暴露。
 
         切片8：``source_run_id`` 用于持久化（recrawl task_id 不是 screening_runs 行）。
         暂停时写入 store（用 task_id 作为 run_id 占位），保存 checkpoint，
         服务重启后用户可点继续从 checkpoint 恢复。
+
+        ``execution_config``: 可选 — 续跑时由调用方传入本轮刷新后的配置快照，
+        不再回退到 legacy JSON 晚绑定读取；未提供时保持旧行为（向后兼容）。
         """
         from webui.ai import match_jds
         from webui.pipeline_exec import (
@@ -7308,6 +7433,7 @@ def create_app(config=None):
                             no_jd, source, artifact_dir=app.config["RESULT_DIR"],
                             stop_event=stop_event, progress=_jd_progress,
                             completed_job_ids=completed_job_ids,
+                            execution_config=execution_config,
                         )
                         detail_jobs = detail.get("jobs", [])
                         for j in detail_jobs:
@@ -7443,7 +7569,11 @@ def create_app(config=None):
                         to_judge.append(jj)
                 if to_judge:
                     _adv = _load_legacy_advanced_settings()
-                    match_batch = int(_adv.get("match_batch_size") or 4)
+                    # 高级设置续跑生效：优先用刷新后的配置，不再靠 legacy JSON 兜底
+                    if execution_config is not None:
+                        match_batch = int(execution_config.match_batch_size)
+                    else:
+                        match_batch = int(_adv.get("match_batch_size") or 4)
                     recrawl_completed_ids = set(completed_job_ids or set())
                     verdicts: dict = store.load_screening_verdicts(task_id)
                     to_judge = [
@@ -7473,6 +7603,7 @@ def create_app(config=None):
                                 model=model, raise_on_systemic=True,
                                 criteria=recrawl_criteria,
                                 profile_facts=profile_facts,
+                                execution_config=execution_config,
                             )
                         except ai_service.AISecurityError as _ai_exc:
                             # 切片8：systemic 错误暂停（不批量变 uncertain 后完成）
@@ -7993,6 +8124,13 @@ def create_app(config=None):
         finished_at = _iso_epoch_ms((live or {}).get("finished_at"))
         if finished_at is None:
             finished_at = _iso_epoch_ms((run or {}).get("finished_at"))
+        # 暂停不计时：从 task_logs 的 pause/resume 事件推导累计实际运行时长。
+        # 刷新页面后仍有效（事件已持久化）；无事件或无法计算时回退 None。
+        try:
+            task_events = store.list_task_events(run_id)
+        except _OPERATIONAL_ERRORS:
+            task_events = []
+        active_elapsed_ms = _active_elapsed_ms(started_at, finished_at, task_events)
         return jsonify({
             "ok": True,
             "run_id": run_id,
@@ -8028,6 +8166,7 @@ def create_app(config=None):
             "updated_at": (run or {}).get("updated_at"),
             "started_at": started_at,
             "finished_at": finished_at,
+            "active_elapsed_ms": active_elapsed_ms,
             # T405: 平台身份与 source outcomes 汇总
             "platform": (run or {}).get("platform") or (live or {}).get("platform"),
             "task_input_digest": (run or {}).get("task_input_digest"),
@@ -8187,7 +8326,18 @@ def create_app(config=None):
         run["execution_params"] = dict(run.get("execution_params") or {})
         run["execution_params"].update(
             {k: v for k, v in identity.items() if v not in (None, "")})
+        # 高级设置续跑生效：block 检查通过后才按当前 active 配置刷新该 run 的
+        # execution_config 并写回 DB（三条续跑路径统一从刷新后的配置读取）。
+        # pages/frozen_scope 保持冻结不变；block 未解除时不提前改写 DB 快照。
         stage = str(run.get("current_stage") or "")
+        refreshed_config = None
+
+        def _refresh_run_config():
+            nonlocal refreshed_config
+            refreshed_config = _refresh_paused_run_execution_config(run, store)
+            if refreshed_config is not None:
+                run["execution_params"]["execution_config"] = refreshed_config.to_dict()
+
         if stage.startswith("recrawl_"):
             passed, code, reason = _check_resume_block(run)
             if not passed:
@@ -8196,6 +8346,7 @@ def create_app(config=None):
                     "error_code": code, "error_reason": reason,
                     "status": "paused",
                 }), 409
+            _refresh_run_config()
             return continue_recrawl(run_id, _block_checked=True)
         if stage == "scrape":
             passed, code, reason = _check_resume_block(run)
@@ -8205,6 +8356,7 @@ def create_app(config=None):
                     "error_code": code, "error_reason": reason,
                     "status": "paused",
                 }), 409
+            _refresh_run_config()
             return continue_execute_search(run_id, _block_checked=True)
 
         passed, code, reason = _check_resume_block(run)
@@ -8228,6 +8380,7 @@ def create_app(config=None):
                 "error": "missing_scrape_snapshot",
                 "message": "抓取岗位快照缺失，无法安全继续 AI 筛选",
             }), 409
+        _refresh_run_config()
 
         if not _claim_resume(run_id):
             return jsonify({
@@ -8283,7 +8436,7 @@ def create_app(config=None):
 
         def run_after_claim_commits(
                 task_id, frozen_filters, frozen_profile, source_task_id,
-                resume_from_run_id, frozen_facts):
+                resume_from_run_id, frozen_facts, execution_config):
             start_gate.wait()
             if not abort_start.is_set():
                 _run_ai_screen_task(
@@ -8293,6 +8446,7 @@ def create_app(config=None):
                     source_task_id,
                     resume_from_run_id,
                     frozen_facts,
+                    execution_config=execution_config,
                 )
 
         try:
@@ -8304,6 +8458,8 @@ def create_app(config=None):
                 scrape_task_id,
                 run_id,
                 profile_facts,
+                # 高级设置续跑生效：优先使用本轮刷新后的配置，而非父抓取 run 的旧冻结值
+                refreshed_config,
             )
             store.append_task_event(run_id, "resume", {
                 "backend_version": _backend_version,

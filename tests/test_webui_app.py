@@ -5416,6 +5416,358 @@ class StatusMappingTests(unittest.TestCase):
         )
 
 
+class PauseElapsedAndResumeConfigTests(unittest.TestCase):
+    """暂停不计时（active_elapsed_ms）+ 高级设置续跑生效（三路径刷新配置）。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+        self.tz = timezone(timedelta(hours=8))
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _create_run(self, run_id, status="queued"):
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, status, record_kind, frozen_filters_json, "
+                "source_count, match_count, mismatch_count, "
+                "execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                "VALUES (?, ?, 'process_log', '{}', "
+                "0, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id), str(status)),
+            )
+
+    def _iso(self, sec):
+        return (datetime(2026, 8, 1, 10, 0, 0, tzinfo=self.tz)
+                + timedelta(seconds=sec)).isoformat()
+
+    def _insert_event(self, run_id, event_type, at_iso):
+        with self.store._connection() as conn:
+            # task_logs 外键指向 tasks 表：先插入占位行（同 append_task_events）
+            conn.execute(
+                "INSERT OR IGNORE INTO tasks (id, kind, status, params_json, created_at, updated_at) "
+                "VALUES (?, 'screening_event_log', 'logging', '{}', ?, ?)",
+                (str(run_id), at_iso, at_iso),
+            )
+            seq = int(conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq "
+                "FROM task_logs WHERE task_id = ?",
+                (str(run_id),),
+            ).fetchone()["next_seq"])
+            line = json.dumps(
+                {"type": event_type, "payload": {}, "at": at_iso},
+                ensure_ascii=False,
+            )
+            conn.execute(
+                "INSERT INTO task_logs (task_id, seq, created_at, line) "
+                "VALUES (?, ?, ?, ?)",
+                (str(run_id), seq, at_iso, line),
+            )
+
+    def _scope(self, **overrides):
+        raw = {
+            "schema_version": 1, "platform": "boss",
+            "keywords": ["Python"], "scope_kind": "cities",
+            "cities": ["上海"], "pages_per_combination": 3,
+            "combination_count": 1, "planned_pages": 3,
+            "task_size": "small", "scope_digest": None,
+        }
+        raw.update(overrides)
+        return raw
+
+    def _config(self, **overrides):
+        base = {
+            "inter_combo_delay": 30.0,
+            "detail_batch_size": 10,
+            "detail_interval": 2.0,
+            "detail_reset_every": 3,
+            "detail_batch_cooldown": 4.0,
+            "detail_tab_pool_size": 10,
+            "screen_batch_size": 30,
+            "screen_concurrency": 3,
+            "match_batch_size": 4,
+            "match_concurrency": 8,
+        }
+        base.update(overrides)
+        return base
+
+    def _resume_mocks(self):
+        """POST /api/task/continue 期间的浏览器隔离 mock。"""
+        return (
+            mock.patch("webui.pipeline_exec.resolve_browser_account", return_value=""),
+            mock.patch("webui.pipeline_exec.set_active_cdp_data_dir"),
+            mock.patch("webui.platforms.resolve_login_space"),
+        )
+
+    # ---- 暂停不计时：/api/task-state 返回 active_elapsed_ms ----
+
+    def test_task_state_active_elapsed_excludes_pause(self):
+        run_id = "elapsed-exclude"
+        self._create_run(run_id, "succeeded")
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET started_at = ?, finished_at = ? WHERE id = ?",
+                (self._iso(0), self._iso(240), run_id),
+            )
+        # 60s 暂停 → 180s 恢复：暂停 120s；总跨度 240s，实际运行 120s
+        self._insert_event(run_id, "pause", self._iso(60))
+        self._insert_event(run_id, "resume", self._iso(180))
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+        self.assertEqual(data["status"], "completed")
+        self.assertEqual(data["active_elapsed_ms"], 120_000)
+
+    def test_task_state_active_elapsed_frozen_while_paused(self):
+        """暂停中无 finished_at：未闭合的 pause 截止到当前，累计仍定格在暂停前。"""
+        run_id = "elapsed-paused"
+        self._create_run(run_id, "paused")
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE screening_runs SET started_at = ? WHERE id = ?",
+                (self._iso(0), run_id),
+            )
+        self._insert_event(run_id, "pause", self._iso(120))
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+        self.assertEqual(data["status"], "paused")
+        # active = (now - 0) - (now - 120) = 120s，不受 now 影响
+        self.assertEqual(data["active_elapsed_ms"], 120_000)
+
+    def test_task_state_active_elapsed_none_without_events(self):
+        """无 pause/resume 事件（老 run / 无暂停）时回退 None，前端沿用 started_at 差值。"""
+        run_id = "elapsed-none"
+        self._create_run(run_id, "succeeded")
+        data = self.client.get(f"/api/task-state/{run_id}").get_json()
+        self.assertIsNone(data.get("active_elapsed_ms"))
+
+    # ---- 高级设置续跑生效 ----
+
+    def test_continue_ai_screen_refreshes_execution_config(self):
+        """暂停 AI 续跑：用新 Tab 数/间隔刷新 run 配置，DB 与 worker 都拿到新值。"""
+        run_id = "resume-ai-config"
+        old = self._config(detail_tab_pool_size=10, detail_interval=2.0)
+        self.store.create_screening_run(
+            run_id,
+            frozen_filters={"salary": ["20-30K"]},
+            source_count=2,
+            execution_params={
+                "platform": "boss",
+                "scrape_task_id": "scrape-src-config",
+                "browser_account": "a", "cdp_port": 9222, "profile_key": "boss:a",
+                "profile_summary": "测试画像", "profile_facts": {"years": 3},
+                "execution_config": old,
+                "frozen_scope": self._scope(),
+            },
+        )
+        self.store.update_screening_run(run_id, status="running")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="screen_b",
+            error_code="ai_rate_limited", error_reason="AI 限流",
+        )
+        new = self._config(detail_tab_pool_size=6, detail_interval=5.0)
+        self.store.save_custom_config(new)
+        # 续 AI 需要父抓取 run 的岗位快照
+        self.store.create_screening_run(
+            "scrape-src-config", source_count=1,
+            execution_params={"platform": "boss"},
+        )
+        self.store.update_screening_run("scrape-src-config", status="succeeded")
+        jobs = [{"job_id": "j1", "platform_job_id": "j1",
+                 "source_url": "https://zhipin.example/j1.html"}]
+        self.store.save_scrape_combo_result(
+            "scrape-src-config", "kw|city", jobs, ["kw|city"])
+
+        captured = []
+        r1, r2, r3 = self._resume_mocks()
+        with mock.patch.object(
+            self.app.config["PIPELINE_EXECUTOR"], "submit",
+            side_effect=lambda fn, *a, **kw: captured.append((fn, a, kw)) or None,
+        ), r1, r2, r3:
+            self.app.config["RESUME_BLOCK_CHECKER"] = lambda run: (True, "", "")
+            resp = self.client.post(f"/api/task/continue/{run_id}", json={})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+
+        from webui.execution_config import ExecutionConfigSnapshot
+        fn, args, kwargs = captured[0]
+        submitted = args[-1]
+        self.assertIsInstance(submitted, ExecutionConfigSnapshot)
+        self.assertEqual(submitted.detail_tab_pool_size, 6)
+        self.assertEqual(submitted.detail_interval, 5.0)
+        run = self.store.get_screening_run(run_id)
+        db_config = (run.get("execution_params") or {}).get("execution_config") or {}
+        self.assertEqual(db_config.get("detail_tab_pool_size"), 6)
+        self.assertEqual(db_config.get("detail_interval"), 5.0)
+        # pages/frozen_scope 保持冻结
+        frozen = (run.get("execution_params") or {}).get("frozen_scope") or {}
+        self.assertEqual(frozen.get("pages_per_combination"), 3)
+
+    def test_continue_scrape_refreshes_inter_combo_delay(self):
+        """暂停续抓：run_search 收到刷新后的间隔，pages 仍用冻结的 frozen_scope。"""
+        run_id = "resume-scrape-config"
+        old = self._config(inter_combo_delay=30.0, detail_tab_pool_size=10)
+        self.store.create_screening_run(
+            run_id,
+            source_count=1,
+            execution_params={
+                "platform": "boss",
+                "script_params": {"keyword": "Python", "city": ["上海"], "pages": 3},
+                "browser_account": "a", "cdp_port": 9222, "profile_key": "boss:a",
+                "execution_config": old,
+                "frozen_scope": self._scope(),
+            },
+        )
+        if self.store.get_screening_run(run_id)["status"] == "queued":
+            self.store.update_screening_run(run_id, status="running")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="源账号限流",
+        )
+        new = self._config(inter_combo_delay=10.0)
+        self.store.save_custom_config(new)
+
+        captured = []
+        r1, r2, r3 = self._resume_mocks()
+        with mock.patch.object(
+            self.app.config["PIPELINE_EXECUTOR"], "submit",
+            side_effect=lambda fn, *a, **kw: captured.append((fn, a, kw)) or None,
+        ), r1, r2, r3:
+            self.app.config["RESUME_BLOCK_CHECKER"] = lambda run: (True, "", "")
+            resp = self.client.post(f"/api/task/continue/{run_id}", json={})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        run = self.store.get_screening_run(run_id)
+        db_config = (run.get("execution_params") or {}).get("execution_config") or {}
+        self.assertEqual(db_config.get("inter_combo_delay"), 10.0)
+
+        # submit 被拦截后 start_gate 已放行；手动跑续抓 worker 并拦截 run_search
+        fn, args, kwargs = captured[0]
+        run_search_calls = []
+        with mock.patch(
+            "webui.pipeline_exec.run_search",
+            side_effect=lambda *a, **kw: run_search_calls.append(kw) or {
+                "ok": True, "jobs": [], "total_scraped": 0, "total_matched": 0,
+                "combinations": 0, "error": "", "completed_combos": [],
+            },
+        ), mock.patch("webui.pipeline_exec.resolve_browser_account", return_value=""), \
+           mock.patch("webui.pipeline_exec.set_active_cdp_data_dir"), \
+           mock.patch("webui.app._BossCdpSource"):
+            fn()
+        self.assertEqual(len(run_search_calls), 1)
+        self.assertEqual(run_search_calls[0]["execution_config"].inter_combo_delay, 10.0)
+        self.assertEqual(run_search_calls[0]["pages"], 3)
+
+    def test_continue_recrawl_refreshes_match_concurrency(self):
+        """暂停续补抓：用刷新后的并发配置，scope 从父抓取 run 继承且 pages 不变。"""
+        run_id = "resume-recrawl-config"
+        parent_id = "parent-scrape-recrawl"
+        self.store.create_screening_run(
+            parent_id,
+            source_count=2,
+            execution_params={
+                "platform": "boss",
+                "execution_config": self._config(match_concurrency=8),
+                "frozen_scope": self._scope(),
+            },
+        )
+        self.store.update_screening_run(parent_id, status="succeeded")
+        self.store.create_screening_run(
+            run_id,
+            source_count=1,
+            execution_params={
+                "platform": "boss",
+                "source_run_id": parent_id,
+                "job_ids": ["j1"],
+                "profile_summary": "测试画像",
+                "browser_account": "a", "cdp_port": 9222, "profile_key": "boss:a",
+            },
+        )
+        if self.store.get_screening_run(run_id)["status"] == "queued":
+            self.store.update_screening_run(run_id, status="running")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="recrawl_jd",
+        )
+        new = self._config(match_concurrency=15)
+        self.store.save_custom_config(new)
+
+        captured = []
+        r1, r2, r3 = self._resume_mocks()
+        with mock.patch.object(
+            self.app.config["PIPELINE_EXECUTOR"], "submit",
+            side_effect=lambda fn, *a, **kw: captured.append((fn, a, kw)) or None,
+        ), r1, r2, r3:
+            self.app.config["RESUME_BLOCK_CHECKER"] = lambda run: (True, "", "")
+            resp = self.client.post(f"/api/task/continue/{run_id}", json={})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+
+        from webui.execution_config import ExecutionConfigSnapshot
+        fn, args, kwargs = captured[0]
+        submitted = args[-1]
+        self.assertIsInstance(submitted, ExecutionConfigSnapshot)
+        self.assertEqual(submitted.match_concurrency, 15)
+        run = self.store.get_screening_run(run_id)
+        db_config = (run.get("execution_params") or {}).get("execution_config") or {}
+        self.assertEqual(db_config.get("match_concurrency"), 15)
+        # 父抓取 run 的 pages/scope 不被刷新改动
+        parent = self.store.get_screening_run(parent_id)
+        self.assertEqual(
+            (parent.get("execution_params") or {}).get("frozen_scope", {}).get("pages_per_combination"),
+            3,
+        )
+
+    def test_continue_blocked_does_not_refresh_db_config(self):
+        """阻断未解除时继续被拒，且不提前改写 paused run 的配置快照。"""
+        run_id = "resume-blocked-config"
+        old = self._config(detail_tab_pool_size=10)
+        self.store.create_screening_run(
+            run_id,
+            source_count=1,
+            execution_params={
+                "platform": "boss",
+                "script_params": {"keyword": "Python", "city": ["上海"], "pages": 3},
+                "browser_account": "a", "cdp_port": 9222, "profile_key": "boss:a",
+                "execution_config": old,
+                "frozen_scope": self._scope(),
+            },
+        )
+        if self.store.get_screening_run(run_id)["status"] == "queued":
+            self.store.update_screening_run(run_id, status="running")
+        self.store.update_screening_run(
+            run_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="源账号限流",
+        )
+        new = self._config(detail_tab_pool_size=6)
+        self.store.save_custom_config(new)
+
+        r1, r2, r3 = self._resume_mocks()
+        with r1, r2, r3:
+            self.app.config["RESUME_BLOCK_CHECKER"] = (
+                lambda run: (False, "captcha_required", "验证码未处理")
+            )
+            resp = self.client.post(f"/api/task/continue/{run_id}", json={})
+        self.assertEqual(resp.status_code, 409)
+        run = self.store.get_screening_run(run_id)
+        db_config = (run.get("execution_params") or {}).get("execution_config") or {}
+        # block 检查通过前不得刷新：DB 仍保留旧配置
+        self.assertEqual(db_config.get("detail_tab_pool_size"), 10)
+
+
 # ======================================================================
 # 门禁D: T414-T419 — 平台敏感外围入口
 # ======================================================================

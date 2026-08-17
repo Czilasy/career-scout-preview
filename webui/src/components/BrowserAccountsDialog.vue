@@ -140,7 +140,7 @@ async function activateAccount(id: string) {
     const next = new Set(pendingRefresh.value);
     next.add(id);
     pendingRefresh.value = next;
-    setLocalNotice({ message: "已设为当前账号，下一次任务将使用它", tone: "success" });
+    setLocalNotice({ message: "已设为当前账号，继续暂停任务或新任务将使用它", tone: "success" });
   } catch (error) {
     setLocalNotice({ message: errorMessage(error, "切换当前账号失败"), tone: "error" });
   } finally {

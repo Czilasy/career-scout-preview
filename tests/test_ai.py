@@ -509,6 +509,57 @@ class CallAITests(unittest.TestCase):
         # the original exception (which may contain the API key).
         self.assertTrue(ctx.exception.__suppress_context__)
 
+    def test_stream_read_blocked_forever_hits_budget(self):
+        """AI 端点连接保持但不返回任何行时，join(budget) 兜底抛 ERROR_TIMEOUT。
+
+        回归：_read_stream 的 STREAM_TOTAL_TIMEOUT 检查只在 iter_lines 循环体内
+        执行；iter_lines 阻塞在 readline（read timeout 对流式不保证生效）时循环体
+        永不执行，任务会无限卡死。线程 + join(budget) 必须在此场景兜底。
+        """
+        import threading
+        from webui.ai import ERROR_TIMEOUT, AISecurityError, call_ai
+
+        release = threading.Event()
+
+        class _BlockingLines:
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                release.wait(30)  # 模拟 AI 端点连接保持但不返回任何行
+                raise StopIteration
+
+        response = MagicMock()
+        response.status_code = 200
+        response.iter_lines.return_value = _BlockingLines()
+        with patch("webui.ai.requests.post", return_value=response), \
+             patch("webui.ai.time.sleep"), \
+             patch("webui.ai_retry.random.uniform", return_value=0.0):
+            with self.assertRaises(AISecurityError) as ctx:
+                call_ai("https://api.example.com/v1/chat/completions", "key",
+                        [{"role": "user", "content": "hi"}], timeout=0.2)
+        release.set()  # 解除阻塞读取线程，避免泄漏
+        self.assertEqual(ctx.exception.error_code, ERROR_TIMEOUT)
+        # 超时路径必须尝试关闭连接，尽早解除底层阻塞
+        self.assertTrue(response.close.called)
+
+    @patch("webui.ai.call_ai")
+    def test_match_jds_fine_batch_uses_batch_timeout(self, mock_call):
+        """match_jds 精筛每批调用 call_ai 必须携带 FINE_BATCH_TIMEOUT（180s）。"""
+        from webui.ai import FINE_BATCH_TIMEOUT, match_jds
+
+        mock_call.return_value = {"results": [
+            {"i": 0, "match": True, "reason": "ok", "caveats": [], "flags": []},
+        ]}
+        jobs = [{"job_id": "j1", "title": "Python", "jd": "需要 Python 3 年经验"}]
+        match_jds(jobs, "画像", "https://x", "key", batch_size=1)
+
+        self.assertEqual(mock_call.call_count, 1)
+        self.assertEqual(
+            mock_call.call_args.kwargs.get("timeout"), FINE_BATCH_TIMEOUT,
+            "精筛单批 AI 请求必须使用 FINE_BATCH_TIMEOUT 作为总时长上限",
+        )
+
 
 # ---------------------------------------------------------------------------
 # test_connection
@@ -637,6 +688,29 @@ class TestConnectionTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["transport"], "ready")
         self.assertEqual(result["generation"], "failed")
+
+    @patch("webui.ai.requests.post")
+    def test_reasoning_field_accepted_for_reasoning_models(self, mock_post):
+        """DeepSeek V4 等推理模型把思考放 message.reasoning 且 content 为空。
+
+        回归：opencode.ai zen/go 端点返回 content="" + reasoning="..." 时，
+        test_connection 必须判定可用，不能误报 invalid_response。
+        """
+        from webui.ai import test_connection
+        response = MagicMock(); response.status_code = 200
+        response.json.return_value = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "We need to reply exactly pong.",
+                },
+            }],
+        }
+        mock_post.return_value = response
+        result = test_connection("https://api.example.com/v1", "secret", "model")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["generation"], "ready")
 
 
 class WindowsSchannelFallbackTests(unittest.TestCase):

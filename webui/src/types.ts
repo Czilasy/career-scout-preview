@@ -210,6 +210,8 @@ export interface TaskSnapshot {
   error?: string;
   started_at?: number;
   finished_at?: number;
+  /** 后端从 task_logs pause/resume 事件推导的累计实际运行时长（排除暂停，毫秒）。 */
+  active_elapsed_ms?: number;
   stage?: string;
   success_count?: number;
   fail_count?: number;

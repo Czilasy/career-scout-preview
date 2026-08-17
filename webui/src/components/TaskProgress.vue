@@ -32,6 +32,9 @@ interface TaskSnapshot {
   // T510：任务自身平台，用于在 header 展示真实平台徽章（http-api.md L201）。
   // 由父组件从 /api/latest-running-task 或 /api/task-state 透传；草稿平台切换不影响此处。
   platform?: Platform;
+  // 后端从 task_logs 的 pause/resume 事件推导的累计实际运行时长（排除暂停），
+  // 单位毫秒；运行中包含当前段，暂停/终态为定格累计。
+  active_elapsed_ms?: number;
 }
 
 const props = defineProps<{
@@ -75,8 +78,13 @@ function isTerminalStatus(status?: string) {
 // ---- 用时计时 ----
 // snapshot 从 null→非 null 时记开始时间；status 进入终态（done/failed/cancelled）时定格。
 // 完成后显示绝对用时；运行中每秒刷新显示"已用 X 秒"。
+// 后端 active_elapsed_ms 提供"排除暂停的累计实际运行时长"时优先使用：
+// 运行中显示"累计 + 当前段"（active_elapsed_ms 已含当前段，随轮询刷新），
+// 暂停/终态显示定格累计；刷新页面后仍由后端事件推导，暂停时长不回流。
 const startedAt = ref<number | null>(null);
 const finishedAt = ref<number | null>(null);
+const activeElapsedMs = ref<number | null>(null);
+const activeElapsedAt = ref<number>(0);
 const tickTok = ref(0); // 触发运行中秒数刷新
 let intervalId: number | undefined;
 
@@ -86,6 +94,8 @@ const displayPercent = ref(0);
 function resetTimer() {
   startedAt.value = null;
   finishedAt.value = null;
+  activeElapsedMs.value = null;
+  activeElapsedAt.value = 0;
 }
 
 watch(
@@ -104,6 +114,12 @@ watch(
       // 新 run 不沿用旧任务的显示位置；同步清零后立即回到当前真实锚点。
       displayPercent.value = 0;
       queueMicrotask(() => { displayPercent.value = realAnchor.value; });
+    }
+    // 后端累计实际运行时长（排除暂停）：数值变化时刷新基准，供运行中叠加当前段。
+    const nextActive = typeof next?.active_elapsed_ms === "number" ? next.active_elapsed_ms : null;
+    if (next && (isNewRun || (nextActive !== null && nextActive !== activeElapsedMs.value))) {
+      activeElapsedMs.value = nextActive;
+      activeElapsedAt.value = Date.now();
     }
     // 任务消失（非null→null）：重置
     if (!next && prev) {
@@ -133,6 +149,12 @@ watch(
 
 const elapsedMs = computed(() => {
   void tickTok.value; // 每秒递增，强制 computed 重新求值
+  // 后端提供排除暂停的累计实际运行时长时优先使用：
+  // 暂停/终态为定格累计；运行中叠加当前运行段的本地增量。
+  if (activeElapsedMs.value !== null) {
+    if (isTerminalStatus(props.snapshot?.status)) return activeElapsedMs.value;
+    return activeElapsedMs.value + Math.max(0, Date.now() - activeElapsedAt.value);
+  }
   if (startedAt.value === null) return 0;
   const end = finishedAt.value ?? Date.now();
   return Math.max(0, end - startedAt.value);
@@ -140,8 +162,10 @@ const elapsedMs = computed(() => {
 
 function formatDuration(ms: number): string {
   const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
+  if (h > 0) return `${h}小时${m}分${s.toString().padStart(2, "0")}秒`;
   if (m === 0) return `${s}秒`;
   return `${m}分${s.toString().padStart(2, "0")}秒`;
 }
@@ -385,10 +409,14 @@ const showPending = computed(() => pendingCount.value > 0);
 // 失败：失败 > 0 且没有待确认时才显示（待确认是 fail 的子集，互斥显示避免重复）。
 const showFailCount = computed(() => failCount.value > 0 && pendingCount.value === 0);
 
-// 终态显示绝对用时；运行中显示"已用 X 秒"
+// 终态显示绝对用时；运行中显示"已用 X 秒"。
+// 后端提供累计实际运行时长时，暂停/终态显示定格累计（不依赖 finished_at）。
 const timeLabel = computed(() => {
-  if (startedAt.value === null) return "";
   const terminal = isTerminalStatus(props.snapshot?.status);
+  if (activeElapsedMs.value !== null) {
+    return terminal ? `用时 ${elapsedLabel.value}` : `已用 ${elapsedLabel.value}`;
+  }
+  if (startedAt.value === null) return "";
   if (terminal && finishedAt.value === null) return "";
   return terminal ? `用时 ${elapsedLabel.value}` : `已用 ${elapsedLabel.value}`;
 });

@@ -95,7 +95,16 @@ export function primaryActionLabel(action: ScreenPrimaryAction): string {
 }
 
 export function withoutRecrawl(action: ScreenPrimaryAction): ScreenPrimaryAction {
-  return action.kind === "recrawl" ? { kind: "none" } : action;
+  // 03 页 AI 筛选卡片只显示 AI 筛选自身的动作；重抓（含暂停/继续重抓）
+  // 由 ScreenRecrawlProgress 单独展示，避免重复按钮且无事件绑定的假按钮。
+  if (
+    action.kind === "recrawl"
+    || action.kind === "pause-recrawl"
+    || action.kind === "continue-recrawl"
+  ) {
+    return { kind: "none" };
+  }
+  return action;
 }
 
 export function continueTargets(

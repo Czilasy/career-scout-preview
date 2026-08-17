@@ -301,6 +301,43 @@ describe("TaskProgress canonical terminal states", () => {
     expect(wrapper.text()).not.toContain("粗筛每批");
     expect(wrapper.text()).not.toContain("精筛每批");
   });
+
+  it("formats terminal elapsed over one hour as X小时Y分Z秒", () => {
+    // 57875s = 16h 4m 35s；旧实现显示成"964分35秒"。
+    const finished = 1_000 + 57_875_000;
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: {
+          status: "completed",
+          progress: { stage: "done", overall_percent: 100 },
+          started_at: 1_000,
+          finished_at: finished,
+        },
+      },
+    });
+    expect(wrapper.get(".task-status").text()).toContain("已完成");
+    expect(wrapper.get(".task-elapsed").text()).toContain("用时 16小时4分35秒");
+    wrapper.unmount();
+  });
+
+  it("keeps cumulative elapsed fixed while paused via active_elapsed_ms", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        kind: "screen",
+        snapshot: {
+          status: "paused",
+          progress: { stage: "fetch_jd", overall_percent: 40 },
+          started_at: 1_000_000,
+          active_elapsed_ms: 90_000,
+        },
+      },
+    });
+    // 暂停态没有 finished_at 也不再依赖 started_at 差值；显示排除暂停后的累计。
+    expect(wrapper.get(".task-status").text()).toContain("已暂停");
+    expect(wrapper.get(".task-elapsed").text()).toContain("用时 1分30秒");
+    wrapper.unmount();
+  });
 });
 
 describe("TaskProgress real progress engine and grouped counts", () => {

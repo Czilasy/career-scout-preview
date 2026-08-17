@@ -2506,7 +2506,8 @@ body,
     flex: 1;
   }.results-view .results-stage.has-recrawl-banner,
 .results-view .results-stage.has-recrawl-guide {
-.results-view .results-stage.has-pending-capsule {
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }.results-view .results-stage.has-pending-capsule {
     grid-template-rows: auto auto minmax(0, 1fr);
   }.results-view .job-workspace,
 .results-view .empty-panel {

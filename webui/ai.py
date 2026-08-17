@@ -53,6 +53,7 @@ DEFAULT_TIMEOUT = 300
 CONNECTION_TIMEOUT = 15
 STREAM_IDLE_TIMEOUT = 30  # 流式模式下，连续 N 秒没收到任何数据即判定连接已死
 STREAM_TOTAL_TIMEOUT = 180  # 流式模式下，从请求发出算起的总时长上限（防慢吐丝卡死）
+FINE_BATCH_TIMEOUT = 180  # 精筛单批 AI 请求的总时长上限（秒）：超时即放弃该批，不无限等
 RANK_BATCH_SIZE = 10
 
 
@@ -428,10 +429,15 @@ def test_connection(endpoint_url: str, api_key: str, model: str = "") -> dict:
         choice = data["choices"][0]
         message = choice["message"]
         # Reasoning models (DeepSeek, GLM-5.2, etc.) may put tokens into
-        # reasoning_content while leaving content empty when max_tokens is tight.
-        # We accept either field as proof the chat completions pipeline works.
+        # reasoning_content/reasoning while leaving content empty when
+        # max_tokens is tight. We accept either field as proof the chat
+        # completions pipeline works.
         content = str(message.get("content") or "").strip()
-        reasoning = str(message.get("reasoning_content") or "").strip()
+        reasoning = str(
+            message.get("reasoning_content")
+            or message.get("reasoning")
+            or ""
+        ).strip()
         if not content and not reasoning:
             raise ValueError("empty reply")
     except Exception:
@@ -559,6 +565,40 @@ def _read_stream(response) -> tuple[str, str]:
     return "".join(content_parts), finish_reason
 
 
+def _read_stream_with_timeout(response, budget):
+    """读取流式响应，受总时长 budget 约束（覆盖 iter_lines 阻塞的极端场景）。
+
+    ``_read_stream`` 的 STREAM_TOTAL_TIMEOUT 检查只在 iter_lines 循环体内执行；
+    若 AI 端点连接保持但不返回任何行，iter_lines 会无限阻塞在 readline 上
+    （requests 的 read timeout 对流式响应不保证生效），循环体永不执行，总时长
+    检查形同虚设。这里用线程 + join(budget) 兜底：超时即关闭连接并抛 Timeout，
+    由外层 call_ai 接住转为 ERROR_TIMEOUT，避免任务无限卡死。
+    """
+    import threading
+    box: dict = {}
+
+    def _run():
+        try:
+            box["result"] = _read_stream(response)
+        except BaseException as exc:  # noqa: BLE001 - 桥接任意读取异常
+            box["error"] = exc
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(max(0.0, float(budget)))
+    if thread.is_alive():
+        try:
+            response.close()
+        except Exception:
+            pass
+        raise requests.Timeout(
+            f"流式响应总时长超过 {budget}s 上限（读取线程仍阻塞）"
+        )
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
 def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFAULT_TIMEOUT,
             temperature: float = 0.3, model: str = "", *,
             measurement_callback=None, measurement_stage: str = "ai",
@@ -680,7 +720,7 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
             # 200 或不可重试 4xx：读取流式内容
             if response.status_code == 200:
                 try:
-                    content, finish_reason = _read_stream(response)
+                    content, finish_reason = _read_stream_with_timeout(response, budget)
                     record_raw_ai_response(correlation_id, attempt_index, content)
                     last_error = None
                     break  # 成功拿到内容，退出重试循环
@@ -1816,6 +1856,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         try:
             data = call_ai(
                 endpoint_url, api_key, messages, model=model,
+                timeout=FINE_BATCH_TIMEOUT,
                 measurement_callback=measurement_callback,
                 measurement_stage="fine",
                 retry_limits=retry_limits,

@@ -2501,17 +2501,14 @@ describe("DiscoveryView", () => {
     expect(wrapper.text()).not.toContain("完成，但有待确认");
     expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(false);
+    // 暂停任务未结束：04 结果页保持不可进，用户留在 03 处理继续/结束保存
     const viewBtn = wrapper.findAll("button").find((b) => b.text().includes("查看结果"));
     expect(viewBtn).toBeDefined();
-    (viewBtn!.element as HTMLButtonElement).click();
-    await flushPromises();
-    await flushPromises();
-    expect(wrapper.find(".results-stage").exists()).toBe(true);
-    expect(wrapper.text()).toContain("已判定部分岗位");
-    expect(wrapper.find('[data-testid="continue-ai-from-results"]').exists()).toBe(false);
+    expect((viewBtn!.element as HTMLButtonElement).disabled).toBe(true);
+    expect(wrapper.find(".results-stage").exists()).toBe(false);
     vi.unstubAllGlobals();
   });
-  it("013: refreshed paused task still shows partial results on 04", async () => {
+  it("013: refreshed paused task keeps 04 closed until the task ends", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/api/latest-running-task")) {
@@ -2560,12 +2557,15 @@ describe("DiscoveryView", () => {
     const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
     await flushPromises();
     await flushPromises();
+    // 暂停任务刷新后仍在 03：04 结果页不开放（步骤导航「查看结果」禁用）
     const stepBtn = wrapper.findAll("button").find((b) => b.text().includes("查看结果"));
+    expect(stepBtn).toBeDefined();
+    expect((stepBtn!.element as HTMLButtonElement).disabled).toBe(true);
     await stepBtn!.trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("暂停部分岗位");
+    expect(wrapper.find(".results-stage").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("暂停部分岗位");
     expect(wrapper.find('[data-testid="continue-ai-from-results"]').exists()).toBe(false);
-    expect(wrapper.get('[data-testid="pending-recrawl-capsule"]').text()).toContain("还有 1 个岗位未处理完");
     vi.unstubAllGlobals();
   });
 
@@ -2935,9 +2935,8 @@ describe("DiscoveryView", () => {
     expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(true);
     await wrapper.get('[data-testid="pending-recrawl"]').trigger("click");
     await flushPromises();
-    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(true);
-    await wrapper.get('[data-testid="recrawl-choose-boss"]').trigger("click");
-    await flushPromises();
+    // 单平台待确认：直接重抓该平台，不再弹平台选择引导
+    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(false);
     const recrawlCall = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/pipeline/recrawl"));
     expect(recrawlCall).toBeTruthy();
     expect(JSON.parse(String(recrawlCall![1]!.body))).toMatchObject({ source_run_id: "run-boss" });
@@ -3656,10 +3655,8 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await wrapper.get('[data-testid="pending-recrawl"]').trigger("click");
     await flushPromises();
-    // “全部”视图先引导选平台，再发起重抓
-    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(true);
-    await wrapper.get('[data-testid="recrawl-choose-boss"]').trigger("click");
-    await flushPromises();
+    // 单平台待确认：直接重抓该平台，不再弹平台选择引导
+    expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(false);
     // 重抓完成：岗位判定与 flags 原地合并（not_match 移入“不匹配”分组）
     await wrapper.findAll("button").find((b) => b!.text().includes("不匹配"))!.trigger("click");
     await flushPromises();
@@ -4043,9 +4040,8 @@ describe("DiscoveryView", () => {
       expect(capsule.text()).toContain("还有 1 个岗位未处理完");
       await wrapper.get('[data-testid="pending-recrawl"]').trigger("click");
       await flushPromises();
-      expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(true);
-      await wrapper.get('[data-testid="recrawl-choose-boss"]').trigger("click");
-      await flushPromises();
+      // 单平台待确认：直接重抓该平台，不再弹平台选择引导
+      expect(wrapper.find('[data-testid="recrawl-platform-guide"]').exists()).toBe(false);
       expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/pipeline/recrawl"))).toBe(true);
       vi.unstubAllGlobals();
     });
