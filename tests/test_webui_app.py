@@ -2021,6 +2021,42 @@ class ScreenContinueFlowTests(unittest.TestCase):
         params = (self.store.get_screening_run(task_id) or {}).get("execution_params") or {}
         self.assertEqual(params.get("browser_account"), "a")
 
+    def test_b057_continue_uses_active_account_without_target(self):
+        """暂停中切换 active 账号后，不带 target_account 继续沿用新账号。"""
+        task_id = "b057-active-switch"
+        self.store.create_screening_run(
+            task_id, source_count=1,
+            execution_params={
+                "platform": "boss",
+                "script_params": {"keyword": "前端", "city": ["上海"], "pages": 3},
+                "browser_account": "a", "cdp_port": 9222, "profile_key": "boss:a",
+            },
+        )
+        if self.store.get_screening_run(task_id)["status"] == "queued":
+            self.store.update_screening_run(task_id, status="running")
+        self.store.update_screening_run(
+            task_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="源账号限流",
+        )
+        with mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            activated = self.client.post("/api/browser-accounts/b/activate")
+        self.assertEqual(activated.status_code, 200, activated.get_json())
+        checked = []
+        self.app.config["RESUME_BLOCK_CHECKER"] = lambda run: (
+            checked.append((run.get("execution_params") or {}).get("browser_account"))
+            or (True, "", "")
+        )
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit") as submit:
+            resp = self.client.post(f"/api/task/continue/{task_id}", json={})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        params = (self.store.get_screening_run(task_id) or {}).get("execution_params") or {}
+        self.assertEqual(params.get("browser_account"), "b")
+        self.assertEqual(params.get("profile_key"), "boss:b")
+        self.assertEqual(params.get("cdp_port"), 9222)
+        self.assertEqual(checked, ["b", "b"])
+        submit.assert_called_once()
+
     def test_worker_pause_writes_paused_and_snapshot(self):
         from webui import pipeline_exec
         scrape_id = self._create_completed_scrape_run()
@@ -2271,13 +2307,38 @@ class BrowserAccountApiTests(unittest.TestCase):
         self.store.update_screening_run(run_id, status="paused")
         return run_id
 
-    def test_open_browser_refuses_other_account_when_task_paused(self):
+    @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
+    @mock.patch("webui.pipeline_exec.close_debug_chrome", return_value=True)
+    def test_paused_open_other_account_allowed_and_closes_old_browser(
+            self, mock_close, _ready):
         self._seed_paused_run(account="b")
+        order = []
+        mock_close.side_effect = lambda port: order.append(("close", port)) or True
+        _ready.side_effect = lambda port: order.append(("ready", port)) or (True, "")
         resp = self.client.post("/api/browser-accounts/a/open")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertTrue(resp.get_json()["ok"])
+        self.assertEqual(order, [("close", 9222), ("ready", 9222)])
+
+    @mock.patch("webui.pipeline_exec.close_debug_chrome", return_value=True)
+    def test_paused_activate_allowed_and_closes_old_browser(self, mock_close):
+        self._seed_paused_run(account="b")
+        resp = self.client.post("/api/browser-accounts/a/activate")
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["active_account"], "a")
+        mock_close.assert_called_once_with(9222)
+        data = self.client.get("/api/browser-accounts").get_json()
+        self.assertEqual(data["active_account"], "a")
+
+    def test_running_activate_rejected(self):
+        self.app.config["PIPELINE_TASKS"]["running-activate"] = {
+            "kind": "scrape", "status": "running", "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None, "finished_at": None,
+            "stop_event": threading.Event(),
+        }
+        resp = self.client.post("/api/browser-accounts/b/activate")
         self.assertEqual(resp.status_code, 409)
-        data = resp.get_json()
-        self.assertEqual(data["error"], "browser_busy")
-        self.assertIn("账号B", data["message"])
+        self.assertEqual(resp.get_json()["error"], "browser_busy")
 
     @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
     def test_open_browser_allows_paused_task_account(self, _ready):
@@ -2323,14 +2384,16 @@ class BrowserAccountApiTests(unittest.TestCase):
         self.assertEqual(resp.get_json()["error_code"], "platform_validation_failed")
 
     @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
-    def test_paused_zhilian_run_blocks_boss_open_but_allows_zhilian(self, _ready):
+    @mock.patch("webui.pipeline_exec.close_debug_chrome", return_value=True)
+    def test_paused_open_any_platform_for_locked_account(self, mock_close, _ready):
         self._seed_paused_run(account="b", platform="zhilian")
-        blocked = self.client.post("/api/browser-accounts/b/open", json={"platform": "boss"})
-        self.assertEqual(blocked.status_code, 409)
-        self.assertEqual(blocked.get_json()["error"], "browser_busy")
-        allowed = self.client.post("/api/browser-accounts/b/open", json={"platform": "zhilian"})
-        self.assertEqual(allowed.status_code, 200, allowed.get_json())
-        _ready.assert_called_once_with(9223)
+        boss_open = self.client.post("/api/browser-accounts/b/open", json={"platform": "boss"})
+        self.assertEqual(boss_open.status_code, 200, boss_open.get_json())
+        self.assertEqual(_ready.call_args_list[-1], mock.call(9222))
+        zhilian_open = self.client.post("/api/browser-accounts/b/open", json={"platform": "zhilian"})
+        self.assertEqual(zhilian_open.status_code, 200, zhilian_open.get_json())
+        self.assertEqual(_ready.call_args_list[-1], mock.call(9223))
+        self.assertEqual(mock_close.call_count, 2)
 
     def test_delete_refuses_zhilian_browser_running(self):
         resp = self.client.post("/api/browser-accounts", json={"name": "账号 Z"})
@@ -2342,6 +2405,57 @@ class BrowserAccountApiTests(unittest.TestCase):
             deleted = self.client.delete(f"/api/browser-accounts/{account['id']}")
         self.assertEqual(deleted.status_code, 409, deleted.get_json())
         self.assertEqual(deleted.get_json()["error"], "browser_in_use")
+
+    def test_paused_delete_allowed(self):
+        self._seed_paused_run(account="b")
+        deleted = self.client.delete("/api/browser-accounts/b")
+        self.assertEqual(deleted.status_code, 200, deleted.get_json())
+        data = self.client.get("/api/browser-accounts").get_json()
+        self.assertNotIn("b", [a["id"] for a in data["accounts"]])
+
+    def test_running_delete_rejected(self):
+        self.app.config["PIPELINE_TASKS"]["running-delete"] = {
+            "kind": "scrape", "status": "running", "progress": {}, "logs": [],
+            "result": None, "error": "", "started_at": None, "finished_at": None,
+            "stop_event": threading.Event(),
+        }
+        resp = self.client.delete("/api/browser-accounts/b")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "browser_busy")
+
+    def test_paused_delete_closes_open_target_browser(self):
+        resp = self.client.post("/api/browser-accounts", json={"name": "账号 Z"})
+        account = resp.get_json()["account"]
+        profile_dir = account["profile_dir"]
+        self._seed_paused_run(account="b")
+        ready_calls = {"n": 0}
+        def is_ready(port):
+            ready_calls["n"] += 1
+            return ready_calls["n"] == 1 and port == 9222
+        with mock.patch("webui.app.boss.is_cdp_ready", side_effect=is_ready), \
+                mock.patch("webui.app.boss.chrome_user_data_dirs_for_cdp_port",
+                           side_effect=lambda port: [profile_dir] if port == 9222 else []), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome",
+                           return_value=True) as mock_close:
+            deleted = self.client.delete(f"/api/browser-accounts/{account['id']}")
+        self.assertEqual(deleted.status_code, 200, deleted.get_json())
+        mock_close.assert_called_once_with(9222)
+
+    def test_paused_delete_close_failure_returns_409(self):
+        resp = self.client.post("/api/browser-accounts", json={"name": "账号 Z"})
+        account = resp.get_json()["account"]
+        profile_dir = account["profile_dir"]
+        self._seed_paused_run(account="b")
+        with mock.patch("webui.app.boss.is_cdp_ready", side_effect=[True, False]), \
+                mock.patch("webui.app.boss.chrome_user_data_dirs_for_cdp_port",
+                           side_effect=lambda port: [profile_dir] if port == 9222 else []), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome",
+                           return_value=False):
+            deleted = self.client.delete(f"/api/browser-accounts/{account['id']}")
+        self.assertEqual(deleted.status_code, 409, deleted.get_json())
+        self.assertEqual(deleted.get_json()["error"], "browser_in_use")
+        data = self.client.get("/api/browser-accounts").get_json()
+        self.assertIn(account["id"], [a["id"] for a in data["accounts"]])
 
     def test_resolve_browser_account_returns_custom_profile(self):
         from webui import pipeline_exec

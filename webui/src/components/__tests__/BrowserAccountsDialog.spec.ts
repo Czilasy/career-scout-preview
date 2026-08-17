@@ -227,12 +227,12 @@ describe("BrowserAccountsDialog", () => {
     expect(JSON.parse(String(calls[0]?.[1]?.body))).toEqual({ platform: "boss" });
   });
 
-  it("disables non-locked platform while a paused task locks one platform", async () => {
+  it("enables every account and platform while a paused task is active", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/browser-accounts") {
         return response({
-          accounts: [dualAccount],
+          accounts: [bossOnlyAccount, dualAccount],
           active_account: "a",
           busy: true,
           busy_kind: "paused",
@@ -246,7 +246,71 @@ describe("BrowserAccountsDialog", () => {
     const wrapper = await mountOpen(fetchMock);
 
     expect(wrapper.get('[data-testid="open-boss-a"]').attributes("disabled")).toBeUndefined();
-    expect(wrapper.get('[data-testid="open-zhilian-a"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="open-zhilian-a"]').attributes("disabled")).toBeUndefined();
+    expect(wrapper.get('[data-testid="open-boss-b"]').attributes("disabled")).toBeUndefined();
+    expect(wrapper.get('[data-testid="activate-b"]').attributes("disabled")).toBeUndefined();
+    expect(wrapper.get('[data-testid="delete-b"]').attributes("disabled")).toBeUndefined();
+    const notice = wrapper.get(".browser-account-notice");
+    expect(notice.text()).toContain("有暂停任务，可切换账号");
+    expect(notice.text()).not.toContain("请先结束任务");
+  });
+
+  it("paused switching account does not open any platform browser", async () => {
+    const openCalls: Array<string> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/browser-accounts") {
+        return response({
+          accounts: [bossOnlyAccount, dualAccount],
+          active_account: "a",
+          busy: true,
+          busy_kind: "paused",
+          locked_account: "a",
+          locked_platform: "boss",
+        });
+      }
+      if (url.endsWith("/api/browser-accounts/b/activate")) {
+        return response({ active_account: "b" });
+      }
+      if (url.includes("/open")) openCalls.push(url);
+      return response({ init });
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+    await findButton(wrapper, "设为当前账号").trigger("click");
+    await flushPromises();
+
+    const activateCalls = fetchMock.mock.calls.filter(
+      ([url]) => String(url).endsWith("/api/browser-accounts/b/activate"),
+    );
+    expect(activateCalls.length).toBe(1);
+    expect(openCalls).toEqual([]);
+  });
+
+  it("keeps open and manage disabled while running or queued", async () => {
+    for (const busyKind of ["running", "queued"]) {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/browser-accounts") {
+          return response({
+            accounts: [bossOnlyAccount, dualAccount],
+            active_account: "a",
+            busy: true,
+            busy_kind: busyKind,
+          });
+        }
+        return response({});
+      });
+      const wrapper = await mountOpen(fetchMock);
+
+      expect(wrapper.get('[data-testid="open-boss-a"]').attributes("disabled")).toBeDefined();
+      expect(wrapper.get('[data-testid="open-zhilian-a"]').attributes("disabled")).toBeDefined();
+      expect(wrapper.get('[data-testid="open-boss-b"]').attributes("disabled")).toBeDefined();
+      expect(wrapper.get('[data-testid="activate-b"]').attributes("disabled")).toBeDefined();
+      expect(wrapper.get('[data-testid="delete-b"]').attributes("disabled")).toBeDefined();
+      expect(wrapper.get(".browser-account-notice").text()).toContain("请先结束或取消任务后再操作");
+      await wrapper.unmount();
+    }
   });
 
   it("activate does not send a platform in the request body", async () => {

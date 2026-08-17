@@ -207,6 +207,8 @@ multipart form 新前端显式提交 `platform=boss|zhilian`；省略平台只�
 
 请求体为空，平台不由客户端选择：
 
+请求可携带 `target_account`；未携带时，若暂停期间 active 账号已切换，以当前 active 账号作为继续账号并替换冻结执行身份。断点、结果与筛选快照保持不变。
+
 1. 读取 `screening_runs.platform`。
 2. 校验 execution params、`task_input_digest`、scope/城市映射快照、AI 筛选快照、checkpoint 与父任务一致。
 3. 按冻结 `browser_account/cdp_port/profile_key` 创建原平台 adapter。
@@ -323,15 +325,15 @@ durable cancel 在同一事务写入 `status=interrupted` 与 `interruption_kind
 
 ### POST `/api/browser-accounts/{account_id}/activate`
 
-只更新新任务使用的 `browser_account` 草稿，不打开或关闭任何浏览器，也不修改运行中、暂停中、历史 run 或调优 experiment 的冻结账号。响应返回 `active_account`；平台不属于 activate 状态。
+只更新新任务使用的 `browser_account` 草稿，不打开浏览器，也不修改历史 run 或调优 experiment 的冻结账号。运行中/排队中返回 `409 browser_busy`；暂停中允许切换，保存前 best-effort 关闭暂停任务冻结的自动化浏览器（端口取冻结 `cdp_port`，缺省用 BOSS 默认端口）。响应返回 `active_account`；平台不属于 activate 状态。
 
 ### POST `/api/browser-accounts/{account_id}/open`
 
-请求 `{"platform":"zhilian"}`；省略平台只兼容旧 BOSS 客户端。同平台账号共享端口并按现有规则受控替换已知 profile；未知 profile 占用返回 `409 login_space_conflict`，不得自动关闭。运行/暂停任务锁定时继续使用 `409 browser_busy`，details 包含 `locked_platform`。
+请求 `{"platform":"zhilian"}`；省略平台只兼容旧 BOSS 客户端。运行中/排队中返回 `409 browser_busy`；暂停中允许打开任意账号任意平台，打开前 best-effort 关闭暂停任务冻结的旧浏览器。同平台账号共享端口并按现有规则受控替换已知 profile；未知 profile 占用返回 `409 login_space_conflict`，不得自动关闭。
 
 ### DELETE `/api/browser-accounts/{account_id}`
 
-删除前原子检查：所有 running/queued/paused run 与调优实验租约、BOSS 9222 上该账号基础 profile、智联 9223 上 `.zhilian` 派生 profile，以及两个端口上的未知 profile。任一命中返回 `409 browser_in_use`、`browser_busy` 或 `login_space_conflict`，不删除账号记录或任一目录。检查通过后才删除账号配置；profile 目录的保留/删除沿用现有账号删除合同，但两个平台必须作为一个原子账号生命周期处理。
+删除只被 running/queued run 与调优实验租约拒绝（`409 browser_busy`）。暂停中允许删除；若 BOSS 9222 或智联 9223 上目标账号浏览器还在运行，先 best-effort 关闭对应 profile，关闭失败沿用 `409 browser_in_use`。随后继续检查两个端口上的未知 profile（`409 login_space_conflict`），全部通过后才删除账号配置；profile 目录的保留/删除沿用现有账号删除合同，但两个平台必须作为一个原子账号生命周期处理。
 
 ## GET `/api/check?platform={platform}`
 

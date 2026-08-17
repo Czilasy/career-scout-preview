@@ -197,9 +197,12 @@ function platformBadge(account: BrowserAccount, platform: Platform) {
   return map[record.state] || { text: "未使用过", tone: "empty" };
 }
 
-// D7：锁定文案简化为「有任务正在使用账号 X，请先结束任务」。
+// 锁定文案：暂停时中性提示，运行/排队保留「请先结束任务」提示。
 const lockNotice = computed(() => {
   if (!serverBusy.value) return "";
+  if (busyKind.value === "paused") {
+    return "有暂停任务，可切换账号；切换后继续将使用新账号";
+  }
   const name = lockedAccount.value
     ? accounts.value.find((item) => item.id === lockedAccount.value)?.name || lockedAccount.value
     : "";
@@ -211,13 +214,11 @@ const lockNotice = computed(() => {
 function canOpenPlatform(id: string, platform: Platform): boolean {
   if (busyAccount.value) return false;
   if (!serverBusy.value) return true;
-  return busyKind.value === "paused"
-    && lockedAccount.value === id
-    && (!lockedPlatform.value || lockedPlatform.value === platform);
+  return busyKind.value === "paused";
 }
 
 function canManage(id: string): boolean {
-  return !busyAccount.value && !serverBusy.value;
+  return !busyAccount.value && (!serverBusy.value || busyKind.value === "paused");
 }
 
 // 把 409 的双平台占用 details 拼成可读串（沿用既有契约）。

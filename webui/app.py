@@ -4223,6 +4223,48 @@ def create_app(config=None):
     def _browser_busy() -> bool:
         return _browser_lock()[0] is not None
 
+    def _latest_paused_run_for_browser_close() -> tuple[dict | None, int | None]:
+        """Return the latest paused run and its frozen CDP port, if any."""
+        try:
+            with store._connection() as conn:
+                row = conn.execute(
+                    "SELECT id FROM screening_runs WHERE status = 'paused' "
+                    "ORDER BY updated_at DESC LIMIT 1"
+                ).fetchone()
+        except (sqlite3.Error, RuntimeError):
+            return None, None
+        if row is None:
+            return None, None
+        try:
+            run = store.get_screening_run(row["id"]) or {}
+        except _OPERATIONAL_ERRORS:
+            return None, None
+        params = run.get("execution_params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        raw_port = params.get("cdp_port")
+        try:
+            frozen_port = int(raw_port) if raw_port not in (None, "") else None
+        except (TypeError, ValueError):
+            frozen_port = None
+        return run, frozen_port
+
+    def _close_paused_run_browser() -> None:
+        """Best-effort close the automation browser frozen by the paused run."""
+        from webui.pipeline_exec import close_debug_chrome
+        run, frozen_port = _latest_paused_run_for_browser_close()
+        if run is None:
+            return
+        try:
+            _activate_run_browser(run)
+        except (OSError, RuntimeError, ValueError):
+            pass
+        try:
+            close_debug_chrome(
+                frozen_port if frozen_port is not None else boss.DEFAULT_CDP_PORT)
+        except (OSError, RuntimeError):
+            pass
+
     def _has_active_pipeline_task() -> bool:
         """Only in-memory running/queued tasks block new task starts."""
         with _pipeline_lock:
@@ -4294,6 +4336,14 @@ def create_app(config=None):
         accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
         if str(account_id) not in accounts:
             return jsonify({"ok": False, "error": _MSG_ACCOUNT_NOT_FOUND}), 404
+        lock_kind, _, _ = _browser_lock()
+        if lock_kind == "running":
+            return jsonify({
+                "ok": False, "error": "browser_busy",
+                "message": "当前有任务运行，浏览器正在被占用；请先等待、取消或结束任务",
+            }), 409
+        if lock_kind == "paused":
+            _close_paused_run_browser()
         settings = _load_legacy_advanced_settings()
         settings["browser_account"] = str(account_id)
         _save_legacy_advanced_settings(settings)
@@ -4342,40 +4392,24 @@ def create_app(config=None):
             else derive_zhilian_profile_dir(boss_profile_dir)
         )
         platform_label = reg.display_name
-        lock_kind, locked_account, locked_platform = _browser_lock()
-        if lock_kind is not None:
-            if (lock_kind == "paused"
-                    and locked_account == str(account_id)
-                    and locked_platform == platform):
-                set_active_cdp_data_dir(profile_dir)
-                ok, msg = ensure_chrome_ready(login_space.cdp_port)
-                if not ok:
-                    return jsonify({
-                        "ok": False, "error": "chrome_not_ready", "message": msg,
-                    }), 409
-                _invalidate_login_cache(str(account_id), platform)
+        lock_kind, _, _ = _browser_lock()
+        if lock_kind == "paused":
+            _close_paused_run_browser()
+            set_active_cdp_data_dir(profile_dir)
+            ok, msg = ensure_chrome_ready(login_space.cdp_port)
+            if not ok:
                 return jsonify({
-                    "ok": True,
-                    "message": (
-                        f"已打开「{account['name']}」的{platform_label}自动化浏览器，"
-                        "请登录后回到任务页点「继续」"
-                    ),
-                })
-            if lock_kind == "paused":
-                locked_name = (
-                    accounts.get(locked_account, {}).get("name") if locked_account else ""
-                )
-                lock_reg = get_platform_or_none(locked_platform or "")
-                lock_label = (lock_reg.display_name if lock_reg else locked_platform or "BOSS")
-                message = (
-                    f"当前有暂停任务，浏览器已锁定到「{locked_name}」的{lock_label}登录空间；" if locked_name else ""
-                    "请先打开该登录空间或结束/取消暂停任务后再操作"
-                ) if locked_name else (
-                    "当前有暂停任务；请先结束或取消任务后再打开浏览器账号"
-                )
-                return jsonify({
-                    "ok": False, "error": "browser_busy", "message": message,
+                    "ok": False, "error": "chrome_not_ready", "message": msg,
                 }), 409
+            _invalidate_login_cache(str(account_id), platform)
+            return jsonify({
+                "ok": True,
+                "message": (
+                    f"已打开「{account['name']}」的{platform_label}自动化浏览器，"
+                    "请登录后回到任务页点「继续」"
+                ),
+            })
+        if lock_kind is not None:
             return jsonify({
                 "ok": False, "error": "browser_busy",
                 "message": "当前有任务运行，浏览器正在被占用；请先等待、取消或结束任务",
@@ -4392,11 +4426,17 @@ def create_app(config=None):
 
     @app.route("/api/browser-accounts/<account_id>", methods=["DELETE"])
     def delete_browser_account_endpoint(account_id):
-        from webui.pipeline_exec import delete_browser_account, load_browser_accounts
-        if _browser_busy():
+        from webui.pipeline_exec import (
+            close_debug_chrome,
+            delete_browser_account,
+            load_browser_accounts,
+            set_active_cdp_data_dir,
+        )
+        lock_kind, _, _ = _browser_lock()
+        if lock_kind == "running":
             return jsonify({
                 "ok": False, "error": "browser_busy",
-                "message": "任务运行或暂停中不能删除账号",
+                "message": "任务运行中不能删除账号",
             }), 409
         accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
         account = accounts.get(str(account_id))
@@ -4426,6 +4466,22 @@ def create_app(config=None):
                 str(a.get("profile_dir") or "")))
             for a in accounts.values() if str(a.get("profile_dir") or "").strip()
         }
+        if boss_profile_dir and boss.normalize_profile_path(boss_profile_dir) in port_profiles_boss:
+            set_active_cdp_data_dir(boss_profile_dir)
+            if not close_debug_chrome(boss.DEFAULT_CDP_PORT):
+                return jsonify({
+                    "ok": False, "error": "browser_in_use",
+                    "message": "该账号的 BOSS 自动化浏览器正在运行，请先打开其他账号或手动关闭后再删除",
+                }), 409
+        if zhilian_profile_dir and boss.normalize_profile_path(zhilian_profile_dir) in port_profiles_zhilian:
+            set_active_cdp_data_dir(zhilian_profile_dir)
+            if not close_debug_chrome(zhilian_port):
+                return jsonify({
+                    "ok": False, "error": "browser_in_use",
+                    "message": "该账号的智联自动化浏览器正在运行，请先打开其他账号或手动关闭后再删除",
+                }), 409
+        port_profiles_boss = _port_profiles(boss.DEFAULT_CDP_PORT)
+        port_profiles_zhilian = _port_profiles(zhilian_port)
         if boss_profile_dir and boss.normalize_profile_path(boss_profile_dir) in port_profiles_boss:
             return jsonify({
                 "ok": False, "error": "browser_in_use",
@@ -8007,12 +8063,21 @@ def create_app(config=None):
                 "status": _run_to_task_status(run["status"]),
                 "message": "只有 paused 状态的任务才能继续",
             }), 409
-        # FR-022：检查内存中是否已有该 run 的工作
-        _activate_run_browser(run)
         # B057：限流后可指定另一个已登录账号继续同一断点。
-        # 只替换执行账号与浏览器身份，任务身份/断点/结果保持不变。
+        # 未显式指定时使用当前 active 账号；只替换执行账号与浏览器身份，
+        # 任务身份/断点/结果保持不变。
         _continue_body = request.get_json(silent=True) or {}
         target_account = str(_continue_body.get("target_account") or "").strip()
+        if not target_account:
+            active_account = str(
+                (_load_legacy_advanced_settings() or {}).get("browser_account") or "a"
+            )
+            frozen_account = str(
+                ((run.get("execution_params") or {}).get("browser_account") or "")
+                or _account_for_run(run)
+            )
+            if active_account and active_account != frozen_account:
+                target_account = active_account
         if target_account:
             from webui.pipeline_exec import load_browser_accounts, resolve_browser_account
             from webui.platforms import resolve_login_space
@@ -8077,6 +8142,8 @@ def create_app(config=None):
                 }), 409
             persist_frozen_identity(store, run_id, candidate)
             run = store.get_screening_run(run_id) or run
+        # FR-022：检查内存中是否已有该 run 的工作
+        _activate_run_browser(run)
         with _pipeline_lock:
             existing = _pipeline_tasks.get(run_id)
             if existing is not None and existing.get("status") == "running":
