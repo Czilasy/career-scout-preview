@@ -43,6 +43,13 @@ from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from scripts.boss_cdp_signals import (
+    api_code_diagnosis,
+    api_code_hint,
+    detail_page_hint,
+    is_risk_api_code,
+)
+
 
 _VISIBILITY_STATE_JS = "Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});"
 
@@ -475,6 +482,10 @@ FETCH_API_JS_TEMPLATE = """
             // 状态 200 但 body 不是 JSON：大概率被风控/验证码页拦截，
             // 带上响应头部片段供调用方识别（不执行、仅诊断）。
             return JSON.stringify([{error: 'parse_failed', sample: (xhr.responseText || '').slice(0, 300)}]);
+        }
+        var apiCode = Number(data.code || 0);
+        if (apiCode !== 0) {
+            return JSON.stringify([{error: 'api_code', code: apiCode, sample: String(data.message || data.msg || '').slice(0, 160)}]);
         }
         var jobs = (data.zpData || {}).jobList || [];
         if (!jobs.length && !(data.zpData || {}).jobList) {
@@ -1338,7 +1349,11 @@ def diagnose_api_jobs_eval_value(value):
         error = item.get("error")
         if error:
             if diagnosis is None:
-                if isinstance(error, (int, float)):
+                if error == "api_code":
+                    diagnosis = api_code_diagnosis(
+                        item.get("code"), item.get("sample", "")
+                    )
+                elif isinstance(error, (int, float)):
                     diagnosis = {"kind": "http_error", "status": int(error)}
                 else:
                     diagnosis = {
@@ -1437,6 +1452,14 @@ def check_list_risk(diagnosis, *, page, consecutive_empty, scraped_count,
                 f"返回内容里出现验证码/风控特征：{sample[:80]}",
                 page=page, scraped_count=scraped_count,
                 output_path=output_path, resume_page=resume_page)
+        if kind == "api_code":
+            code = diagnosis.get("code", 0)
+            if is_risk_api_code(code):
+                return RiskControlError(
+                    api_code_hint(code, sample),
+                    page=page, scraped_count=scraped_count,
+                    output_path=output_path, resume_page=resume_page,
+                )
         if kind == "http_error":
             status = diagnosis.get("status", 0)
             if status in (401, 403, 412, 418, 429):
@@ -1987,6 +2010,16 @@ def _emit_detail_safe_event(event_callback, job, status, safe_code, started_at,
     event_callback(event)
 
 
+def _emit_runtime_safe_event(event_callback, event, *, safe_code="ok", safe_hint=""):
+    """Emit a safe non-job runtime event for orchestration-side auditing."""
+    if event_callback is None:
+        return
+    payload = {"kind": "runtime", "event": event, "safe_code": safe_code}
+    if safe_hint:
+        payload["safe_hint"] = str(safe_hint)[:160]
+    event_callback(payload)
+
+
 def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
                        sleeper, event_callback, readiness_timeout_seconds,
                        max_readiness_retries, inter_job_gap_range,
@@ -2053,8 +2086,11 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
         d = {"jd": "", "tags": []}
 
     skip_gap = False
+    detail_hint = detail_page_hint(d.get("url"))
     try:
         try:
+            if detail_hint:
+                raise DetailExtractionError(detail_hint)
             d["jd"] = extract_job_description(d)
         except DetailLoginRequiredError as exc:
             ws.send(CDP_CMD_CLOSE_TARGET, {"targetId": tid})
@@ -2087,6 +2123,7 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
             _emit_detail_safe_event(
                 event_callback, job, "failed",
                 "source_invalid_output", started_at,
+                safe_hint=detail_hint or str(exc),
             )
             return False
 
@@ -2159,7 +2196,10 @@ def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
     except (ValueError, TypeError):
         d = {"jd": "", "tags": []}
 
+    detail_hint = detail_page_hint(d.get("url"))
     try:
+        if detail_hint:
+            raise DetailExtractionError(detail_hint)
         d["jd"] = extract_job_description(d)
     except DetailLoginRequiredError:
         _emit_detail_safe_event(
@@ -2185,6 +2225,7 @@ def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
         print(f"[{tab_label}]   跳过无效详情页: {exc}")
         _emit_detail_safe_event(
             event_callback, job, "failed", "source_invalid_output", started_at,
+            safe_hint=detail_hint or str(exc),
         )
         return False
 
@@ -2204,13 +2245,16 @@ def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
     return True
 
 
-def _reset_detail_session(ws, sid, sleeper, tab_label):
+def _reset_detail_session(ws, sid, sleeper, tab_label, event_callback=None):
     """重置详情抓取的 session 计数器（防 code:37 环境异常）。
 
     与列表翻页相同的策略：导航回 BOSS 首页 + 等待 + 滚动，
     让 BOSS 的 session 级请求计数归零，避免连续自动化访问触发拦截。
     """
     print(f"[{tab_label}] ⟳ session 重置：导航回首页...")
+    _emit_runtime_safe_event(
+        event_callback, "detail_session_reset", safe_hint="详情抓取 session 重置",
+    )
     ws.send(CDP_CMD_PAGE_NAVIGATE, {"url": "https://www.zhipin.com/"}, sid)
     sleeper(random.uniform(5, 8), label="session_reset_wait")
     # 模拟真人滚动
@@ -2298,7 +2342,9 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
             # 每抓 reset_every 个详情重置一次 session（同列表翻页防 code:37 策略）：
             # 导航回 BOSS 首页 + 滚动，重置 BOSS 的 session 级请求计数器。
             if jobs_done_on_tab % reset_every == 0 and not is_last:
-                _reset_detail_session(ws, sid, sleeper, tab_label)
+                _reset_detail_session(
+                    ws, sid, sleeper, tab_label, event_callback=event_callback,
+                )
             # 补位节奏：宁慢求稳，抓完空出来也等随机间隔再喂下一个
             if not is_last or trailing_wait:
                 gap = random.uniform(inter_job_gap_range[0], inter_job_gap_range[1])

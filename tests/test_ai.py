@@ -2656,5 +2656,34 @@ class AIMeasurementEventTests(unittest.TestCase):
         )
 
 
+class MatchJdsDetailAdmissionTests(unittest.TestCase):
+    def test_empty_jd_becomes_uncertain_without_ai_request(self):
+        from webui import ai
+
+        jobs = [
+            {"job_id": "ready", "title": "后端", "jd": "负责服务开发"},
+            {
+                "job_id": "missing",
+                "title": "未知岗位",
+                "jd": "   ",
+                "jd_failed_code": "detail_timeout",
+                "jd_failed_reason": "详情页超时",
+            },
+        ]
+        with patch("webui.ai.call_ai", return_value={
+            "results": [{"i": 0, "match": True, "reason": "匹配", "caveats": [], "flags": []}],
+        }) as call_ai:
+            result = ai.match_jds(jobs, "候选人画像", "https://example.test", "key")
+
+        payload = json.loads(call_ai.call_args.args[2][1]["content"])
+        self.assertEqual([item["i"] for item in payload], [0])
+        self.assertEqual(payload[0]["jd"], "负责服务开发")
+        self.assertEqual(result["verdicts"]["ready"]["verdict"], "match")
+        self.assertEqual(result["verdicts"]["missing"], {
+            "verdict": "uncertain",
+            "reason": "未抓到 JD（详情页超时），无法精筛",
+        })
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -47,6 +47,7 @@ from webui.flag_features import (
     clean_flags,
     decide_flags,
 )
+from webui.screening_jd_gate import has_usable_jd, missing_jd_verdict
 
 KEYRING_SERVICE = "boss-workbench"
 DEFAULT_TIMEOUT = 300
@@ -1762,6 +1763,16 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         int(measurement_input_count)
         if measurement_input_count is not None else len(jobs_with_jd)
     )
+    eligible_jobs = []
+    for _idx, _job in enumerate(jobs_with_jd):
+        if has_usable_jd(_job):
+            eligible_jobs.append(_job)
+            continue
+        verdicts[str(_job.get("job_id", ""))] = missing_jd_verdict(_job)
+        _emit_final_terminal(_job, _idx, "uncertain")
+    jobs_with_jd = eligible_jobs
+    if not jobs_with_jd:
+        return {"verdicts": verdicts}
     # 已选筛选字段是硬约束：结构化标签/JD 明确值与筛选条件冲突时直接 not_match，
     # 不交给 AI 各批自判；字段未知或未标明的岗位保留给 AI 判断。
     _hard_kept = []

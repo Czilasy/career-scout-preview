@@ -25,6 +25,7 @@ from scripts import boss_cdp_raw as boss
 from webui.process_executor import ScraperExecutor, run_with_deadline
 from webui.workbench import normalize_job_link
 from webui.error_registry import SAFE_FAILURE_CODES
+from webui.runtime_audit import record_runtime_event
 
 logger = logging.getLogger(__name__)
 
@@ -944,14 +945,42 @@ class BossCdpSource:
         parsed_events = self._read_events_file(events_output_path)
         matched_event_by_url: dict[str, dict] = {}
         for event in parsed_events:
-            ok, _ = self._validate_detail_event(event, expected_urls)
+            if isinstance(event, dict) and event.get("kind") == "runtime":
+                runtime_event = str(event.get("event") or "")
+                if runtime_event == "detail_session_reset":
+                    record_runtime_event(
+                        event=runtime_event, stage="detail",
+                        safe_hint=event.get("safe_hint") or "",
+                    )
+                else:
+                    record_runtime_event(
+                        event="detail_event_rejected", stage="detail",
+                        failed_code="source_invalid_output",
+                        safe_hint="unknown_runtime_event",
+                    )
+                continue
+            ok, reason = self._validate_detail_event(event, expected_urls)
             if not ok:
-                continue  # rejected events are silently dropped
+                record_runtime_event(
+                    event="detail_event_rejected", stage="detail",
+                    failed_code="source_invalid_output", safe_hint=reason,
+                )
+                continue
             # First valid event for a given job wins; later duplicates are
             # dropped to avoid double-dispatch.
             if event["job_id"] in matched_event_by_url:
+                record_runtime_event(
+                    event="detail_event_rejected", stage="detail",
+                    failed_code="source_invalid_output", safe_hint="duplicate_job_event",
+                )
                 continue
             matched_event_by_url[event["job_id"]] = event
+            record_runtime_event(
+                event="detail_terminal", stage="detail",
+                failed_code=str(event.get("safe_code") or ""),
+                safe_hint=event.get("safe_hint") or "",
+                extra={"status": event.get("status") or ""},
+            )
             if event_callback is not None:
                 try:
                     event_callback(event)

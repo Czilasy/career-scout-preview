@@ -24,6 +24,7 @@ from scripts import boss_cdp_raw as boss
 from webui import ai as ai_service
 from webui.constants import CLEANUP_EXPIRED_DAYS
 from webui.process_executor import ArtifactSpec, ScraperExecutor, run_with_deadline
+from webui.runtime_audit import record_runtime_event
 from webui.workbench import (
     MAX_DETAIL_BUDGET,
     allocate_detail_budget,
@@ -450,7 +451,7 @@ class TaskRunner:
                     "succeeded" if result.ok else "failed",
                     result.returncode if result.returncode is not None else -1,
                     result.failure_code or "process_failed",
-                    "",
+                    result.output_tail or "",
                 )
             # SearchCancelled → interrupted（cancel() 可能已改状态，也可能尚未）
             if outcome[0] == "interrupted":
@@ -468,6 +469,13 @@ class TaskRunner:
                 self.store.update_task(task_id, "succeeded", returncode=0)
             else:
                 message = f"抓取执行失败: {outcome[2] or 'process_failed'}"
+                record_runtime_event(
+                    event="task_execution_failed", stage=str(task.get("kind") or "task"),
+                    failed_code=str(outcome[2] or "process_failed"),
+                    safe_hint=outcome[3], task_id=task_id,
+                    correlation_id=task_id, store=self.store,
+                    extra={"returncode": outcome[1]},
+                )
                 self.store.append_log(task_id, message)
                 self.store.update_task(
                     task_id, "failed", returncode=outcome[1], error=message,

@@ -717,5 +717,45 @@ class CsvFormulaInjectionTests(unittest.TestCase):
         for value, expected in cases:
             self.assertEqual(self.module.csv_safe_cell(value), expected)
 
+
+class ExplicitRiskSignalTests(unittest.TestCase):
+    def setUp(self):
+        self.module = load_module()
+
+    def test_code_37_stops_list_scrape_with_explicit_reason(self):
+        _, diagnosis, _ = self.module.diagnose_api_jobs_eval_value(
+            '[{"error":"api_code","code":37,"sample":"您的环境存在异常"}]'
+        )
+
+        error = self.module.check_list_risk(
+            diagnosis, page=2, consecutive_empty=1, scraped_count=10,
+            output_path="result.json", resume_page=2,
+        )
+
+        self.assertIsInstance(error, self.module.RiskControlError)
+        self.assertIn("code:37", str(error))
+        self.assertIn("环境存在异常", str(error))
+
+
+class RuntimeAuditEventTests(unittest.TestCase):
+    def setUp(self):
+        self.module = load_module()
+
+    def test_detail_session_reset_emits_a_safe_runtime_event(self):
+        events = []
+        ws = mock.Mock()
+
+        self.module._reset_detail_session(
+            ws, "sid", _no_sleep, "tab1", event_callback=events.append,
+        )
+
+        self.assertEqual(events, [{
+            "kind": "runtime",
+            "event": "detail_session_reset",
+            "safe_code": "ok",
+            "safe_hint": "详情抓取 session 重置",
+        }])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,6 +14,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable
 
+from webui.runtime_audit import record_runtime_event
+
 
 BROWSER_LOST_CODES = frozenset({"cdp_unavailable", "source_cdp_unavailable"})
 
@@ -59,6 +61,12 @@ class BrowserRecovery:
                 from webui.pipeline_exec import ensure_chrome_ready
                 ensure = ensure_chrome_ready
             ok, msg = ensure(self.cdp_port, minimize_after_launch=True)
+            record_runtime_event(
+                event="browser_restart", stage="browser_recovery",
+                failed_code="" if ok else "source_cdp_unavailable",
+                safe_hint=msg,
+                extra={"result": "succeeded" if ok else "failed"},
+            )
             # 无论成功或失败都消耗本次失联事件的重启机会，避免无限循环。
             self._restart_allowed = False
             if ok:
