@@ -8009,6 +8009,74 @@ def create_app(config=None):
             }), 409
         # FR-022：检查内存中是否已有该 run 的工作
         _activate_run_browser(run)
+        # B057：限流后可指定另一个已登录账号继续同一断点。
+        # 只替换执行账号与浏览器身份，任务身份/断点/结果保持不变。
+        _continue_body = request.get_json(silent=True) or {}
+        target_account = str(_continue_body.get("target_account") or "").strip()
+        if target_account:
+            from webui.pipeline_exec import load_browser_accounts, resolve_browser_account
+            from webui.platforms import resolve_login_space
+            from webui.cooldown import get_cooldown as _get_cooldown
+            from webui.resume_identity import persist_frozen_identity
+            accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
+            if target_account not in accounts:
+                return jsonify({
+                    "ok": False, "error": "target_account_not_found",
+                    "message": "目标账号不存在，请刷新账号列表后重试",
+                    "status": "paused",
+                }), 404
+            platform = str(run.get("platform") or (run.get("execution_params") or {}).get("platform") or "boss")
+            cd = _get_cooldown(target_account, platform)
+            if cd is not None:
+                remaining = max(1, int(cd["until"] - time.time()))
+                return jsonify({
+                    "ok": False, "error": "account_in_cooldown",
+                    "error_code": "account_in_cooldown",
+                    "remaining_seconds": remaining,
+                    "until": cd["until"],
+                    "message": (
+                        f"目标账号也处于风控冷却，建议等待至 "
+                        f"{_format_unlock_time(cd['until'])} 后再继续"
+                    ),
+                    "status": "paused",
+                }), 409
+            target_dir = resolve_browser_account(
+                target_account, app.config["BROWSER_ACCOUNTS_PATH"]) or "unresolved"
+            try:
+                _login_space = resolve_login_space(
+                    platform, target_account, boss_profile_dir=target_dir)
+            except ValueError:
+                return jsonify({
+                    "ok": False, "error": "target_account_invalid",
+                    "message": "目标账号浏览器身份不可用，请确认该账号已配置",
+                    "status": "paused",
+                }), 409
+            candidate = {
+                "platform": platform,
+                "browser_account": target_account,
+                "cdp_port": _login_space.cdp_port,
+                "profile_key": _login_space.profile_key,
+            }
+            candidate_params = dict(run.get("execution_params") or {})
+            candidate_params.update(
+                {k: v for k, v in candidate.items() if v not in (None, "")})
+            candidate_run = dict(run)
+            candidate_run["execution_params"] = candidate_params
+            candidate_run["platform"] = platform
+            passed, code, reason = _check_resume_block(candidate_run)
+            if not passed:
+                return jsonify({
+                    "ok": False, "error": "block_not_resolved",
+                    "error_code": code, "error_reason": reason,
+                    "target_account": target_account,
+                    "status": "paused",
+                    "message": (
+                        f"目标账号「{accounts[target_account].get('name') or target_account}」"
+                        f"暂不可用：{reason}"
+                    ),
+                }), 409
+            persist_frozen_identity(store, run_id, candidate)
+            run = store.get_screening_run(run_id) or run
         with _pipeline_lock:
             existing = _pipeline_tasks.get(run_id)
             if existing is not None and existing.get("status") == "running":

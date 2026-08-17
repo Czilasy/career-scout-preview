@@ -1911,6 +1911,116 @@ class ScreenContinueFlowTests(unittest.TestCase):
         fn, args, kwargs = captured[0]
         self.assertEqual(args[5], facts)
 
+    def test_b057_continue_switch_account_persists_target_identity(self):
+        """B057：限流后切换到另一账号继续，冻结身份被替换且断点保留。"""
+        task_id = "b057-switch"
+        self.store.create_screening_run(
+            task_id, source_count=1,
+            execution_params={
+                "platform": "boss",
+                "script_params": {"keyword": "前端", "city": ["上海"], "pages": 3},
+                "browser_account": "a", "cdp_port": 9222, "profile_key": "boss:a",
+            },
+        )
+        if self.store.get_screening_run(task_id)["status"] == "queued":
+            self.store.update_screening_run(task_id, status="running")
+        self.store.update_screening_run(
+            task_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="源账号限流",
+        )
+        checked = []
+        self.app.config["RESUME_BLOCK_CHECKER"] = lambda run: (
+            checked.append((run.get("execution_params") or {}).get("browser_account"))
+            or (True, "", "")
+        )
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit") as submit:
+            resp = self.client.post(
+                f"/api/task/continue/{task_id}",
+                json={"target_account": "b"},
+            )
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        params = (self.store.get_screening_run(task_id) or {}).get("execution_params") or {}
+        self.assertEqual(params.get("browser_account"), "b")
+        self.assertEqual(params.get("profile_key"), "boss:b")
+        self.assertEqual(params.get("cdp_port"), 9222)
+        self.assertEqual(checked, ["b", "b"])
+        submit.assert_called_once()
+
+    def test_b057_continue_switch_missing_account_rejected(self):
+        task_id = "b057-missing"
+        self.store.create_screening_run(
+            task_id, source_count=1,
+            execution_params={"platform": "boss",
+                           "script_params": {"keyword": "前端", "city": ["上海"]}},
+        )
+        if self.store.get_screening_run(task_id)["status"] == "queued":
+            self.store.update_screening_run(task_id, status="running")
+        self.store.update_screening_run(
+            task_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="源账号限流",
+        )
+        self.app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
+        resp = self.client.post(
+            f"/api/task/continue/{task_id}",
+            json={"target_account": "nope"},
+        )
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.get_json()["error"], "target_account_not_found")
+
+    def test_b057_continue_switch_blocked_by_target_cooldown(self):
+        task_id = "b057-cooldown"
+        self.store.create_screening_run(
+            task_id, source_count=1,
+            execution_params={"platform": "boss",
+                           "script_params": {"keyword": "前端", "city": ["上海"]}},
+        )
+        if self.store.get_screening_run(task_id)["status"] == "queued":
+            self.store.update_screening_run(task_id, status="running")
+        self.store.update_screening_run(
+            task_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="源账号限流",
+        )
+        self.app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
+        with mock.patch(
+            "webui.cooldown.get_cooldown",
+            return_value={"until": 9999999999, "reason": "测试冷却"},
+        ):
+            resp = self.client.post(
+                f"/api/task/continue/{task_id}",
+                json={"target_account": "b"},
+            )
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "account_in_cooldown")
+
+    def test_b057_continue_switch_target_preflight_failure_keeps_identity(self):
+        task_id = "b057-preflight"
+        self.store.create_screening_run(
+            task_id, source_count=1,
+            execution_params={
+                "platform": "boss",
+                "script_params": {"keyword": "前端", "city": ["上海"], "pages": 3},
+                "browser_account": "a", "cdp_port": 9222, "profile_key": "boss:a",
+            },
+        )
+        if self.store.get_screening_run(task_id)["status"] == "queued":
+            self.store.update_screening_run(task_id, status="running")
+        self.store.update_screening_run(
+            task_id, status="paused", current_stage="scrape",
+            error_code="source_rate_limited", error_reason="源账号限流",
+        )
+        self.app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (
+            False, "cdp_unavailable", "目标账号浏览器未就绪",
+        )
+        resp = self.client.post(
+            f"/api/task/continue/{task_id}",
+            json={"target_account": "b"},
+        )
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "block_not_resolved")
+        params = (self.store.get_screening_run(task_id) or {}).get("execution_params") or {}
+        self.assertEqual(params.get("browser_account"), "a")
+
     def test_worker_pause_writes_paused_and_snapshot(self):
         from webui import pipeline_exec
         scrape_id = self._create_completed_scrape_run()
