@@ -1473,8 +1473,10 @@ async function startScrape(options: OneClickLaunch = {}) {
     effectiveSearchCities.value,
     locationDraft.allLocations(draftPlatform.value, cityList.value),
   );
-  if (!scriptParams.keyword || !scriptParams.city.length) {
-    notify("请确认至少一个关键词和一个城市", "warning");
+  // 城市为空时，入口已先弹出全国范围确认；确认后用 effectiveSearchCities
+  // 生成的“全国”继续，不能在这里再次按空城市拦截。
+  if (!scriptParams.keyword) {
+    notify("请确认至少一个关键词", "warning");
     return;
   }
   const preview = await refreshScopePreview();

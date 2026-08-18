@@ -67,22 +67,30 @@ def record_raw_ai_response(
     attempt_index: int,
     text: str,
     *,
+    operation: str = "",
     log_dir: str | Path | None = None,
 ) -> None:
-    """Write one raw AI response attempt to the local rotating log."""
+    """Write one raw AI response attempt to the local rotating log.
+
+    ``operation`` (B063)：调用环节类型（resume/screen/fine/...），由 call_ai
+    的 measurement_stage 透传；correlation_id 仍为 run 级，无法单独定位环节，
+    因此日志靠 operation 字段区分。
+    """
     body = redact(str(text or ""))
     original_length = len(str(text or ""))
     truncated = False
     if len(body) > MAX_RAW_AI_RESPONSE_BYTES:
         truncated = True
         body = body[:MAX_RAW_AI_RESPONSE_BYTES]
-    payload = {
+    payload: dict[str, object] = {
         "correlation_id": str(correlation_id or ""),
         "attempt_index": int(attempt_index),
         "original_length": original_length,
         "truncated": truncated,
         "body": body,
     }
+    if operation:
+        payload["operation"] = str(operation)
     # 并发 AI 调用共用全局 handler，串行写入避免轮转/关闭竞态丢日志。
     with _handler_lock:
         handler = _resolve_handler(log_dir)

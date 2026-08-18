@@ -36,7 +36,7 @@ def _make_ai_run(store, run_id="screen-1", scrape_task_id="scrape-1",
                  facts=None):
     store.create_screening_run(
         run_id,
-        frozen_filters=filters or FILTERS,
+        frozen_filters=FILTERS if filters is None else filters,
         source_count=10,
         execution_params={
             "platform": "boss",
@@ -146,6 +146,12 @@ class ScreenFlowTests(unittest.TestCase):
         self.assertEqual(ctx["status"], "partial")
         self.assertFalse(ctx["resumable"])
         self.assertEqual(ctx["screen_run_id"], "finished-run")
+
+    def test_build_round_context_empty_filters_are_valid_unlimited_conditions(self):
+        _make_ai_run(self.store, "unlimited-run", status="paused", filters={})
+        ctx = build_round_context_payload(self.store, self.store.get_screening_run("unlimited-run"))
+        self.assertEqual(ctx["screening_fields"], {})
+        self.assertFalse(ctx["has_frozen_filters"])
     def test_build_round_context_from_snapshot_with_screen_run_id(self):
         _make_ai_run(self.store, "paused-run", status="paused")
         snapshot_id = self.store.save_pipeline_result(

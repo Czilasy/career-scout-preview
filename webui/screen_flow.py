@@ -250,5 +250,6 @@ def build_round_context_payload(store, run):
         "screen_run_id": source_run.get("id") or "",
         "status": "partial" if closed_saved else status,
         "resumable": False if closed_saved else status in RESUMABLE_STATUSES,
-        "has_frozen_filters": True,
+        # 空对象是合法的“六类条件均不限”，不能误报为条件快照丢失。
+        "has_frozen_filters": bool(source_run.get("frozen_filters") or {}),
     }

@@ -466,38 +466,40 @@ function clearFilters() {
         ><span class="job-extra-fact-label">{{ item.label + ": " }}</span><span class="job-extra-fact-value">{{ item.value }}</span></span>
       </div>
 
-      <div
-        v-if="selectedJob.verdict_reason || selectedJob.reason"
-        class="verdict-reason"
-        :class="{ 'flag-danger': highFlags.length }"
-      >
-        <strong><span class="sec-mk" aria-hidden="true"></span>AI 判断说明</strong>
-        <p>
-          <span
-            v-for="(f, i) in highFlags"
-            :key="i"
-            class="flag-reason"
-            :data-testid="`flag-high-${i}`"
-          ><span class="flag-icon" aria-hidden="true">⚠</span>{{ f.reason }}</span>
-          {{ selectedJob.verdict_reason || selectedJob.reason }}
-        </p>
-      </div>
+      <div class="verdict-pair">
+        <div
+          v-if="selectedJob.verdict_reason || selectedJob.reason"
+          class="verdict-reason"
+          :class="{ 'flag-danger': highFlags.length }"
+        >
+          <strong><span class="sec-mk" aria-hidden="true"></span>AI 判断说明</strong>
+          <p>
+            <span
+              v-for="(f, i) in highFlags"
+              :key="i"
+              class="flag-reason"
+              :data-testid="`flag-high-${i}`"
+            ><span class="flag-icon" aria-hidden="true">⚠</span>{{ f.reason }}</span>
+            {{ selectedJob.verdict_reason || selectedJob.reason }}
+          </p>
+        </div>
 
-      <div
-        v-if="(selectedJob.caveats && selectedJob.caveats.length) || mediumFlags.length"
-        class="caveats-list"
-        :class="{ 'flag-unsure': mediumFlags.length }"
-      >
-        <strong><span class="sec-mk" aria-hidden="true"></span>软性要求提醒（不影响匹配，自己判断）</strong>
-        <ul>
-          <li v-for="(c, i) in selectedJob.caveats" :key="i">{{ c }}</li>
-          <li
-            v-for="(f, i) in mediumFlags"
-            :key="'flag-' + i"
-            class="flag-reason"
-            :data-testid="`flag-medium-${i}`"
-          ><span class="flag-icon" aria-hidden="true">⚠</span>{{ f.reason }}</li>
-        </ul>
+        <div
+          v-if="(selectedJob.caveats && selectedJob.caveats.length) || mediumFlags.length"
+          class="caveats-list"
+          :class="{ 'flag-unsure': mediumFlags.length }"
+        >
+          <strong><span class="sec-mk" aria-hidden="true"></span>软性要求提醒（不影响匹配，自己判断）</strong>
+          <ul>
+            <li v-for="(c, i) in selectedJob.caveats" :key="i">{{ c }}</li>
+            <li
+              v-for="(f, i) in mediumFlags"
+              :key="'flag-' + i"
+              class="flag-reason"
+              :data-testid="`flag-medium-${i}`"
+            ><span class="flag-icon" aria-hidden="true">⚠</span>{{ f.reason }}</li>
+          </ul>
+        </div>
       </div>
 
       <section class="jd-content">

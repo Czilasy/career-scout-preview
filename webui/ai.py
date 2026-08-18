@@ -48,6 +48,14 @@ from webui.flag_features import (
     decide_flags,
 )
 from webui.screening_jd_gate import has_usable_jd, missing_jd_verdict
+from webui.profile_facts import (
+    build_profile_facts_description,
+    validate_profile_facts,
+)
+from webui.ai_prompts import (
+    build_match_system_prompt,
+    build_resume_analysis_prompt,
+)
 
 KEYRING_SERVICE = "boss-workbench"
 DEFAULT_TIMEOUT = 300
@@ -722,9 +730,31 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
             if response.status_code == 200:
                 try:
                     content, finish_reason = _read_stream_with_timeout(response, budget)
-                    record_raw_ai_response(correlation_id, attempt_index, content)
-                    last_error = None
-                    break  # 成功拿到内容，退出重试循环
+                    record_raw_ai_response(
+                        correlation_id, attempt_index, content,
+                        operation=measurement_stage or "",
+                    )
+                    if not content.strip():
+                        # B063：HTTP 200 但流式内容为空 → 按可重试传输故障处理。
+                        # 不 break，而是设 last_error + response=None，让本循环
+                        # 按 invalid_response(empty_response) 的退避/次数重试；
+                        # json_decode 型 invalid 仍在循环外原地抛，不做重试。
+                        last_error = AISecurityError(
+                            ERROR_INVALID,
+                            {
+                                "failure_phase": "empty_response",
+                                "response_empty": True,
+                                "response_length": 0,
+                                "finish_reason": finish_reason or None,
+                            },
+                        )
+                        response = None
+                        emit_attempt(attempt_index, attempt_started_at,
+                                     error_code=last_error.error_code,
+                                     metadata=last_error.diagnostics)
+                    else:
+                        last_error = None
+                        break  # 成功拿到非空内容，退出重试循环
                 except requests.Timeout:
                     # 流式读取中途 20s 无数据：连接已死，重试
                     last_error = AISecurityError(
@@ -994,21 +1024,7 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
         raise ValueError("简历内容为空")
 
     field_options = _build_field_options_prompt(platform)
-    system_prompt = (
-        "你是简历分析助手。读用户简历，帮用户填好求职搜索字段。\n"
-        "规则只有两条：简历里明确写了就填，没写的字段留空，不要编造。\n"
-        f"{field_options}\n\n"
-        "另外输出两部分：\n"
-        "- profile_facts: 简历里明确写出的客观事实（隐藏，不展示给用户），输出JSON对象：\n"
-        "  {\"core_skills\":[\"Python\",\"Django\"],\"projects\":[{\"name\":\"xx系统\",\"role\":\"后端开发\",\"stack\":\"Python/Django\",\"summary\":\"负责订单模块\"}],\"job_type\":\"全职|实习|兼职|未体现\",\"degree\":\"本科\",\"languages\":[\"英语\"]}\n"
-        "  core_skills 只列简历明确列出的技能（最多10个）；languages 只列简历明确的语言能力（无则空数组）；projects 只列简历明确的项目/工作经历，每项 name 必填，role/stack/summary 有则填（无项目则空数组），summary 可写职责、实现方式和量化成果，但必须是简历明确写出的内容；job_type 只能输出 全职/实习/兼职/未体现 之一；degree 只填简历明确写出的最高学历（如\"本科\"），没明确写出就省略；简历没写的输出\"未体现\"或空数组，禁止推断、补全或编造\n"
-        "- profile_summary: 用自然语言写一段求职画像（给用户看、可编辑），像人写的段落，不列字段，不要出现'系统建议/自动补充'等说明性标记；先用3-5句话写求职方向、期望城市/薪资、求职类型、核心技能、项目经历和放宽意愿（简历写了什么就写什么，没写的不补）；项目经历只写项目方向、个人角色和所用技术栈，一句话概括即可，不写实现过程、量化指标或细节，详细项目事实放 profile_facts.projects；若简历体现了以下偏好且画像里还没有，用候选说法随机挑1-3个自然补充，不一次全塞，最终总共5-10句，说法、顺序、数量随机且自然：\n"
-        "  - 求职类型：只找全职，兼职/外包/按单结算不考虑；远程全职可接受\n"
-        "  - 双休：期望双休\n"
-        "  - 远程全职可接受：接受远程全职\n"
-        "  - 加班强度：不接受996\n"
-        "  画像里已有该偏好就不重复；简历没体现的不补；简历推断内容（如学历层次）可写进画像自然语言或 profile_facts，不确定时不得写成事实\n"
-    )
+    system_prompt = build_resume_analysis_prompt(field_options)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -1023,66 +1039,10 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
     summary = data.get("profile_summary", "") if isinstance(data, dict) else ""
     result["profile_summary"] = str(summary).strip()
     # profile_facts 隐藏画像事实：宽松验证，无效项丢弃不阻塞整体
-    result["profile_facts"] = _validate_profile_facts(
+    result["profile_facts"] = validate_profile_facts(
         data.get("profile_facts") if isinstance(data, dict) else None
     )
     return result
-
-
-# 画像事实 job_type 四值枚举（与精筛 prompt 契约一致）
-_PROFILE_FACT_JOB_TYPES = ("全职", "实习", "兼职", "未体现")
-
-
-def _validate_profile_facts(data) -> dict:
-    """宽松验证 AI 提取的画像事实：类型 + 长度，无效项丢弃不阻塞。
-
-    契约字段：core_skills[] / projects[{name,role,stack,summary}] /
-    job_type(四值) / degree(str) / languages[]。缺失字段不写入（调用方按\"未体现\"
-    语义处理）；列表只保留非空字符串，超长截断。
-    """
-    if not isinstance(data, dict):
-        return {}
-    facts: dict = {}
-
-    skills = data.get("core_skills")
-    if isinstance(skills, list):
-        cleaned = [str(s).strip() for s in skills
-                   if isinstance(s, str) and s.strip()]
-        if cleaned:
-            facts["core_skills"] = cleaned[:10]
-
-    projects = data.get("projects")
-    if isinstance(projects, list):
-        cleaned = []
-        for project in projects:
-            if not isinstance(project, dict):
-                continue
-            item = {}
-            for key in ("name", "role", "stack", "summary"):
-                value = project.get(key)
-                if isinstance(value, str) and value.strip():
-                    item[key] = value.strip()
-            if item.get("name"):
-                cleaned.append(item)
-        if cleaned:
-            facts["projects"] = cleaned[:10]
-
-    job_type = data.get("job_type")
-    if isinstance(job_type, str) and job_type.strip() in _PROFILE_FACT_JOB_TYPES:
-        facts["job_type"] = job_type.strip()
-
-    degree = data.get("degree")
-    if isinstance(degree, str) and degree.strip():
-        facts["degree"] = degree.strip()
-
-    languages = data.get("languages")
-    if isinstance(languages, list):
-        cleaned = [str(lang).strip() for lang in languages
-                   if isinstance(lang, str) and lang.strip()]
-        if cleaned:
-            facts["languages"] = cleaned[:10]
-
-    return facts
 
 
 def _validate_unified_fields(data, platform: str = "boss") -> dict:
@@ -1209,43 +1169,6 @@ def _build_criteria_description(criteria):
             if names:
                 lines.append(f"{label}：" + "、".join(names))
     return "\n".join(lines) if lines else "（无明确标准，宽松判断）"
-
-
-def _build_profile_facts_description(profile_facts) -> str:
-    """把画像事实 dict 转成精筛 prompt 自然语言段落（缺失维度不输出）。"""
-    if not isinstance(profile_facts, dict) or not profile_facts:
-        return "（无画像事实，按未体现处理）"
-    lines = []
-    skills = profile_facts.get("core_skills")
-    if skills:
-        lines.append("核心技能：" + "、".join(str(s) for s in skills))
-    projects = profile_facts.get("projects")
-    if projects:
-        parts = []
-        for project in projects[:3]:
-            name = str(project.get("name") or "未命名项目")
-            role = str(project.get("role") or "").strip()
-            stack = str(project.get("stack") or "").strip()
-            summary = str(project.get("summary") or "").strip()
-            detail = name
-            if role:
-                detail += f"（{role}）"
-            if stack:
-                detail += f"，技术栈：{stack}"
-            if summary:
-                detail += f"，{summary}"
-            parts.append(detail)
-        lines.append("项目经历：" + "；".join(parts))
-    job_type = profile_facts.get("job_type")
-    if job_type:
-        lines.append(f"求职类型：{job_type}")
-    degree = profile_facts.get("degree")
-    if degree:
-        lines.append(f"学历：{degree}")
-    languages = profile_facts.get("languages")
-    if languages:
-        lines.append("语言能力：" + "、".join(str(l) for l in languages))
-    return "\n".join(lines) if lines else "（无画像事实，按未体现处理）"
 
 
 def _salary_selected_bounds(selected_codes):
@@ -1796,46 +1719,12 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             {k: v for k, v in criteria.items() if k != "profile_summary"}
         )
     criteria_desc = criteria_desc or "（无明确标准，宽松判断）"
-    facts_desc = _build_profile_facts_description(profile_facts)
-    system_prompt = (
-        "你是求职匹配度评估助手。根据候选人的完整信息包，判断每个岗位的JD工作内容是否适合候选人。\n"
-        "候选人信息包（同一轮流程内所有判断共用，优先级从高到低）：\n"
-        f"【第一层·筛选条件】用户已选择的六类字段（薪资/经验/学历/规模/融资/行业），最高优先级，绝对硬约束：{criteria_desc}\n"
-        f"【第二层·求职画像】候选人求职画像（用户可编辑，只能放宽未选择的维度，不能推翻已选字段）：{summary}\n"
-        f"【第三层·隐藏画像字段】简历提取的客观事实（未列出的维度一律视为未体现，不得推断）：{facts_desc}\n\n"
-        f"【第四层·默认偏好】求职类型（只找全职，兼职/外包/按单结算不考虑；远程全职可接受）、实习、双休、加班强度（不接受996）按默认偏好处理，除非画像明确写'不限/都可以/接受xx'；其中求职类型和实习是硬默认，JD 明确实习/兼职/按单/日薪/周薪/时薪/项目制 → match=false，不得只写 caveats 后仍判 match；双休、加班强度等未明确维度标记为未填写/未确认，不得当作默认匹配，写 caveats 由用户确认。\n\n"
-        "判断规则：\n"
-        "- JD 正文硬要求优先于标题和标签：任职要求/岗位要求里出现'必须/必须具备/要求'且带明确数值或条件（如'3年以上''5年经验''硕士''统招本科'），与第一层已选字段冲突时直接 match=false，即使标题、标签看起来匹配也不能翻案。示例：岗位标签'1-3年 | 本科'，JD 写'必须具备 Python 3年以上生产环境开发经验'，已选经验 1-3年，则必须 match=false。\n"
-        "- 已确认的筛选条件（薪资/经验/学历/规模/融资/行业）是硬约束：岗位结构化标签或 JD 明确写'必须/要求/限'的硬性要求与已选条件冲突时，必须 match=false，不得只写 caveats 后仍判 match；JD 中'优先/加分/熟悉/了解'类软性要求不受此限。\n"
-        "- 判断是参考不是法律：匹配从宽只适用于候选人没有约束的维度；第一层已选字段冲突即 match=false，画像和隐藏画像字段不得推翻；画像只能放宽未选择的维度。\n"
-        "- 以候选人自己的主业方向为锚：画像明确写了方向（如开发、运营、设计、产品、销售、培训等），岗位属于同一职业链路才可 match；明显跨链路的岗位默认 match=false。\n"
-        "- 画像未明确写方向时，从核心技能和经历判断主业；岗位明显不属于该链路且候选人能力支撑不了，默认 match=false。\n"
-        "- 用户明确写'不限/都可以/接受xx'时，按用户意愿放宽，覆盖默认不匹配。\n"
-        "- 岗位类别不能只按标题判断，以 JD 主责为准；混合岗（如售前、解决方案）按主责归入对应链路。\n"
-        "- 意愿与基线冲突时以意愿为准；意愿未提及的维度回退用筛选条件与画像事实判断；包里没有的维度（如薪资未填、学历未体现）默认匹配，不得写'候选人未知'。\n"
-        "- 对【第四层·默认偏好】标记的维度：JD 有明确要求而候选人未确认时，不得当作默认匹配，必须把'未填写/未确认'写入 caveats 让用户确认；但求职类型和实习属于默认硬条件：JD 明确实习/校招/兼职/长期兼职/按单结算/日结/周结/时薪/项目制/每周N小时，且画像未明确接受 → match=false，reason 写'实习/兼职与全职冲突'，禁止写'求职类型未确认，JD 为兼职'后仍判 match。候选人明确写'不限/都可以/接受xx'时按意愿放宽。\n"
-        "- JD 明确写硬性条件（如'统招公办本科''本科及以上''双证齐全''全日制'）而候选人信息未确认是否满足时，必须写入 caveats，不得当作满足、不得留空。\n"
-        "- JD 经验要求与已选区间只是部分重叠（如已选'1-3年'，JD 写'2-3年及以上'）时，不得直接当符合，必须把经验边界写入 caveats 由用户确认。\n"
-        "- 城市由抓取阶段已保证，不再作为不匹配理由。\n"
-        "- 薪资筛选区间已由系统硬性核对，本阶段只保留与已选区间有重叠的岗位；禁止再以'薪资超出/低于期望'判不匹配，薪资构成风险写入 caveats。\n"
-        "- 对已确认筛选字段：结构化标签或 JD 明确写'必须/要求/限'的硬性要求与已选条件冲突即 match=false，不以'候选人包里未体现'为由降级为 caveat；未选择或岗位未标明的维度才拿不准保留。\n"
-        "- JD 中'优先/加分/plus/熟悉/了解'类软性要求（如行业经验、英语等级、证书、技能未列出）不得影响 match，应写入 caveats 数组（每项一句话，如'优先英语六级，候选人未提供'）；除非该维度是用户已确认的硬约束。\n"
-        "- 不得把 AI 已识别出的方向冲突、硬性不满足只写进 caveats 后仍判 match；这类冲突必须反映到 match=false。\n"
-        "- 计薪与用工形式：'元/天''元/周''元/时''按单结算''完工结''日结''周结''工作周期''每周N小时'且 JD 未明确'全职/坐班/正式员工/五险一金' → 按兼职/项目制处理，默认 match=false；日薪但 JD 明确全职坐班正式用工，可 match 但 caveats 必须标注结算方式。\n"
-        "- 技术栈硬冲突：JD 任职要求明确'必须/熟练掌握 Java、.NET、C#、Go、Node.js'等，而候选人核心技能无交集时 → match=false，不得以'全栈可迁移'写成 caveats 后仍判 match。\n"
-        "- 输出自检：判 match 前必须确认 fulltime_ok（满足全职）、stack_ok（硬性技术栈有交集）、direction_ok（主业链路一致）；任一不满足 → match=false。\n"
-        "对每个岗位输出判定。严格输出JSON：\n"
-        '{"results":[{"i":0,"match":true,"reason":"一句话理由","caveats":["软性提醒"],"flags":[{"code":"A1","level":"medium","reason":"命中证据"}]},...]}\n'
-        "i 为岗位序号；match=true 适合，false 不适合；reason 简短（20字内）；caveats 可为空数组。\n"
-        "岗位靠谱判定：按下列特征清单核对岗位标题与JD正文是否命中可疑特征（\n"
-        f"{build_features_prompt_text()}\n"
-        "）。flags 为必填字段，无命中输出空数组 []，不得省略：\n"
-        "  [{\"code\":\"特征code\",\"level\":\"high或medium\",\"reason\":\"引用标题/JD原文证据\"}]\n"
-        "- level 只能是 high 或 medium；reason 必须引用岗位标题或JD正文的具体证据。\n"
-        "- 命中任一高危（level=high）特征：该岗位强制 match=false，reason 以\"疑似骗局：\"开头并说明命中特征。\n"
-        "- 中危特征逐条如实输出（命中几条输出几条）；拿不准的不要输出。\n"
-        "- 不需要时间维度的特征（如\"岗位挂多久\"）一律不判断。\n"
-        "- 不涉及上述清单的可疑迹象可写入 caveats（措辞\"需留意：…\"）。"
+    facts_desc = build_profile_facts_description(profile_facts)
+    system_prompt = build_match_system_prompt(
+        criteria_desc=criteria_desc,
+        profile_summary=summary,
+        facts_desc=facts_desc,
+        features_prompt_text=build_features_prompt_text(),
     )
     def _match_one_batch(batch, _invalid_retried=False):
         """单批精筛，返回 {jid: verdict}。

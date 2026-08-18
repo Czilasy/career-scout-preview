@@ -411,7 +411,16 @@ class CallAITests(unittest.TestCase):
         self.assertEqual(ctx.exception.error_code, "invalid_response")
 
     @patch("webui.ai.requests.post")
-    def test_empty_response_raw_logged_once(self, mock_post):
+    @patch("webui.ai_retry.random.uniform", return_value=0.0)
+    @patch("webui.ai.time.sleep")
+    def test_empty_response_raw_logged_per_attempt_and_retried(
+        self, mock_sleep, _mock_uniform, mock_post,
+    ):
+        """B063：HTTP 200 空 body 在统一层重试 2 次，三次尝试各写一次原始日志。
+
+        旧行为：空 body 直接抛错且只记录 1 次；新行为重试（共 3 次尝试），
+        每次尝试的原始响应都记录，诊断带 empty_response。
+        """
         from webui.ai import AISecurityError, call_ai
 
         response = MagicMock()
@@ -420,12 +429,15 @@ class CallAITests(unittest.TestCase):
         mock_post.return_value = response
 
         with patch("webui.ai.record_raw_ai_response") as record:
-            with self.assertRaises(AISecurityError):
+            with self.assertRaises(AISecurityError) as ctx:
                 call_ai(
                     "https://api.example.com/v1/chat/completions", "secret-key",
                     [{"role": "user", "content": "hi"}],
                 )
-        self.assertEqual(record.call_count, 1)
+        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(record.call_count, 3)
+        self.assertEqual(
+            ctx.exception.diagnostics.get("failure_phase"), "empty_response")
 
     @patch("webui.ai.requests.post")
     def test_successful_call_returns_parsed_json(self, mock_post):
@@ -2179,7 +2191,7 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
         self.assertIn("（无明确标准，宽松判断）", prompt)
 
     def test_match_jds_prompt_marks_unconfirmed_preferences(self):
-        """精筛信息包把求职类型/实习设为默认硬条件，未确认项才走 caveats。"""
+        """B062：精筛信息包不再含第四层默认偏好，主观维度放松 + caveats 提醒。"""
         from webui.ai import match_jds
 
         jobs = [{"job_id": "job-001", "title": "后端", "jd": "负责后端"}]
@@ -2189,17 +2201,19 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
             match_jds(jobs, "3年Python后端", "https://x", "key", batch_size=1)
 
         prompt = call.call_args.args[2][0]["content"]
-        self.assertIn("【第四层·默认偏好】", prompt)
-        self.assertIn("标记为未填写/未确认", prompt)
-        self.assertIn("只找全职，兼职/外包/按单结算不考虑", prompt)
-        self.assertIn("不接受996", prompt)
-        self.assertIn("不得当作默认匹配", prompt)
-        self.assertIn("求职类型未确认，JD 为兼职", prompt)
-        self.assertIn("默认匹配，不得写'候选人未知'", prompt)
+        # 第四层整段移除：不得再出现硬默认措辞。
+        self.assertNotIn("【第四层·默认偏好】", prompt)
+        self.assertNotIn("只找全职，兼职/外包/按单结算不考虑", prompt)
+        self.assertNotIn("不接受996", prompt)
+        # 新语义：主观偏好按第三层事实 + 最大接受度，JD 更苛刻时进 caveats。
+        self.assertIn("主观偏好", prompt)
+        self.assertIn("最大接受度", prompt)
+        self.assertIn("标记\"（默认）\"", prompt)
+        self.assertIn("不得判不匹配", prompt)
         self.assertIn("实习/兼职与全职冲突", prompt)
-        self.assertIn("计薪与用工形式", prompt)
         self.assertIn("技术栈硬冲突", prompt)
-        self.assertIn("fulltime_ok", prompt)
+        self.assertIn("hard_ok", prompt)
+        self.assertNotIn("fulltime_ok", prompt)
 
     def test_match_jds_prompt_jd_hard_requirement_example(self):
         """精筛 prompt 明确 JD 正文硬要求优先于标题/标签，并给出漏判示例。"""
@@ -2217,7 +2231,7 @@ class AIScreeningPromptPolicyTests(unittest.TestCase):
         self.assertIn("必须具备 Python 3年以上生产环境开发经验", prompt)
         self.assertIn("统招公办本科", prompt)
         self.assertIn("2-3年及以上", prompt)
-        self.assertIn("、实习、双休", prompt)
+        self.assertIn("硬性要求与已选条件冲突时", prompt)
 
 
 class FlagFeaturesTests(unittest.TestCase):
@@ -2300,21 +2314,26 @@ class ProfileFactsTests(unittest.TestCase):
     """画像事实提取与宽松验证（B033 T005/T006）。"""
 
     def test_validate_profile_facts_keeps_valid_items(self):
-        from webui.ai import _validate_profile_facts
-        facts = _validate_profile_facts({
+        from webui.profile_facts import validate_profile_facts
+        facts = validate_profile_facts({
             "core_skills": ["Python", "Django"],
             "projects": [{"name": "订单系统", "role": "后端", "stack": "Django", "summary": "订单模块"}],
             "job_type": "全职",
+            "degree": "本科",
+            "degree_type": "统招",
             "languages": ["英语"],
+            "week_off": "双休",
         })
         self.assertEqual(facts["core_skills"], ["Python", "Django"])
         self.assertEqual(facts["projects"][0]["name"], "订单系统")
         self.assertEqual(facts["job_type"], "全职")
+        self.assertEqual(facts["degree_type"], "统招")
         self.assertEqual(facts["languages"], ["英语"])
+        self.assertEqual(facts["week_off"], "双休")
 
     def test_validate_profile_facts_drops_invalid_items(self):
-        from webui.ai import _validate_profile_facts
-        facts = _validate_profile_facts({
+        from webui.profile_facts import validate_profile_facts
+        facts = validate_profile_facts({
             "core_skills": ["Python", 123, "", "  "],
             "projects": [
                 {"name": "好项目", "role": "后端"},
@@ -2330,18 +2349,32 @@ class ProfileFactsTests(unittest.TestCase):
         self.assertEqual(facts["languages"], ["英语"])
 
     def test_validate_profile_facts_missing_fields(self):
-        from webui.ai import _validate_profile_facts
-        self.assertEqual(_validate_profile_facts(None), {})
-        self.assertEqual(_validate_profile_facts("not-a-dict"), {})
-        facts = _validate_profile_facts({"job_type": "未体现"})
+        from webui.profile_facts import validate_profile_facts
+        self.assertEqual(validate_profile_facts(None), {})
+        self.assertEqual(validate_profile_facts("not-a-dict"), {})
+        facts = validate_profile_facts({"job_type": "未体现"})
         self.assertEqual(facts, {"job_type": "未体现"})
+        # B062：degree_type 未显式输出时不注入「统招」，统一由描述层 flex 呈现。
+        self.assertNotIn("degree_type", validate_profile_facts({"degree": "本科"}))
 
     def test_validate_profile_facts_keeps_explicit_degree_only(self):
-        from webui.ai import _validate_profile_facts
-        facts = _validate_profile_facts({"degree": "本科"})
+        from webui.profile_facts import validate_profile_facts
+        facts = validate_profile_facts({"degree": "本科"})
         self.assertEqual(facts["degree"], "本科")
-        self.assertNotIn("degree", _validate_profile_facts({"degree": ""}))
-        self.assertNotIn("degree", _validate_profile_facts({"degree": 123}))
+        self.assertNotIn("degree", validate_profile_facts({"degree": ""}))
+        self.assertNotIn("degree", validate_profile_facts({"degree": 123}))
+
+    def test_validate_profile_facts_degree_type_default(self):
+        """B062：degree_type 非统招只认明确标志，专升本不当作非统招。"""
+        from webui.profile_facts import validate_profile_facts, normalize_degree_type
+        self.assertEqual(normalize_degree_type(None), "统招")
+        self.assertEqual(normalize_degree_type(""), "统招")
+        self.assertEqual(normalize_degree_type("专升本"), "统招")
+        self.assertEqual(normalize_degree_type("先专后本"), "统招")
+        self.assertEqual(normalize_degree_type("自考本科"), "非统招")
+        self.assertEqual(normalize_degree_type("函授"), "非统招")
+        self.assertEqual(
+            validate_profile_facts({"degree_type": "自考"})["degree_type"], "非统招")
 
     def test_analyze_resume_extracts_profile_facts(self):
         from webui.ai import analyze_resume_to_fields
@@ -2408,13 +2441,16 @@ class ProfileFactsTests(unittest.TestCase):
         self.assertIn("简历里明确写了就填，没写的字段留空", prompt)
         self.assertIn("不输出城市", prompt)
         self.assertIn("简历写了什么就写什么，没写的不补", prompt)
-        self.assertIn("projects 只列简历明确的项目/工作经历", prompt)
+        self.assertIn("projects：只列简历明确写出的项目/工作/实习经历", prompt)
+        self.assertIn("degree_type", prompt)
+        self.assertIn("week_off", prompt)
+        self.assertIn("overtime", prompt)
         self.assertNotIn("事实清单式", prompt)
         self.assertNotIn("第一句写工作年限", prompt)
         self.assertNotIn("禁止评价性概括", prompt)
 
     def test_analyze_resume_prompt_contains_preference_fill_rules(self):
-        """简历分析提示词包含偷偷塞字偏好规则与 5-10 句扩写约束。"""
+        """B062：简历分析提示词含新字段填写说明书，不再塞旧硬默认偏好。"""
         from webui.ai import analyze_resume_to_fields
 
         with patch("webui.ai.call_ai", return_value={
@@ -2426,14 +2462,18 @@ class ProfileFactsTests(unittest.TestCase):
         self.assertIn("最终总共5-10句", prompt)
         self.assertIn("随机挑1-3个自然补充", prompt)
         self.assertIn("不一次全塞", prompt)
-        self.assertIn("只找全职，兼职/外包/按单结算不考虑", prompt)
-        self.assertIn("双休", prompt)
-        self.assertIn("远程全职可接受", prompt)
-        self.assertIn("不接受996", prompt)
+        # 旧硬默认偏好已随第四层移除，改为字段填写说明书驱动：
+        self.assertNotIn("只找全职，兼职/外包/按单结算不考虑", prompt)
+        self.assertNotIn("不接受996", prompt)
+        self.assertIn("逐字段填写说明书", prompt)
+        self.assertIn("degree_type：", prompt)
+        self.assertIn("week_off：", prompt)
+        self.assertIn("overtime：", prompt)
+        self.assertIn("默认\"统招\"", prompt)
         self.assertIn("画像里已有该偏好就不重复", prompt)
         self.assertIn("degree", prompt)
         self.assertIn("项目经历只写项目方向、个人角色和所用技术栈", prompt)
-        self.assertIn("summary 可写职责、实现方式和量化成果", prompt)
+        self.assertIn("summary 只写简历明确给出的职责或成果一句话", prompt)
 
 
 class AIMeasurementEventTests(unittest.TestCase):

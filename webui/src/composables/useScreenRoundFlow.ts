@@ -182,7 +182,9 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     } finally {
       suppressProfileWatch.value = false;
     }
-    if (!roundConditionsRestored(ctx)) {
+    // 已完成/不可续跑的结果快照不应因历史筛选字段缺失阻塞结果页，
+    // 只有确实需要续跑的任务才提示恢复失败。
+    if (ctx.resumable && !roundConditionsRestored(ctx)) {
       deps.api.notify("本轮筛选条件未能恢复，无法继续 AI 筛选", "warning");
       return false;
     }
@@ -268,7 +270,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   async function continueScreen(platform?: Platform): Promise<void> {
     if (busyAction.value) return;
     const targetCtx = platform ? roundContexts.value[platform] : roundContext.value;
-    if (targetCtx && !roundConditionsRestored(targetCtx)) {
+    if (targetCtx?.resumable && !roundConditionsRestored(targetCtx)) {
       deps.api.notify("本轮筛选条件未能恢复，无法继续 AI 筛选", "warning");
       return;
     }

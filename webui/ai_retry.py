@@ -1,10 +1,11 @@
-"""Default AI retry policy and tuning overrides (B045).
+"""Default AI retry policy and tuning overrides (B045 / B063).
 
 The default policy is per error code: bounded backoff + jitter + a total
-wait cap between retries.  ``invalid_response`` is not retried by the
-transport layer; the fine-screen single-job path owns its single retry.
-Explicit ``retry_limits`` from a tuning manifest still wins over the
-default plan.
+wait cap between retries.  ``invalid_response`` is retried by the transport
+layer only for the empty-response phase (HTTP 200 with empty body, B063);
+json_decode-type invalid responses are not retried here — the fine-screen
+single-job path owns that fallback.  Explicit ``retry_limits`` from a tuning
+manifest still wins over the default plan.
 """
 
 from __future__ import annotations
@@ -21,8 +22,11 @@ FINE_SINGLE_INVALID_RESPONSE_RETRIES = 1
 FINE_SINGLE_INVALID_RESPONSE_DELAY_SECONDS = 1.0
 
 # manifest 里能覆盖 AI 传输层重试的错误码；其余码只影响对应阶段。
+# B063：invalid_response 加入传输层可重试集合，但仅对 failure_phase=empty_response
+# （HTTP 200 空 body）生效；json_decode 型 invalid 由精筛单岗位路径兜底，不被误重试。
 AI_TRANSPORT_RETRY_CODES = frozenset({
     "network_error", "rate_limited", "timeout", "server_error",
+    "invalid_response",
 })
 
 DEFAULT_RETRY_POLICY: dict[str, dict[str, Any]] = {
@@ -46,6 +50,13 @@ DEFAULT_RETRY_POLICY: dict[str, dict[str, Any]] = {
         "max_retries": 3,
         "backoff_seconds": (2.0, 4.0, 8.0),
         "jitter_seconds": 1.0,
+    },
+    # B063：HTTP 200 空 body（failure_phase=empty_response）统一层自动重试 2 次；
+    # json_decode 型 invalid 不走本策略（见 webui/ai.py call_ai 注释）。
+    "invalid_response": {
+        "max_retries": 2,
+        "backoff_seconds": (1.0, 2.0),
+        "jitter_seconds": 0.5,
     },
 }
 

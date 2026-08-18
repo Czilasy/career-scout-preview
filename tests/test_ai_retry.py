@@ -88,9 +88,15 @@ class AiRetryPlanTests(unittest.TestCase):
         self.assertGreaterEqual(delay, 2.0)
         self.assertLessEqual(delay, 3.0)
 
-    def test_invalid_response_has_no_transport_delay(self):
+    def test_invalid_response_has_transport_delay(self):
+        # B063：invalid_response 进入默认策略（空响应退避 1/2s），不再是无退避。
         plan = effective_retry_plan(None)
-        self.assertEqual(retry_delay_seconds("invalid_response", 0, plan), 0.0)
+        self.assertEqual(
+            tuple(DEFAULT_RETRY_POLICY["invalid_response"]["backoff_seconds"]),
+            (1.0, 2.0),
+        )
+        self.assertEqual(
+            plan["policy"]["invalid_response"]["max_retries"], 2)
 
 
 class RetryPolicyNormalizationTests(unittest.TestCase):
@@ -221,23 +227,56 @@ class CallAiDefaultRetryTests(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 1)
         mock_sleep.assert_not_called()
 
+    @patch("webui.ai_retry.random.uniform", return_value=0.0)
     @patch("webui.ai.time.sleep")
     @patch("webui.ai.requests.post")
-    def test_invalid_response_does_not_retry(self, mock_post, mock_sleep):
+    def test_empty_response_retries_twice_then_invalid(
+        self, mock_post, mock_sleep, _mock_uniform,
+    ):
+        """B063：HTTP 200 空 body 在统一层重试默认 2 次，全部为空才抛 invalid_response。
+
+        旧行为：空 body 直接抛错（mock_post 只调用 1 次）。新行为：重试 2 次
+        （共 3 次调用），耗尽后仍抛 invalid_response 且带 empty_response 诊断。
+        """
         from webui.ai import AISecurityError, call_ai
 
-        response = MagicMock()
-        response.status_code = 200
-        response.iter_lines.return_value = iter(["data: [DONE]", ""])
-        mock_post.return_value = response
+        def _empty():
+            response = MagicMock()
+            response.status_code = 200
+            response.iter_lines.return_value = iter(["data: [DONE]", ""])
+            return response
+
+        mock_post.side_effect = [_empty(), _empty(), _empty()]
         with self.assertRaises(AISecurityError) as ctx:
             call_ai(
                 "https://api.example.com/v1/chat/completions", "key",
-                [{"role": "user", "content": "hi"}],
+                [{"role": "user", "content": "hi"}], timeout=30,
             )
         self.assertEqual(ctx.exception.error_code, "invalid_response")
-        self.assertEqual(mock_post.call_count, 1)
-        mock_sleep.assert_not_called()
+        self.assertEqual(
+            ctx.exception.diagnostics.get("failure_phase"), "empty_response")
+        self.assertEqual(mock_post.call_count, 3)
+
+    @patch("webui.ai_retry.random.uniform", return_value=0.0)
+    @patch("webui.ai.time.sleep")
+    @patch("webui.ai.requests.post")
+    def test_empty_response_retries_then_success(self, mock_post, mock_sleep, _mock_uniform):
+        """B063：第一次空 body、第二次正常返回 → 自动重试成功，无异常。"""
+        from webui.ai import call_ai
+
+        def _empty():
+            response = MagicMock()
+            response.status_code = 200
+            response.iter_lines.return_value = iter(["data: [DONE]", ""])
+            return response
+
+        mock_post.side_effect = [_empty(), _mock_chat_response({"ok": True})]
+        result = call_ai(
+            "https://api.example.com/v1/chat/completions", "key",
+            [{"role": "user", "content": "hi"}], timeout=30,
+        )
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(mock_post.call_count, 2)
 
     @patch("webui.ai_retry.random.uniform", return_value=0.0)
     @patch("webui.ai.time.sleep")

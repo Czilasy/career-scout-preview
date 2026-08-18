@@ -43,6 +43,13 @@ from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+# Direct execution (`python scripts/boss_cdp_raw.py`) puts only `scripts/` on
+# sys.path. Add the repository root before importing the package-qualified
+# companion module so CLI modes work outside `python -m` invocation.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from scripts.boss_cdp_signals import (
     api_code_diagnosis,
     api_code_hint,

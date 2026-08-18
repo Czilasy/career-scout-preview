@@ -275,6 +275,18 @@ describe("useScreenRoundFlow", () => {
     expect(api.continueAiScreen).not.toHaveBeenCalled();
   });
 
+  it("closed completed context does not warn about missing frozen filters", async () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    flow.registerRoundContext("boss", roundContext({
+      screening_fields: {}, has_frozen_filters: true, status: "interrupted", resumable: false,
+    }));
+    await flow.continueScreen("boss");
+    expect(api.notify).not.toHaveBeenCalledWith(
+      "本轮筛选条件未能恢复，无法继续 AI 筛选", "warning",
+    );
+  });
+
   it("startScreen navigates to 03 and starts AI screening", async () => {
     const { refs, api } = makeDeps();
     const flow = useScreenRoundFlow({ refs, api });
