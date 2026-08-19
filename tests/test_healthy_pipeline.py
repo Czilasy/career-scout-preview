@@ -5,6 +5,7 @@
 """
 import ast
 import importlib.util
+import os
 import json
 import pathlib
 import sys
@@ -120,6 +121,31 @@ class Slice1StateAndFinalizeTests(unittest.TestCase):
         )
         result = self.store.finalize_run_status(self.run_id)
         self.assertEqual(result, "partial", "全部处理+少量pending应 completed_with_pending")
+
+    def test_terminal_success_and_partial_clear_stale_error_details(self):
+        """终态不能残留此前暂停/失败的错误，避免前端同时显示旧错误。"""
+        self.store.update_screening_run(
+            self.run_id, status="running", error_code="source_cdp_unavailable",
+            error_reason="旧的浏览器未就绪",
+        )
+        self.store.update_screening_run(
+            self.run_id, status="partial", processed_count=100, pending_count=2,
+        )
+        run = self.store.get_screening_run(self.run_id)
+        self.assertEqual(run["status"], "partial")
+        self.assertIsNone(run["error_code"])
+        self.assertIsNone(run["error_reason"])
+
+        succeeded_id = "test-run-terminal-success"
+        self.store.create_screening_run(succeeded_id, source_count=1)
+        self.store.update_screening_run(
+            succeeded_id, status="running", error_code="source_cdp_unavailable",
+            error_reason="旧错误",
+        )
+        self.store.update_screening_run(succeeded_id, status="succeeded", processed_count=1)
+        run = self.store.get_screening_run(succeeded_id)
+        self.assertIsNone(run["error_code"])
+        self.assertIsNone(run["error_reason"])
 
     def test_state_machine_rejects_illegal_transition(self):
         """非法状态迁移被拒绝（FR-005）。"""
@@ -3738,6 +3764,181 @@ class Slice8RecrawlTests(unittest.TestCase):
         run = self.store.get_screening_run(task_id)
         self.assertEqual(run["status"], "paused")
         self.assertEqual(run["error_code"], "source_cdp_unavailable")
+
+    def test_recrawl_zero_detail_results_pauses_instead_of_completing(self):
+        """详情抓取器返回 0 条 JD 时，重抓不能伪装为已完成。"""
+        source_run_id = self._save_pending_source()
+        detail_result = {
+            "jobs": [{
+                "job_id": "j1", "jd": "",
+                "jd_failed_code": "source_invalid_output",
+                "jd_failed_reason": "浏览器未返回岗位详情",
+            }],
+            "hard_stop": False, "stopped": False, "fetched": 0,
+        }
+        with mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ), mock.patch(
+            "webui.app._BossCdpSource", return_value=object()
+        ), mock.patch(
+            "webui.pipeline_exec.fetch_job_details", return_value=detail_result
+        ):
+            task_id = self._post_recrawl(source_run_id)
+            paused = _wait_for_pipeline_task(self.client, task_id)
+
+        self.assertEqual(paused["status"], "paused", paused)
+        run = self.store.get_screening_run(task_id)
+        self.assertEqual(run["status"], "paused")
+        self.assertEqual(run["error_code"], "recrawl_no_work")
+        self.assertIn("0/1", str(run["error_reason"]))
+
+    def test_zhilian_recrawl_detail_input_keeps_platform_identity(self):
+        """重抓智联详情时，输入必须保留 adapter 所需的平台身份三元组。"""
+        source_run_id = self.store.save_pipeline_result({
+            "jobs": [{
+                "job_id": "CC000544460J40760128216",
+                "platform": "zhilian",
+                "platform_job_id": "CC000544460J40760128216",
+                "canonical_url": (
+                    "https://www.zhaopin.com/jobdetail/"
+                    "CC000544460J40760128216.htm"
+                ),
+                "source_url": (
+                    "https://www.zhaopin.com/jobdetail/"
+                    "CC000544460J40760128216.htm"
+                ),
+                "title": "AI 应用开发工程师",
+                "verdict": "uncertain",
+                "jd": "",
+            }],
+            "dropped": [],
+            "total_scraped": 1,
+            "total_kept": 1,
+            "total_matched": 0,
+            "total_dropped": 0,
+            "profile_summary": "AI 应用开发工程师",
+        }, {
+            "platform": "zhilian",
+        }, execution_params={
+            "browser_account": "a",
+            "cdp_port": 9223,
+            "profile_key": "zhilian:a",
+        })
+        captured = {}
+        detail_result = {
+            "jobs": [{
+                "job_id": "CC000544460J40760128216",
+                "jd": "岗位职责：负责 AI 应用开发",
+            }],
+            "hard_stop": False, "stopped": False, "fetched": 1,
+        }
+
+        def capture_detail(jobs, *_args, **_kwargs):
+            captured["jobs"] = jobs
+            return detail_result
+
+        with mock.patch(
+            "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
+        ), mock.patch("webui.source.ZhilianCdpSource", return_value=object()), \
+                mock.patch("webui.pipeline_exec.fetch_job_details",
+                           side_effect=capture_detail):
+            task_id = self._post_recrawl(
+                source_run_id, job_id="CC000544460J40760128216"
+            )
+            paused = _wait_for_pipeline_task(self.client, task_id)
+
+        self.assertEqual(paused["status"], "paused", paused)
+        self.assertEqual(
+            self.store.get_screening_run(task_id)["error_code"], "ai_key_invalid"
+        )
+        self.assertEqual(captured["jobs"], [{
+            "platform": "zhilian",
+            "platform_job_id": "CC000544460J40760128216",
+            "job_id": "CC000544460J40760128216",
+            "source_url": (
+                "https://www.zhaopin.com/jobdetail/"
+                "CC000544460J40760128216.htm"
+            ),
+            "job_link": (
+                "https://www.zhaopin.com/jobdetail/"
+                "CC000544460J40760128216.htm"
+            ),
+            "canonical_url": (
+                "https://www.zhaopin.com/jobdetail/"
+                "CC000544460J40760128216.htm"
+            ),
+        }])
+
+    def test_zhilian_recrawl_rebinds_frozen_profile_before_cdp_check(self):
+        """重抓线程不能沿用其他任务留下的 CDP profile。"""
+        from webui import pipeline_exec
+        from webui.pipeline_exec import resolve_browser_account
+        from webui.platforms import derive_zhilian_profile_dir
+
+        source_run_id = self.store.save_pipeline_result({
+            "jobs": [{
+                "job_id": "CC000544460J40760128216",
+                "platform": "zhilian",
+                "platform_job_id": "CC000544460J40760128216",
+                "canonical_url": (
+                    "https://www.zhaopin.com/jobdetail/"
+                    "CC000544460J40760128216.htm"
+                ),
+                "title": "AI 应用开发工程师",
+                "verdict": "uncertain",
+                "jd": "",
+            }],
+            "dropped": [],
+            "total_scraped": 1,
+            "total_kept": 1,
+            "total_matched": 0,
+            "total_dropped": 0,
+            "profile_summary": "AI 应用开发工程师",
+        }, {"platform": "zhilian"}, execution_params={
+            "browser_account": "a",
+            "cdp_port": 9223,
+            "profile_key": "zhilian:a",
+        })
+        boss_profile = resolve_browser_account(
+            "a", self.app.config["BROWSER_ACCOUNTS_PATH"]
+        )
+        expected_profile = derive_zhilian_profile_dir(boss_profile)
+        seen_profiles = []
+
+        def verify_profile(_port, **_kwargs):
+            seen_profiles.append(pipeline_exec._ACTIVE_CDP_DATA_DIR)
+            return True, ""
+
+        detail_result = {
+            "jobs": [{
+                "job_id": "CC000544460J40760128216",
+                "jd": "岗位职责：负责 AI 应用开发",
+            }],
+            "hard_stop": False, "stopped": False, "fetched": 1,
+        }
+        old_profile = pipeline_exec._ACTIVE_CDP_DATA_DIR
+        pipeline_exec._ACTIVE_CDP_DATA_DIR = "C:/wrong-profile"
+        try:
+            with mock.patch(
+                "webui.pipeline_exec.ensure_chrome_ready",
+                side_effect=verify_profile,
+            ), mock.patch(
+                "webui.source.ZhilianCdpSource", return_value=object()
+            ), mock.patch(
+                "webui.pipeline_exec.fetch_job_details", return_value=detail_result
+            ):
+                task_id = self._post_recrawl(
+                    source_run_id, job_id="CC000544460J40760128216"
+                )
+                paused = _wait_for_pipeline_task(self.client, task_id)
+        finally:
+            pipeline_exec._ACTIVE_CDP_DATA_DIR = old_profile
+
+        self.assertEqual(paused["status"], "paused", paused)
+        self.assertEqual(
+            [os.path.normcase(os.path.normpath(path)) for path in seen_profiles],
+            [os.path.normcase(os.path.normpath(expected_profile))],
+        )
 
     def test_recrawl_pause_persistence_failure_does_not_claim_paused(self):
         """Recrawl pause writes are mandatory before the in-memory pause is visible."""

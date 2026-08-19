@@ -1120,15 +1120,20 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
         }
 
     def latest_pipeline_result_saved_at(self) -> str | None:
-        """Return created_at of the newest result snapshot, or None."""
+        """Return the latest durable update time of a result snapshot.
+
+        Recrawl updates the existing source snapshot in place, so ``created_at``
+        is the original screening time and cannot tell whether a newer result
+        superseded an older paused task.
+        """
         with self._connection() as conn:
             row = conn.execute(
-                "SELECT created_at FROM screening_runs "
+                "SELECT updated_at FROM screening_runs "
                 "WHERE status IN ('done', 'partial', 'scraped_only') AND record_kind = 'result_snapshot' "
                 "AND archived_at IS NULL "
-                "ORDER BY created_at DESC LIMIT 1",
+                "ORDER BY updated_at DESC LIMIT 1",
             ).fetchone()
-        return row["created_at"] if row is not None else None
+        return row["updated_at"] if row is not None else None
 
     def update_pipeline_job_jd(self, run_id: str, job_id: str, jd: str):
         """Update the JD text for a specific job in a pipeline run (补抓 JD)."""
@@ -2076,9 +2081,15 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
                 raise ValueError(f"未知运行状态: {status}")
         sets = []
         params = []
+        terminal_success = status in {"succeeded", "partial"}
         if status is not None:
             sets.append(_STATUS_SET_CLAUSE)
             params.append(str(status))
+            # A terminal success/partial result is authoritative.  Clear any
+            # stale pause/failure detail from an earlier attempt so the UI
+            # cannot show an old CDP error alongside the final result.
+            if terminal_success:
+                sets.extend(["error_code = NULL", "error_reason = NULL"])
         if processed_count is not None:
             sets.append("processed_count = ?")
             params.append(int(processed_count))
@@ -2091,7 +2102,7 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
         if mismatch_count is not None:
             sets.append("mismatch_count = ?")
             params.append(int(mismatch_count))
-        if error_code is not None:
+        if error_code is not None and not terminal_success:
             sets.append(_ERROR_CODE_SET_CLAUSE)
             params.append(str(error_code))
         if pending_count is not None:
@@ -2100,7 +2111,7 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
         if current_stage is not None:
             sets.append("current_stage = ?")
             params.append(str(current_stage))
-        if error_reason is not None:
+        if error_reason is not None and not terminal_success:
             sets.append("error_reason = ?")
             params.append(str(error_reason))
         if backend_version is not None:
@@ -2850,16 +2861,22 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
 
     def _screening_run_row(self, row) -> dict:
         keys = row.keys()
+        status = row["status"]
+        # Terminal results are authoritative.  Older runs may have retained
+        # a pause error from an earlier attempt; never expose that stale
+        # detail as if it were the reason for a successful/partial result.
+        terminal_error_code = None if status in {"succeeded", "partial"} else row["error_code"]
+        terminal_error_reason = None if status in {"succeeded", "partial"} else (row["error_reason"] if "error_reason" in keys else None)
         return {
             "id": row["id"],
-            "status": row["status"],
+            "status": status,
             "frozen_filters": json.loads(row["frozen_filters_json"] or "{}"),
             "source_count": row["source_count"],
             "match_count": row["match_count"],
             "mismatch_count": row["mismatch_count"],
             "processed_count": row["processed_count"],
             "source_cursor": row["source_cursor"],
-            "error_code": row["error_code"],
+            "error_code": terminal_error_code,
             "profile_id": row["profile_id"],
             "execution_params": json.loads(row["execution_params_json"] or "{}"),
             "created_at": row["created_at"],
@@ -2884,7 +2901,7 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
             ),
             # FR-005/FR-037 新增字段（migration_020 加的列）
             "current_stage": row["current_stage"] if "current_stage" in keys else None,
-            "error_reason": row["error_reason"] if "error_reason" in keys else None,
+            "error_reason": terminal_error_reason,
             "backend_version": row["backend_version"] if "backend_version" in keys else None,
             # migration 27 平台身份字段（T405: 进度/状态接口返回）
             "platform": row["platform"] if "platform" in keys else None,

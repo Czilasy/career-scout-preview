@@ -43,7 +43,7 @@ const props = defineProps<{
   taskId?: string;
 }>();
 
-const COMPLETED_STATUSES = new Set(["done", "completed", "completed_with_pending"]);
+const COMPLETED_STATUSES = new Set(["done", "completed", "completed_with_pending", "partial"]);
 const TERMINAL_STATUSES = new Set([
   ...COMPLETED_STATUSES,
   "failed",
@@ -262,7 +262,7 @@ const percentage = computed(() => Math.round(displayPercent.value));
 
 const message = computed(() => String(progress.value.message || "正在准备任务…"));
 const statusLabel = computed(() => {
-  if (props.snapshot?.status === "completed_with_pending") return "完成，但有待确认";
+  if (["completed_with_pending", "partial"].includes(String(props.snapshot?.status || ""))) return "完成，但有待确认";
   if (isCompletedStatus(props.snapshot?.status)) return "已完成";
   if (props.snapshot?.status === "failed") return "执行失败";
   if (props.snapshot?.status === "cancelled") return "已停止";

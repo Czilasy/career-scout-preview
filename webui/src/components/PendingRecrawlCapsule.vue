@@ -9,10 +9,13 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   recrawl: [];
+  dismiss: [];
 }>();
 
 // 全部处理完时短暂展示绿色对勾，然后自动收掉。
 const done = ref(false);
+// 用户点「暂不处理」后隐藏横幅，直到待处理数归零（新一轮/真正清空）再复位。
+const dismissed = ref(false);
 let doneTimer: number | undefined;
 
 watch(
@@ -20,6 +23,7 @@ watch(
   (next, prev) => {
     if (typeof prev === "number" && prev > 0 && next === 0) {
       done.value = true;
+      dismissed.value = false;
       if (doneTimer) window.clearTimeout(doneTimer);
       doneTimer = window.setTimeout(() => {
         done.value = false;
@@ -32,7 +36,12 @@ onBeforeUnmount(() => {
   if (doneTimer) window.clearTimeout(doneTimer);
 });
 
-const showPending = computed(() => !done.value && props.count > 0);
+const showPending = computed(() => !done.value && !dismissed.value && props.count > 0);
+
+function onDismiss() {
+  dismissed.value = true;
+  emit("dismiss");
+}
 </script>
 
 <template>
@@ -46,13 +55,23 @@ const showPending = computed(() => !done.value && props.count > 0);
       <span class="pending-capsule-message">
         还有 <span class="pending-capsule-count">{{ count }}</span> 个岗位未处理完
       </span>
-      <button
-        class="pending-capsule-action"
-        type="button"
-        data-testid="pending-recrawl"
-        :disabled="busy"
-        @click="emit('recrawl')"
-      >
+      <div class="pending-capsule-actions">
+        <button
+          class="pending-capsule-skip"
+          type="button"
+          data-testid="pending-recrawl-dismiss"
+          :disabled="busy"
+          @click="onDismiss"
+        >
+          暂不处理
+        </button>
+        <button
+          class="pending-capsule-action"
+          type="button"
+          data-testid="pending-recrawl"
+          :disabled="busy"
+          @click="emit('recrawl')"
+        >
         <LoaderCircle
           v-if="busy"
           class="spin pending-capsule-icon"
@@ -62,6 +81,7 @@ const showPending = computed(() => !done.value && props.count > 0);
         <RotateCcw v-else class="pending-capsule-icon" :size="16" aria-hidden="true" />
         全部重抓（{{ count }}）
       </button>
+      </div>
     </div>
     <div
       v-else-if="done"
@@ -140,6 +160,36 @@ const showPending = computed(() => !done.value && props.count > 0);
 .pending-capsule-action:disabled {
   cursor: not-allowed;
   opacity: .78;
+}
+
+.pending-capsule-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pending-capsule-skip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--unsure-deep);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 160ms ease, background 160ms ease, border-color 160ms ease;
+}
+.pending-capsule-skip:hover,
+.pending-capsule-skip:focus-visible {
+  background: var(--panel-2, rgba(127, 127, 127, 0.12));
+  border-color: var(--unsure-edge);
+}
+.pending-capsule-skip:disabled {
+  cursor: not-allowed;
+  opacity: .6;
 }
 .pending-capsule-icon {
   flex: 0 0 auto;

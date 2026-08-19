@@ -23,6 +23,14 @@
   --brand-strong: #00857a;
   --brand-ink: #005e53;
   --brand-wash: #e3f6f2;
+  --boss-accent: #00beab;
+  --boss-accent-ink: #005e53;
+  --boss-accent-wash: #e3f6f2;
+  --boss-accent-edge: #bee9e2;
+  --zhilian-accent-ink: #082c60;
+  --zhilian-accent: #0f4ca3;
+  --zhilian-accent-wash: #e9eff8;
+  --zhilian-accent-edge: #c4d4ec;
 
   --match: #12905f;
   --match-deep: #0c6b46;
@@ -158,6 +166,10 @@
   --brand-strong: #14c3ae;
   --brand-ink: #82f0e1;
   --brand-wash: rgba(0, 212, 188, 0.12);
+  --boss-accent: #00d4bc;
+  --boss-accent-ink: #82f0e1;
+  --boss-accent-wash: rgba(0, 212, 188, 0.12);
+  --boss-accent-edge: rgba(0, 212, 188, 0.35);
 
   --match: #3bd499;
   --match-deep: #6ce3b2;
@@ -211,6 +223,14 @@
   --brand-strong: #4e86e4;
   --brand-ink: #aecbf8;
   --brand-wash: rgba(91, 150, 238, 0.13);
+  --boss-accent: #00d4bc;
+  --boss-accent-ink: #82f0e1;
+  --boss-accent-wash: rgba(0, 212, 188, 0.12);
+  --boss-accent-edge: rgba(0, 212, 188, 0.35);
+  --zhilian-accent-ink: #aecbf8;
+  --zhilian-accent: #5b96ee;
+  --zhilian-accent-wash: rgba(91, 150, 238, 0.13);
+  --zhilian-accent-edge: rgba(91, 150, 238, 0.35);
 
   --canvas: #0b0f18;
   --panel: #131a29;

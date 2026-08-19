@@ -2253,25 +2253,141 @@ button:disabled {
 .caveats-list .flag-reason .flag-icon {
   color: var(--unsure);
 }
-/* B058：AI 判定卡片下方「判断说明 + 软性要求」桌面端左右 50/50；移动端单列由
-   @media(max-width:760px) 覆盖回 block。只影响该红框区域内两个区块的摆放。 */
-.verdict-pair {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0;
-  align-items: stretch;
-  margin: 16px 0 0;
+/* B058：岗位元信息行最右侧的悬停说明按钮，内容只在按钮下方展开。 */
+.company-insight-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
 }
-.verdict-pair > .verdict-reason,
-.verdict-pair > .caveats-list {
+.company-insight {
+  position: relative;
+  display: inline-flex;
+}
+.ai-insight[data-platform="boss"] {
+  --insight-ink: var(--boss-accent-ink);
+  --insight-edge: var(--boss-accent-edge);
+  --insight-wash: var(--boss-accent-wash);
+  --insight-marker: var(--boss-accent);
+}
+.ai-insight[data-platform="zhilian"] {
+  --insight-ink: var(--zhilian-accent-ink);
+  --insight-edge: var(--zhilian-accent-edge);
+  --insight-wash: var(--zhilian-accent-wash);
+  --insight-marker: var(--zhilian-accent);
+}
+.company-insight-button {
+  border: 1px solid transparent;
+  border-radius: 4px;
+  min-height: 0;
+  padding: 2px 7px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.25;
+  cursor: help;
+  transition: transform 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+}
+.ai-insight-button {
+  color: var(--insight-ink);
+  border-color: var(--insight-edge);
+  background: color-mix(in srgb, var(--insight-wash) 82%, var(--panel));
+}
+.soft-insight-button {
+  color: var(--unsure-deep);
+  border-color: var(--unsure-edge);
+  background: color-mix(in srgb, var(--unsure-wash) 82%, var(--panel));
+}
+.company-insight-button:hover,
+.company-insight-button:focus-visible {
+  transform: translateY(-1px);
+  box-shadow: 0 5px 12px color-mix(in srgb, currentColor 18%, transparent);
+  outline: none;
+}
+.ai-insight-button:hover,
+.ai-insight-button:focus-visible {
+  background: color-mix(in srgb, var(--insight-wash) 56%, var(--panel));
+}
+.soft-insight-button:hover,
+.soft-insight-button:focus-visible {
+  background: color-mix(in srgb, var(--unsure-wash) 54%, var(--panel));
+}
+.company-insight-popover {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 6px);
+  right: 0;
+  left: auto;
+  width: max-content;
+  min-width: 0;
+  max-width: min(580px, calc(100vw - 48px));
+  padding: 7px 10px;
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+  color: var(--ink-2);
+  background: var(--panel);
+  box-shadow: 0 8px 18px rgb(0 0 0 / 12%);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  transition: opacity 160ms ease, transform 160ms ease, visibility 0s linear 160ms;
+}
+.company-insight-popover .insight-list {
   margin: 0;
-  font-size: 0.92em;
+  padding: 0 0 0 18px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: inherit;
+  line-height: 1.75;
+  width: max-content;
+  max-width: 100%;
 }
-.verdict-pair > .verdict-reason {
-  border-right: 1px solid var(--hair-2);
+.company-insight-popover .insight-list li {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  column-gap: 4px;
+  position: relative;
+  margin: 3px 0;
+  list-style: none;
+  overflow-wrap: break-word;
 }
-.verdict-pair > .caveats-list {
-  background: var(--unsure-wash, color-mix(in srgb, var(--unsure) 10%, var(--panel)));
+.company-insight-popover .insight-list li::before {
+  grid-column: 1;
+  justify-self: center;
+}
+.company-insight-popover .ai-insight-list {
+  padding-left: 0;
+}
+.company-insight-popover .ai-insight-list li::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin-top: 8px;
+  border-radius: 1px;
+  transform: rotate(45deg);
+  background: var(--insight-marker);
+}
+.company-insight-popover .soft-insight-list {
+  padding-left: 0;
+}
+.company-insight-popover .soft-insight-list li::before {
+  content: "·";
+  color: var(--unsure);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.12;
+}
+.company-insight:hover .company-insight-popover,
+.company-insight:focus-within .company-insight-popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition-delay: 0s;
 }
 .caveats-list.flag-unsure ul {
   color: var(--unsure-deep);
@@ -2290,9 +2406,31 @@ button:disabled {
 .job-row-flag.medium {
   color: var(--unsure);
 }.jd-content {
-  padding: 12px 28px 16px;
+  position: relative;
+  margin-top: 16px;
+  padding: 22px 28px 16px;
   border-bottom: 1px solid var(--hair-2);
-}.jd-content h3 {
+  --divider-accent: var(--boss-accent);
+}
+.jd-content[data-platform="zhilian"] {
+  --divider-accent: var(--zhilian-accent);
+}
+.jd-content::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 28px;
+  left: 28px;
+  height: 4px;
+  background: linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--divider-accent) 18%, transparent) 15%, color-mix(in srgb, var(--divider-accent) 34%, transparent) 28%, color-mix(in srgb, var(--divider-accent) 48%, transparent) 50%, color-mix(in srgb, var(--divider-accent) 34%, transparent) 72%, color-mix(in srgb, var(--divider-accent) 18%, transparent) 85%, transparent 100%);
+  clip-path: polygon(0 40%, 21% 40%, 40% 20%, 60% 20%, 79% 40%, 100% 40%, 100% 60%, 79% 60%, 60% 80%, 40% 80%, 21% 60%, 0 60%);
+  animation: job-detail-divider 4.8s ease-in-out infinite;
+}
+@keyframes job-detail-divider {
+  0%, 100% { opacity: .82; }
+  50% { opacity: .92; }
+}
+.jd-content h3 {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2728,12 +2866,12 @@ body,
   }.job-detail-facts {
     margin-left: 0;
     margin-right: 0;
-  }.verdict-pair {
-    display: block;
-  }.verdict-reason,
-  .caveats-list {
-    padding-left: 0;
-    padding-right: 0;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }.company-insight-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
   }.job-detail-actions {
     padding-left: 0;
     padding-right: 0;

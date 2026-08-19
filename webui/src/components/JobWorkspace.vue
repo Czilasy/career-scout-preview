@@ -285,6 +285,27 @@ const highFlags = computed(() =>
   (selectedJob.value?.flags || []).filter((f) => f?.level === "high"));
 const mediumFlags = computed(() =>
   (selectedJob.value?.flags || []).filter((f) => f?.level === "medium"));
+const highFlagsWithReason = computed(() =>
+  highFlags.value.filter((flag) => Boolean(String(flag.reason || "").trim())));
+const mediumFlagsWithReason = computed(() =>
+  mediumFlags.value.filter((flag) => Boolean(String(flag.reason || "").trim())));
+const caveatsWithContent = computed(() =>
+  (selectedJob.value?.caveats || []).filter((caveat) => Boolean(String(caveat || "").trim())));
+
+function hasVerdictReason(job: JobItem): boolean {
+  return Boolean(String(job.verdict_reason || job.reason || "").trim())
+    || job.flags?.some((flag) => flag?.level === "high" && Boolean(String(flag.reason || "").trim())) === true;
+}
+
+function hasSoftRequirements(job: JobItem): boolean {
+  // B065：软性提醒只属于匹配岗位；不匹配岗位只展示不匹配理由。
+  const hasCaveat = job.caveats?.some((caveat) => Boolean(String(caveat || "").trim())) === true;
+  const hasMediumFlag = job.flags?.some((flag) =>
+    flag?.level === "medium" && Boolean(String(flag.reason || "").trim()),
+  ) === true;
+  return job.verdict === "match"
+    && (hasCaveat || hasMediumFlag);
+}
 
 function verdictLabel(job: JobItem): string {
   if (job.verdict === "match") return "匹配";
@@ -422,7 +443,9 @@ function clearFilters() {
       <header class="job-detail-header">
         <div>
           <h2>{{ selectedJob.title || "未知岗位" }}</h2>
-          <p>{{ company(selectedJob) }}</p>
+          <div class="job-company-line">
+            <p>{{ company(selectedJob) }}</p>
+          </div>
         </div>
         <div class="job-detail-header-side">
           <div class="verdict-line">
@@ -455,6 +478,33 @@ function clearFilters() {
         <span><BriefcaseBusiness :size="16" aria-hidden="true" />{{ company(selectedJob) }}</span>
         <span v-if="selectedJob.experience" data-testid="job-experience">{{ selectedJob.experience }}</span>
         <span v-if="selectedJob.degree" data-testid="job-degree">{{ selectedJob.degree }}</span>
+        <div class="company-insight-actions" aria-label="岗位说明">
+          <div
+            v-if="hasVerdictReason(selectedJob)"
+            class="company-insight ai-insight"
+            :data-platform="selectedJob.platform || 'boss'"
+          >
+            <button
+              type="button"
+              class="company-insight-button ai-insight-button"
+            >AI 判断说明</button>
+            <div class="company-insight-popover" role="tooltip">
+              <ul class="insight-list ai-insight-list">
+                <li v-for="(f, i) in highFlagsWithReason" :key="`header-high-flag-${i}`">{{ f.reason }}</li>
+                <li v-if="String(selectedJob.verdict_reason || selectedJob.reason || '').trim()">{{ selectedJob.verdict_reason || selectedJob.reason }}</li>
+              </ul>
+            </div>
+          </div>
+          <div v-if="hasSoftRequirements(selectedJob)" class="company-insight soft-insight">
+            <button type="button" class="company-insight-button soft-insight-button">软性要求提醒</button>
+            <div class="company-insight-popover" role="tooltip">
+              <ul class="insight-list soft-insight-list">
+                <li v-for="(c, i) in caveatsWithContent" :key="i">{{ c }}</li>
+                <li v-for="(f, i) in mediumFlagsWithReason" :key="`header-flag-${i}`">{{ f.reason }}</li>
+              </ul>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div v-if="extraLabels.length" class="job-extra-facts" data-testid="job-extra-facts">
@@ -466,43 +516,7 @@ function clearFilters() {
         ><span class="job-extra-fact-label">{{ item.label + ": " }}</span><span class="job-extra-fact-value">{{ item.value }}</span></span>
       </div>
 
-      <div class="verdict-pair">
-        <div
-          v-if="selectedJob.verdict_reason || selectedJob.reason"
-          class="verdict-reason"
-          :class="{ 'flag-danger': highFlags.length }"
-        >
-          <strong><span class="sec-mk" aria-hidden="true"></span>AI 判断说明</strong>
-          <p>
-            <span
-              v-for="(f, i) in highFlags"
-              :key="i"
-              class="flag-reason"
-              :data-testid="`flag-high-${i}`"
-            ><span class="flag-icon" aria-hidden="true">⚠</span>{{ f.reason }}</span>
-            {{ selectedJob.verdict_reason || selectedJob.reason }}
-          </p>
-        </div>
-
-        <div
-          v-if="(selectedJob.caveats && selectedJob.caveats.length) || mediumFlags.length"
-          class="caveats-list"
-          :class="{ 'flag-unsure': mediumFlags.length }"
-        >
-          <strong><span class="sec-mk" aria-hidden="true"></span>软性要求提醒（不影响匹配，自己判断）</strong>
-          <ul>
-            <li v-for="(c, i) in selectedJob.caveats" :key="i">{{ c }}</li>
-            <li
-              v-for="(f, i) in mediumFlags"
-              :key="'flag-' + i"
-              class="flag-reason"
-              :data-testid="`flag-medium-${i}`"
-            ><span class="flag-icon" aria-hidden="true">⚠</span>{{ f.reason }}</li>
-          </ul>
-        </div>
-      </div>
-
-      <section class="jd-content">
+      <section class="jd-content" :data-platform="selectedJob.platform || 'boss'">
         <h3><span class="sec-mk" aria-hidden="true"></span>职位描述</h3>
         <p>{{ selectedJob.jd || selectedJob.jd_excerpt || "尚未获取职位描述。" }}</p>
       </section>

@@ -121,6 +121,29 @@ const emit = defineEmits<{
   "open-browser-accounts": [];
 }>();
 
+const WORKFLOW_STATE_VERSION = 1;
+const workflowStateKey = computed(() => `career-scout-workflow:${props.profileId}`);
+const workflowStateRestored = ref(false);
+const unfinishedWorkflowRestored = ref(false);
+const resultsPageSeen = ref(false);
+const restoredWorkflowSnapshot = ref<Record<string, any> | null>(null);
+const activeTaskRestored = ref(false);
+
+function readWorkflowState(): Record<string, any> | null {
+  try {
+    const raw = sessionStorage.getItem(workflowStateKey.value);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, any>;
+    return parsed.version === WORKFLOW_STATE_VERSION ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearWorkflowState(): void {
+  try { sessionStorage.removeItem(workflowStateKey.value); } catch { /* storage unavailable */ }
+}
+
 // D7：未登录类错误码（BOSS/智联 preflight 与任务暂停的稳定错误码）。
 const LOGIN_ERROR_CODES = new Set([
   "source_login_required", "login_expired", "boss_login_required",
@@ -454,6 +477,117 @@ const oneClickDisabled = computed(() => Boolean(draftPlatformDisabled.value || p
 // 步骤 2 两个面板（关键词配置 / 高级执行设置）共用同一受控状态：
 // 默认收拢、手动展开/收起联动（一个 ref 天然同步两卡）；开始抓取后自动收拢。
 const searchPanelsOpen = ref(false);
+
+function workflowIsFinished(): boolean {
+  return resultsPageSeen.value || finishedPartial.value;
+}
+
+function persistWorkflowState(): void {
+  if (!workflowStateRestored.value) return;
+  const unfinished = !workflowIsFinished() && Boolean(
+    analysisReady.value || scrapeTaskId.value || screenTaskId.value || pausedRunId.value || interruptedRunId.value
+    || scrapeBusy.value || screenBusy.value
+    || [scrapeSnapshot.value?.status, screenSnapshot.value?.status].some((status) =>
+      ["running", "queued", "paused", "interrupted"].includes(String(status))),
+  );
+  if (!unfinished) {
+    clearWorkflowState();
+    return;
+  }
+  try {
+    sessionStorage.setItem(workflowStateKey.value, JSON.stringify({
+      version: WORKFLOW_STATE_VERSION,
+      unfinished: true,
+      activeStep: activeStep.value,
+      analysisReady: analysisReady.value,
+      keywords: keywords.value,
+      selectedKeywords: selectedKeywords.value,
+      cityText: cityText.value,
+      filterValues: filterValues.value,
+      profileSummary: profileSummary.value,
+      profileFacts: profileFacts.value,
+      scrapeTaskId: scrapeTaskId.value,
+      screenTaskId: screenTaskId.value,
+      pausedRunId: pausedRunId.value,
+      interruptedRunId: interruptedRunId.value,
+      recrawlTaskId: recrawlTaskId.value,
+      scrapeCompleted: scrapeCompleted.value,
+      scrapeSnapshot: scrapeSnapshot.value,
+      screenSnapshot: screenSnapshot.value,
+      recrawlSnapshot: recrawlSnapshot.value,
+      pipelineResult: pipelineResult.value,
+      pipelineResultRunId: pipelineResultRunId.value,
+      currentRoundStatus: currentRoundStatus.value,
+      resultLoaded: resultLoaded.value,
+      resultsPageSeen: resultsPageSeen.value,
+    }));
+  } catch {
+    // sessionStorage is best effort; the backend remains authoritative.
+  }
+}
+
+function restoreWorkflowState(): void {
+  const saved = readWorkflowState();
+  if (!saved?.unfinished) {
+    workflowStateRestored.value = true;
+    return;
+  }
+  unfinishedWorkflowRestored.value = true;
+  restoredWorkflowSnapshot.value = saved;
+  resultsPageSeen.value = Boolean(saved.resultsPageSeen);
+  if (saved.activeStep) activeStep.value = saved.activeStep as StepId;
+  analysisReady.value = Boolean(saved.analysisReady);
+  keywords.value = Array.isArray(saved.keywords) ? saved.keywords : [];
+  selectedKeywords.value = Array.isArray(saved.selectedKeywords) ? saved.selectedKeywords : [];
+  cityText.value = String(saved.cityText || "");
+  if (saved.filterValues && typeof saved.filterValues === "object") {
+    filterValues.value = { boss: {}, zhilian: {}, ...saved.filterValues };
+  }
+  profileSummary.value = String(saved.profileSummary || "");
+  profileFacts.value = saved.profileFacts && typeof saved.profileFacts === "object" ? saved.profileFacts : {};
+  scrapeTaskId.value = String(saved.scrapeTaskId || "");
+  screenTaskId.value = String(saved.screenTaskId || "");
+  pausedRunId.value = String(saved.pausedRunId || "");
+  interruptedRunId.value = String(saved.interruptedRunId || "");
+  recrawlTaskId.value = String(saved.recrawlTaskId || "");
+  scrapeCompleted.value = Boolean(saved.scrapeCompleted);
+  scrapeSnapshot.value = saved.scrapeSnapshot || null;
+  screenSnapshot.value = saved.screenSnapshot || null;
+  recrawlSnapshot.value = saved.recrawlSnapshot || null;
+  pipelineResult.value = saved.pipelineResult || null;
+  pipelineResultRunId.value = String(saved.pipelineResultRunId || "");
+  currentRoundStatus.value = String(saved.currentRoundStatus || "");
+  resultLoaded.value = Boolean(saved.resultLoaded);
+  workflowStateRestored.value = true;
+}
+
+function restoreSaved02State(): void {
+  const saved = restoredWorkflowSnapshot.value;
+  if (!saved || resultsPageSeen.value) return;
+  // 任务接口只负责恢复后台任务状态；02 页的用户草稿和停留步骤以本地快照为准。
+  if (saved.activeStep) activeStep.value = saved.activeStep as StepId;
+  analysisReady.value = Boolean(saved.analysisReady);
+  keywords.value = Array.isArray(saved.keywords) ? saved.keywords : [];
+  selectedKeywords.value = Array.isArray(saved.selectedKeywords) ? saved.selectedKeywords : [];
+  cityText.value = String(saved.cityText || "");
+  if (saved.filterValues && typeof saved.filterValues === "object") {
+    filterValues.value = { boss: {}, zhilian: {}, ...saved.filterValues };
+  }
+  profileSummary.value = String(saved.profileSummary || "");
+  profileFacts.value = saved.profileFacts && typeof saved.profileFacts === "object" ? saved.profileFacts : {};
+  scrapeCompleted.value = Boolean(saved.scrapeCompleted);
+  pipelineResult.value = saved.pipelineResult || null;
+  pipelineResultRunId.value = String(saved.pipelineResultRunId || "");
+  currentRoundStatus.value = String(saved.currentRoundStatus || "");
+  resultLoaded.value = Boolean(saved.resultLoaded);
+}
+
+watch(activeStep, (step) => {
+  if (step === "results") {
+    resultsPageSeen.value = true;
+    clearWorkflowState();
+  }
+});
 let pollTimer: number | undefined;
 
 const scopeLocked = computed(() => Boolean(
@@ -626,11 +760,14 @@ const currentEmptyMessage = computed(() => isScrapedOnly.value
   } as Record<ResultCategory, string>)[activeCategory.value]);
 
 onMounted(() => {
+  restoreWorkflowState();
   void loadAdvancedSettings();
   void loadFilterLabels();
   void loadCityCatalog();
   void restoreRunningTask().finally(() => {
-    if (!scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
+    restoreSaved02State();
+    if (!unfinishedWorkflowRestored.value && !activeTaskRestored.value
+      && !scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
       void loadLatestResult();
     }
   });
@@ -669,6 +806,7 @@ async function restoreRunningTask() {
       round_context?: Partial<RoundContext> | null;
     }>("/api/latest-running-task");
     if (!data.has_task || !data.task_id) return;
+    activeTaskRestored.value = true;
     // T509：先设置任务自身平台，再加载对应 schema/城市（platform-schema.md L157）。
     // 不改草稿平台（不变式 2：setTaskPlatform 不改 draft/result）。
     const taskPlatform = data.platform;
@@ -937,6 +1075,7 @@ const COMPLETED_TASK_STATUSES = new Set([
   "done",
   "completed",
   "completed_with_pending",
+  "partial",
 ]);
 
 function isCompletedTaskStatus(status?: string) {
@@ -1053,6 +1192,7 @@ watch(() => props.profileId, () => {
 });
 
 onBeforeUnmount(() => {
+  persistWorkflowState();
   if (pollTimer) window.clearTimeout(pollTimer);
   document.removeEventListener("keydown", handleLifecycleDialogKeydown);
 });
@@ -1745,6 +1885,7 @@ async function finishPausedTask(runId: string) {
     interruptedRunId.value = "";
     autoScreenArmed.value = false;
     finishedPartial.value = true;
+    clearWorkflowState();
     const totalScraped = Number(data.result?.total_scraped ?? 0);
     const finished: TaskSnapshot = {
       status: "completed_with_pending", stage: "done",
@@ -2064,6 +2205,8 @@ function hasLiveTaskState(): boolean {
 }
 
 async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean }) {
+  // B068：刷新接回未完成轮次时，04 尚未出现，旧结果不能覆盖 02/03 的当前状态。
+  if (unfinishedWorkflowRestored.value && !resultsPageSeen.value) return;
   // 暂停/中断任务未结束，不得把暂停时保存的安全网快照当作结果加载，
   // 否则 resultLoaded 被误置 true、04 结果页对用户开放造成「任务还在跑」误解。
   if (interruptedRunId.value || pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
@@ -2089,7 +2232,9 @@ async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean }) {
   // 重抓任务恢复：结果已加载供 04 查看，但 03 页应显示重抓自身进度，
   // 不伪造"上次已完成"快照。
   if (opts?.skipTerminalSnapshot) return;
-  const snapshotStatus = newer.data.status === "completed_with_pending" ? "completed_with_pending" : "completed";
+  const snapshotStatus = (newer.data.status === "completed_with_pending" || newer.data.status === "partial")
+    ? "completed_with_pending"
+    : "completed";
   scrapeSnapshot.value = {
     status: snapshotStatus, stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
     started_at: newer.data.started_at,
@@ -2419,6 +2564,8 @@ async function exportResultCsv() {
 async function resetWorkflow() {
   if (!(await cancelActiveTasksForNewRound())) return;
   if (!(await clearLatestResult())) return;
+  clearWorkflowState();
+  resultsPageSeen.value = false;
   if (pollTimer) window.clearTimeout(pollTimer);
   activeStep.value = "upload";
   analysisReady.value = false;
@@ -2482,7 +2629,14 @@ function jobId(job: JobItem): string {
   if (job.platform_job_id) {
     return String(job.platform_job_id);
   }
-  return String(job.job_id || job.id || job.canonical_url || "");
+  return String(
+    job.job_id
+      || job.id
+      || job.canonical_url
+      || job.source_url
+      || job.job_link
+      || ""
+  );
 }
 
 function withBusy(setRef: typeof feedbackBusyIds, id: string, active: boolean) {
@@ -2640,11 +2794,6 @@ async function recrawlUncertain(platformOverride?: "boss" | "zhilian") {
     notify("历史轮次不可改写，请先回到最新", "warning");
     return;
   }
-  const ids = groups.value.uncertain.map((job) => jobId(job)).filter(Boolean);
-  if (!ids.length) {
-    notify("没有待确认的岗位", "info");
-    return;
-  }
   let filter = platformOverride || resultPlatformFilter.value;
   // “全部”视图不发起混合重抓：仅当两个平台都有待确认岗位时才引导选择；
   // 只有一个平台有待确认岗位时直接用该平台，无需用户再选一次。
@@ -2656,6 +2805,14 @@ async function recrawlUncertain(platformOverride?: "boss" | "zhilian") {
       return;
     }
     filter = bossCount > 0 ? "boss" : "zhilian";
+  }
+  const ids = groups.value.uncertain
+    .filter((job) => job.platform === filter)
+    .map((job) => jobId(job))
+    .filter(Boolean);
+  if (!ids.length) {
+    notify("没有待确认的岗位", "info");
+    return;
   }
   if (recrawlBusy.value) return;
   // 单平台直接重抓：进度回 03 页展示（“全部”视图单平台场景由 startRecrawl
@@ -2737,10 +2894,12 @@ async function pollRecrawl(taskId: string) {
       const updates = (data.result as unknown as { updates?: Record<string, unknown> } | undefined)?.updates;
       if (updates) mergeRecrawlUpdates(updates as Record<string, unknown>);
       notify(
-        data.status === "completed_with_pending"
-          ? "重抓完成，但仍有岗位待确认"
+        data.status === "completed_with_pending" || data.status === "partial"
+          ? String(data.progress?.message || "重抓完成，但仍有岗位待确认")
           : "待确认岗位已重抓完成",
-        data.status === "completed_with_pending" ? "warning" : "success",
+        data.status === "completed_with_pending" || data.status === "partial"
+          ? "warning"
+          : "success",
       );
       activeStep.value = "results";
       window.setTimeout(() => { recrawlSnapshot.value = null; }, 3000);

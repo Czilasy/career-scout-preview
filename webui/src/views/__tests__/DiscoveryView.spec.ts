@@ -15,7 +15,51 @@ describe("DiscoveryView", () => {
   beforeEach(() => {
     // 确保当前测试引用的 api 模块实例处于已验证状态（setup.ts 的验证可能落在另一个模块实例上）
     setBuildIdentity(expectedBackendBuildHash);
+    sessionStorage.clear();
   });
+
+  it("B068: refresh keeps the unfinished 02 page state and does not load an old result over a live task", async () => {
+    sessionStorage.clear();
+    sessionStorage.setItem("career-scout-workflow:profile-b068", JSON.stringify({
+      version: 1, unfinished: true, activeStep: "search", analysisReady: true,
+      keywords: [{ word: "恢复关键词", recommended: true }], selectedKeywords: ["恢复关键词"], cityText: "恢复城市",
+      filterValues: { boss: { salary: ["406"] }, zhilian: {} }, profileSummary: "恢复的求职画像", profileFacts: { experience: "3年" },
+      scrapeTaskId: "scrape-b068", screenTaskId: "screen-b068", scrapeCompleted: true,
+      scrapeSnapshot: { status: "completed", progress: {}, logs: [] },
+      screenSnapshot: { status: "running", progress: { message: "AI 筛选中" }, logs: [] },
+      resultLoaded: false, resultsPageSeen: false,
+    }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({
+        ok: true, has_task: true, task_id: "screen-b068", kind: "ai_screen", status: "running",
+        platform: "boss", scrape_task_id: "scrape-b068", scrape_completed: true,
+        frozen_filters: { salary: ["999"] }, profile_summary: "接口返回的画像不应覆盖 02",
+        progress: { message: "AI 筛选中" }, logs: [],
+      });
+      if (url.endsWith("/api/task-state/screen-b068")) return response({ status: "running", progress: { message: "AI 筛选中" }, logs: [] });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: true, source_run_id: "old-result", result: { jobs: [{ job_id: "old", title: "旧结果" }], dropped: [], total_kept: 1, total_dropped: 0 } });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-b068" } });
+    await flushPromises();
+
+    expect(wrapper.find(`[data-testid="custom-keyword"]`).exists()).toBe(true);
+    expect(wrapper.text()).toContain("恢复关键词");
+    expect(wrapper.text()).toContain("恢复城市");
+    expect((wrapper.get(".profile-summary-input").element as HTMLTextAreaElement).value).toBe("恢复的求职画像");
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/latest-pipeline-result"))).toBe(false);
+
+    wrapper.unmount();
+    sessionStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
   it("keeps scope editable when only a completed historical result is restored", async () => {
     const settings = {
       inter_combo_delay: 10,

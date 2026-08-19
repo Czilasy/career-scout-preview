@@ -2221,20 +2221,32 @@ def create_app(config=None):
         profile_dir = boss_dir if platform == "boss" else derive_zhilian_profile_dir(boss_dir)
         set_active_cdp_data_dir(profile_dir)
 
-    def _activate_task_browser(task_id: str) -> None:
-        """Use the account captured when the task was submitted, if present."""
+    def _activate_task_browser(task_id: str, *, platform: str | None = None,
+                               browser_account: str | None = None) -> None:
+        """Bind CDP helpers to a task's frozen browser identity.
+
+        ``ensure_chrome_ready`` reads a process-wide active profile.  A
+        background recrawl must therefore rebind it from its frozen task
+        identity immediately before checking CDP, rather than inheriting the
+        profile last selected by a request or another task.
+        """
         with _pipeline_lock:
             task = _pipeline_tasks.get(task_id) or {}
-            account = str(task.get("browser_account") or "")
+            account = str(browser_account or task.get("browser_account") or "")
         from webui.pipeline_exec import resolve_browser_account, set_active_cdp_data_dir
         profile_dir = resolve_browser_account(
             account, app.config["BROWSER_ACCOUNTS_PATH"])
         if profile_dir:
-            platform = str(task.get("platform") or "boss")
+            resolved_platform = str(platform or task.get("platform") or "boss")
             from webui.platforms import resolve_login_space
-            _ = resolve_login_space(platform, account or "a", boss_profile_dir=profile_dir)
+            _ = resolve_login_space(
+                resolved_platform, account or "a", boss_profile_dir=profile_dir
+            )
             from webui.platforms import derive_zhilian_profile_dir
-            set_active_cdp_data_dir(profile_dir if platform == "boss" else derive_zhilian_profile_dir(profile_dir))
+            set_active_cdp_data_dir(
+                profile_dir if resolved_platform == "boss"
+                else derive_zhilian_profile_dir(profile_dir)
+            )
         else:
             _activate_run_browser()
 
@@ -6923,6 +6935,20 @@ def create_app(config=None):
         return jsonify({"ok": True, "jd": jd, "job_id": job_id,
                         "persisted": persisted, **verdict_info})
 
+    def _recrawl_job_key(job):
+        """Return the same stable key used by the result-page recrawl request."""
+        if not isinstance(job, dict):
+            return ""
+        return str(
+            job.get("platform_job_id")
+            or job.get("job_id")
+            or job.get("id")
+            or job.get("canonical_url")
+            or job.get("source_url")
+            or job.get("job_link")
+            or ""
+        ).strip()
+
     @app.route("/api/pipeline/recrawl", methods=["POST"])
     def pipeline_recrawl():
         """对待确认（uncertain）岗位批量重抓：缺 JD 的补抓 JD，有 JD 的用画像重跑 AI 精筛。
@@ -6955,9 +6981,7 @@ def create_app(config=None):
                     continue
                 if str(_job.get("verdict") or "") in ("match", "not_match", "mismatch"):
                     continue
-                _sid = str(
-                    _job.get("platform_job_id") or _job.get("job_id") or ""
-                ).strip()
+                _sid = _recrawl_job_key(_job)
                 if _sid:
                     snapshot_ids.add(_sid)
         except _OPERATIONAL_ERRORS:
@@ -6967,7 +6991,10 @@ def create_app(config=None):
         if not job_ids or job_ids == "auto":
             job_ids = sorted(recrawlable_ids)
             if not job_ids:
-                return jsonify({"ok": False, "error": "没有待确认岗位可重抓"}), 400
+                return jsonify({
+                    "ok": False, "error": "no_recrawlable_targets",
+                    "message": "0 个可重抓岗位",
+                }), 400
         if not isinstance(job_ids, list) or not job_ids:
             return jsonify({"ok": False, "error": "缺少 job_ids"}), 400
         requested_ids = {str(job_id) for job_id in job_ids}
@@ -6979,6 +7006,16 @@ def create_app(config=None):
                 "message": "只能重抓当前结果中未完成判定的岗位",
                 "job_ids": non_pending,
             }), 409
+        # The request may pass pending-table IDs that no longer resolve to the
+        # source snapshot (for example, a platform ID was empty in the old row).
+        # Reject before queueing so this cannot become an asynchronous empty run.
+        if snapshot_ids and requested_ids and not (requested_ids & snapshot_ids):
+            return jsonify({
+                "ok": False,
+                "error": "no_recrawlable_targets",
+                "message": "0 个可重抓岗位",
+                "job_ids": sorted(requested_ids),
+            }), 400
         job_ids = sorted(requested_ids)
         # T406: 从父 run 读取冻结平台身份和浏览器身份
         parent_identity = None
@@ -7230,8 +7267,6 @@ def create_app(config=None):
             task["status"] = "running"
             stop_event = task.get("stop_event")
 
-        _activate_task_browser(task_id)
-
         # T403: 从 task dict 读取冻结平台/浏览器身份，fallback 到 run execution_params
         with _pipeline_lock:
             _t_ref = _pipeline_tasks.get(task_id, {})
@@ -7239,16 +7274,29 @@ def create_app(config=None):
             frozen_cdp_port = _t_ref.get("cdp_port")
             frozen_profile_key = _t_ref.get("profile_key")
             frozen_browser_account = _t_ref.get("browser_account")
-        if not frozen_platform:
-            try:
-                _run_ref = store.get_screening_run(task_id)
-                _params_ref = (_run_ref or {}).get("execution_params") or {}
-                frozen_platform = _params_ref.get("platform") or "boss"
-                frozen_cdp_port = frozen_cdp_port or _params_ref.get("cdp_port")
-                frozen_profile_key = frozen_profile_key or _params_ref.get("profile_key")
-                frozen_browser_account = frozen_browser_account or _params_ref.get("browser_account")
-            except _OPERATIONAL_ERRORS:
-                frozen_platform = frozen_platform or "boss"
+        try:
+            _run_ref = store.get_screening_run(task_id)
+            _params_ref = (_run_ref or {}).get("execution_params") or {}
+            frozen_platform = frozen_platform or _params_ref.get("platform") or "boss"
+            frozen_cdp_port = frozen_cdp_port or _params_ref.get("cdp_port")
+            frozen_profile_key = frozen_profile_key or _params_ref.get("profile_key")
+            frozen_browser_account = (
+                frozen_browser_account or _params_ref.get("browser_account")
+            )
+        except _OPERATIONAL_ERRORS:
+            frozen_platform = frozen_platform or "boss"
+
+        # A recrawl can be resumed after a server restart, when its in-memory
+        # task is incomplete or absent.  Rebind after every DB fallback so the
+        # CDP preflight below always compares port 9223 with the frozen Zhilian
+        # profile, not the profile selected by a previous request.
+        _activate_task_browser(
+            task_id,
+            platform=str(frozen_platform or "boss"),
+            browser_account=(
+                str(frozen_browser_account) if frozen_browser_account else None
+            ),
+        )
 
         last_event_stage = None
 
@@ -7368,11 +7416,26 @@ def create_app(config=None):
             payload = store.load_latest_pipeline_result(source_run_id or None)
             run_id = source_run_id or store.get_latest_done_run_id()
             jobs = (payload or {}).get("result", {}).get("jobs", []) if payload else []
+            # 历史结果页可能没有把画像正文留在前端状态；重抓必须从来源
+            # 轮次恢复画像，否则已有 JD 的岗位会被静默跳过 AI。
+            if not profile_summary.strip():
+                profile_summary = str(
+                    ((payload or {}).get("result") or {}).get("profile_summary")
+                    or ""
+                ).strip()
+            if not profile_summary.strip() and source_run_id:
+                try:
+                    profile_summary = str(
+                        (store.get_screening_run(source_run_id) or {}).get("profile_summary")
+                        or ""
+                    ).strip()
+                except _OPERATIONAL_ERRORS:
+                    pass
             by_id: dict[str, dict] = {}
             for j in jobs:
                 if not isinstance(j, dict):
                     continue
-                pid = str(j.get("platform_job_id") or j.get("job_id") or "").strip()
+                pid = _recrawl_job_key(j)
                 if pid:
                     by_id.setdefault(pid, j)
             targets = [by_id[jid] for jid in job_ids if jid in by_id]
@@ -7381,10 +7444,17 @@ def create_app(config=None):
                  message=f"准备重抓 {total} 个待确认岗位…")
             if not targets:
                 emit(stage="done", current=0, total=0, message="没有可重抓的岗位")
+                _write_run_unless_finished(
+                    task_id, status="failed",
+                    error_code="no_recrawlable_targets",
+                    error_reason="0 个可重抓岗位",
+                    current_stage="done",
+                )
                 with _pipeline_lock:
                     t = _pipeline_tasks.get(task_id)
                     if t is not None:
-                        t["status"] = "done"
+                        t["status"] = "failed"
+                        t["error"] = "0 个可重抓岗位"
                         t["result"] = {"updates": {}}
                 _schedule_pipeline_task_cleanup(task_id)
                 _release_worker_resume_claims(_pipeline_tasks.get(task_id))
@@ -7402,17 +7472,30 @@ def create_app(config=None):
             for j in targets:
                 if str(j.get("jd", "")).strip():
                     continue
-                url = normalize_job_link(
-                    j.get("source_url") or j.get("job_link") or j.get("canonical_url") or ""
+                # ``normalize_job_link`` only accepts BOSS URLs.  Using it
+                # for an already-frozen Zhilian task erased every target URL
+                # before fetch_job_details could invoke CDP.
+                url = normalize_job_link_for_platform(
+                    j.get("source_url") or j.get("job_link") or j.get("canonical_url") or "",
+                    platform=frozen_platform,
                 )
                 if url:
+                    stable_id = _recrawl_job_key(j)
                     no_jd.append({
-                        "platform_job_id": str(j.get("platform_job_id") or j.get("job_id") or ""),
-                        "job_id": str(j.get("platform_job_id") or j.get("job_id") or ""),
+                        "platform": frozen_platform,
+                        "platform_job_id": str(j.get("platform_job_id") or stable_id),
+                        "job_id": stable_id,
+                        # Zhilian's parallel detail runner accepts only jobs
+                        # with canonical_url.  Recrawl previously rebuilt this
+                        # payload without it, so every target was rejected
+                        # locally as source_invalid_output before CDP/Chrome
+                        # was ever invoked.
                         "source_url": url, "job_link": url,
+                        "canonical_url": url,
                     })
             fetched_jd: dict = {}
             detail_jobs: list = []
+            actual_processed = 0
             if no_jd:
                 chrome_ok, chrome_err = ensure_chrome_ready(
                     frozen_cdp_port, minimize_after_launch=True,
@@ -7437,7 +7520,7 @@ def create_app(config=None):
                         )
                         detail_jobs = detail.get("jobs", [])
                         for j in detail_jobs:
-                            jid = str(j.get("job_id", ""))
+                            jid = _recrawl_job_key(j)
                             jd = str(j.get("jd", "")).strip()
                             if jid and jd:
                                 fetched_jd[jid] = jd
@@ -7447,6 +7530,7 @@ def create_app(config=None):
                         )
                         for jid, jd in fetched_jd.items():
                             updates.setdefault(jid, {})["jd"] = jd
+                        actual_processed += len(fetched_jd)
                         publish_recrawl_updates()
                         if detail.get("hard_stop"):
                             # 暂停，不关浏览器（用户需要它处理验证码/登录）
@@ -7514,6 +7598,47 @@ def create_app(config=None):
                     _pause_recrawl_source_unavailable(reason)
                     return
 
+            # A recrawl must do real work before it can reach a terminal
+            # success/partial state.  An empty CDP response used to fall
+            # through to the AI branch with no jobs and was reported as
+            # "completed" even though nothing was fetched or judged.
+            if no_jd and not fetched_jd:
+                reason = (
+                    f"重抓未处理任何岗位：浏览器未返回 JD（0/{len(no_jd)}），"
+                    "请检查自动化浏览器后点「继续」"
+                )
+                failed_jobs = [
+                    {
+                        "job_id": str(job.get("job_id") or ""),
+                        "jd": "",
+                        "jd_failed_code": str(job.get("jd_failed_code") or "source_invalid_output"),
+                        "jd_failed_reason": str(job.get("jd_failed_reason") or "浏览器未返回岗位详情"),
+                    }
+                    for job in (detail_jobs or no_jd)
+                ]
+                _persist_jd_job_failures(
+                    task_id, failed_jobs, stage="recrawl_fetch_jd",
+                    source_run_id=source_run_id, platform=frozen_platform,
+                )
+                _write_run_unless_finished(
+                    task_id, status="paused", error_code="recrawl_no_work",
+                    current_stage="recrawl_fetch_jd", processed_count=0,
+                    error_reason=reason,
+                )
+                store.append_task_event(task_id, "pause", {
+                    "stage": "recrawl_fetch_jd",
+                    "code": "recrawl_no_work",
+                    "processed": 0, "total": len(no_jd),
+                })
+                with _pipeline_lock:
+                    t = _pipeline_tasks.get(task_id)
+                    if t is not None:
+                        t["status"] = "paused"
+                        t["error"] = reason
+                        t["result"] = {"updates": updates}
+                _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                return
+
             # 补抓仍失败的岗位：把具体原因回写前端（验证码/限流等）
             for j in detail_jobs:
                 jid = str(j.get("job_id", ""))
@@ -7556,12 +7681,29 @@ def create_app(config=None):
                 _release_worker_resume_claims(_pipeline_tasks.get(task_id))
                 return
             elif not profile_summary.strip():
-                emit(stage="screen_b", current=total, total=total,
-                     message="未填写求职画像，跳过 AI 重判")
+                reason = "缺少本轮求职画像，无法进行 AI 重判；请回到本轮画像后继续"
+                emit(stage="screen_b", current=0, total=total, message=reason)
+                _write_run_unless_finished(
+                    task_id, status="paused", error_code="recrawl_profile_missing",
+                    current_stage="recrawl_ai", processed_count=0,
+                    error_reason=reason,
+                )
+                store.append_task_event(task_id, "pause", {
+                    "stage": "recrawl_ai", "code": "recrawl_profile_missing",
+                    "processed": 0, "total": total,
+                })
+                with _pipeline_lock:
+                    t = _pipeline_tasks.get(task_id)
+                    if t is not None:
+                        t["status"] = "paused"
+                        t["error"] = reason
+                        t["result"] = {"updates": updates}
+                _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                return
             else:
                 to_judge = []
                 for j in targets:
-                    jid = str(j.get("platform_job_id") or j.get("job_id") or "")
+                    jid = _recrawl_job_key(j)
                     jd = str(j.get("jd", "")).strip() or fetched_jd.get(jid, "")
                     if jd:
                         jj = dict(j)
@@ -7648,6 +7790,7 @@ def create_app(config=None):
                         batch_verdicts = res.get("verdicts", {})
                         verdicts.update(batch_verdicts)
                         recrawl_completed_ids.update(batch_verdicts)
+                        actual_processed += len(batch_verdicts)
                         store.save_verdict_and_checkpoint_atomic(
                             task_id, "recrawl_ai", batch_verdicts,
                             sorted(recrawl_completed_ids),
@@ -7680,7 +7823,55 @@ def create_app(config=None):
                     if run_id:
                         store.recount_pipeline_result(run_id)
 
-            emit(stage="done", current=total, total=total, message="重抓完成")
+            if actual_processed == 0:
+                reason = (
+                    f"重抓未处理任何岗位（0/{total}），未产生 JD 或 AI 判定；"
+                    "请检查自动化浏览器和 AI 配置后点「继续」"
+                )
+                _write_run_unless_finished(
+                    task_id, status="paused", error_code="recrawl_no_work",
+                    current_stage="recrawl_ai", processed_count=0,
+                    error_reason=reason,
+                )
+                store.append_task_event(task_id, "pause", {
+                    "stage": "recrawl_ai",
+                    "code": "recrawl_no_work",
+                    "processed": 0, "total": total,
+                })
+                with _pipeline_lock:
+                    t = _pipeline_tasks.get(task_id)
+                    if t is not None:
+                        t["status"] = "paused"
+                        t["error"] = reason
+                        t["result"] = {"updates": updates}
+                _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                return
+
+            recrawl_status = "succeeded"
+            recount = None
+            remaining_uncertain = 0
+            if run_id:
+                recount = store.recount_pipeline_result(run_id)
+                try:
+                    latest_payload = store.load_latest_pipeline_result(run_id) or {}
+                    latest_jobs = ((latest_payload.get("result") or {}).get("jobs") or [])
+                    remaining_uncertain = sum(
+                        1 for job in latest_jobs
+                        if isinstance(job, dict)
+                        and str(job.get("verdict") or "")
+                        not in ("match", "not_match", "mismatch")
+                    )
+                except _OPERATIONAL_ERRORS:
+                    remaining_uncertain = int((recount or {}).get("pending_count") or 0)
+                if remaining_uncertain > 0:
+                    recrawl_status = "partial"
+            emit(
+                stage="done", current=total, total=total,
+                message=(
+                    f"重抓完成，但仍有 {remaining_uncertain} 个岗位待确认"
+                    if recrawl_status == "partial" else "重抓完成"
+                ),
+            )
             store.append_task_events(task_id, [
                 (
                     "job_success" if update.get("verdict") in ("match", "not_match")
@@ -7695,13 +7886,15 @@ def create_app(config=None):
             ])
             _write_run_unless_finished(
                 task_id,
-                status="cancelled" if _stop_requested() else "succeeded",
+                status="cancelled" if _stop_requested() else recrawl_status,
                 current_stage="done",
             )
             with _pipeline_lock:
                 t = _pipeline_tasks.get(task_id)
                 if t is not None:
-                    t["status"] = "cancelled" if _stop_requested() else "done"
+                    # Keep the in-memory task status aligned with the DB status.
+                    # The polling API prefers this live task over the DB row.
+                    t["status"] = "cancelled" if _stop_requested() else recrawl_status
                     t["result"] = {"updates": updates}
             _schedule_pipeline_task_cleanup(task_id)
             _release_worker_resume_claims(_pipeline_tasks.get(task_id))
@@ -7990,7 +8183,7 @@ def create_app(config=None):
                 _, conflict = _check_run_identity_conflict(run_id, task)
                 if conflict is not None:
                     return conflict
-                if task["status"] in ("done", "failed", "cancelled") and task.get(
+                if task["status"] in ("done", "partial", "failed", "cancelled") and task.get(
                     "finished_at"
                 ) is None:
                     task["finished_at"] = int(time.time() * 1000)
@@ -8047,6 +8240,11 @@ def create_app(config=None):
             or "unknown"
         )
         progress_kind = live_kind or _pipeline_kind_for_stage(stage)
+        # Recrawl runs persist their final stage as ``done``.  Once the live
+        # task has been cleaned up, recover the kind from the durable run id
+        # so refreshes retain recrawl-specific messaging/count semantics.
+        if progress_kind == "ai_screen" and str(run_id).startswith("recrawl-"):
+            progress_kind = "recrawl"
         # processed_count 只记录已成功完成的当前阶段工作单元；pending
         # 是已失败并进入待确认的独立工作单元，两者不能互相扣减。
         # JD 详情/精筛阶段只处理粗筛保留的岗位；原始列表里的 dropped
@@ -8101,6 +8299,16 @@ def create_app(config=None):
         progress.setdefault("overall_percent", overall_percent)
         progress.setdefault("current", success_count if jd_stage else completed_count)
         progress.setdefault("total", stage_total)
+        # A persisted terminal task has no in-memory live progress after a
+        # refresh. Reconstruct the user-facing result message from durable
+        # status/counts so a partial recrawl never falls back to generic
+        # success text.
+        if (
+            progress_kind == "recrawl"
+            and str((run or {}).get("status") or "") == "partial"
+            and pending > 0
+        ):
+            progress.setdefault("message", f"重抓完成，但仍有 {pending} 个岗位待确认")
         pause_info = None
         effective_status = _public_task_status(
             str(live.get("status")) if live is not None else str(run["status"]),

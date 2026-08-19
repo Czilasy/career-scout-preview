@@ -41,12 +41,13 @@ describe("JobWorkspace job count", () => {
   });
 });
 
-describe("JobWorkspace verdict pair (B058)", () => {
-  it("wraps verdict reason and soft-requirement blocks in .verdict-pair", () => {
+describe("JobWorkspace company insight buttons (B058/B065)", () => {
+  it("shows insight buttons at the far right of the job facts row and keeps content in hover popovers", async () => {
     const wrapper = mount(JobWorkspace, {
       props: {
         jobs: [
           job({
+            verdict: "match",
             verdict_reason: "技能匹配",
             caveats: ["优先英语六级，候选人未提供"],
           }),
@@ -54,28 +55,58 @@ describe("JobWorkspace verdict pair (B058)", () => {
         emptyMessage: "暂无岗位",
       },
     });
-    const pair = wrapper.find(".verdict-pair");
-    expect(pair.exists()).toBe(true);
-    expect(pair.find(".verdict-reason").exists()).toBe(true);
-    expect(pair.find(".caveats-list").exists()).toBe(true);
-    // 桌面双栏：两个区块是 .verdict-pair 的直接子元素，以便 grid 50/50 生效。
-    expect(pair.element.children).toHaveLength(2);
-    expect(pair.element.children[0].className).toContain("verdict-reason");
-    expect(pair.element.children[1].className).toContain("caveats-list");
-    expect(pair.text()).toContain("AI 判断说明");
-    expect(pair.text()).toContain("软性要求提醒");
+    const line = wrapper.get(".job-detail-facts");
+    expect(line.findAll(".company-insight-button").map((button) => button.text())).toEqual([
+      "AI 判断说明", "软性要求提醒",
+    ]);
+    expect(line.get(".ai-insight").attributes("data-platform")).toBe("boss");
+    expect(wrapper.get(".jd-content").attributes("data-platform")).toBe("boss");
+    expect(line.findAll(".company-insight-popover")).toHaveLength(2);
+    expect(wrapper.find(".verdict-pair").exists()).toBe(false);
+    await line.findAll(".company-insight")[0].trigger("mouseenter");
+    expect(line.findAll(".company-insight-popover")[0].text()).toContain("技能匹配");
+    expect(line.findAll(".ai-insight-list li")).toHaveLength(1);
+    const softItems = line.findAll(".company-insight-popover")[1].findAll(".soft-insight-list li");
+    expect(softItems.map((item) => item.text())).toEqual(["优先英语六级，候选人未提供"]);
   });
 
-  it("renders verdict reason block without soft requirements", () => {
+  it("binds the description divider to the selected job platform", () => {
     const wrapper = mount(JobWorkspace, {
       props: {
-        jobs: [job({ verdict_reason: "技能匹配" })],
+        jobs: [job({ platform: "zhilian", verdict: "match", verdict_reason: "技能匹配" })],
         emptyMessage: "暂无岗位",
       },
     });
-    const pair = wrapper.find(".verdict-pair");
-    expect(pair.exists()).toBe(true);
-    expect(pair.find(".verdict-reason").exists()).toBe(true);
-    expect(pair.find(".caveats-list").exists()).toBe(false);
+
+    expect(wrapper.get(".jd-content").attributes("data-platform")).toBe("zhilian");
+  });
+
+  it("hides soft requirements for a not-matched job", () => {
+    const wrapper = mount(JobWorkspace, {
+      props: {
+        jobs: [job({ verdict: "not_match", verdict_reason: "薪资不符", caveats: ["仅供参考"] })],
+        emptyMessage: "暂无岗位",
+      },
+    });
+    const line = wrapper.get(".job-detail-facts");
+    expect(line.findAll(".company-insight-button").map((button) => button.text())).toEqual(["AI 判断说明"]);
+    expect(line.text()).toContain("AI 判断说明");
+    expect(line.text()).not.toContain("软性要求提醒");
+  });
+
+  it("does not show soft requirements when all reminder content is blank", () => {
+    const wrapper = mount(JobWorkspace, {
+      props: {
+        jobs: [job({
+          verdict: "match",
+          verdict_reason: "技能匹配",
+          caveats: ["  "],
+          flags: [{ code: "M1", level: "medium", reason: "" }],
+        })],
+        emptyMessage: "暂无岗位",
+      },
+    });
+
+    expect(wrapper.get(".job-detail-facts").findAll(".company-insight-button").map((button) => button.text())).toEqual(["AI 判断说明"]);
   });
 });
