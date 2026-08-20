@@ -721,6 +721,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                execution_config=None,
                measurement_callback=None,
                on_page_completed=None,
+               on_issue=None,
                resume_pages: dict[str, int] | None = None,
                resume_jobs: dict[str, list[dict]] | None = None,
                close_chrome_on_success: bool = True) -> dict:
@@ -820,6 +821,7 @@ def run_search(params: dict, source, *, pages: int = 3,
     merged: dict[str, dict] = {}
     total_scraped = 0
     failed_combos = 0
+    login_skipped = 0
     completed_combos: list[str] = []
     _skip = skip_combos or set()
 
@@ -953,8 +955,61 @@ def run_search(params: dict, source, *, pages: int = 3,
         def _fetch_list_once():
             return source.fetch_list(plan_item, on_page_completed=_page_completed)
 
+        _skipped_login_combo = [False]
+
+        def _notify_combo_issue(entry: dict) -> None:
+            if on_issue is None:
+                return
+            try:
+                on_issue(combo_key, entry)
+            except Exception:
+                pass
+
+        def _secondary_login_probe():
+            recheck = getattr(source, "recheck_login", None)
+            if callable(recheck):
+                return recheck()
+            return source.preflight()
+
+        def _probe_passed(probe) -> bool:
+            return probe.ok or probe.failed_code not in (
+                "source_login_required", "source_blocked", "source_cdp_unavailable",
+            )
+
+        def _recheck_login_combo(outcome):
+            """疑似登录失效：独立复核一次，通过则重试本组合，否则跳过。"""
+            probe = _secondary_login_probe()
+            if _probe_passed(probe):
+                _notify_combo_issue({
+                    "event": "login_recheck_passed_retry",
+                    "probe": probe.failed_code or "logged_in",
+                    "detail": outcome.failed_reason or outcome.safe_log or "",
+                })
+                emit(stage="waiting", current=len(completed_combos), total=len(combos),
+                     keyword=kw, city=display_city,
+                     message="登录复核通过（疑似误报），重试本组合…")
+                retried = _fetch_list_once()
+                if retried.ok or retried.failed_code != "source_login_required":
+                    return retried
+                _notify_combo_issue({
+                    "event": "login_required_confirmed_after_retry",
+                    "probe": probe.failed_code or "logged_in",
+                    "detail": retried.failed_reason or retried.safe_log or "",
+                })
+                _skipped_login_combo[0] = True
+                return retried
+            _notify_combo_issue({
+                "event": "login_required_confirmed_skip",
+                "probe": probe.failed_code or "unknown",
+                "detail": outcome.failed_reason or outcome.safe_log or "",
+            })
+            _skipped_login_combo[0] = True
+            return outcome
+
         try:
             outcome = _fetch_list_once()
+            if not outcome.ok and outcome.failed_code == "source_login_required":
+                outcome = _recheck_login_combo(outcome)
         except PageEventPersistenceError as exc:
             return {
                 "ok": False, "jobs": list(merged.values()),
@@ -1029,8 +1084,17 @@ def run_search(params: dict, source, *, pages: int = 3,
                         "hard_stop": True, "hard_stop_code": "source_cdp_unavailable",
                         "error": f"调试浏览器自动重启失败：{restart_err}，任务暂停"}
         if not outcome.ok:
-            # 系统性阻断（验证码/登录失效/IP风控/CDP不可用）：立即停止，不继续跑其他组合
-            if outcome.failed_code in _HARD_STOP_CODES:
+            # 二次复核确认登录失效：跳过本组合并记录原因，不整场暂停
+            if _skipped_login_combo[0]:
+                label = failed_code_label(outcome.failed_code, platform)
+                emit(stage="combo_failed", current=len(completed_combos), total=len(combos),
+                     keyword=kw, city=display_city, failed_code=outcome.failed_code,
+                     combo_key=combo_key,
+                     message=f"已跳过本组合（{label}，二次复核仍登录失效），原因已记录")
+                failed_combos += 1
+                login_skipped += 1
+            elif outcome.failed_code in _HARD_STOP_CODES:
+                # 系统性阻断（验证码/IP风控/CDP不可用等）：立即停止，不继续跑其他组合
                 label = failed_code_label(outcome.failed_code, platform)
                 emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
                      keyword=kw, city=display_city, failed_code=outcome.failed_code,
@@ -1041,17 +1105,18 @@ def run_search(params: dict, source, *, pages: int = 3,
                         "combinations": len(combos), "completed_combos": completed_combos,
                         "hard_stop": True, "hard_stop_code": outcome.failed_code,
                         "error": f"系统性阻断：{label}"}
-            failed_combos += 1
-            # 从 safe_log 提取 reason= 后的可读原因
-            _reason = ""
-            if outcome.safe_log and "reason=" in outcome.safe_log:
-                _reason = outcome.safe_log.split("reason=", 1)[1]
-            detail = f"（{_reason}）" if _reason else ""
-            label = failed_code_label(outcome.failed_code, platform)
-            emit(stage="combo_failed", current=len(completed_combos), total=len(combos),
-                 keyword=kw, city=display_city, failed_code=outcome.failed_code,
-                 **({"page_progress": last_page_ratio} if page_progress_seen else {}),
-                 message=f"组合失败：{label}{detail}")
+            else:
+                failed_combos += 1
+                # 从 safe_log 提取 reason= 后的可读原因
+                _reason = ""
+                if outcome.safe_log and "reason=" in outcome.safe_log:
+                    _reason = outcome.safe_log.split("reason=", 1)[1]
+                detail = f"（{_reason}）" if _reason else ""
+                label = failed_code_label(outcome.failed_code, platform)
+                emit(stage="combo_failed", current=len(completed_combos), total=len(combos),
+                     keyword=kw, city=display_city, failed_code=outcome.failed_code,
+                     **({"page_progress": last_page_ratio} if page_progress_seen else {}),
+                     message=f"组合失败：{label}{detail}")
         else:
             total_scraped += len(outcome.jobs)
             completed_combos.append(combo_key)
@@ -1120,12 +1185,16 @@ def run_search(params: dict, source, *, pages: int = 3,
     # 哨兵第三层：所有非跳过组合全失败 → 中性提示，不冒充风控
     ran_combos = len(combos) - len(_skip)
     if failed_combos > 0 and total_scraped == 0 and ran_combos > 0:
+        warning_message = (
+            f"因登录失效跳过了全部 {login_skipped} 个组合，请确认登录态后重试"
+            if login_skipped else "所有组合均失败，请检查浏览器登录、网络或平台提示后重试。")
         emit(stage="risk_warning", current=len(completed_combos), total=len(combos),
-             message="所有组合均失败，请检查浏览器登录、网络或平台提示后重试。")
+             message=warning_message)
         return {"ok": False, "jobs": [], "total_scraped": 0,
                 "total_matched": 0, "combinations": len(combos),
                 "completed_combos": completed_combos,
-                "error": "所有搜索组合均失败，请检查浏览器登录、网络或平台提示后重试"}
+                "error": (f"因登录失效跳过了全部 {login_skipped} 个组合，请确认登录态后重试" if login_skipped
+                          else "所有搜索组合均失败，请检查浏览器登录、网络或平台提示后重试")}
 
     # 有数据才关浏览器（任务完成）；全失败则保留窗口供用户排查/重试。
     if total_scraped > 0 and close_chrome_on_success:

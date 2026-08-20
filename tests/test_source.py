@@ -2372,6 +2372,23 @@ class RiskSignalClassificationTests(unittest.TestCase):
         ):
             self.assertEqual(_classify_failed_code(10, sample), "source_login_required")
 
+    def test_exit_1_loose_login_words_not_login_required(self):
+        """退出码 1 只认高置信短语，单个“登录/login/cookie”字眼不再误判。"""
+        from webui.source import _classify_failed_code
+        for sample in (
+            "登录解锁更多职位", "页面顶部有登录按钮", "需要登录后可见",
+            "cookie 已设置", "login",
+        ):
+            self.assertEqual(_classify_failed_code(1, sample), "source_unknown_error")
+
+    def test_exit_1_high_confidence_login_required(self):
+        from webui.source import _classify_failed_code
+        for sample in (
+            "登录态失效, 请重新登录", "登录失效", "登录已失效", "请先登录",
+            "未登录", "cookie 已失效",
+        ):
+            self.assertEqual(_classify_failed_code(1, sample), "source_login_required")
+
     def test_record_risk_signals_only_writes_for_high_confidence(self):
         from webui.source import _record_risk_signals
         with mock.patch("scripts.login_state_cache.write_login_state") as write_state, \

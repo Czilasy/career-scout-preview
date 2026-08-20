@@ -2674,6 +2674,15 @@ def create_app(config=None):
                 except _OPERATIONAL_ERRORS:
                     resume_jobs[row["combo_key"]] = []
 
+            def _record_combo_issue(combo_key, entry):
+                """把运行中组合问题（如登录失效复核）写进任务事件日志。"""
+                try:
+                    store.append_task_event(
+                        task_id, "combo_issue",
+                        {**(entry or {}), "combo_key": str(combo_key)},
+                    )
+                except _OPERATIONAL_ERRORS:
+                    pass
             result = run_search(
                 script_params, source,
                 pages=(
@@ -2686,6 +2695,7 @@ def create_app(config=None):
                 on_combo_done=on_combo_done,
                 execution_config=execution_config,
                 on_page_completed=on_page_completed,
+                on_issue=_record_combo_issue,
                 resume_pages=resume_pages,
                 resume_jobs=resume_jobs,
             )
@@ -8215,7 +8225,23 @@ def create_app(config=None):
         live_current = int(live_progress.get("current") or 0)
         if not count_live:
             live_current = 0
+        stage = (
+            (run or {}).get("current_stage")
+            or live_progress.get("stage")
+            or "unknown"
+        )
         processed_db = int((run or {}).get("processed_count") or 0)
+        durable_completed = 0
+        if live_kind == "scrape" or str(stage) == "scrape":
+            # A resumed scrape can finish combinations after the last run
+            # projection write (or while the process is being refreshed). The
+            # checkpoint is committed with each combo and is therefore the
+            # durable floor for the user-facing progress counter.
+            try:
+                durable_completed = len(store.load_checkpoint(run_id, "scrape"))
+            except _OPERATIONAL_ERRORS:
+                durable_completed = 0
+        processed_db = max(processed_db, durable_completed)
         # DB processed_count 是批次粒度（智联详情每批 15 条才落库一次），
         # 为空时用实时 live current 兜底，保证进度按条前进且跨阶段不回退。
         processed = processed_db if processed_db > 0 else live_current
@@ -8234,11 +8260,6 @@ def create_app(config=None):
             scraped_count = 0
         error_code = (run or {}).get("error_code")
         error_reason = (run or {}).get("error_reason")
-        stage = (
-            (run or {}).get("current_stage")
-            or live_progress.get("stage")
-            or "unknown"
-        )
         progress_kind = live_kind or _pipeline_kind_for_stage(stage)
         # Recrawl runs persist their final stage as ``done``.  Once the live
         # task has been cleaned up, recover the kind from the durable run id
@@ -8297,7 +8318,18 @@ def create_app(config=None):
                 progress["overall_percent"] = _scrape_page_overall_percent(
                     stage, completed_count, stage_total, page_ratio)
         progress.setdefault("overall_percent", overall_percent)
-        progress.setdefault("current", success_count if jd_stage else completed_count)
+        if not count_live:
+            # A browser refresh may leave an in-memory snapshot behind the
+            # durable checkpoint. Do not let that stale current/percent mask
+            # the reconciled combo count.
+            progress["current"] = max(
+                int(progress.get("current") or 0),
+                success_count if jd_stage else completed_count,
+            )
+            if durable_completed > live_current:
+                progress["overall_percent"] = overall_percent
+        else:
+            progress.setdefault("current", success_count if jd_stage else completed_count)
         progress.setdefault("total", stage_total)
         # A persisted terminal task has no in-memory live progress after a
         # refresh. Reconstruct the user-facing result message from durable

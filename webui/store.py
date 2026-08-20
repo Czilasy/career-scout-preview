@@ -2410,6 +2410,20 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
                     ts,
                 ),
             )
+            # The checkpoint is the durable source of truth for scrape combo
+            # progress. Keep the run projection in the same transaction so a
+            # refresh (or a resumed worker) cannot observe the old count.
+            conn.execute(
+                "UPDATE screening_runs SET processed_count = CASE "
+                "WHEN processed_count < ? THEN ? ELSE processed_count END, "
+                "updated_at = ? WHERE id = ? AND record_kind = 'process_log'",
+                (
+                    len(completed_combos or []),
+                    len(completed_combos or []),
+                    ts,
+                    str(run_id),
+                ),
+            )
             conn.execute(
                 "DELETE FROM scrape_page_progress WHERE run_id = ? AND combo_key = ?",
                 (str(run_id), str(combo_key)),

@@ -1369,6 +1369,28 @@ class ScreeningRunStoreTests(unittest.TestCase):
     def test_missing_screening_run_returns_none(self):
         self.assertIsNone(self.store.get_screening_run("nope"))
 
+    def test_scrape_combo_checkpoint_advances_persisted_progress(self):
+        """每个组合 checkpoint 与可刷新读取的 processed_count 保持一致。"""
+        self.store.create_screening_run("scrape-progress", source_count=3)
+        self.store.save_scrape_combo_result(
+            "scrape-progress", "kw-1|city",
+            [{"platform_job_id": "job-1"}],
+            ["kw-1|city"],
+        )
+        self.assertEqual(
+            self.store.get_screening_run("scrape-progress")["processed_count"],
+            1,
+        )
+        self.store.save_scrape_combo_result(
+            "scrape-progress", "kw-2|city",
+            [{"platform_job_id": "job-2"}],
+            ["kw-1|city", "kw-2|city"],
+        )
+        self.assertEqual(
+            self.store.get_screening_run("scrape-progress")["processed_count"],
+            2,
+        )
+
     def test_verdicts_round_trip_and_upsert(self):
         self.store.create_screening_run("sr-2")
         self.store.save_screening_verdicts("sr-2", {

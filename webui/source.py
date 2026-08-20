@@ -470,6 +470,38 @@ class BossCdpSource:
             safe_log=f"boss_login_probe_unknown{retry_note or ' retry=1'} proceed=1",
         )
 
+    def recheck_login(self) -> SourceOutcome:
+        """运行中疑似登录失效时的独立复核探测（绕过登录态缓存）。
+
+        与任务开始时 preflight 使用同一套 CDP 登录探测，但不复用 15 分钟
+        缓存，保证拿到当时当刻的真实探测结果；探测失败只降级不加冷却。
+        """
+        state = boss.check_login_state_tri(self.cdp_port)
+        if state == "unknown":
+            state = boss.check_login_state_tri(self.cdp_port)
+        retry_note = ""
+        if state == "restricted":
+            time.sleep(PREFLIGHT_RETRY_DELAY_SECONDS)
+            retry_note = " retry=1"
+            state = boss.check_login_state_tri(self.cdp_port)
+            if state == "unknown":
+                state = boss.check_login_state_tri(self.cdp_port)
+        if state == "logged_in":
+            return SourceOutcome.success(safe_log=f"recheck_logged_in{retry_note}")
+        if state == "restricted":
+            return SourceOutcome.failure(
+                failed_code="source_blocked",
+                safe_log=f"recheck_restricted{retry_note}",
+            )
+        if state == "not_logged_in":
+            return SourceOutcome.failure(
+                failed_code="source_login_required",
+                safe_log="recheck_not_logged_in",
+            )
+        return SourceOutcome.success(
+            safe_log=f"recheck_unknown{retry_note} proceed=1",
+        )
+
     def fetch_list(
         self, plan_item: dict, *, on_page_completed: Callable[[dict], None] | None = None,
     ) -> SourceOutcome:
@@ -1804,6 +1836,14 @@ _LOGIN_REQUIRED_KEYWORDS = (
     "401", "登录态失效", "登录失效", "登录已失效", "请先登录", "未登录",
     "cookie 失效", "cookie已失效",
 )
+# 退出码 1（登录态失效或环境异常）专用：只认高置信短语，避免正文里
+# 单个“登录/login/cookie”字眼把正常页面误判成登录失效。B027 回归方向。
+_LOGIN_REQUIRED_HI_CONFIDENCE_KEYWORDS = (
+    "401",
+    "登录态失效", "登录失效", "登录已失效", "请先登录", "未登录",
+    "未检测到 boss直聘登录状态",
+    "cookie 失效", "cookie已失效", "cookie 已失效",
+)
 
 
 def _has_unlock_signal(text: str) -> bool:
@@ -1837,7 +1877,7 @@ def _classify_failed_code(returncode: int, captured: str) -> str:
         return "source_request_limit_exceeded"
     text = (captured or "").lower()
     if returncode == 1:
-        if any(kw in text for kw in ("登录", "login", "cookie")):
+        if any(kw in text for kw in _LOGIN_REQUIRED_HI_CONFIDENCE_KEYWORDS):
             return "source_login_required"
         return "source_unknown_error"
     if returncode == 10:

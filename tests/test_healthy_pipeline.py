@@ -1117,6 +1117,32 @@ class Slice7And9ApiTests(unittest.TestCase):
             data.get("build_time", ""), r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$"
         )
 
+    def test_task_state_scrape_uses_checkpoint_after_resume(self):
+        """刷新时组合 checkpoint 前进，状态不得回退到旧 processed_count。"""
+        run_id = "scrape-checkpoint-refresh"
+        self.store.create_screening_run(run_id, source_count=10)
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="scrape", processed_count=3,
+        )
+        self.store.save_checkpoint(
+            run_id, "scrape", [f"kw-{i}|city" for i in range(6)],
+        )
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "running",
+            "progress": {"stage": "combo_done", "current": 3, "total": 10},
+            "logs": [], "result": None, "error": "",
+            "started_at": None, "finished_at": None,
+            "stop_event": threading.Event(),
+        }
+
+        response = self.client.get(f"/api/task-state/{run_id}")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        data = response.get_json()
+        self.assertEqual(data["processed"], 6)
+        self.assertEqual(data["success_count"], 6)
+        self.assertEqual(data["progress"]["current"], 6)
+
     def test_version_hash_covers_all_backend_modules(self):
         """共享状态/恢复模块变化也必须产生新的前后端构建身份。"""
         import hashlib
@@ -5265,6 +5291,118 @@ class Slice13ComboDoneHardStopTests(unittest.TestCase):
                         f"on_combo_done 失败必须 hard_stop，实际 {result}")
         self.assertEqual(result.get("hard_stop_code"), "internal_error",
                          f"hard_stop_code 必须 internal_error，实际 {result.get('hard_stop_code')}")
+
+class LoginRecheckTests(unittest.TestCase):
+    """登录失效二次复核：通过则重试本组合，确认失败则跳过并上报原因，不整场暂停。"""
+
+    class _Source:
+        platform = "boss"
+
+        def __init__(self, outcomes, recheck):
+            self.outcomes = list(outcomes)
+            self.recheck = recheck
+            self.fetch_calls = 0
+
+        def preflight(self):
+            from webui.source import SourceOutcome
+            return SourceOutcome.success()
+
+        def recheck_login(self):
+            return self.recheck
+
+        def fetch_list(self, plan_item, *, on_page_completed=None):
+            self.fetch_calls += 1
+            idx = min(self.fetch_calls - 1, len(self.outcomes) - 1)
+            return self.outcomes[idx]
+
+    @staticmethod
+    def _run(outcomes, recheck, params=None):
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+        source = LoginRecheckTests._Source(outcomes, recheck)
+        issues = []
+        with mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                        return_value=(True, "")), \
+             mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            result = run_search(
+                params or {"keyword": "A,B", "city": ["上海"]},
+                source, pages=1, sleeper=lambda _s: None,
+                on_issue=lambda combo, entry: issues.append((combo, dict(entry))),
+                close_chrome_on_success=False,
+            )
+        return source, result, issues
+
+    def test_recheck_passes_retries_and_recovers_combo(self):
+        from webui.source import SourceOutcome
+        source, result, issues = self._run(
+            [
+                SourceOutcome.failure(
+                    failed_code="source_login_required", safe_log="reason=疑似"),
+                SourceOutcome.success(jobs=[{"job_id": "j1", "source_url": "u1"}]),
+            ],
+            SourceOutcome.success(),
+            params={"keyword": "A", "city": ["上海"]},  # 单组合：1 次失败 + 1 次重试
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("hard_stop", result)
+        self.assertEqual(source.fetch_calls, 2)
+        self.assertEqual(result["total_scraped"], 1)
+        self.assertEqual(issues[0][1]["event"], "login_recheck_passed_retry")
+
+    def test_recheck_confirmed_skips_combo_and_continues(self):
+        from webui.source import SourceOutcome
+        source, result, issues = self._run(
+            [
+                SourceOutcome.failure(
+                    failed_code="source_login_required", safe_log="reason=确认"),
+                SourceOutcome.success(jobs=[{"job_id": "j2", "source_url": "u2"}]),
+            ],
+            SourceOutcome.failure(failed_code="source_login_required"),
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("hard_stop", result)
+        self.assertEqual(source.fetch_calls, 2)
+        self.assertEqual(result["total_scraped"], 1)
+        self.assertEqual(result["completed_combos"], ["B|上海"])
+        self.assertEqual(issues[0][1]["event"], "login_required_confirmed_skip")
+
+    def test_all_combos_confirmed_login_skip_no_hard_stop(self):
+        from webui.source import SourceOutcome
+        source, result, issues = self._run(
+            [SourceOutcome.failure(
+                failed_code="source_login_required", safe_log="reason=全部")],
+            SourceOutcome.failure(failed_code="source_login_required"),
+            params={"keyword": "A", "city": ["上海"]},
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertNotIn("hard_stop", result)
+        self.assertIn("因登录失效跳过了全部 1 个组合", result["error"])
+        self.assertEqual(source.fetch_calls, 1)
+        self.assertEqual(issues[0][1]["event"], "login_required_confirmed_skip")
+
+    def test_confirmed_login_skip_keeps_inter_combo_wait(self):
+        """登录复核确认失败跳过组合时，仍需保留组合间冷却等待。"""
+        from webui.pipeline_exec import run_search
+        from webui.source import SourceOutcome
+        source = LoginRecheckTests._Source(
+            [
+                SourceOutcome.failure(failed_code="source_login_required"),
+                SourceOutcome.failure(failed_code="source_login_required"),
+            ],
+            SourceOutcome.failure(failed_code="source_login_required"),
+        )
+        wakes = []
+        with mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                        return_value=(True, "")), \
+             mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            result = run_search(
+                {"keyword": "A,B", "city": ["上海"]},
+                source, pages=1, sleeper=lambda s: wakes.append(s),
+                close_chrome_on_success=False,
+            )
+        self.assertFalse(result["ok"], result)
+        self.assertNotIn("hard_stop", result)
+        self.assertEqual(len(wakes), 1)
 
 
 # ===========================================================================
