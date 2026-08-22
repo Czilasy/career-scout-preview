@@ -188,11 +188,14 @@ class CancelProcessTreeTests(unittest.TestCase):
             try:
                 if os.name == "nt":
                     # os.kill on Windows with signal 0 doesn't work reliably; use tasklist.
+                    # 中文 Windows 的 tasklist 输出为 GBK，text=True 按 UTF-8
+                    # 解码会失败并把 stdout 变成 None；PID 数字是 ASCII，
+                    # 直接按字节比较对任意编码都成立。
                     proc = _sp.run(
                         ["tasklist", "/FI", f"PID eq {child_pid}", "/NH", "/FO", "CSV"],
-                        capture_output=True, text=True, timeout=2,
+                        capture_output=True, timeout=2,
                     )
-                    child_alive = str(child_pid) in proc.stdout
+                    child_alive = str(child_pid).encode() in (proc.stdout or b"")
                 else:
                     os.kill(child_pid, 0)
                     child_alive = True

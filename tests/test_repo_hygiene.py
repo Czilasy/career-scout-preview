@@ -83,7 +83,6 @@ class RepoHygieneTests(unittest.TestCase):
             "node_modules/",
             "tests/run_isolated_webui.py",
             "tests/sc002_24h_monitor.py",
-            "tests/test_historical_recovery_realdb.py",
         ]
         missing = [rule for rule in required if rule not in text]
         self.assertEqual(missing, [])
@@ -171,7 +170,6 @@ class RepoHygieneTests(unittest.TestCase):
             ".env",
             "run_isolated_webui.py",
             "sc002_24h_monitor.py",
-            "test_historical_recovery_realdb.py",
         }
         forbidden_suffixes = (
             ".db",

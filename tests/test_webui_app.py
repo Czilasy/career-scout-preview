@@ -6969,8 +6969,9 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
 # 详见 contracts/http-api.md：
 # - L219-229：cancel 合同（run_id + platform + status，DB 权威、内存快照兜底）
 # - L247-251：/api/job-detail 成功响应含 platform + platform_job_id + jd
-# - L253-255：/api/pipeline/jobs/{platform_job_id}/jd（fallback 无 source_run_id
-#   是历史兼容路径，不得依赖 latest done run 猜平台）
+# - /api/pipeline/jobs/{platform_job_id}/jd：017-US4 起 source_run_id 必填，
+#   缺失返回 409 missing_source_run_id（specs/017-*/contracts/http-api.md，
+#   拒绝路径由 test_jd_refetch_without_source_run_id_rejected 覆盖）
 # - L334-336：/api/check 显式平台解析；智联不得调旧 BOSS scraper
 class ContractCompliancePatchTests(unittest.TestCase):
     """契约合规补丁：5 处修复的 HTTP 行为回归。"""
@@ -7149,43 +7150,9 @@ class ContractCompliancePatchTests(unittest.TestCase):
         self.assertFalse(fake_source.fetch_detail.called)
 
     # -- (e) /api/pipeline/jobs/<job_id>/jd fallback path --------------
-
-    def test_pipeline_job_jd_fallback_infers_boss_platform_from_url(self):
-        """契约 L253-255：无 source_run_id 的 fallback 路径从 source_url 推断
-        BOSS 平台，不依赖 latest done run（避免最新完成 run 是另一平台时
-        误用平台身份）。"""
-        from webui.source import SourceOutcome
-        fake_source = mock.MagicMock()
-        fake_source.fetch_detail.return_value = SourceOutcome.success(
-            detail={"jd": "岗位职责：后端开发与系统维护。"},
-            safe_log="detail ok",
-        )
-        with mock.patch("webui.app._BossCdpSource",
-                        return_value=fake_source) as boss_mock, \
-                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
-                           return_value=(True, "")):
-            resp = self.client.post(
-                "/api/pipeline/jobs/job-xyz/jd",
-                json={"source_url": "https://www.zhipin.com/job/xyz.html"},
-            )
-        self.assertEqual(resp.status_code, 200, resp.get_json())
-        data = resp.get_json()
-        self.assertTrue(data["ok"])
-        self.assertTrue(data["jd"])
-        # _BossCdpSource 被调用证明 fallback_platform == "boss"
-        # （若误判 zhilian，会调 ZhilianCdpSource 而非 _BossCdpSource，
-        # 且无 browser_account/cdp_port 时 _make_cdp_source 返回 None → 500）
-        self.assertTrue(boss_mock.called)
-        self.assertTrue(fake_source.fetch_detail.called)
-
-    def test_pipeline_job_jd_zhilian_without_source_run_id_rejects(self):
-        """契约 L253-255：智联补抓必须携带 source_run_id，不能按 URL 猜测。"""
-        resp = self.client.post(
-            "/api/pipeline/jobs/job-xyz/jd",
-            json={"source_url": "https://www.zhaopin.com/jobdetail/job-xyz.htm"},
-        )
-        self.assertEqual(resp.status_code, 409, resp.get_json())
-        self.assertEqual(resp.get_json().get("error_code"), "run_identity_conflict")
+    # 017-US4 起 fallback 的无 source_run_id 历史兼容路径已废除（统一
+    # 409 missing_source_run_id），BOSS/智联 URL 均不再猜测平台身份；
+    # 拒绝契约见 test_jd_refetch_without_source_run_id_rejected。
 
 
 class Task008BackendIntegrationTests(unittest.TestCase):
