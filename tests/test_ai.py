@@ -2841,5 +2841,40 @@ class MatchJdsDetailAdmissionTests(unittest.TestCase):
         })
 
 
+class BadResponseTypeGuardTests(unittest.TestCase):
+    """018：端点返回非列表 results/dropped 时按无结果降级，不抛 TypeError。"""
+
+    def test_match_jds_int_results_degrades_to_uncertain(self):
+        from webui import ai
+        jobs = [{"job_id": "j0", "title": "后端", "jd": "负责服务开发"}]
+        with patch("webui.ai.call_ai", return_value={"results": 40}):
+            result = ai.match_jds(jobs, "候选人画像", "https://x", "key")
+        self.assertEqual(result["verdicts"]["j0"]["verdict"], "uncertain")
+
+    def test_match_jds_non_list_results_variants_degrade(self):
+        from webui import ai
+        jobs = [{"job_id": "j0", "title": "后端", "jd": "负责服务开发"}]
+        for bad in (None, "ok", True, {"i": 0}):
+            with self.subTest(bad=bad), patch(
+                "webui.ai.call_ai", return_value={"results": bad},
+            ):
+                result = ai.match_jds(jobs, "候选人画像", "https://x", "key")
+            self.assertEqual(result["verdicts"]["j0"]["verdict"], "uncertain")
+
+    def test_screen_jobs_int_dropped_keeps_whole_batch(self):
+        from webui import ai
+        jobs = [{"job_id": f"j{i}", "title": "T", "salary": "10K",
+                 "location": "上海"} for i in range(3)]
+        with patch("webui.ai.call_ai", return_value={"dropped": 40}):
+            result = ai.screen_jobs(
+                jobs, {"profile_summary": "画像"}, "https://x", "key",
+            )
+        self.assertEqual(result["kept"], ["j0", "j1", "j2"])
+        self.assertEqual(result["dropped"], [])
+        self.assertTrue(
+            all(v["verdict"] == "kept" for v in result["verdicts"].values())
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

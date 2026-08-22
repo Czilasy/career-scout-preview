@@ -2183,6 +2183,212 @@ class ScreenContinueFlowTests(unittest.TestCase):
         self.assertEqual((latest.get("result") or {}).get("profile_summary"), "测试画像")
         self.assertEqual((latest.get("result") or {}).get("profile_facts"), {"years": 3})
 
+    def test_resume_chain_restores_full_survivors_after_collapse(self):
+        """018 事故链回归：完整判定挂在链首 run，续跑幸存者不塌缩。
+
+        run1 名下 277 条粗筛判定（165 kept + 112 dropped）+ 277 断点；
+        run2（续跑目标）名下仅 40 条精筛判定 + 继承的 277 断点；
+        run3 续跑 → 幸存者 165、40 条精筛判定被继承、无岗位静默消失。
+        """
+        from webui import pipeline_exec
+        kept_n, dropped_n, fine_n = 165, 112, 40
+        jobs = [
+            {"job_id": f"j{i:03d}", "platform_job_id": f"j{i:03d}",
+             "title": "岗位", "salary": "20K", "location": "上海",
+             "source_url": f"https://zhipin.example/j{i:03d}.html"}
+            for i in range(kept_n + dropped_n)
+        ]
+        kept_ids = [f"j{i:03d}" for i in range(kept_n)]
+        dropped_ids = [f"j{kept_n + i:03d}" for i in range(dropped_n)]
+        scrape_id = self._create_completed_scrape_run()
+        self.app.config["PIPELINE_TASKS"][scrape_id]["result"] = {
+            "ok": True, "jobs": jobs, "total_scraped": len(jobs),
+            "total_matched": 0, "completed_combos": ["kw|city"],
+        }
+        run1 = "chain-run1"
+        self._seed_ai_run(scrape_id, run1, status="failed")
+        self.store.save_screening_verdicts(run1, {
+            **{jid: "kept" for jid in kept_ids},
+            **{jid: "dropped" for jid in dropped_ids},
+        })
+        self.store.save_checkpoint(run1, "ai_rough", kept_ids + dropped_ids)
+        run2 = "chain-run2"
+        self._seed_ai_run(scrape_id, run2, status="failed")
+        fine_ids = kept_ids[:fine_n]
+        self.store.save_screening_verdicts(run2, {
+            jid: {"verdict": "not_match", "reason": "跨链路",
+                  "caveats": [], "flags": []}
+            for jid in fine_ids
+        })
+        self.store.save_checkpoint(run2, "ai_rough", kept_ids + dropped_ids)
+        self.store.save_checkpoint(run2, "ai_fine", fine_ids)
+
+        captured = []
+        with mock.patch.object(
+            self.app.config["PIPELINE_EXECUTOR"], "submit",
+            side_effect=lambda fn, *a, **kw: captured.append((fn, a, kw)) or None,
+        ):
+            resp = self.client.post("/api/ai-screen", json={
+                "scrape_task_id": scrape_id,
+                "screening_fields": {"salary": ["20-30K"]},
+                "profile_summary": "测试画像",
+                "profile_facts": {"years": 3},
+                "filter_schema_version": 1,
+            })
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertTrue(resp.get_json()["resuming"])
+        task_id = resp.get_json()["task_id"]
+        fn, args, kwargs = captured[0]
+
+        screen_calls, match_calls = [], []
+
+        def _fake_screen_jobs(jobs_arg, *a, **kw):
+            screen_calls.append(list(jobs_arg))
+            return {"kept": [], "dropped": [], "verdicts": {}}
+
+        def _fake_match_jds(jobs_arg, *a, **kw):
+            match_calls.append(list(jobs_arg))
+            verdicts = {
+                str(j["job_id"]): {"verdict": "match", "reason": "匹配",
+                                   "caveats": [], "flags": []}
+                for j in jobs_arg
+            }
+            if verdicts and kw.get("on_batch_done"):
+                kw["on_batch_done"](
+                    verdicts, [str(j["job_id"]) for j in jobs_arg])
+            return {"verdicts": verdicts}
+
+        def _fake_fetch_details(chunk, source, **kw):
+            return {
+                "jobs": [dict(j, jd="岗位描述") for j in chunk],
+                "hard_stop": False, "stopped": False,
+            }
+
+        with mock.patch.object(
+            pipeline_exec, "resolve_browser_account", return_value="",
+        ), mock.patch.object(pipeline_exec, "set_active_cdp_data_dir"), \
+           mock.patch.object(
+               pipeline_exec, "ensure_chrome_ready",
+               return_value=(True, "")), \
+           mock.patch.object(pipeline_exec, "close_debug_chrome"), \
+           mock.patch.object(
+               pipeline_exec, "fetch_job_details",
+               side_effect=_fake_fetch_details), \
+           mock.patch.object(
+               self.store, "get_ai_settings",
+               return_value={"endpoint_url": "http://ai.test", "model": "m",
+                             "is_configured": True},
+           ), mock.patch(
+               "webui.app.ai_service.is_ai_available", return_value=True,
+           ), mock.patch(
+               "webui.ai.screen_jobs", side_effect=_fake_screen_jobs,
+           ), mock.patch(
+               "webui.ai.match_jds", side_effect=_fake_match_jds,
+           ):
+            fn(*args, **kwargs)
+
+        run = self.store.get_screening_run(task_id)
+        self.assertEqual(run["total_kept"], kept_n)
+        self.assertEqual(run["total_dropped"], dropped_n)
+        self.assertEqual(run["status"], "succeeded")
+        # 链首 277 断点齐全：粗筛零重筛（旧代码会重筛或塌缩幸存者）
+        self.assertEqual(screen_calls, [[]])
+        # 40 条精筛判定被继承，只精筛剩余 125 条
+        self.assertEqual(len(match_calls), 1)
+        self.assertEqual(len(match_calls[0]), kept_n - fine_n)
+        # 无岗位静默消失：幸存者 + 移除 = 全部岗位
+        self.assertEqual(run["total_kept"] + run["total_dropped"], len(jobs))
+        # 正常完成：历史恰好一条轮（018 换序后正常路径仍写轮）
+        self.assertEqual(len(self.store.list_history_rounds()), 1)
+
+    def test_finalize_mismatch_fails_without_history_round(self):
+        """018：终态校验失败抛错时库里没有任何 done 轮（幽灵轮事故回归）。"""
+        from webui import pipeline_exec
+        jobs = [
+            {"job_id": f"j{i}", "platform_job_id": f"j{i}", "title": "岗位",
+             "source_url": f"https://zhipin.example/j{i}.html"}
+            for i in range(3)
+        ]
+        scrape_id = self._create_completed_scrape_run()
+        self.app.config["PIPELINE_TASKS"][scrape_id]["result"] = {
+            "ok": True, "jobs": jobs, "total_scraped": 3,
+            "total_matched": 0, "completed_combos": ["kw|city"],
+        }
+        captured = []
+        with mock.patch.object(
+            self.app.config["PIPELINE_EXECUTOR"], "submit",
+            side_effect=lambda fn, *a, **kw: captured.append((fn, a, kw)) or None,
+        ):
+            resp = self.client.post("/api/ai-screen", json={
+                "scrape_task_id": scrape_id,
+                "screening_fields": {"salary": ["20-30K"]},
+                "profile_summary": "测试画像",
+                "profile_facts": {"years": 3},
+                "filter_schema_version": 1,
+            })
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        task_id = resp.get_json()["task_id"]
+        fn, args, kwargs = captured[0]
+
+        def _fake_screen_jobs(jobs_arg, *a, **kw):
+            # j3 既不保留也不移除：计数对不上，finalize 必判 paused
+            return {
+                "kept": ["j0"],
+                "dropped": [{"job_id": "j1", "title": "岗位", "reason": "经验不符"}],
+                "verdicts": {"j0": "kept", "j1": "dropped"},
+            }
+
+        def _fake_match_jds(jobs_arg, *a, **kw):
+            verdicts = {
+                str(j["job_id"]): {"verdict": "match", "reason": "匹配",
+                                   "caveats": [], "flags": []}
+                for j in jobs_arg
+            }
+            if verdicts and kw.get("on_batch_done"):
+                kw["on_batch_done"](
+                    verdicts, [str(j["job_id"]) for j in jobs_arg])
+            return {"verdicts": verdicts}
+
+        def _fake_fetch_details(chunk, source, **kw):
+            return {
+                "jobs": [dict(j, jd="岗位描述") for j in chunk],
+                "hard_stop": False, "stopped": False,
+            }
+
+        with mock.patch.object(
+            pipeline_exec, "resolve_browser_account", return_value="",
+        ), mock.patch.object(pipeline_exec, "set_active_cdp_data_dir"), \
+           mock.patch.object(
+               pipeline_exec, "ensure_chrome_ready",
+               return_value=(True, "")), \
+           mock.patch.object(pipeline_exec, "close_debug_chrome"), \
+           mock.patch.object(
+               pipeline_exec, "fetch_job_details",
+               side_effect=_fake_fetch_details), \
+           mock.patch.object(
+               self.store, "get_ai_settings",
+               return_value={"endpoint_url": "http://ai.test", "model": "m",
+                             "is_configured": True},
+           ), mock.patch(
+               "webui.app.ai_service.is_ai_available", return_value=True,
+           ), mock.patch(
+               "webui.ai.screen_jobs", side_effect=_fake_screen_jobs,
+           ), mock.patch(
+               "webui.ai.match_jds", side_effect=_fake_match_jds,
+           ):
+            fn(*args, **kwargs)
+
+        run = self.store.get_screening_run(task_id)
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["error_code"], "internal_error")
+        self.assertEqual(
+            self.app.config["PIPELINE_TASKS"][task_id]["status"], "failed")
+        # 幽灵轮回归：校验失败时不得留下任何 done 历史
+        self.assertEqual(self.store.list_history_rounds(), [])
+        events = self.store.list_task_events(task_id)
+        self.assertFalse(
+            any(event["type"] == "history_snapshot" for event in events))
+
 class ChromeAccountProfileSwitchTests(unittest.TestCase):
     """账号切换时，端口上旧账号的 Chrome 必须被替换而不是复用。"""
 

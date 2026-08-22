@@ -129,7 +129,6 @@ _OPERATIONAL_ERRORS = (
 
 
 from webui.task_runners import (
-    _FINE_VERDICTS,
     DEFAULT_STATE_DIR,
     SCRAPER,
     TaskRunner,
@@ -3102,6 +3101,7 @@ def create_app(config=None):
                 resume_verdicts = load_resume_verdicts_with_fallback(
                     store, resume_from_run_id, frozen_platform,
                     scrape_task_id, screening_fields, profile_summary,
+                    profile_facts=profile_facts,
                 )
                 old_jd_path = _jd_checkpoint_path(
                     app.config["RESULT_DIR"], resume_from_run_id)
@@ -3150,22 +3150,32 @@ def create_app(config=None):
                 _rough_done_ids = store.load_checkpoint(
                     resume_from_run_id, "ai_rough"
                 )
-                # 从 DB 查真实 verdict，不默认全部 kept
-                _db_verdicts = store.load_screening_verdicts(resume_from_run_id)
-                for _jid, _vobj in _db_verdicts.items():
-                    _resume_verdicts[_jid] = (
-                        _vobj.get("verdict", "") if isinstance(_vobj, dict) else ""
+                # 判定取同源链合并结果（resume_verdicts）：完整判定可能挂在
+                # 链上更早的 run 名下（018 事故），只读最近一条 run 会看不见
+                # 全部 dropped/精筛判定。值形态兼容 dict 与早期纯字符串。
+                for _jid, _vobj in (resume_verdicts or {}).items():
+                    _resume_verdicts[str(_jid)] = (
+                        _vobj.get("verdict", "") if isinstance(_vobj, dict)
+                        else str(_vobj or "")
                     )
             _rough_todo = [j for j in raw_jobs
                            if str(j.get("job_id", "")) not in _rough_done_ids] if _rough_done_ids else raw_jobs
-            # 粗筛历史使用 kept/dropped；兼容早期写成 match 的记录。
+            # 018：断点内的岗位默认保留，仅判定链上明确 dropped 才移除；
+            # 判定记录缺失的岗位不再被静默丢弃（旧数据纯字符串与早期
+            # 误写的 "match" 在该语义下自动兼容）。
             _rough_kept_from_resume = [
                 j for j in raw_jobs
                 if str(j.get("job_id", "")) in _rough_done_ids
-                and _resume_verdicts.get(str(j.get("job_id", "")), "")
-                in (_FINE_VERDICTS | {"kept"})
+                and _resume_verdicts.get(str(j.get("job_id", "")), "") != "dropped"
             ] if _rough_done_ids else []
             _rough_completed_ids = set(_rough_done_ids)
+            # 护栏：判定数仍少于断点数说明链上有岗位没有任何判定记录，
+            # 只记事件供排查，不阻断续跑。
+            if resume_from_run_id and len(resume_verdicts) < len(_rough_done_ids):
+                store.append_task_event(task_id, "resume_inconsistent", {
+                    "verdicts": len(resume_verdicts),
+                    "checkpoint": len(_rough_done_ids),
+                })
 
             try:
                 def _rough_batch_done(batch_verdicts, completed_job_ids):
@@ -3239,7 +3249,11 @@ def create_app(config=None):
             }
             if resume_from_run_id:
                 for item in _resume_dropped_from_verdicts(raw_jobs, resume_verdicts):
-                    dropped_by_id.setdefault(str(item.get("job_id") or ""), item)
+                    _drop_jid = str(item.get("job_id") or "")
+                    # 断点塌缩后部分岗位会重新粗筛；本轮判 kept 的不并入
+                    # dropped（重筛结果新于链上旧判定），避免同一岗位双列表。
+                    if _drop_jid not in kept_ids:
+                        dropped_by_id.setdefault(_drop_jid, item)
             dropped = list(dropped_by_id.values())
             store.save_checkpoint(
                 task_id,
@@ -3619,6 +3633,46 @@ def create_app(config=None):
                     },
                 ))
             store.append_task_events(task_id, job_events)
+            mismatch_count = sum(
+                1 for job in enriched if job.get("verdict") == "not_match"
+            )
+            pending_count = sum(
+                1 for job in enriched
+                if job.get("verdict") not in ("match", "not_match", "mismatch")
+            )
+            processed_count = match_count + mismatch_count
+            _write_run_unless_finished(
+                task_id,
+                match_count=match_count,
+                mismatch_count=mismatch_count,
+                pending_count=pending_count,
+                processed_count=processed_count,
+                total_scraped=len(raw_jobs),
+                total_kept=len(enriched),
+                total_dropped=len(dropped),
+                current_stage="done",
+            )
+            terminal_message = (
+                f"筛选完成，但有 {pending_count} 条待确认：匹配 {match_count} 条"
+                if pending_count else f"筛选完成：匹配 {match_count} 条"
+            )
+            # 最终事件也是持久化契约的一部分；先写事件，再提交终态，避免
+            # DB 已终态后事件写失败造成内存 failed / DB completed 分裂。
+            emit(stage="done", total_matched=match_count,
+                 message=terminal_message)
+            # 018：终态校验先于写历史轮——校验失败抛错时库里没有任何
+            # done 轮，杜绝"任务 failed 但历史多一条幽灵轮"的事故。
+            if _is_user_finished(task_id):
+                final_db_status = "partial"
+            else:
+                final_db_status = store.finalize_run_status(task_id)
+                if final_db_status not in ("succeeded", "partial"):
+                    if _is_user_finished(task_id):
+                        final_db_status = "partial"
+                    else:
+                        raise RuntimeError(
+                            f"invalid_ai_terminal_status:{final_db_status}"
+                        )
             # B038: 命中已保存的未筛选轮则原地升级（同一 run_id），否则新建。
             # 017-US2: 写入统一走 result_rounds.save_finished_round（一条流程一条轮）。
             from webui.screen_flow import build_round_script_params
@@ -3636,7 +3690,6 @@ def create_app(config=None):
                 finished_at=int(time.time() * 1000),
             )
             result["source_run_id"] = source_run_id
-            _prune_history_best_effort()
             try:
                 _saved_run = store.get_screening_run(source_run_id) or {}
                 store.append_task_event(task_id, "history_snapshot", {
@@ -3647,44 +3700,7 @@ def create_app(config=None):
                 })
             except _OPERATIONAL_ERRORS:
                 pass
-            mismatch_count = sum(
-                1 for job in enriched if job.get("verdict") == "not_match"
-            )
-            pending_count = sum(
-                1 for job in enriched
-                if job.get("verdict") not in ("match", "not_match", "mismatch")
-            )
-            processed_count = match_count + mismatch_count
-            terminal_message = (
-                f"筛选完成，但有 {pending_count} 条待确认：匹配 {match_count} 条"
-                if pending_count else f"筛选完成：匹配 {match_count} 条"
-            )
-            # 最终事件也是持久化契约的一部分；先写事件，再提交终态，避免
-            # DB 已终态后事件写失败造成内存 failed / DB completed 分裂。
-            emit(stage="done", total_matched=match_count,
-                 message=terminal_message)
-            _write_run_unless_finished(
-                task_id,
-                match_count=match_count,
-                mismatch_count=mismatch_count,
-                pending_count=pending_count,
-                processed_count=processed_count,
-                total_scraped=len(raw_jobs),
-                total_kept=len(enriched),
-                total_dropped=len(dropped),
-                current_stage="done",
-            )
-            if _is_user_finished(task_id):
-                final_db_status = "partial"
-            else:
-                final_db_status = store.finalize_run_status(task_id)
-                if final_db_status not in ("succeeded", "partial"):
-                    if _is_user_finished(task_id):
-                        final_db_status = "partial"
-                    else:
-                        raise RuntimeError(
-                            f"invalid_ai_terminal_status:{final_db_status}"
-                        )
+            _prune_history_best_effort()
             with _pipeline_lock:
                 task = _pipeline_tasks.get(task_id)
                 if task is not None:

@@ -114,36 +114,36 @@ def load_resume_jd(store, jd_checkpoint_path, run_id):
 
 
 def load_resume_verdicts_with_fallback(
-    store, run_id, platform, scrape_task_id, screening_fields, profile_summary
+    store, run_id, platform, scrape_task_id, screening_fields, profile_summary,
+    profile_facts=None,
 ):
-    """续跑判定优先读 run 自身；粗筛 checkpoint 比判定多时从同轮快照回退。
+    """续跑判定优先读 run 自身；粗筛 checkpoint 比判定多时从同源链合并。
 
-    历史版本的硬规则剔除没有逐条写入 screening_results，但结果快照里保存了
-    完整判定；回退只合并同来源、同条件、同画像的最新快照，避免续跑整批重跑。
+    历史版本的硬规则剔除没有逐条写入 screening_results，但同源链上的
+    其他 run 保存了完整判定（018 事故：完整判定挂在链上第一条 run 名下）。
+    回退只合并同来源、同条件、同画像、同画像事实的 run（排除自身），按
+    created_at 从旧到新合并、新的覆盖旧的，避免续跑整批重跑或幸存者塌缩。
+    ``platform`` 仅保持既有签名兼容，合并不再依赖结果快照。
     """
     verdicts = store.load_screening_verdicts(run_id)
     checkpoint_ids = list(store.load_checkpoint(run_id, "ai_rough") or [])
     if not checkpoint_ids or len(verdicts) >= len(checkpoint_ids):
         return verdicts
-    payload = store.load_latest_pipeline_result_for_platform(platform)
-    if payload is None:
+    merged = {}
+    for run in store.latest_screen_runs_for_source(scrape_task_id) or []:
+        if str(run.get("id") or "") == str(run_id):
+            continue
+        params = run.get("execution_params") or {}
+        if run.get("frozen_filters") != screening_fields:
+            continue
+        if str(params.get("profile_summary") or "") != str(profile_summary or ""):
+            continue
+        if not _same_facts(params.get("profile_facts"), profile_facts):
+            continue
+        merged.update(store.load_screening_verdicts(str(run.get("id") or "")))
+    if not merged:
         return verdicts
-    if str(payload.get("scrape_task_id") or "") != str(scrape_task_id or ""):
-        return verdicts
-    snapshot_screening = (payload.get("script_params") or {}).get("screening")
-    if snapshot_screening is not None and snapshot_screening != screening_fields:
-        return verdicts
-    if str((payload.get("result") or {}).get("profile_summary") or "") != str(
-        profile_summary or ""
-    ):
-        return verdicts
-    snapshot_run_id = str(payload.get("run_id") or "")
-    if not snapshot_run_id or snapshot_run_id == str(run_id):
-        return verdicts
-    snapshot_verdicts = store.load_screening_verdicts(snapshot_run_id)
-    if not snapshot_verdicts:
-        return verdicts
-    return {**snapshot_verdicts, **verdicts}
+    return {**merged, **verdicts}
 
 
 def resolve_snapshot_source_run(store, run):

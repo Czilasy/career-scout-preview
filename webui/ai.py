@@ -1550,7 +1550,8 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 retry_limits=retry_limits,
                 correlation_id=correlation_id,
             )
-            dropped_list = data.get("dropped", []) if isinstance(data, dict) else []
+            raw_dropped = data.get("dropped", []) if isinstance(data, dict) else []
+            dropped_list = raw_dropped if isinstance(raw_dropped, list) else []
             by_i = {r.get("i"): r for r in dropped_list if isinstance(r, dict)}
         except AISecurityError as exc:
             # 切片6：systemic 错误（限流/额度/密钥/网络）立即抛，让调用方暂停
@@ -1851,7 +1852,8 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 retry_limits=retry_limits,
                 correlation_id=correlation_id,
             )
-            results = data.get("results", []) if isinstance(data, dict) else []
+            raw_results = data.get("results", []) if isinstance(data, dict) else []
+            results = raw_results if isinstance(raw_results, list) else []
             by_i = {r.get("i"): r for r in results if isinstance(r, dict)}
         except AISecurityError as exc:
             # 切片6：systemic 错误立即抛，让调用方暂停（不批量变 uncertain 后完成）

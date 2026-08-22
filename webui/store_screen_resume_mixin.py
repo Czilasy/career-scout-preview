@@ -35,18 +35,29 @@ class StoreScreenResumeMixin:
                 out[key] = jd
         return out
 
-    def latest_screen_runs_for_source(self, source_task_id, statuses):
+    def latest_screen_runs_for_source(self, source_task_id, statuses=None):
         """按 ``statuses`` 顺序返回每个状态各自最新的筛选 run。
 
         每个状态独立按 ``updated_at DESC`` 取最近一行，返回顺序即调用方
-        传入的状态顺序，供续跑候选优先级使用。
+        传入的状态顺序，供续跑候选优先级使用；``statuses=None`` 时不筛
+        状态、按 ``created_at`` 升序返回全部非快照 run，供同源判定链
+        合并（018）使用。
         """
         source_task_id = str(source_task_id or "")
         if not source_task_id:
             return []
         rows = []
         with self._connection() as conn:
-            for status in statuses or ():
+            if statuses is None:
+                rows = conn.execute(
+                    "SELECT * FROM screening_runs "
+                    "WHERE json_extract(execution_params_json, '$.scrape_task_id') = ? "
+                    "AND record_kind != 'result_snapshot' "
+                    "ORDER BY created_at ASC, rowid ASC",
+                    (source_task_id,),
+                ).fetchall()
+                return [self._screening_run_row(row) for row in rows]
+            for status in statuses:
                 row = conn.execute(
                     "SELECT * FROM screening_runs "
                     "WHERE json_extract(execution_params_json, '$.scrape_task_id') = ? "

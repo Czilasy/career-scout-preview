@@ -259,6 +259,8 @@ class LoadResumeJdTests(unittest.TestCase):
 
 
 class LoadResumeVerdictsTests(unittest.TestCase):
+    """018：判定回退 = 同源链合并（同抓取、同条件、同画像、新覆盖旧）。"""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.store = TaskStore(pathlib.Path(self.temp.name) / "state" / "webui.db")
@@ -267,45 +269,93 @@ class LoadResumeVerdictsTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def _seed_partial_run(self, run_id="partial-run", filters=None, profile="3年Python后端", facts=None):
-        _make_ai_run(self.store, run_id, status="partial", filters=filters or FILTERS, profile=profile, facts=facts if facts is not None else FACTS)
-        self.store.save_checkpoint(run_id, "ai_rough", ["a", "b", "c"])
-        self.store.save_screening_verdicts(run_id, {"a": {"verdict": "kept", "reason": ""}})
+    def _seed_chain_run(self, run_id, verdicts=None, checkpoint=None,
+                        filters=None, profile="3年Python后端", facts=None):
+        _make_ai_run(
+            self.store, run_id, status="failed",
+            filters=filters if filters is not None else FILTERS,
+            profile=profile, facts=facts if facts is not None else FACTS,
+        )
+        if checkpoint is not None:
+            self.store.save_checkpoint(run_id, "ai_rough", checkpoint)
+        if verdicts:
+            self.store.save_screening_verdicts(run_id, verdicts)
         return run_id
 
-    def _save_snapshot(self, filters=None, profile="3年Python后端", scrape_task_id="scrape-1"):
-        return self.store.save_pipeline_result(
-            {
-                "ok": True,
-                "jobs": [{"platform_job_id": "a", "title": "A", "verdict": "kept"}],
-                "dropped": [
-                    {"platform_job_id": "b", "title": "B", "reason": "经验不符"},
-                    {"platform_job_id": "c", "title": "C", "reason": "薪资不符"},
-                ],
-                "total_scraped": 3, "total_kept": 1, "total_dropped": 2,
-                "profile_summary": profile,
-            },
-            {
-                "screening": filters if filters is not None else FILTERS,
-                "platform": "boss", "scrape_task_id": scrape_task_id,
-            },
-            execution_params={"platform": "boss", "scrape_task_id": scrape_task_id},
+    def _load(self, run_id):
+        return load_resume_verdicts_with_fallback(
+            self.store, run_id, "boss", "scrape-1", FILTERS,
+            "3年Python后端", profile_facts=FACTS)
+
+    def test_merges_same_source_chain_verdicts(self):
+        """完整判定挂在链上第一条 run 名下时，续跑合并后全部可见。"""
+        self._seed_chain_run(
+            "run1",
+            {"a": {"verdict": "kept", "reason": ""},
+             "b": {"verdict": "dropped", "reason": "经验不符"},
+             "c": {"verdict": "dropped", "reason": "薪资不符"}},
+            checkpoint=["a", "b", "c"],
         )
-
-    def test_falls_back_to_same_round_snapshot_verdicts(self):
-        run_id = self._seed_partial_run()
-        self._save_snapshot()
-        verdicts = load_resume_verdicts_with_fallback(
-            self.store, run_id, "boss", "scrape-1", FILTERS, "3年Python后端")
+        current = self._seed_chain_run(
+            "current",
+            {"a": {"verdict": "not_match", "reason": "跨链路"}},
+            checkpoint=["a", "b", "c"],
+        )
+        verdicts = self._load(current)
         self.assertEqual(set(verdicts), {"a", "b", "c"})
+        # 当前 run 自身判定最终覆盖链上旧判定
+        self.assertEqual(verdicts["a"]["verdict"], "not_match")
         self.assertEqual(verdicts["b"]["verdict"], "dropped")
-        self.assertEqual(verdicts["a"]["verdict"], "kept")
+        self.assertEqual(verdicts["c"]["verdict"], "dropped")
 
-    def test_skips_snapshot_when_conditions_differ(self):
-        run_id = self._seed_partial_run()
-        self._save_snapshot(filters={"salary": ["30-50K"]})
-        verdicts = load_resume_verdicts_with_fallback(
-            self.store, run_id, "boss", "scrape-1", FILTERS, "3年Python后端")
+    def test_newer_run_overrides_older_across_chain(self):
+        self._seed_chain_run("old", {"x": {"verdict": "kept", "reason": ""}})
+        self._seed_chain_run("mid", {"x": {"verdict": "not_match", "reason": "跨链路"}})
+        current = self._seed_chain_run("current", checkpoint=["x"])
+        verdicts = self._load(current)
+        self.assertEqual(verdicts["x"]["verdict"], "not_match")
+
+    def test_skips_runs_with_different_conditions(self):
+        self._seed_chain_run(
+            "run1",
+            {"b": {"verdict": "dropped", "reason": "经验不符"}},
+            filters={"salary": ["30-50K"]},
+        )
+        current = self._seed_chain_run(
+            "current",
+            {"a": {"verdict": "kept", "reason": ""}},
+            checkpoint=["a", "b"],
+        )
+        verdicts = self._load(current)
+        self.assertEqual(set(verdicts), {"a"})
+
+    def test_skips_runs_with_different_profile_or_facts(self):
+        self._seed_chain_run(
+            "run1", {"b": {"verdict": "dropped", "reason": "经验不符"}},
+            profile="另一个画像",
+        )
+        self._seed_chain_run(
+            "run2", {"c": {"verdict": "dropped", "reason": "薪资不符"}},
+            facts={"stable_key": "years", "value": "5"},
+        )
+        current = self._seed_chain_run(
+            "current",
+            {"a": {"verdict": "kept", "reason": ""}},
+            checkpoint=["a", "b", "c"],
+        )
+        verdicts = self._load(current)
+        self.assertEqual(set(verdicts), {"a"})
+
+    def test_returns_own_verdicts_when_checkpoint_covered(self):
+        """判定数 >= 断点数时不触发回退，返回 run 自身判定。"""
+        self._seed_chain_run(
+            "run1", {"b": {"verdict": "dropped", "reason": "经验不符"}})
+        current = self._seed_chain_run(
+            "current",
+            {"a": {"verdict": "kept", "reason": ""}},
+            checkpoint=["a"],
+        )
+        verdicts = self._load(current)
         self.assertEqual(set(verdicts), {"a"})
 
 
