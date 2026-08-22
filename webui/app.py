@@ -94,7 +94,7 @@ from webui.error_registry import resolve_code
 from webui.store import SYSTEMIC_BLOCK_CODES, DiscoveryStoreConflictError, TaskStore
 from webui.result_history import ResultHistoryService
 from webui.result_history_api import register_result_history_routes
-from webui.scrape_only import save_scrape_snapshot, save_screen_result
+from webui.result_rounds import save_scraped_only_round
 from webui.workbench import (
     merge_profile_fields,
     normalize_job_link,
@@ -145,19 +145,6 @@ from webui.task_runners import (
     _theme_path,
 )
 
-
-def _run_to_task_status(db_status: str) -> str:
-    """DB 状态 → 统一任务状态名（FR-005）。"""
-    mapping = {
-        "queued": "waiting",
-        "running": "running",
-        "paused": "paused",
-        "succeeded": "completed",
-        "partial": "completed_with_pending",
-        "failed": "failed",
-        "interrupted": "cancelled",
-    }
-    return mapping.get(db_status, "failed")
 
 def _public_task_status(status: str, interruption_kind: str | None = None) -> str:
     """Canonical DB/内存状态 → 公共 API 状态（http-api.md 公共状态映射）。"""
@@ -457,100 +444,6 @@ def create_app(config=None):
             history_service.prune_retention()
         except _OPERATIONAL_ERRORS:
             pass  # 保留清理失败不阻断任务主流程
-
-    def _save_cancelled_history_snapshot(run, task):
-        """取消结束但已有岗位时，写终态前保存本轮快照（FR-019）。"""
-        from webui.screen_flow import build_round_script_params
-        try:
-            if run is None:
-                return None
-            run_id = str(run["id"])
-            if run.get("record_kind") == "result_snapshot" or store.history_round_exists(run_id):
-                return None
-            if any(event["type"] == "history_snapshot"
-                   for event in store.list_task_events(run_id)):
-                return None
-            params = dict(run.get("execution_params") or {})
-            platform = str(
-                params.get("platform") or run.get("platform")
-                or (task or {}).get("platform") or ""
-            )
-            if not platform:
-                return None
-            in_memory = (task or {}).get("result") if isinstance(task, dict) else None
-            source_jobs = []
-            source_dropped = []
-            total_scraped = None
-            scrape_task_id = str(params.get("scrape_task_id") or "")
-            source_run_id = str(params.get("source_run_id") or "")
-            if isinstance(in_memory, dict) and (
-                in_memory.get("jobs") or in_memory.get("dropped")
-            ):
-                source_jobs = in_memory.get("jobs") or []
-                source_dropped = in_memory.get("dropped") or []
-                total_scraped = in_memory.get("total_scraped")
-            elif scrape_task_id:
-                source_jobs = store.load_scrape_run_jobs(scrape_task_id)
-            elif source_run_id:
-                payload = store.load_latest_pipeline_result(source_run_id)
-                source_jobs = ((payload or {}).get("result") or {}).get("jobs") or []
-                source_dropped = ((payload or {}).get("result") or {}).get("dropped") or []
-                total_scraped = ((payload or {}).get("result") or {}).get("total_scraped")
-            elif str(run.get("current_stage") or "") == "scrape":
-                scrape_task_id = run_id
-                source_jobs = store.load_scrape_run_jobs(run_id)
-            if not source_jobs and not source_dropped:
-                return None
-            verdicts = store.load_screening_verdicts(run_id)
-            pending_rows = store.load_screening_pending(run_id)
-            if not verdicts and not pending_rows and scrape_task_id and scrape_task_id != run_id:
-                verdicts = store.load_screening_verdicts(scrape_task_id)
-                pending_rows = store.load_screening_pending(scrape_task_id)
-            jd_map = {}
-            try:
-                jd_map = _load_jd_checkpoint(
-                    _jd_checkpoint_path(app.config["RESULT_DIR"], run_id))
-            except RuntimeError:
-                jd_map = {}
-            profile_summary = str(
-                params.get("profile_summary") or run.get("profile_summary") or ""
-            )
-            profile_facts = params.get("profile_facts") or None
-            result = _build_partial_pipeline_result(
-                source_jobs, verdicts, pending_rows, jd_map,
-                profile_summary,
-                source_dropped=source_dropped,
-                total_scraped=total_scraped,
-                platform=platform,
-                profile_facts=profile_facts,
-            )
-            if not result.get("jobs") and not result.get("dropped"):
-                return None
-            snapshot_id = store.save_pipeline_result(
-                result,
-                build_round_script_params(store, run, run.get("frozen_filters") or {}, platform),
-                started_at=run.get("started_at") or (task or {}).get("started_at"),
-                finished_at=int(time.time() * 1000),
-                execution_config=params.get("execution_config") or {},
-                status="cancelled",
-                execution_params={
-                    "platform": platform,
-                    "scrape_task_id": (
-                        scrape_task_id
-                        or (run_id if str(run.get("current_stage") or "") == "scrape" else "")
-                    ),
-                },
-            )
-            store.append_task_event(run_id, "history_snapshot", {
-                "snapshot_run_id": snapshot_id,
-                "status": "cancelled",
-                "jobs": len(result.get("jobs") or []),
-                "dropped": len(result.get("dropped") or []),
-            })
-            _prune_history_best_effort()
-            return snapshot_id
-        except Exception:
-            return None  # 快照兜底失败不阻断取消
 
     from webui.tuning import TuningController
     TuningController(store).recover_after_restart()
@@ -2999,22 +2892,7 @@ def create_app(config=None):
                 return "pause" if t.get("stop_mode") == "pause" else "cancel"
 
         def _mark_paused():
-            """用户暂停：先保存部分结果快照，再把原 run 写为 paused。"""
-            from webui.screen_flow import build_round_script_params
-            run = store.get_screening_run(task_id) or {}
-            params = dict(run.get("execution_params") or {})
-            platform = str(params.get("platform") or run.get("platform") or frozen_platform or "boss")
-            screening = run.get("frozen_filters") or {}
-            _try_save_failure_snapshot(
-                "partial",
-                script_params_override=build_round_script_params(
-                    store, run, screening, platform),
-                execution_params_override={
-                    "platform": platform,
-                    "scrape_task_id": scrape_task_id,
-                    "screen_run_id": task_id,
-                },
-            )
+            """用户暂停：把原 run 写为 paused，不产生历史轮（017-US1）。"""
             _write_run_unless_finished(
                 task_id, status="paused", error_code="user_paused",
                 error_reason="用户已暂停，结果已保留",
@@ -3039,103 +2917,11 @@ def create_app(config=None):
             else:
                 _mark_cancelled()
 
-
-
-        def _try_save_failure_snapshot(
-            terminal_status: str,
-            *,
-            script_params_override: dict | None = None,
-            execution_params_override: dict | None = None,
-        ) -> str | None:
-            """Save a result snapshot before a failed/cancelled terminal write.
-
-            Only runs that already produced jobs or dropped rows become history.
-            """
-            from webui.screen_flow import build_round_script_params
-            try:
-                if store.history_round_exists(task_id):
-                    return None
-                if _is_user_finished(task_id):
-                    return None
-                if any(event["type"] == "history_snapshot" for event in store.list_task_events(task_id)):
-                    return None
-                in_memory = None
-                try:
-                    if isinstance(result, dict) and (result.get("jobs") or result.get("dropped")):
-                        in_memory = result
-                except (NameError, UnboundLocalError):
-                    in_memory = None
-                run = store.get_screening_run(task_id) or {}
-                params = dict(run.get("execution_params") or {})
-                platform = str(params.get("platform") or run.get("platform") or frozen_platform or "boss")
-                profile = str(params.get("profile_summary") or profile_summary or "")
-                source_jobs = []
-                source_dropped = []
-                total_scraped = None
-                if in_memory is not None:
-                    source_jobs = in_memory.get("jobs") or []
-                    source_dropped = in_memory.get("dropped") or []
-                    total_scraped = in_memory.get("total_scraped")
-                else:
-                    source_run_id = str(params.get("source_run_id") or "")
-                    if scrape_task_id:
-                        source_jobs = store.load_scrape_run_jobs(scrape_task_id)
-                    elif source_run_id:
-                        payload = store.load_latest_pipeline_result(source_run_id)
-                        source_jobs = ((payload or {}).get("result") or {}).get("jobs") or []
-                        source_dropped = ((payload or {}).get("result") or {}).get("dropped") or []
-                        total_scraped = ((payload or {}).get("result") or {}).get("total_scraped")
-                    if not source_jobs and not source_dropped:
-                        return None
-                    verdicts = store.load_screening_verdicts(task_id)
-                    pending_rows = store.load_screening_pending(task_id)
-                    if not verdicts and not pending_rows:
-                        return None
-                    jd_map = {}
-                    try:
-                        jd_map = _load_jd_checkpoint(
-                            _jd_checkpoint_path(app.config["RESULT_DIR"], task_id))
-                    except RuntimeError:
-                        jd_map = {}
-                    result_to_save = _build_partial_pipeline_result(
-                        source_jobs, verdicts, pending_rows, jd_map, profile,
-                        source_dropped=source_dropped,
-                        total_scraped=total_scraped,
-                        platform=platform,
-                    )
-                snapshot_result = result_to_save if in_memory is None else in_memory
-                snapshot_script_params = (
-                    script_params_override
-                    if script_params_override is not None
-                    else build_round_script_params(store, run, run.get("frozen_filters") or {}, platform)
-                )
-                snapshot_execution_params = (
-                    execution_params_override
-                    if execution_params_override is not None
-                    else {"platform": platform, "scrape_task_id": scrape_task_id}
-                )
-                snapshot_id = store.save_pipeline_result(
-                    snapshot_result,
-                    snapshot_script_params,
-                    started_at=run.get("started_at") or task.get("started_at"),
-                    finished_at=int(time.time() * 1000),
-                    execution_config=params.get("execution_config") or {},
-                    status=terminal_status,
-                    execution_params=snapshot_execution_params,
-                )
-                store.append_task_event(task_id, "history_snapshot", {
-                    "snapshot_run_id": snapshot_id,
-                    "status": terminal_status,
-                    "jobs": len(snapshot_result.get("jobs") or []),
-                    "dropped": len(snapshot_result.get("dropped") or []),
-                })
-                _prune_history_best_effort()
-                return snapshot_id
-            except Exception:
-                return None  # 快照兜底失败不掩盖原始终态错误
         def _mark_cancelled():
-            """用户取消：标 cancelled（不覆盖为 done/failed），落清理定时。"""
-            _try_save_failure_snapshot("cancelled")
+            """用户取消：标 cancelled（不覆盖为 done/failed），落清理定时。
+
+            017-US1：取消不再写历史快照；底层已抓岗位数据保留。
+            """
             _write_run_unless_finished(
                 task_id, status="cancelled", error_reason=_MSG_USER_STOPPED_SCREEN
             )
@@ -3415,7 +3201,6 @@ def create_app(config=None):
                     # 暂停状态、真实进度、checkpoint 和事件必须全部可靠落库；
                     # 任一步失败都交给外层 internal_error 路径，不能只改内存。
                     _done_keys = sorted(_rough_completed_ids)
-                    _try_save_failure_snapshot("partial")
                     _write_run_unless_finished(
                         task_id, status="paused", error_code=_block_code,
                         current_stage="ai_rough",
@@ -3484,7 +3269,6 @@ def create_app(config=None):
                 if not chrome_ok:
                     reason = f"调试浏览器未就绪（{chrome_err}），请处理后继续"
                     _save_jd_checkpoint(jd_path, jd_map)
-                    _try_save_failure_snapshot("partial")
                     _write_run_unless_finished(
                         task_id, status="paused", error_code="source_cdp_unavailable",
                         current_stage="jd_detail", processed_count=len(jd_map),
@@ -3518,7 +3302,6 @@ def create_app(config=None):
                 if source is None:
                     reason = "CDP 抓取源不可用，请确认调试浏览器后继续"
                     _save_jd_checkpoint(jd_path, jd_map)
-                    _try_save_failure_snapshot("partial")
                     _write_run_unless_finished(
                         task_id, status="paused", error_code="source_cdp_unavailable",
                         current_stage="jd_detail", processed_count=len(jd_map),
@@ -3603,7 +3386,6 @@ def create_app(config=None):
                             stage="jd_detail",
                             platform=frozen_platform,
                         )
-                        _try_save_failure_snapshot("partial")
                         _write_run_unless_finished(
                             task_id, status="paused", error_code=_hs_code,
                             current_stage="jd_detail",
@@ -3725,7 +3507,6 @@ def create_app(config=None):
                     if isinstance(_ai_exc, AISecurityError):
                         _block_code = map_ai_error_to_block_code(_ai_exc.error_code)
                         if _block_code:
-                            _try_save_failure_snapshot("partial")
                             _write_run_unless_finished(
                                 task_id, status="paused", error_code=_block_code,
                                 current_stage="ai_fine",
@@ -3839,11 +3620,13 @@ def create_app(config=None):
                 ))
             store.append_task_events(task_id, job_events)
             # B038: 命中已保存的未筛选轮则原地升级（同一 run_id），否则新建。
+            # 017-US2: 写入统一走 result_rounds.save_finished_round（一条流程一条轮）。
             from webui.screen_flow import build_round_script_params
+            from webui.result_rounds import save_finished_round
             ai_run_for_params = store.get_screening_run(task_id) or {}
             saved_script_params = build_round_script_params(
                 store, ai_run_for_params, screening_fields, frozen_platform)
-            source_run_id = save_screen_result(
+            source_run_id = save_finished_round(
                 store, result, saved_script_params,
                 scrape_task_id=scrape_task_id,
                 status="done",
@@ -3912,8 +3695,6 @@ def create_app(config=None):
             # 任务成功：断点文件使命完成（续跑只服务失败/取消/中断）
             _remove_jd_checkpoint(jd_path)
         except ai_service.AISecurityError as exc:
-            _try_save_failure_snapshot(
-                "cancelled" if _is_user_finished(task_id) else "failed")
             error_message = ai_service.user_facing_error(exc.error_code)
             if not _is_user_finished(task_id):
                 record_failure(
@@ -3950,8 +3731,6 @@ def create_app(config=None):
                 _clear_auto_screen(task_id)
             _release_worker_resume_claims(_pipeline_tasks.get(task_id))
         except Exception as exc:
-            _try_save_failure_snapshot(
-                "cancelled" if _is_user_finished(task_id) else "failed")
             error_message = ai_service.user_facing_error("internal_error")
             if not _is_user_finished(task_id):
                 record_failure(
@@ -5137,18 +4916,8 @@ def create_app(config=None):
         script_params = params.get("script_params") or {}
         if isinstance(script_params, dict) and "platform" not in script_params:
             script_params = {**script_params, "platform": platform}
-        # B038：同一来源已保存未筛选轮时幂等返回，避免轮询/手动入口重复建轮。
-        existing = store.latest_scraped_only_for_source(task_id)
-        if existing is not None:
-            payload = store.load_latest_pipeline_result(str(existing["id"]))
-            if payload is not None:
-                result = dict(payload.get("result") or {})
-                result["source_run_id"] = str(existing["id"])
-                return jsonify({
-                    "ok": True, "saved": True,
-                    "run_id": str(existing["id"]), "result": result,
-                })
-        outcome = save_scrape_snapshot(
+        # 017-US2: 幂等由 result_rounds.save_scraped_only_round 保证（不再端点预检）。
+        outcome = save_scraped_only_round(
             store,
             source_jobs,
             platform=platform,
@@ -5196,7 +4965,7 @@ def create_app(config=None):
             return jsonify({
                 "ok": False,
                 "error": "not_paused",
-                "status": _run_to_task_status(effective_status),
+                "status": _public_task_status(effective_status),
                 "message": "只有 paused 状态的任务才能继续",
             }), 409
         if db_run is not None and not _block_checked:
@@ -6410,32 +6179,6 @@ def create_app(config=None):
     # Pipeline 结果增强：按需抓 JD 详情 + 感兴趣/不感兴趣（接入筛选工作台）
     # ------------------------------------------------------------------
 
-    @app.route("/api/reset-latest-result", methods=["POST"])
-    def reset_latest_result():
-        """T418: 无 run_id 归档当前结果；有 run_id 保留日志删除历史轮次。"""
-        body = request.get_json(silent=True) or {}
-        target_run_id = str(body.get("run_id") or "").strip() or None
-        archived_run_ids = None
-        if target_run_id:
-            run = store.get_screening_run(target_run_id)
-            if run is None or run.get("record_kind") != "result_snapshot":
-                return jsonify({"ok": False, "error": "run_not_found"}), 404
-            request_platform = str(body.get("platform") or "").strip() or None
-            if request_platform and request_platform != run.get("platform"):
-                return jsonify({
-                    "ok": False, "error": "run_platform_conflict",
-                    "message": "请求平台与目标 run 不一致",
-                }), 409
-            cleared = store.delete_history_result_preserving_logs(target_run_id)
-            platform = run.get("platform")
-        else:
-            archived_run_ids = store.archive_all_current_results()
-            cleared = True
-            platform = None
-        return jsonify({"ok": True, "cleared": cleared, "run_id": target_run_id,
-                        "platform": platform,
-                        "archived": archived_run_ids})
-
     _job_detail_lock = threading.Lock()
 
     @app.route("/api/job-detail", methods=["POST"])
@@ -6665,6 +6408,12 @@ def create_app(config=None):
         """
         raw = request.get_json(silent=True) or {}
         source_run_id = str(raw.get("source_run_id") or "").strip()
+        # 017-US4: 目标轮必填；禁止按 URL/最新结果猜测身份（FR-010）。
+        if not source_run_id:
+            return jsonify({
+                "ok": False, "error": "missing_source_run_id",
+                "message": "必须指定目标结果轮",
+            }), 409
         if source_run_id:
             if store.get_pending_result(source_run_id, job_id) is None:
                 return jsonify({
@@ -6770,119 +6519,6 @@ def create_app(config=None):
                 "single_retry": True,
             }), 202
 
-        _activate_run_browser()
-        from webui.pipeline_exec import ensure_chrome_ready
-
-        raw_source_url = str(raw.get("source_url") or raw.get("job_link") or "")
-        if not raw_source_url.strip():
-            return jsonify({"ok": False, "error": "缺少 source_url 或 job_link",
-                            "job_id": job_id}), 400
-
-        if _ZHILIAN_HOST_TOKEN in raw_source_url.lower():
-            return jsonify({
-                "ok": False, "error": "run_identity_conflict",
-                "error_code": "run_identity_conflict",
-                "message": "智联补抓必须携带 source_run_id，不能按 URL 猜测身份",
-            }), 409
-
-        chrome_ok, chrome_err = ensure_chrome_ready(minimize_after_launch=True)
-        if not chrome_ok:
-            return jsonify({"error": f"CDP Chrome 未运行：{chrome_err}",
-                            "error_code": "cdp_not_ready"}), 503
-
-        # T406: fallback 路径从 source_url 推断平台，不依赖 latest done run
-        # （最新完成 run 可能是另一平台，会误用平台身份）。智联无冻结
-        # 账号/端口时 _make_cdp_source 返回 None，由下方 500 阻断默认 BOSS。
-        fallback_platform = "boss"
-        source = _make_cdp_source(platform=fallback_platform)
-        source_url = normalize_job_link(raw_source_url)
-        if source is None:
-            return jsonify({"ok": False, "error": "抓取源不可用", "job_id": job_id}), 500
-
-        job = {"job_id": job_id, "source_url": source_url, "job_link": source_url}
-        detail_path = str(
-            Path(app.config["RESULT_DIR"]) / f"job_detail_{job_id}.json"
-        )
-        try:
-            with _job_detail_lock:
-                outcome = source.fetch_detail(job, detail_output_path=detail_path)
-        except (OSError, ValueError, RuntimeError) as exc:
-            return jsonify({"ok": False, "error": str(exc), "job_id": job_id}), 500
-
-        if not outcome.ok:
-            return jsonify({"ok": False,
-                            "error": f"详情抓取失败（{outcome.failed_code}），请确认已登录 BOSS 后重试",
-                            "job_id": job_id}), 502
-        jd = str((outcome.detail or {}).get("jd", "")).strip()
-        if not jd:
-            return jsonify({"ok": False,
-                            "error": "详情页未提取到 JD 正文，岗位可能已下架",
-                            "job_id": job_id}), 502
-
-        # 抓到 JD 后回写数据库中匹配的 job 项，并尝试单条 AI 精筛
-        persisted = False
-        verdict_info: dict = {}
-        payload = store.load_latest_pipeline_result()
-        if payload is not None:
-            result = payload.get("result") or {}
-            jobs = result.get("jobs") or []
-            matched = False
-            for item in jobs:
-                if isinstance(item, dict) and str(item.get("job_id")) == str(job_id):
-                    matched = True
-                    break
-            if matched:
-                run_id = store.get_latest_done_run_id()
-                if run_id:
-                    store.update_pipeline_job_jd(run_id, str(job_id), jd)
-                    persisted = True
-
-                # 单条 AI 精筛：有画像 + AI 已配置 → 判定后回写
-                profile_summary = str(result.get("profile_summary", "")).strip()
-                profile_facts = result.get("profile_facts")
-                settings = store.get_ai_settings()
-                cred_ref = store.get_credential_ref()
-                api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
-                endpoint_url = settings.get("endpoint_url", "")
-                if profile_summary and api_key and endpoint_url:
-                    from webui.ai import match_jds
-                    job_for_ai = {"job_id": job_id, "jd": jd, "source_url": source_url}
-                    # 把原始岗位信息也带上（标题、薪资等供 AI 参考）
-                    for item in jobs:
-                        if isinstance(item, dict) and str(item.get("job_id")) == str(job_id):
-                            job_for_ai.update({k: v for k, v in item.items()
-                                              if k in ("title", "salary", "company", "location")})
-                            break
-                    try:
-                        res = match_jds(
-                            [job_for_ai], profile_summary, endpoint_url, api_key,
-                            model=settings.get("model", ""),
-                            criteria=(payload.get("script_params") or {}).get("screening"),
-                            profile_facts=profile_facts,
-                        )
-                    except ai_service.AISecurityError as ai_exc:
-                        # JD 已可靠落库；外部 AI 阻断保留具体原因，但不能吞掉
-                        # 后续的本地 verdict 持久化异常。
-                        verdict_info = {
-                            "verdict_reason": ai_service.user_facing_error(
-                                ai_exc.error_code
-                            )
-                        }
-                    else:
-                        v = (res.get("verdicts") or {}).get(job_id)
-                        if v:
-                            verdict_info = {
-                                "verdict": v.get("verdict"),
-                                "verdict_reason": v.get("reason"),
-                                "caveats": v.get("caveats", []),
-                                "flags": v.get("flags", []),
-                            }
-                            if run_id:
-                                store.save_screening_verdicts(run_id, {job_id: v})
-
-        return jsonify({"ok": True, "jd": jd, "job_id": job_id,
-                        "persisted": persisted, **verdict_info})
-
     def _recrawl_job_key(job):
         """Return the same stable key used by the result-page recrawl request."""
         if not isinstance(job, dict):
@@ -6912,9 +6548,8 @@ def create_app(config=None):
         job_ids = raw.get("job_ids")
         profile_summary = str(raw.get("profile_summary") or "")
         profile_facts = raw.get("profile_facts") or None
-        source_run_id = str(
-            raw.get("source_run_id") or store.get_latest_done_run_id() or ""
-        ).strip()
+        # 017-US4: 目标轮必须显式携带，禁止"猜最新"回退（FR-010）。
+        source_run_id = str(raw.get("source_run_id") or "").strip()
         if not source_run_id:
             return jsonify({"ok": False, "error": "missing_source_run_id"}), 409
         pending_rows = store.list_pending_results(source_run_id)
@@ -7362,7 +6997,8 @@ def create_app(config=None):
                     task["result"] = {"updates": dict(updates)}
         try:
             payload = store.load_latest_pipeline_result(source_run_id or None)
-            run_id = source_run_id or store.get_latest_done_run_id()
+            # 017-US4: 重抓目标由调用方显式指定（source_run_id 必传），不再回退"最新"
+            run_id = source_run_id
             jobs = (payload or {}).get("result", {}).get("jobs", []) if payload else []
             # 历史结果页可能没有把画像正文留在前端状态；重抓必须从来源
             # 轮次恢复画像，否则已有 JD 的岗位会被静默跳过 AI。
@@ -7755,21 +7391,19 @@ def create_app(config=None):
                         _release_worker_resume_claims(_pipeline_tasks.get(task_id))
                         return
                     if run_id:
-                        store.save_screening_verdicts(run_id, verdicts)
+                        # 017-US2: 判定/JD 回写 + pending 移除 + 计数重算 + 定稿时间
+                        # 刷新统一走 result_rounds.apply_recrawl_writeback。
+                        from webui.result_rounds import apply_recrawl_writeback
+                        apply_recrawl_writeback(
+                            store, run_id, verdicts,
+                            source_run_id=source_run_id or "",
+                        )
                     for jid, v in verdicts.items():
                         u = updates.setdefault(jid, {})
                         u["verdict"] = v.get("verdict")
                         u["verdict_reason"] = v.get("reason")
                         u["caveats"] = v.get("caveats", [])
-                    # 切片8：补救成功后从 screening_pending_results 移除（FR-023）
-                    if source_run_id:
-                        for jid in verdicts:
-                            v = verdicts[jid].get("verdict")
-                            if v in ("match", "not_match"):
-                                store.delete_pending_result(source_run_id, jid)
                     publish_recrawl_updates()
-                    if run_id:
-                        store.recount_pipeline_result(run_id)
 
             if actual_processed == 0:
                 reason = (
@@ -8401,7 +8035,7 @@ def create_app(config=None):
             return jsonify({
                 "ok": False,
                 "error": "not_paused",
-                "status": _run_to_task_status(run["status"]),
+                "status": _public_task_status(run["status"], run.get("interruption_kind")),
                 "message": "只有 paused 状态的任务才能继续",
             }), 409
         # B057：限流后可指定另一个已登录账号继续同一断点。
@@ -8752,7 +8386,6 @@ def create_app(config=None):
                 if run["status"] not in (
                     "succeeded", "partial", "failed", "interrupted",
                 ):
-                    _save_cancelled_history_snapshot(run, task)
                     store.update_screening_run(
                         run_id, status="cancelled",
                         error_code="user_cancelled",
@@ -8778,7 +8411,8 @@ def create_app(config=None):
                     with _pipeline_lock:
                         current = _pipeline_tasks.get(run_id)
                         if current is not None:
-                            current["status"] = _run_to_task_status(latest["status"])
+                            current["status"] = _public_task_status(
+                                latest["status"], latest.get("interruption_kind"))
                             current["error"] = "用户已取消"
                 return jsonify({
                     "ok": False,
@@ -8791,7 +8425,7 @@ def create_app(config=None):
             current = _pipeline_tasks.get(run_id)
             if current is not None:
                 current["status"] = (
-                    _run_to_task_status(run["status"])
+                    _public_task_status(run["status"], run.get("interruption_kind"))
                     if run is not None else "cancelled"
                 )
                 current["error"] = "用户已取消"
@@ -8812,7 +8446,7 @@ def create_app(config=None):
             "run_id": run_id,
             "platform": (run or {}).get("platform"),
             "status": (
-                _run_to_task_status(run["status"]) if run is not None else "cancelled"
+                _public_task_status(run["status"], run.get("interruption_kind")) if run is not None else "cancelled"
             ),
             "processed_count": int((run or {}).get("processed_count") or 0),
             "message": "任务已取消，已有结果保留",
@@ -8850,7 +8484,7 @@ def create_app(config=None):
         if run["status"] in ("succeeded", "partial"):
             return jsonify({
                 "ok": False, "error": "already_terminal",
-                "status": _run_to_task_status(run["status"]),
+                "status": _public_task_status(run["status"], run.get("interruption_kind")),
                 "message": "任务已完成，无需结束保存",
             }), 409
         allowed_finish_statuses = {
@@ -8859,7 +8493,7 @@ def create_app(config=None):
         if run["status"] not in allowed_finish_statuses:
             return jsonify({
                 "ok": False, "error": "not_paused",
-                "status": _run_to_task_status(run["status"]),
+                "status": _public_task_status(run["status"], run.get("interruption_kind")),
                 "message": "当前任务状态不能结束并保存",
             }), 409
         params = run.get("execution_params") or {}
@@ -8988,17 +8622,19 @@ def create_app(config=None):
             profile_facts=profile_facts,
         )
         from webui.screen_flow import build_round_script_params
-        snapshot_run_id = store.save_pipeline_result(
+        from webui.result_rounds import save_finished_round
+        snapshot_run_id = save_finished_round(
+            store,
             result,
             build_round_script_params(store, run, run.get("frozen_filters") or {}, platform),
+            scrape_task_id=parent_scrape_task_id,
+            status="partial",
+            execution_config=params.get("execution_config") or {},
+            platform=platform,
+            profile_summary=profile_summary,
+            profile_facts=profile_facts,
             started_at=run.get("started_at"),
             finished_at=int(time.time() * 1000),
-            execution_config=params.get("execution_config") or {},
-            status="partial",
-            execution_params={
-                "platform": platform,
-                "scrape_task_id": parent_scrape_task_id,
-            },
         )
         # 快照先落库，再原子标记 user_finished：保存失败时任务仍可重试，
         # 不会留下“已结束但无结果”的死状态；worker 已收到停止信号。

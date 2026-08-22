@@ -6,11 +6,11 @@ import unittest
 from unittest import mock
 
 from webui.app import create_app
-from webui.scrape_only import (
-    build_undecided_result,
-    save_scrape_snapshot,
-    save_screen_result,
+from webui.result_rounds import (
+    save_finished_round,
+    save_scraped_only_round,
 )
+from webui.scrape_only import build_undecided_result
 from webui.store import TaskStore
 
 
@@ -68,7 +68,7 @@ class ScrapeOnlyServiceTests(unittest.TestCase):
         self.assertEqual(job["flags"], [])
 
     def test_save_scrape_snapshot_persists_round(self):
-        outcome = save_scrape_snapshot(
+        outcome = save_scraped_only_round(
             self.store, _scrape_jobs(), platform="boss",
             scrape_task_id="scrape-1", profile_summary="3年Python后端",
         )
@@ -80,19 +80,19 @@ class ScrapeOnlyServiceTests(unittest.TestCase):
 
     def test_save_scrape_snapshot_zero_jobs_skips_persist(self):
         before = self.store.list_history_rounds()
-        outcome = save_scrape_snapshot(
+        outcome = save_scraped_only_round(
             self.store, [], platform="boss", scrape_task_id="scrape-0",
         )
         self.assertFalse(outcome["saved"])
         self.assertEqual(self.store.list_history_rounds(), before)
 
     def test_save_screen_result_upgrades_same_round(self):
-        first = save_scrape_snapshot(
+        first = save_scraped_only_round(
             self.store, _scrape_jobs(), platform="boss", scrape_task_id="scrape-1",
         )
         created_before = self.store.get_screening_run(first["run_id"])["created_at"]
 
-        run_id = save_screen_result(
+        run_id = save_finished_round(
             self.store, _screened_result(), {"screening": {}, "platform": "boss"},
             scrape_task_id="scrape-1", status="done", platform="boss",
         )
@@ -106,7 +106,7 @@ class ScrapeOnlyServiceTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_history_rounds("boss")), 1)
 
     def test_save_screen_result_creates_new_round_when_no_scraped_only(self):
-        run_id = save_screen_result(
+        run_id = save_finished_round(
             self.store, _screened_result(1), {"screening": {}, "platform": "boss"},
             scrape_task_id="scrape-x", status="done", platform="boss",
         )

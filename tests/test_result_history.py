@@ -112,12 +112,30 @@ class ResultHistoryStoreTests(unittest.TestCase):
         self.assertFalse(any(item["is_latest"] for item in items))
         self.assertTrue(all(item["archived_at"] for item in items))
 
-    def test_failed_round_detail_keeps_raw_status(self):
-        run_id = _save_round(self.store, "zhilian", status="failed")
-        detail = self.service.get_round(run_id)
-        self.assertIsNotNone(detail)
-        self.assertEqual(detail["status"], "failed")
-        self.assertEqual(detail["result"]["jobs"][0]["platform"], "zhilian")
+    def test_history_statuses_are_three_way_only(self):
+        """017-US3: 历史轮状态取值域收敛为 done/partial/scraped_only。"""
+        _save_round(self.store, "boss", status="done")
+        _save_round(self.store, "boss", status="partial")
+        self.store.save_scraped_only_snapshot(
+            {
+                "ok": True,
+                "jobs": [{"platform": "boss", "platform_job_id": "s1",
+                          "title": "岗位", "verdict": ""}],
+                "dropped": [], "total_scraped": 1, "total_kept": 1,
+            },
+            {"platform": "boss"},
+            scrape_task_id="src-s3",
+        )
+        items = self.service.list_history("boss")
+        self.assertEqual(len(items), 3)
+        self.assertEqual(
+            {item["status"] for item in items},
+            {"done", "partial", "scraped_only"},
+        )
+        # 017-US3: 列表返回定稿时间字段（抽屉主时间消费）
+        for item in items:
+            self.assertIn("finished_at", item)
+            self.assertIsNotNone(item["finished_at"])
 
     def test_prune_keeps_30_rounds_per_platform(self):
         for index in range(32):

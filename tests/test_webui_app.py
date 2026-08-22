@@ -1571,6 +1571,39 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.get_json()["error"], "already_terminal")
 
+    def test_recrawl_without_source_run_id_rejected(self):
+        """017-US4: 重抓必须显式携带目标轮；缺省即使存在最新轮也 409。"""
+        source_id = self.store.save_pipeline_result({
+            "jobs": [{"job_id": "j1", "platform_job_id": "j1", "title": "岗位",
+                      "verdict": "uncertain", "verdict_reason": "待确认",
+                      "caveats": []}],
+            "dropped": [], "total_scraped": 1, "total_kept": 1,
+            "total_matched": 0, "total_dropped": 0, "profile_summary": "画像",
+            "error": "",
+        }, {"platform": "boss"})
+        self.store.insert_pending_result(
+            source_id, "j1", failure_stage="ai_fine", failed_code="ai_missing_job",
+        )
+        resp = self.client.post("/api/pipeline/recrawl", json={
+            "job_ids": ["j1"], "profile_summary": "画像",
+        })
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "missing_source_run_id")
+
+    def test_jd_refetch_without_source_run_id_rejected(self):
+        """017-US4: 单岗位 JD 补抓必须携带目标轮；缺省被拒绝。"""
+        resp = self.client.post("/api/pipeline/jobs/j1/jd", json={
+            "source_url": "https://zhipin.example/j1.html",
+            "profile_summary": "画像",
+        })
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["error"], "missing_source_run_id")
+
+    def test_legacy_reset_latest_result_endpoint_removed(self):
+        """017-US4: 旧结果清空端点已删除；归档/删除统一走历史接口。"""
+        resp = self.client.post("/api/reset-latest-result", json={})
+        self.assertEqual(resp.status_code, 404)
+
     def _save_zhilian_pipeline_result(self):
         return self.store.save_pipeline_result({
             "jobs": [
@@ -2044,7 +2077,8 @@ class ScreenContinueFlowTests(unittest.TestCase):
         self.assertEqual(checked, ["b", "b"])
         submit.assert_called_once()
 
-    def test_worker_pause_writes_paused_and_snapshot(self):
+    def test_worker_pause_writes_paused_without_history_round(self):
+        """US1：用户暂停后任务可继续，但历史列表零增长（不再写 partial 快照）。"""
         from webui import pipeline_exec
         scrape_id = self._create_completed_scrape_run()
         captured = []
@@ -2061,16 +2095,23 @@ class ScreenContinueFlowTests(unittest.TestCase):
             })
         self.assertEqual(resp.status_code, 200)
         task_id = resp.get_json()["task_id"]
-        pause_resp = self.client.post(f"/api/task/pause/{task_id}")
-        self.assertEqual(pause_resp.status_code, 200)
         fn, args, kwargs = captured[0]
+        # 先设暂停模式但不发信号；粗筛 mock 落判定后注入暂停信号，
+        # 使暂停检测点（粗筛后 3446）已有部分判定——US1 核心场景
+        # （AI 已判部分岗位后点暂停）。
+        self.app.config["PIPELINE_TASKS"][task_id]["stop_mode"] = "pause"
+        def _rough_ok(*a, **kw):
+            kw["on_batch_done"]({"j1": "match"}, ["j1"])
+            self.app.config["PIPELINE_TASKS"][task_id]["stop_event"].set()
+            return {"verdicts": {"j1": "match"}, "kept": ["j1"], "dropped": []}
         with mock.patch.object(
             pipeline_exec, "resolve_browser_account", return_value="",
         ), mock.patch.object(pipeline_exec, "set_active_cdp_data_dir"):
             with mock.patch.object(
                 self.store, "get_ai_settings",
                 return_value={"endpoint_url": "http://ai.test", "model": "m", "is_configured": True},
-            ), mock.patch("webui.app.ai_service.is_ai_available", return_value=True):
+            ), mock.patch("webui.app.ai_service.is_ai_available", return_value=True), \
+               mock.patch("webui.ai.screen_jobs", side_effect=_rough_ok):
                 fn(*args, **kwargs)
         run = self.store.get_screening_run(task_id)
         self.assertEqual(run["status"], "paused")
@@ -2078,6 +2119,55 @@ class ScreenContinueFlowTests(unittest.TestCase):
         self.assertEqual(self.app.config["PIPELINE_TASKS"][task_id]["status"], "paused")
         events = self.store.list_task_events(task_id)
         self.assertTrue(any(event["type"] == "pause" for event in events))
+        # 017-US1：即使已判部分岗位，暂停也只是暂停，历史不新增轮
+        self.assertEqual(self.store.list_history_rounds(), [])
+        history = self.client.get("/api/result-history").get_json()
+        self.assertEqual(history["items"], [])
+
+    def test_worker_hard_block_pauses_without_history_round(self):
+        """US1：AI 粗筛系统性阻断（如验证码/限流）强停任务，历史不新增轮。"""
+        from webui import pipeline_exec
+        from webui.ai import AISecurityError
+        scrape_id = self._create_completed_scrape_run()
+        captured = []
+        with mock.patch.object(
+            self.app.config["PIPELINE_EXECUTOR"], "submit",
+            side_effect=lambda fn, *args, **kwargs: captured.append((fn, args, kwargs)) or None,
+        ):
+            resp = self.client.post("/api/ai-screen", json={
+                "scrape_task_id": scrape_id,
+                "screening_fields": {"salary": ["20-30K"]},
+                "profile_summary": "测试画像",
+                "profile_facts": {"years": 3},
+                "filter_schema_version": 1,
+            })
+        self.assertEqual(resp.status_code, 200)
+        task_id = resp.get_json()["task_id"]
+        # 粗筛 mock 先落判定再抛阻断：强停时已有部分判定（US1 核心场景）
+        def _blocking_screen_jobs(*args, **kwargs):
+            kwargs["on_batch_done"]({"j1": "match"}, ["j1"])
+            raise AISecurityError("ai_rate_limited")
+        fn, args, kwargs = captured[0]
+        with mock.patch.object(
+            pipeline_exec, "resolve_browser_account", return_value="",
+        ), mock.patch.object(pipeline_exec, "set_active_cdp_data_dir"):
+            with mock.patch.object(
+                self.store, "get_ai_settings",
+                return_value={"endpoint_url": "http://ai.test", "model": "m", "is_configured": True},
+            ), mock.patch("webui.app.ai_service.is_ai_available", return_value=True), \
+               mock.patch("webui.ai.screen_jobs", side_effect=_blocking_screen_jobs), \
+               mock.patch(
+                   "webui.ai.map_ai_error_to_block_code",
+                   return_value="ai_blocked",
+               ):
+                fn(*args, **kwargs)
+        run = self.store.get_screening_run(task_id)
+        self.assertEqual(run["status"], "paused")
+        self.assertTrue(run["error_code"])
+        # 017-US1：硬阻断强停只是暂停，历史不新增轮
+        self.assertEqual(self.store.list_history_rounds(), [])
+        history = self.client.get("/api/result-history").get_json()
+        self.assertEqual(history["items"], [])
 
     def test_scrape_result_save_falls_back_to_parent_profile(self):
         scrape_id = self._create_completed_scrape_run()
@@ -5227,23 +5317,51 @@ class StatusMappingTests(unittest.TestCase):
                 (str(run_id), str(status)),
             )
 
-    def test_run_to_task_status_mapping_unique(self):
-        """T410: 7 种 DB 状态都映射到唯一任务状态。"""
-        from webui.app import _run_to_task_status
+    def test_public_status_vocabulary_has_no_waiting(self):
+        """017-US5: 一套话术一个口径——公共词汇唯一且不含 waiting（queued 统一）。"""
+        from webui.app import _public_task_status
         cases = {
-            "queued": "waiting",
+            "queued": "queued",
+            "waiting": "queued",  # 旧词并入 queued（前端无人消费）
             "running": "running",
             "paused": "paused",
             "succeeded": "completed",
+            "done": "completed",
             "partial": "completed_with_pending",
             "failed": "failed",
-            "interrupted": "cancelled",
+            "interrupted": "cancelled",  # 无 interruption_kind 时按终态取消
         }
         for db_status, expected in cases.items():
             self.assertEqual(
-                _run_to_task_status(db_status), expected,
+                _public_task_status(db_status), expected,
                 f"DB 状态 {db_status} 应映射到 {expected}",
             )
+
+    def test_same_task_status_across_detail_poll_and_resume(self):
+        """017-US5: 同一任务在详情/轮询/接回三接口状态词一致（无 waiting 分叉）。"""
+        cases = {
+            "paused": "paused",
+            "partial": "completed_with_pending",
+            "failed": "failed",
+        }
+        for db_status, expected in cases.items():
+            run_id = f"vocab-{db_status}"
+            self._create_run(run_id, db_status)
+            self.app.config["PIPELINE_TASKS"][run_id] = {
+                "kind": "scrape", "status": db_status, "progress": {}, "logs": [],
+                "result": None, "error": "", "started_at": None,
+                "finished_at": None, "stop_event": threading.Event(),
+                "platform": "boss",
+            }
+            detail = self.client.get(f"/api/task-state/{run_id}").get_json()
+            self.assertEqual(detail.get("status"), expected, f"{db_status} 详情")
+            poll = self.client.get(f"/api/search-progress/{run_id}").get_json()
+            self.assertEqual(poll.get("status"), expected, f"{db_status} 轮询")
+            self.assertNotEqual(poll.get("status"), "waiting")
+        # 接回接口（列表顶部）对 paused 任务与详情/轮询一致
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["status"], "paused")
 
     def test_public_task_status_mapping_unique(self):
         """T410: 内存/DB canonical 状态统一映射到公共 API 状态。"""
@@ -5907,8 +6025,8 @@ class PlatformAwareCancelTests(unittest.TestCase):
         self.assertIsNotNone(run)
         self.assertEqual(run["status"], "interrupted")
 
-    def test_cancel_with_jobs_saves_cancelled_history_round(self):
-        """FR-019: 取消结束但已有岗位时必须保存 result_snapshot。"""
+    def test_cancel_with_jobs_keeps_scrape_data_without_history_round(self):
+        """017-US1: 取消保留底层已抓岗位数据，但不再生成历史轮。"""
         run_id = "cancel-with-jobs-history"
         jobs = [
             {"job_id": "j1", "platform_job_id": "j1", "title": "岗位1",
@@ -5926,14 +6044,17 @@ class PlatformAwareCancelTests(unittest.TestCase):
 
         resp = self.client.post(f"/api/task/cancel/{run_id}")
         self.assertEqual(resp.status_code, 200, resp.get_json())
-        items = self.store.list_history_rounds("boss")
-        self.assertEqual(len(items), 1)
-        snapshot = self.store.get_screening_run(items[0]["id"])
-        self.assertEqual(snapshot["record_kind"], "result_snapshot")
-        self.assertEqual(snapshot["status"], "cancelled")
-        self.assertEqual(snapshot["total_kept"], 2)
-        self.assertEqual(
-            (snapshot["execution_params"] or {}).get("scrape_task_id"), run_id)
+        run = self.store.get_screening_run(run_id)
+        # DB 存 interrupted + user_cancelled（对外公共词汇 cancelled）
+        self.assertEqual(run["status"], "interrupted")
+        self.assertEqual(run["interruption_kind"], "user_cancelled")
+        # 底层已抓岗位数据保留，可对同一批抓取结果重新发起筛选
+        kept = self.store.load_scrape_run_jobs(run_id)
+        self.assertEqual(len(kept), 2)
+        # 017-US1: 取消不再生成历史轮
+        self.assertEqual(self.store.list_history_rounds("boss"), [])
+        history = self.client.get("/api/result-history").get_json()
+        self.assertEqual(history["items"], [])
 
     def test_cancel_without_jobs_does_not_create_history(self):
         """FR-019: 没有岗位产出的取消不进入历史。"""
@@ -5948,6 +6069,30 @@ class PlatformAwareCancelTests(unittest.TestCase):
         resp = self.client.post(f"/api/task/cancel/{run_id}")
         self.assertEqual(resp.status_code, 200, resp.get_json())
         self.assertEqual(self.store.list_history_rounds("boss"), [])
+
+    def test_restart_interrupted_run_has_no_history_round(self):
+        """017-US1: 进程强杀重启后任务显示中断、可续跑，历史不新增轮。"""
+        run_id = "restart-interrupted-017"
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO screening_runs "
+                "(id, platform, status, error_code, record_kind, "
+                "frozen_filters_json, source_count, match_count, mismatch_count, "
+                "execution_params_json, profile_summary, "
+                "created_at, updated_at, started_at) "
+                "VALUES (?, 'boss', 'interrupted', 'restart', 'process_log', "
+                "'{}', 2, 0, 0, '{}', '', "
+                "datetime('now'), datetime('now'), NULL)",
+                (str(run_id),),
+            )
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["status"], "interrupted")
+        self.assertTrue(data["resumable"])
+        # 017-US1: 重启中断不产生历史轮
+        self.assertEqual(self.store.list_history_rounds("boss"), [])
+        history = self.client.get("/api/result-history").get_json()
+        self.assertEqual(history["items"], [])
 
 
 class PlatformAwareFinishTests(unittest.TestCase):
@@ -6138,22 +6283,22 @@ class DraftSwitchTargetRunConservationTests(unittest.TestCase):
         self.assertEqual(run["platform"], "zhilian")
 
     def test_reset_after_draft_switch_still_targets_original_run(self):
-        """T712: 创建 zhilian run → 草稿切到 boss → reset 仍校验原 run 平台。"""
-        # reset 要求 run 状态为 succeeded/partial/failed
+        """017-US4: 旧结果清空端点已删除（404）；归档/删除统一走历史接口。"""
+        # 旧 reset 端点不存在（无论草稿如何切换）
+        resp = self.client.post("/api/reset-latest-result", json={
+            "run_id": "anything", "platform": "boss",
+        })
+        self.assertEqual(resp.status_code, 404)
+        # 新路径：归档走 archive-latest，删除走 DELETE /api/result-history/<run_id>
         run_id = self._seed_paused_zhilian_run(status="succeeded")
         with self.store._connection() as conn:
             conn.execute(
                 "UPDATE screening_runs SET record_kind = 'result_snapshot' WHERE id = ?",
                 (run_id,),
             )
-        # reset 请求带 platform=boss（模拟草稿切到 boss），应与 run.platform=zhilian 冲突
-        resp = self.client.post("/api/reset-latest-result", json={
-            "run_id": run_id,
-            "platform": "boss",
-        })
-        self.assertEqual(resp.status_code, 409)
-        data = resp.get_json()
-        self.assertEqual(data.get("error"), "run_platform_conflict")
+        archive = self.client.post("/api/result-history/archive-latest")
+        self.assertEqual(archive.status_code, 200)
+        self.assertIn(run_id, archive.get_json()["archived_run_ids"])
 
 
 class CrossPlatformBrowserConservationTests(unittest.TestCase):
@@ -6258,18 +6403,16 @@ class PlatformAwareResetResultTests(unittest.TestCase):
         except (PermissionError, OSError):
             pass
 
-    def test_reset_unknown_run_returns_404(self):
-        """T418: 不存在的 run_id 返回 404。"""
+    def test_legacy_reset_endpoint_removed(self):
+        """017-US4: 旧结果清空端点已删除（404），归档/删除统一走历史接口。"""
         resp = self.client.post("/api/reset-latest-result", json={
             "run_id": "nonexistent",
         })
         self.assertEqual(resp.status_code, 404)
-        data = resp.get_json()
-        self.assertEqual(data.get("error"), "run_not_found")
 
-    def test_reset_with_platform_mismatch_returns_409(self):
-        """T418: 请求平台与目标 run 不一致返回 409。"""
-        run_id = "test_reset_platform_conflict"
+    def test_archive_and_delete_go_through_history_api(self):
+        """017-US4: 归档走 archive-latest，删除走 DELETE /api/result-history/<run_id>。"""
+        run_id = "archive-delete-017"
         with self.store._connection() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO screening_runs "
@@ -6282,13 +6425,12 @@ class PlatformAwareResetResultTests(unittest.TestCase):
                 "datetime('now'), datetime('now'), NULL, NULL)",
                 (str(run_id),),
             )
-        resp = self.client.post("/api/reset-latest-result", json={
-            "run_id": run_id,
-            "platform": "zhilian",
-        })
-        self.assertEqual(resp.status_code, 409)
-        data = resp.get_json()
-        self.assertEqual(data.get("error"), "run_platform_conflict")
+        archive = self.client.post("/api/result-history/archive-latest")
+        self.assertEqual(archive.status_code, 200)
+        self.assertIn(run_id, archive.get_json()["archived_run_ids"])
+        deleted = self.client.delete(f"/api/result-history/{run_id}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.get_json()["deleted"], True)
 
 
 class PlatformAwareBrowserAccountTests(unittest.TestCase):

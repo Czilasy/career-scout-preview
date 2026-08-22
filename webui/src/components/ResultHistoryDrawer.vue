@@ -184,7 +184,7 @@ const countParts = (item: HistoryRoundItem) => [
                 @click="emit('open-round', item.run_id)"
               >
                 <span class="history-round-head">
-                  <span class="history-round-time">{{ formatHistoryTime(item.created_at) || "时间未知" }}</span>
+                  <span class="history-round-time">{{ formatHistoryTime(item.finished_at || item.created_at) || "时间未知" }}</span>
                   <span v-if="item.is_latest" class="history-latest-badge" data-testid="history-latest-badge">最新</span>
                 </span>
                 <span class="history-round-status" :data-status="item.status">
@@ -238,7 +238,7 @@ const countParts = (item: HistoryRoundItem) => [
                   <button
                     class="icon-button history-delete"
                     type="button"
-                    :aria-label="`删除 ${formatHistoryTime(item.created_at) || '该轮次'}`"
+                    :aria-label="`删除 ${formatHistoryTime(item.finished_at || item.created_at) || '该轮次'}`"
                     data-testid="history-delete-trigger"
                     @click="emit('confirm-delete', item)"
                   >

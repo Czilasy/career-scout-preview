@@ -509,11 +509,12 @@ describe("platform schema race (T504)", () => {
 });
 
 describe("historyStatusLabel (B038)", () => {
-  it("maps scraped_only to 已抓取，未筛选 and keeps existing labels", () => {
+  it("maps scraped_only to 已抓取，未筛选 and keeps three allowed labels", () => {
     expect(historyStatusLabel("scraped_only", 3)).toBe("已抓取，未筛选");
     expect(historyStatusLabel("done", 3)).toBe("完成");
     expect(historyStatusLabel("partial", 3)).toBe("部分结果");
-    expect(historyStatusLabel("failed", 3)).toBe("失败但有 3 个岗位");
+    // 017-US3: 标签只有三种；未知状态不渲染（失败/取消轮已不再产生）
+    expect(historyStatusLabel("failed", 3)).toBe("");
   });
 });
 
@@ -523,9 +524,10 @@ describe("history status mapping", () => {
     expect(historyStatusLabel("completed", 5)).toBe("完成");
     expect(historyStatusLabel("partial", 5)).toBe("部分结果");
     expect(historyStatusLabel("completed_with_pending", 5)).toBe("部分结果");
-    expect(historyStatusLabel("failed", 3)).toBe("失败但有 3 个岗位");
-    expect(historyStatusLabel("interrupted", 2)).toBe("失败但有 2 个岗位");
-    expect(historyStatusLabel("cancelled", 1)).toBe("失败但有 1 个岗位");
+    // 017-US3: 未知状态不渲染标签（不再出现"失败但有 N 个岗位"）
+    expect(historyStatusLabel("failed", 3)).toBe("");
+    expect(historyStatusLabel("interrupted", 2)).toBe("");
+    expect(historyStatusLabel("cancelled", 1)).toBe("");
   });
 
   it("labels round scopes without exposing platform names in all/history scopes", () => {

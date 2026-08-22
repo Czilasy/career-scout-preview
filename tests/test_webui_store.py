@@ -4,6 +4,7 @@ import pathlib
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 from webui.store import TaskStore, _now
@@ -220,7 +221,8 @@ class Migration28SchemaTests(unittest.TestCase):
         with patch.object(TaskStore, "_migration_028", return_value=None), \
                 patch.object(TaskStore, "_migration_029", return_value=None), \
                 patch.object(TaskStore, "_migration_030", return_value=None), \
-                patch.object(TaskStore, "_migration_031", return_value=None):
+                patch.object(TaskStore, "_migration_031", return_value=None), \
+                patch.object(TaskStore, "_migration_032", return_value=None):
             store = TaskStore(self.db_path)
         self.assertEqual(store.schema_version(), 27)
         return store
@@ -1656,7 +1658,6 @@ class ScreeningRunStoreTests(unittest.TestCase):
         self.assertEqual(run["status"], "partial")
         loaded = self.store.load_latest_pipeline_result(run_id)
         self.assertEqual(loaded["status"], "completed_with_pending")
-        self.assertEqual(self.store.get_latest_done_run_id(), run_id)
 
     def test_save_pipeline_result_persists_jd_failed_evidence(self):
         result = {
@@ -2466,3 +2467,130 @@ class TuningInvariantTests(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             self.store.create_mode_version(matrix=partial_matrix, manual_ranges={})
+
+
+class Migration032ClearHistoryTests(unittest.TestCase):
+    """017-US3: 升级迁移一次性清空存量历史轮（FR-009/SC-005）。
+
+    - 全部 result_snapshot 轮（含子表行）删除；任务行（process_log）与
+      任务日志/事件保留；活动任务进度与断点不受影响。
+    - recount_pipeline_result 重算时同步刷新 finished_at（定稿时间）。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db_path = pathlib.Path(self.temp.name) / "state" / "webui.db"
+        self._cleanup_shared_backup_dir()
+
+    def tearDown(self):
+        self._cleanup_shared_backup_dir()
+        self.temp.cleanup()
+
+    @staticmethod
+    def _cleanup_shared_backup_dir():
+        dummy = TaskStore.__new__(TaskStore)
+        backup_dir = TaskStore._migration_backup_dir(dummy)
+        if backup_dir.exists():
+            for path in backup_dir.iterdir():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    def _build_v31_with_history(self):
+        """构造带存量历史轮 + 活动任务的 v31 库（patch 掉 _migration_032）。"""
+        with patch.object(TaskStore, "_migration_032", return_value=None):
+            store = TaskStore(self.db_path)
+        self.assertEqual(store.schema_version(), 31)
+        # 存量历史轮（result_snapshot + 岗位行）
+        round_id = store.save_pipeline_result(
+            {
+                "ok": True,
+                "jobs": [{"platform": "boss", "platform_job_id": "j1",
+                          "title": "岗位", "verdict": "match"}],
+                "dropped": [], "total_scraped": 1, "total_kept": 1,
+                "total_matched": 1, "total_dropped": 0,
+            },
+            {"platform": "boss"},
+        )
+        store.append_task_event(round_id, "stage_start", {"stage": "ai"})
+        # 活动任务（process_log + 岗位 + 事件）
+        task_id = "active-task-017"
+        store.create_screening_run(
+            task_id, source_count=1, execution_params={"platform": "boss"},
+        )
+        store.save_scrape_combo_result(
+            task_id, "k", [{"job_id": "j9", "platform_job_id": "j9",
+                            "title": "岗位"}], ["k"],
+        )
+        store.append_task_event(task_id, "stage_start", {"stage": "scrape"})
+        return store, round_id, task_id
+
+    def test_upgrade_clears_history_rounds_keeps_active_tasks(self):
+        store, round_id, task_id = self._build_v31_with_history()
+        self.assertEqual(len(store.list_history_rounds("boss")), 1)
+
+        reopened = TaskStore(self.db_path)  # 触发 migration 32
+        self.assertGreaterEqual(reopened.schema_version(), 32)
+        # 存量历史轮全清
+        self.assertEqual(reopened.list_history_rounds("boss"), [])
+        self.assertFalse(reopened.history_round_exists(round_id))
+        # 活动任务与日志保留
+        task = reopened.get_screening_run(task_id)
+        self.assertIsNotNone(task)
+        self.assertEqual(task["record_kind"], "process_log")
+        self.assertEqual(len(reopened.list_task_events(task_id)), 1)
+
+    def test_recount_refreshes_finished_at(self):
+        store = TaskStore(self.db_path)
+        run_id = store.save_pipeline_result(
+            {
+                "ok": True,
+                "jobs": [{"platform": "boss", "platform_job_id": "p1",
+                          "title": "岗位", "verdict": "uncertain"}],
+                "dropped": [], "total_scraped": 1, "total_kept": 1,
+                "total_matched": 0, "total_dropped": 0,
+            },
+            {"platform": "boss"},
+            finished_at="2026-01-01T00:00:00+08:00",
+        )
+        before = store.get_screening_run(run_id)["finished_at"]
+        store.recount_pipeline_result(run_id)
+        after = store.get_screening_run(run_id)["finished_at"]
+        # 017-US3: 定稿时间随重算刷新（重抓/补筛完成后时间诚实）
+        self.assertGreater(
+            datetime.fromisoformat(after),
+            datetime.fromisoformat(before),
+        )
+
+
+class LatestResultSingleSourceOfTruthTests(unittest.TestCase):
+    """017-US5: "最新结果"判定唯一口径（FR-013）。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db_path = pathlib.Path(self.temp.name) / "state" / "webui.db"
+        self.store = TaskStore(self.db_path)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_global_and_platform_latest_share_filter(self):
+        """全局与按平台 latest 查询命中同一 run（共用过滤口径）。"""
+        from webui.store import _LATEST_RESULT_FILTER
+        self.assertIn("'done', 'partial', 'scraped_only'", _LATEST_RESULT_FILTER)
+        self.assertIn("archived_at IS NULL", _LATEST_RESULT_FILTER)
+        run_id = self.store.save_pipeline_result(
+            {
+                "ok": True,
+                "jobs": [{"platform": "boss", "platform_job_id": "j1",
+                          "title": "岗位", "verdict": "match"}],
+                "dropped": [], "total_scraped": 1, "total_kept": 1,
+                "total_matched": 1, "total_dropped": 0,
+            },
+            {"platform": "boss"},
+        )
+        global_latest = self.store.load_latest_pipeline_result()
+        platform_latest = self.store.load_latest_pipeline_result_for_platform("boss")
+        self.assertEqual(global_latest["run_id"], platform_latest["run_id"])
+        self.assertEqual(global_latest["run_id"], run_id)

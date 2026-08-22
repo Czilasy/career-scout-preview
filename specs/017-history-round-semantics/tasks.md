@@ -31,7 +31,7 @@ description: "Task list for 017-history-round-semantics"
 
 ## Phase 1: Setup（基线）
 
-- [ ] T001 基线验证与行数记录：跑通后端全量与前端测试；记录 `webui/app.py`、`webui/store.py` 当前行数作为行数门禁基线（写入本文件 Notes）
+- [x] T001 基线验证与行数记录：跑通后端全量与前端测试；记录 `webui/app.py`、`webui/store.py` 当前行数作为行数门禁基线（写入本文件 Notes）
 
 ## Phase 2: Foundational（统一写入服务，阻塞 US2/US3）
 
@@ -125,4 +125,5 @@ T030 依赖全部；T031 在 T030 前后皆可
 
 ## Notes（T001 填写）
 
-- 基线行数：app.py=____、store.py=____（实现批次填写）
+- 基线行数：app.py=9669、store.py=4882（2026-08-22，wc -l）
+- 后端全量 `uv run python -m unittest discover -s tests` 通过（exit 0）；前端 `npm test` 34 文件 450 用例通过

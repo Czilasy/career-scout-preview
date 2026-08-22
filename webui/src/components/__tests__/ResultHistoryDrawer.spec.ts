@@ -64,8 +64,46 @@ describe("ResultHistoryDrawer", () => {
     expect(rows[0].attributes("tabindex")).toBeUndefined();
     expect(rows[0].text()).toContain("完成");
     expect(rows[1].text()).toContain("部分结果");
-    expect(rows[2].text()).toContain("失败但有 2 个岗位");
+    // 017-US3: "失败但有 N 个岗位" 文案永久消失；未知状态不渲染标签
+    expect(rows[2].text()).not.toContain("失败但有");
+    expect(wrapper.get('[data-run-id="h3"] .history-round-status').text()).toBe("");
     expect(wrapper.findAll('[data-testid="history-latest-badge"]')).toHaveLength(2);
+  });
+
+  it("shows finished_at as the primary time and falls back to created_at", () => {
+    // 017-US3: 主时间=定稿时间（重抓/补筛后刷新）；缺失回退创建时间
+    const wrapper = mountDrawer({
+      items: [
+        item({
+          run_id: "h1", status: "done",
+          created_at: "2026-08-01 09:00:00",
+          finished_at: "2026-08-11 10:30:00",
+        }),
+        item({
+          run_id: "h2", status: "partial",
+          created_at: "2026-08-02 09:00:00",
+          finished_at: null,
+        }),
+      ],
+    });
+    const times = wrapper.findAll(".history-round-time");
+    expect(times[0].text()).toContain("2026-08-11 10:30");
+    expect(times[1].text()).toContain("2026-08-02 09:00");
+  });
+
+  it("renders only the three allowed status labels", () => {
+    // 017-US3: 标签只有 完成 / 部分结果 / 已抓取，未筛选 三种
+    const wrapper = mountDrawer({
+      items: [
+        item({ run_id: "h1", status: "done" }),
+        item({ run_id: "h2", status: "partial" }),
+        item({ run_id: "h3", status: "scraped_only" }),
+      ],
+    });
+    const statuses = wrapper.findAll(".history-round-status");
+    expect(statuses[0].text()).toBe("完成");
+    expect(statuses[1].text()).toBe("部分结果");
+    expect(statuses[2].text()).toBe("已抓取，未筛选");
   });
 
   it("keeps latest badge immediately after the time", () => {

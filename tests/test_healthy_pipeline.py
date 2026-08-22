@@ -1581,7 +1581,8 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(finished["status"], "failed", finished)
         self.assertEqual(self.store.list_history_rounds(), [])
 
-    def test_failure_after_rough_verdicts_saves_failed_history_snapshot(self):
+    def test_failure_after_rough_verdicts_creates_no_history_round(self):
+        """017-US1: 粗筛已判部分岗位后出错强停，历史不新增轮（不再写失败快照）。"""
         scrape_task_id = "rough-verdict-failure-source"
         jobs = [{"job_id": "job-1", "title": "后端工程师"}]
         self._install_scrape_source(scrape_task_id, jobs)
@@ -1600,14 +1601,10 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
             finished = _wait_for_pipeline_task(self.client, task_id)
 
         self.assertEqual(finished["status"], "failed", finished)
-        items = self.store.list_history_rounds()
+        # 017-US1: 出错强停不产生历史轮；底层岗位数据与判定保留（可恢复）
+        self.assertEqual(self.store.list_history_rounds(), [])
         self.assertGreater(len(self.store.load_scrape_run_jobs(scrape_task_id)), 0)
         self.assertNotEqual(self.store.load_screening_verdicts(task_id), {})
-        events = self.store.list_task_events(task_id)
-        self.assertTrue(any(event["type"] == "history_snapshot" for event in events))
-        self.assertEqual(len(items), 1)
-        self.assertEqual(self.store.get_screening_run(items[0]["id"])["status"], "failed")
-        self.assertEqual(items[0]["total_kept"], 1)
 
     def test_terminal_failure_after_snapshot_does_not_duplicate_history(self):
         scrape_task_id = "post-snapshot-failure-source"

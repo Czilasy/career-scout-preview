@@ -105,6 +105,8 @@ class StoreMigrationsMixin:
             self._migration_030()
         if current < 31:
             self._migration_031()
+        if current < 32:
+            self._migration_032()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 
@@ -2077,6 +2079,34 @@ class StoreMigrationsMixin:
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
                 "VALUES (31, ?, 'profile facts and structured screening flags')",
+                (_now(),),
+            )
+
+    def _migration_032(self):
+        """017-US3: 一次性清空存量历史轮（FR-009/SC-005）。
+
+        删除全部 ``record_kind='result_snapshot'`` 轮及其子表行（表集合与
+        ``delete_history_result_preserving_logs`` 一致）；任务行（process_log）、
+        任务日志/事件与活动任务进度/断点一律不动。迁移幂等（版本号只跑一次）。
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT id FROM screening_runs WHERE record_kind = 'result_snapshot'"
+            ).fetchall()
+            for row in rows:
+                run_id = str(row["id"])
+                for table in (
+                    "screening_results",
+                    "screening_pending_results",
+                    "pipeline_checkpoints",
+                    "scrape_run_jobs",
+                    "scrape_page_progress",
+                ):
+                    conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
+                conn.execute("DELETE FROM screening_runs WHERE id = ?", (run_id,))
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) "
+                "VALUES (32, ?, 'clear legacy history result snapshots')",
                 (_now(),),
             )
 

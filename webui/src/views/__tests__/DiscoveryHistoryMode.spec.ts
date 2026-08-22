@@ -108,7 +108,8 @@ describe("DiscoveryView history mode", () => {
     await flushPromises();
 
     expect(wrapper.find('[data-testid="history-round-marker"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="history-round-marker"]').text()).toContain("失败但有 1 个岗位");
+    // 017-US3: 历史轮状态标签只有三种，不再出现"失败但有 N 个岗位"
+    expect(wrapper.get('[data-testid="history-round-marker"]').text()).not.toContain("失败但有");
     expect(wrapper.find('[data-testid="result-platform-filter"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
     expect(wrapper.findAll("button").some((button) => button.text().includes("补抓 JD"))).toBe(false);

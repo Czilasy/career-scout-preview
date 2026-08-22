@@ -54,7 +54,9 @@ export function historyStatusLabel(status: string, jobCount: number): string {
   if (["scraped_only"].includes(normalized)) return "已抓取，未筛选";
   if (["done", "succeeded", "completed"].includes(normalized)) return "完成";
   if (["partial", "completed_with_pending"].includes(normalized)) return "部分结果";
-  return `失败但有 ${jobCount} 个岗位`;
+  // 017-US3: 标签只有三种；存量已清，未知状态不渲染（防御性空白优于错误文案）
+  void jobCount;
+  return "";
 }
 /** 纯展示层平台过滤：按 job.platform 过滤 jobs/dropped；"all" 原样返回。
  *

@@ -462,9 +462,6 @@ describe("DiscoveryView", () => {
           deduplicated: { keywords: [], cities: [] },
         });
       }
-      if (url.endsWith("/api/reset-latest-result")) {
-        return response({ ok: true, cleared: true });
-      }
       if (url.endsWith("/api/analyze-resume")) {
         return response({
           ok: true,

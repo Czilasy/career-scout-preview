@@ -45,6 +45,12 @@ _SQL_MAX_SCHEMA_VERSION = "SELECT MAX(version) AS v FROM schema_migrations"
 _SQL_DELETE_EXPIRED_RECOVERY_LOCK = "DELETE FROM recovery_lock WHERE expires_at <= ?"
 _SQL_TUNING_EXPERIMENT_STATUS = "SELECT status FROM tuning_experiments WHERE id = ?"
 _SQL_TUNING_MANIFEST = "SELECT * FROM tuning_task_manifests WHERE id = ?"
+# 017-US5: "最新结果"判定唯一口径（FR-013）——全局与按平台共用同一过滤。
+_LATEST_RESULT_VISIBLE_STATUSES = "('done', 'partial', 'scraped_only')"
+_LATEST_RESULT_FILTER = (
+    f"status IN {_LATEST_RESULT_VISIBLE_STATUSES} "
+    "AND record_kind = 'result_snapshot' AND archived_at IS NULL"
+)
 
 
 class DiscoveryStoreConflictError(Exception):
@@ -944,9 +950,7 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
                 ).fetchone()
             else:
                 run = conn.execute(
-                    "SELECT * FROM screening_runs WHERE status IN ('done', 'partial', 'scraped_only') "
-                    "AND record_kind = 'result_snapshot' "
-                    "AND archived_at IS NULL "
+                    "SELECT * FROM screening_runs WHERE " + _LATEST_RESULT_FILTER + " "
                     "ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 ).fetchone()
             if run is None:
@@ -1036,15 +1040,16 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
             elif verdict in ("not_match", "mismatch"):
                 mismatch += 1
         status = "done" if pending == 0 else "partial"
+        now = _now()
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
             conn.execute(
                 "UPDATE screening_runs SET status = ?, match_count = ?, mismatch_count = ?, "
                 " pending_count = ?, processed_count = ?, total_kept = ?, "
-                " total_dropped = ?, source_count = ?, updated_at = ? WHERE id = ?",
+                " total_dropped = ?, source_count = ?, finished_at = ?, updated_at = ? WHERE id = ?",
                 (
                     status, match, mismatch, pending, match + mismatch,
-                    kept, dropped, kept + dropped, _now(), str(run_id),
+                    kept, dropped, kept + dropped, now, now, str(run_id),
                 ),
             )
         return {
@@ -1052,17 +1057,6 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
             "pending_count": pending, "processed_count": match + mismatch,
             "total_kept": kept, "total_dropped": dropped,
         }
-
-    def get_latest_done_run_id(self) -> str | None:
-        """Return the run_id of the most recent successful pipeline run, or None."""
-        with self._connection() as conn:
-            row = conn.execute(
-                "SELECT id FROM screening_runs WHERE status IN ('done', 'partial') "
-                "AND record_kind = 'result_snapshot' "
-                "AND archived_at IS NULL "
-                "ORDER BY created_at DESC LIMIT 1",
-            ).fetchone()
-        return row["id"] if row else None
 
     def load_latest_pipeline_result_for_platform(self, platform: str) -> dict | None:
         """T409: 按平台加载最近一次成功结果。
@@ -1072,9 +1066,7 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
         """
         with self._connection() as conn:
             run = conn.execute(
-                "SELECT * FROM screening_runs WHERE platform=? AND "
-                "status IN ('done', 'partial', 'scraped_only') AND record_kind = 'result_snapshot' "
-                "AND archived_at IS NULL "
+                "SELECT * FROM screening_runs WHERE platform=? AND " + _LATEST_RESULT_FILTER + " "
                 "ORDER BY created_at DESC LIMIT 1",
                 (str(platform),),
             ).fetchone()
