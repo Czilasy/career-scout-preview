@@ -12,8 +12,8 @@
 state 四态: "logged_in" / "not_logged_in" / "restricted" / "unknown"。
 - TTL 15 分钟（可注入覆盖）；
 - 信号回写：登录成功（打开/等待登录完成）→ invalidate 立即失效重探；
-  任务抓取持续拿到明文工资 → 写 logged_in；RiskControlError 终止 → 写 restricted；
-  智联 DOM marker 探测结果也进同一缓存。
+  任务抓取持续拿到明文工资 → 写 logged_in；登录失效 → 写 not_logged_in；
+  受限类信号不写缓存（016：受限只在当次任务内实时判定）。
 
 模块级路径可注入（set_login_state_path），测试隔离用。
 """
@@ -27,7 +27,10 @@ import time
 from pathlib import Path
 
 LOGIN_STATE_TTL = 15 * 60  # 秒；D3: TTL 15 分钟
-LOGIN_STATE_STATES = ("logged_in", "not_logged_in", "restricted", "unknown")
+# 016-error-module-rework：登录缓存只存事实态。受限（restricted）是瞬态，
+# 持久化只会制造跨任务假拦截，已从值域移除；旧文件遗留的 restricted
+# 记录在读取时按无缓存处理（触发重探），无需迁移。
+LOGIN_STATE_STATES = ("logged_in", "not_logged_in", "unknown")
 
 _PATH_OVERRIDE: Path | None = None
 _LOCK = threading.RLock()

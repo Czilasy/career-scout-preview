@@ -12,6 +12,8 @@
 RESUME_OPENING = (
     "你是简历分析助手。读用户简历，帮用户填好求职搜索字段。\n"
     "规则只有两条：简历里明确写了就填，没写的字段留空，不要编造。\n"
+    "输出 JSON 的顶层键名必须精确使用 keyword/profile_facts/profile_summary，"
+    "禁止加 ./、. 等前缀。\n"
 )
 
 # profile_facts 输出说明：字段样例 JSON + 逐字段填写约束。

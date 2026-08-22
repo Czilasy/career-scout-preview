@@ -93,40 +93,11 @@ class ResultHistoryStoreMixin:
             ).fetchone()
             if row is None:
                 return False
-            platform = str(row["platform"] or "")
-            latest_before = conn.execute(
-                "SELECT id FROM screening_runs "
-                "WHERE platform = ? AND record_kind = ? AND archived_at IS NULL "
-                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                (platform, _RESULT_SNAPSHOT),
-            ).fetchone()
-            deleting_latest = latest_before is not None and str(latest_before["id"]) == str(run_id)
 
             for table in _HISTORY_TABLES:
                 conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (str(run_id),))
             conn.execute("DELETE FROM screening_runs WHERE id = ?", (str(run_id),))
 
-            if deleting_latest:
-                remaining = conn.execute(
-                    "SELECT 1 FROM screening_runs "
-                    "WHERE platform = ? AND record_kind = ? AND archived_at IS NULL "
-                    "LIMIT 1",
-                    (platform, _RESULT_SNAPSHOT),
-                ).fetchone()
-                if remaining is None:
-                    archived = conn.execute(
-                        "SELECT id FROM screening_runs "
-                        "WHERE platform = ? AND record_kind = ? AND archived_at IS NOT NULL "
-                        "AND EXISTS (SELECT 1 FROM screening_results r WHERE r.run_id = screening_runs.id) "
-                        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                        (platform, _RESULT_SNAPSHOT),
-                    ).fetchone()
-                    if archived is not None:
-                        conn.execute(
-                            "UPDATE screening_runs SET archived_at = NULL, updated_at = ? "
-                            "WHERE id = ?",
-                            (_now(), str(archived["id"])),
-                        )
         return True
 
     def prune_result_history(self, limit: int = 30) -> list[str]:

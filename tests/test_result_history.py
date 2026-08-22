@@ -98,17 +98,19 @@ class ResultHistoryStoreTests(unittest.TestCase):
         self.assertFalse(self.store.history_round_exists(run_id))
         self.assertEqual(len(self.store.list_task_events(run_id)), 1)
 
-    def test_delete_latest_promotes_most_recent_archive(self):
+    def test_delete_latest_does_not_promote_archive(self):
         _save_round(self.store, "boss", keyword="old-1")
         _save_round(self.store, "boss", keyword="old-2")
         self.service.archive_all_current_results()
         newest = _save_round(self.store, "boss", keyword="newest")
 
         self.assertTrue(self.service.delete_round(newest))
+        # 删除最新轮后不复活上一轮：该平台 latest 置空，旧轮保持归档
+        self.assertIsNone(
+            self.store.load_latest_pipeline_result_for_platform("boss"))
         items = self.service.list_history("boss")
-        self.assertTrue(items[0]["is_latest"])
-        self.assertIsNone(items[0]["archived_at"])
-        self.assertEqual(items[0]["keyword_summary"], "old-2 / 上海")
+        self.assertFalse(any(item["is_latest"] for item in items))
+        self.assertTrue(all(item["archived_at"] for item in items))
 
     def test_failed_round_detail_keeps_raw_status(self):
         run_id = _save_round(self.store, "zhilian", status="failed")

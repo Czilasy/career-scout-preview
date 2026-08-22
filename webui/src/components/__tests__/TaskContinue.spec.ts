@@ -81,6 +81,11 @@ describe("DiscoveryView paused AI recovery", () => {
     await resumeButton.trigger("click");
     await flushPromises();
 
+    // 016：续跑瞬间进度从断点起步，不出现"归零再跳变"——
+    // /api/task-state/resumed-ai-run 的首个响应 progress 为空对象，
+    // 若前端本地重置，进度条会先回到 0%；断点起步应保持 40%。
+    expect(wrapper.get(".task-percentage").text()).toBe("40%");
+
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/task/continue/paused-ai-run",
       expect.objectContaining({
@@ -168,6 +173,80 @@ describe("DiscoveryView paused AI recovery", () => {
     expect(continueCall).toBeTruthy();
     // T510：cancel/continue/finish 都是无 body POST，不提交草稿平台选择
     expect(continueCall?.[1]?.body).toBeUndefined();
+  });
+
+  it("continue failure restores the paused snapshot and hides the english error code", async () => {
+    // 016：AI 限流未解除 → 继续返回 409 block_not_resolved。界面应回到报错暂停时的
+    // 样子（进度/日志/红色错误/中文原因），不重建空快照、不直出英文码。
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/latest-running-task") {
+        return response({
+          ok: true,
+          has_task: true,
+          task_id: "paused-ai-run",
+          kind: "ai_screen",
+          status: "paused",
+          stage: "ai_rough",
+          scrape_task_id: "scrape-task-1",
+          scrape_completed: true,
+          pause_info: { error_code: "ai_rate_limited", error_reason: "AI 接口限流" },
+          version_match: true,
+        });
+      }
+      if (url === "/api/task-state/paused-ai-run") {
+        return response({
+          status: "paused",
+          stage: "ai_rough",
+          progress: 40,
+          success_count: 20,
+          fail_count: 0,
+          unstarted_count: 30,
+          total: 50,
+          logs: ["AI 精筛中"],
+          error: "AI 服务限流，请求过于频繁",
+          pause_info: { error_code: "ai_rate_limited", error_reason: "AI 服务限流，请求过于频繁" },
+        });
+      }
+      if (url === "/api/task/continue/paused-ai-run") {
+        return response({
+          ok: false,
+          error: "block_not_resolved",
+          error_code: "ai_rate_limited",
+          error_reason: "AI 服务限流，请求过于频繁",
+          status: "paused",
+        }, 409);
+      }
+      if (url.startsWith("/api/latest-pipeline-result")) {
+        return response({ ok: true, has_result: false });
+      }
+      if (url === "/api/version") {
+        return response({
+          backend_version: "010",
+          build_hash: expectedBackendBuildHash,
+          build_time: "now",
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+
+    // 暂停快照已恢复：进度 40%、红色错误（中文原因）
+    expect(wrapper.get(".task-percentage").text()).toBe("40%");
+    expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("AI 服务限流");
+
+    // 点继续 → 409 block_not_resolved
+    await wrapper.get('[data-testid="continue-ai-screen"]').trigger("click");
+    await flushPromises();
+
+    // 回到报错暂停的样子：进度保留、红色错误保留、中文原因、无英文码、仍可再点继续
+    expect(wrapper.get(".task-percentage").text()).toBe("40%");
+    expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("AI 服务限流，请求过于频繁");
+    expect(wrapper.text()).not.toContain("block_not_resolved");
+    expect(wrapper.find('[data-testid="continue-ai-screen"]').exists()).toBe(true);
   });
 });
 

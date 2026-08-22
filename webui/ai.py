@@ -1004,6 +1004,42 @@ def _resume_bytes_to_text(file_bytes: bytes, fmt: str) -> str:
     raise ValueError(f"不支持的简历格式: {fmt}")
 
 
+_FALLBACK_KEYWORDS_MAX = 10
+
+
+def _fallback_keywords_from_facts(facts: dict) -> list[str]:
+    """AI 漏返 keyword 时，用简历自身核心技能兜底成候选搜索词。
+
+    只取简历里真实出现的技能词，不标 recommended，交给用户二次确认。
+    """
+    raw = facts.get("core_skills") if isinstance(facts, dict) else None
+    if not isinstance(raw, list):
+        return []
+    words: list[str] = []
+    for item in raw:
+        word = str(item).strip()
+        if not word or word in words:
+            continue
+        words.append(word)
+        if len(words) >= _FALLBACK_KEYWORDS_MAX:
+            break
+    return words
+
+
+def _normalize_ai_payload_keys(data):
+    """归一化 AI 顶层键名：模型偶发把 profile_facts 写成 ./profile_facts、
+    ".profile_facts" 等带 ./ 或 . 前缀的键，剥离前缀避免画像/关键词被丢。"""
+    if not isinstance(data, dict):
+        return data
+    normalized = dict(data)
+    for key in list(normalized):
+        plain = str(key).lstrip("./")
+        if plain and plain != key and plain not in normalized:
+            normalized[plain] = normalized[key]
+            normalized.pop(key, None)
+    return normalized
+
+
 def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
                              api_key: str, model: str = "",
                              platform: str = "boss", timeout: int = DEFAULT_TIMEOUT) -> dict:
@@ -1033,6 +1069,8 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
 
     data = call_ai(endpoint_url, api_key, messages, timeout=timeout, model=model)
     result = _validate_unified_fields(data, platform)
+    data = _normalize_ai_payload_keys(data)
+
     # 城市不由 AI 管理：用户未选择时由执行层按全国兜底。
     result["city"] = []
     # profile_summary 是自由文本，不参与枚举校验，验证后附加返回
@@ -1042,6 +1080,16 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
     result["profile_facts"] = validate_profile_facts(
         data.get("profile_facts") if isinstance(data, dict) else None
     )
+    # AI 可能漏返 keyword（模型没按提示词输出）：此时不得静默空着进
+    # 确认页，先用简历自身技能兜底出可选项；完全无可用词才报错重试。
+    if not result.get("keyword"):
+        fallback = _fallback_keywords_from_facts(result.get("profile_facts") or {})
+        if fallback:
+            result["keyword"] = [
+                {"word": word, "recommended": False} for word in fallback
+            ]
+        else:
+            raise ValueError("未提取到搜索关键词，请重试或手动输入")
     return result
 
 
@@ -1124,6 +1172,10 @@ SCREEN_BATCH_SIZE = 50   # Stage A 每批送 AI 的岗位数（默认值，可�
 SCREEN_CONCURRENCY = 1   # Stage A 并发批次数（默认值，可被高级设置覆盖）
 MATCH_BATCH_SIZE = 4     # Stage B 每批送 AI 的岗位数（默认值，可被高级设置覆盖）
 MATCH_CONCURRENCY = 1    # Stage B 并发批次数（默认值，可被高级设置覆盖）
+# 精筛熔断：连续整批 AI 无有效判定（空响应/截断/无效 JSON 等非 systemic 失败）
+# 达到阈值即判定端点系统性故障，抛 server_error 让调用方暂停整任务，
+# 避免故障时拆半递归放大请求、长期空转。仅 raise_on_systemic=True 时生效。
+AI_CONSECUTIVE_FAILURE_LIMIT = 3
 # 岗位靠谱判定（B033）：特征清单与分级规则在 webui/flag_features.py，
 # 高危≥1 或 中危≥2 → 输出 flags；中危仅 1 条 → 降级 caveats。本模块不再持有阈值。
 
@@ -1646,6 +1698,11 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     切片6（FR-020/SC-008）：``raise_on_systemic=True`` 时，AI 命中限流/额度/密钥/
     网络等 systemic 错误立即抛 ``AISecurityError``，调用方应捕获并暂停整任务，
     而不是批量变 uncertain 后完成。默认 False 保持向后兼容。
+
+    熔断：``raise_on_systemic=True`` 时，连续 AI_CONSECUTIVE_FAILURE_LIMIT 个批次
+    全部无有效判定（空响应/截断/无效 JSON 等非 systemic 失败）也会抛
+    ``AISecurityError(server_error, failure_phase=circuit_open)`` 触发暂停，
+    防止端点整体劣化时拆半递归放大请求、长期空转。
     """
     if batch_size is None:
         if execution_config is not None:
@@ -1682,6 +1739,38 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                         if str(j.get("job_id", "")) not in done_ids]
     if not jobs_with_jd:
         return {"verdicts": verdicts}
+    # 熔断：连续整批 AI 无有效判定（空响应/截断/无效 JSON 等非 systemic 失败）
+    # 达到 AI_CONSECUTIVE_FAILURE_LIMIT 即判定端点系统性故障，抛 server_error
+    # 让调用方暂停整任务，避免故障时拆半递归放大请求、长期空转。
+    # 仅 raise_on_systemic=True 时生效；False 保持原“标 uncertain 继续”行为。
+    _circuit_state = {"consecutive": 0}
+    _circuit_lock = threading.Lock()
+
+    def _circuit_after_batch(batch_verdicts: dict) -> None:
+        """整批全部 uncertain（AI 未给出任何有效判定）→ 连续失败计数，否则清零。"""
+        all_uncertain = bool(batch_verdicts) and all(
+            isinstance(v, dict) and v.get("verdict") == "uncertain"
+            for v in batch_verdicts.values()
+        )
+        should_open = False
+        with _circuit_lock:
+            if all_uncertain:
+                _circuit_state["consecutive"] += 1
+            else:
+                _circuit_state["consecutive"] = 0
+            should_open = (
+                raise_on_systemic
+                and _circuit_state["consecutive"] >= AI_CONSECUTIVE_FAILURE_LIMIT
+            )
+        if should_open:
+            raise AISecurityError(
+                ERROR_SERVER,
+                {
+                    "failure_phase": "circuit_open",
+                    "consecutive_failures": _circuit_state["consecutive"],
+                    "limit": AI_CONSECUTIVE_FAILURE_LIMIT,
+                },
+            )
     terminal_input_count = (
         int(measurement_input_count)
         if measurement_input_count is not None else len(jobs_with_jd)
@@ -1856,6 +1945,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         for batch in batches:
             batch_verdicts = _match_one_batch(batch)
             verdicts.update(batch_verdicts)
+            _circuit_after_batch(batch_verdicts)
             if on_batch_done is not None:
                 try:
                     on_batch_done(dict(batch_verdicts), list(verdicts.keys()))
@@ -1892,6 +1982,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 with lock:
                     verdicts.update(batch_verdicts)
                     completed_snapshot = list(verdicts.keys())
+                _circuit_after_batch(batch_verdicts)
                 if on_batch_done is not None:
                     try:
                         on_batch_done(dict(batch_verdicts), completed_snapshot)

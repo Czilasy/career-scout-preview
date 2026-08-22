@@ -28,6 +28,10 @@ interface TaskSnapshot {
   pending_count?: number;
   source_total?: number;
   scraped_count?: number;
+  // 016：软失败组合留痕（最近 20 条倒序）
+  combo_issues?: Array<{
+    combo_key: string; code: string; code_text: string; reason: string; ts: string;
+  }> | null;
   execution_config?: Record<string, unknown> | null;
   // T510：任务自身平台，用于在 header 展示真实平台徽章（http-api.md L201）。
   // 由父组件从 /api/latest-running-task 或 /api/task-state 透传；草稿平台切换不影响此处。
@@ -51,12 +55,16 @@ const TERMINAL_STATUSES = new Set([
   "paused",
 ]);
 
+// 016：与后端 SYSTEMIC_BLOCK_CODES 对齐（统一正名 + 历史别名兼容）
 const BLOCK_CODES = new Set([
-  "captcha_required", "login_expired", "ai_rate_limited",
-  "ai_quota_exhausted", "ai_key_invalid", "ai_network_error",
-  "ip_risk_control", "cdp_unavailable", "internal_error",
+  "ai_rate_limited", "ai_quota_exhausted", "ai_key_invalid",
+  "ai_network_error", "internal_error",
   "source_verification_required", "source_login_required",
-  "source_rate_limited", "source_blocked", "source_cdp_unavailable",
+  "source_rate_limited", "source_account_restricted",
+  "source_blocked", "source_cdp_unavailable",
+  "source_request_limit_exceeded", "source_unreachable",
+  // 历史别名（旧任务记录仍可能出现）
+  "captcha_required", "login_expired", "ip_risk_control", "cdp_unavailable",
 ]);
 
 const blocked = computed(() => {
@@ -332,6 +340,11 @@ const failureVisible = computed(() => {
   return status === "failed" || status === "paused";
 });
 
+// 016：软失败组合留痕摘要（不阻塞任务，但让用户看见哪些组合失败、为什么）。
+const comboIssues = computed(() =>
+  (props.snapshot?.combo_issues || []).slice(0, 5),
+);
+
 // B052：暂停/失败统一内联展示「中文原因 · 错误字段」，错误字段红色。
 const failureLine = computed(() => {
   const status = props.snapshot?.status;
@@ -453,6 +466,16 @@ const timeLabel = computed(() => {
       {{ failureLine.reason }}<span v-if="failureLine.code" class="error-field" data-testid="error-field"> · {{ failureLine.code }}</span>
     </p>
     <p v-else class="task-message">{{ snapshot.error || message }}</p>
+    <ul v-if="comboIssues.length" class="task-combo-issues" data-testid="combo-issues">
+      <li
+        v-for="issue in comboIssues"
+        :key="`${issue.combo_key}:${issue.ts}`"
+        class="task-combo-issue"
+      >
+        <span class="task-combo-issue-key">{{ issue.combo_key || "组合" }}</span>
+        <span class="task-combo-issue-text">{{ issue.code_text }}<template v-if="issue.reason"> · {{ issue.reason }}</template></span>
+      </li>
+    </ul>
     <!-- 切片7：完整计数画面（FR-037）。按语义分组：来源 / 粗筛 / 当前阶段 / 待确认 / 失败 -->
     <div v-if="showCounts" class="task-counts" data-testid="task-counts">
       <div v-if="scrapedCount > 0" class="count-group count-scraped">
@@ -496,6 +519,31 @@ const timeLabel = computed(() => {
 </template>
 
 <style scoped>
+/* 016：软失败组合留痕摘要（最多 5 条，弱化样式不与暂停原因抢焦点） */
+.task-combo-issues {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.task-combo-issue {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.task-combo-issue-key {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+.task-combo-issue-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .error-field {
   color: var(--danger);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;

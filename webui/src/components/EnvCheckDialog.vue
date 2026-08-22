@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Activity, LoaderCircle, RefreshCw, ShieldAlert, Wrench } from "@lucide/vue";
+import { Activity, LoaderCircle, RefreshCw, Wrench } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
 import { apiRequest, errorMessage } from "../api";
 import type { Notice } from "../types";
@@ -20,21 +20,11 @@ interface CheckGroup {
   items: CheckItem[];
 }
 
-interface CooldownRecord {
-  account_id: string;
-  platform: string;
-  until: number;
-  until_text: string;
-  reason: string;
-  from_run?: string;
-}
-
 interface EnvCheckResponse {
   ok: boolean;
   runtime_mode?: "source" | "exe";
   groups: CheckGroup[];
   active_account: string;
-  cooldowns: CooldownRecord[];
   checked_at: number;
 }
 
@@ -47,7 +37,6 @@ const emit = defineEmits<{
 
 const loading = ref(false);
 const groups = ref<CheckGroup[]>([]);
-const cooldowns = ref<CooldownRecord[]>([]);
 const activeAccount = ref("");
 const checkedAt = ref<number | null>(null);
 // 运行时模式：仅用于展示差异文案（EXE 模式 deps=内置运行时、新增 webview2 项），不改变检查流程。
@@ -56,7 +45,6 @@ const runtimeMode = ref<"source" | "exe">("source");
 const localNotice = ref<Notice | null>(null);
 const busyAction = ref(""); // 正在执行的修复动作 id，避免重复点击
 const accountNames = ref<Record<string, string>>({});
-const pendingCooldown = ref<CooldownRecord | null>(null);
 
 const PLATFORM_LABELS: Record<string, string> = {
   boss: "BOSS",
@@ -102,7 +90,6 @@ async function runCheck() {
   try {
     const data = await apiRequest<EnvCheckResponse>("/api/env-check");
     groups.value = data.groups || [];
-    cooldowns.value = data.cooldowns || [];
     activeAccount.value = data.active_account || "";
     checkedAt.value = data.checked_at || null;
     runtimeMode.value = data.runtime_mode === "exe" ? "exe" : "source";
@@ -166,31 +153,6 @@ async function runFix(item: CheckItem) {
   }
 }
 
-// 手动解除冷却：先打开应用内确认弹窗，只清 cooldown 不碰登录态缓存（D6）。
-function clearCooldown(record: CooldownRecord) {
-  pendingCooldown.value = record;
-}
-
-async function confirmClearCooldown() {
-  const record = pendingCooldown.value;
-  if (!record || busyAction.value) return;
-  pendingCooldown.value = null;
-  busyAction.value = `clear:${record.account_id}:${record.platform}`;
-  try {
-    await apiRequest("/api/cooldown/clear", {
-      method: "POST",
-      json: { account_id: record.account_id, platform: record.platform },
-    });
-    cooldowns.value = cooldowns.value.filter(
-      (item) => item.account_id !== record.account_id || item.platform !== record.platform,
-    );
-    setLocalNotice({ message: "冷却已解除", tone: "success" });
-  } catch (error) {
-    setLocalNotice({ message: errorMessage(error, "解除冷却失败"), tone: "error" });
-  } finally {
-    busyAction.value = "";
-  }
-}
 </script>
 
 <template>
@@ -275,50 +237,6 @@ async function confirmClearCooldown() {
       </section>
     </div>
 
-    <section
-      v-if="cooldowns.length"
-      class="env-check-cooldowns"
-      data-testid="env-cooldowns"
-    >
-      <h3 class="env-check-group-title">
-        <ShieldAlert :size="15" aria-hidden="true" />
-        风控冷却提醒
-      </h3>
-      <p class="env-check-cooldown-tip">
-        命中风控的账号在冷却期内不建议提交任务；连坐风险提示：其他账号抓取也可能受影响。
-      </p>
-      <ul class="env-check-cooldown-list">
-        <li
-          v-for="record in cooldowns"
-          :key="`${record.account_id}:${record.platform}`"
-          class="env-check-cooldown-item"
-          :data-testid="`cooldown-${record.account_id}-${record.platform}`"
-        >
-          <div class="env-check-cooldown-main">
-            <strong>
-              {{ accountNames[record.account_id] || record.account_id }}
-              <span class="env-check-cooldown-platform">
-                {{ PLATFORM_LABELS[record.platform] || record.platform }}
-              </span>
-            </strong>
-            <p>建议等待至 {{ record.until_text }} 后重试</p>
-            <p v-if="record.reason" class="env-check-cooldown-reason">{{ record.reason }}</p>
-            <p v-if="record.from_run" class="env-check-cooldown-source" data-testid="cooldown-from-run">来源任务：{{ record.from_run }}</p>
-          </div>
-          <button
-            type="button"
-            class="button danger small"
-            :disabled="Boolean(busyAction)"
-            @click="clearCooldown(record)"
-          >
-            <LoaderCircle v-if="busyAction === `clear:${record.account_id}:${record.platform}`" class="spin" :size="13" aria-hidden="true" />
-            {{ busyAction === `clear:${record.account_id}:${record.platform}` ? "解除中…" : "解除冷却" }}
-          </button>
-        </li>
-      </ul>
-    </section>
-
-
     <div
       v-if="localNotice"
       class="env-check-notice"
@@ -330,32 +248,6 @@ async function confirmClearCooldown() {
     </div>
   </BaseDialog>
 
-  <BaseDialog
-    id="cooldown-confirm"
-    :open="Boolean(pendingCooldown)"
-    title="解除风控冷却"
-    size="sm"
-    @close="pendingCooldown = null"
-  >
-    <p class="env-check-confirm-text">
-      解除「{{ pendingCooldown ? (accountNames[pendingCooldown.account_id] || pendingCooldown.account_id) : '' }}」的{{ pendingCooldown ? (PLATFORM_LABELS[pendingCooldown.platform] || pendingCooldown.platform) : '' }}风控冷却？解除后仍建议等待风控缓解后再跑任务。
-    </p>
-    <template #footer>
-      <button
-        type="button"
-        class="button secondary"
-        data-testid="cooldown-confirm-cancel"
-        @click="pendingCooldown = null"
-      >取消</button>
-      <button
-        type="button"
-        class="button danger"
-        data-testid="cooldown-confirm-ok"
-        :disabled="Boolean(busyAction)"
-        @click="confirmClearCooldown"
-      >确认解除</button>
-    </template>
-  </BaseDialog>
 </template>
 
 <style scoped>
@@ -434,61 +326,6 @@ async function confirmClearCooldown() {
 }
 .env-check-ai-test {
   margin-top: 8px;
-}
-.env-check-cooldowns {
-  margin-top: 16px;
-  padding-top: 14px;
-  border-top: 1px solid var(--hair);
-}
-.env-check-cooldown-tip {
-  margin: 0 0 10px;
-  color: var(--unsure-deep);
-  font-size: 12px;
-  line-height: 1.5;
-}
-.env-check-cooldown-list {
-  display: grid;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.env-check-cooldown-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--unsure-edge, var(--hair));
-  border-radius: 9px;
-  background: var(--unsure-wash);
-}
-.env-check-cooldown-main {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.env-check-cooldown-main strong {
-  font-size: 13px;
-  color: var(--ink-1);
-}
-.env-check-cooldown-platform {
-  margin-left: 6px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--hair-2);
-  color: var(--muted);
-  font-size: 11px;
-}
-.env-check-cooldown-main p {
-  margin: 3px 0 0;
-  color: var(--unsure-deep);
-  font-size: 12px;
-}
-.env-check-cooldown-reason {
-  opacity: 0.85;
-}
-.env-check-cooldown-source {
-  opacity: 0.75;
-  font-size: 11px;
 }
 .env-check-notice {
   margin-top: 14px;

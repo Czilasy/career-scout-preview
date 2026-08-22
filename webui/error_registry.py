@@ -62,6 +62,7 @@ _SOURCE_CODES: dict[str, dict[str, Any]] = {
         blocking=True, retryable=True,
         user_message="连不上调试浏览器", impact="systemic",
         resume_condition="启动 Chrome 调试端口后点继续",
+        aliases=("cdp_unavailable",),
     ),
     "source_request_limit_exceeded": _entry(
         "source_request_limit_exceeded", "source",
@@ -75,12 +76,14 @@ _SOURCE_CODES: dict[str, dict[str, Any]] = {
         blocking=True, retryable=True,
         user_message="登录已失效，需重新登录", impact="systemic",
         resume_condition="重新登录后点继续",
+        aliases=("login_expired",),
     ),
     "source_verification_required": _entry(
         "source_verification_required", "source",
         blocking=True, retryable=True,
         user_message="触发验证码/滑块，需手动完成", impact="systemic",
         resume_condition="完成验证码后点继续",
+        aliases=("captcha_required",),
     ),
     "source_rate_limited": _entry(
         "source_rate_limited", "source",
@@ -88,11 +91,24 @@ _SOURCE_CODES: dict[str, dict[str, Any]] = {
         user_message="账号/操作频繁被限流", impact="systemic",
         resume_condition="等待限流解除后点继续",
     ),
+    "source_account_restricted": _entry(
+        "source_account_restricted", "source",
+        blocking=True, retryable=True,
+        user_message="确认账号/平台受限", impact="systemic",
+        resume_condition="到自动化浏览器查看提示并处理后点继续",
+    ),
+    "source_status_unclear": _entry(
+        "source_status_unclear", "source",
+        retryable=True,
+        user_message="暂时无法确认平台状态", impact="independent",
+        resume_condition="可直接重试或稍后再试",
+    ),
     "source_blocked": _entry(
         "source_blocked", "source",
         blocking=True, retryable=True,
         user_message="IP 级风控拦截", impact="systemic",
         resume_condition="更换网络或等待后点继续",
+        aliases=("ip_risk_control",),
     ),
     "source_unreachable": _entry(
         "source_unreachable", "source",
@@ -131,18 +147,9 @@ _SOURCE_CODES: dict[str, dict[str, Any]] = {
 
 
 _TAXONOMY_CODES: dict[str, dict[str, Any]] = {
-    "captcha_required": _entry(
-        "captcha_required", "platform",
-        blocking=True, retryable=True,
-        user_message="触发验证码/滑块，需手动完成", impact="systemic",
-        resume_condition="用户完成验证码后点继续",
-    ),
-    "login_expired": _entry(
-        "login_expired", "platform",
-        blocking=True, retryable=True,
-        user_message="登录已失效，需重新登录", impact="systemic",
-        resume_condition="用户重新登录后点继续",
-    ),
+    # 016-error-module-rework：平台侧重复码（captcha_required/login_expired/
+    # ip_risk_control/cdp_unavailable）已收敛为 source_* 正名码的别名，
+    # 历史数据展示经 ALIAS_TO_CODE 解析。
     "ai_rate_limited": _entry(
         "ai_rate_limited", "ai",
         blocking=True, retryable=True,
@@ -166,18 +173,6 @@ _TAXONOMY_CODES: dict[str, dict[str, Any]] = {
         blocking=True, retryable=True,
         user_message="AI 网络或服务故障", impact="systemic",
         resume_condition="网络恢复后点继续",
-    ),
-    "ip_risk_control": _entry(
-        "ip_risk_control", "platform",
-        blocking=True, retryable=True,
-        user_message="IP 级风控拦截", impact="systemic",
-        resume_condition="更换网络或等待后点继续",
-    ),
-    "cdp_unavailable": _entry(
-        "cdp_unavailable", "platform",
-        blocking=True, retryable=True,
-        user_message="连不上调试浏览器", impact="systemic",
-        resume_condition="启动 Chrome 调试端口后点继续",
     ),
     "job_offline": _entry(
         "job_offline", "job",
@@ -214,19 +209,19 @@ _AI_INTERNAL_CODES: dict[str, dict[str, Any]] = {
     ERROR_TIMEOUT: _entry(
         ERROR_TIMEOUT, "ai",
         blocking=True, retryable=True,
-        user_message="AI 响应超时，请稍后重试", impact="systemic",
+        user_message="AI 响应超时，请稍后重试",
         aliases=("ERROR_TIMEOUT",),
     ),
     ERROR_AUTH: _entry(
         ERROR_AUTH, "ai",
         blocking=True,
-        user_message="API 密钥无效或已过期，请检查 AI 设置", impact="systemic",
+        user_message="API 密钥无效或已过期，请检查 AI 设置",
         aliases=("ERROR_AUTH",),
     ),
     ERROR_NETWORK: _entry(
         ERROR_NETWORK, "ai",
         blocking=True, retryable=True,
-        user_message="无法连接 AI 服务，请检查网络与地址配置", impact="systemic",
+        user_message="无法连接 AI 服务，请检查网络与地址配置",
         aliases=("ERROR_NETWORK",),
     ),
     ERROR_INVALID: _entry(
@@ -238,7 +233,7 @@ _AI_INTERNAL_CODES: dict[str, dict[str, Any]] = {
     ERROR_RATE_LIMIT: _entry(
         ERROR_RATE_LIMIT, "ai",
         blocking=True, retryable=True,
-        user_message="AI 服务限流（免费额度），请稍候再试", impact="systemic",
+        user_message="AI 服务限流（免费额度），请稍候再试",
         aliases=("ERROR_RATE_LIMIT",),
     ),
     ERROR_TRUNCATED: _entry(
@@ -250,19 +245,19 @@ _AI_INTERNAL_CODES: dict[str, dict[str, Any]] = {
     ERROR_NOT_CONFIGURED: _entry(
         ERROR_NOT_CONFIGURED, "ai",
         blocking=True,
-        user_message="AI 未配置，请先设置 API 地址和密钥", impact="systemic",
+        user_message="AI 未配置，请先设置 API 地址和密钥",
         aliases=("ERROR_NOT_CONFIGURED",),
     ),
     ERROR_QUOTA_EXHAUSTED: _entry(
         ERROR_QUOTA_EXHAUSTED, "ai",
         blocking=True,
-        user_message="AI 额度已用完，请明天再试或更换 API 密钥", impact="systemic",
+        user_message="AI 额度已用完，请明天再试或更换 API 密钥",
         aliases=("ERROR_QUOTA_EXHAUSTED",),
     ),
     ERROR_SERVER: _entry(
         ERROR_SERVER, "ai",
         blocking=True, retryable=True,
-        user_message="AI 服务暂时不可用，请稍后重试", impact="systemic",
+        user_message="AI 服务暂时不可用，请稍后重试",
         aliases=("ERROR_SERVER",),
     ),
 }
@@ -321,21 +316,20 @@ for _group in (
 ERROR_CODES = frozenset(REGISTRY)
 
 SAFE_FAILURE_CODES = frozenset(_SOURCE_CODES)
-ERROR_TAXONOMY = {code: dict(entry) for code, entry in _TAXONOMY_CODES.items()}
+ERROR_TAXONOMY = {
+    code: dict(entry) for code, entry in REGISTRY.items()
+    if entry["category"] in ("source", "ai", "platform", "internal", "job")
+}
 FAILED_CODE_LABELS = {
     code: str(entry["user_message"])
     for code, entry in REGISTRY.items()
 }
-SYSTEMIC_BLOCK_CODES = frozenset({
-    "captcha_required", "login_expired",
-    "ai_rate_limited", "ai_quota_exhausted", "ai_key_invalid", "ai_network_error",
-    "ip_risk_control", "cdp_unavailable", "internal_error",
-    "source_verification_required", "source_login_required",
-    "source_rate_limited", "source_blocked", "source_cdp_unavailable",
-    "source_request_limit_exceeded",
-})
+# 016-error-module-rework：阻断集合改由注册表标记推导（blocking 且 systemic），
+# 实际定义移至 ALIAS_TO_CODE 之后（集合需吸收历史别名闭包，见下）。占位的
+# 旧手工并集已删除。
 INDEPENDENT_FAILURE_CODES = frozenset({
     "job_offline", "detail_timeout", "detail_invalid", "ai_missing_job",
+    "source_status_unclear",
 })
 SYSTEMIC_AI_ERROR_CODES = frozenset({
     ERROR_RATE_LIMIT, ERROR_QUOTA_EXHAUSTED, ERROR_AUTH,
@@ -354,6 +348,32 @@ AI_TAXONOMY_TARGETS = {
     ERROR_SERVER: "ai_network_error",
 }
 
+# 历史码 → 唯一正名码（016-error-module-rework：双套码收敛后的兼容层）。
+ALIAS_TO_CODE: dict[str, str] = {}
+for _code, _entry_data in REGISTRY.items():
+    for _alias in _entry_data.get("aliases", ()):
+        ALIAS_TO_CODE[_alias] = _code
+
+
+def _derived_systemic_block_codes() -> frozenset[str]:
+    """blocking 且 systemic 的正名码，外加目标为阻断码的历史别名闭包。
+
+    消费方（store/app/pipeline）对 DB 与事件流里的旧码做成员判定时无需
+    先归一；文案与展示仍走正名码。
+    """
+    canonical = frozenset({
+        code for code, entry in REGISTRY.items()
+        if entry["blocking"] and entry["impact"] == "systemic"
+    })
+    aliases = frozenset({
+        alias for alias, target in ALIAS_TO_CODE.items()
+        if target in canonical
+    })
+    return canonical | aliases
+
+
+SYSTEMIC_BLOCK_CODES = _derived_systemic_block_codes()
+
 
 def validate_code(code: str) -> str:
     """Return the canonical code or raise for unknown codes."""
@@ -367,12 +387,17 @@ def validate_code(code: str) -> str:
 def resolve_code(code: object, *, default: str = "internal_error") -> str:
     """Normalize a runtime error code with a visible fallback.
 
-    Known codes pass through unchanged.  Unknown or empty codes emit a
-    warning with the original value and return ``default`` so runtime
-    paths never silently keep an unregistered code.
+    Known codes pass through unchanged; registered aliases (historical
+    duplicate codes) resolve to their canonical code.  Unknown or empty
+    codes emit a warning with the original value and return ``default``
+    so runtime paths never silently keep an unregistered code.
     """
-    if isinstance(code, str) and code in REGISTRY:
-        return code
+    if isinstance(code, str):
+        if code in REGISTRY:
+            return code
+        alias_target = ALIAS_TO_CODE.get(code)
+        if alias_target:
+            return alias_target
     original = str(code or "")
     _LOGGER.warning(
         "runtime error code not in registry; falling back to %s: %r",

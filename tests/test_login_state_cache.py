@@ -1,7 +1,8 @@
-"""登录态缓存（D3）测试：TTL / 四态 / 回写 / 失效 / 快照。
+"""登录态缓存（D3）测试：TTL / 事实两态 / 回写 / 失效 / 快照。
 
 覆盖：
-- write_login_state / read_cached_state：四态读写与 TTL 15 分钟
+- write_login_state / read_cached_state：两态+unknown 读写与 TTL 15 分钟
+- 016：restricted 不再是合法状态；旧文件遗留 restricted 读作无缓存
 - invalidate_login_state：单平台与全平台失效
 - read_login_state：非法记录容错
 - all_login_states：清理后的快照
@@ -34,10 +35,20 @@ class LoginStateCacheTests(unittest.TestCase):
         self.assertIsInstance(record["at"], float)
         self.assertEqual(cache.read_cached_state("acc1", "boss"), "logged_in")
 
-    def test_four_states_roundtrip(self):
-        for state in ("logged_in", "not_logged_in", "restricted", "unknown"):
+    def test_fact_states_roundtrip(self):
+        for state in ("logged_in", "not_logged_in", "unknown"):
             cache.write_login_state("acc1", "boss", state)
             self.assertEqual(cache.read_cached_state("acc1", "boss"), state)
+
+    def test_restricted_is_no_longer_a_valid_state(self):
+        # 016：受限不落缓存；直接写被拒绝，读旧文件遗留 restricted 视为无缓存
+        cache.write_login_state("acc1", "boss", "restricted")
+        self.assertIsNone(cache.read_cached_state("acc1", "boss"))
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump({
+                "acc1": {"boss": {"state": "restricted", "at": time.time()}},
+            }, f)
+        self.assertIsNone(cache.read_cached_state("acc1", "boss"))
 
     def test_invalid_state_is_rejected(self):
         cache.write_login_state("acc1", "boss", "half_logged")
@@ -85,11 +96,11 @@ class LoginStateCacheTests(unittest.TestCase):
 
     def test_all_login_states_snapshot(self):
         cache.write_login_state("acc1", "boss", "logged_in")
-        cache.write_login_state("acc1", "zhilian", "restricted")
+        cache.write_login_state("acc1", "zhilian", "not_logged_in")
         cache.write_login_state("acc2", "boss", "unknown")
         snapshot = cache.all_login_states()
         self.assertEqual(snapshot["acc1"]["boss"]["state"], "logged_in")
-        self.assertEqual(snapshot["acc1"]["zhilian"]["state"], "restricted")
+        self.assertEqual(snapshot["acc1"]["zhilian"]["state"], "not_logged_in")
         self.assertEqual(snapshot["acc2"]["boss"]["state"], "unknown")
 
 

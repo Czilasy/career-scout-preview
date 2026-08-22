@@ -22,9 +22,15 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from scripts import boss_cdp_raw as boss
+from scripts.boss_cdp_signals import FAILURE_LINE_PREFIX, parse_failure_line
 from webui.process_executor import ScraperExecutor, run_with_deadline
 from webui.workbench import normalize_job_link
-from webui.error_registry import SAFE_FAILURE_CODES
+from webui.error_registry import (
+    ERROR_USER_MESSAGES,
+    SAFE_FAILURE_CODES,
+    resolve_code,
+)
+from webui.task_runners import _classify_risk_control_reason
 from webui.runtime_audit import record_runtime_event
 
 logger = logging.getLogger(__name__)
@@ -431,14 +437,14 @@ class BossCdpSource:
             cached = read_cached_state(self.browser_account, "boss")
             if cached == "logged_in":
                 return SourceOutcome.success(safe_log="source_ready cache=hit")
-            if cached == "restricted":
-                return SourceOutcome.failure(
-                    failed_code="source_blocked",
-                    safe_log="boss_login_restricted cache=hit",
-                )
+            # 016：受限不再缓存（登录缓存只存 logged_in/not_logged_in 事实态），
+            # 不存在"缓存命中即拦截"；未登录事实命中时也改为真实提示。
             if cached == "not_logged_in":
-                cache_note = " cache=not_logged_in_ignored"
-            elif cached == "unknown":
+                return SourceOutcome.failure(
+                    failed_code="source_login_required",
+                    safe_log="boss_login_required cache=hit",
+                )
+            if cached == "unknown":
                 cache_note = " cache=unknown_ignored"
 
         state = boss.check_login_state_tri(self.cdp_port)
@@ -451,14 +457,16 @@ class BossCdpSource:
             state = boss.check_login_state_tri(self.cdp_port)
             if state == "unknown":
                 state = boss.check_login_state_tri(self.cdp_port)
-        if self.browser_account:
+        if self.browser_account and state in ("logged_in", "not_logged_in", "unknown"):
             from scripts.login_state_cache import write_login_state
             write_login_state(self.browser_account, "boss", state)
         if state == "logged_in":
             return SourceOutcome.success(safe_log=f"source_ready{cache_note}{retry_note}")
         if state == "restricted":
+            # 复探后仍受限 → 确认账号/平台受限（016：独立码，不再借用
+            # source_blocked 的"IP 级风控"文案；受限不写缓存）。
             return SourceOutcome.failure(
-                failed_code="source_blocked",
+                failed_code="source_account_restricted",
                 safe_log=f"boss_login_restricted{cache_note}{retry_note}",
             )
         if state == "not_logged_in":
@@ -490,7 +498,7 @@ class BossCdpSource:
             return SourceOutcome.success(safe_log=f"recheck_logged_in{retry_note}")
         if state == "restricted":
             return SourceOutcome.failure(
-                failed_code="source_blocked",
+                failed_code="source_account_restricted",
                 safe_log=f"recheck_restricted{retry_note}",
             )
         if state == "not_logged_in":
@@ -1344,11 +1352,13 @@ class BossCdpSource:
         except boss.RequestLimitExceededError as exc:
             return (11, str(exc))
         except boss.LoginRequiredError as exc:
-            # captured 含「登录」关键词，_classify_failed_code 据此映射为
-            # source_login_required（合同 §3 表 LoginRequiredError 行）
-            return (1, f"登录态失效: {exc}")
+            # 016：登录失效走结构化失败行，不再依赖 captured 关键词
+            return (1, _format_inprocess_failure("source_login_required", str(exc)))
         except boss.RiskControlError as exc:
-            return (10, exc.reason)
+            # 016：优先异常自带 code；缺码时用 reason 兜底分类并把结果写进失败行，
+            # 与子进程模式共享同一分类契约
+            code = str(getattr(exc, "code", "") or "") or _classify_risk_control_reason(exc.reason)
+            return (10, _format_inprocess_failure(code, exc.reason))
         except PageEventPersistenceError:
             raise
         except ValueError as exc:
@@ -1824,20 +1834,9 @@ _EXIT_REASONS = {
     10: "触发风控/限流（验证码、连续空页或 HTTP 拦截）",
 }
 
-# 退出码 + 输出关键词 → 具体 failed_code（不再一律 source_blocked）
-_VERIFICATION_KEYWORDS = ("验证码", "滑块", "滑动验证", "captcha", "slider")
-_RATE_LIMIT_KEYWORDS = (
-    "429", "http 403", "http 412", "http 418",
-    "403 forbidden", "412 precondition", "418 im a teapot",
-    "操作频繁", "频繁访问", "访问频繁", "稍后再试", "访问受限", "异常流量", "账号受限", "限流",
-    "rate limit", "too many",
-)
-_LOGIN_REQUIRED_KEYWORDS = (
-    "401", "登录态失效", "登录失效", "登录已失效", "请先登录", "未登录",
-    "cookie 失效", "cookie已失效",
-)
-# 退出码 1（登录态失效或环境异常）专用：只认高置信短语，避免正文里
-# 单个“登录/login/cookie”字眼把正常页面误判成登录失效。B027 回归方向。
+# 退出码 1（登录态失效或环境异常）缺失败行时的兜底：只认高置信短语，
+# 避免正文里单个“登录/login/cookie”字眼把正常页面误判成登录失效（B027 回归）。
+# 016：限流/验证码不再靠输出全文关键词分类，判定收敛到脚本侧实锤分档。
 _LOGIN_REQUIRED_HI_CONFIDENCE_KEYWORDS = (
     "401",
     "登录态失效", "登录失效", "登录已失效", "请先登录", "未登录",
@@ -1846,73 +1845,57 @@ _LOGIN_REQUIRED_HI_CONFIDENCE_KEYWORDS = (
 )
 
 
-def _has_unlock_signal(text: str) -> bool:
-    """高置信解封时间信号：完整未来时间点或明确解封/解锁时间文案。"""
-    if not text:
-        return False
-    try:
-        if boss.parse_unlock_time(text) is not None:
-            return True
-    except Exception:
-        pass
-    lowered = str(text).lower()
-    return any(kw in lowered for kw in ("解封时间", "解封后", "解封于", "解锁时间"))
+def _format_inprocess_failure(code: str, hint: str) -> str:
+    """in-process 模式的失败输出：一行结构化失败行 + 可读原因。"""
+    return f"{FAILURE_LINE_PREFIX} code={code} hint={str(hint or '')[:120]}"
 
 
 def _classify_failed_code(returncode: int, captured: str) -> str:
-    """根据退出码和输出文本分类出具体 failed_code。
+    """以脚本输出的结构化失败行为唯一权威分类来源（016-error-module-rework）。
+
+    失败行格式见 scripts/boss_cdp_signals.py（``__CAREERSCOUT_FAILED__``）。
+    缺行时按退出码粗分兜底：2/3/11 精确；10 一律 source_status_unclear
+    （旧版全文关键词扫描会把岗位标题/薪资里的"429/滑块"等词误判成
+    限流/验证码，已删除）；1 只认高置信登录短语。
 
     退出码含义（boss_cdp_raw.py）：
       1  — 登录态失效或环境异常
       2  — 连不上调试浏览器（CDPUnavailableError）
       3  — 抓取参数错误（CLI 参数校验失败）
-      10 — 触发风控/限流（RiskControlError：验证码、连续空页、HTTP 拦截）
+      10 — 实锤受限/验证码/登录失效，或无法确认状态（RiskControlError）
       11 — 单次抓取运行请求数达到上限（RequestLimitExceededError）
     """
+    parsed = parse_failure_line(captured)
+    if parsed is not None:
+        return resolve_code(parsed[0])
     if returncode == 2:
         return "source_cdp_unavailable"
     if returncode == 3:
         return "source_invalid_output"
     if returncode == 11:
         return "source_request_limit_exceeded"
-    text = (captured or "").lower()
+    if returncode == 10:
+        return "source_status_unclear"
     if returncode == 1:
+        text = (captured or "").lower()
         if any(kw in text for kw in _LOGIN_REQUIRED_HI_CONFIDENCE_KEYWORDS):
             return "source_login_required"
-        return "source_unknown_error"
-    if returncode == 10:
-        if any(kw in text for kw in _LOGIN_REQUIRED_KEYWORDS):
-            return "source_login_required"
-        if _has_unlock_signal(captured):
-            return "source_rate_limited"
-        if any(kw in text for kw in _RATE_LIMIT_KEYWORDS):
-            return "source_rate_limited"
-        if any(kw in text for kw in _VERIFICATION_KEYWORDS):
-            return "source_verification_required"
         return "source_unknown_error"
     return "source_unknown_error"
 
 
 def _record_risk_signals(account, platform, failed_code, captured, run_id=""):
-    """抓取失败时同步回写登录态缓存与风控冷却（D3/D6 信号回写）。
+    """抓取失败时的登录事实回写（016-error-module-rework 后的收敛语义）。
 
-    - restricted 类错误码（blocked/rate_limited/verification）→
-      登录缓存写 restricted，并用风控 hint 文本标记 cooldown
-      （文本含完整日期时间解封点时用精确时间，否则默认 4 小时）；
-    - source_login_required → 登录缓存写 not_logged_in（不冷却）。
+    - 仅 source_login_required → 登录缓存写 not_logged_in（登录与否是事实，可缓存）；
+    - 受限类错误码不再写任何持久状态：无 restricted 缓存、无冷却
+      （受限是瞬态且判定只在当次任务内生效，避免跨任务假拦截）。
     account 为空时跳过（CLI 直连场景不记录账号维度）。
     """
     if not account:
         return
     from scripts.login_state_cache import write_login_state
-    from webui.cooldown import mark_cooldown
-    # 只有高置信风控（限流/验证码）才写 restricted 缓存与冷却；通用 source_blocked
-    # 不写持久副作用，避免正常失败把账号误标成受限（B027 回归）。
-    if failed_code in ("source_rate_limited", "source_verification_required"):
-        write_login_state(account, platform, "restricted")
-        hint = boss.extract_block_hint(captured) if captured else ""
-        mark_cooldown(account, platform, hint or failed_code, from_run=run_id)
-    elif failed_code == "source_login_required":
+    if failed_code == "source_login_required":
         write_login_state(account, platform, "not_logged_in")
 
 
@@ -1925,7 +1908,12 @@ def _record_success_signal(account, platform):
 
 
 def _exit_reason(returncode: int, captured: str) -> str:
-    """从退出码和输出尾部提取一句用户可读的失败原因。"""
+    """从失败行或输出尾部提取一句用户可读的失败原因。"""
+    parsed = parse_failure_line(captured)
+    if parsed is not None:
+        code, hint = parsed
+        label = ERROR_USER_MESSAGES.get(resolve_code(code), resolve_code(code))
+        return f"{label}｜{hint}" if hint else label
     base = _EXIT_REASONS.get(returncode, f"scraper 异常退出（code={returncode}）")
     tail = _safe_tail(captured, max_chars=150)
     if tail:
@@ -1990,19 +1978,18 @@ _ZHILIAN_PREFLIGHT_SIGNAL_MAP = {
     "timeout": "source_timeout",
 }
 
-# 智联 preflight signal ↔ 登录态缓存四态（D3：智联状态也进同一缓存）
+# 智联 preflight signal → 登录缓存事实态（016：受限不落缓存，反向映射只认两态）
 _SIGNAL_TO_STATE = {
     "ok": "logged_in",
     "login_required": "not_logged_in",
-    "verification": "restricted",
-    "rate_limited": "restricted",
-    "blocked": "restricted",
     "cdp_unavailable": "unknown",
     "unreachable": "unknown",
     "timeout": "unknown",
 }
-_STATE_TO_SIGNAL = {state: signal for signal, state in _SIGNAL_TO_STATE.items()}
-_STATE_TO_SIGNAL["unknown"] = "unreachable"  # 缓存 unknown 时回退真实探测
+_STATE_TO_SIGNAL = {
+    "logged_in": "ok",
+    "not_logged_in": "login_required",
+}
 
 # zhilian_cdp_raw.fetch_detail signal → SAFE_FAILURE_CODES 映射。
 _ZHILIAN_DETAIL_SIGNAL_MAP = {
@@ -2219,19 +2206,19 @@ class ZhilianCdpSource:
         if self.browser_account:
             from scripts.login_state_cache import read_cached_state
             cached = read_cached_state(self.browser_account, "zhilian")
-        if cached is not None and cached != "unknown":
-            return self._outcome_for_signal(_STATE_TO_SIGNAL.get(cached, "ok"))
+        # 016：缓存只承载登录事实（logged_in/not_logged_in）；命中即复用，
+        # 其余（含受限信号）一律真实探测，探测到的受限只在当次生效。
+        if cached in ("logged_in", "not_logged_in"):
+            return self._outcome_for_signal(_STATE_TO_SIGNAL[cached])
         try:
             signal = self._preflight_runner(self.cdp_port)
         except Exception:
             signal = "unreachable"
         signal = str(signal or "unreachable")
-        if self.browser_account:
+        state = _SIGNAL_TO_STATE.get(signal)
+        if self.browser_account and state is not None:
             from scripts.login_state_cache import write_login_state
-            write_login_state(
-                self.browser_account, "zhilian",
-                _SIGNAL_TO_STATE.get(signal, "unknown"),
-            )
+            write_login_state(self.browser_account, "zhilian", state)
         return self._outcome_for_signal(signal)
 
     def _outcome_for_signal(self, signal: str) -> SourceOutcome:

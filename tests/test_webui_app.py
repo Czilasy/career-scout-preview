@@ -750,58 +750,29 @@ class PipelineFeedbackRegressionTests(unittest.TestCase):
 
 
 class SourceErrorClassificationTests(unittest.TestCase):
-    """退出码 + 关键词 → 具体 failed_code 分类。"""
+    """016：分类只认结构化失败行；退出码兜底不再扫全文关键词。"""
 
-    def test_exit_10_with_captcha_keyword_returns_verification(self):
+    def test_exit_10_without_failure_line_is_status_unclear(self):
         from webui.source import _classify_failed_code
-        self.assertEqual(
-            _classify_failed_code(10, "触发风控：验证码拦截"),
-            "source_verification_required",
-        )
-
-    def test_exit_10_with_slider_keyword_returns_verification(self):
-        from webui.source import _classify_failed_code
-        self.assertEqual(
-            _classify_failed_code(10, "slider detected"),
-            "source_verification_required",
-        )
-
-    def test_exit_10_with_429_keyword_returns_rate_limited(self):
-        from webui.source import _classify_failed_code
-        self.assertEqual(
-            _classify_failed_code(10, "HTTP 429 Too Many Requests"),
-            "source_rate_limited",
-        )
-
-    def test_exit_10_http_403_412_418_returns_rate_limited(self):
-        from webui.source import _classify_failed_code
+        # 全文关键词扫描已删除：敏感词输出不再定类
         for sample in (
-            "列表接口返回 HTTP 403（被风控拦截）",
-            "列表接口返回 HTTP 412", "列表接口返回 HTTP 418",
+            "触发风控：验证码拦截", "slider detected",
+            "HTTP 429 Too Many Requests", "被限流了", "连续空页",
+            "账号将于 2099-08-05 18:30 解封",
+            "账号操作频繁，触发滑块验证，请稍后再试",
         ):
-            self.assertEqual(
-                _classify_failed_code(10, sample), "source_rate_limited")
+            self.assertEqual(_classify_failed_code(10, sample), "source_status_unclear")
 
-    def test_exit_10_unlock_time_returns_rate_limited(self):
+    def test_failure_line_decides_the_code(self):
         from webui.source import _classify_failed_code
-        self.assertEqual(
-            _classify_failed_code(10, "账号将于 2099-08-05 18:30 解封"),
-            "source_rate_limited",
+        cases = (
+            ("source_verification_required", "__CAREERSCOUT_FAILED__ code=source_verification_required hint=验证码"),
+            ("source_rate_limited", "__CAREERSCOUT_FAILED__ code=source_rate_limited hint=操作频繁"),
+            ("source_login_required", "__CAREERSCOUT_FAILED__ code=source_login_required hint=401"),
+            ("source_status_unclear", "__CAREERSCOUT_FAILED__ code=source_status_unclear hint=无法确认"),
         )
-
-    def test_exit_10_with_rate_limit_chinese_returns_rate_limited(self):
-        from webui.source import _classify_failed_code
-        self.assertEqual(
-            _classify_failed_code(10, "被限流了"),
-            "source_rate_limited",
-        )
-
-    def test_exit_10_generic_returns_unknown_error(self):
-        from webui.source import _classify_failed_code
-        self.assertEqual(
-            _classify_failed_code(10, "连续空页"),
-            "source_unknown_error",
-        )
+        for expected, sample in cases:
+            self.assertEqual(_classify_failed_code(10, sample), expected)
 
     def test_exit_1_with_login_keyword_returns_login_required(self):
         from webui.source import _classify_failed_code
@@ -838,42 +809,23 @@ class SourceErrorClassificationTests(unittest.TestCase):
             "source_unknown_error",
         )
 
-    def test_rate_limit_text_wins_over_verification_keywords(self):
-        """账号限流文本命中时不再显示成验证码/滑块（用户反馈回归）。"""
-        from webui.source import _classify_failed_code
-        self.assertEqual(
-            _classify_failed_code(10, "账号操作频繁，触发滑块验证，请稍后再试"),
-            "source_rate_limited",
-        )
+    def test_rate_limit_label_not_verification(self):
+        """限流文案不得显示成验证码/滑块（用户反馈回归）。"""
         from webui.pipeline_exec import _FAILED_CODE_LABELS
         self.assertEqual(_FAILED_CODE_LABELS["source_rate_limited"], "账号/操作频繁被限流")
         self.assertNotIn("验证码", _FAILED_CODE_LABELS["source_rate_limited"])
 
-    def test_scrape_block_rate_limit_wins_over_verification_keywords(self):
-        """列表抓取同样优先识别账号限流，而不是先命中滑块关键字。"""
+    def test_scrape_block_only_parses_failure_line(self):
         from webui.app import _classify_scrape_block
+        # 关键词路径已删：只有失败行能给出码
+        self.assertEqual(_classify_scrape_block(""), "")
+        for sample in ("登录解锁更多职位", "频繁更新职位", "冻结岗位",
+                       "账号操作频繁，触发滑块验证，请稍后再试",
+                       "列表接口返回 HTTP 403（被风控拦截）"):
+            self.assertEqual(_classify_scrape_block(sample), "", sample)
         self.assertEqual(
-            _classify_scrape_block("账号操作频繁，触发滑块验证，请稍后再试"),
-            "source_rate_limited",
-        )
-        self.assertEqual(
-            _classify_scrape_block("请完成滑块验证后再继续"),
-            "captcha_required",
-        )
-
-    def test_scrape_block_http_status_and_unlock_time(self):
-        from webui.app import _classify_scrape_block
-        for sample in (
-            "列表接口返回 HTTP 403（被风控拦截）", "HTTP 412", "HTTP 418",
-            "账号将于 2099-08-05 18:30 解封",
-        ):
-            self.assertEqual(
-                _classify_scrape_block(sample), "source_rate_limited")
-
-    def test_scrape_block_common_words_do_not_pause(self):
-        from webui.app import _classify_scrape_block
-        for sample in ("登录解锁更多职位", "频繁更新职位", "冻结岗位"):
-            self.assertEqual(_classify_scrape_block(sample), "")
+            _classify_scrape_block("__CAREERSCOUT_FAILED__ code=ip_risk_control hint=x"),
+            "source_blocked")
 
     def test_failed_code_label_zhilian_login_has_no_boss(self):
         from webui.pipeline_exec import failed_code_label, taxonomy_reason
@@ -1369,6 +1321,44 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.store.update_screening_run(run_id, status="failed", current_stage="scrape")
         data = self.client.get("/api/latest-running-task").get_json()
         self.assertFalse(data["has_task"])
+
+    def test_latest_running_task_reconciles_orphaned_running_scrape(self):
+        """数据已抓完但终态漏写的 running 抓取，刷新时自动补写完成。"""
+        run_id = "orphan-running-complete"
+        jobs = [
+            {"job_id": "j1", "platform_job_id": "j1", "title": "岗位1",
+             "source_url": "https://zhipin.example/j1.html"},
+            {"job_id": "j2", "platform_job_id": "j2", "title": "岗位2",
+             "source_url": "https://zhipin.example/j2.html"},
+        ]
+        self.store.create_screening_run(
+            run_id, source_count=2,
+            execution_params={
+                "platform": "boss",
+                "script_params": {"keyword": "AI", "city": ["深圳"]},
+            },
+        )
+        self.store.save_scrape_combo_result(run_id, "kw|city1", [jobs[0]], ["kw|city1"])
+        self.store.save_scrape_combo_result(
+            run_id, "kw|city2", [jobs[1]], ["kw|city1", "kw|city2"])
+        self.store.update_screening_run(run_id, status="running", current_stage="scrape")
+
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["status"], "completed")
+        self.assertEqual(data["kind"], "scrape")
+        run = self.store.get_screening_run(run_id)
+        self.assertEqual(run["status"], "succeeded")
+        self.assertEqual(run["current_stage"], "scrape")
+        events = self.store.list_task_events(run_id)
+        self.assertEqual(
+            sum(1 for e in events if e["type"] == "stage_complete"), 1)
+        # 幂等：再次恢复不再重复补写完成事件。
+        again = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(again["has_task"])
+        events = self.store.list_task_events(run_id)
+        self.assertEqual(
+            sum(1 for e in events if e["type"] == "stage_complete"), 1)
 
     def test_finish_failed_scrape_run_saves_partial_snapshot(self):
         self._seed_scrape_run(
@@ -1968,7 +1958,8 @@ class ScreenContinueFlowTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.get_json()["error"], "target_account_not_found")
 
-    def test_b057_continue_switch_blocked_by_target_cooldown(self):
+    def test_b057_continue_switch_no_longer_blocked_by_cooldown(self):
+        # 016：冷却功能删除；切换账号续跑不再有 account_in_cooldown 拦截路径
         task_id = "b057-cooldown"
         self.store.create_screening_run(
             task_id, source_count=1,
@@ -1982,16 +1973,12 @@ class ScreenContinueFlowTests(unittest.TestCase):
             error_code="source_rate_limited", error_reason="源账号限流",
         )
         self.app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
-        with mock.patch(
-            "webui.cooldown.get_cooldown",
-            return_value={"until": 9999999999, "reason": "测试冷却"},
-        ):
-            resp = self.client.post(
-                f"/api/task/continue/{task_id}",
-                json={"target_account": "b"},
-            )
-        self.assertEqual(resp.status_code, 409)
-        self.assertEqual(resp.get_json()["error"], "account_in_cooldown")
+        resp = self.client.post(
+            f"/api/task/continue/{task_id}",
+            json={"target_account": "b"},
+        )
+        # 目标账号存在：不再返回 account_in_cooldown，按正常续跑路径走
+        self.assertNotEqual(resp.get_json().get("error"), "account_in_cooldown")
 
     def test_b057_continue_switch_target_preflight_failure_keeps_identity(self):
         task_id = "b057-preflight"
@@ -7561,20 +7548,13 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
         self.assertEqual(webview2_item["status"], "fail")
         self.assertIn("WebView2", webview2_item.get("fix") or "")
 
-    def test_env_check_cooldown_includes_from_run(self):
+    def test_env_check_has_no_cooldown_payload(self):
+        # 016：冷却功能删除；env-check 不再返回 cooldowns 字段
         app, client = self._make_app("source")
-        cooldowns = {
-            "acc1": {
-                "boss": {
-                    "until": 1893456000, "reason": "操作频繁", "from_run": "run-abc",
-                },
-            },
-        }
         with mock.patch("webui.app.boss.collect_check_items",
-                        return_value=self._fake_check_items()), \
-                mock.patch("webui.cooldown.all_cooldowns", return_value=cooldowns):
+                        return_value=self._fake_check_items()):
             payload = client.get("/api/env-check").get_json()
-        self.assertEqual(payload["cooldowns"][0]["from_run"], "run-abc")
+        self.assertNotIn("cooldowns", payload)
 
 
 class MakeCdpSourceRuntimeModeTests(unittest.TestCase):

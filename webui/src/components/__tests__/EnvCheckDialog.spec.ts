@@ -37,9 +37,6 @@ const envPayload = {
     },
   ],
   active_account: "a",
-  cooldowns: [
-    { account_id: "a", platform: "boss", until: 9999999999, until_text: "08-08 12:00", reason: "操作频繁", from_run: "run-123" },
-  ],
   checked_at: 1785940000,
 };
 
@@ -67,7 +64,6 @@ const exePayload = {
     },
   ],
   active_account: "",
-  cooldowns: [],
   checked_at: 1785940000,
 };
 
@@ -86,7 +82,6 @@ const sourcePayload = {
     },
   ],
   active_account: "",
-  cooldowns: [],
   checked_at: 1785940000,
 };
 
@@ -150,8 +145,7 @@ describe("EnvCheckDialog", () => {
     expect(confirmSpy).not.toHaveBeenCalled();
   });
 
-  it("cancel on the in-app cooldown confirm performs no action", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm");
+  it("renders no cooldown section after removal (016)", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/env-check") return response(envPayload);
@@ -161,59 +155,9 @@ describe("EnvCheckDialog", () => {
 
     const wrapper = await mountOpen(fetchMock);
 
-    await wrapper.get('[data-testid="env-cooldowns"]').find("button").trigger("click");
-    await wrapper.get('[data-testid="cooldown-confirm-cancel"]').trigger("click");
-    await flushPromises();
-
+    expect(wrapper.find('[data-testid="env-cooldowns"]').exists()).toBe(false);
     const clearCall = fetchMock.mock.calls.some(([input]) => String(input) === "/api/cooldown/clear");
     expect(clearCall).toBe(false);
-    expect(wrapper.find('[data-testid="env-cooldowns"]').exists()).toBe(true);
-    expect(confirmSpy).not.toHaveBeenCalled();
-  });
-
-  it("shows cooldown records with clear button", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url === "/api/env-check") return response(envPayload);
-      if (url === "/api/browser-accounts") return response({ accounts: [{ id: "a", name: "账号 A" }] });
-      return response({});
-    });
-
-    const wrapper = await mountOpen(fetchMock);
-
-    const cooldown = wrapper.get('[data-testid="env-cooldowns"]');
-    expect(cooldown.text()).toContain("账号 A");
-    expect(cooldown.text()).toContain("建议等待至 08-08 12:00");
-    expect(wrapper.get('[data-testid="cooldown-from-run"]').text()).toContain("run-123");
-    expect(cooldown.find("button").text()).toContain("解除冷却");
-  });
-
-  it("clears a cooldown after confirm and removes the row", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm");
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url === "/api/env-check") return response(envPayload);
-      if (url === "/api/browser-accounts") return response({ accounts: [{ id: "a", name: "账号 A" }] });
-      if (url === "/api/cooldown/clear") return response({ ok: true });
-      return response({});
-    });
-
-    const wrapper = await mountOpen(fetchMock);
-
-    await wrapper.get('[data-testid="env-cooldowns"]').find("button").trigger("click");
-    expect(wrapper.find('[data-testid="cooldown-confirm-ok"]').exists()).toBe(true);
-    await flushPromises();
-    await wrapper.get('[data-testid="cooldown-confirm-ok"]').trigger("click");
-    await flushPromises();
-
-    const clearCall = fetchMock.mock.calls.find(([input]) => String(input) === "/api/cooldown/clear");
-    expect(clearCall).toBeDefined();
-    expect(JSON.parse(String((clearCall as unknown[])[1] && (clearCall as [unknown, RequestInit])[1].body))).toEqual({
-      account_id: "a",
-      platform: "boss",
-    });
-    expect(wrapper.find('[data-testid="env-cooldowns"]').exists()).toBe(false);
-    expect(confirmSpy).not.toHaveBeenCalled();
   });
 
   it("emits open-browser-accounts when clicking the login guidance fix", async () => {

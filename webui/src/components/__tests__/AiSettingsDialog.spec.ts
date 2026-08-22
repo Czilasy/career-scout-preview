@@ -127,4 +127,28 @@ describe("AiSettingsDialog failure messages", () => {
     expect(notice.text()).toContain("模型列表拉取失败，请检查 AI 设置后重试");
     expect(wrapper.text()).not.toContain("mystery_code");
   });
+
+  it("shows the success notice then closes the dialog automatically after saving", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/ai-settings") return settingsResponse();
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+    vi.useFakeTimers();
+    // 保存按钮是 type=submit，jsdom 下点按钮不触发表单提交，需直接触发 form 的 submit.prevent
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    // 保存成功提示先展示；对话框尚未关闭
+    expect(wrapper.get(".ai-local-notice").text()).toContain("AI 设置已保存");
+    expect(wrapper.emitted("close")).toBeUndefined();
+
+    // 短暂停留后自动关闭，无需用户点叉
+    vi.advanceTimersByTime(700);
+    await flushPromises();
+    expect(wrapper.emitted("close")).toHaveLength(1);
+    vi.useRealTimers();
+  });
 });

@@ -722,19 +722,33 @@ class ExplicitRiskSignalTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module()
 
-    def test_code_37_stops_list_scrape_with_explicit_reason(self):
+    def test_code_37_is_retry_then_unclear_not_account_risk(self):
+        # 016：code:37（环境异常）单次→重试；复现→暂无法确认（软失败），不定罪账号
         _, diagnosis, _ = self.module.diagnose_api_jobs_eval_value(
             '[{"error":"api_code","code":37,"sample":"您的环境存在异常"}]'
         )
 
+        # 单次：不定罪（调用方原地重试）
         error = self.module.check_list_risk(
             diagnosis, page=2, consecutive_empty=1, scraped_count=10,
             output_path="result.json", resume_page=2,
         )
+        self.assertIsNone(error)
 
-        self.assertIsInstance(error, self.module.RiskControlError)
-        self.assertIn("code:37", str(error))
-        self.assertIn("环境存在异常", str(error))
+        verdict, code, hint = self.module.classify_list_diagnosis(
+            diagnosis, repeated=True)
+        self.assertEqual(verdict, self.module.VERDICT_STOP)
+        self.assertEqual(code, "source_status_unclear")
+        self.assertIn("code:37", hint)
+
+        # code:31（平台明确请求受限）单次即实锤
+        _, diagnosis_31, _ = self.module.diagnose_api_jobs_eval_value(
+            '[{"error":"api_code","code":31,"sample":"请求受限"}]'
+        )
+        verdict31, code31, hint31 = self.module.classify_list_diagnosis(
+            diagnosis_31, repeated=False)
+        self.assertEqual(verdict31, self.module.VERDICT_CONFIRMED)
+        self.assertEqual(code31, "source_rate_limited")
 
 
 class RuntimeAuditEventTests(unittest.TestCase):

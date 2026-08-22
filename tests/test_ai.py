@@ -1263,6 +1263,77 @@ class MatchJdsFailurePolicyTests(unittest.TestCase):
             sorted(e["counts"]["item_index"] for e in terminals), [0, 1]
         )
 
+    def test_consecutive_batch_failures_open_circuit(self):
+        from webui.ai import (
+            AISecurityError, ERROR_INVALID, ERROR_SERVER, match_jds,
+        )
+
+        jobs = [
+            {"job_id": f"j{i}", "title": f"岗位{i}", "jd": f"JD{i}"}
+            for i in range(6)
+        ]
+        with patch(
+            "webui.ai.call_ai",
+            side_effect=AISecurityError(ERROR_INVALID),
+        ):
+            with self.assertRaises(AISecurityError) as cm:
+                match_jds(
+                    jobs, "画像", "https://x", "key", batch_size=2,
+                    concurrency=1, raise_on_systemic=True,
+                )
+
+        exc = cm.exception
+        self.assertEqual(exc.error_code, ERROR_SERVER)
+        self.assertEqual(exc.diagnostics.get("failure_phase"), "circuit_open")
+        self.assertEqual(exc.diagnostics.get("consecutive_failures"), 3)
+
+    def test_successful_batch_resets_circuit(self):
+        from webui.ai import AISecurityError, ERROR_INVALID, match_jds
+
+        jobs = [
+            {"job_id": f"j{i}", "title": f"岗位{i}", "jd": f"JD{i}"}
+            for i in range(6)
+        ]
+        responses = [
+            AISecurityError(ERROR_INVALID),
+            AISecurityError(ERROR_INVALID),
+            {"results": [
+                {"i": 0, "match": True, "reason": "匹配"},
+                {"i": 1, "match": False, "reason": "不匹配"},
+            ]},
+        ]
+        with patch("webui.ai.call_ai", side_effect=responses):
+            result = match_jds(
+                jobs, "画像", "https://x", "key", batch_size=2,
+                concurrency=1, raise_on_systemic=True,
+            )
+
+        self.assertEqual(result["verdicts"]["j0"]["verdict"], "uncertain")
+        self.assertEqual(result["verdicts"]["j2"]["verdict"], "uncertain")
+        self.assertEqual(result["verdicts"]["j4"]["verdict"], "match")
+        self.assertEqual(result["verdicts"]["j5"]["verdict"], "not_match")
+
+    def test_circuit_inactive_without_raise_on_systemic(self):
+        from webui.ai import AISecurityError, ERROR_INVALID, match_jds
+
+        jobs = [
+            {"job_id": f"j{i}", "title": f"岗位{i}", "jd": f"JD{i}"}
+            for i in range(6)
+        ]
+        with patch(
+            "webui.ai.call_ai",
+            side_effect=AISecurityError(ERROR_INVALID),
+        ):
+            result = match_jds(
+                jobs, "画像", "https://x", "key", batch_size=2,
+                concurrency=1,
+            )
+
+        self.assertEqual(len(result["verdicts"]), 6)
+        self.assertTrue(
+            all(v["verdict"] == "uncertain" for v in result["verdicts"].values())
+        )
+
     @patch("webui.ai.time.sleep")
     def test_single_invalid_response_retries_once_then_matches(self, _mock_sleep):
         from webui.ai import AISecurityError, ERROR_INVALID, match_jds
@@ -2409,6 +2480,51 @@ class ProfileFactsTests(unittest.TestCase):
 
         self.assertEqual(result["profile_facts"], {})
 
+    def test_analyze_resume_missing_keyword_falls_back_to_core_skills(self):
+        """AI 漏返 keyword 时，用简历核心技能兜底，确认页不会空着。"""
+        from webui.ai import analyze_resume_to_fields
+
+        payload = {
+            "profile_summary": "3年Python后端经验",
+            "profile_facts": {"core_skills": ["Python", "Django", "FastAPI"]},
+        }
+        with patch("webui.ai.call_ai", return_value=payload), \
+                patch("webui.ai._resume_bytes_to_text", return_value="3年Python后端"):
+            result = analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
+
+        self.assertEqual(
+            [item["word"] for item in result["keyword"]],
+            ["Python", "Django", "FastAPI"])
+        self.assertTrue(
+            all(item["recommended"] is False for item in result["keyword"]))
+
+    def test_analyze_resume_normalizes_dot_slash_facts_key(self):
+        """模型把键写成 ./profile_facts 时也能识别：画像恢复，缺 keyword 走兜底。"""
+        from webui.ai import analyze_resume_to_fields
+
+        payload = {
+            "./profile_facts": {"core_skills": ["Python", "Django"]},
+            "profile_summary": "3年Python后端经验",
+        }
+        with patch("webui.ai.call_ai", return_value=payload), \
+                patch("webui.ai._resume_bytes_to_text", return_value="3年Python后端"):
+            result = analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
+
+        self.assertEqual(
+            result["profile_facts"]["core_skills"], ["Python", "Django"])
+        self.assertEqual(
+            [item["word"] for item in result["keyword"]], ["Python", "Django"])
+
+    def test_analyze_resume_no_keyword_no_skills_raises(self):
+        """无 keyword 且无技能可兜底时，报错提示重试，不静默进第二页。"""
+        from webui.ai import analyze_resume_to_fields
+
+        payload = {"profile_summary": "3年Python后端经验"}
+        with patch("webui.ai.call_ai", return_value=payload), \
+                patch("webui.ai._resume_bytes_to_text", return_value="3年Python后端"):
+            with self.assertRaises(ValueError):
+                analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
+
     def test_analyze_resume_does_not_return_ai_city(self):
         """AI 不代填城市；用户未选择时由执行层按全国兜底。"""
         from webui.ai import analyze_resume_to_fields
@@ -2428,7 +2544,7 @@ class ProfileFactsTests(unittest.TestCase):
         from webui.ai import analyze_resume_to_fields
 
         with patch("webui.ai.call_ai", return_value={
-            "keyword": [], "city": "", "profile_summary": "s",
+            "keyword": [{"word": "Python", "recommended": True}], "city": "", "profile_summary": "s",
         }) as call, patch("webui.ai._resume_bytes_to_text", return_value="简历"):
             analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
 
@@ -2454,7 +2570,7 @@ class ProfileFactsTests(unittest.TestCase):
         from webui.ai import analyze_resume_to_fields
 
         with patch("webui.ai.call_ai", return_value={
-            "keyword": [], "city": "", "profile_summary": "s",
+            "keyword": [{"word": "Python", "recommended": True}], "city": "", "profile_summary": "s",
         }) as call, patch("webui.ai._resume_bytes_to_text", return_value="简历"):
             analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
 

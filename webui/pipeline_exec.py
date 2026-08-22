@@ -22,6 +22,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
 
@@ -321,30 +322,28 @@ _SCRAPE_STAGE_MESSAGES: dict[str, str] = {
 _PLATFORM_LABEL_OVERRIDES: dict[str, dict[str, str]] = {
     "zhilian": {
         "source_login_required": "智联登录已失效",
-        "login_expired": _MSG_ZHILIAN_LOGIN_REQUIRED,
     },
 }
 _PLATFORM_TAXONOMY_OVERRIDES: dict[str, dict[str, str]] = {
     "zhilian": {
         "source_login_required": _MSG_ZHILIAN_LOGIN_REQUIRED,
-        "login_expired": _MSG_ZHILIAN_LOGIN_REQUIRED,
     },
 }
 
 def failed_code_label(code: str, platform: str = "") -> str:
-    """按平台返回 failed_code 的用户可读文案。"""
-    override = _PLATFORM_LABEL_OVERRIDES.get(str(platform or ""), {}).get(code)
+    """按平台返回 failed_code 的用户可读文案（别名先归一，016）。"""
+    resolved = resolve_code(code) if code else code
+    override = _PLATFORM_LABEL_OVERRIDES.get(str(platform or ""), {}).get(resolved)
     if override:
         return override
-    resolved = resolve_code(code) if code else code
     return _FAILED_CODE_LABELS.get(resolved, resolved or "")
 
 def taxonomy_reason(code: str, platform: str = "", fallback: str = "任务被阻断") -> str:
-    """按平台返回 ERROR_TAXONOMY.reason，缺失时用 fallback。"""
-    override = _PLATFORM_TAXONOMY_OVERRIDES.get(str(platform or ""), {}).get(code)
+    """按平台返回 ERROR_TAXONOMY.reason，缺失时用 fallback（别名先归一，016）。"""
+    resolved = resolve_code(code) if code else code
+    override = _PLATFORM_TAXONOMY_OVERRIDES.get(str(platform or ""), {}).get(resolved)
     if override:
         return override
-    resolved = resolve_code(code) if code else code
     taxonomy = ERROR_TAXONOMY.get(resolved, {})
     return str(taxonomy.get("reason") or fallback)
 
@@ -361,7 +360,7 @@ def _classify_detail_batch_exception(exc: Exception) -> str:
     )
     if isinstance(exc, (ConnectionError, TimeoutError)) or any(
             marker in text for marker in cdp_markers):
-        return "cdp_unavailable"
+        return "source_cdp_unavailable"
     return "internal_error"
 
 
@@ -1093,7 +1092,8 @@ def run_search(params: dict, source, *, pages: int = 3,
                      message=f"已跳过本组合（{label}，二次复核仍登录失效），原因已记录")
                 failed_combos += 1
                 login_skipped += 1
-            elif outcome.failed_code in _HARD_STOP_CODES:
+            elif (resolve_code(outcome.failed_code) in _HARD_STOP_CODES
+                  if outcome.failed_code else False):
                 # 系统性阻断（验证码/IP风控/CDP不可用等）：立即停止，不继续跑其他组合
                 label = failed_code_label(outcome.failed_code, platform)
                 emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
@@ -1113,6 +1113,14 @@ def run_search(params: dict, source, *, pages: int = 3,
                     _reason = outcome.safe_log.split("reason=", 1)[1]
                 detail = f"（{_reason}）" if _reason else ""
                 label = failed_code_label(outcome.failed_code, platform)
+                # 016：软失败不暂停，但必须按组合落库留痕（combo_issue 事件），
+                # 供任务详情回查；不写任何账号级持久状态。
+                _notify_combo_issue({
+                    "kind": "combo_failed",
+                    "failed_code": str(outcome.failed_code or "source_unknown_error"),
+                    "reason": (detail.strip("（）") or label)[:200],
+                    "ts": datetime.now().isoformat(timespec="milliseconds"),
+                })
                 emit(stage="combo_failed", current=len(completed_combos), total=len(combos),
                      keyword=kw, city=display_city, failed_code=outcome.failed_code,
                      **({"page_progress": last_page_ratio} if page_progress_seen else {}),
@@ -1281,16 +1289,14 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     hard_stop_code: str | None = None
     stopped = False
     # 源级硬信号集合：命中任何一个都意味着继续抓只会抓空气，必须截停并上报用户。
-    # JD 抓取阶段只关心 source_* 码（不调 AI，不会产生 ai_* 码）。
-    _jd_hard_stop_codes = frozenset({
-        "captcha_required",
-        "source_login_required",
-        "source_verification_required",
-        "source_rate_limited",
-        "source_blocked",
-        "source_cdp_unavailable",
-        "source_request_limit_exceeded",
-    })
+    # 016：与组合层共用注册表派生的 SYSTEMIC_BLOCK_CODES，不再维护第二份清单
+    # （JD 抓取阶段不调 AI，ai_* 码实际不会出现）。
+    _jd_hard_stop_codes = _HARD_STOP_CODES
+
+    def _jd_is_hard_stop(code: object) -> bool:
+        """硬停判定先归一别名码（历史码/测试夹具可能仍带旧码）。"""
+        code = str(code or "")
+        return bool(code) and resolve_code(code) in _jd_hard_stop_codes
     for batch_start in range(0, len(indexed_jobs), BATCH_SIZE):
         if stop_event is not None and stop_event.is_set():
             stopped = True
@@ -1365,7 +1371,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             )
         )
         _other_hard = (
-            batch_exception_code in _jd_hard_stop_codes
+            _jd_is_hard_stop(batch_exception_code)
             and not recovery.is_browser_lost(batch_exception_code)
         ) or any(
             outcome is not None
@@ -1399,7 +1405,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                         outcome.failed_code
                         for outcome in outcomes.values()
                         if outcome is not None
-                        and outcome.failed_code in _jd_hard_stop_codes
+                        and _jd_is_hard_stop(outcome.failed_code)
                     ]
                     if batch_exception_code is not None or remaining_hard:
                         # 自动重启后的重试仍异常（含 cdp_unavailable）或仍命中
@@ -1429,7 +1435,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             jd = ""
             if outcome is not None and outcome.ok and isinstance(outcome.detail, dict):
                 jd = str(outcome.detail.get("jd", "")).strip()
-            elif outcome is not None and outcome.failed_code in _jd_hard_stop_codes:
+            elif outcome is not None and _jd_is_hard_stop(outcome.failed_code):
                 # 源级硬信号：停后续批次并上报（别继续抓空气还装完成）
                 hard_stop = True
                 hard_stop_code = outcome.failed_code

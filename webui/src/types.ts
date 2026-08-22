@@ -50,6 +50,8 @@ export type SourceErrorCode =
   | "source_cdp_unavailable"
   | "source_login_required"
   | "source_unreachable"
+  | "source_account_restricted"
+  | "source_status_unclear"
   | "source_blocked"
   | "source_not_found"
   | "source_invalid_output"
@@ -228,8 +230,19 @@ export interface TaskSnapshot {
   scope_digest?: string;
   source_summary?: Record<string, unknown> | null;
   source_outcomes?: Array<Record<string, unknown>> | null;
+  /** 016：软失败组合留痕（最近 20 条倒序），文案来自统一注册表。 */
+  combo_issues?: ComboIssue[] | null;
   /** 一键链路标记：抓取任务完成后前端自动接续 AI 筛选。 */
   auto_screen?: boolean;
+}
+
+/** 016：单个组合的软失败记录（combo_issue 事件投影）。 */
+export interface ComboIssue {
+  combo_key: string;
+  code: string;
+  code_text: string;
+  reason: string;
+  ts: string;
 }
 
 /** 本轮上下文：后端从父抓取 run 与 AI 筛选 run 合并返回。 */

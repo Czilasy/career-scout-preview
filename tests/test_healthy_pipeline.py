@@ -372,7 +372,8 @@ class Slice3ErrorClassificationTests(unittest.TestCase):
         self.assertIsNotNone(rows[0]["failed_code"], "uncertain 必须带具体 failed_code")
 
     def test_error_taxonomy_covers_13_types(self):
-        """统一错误码表必须覆盖 13 类错误（FR-040）。"""
+        """统一错误码表必须覆盖 13 类错误（FR-040；016 后旧码经别名归一）。"""
+        from webui.error_registry import resolve_code
         from webui.pipeline_exec import ERROR_TAXONOMY
         required = {
             "captcha_required", "login_expired",
@@ -381,7 +382,10 @@ class Slice3ErrorClassificationTests(unittest.TestCase):
             "job_offline", "detail_timeout", "detail_invalid",
             "ai_missing_job", "internal_error",
         }
-        missing = required - set(ERROR_TAXONOMY.keys())
+        missing = {
+            code for code in required
+            if resolve_code(code) not in ERROR_TAXONOMY
+        }
         self.assertFalse(missing, f"ERROR_TAXONOMY 缺失: {missing}")
         # 每条必须有 impact/blocking/retryable/reason/resume_condition
         for code, info in ERROR_TAXONOMY.items():
@@ -414,8 +418,8 @@ class JDBatchExceptionClassificationTests(unittest.TestCase):
             )
 
         self.assertTrue(result["hard_stop"], result)
-        self.assertEqual(result["hard_stop_code"], "cdp_unavailable")
-        self.assertEqual(result["jobs"][0]["jd_failed_code"], "cdp_unavailable")
+        self.assertEqual(result["hard_stop_code"], "source_cdp_unavailable")
+        self.assertEqual(result["jobs"][0]["jd_failed_code"], "source_cdp_unavailable")
         self.assertEqual(source.calls, 2, "同一失联事件只自动重启一次，随后必须暂停")
 
     def test_cdp_disconnect_restart_success_resumes_same_batch(self):
@@ -1700,7 +1704,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(paused["status"], "paused", paused)
         run = self.store.get_screening_run(task_id)
         self.assertEqual(run["status"], "paused")
-        self.assertEqual(run["error_code"], "cdp_unavailable")
+        self.assertEqual(run["error_code"], "source_cdp_unavailable")
         self.assertEqual(run["current_stage"], "jd_detail")
         self.assertEqual(self.store.load_checkpoint(task_id, "ai_rough"), {"job-1"})
         self.assertEqual(run["processed_count"], 0)
@@ -1746,7 +1750,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertEqual(paused["status"], "paused", paused)
         run = self.store.get_screening_run(task_id)
         self.assertEqual(run["status"], "paused")
-        self.assertEqual(run["error_code"], "cdp_unavailable")
+        self.assertEqual(run["error_code"], "source_cdp_unavailable")
         new_jd = (
             pathlib.Path(self.app.config["RESULT_DIR"])
             / f"ai_screen_jd_{task_id}.json"
@@ -3582,7 +3586,7 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
             self.assertEqual(paused["status"], "paused", paused)
             run = app.config["TASK_STORE"].get_screening_run(task_id)
             self.assertEqual(run["status"], "paused")
-            self.assertEqual(run["error_code"], "cdp_unavailable")
+            self.assertEqual(run["error_code"], "source_cdp_unavailable")
             self.assertEqual(run["current_stage"], "scrape")
         finally:
             executor = app.config.get("PIPELINE_EXECUTOR")
@@ -3630,6 +3634,127 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
             data = resp.get_json() or {}
             self.assertEqual(data.get("skipped"), 1)
             self.assertEqual(captured.get("skip_combos"), {"前端|上海"})
+        finally:
+            executor = app.config.get("PIPELINE_EXECUTOR")
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+            temp.cleanup()
+
+    def test_resume_survives_stale_pause_cleanup_timer(self):
+        """暂停任务 30 分钟清理定时器不得误删续跑的新内存任务。
+
+        复现线上卡死：暂停时排程的旧定时器到点会把同一 run_id 的续跑
+        任务从内存弹掉，导致“数据已抓完但终态没写”。修复后旧定时器
+        只能删它自己注册的任务对象，续跑完成仍会落 succeeded。
+        """
+        app, temp = _make_app()
+        try:
+            client = _authed_test_client(app)
+            store = app.config["TASK_STORE"]
+            app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
+            headers = {"X-Boss-Token": app.config["API_TOKEN"]}
+
+            class _RecordingTimer:
+                instances = []
+
+                def __init__(self, interval, fn):
+                    self.interval = interval
+                    self.fn = fn
+                    _RecordingTimer.instances.append(self)
+
+                def start(self):
+                    pass
+
+            _job1 = {"job_id": "j1", "platform_job_id": "j1",
+                     "title": "岗位1", "source_url": "https://zhipin.example/j1.html"}
+            _job2 = {"job_id": "j2", "platform_job_id": "j2",
+                     "title": "岗位2", "source_url": "https://zhipin.example/j2.html"}
+            _resumed_started = threading.Event()
+            _release_resumed = threading.Event()
+
+            def _first_search(*_args, **_kwargs):
+                on_combo_done = _kwargs.get("on_combo_done")
+                if on_combo_done is not None:
+                    on_combo_done("kw|city1", [_job1], ["kw|city1"])
+                return {
+                    "ok": False, "jobs": [], "total_scraped": 0, "total_matched": 0,
+                    "combinations": 2, "completed_combos": ["kw|city1"],
+                    "hard_stop": True, "hard_stop_code": "captcha_required",
+                    "error": "系统性阻断：触发验证码/滑块，需手动完成",
+                }
+
+            def _resumed_search(*_args, **_kwargs):
+                _resumed_started.set()
+                if not _release_resumed.wait(timeout=5):
+                    return {
+                        "ok": False, "jobs": [], "total_scraped": 0, "total_matched": 0,
+                        "combinations": 2,
+                        "completed_combos": list(_kwargs.get("skip_combos") or []),
+                        "hard_stop": True, "hard_stop_code": "internal_error",
+                        "error": "resume gate timeout",
+                    }
+                on_combo_done = _kwargs.get("on_combo_done")
+                if on_combo_done is not None:
+                    on_combo_done("kw|city2", [_job2], ["kw|city1", "kw|city2"])
+                return {
+                    "ok": True, "jobs": [_job2], "total_scraped": 1, "total_matched": 1,
+                    "combinations": 2, "completed_combos": ["kw|city1", "kw|city2"],
+                    "error": "",
+                }
+
+            _dispatch_calls = 0
+
+            def _dispatch_search(*_args, **_kwargs):
+                nonlocal _dispatch_calls
+                _dispatch_calls += 1
+                if _dispatch_calls == 1:
+                    return _first_search(*_args, **_kwargs)
+                return _resumed_search(*_args, **_kwargs)
+
+            with mock.patch("webui.app.threading.Timer", new=_RecordingTimer), \
+                    mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                               return_value=(True, "")), \
+                    mock.patch("webui.pipeline_exec.run_search",
+                               side_effect=_dispatch_search):
+                resp = client.post("/api/execute-search",
+                                  json={"script_params": {"keyword": "前端", "city": ["上海"]}},
+                                  headers=headers)
+                task_id = resp.get_json()["task_id"]
+                # 等 pause 稳定落库。
+                for _ in range(200):
+                    if store.get_screening_run(task_id)["status"] == "paused":
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(store.get_screening_run(task_id)["status"], "paused")
+
+                resp2 = client.post(f"/api/execute-search/continue/{task_id}",
+                                   headers=headers)
+                self.assertEqual(resp2.status_code, 200, resp2.get_json())
+                # 等续跑 worker 进入 run_search 但尚未结束。
+                self.assertTrue(_resumed_started.wait(timeout=5))
+                # 让旧暂停任务的清理定时器“到点”：修复后不得删除续跑新任务。
+                _RecordingTimer.instances[0].fn()
+
+                # 放行续跑前，恢复接口必须仍把整活任务当运行中，不得误收尾。
+                live = client.get("/api/latest-running-task", headers=headers).get_json()
+                self.assertTrue(live["has_task"])
+                self.assertEqual(live["status"], "running")
+                _release_resumed.set()
+
+                # 等续跑完成并落 succeeded。
+                for _ in range(500):
+                    run = store.get_screening_run(task_id)
+                    if run["status"] in ("succeeded", "failed", "paused", "interrupted"):
+                        break
+                    time.sleep(0.01)
+                run = store.get_screening_run(task_id)
+                self.assertEqual(run["status"], "succeeded", run)
+                self.assertEqual(run["current_stage"], "scrape")
+                events = store.list_task_events(task_id)
+                self.assertEqual(
+                    sum(1 for e in events if e["type"] == "stage_complete"), 1)
+                self.assertEqual(
+                    store.load_checkpoint(task_id, "scrape"), {"kw|city1", "kw|city2"})
         finally:
             executor = app.config.get("PIPELINE_EXECUTOR")
             if executor is not None:

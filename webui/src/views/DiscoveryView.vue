@@ -1122,7 +1122,22 @@ async function enrichPausedSnapshot(
         overall_percent: data.progress,
       };
     } else if (data.progress) {
+      // 016：恢复首拍防御——后端未带整体进度时沿用上一拍断点值，
+      // 避免进度条"归零再跳变"；新值到达后按新值覆盖。
+      const prevProgress = snapshot.progress || {};
       snapshot.progress = { ...data.progress };
+      if (snapshot.progress.overall_percent == null
+        && typeof prevProgress.overall_percent === "number") {
+        snapshot.progress.overall_percent = prevProgress.overall_percent;
+      }
+      if (snapshot.progress.current == null
+        && typeof prevProgress.current === "number") {
+        snapshot.progress.current = prevProgress.current;
+      }
+      if (snapshot.progress.total == null
+        && typeof prevProgress.total === "number") {
+        snapshot.progress.total = prevProgress.total;
+      }
     }
     if (data.pause_info) snapshot.pause_info = data.pause_info;
     if (data.execution_config) snapshot.execution_config = data.execution_config;
@@ -1700,7 +1715,14 @@ async function continueScrape(targetAccount?: string) {
   pausedRunId.value = ""; // 切片7：清掉 DB paused 标记，进入内存工作模式
   interruptedRunId.value = "";
   restoredTaskHint.value = "";
-  scrapeSnapshot.value = { status: "running", progress: { message: "正在从断点继续…" }, logs: [] };
+  // 016：续跑起步沿用上一快照的断点进度，禁止归零后再跳到真实位置
+  const resumeProgress = { ...(scrapeSnapshot.value?.progress || {}) };
+  resumeProgress.message = "正在从断点继续…";
+  scrapeSnapshot.value = {
+    status: "running",
+    progress: resumeProgress,
+    logs: scrapeSnapshot.value?.logs || [],
+  };
   try {
     const data = await apiRequest<{ task_id: string; skipped: number; old_jobs: number }>(
       `/api/task/continue/${encodeURIComponent(scrapeTaskId.value)}`,
@@ -1822,7 +1844,14 @@ async function continueAiScreen(platform?: Platform) {
   restoredTaskHint.value = "";
   roundFlow.clearRoundContext();
   interruptedRunId.value = "";
-  screenSnapshot.value = { status: "running", progress: { message: "正在从 AI 断点继续…" }, logs: [] };
+  // 016：续跑起步沿用上一快照断点进度，禁止归零再跳
+  const screenResumeProgress = { ...(screenSnapshot.value?.progress || {}) };
+  screenResumeProgress.message = "正在从 AI 断点继续…";
+  screenSnapshot.value = {
+    status: "running",
+    progress: screenResumeProgress,
+    logs: screenSnapshot.value?.logs || [],
+  };
   try {
     const data = await apiRequest<{ task_id: string }>(
       `/api/task/continue/${encodeURIComponent(runId)}`,
@@ -1834,10 +1863,15 @@ async function continueAiScreen(platform?: Platform) {
     await pollTask(data.task_id, "screen");
   } catch (error) {
     screenBusy.value = false;
-    screenSnapshot.value = {
-      status: "paused", progress: {}, logs: [],
-      error: errorMessage(error, "AI 断点继续失败"),
-    };
+    // 继续失败（如 AI 限流未解除 → 409 block_not_resolved）：回到报错暂停时的样子。
+    // 与刷新页面同一恢复路径：拉 task-state 全量暂停快照（进度/日志/pause_info/中文原因），
+    // 不重建空快照，不直出英文错误码。
+    const restored = await apiRequest<TaskSnapshot>(
+      `/api/task-state/${encodeURIComponent(runId)}`,
+    ).catch(() => null);
+    screenSnapshot.value = restored
+      ? { ...restored, status: "paused" }
+      : { ...(screenSnapshot.value || {}), status: "paused", error: errorMessage(error, "AI 断点继续失败") };
   }
 }
 // 切片7：统一取消 paused 任务（FR-024）。
@@ -2020,8 +2054,23 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
       pollTimer = window.setTimeout(() => void pollTask(taskId, kind), 1800);
       return;
     }
-    if (kind === "scrape") scrapeSnapshot.value = data;
-    else screenSnapshot.value = data;
+    // 016：恢复首拍防御——轮询响应未带整体进度/计数时沿用上一拍断点值，
+    // 避免续跑/刷新后进度条"归零再跳变"；新任务起步快照本身无进度，不受影响。
+    const applyProgressFloor = (incoming: TaskSnapshot, previous?: TaskSnapshot | null): TaskSnapshot => {
+      const prev = (previous?.progress || {}) as Record<string, unknown>;
+      const next = (incoming.progress || {}) as Record<string, unknown>;
+      const patch: Record<string, unknown> = {};
+      for (const key of ("overall_percent current total" as const).split(" ")) {
+        if (next[key] == null && typeof prev[key] === "number") {
+          patch[key] = prev[key];
+        }
+      }
+      return Object.keys(patch).length
+        ? { ...incoming, progress: { ...next, ...patch } }
+        : incoming;
+    };
+    if (kind === "scrape") scrapeSnapshot.value = applyProgressFloor(data, scrapeSnapshot.value);
+    else screenSnapshot.value = applyProgressFloor(data, screenSnapshot.value);
 
     if (isCompletedTaskStatus(data.status)) {
       pollRetryCount = 0;
@@ -2861,8 +2910,12 @@ async function continueRecrawl() {
   recrawlBusy.value = true;
   restoredTaskHint.value = "";
   interruptedRunId.value = "";
+  const recrawlResumeProgress = { ...(recrawlSnapshot.value?.progress || {}) };
+  recrawlResumeProgress.message = "正在从重抓断点继续…";
   recrawlSnapshot.value = {
-    status: "running", progress: { message: "正在从重抓断点继续…" }, logs: [],
+    status: "running",
+    progress: recrawlResumeProgress,
+    logs: recrawlSnapshot.value?.logs || [],
   };
   try {
     const data = await apiRequest<{ task_id?: string }>(
@@ -2875,10 +2928,13 @@ async function continueRecrawl() {
     await pollRecrawl(recrawlTaskId.value);
   } catch (error) {
     recrawlBusy.value = false;
-    recrawlSnapshot.value = {
-      status: "paused", progress: {}, logs: [],
-      error: errorMessage(error, "重抓断点继续失败"),
-    };
+    // 继续重抓失败：回到报错暂停时的样子（与 continueAiScreen 同一恢复路径）。
+    const restored = await apiRequest<TaskSnapshot>(
+      `/api/task-state/${encodeURIComponent(taskId)}`,
+    ).catch(() => null);
+    recrawlSnapshot.value = restored
+      ? { ...restored, status: "paused" }
+      : { ...(recrawlSnapshot.value || {}), status: "paused", error: errorMessage(error, "重抓断点继续失败") };
   }
 }
 

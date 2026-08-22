@@ -90,6 +90,7 @@ from webui.platforms import UnknownPlatformError
 from webui.process_executor import ScraperExecutor
 from webui.source import BossCdpSource as _BossCdpSource
 from webui.logging_setup import configure_logging
+from webui.error_registry import resolve_code
 from webui.store import SYSTEMIC_BLOCK_CODES, DiscoveryStoreConflictError, TaskStore
 from webui.result_history import ResultHistoryService
 from webui.result_history_api import register_result_history_routes
@@ -442,12 +443,9 @@ def create_app(config=None):
     set_browser_accounts_path(app.config["BROWSER_ACCOUNTS_PATH"])
 
     from scripts.login_state_cache import set_login_state_path as _set_login_state_path
-    from webui.cooldown import set_cooldown_path as _set_cooldown_path
     state_dir = Path(app.config["DB_PATH"]).parent
     app.config["LOGIN_STATE_PATH"] = str(state_dir / "login-state.json")
-    app.config["COOLDOWN_PATH"] = str(state_dir / "cooldown.json")
     _set_login_state_path(app.config["LOGIN_STATE_PATH"])
-    _set_cooldown_path(app.config["COOLDOWN_PATH"])
 
     store = TaskStore(app.config["DB_PATH"])
     history_service = ResultHistoryService(store)
@@ -1031,10 +1029,6 @@ def create_app(config=None):
             if cached == "logged_in":
                 boss_login = {"id": "boss_login", "name": _MSG_BOSS_LOGIN_STATUS,
                               "status": "ok", "detail": "已登录（缓存）", "fix": None}
-            elif cached == "restricted":
-                boss_login = {"id": "boss_login", "name": _MSG_BOSS_LOGIN_STATUS,
-                              "status": "fail", "detail": _restricted_cache_detail(account),
-                              "fix": None}
             elif cached == "not_logged_in":
                 boss_login = {"id": "boss_login", "name": _MSG_BOSS_LOGIN_STATUS,
                               "status": "fail", "detail": "未登录（缓存） — 请打开该账号的 BOSS 窗口登录",
@@ -1120,18 +1114,6 @@ def create_app(config=None):
                 "fix": None if wv2["installed"] else "安装 WebView2 运行时",
             })
 
-        cooldowns = []
-        from webui.cooldown import all_cooldowns
-        for aid, platforms in all_cooldowns().items():
-            for pid, rec in platforms.items():
-                cooldowns.append({
-                    "account_id": aid,
-                    "platform": pid,
-                    "until": rec["until"],
-                    "until_text": _format_unlock_time(rec["until"]),
-                    "reason": rec.get("reason") or "",
-                    "from_run": rec.get("from_run") or "",
-                })
         return jsonify({
             "ok": True,
             "runtime_mode": _runtime_mode,
@@ -1141,7 +1123,6 @@ def create_app(config=None):
                 {"id": "local", "name": "本地环境", "items": local_items},
             ],
             "active_account": account,
-            "cooldowns": cooldowns,
             "checked_at": int(time.time()),
         })
 
@@ -1161,17 +1142,12 @@ def create_app(config=None):
             return jsonify({"tasks": [_tag_boss(t) for t in store.list_tasks(limit=limit)]})
         raw = request.get_json(silent=True) or {}
         legacy_platform_guard(raw.get("platform"))
-        error_resp, error_status, warning = _submit_cooldown_guard(raw)
-        if error_resp is not None:
-            return error_resp, error_status
         search = validate_search_params(raw)
         profile_raw = raw.get("profile") if "profile" in raw else store.load_profile()
         normalized_profile = normalize_profile(profile_raw)
         store.save_profile(normalized_profile)
         task = runner.create_scrape(search, normalized_profile)
         payload: dict = {"task": _tag_boss(task)}
-        if warning is not None:
-            payload["warning"] = warning
         return jsonify(payload), 202
 
     @app.route("/api/scrape", methods=["POST"])
@@ -2078,10 +2054,19 @@ def create_app(config=None):
             _release_resume_claim(str(claim_id))
 
     def _schedule_pipeline_task_cleanup(task_id):
-        """30 分钟后自动从 _pipeline_tasks 中移除已完成的任务，避免内存泄漏。"""
+        """30 分钟后自动移除已完成任务，避免内存泄漏。
+
+        定时器只删除排程时刻捕获的那个任务对象：续跑会用同一 run_id
+        重新注册新任务，旧暂停任务的定时器到点不能误删仍在运行的新任务。
+        """
+        with _pipeline_lock:
+            task = _pipeline_tasks.get(task_id)
+
         def _cleanup():
             with _pipeline_lock:
-                _pipeline_tasks.pop(task_id, None)
+                if _pipeline_tasks.get(task_id) is task:
+                    _pipeline_tasks.pop(task_id, None)
+
         timer = threading.Timer(30 * 60, _cleanup)
         timer.daemon = True
         timer.start()
@@ -2123,30 +2108,6 @@ def create_app(config=None):
         account = str((_load_legacy_advanced_settings() or {}).get("browser_account") or "a")
         return account if account in accounts else "a"
 
-    def _format_unlock_time(until: float) -> str:
-        """把解封时间戳格式化为用户可读的「MM-DD HH:MM」。"""
-        from datetime import datetime as _dt
-        return _dt.fromtimestamp(until).strftime("%m-%d %H:%M")
-
-    def _restricted_cache_detail(account: str) -> str:
-        """受限中（缓存）展示来源：冷却记录原因与来源任务，缺来源时不编造。"""
-        try:
-            from webui.cooldown import get_cooldown
-            record = get_cooldown(account, "boss")
-        except Exception:
-            record = None
-        base = "受限中（缓存） — 账号或 IP 命中风控，建议等待后重试"
-        if not isinstance(record, dict):
-            return base
-        reason = str(record.get("reason") or "").strip()
-        from_run = str(record.get("from_run") or "").strip()
-        parts = [base]
-        if reason:
-            parts.append(f"原因：{reason}")
-        if from_run:
-            parts.append(f"来源任务：{from_run}")
-        return "；".join(parts)
-
     def _invalidate_login_cache(account_id: str, platform: str) -> None:
         """打开浏览器登录窗口时失效该账号该平台的登录态缓存（D3 信号）。
 
@@ -2158,57 +2119,6 @@ def create_app(config=None):
             invalidate_login_state(str(account_id), str(platform))
         except Exception:
             pass
-
-    def _submit_cooldown_guard(raw: dict):
-        """任务提交前的冷却校验（D6）。
-
-        Returns:
-            (error_response, error_status, warning_payload)
-            - error_response: 同账号正处于冷却 → jsonify 拒绝响应，否则 None；
-            - error_status: 拒绝时的 HTTP 状态码（409），无拒绝时为 None；
-            - warning_payload: 其他账号冷却中 → 连坐提醒 dict，否则 None。
-        """
-        from webui.cooldown import all_cooldowns
-        from webui.pipeline_exec import load_browser_accounts
-        accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
-        account = str(raw.get("browser_account") or "") or _account_for_run()
-        if account not in accounts:
-            account = "a"
-        platform = str(raw.get("platform") or "boss")
-        cooldowns = all_cooldowns()
-        record = cooldowns.get(account, {}).get(platform)
-        if record is not None:
-            remaining = max(1, int(record["until"] - time.time()))
-            return jsonify({
-                "ok": False,
-                "error_code": "account_in_cooldown",
-                "remaining_seconds": remaining,
-                "until": record["until"],
-                "user_message": (
-                    f"账号正处风控冷却，建议等待至 "
-                    f"{_format_unlock_time(record['until'])} 后再提交任务"
-                ),
-            }), 409, None
-        warnings = [
-            {
-                "account_id": aid,
-                "platform": pid,
-                "until": rec["until"],
-            }
-            for aid, platforms in cooldowns.items()
-            for pid, rec in platforms.items()
-            if aid != account or pid != platform
-        ]
-        if not warnings:
-            return None, None, None
-        return None, None, {
-            "code": "other_account_cooldown",
-            "message": (
-                "其他账号正处于风控冷却（连坐风险），新任务仍会提交，"
-                "但抓取可能受影响，建议等待冷却结束后再跑"
-            ),
-            "cooldowns": warnings,
-        }
 
     def _activate_run_browser(run=None) -> None:
         """Point the shared CDP helper at the selected profile."""
@@ -2329,16 +2239,16 @@ def create_app(config=None):
         if callable(checker):
             passed, code, reason = checker(run)
         else:
-            code = str(run.get("error_code") or "")
+            _raw_code = str(run.get("error_code") or "")
+            code = resolve_code(_raw_code) if _raw_code else ""
             reason = ""
             passed = True
+            _ai_resume_codes = {
+                "ai_rate_limited", "ai_quota_exhausted",
+                "ai_key_invalid", "ai_network_error",
+            }
             try:
-                if code in {
-                    "captcha_required", "login_expired", "ip_risk_control",
-                    "cdp_unavailable", "source_verification_required",
-                    "source_login_required", "source_blocked", "source_rate_limited",
-                    "source_cdp_unavailable",
-                }:
+                if code in SYSTEMIC_BLOCK_CODES and code not in _ai_resume_codes:
                     from webui.pipeline_exec import ensure_chrome_ready, taxonomy_reason
                     # T403: 从 run 继承冻结平台/浏览器身份
                     _resume_params = run.get("execution_params") or {}
@@ -2350,7 +2260,7 @@ def create_app(config=None):
                     chrome_ok, chrome_err = ensure_chrome_ready(_resume_params.get("cdp_port"))
                     if not chrome_ok:
                         passed = False
-                        code = "cdp_unavailable"
+                        code = "source_cdp_unavailable"
                         reason = f"调试浏览器尚未就绪：{chrome_err}"
                     else:
                         source = _make_cdp_source(
@@ -2364,11 +2274,8 @@ def create_app(config=None):
                         if outcome is None or not outcome.ok:
                             passed = False
                             source_code = getattr(outcome, "failed_code", "")
-                            code = {
-                                "source_login_required": "login_expired",
-                                "source_cdp_unavailable": "cdp_unavailable",
-                                "source_verification_required": "captcha_required",
-                            }.get(source_code, code or "source_blocked")
+                            code = resolve_code(source_code) if source_code else (
+                                code or "source_blocked")
                             reason = taxonomy_reason(
                                 code, _resume_platform, fallback="阻断条件尚未解除"
                             )
@@ -2429,11 +2336,6 @@ def create_app(config=None):
         if source_run_id and str(source_run_id) not in target_run_ids:
             target_run_ids.append(str(source_run_id))
         events = []
-        source_code_aliases = {
-            "source_login_required": "login_expired",
-            "source_verification_required": "captcha_required",
-            "source_cdp_unavailable": "cdp_unavailable",
-        }
         for job in jobs or []:
             if not isinstance(job, dict) or str(job.get("jd") or "").strip():
                 continue
@@ -2441,7 +2343,7 @@ def create_app(config=None):
             failed_code = str(job.get("jd_failed_code") or "").strip()
             if not job_id or not failed_code:
                 continue
-            taxonomy_code = source_code_aliases.get(failed_code, failed_code)
+            taxonomy_code = resolve_code(failed_code)
             taxonomy = ERROR_TAXONOMY.get(taxonomy_code, {})
             reason = str(job.get("jd_failed_reason") or "").strip()
             if not reason:
@@ -2568,18 +2470,18 @@ def create_app(config=None):
                     task_id,
                     status="paused",
                     current_stage="scrape",
-                    error_code="cdp_unavailable",
+                    error_code="source_cdp_unavailable",
                     error_reason=reason,
                     processed_count=len(completed),
                 )
                 store.save_checkpoint(task_id, "scrape", completed)
                 store.append_task_event(task_id, "pause", {
                     "stage": "scrape",
-                    "code": "cdp_unavailable",
+                    "code": "source_cdp_unavailable",
                     "completed_combos": len(completed),
                 })
                 _record_pause_failure(
-                    task_id, "scrape", "cdp_unavailable", reason,
+                    task_id, "scrape", "source_cdp_unavailable", reason,
                     processed=len(completed), total=len(completed),
                 )
                 with _pipeline_lock:
@@ -2712,8 +2614,73 @@ def create_app(config=None):
                 merged_total = len(result["jobs"])
                 result["total_matched"] = merged_total
                 result["total_scraped"] = merged_total
+            # 终态先按真实结果判定并写 DB，不依赖内存 task 是否存活。
+            # 续跑会用同一 run_id 重新注册内存任务；旧任务被清理/替换时
+            # 内存字段可以跳过同步，但 DB 终态必须照常写入，否则 run 会
+            # 永远停在 running（数据已齐却没收尾）。
             with _pipeline_lock:
                 task = _pipeline_tasks.get(task_id)
+                if stop_event is not None and stop_event.is_set():
+                    _write_run_unless_finished(
+                        task_id, status="cancelled", current_stage="scrape",
+                        processed_count=len(result.get("completed_combos") or []),
+                        error_reason=_MSG_USER_STOPPED_SCRAPE,
+                    )
+                    _terminal_status = "cancelled"
+                elif result.get("ok"):
+                    completed = list(result.get("completed_combos") or [])
+                    _write_run_unless_finished(
+                        task_id, status="succeeded", current_stage="scrape",
+                        processed_count=len(completed),
+                        source_count=int(result.get("combinations") or len(completed)),
+                        total_scraped=int(result.get("total_scraped") or 0),
+                    )
+                    store.append_task_event(task_id, "stage_complete", {"stage": "scrape"})
+                    _terminal_status = "done"
+                else:
+                    # 切片4：列表抓取失败时区分"系统性阻断暂停" vs "真失败"
+                    # 部分组合已完成 + 错误含阻断关键字 → paused + checkpoint
+                    # 服务重启后用户点继续可从 DB checkpoint 恢复 completed_combos
+                    completed = list(result.get("completed_combos") or [])
+                    err_msg = str(result.get("error", "") or "")
+                    _pause_code = (
+                        str(result.get("hard_stop_code") or "")
+                        or _classify_scrape_block(err_msg)
+                    )
+                    if result.get("hard_stop") and _pause_code:
+                        _write_run_unless_finished(
+                            task_id, status="paused", error_code=_pause_code,
+                            current_stage="scrape",
+                            processed_count=len(completed),
+                            source_count=int(result.get("combinations") or 0),
+                            error_reason=err_msg,
+                            total_scraped=int(result.get("total_scraped") or 0))
+                        store.save_checkpoint(task_id, "scrape", completed)
+                        store.append_task_event(
+                            task_id, "pause",
+                            {"stage": "scrape", "code": _pause_code,
+                             "completed_combos": len(completed)})
+                        _record_pause_failure(
+                            task_id, "scrape", _pause_code, err_msg,
+                            processed=len(completed),
+                            total=int(result.get("combinations") or 0),
+                        )
+                        _terminal_status = "paused"
+                    else:
+                        store.append_task_event(task_id, "job_fail", {
+                            "stage": "scrape", "error": err_msg,
+                            "failed_code": _pause_code or "scrape_failed",
+                        })
+                        _write_run_unless_finished(
+                            task_id, status="failed", current_stage="scrape",
+                            processed_count=len(completed),
+                            source_count=int(result.get("combinations") or 0),
+                            error_reason=err_msg,
+                            total_scraped=int(result.get("total_scraped") or 0),
+                        )
+                        _terminal_status = "failed"
+                # 内存任务状态同步（task 可能已在续跑时被替换/清理；DB 终态
+                # 已在上方保证写入，内存同步仅当对象仍指向本 run 时执行）。
                 if task is not None:
                     task["result"] = result
                     task["error"] = result.get("error", "")
@@ -2725,77 +2692,20 @@ def create_app(config=None):
                         )
                         progress["total_matched"] = merged_total
                         task["progress"] = progress
-                    # 用户点过停止：无论 run_search 返回 ok 与否，都标 cancelled，
-                    # 不标 failed（不是出错）也不标 done（不是正常完成）。
-                    if stop_event is not None and stop_event.is_set():
+                    if _terminal_status == "cancelled":
                         task["status"] = "cancelled"
                         task["error"] = _MSG_USER_STOPPED_SCRAPE
-                        _write_run_unless_finished(
-                            task_id, status="cancelled", current_stage="scrape",
-                            processed_count=len(result.get("completed_combos") or []),
-                            error_reason=_MSG_USER_STOPPED_SCRAPE,
-                        )
-                    elif result.get("ok"):
+                    elif _terminal_status == "done":
                         task["status"] = "done"
-                        completed = list(result.get("completed_combos") or [])
-                        _write_run_unless_finished(
-                            task_id, status="succeeded", current_stage="scrape",
-                            processed_count=len(completed),
-                            source_count=int(result.get("combinations") or len(completed)),
-                            total_scraped=int(result.get("total_scraped") or 0),
-                        )
-                        store.append_task_event(
-                            task_id, "stage_complete", {"stage": "scrape"}
+                    elif _terminal_status == "paused":
+                        task["status"] = "paused"
+                        task["error"] = (
+                            f"列表抓取被阻断（{_pause_code}）："
+                            f"已完成 {len(completed)} 个组合，已保存断点。"
+                            "在自动化浏览器中处理后点「继续」"
                         )
                     else:
-                        # 切片4：列表抓取失败时区分"系统性阻断暂停" vs "真失败"
-                        # 部分组合已完成 + 错误含阻断关键字 → paused + checkpoint
-                        # 服务重启后用户点继续可从 DB checkpoint 恢复 completed_combos
-                        completed = list(result.get("completed_combos") or [])
-                        err_msg = str(result.get("error", "") or "")
-                        _pause_code = (
-                            str(result.get("hard_stop_code") or "")
-                            or _classify_scrape_block(err_msg)
-                        )
-                        if result.get("hard_stop") and _pause_code:
-                            _write_run_unless_finished(
-                                task_id, status="paused", error_code=_pause_code,
-                                current_stage="scrape",
-                                processed_count=len(completed),
-                                source_count=int(result.get("combinations") or 0),
-                                error_reason=err_msg,
-                                total_scraped=int(result.get("total_scraped") or 0))
-                            store.save_checkpoint(task_id, "scrape", completed)
-                            store.append_task_event(
-                                task_id, "pause",
-                                {"stage": "scrape", "code": _pause_code,
-                                 "completed_combos": len(completed)})
-                            _record_pause_failure(
-                                task_id, "scrape", _pause_code, err_msg,
-                                processed=len(completed),
-                                total=int(result.get("combinations") or 0),
-                            )
-                            task["status"] = "paused"
-                            task["error"] = (
-                                f"列表抓取被阻断（{_pause_code}）："
-                                f"已完成 {len(completed)} 个组合，已保存断点。"
-                                "在自动化浏览器中处理后点「继续」"
-                            )
-                        else:
-                            task["status"] = "failed"
-                            store.append_task_event(task_id, "job_fail", {
-                                "stage": "scrape", "error": err_msg,
-                                "failed_code": _pause_code or "scrape_failed",
-                            })
-                            _write_run_unless_finished(
-                                task_id, status="failed", current_stage="scrape",
-                                processed_count=len(completed),
-                                source_count=int(result.get("combinations") or 0),
-                                error_reason=err_msg,
-                                total_scraped=int(result.get("total_scraped") or 0),
-                            )
-            with _pipeline_lock:
-                _terminal_status = (_pipeline_tasks.get(task_id) or {}).get("status")
+                        task["status"] = "failed"
             if _terminal_status in ("cancelled", "failed"):
                 _clear_auto_screen(task_id)
             _schedule_pipeline_task_cleanup(task_id)
@@ -2803,7 +2713,7 @@ def create_app(config=None):
         except Exception as exc:
             with _pipeline_lock:
                 task = _pipeline_tasks.get(task_id)
-                stop_event = task.get("stop_event") if task is not None else None
+            stop_event = task.get("stop_event") if task is not None else None
             cancelled = stop_event is not None and stop_event.is_set()
             error_message = (
                 _MSG_USER_STOPPED_SCRAPE if cancelled
@@ -3576,7 +3486,7 @@ def create_app(config=None):
                     _save_jd_checkpoint(jd_path, jd_map)
                     _try_save_failure_snapshot("partial")
                     _write_run_unless_finished(
-                        task_id, status="paused", error_code="cdp_unavailable",
+                        task_id, status="paused", error_code="source_cdp_unavailable",
                         current_stage="jd_detail", processed_count=len(jd_map),
                         error_reason=reason,
                     )
@@ -3584,11 +3494,11 @@ def create_app(config=None):
                         task_id, "jd_detail", sorted(jd_map)
                     )
                     store.append_task_event(task_id, "pause", {
-                        "stage": "jd_detail", "code": "cdp_unavailable",
+                        "stage": "jd_detail", "code": "source_cdp_unavailable",
                         "processed": len(jd_map), "total": len(survivors),
                     })
                     _record_pause_failure(
-                        task_id, "jd_detail", "cdp_unavailable", reason,
+                        task_id, "jd_detail", "source_cdp_unavailable", reason,
                         processed=len(jd_map), total=len(survivors),
                     )
                     with _pipeline_lock:
@@ -3610,7 +3520,7 @@ def create_app(config=None):
                     _save_jd_checkpoint(jd_path, jd_map)
                     _try_save_failure_snapshot("partial")
                     _write_run_unless_finished(
-                        task_id, status="paused", error_code="cdp_unavailable",
+                        task_id, status="paused", error_code="source_cdp_unavailable",
                         current_stage="jd_detail", processed_count=len(jd_map),
                         error_reason=reason,
                     )
@@ -3618,11 +3528,11 @@ def create_app(config=None):
                         task_id, "jd_detail", sorted(jd_map)
                     )
                     store.append_task_event(task_id, "pause", {
-                        "stage": "jd_detail", "code": "cdp_unavailable",
+                        "stage": "jd_detail", "code": "source_cdp_unavailable",
                         "processed": len(jd_map), "total": len(survivors),
                     })
                     _record_pause_failure(
-                        task_id, "jd_detail", "cdp_unavailable", reason,
+                        task_id, "jd_detail", "source_cdp_unavailable", reason,
                         processed=len(jd_map), total=len(survivors),
                     )
                     with _pipeline_lock:
@@ -4633,22 +4543,6 @@ def create_app(config=None):
         if str(settings.get("browser_account") or "") == str(account_id):
             settings["browser_account"] = "a"
             _save_legacy_advanced_settings(settings)
-        return jsonify({"ok": True})
-
-    @app.route("/api/cooldown/clear", methods=["POST"])
-    def clear_cooldown_endpoint():
-        """手动解除风控冷却（D6）。
-
-        只清 cooldown.json 中该账号（可选平台）的记录，不碰登录态缓存；
-        前端二次确认弹窗后再调用。
-        """
-        from webui.cooldown import clear_cooldown
-        body = request.get_json(silent=True) or {}
-        account_id = str(body.get("account_id") or "").strip()
-        platform = str(body.get("platform") or "").strip() or None
-        if not account_id:
-            return jsonify({"ok": False, "error": "account_id 不能为空"}), 400
-        clear_cooldown(account_id, platform)
         return jsonify({"ok": True})
 
     @app.route("/api/advanced-settings/custom", methods=["PUT"])
@@ -6085,6 +5979,50 @@ def create_app(config=None):
                 "source_total": int(run.get("source_count") or 0),
                 "round_context": _round_context_for_run(run),
             })
+        # 3.4 孤儿收尾：DB 里 running+scrape、内存已无 worker、但 checkpoint
+        # 已满且已抓岗位>0 —— 说明抓取确实完成而终态漏写。这里补写
+        # succeeded，落到 3.5/3.6 继续走正常恢复展示，修复"数据已齐却
+        # 卡在运行中"（续跑被旧清理定时器误删内存任务后仍能自愈）。
+        try:
+            with store._connection() as conn:
+                _running_rows = conn.execute(
+                    "SELECT * FROM screening_runs WHERE status = 'running' "
+                    "AND current_stage = 'scrape' ORDER BY updated_at DESC LIMIT 20"
+                ).fetchall()
+        except (sqlite3.Error, RuntimeError):
+            _running_rows = []
+        for _running_row in _running_rows:
+            _rid = str(_running_row["id"])
+            with _pipeline_lock:
+                _live_task = _pipeline_tasks.get(_rid)
+            if _live_task is not None and _live_task.get("status") in ("running", "queued"):
+                continue
+            _running_run = store.get_screening_run(_rid) or {}
+            if not _running_run:
+                continue
+            _rk = _running_run.get("record_kind")
+            if _rk and _rk != "process_log":
+                continue
+            if _has_newer_saved_result_than(_running_run.get("updated_at")):
+                continue
+            _source_total = int(_running_run.get("source_count") or 0)
+            if _source_total <= 0:
+                continue
+            try:
+                _checkpoint_done = len(store.load_checkpoint(_rid, "scrape"))
+            except _OPERATIONAL_ERRORS:
+                _checkpoint_done = 0
+            if _checkpoint_done < _source_total:
+                continue
+            if store.count_scrape_run_jobs(_rid) <= 0:
+                continue
+            # 数据可证明已抓完且 worker 已不在：补写完成终态（幂等）。
+            _write_run_unless_finished(
+                _rid, status="succeeded", current_stage="scrape",
+                processed_count=max(int(_running_run.get("processed_count") or 0), _checkpoint_done),
+                source_count=_source_total,
+            )
+            store.append_task_event(_rid, "stage_complete", {"stage": "scrape"})
         # 3.5 已完成抓取 + auto_screen 未消费：刷新后自动接 AI 筛选。
         try:
             with store._connection() as conn:
@@ -8346,9 +8284,11 @@ def create_app(config=None):
             str(live.get("status")) if live is not None else str(run["status"]),
             (run or {}).get("interruption_kind"),
         )
+        _resolved_error_code = (
+            resolve_code(error_code) if error_code else "")
         if effective_status == "paused" or (
                 effective_status == "failed" and error_code) or (
-                error_code and error_code in SYSTEMIC_BLOCK_CODES):
+                _resolved_error_code and _resolved_error_code in SYSTEMIC_BLOCK_CODES):
             pause_info = {
                 "error_code": error_code,
                 "error_reason": error_reason or failed_code_label(
@@ -8371,6 +8311,27 @@ def create_app(config=None):
         except _OPERATIONAL_ERRORS:
             task_events = []
         active_elapsed_ms = _active_elapsed_ms(started_at, finished_at, task_events)
+        # 016：软失败组合留痕（combo_issue/kind=combo_failed），倒序取最近 20 条；
+        # 文案来自统一注册表，前端只展示不猜码。
+        combo_issues = []
+        _platform_label = str((run or {}).get("platform") or (live or {}).get("platform") or "")
+        for _event in reversed(task_events):
+            _payload = _event.get("payload") or {}
+            if (
+                _event.get("type") == "combo_issue"
+                and _payload.get("kind") == "combo_failed"
+            ):
+                _code = resolve_code(
+                    str(_payload.get("failed_code") or "source_unknown_error"))
+                combo_issues.append({
+                    "combo_key": str(_payload.get("combo_key") or ""),
+                    "code": _code,
+                    "code_text": failed_code_label(_code, _platform_label) or _code,
+                    "reason": str(_payload.get("reason") or ""),
+                    "ts": _payload.get("ts") or _event.get("at") or "",
+                })
+            if len(combo_issues) >= 20:
+                break
         return jsonify({
             "ok": True,
             "run_id": run_id,
@@ -8413,6 +8374,7 @@ def create_app(config=None):
             "auto_screen": bool((live or {}).get("auto_screen", exec_params.get("auto_screen"))),
             "source_summary": source_summary,
             "source_outcomes": source_outcomes,
+            "combo_issues": combo_issues,
             **(
                 {"result": live["result"]}
                 if live is not None and live.get("result") is not None else {}
@@ -8460,7 +8422,6 @@ def create_app(config=None):
         if target_account:
             from webui.pipeline_exec import load_browser_accounts, resolve_browser_account
             from webui.platforms import resolve_login_space
-            from webui.cooldown import get_cooldown as _get_cooldown
             from webui.resume_identity import persist_frozen_identity
             accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
             if target_account not in accounts:
@@ -8470,20 +8431,6 @@ def create_app(config=None):
                     "status": "paused",
                 }), 404
             platform = str(run.get("platform") or (run.get("execution_params") or {}).get("platform") or "boss")
-            cd = _get_cooldown(target_account, platform)
-            if cd is not None:
-                remaining = max(1, int(cd["until"] - time.time()))
-                return jsonify({
-                    "ok": False, "error": "account_in_cooldown",
-                    "error_code": "account_in_cooldown",
-                    "remaining_seconds": remaining,
-                    "until": cd["until"],
-                    "message": (
-                        f"目标账号也处于风控冷却，建议等待至 "
-                        f"{_format_unlock_time(cd['until'])} 后再继续"
-                    ),
-                    "status": "paused",
-                }), 409
             target_dir = resolve_browser_account(
                 target_account, app.config["BROWSER_ACCOUNTS_PATH"]) or "unresolved"
             try:

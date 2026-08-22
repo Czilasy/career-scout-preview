@@ -2116,19 +2116,31 @@ class RiskControlTests(unittest.TestCase):
         self.assertFalse(module.looks_like_risk_control(""))
         self.assertFalse(module.looks_like_risk_control(None))
 
-    def test_check_list_risk_http_error_hard_stop(self):
+    def test_check_list_risk_http_error_single_block_is_retry(self):
+        # 016：单次 403 不定罪（None=调用方原地重试）；重试后复现才实锤
         module = load_module()
 
         err = module.check_list_risk(
             {"kind": "http_error", "status": 403},
             page=2, consecutive_empty=0, scraped_count=30,
             output_path="out.json", resume_page=2)
+        self.assertIsNone(err)
 
+        verdict, code, hint = module.classify_list_diagnosis(
+            {"kind": "http_error", "status": 403}, repeated=True)
+        self.assertEqual(verdict, module.VERDICT_CONFIRMED)
+        self.assertEqual(code, "source_rate_limited")
+        self.assertIn("403", hint)
+
+    def test_check_list_risk_http_401_is_immediate_login_stop(self):
+        module = load_module()
+
+        err = module.check_list_risk(
+            {"kind": "http_error", "status": 401},
+            page=2, consecutive_empty=0, scraped_count=30,
+            output_path="out.json", resume_page=2)
         self.assertIsInstance(err, module.RiskControlError)
-        self.assertEqual(err.page, 2)
-        self.assertEqual(err.scraped_count, 30)
-        self.assertEqual(err.resume_page, 2)
-        self.assertIn("403", err.reason)
+        self.assertEqual(err.code, "source_login_required")
 
     def test_check_list_risk_ignores_benign_http_status(self):
         module = load_module()
@@ -2150,7 +2162,8 @@ class RiskControlTests(unittest.TestCase):
 
         self.assertIsInstance(err, module.RiskControlError)
 
-    def test_check_list_risk_consecutive_empty_threshold(self):
+    def test_check_list_risk_consecutive_empty_never_defames(self):
+        # 016：连续空页只做"停止翻页"刹车，不再定性成风控/限流
         module = load_module()
 
         below = module.check_list_risk(
@@ -2161,8 +2174,7 @@ class RiskControlTests(unittest.TestCase):
         at = module.check_list_risk(
             None, page=3, consecutive_empty=module.MAX_CONSECUTIVE_EMPTY_PAGES,
             scraped_count=10, output_path="o.json", resume_page=4)
-        self.assertIsInstance(at, module.RiskControlError)
-        self.assertIn("连续", at.reason)
+        self.assertIsNone(at)
 
     def test_cdp_session_wraps_connection_failure_in_plain_language(self):
         module = load_module()

@@ -2342,35 +2342,48 @@ class NormalizeJobFieldsWelfareTests(unittest.TestCase):
 
 
 class RiskSignalClassificationTests(unittest.TestCase):
-    """B027/B013：普通词不判风控，高置信才暂停并写冷却。"""
+    """016：分类只认结构化失败行；退出码兜底；无冷却、无受限缓存副作用。"""
 
-    def test_exit_10_common_words_are_not_risk(self):
+    def test_exit_10_without_failure_line_is_status_unclear(self):
         from webui.source import _classify_failed_code
-        for sample in ("登录解锁更多职位", "频繁更新职位", "冻结岗位"):
+        # 岗位标题/薪资里的"429/滑块/稍后再试"不再参与分类（全文扫描已删除）
+        for sample in (
+            "登录解锁更多职位", "频繁更新职位", "冻结岗位",
+            "  ✓ 滑块交互工程师 | 429元/天 | 操作频繁系统维护",
+        ):
             self.assertEqual(
-                _classify_failed_code(10, sample), "source_unknown_error")
+                _classify_failed_code(10, sample), "source_status_unclear")
 
-    def test_exit_10_high_confidence_rate_limit(self):
+    def test_failure_line_is_the_authoritative_classifier(self):
         from webui.source import _classify_failed_code
+        # 失败行存在时，输出其余内容（哪怕含敏感词）不影响定类
         self.assertEqual(
-            _classify_failed_code(10, "操作频繁，请稍后再试"), "source_rate_limited")
+            _classify_failed_code(
+                10, "✓ 滑块工程师 | 429元/天\n__CAREERSCOUT_FAILED__ code=source_rate_limited hint=操作频繁"),
+            "source_rate_limited")
         self.assertEqual(
-            _classify_failed_code(10, "HTTP 429 Too Many Requests"), "source_rate_limited")
-        for sample in (
-            "列表接口返回 HTTP 403（被风控拦截）",
-            "列表接口返回 HTTP 412", "列表接口返回 HTTP 418",
-        ):
-            self.assertEqual(_classify_failed_code(10, sample), "source_rate_limited")
+            _classify_failed_code(
+                10, "__CAREERSCOUT_FAILED__ code=source_verification_required hint=验证码"),
+            "source_verification_required")
         self.assertEqual(
-            _classify_failed_code(10, "账号将于 2099-08-05 18:30 解封"), "source_rate_limited")
+            _classify_failed_code(
+                10, "__CAREERSCOUT_FAILED__ code=source_login_required hint=401"),
+            "source_login_required")
+        # 多行取最后一行；别名归一
+        self.assertEqual(
+            _classify_failed_code(
+                10, "__CAREERSCOUT_FAILED__ code=source_rate_limited hint=a\nsome tail\n__CAREERSCOUT_FAILED__ code=ip_risk_control hint=b"),
+            "source_blocked")
 
-    def test_exit_10_login_required_maps_to_login_required(self):
+    def test_exit_code_fallback_mapping(self):
         from webui.source import _classify_failed_code
-        for sample in (
-            "列表接口返回 HTTP 401（登录态失效）",
-            "列表接口提示请先登录", "登录已失效，请重新登录",
-        ):
-            self.assertEqual(_classify_failed_code(10, sample), "source_login_required")
+        self.assertEqual(_classify_failed_code(2, ""), "source_cdp_unavailable")
+        self.assertEqual(_classify_failed_code(3, ""), "source_invalid_output")
+        self.assertEqual(
+            _classify_failed_code(11, ""), "source_request_limit_exceeded")
+        self.assertEqual(_classify_failed_code(10, ""), "source_status_unclear")
+        self.assertEqual(
+            _classify_failed_code(10, "旧脚本无失败行"), "source_status_unclear")
 
     def test_exit_1_loose_login_words_not_login_required(self):
         """退出码 1 只认高置信短语，单个“登录/login/cookie”字眼不再误判。"""
@@ -2389,19 +2402,18 @@ class RiskSignalClassificationTests(unittest.TestCase):
         ):
             self.assertEqual(_classify_failed_code(1, sample), "source_login_required")
 
-    def test_record_risk_signals_only_writes_for_high_confidence(self):
+    def test_record_risk_signals_only_persists_login_fact(self):
         from webui.source import _record_risk_signals
-        with mock.patch("scripts.login_state_cache.write_login_state") as write_state, \
-                mock.patch("webui.cooldown.mark_cooldown") as mark_cd:
-            _record_risk_signals(
-                "acc", "boss", "source_blocked", "登录解锁更多职位", "run-1")
+        with mock.patch("scripts.login_state_cache.write_login_state") as write_state:
+            # 受限/验证码/无法确认：一律不写任何持久状态（无冷却模块可写）
+            for code in ("source_blocked", "source_rate_limited",
+                         "source_verification_required", "source_status_unclear"):
+                _record_risk_signals("acc", "boss", code, "操作频繁", "run-1")
             write_state.assert_not_called()
-            mark_cd.assert_not_called()
+            # 登录失效是事实态：写 not_logged_in
             _record_risk_signals(
-                "acc", "boss", "source_rate_limited", "操作频繁", "run-2")
-            write_state.assert_called_once_with("acc", "boss", "restricted")
-            mark_cd.assert_called_once()
-            self.assertEqual(mark_cd.call_args.kwargs["from_run"], "run-2")
+                "acc", "boss", "source_login_required", "401", "run-2")
+            write_state.assert_called_once_with("acc", "boss", "not_logged_in")
 
 
 class BossCdpSourcePreflightTests(_LoginCacheIsolated):
@@ -2417,29 +2429,32 @@ class BossCdpSourcePreflightTests(_LoginCacheIsolated):
         resp.json.return_value = {"Browser": "Chrome"}
         return mock.patch.object(boss.requests, "get", return_value=resp)
 
-    def test_cached_not_logged_in_is_reprobed(self):
+    def test_cached_not_logged_in_blocks_until_invalidated(self):
+        # 016：未登录是事实态，命中直接提示登录；打开登录窗口会失效缓存重探
         from scripts import boss_cdp_raw as boss
         from scripts import login_state_cache as cache
         cache.write_login_state("a", "boss", "not_logged_in")
         source = self._source()
         with self._mock_cdp_ok(), \
-                mock.patch.object(boss, "check_login_state_tri", return_value="logged_in") as m:
-            outcome = source.preflight()
-        self.assertTrue(outcome.ok)
-        m.assert_called_once()
-        self.assertIn("not_logged_in_ignored", outcome.safe_log)
-
-    def test_cached_restricted_still_blocks(self):
-        from scripts import boss_cdp_raw as boss
-        from scripts import login_state_cache as cache
-        cache.write_login_state("a", "boss", "restricted")
-        source = self._source()
-        with self._mock_cdp_ok(), \
                 mock.patch.object(boss, "check_login_state_tri") as m:
             outcome = source.preflight()
         self.assertFalse(outcome.ok)
-        self.assertEqual(outcome.failed_code, "source_blocked")
+        self.assertEqual(outcome.failed_code, "source_login_required")
         m.assert_not_called()
+
+    def test_restricted_probe_never_persists_to_cache(self):
+        # 016：受限只在当次生效，探测受限后缓存里不应出现任何受限态
+        from scripts import boss_cdp_raw as boss
+        from scripts import login_state_cache as cache
+        source = self._source()
+        with self._mock_cdp_ok(), \
+                mock.patch.object(boss, "check_login_state_tri",
+                    side_effect=["restricted", "restricted"]), \
+                mock.patch("webui.source.time.sleep"):
+            outcome = source.preflight()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_account_restricted")
+        self.assertNotEqual(cache.read_cached_state("a", "boss"), "restricted")
 
     def test_unknown_probe_retries_once_then_proceeds(self):
         from scripts import boss_cdp_raw as boss
@@ -2475,7 +2490,7 @@ class BossCdpSourcePreflightTests(_LoginCacheIsolated):
         sleep.assert_called_once_with(PREFLIGHT_RETRY_DELAY_SECONDS)
         self.assertEqual(cache.read_cached_state("a", "boss"), "logged_in")
 
-    def test_restricted_twice_returns_source_blocked(self):
+    def test_restricted_twice_returns_account_restricted(self):
         from scripts import boss_cdp_raw as boss
         source = self._source()
         with self._mock_cdp_ok(), \
@@ -2484,7 +2499,7 @@ class BossCdpSourcePreflightTests(_LoginCacheIsolated):
                 mock.patch("webui.source.time.sleep") as sleep:
             outcome = source.preflight()
         self.assertFalse(outcome.ok)
-        self.assertEqual(outcome.failed_code, "source_blocked")
+        self.assertEqual(outcome.failed_code, "source_account_restricted")
         self.assertEqual(m.call_count, 2)
         sleep.assert_called_once_with(PREFLIGHT_RETRY_DELAY_SECONDS)
         self.assertIn("retry=1", outcome.safe_log)

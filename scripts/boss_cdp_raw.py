@@ -51,10 +51,21 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from scripts.boss_cdp_signals import (
+    RATE_LIMIT_KEYWORDS,
+    RISK_CONTROL_KEYWORDS,
+    DETAIL_RATE_LIMIT_KEYWORDS,
+    VERDICT_CONFIRMED,
+    VERDICT_RETRY,
+    VERDICT_STOP,
     api_code_diagnosis,
     api_code_hint,
+    classify_list_diagnosis,
     detail_page_hint,
+    emit_failure_line,
     is_risk_api_code,
+    looks_like_detail_rate_limited,
+    looks_like_rate_limited,
+    looks_like_risk_control,
 )
 
 
@@ -598,19 +609,22 @@ class DetailRateLimitedError(DetailExtractionError):
 
 
 class RiskControlError(RuntimeError):
-    """抓取中途命中风控/验证码，立即停止（不静默跳过、不伪装完成）。
+    """抓取中途命中风控/验证码/无法确认状态，立即停止（不静默跳过、不伪装完成）。
 
     携带诊断信息，供终端醒目报错：第几页挂的、为什么、已抓多少条存哪了、
-    从哪页续抓。
+    从哪页续抓。``code`` 为注册表错误码（016-error-module-rework）：
+    实锤类（验证码/限流/登录失效）与 source_status_unclear（无法确认），
+    入口统一以结构化失败行输出给 webui 分类。
     """
 
     def __init__(self, reason, *, page=None, scraped_count=0, output_path="",
-                 resume_page=None):
+                 resume_page=None, code=""):
         self.reason = reason
         self.page = page
         self.scraped_count = scraped_count
         self.output_path = output_path
         self.resume_page = resume_page
+        self.code = str(code or "")
         super().__init__(reason)
 
 
@@ -987,13 +1001,23 @@ def probe_login_state_tri(cdp, sid):
         text = json.dumps(payload, ensure_ascii=False)
     if status in (401, 403, 412, 418, 429):
         return "not_logged_in" if status == 401 else "restricted"
-    if looks_like_risk_control(text):
-        return "restricted"
+    # 016：先判"正常已登录返回"再谈风控——岗位正文/公司名里出现
+    # "滑块/验证码/captcha"等词不再把已登录账号误判成受限。
     try:
         data = json.loads(text) if isinstance(text, str) else text
     except ValueError:
-        return "unknown"
-    return "logged_in" if is_logged_in_search_response(data) else "not_logged_in"
+        data = None
+    if data is not None:
+        code = data.get("code") if isinstance(data, dict) else None
+        if code == 31:
+            return "restricted"
+        if code == 37:
+            return "unknown"
+        return "logged_in" if is_logged_in_search_response(data) else "not_logged_in"
+    # 非正常结构（非 JSON）响应：高置信风控短语才判受限，其余无法确认
+    if looks_like_risk_control(text):
+        return "restricted"
+    return "unknown"
 
 
 # ============================================================
@@ -1298,23 +1322,9 @@ def parse_api_jobs_eval_value(value):
     return jobs
 
 
-# 风控/验证码特征词：命中即实锤（在 API 返回的错误样本或页面文本里找）
-RISK_CONTROL_KEYWORDS = (
-    "安全验证", "滑动验证", "滑块", "访问受限", "异常流量", "操作频繁",
-    "captcha", "CAPTCHA", "verify-sliding", "waf",
-)
-RATE_LIMIT_KEYWORDS = (
-    "操作频繁", "访问受限", "异常流量", "频繁", "限流", "rate limit",
-    "too many", "429", "稍后再试", "账号受限", "解锁", "冻结",
-)
-
-# 详情页限流判定专用：只认高置信度的限流特征。
-# 裸词“频繁/解锁/冻结”会命中页面 chrome（如“登录解锁更多职位”），
-# 在 JD 提取失败时误判成限流页，把没被封的账号误停成“限流”（用户反馈回归）。
-DETAIL_RATE_LIMIT_KEYWORDS = (
-    "操作频繁", "访问受限", "异常流量", "限流", "rate limit",
-    "too many", "429", "稍后再试", "账号受限",
-)
+# 风控/限流关键词与实锤分档已收敛到 scripts/boss_cdp_signals.py（单一来源，
+# 016-error-module-rework）；本模块经顶部 import 继续暴露同名符号供既有调用方
+# 与测试使用，不再各自维护词表。
 
 # 列表抓取：连续多少页拿不到数据就判定异常并停止（正常搜索极少连续空页）
 MAX_CONSECUTIVE_EMPTY_PAGES = 3
@@ -1373,24 +1383,8 @@ def diagnose_api_jobs_eval_value(value):
     return jobs, diagnosis, None
 
 
-def looks_like_risk_control(text):
-    """文本里是否含风控/验证码特征词。"""
-    if not text:
-        return False
-    return any(keyword in text for keyword in RISK_CONTROL_KEYWORDS)
-
-def looks_like_rate_limited(text):
-    """文本里是否含账号/操作频率限流特征词。"""
-    if not text:
-        return False
-    return any(keyword in text for keyword in RATE_LIMIT_KEYWORDS)
-
-
-def looks_like_detail_rate_limited(text):
-    """详情页专用：只匹配高置信度限流特征，避免页面 chrome 词汇误判。"""
-    if not text:
-        return False
-    return any(keyword in text for keyword in DETAIL_RATE_LIMIT_KEYWORDS)
+# looks_like_risk_control / looks_like_rate_limited / looks_like_detail_rate_limited
+# 的实现已迁至 scripts/boss_cdp_signals.py，此处经由顶部 import 提供同名符号。
 
 
 _UNLOCK_TIME_PATTERNS = (
@@ -1447,42 +1441,17 @@ def extract_block_hint(text, max_chars=160):
 
 def check_list_risk(diagnosis, *, page, consecutive_empty, scraped_count,
                     output_path, resume_page):
-    """组合式风控判定：已知特征命中=实锤；结构异常/连续空页=达阈值实锤。
+    """单页诊断的实锤判定：确认受限/登录失效/验证码即抛 RiskControlError。
 
-    返回 RiskControlError 实例（应停止）或 None（继续）。
+    016-error-module-rework：
+    - 单次拦截（403/429）与结构异常不再定罪，返回 None 由调用方原地重试；
+    - "连续空页"不再作为风控定性理由（聚合刹车语义在 scrape_list 内处理）；
+    - 抛错携带注册表错误码（RiskControlError.code）。
     """
-    if diagnosis:
-        kind = diagnosis.get("kind", "")
-        sample = diagnosis.get("sample", "")
-        if looks_like_risk_control(sample):
-            return RiskControlError(
-                f"返回内容里出现验证码/风控特征：{sample[:80]}",
-                page=page, scraped_count=scraped_count,
-                output_path=output_path, resume_page=resume_page)
-        if kind == "api_code":
-            code = diagnosis.get("code", 0)
-            if is_risk_api_code(code):
-                return RiskControlError(
-                    api_code_hint(code, sample),
-                    page=page, scraped_count=scraped_count,
-                    output_path=output_path, resume_page=resume_page,
-                )
-        if kind == "http_error":
-            status = diagnosis.get("status", 0)
-            if status in (401, 403, 412, 418, 429):
-                hint = "登录态失效" if status == 401 else "被风控拦截"
-                return RiskControlError(
-                    f"列表接口返回 HTTP {status}（{hint}）",
-                    page=page, scraped_count=scraped_count,
-                    output_path=output_path, resume_page=resume_page)
-        if kind in ("parse_failed", "unexpected_shape", "js_exception"):
-            # 结构对不上时可能是页面未就绪（可疑），连续出现才算实锤，
-            # 由调用方按连续空页阈值统一处置（本次先按空页计数）。
-            pass
-    if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES:
+    verdict, code, hint = classify_list_diagnosis(diagnosis, repeated=False)
+    if verdict == VERDICT_CONFIRMED:
         return RiskControlError(
-            f"连续 {consecutive_empty} 页拿不到职位数据，"
-            "大概率被风控限制（也可能是该搜索条件确实没有职位）",
+            hint, code=code,
             page=page, scraped_count=scraped_count,
             output_path=output_path, resume_page=resume_page)
     return None
@@ -1718,7 +1687,8 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 human_scroll(cdp, sid)
                 human_mouse_jitter(cdp, sid)
 
-            # 优先用 API 获取明文数据
+            # 优先用 API 获取明文数据；单次可疑（拦截/结构异常/code:37）先原地
+            # 重试本页一次（016：单次不定罪），重试后仍异常按分档处置。
             api_params = {
                 "scene": "1",
                 "query": keyword,
@@ -1731,17 +1701,31 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                     api_params[k] = v
             api_url = f"{API_JOB_LIST_PATH}?{urlencode(api_params)}"
             api_js = FETCH_API_JS_TEMPLATE.replace("__API_URL__", api_url)
-            val = cdp.eval_js(api_js, sid)
 
-            jobs, api_diagnosis, api_meta = diagnose_api_jobs_eval_value(val)
+            def _fetch_api_page():
+                return diagnose_api_jobs_eval_value(cdp.eval_js(api_js, sid))
 
-            # 风控实锤（验证码特征/特定 HTTP 错误码）：存好已抓数据后立刻停止，
-            # 不做 DOM 降级（被风控时降级同样会被拦）。
-            risk = check_list_risk(
-                api_diagnosis, page=pg, consecutive_empty=0,
-                scraped_count=len(all_jobs), output_path=output_path,
-                resume_page=pg)
-            if risk is not None:
+            def _renavigate_and_wait():
+                url = build_search_url(keyword, city_code, pg, filters)
+                cdp.send(CDP_CMD_PAGE_NAVIGATE, {"url": url}, sid)
+                time.sleep(random.uniform(4, 8))
+                human_scroll(cdp, sid)
+
+            jobs, api_diagnosis, api_meta = _fetch_api_page()
+            verdict, verdict_code, verdict_hint = classify_list_diagnosis(
+                api_diagnosis, repeated=False)
+            if verdict == VERDICT_RETRY:
+                print(f"  ⚠️ {verdict_hint}；重新导航后重试本页一次…")
+                _renavigate_and_wait()
+                jobs, api_diagnosis, api_meta = _fetch_api_page()
+                verdict, verdict_code, verdict_hint = classify_list_diagnosis(
+                    api_diagnosis, repeated=True)
+                if verdict == VERDICT_CONFIRMED:
+                    verdict_hint = verdict_hint + "（重试后复现）"
+
+            # 实锤（验证码特征/明确请求受限/重试后仍被拦截/登录失效）：
+            # 存好已抓数据后立刻停止，不做 DOM 降级（被风控时降级同样会被拦）。
+            if verdict == VERDICT_CONFIRMED:
                 if output_path:
                     flush_jobs(output_path, {
                         "keyword": keyword,
@@ -1753,7 +1737,10 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                     }, all_jobs)
                 _emit_page(
                     last_completed_page, 0, True, pg, snapshot=all_jobs)
-                raise risk
+                raise RiskControlError(
+                    verdict_hint, code=verdict_code,
+                    page=pg, scraped_count=len(all_jobs),
+                    output_path=output_path, resume_page=pg)
 
             # DOM 提取的薪资可能是加密字体，默认禁用；只有显式允许时才降级。
             if should_use_dom_fallback(jobs, allow_dom_fallback):
@@ -1811,18 +1798,19 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES and len(all_jobs) > 0:
                     print(f"  ℹ️ 连续 {consecutive_empty} 页无数据，搜索结果已翻完，停止翻页（已抓 {len(all_jobs)} 条）")
                     break
-                # 从头就空 + 连续达阈值：全部空页都是 API 正常应答 → 真实空结果，不报风控；
-                # 只有空页伴随结构异常/HTTP 错误等可疑诊断才按风控处置。
+                # 从头就空 + 连续达阈值：全部空页都是 API 正常应答 → 真实空结果；
+                # 伴随结构异常/拦截的空页已按分档处置，这里只做"停止翻页"刹车，
+                # 不再把连续空页定性成风控（016：聚合症状不定罪）。
                 if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES and len(all_jobs) == 0:
                     if legit_empty_streak >= consecutive_empty:
                         print(f"  ℹ️ 连续 {consecutive_empty} 页 API 正常应答但无职位，判定该搜索条件没有职位（非风控）")
                         break
-                    risk = check_list_risk(
-                        api_diagnosis, page=pg, consecutive_empty=consecutive_empty,
-                        scraped_count=0, output_path=output_path,
-                        resume_page=pg + 1)
-                    if risk is not None:
-                        raise risk
+                    print(f"  ⚠️ 连续 {consecutive_empty} 页无法获取职位数据，原因无法确认，停止本组合")
+                    raise RiskControlError(
+                        f"连续 {consecutive_empty} 页无法获取职位数据，原因无法确认",
+                        code="source_status_unclear",
+                        page=pg, scraped_count=0,
+                        output_path=output_path, resume_page=pg + 1)
                 continue
 
             consecutive_empty = 0
@@ -2122,6 +2110,7 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
             skip_gap = True
             raise RiskControlError(
                 f"BOSS 账号/操作频繁被限流：{exc}",
+                code="source_rate_limited",
                 scraped_count=len(results), output_path=output_path or "",
             ) from exc
         except DetailExtractionError as exc:
@@ -2527,6 +2516,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
             # source_rate_limited 并停掉整个任务）；限流页已留在屏幕上。
             raise RiskControlError(
                 "BOSS 账号/操作频繁被限流，已停止抓取（限流页保留在浏览器中）",
+                code="source_rate_limited",
                 scraped_count=len(results), output_path=output_path or "",
             )
         if degrade_event.is_set():
@@ -3989,6 +3979,7 @@ def main():
         sys.exit(run_stop_chrome())
 
     if not require_runtime_dependencies("requests", "websocket"):
+        emit_failure_line("source_unreachable", "运行时依赖缺失（requests/websocket）")
         sys.exit(1)
 
     # 页数限制
@@ -3998,6 +3989,7 @@ def main():
     if args.start_page < 1 or args.start_page > args.pages:
         print(f"❌ start-page 必须在 1 到 {args.pages} 之间")
         # 参数错误用退出码 3，与 CDP 失联(2)区分，避免 WebUI 误报成浏览器问题。
+        emit_failure_line("source_invalid_output", "start-page 参数超出范围")
         sys.exit(3)
 
     # 收集筛选条件
@@ -4020,6 +4012,7 @@ def main():
             if not check_login_state(args.cdp_port):
                 print("❌ 未检测到 BOSS直聘登录状态。请先在 Chrome 中登录 zhipin.com。")
                 print("   可运行 --check 检查环境，或 --setup-chrome 启动 Chrome。")
+                emit_failure_line("source_login_required", "未检测到 BOSS直聘登录状态")
                 sys.exit(1)
             print("✅ 已登录\n")
         else:
@@ -4152,10 +4145,21 @@ if __name__ == "__main__":
         main()
     except CDPUnavailableError as e:
         print(f"\n❌ {e}")
+        emit_failure_line("source_cdp_unavailable", str(e))
         sys.exit(2)
     except RequestLimitExceededError as e:
         print(f"\n❌ {e}")
+        emit_failure_line("source_request_limit_exceeded", str(e))
         sys.exit(11)
     except RiskControlError as e:
         print_risk_control_report(e)
+        emit_failure_line(
+            e.code or "source_status_unclear",
+            e.reason if e.code != "source_status_unclear" else str(e),
+        )
         sys.exit(10)
+    except RuntimeError as e:
+        # 兜底（如详情登录墙 RuntimeError）：同样走失败行，webui 不再扫全文猜
+        print(f"\n❌ {e}")
+        emit_failure_line("source_unknown_error", str(e))
+        sys.exit(1)

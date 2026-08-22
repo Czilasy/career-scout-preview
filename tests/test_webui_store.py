@@ -69,6 +69,36 @@ class TaskStoreTests(unittest.TestCase):
         self.assertIn(meta["env"], ("live", "test"))
         self.assertTrue(meta["updated_at"])
 
+    def test_delete_latest_history_round_does_not_promote_old(self):
+        """删除最新历史轮后，不得自动把上一轮提升为最新（latest 置空）。"""
+        old_id = self.store.save_pipeline_result(
+            {"jobs": [{"job_id": "old", "platform_job_id": "old",
+                       "title": "旧轮", "verdict": "match",
+                       "source_url": "https://zhipin.example/old.html"}],
+             "dropped": [], "total_scraped": 1, "total_kept": 1,
+             "total_dropped": 0, "profile_summary": ""},
+            {"platform": "boss", "keyword": "旧"},
+        )
+        self.store.archive_all_current_results()
+        latest_id = self.store.save_pipeline_result(
+            {"jobs": [{"job_id": "new", "platform_job_id": "new",
+                       "title": "新轮", "verdict": "match",
+                       "source_url": "https://zhipin.example/new.html"}],
+             "dropped": [], "total_scraped": 1, "total_kept": 1,
+             "total_dropped": 0, "profile_summary": ""},
+            {"platform": "boss", "keyword": "新"},
+        )
+        self.assertIsNotNone(
+            self.store.load_latest_pipeline_result_for_platform("boss"))
+        self.assertTrue(
+            self.store.delete_history_result_preserving_logs(latest_id))
+        # 删掉最新后 latest 应置空，而不是复活旧轮
+        self.assertIsNone(
+            self.store.load_latest_pipeline_result_for_platform("boss"))
+        # 旧轮仍留在历史里，保持归档态
+        history_ids = {r["id"] for r in self.store.list_history_rounds("boss")}
+        self.assertIn(old_id, history_ids)
+
 
 class ScrapePageProgressTests(unittest.TestCase):
     """页级 checkpoint：岗位快照与页进度同事务原子落库。"""

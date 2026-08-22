@@ -82,6 +82,8 @@ async function saveSettings() {
     });
     setLocalNotice({ message: "AI 设置已保存", tone: "success" });
     await loadSettings();
+    // 保存成功后短暂展示成功提示，随后自动关闭对话框，无需用户再点叉
+    window.setTimeout(() => emit("close"), 600);
   } catch (error) {
     setLocalNotice({ message: userFacingMessage(error, "AI 设置保存失败"), tone: "error" });
   } finally {

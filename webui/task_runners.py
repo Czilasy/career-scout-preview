@@ -21,7 +21,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts import boss_cdp_raw as boss
+from scripts.boss_cdp_signals import parse_failure_line
 from webui import ai as ai_service
+from webui.error_registry import resolve_code
 from webui.constants import CLEANUP_EXPIRED_DAYS
 from webui.process_executor import ArtifactSpec, ScraperExecutor, run_with_deadline
 from webui.runtime_audit import record_runtime_event
@@ -30,21 +32,6 @@ from webui.workbench import (
     allocate_detail_budget,
     normalize_job_link,
 )
-
-_SCRAPE_BLOCK_PATTERNS = (
-    ("login_expired", (
-        "登录已失效", "登录过期", "未登录", "登 录 失效", "登 录 已失效", "请先登录", "wt2", "login expired",
-    )),
-    ("source_rate_limited", (
-        "操作频繁", "频繁访问", "访问频繁", "稍后再试", "访问受限", "异常流量", "账号受限", "限流",
-        "rate limit", "too many", "429", "http 403", "http 412", "http 418",
-        "403 forbidden", "412 precondition", "418 im a teapot",
-    )),
-    ("captcha_required", ("验证码", "滑块", "滑动验证", "captcha", "geetest")),
-    ("ip_risk_control", ("IP 级风控", "ip risk")),
-    ("cdp_unavailable", ("CDP", "调试浏览器", "chrome not ready")),
-)
-
 
 _MSG_USER_CANCELLED_TASK = "用户取消任务"
 
@@ -63,28 +50,23 @@ def _has_unlock_signal(text: str) -> bool:
 
 
 def _classify_scrape_block(err_msg: str) -> str:
-    """把 run_search 返回的 error 字符串映射到 SYSTEMIC_BLOCK_CODES。
+    """hard_stop_code 缺失时的兜底：只解析结构化失败行，不再全文猜码。
 
-    命中返回对应码（如 'source_rate_limited'），未命中返回空串（表示真失败，
-    不应暂停）。限流优先于验证码，避免“频繁 + 滑块”文案被误显示为验证码。
+    016-error-module-rework：run_search 硬停时总携带 hard_stop_code；
+    本函数仅防御性兜底，输出全文关键词扫描路径已删除（岗位文案里的
+    "429/滑块"等词曾把软失败误判成限流硬停）。
     """
     if not err_msg:
         return ""
-    if _has_unlock_signal(err_msg):
-        return "source_rate_limited"
-    text = err_msg.lower()
-    for code, keywords in _SCRAPE_BLOCK_PATTERNS:
-        for kw in keywords:
-            if kw.lower() in text:
-                return code
+    parsed = parse_failure_line(err_msg)
+    if parsed is not None:
+        return resolve_code(parsed[0])
     return ""
 
 
-# 风控异常 reason → 安全失败码（合同 inprocess-runner §3）。
-# 顺序敏感：限流优先于验证码（与 _classify_scrape_block 一致），避免
-# "频繁 + 滑块" 文案被误判为验证码。
-# 关键词集与 webui/source.py 的 _RATE_LIMIT_KEYWORDS / _VERIFICATION_KEYWORDS
-# 及下方 _SCRAPE_BLOCK_PATTERNS 保持同步，避免两种模式下同一文案分类不一致。
+# 风控异常 reason → 安全失败码（合同 inprocess-runner §3 的防御性兜底）。
+# 016：RiskControlError 自带 code 后本表仅在异常对象缺码时使用；
+# 顺序敏感：限流优先于验证码，避免"频繁 + 滑块"文案被误判为验证码。
 _RISK_CONTROL_REASON_PATTERNS = (
     ("source_login_required", (
         "登录已失效", "登录过期", "未登录", "登 录 失效", "登 录 已失效", "请先登录", "wt2", "401", "login expired",
@@ -533,7 +515,10 @@ class TaskRunner:
         except boss.RequestLimitExceededError as exc:
             return ("failed", 11, "source_request_limit_exceeded", str(exc))
         except boss.RiskControlError as exc:
-            failed_code = _classify_risk_control_reason(exc.reason)
+            failed_code = (
+                str(getattr(exc, "code", "") or "")
+                or _classify_risk_control_reason(exc.reason)
+            )
             return ("failed", 10, failed_code, exc.reason)
         except Exception as exc:
             return ("failed", -1, "process_failed", str(exc))
@@ -816,7 +801,8 @@ class WorkbenchRunner(TaskRunner):
         except boss.RequestLimitExceededError as exc:
             return ("failed", 11, "source_request_limit_exceeded", str(exc))
         except boss.RiskControlError as exc:
-            return ("failed", 10, _classify_risk_control_reason(exc.reason), exc.reason)
+            return ("failed", 10, str(getattr(exc, "code", "") or "")
+                    or _classify_risk_control_reason(exc.reason), exc.reason)
         except Exception as exc:
             return ("failed", -1, "process_failed", str(exc))
         if not completed:

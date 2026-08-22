@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from webui.error_registry import (
+    ALIAS_TO_CODE,
     ERROR_CODES,
     ERROR_TAXONOMY,
     INDEPENDENT_FAILURE_CODES,
@@ -27,28 +28,54 @@ class ErrorRegistryTests(unittest.TestCase):
     def test_codes_are_unique_and_fully_covered_by_sets(self):
         self.assertEqual(len(ERROR_CODES), len(set(ERROR_CODES)))
         self.assertTrue(SAFE_FAILURE_CODES <= ERROR_CODES)
-        self.assertTrue(SYSTEMIC_BLOCK_CODES <= ERROR_CODES)
+        self.assertTrue(SYSTEMIC_BLOCK_CODES <= ERROR_CODES | set(ALIAS_TO_CODE))
         self.assertTrue(INDEPENDENT_FAILURE_CODES <= ERROR_CODES)
         self.assertTrue(SYSTEMIC_AI_ERROR_CODES <= ERROR_CODES)
 
-    def test_existing_sets_are_preserved(self):
-        self.assertEqual(
-            SYSTEMIC_BLOCK_CODES,
-            frozenset({
-                "captcha_required", "login_expired", "ai_rate_limited",
-                "ai_quota_exhausted", "ai_key_invalid", "ai_network_error",
-                "ip_risk_control", "cdp_unavailable", "internal_error",
-                "source_verification_required", "source_login_required",
-                "source_rate_limited", "source_blocked", "source_cdp_unavailable",
-                "source_request_limit_exceeded",
-            }),
+    def test_block_set_is_derived_from_registry_marks(self):
+        # 016-error-module-rework：阻断集合由 blocking+systemic 推导 + 历史别名闭包
+        from webui.error_registry import REGISTRY, _derived_systemic_block_codes
+        self.assertEqual(SYSTEMIC_BLOCK_CODES, _derived_systemic_block_codes())
+        canonical = frozenset(
+            code for code, entry in REGISTRY.items()
+            if entry["blocking"] and entry["impact"] == "systemic"
         )
+        self.assertTrue(canonical <= SYSTEMIC_BLOCK_CODES)
+        # 双套码收敛：四个旧 taxonomy 码不再是正名，且新码就位
+        for legacy in ("captcha_required", "login_expired", "ip_risk_control",
+                       "cdp_unavailable"):
+            self.assertNotIn(legacy, ERROR_CODES)
+        self.assertIn("source_account_restricted", SYSTEMIC_BLOCK_CODES)
+        self.assertNotIn("source_status_unclear", SYSTEMIC_BLOCK_CODES)
+        self.assertIn("source_status_unclear", INDEPENDENT_FAILURE_CODES)
         self.assertEqual(
             INDEPENDENT_FAILURE_CODES,
-            frozenset({"job_offline", "detail_timeout", "detail_invalid", "ai_missing_job"}),
+            frozenset({"job_offline", "detail_timeout", "detail_invalid",
+                       "ai_missing_job", "source_status_unclear"}),
         )
-        self.assertEqual(len(SAFE_FAILURE_CODES), 12)
+        self.assertEqual(len(SAFE_FAILURE_CODES), 14)
         self.assertTrue(set(ERROR_TAXONOMY) <= ERROR_CODES)
+
+    def test_legacy_taxonomy_codes_resolve_to_canonical(self):
+        from webui.error_registry import ALIAS_TO_CODE
+        self.assertEqual(resolve_code("captcha_required"),
+                         "source_verification_required")
+        self.assertEqual(resolve_code("login_expired"), "source_login_required")
+        self.assertEqual(resolve_code("ip_risk_control"), "source_blocked")
+        self.assertEqual(resolve_code("cdp_unavailable"), "source_cdp_unavailable")
+        expected_legacy_aliases = {
+            "captcha_required": "source_verification_required",
+            "login_expired": "source_login_required",
+            "ip_risk_control": "source_blocked",
+            "cdp_unavailable": "source_cdp_unavailable",
+        }
+        for alias, target in expected_legacy_aliases.items():
+            self.assertEqual(ALIAS_TO_CODE.get(alias), target)
+        # AI 内部码保留自身大写名作为别名（既有行为）
+        for alias, target in ALIAS_TO_CODE.items():
+            if alias in expected_legacy_aliases:
+                continue
+            self.assertEqual(resolve_code(alias), target)
 
     def test_database_historical_codes_are_known(self):
         historical = {
@@ -58,7 +85,7 @@ class ErrorRegistryTests(unittest.TestCase):
             "source_verification_required", "internal_error", "resumed",
             "user_finished",
         }
-        self.assertTrue(historical <= ERROR_CODES)
+        self.assertTrue(historical <= ERROR_CODES | set(ALIAS_TO_CODE))
 
     def test_unknown_code_fails_validation(self):
         with self.assertRaises(UnknownErrorCode):
