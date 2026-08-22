@@ -68,7 +68,7 @@
 ## Phase 6: Polish & 收口
 
 - [X] T014 CHANGELOG.md 按 AGENTS.md 文案格式（修复：/优化：简单列表、无标题无英文术语）补 018 条目
-- [ ] T015 全量聚焦验证：`uv run python -m unittest tests.test_ai tests.test_webui_app tests.test_result_rounds tests.test_repo_hygiene tests.test_screen_flow` 全绿；`uv run python -m unittest tests.test_repo_hygiene` + `git status` + `git diff --check` 通过后按 Conventional Commits 提交（`fix: …018…`，作者邮箱 czyooutzilas@gmail.com）
+- [X] T015 全量聚焦验证：`uv run python -m unittest tests.test_ai tests.test_webui_app tests.test_result_rounds tests.test_repo_hygiene tests.test_screen_flow` 全绿；`uv run python -m unittest tests.test_repo_hygiene` + `git status` + `git diff --check` 通过后按 Conventional Commits 提交（`fix: …018…`，作者邮箱 czyooutzilas@gmail.com）
 
 ---
 
