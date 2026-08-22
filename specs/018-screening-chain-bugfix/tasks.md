@@ -94,3 +94,9 @@ T001（基线）
 
 - MVP = US1（最小独立价值：坏格式不再炸整轮）；随后 US2（数据安全主修）、US3（历史可信）、US4（清库）、收口。
 - 行号漂移以冻结核代码片段内容定位为准（基于 HEAD 900927f）。
+
+## Phase 7: 全量审查（用户明确要求全量验证后追加）
+
+- [X] T016 后端全量 2434 例 + 前端 452 例 + npm run build + 卫生测试；失败分诊：2 个 ContractCompliancePatchTests 与 ~37 个 test_historical_recovery_realdb / test_process_executor 失败经 018 前基线（worktree 900927f + 8-20 备份库复验）确认为存量/环境性，与 018 无关
+- [X] T017 test_healthy_pipeline 的 test_terminal_failure_after_snapshot_does_not_duplicate_history 断言旧收尾顺序（终态写失败仍留 1 条 done 轮），按 018 契约修正为零历史轮并改名 test_terminal_write_failure_leaves_no_history_round（tests/test_healthy_pipeline.py）
+- [X] T018 前端构建产物随 018 后端指纹同步（webui/dist/**，ensure_frontend_sync 校验通过）

@@ -1606,7 +1606,8 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         self.assertGreater(len(self.store.load_scrape_run_jobs(scrape_task_id)), 0)
         self.assertNotEqual(self.store.load_screening_verdicts(task_id), {})
 
-    def test_terminal_failure_after_snapshot_does_not_duplicate_history(self):
+    def test_terminal_write_failure_leaves_no_history_round(self):
+        """018：终态校验/写入先于写历史轮——终态写失败时库里没有任何轮。"""
         scrape_task_id = "post-snapshot-failure-source"
         jobs = [{"job_id": "job-1", "title": "后端工程师"}]
         self._install_scrape_source(scrape_task_id, jobs)
@@ -1641,9 +1642,9 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
             finished = _wait_for_pipeline_task(self.client, task_id)
 
         self.assertEqual(finished["status"], "failed", finished)
-        items = self.store.list_history_rounds()
-        self.assertEqual(len(items), 1)
-        self.assertEqual(self.store.get_screening_run(items[0]["id"])["status"], "done")
+        # 018：finalize 先于 save_finished_round——终态写失败时任务失败，
+        # 且库里没有任何历史轮（不再有"已写轮后终态失败"的中间态）。
+        self.assertEqual(self.store.list_history_rounds(), [])
 
     def test_main_ai_uses_source_frozen_execution_config(self):
         scrape_task_id = "frozen-config-source"
