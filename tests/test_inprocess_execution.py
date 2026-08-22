@@ -611,7 +611,7 @@ class RunWithDeadlineTests(unittest.TestCase):
 
 
 # ===========================================================================
-# 风控分类器词表（与 source.py / _SCRAPE_BLOCK_PATTERNS 对齐）
+# 风控 reason 兜底分类器词表（RiskControlError 缺 code 时的防御路径，016）
 # ===========================================================================
 class RiskControlClassifierTests(unittest.TestCase):
     """_classify_risk_control_reason 对对齐后的词表命中正确。"""
