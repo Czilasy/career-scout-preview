@@ -2,6 +2,11 @@
 
 本文件记录 Career Scout 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.7.11] - 2026-08-23
+
+修复：
+- Boss 列表翻页之间的等待时间从 30~38 秒缩短到 12~22 秒，抓取一个组合更快
+
 ## [Unreleased]
 
 修复：
