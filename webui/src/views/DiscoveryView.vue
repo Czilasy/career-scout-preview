@@ -1,21 +1,9 @@
 <script setup lang="ts">
+// 021 B8 T027：视图壳——状态/动作外迁 composables，模板零改动。
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type Ref } from "vue";
 import {
-  Bookmark,
-  Check,
-  Download,
-  FileText,
-  Filter,
-  History,
-  LoaderCircle,
-  Play,
-  RotateCcw,
-  Search,
-  SlidersHorizontal,
-  Sparkles,
-  Square,
-  UploadCloud,
-  X,
+  Bookmark, Check, Download, FileText, Filter, History, LoaderCircle, Play,
+  RotateCcw, Search, SlidersHorizontal, Sparkles, Square, UploadCloud, X,
 } from "@lucide/vue";
 import CollapsibleCard from "../components/CollapsibleCard.vue";
 import ExecutionModeSelector from "../components/ExecutionModeSelector.vue";
@@ -34,27 +22,9 @@ import ScreenRoundActions from "../components/ScreenRoundActions.vue";
 import ScreenRecrawlProgress from "../components/ScreenRecrawlProgress.vue";
 import PendingRecrawlCapsule from "../components/PendingRecrawlCapsule.vue";
 import TaskProgress from "../components/TaskProgress.vue";
-import { ApiError, apiRequest, errorMessage, settingsApi, userFacingMessage } from "../api";
-import { setThemePlatform } from "../composables/useTheme";
 import { useScreenRoundFlow } from "../composables/useScreenRoundFlow";
 import { withoutRecrawl } from "../screenFlow";
-import {
-  buildSearchScriptParams,
-  createCityCatalogLoader,
-  createPlatformState,
-  createSchemaLoader,
-  DEFAULT_PLATFORM,
-  filterPipelineResultByPlatform,
-  normalizeScopePreview,
-  partitionPipelineResult,
-  projectResumeSuggestionToSchema,
-  shouldConfirmNationalScope,
-} from "../discovery";
-import { historyStatusLabel } from "../discovery";
 import type { PipelineResult, RoundStatusPayload } from "../discovery";
-import { useResultHistory } from "../composables/resultHistory";
-import { useLocationDraft } from "../composables/useLocationDraft";
-import type { HistoryRoundDetail } from "../composables/resultHistory";
 import type {
   AdvancedSettingsState,
   CandidateProfile,
@@ -70,6 +40,12 @@ import type {
   RoundContext,
   TaskSnapshot as ApiTaskSnapshot,
 } from "../types";
+import { useDiscoveryState } from "../composables/useDiscoveryState";
+import { useDiscoveryWorkflow } from "../composables/useDiscoveryWorkflow";
+import { useDiscoverySearch } from "../composables/useDiscoverySearch";
+import { useDiscoveryExecution } from "../composables/useDiscoveryExecution";
+import { useDiscoveryTasks } from "../composables/useDiscoveryTasks";
+import { useDiscoveryResults } from "../composables/useDiscoveryResults";
 
 type StepId = "upload" | "search" | "screen" | "results";
 type ResultCategory = "matched" | "unmatched" | "uncertain" | "dropped";
@@ -124,582 +100,304 @@ const emit = defineEmits<{
   "open-browser-accounts": [];
 }>();
 
-const WORKFLOW_STATE_VERSION = 1;
-const workflowStateKey = computed(() => `career-scout-workflow:${props.profileId}`);
-const workflowStateRestored = ref(false);
-const unfinishedWorkflowRestored = ref(false);
-const resultsPageSeen = ref(false);
-const restoredWorkflowSnapshot = ref<Record<string, any> | null>(null);
-const activeTaskRestored = ref(false);
-
-function readWorkflowState(): Record<string, any> | null {
-  try {
-    const raw = sessionStorage.getItem(workflowStateKey.value);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Record<string, any>;
-    return parsed.version === WORKFLOW_STATE_VERSION ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function clearWorkflowState(): void {
-  try { sessionStorage.removeItem(workflowStateKey.value); } catch { /* storage unavailable */ }
-}
-
-// D7：未登录类错误码（BOSS/智联 preflight 与任务暂停的稳定错误码）。
-const LOGIN_ERROR_CODES = new Set([
-  "source_login_required", "login_expired", "boss_login_required",
-]);
-// 任务失败后显示的登录引导条；visible 时展示「打开账号 X 的 BOSS 窗口登录」。
-const loginGuide = ref<{ visible: boolean; platform: Platform; accountName: string }>({
-  visible: false,
-  platform: "boss",
-  accountName: "",
-});
-
-function isLoginErrorCode(code: unknown): boolean {
-  return typeof code === "string" && LOGIN_ERROR_CODES.has(code);
-}
-
-async function showLoginGuide(platform: Platform) {
-  loginGuide.value = { visible: true, platform, accountName: "" };
-  try {
-    const data = await apiRequest<{
-      accounts?: { id: string; name: string }[];
-      active_account?: string;
-    }>("/api/browser-accounts");
-    const active = data.active_account || "a";
-    const account = (data.accounts || []).find((item) => item.id === active);
-    // 内置 ~/.career-scout/chrome-profile 账号在 UI 上固定叫「默认账号」（D7）。
-    let accountName = active;
-    if (account) accountName = account.id === "a" ? "默认账号" : account.name;
-    loginGuide.value.accountName = accountName;
-  } catch {
-    // 账号名只是引导文案辅助，拉不到就显示通用文案。
-  }
-}
-
-// T503：平台三身份独立（platform-schema.md L142-159）
-// platformState 是真相之源（非响应式闭包）；draftPlatform 是 Vue 镜像，仅供模板渲染。
-// setDraftPlatform 同步更新两者，不用 watcher 相互覆盖（不变式 4）。
-// 仅切换新任务草稿，不改 task/result（不变式 1）；T505 起按 platformState.draft 加载 schema/城市。
-const platformState = createPlatformState(DEFAULT_PLATFORM);
-const draftPlatform = ref<Platform>(platformState.draft);
-// T505：schema / 城市目录加载器。带请求序号 + AbortController + 响应平台校验，
-// 旧响应晚到不会覆盖当前平台（platform-schema.md L151-156）。
-const schemaLoader = createSchemaLoader();
-const cityLoader = createCityCatalogLoader();
-const schemaRef = ref<PlatformFilterSchema | null>(null);
-const cityCatalogRef = ref<PlatformCityCatalog | null>(null);
-const schemaBusy = ref(false);
-const cityCatalogBusy = ref(false);
-// T513：草稿平台 schema 标记 enabled_for_new_tasks=false 时，禁用新建任务入口。
-// 平台注册表权威来自后端；前端只读 schema 投影，不猜原因（platform-schema.md L222）。
-// 用 draftPlatform ref（响应式）；platformState.draft 是普通闭包 getter，不触发追踪。
-const draftPlatformDisabled = computed(() => Boolean(
-  schemaRef.value && schemaRef.value.platform === draftPlatform.value && schemaRef.value.enabled_for_new_tasks === false,
-));
-const pendingPlatformSwitch = ref<Platform | null>(null);
-const nationalScopeConfirm = ref<"scrape" | "one-click" | null>(null);
-
-function confirmNationalScope() {
-  const action = nationalScopeConfirm.value;
-  nationalScopeConfirm.value = null;
-  if (action === "scrape") void startScrape();
-  if (action === "one-click") openOneClickDialog();
-}
-
-function cancelNationalScope() {
-  nationalScopeConfirm.value = null;
-}
-function setDraftPlatform(platform: Platform) {
-  if (platformState.draft === platform) return;
-  platformState.setDraftPlatform(platform);
-  draftPlatform.value = platform;
-  // 同步主题品牌色到新平台（boss 青 / 智联蓝）。
-  setThemePlatform(platform);
-  // B007：切平台视为新草稿，清掉旧 run 身份与 scope 快照；双平台结果保留。
-  scopePreview.value = null;
-  scopePreviewBusy.value = false;
-  scrapeTaskId.value = "";
-  scrapeCompleted.value = false;
-  scrapeSnapshot.value = null;
-  screenTaskId.value = "";
-  screenSnapshot.value = null;
-  interruptedRunId.value = "";
-  restoredTaskHint.value = "";
-  // 切换草稿平台后按新平台重新加载 schema / 城市；旧请求被 loader 内部取消丢弃。
-  oneClickOpen.value = false;
-  autoScreenArmed.value = false;
-  void loadFilterLabels();
-  void loadCityCatalog();
-}
-
-function requestDraftPlatform(platform: Platform) {
-  if (platformState.draft === platform) return;
-  // 已抓完但尚未生成第四页结果的轮次只存在临时抓取上下文，切换会清掉它。
-  // 先征得确认，取消时不改变草稿平台或任何任务状态。
-  if (scrapeCompleted.value && !resultLoaded.value && !screenBusy.value) {
-    pendingPlatformSwitch.value = platform;
-    return;
-  }
-  setDraftPlatform(platform);
-}
-
-function cancelPlatformSwitch() {
-  pendingPlatformSwitch.value = null;
-}
-
-function confirmPlatformSwitch() {
-  const platform = pendingPlatformSwitch.value;
-  pendingPlatformSwitch.value = null;
-  if (platform) setDraftPlatform(platform);
-}
-
-const steps = [
-  { id: "upload", label: "上传简历" },
-  { id: "search", label: "广泛抓取" },
-  { id: "screen", label: "AI 筛选" },
-  { id: "results", label: "查看结果" },
-];
-const stepCopy: Record<StepId, { eyebrow: string; title: string; description: string }> = {
-  upload: {
-    eyebrow: "01 · 建立本轮标准",
-    title: "让 AI 先读懂你的简历",
-    description: "支持 TXT、PDF、DOCX。分析后仍由你确认搜索范围和筛选条件。",
-  },
-  search: {
-    eyebrow: "02 · 广泛发现",
-    title: "确认关键词与城市",
-    description: "这一步只按关键词和城市抓取，不提前缩窄岗位池。",
-  },
-  screen: {
-    eyebrow: "03 · 两阶段判断",
-    title: "确认六类筛选条件",
-    description: "先按列表字段粗筛，再抓取 JD 与简历画像精筛。",
-  },
-  results: {
-    eyebrow: "04 · 集中决策",
-    title: "查看与整理岗位",
-    description: "匹配、不匹配、待确认与粗筛剔除分开展示。",
-  },
-};
-
-const activeStep = ref<StepId>("upload");
-const analysisReady = ref(false);
-
-const selectedFile = ref<File | null>(null);
-const aiConsent = ref(false);
-const dragActive = ref(false);
-const uploadBusy = ref(false);
-const resumeError = ref("");
-const keywords = ref<Array<{ word: string; recommended: boolean }>>([]);
-const selectedKeywords = ref<string[]>([]);
-const customKeyword = ref("");
-const cityText = ref("");
-const locationDraft = useLocationDraft();
-const customCity = ref("");
-const fieldLabels = ref<Record<string, FieldLabel>>({});
-// T506：筛选草稿分平台独立保存（platform-schema.md L139）。
-// boss.stage 与 zhilian.company_nature 互不串用；公共字段（salary/experience/...）
-// 也按平台隔离，避免切换平台时把 A 平台不支持的值带给 B 平台。
-const filterValues = ref<Record<Platform, Record<string, string[]>>>({
-  boss: {},
-  zhilian: {},
-});
-const profileSummary = ref("");
-// B033：画像事实（隐藏层）随简历分析产生，随筛选任务透传后端落库，界面不展示。
-const profileFacts = ref<Record<string, unknown>>({});
-// B009：保存最近一次简历分析的中文语义，切平台时按新 schema 重投影。
-const resumeAnalysis = ref<AnalyzeResponse | null>(null);
-const appliedResumePlatforms = ref<Set<Platform>>(new Set());
-const scrapeTaskId = ref("");
-const scrapeBusy = ref(false);
-const scrapeSnapshot = ref<TaskSnapshot | null>(null);
-const screenBusy = ref(false);
-const pausingScreen = ref(false);
-const switchAccounts = ref<Array<{ id: string; name: string }>>([]);
-const switchAccountId = ref("");
-const screenSnapshot = ref<TaskSnapshot | null>(null);
-const screenTaskId = ref("");
-// 待确认项「全部重抓」状态
-const recrawlBusy = ref(false);
-const recrawlTaskId = ref("");
-const recrawlSnapshot = ref<TaskSnapshot | null>(null);
-let recrawlRetryCount = 0;
-const scrapeCompleted = ref(false);
-const resultLoaded = ref(false);
-// 结束保存后的内存关闭标记：与持久化 round_context 一起驱动“本轮已结束保存”态。
-const finishedPartial = ref(false);
-// “全部”视图重抓的平台选择引导：展示各平台待确认数量，数量为 0 的平台禁用。
-const recrawlPlatformGuide = ref<{ boss: number; zhilian: number } | null>(null);
-const exportBusy = ref(false);
-const finishSaveBusy = ref(false);
-const cancelBusy = ref(false);
-const historyScreenBusy = ref(false);
-// 刷新后接回任务时显示的恢复提示条；任务结束后清空
-const restoredTaskHint = ref("");
-// 切片7：从 DB 恢复的 paused 任务 run_id（无内存工作线程，不能 poll）
-const pausedRunId = ref("");
-// 服务重启打断的 AI 筛选任务：恢复后优先展示续跑入口，不被旧历史结果覆盖
-const interruptedRunId = ref("");
-const pipelineResult = ref<PipelineResult | null>(null);
-const pipelineResultRunId = ref("");
-// 结果页平台筛选（全部/BOSS/智联）：纯展示层过滤，不改草稿/任务身份（不变式 1）。
-const resultPlatformFilter = ref<"all" | "boss" | "zhilian">("all");
-// specs/004：结果加载代次。pipelineResult 被新 run 结果替换时递增，
-// JobWorkspace 据此重置列表筛选/排序（切分类/切平台不重置，contracts §6 D3）。
-const resultEpoch = ref(0);
-// 合并载入时每个平台各自的结果来源 run：单平台视图下“全部重抓”/导出用对应 run。
-const resultRunIds = ref<{ boss: string; zhilian: string }>({ boss: "", zhilian: "" });
-// 历史轮次：抽屉状态由独立 composable 持有，历史模式状态留在本视图。
-const historyStore = useResultHistory();
+const state = useDiscoveryState(props, emit);
 const {
-  open: historyOpen,
-  items: historyItems,
-  loading: historyLoading,
-  error: historyError,
-  deleting: historyDeleting,
-  deleteTarget: historyDeleteTarget,
-  detail: historyDetail,
-  show: showHistory,
-  hide: hideHistory,
-  openRound: openHistoryRound,
-  backToLatest: historyBackToLatest,
-  confirmDelete: confirmHistoryDelete,
-  cancelDelete: cancelHistoryDelete,
-  deleteRound: deleteHistoryRound,
-  archiveAllCurrentResults: archiveHistoryLatest,
-} = historyStore;
-const historyRound = ref<{ runId: string; platform: Platform; status: string; jobCount: number } | null>(null);
-const platformBeforeHistory = ref<Platform | null>(null);
-const historyMode = computed(() => Boolean(historyRound.value));
-// B038：当前展示轮的次级状态。'' = 无轮 / 'scraped_only' = 已抓取未筛选 /
-// 其它 = AI 筛选轮。驱动 04 页"待筛选"单列表模式，岗位 verdict 本身保持无判定。
-const currentRoundStatus = ref("");
-const isScrapedOnly = computed(() => currentRoundStatus.value === "scraped_only");
-const historyStatusText = computed(() => historyRound.value
-  ? historyStatusLabel(historyRound.value.status, historyRound.value.jobCount)
-  : "");
-const historyProfileText = computed(() => String(historyDetail.value?.result?.profile_summary || ""));
-const activeCategory = ref<ResultCategory>("matched");
-const rejectedIds = ref(new Set<string>());
-const feedbackBusyIds = ref(new Set<string>());
-const jdBusyIds = ref(new Set<string>());
-const advancedBusy = ref(false);
-const executionSelection = ref<ExecutionSelection>("custom");
-const scopePreview = ref<FrozenSearchScope | null>(null);
-const scopePreviewBusy = ref(false);
-let scopePreviewReqId = 0;
-const advancedSettings = ref<Record<string, number | string>>({
-  pages: 3,
-  inter_combo_delay: 10,
-  detail_batch_size: 15,
-  detail_interval: 2,
-  detail_reset_every: 4,
-  detail_batch_cooldown: 5,
-  detail_tab_pool_size: 5,
-  screen_batch_size: 50,
-  screen_concurrency: 5,
-  match_batch_size: 4,
-  match_concurrency: 10,
-});
-// 字段合法范围（与 input 的 min/max 保持一致）。失焦/回车时才钳到边界，
-// 输入过程中不干预，让用户自由编辑。
-const advancedRanges = ref<Record<string, [number, number]>>({
-  pages: [1, 9999],
-  inter_combo_delay: [5, 120],
-  detail_batch_size: [1, Number.MAX_SAFE_INTEGER],
-  detail_interval: [2, 15],
-  detail_reset_every: [2, 10],
-  detail_batch_cooldown: [5, 60],
-  detail_tab_pool_size: [1, 10],
-  screen_batch_size: [1, 100],
-  screen_concurrency: [1, 10],
-  match_batch_size: [1, 20],
-  match_concurrency: [1, 10],
-});
-const pagesValue = computed(() => Number(advancedSettings.value.pages || 3));
-const executionModeLabels: Record<ExecutionSelection, string> = {
-  stable: "稳定",
-  balanced: "平衡",
-  extreme: "极限",
-  custom: "自定义",
+  WORKFLOW_STATE_VERSION,
+  workflowStateKey,
+  workflowStateRestored,
+  unfinishedWorkflowRestored,
+  resultsPageSeen,
+  restoredWorkflowSnapshot,
+  activeTaskRestored,
+  LOGIN_ERROR_CODES,
+  loginGuide,
+  platformState,
+  draftPlatform,
+  schemaLoader,
+  cityLoader,
+  schemaRef,
+  cityCatalogRef,
+  schemaBusy,
+  cityCatalogBusy,
+  draftPlatformDisabled,
+  pendingPlatformSwitch,
+  nationalScopeConfirm,
+  steps,
+  stepCopy,
+  activeStep,
+  analysisReady,
+  selectedFile,
+  aiConsent,
+  dragActive,
+  uploadBusy,
+  resumeError,
+  keywords,
+  selectedKeywords,
+  customKeyword,
+  cityText,
+  locationDraft,
+  customCity,
+  fieldLabels,
+  filterValues,
+  profileSummary,
+  profileFacts,
+  resumeAnalysis,
+  appliedResumePlatforms,
+  scrapeTaskId,
+  scrapeBusy,
+  scrapeSnapshot,
+  screenBusy,
+  pausingScreen,
+  switchAccounts,
+  switchAccountId,
+  screenSnapshot,
+  screenTaskId,
+  recrawlBusy,
+  recrawlTaskId,
+  recrawlSnapshot,
+  recrawlRetryCount,
+  scrapeCompleted,
+  resultLoaded,
+  finishedPartial,
+  recrawlPlatformGuide,
+  exportBusy,
+  finishSaveBusy,
+  cancelBusy,
+  historyScreenBusy,
+  restoredTaskHint,
+  pausedRunId,
+  interruptedRunId,
+  pipelineResult,
+  pipelineResultRunId,
+  resultPlatformFilter,
+  resultEpoch,
+  resultRunIds,
+  historyStore,
+  historyRound,
+  platformBeforeHistory,
+  historyMode,
+  currentRoundStatus,
+  isScrapedOnly,
+  historyStatusText,
+  historyProfileText,
+  activeCategory,
+  rejectedIds,
+  feedbackBusyIds,
+  jdBusyIds,
+  advancedBusy,
+  executionSelection,
+  scopePreview,
+  scopePreviewBusy,
+  scopePreviewReqId,
+  advancedSettings,
+  advancedRanges,
+  pagesValue,
+  executionModeLabels,
+  executionModeSummary,
+  screenPanelOpen,
+  oneClickOpen,
+  oneClickGroups,
+  hasOldResult,
+  autoScreenArmed,
+  autoScreenFields,
+  autoScreenProfile,
+  profileError,
+  profileInputEl,
+  profileConfirmed,
+  pipelineBusy,
+  oneClickDisabled,
+  searchPanelsOpen,
+  pollTimer,
+  scopeLocked,
+  enabledSteps,
+  completedSteps,
+  currentCopy,
+  cityList,
+  effectiveSearchCities,
+  FILTER_SENTINEL_LABELS,
+  filterGroups,
+  searchSummary,
+  screenSummaryChips,
+  filteredPipelineResult,
+  groups,
+  uncertainByPlatform,
+  resultTabs,
+  currentJobs,
+  currentEmptyMessage,
+  COMPLETED_TASK_STATUSES,
+  SPEED_FIELDS,
+  POLL_MAX_RETRIES,
+  POLL_BASE_DELAY,
+  POLL_MAX_DELAY,
+  pollRetryCount,
+  lifecycleDialogOpen,
+  lifecycleDialogJob,
+  roundStatusPayload,
+  historyOpen,
+  historyItems,
+  historyLoading,
+  historyError,
+  historyDeleting,
+  historyDeleteTarget,
+  historyDetail,
+  showHistory,
+  hideHistory,
+  openHistoryRound,
+  historyBackToLatest,
+  confirmHistoryDelete,
+  cancelHistoryDelete,
+  deleteHistoryRound,
+  archiveHistoryLatest,
+} = state;
+
+// 共享依赖容器：跨域函数经 deps 调用时解析（roundFlow 最后回填）。
+const shared: Record<string, unknown> = {
+  emit,
+  props,
 };
-const executionModeSummary = computed(() => {
-  const delay = Number(advancedSettings.value.inter_combo_delay || 0);
-  const batch = Number(advancedSettings.value.detail_batch_size || 0);
-  const screen = Number(advancedSettings.value.screen_concurrency || 0);
-  const match = Number(advancedSettings.value.match_concurrency || 0);
-  return `当前模式：${executionModeLabels[executionSelection.value] || "自定义"} · 组合延迟 ${delay} 秒 · 详情每批 ${batch} 个 · 粗筛 ${screen} 路并发 · 精筛 ${match} 路并发`;
-});
-function mergeManualRanges(raw: AdvancedSettingsState["manual_ranges"] | undefined) {
-  if (!raw) return;
-  for (const [field, value] of Object.entries(raw)) {
-    const range = Array.isArray(value) ? value : [value.min, value.max];
-    if (range.length === 2 && range.every((item) => Number.isFinite(item)) && range[0] <= range[1]) {
-      advancedRanges.value[field] = [Number(range[0]), Number(range[1])];
-    }
-  }
-}
-function advancedRange(field: string): [number, number] {
-  return advancedRanges.value[field] || [0, Number.MAX_SAFE_INTEGER];
-}
-function clampAdvanced(field: string) {
-  const raw = advancedSettings.value[field];
-  if (typeof raw !== "number" || Number.isNaN(raw)) return;
-  const range = advancedRanges.value[field];
-  if (!range) return;
-  const [min, max] = range;
-  let next = raw;
-  if (next < min) next = min;
-  else if (next > max) next = max;
-  if (next !== raw) advancedSettings.value[field] = next;
-}
-const screenPanelOpen = ref(true);
-const oneClickOpen = ref(false);
-const oneClickGroups = computed<OneClickFilterGroup[]>(() => filterGroups.value);
-const hasOldResult = computed(() => resultLoaded.value && Boolean(pipelineResult.value));
-const autoScreenArmed = ref(false);
-const autoScreenFields = ref<Record<string, string[]>>({});
-const autoScreenProfile = ref("");
-const profileError = ref("");
-const profileInputEl = ref<HTMLTextAreaElement | null>(null);
-const profileConfirmed = ref(false);
+const workflow = useDiscoveryWorkflow(state, shared);
+const search = useDiscoverySearch(state, shared);
+const execution = useDiscoveryExecution(state, shared);
+const tasks = useDiscoveryTasks(state, shared);
+const results = useDiscoveryResults(state, shared);
 
-// 任意 pipeline 任务占用中（运行/暂停/待恢复）都禁止再启动新任务。
-const pipelineBusy = computed(() => Boolean(
-  scrapeBusy.value || screenBusy.value || recrawlBusy.value
-  || pausedRunId.value || interruptedRunId.value
-  || scrapeSnapshot.value?.status === "paused"
-  || screenSnapshot.value?.status === "paused"
-  || recrawlSnapshot.value?.status === "paused",
-));
-const oneClickDisabled = computed(() => Boolean(draftPlatformDisabled.value || pipelineBusy.value));
-// 步骤 2 两个面板（关键词配置 / 高级执行设置）共用同一受控状态：
-// 默认收拢、手动展开/收起联动（一个 ref 天然同步两卡）；开始抓取后自动收拢。
-const searchPanelsOpen = ref(false);
+// 跨域函数接线（composable 内经 deps.X 调用时解析，此处赋值生效）
+shared.notify = workflow.notify;
+shared.enterSearchStep = workflow.enterSearchStep;
+shared.enterScreenStep = workflow.enterScreenStep;
+shared.clearWorkflowState = workflow.clearWorkflowState;
+shared.startScrape = execution.startScrape;
+shared.openOneClickDialog = execution.openOneClickDialog;
+shared.restoreRunningTask = execution.restoreRunningTask;
+shared.finishPausedTask = execution.finishPausedTask;
+shared.continueAiScreen = execution.continueAiScreen;
+shared.cancelScrape = execution.cancelScrape;
+shared.startAiScreen = execution.startAiScreen;
+shared.cancelActiveTasksForNewRound = tasks.cancelActiveTasksForNewRound;
+shared.clearLatestResult = results.clearLatestResult;
+shared.loadLatestResult = results.loadLatestResult;
+shared.setPipelineResult = results.setPipelineResult;
+shared.fetchMergedLatestResult = results.fetchMergedLatestResult;
+shared.returnToLatest = results.returnToLatest;
+shared.restoreLocationsFromContext = results.restoreLocationsFromContext;
+shared.jobId = results.jobId;
+shared.setDraftPlatform = search.setDraftPlatform;
+shared.loadCityCatalog = search.loadCityCatalog;
+shared.loadFilterLabels = search.loadFilterLabels;
+shared.refreshScopePreview = search.refreshScopePreview;
+shared.requireProfileConfirmed = search.requireProfileConfirmed;
+shared.validateProfileForScreen = search.validateProfileForScreen;
+shared.showLoginGuide = search.showLoginGuide;
+shared.isLoginErrorCode = search.isLoginErrorCode;
+shared.mergeRecrawlUpdates = tasks.mergeRecrawlUpdates;
+shared.pollRecrawl = tasks.pollRecrawl;
+shared.pollTask = tasks.pollTask;
+shared.saveScrapedOnlySnapshot = tasks.saveScrapedOnlySnapshot;
+shared.enrichPausedSnapshot = tasks.enrichPausedSnapshot;
+shared.isCompletedTaskStatus = tasks.isCompletedTaskStatus;
 
-function workflowIsFinished(): boolean {
-  return resultsPageSeen.value || finishedPartial.value;
-}
+// 模板绑定：composable 返回值解构
+const {
+  readWorkflowState,
+  clearWorkflowState,
+  workflowIsFinished,
+  persistWorkflowState,
+  restoreWorkflowState,
+  restoreSaved02State,
+  enterSearchStep,
+  enterScreenStep,
+  selectStep,
+  notify,
+  showLoginGuide,
+  isLoginErrorCode,
+  confirmNationalScope,
+  cancelNationalScope,
+  setDraftPlatform,
+  requestDraftPlatform,
+  cancelPlatformSwitch,
+  confirmPlatformSwitch,
+  loadFilterLabels,
+  loadCityCatalog,
+  confirmCities,
+  addCustomCity,
+  removeCity,
+  toggleFilter,
+  chooseFile,
+  handleDrop,
+  analyzeResume,
+  initializeFromAnalysis,
+  applyResumeAnalysisToCurrentSchema,
+  toggleKeyword,
+  removeKeyword,
+  addCustomKeyword,
+  confirmProfile,
+  handleProfileInput,
+  handleProfileBlur,
+  validateProfileForScreen,
+  requireProfileConfirmed,
+  loadAdvancedSettings,
+  saveAdvancedSettings,
+  currentExecutionSettings,
+  refreshScopePreview,
+  selectExecutionMode,
+  mergeManualRanges,
+  advancedRange,
+  clampAdvanced,
+  restoreRunningTask,
+  startScrape,
+  cancelScrape,
+  continueScrape,
+  loadSwitchAccounts,
+  flowStartAiScreen,
+  startAiScreen,
+  continueAiScreen,
+  finishPausedTask,
+  cancelPausedTask,
+  handleStartScrapeClick,
+  openOneClick,
+  openOneClickDialog,
+  confirmOneClick,
+  startScreenFromHistory,
+  pollTask,
+  saveScrapedOnlySnapshot,
+  viewScrapedOnly,
+  cancelActiveTasksForNewRound,
+  finishScreenSave,
+  isCompletedTaskStatus,
+  enrichPausedSnapshot,
+  recrawlUncertain,
+  chooseRecrawlPlatform,
+  continueRecrawl,
+  pollRecrawl,
+  mergeRecrawlUpdates,
+  resetWorkflow,
+  setPipelineResult,
+  hasLiveTaskState,
+  loadLatestResult,
+  fetchMergedLatestResult,
+  clearLatestResult,
+  openHistoryDrawer,
+  toggleHistoryDrawer,
+  closeHistoryDrawer,
+  enterHistoryRound,
+  returnToLatest,
+  onResultPlatformFilterChange,
+  exportResultCsv,
+  restoreLocationsFromContext,
+  jobId,
+  withBusy,
+  ensureFeedbackProfile,
+  feedbackPayload,
+  toggleInterest,
+  toggleRejected,
+  retryJd,
+  lifecycleJob,
+  onJobFeedbackChanged,
+  openLifecycleDialog,
+  closeLifecycleDialog,
+  handleLifecycleDialogKeydown,
+} = { ...workflow, ...search, ...execution, ...tasks, ...results };
 
-function persistWorkflowState(): void {
-  if (!workflowStateRestored.value) return;
-  const unfinished = !workflowIsFinished() && Boolean(
-    analysisReady.value || scrapeTaskId.value || screenTaskId.value || pausedRunId.value || interruptedRunId.value
-    || scrapeBusy.value || screenBusy.value
-    || [scrapeSnapshot.value?.status, screenSnapshot.value?.status].some((status) =>
-      ["running", "queued", "paused", "interrupted"].includes(String(status))),
-  );
-  if (!unfinished) {
-    clearWorkflowState();
-    return;
-  }
-  try {
-    sessionStorage.setItem(workflowStateKey.value, JSON.stringify({
-      version: WORKFLOW_STATE_VERSION,
-      unfinished: true,
-      activeStep: activeStep.value,
-      analysisReady: analysisReady.value,
-      keywords: keywords.value,
-      selectedKeywords: selectedKeywords.value,
-      cityText: cityText.value,
-      filterValues: filterValues.value,
-      profileSummary: profileSummary.value,
-      profileFacts: profileFacts.value,
-      scrapeTaskId: scrapeTaskId.value,
-      screenTaskId: screenTaskId.value,
-      pausedRunId: pausedRunId.value,
-      interruptedRunId: interruptedRunId.value,
-      recrawlTaskId: recrawlTaskId.value,
-      scrapeCompleted: scrapeCompleted.value,
-      scrapeSnapshot: scrapeSnapshot.value,
-      screenSnapshot: screenSnapshot.value,
-      recrawlSnapshot: recrawlSnapshot.value,
-      pipelineResult: pipelineResult.value,
-      pipelineResultRunId: pipelineResultRunId.value,
-      currentRoundStatus: currentRoundStatus.value,
-      resultLoaded: resultLoaded.value,
-      resultsPageSeen: resultsPageSeen.value,
-    }));
-  } catch {
-    // sessionStorage is best effort; the backend remains authoritative.
-  }
-}
-
-function restoreWorkflowState(): void {
-  const saved = readWorkflowState();
-  if (!saved?.unfinished) {
-    workflowStateRestored.value = true;
-    return;
-  }
-  unfinishedWorkflowRestored.value = true;
-  restoredWorkflowSnapshot.value = saved;
-  resultsPageSeen.value = Boolean(saved.resultsPageSeen);
-  if (saved.activeStep) activeStep.value = saved.activeStep as StepId;
-  analysisReady.value = Boolean(saved.analysisReady);
-  keywords.value = Array.isArray(saved.keywords) ? saved.keywords : [];
-  selectedKeywords.value = Array.isArray(saved.selectedKeywords) ? saved.selectedKeywords : [];
-  cityText.value = String(saved.cityText || "");
-  if (saved.filterValues && typeof saved.filterValues === "object") {
-    filterValues.value = { boss: {}, zhilian: {}, ...saved.filterValues };
-  }
-  profileSummary.value = String(saved.profileSummary || "");
-  profileFacts.value = saved.profileFacts && typeof saved.profileFacts === "object" ? saved.profileFacts : {};
-  scrapeTaskId.value = String(saved.scrapeTaskId || "");
-  screenTaskId.value = String(saved.screenTaskId || "");
-  pausedRunId.value = String(saved.pausedRunId || "");
-  interruptedRunId.value = String(saved.interruptedRunId || "");
-  recrawlTaskId.value = String(saved.recrawlTaskId || "");
-  scrapeCompleted.value = Boolean(saved.scrapeCompleted);
-  scrapeSnapshot.value = saved.scrapeSnapshot || null;
-  screenSnapshot.value = saved.screenSnapshot || null;
-  recrawlSnapshot.value = saved.recrawlSnapshot || null;
-  pipelineResult.value = saved.pipelineResult || null;
-  pipelineResultRunId.value = String(saved.pipelineResultRunId || "");
-  currentRoundStatus.value = String(saved.currentRoundStatus || "");
-  resultLoaded.value = Boolean(saved.resultLoaded);
-  workflowStateRestored.value = true;
-}
-
-function restoreSaved02State(): void {
-  const saved = restoredWorkflowSnapshot.value;
-  if (!saved || resultsPageSeen.value) return;
-  // 任务接口只负责恢复后台任务状态；02 页的用户草稿和停留步骤以本地快照为准。
-  if (saved.activeStep) activeStep.value = saved.activeStep as StepId;
-  analysisReady.value = Boolean(saved.analysisReady);
-  keywords.value = Array.isArray(saved.keywords) ? saved.keywords : [];
-  selectedKeywords.value = Array.isArray(saved.selectedKeywords) ? saved.selectedKeywords : [];
-  cityText.value = String(saved.cityText || "");
-  if (saved.filterValues && typeof saved.filterValues === "object") {
-    filterValues.value = { boss: {}, zhilian: {}, ...saved.filterValues };
-  }
-  profileSummary.value = String(saved.profileSummary || "");
-  profileFacts.value = saved.profileFacts && typeof saved.profileFacts === "object" ? saved.profileFacts : {};
-  scrapeCompleted.value = Boolean(saved.scrapeCompleted);
-  pipelineResult.value = saved.pipelineResult || null;
-  pipelineResultRunId.value = String(saved.pipelineResultRunId || "");
-  currentRoundStatus.value = String(saved.currentRoundStatus || "");
-  resultLoaded.value = Boolean(saved.resultLoaded);
-}
-
-watch(activeStep, (step) => {
-  if (step === "results") {
-    resultsPageSeen.value = true;
-    clearWorkflowState();
-  }
-});
-let pollTimer: number | undefined;
-
-const scopeLocked = computed(() => Boolean(
-  scrapeBusy.value || screenBusy.value || recrawlBusy.value || pausedRunId.value
-  || activeStep.value === "screen" || activeStep.value === "results"
-  || historyMode.value,
-));
-
-const enabledSteps = computed<StepId[]>(() => {
-  if (historyMode.value) return ["results"];
-  const enabled: StepId[] = ["upload"];
-  if (analysisReady.value) enabled.push("search");
-  if (scrapeCompleted.value) enabled.push("screen");
-  // 结果页只在任务真正结束后开放；AI 筛选暂停中任务未结束，04 保持不可进。
-  if (resultLoaded.value && screenSnapshot.value?.status !== "paused") enabled.push("results");
-  return enabled;
-});
-const completedSteps = computed<StepId[]>(() => {
-  const completed: StepId[] = [];
-  if (analysisReady.value) completed.push("upload");
-  if (scrapeCompleted.value) completed.push("search");
-  if (resultLoaded.value) completed.push("screen");
-  return completed;
-});
-const currentCopy = computed(() => stepCopy[activeStep.value]);
-const cityList = computed(() => cityText.value
-  .replaceAll("，", ",")
-  .split(",")
-  .map((city) => city.trim())
-  .filter(Boolean));
-const effectiveSearchCities = computed(() => cityList.value.length ? cityList.value : ["全国"]);
-// T505：filterGroups 由当前已加载 schema 派生（platform-schema.md L147）。
-// 旧 fieldLabels 不再驱动筛选 UI；T507 起由 analyzeResume 按当前 schema 投影建议。
-// 每组自带一个“清空键”（BOSS 的 value="0"，智联的“不限/全部”）：
-// 点它等于不选任何值（空数组，提交时该字段不下发），不再另加内置“不限”芯片造成重复。
-const FILTER_SENTINEL_LABELS = new Set(["不限", "全部"]);
-const filterGroups = computed(() => {
-  const schema = schemaRef.value;
-  if (!schema) return [];
-  return schema.fields
-    .map((field) => {
-      const sentinelOpt = field.options.find(
-        (opt) => opt.value === "0" || FILTER_SENTINEL_LABELS.has(opt.label),
-      );
-      return {
-        key: field.key,
-        label: field.label,
-        sentinel: sentinelOpt ? { label: sentinelOpt.label, code: sentinelOpt.value } : null,
-        options: field.options
-          .filter((opt) => !sentinelOpt || opt.value !== sentinelOpt.value)
-          .map((opt) => [opt.label, opt.value] as [string, string]),
-      };
-    })
-    .filter((group) => group.options.length || group.sentinel);
-});
-const searchSummary = computed(() => {
-  const kw = selectedKeywords.value.length;
-  const locCount = locationDraft.allLocations(draftPlatform.value, cityList.value).length;
-  const ct = locCount || cityList.value.length || 1;
-  const parts: string[] = [];
-  parts.push(kw && ct ? `${kw}×${ct}=${kw * ct}组` : "未配置");
-  parts.push(profileSummary.value.trim() ? "画像已填" : "画像未填");
-  return parts.join(" · ");
-});
-const screenSummaryChips = computed(() => {
-  const chips: { label: string; value: string }[] = [];
-  const drafts = filterValues.value[draftPlatform.value];
-  filterGroups.value.forEach((group) => {
-    const values = drafts[group.key] || [];
-    if (!values.length) return;
-    // B011：未知值不显示数字编号，直接省略该胶囊内容。
-    const labels = values
-      .map((code) => group.options.find(([, optCode]) => optCode === code)?.[0])
-      .filter((label): label is string => Boolean(label));
-    if (!labels.length) return;
-    chips.push({ label: group.label, value: labels.join(" / ") });
-  });
-  return chips;
-});
-watch(
-  [
-    selectedKeywords,
-    cityText,
-    () => advancedSettings.value.pages,
-    () => draftPlatform.value,
-    () => locationDraft.byPlatform,
-  ],
-  () => { if (!scopeLocked.value) void refreshScopePreview(); },
-  { deep: true },
-);
-watch(
-  [draftPlatform, schemaRef],
-  () => applyResumeAnalysisToCurrentSchema(),
-);
-// 分类基于当前平台过滤后的结果：页签计数跟随筛选联动。
-// 过滤逻辑抽到 discovery.ts 纯函数（filterPipelineResultByPlatform），
-// 切换筛选只影响展示层派生，不触碰 pipelineResult 本体。
-const filteredPipelineResult = computed<PipelineResult>(() =>
-  filterPipelineResultByPlatform(pipelineResult.value || {}, resultPlatformFilter.value),
-);
-const groups = computed(() => partitionPipelineResult(filteredPipelineResult.value));
-// “全部”视图重抓引导按岗位自身平台统计待确认数量，不按当前草稿/结果 run 猜。
-const uncertainByPlatform = computed(() => {
-  const jobs = groups.value.uncertain;
-  return {
-    boss: jobs.filter((job) => job.platform === "boss").length,
-    zhilian: jobs.filter((job) => job.platform === "zhilian").length,
-  };
-});
 const roundFlow = reactive(useScreenRoundFlow({
   refs: {
     filterValues,
@@ -726,482 +424,41 @@ const roundFlow = reactive(useScreenRoundFlow({
     uncertainCount: computed(() => groups.value.uncertain.length),
   },
   api: {
-    startAiScreen: flowStartAiScreen,
-    continueAiScreen,
-    recrawlUncertain,
-    continueRecrawl,
-    finishPausedTask,
-    resetWorkflow,
-    loadLatestResult,
-    notify,
+    startAiScreen: execution.flowStartAiScreen,
+    continueAiScreen: execution.continueAiScreen,
+    recrawlUncertain: tasks.recrawlUncertain,
+    continueRecrawl: tasks.continueRecrawl,
+    finishPausedTask: execution.finishPausedTask,
+    resetWorkflow: tasks.resetWorkflow,
+    loadLatestResult: results.loadLatestResult,
+    notify: workflow.notify,
   },
 }));
-const resultTabs = computed(() => {
-  if (isScrapedOnly.value) {
-    // B038：未筛选轮只展示单"待筛选"列表，不经过 verdict 分类。
-    const total = (filteredPipelineResult.value.jobs || []).length;
-    return [{ id: "matched" as const, label: "待筛选", count: total }];
-  }
-  return [
-    { id: "matched" as const, label: "匹配", count: groups.value.matched.length },
-    { id: "unmatched" as const, label: "不匹配", count: groups.value.unmatched.length },
-    { id: "uncertain" as const, label: "待确认", count: groups.value.uncertain.length },
-    { id: "dropped" as const, label: "已筛除", count: groups.value.dropped.length },
-  ];
-});
-const currentJobs = computed(() => {
-  if (isScrapedOnly.value) return filteredPipelineResult.value.jobs || [];
-  return groups.value[activeCategory.value];
-});
-const currentEmptyMessage = computed(() => isScrapedOnly.value
-  ? "没有待筛选的岗位"
-  : ({
-    matched: "没有明确匹配的岗位",
-    unmatched: "没有明确不匹配的岗位",
-    uncertain: "没有需要人工确认的岗位",
-    dropped: "没有在粗筛阶段被移除的岗位",
-  } as Record<ResultCategory, string>)[activeCategory.value]);
+shared.roundFlow = roundFlow;
 
-onMounted(() => {
-  restoreWorkflowState();
-  void loadAdvancedSettings();
-  void loadFilterLabels();
-  void loadCityCatalog();
-  void restoreRunningTask().finally(() => {
-    restoreSaved02State();
-    if (!unfinishedWorkflowRestored.value && !activeTaskRestored.value
-      && !scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
-      void loadLatestResult();
-    }
-  });
+watch(activeStep, (step) => {
+  if (step === "results") {
+    resultsPageSeen.value = true;
+    clearWorkflowState();
+  }
 });
 
-async function restoreRunningTask() {
-  try {
-    const data = await apiRequest<{
-      has_task?: boolean;
-      task_id?: string;
-      kind?: string;
-      status?: string;
-      // T509：任务自身平台（http-api.md L201，所有 has_task=true 响应含 platform）
-      platform?: Platform;
-      progress?: Record<string, unknown>;
-      logs?: string[];
-      error?: string;
-      stage?: string;
-      pause_info?: { error_code?: string; error_reason?: string } | null;
-      execution_config?: Record<string, unknown> | null;
-      backend_version?: string;
-      current_version?: string;
-      version_match?: boolean;
-      scrape_task_id?: string;
-      scrape_completed?: boolean;
-      source_run_id?: string;
-      started_at?: number;
-      finished_at?: number;
-      scraped_count?: number;
-      source_total?: number;
-      frozen_filters?: Record<string, unknown>;
-      profile_summary?: string;
-      profile_facts?: Record<string, unknown>;
-      auto_screen?: boolean;
-      auto_screen_fields?: Record<string, unknown>;
-      round_context?: Partial<RoundContext> | null;
-    }>("/api/latest-running-task");
-    if (!data.has_task || !data.task_id) return;
-    activeTaskRestored.value = true;
-    // T509：先设置任务自身平台，再加载对应 schema/城市（platform-schema.md L157）。
-    // 不改草稿平台（不变式 2：setTaskPlatform 不改 draft/result）。
-    const taskPlatform = data.platform;
-    if (taskPlatform) {
-      platformState.setTaskPlatform(taskPlatform);
-      // 任务平台变化时同步主题品牌色（如恢复一个智联任务时切到蓝色品牌色）。
-      setThemePlatform(taskPlatform);
-      void loadFilterLabels(taskPlatform);
-      void loadCityCatalog(taskPlatform);
-    }
-    // frozen_filters 写入任务平台对应的草稿槽；缺平台时退化到草稿平台（兼容旧 mock）
-    const filterPlatform: Platform = taskPlatform ?? draftPlatform.value;
-    if (data.kind === "recrawl") {
-      // 重抓任务恢复：先加载结果供 04 查看，但跳过"上次已完成"快照
-      //（03 页应显示重抓自身进度，不伪造完成态）。
-      await loadLatestResult({ skipTerminalSnapshot: true });
-    }
-    const snapshot: TaskSnapshot = {
-      status: data.status || "running",
-      progress: data.progress || {},
-      logs: data.logs || [],
-      error: data.error || "",
-      stage: data.stage,
-      pause_info: data.pause_info,
-      started_at: data.started_at,
-      finished_at: data.finished_at,
-      // T510：快照携带任务平台，供 TaskProgress 展示真实平台徽章
-      platform: taskPlatform,
-    };
-    let kind: "scrape" | "screen" | "recrawl" = "screen";
-    if (data.kind === "scrape") kind = "scrape";
-    else if (data.kind === "recrawl") kind = "recrawl";
-    if (kind === "scrape" && isCompletedTaskStatus(data.status) && data.auto_screen) {
-      scrapeTaskId.value = data.scrape_task_id || data.task_id;
-      scrapeCompleted.value = true;
-      analysisReady.value = true;
-      const savedFilters = data.auto_screen_fields || data.frozen_filters || {};
-      const drafts = filterValues.value[filterPlatform];
-      for (const key of Object.keys(drafts)) delete drafts[key];
-      Object.assign(
-        drafts,
-        Object.fromEntries(
-          Object.entries(savedFilters)
-            .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
-            .map(([key, value]) => [key, value as string[]]),
-        ),
-      );
-      profileSummary.value = data.profile_summary || "";
-      profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
-        ? (data.profile_facts as Record<string, unknown>) : {};
-      enterScreenStep();
-      restoredTaskHint.value = "检测到一键任务已抓取完成，正在自动接续 AI 筛选";
-      if (data.round_context) restoreLocationsFromContext(data.round_context);
-      void startAiScreen({ consumeAutoScreen: true, fields: drafts, profile: profileSummary.value });
-      return;
-    }
-    if (kind === "scrape" && isCompletedTaskStatus(data.status) && !data.auto_screen) {
-      scrapeTaskId.value = data.task_id;
-      scrapeCompleted.value = true;
-      analysisReady.value = true;
-      activeStep.value = "search";
-      profileSummary.value = data.profile_summary || "";
-      profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
-        ? (data.profile_facts as Record<string, unknown>) : {};
-      scrapeSnapshot.value = {
-        ...snapshot,
-        scraped_count: data.scraped_count,
-        source_total: data.source_total,
-      };
-      if (data.round_context) roundFlow.restoreRoundContext(data.round_context);
-      if (data.round_context) restoreLocationsFromContext(data.round_context);
-      restoredTaskHint.value = "检测到已完成的抓取任务，正在恢复结果";
-      await loadLatestResult();
-      await saveScrapedOnlySnapshot();
-      return;
-    }
-    if (data.status === "interrupted") {
-      // 服务重启打断的任务：工作线程已死不能 poll；提示用户重开（后端会自动接着上次进度）
-      interruptedRunId.value = data.task_id;
-      if (data.kind === "scrape") {
-        scrapeTaskId.value = data.task_id;
-        analysisReady.value = true;
-        activeStep.value = "search";
-        restoredTaskHint.value = "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取";
-        scrapeSnapshot.value = {
-          ...snapshot,
-          scraped_count: data.scraped_count,
-          source_total: data.source_total,
-        };
-        if (data.round_context) restoreLocationsFromContext(data.round_context);
-        return;
-      }
-      if (data.kind === "recrawl") {
-        recrawlTaskId.value = data.task_id;
-        resultLoaded.value = true;
-        activeCategory.value = "uncertain";
-        activeStep.value = "results";
-        restoredTaskHint.value = "上次补抓因服务重启被中断；可结束保存已有结果";
-        return;
-      }
-      restoredTaskHint.value = "上次 AI 筛选因服务重启被中断；重新开始 AI 筛选会接着上次进度，不重复消耗";
-      scrapeTaskId.value = data.scrape_task_id || "";
-      scrapeCompleted.value = Boolean(data.scrape_completed);
-      screenTaskId.value = data.task_id;
-      analysisReady.value = true;
-      enterScreenStep();
-      const savedFilters = data.frozen_filters || {};
-      // T509：写入任务平台对应的草稿槽（platform-schema.md L157），
-      // 不再用草稿平台槽 — 否则 zhilian 任务恢复后 filters 落到 boss 槽会被 boss schema 拒绝。
-      const drafts = filterValues.value[filterPlatform];
-      for (const key of Object.keys(drafts)) delete drafts[key];
-      Object.assign(
-        drafts,
-        Object.fromEntries(
-          Object.entries(savedFilters)
-            .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
-            .map(([key, value]) => [key, value as string[]]),
-        ),
-      );
-      profileSummary.value = data.profile_summary || "";
-      profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
-        ? (data.profile_facts as Record<string, unknown>) : {};
-      if (data.round_context) roundFlow.restoreRoundContext(data.round_context);
-      restoreLocationsFromContext(data.round_context);
-      return;
-    }
-    // 切片7：paused 状态从 DB 恢复（无内存工作线程，不能 poll）
-    if (data.status === "failed" && kind === "scrape") {
-      scrapeTaskId.value = data.task_id;
-      analysisReady.value = true;
-      activeStep.value = "search";
-      scrapeSnapshot.value = {
-        ...snapshot,
-        scraped_count: data.scraped_count,
-        source_total: data.source_total,
-      };
-      restoredTaskHint.value = "检测到失败的抓取任务；已抓数据已保存，可结束保存结果或重新开始抓取";
-      if (data.round_context) restoreLocationsFromContext(data.round_context);
-      return;
-    }
-    if (data.status === "paused") {
-      pausedRunId.value = data.task_id;
-      analysisReady.value = true;
-      if (kind === "scrape") {
-        activeStep.value = "search";
-        autoScreenArmed.value = Boolean(data.auto_screen);
-        if (data.auto_screen_fields) {
-          const autoDrafts = filterValues.value[filterPlatform];
-          for (const key of Object.keys(autoDrafts)) delete autoDrafts[key];
-          Object.assign(
-            autoDrafts,
-            Object.fromEntries(
-              Object.entries(data.auto_screen_fields)
-                .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
-                .map(([key, value]) => [key, value as string[]]),
-            ),
-          );
-          autoScreenFields.value = Object.fromEntries(
-            Object.entries(data.auto_screen_fields)
-              .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
-              .map(([key, value]) => [key, value as string[]]),
-          );
-        }
-        profileSummary.value = data.profile_summary || "";
-      profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
-        ? (data.profile_facts as Record<string, unknown>) : {};
-        autoScreenProfile.value = data.profile_summary || "";
-        if (data.round_context) restoreLocationsFromContext(data.round_context);
-      } else if (kind === "screen") {
-        scrapeTaskId.value = data.scrape_task_id || "";
-        scrapeCompleted.value = Boolean(data.scrape_completed);
-        screenTaskId.value = data.task_id;
-        enterScreenStep();
-        // T509：paused screen 任务也投影冻结筛选快照（platform-schema.md L157）
-        const savedFilters = data.frozen_filters || {};
-        const drafts = filterValues.value[filterPlatform];
-        for (const key of Object.keys(drafts)) delete drafts[key];
-        Object.assign(
-          drafts,
-          Object.fromEntries(
-            Object.entries(savedFilters)
-              .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
-              .map(([key, value]) => [key, value as string[]]),
-          ),
-        );
-        profileSummary.value = data.profile_summary || "";
-      profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
-        ? (data.profile_facts as Record<string, unknown>) : {};
-        if (data.round_context) roundFlow.restoreRoundContext(data.round_context);
-        restoreLocationsFromContext(data.round_context);
-      } else {
-        // 重抓暂停也是任务未结束：进度回 03 页，04 保持结果展示可切。
-        recrawlTaskId.value = data.task_id;
-        resultLoaded.value = true;
-        activeCategory.value = "uncertain";
-        activeStep.value = "screen";
-      }
-      // 拉 /api/task-state 拿完整计数画面（success/fail/unstarted/total）
-      await enrichPausedSnapshot(data.task_id, snapshot, kind);
-      const reason = data.pause_info?.error_reason || "任务已暂停";
-      restoredTaskHint.value = `检测到暂停中的任务（${reason}），处理后点继续`;
-      return;
-    }
-    if (kind === "scrape") {
-      scrapeTaskId.value = data.task_id;
-      analysisReady.value = true;
-      scrapeBusy.value = true;
-      scrapeSnapshot.value = snapshot;
-      restoredTaskHint.value = "检测到抓取任务仍在后台运行，已自动接回";
-      activeStep.value = "search";
-      autoScreenArmed.value = Boolean(data.auto_screen);
-      if (data.auto_screen_fields) {
-        autoScreenFields.value = Object.fromEntries(
-          Object.entries(data.auto_screen_fields)
-            .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
-            .map(([key, value]) => [key, value as string[]]),
-        );
-      }
-      const restoredProfile = data.profile_summary || "";
-      profileSummary.value = restoredProfile;
-      profileFacts.value = data.profile_facts && typeof data.profile_facts === "object"
-        ? (data.profile_facts as Record<string, unknown>) : {};
-      autoScreenProfile.value = restoredProfile;
-      if (data.round_context) restoreLocationsFromContext(data.round_context);
-      void pollTask(data.task_id, "scrape");
-    } else if (kind === "screen") {
-      screenTaskId.value = data.task_id;
-      scrapeTaskId.value = data.scrape_task_id || "";
-      scrapeCompleted.value = true;
-      screenBusy.value = true;
-      screenSnapshot.value = snapshot;
-      restoredTaskHint.value = "检测到 AI 筛选任务仍在后台运行，已自动接回";
-      analysisReady.value = true;
-      enterScreenStep();
-      void pollTask(data.task_id, "screen");
-      if (data.round_context) restoreLocationsFromContext(data.round_context);
-    } else {
-      recrawlTaskId.value = data.task_id;
-      recrawlBusy.value = true;
-      recrawlSnapshot.value = snapshot;
-      resultLoaded.value = true;
-      activeCategory.value = "uncertain";
-      // 重抓运行中进度在 03 页展示；04 保持结果展示，用户可切回看旧结果。
-      activeStep.value = "screen";
-      restoredTaskHint.value = "检测到重抓任务仍在后台运行，已自动接回";
-      void pollRecrawl(data.task_id);
-    }
-  } catch { /* non-critical: 接不回就当没有 */ }
-}
+watch(
+  [
+    selectedKeywords,
+    cityText,
+    () => advancedSettings.value.pages,
+    () => draftPlatform.value,
+    () => locationDraft.byPlatform,
+  ],
+  () => { if (!scopeLocked.value) void refreshScopePreview(); },
+  { deep: true },
+);
 
-function restoreLocationsFromContext(ctx?: Partial<RoundContext> | null) {
-  if (!ctx?.locations?.length) return;
-  const grouped = new Map<string, LocationCondition[]>();
-  for (const loc of ctx.locations) {
-    if (!loc?.city_name) continue;
-    const list = grouped.get(loc.city_name) ?? [];
-    list.push(loc);
-    grouped.set(loc.city_name, list);
-  }
-  for (const [city, conditions] of grouped) {
-    locationDraft.setLocations(ctx.platform ?? draftPlatform.value, city, conditions);
-  }
-}
-
-const COMPLETED_TASK_STATUSES = new Set([
-  "done",
-  "completed",
-  "completed_with_pending",
-  "partial",
-]);
-
-function isCompletedTaskStatus(status?: string) {
-  return Boolean(status && COMPLETED_TASK_STATUSES.has(status));
-}
-
-// 切片7：paused 任务从 /api/task-state 拉完整计数（FR-037）
-async function enrichPausedSnapshot(
-  runId: string,
-  snapshot: TaskSnapshot,
-  kind: "scrape" | "screen" | "recrawl",
-) {
-  try {
-    const data = await apiRequest<{
-      status?: string;
-      stage?: string;
-      progress?: number | Record<string, unknown>;
-      success_count?: number;
-      fail_count?: number;
-      unstarted_count?: number;
-      total?: number;
-      kept_count?: number;
-      dropped_count?: number;
-      pending_count?: number;
-      source_total?: number;
-      scraped_count?: number;
-      pause_info?: { error_code?: string; error_reason?: string } | null;
-      execution_config?: Record<string, unknown> | null;
-      result?: { updates?: Record<string, unknown> } | null;
-    }>(`/api/task-state/${encodeURIComponent(runId)}`);
-    snapshot.success_count = data.success_count;
-    snapshot.fail_count = data.fail_count;
-    snapshot.unstarted_count = data.unstarted_count;
-    snapshot.total = data.total;
-    snapshot.kept_count = data.kept_count;
-    snapshot.dropped_count = data.dropped_count;
-    snapshot.pending_count = data.pending_count;
-    snapshot.source_total = data.source_total;
-    snapshot.scraped_count = data.scraped_count;
-    snapshot.stage = data.stage || snapshot.stage;
-    if (typeof data.progress === "number") {
-      snapshot.progress = {
-        ...(snapshot.progress || {}),
-        overall_percent: data.progress,
-      };
-    } else if (data.progress) {
-      // 016：恢复首拍防御——后端未带整体进度时沿用上一拍断点值，
-      // 避免进度条"归零再跳变"；新值到达后按新值覆盖。
-      const prevProgress = snapshot.progress || {};
-      snapshot.progress = { ...data.progress };
-      if (snapshot.progress.overall_percent == null
-        && typeof prevProgress.overall_percent === "number") {
-        snapshot.progress.overall_percent = prevProgress.overall_percent;
-      }
-      if (snapshot.progress.current == null
-        && typeof prevProgress.current === "number") {
-        snapshot.progress.current = prevProgress.current;
-      }
-      if (snapshot.progress.total == null
-        && typeof prevProgress.total === "number") {
-        snapshot.progress.total = prevProgress.total;
-      }
-    }
-    if (data.pause_info) snapshot.pause_info = data.pause_info;
-    if (data.execution_config) snapshot.execution_config = data.execution_config;
-    if (data.result?.updates) mergeRecrawlUpdates(data.result.updates);
-  } catch { /* 退化到 progress 字段 */ }
-  if (kind === "scrape") {
-    scrapeTaskId.value = runId;
-    scrapeSnapshot.value = { ...snapshot };
-  } else if (kind === "screen") {
-    screenTaskId.value = runId;
-    screenSnapshot.value = { ...snapshot };
-  } else {
-    recrawlTaskId.value = runId;
-    recrawlSnapshot.value = { ...snapshot };
-  }
-}
-
-// T505/T509：按指定平台加载 schema（/api/filter-labels?platform=）。
-// schemaLoader 内部用单调 reqId + AbortController + 响应平台校验，
-// 保证旧平台响应晚到不覆盖当前平台（platform-schema.md L151-156）。
-// T509：默认参数 = 草稿平台（新任务表单/简历建议路径）；restoreRunningTask 显式传入任务平台
-// 以满足 platform-schema.md L157「先从任务响应设置任务平台，再加载对应 schema/城市」。
-async function loadFilterLabels(platform: Platform = platformState.draft) {
-  if (schemaLoader.loadedPlatform === platform && schemaRef.value) return;
-  schemaBusy.value = true;
-  try {
-    const accepted = await schemaLoader.load(platform, (p, signal) =>
-      apiRequest<PlatformFilterSchema>(
-        `/api/filter-labels?platform=${encodeURIComponent(p)}`,
-        { signal },
-      ),
-    );
-    if (accepted && schemaLoader.data) {
-      schemaRef.value = schemaLoader.data;
-    }
-  } catch { /* non-critical：loader 已记录 error */ }
-  finally {
-    if (schemaLoader.pendingPlatform === null) schemaBusy.value = false;
-  }
-}
-
-// T505/T509：按指定平台加载城市目录（/api/options?platform=）。
-// 与 loadFilterLabels 共用同一份序号 + 取消 + 校验逻辑（createAsyncResourceLoader）。
-async function loadCityCatalog(platform: Platform = platformState.draft) {
-  if (cityLoader.loadedPlatform === platform && cityCatalogRef.value) return;
-  cityCatalogBusy.value = true;
-  try {
-    const accepted = await cityLoader.load(platform, (p, signal) =>
-      apiRequest<PlatformCityCatalog>(
-        `/api/options?platform=${encodeURIComponent(p)}`,
-        { signal },
-      ),
-    );
-    if (accepted && cityLoader.data) {
-      cityCatalogRef.value = cityLoader.data;
-    }
-  } catch { /* non-critical：loader 已记录 error */ }
-  finally {
-    if (cityLoader.pendingPlatform === null) cityCatalogBusy.value = false;
-  }
-}
+watch(
+  [draftPlatform, schemaRef],
+  () => applyResumeAnalysisToCurrentSchema(),
+);
 
 watch(() => props.profileId, () => {
   if (!pausedRunId.value && !scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
@@ -1211,1385 +468,19 @@ watch(() => props.profileId, () => {
 
 onBeforeUnmount(() => {
   persistWorkflowState();
-  if (pollTimer) window.clearTimeout(pollTimer);
+  if (pollTimer.value) window.clearTimeout(pollTimer.value);
   document.removeEventListener("keydown", handleLifecycleDialogKeydown);
 });
-
-function notify(message: string, tone: Notice["tone"] = "info") {
-  emit("notify", { message, tone });
-}
-
-function enterSearchStep() {
-  // B040：抓取运行中切回步骤 2 时保持配置卡收拢。
-  searchPanelsOpen.value = !scrapeBusy.value;
-  activeStep.value = "search";
-}
-
-function enterScreenStep() {
-  // B040：AI 筛选运行中切回步骤 3 时保持配置卡收拢。
-  screenPanelOpen.value = !resultLoaded.value && !screenBusy.value;
-  activeStep.value = "screen";
-}
-
-function selectStep(step: string) {
-  if (historyMode.value && step !== "results") {
-    notify("历史轮次不可改写，请先回到最新", "warning");
-    return;
-  }
-  if (!enabledSteps.value.includes(step as StepId)) return;
-  if (step === "search") enterSearchStep();
-  else if (step === "screen") enterScreenStep();
-  else activeStep.value = step as StepId;
-}
-
-function chooseFile(event: Event) {
-  const input = event.target as HTMLInputElement;
-  selectedFile.value = input.files?.[0] || null;
-}
-
-function handleDrop(event: DragEvent) {
-  dragActive.value = false;
-  selectedFile.value = event.dataTransfer?.files?.[0] || null;
-}
-
-function applyResumeAnalysisToCurrentSchema() {
-  const analysis = resumeAnalysis.value;
-  const schema = schemaRef.value;
-  if (!analysis || !schema || schema.platform !== draftPlatform.value) return;
-  if (appliedResumePlatforms.value.has(draftPlatform.value)) return;
-  const semantic = analysis.semantic;
-  const projected = semantic
-    ? projectResumeSuggestionToSchema(semantic, schema)
-    : {};
-  if (!semantic) {
-    // 旧响应兜底：直接按当前 schema 校验 code。
-    for (const field of schema.fields) {
-      const value = analysis.fields[field.key];
-      let codesRaw: unknown[] = [];
-      if (Array.isArray(value)) codesRaw = value;
-      else if (value) codesRaw = [value];
-      const codes = codesRaw
-        .map(String)
-        .filter((code) => code !== "0" && field.options.some((opt) => opt.value === code));
-      if (codes.length) projected[field.key] = codes;
-    }
-  }
-  filterValues.value[draftPlatform.value] = projected;
-  appliedResumePlatforms.value = new Set([...appliedResumePlatforms.value, draftPlatform.value]);
-}
-
-function initializeFromAnalysis(data: AnalyzeResponse) {
-  const fields = data.fields || {};
-  // T507：不替换权威标签 fieldLabels（platform-schema.md L147）。
-  // filterGroups 由 schemaLoader 加载的 schema 驱动，不用 analyze 响应的 labels 覆盖。
-  // data.labels 仍保留给 fallback 或后续调试，但不写入 fieldLabels。
-  const rawKeywords = Array.isArray(fields.keyword) ? fields.keyword : [];
-  keywords.value = rawKeywords
-    .map((item) => typeof item === "string"
-      ? { word: item, recommended: false }
-      : {
-        word: String((item as Record<string, unknown>).word || ""),
-        recommended: Boolean((item as Record<string, unknown>).recommended),
-      })
-    .filter((item) => item.word);
-  const recommended = keywords.value.filter((item) => item.recommended).map((item) => item.word);
-  selectedKeywords.value = recommended.length ? recommended : keywords.value.map((item) => item.word);
-  // 城市由用户选择，AI 不代填；未选择时默认全国。
-  cityText.value = "";
-  // T507：按当前已加载 schema 投影筛选建议（platform-schema.md L147）。
-  // 只接受 schema 允许的字段；boss.stage 与 zhilian.company_nature 因 schema 不同不会串用。
-  // 若 schema 未加载（如刚切平台尚未响应），保留空草稿，不投影。
-  // B009：保存中文语义，切平台时按新 schema 重新投影，不静默丢字段。
-  resumeAnalysis.value = data;
-  appliedResumePlatforms.value = new Set();
-  filterValues.value = { boss: {}, zhilian: {} };
-  applyResumeAnalysisToCurrentSchema();
-  profileSummary.value = String(fields.profile_summary || "");
-  const pfacts = (fields as Record<string, unknown>).profile_facts;
-  profileFacts.value = (pfacts && typeof pfacts === "object"
-    ? pfacts as Record<string, unknown> : {});
-}
-
-async function analyzeResume() {
-  resumeError.value = "";
-  if (!selectedFile.value) {
-    notify("请先选择简历文件", "warning");
-    return;
-  }
-  if (!aiConsent.value) {
-    notify("请勾选 AI 解析同意后再继续", "warning");
-    return;
-  }
-  uploadBusy.value = true;
-  try {
-    if (!(await cancelActiveTasksForNewRound())) return;
-    if (!(await clearLatestResult())) return;
-    const form = new FormData();
-    form.append("file", selectedFile.value);
-    form.append("platform", draftPlatform.value);
-    resumeAnalysis.value = null;
-    appliedResumePlatforms.value = new Set();
-    const data = await apiRequest<AnalyzeResponse>("/api/analyze-resume", {
-      method: "POST",
-      body: form,
-    });
-    historyRound.value = null;
-    historyBackToLatest();
-    scrapeTaskId.value = "";
-    screenTaskId.value = "";
-    recrawlTaskId.value = "";
-    scrapeSnapshot.value = null;
-    screenSnapshot.value = null;
-    recrawlSnapshot.value = null;
-    pipelineResultRunId.value = "";
-    resultPlatformFilter.value = "all";
-    finishedPartial.value = false;
-    recrawlPlatformGuide.value = null;
-    resultRunIds.value = { boss: "", zhilian: "" };
-    pausedRunId.value = "";
-    interruptedRunId.value = "";
-    restoredTaskHint.value = "";
-    scopePreview.value = null;
-    autoScreenArmed.value = false;
-    locationDraft.reset();
-    oneClickOpen.value = false;
-    scopePreviewBusy.value = false;
-    currentRoundStatus.value = "";
-    activeCategory.value = "matched";
-    initializeFromAnalysis(data);
-    analysisReady.value = true;
-    scrapeCompleted.value = false;
-    resultLoaded.value = false;
-    pipelineResult.value = null;
-    rejectedIds.value = new Set();
-    enterSearchStep();
-    notify("简历分析完成，请确认关键词与城市", "success");
-  } catch (error) {
-    resumeError.value = "失败，点击重试";
-    notify(errorMessage(error, "简历分析失败"), "error");
-  } finally {
-    uploadBusy.value = false;
-  }
-}
-
-function toggleKeyword(word: string) {
-  selectedKeywords.value = selectedKeywords.value.includes(word)
-    ? selectedKeywords.value.filter((item) => item !== word)
-    : [...selectedKeywords.value, word];
-}
-
-function removeKeyword(word: string) {
-  keywords.value = keywords.value.filter((item) => item.word !== word);
-  selectedKeywords.value = selectedKeywords.value.filter((item) => item !== word);
-}
-
-function addCustomKeyword() {
-  const word = customKeyword.value.trim().replace(/[，,]+$/, "");
-  if (!word) return;
-  if (!keywords.value.some((item) => item.word === word)) {
-    keywords.value.push({ word, recommended: false });
-  }
-  if (!selectedKeywords.value.includes(word)) selectedKeywords.value.push(word);
-  customKeyword.value = "";
-}
-
-function confirmCities() {
-  const cities = cityList.value;
-  if (!cities.length) {
-    notify("请输入至少一个城市", "warning");
-    return;
-  }
-  notify(`已确认 ${cities.length} 个城市：${cities.join("、")}`, "success");
-}
-
-function addCustomCity() {
-  const city = customCity.value.trim().replace(/[，,]+$/, "");
-  if (!city) return;
-  if (cityList.value.includes(city)) {
-    customCity.value = "";
-    return;
-  }
-  const current = cityText.value.trim().replace(/[，,]+$/, "");
-  cityText.value = current ? `${current},${city}` : city;
-  customCity.value = "";
-}
-
-function removeCity(city: string) {
-  cityText.value = cityList.value.filter((c) => c !== city).join(",");
-  locationDraft.clearLocations(draftPlatform.value, city);
-}
-
-function toggleFilter(key: string, code: string) {
-  const drafts = filterValues.value[draftPlatform.value];
-  const values = drafts[key] || [];
-  drafts[key] = values.includes(code)
-    ? values.filter((value) => value !== code)
-    : [...values, code];
-}
-
-async function loadAdvancedSettings() {
-  try {
-    const data = await apiRequest<Partial<AdvancedSettingsState> & { settings?: Record<string, number | string> }>("/api/advanced-settings");
-    advancedSettings.value = { ...advancedSettings.value, ...(data.settings || {}) };
-    if (data.selection) executionSelection.value = data.selection;
-    mergeManualRanges(data.manual_ranges);
-  } catch (error) {
-    notify(errorMessage(error, "高级设置加载失败"), "warning");
-  }
-}
-
-const SPEED_FIELDS = [
-  "pages", "inter_combo_delay", "detail_batch_size", "detail_interval",
-  "detail_reset_every", "detail_batch_cooldown",
-  "detail_tab_pool_size", "screen_batch_size",
-  "screen_concurrency", "match_batch_size", "match_concurrency",
-] as const;
-
-function currentExecutionSettings(): ExecutionSettings {
-  return Object.fromEntries(SPEED_FIELDS.map((field) => [field, Number(advancedSettings.value[field])])) as unknown as ExecutionSettings;
-}
-
-async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
-  if (!selectedKeywords.value.length) {
-    scopePreview.value = null;
-    return null;
-  }
-  const reqId = ++scopePreviewReqId;
-  scopePreviewBusy.value = true;
-  try {
-    const data = await settingsApi.previewScope({
-      platform: draftPlatform.value,
-      keywords: selectedKeywords.value,
-      scope_kind: cityList.value.length ? "cities" : "nationwide",
-      cities: cityList.value.length ? cityList.value : [],
-      locations: locationDraft.allLocations(draftPlatform.value, cityList.value),
-      pages_per_combination: pagesValue.value,
-    });
-    if (reqId !== scopePreviewReqId) return scopePreview.value;
-    scopePreview.value = normalizeScopePreview(data);
-    return scopePreview.value;
-  } catch (error) {
-    if (reqId !== scopePreviewReqId) return scopePreview.value;
-    scopePreview.value = null;
-    notify(errorMessage(error, "搜索范围校验失败"), "warning");
-    return null;
-  } finally {
-    scopePreviewBusy.value = false;
-  }
-}
-
-async function selectExecutionMode(selection: ExecutionSelection) {
-  const preview = await refreshScopePreview();
-  if (!preview) return;
-  advancedBusy.value = true;
-  try {
-    const data = await settingsApi.selectMode(selection, preview.scope_digest);
-    const returned = (data as unknown as { settings?: ExecutionSettings; config?: ExecutionSettings }).settings
-      || (data as unknown as { config?: ExecutionSettings }).config;
-    if (!returned) throw new Error("模式响应缺少完整执行配置");
-    advancedSettings.value = { ...advancedSettings.value, ...returned };
-    executionSelection.value = selection;
-  } catch (error) {
-    notify(errorMessage(error, "执行模式切换失败"), "error");
-  } finally {
-    advancedBusy.value = false;
-  }
-}
-
-interface OneClickLaunch {
- autoScreen?: boolean;
- fields?: Record<string, string[]>;
- profile?: string;
-}
-
-function validateProfileForScreen(): boolean {
- if (profileSummary.value.trim().length < 10) {
-   profileError.value = "求职画像至少 10 个字（不含首尾空格）";
-   void nextTick(() => profileInputEl.value?.focus());
-   return false;
- }
- profileError.value = "";
- return true;
-}
-
-function handleProfileInput() {
- if (profileError.value && profileSummary.value.trim().length >= 10) profileError.value = "";
-}
-
-function handleProfileBlur() {
-  if (profileSummary.value.trim().length < 10) {
-    profileError.value = "求职画像至少 10 个字（不含首尾空格）";
-  } else {
-    profileError.value = "";
-  }
-}
 
 watch(profileSummary, () => {
   if (roundFlow.suppressProfileWatch) return;
   profileConfirmed.value = false;
 });
 
-function confirmProfile() {
-  if (profileConfirmed.value) return;
-  if (!validateProfileForScreen()) {
-    notify("求职画像至少 10 个字（不含首尾空格）", "warning");
-    return;
-  }
-  profileConfirmed.value = true;
-}
-
-function requireProfileConfirmed(): boolean {
-  if (profileConfirmed.value) return true;
-  notify("确认后 AI 精筛按当前画像判断，修改画像需重新确认", "warning");
-  return false;
-}
-
-function handleStartScrapeClick() {
-  if (scrapeBusy.value) {
-    void cancelScrape();
-    return;
-  }
-  if (!validateProfileForScreen()) {
-    notify("求职画像至少 10 个字（不含首尾空格）", "warning");
-    return;
-  }
-  if (!requireProfileConfirmed()) return;
-  if (shouldConfirmNationalScope(selectedKeywords.value, cityList.value)) {
-    nationalScopeConfirm.value = "scrape";
-    return;
-  }
-  void startScrape();
-}
-async function flowStartAiScreen(opts?: AiScreenLaunch) {
-  if (!validateProfileForScreen()) {
-    notify("求职画像至少 10 个字（不含首尾空格）", "warning");
-    return;
-  }
-  if (!requireProfileConfirmed()) return;
-  await startAiScreen(opts);
-}
-
-function openOneClick() {
-  if (pipelineBusy.value) {
-    notify("当前已有任务在运行或暂停，请先处理完再开始新任务", "warning");
-    return;
-  }
-  profileError.value = "";
-  if (!selectedKeywords.value.length) {
-    enterSearchStep();
-    notify("请先到第二步补齐关键词和城市", "warning");
-    return;
-  }
-  if (shouldConfirmNationalScope(selectedKeywords.value, cityList.value)) {
-    nationalScopeConfirm.value = "one-click";
-    return;
-  }
-  openOneClickDialog();
-}
-
-function openOneClickDialog() {
-  if (!validateProfileForScreen()) {
-    notify("求职画像至少 10 个字（不含首尾空格）", "warning");
-    return;
-  }
-  if (!requireProfileConfirmed()) return;
-  oneClickOpen.value = true;
-}
-
-function confirmOneClick(fields: Record<string, string[]>) {
- oneClickOpen.value = false;
- filterValues.value[draftPlatform.value] = fields;
- void startScrape({ autoScreen: true, fields, profile: profileSummary.value });
-}
-
-
-async function saveAdvancedSettings() {
-  advancedBusy.value = true;
-  try {
-    const data = await settingsApi.saveCustom(currentExecutionSettings());
-    advancedSettings.value = { ...advancedSettings.value, ...(data.settings || {}) };
-    executionSelection.value = "custom";
-    notify("高级设置已保存", "success");
-  } catch (error) {
-    notify(errorMessage(error, "高级设置保存失败"), "error");
-  } finally {
-    advancedBusy.value = false;
-  }
-}
-
-async function startScrape(options: OneClickLaunch = {}) {
-  if (historyMode.value) {
-    notify("历史轮次不可改写，请先回到最新", "warning");
-    return;
-  }
-  if (pipelineBusy.value) {
-    notify("当前已有任务在运行或暂停，请先处理完再开始新任务", "warning");
-    return;
-  }
-  const scriptParams = buildSearchScriptParams(
-    selectedKeywords.value,
-    effectiveSearchCities.value,
-    locationDraft.allLocations(draftPlatform.value, cityList.value),
-  );
-  // 城市为空时，入口已先弹出全国范围确认；确认后用 effectiveSearchCities
-  // 生成的“全国”继续，不能在这里再次按空城市拦截。
-  if (!scriptParams.keyword) {
-    notify("请确认至少一个关键词", "warning");
-    return;
-  }
-  const preview = await refreshScopePreview();
-  if (!preview) return;
-  // 开始抓取后自动收拢两个配置面板（用户可随时手动展开查看）。
-  autoScreenArmed.value = Boolean(options.autoScreen);
-  autoScreenFields.value = options.fields || {};
-  autoScreenProfile.value = options.profile || "";
-  profileError.value = "";
-  searchPanelsOpen.value = false;
-  scrapeBusy.value = true;
-  scrapeCompleted.value = false;
-  resultLoaded.value = false;
-  pipelineResult.value = null;
-  interruptedRunId.value = "";
-  scrapeSnapshot.value = { status: "running", progress: { message: "正在创建抓取任务…" }, logs: [] };
-  finishedPartial.value = false;
-  recrawlPlatformGuide.value = null;
-  try {
-    const data = await apiRequest<{ task_id: string }>("/api/execute-search", {
-      method: "POST",
-      json: {
-        platform: draftPlatform.value,
-        script_params: scriptParams,
-        scope_digest: preview.scope_digest,
-        profile_summary: profileSummary.value,
-        profile_facts: profileFacts.value,
-        ...(options.autoScreen ? {
-          auto_screen: true,
-          auto_screen_fields: options.fields || {},
-          auto_screen_profile: options.profile || "",
-          // B033：一键自动筛选同样冻结画像事实快照，刷新后接续不丢三通道输入
-          auto_screen_facts: profileFacts.value,
-        } : {}),
-      },
-    });
-    scrapeTaskId.value = data.task_id;
-    await pollTask(data.task_id, "scrape");
-  } catch (error) {
-    scrapeBusy.value = false;
-    scrapeSnapshot.value = { status: "failed", error: errorMessage(error, "抓取启动失败") };
-    notify(errorMessage(error, "抓取启动失败"), "error");
-    // D7：未登录被拒时给出账号级登录引导并跳转账号面板。
-    if (error instanceof ApiError && isLoginErrorCode(error.payload.error_code)) {
-      void showLoginGuide(draftPlatform.value);
-    }
-  }
-}
-
-async function cancelScrape() {
-  if (!scrapeTaskId.value) return;
-  // 先停轮询，避免取消后还去拿旧状态
-  if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = undefined; }
-  cancelBusy.value = true;
-  try {
-    await apiRequest(`/api/task/cancel/${encodeURIComponent(scrapeTaskId.value)}`, {
-      method: "POST",
-    });
-    // 后端会立刻关浏览器并标 cancelled；这里直接复位，不等下一次轮询
-    scrapeBusy.value = false;
-    autoScreenArmed.value = false;
-    restoredTaskHint.value = "";
-    scrapeSnapshot.value = { status: "cancelled", progress: { message: "已停止抓取" }, logs: [], error: "" };
-    interruptedRunId.value = "";
-    notify("已停止抓取", "warning");
-  } catch (error) {
-    // 取消接口失败时不要卡死：恢复轮询让前端看真实状态
-    notify(errorMessage(error, "停止失败，请重试"), "error");
-    await pollTask(scrapeTaskId.value, "scrape");
-  }
-  finally {
-    cancelBusy.value = false;
-  }
-}
-
-async function continueScrape(targetAccount?: string) {
-  if (historyMode.value) return;
-  if (!scrapeTaskId.value || scrapeBusy.value) return;
-  scrapeBusy.value = true;
-  scrapeCompleted.value = false;
-  pausedRunId.value = ""; // 切片7：清掉 DB paused 标记，进入内存工作模式
-  interruptedRunId.value = "";
-  restoredTaskHint.value = "";
-  // 016：续跑起步沿用上一快照的断点进度，禁止归零后再跳到真实位置
-  const resumeProgress = { ...(scrapeSnapshot.value?.progress || {}) };
-  resumeProgress.message = "正在从断点继续…";
-  scrapeSnapshot.value = {
-    status: "running",
-    progress: resumeProgress,
-    logs: scrapeSnapshot.value?.logs || [],
-  };
-  try {
-    const data = await apiRequest<{ task_id: string; skipped: number; old_jobs: number }>(
-      `/api/task/continue/${encodeURIComponent(scrapeTaskId.value)}`,
-      { method: "POST", json: targetAccount ? { target_account: targetAccount } : undefined },
-    );
-    scrapeTaskId.value = data.task_id;
-    pollRetryCount = 0;
-    switchAccountId.value = "";
-    await pollTask(data.task_id, "scrape");
-  } catch (error) {
-    scrapeBusy.value = false;
-    scrapeSnapshot.value = { status: "failed", progress: {}, logs: [], error: errorMessage(error, "断点续抓启动失败") };
-  }
-}
-
-async function loadSwitchAccounts() {
-  try {
-    const data = await apiRequest<{ accounts?: Array<{ id: string; name: string }> }>("/api/browser-accounts");
-    const list = Array.isArray(data.accounts)
-      ? data.accounts.map((a) => ({ id: String(a.id), name: a.id === "a" ? "默认账号" : (a.name || a.id) }))
-      : [];
-    switchAccounts.value = list.filter((a) => a.id);
-  } catch {
-    switchAccounts.value = [];
-  }
-}
-
 watch(
   () => scrapeSnapshot.value?.status === "paused" && Boolean(scrapeTaskId.value),
   (visible) => { if (visible) void loadSwitchAccounts(); },
 );
-
-interface AiScreenLaunch {
- consumeAutoScreen?: boolean;
- fields?: Record<string, string[]>;
- profile?: string;
-}
-async function startAiScreen(options: AiScreenLaunch = {}) {
-  if (historyMode.value) {
-    notify("历史轮次不可改写，请先回到最新", "warning");
-    return;
-  }
-
-
-  // 抓取/重抓占用时不允许再开一轮 AI 筛选；中断/暂停的 AI 续跑仍可进入。
-  if (scrapeBusy.value || recrawlBusy.value || scrapeSnapshot.value?.status === "paused") {
-    notify("当前已有任务在运行或暂停，请先处理完再开始新任务", "warning");
-    return;
-  }
-  if (!scrapeCompleted.value || !scrapeTaskId.value) {
-    if (!scrapeCompleted.value) {
-      notify("请先完成本轮抓取，再开始 AI 筛选", "warning");
-    } else {
-      // 旧快照缺父任务来源时不伪造 ID，明确提示重新抓取（B027 契约）。
-      notify("旧结果缺少抓取任务来源，无法继续 AI 筛选；请重新开始抓取", "warning");
-    }
-    return;
-  }
-  if (!validateProfileForScreen()) {
-    notify("求职画像至少 10 个字（不含首尾空格）", "warning");
-    return;
-  }
-  const consumeAutoScreen = Boolean(options.consumeAutoScreen || autoScreenArmed.value);
-  autoScreenArmed.value = false;
-  const screenFields = options.fields || filterValues.value[draftPlatform.value];
-  const screenProfile = options.profile ?? profileSummary.value;
-  screenPanelOpen.value = false;
-  screenBusy.value = true;
-  pausedRunId.value = ""; // 切片7：清掉 DB paused 标记，进入内存工作模式
-  interruptedRunId.value = "";
-  finishedPartial.value = false;
-  restoredTaskHint.value = "";
-  roundFlow.clearRoundContext();
-  // 020 US5：发起即离开「已抓取未筛选」次级状态，终态展示不被其遮蔽。
-  currentRoundStatus.value = "screened";
-  screenSnapshot.value = { status: "running", progress: { message: "正在创建 AI 筛选任务…" }, logs: [] };
-  try {
-    const data = await apiRequest<{ task_id: string; resuming?: boolean }>("/api/ai-screen", {
-      method: "POST",
-      json: {
-        // T506/T508：只提交当前草稿平台的筛选草稿 + schema 版本。
-        // 不发 platform（父 run 已冻结平台，后端从父 run 读）；不发 BOSS 的 stage 给智联 run。
-        screening_fields: screenFields,
-        filter_schema_version: schemaRef.value?.schema_version ?? null,
-        profile_summary: screenProfile,
-        profile_facts: profileFacts.value,
-        scrape_task_id: scrapeTaskId.value,
-        // 019：跨平台去重开关（对话框本地记忆；后端随 run 冻结，续跑沿用）。
-        cross_platform_dedupe: crossPlatformDedupeEnabled(),
-        ...(consumeAutoScreen ? { consume_auto_screen: true } : {}),
-      },
-    });
-    screenTaskId.value = data.task_id;
-    if (data.resuming) {
-      screenSnapshot.value = { status: "running", progress: { message: "检测到上次未完成的筛选，接着上次进度继续…" }, logs: [] };
-      notify("检测到上次未完成的筛选，已自动续跑", "info");
-    }
-    await pollTask(data.task_id, "screen");
-  } catch (error) {
-    screenBusy.value = false;
-    screenSnapshot.value = { status: "failed", error: errorMessage(error, "AI 筛选启动失败") };
-    notify(errorMessage(error, "AI 筛选启动失败"), "error");
-  }
-}
-
-async function continueAiScreen(platform?: Platform) {
-  if (historyMode.value) return;
-  const ctx = platform ? roundFlow.roundContexts[platform] : roundFlow.roundContext;
-  const status = String(ctx?.status || screenSnapshot.value?.status || "");
-  const isPausedResume = Boolean(pausedRunId.value) || status === "paused";
-  activeStep.value = "screen";
-  if (!isPausedResume) {
-    await startAiScreen({
-      fields: ctx?.screening_fields || filterValues.value[draftPlatform.value],
-      profile: ctx?.profile_summary || profileSummary.value,
-    });
-    return;
-  }
-  const runId = pausedRunId.value || ctx?.screen_run_id || screenTaskId.value;
-  if (!runId || screenBusy.value) return;
-  screenBusy.value = true;
-  finishedPartial.value = false;
-  restoredTaskHint.value = "";
-  roundFlow.clearRoundContext();
-  interruptedRunId.value = "";
-  // 016：续跑起步沿用上一快照断点进度，禁止归零再跳
-  const screenResumeProgress = { ...(screenSnapshot.value?.progress || {}) };
-  screenResumeProgress.message = "正在从 AI 断点继续…";
-  screenSnapshot.value = {
-    status: "running",
-    progress: screenResumeProgress,
-    logs: screenSnapshot.value?.logs || [],
-  };
-  try {
-    const data = await apiRequest<{ task_id: string }>(
-      `/api/task/continue/${encodeURIComponent(runId)}`,
-      { method: "POST" },
-    );
-    pausedRunId.value = "";
-    screenTaskId.value = data.task_id;
-    pollRetryCount = 0;
-    await pollTask(data.task_id, "screen");
-  } catch (error) {
-    screenBusy.value = false;
-    // 继续失败（如 AI 限流未解除 → 409 block_not_resolved）：回到报错暂停时的样子。
-    // 与刷新页面同一恢复路径：拉 task-state 全量暂停快照（进度/日志/pause_info/中文原因），
-    // 不重建空快照，不直出英文错误码。
-    const restored = await apiRequest<TaskSnapshot>(
-      `/api/task-state/${encodeURIComponent(runId)}`,
-    ).catch(() => null);
-    screenSnapshot.value = restored
-      ? { ...restored, status: "paused" }
-      : { ...(screenSnapshot.value || {}), status: "paused", error: errorMessage(error, "AI 断点继续失败") };
-  }
-}
-// 切片7：统一取消 paused 任务（FR-024）。
-async function cancelPausedTask(runId: string) {
-  if (!runId) return;
-  cancelBusy.value = true;
-  try {
-    await apiRequest(`/api/task/cancel/${encodeURIComponent(runId)}`, {
-      method: "POST",
-    });
-    scrapeBusy.value = false;
-    screenBusy.value = false;
-    restoredTaskHint.value = "";
-    pausedRunId.value = "";
-    interruptedRunId.value = "";
-    autoScreenArmed.value = false;
-    if (scrapeSnapshot.value) scrapeSnapshot.value = { status: "cancelled", progress: { message: "已取消任务" }, logs: [], error: "" };
-    if (screenSnapshot.value) screenSnapshot.value = { status: "cancelled", progress: { message: "已取消任务" }, logs: [], error: "" };
-    notify("已取消任务，已有结果保留", "warning");
-  } catch (error) {
-    notify(errorMessage(error, "取消失败，请重试"), "error");
-  }
-  finally {
-    cancelBusy.value = false;
-  }
-}
-
-async function finishPausedTask(runId: string) {
-  if (!runId) return;
-  // 先停轮询，避免旧状态在保存完成后覆盖新快照。
-  if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = undefined; }
-  finishSaveBusy.value = true;
-  try {
-    const data = await apiRequest<{
-      result?: PipelineResult;
-      snapshot_run_id?: string;
-      scrape_task_id?: string;
-      platform?: Platform;
-    }>(`/api/task/finish/${encodeURIComponent(runId)}`, { method: "POST" });
-    scrapeBusy.value = false;
-    screenBusy.value = false;
-    recrawlBusy.value = false;
-    restoredTaskHint.value = "";
-    pausedRunId.value = "";
-    interruptedRunId.value = "";
-    autoScreenArmed.value = false;
-    finishedPartial.value = true;
-    clearWorkflowState();
-    const totalScraped = Number(data.result?.total_scraped ?? 0);
-    const finished: TaskSnapshot = {
-      status: "completed_with_pending", stage: "done",
-      progress: { message: "已结束并保存部分结果" }, logs: [], error: "",
-      scraped_count: totalScraped,
-      source_total: totalScraped,
-      platform: data.platform,
-    };
-    if (scrapeSnapshot.value) scrapeSnapshot.value = finished;
-    if (screenSnapshot.value) screenSnapshot.value = finished;
-    if (recrawlSnapshot.value) recrawlSnapshot.value = null;
-    if (data.scrape_task_id) scrapeTaskId.value = data.scrape_task_id;
-    if (data.result) {
-      const result = data.result as PipelineResult & { platform?: Platform };
-      if (!result.platform && data.platform) result.platform = data.platform;
-      setPipelineResult(result);
-      if (data.snapshot_run_id) pipelineResultRunId.value = data.snapshot_run_id;
-      // 保存结果后恢复画像，保证“继续 AI 筛选”能真正发起而不被画像校验拦下。
-      const savedProfile = (result as Record<string, unknown>).profile_summary;
-      roundFlow.suppressProfileWatch = true;
-      try {
-        if (typeof savedProfile === "string" && savedProfile.trim()) {
-          profileSummary.value = savedProfile;
-        }
-        const savedFacts = (result as Record<string, unknown>).profile_facts;
-        if (savedFacts && typeof savedFacts === "object") {
-          profileFacts.value = savedFacts as Record<string, unknown>;
-        }
-        await nextTick();
-        profileConfirmed.value = true;
-      } finally {
-        roundFlow.suppressProfileWatch = false;
-      }
-    }
-    scrapeCompleted.value = true;
-    resultLoaded.value = true;
-    currentRoundStatus.value = "screened";
-    // 不强制跳结果页：由"查看结果/继续 AI 筛选"入口决定下一步。
-    notify("任务已结束，已完成结果已保存", "success");
-  } catch (error) {
-    notify(errorMessage(error, "结束任务失败"), "error");
-  }
-  finally {
-    finishSaveBusy.value = false;
-  }
-}
-
-async function finishScreenSave() {
-  if (roundFlow.busyAction) return;
-  const runId = screenTaskId.value || pausedRunId.value;
-  if (!runId) return;
-  roundFlow.busyAction = "finish";
-  try {
-    await finishPausedTask(runId);
-  } finally {
-    roundFlow.busyAction = "";
-  }
-}
-
-// B038：把抓取结果固化为"已抓取，未筛选"轮，供自动保存与手动查看共用。
-async function saveScrapedOnlySnapshot(markViewed = false): Promise<"saved" | "zero" | "failed"> {
-  if (!scrapeTaskId.value) return "failed";
-  const emptyResult = (): PipelineResult => ({
-    ok: true, jobs: [], dropped: [],
-    total_scraped: 0, total_kept: 0, total_matched: 0, total_dropped: 0,
-    profile_summary: profileSummary.value, error: "",
-  });
-  const snap = scrapeSnapshot.value;
-  const scrapedCount = Number(
-    snap?.scraped_count ?? snap?.source_total ?? snap?.result?.total_scraped ?? -1,
-  );
-  if (scrapedCount === 0) {
-    setPipelineResult(emptyResult());
-    if (!markViewed) resultLoaded.value = false;
-    if (markViewed) currentRoundStatus.value = "scraped_only";
-    return "zero";
-  }
-  try {
-    const data = await apiRequest<{
-      saved?: boolean; run_id?: string; result?: PipelineResult;
-    }>("/api/scrape-result-save", {
-      method: "POST",
-      json: {
-        task_id: scrapeTaskId.value,
-        profile_summary: profileSummary.value,
-        profile_facts: profileFacts.value,
-      },
-    });
-    if (data.saved && data.result) setPipelineResult(data.result);
-    else setPipelineResult(emptyResult());
-    if (!markViewed) resultLoaded.value = false;
-    if (markViewed) currentRoundStatus.value = "scraped_only";
-    return "saved";
-  } catch (error) {
-    notify(errorMessage(error, "保存结果失败"), "error");
-    return "failed";
-  }
-}
-
-async function viewScrapedOnly() {
-  const outcome = await saveScrapedOnlySnapshot(true);
-  if (outcome === "failed") return;
-  activeCategory.value = "matched";
-  activeStep.value = "results";
-  notify(
-    outcome === "zero" ? "本轮没有抓到岗位，可回到第二步重新抓取" : "已保存本轮抓取结果（已抓取，未筛选）",
-    outcome === "zero" ? "warning" : "success",
-  );
-}
-
-// 指数退避：7 次 / 64s 上限。前 5 次快速重试（4s→8s→16s→32s→64s），
-// 后 2 次保持 64s，总等待约 4 分钟。达上限后主动放弃并提示用户。
-const POLL_MAX_RETRIES = 7;
-const POLL_BASE_DELAY = 4000;
-const POLL_MAX_DELAY = 64000;
-
-let pollRetryCount = 0;
-
-async function pollTask(taskId: string, kind: "scrape" | "screen") {
-  try {
-    const data = await apiRequest<TaskSnapshot>(`/api/task-state/${encodeURIComponent(taskId)}`);
-    // 暂停请求已发出但后端仍在等当前批次结束：保持“正在暂停”，
-    // 不被旧的运行态轮询覆盖，也不提前进入完成态。
-    if (kind === "screen" && pausingScreen.value && data.status !== "paused"
-        && data.status !== "failed" && data.status !== "cancelled"
-        && data.status !== "interrupted" && !isCompletedTaskStatus(data.status)) {
-      screenSnapshot.value = {
-        ...data,
-        status: "pausing",
-        progress: { ...(data.progress || {}), message: "正在暂停…" },
-      };
-      pollTimer = window.setTimeout(() => void pollTask(taskId, kind), 1800);
-      return;
-    }
-    // 016：恢复首拍防御——轮询响应未带整体进度/计数时沿用上一拍断点值，
-    // 避免续跑/刷新后进度条"归零再跳变"；新任务起步快照本身无进度，不受影响。
-    const applyProgressFloor = (incoming: TaskSnapshot, previous?: TaskSnapshot | null): TaskSnapshot => {
-      const prev = (previous?.progress || {}) as Record<string, unknown>;
-      const next = (incoming.progress || {}) as Record<string, unknown>;
-      const patch: Record<string, unknown> = {};
-      for (const key of ("overall_percent current total" as const).split(" ")) {
-        if (next[key] == null && typeof prev[key] === "number") {
-          patch[key] = prev[key];
-        }
-      }
-      return Object.keys(patch).length
-        ? { ...incoming, progress: { ...next, ...patch } }
-        : incoming;
-    };
-    if (kind === "scrape") scrapeSnapshot.value = applyProgressFloor(data, scrapeSnapshot.value);
-    else screenSnapshot.value = applyProgressFloor(data, screenSnapshot.value);
-
-    if (isCompletedTaskStatus(data.status)) {
-      pollRetryCount = 0;
-      restoredTaskHint.value = "";
-      const hasJobs = typeof data.scraped_count === "number" ? data.scraped_count > 0 : true;
-      const shouldAutoScreen = kind === "scrape" && (autoScreenArmed.value || data.auto_screen === true) && hasJobs;
-      autoScreenArmed.value = false;
-      if (kind === "scrape") {
-        scrapeBusy.value = false;
-        scrapeCompleted.value = true;
-        let noticeMessage: string;
-        if (shouldAutoScreen) {
-          noticeMessage = data.status === "completed_with_pending"
-            ? "抓取完成，正在自动开始 AI 筛选，部分岗位待确认"
-            : "抓取完成，正在自动开始 AI 筛选";
-        } else {
-          noticeMessage = data.status === "completed_with_pending"
-            ? "抓取完成，但有待确认，请继续检查筛选条件"
-            : "抓取完成，请继续确认 AI 筛选条件";
-        }
-        notify(
-          noticeMessage,
-          data.status === "completed_with_pending" ? "warning" : "success",
-        );
-        // B038：单独抓取完成即自动保存未筛选轮，刷新后不再依赖手动"直接查看结果"。
-        if (kind === "scrape" && !shouldAutoScreen && hasJobs) {
-          await saveScrapedOnlySnapshot();
-        }
-        if (shouldAutoScreen) {
-          enterScreenStep();
-          await startAiScreen({ consumeAutoScreen: true, fields: autoScreenFields.value, profile: autoScreenProfile.value });
-        }
-      } else {
-        screenBusy.value = false;
-        pausingScreen.value = false;
-        // 实时路径与刷新路径统一：任务完成后拉双平台合并结果（R2），
-        // 避免只 set 单平台结果导致结果页切平台显示 0。
-        const fetched = await fetchMergedLatestResult();
-        if (fetched) {
-          setPipelineResult(fetched.merged);
-          currentRoundStatus.value = fetched.newer.data.status === "scraped_only" ? "scraped_only" : "screened";
-          if (isScrapedOnly.value) activeCategory.value = "matched";
-        }
-        activeStep.value = "results";
-        notify(
-          data.status === "completed_with_pending"
-            ? "AI 筛选完成，但有岗位待确认"
-            : "AI 筛选完成",
-          data.status === "completed_with_pending" ? "warning" : "success",
-        );
-      }
-      return;
-    }
-    if (data.status === "cancelled") {
-      pollRetryCount = 0;
-      restoredTaskHint.value = "";
-      if (kind === "scrape") scrapeBusy.value = false;
-      else screenBusy.value = false;
-      if (kind === "screen") pausingScreen.value = false;
-      // 不弹 error 通知：cancelScrape 已经弹过了；这里是轮询兜底（如刷新后接回的取消态）
-      return;
-    }
-    if (data.status === "paused") {
-      pollRetryCount = 0;
-      if (kind === "scrape") scrapeBusy.value = false;
-      else screenBusy.value = false;
-      if (kind === "screen") {
-        pausingScreen.value = false;
-        pausedRunId.value = taskId;
-        void loadLatestResult();
-      }
-      notify(data.error || "任务已暂停，请处理后点继续", "warning");
-      return;
-    }
-    if (data.status === "failed") {
-      pollRetryCount = 0;
-      restoredTaskHint.value = "";
-      if (kind === "scrape") scrapeBusy.value = false;
-      else screenBusy.value = false;
-      if (kind === "screen") pausingScreen.value = false;
-      notify(data.error || "任务执行失败", "error");
-      // D7：任务因未登录失败时给出账号级登录引导。
-      if (kind === "scrape" && isLoginErrorCode(data.pause_info?.error_code)) {
-        void showLoginGuide(data.platform || draftPlatform.value);
-      }
-      return;
-    }
-    if (data.status === "interrupted") {
-      // 服务重启打断：工作线程已死，不能继续轮询；停止 busy 并回到可操作的中断态。
-      pollRetryCount = 0;
-      interruptedRunId.value = taskId;
-      if (kind === "scrape") {
-        scrapeBusy.value = false;
-        scrapeTaskId.value = taskId;
-        analysisReady.value = true;
-        activeStep.value = "search";
-        restoredTaskHint.value = "上次抓取因服务重启被中断；已抓数据已保存，可结束保存结果或重新开始抓取";
-      } else {
-        screenBusy.value = false;
-        screenTaskId.value = taskId;
-        pausingScreen.value = false;
-        analysisReady.value = true;
-        enterScreenStep();
-        restoredTaskHint.value = "上次 AI 筛选因服务重启被中断；重新开始 AI 筛选会接着上次进度，不重复消耗";
-      }
-      data.progress = { ...(data.progress || {}), message: "任务因服务重启被中断，已保存进度" };
-      if (kind === "scrape") scrapeSnapshot.value = data;
-      else screenSnapshot.value = data;
-      return;
-    }
-    pollTimer = window.setTimeout(() => void pollTask(taskId, kind), 1800);
-  } catch (error) {
-    pollRetryCount += 1;
-    if (pollRetryCount > POLL_MAX_RETRIES) {
-      // 达上限，主动放弃
-      pollRetryCount = 0;
-      if (kind === "scrape") scrapeBusy.value = false;
-      else screenBusy.value = false;
-      const failed: TaskSnapshot = {
-        status: "failed",
-        progress: { message: "任务执行失败" },
-        logs: [],
-        error: "进度获取连续失败，请检查网络后重试",
-      };
-      if (kind === "scrape") scrapeSnapshot.value = failed;
-      else screenSnapshot.value = failed;
-      notify("进度获取连续失败，请检查网络后重试", "error");
-      return;
-    }
-    const delay = Math.min(POLL_BASE_DELAY * 2 ** (pollRetryCount - 1), POLL_MAX_DELAY);
-    const retrying: TaskSnapshot = {
-      status: "running",
-      // 文案改温和：大多数情况是后端正忙没及时回，不是真失败
-      progress: { message: `正在获取进度（${pollRetryCount}/${POLL_MAX_RETRIES}）…` },
-      logs: [],
-      error: "",
-    };
-    if (kind === "scrape") scrapeSnapshot.value = retrying;
-    else screenSnapshot.value = retrying;
-    pollTimer = window.setTimeout(() => void pollTask(taskId, kind), delay);
-  }
-}
-
-function setPipelineResult(result: PipelineResult) {
-  if (historyMode.value) return;
-  pipelineResult.value = result;
-  // 后端权威优先；即时 finish 响应或旧快照缺 platform 时按结果级平台回填。
-  const platform = (result as PipelineResult & { platform?: string }).platform || "";
-  if (platform) {
-    for (const list of [result.jobs, result.dropped]) {
-      if (!Array.isArray(list)) continue;
-      for (const job of list) {
-        if (job && typeof job === "object" && !(job as JobItem).platform) {
-          (job as JobItem).platform = platform as JobItem["platform"];
-        }
-      }
-    }
-  }
-  // specs/004：新 run 结果替换完成 → 递增 resultEpoch，通知 JobWorkspace 重置筛选/排序。
-  resultEpoch.value += 1;
-  const sourceRunId = (result as Record<string, unknown>).source_run_id;
-  if (typeof sourceRunId === "string") pipelineResultRunId.value = sourceRunId;
-  analysisReady.value = true;
-  scrapeCompleted.value = true;
-  resultLoaded.value = true;
-  const groups = partitionPipelineResult(result);
-  let nextCategory: "matched" | "uncertain" | "unmatched" | "dropped" = "dropped";
-  if (groups.matched.length) nextCategory = "matched";
-  else if (groups.uncertain.length) nextCategory = "uncertain";
-  else if (groups.unmatched.length) nextCategory = "unmatched";
-  activeCategory.value = nextCategory;
-}
-
-function hasLiveTaskState(): boolean {
-  if (pausedRunId.value || interruptedRunId.value) return true;
-  const liveStatuses = new Set(["running", "queued", "paused", "failed", "interrupted"]);
-  for (const snap of [screenSnapshot.value, scrapeSnapshot.value, recrawlSnapshot.value]) {
-    if (snap && liveStatuses.has(String(snap.status))) return true;
-  }
-  return false;
-}
-
-async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean }) {
-  // B068：刷新接回未完成轮次时，04 尚未出现，旧结果不能覆盖 02/03 的当前状态。
-  if (unfinishedWorkflowRestored.value && !resultsPageSeen.value) return;
-  // 暂停/中断任务未结束，不得把暂停时保存的安全网快照当作结果加载，
-  // 否则 resultLoaded 被误置 true、04 结果页对用户开放造成「任务还在跑」误解。
-  if (interruptedRunId.value || pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
-  const fetched = await fetchMergedLatestResult();
-  if (!fetched) return;
-  const { merged, newer } = fetched;
-  if (hasLiveTaskState() && newer.data.scrape_task_id && scrapeTaskId.value && newer.data.scrape_task_id !== scrapeTaskId.value) return;
-  const live = hasLiveTaskState();
-  pipelineResultRunId.value = newer.data.source_run_id || "";
-  setPipelineResult(merged);
-  // B038：最新轮可能是"已抓取，未筛选"，原样透传驱动展示模式。
-  currentRoundStatus.value = newer.data.status === "scraped_only" ? "scraped_only" : "screened";
-  if (isScrapedOnly.value) activeCategory.value = "matched";
-  if (!live) {
-    if (newer.data.scrape_task_id) scrapeTaskId.value = newer.data.scrape_task_id;
-    const ps = (newer.data.result as Record<string, unknown>).profile_summary;
-    if (typeof ps === "string" && ps.trim()) profileSummary.value = ps;
-    const pfacts = (newer.data.result as Record<string, unknown>).profile_facts;
-    if (pfacts && typeof pfacts === "object") profileFacts.value = pfacts as Record<string, unknown>;
-    if (newer.data.round_context) roundFlow.restoreRoundContext(newer.data.round_context);
-  }
-  if (pausedRunId.value) return;
-  // 重抓任务恢复：结果已加载供 04 查看，但 03 页应显示重抓自身进度，
-  // 不伪造"上次已完成"快照。
-  if (opts?.skipTerminalSnapshot) return;
-  const snapshotStatus = (newer.data.status === "completed_with_pending" || newer.data.status === "partial")
-    ? "completed_with_pending"
-    : "completed";
-  scrapeSnapshot.value = {
-    status: snapshotStatus, stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
-    started_at: newer.data.started_at,
-    finished_at: newer.data.finished_at,
-  };
-  screenSnapshot.value = {
-    status: snapshotStatus, stage: "done", progress: { message: "上次 AI 筛选已完成" }, logs: [],
-    started_at: newer.data.started_at,
-    finished_at: newer.data.finished_at,
-  };
-  const execConfig = newer.data.execution_config || {};
-  scrapeSnapshot.value.execution_config = execConfig;
-  screenSnapshot.value.execution_config = execConfig;
-  screenSnapshot.value.kept_count = Number(merged.total_kept || 0);
-  screenSnapshot.value.dropped_count = Number(merged.total_dropped || 0);
-  const sourceTotal = Number(merged.total_scraped || 0);
-  const stageTotal = snapshotStatus === "completed_with_pending"
-    ? Number(merged.total_kept || 0)
-    : sourceTotal;
-  scrapeSnapshot.value.total = stageTotal || sourceTotal;
-  scrapeSnapshot.value.source_total = sourceTotal;
-  screenSnapshot.value.total = stageTotal || sourceTotal;
-  screenSnapshot.value.source_total = sourceTotal;
-  const uncertainCount = (merged.jobs || []).filter((job) => job.verdict !== "match" && job.verdict !== "not_match" && job.verdict !== "mismatch").length;
-  screenSnapshot.value.pending_count = snapshotStatus === "completed_with_pending" ? uncertainCount : 0;
-}
-
-// 双平台合并加载：拉两个平台的 /api/latest-pipeline-result 并合并。
-// 刷新路径（loadLatestResult）与实时任务完成路径（pollTask）共用，
-// 保证两条路径行为一致（R2：实时路径只 set 单平台结果导致切平台显示 0）。
-interface MergedLatestResult {
-  merged: PipelineResult;
-  newer: {
-    platform: "boss" | "zhilian";
-    data: {
-      source_run_id?: string;
-      status?: string;
-      started_at?: number;
-      finished_at?: number;
-      execution_config?: Record<string, unknown> | null;
-      result?: PipelineResult | null;
-      scrape_task_id?: string;
-      round_context?: Partial<RoundContext> | null;
-    };
-  };
-}
-
-async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
-  try {
-    // 分别拉两个平台各自的最近结果，合并展示（后端 T409 按平台查询）。
-    const base = props.profileId ? `&profile_id=${encodeURIComponent(props.profileId)}` : "";
-    const fetchOne = (platform: "boss" | "zhilian") => apiRequest<{
-      has_result?: boolean;
-      source_run_id?: string;
-      result?: PipelineResult;
-      status?: string;
-      started_at?: number;
-      finished_at?: number;
-      execution_config?: Record<string, unknown> | null;
-      scrape_task_id?: string;
-      round_context?: Partial<RoundContext> | null;
-    }>(`/api/latest-pipeline-result?platform=${platform}${base}`).catch(() => null);
-    const [bossData, zhilianData] = await Promise.all([fetchOne("boss"), fetchOne("zhilian")]);
-    if (interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return null;
-
-    const parts = [
-      bossData?.has_result && bossData.result ? { platform: "boss" as const, data: bossData } : null,
-      zhilianData?.has_result && zhilianData.result ? { platform: "zhilian" as const, data: zhilianData } : null,
-    ].filter((part): part is { platform: "boss" | "zhilian"; data: NonNullable<typeof bossData> } => Boolean(part))
-      .filter((part) => {
-        if (!hasLiveTaskState()) return true;
-        const activeScrapeTaskId = scrapeTaskId.value;
-        return !activeScrapeTaskId || !part.data.scrape_task_id || part.data.scrape_task_id === activeScrapeTaskId;
-      });
-    if (!parts.length) return null;
-
-    // 每个岗位标记来源 run（单岗位补抓/单 JD 动作需要定位来源）。
-    for (const part of parts) {
-      resultRunIds.value[part.platform] = part.data.source_run_id || "";
-      if (!hasLiveTaskState()) {
-        roundFlow.registerRoundContext(part.platform, part.data.round_context);
-      }
-      const runId = part.data.source_run_id || "";
-      for (const list of [part.data.result?.jobs, part.data.result?.dropped]) {
-        if (!Array.isArray(list)) continue;
-        for (const job of list) {
-          if (job && typeof job === "object") {
-            (job as JobItem)._result_run_id = runId;
-            // 兼容旧快照缺 platform 字段：按查询平台回填（后端权威优先）。
-            if (!(job as JobItem).platform) (job as JobItem).platform = part.platform;
-          }
-        }
-      }
-    }
-    // 以更新时间较新的一份为主干（profile_summary / 状态投影 / 默认 run）。
-    let newer = parts[0];
-    if (parts.length > 1 && Number(parts[1].data.started_at || 0) > Number(parts[0].data.started_at || 0)) {
-      newer = parts[1];
-    }
-
-    const sum = (key: "total_scraped" | "total_matched" | "total_kept" | "total_dropped") =>
-      parts.reduce((acc, part) => acc + Number((part.data.result as Record<string, unknown> | undefined)?.[key] || 0), 0);
-    const merged: PipelineResult = {
-      ...(newer.data.result as PipelineResult),
-      jobs: parts.flatMap((part) => (Array.isArray(part.data.result?.jobs) ? part.data.result!.jobs : [])),
-      dropped: parts.flatMap((part) => (Array.isArray(part.data.result?.dropped) ? part.data.result!.dropped : [])),
-      total_scraped: sum("total_scraped"),
-      total_matched: sum("total_matched"),
-      total_kept: sum("total_kept"),
-      total_dropped: sum("total_dropped"),
-    };
-    // 019：跨平台重复簇——剔除行 extra.cross_platform_dup_of 反查合并 jobs 中
-    // 的对端保留条目，命中者挂运行时簇数据（复用 _result_run_id 惯例）；
-    // 未命中（对端条目随轮次顶替不可见）静默跳过，退化为剔除台账条目。
-    const jobsByPlatformKey = new Map<string, JobItem>();
-    for (const job of merged.jobs || []) {
-      if (job?.platform && job.platform_job_id) {
-        jobsByPlatformKey.set(`${job.platform}:${job.platform_job_id}`, job);
-      }
-    }
-    for (const drop of merged.dropped || []) {
-      const dupOf = (drop as JobItem).extra?.cross_platform_dup_of;
-      if (!dupOf || typeof dupOf !== "object") continue;
-      const head = jobsByPlatformKey.get(
-        `${String((dupOf as Record<string, unknown>).platform ?? "")}:${String((dupOf as Record<string, unknown>).platform_job_id ?? "")}`,
-      );
-      if (!head) continue;
-      (head._also_on_copies || (head._also_on_copies = [])).push({
-        platform: ((drop as JobItem).platform || head.platform) as NonNullable<JobItem["platform"]>,
-        salary: drop.salary || "",
-        source_url: String((drop as JobItem).canonical_url || drop.source_url || ""),
-        platform_job_id: drop.platform_job_id,
-      });
-    }
-    return { merged, newer };
-  } catch (error) {
-    notify(errorMessage(error, "上次结果暂时无法恢复"), "warning");
-    return null;
-  }
-}
-
-async function cancelActiveTasksForNewRound(): Promise<boolean> {
-  const ids = new Set<string>();
-  for (const id of [
-    scrapeTaskId.value, screenTaskId.value, recrawlTaskId.value,
-    pausedRunId.value, interruptedRunId.value,
-  ]) {
-    if (id) ids.add(id);
-  }
-  if (!ids.size) {
-    try {
-      const latest = await apiRequest<{ has_task?: boolean; task_id?: string }>("/api/latest-running-task");
-      if (latest.has_task && latest.task_id) ids.add(latest.task_id);
-    } catch { /* 接回失败不阻断归档 */ }
-  }
-  let cancelled = false;
-  for (const id of ids) {
-    try {
-      await apiRequest(`/api/task/cancel/${encodeURIComponent(id)}`, { method: "POST" });
-      cancelled = true;
-    } catch (error) {
-      const payload = (error as ApiError).payload as { error?: string } | undefined;
-      if (payload?.error && [
-        "already_finished", "run_not_found", "task_not_active", "not_paused",
-      ].includes(payload.error)) {
-        continue;
-      }
-      notify(errorMessage(error, "结束旧任务失败，已停止开始新一轮"), "error");
-      return false;
-    }
-  }
-  if (cancelled) notify("已结束旧任务，开始新一轮", "info");
-  return true;
-}
-
-async function clearLatestResult() {
-  try {
-    await archiveHistoryLatest();
-    return true;
-  } catch (error) {
-    notify(userFacingMessage(error, "归档旧结果失败，已停止开始新一轮"), "error");
-    return false;
-  }
-}
-
-function openHistoryDrawer() {
-  showHistory();
-}
-
-function toggleHistoryDrawer() {
-  if (historyOpen.value) hideHistory();
-  else showHistory();
-}
-
-function closeHistoryDrawer() {
-  if (historyOpen.value) hideHistory();
-}
-
-function enterHistoryRound(detail: HistoryRoundDetail) {
-  // 首次进入历史时记住进入前的草稿平台，返回最新时还原。
-  if (!historyRound.value) platformBeforeHistory.value = platformState.draft;
-  // 先退出历史模式，再装载新轮详情；同一时刻只有一个历史轮处于激活态。
-  historyRound.value = null;
-  setPipelineResult(detail.result || {});
-  pipelineResultRunId.value = detail.source_run_id || "";
-  resultRunIds.value[detail.platform] = detail.source_run_id || "";
-  resultPlatformFilter.value = detail.platform;
-  // 历史轮次与顶部平台开关/品牌色绑定：BOSS 历史进 BOSS 模式，智联历史进智联模式。
-  platformState.setDraftPlatform(detail.platform);
-  draftPlatform.value = detail.platform;
-  setThemePlatform(detail.platform);
-  activeStep.value = "results";
-  historyRound.value = {
-    runId: detail.source_run_id || "",
-    platform: detail.platform,
-    status: detail.status,
-    jobCount: Number(detail.result?.total_kept || (detail.result?.jobs || []).length || 0),
-  };
-  // B038：历史轮原始状态透传，scraped_only 轮进入"待筛选"展示模式。
-  currentRoundStatus.value = detail.status;
-  if (isScrapedOnly.value) activeCategory.value = "matched";
-}
-
-async function returnToLatest() {
-  const restorePlatform = platformBeforeHistory.value;
-  platformBeforeHistory.value = null;
-  historyRound.value = null;
-  historyBackToLatest();
-  resultPlatformFilter.value = "all";
-  pipelineResult.value = null;
-  pipelineResultRunId.value = "";
-  resultLoaded.value = false;
-  resultRunIds.value = { boss: "", zhilian: "" };
-  resultEpoch.value += 1;
-  currentRoundStatus.value = "";
-  if (restorePlatform) {
-    platformState.setDraftPlatform(restorePlatform);
-    draftPlatform.value = restorePlatform;
-    setThemePlatform(restorePlatform);
-  }
-  activeStep.value = "results";
-  await loadLatestResult();
-}
-
-// B038：历史未筛选轮补筛——退出历史模式，挂载父抓取任务与画像后
-// 复用现有"开始 AI 筛选"全流程；后端把结果升级回同一轮次。
-async function startScreenFromHistory() {
-  const detail = historyDetail.value;
-  if (!detail) return;
-  const taskId = String(detail.scrape_task_id || "");
-  if (!taskId) {
-    notify("该轮缺少抓取任务来源，无法发起 AI 筛选；请重新抓取", "warning");
-    return;
-  }
-  if (pipelineBusy.value) {
-    notify("当前已有任务在运行或暂停，请先处理完再开始新任务", "warning");
-    return;
-  }
-  historyScreenBusy.value = true;
-  try {
-  // 退出历史模式（historyRound 置空不触发 returnToLatest 的加载）。
-  platformBeforeHistory.value = null;
-  historyRound.value = null;
-  resultPlatformFilter.value = "all";
-  pipelineResult.value = null;
-  pipelineResultRunId.value = "";
-  resultLoaded.value = false;
-  resultRunIds.value = { boss: "", zhilian: "" };
-  resultEpoch.value += 1;
-  currentRoundStatus.value = "";
-  platformState.setDraftPlatform(detail.platform);
-  draftPlatform.value = detail.platform;
-  setThemePlatform(detail.platform);
-  // 等待目标平台 schema/城市加载完成，避免步骤 3 提交旧平台的
-  // filter_schema_version 触发后端 409（platform-schema.md L157）。
-  await Promise.all([
-    loadFilterLabels(detail.platform),
-    loadCityCatalog(detail.platform),
-  ]);
-  // 挂载父抓取任务：AI 筛选从该任务读取同一来源岗位，不重新抓取。
-  scrapeTaskId.value = taskId;
-  scrapeCompleted.value = true;
-  profileSummary.value = String(detail.result?.profile_summary || "");
-  const pfacts = (detail.result as PipelineResult & { profile_facts?: unknown }).profile_facts;
-  profileFacts.value = (pfacts && typeof pfacts === "object"
-    ? pfacts as Record<string, unknown> : {});
-  filterValues.value[detail.platform] = {};
-  activeCategory.value = "matched";
-  enterScreenStep();
-  notify("已载入该轮岗位，确认筛选条件后开始 AI 筛选", "info");
-  } finally {
-    historyScreenBusy.value = false;
-  }
-}
-
-function onResultPlatformFilterChange(value: "all" | "boss" | "zhilian") {
-  if (historyMode.value) return;
-  resultPlatformFilter.value = value;
-}
 
 watch(activeCategory, (next, prev) => {
   if (prev === "uncertain" && next !== "uncertain") recrawlPlatformGuide.value = null;
@@ -2605,544 +496,29 @@ watch(historyDetail, (detail, prev) => {
 
 defineExpose({ openHistoryDrawer, toggleHistoryDrawer, closeHistoryDrawer });
 
-async function exportResultCsv() {
-  if (exportBusy.value) return;
-  exportBusy.value = true;
-  try {
-    // 优先按当前结果的 run_id 导出，与结果页展示完全同源
-    const query = pipelineResultRunId.value
-      ? `?run_id=${encodeURIComponent(pipelineResultRunId.value)}`
-      : "";
-    const response = await fetch(`/api/pipeline-result/export.csv${query}`, {
-      credentials: "same-origin",
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
-      throw new ApiError(response.status, payload);
-    }
-    const disposition = response.headers.get("Content-Disposition") || "";
-    const matched = /filename=([^;]+)/.exec(disposition);
-    const filename = matched?.[1]?.trim() || "career_scout_jobs.csv";
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
-    notify("已导出匹配/不匹配分组 CSV", "success");
-  } catch (error) {
-    notify(errorMessage(error, "导出 CSV 失败"), "error");
-  } finally {
-    exportBusy.value = false;
-  }
-}
-
-async function resetWorkflow() {
-  if (!(await cancelActiveTasksForNewRound())) return;
-  if (!(await clearLatestResult())) return;
-  clearWorkflowState();
-  resultsPageSeen.value = false;
-  if (pollTimer) window.clearTimeout(pollTimer);
-  activeStep.value = "upload";
-  analysisReady.value = false;
-  scrapeCompleted.value = false;
-  resultLoaded.value = false;
-  selectedFile.value = null;
-  aiConsent.value = false;
-  scrapeTaskId.value = "";
-  scrapeSnapshot.value = null;
-  screenTaskId.value = "";
-  screenSnapshot.value = null;
-  recrawlTaskId.value = "";
-  recrawlSnapshot.value = null;
-  pipelineResult.value = null;
-  pipelineResultRunId.value = "";
-  resultPlatformFilter.value = "all";
-  finishedPartial.value = false;
-  recrawlPlatformGuide.value = null;
-  roundFlow.clearRoundContext();
-  resultRunIds.value = { boss: "", zhilian: "" };
-  activeCategory.value = "matched";
-  rejectedIds.value = new Set();
-  pausedRunId.value = "";
-  interruptedRunId.value = "";
-  restoredTaskHint.value = "";
-  currentRoundStatus.value = "";
-  scopePreview.value = null;
-  scopePreviewBusy.value = false;
-  keywords.value = [];
-  autoScreenArmed.value = false;
-  oneClickOpen.value = false;
-  profileError.value = "";
-  selectedKeywords.value = [];
-  customKeyword.value = "";
-  cityText.value = "";
-  customCity.value = "";
-  locationDraft.reset();
-  // T506：重置两个平台的筛选草稿
-  filterValues.value = { boss: {}, zhilian: {} };
-  resumeAnalysis.value = null;
-  appliedResumePlatforms.value = new Set();
-  profileSummary.value = "";
-  profileFacts.value = {};
-  historyRound.value = null;
-  historyBackToLatest();
-  scrapeBusy.value = false;
-  screenBusy.value = false;
-  recrawlBusy.value = false;
-  pausingScreen.value = false;
-  recrawlRetryCount = 0;
-  screenPanelOpen.value = true;
-}
-
-function jobId(job: JobItem): string {
-  // T511/T714：pipeline 待确认岗位稳定键是 platform_job_id（store._pending_result_row
-  // 把 platform_job_id 映射成 job_id 返回）。智联岗位 job_id 经常为 null（未落库），
-  // 旧实现 fallback 到 canonical_url，导致 /api/pipeline/jobs/<id>/jd 等接口 404。
-  // 这里优先 platform_job_id（后端按 platform_job_id 查 pending 表），
-  // BOSS 历史结果 platform_job_id 缺失时退回 job_id/id/canonical_url 兼容旧行为。
-  // 与 JobWorkspace.jobKey（带 platform 前缀，用于 Vue v-for 跨平台唯一）用途不同。
-  if (job.platform_job_id) {
-    return String(job.platform_job_id);
-  }
-  return String(
-    job.job_id
-      || job.id
-      || job.canonical_url
-      || job.source_url
-      || job.job_link
-      || ""
-  );
-}
-
-function withBusy(setRef: typeof feedbackBusyIds, id: string, active: boolean) {
-  const next = new Set(setRef.value);
-  if (active) next.add(id);
-  else next.delete(id);
-  setRef.value = next;
-}
-
-async function ensureFeedbackProfile(): Promise<string> {
-  if (props.profileId) return props.profileId;
-  const profile = await apiRequest<CandidateProfile>("/api/profiles", {
-    method: "POST",
-    json: { name: "岗位发现", confirmed_fields: {} },
-  });
-  emit("profile-created", profile);
-  return profile.id;
-}
-
-function feedbackPayload(job: JobItem, profileId: string) {
-  return {
-    profile_id: profileId,
-    job: {
-      job_id: job.job_id || job.id,
-      platform: job.platform,
-      platform_job_id: job.platform_job_id,
-      title: job.title,
-      salary: job.salary,
-      location: job.location,
-      company: job.company || job.boss_name,
-      jd: job.jd,
-      job_link: job.job_link || job.source_url || job.canonical_url,
-    },
-  };
-}
-
-async function toggleInterest(job: JobItem) {
-  const id = jobId(job);
-  if (!id || feedbackBusyIds.value.has(id)) return;
-  withBusy(feedbackBusyIds, id, true);
-  try {
-    const profileId = await ensureFeedbackProfile();
-    const marked = job._marked === "interested";
-    await apiRequest(marked
-      ? "/api/pipeline/jobs/interest/cancel"
-      : "/api/pipeline/jobs/interest", {
-      method: "POST",
-      json: feedbackPayload(job, profileId),
-    });
-    job._marked = marked ? null : "interested";
-    if (!marked) {
-      const next = new Set(rejectedIds.value);
-      next.delete(id);
-      rejectedIds.value = next;
-    }
-    notify(marked ? "已取消收藏" : "已收藏", marked ? "info" : "success");
-  } catch (error) {
-    notify(errorMessage(error, "收藏状态更新失败"), "error");
-  } finally {
-    withBusy(feedbackBusyIds, id, false);
-  }
-}
-
-async function toggleRejected(job: JobItem) {
-  const id = jobId(job);
-  if (!id || feedbackBusyIds.value.has(id)) return;
-  if (job._marked === "interested") await toggleInterest(job);
-  withBusy(feedbackBusyIds, id, true);
-  try {
-    const profileId = await ensureFeedbackProfile();
-    const currentlyRejected = rejectedIds.value.has(id) || job._marked === "rejected";
-    await apiRequest(currentlyRejected
-      ? "/api/pipeline/jobs/reject/cancel"
-      : "/api/pipeline/jobs/reject", {
-      method: "POST",
-      json: feedbackPayload(job, profileId),
-    });
-    const next = new Set(rejectedIds.value);
-    if (currentlyRejected) {
-      next.delete(id);
-      job._marked = null;
-      notify("已撤销不感兴趣", "info");
-    } else {
-      next.add(id);
-      job._marked = "rejected";
-      notify("已标记不感兴趣", "info");
-    }
-    rejectedIds.value = next;
-  } catch (error) {
-    notify(errorMessage(error, "不感兴趣状态更新失败"), "error");
-  } finally {
-    withBusy(feedbackBusyIds, id, false);
-  }
-}
-
-async function retryJd(job: JobItem) {
-  if (historyMode.value) return;
-  const id = jobId(job);
-  if (!id || jdBusyIds.value.has(id)) return;
-  withBusy(jdBusyIds, id, true);
-  try {
-    const data = await apiRequest<{
-      task_id?: string;
-      jd?: string;
-      verdict?: string;
-      verdict_reason?: string;
-      caveats?: string[];
-      flags?: JobItem["flags"];
-    }>(
-      `/api/pipeline/jobs/${encodeURIComponent(id)}/jd`, {
-      method: "POST",
-      json: {
-        // 单岗位动作优先用岗位自身来源 run（合并视图下跨平台也准确）。
-        source_run_id: job._result_run_id || pipelineResultRunId.value,
-        source_url: job.source_url || job.job_link || job.canonical_url,
-        profile_summary: profileSummary.value,
-        profile_facts: profileFacts.value,
-      },
-    });
-    if (data.task_id) {
-      recrawlBusy.value = true;
-      recrawlTaskId.value = data.task_id;
-      // 单条补抓也是重抓任务：进度回 03 页展示。
-      activeStep.value = "screen";
-      recrawlSnapshot.value = {
-        status: "running",
-        progress: { message: "正在补抓这条岗位…" },
-        logs: [],
-        error: "",
-      };
-      await pollRecrawl(data.task_id);
-      return;
-    }
-    job.jd = data.jd || "";
-    if (data.verdict) {
-      job.verdict = data.verdict as JobItem["verdict"];
-      job.verdict_reason = data.verdict_reason || "";
-      job.caveats = data.caveats || [];
-      job.flags = data.flags || [];
-      notify(`JD 已补抓，AI 判定：${data.verdict === "match" ? "匹配" : "不匹配"}`, "success");
-    } else {
-      notify("JD 已补抓（AI 未判定，可点全部重抓触发精筛）", "success");
-    }
-  } catch (error) {
-    notify(errorMessage(error, "JD 补抓失败"), "error");
-  } finally {
-    withBusy(jdBusyIds, id, false);
-  }
-}
-
-// 待确认项「全部重抓」：缺 JD 的补 CDP 抓取，有 JD 的用画像重跑 AI 精筛。
-// 复用现有轮询机制显示进度（已完成 X / 共 N），结果原地合并进当前结果，保留当前 tab。
-async function recrawlUncertain(platformOverride?: "boss" | "zhilian") {
-  if (historyMode.value) {
-    notify("历史轮次不可改写，请先回到最新", "warning");
-    return;
-  }
-  let filter = platformOverride || resultPlatformFilter.value;
-  // “全部”视图不发起混合重抓：仅当两个平台都有待确认岗位时才引导选择；
-  // 只有一个平台有待确认岗位时直接用该平台，无需用户再选一次。
-  if (filter === "all") {
-    const bossCount = Number(uncertainByPlatform.value.boss || 0);
-    const zhilianCount = Number(uncertainByPlatform.value.zhilian || 0);
-    if (bossCount > 0 && zhilianCount > 0) {
-      recrawlPlatformGuide.value = { ...uncertainByPlatform.value };
-      return;
-    }
-    filter = bossCount > 0 ? "boss" : "zhilian";
-  }
-  const ids = groups.value.uncertain
-    .filter((job) => job.platform === filter)
-    .map((job) => jobId(job))
-    .filter(Boolean);
-  if (!ids.length) {
-    notify("没有待确认的岗位", "info");
-    return;
-  }
-  if (recrawlBusy.value) return;
-  // 单平台直接重抓：进度回 03 页展示（“全部”视图单平台场景由 startRecrawl
-  // 以 undefined 调用，这里补切；单平台视图已在 startRecrawl 显式切过）。
-  activeStep.value = "screen";
-  recrawlBusy.value = true;
-  recrawlPlatformGuide.value = null;
-  recrawlSnapshot.value = {
-    status: "running",
-    progress: { message: `准备重抓 ${ids.length} 个待确认岗位…` },
-    logs: [],
-    error: "",
-  };
-  interruptedRunId.value = "";
-  try {
-    const data = await apiRequest<{ task_id: string }>("/api/pipeline/recrawl", {
-      method: "POST",
-      json: {
-        // 单平台视图按岗位自身来源 run 重抓，不跨平台混合。
-        source_run_id: resultRunIds.value[filter] || pipelineResultRunId.value,
-        job_ids: ids,
-        profile_summary: profileSummary.value,
-        profile_facts: profileFacts.value,
-      },
-    });
-    recrawlTaskId.value = data.task_id;
-    await pollRecrawl(data.task_id);
-  } catch (error) {
-    recrawlBusy.value = false;
-    recrawlSnapshot.value = {
-      status: "failed", progress: {}, logs: [], error: errorMessage(error, "重抓启动失败"),
-    };
-    notify(errorMessage(error, "重抓启动失败"), "error");
-  }
-}
-
-function chooseRecrawlPlatform(platform: "boss" | "zhilian") {
-  recrawlPlatformGuide.value = null;
-  resultPlatformFilter.value = platform;
-  void roundFlow.startRecrawl(platform);
-}
-
-async function continueRecrawl() {
-  if (!recrawlTaskId.value || recrawlBusy.value) return;
-  const taskId = recrawlTaskId.value;
-  recrawlBusy.value = true;
-  restoredTaskHint.value = "";
-  interruptedRunId.value = "";
-  const recrawlResumeProgress = { ...(recrawlSnapshot.value?.progress || {}) };
-  recrawlResumeProgress.message = "正在从重抓断点继续…";
-  recrawlSnapshot.value = {
-    status: "running",
-    progress: recrawlResumeProgress,
-    logs: recrawlSnapshot.value?.logs || [],
-  };
-  try {
-    const data = await apiRequest<{ task_id?: string }>(
-      `/api/task/continue/${encodeURIComponent(taskId)}`,
-      { method: "POST" },
-    );
-    pausedRunId.value = "";
-    recrawlTaskId.value = data.task_id || taskId;
-    recrawlRetryCount = 0;
-    await pollRecrawl(recrawlTaskId.value);
-  } catch (error) {
-    recrawlBusy.value = false;
-    // 继续重抓失败：回到报错暂停时的样子（与 continueAiScreen 同一恢复路径）。
-    const restored = await apiRequest<TaskSnapshot>(
-      `/api/task-state/${encodeURIComponent(taskId)}`,
-    ).catch(() => null);
-    recrawlSnapshot.value = restored
-      ? { ...restored, status: "paused" }
-      : { ...(recrawlSnapshot.value || {}), status: "paused", error: errorMessage(error, "重抓断点继续失败") };
-  }
-}
-
-async function pollRecrawl(taskId: string) {
-  try {
-    const data = await apiRequest<TaskSnapshot>(`/api/task-state/${encodeURIComponent(taskId)}`);
-    recrawlSnapshot.value = data;
-    const liveUpdates = (data.result as unknown as { updates?: Record<string, unknown> } | undefined)?.updates;
-    if (liveUpdates) mergeRecrawlUpdates(liveUpdates as Record<string, unknown>);
-    if (isCompletedTaskStatus(data.status)) {
-      recrawlRetryCount = 0;
-      recrawlBusy.value = false;
-      const updates = (data.result as unknown as { updates?: Record<string, unknown> } | undefined)?.updates;
-      if (updates) mergeRecrawlUpdates(updates as Record<string, unknown>);
-      notify(
-        data.status === "completed_with_pending" || data.status === "partial"
-          ? String(data.progress?.message || "重抓完成，但仍有岗位待确认")
-          : "待确认岗位已重抓完成",
-        data.status === "completed_with_pending" || data.status === "partial"
-          ? "warning"
-          : "success",
-      );
-      activeStep.value = "results";
-      window.setTimeout(() => { recrawlSnapshot.value = null; }, 3000);
-      return;
-    }
-    if (data.status === "cancelled") {
-      recrawlRetryCount = 0;
-      recrawlBusy.value = false;
-      notify("已停止重抓", "warning");
-      window.setTimeout(() => { recrawlSnapshot.value = null; }, 3000);
-      return;
-    }
-    if (data.status === "paused") {
-      recrawlRetryCount = 0;
-      recrawlBusy.value = false;
-      notify(data.error || "重抓已暂停，请处理后点继续", "warning");
-      return;
-    }
-    if (data.status === "failed") {
-      recrawlRetryCount = 0;
-      recrawlBusy.value = false;
-      notify(data.error || "重抓失败", "error");
-      window.setTimeout(() => { recrawlSnapshot.value = null; }, 5000);
-      return;
-    }
-    if (data.status === "interrupted") {
-      recrawlRetryCount = 0;
-      recrawlBusy.value = false;
-      interruptedRunId.value = taskId;
-      recrawlTaskId.value = taskId;
-      restoredTaskHint.value = "上次补抓因服务重启被中断；可结束保存已有结果";
-      data.progress = { ...(data.progress || {}), message: "任务因服务重启被中断，已保存进度" };
-      recrawlSnapshot.value = data;
-      return;
-    }
-    pollTimer = window.setTimeout(() => void pollRecrawl(taskId), 1800);
-  } catch (error) {
-    recrawlRetryCount += 1;
-    if (recrawlRetryCount > POLL_MAX_RETRIES) {
-      recrawlRetryCount = 0;
-      recrawlBusy.value = false;
-      recrawlSnapshot.value = {
-        status: "failed",
-        progress: { message: "重抓进度获取连续失败" },
-        logs: [],
-        error: "重抓进度获取连续失败，请检查后重试",
-      };
-      notify("重抓进度获取连续失败，请检查后重试", "error");
-      return;
-    }
-    const delay = Math.min(POLL_BASE_DELAY * 2 ** (recrawlRetryCount - 1), POLL_MAX_DELAY);
-    pollTimer = window.setTimeout(() => void pollRecrawl(taskId), delay);
-  }
-}
-
-// 把后端回写的 {jd/verdict/verdict_reason/caveats} 原地合并到当前结果，
-// 已解决的项会随 groups 重算自动离开待确认 tab，未解决项原地保留。
-function mergeRecrawlUpdates(updates: Record<string, unknown>) {
-  const result = pipelineResult.value as (PipelineResult & { jobs?: JobItem[] }) | null;
-  if (!result || !Array.isArray(result.jobs)) return;
-  for (const job of result.jobs) {
-    const id = jobId(job);
-    const upd = updates[id];
-    if (!upd || typeof upd !== "object") continue;
-    const map = upd as Record<string, unknown>;
-    if (typeof map.jd !== "undefined") job.jd = String(map.jd ?? "");
-    if (typeof map.verdict !== "undefined") job.verdict = map.verdict as JobItem["verdict"];
-    if (typeof map.verdict_reason !== "undefined") job.verdict_reason = String(map.verdict_reason ?? "");
-    if (Array.isArray(map.caveats)) job.caveats = map.caveats as string[];
-    if (Array.isArray(map.flags)) job.flags = map.flags as JobItem["flags"];
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Task 009：详情生命周期控件接入（JobWorkspace actions slot）
-// ---------------------------------------------------------------------------
-
-/**
- * 传给 JobLifecycleActions 的岗位身份投影：
- * 权威三元组（job 自身冻结 platform + platform_job_id + canonical_url）完整时
- * 优先按三元组解析，避免把 pipeline pending 映射的平台原始 ID 误当内部 job_id。
- * 三元组不完整时保留原 job（由组件内部阻断写操作），绝不用当前 UI 平台补值。
- */
-function lifecycleJob(job: JobItem): JobItem {
-  if (job.platform && job.platform_job_id && job.canonical_url) {
-    return { ...job, id: undefined, job_id: undefined };
-  }
-  return job;
-}
-
-function onJobFeedbackChanged(payload: { profileId: string; jobId: string }) {
-  emit("job-feedback-changed", payload);
-}
-
-// ---------------------------------------------------------------------------
-// 轨迹浮窗：大卡片收敛为“查看轨迹”小按钮，点击后居中弹窗展示全部内容
-// ---------------------------------------------------------------------------
-
-const lifecycleDialogOpen = ref(false);
-const lifecycleDialogJob = ref<JobItem | null>(null);
-
-function openLifecycleDialog(job: JobItem) {
-  lifecycleDialogJob.value = lifecycleJob(job);
-  lifecycleDialogOpen.value = true;
-}
-
-function closeLifecycleDialog() {
-  lifecycleDialogOpen.value = false;
-}
-
-function handleLifecycleDialogKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape") closeLifecycleDialog();
-}
-
 watch(lifecycleDialogOpen, (open) => {
   if (open) document.addEventListener("keydown", handleLifecycleDialogKeydown);
   else document.removeEventListener("keydown", handleLifecycleDialogKeydown);
 });
 
-// ---------------------------------------------------------------------------
-// 顶栏本轮状态胶囊数据（纯派生，不发请求）：
-// 运行中（抓取/筛选/补抓）显示进行中态；有结果时显示已判定数；其余空闲态上抛 null。
-// 平台优先取任务自身平台（恢复任务快照携带），缺省时用草稿平台。
-// ---------------------------------------------------------------------------
-const roundStatusPayload = computed(() => {
-  const platform: Platform = scrapeSnapshot.value?.platform
-    || screenSnapshot.value?.platform
-    || draftPlatform.value;
-  if (historyRound.value) {
-    if (isScrapedOnly.value) {
-      return { platform: historyRound.value.platform, phase: "scraped" as const, judged: historyRound.value.jobCount, scope: "history" as const };
-    }
-    const g = groups.value;
-    const judged = g.matched.length + g.unmatched.length + g.uncertain.length + g.dropped.length;
-    return { platform: historyRound.value.platform, phase: "judged" as const, judged, scope: "history" as const };
-  }
-  if (scrapeBusy.value || recrawlBusy.value) {
-    return { platform, phase: "scraping" as const, judged: 0, scope: platform };
-  }
-  if (screenBusy.value) return { platform, phase: "screening" as const, judged: 0, scope: platform };
-  if (resultLoaded.value && pipelineResult.value) {
-    const scope = resultPlatformFilter.value === "all" ? "all" as const : resultPlatformFilter.value;
-    if (isScrapedOnly.value) {
-      const total = (filteredPipelineResult.value.jobs || []).length;
-      return { platform, phase: "scraped" as const, judged: total, scope };
-    }
-    const g = groups.value;
-    const judged = g.matched.length + g.unmatched.length + g.uncertain.length + g.dropped.length;
-    return { platform, phase: "judged" as const, judged, scope };
-  }
-  return null;
-});
 watch(roundStatusPayload, (payload) => {
   emit("round-status", payload);
-}, { immediate: true });
-</script>
+});
 
+onMounted(() => {
+  restoreWorkflowState();
+  void loadAdvancedSettings();
+  void loadFilterLabels();
+  void loadCityCatalog();
+  void restoreRunningTask().finally(() => {
+    restoreSaved02State();
+    if (!unfinishedWorkflowRestored.value && !activeTaskRestored.value
+      && !scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
+      void loadLatestResult();
+    }
+  });
+});
+</script>
 <template>
   <main
     class="view-shell"
@@ -3746,7 +1122,6 @@ watch(roundStatusPayload, (payload) => {
     />
   </main>
 </template>
-
 <style scoped>
 .adv-mode-summary {
   margin: -6px 0 14px;
