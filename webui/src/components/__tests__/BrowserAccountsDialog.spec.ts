@@ -111,7 +111,7 @@ describe("BrowserAccountsDialog", () => {
     expect(accountCards[1].find('[data-testid="delete-b"]').exists()).toBe(true);
   });
 
-  it("shows 受限中 badge and 待刷新 for expired records", async () => {
+  it("shows 受限中 badge and 上次结果 · 待刷新 for stale records", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/browser-accounts") {
@@ -120,7 +120,7 @@ describe("BrowserAccountsDialog", () => {
           active_account: "a",
           login_states: {
             a: {
-              boss: { state: "restricted", at: Date.now() / 1000 - 16 * 60 },
+              boss: { state: "logged_in", at: Date.now() / 1000 - 16 * 60 },
               zhilian: { state: "restricted", at: Date.now() / 1000 },
             },
           },
@@ -131,8 +131,8 @@ describe("BrowserAccountsDialog", () => {
 
     const wrapper = await mountOpen(fetchMock);
 
-    // 新鲜受限记录 → 受限中；过期记录 → 待刷新
-    expect(wrapper.get('[data-testid="account-state-a-boss"]').text()).toBe("待刷新");
+    // 过期记录保留上次结果并标注待刷新；新鲜受限记录 → 受限中
+    expect(wrapper.get('[data-testid="account-state-a-boss"]').text()).toBe("已登录 · 待刷新");
     expect(wrapper.get('[data-testid="account-state-a-zhilian"]').text()).toBe("受限中");
   });
 
@@ -171,8 +171,8 @@ describe("BrowserAccountsDialog", () => {
     await findButton(wrapper, "设为当前账号").trigger("click");
     await flushPromises();
 
-    // 切换后账号 b 的徽章标记为待刷新，直到后端有新鲜探测记录
-    expect(wrapper.get('[data-testid="account-state-b-boss"]').text()).toBe("待刷新");
+    // 切换后账号 b 的徽章保留上次结果并标注待刷新，直到后端有新鲜探测记录
+    expect(wrapper.get('[data-testid="account-state-b-boss"]').text()).toBe("已登录 · 待刷新");
   });
 
   it("open button sends one request for the clicked platform only", async () => {

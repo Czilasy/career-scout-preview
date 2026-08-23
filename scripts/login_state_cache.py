@@ -11,9 +11,11 @@
 
 state 四态: "logged_in" / "not_logged_in" / "restricted" / "unknown"。
 - TTL 15 分钟（可注入覆盖）；
-- 信号回写：登录成功（打开/等待登录完成）→ invalidate 立即失效重探；
+- 信号回写：登录成功（打开/等待登录完成）→ invalidate 软失效（保留上次结果、
+  时间回拨到 TTL 外，任务侧读到的是"需重探"，UI 侧仍能看到上次确认的状态）；
   任务抓取持续拿到明文工资 → 写 logged_in；登录失效 → 写 not_logged_in；
-  受限类信号不写缓存（016：受限只在当次任务内实时判定）。
+  受限类信号不写缓存（016：受限只在当次任务内实时判定）；
+  账号被删除 → forget 硬删该账号全部记录，不留幽灵数据。
 
 模块级路径可注入（set_login_state_path），测试隔离用。
 """
@@ -134,10 +136,12 @@ def write_login_state(account_id: str, platform: str, state: str) -> None:
 def invalidate_login_state(
     account_id: str, platform: str | None = None,
 ) -> None:
-    """Invalidate the login cache for one account (one or all platforms).
+    """软失效：保留记录，只把时间回拨到 TTL 之外。
 
-    登录成功信号（wait_for_login 完成 / 打开浏览器登录）触发，
-    使下次读取重新探测，避免沿用登录前的旧状态。
+    登录成功信号（wait_for_login 完成 / 打开浏览器登录）触发。
+    任务侧 read_cached_state 按 TTL 判定过期 → 下次 preflight 真实重探，
+    不沿用登录前的旧判定（016 语义不变）；UI 侧 all_login_states 仍能读到
+    上一次任务确认的状态，徽章显示「上次结果 · 待刷新」而不是「未使用过」。
     """
     account_id = str(account_id or "")
     if not account_id:
@@ -145,14 +149,30 @@ def invalidate_login_state(
     with _LOCK:
         data = _load()
         account = data.get(account_id)
-        if account is None:
+        if not isinstance(account, dict):
             return
-        if platform:
-            account.pop(str(platform), None)
-            if not account:
-                data.pop(account_id, None)
-        else:
-            data.pop(account_id, None)
+        changed = False
+        records = (
+            [account.get(str(platform))] if platform
+            else list(account.values())
+        )
+        for record in records:
+            if isinstance(record, dict) and record.get("state") in LOGIN_STATE_STATES:
+                record["at"] = 0.0
+                changed = True
+        if changed:
+            _save(data)
+
+
+def forget_login_state(account_id: str) -> None:
+    """硬删除整个账号的登录记录（账号被删除时调用）。"""
+    account_id = str(account_id or "")
+    if not account_id:
+        return
+    with _LOCK:
+        data = _load()
+        if data.pop(account_id, None) is None:
+            return
         _save(data)
 
 

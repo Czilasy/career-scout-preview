@@ -176,25 +176,30 @@ async function openPlatform(account: BrowserAccount, platform: Platform) {
   await loadAccounts();
 }
 
-// D7：徽章三态 + 第四态 unknown + 无记录/过期两种弱状态。
+// D7：徽章显示最后一次任务确认的结果；记录被软失效（打开窗口/续跑/重新登录
+// 只回拨时间不删记录）或超过 15 分钟 TTL 时，结果保留并追加「待刷新」标注；
+// 从未有过记录才是「未使用过」。
+const STATE_BADGES: Record<string, { text: string; tone: string }> = {
+  logged_in: { text: "已登录", tone: "ok" },
+  not_logged_in: { text: "未登录", tone: "warn" },
+  restricted: { text: "受限中", tone: "restricted" },
+  unknown: { text: "状态未知", tone: "empty" },
+};
+
 function platformBadge(account: BrowserAccount, platform: Platform) {
-  if (pendingRefresh.value.has(account.id)) {
-    return { text: "待刷新", tone: "refresh" };
-  }
   const record = loginStates.value[account.id]?.[platform];
   if (!record) {
     return { text: "未使用过", tone: "empty" };
   }
-  if (Date.now() - record.at * 1000 > LOGIN_STATE_TTL_MS) {
-    return { text: "待刷新", tone: "refresh" };
+  const badge = STATE_BADGES[record.state];
+  if (!badge) {
+    return { text: "未使用过", tone: "empty" };
   }
-  const map: Record<string, { text: string; tone: string }> = {
-    logged_in: { text: "已登录", tone: "ok" },
-    not_logged_in: { text: "未登录", tone: "warn" },
-    restricted: { text: "受限中", tone: "restricted" },
-    unknown: { text: "状态未知", tone: "empty" },
-  };
-  return map[record.state] || { text: "未使用过", tone: "empty" };
+  const stale = Date.now() - record.at * 1000 > LOGIN_STATE_TTL_MS;
+  if (pendingRefresh.value.has(account.id) || stale) {
+    return { text: `${badge.text} · 待刷新`, tone: "refresh" };
+  }
+  return badge;
 }
 
 // 锁定文案：暂停时中性提示，运行/排队保留「请先结束任务」提示。

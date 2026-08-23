@@ -260,6 +260,8 @@ def delete_browser_account(account_id: str, path: str | os.PathLike[str] | None 
             raise ValueError("内置账号不能删除")
         del accounts[str(account_id)]
         save_browser_accounts(accounts, path)
+        from scripts.login_state_cache import forget_login_state
+        forget_login_state(str(account_id))
 
 _ACTIVE_CDP_DATA_DIR: str | None = None
 

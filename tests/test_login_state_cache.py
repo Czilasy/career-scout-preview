@@ -3,7 +3,8 @@
 覆盖：
 - write_login_state / read_cached_state：两态+unknown 读写与 TTL 15 分钟
 - 016：restricted 不再是合法状态；旧文件遗留 restricted 读作无缓存
-- invalidate_login_state：单平台与全平台失效
+- invalidate_login_state：软失效——任务侧过期重探，UI 侧保留上次结果
+- forget_login_state：账号删除时的硬删除
 - read_login_state：非法记录容错
 - all_login_states：清理后的快照
 """
@@ -83,6 +84,24 @@ class LoginStateCacheTests(unittest.TestCase):
         cache.invalidate_login_state("acc1")
         self.assertIsNone(cache.read_cached_state("acc1", "boss"))
         self.assertIsNone(cache.read_cached_state("acc1", "zhilian"))
+
+    def test_invalidate_keeps_last_result_for_ui(self):
+        # 软失效：任务侧过期重探，但 UI 快照仍能读到上一次确认的状态
+        cache.write_login_state("acc1", "boss", "logged_in")
+        cache.invalidate_login_state("acc1", "boss")
+        self.assertIsNone(cache.read_cached_state("acc1", "boss"))
+        record = cache.read_login_state("acc1", "boss")
+        self.assertEqual(record["state"], "logged_in")
+        snapshot = cache.all_login_states()
+        self.assertEqual(snapshot["acc1"]["boss"]["state"], "logged_in")
+
+    def test_forget_login_state_removes_account(self):
+        cache.write_login_state("acc1", "boss", "logged_in")
+        cache.write_login_state("acc1", "zhilian", "not_logged_in")
+        cache.forget_login_state("acc1")
+        self.assertIsNone(cache.read_login_state("acc1", "boss"))
+        self.assertIsNone(cache.read_login_state("acc1", "zhilian"))
+        self.assertNotIn("acc1", cache.all_login_states())
 
     def test_missing_account_returns_none(self):
         self.assertIsNone(cache.read_cached_state("ghost", "boss"))
