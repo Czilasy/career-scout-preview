@@ -2594,3 +2594,146 @@ class LatestResultSingleSourceOfTruthTests(unittest.TestCase):
         platform_latest = self.store.load_latest_pipeline_result_for_platform("boss")
         self.assertEqual(global_latest["run_id"], platform_latest["run_id"])
         self.assertEqual(global_latest["run_id"], run_id)
+
+
+# ===========================================================================
+# 020 US4：用过收藏/反馈的画像可删除（子表显式清理）
+# ===========================================================================
+class ProfileDeletionWithHistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = TaskStore(pathlib.Path(self.temp.name) / "db")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _make_profile_with_history(self):
+        from webui.store import _now
+
+        profile = self.store.create_profile("带历史画像")
+        job = self.store.save_job(
+            "https://www.zhipin.com/job_detail/del-1.html",
+            "https://www.zhipin.com/job_detail/del-1.html",
+            "岗位", "公司", "20K", "上海", "JD",
+        )
+        self.store.link_profile_job(
+            profile["id"], job["id"], None, None, status="interested")
+        with self.store._connection() as conn:
+            conn.execute(
+                "INSERT INTO profile_job_events ("
+                "id, profile_id, job_id, action, from_status, to_status, "
+                "occurred_at) VALUES ('evt-1', ?, ?, 'mark_applied', "
+                "'interested', 'applied', ?)",
+                (profile["id"], job["id"], _now()),
+            )
+            conn.execute(
+                "INSERT INTO profile_job_command_receipts ("
+                "request_id, request_fingerprint, profile_id, job_id, "
+                "action, changed, event_id, created_at) VALUES ("
+                "'req-1', 'fp-1', ?, ?, 'mark_applied', 1, 'evt-1', ?)",
+                (profile["id"], job["id"], _now()),
+            )
+        return profile["id"], job["id"]
+
+    def test_delete_profile_with_events_and_receipts_succeeds(self):
+        pid, _jid = self._make_profile_with_history()
+        result = self.store.delete_profile(pid)
+        self.assertEqual(result["deleted"], True)
+        with self.store._connection() as conn:
+            events = conn.execute(
+                "SELECT COUNT(*) FROM profile_job_events WHERE profile_id=?",
+                (pid,),
+            ).fetchone()[0]
+            receipts = conn.execute(
+                "SELECT COUNT(*) FROM profile_job_command_receipts WHERE profile_id=?",
+                (pid,),
+            ).fetchone()[0]
+            profiles = conn.execute(
+                "SELECT COUNT(*) FROM candidate_profiles WHERE id=?",
+                (pid,),
+            ).fetchone()[0]
+        self.assertEqual(events, 0)
+        self.assertEqual(receipts, 0)
+        self.assertEqual(profiles, 0)
+        with self.assertRaises(KeyError):
+            self.store.get_profile(pid)
+
+    def test_delete_profile_without_history_returns_same_shape(self):
+        profile = self.store.create_profile("无历史画像")
+        result = self.store.delete_profile(profile["id"])
+        self.assertEqual(result, {"deleted": True,
+                                  "resume_ids": []})
+        with self.assertRaises(KeyError):
+            self.store.get_profile(profile["id"])
+
+
+# ===========================================================================
+# 020 US7：条件降级守卫（succeeded → failed 仅当同流程无结果轮）
+# ===========================================================================
+class DowngradeSucceededIfNoResultRoundTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = TaskStore(pathlib.Path(self.temp.name) / "db")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _seed_run(self, run_id, *, status="succeeded",
+                  scrape_task_id="src-1", platform="boss"):
+        self.store.create_screening_run(
+            run_id,
+            frozen_filters={},
+            source_count=1,
+            execution_params={
+                "platform": platform,
+                "scrape_task_id": scrape_task_id,
+            },
+        )
+        self.store.update_screening_run(run_id, status="running")
+        if status != "running":
+            self.store.update_screening_run(run_id, status=status)
+
+    def test_succeeded_without_round_downgrades_to_failed(self):
+        self._seed_run("run-a")
+        ok = self.store.downgrade_succeeded_if_no_result_round(
+            "run-a", error_code="result_round_save_failed",
+            error_reason="筛选已完成但结果保存失败")
+        self.assertTrue(ok)
+        run = self.store.get_screening_run("run-a")
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["error_code"], "result_round_save_failed")
+        self.assertEqual(run["error_reason"], "筛选已完成但结果保存失败")
+
+    def test_flow_with_visible_round_refuses_downgrade(self):
+        self._seed_run("run-b", scrape_task_id="src-2")
+        # 同流程已存在可见结果轮
+        self.store.save_pipeline_result(
+            {
+                "ok": True,
+                "jobs": [{"platform": "boss", "platform_job_id": "j1",
+                          "title": "岗位", "verdict": "match"}],
+                "dropped": [], "total_scraped": 1, "total_kept": 1,
+                "total_matched": 1, "total_dropped": 0,
+            },
+            {"platform": "boss"},
+            execution_params={"platform": "boss",
+                              "scrape_task_id": "src-2"},
+        )
+        ok = self.store.downgrade_succeeded_if_no_result_round(
+            "run-b", error_code="result_round_save_failed",
+            error_reason="x")
+        self.assertFalse(ok)
+        run = self.store.get_screening_run("run-b")
+        self.assertEqual(run["status"], "succeeded")
+
+    def test_non_succeeded_run_refuses_downgrade(self):
+        self._seed_run("run-c", status="paused")
+        ok = self.store.downgrade_succeeded_if_no_result_round(
+            "run-c", error_code="result_round_save_failed",
+            error_reason="x")
+        self.assertFalse(ok)
+        self.assertEqual(
+            self.store.get_screening_run("run-c")["status"], "paused")
+        # run 不存在：拒绝降级（False，不抛）
+        self.assertFalse(self.store.downgrade_succeeded_if_no_result_round(
+            "run-missing", error_code="x", error_reason="y"))

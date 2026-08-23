@@ -1799,6 +1799,8 @@ async function startAiScreen(options: AiScreenLaunch = {}) {
   finishedPartial.value = false;
   restoredTaskHint.value = "";
   roundFlow.clearRoundContext();
+  // 020 US5：发起即离开「已抓取未筛选」次级状态，终态展示不被其遮蔽。
+  currentRoundStatus.value = "screened";
   screenSnapshot.value = { status: "running", progress: { message: "正在创建 AI 筛选任务…" }, logs: [] };
   try {
     const data = await apiRequest<{ task_id: string; resuming?: boolean }>("/api/ai-screen", {

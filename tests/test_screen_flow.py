@@ -347,7 +347,7 @@ class LoadResumeVerdictsTests(unittest.TestCase):
         self.assertEqual(set(verdicts), {"a"})
 
     def test_returns_own_verdicts_when_checkpoint_covered(self):
-        """判定数 >= 断点数时不触发回退，返回 run 自身判定。"""
+        """断点岗位全部有判定（覆盖完整）时不触发回退，返回 run 自身判定。"""
         self._seed_chain_run(
             "run1", {"b": {"verdict": "dropped", "reason": "经验不符"}})
         current = self._seed_chain_run(
@@ -357,6 +357,36 @@ class LoadResumeVerdictsTests(unittest.TestCase):
         )
         verdicts = self._load(current)
         self.assertEqual(set(verdicts), {"a"})
+
+    def test_count_enough_but_keys_do_not_cover_still_merges(self):
+        """020 US6：判定数够但键集不覆盖断点（精筛判定计入总数）→ 仍合并，
+        run1 的 dropped 不复活。"""
+        self._seed_chain_run(
+            "run1", {"b": {"verdict": "dropped", "reason": "经验不符"}})
+        # 断点 [a, b]；当前 run 判定 {a, x}：数量 2 >= 2 但 b 无判定
+        current = self._seed_chain_run(
+            "current",
+            {"a": {"verdict": "not_match", "reason": "跨链路"},
+             "x": {"verdict": "match", "reason": "精筛"}},
+            checkpoint=["a", "b"],
+        )
+        verdicts = self._load(current)
+        self.assertEqual(set(verdicts), {"a", "b", "x"})
+        self.assertEqual(verdicts["b"]["verdict"], "dropped",
+                         "断点岗位缺判定必须从链上合并，dropped 不复活")
+
+    def test_full_coverage_skips_merge(self):
+        """断点 ⊆ 判定键集（全覆盖）→ 跳过合并（回归）。"""
+        self._seed_chain_run(
+            "run1", {"z": {"verdict": "dropped", "reason": "无关岗位"}})
+        current = self._seed_chain_run(
+            "current",
+            {"a": {"verdict": "kept", "reason": ""},
+             "b": {"verdict": "match", "reason": "精筛"}},
+            checkpoint=["a", "b"],
+        )
+        verdicts = self._load(current)
+        self.assertEqual(set(verdicts), {"a", "b"})
 
 
 if __name__ == "__main__":

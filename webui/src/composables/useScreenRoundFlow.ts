@@ -98,13 +98,16 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       return ctxStatus;
     }
     const raw = String(deps.refs.screenSnapshot.value?.status || "");
+    // 运行态优先于「已抓取未筛选」次级状态（020 US5）：scraped_only 轮
+    // 发起筛选进入运行期必须显示运行/暂停，不得残留 start。
+    if (raw === "running" || deps.refs.screenBusy.value) return "running";
     if (deps.refs.currentRoundStatus.value === "scraped_only") return "scraped_only";
     if (raw === "completed_with_pending") return "partial";
     if (raw === "completed") return "succeeded";
     if (raw === "cancelled") return "interrupted";
     if (deps.refs.interruptedRunId.value) return "interrupted";
     if (deps.refs.pausedRunId.value) return "paused";
-    return raw || (deps.refs.screenBusy.value ? "running" : "");
+    return raw;
   });
 
   const recrawlStatus = computed(() => {

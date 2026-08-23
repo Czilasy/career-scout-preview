@@ -6,6 +6,7 @@ import type {
   ScopePreviewRequest,
   ScopePreviewResponse,
 } from "./types";
+import { ERROR_MESSAGES } from "./errorCodes";
 
 let sessionToken = "";
 let buildIdentityVerified = false;
@@ -71,8 +72,10 @@ export class ApiError extends Error {
   constructor(status: number, payload: Record<string, unknown>) {
     // error_reason 优先于 error/error_code：后两者是机器码（如 block_not_resolved），
     // 直接展示给用户会产生"找不到任务"之类的误读；error_reason 恒为中文原因。
+    // 机器码直出前先查中文映射表（020 US2），查不到才回退原始值。
+    const mapped = ERROR_MESSAGES[String(payload.error_code || "")] || "";
     const message = String(
-      payload.user_message || payload.message || payload.error_reason || payload.error || payload.error_code || `请求失败（${status}）`,
+      payload.user_message || payload.message || payload.error_reason || mapped || payload.error || payload.error_code || `请求失败（${status}）`,
     );
     super(message);
     this.name = "ApiError";

@@ -7,6 +7,7 @@
 - BossCdpSource 携带 platform 和显式 cdp_port；
 - SAFE_FAILURE_CODES 覆盖错误矩阵全部稳定码。
 """
+import json
 import pathlib
 import tempfile
 import unittest
@@ -886,11 +887,12 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         self.assertEqual(results["j0"].failed_code, "source_login_required")
         self.assertFalse(results["j1"].ok)
         self.assertEqual(results["j1"].failed_code, "source_login_required")
-        # 熔断器打开后，后续岗位不再调用 runner，直接返回 source_blocked。
+        # 熔断器打开后，后续岗位不再调用 runner；开闸失败码透传开闸信号
+        #（020 US1：登录开闸报登录，不再误报 source_blocked）。
         self.assertLess(call_count["n"], len(jobs))
         for jid in ("j2", "j3"):
             self.assertFalse(results[jid].ok)
-            self.assertEqual(results[jid].failed_code, "source_blocked")
+            self.assertEqual(results[jid].failed_code, "source_login_required")
 
     def test_batch_invalid_job_gets_failure(self):
         source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
@@ -1068,11 +1070,11 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         for jid in ("j0", "j1", "j2", "j3"):
             self.assertFalse(results[jid].ok)
             self.assertEqual(results[jid].failed_code, "source_login_required")
-        # 熔断打开后第二批不再调用 runner，直接 source_blocked
+        # 熔断打开后第二批不再调用 runner；失败码透传开闸信号（020 US1）
         results2 = source.fetch_details_batch(jobs, tab_pool_size=2)
         self.assertEqual(len(batch_calls), 1, "熔断打开后不得再调用 runner")
         for jid in ("j0", "j1", "j2", "j3"):
-            self.assertEqual(results2[jid].failed_code, "source_blocked")
+            self.assertEqual(results2[jid].failed_code, "source_login_required")
 
     def test_batch_parallel_breaker_open_skips_runner(self):
         """调用前熔断已打开：整批 source_blocked，runner 零调用。"""
@@ -2512,6 +2514,277 @@ class BossCdpSourcePreflightTests(_LoginCacheIsolated):
             outcome = source.preflight()
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.failed_code, "source_login_required")
+
+
+# ===========================================================================
+# 020 US1：熔断器开闸失败码透传 last_signal + 冷却期满可复位
+# ===========================================================================
+class BreakerOpenFailureCodeTests(unittest.TestCase):
+    """open_failure_code() 透传开闸信号；缺失时回落 source_blocked。"""
+
+    def test_open_failure_code_transmits_login_signal(self):
+        breaker = SourceCircuitBreaker()
+        breaker.record_signal("source_login_required")
+        breaker.record_signal("source_login_required")
+        self.assertTrue(breaker.is_open())
+        self.assertEqual(breaker.open_failure_code(), "source_login_required")
+
+    def test_open_failure_code_transmits_risk_signals(self):
+        for signal in (
+            "source_verification_required",
+            "source_rate_limited",
+            "source_blocked",
+        ):
+            breaker = SourceCircuitBreaker()
+            breaker.record_signal(signal)
+            breaker.record_signal(signal)
+            self.assertTrue(breaker.is_open())
+            self.assertEqual(breaker.open_failure_code(), signal)
+
+    def test_open_failure_code_falls_back_when_signal_missing(self):
+        breaker = SourceCircuitBreaker()
+        breaker.record_signal("source_rate_limited")
+        breaker.record_signal("source_rate_limited")
+        # 防御路径：开闸但 last_signal 缺失（理论不可达）
+        breaker._last_signal = None
+        self.assertEqual(breaker.open_failure_code(), "source_blocked")
+
+    def test_cooldown_elapsed_reflects_time_progress(self):
+        times = [0.0]
+        breaker = SourceCircuitBreaker(
+            cooldown_seconds=60, clock=lambda: times[0],
+        )
+        breaker.record_signal("source_login_required")
+        breaker.record_signal("source_login_required")
+        self.assertFalse(breaker.cooldown_elapsed())
+        times[0] = 60.0
+        self.assertTrue(breaker.cooldown_elapsed())
+
+
+class BossBreakerFaithfulnessTests(unittest.TestCase):
+    """020 US1：Boss fetch_list 开闸失败码透传 + 冷却期满复位接线。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+        self.artifact_root = self.root / "artifacts"
+        self.artifact_root.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _breaker(self):
+        self._times = [0.0]
+        return SourceCircuitBreaker(
+            cooldown_seconds=60, clock=lambda: self._times[0],
+        )
+
+    def _source(self, breaker):
+        return BossCdpSource(
+            artifact_root=self.artifact_root,
+            cdp_port=9222,
+            in_process=True,
+            breaker=breaker,
+        )
+
+    def _plan_item(self, name):
+        list_path = str(self.artifact_root / f"list_{name}.json")
+        payload = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+        }
+        return {
+            **payload,
+            "input_hash": _boss_input_hash(payload),
+            "list_output_path": list_path,
+        }
+
+    def test_open_gate_transmits_login_signal(self):
+        breaker = self._breaker()
+        source = self._source(breaker)
+        breaker.record_signal("source_login_required")
+        breaker.record_signal("source_login_required")
+        with mock.patch.object(
+            source, "preflight",
+            return_value=SourceOutcome.success(safe_log="preflight_ok"),
+        ) as m_preflight, mock.patch.object(source, "_run_command") as m_run:
+            outcome = source.fetch_list(self._plan_item("login_open"))
+        # 冷却未满：不做探测、不发起抓取，失败码如实透传登录信号
+        m_preflight.assert_not_called()
+        m_run.assert_not_called()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_login_required")
+
+    def test_open_gate_transmits_risk_signals(self):
+        for signal in ("source_verification_required", "source_rate_limited"):
+            breaker = self._breaker()
+            source = self._source(breaker)
+            breaker.record_signal(signal)
+            breaker.record_signal(signal)
+            with mock.patch.object(source, "preflight") as m_preflight, \
+                    mock.patch.object(source, "_run_command") as m_run:
+                outcome = source.fetch_list(self._plan_item(f"risk_{signal}"))
+            m_preflight.assert_not_called()
+            m_run.assert_not_called()
+            self.assertFalse(outcome.ok)
+            self.assertEqual(outcome.failed_code, signal)
+
+    def test_cooldown_elapsed_preflight_success_resets_and_proceeds(self):
+        breaker = self._breaker()
+        source = self._source(breaker)
+        breaker.record_signal("source_login_required")
+        breaker.record_signal("source_login_required")
+        self._times[0] = 120.0  # 冷却期满
+
+        plan = self._plan_item("reset_ok")
+        output_path = plan["list_output_path"]
+
+        def fake_run(command, timeout, **kwargs):
+            pathlib.Path(output_path).write_text(
+                json.dumps({"jobs": [{"job_id": "j1",
+                                      "source_url": "https://www.zhipin.com/job/1"}]},
+                           ensure_ascii=False),
+                encoding="utf-8",
+            )
+            return 0, ""
+
+        with mock.patch.object(
+            source, "preflight",
+            return_value=SourceOutcome.success(safe_log="preflight_ok"),
+        ) as m_preflight, mock.patch.object(
+            source, "_run_command", side_effect=fake_run,
+        ) as m_run:
+            outcome = source.fetch_list(plan)
+
+        m_preflight.assert_called_once()
+        m_run.assert_called_once()
+        self.assertFalse(breaker.is_open(), "preflight 通过且冷却期满必须复位熔断器")
+        self.assertTrue(outcome.ok)
+
+    def test_cooldown_elapsed_preflight_failure_keeps_breaker_open(self):
+        breaker = self._breaker()
+        source = self._source(breaker)
+        breaker.record_signal("source_login_required")
+        breaker.record_signal("source_login_required")
+        self._times[0] = 120.0
+        with mock.patch.object(
+            source, "preflight",
+            return_value=SourceOutcome.failure(
+                failed_code="source_login_required", safe_log="preflight_fail"),
+        ) as m_preflight, mock.patch.object(source, "_run_command") as m_run:
+            outcome = source.fetch_list(self._plan_item("reset_fail"))
+        m_preflight.assert_called_once()
+        m_run.assert_not_called()
+        self.assertTrue(breaker.is_open(), "preflight 失败不得复位")
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_login_required")
+
+    def test_preflight_exception_treated_as_failure_no_reset(self):
+        breaker = self._breaker()
+        source = self._source(breaker)
+        breaker.record_signal("source_rate_limited")
+        breaker.record_signal("source_rate_limited")
+        self._times[0] = 120.0
+        with mock.patch.object(
+            source, "preflight", side_effect=RuntimeError("boom"),
+        ), mock.patch.object(source, "_run_command") as m_run:
+            outcome = source.fetch_list(self._plan_item("reset_exc"))
+        m_run.assert_not_called()
+        self.assertTrue(breaker.is_open())
+        self.assertEqual(outcome.failed_code, "source_rate_limited")
+
+
+class ZhilianBreakerFaithfulnessTests(unittest.TestCase):
+    """020 US1：智联串行/并行批量开闸失败码透传。"""
+
+    @staticmethod
+    def _jobs(n):
+        return [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(n)
+        ]
+
+    def test_serial_open_gate_transmits_login_signal(self):
+        breaker = SourceCircuitBreaker()
+        breaker.record_signal("source_login_required")
+        breaker.record_signal("source_login_required")
+        calls = []
+
+        def runner(job, **kw):
+            calls.append(job["platform_job_id"])
+            return _fake_detail(signal="ok")
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            detail_runner=runner, breaker=breaker,
+        )
+        results = source.fetch_details_batch(self._jobs(2))
+        self.assertEqual(calls, [], "开闸后串行批量不得调用 runner")
+        for jid in ("j0", "j1"):
+            self.assertEqual(results[jid].failed_code, "source_login_required")
+
+    def test_serial_open_gate_transmits_verification_signal(self):
+        breaker = SourceCircuitBreaker()
+        breaker.record_signal("source_verification_required")
+        breaker.record_signal("source_verification_required")
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            detail_runner=lambda job, **kw: _fake_detail(signal="ok"),
+            breaker=breaker,
+        )
+        results = source.fetch_details_batch(self._jobs(1))
+        self.assertEqual(results["j0"].failed_code, "source_verification_required")
+
+    def test_parallel_open_gate_transmits_login_signal_no_recovery_probe(self):
+        breaker = SourceCircuitBreaker()
+        breaker.record_signal("source_login_required")
+        breaker.record_signal("source_login_required")
+        calls = []
+
+        def batch_runner(list_data, **kw):
+            calls.append(kw)
+            return [], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner, breaker=breaker,
+        )
+        with mock.patch.object(source, "preflight") as m_preflight:
+            results = source.fetch_details_batch(self._jobs(2), tab_pool_size=2)
+        # 冷却未满：不做探测，整批透传登录信号
+        m_preflight.assert_not_called()
+        self.assertEqual(calls, [])
+        for jid in ("j0", "j1"):
+            self.assertEqual(results[jid].failed_code, "source_login_required")
+
+    def test_parallel_cooldown_elapsed_preflight_success_resets(self):
+        times = [0.0]
+        breaker = SourceCircuitBreaker(
+            cooldown_seconds=60, clock=lambda: times[0],
+        )
+        breaker.record_signal("source_login_required")
+        breaker.record_signal("source_login_required")
+        times[0] = 120.0
+        calls = []
+
+        def batch_runner(list_data, **kw):
+            calls.append(kw)
+            return [("ok", {}) for _ in list_data.get("jobs", [])], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner, breaker=breaker,
+        )
+        with mock.patch.object(
+            source, "preflight",
+            return_value=SourceOutcome.success(safe_log="preflight_ok"),
+        ) as m_preflight:
+            results = source.fetch_details_batch(self._jobs(2), tab_pool_size=2)
+        m_preflight.assert_called_once()
+        self.assertFalse(breaker.is_open())
+        self.assertEqual(len(calls), 1, "复位后本批应正常发起")
+        self.assertTrue(all(o.ok for o in results.values()))
 
 
 if __name__ == "__main__":

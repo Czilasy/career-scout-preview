@@ -423,5 +423,71 @@ class ResultRoundFlowApiTests(unittest.TestCase):
         self.assertEqual(items[0]["status"], "partial")
 
 
+# ===========================================================================
+# 020 US7：save_finished_round 瞬时锁短退避重试
+# ===========================================================================
+class _FlakyWriteStore:
+    """最小桩：get_screening_run / 防重查询直通，写入口按脚本抛错。"""
+
+    def __init__(self, failures):
+        self._failures = list(failures)
+        self.write_attempts = 0
+
+    def get_screening_run(self, run_id):
+        return None
+
+    def latest_scraped_only_for_source(self, scrape_task_id):
+        return None
+
+    def list_history_rounds(self, platform=None):
+        return []
+
+    def upgrade_scraped_run(self, *args, **kwargs):
+        raise AssertionError("不应走升级路径")
+
+    def save_pipeline_result(self, *args, **kwargs):
+        self.write_attempts += 1
+        if self._failures:
+            failure = self._failures.pop(0)
+            if failure is not None:
+                raise failure
+        return f"round-{self.write_attempts}"
+
+
+class SaveFinishedRoundRetryTests(unittest.TestCase):
+    def setUp(self):
+        import webui.result_rounds as result_rounds
+        self.result_rounds = result_rounds
+        self.sleeps: list[float] = []
+        result_rounds._retry_sleep = self.sleeps.append
+
+    def tearDown(self):
+        self.result_rounds._retry_sleep = self.result_rounds._default_retry_sleep
+
+    def test_transient_lock_retries_then_succeeds(self):
+        import sqlite3
+        store = _FlakyWriteStore([
+            sqlite3.OperationalError("database is locked"),
+            sqlite3.OperationalError("database is locked"),
+        ])
+        run_id = save_finished_round(
+            store, _result(), _script_params(),
+            scrape_task_id=SCRAPE_TASK_ID, status="done", platform=PLATFORM,
+        )
+        self.assertEqual(store.write_attempts, 3)
+        self.assertEqual(len(self.sleeps), 2, "两次重试之间必须退避")
+        self.assertEqual(run_id, "round-3")
+
+    def test_non_operational_error_not_retried(self):
+        store = _FlakyWriteStore([ValueError("boom")])
+        with self.assertRaises(ValueError):
+            save_finished_round(
+                store, _result(), _script_params(),
+                scrape_task_id=SCRAPE_TASK_ID, status="done", platform=PLATFORM,
+            )
+        self.assertEqual(store.write_attempts, 1)
+        self.assertEqual(self.sleeps, [])
+
+
 if __name__ == "__main__":
     unittest.main()

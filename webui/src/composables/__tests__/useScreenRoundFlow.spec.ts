@@ -353,6 +353,24 @@ describe("useScreenRoundFlow", () => {
     expect(flow.screenAction.value.kind).toBe("start");
   });
 
+  it("scraped_only round reports running while snapshot is running (020 US5)", () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    refs.currentRoundStatus.value = "scraped_only";
+    refs.screenSnapshot.value = { status: "running" };
+    expect(flow.screenStatus.value).toBe("running");
+    expect(flow.screenAction.value.kind).toBe("pause");
+  });
+
+  it("scraped_only round reports running when only screenBusy is set (020 US5)", () => {
+    const { refs, api } = makeDeps();
+    const flow = useScreenRoundFlow({ refs, api });
+    refs.currentRoundStatus.value = "scraped_only";
+    refs.screenBusy.value = true;
+    expect(flow.screenStatus.value).toBe("running");
+    expect(flow.screenAction.value.kind).toBe("pause");
+  });
+
   it("closed saved round maps screenStatus to partial and keeps recrawl on results", () => {
     const { refs, api } = makeDeps();
     const flow = useScreenRoundFlow({ refs, api });

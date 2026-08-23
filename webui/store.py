@@ -1685,8 +1685,12 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
     def delete_profile(self, profile_id):
         """删除画像及其关联数据。
 
-        - 删除 candidate_profiles 行，外键 ON DELETE CASCADE 自动清理
-          profile_jobs / search_runs / resumes / screening_* 等关联表
+        - 岗位状态事件（profile_job_events）与命令回执
+          （profile_job_command_receipts）两张子表对 profile_jobs 是
+          ON DELETE RESTRICT，删主表前必须显式清理（回执另有 event_id
+          外键，先删回执再删事件）。
+        - 其余关联（profile_jobs / search_runs / resumes / screening_*）
+          由外键 ON DELETE CASCADE 随主表行清理。
         """
         pid = str(profile_id)
         # 校验存在，不存在抛 KeyError 与 get_profile 行为一致
@@ -1700,6 +1704,14 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
         # 删除简历文件需要 resume_service，但 store 不依赖 resume_service；
         # 这里只清数据库层，文件删除由 app 层调用前清理（见 app.py delete_profile 路由）。
         with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM profile_job_command_receipts WHERE profile_id = ?",
+                (pid,),
+            )
+            conn.execute(
+                "DELETE FROM profile_job_events WHERE profile_id = ?",
+                (pid,),
+            )
             conn.execute("DELETE FROM candidate_profiles WHERE id = ?", (pid,))
         return {"deleted": True, "resume_ids": resume_ids}
 
@@ -2190,6 +2202,55 @@ class TaskStore(ResultHistoryStoreMixin, ScrapeOnlyStoreMixin, StoreMigrationsMi
                 ("用户提前结束，已保存部分结果", ts, str(run_id)),
             )
         return self.get_screening_run(run_id)
+
+    def downgrade_succeeded_if_no_result_round(
+        self, run_id, *, error_code: str, error_reason: str,
+    ) -> bool:
+        """条件降级 succeeded → failed（020 US7 写轮失败救援出口）。
+
+        事务内校验，同时满足才允许降级：
+        1. run 当前仍为 succeeded；
+        2. 同流程（scrape_task_id + platform）不存在任何可见 result_snapshot
+           轮（done/partial/scraped_only）。
+        任一不满足返回 False、终态不动（调用方落诊断事件）。
+        """
+        ts = _now()
+        with self._connection() as conn:
+            conn.execute(_BEGIN_IMMEDIATE)
+            self._assert_recovery_writes_allowed(conn)
+            row = conn.execute(
+                "SELECT status, platform, execution_params_json "
+                "FROM screening_runs WHERE id = ?",
+                (str(run_id),),
+            ).fetchone()
+            if row is None or str(row["status"] or "") != "succeeded":
+                return False
+            try:
+                params = json.loads(row["execution_params_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                params = {}
+            params = params if isinstance(params, dict) else {}
+            scrape_task_id = str(params.get("scrape_task_id") or "")
+            platform = str(row["platform"] or params.get("platform") or "")
+            if not scrape_task_id or not platform:
+                return False
+            visible_round = conn.execute(
+                "SELECT id FROM screening_runs "
+                "WHERE record_kind = 'result_snapshot' "
+                "AND status IN ('done', 'partial', 'scraped_only') "
+                "AND json_extract(execution_params_json, '$.scrape_task_id') = ? "
+                "AND platform = ? LIMIT 1",
+                (scrape_task_id, platform),
+            ).fetchone()
+            if visible_round is not None:
+                return False
+            conn.execute(
+                "UPDATE screening_runs SET status = 'failed', "
+                "error_code = ?, error_reason = ?, updated_at = ? "
+                "WHERE id = ?",
+                (str(error_code), str(error_reason), ts, str(run_id)),
+            )
+        return True
 
     def update_screening_execution_params(self, run_id, params: dict) -> None:
         """Replace the JSON execution params for a screening run."""

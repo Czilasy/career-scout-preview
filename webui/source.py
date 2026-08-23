@@ -227,6 +227,21 @@ class SourceCircuitBreaker:
         """True if the breaker is open (no new source job should start)."""
         return self._opened_at is not None
 
+    def open_failure_code(self) -> str:
+        """开闸期间对外失败码：透传 ``last_signal``（登录报登录、风控报风控），
+        信号缺失（防御路径）回落 ``source_blocked``。"""
+        signal = self._last_signal
+        if signal in self.SIGNAL_CODES:
+            return signal
+        return "source_blocked"
+
+    def cooldown_elapsed(self, *, now: float | None = None) -> bool:
+        """True if open AND the cooldown period has elapsed (probe allowed)."""
+        if self._opened_at is None or self._cooldown_until is None:
+            return False
+        current = now if now is not None else self._clock()
+        return current >= self._cooldown_until
+
     def try_reset(self, preflight_ok: bool, *, now: float | None = None) -> bool:
         """Attempt to close the breaker.
 
@@ -391,6 +406,19 @@ class BossCdpSource:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def _try_breaker_recovery(self) -> bool:
+        """开闸且冷却期满时做一次 preflight 探测，通过才复位（020 US1）。
+
+        冷却未满不做探测（避免空耗）；preflight 异常视为探测失败。
+        """
+        if not self.breaker.is_open() or not self.breaker.cooldown_elapsed():
+            return False
+        try:
+            outcome = self.preflight()
+        except Exception:
+            return False
+        return self.breaker.try_reset(outcome.ok)
 
     def preflight(self) -> SourceOutcome:
         """Check the dedicated Chrome connection and BOSS login once per run.
@@ -596,9 +624,9 @@ class BossCdpSource:
             start_page=start_page,
         )
         safe_log = f"list combo_key_present=1 keyword_present=1 city_present={bool(city)} pages={target_pages}"
-        if self.breaker.is_open():
+        if self.breaker.is_open() and not self._try_breaker_recovery():
             return SourceOutcome.failure(
-                failed_code="source_blocked",
+                failed_code=self.breaker.open_failure_code(),
                 safe_log=f"{safe_log} breaker_open",
             )
         try:
@@ -721,13 +749,13 @@ class BossCdpSource:
             )
         command = self._build_detail_command(detail_input_path, str(detail_path))
         safe_log = f"detail job_id_present=1 url_host_safe={_safe_host(source_url)}"
-        if self.breaker.is_open():
+        if self.breaker.is_open() and not self._try_breaker_recovery():
             try:
                 Path(detail_input_path).unlink(missing_ok=True)
             except OSError:
                 pass
             return SourceOutcome.failure(
-                failed_code="source_blocked",
+                failed_code=self.breaker.open_failure_code(),
                 safe_log=f"{safe_log} breaker_open",
             )
         try:
@@ -927,14 +955,14 @@ class BossCdpSource:
             tab_pool_size=tab_pool_size,
         )
         safe_log = f"batch_detail job_count={len(valid_jobs)}"
-        if self.breaker.is_open():
+        if self.breaker.is_open() and not self._try_breaker_recovery():
             try:
                 Path(batch_input_path).unlink(missing_ok=True)
             except OSError:
                 pass
             for job_id in expected_urls_by_job_id:
                 results[job_id] = SourceOutcome.failure(
-                    failed_code="source_blocked",
+                    failed_code=self.breaker.open_failure_code(),
                     safe_log=f"{safe_log} breaker_open",
                 )
             return results
@@ -2171,6 +2199,19 @@ class ZhilianCdpSource:
             reason or _zhilian_failed_reason(failed_code), run_id=self.run_id,
         )
 
+    def _try_breaker_recovery(self) -> bool:
+        """开闸且冷却期满时做一次 preflight 探测，通过才复位（020 US1）。
+
+        冷却未满不做探测（避免空耗）；preflight 异常视为探测失败。
+        """
+        if not self.breaker.is_open() or not self.breaker.cooldown_elapsed():
+            return False
+        try:
+            outcome = self.preflight()
+        except Exception:
+            return False
+        return self.breaker.try_reset(outcome.ok)
+
     # ------------------------------------------------------------------
     # T301: 平台禁用门禁（新任务创建前由编排层调用）
     # ------------------------------------------------------------------
@@ -2437,12 +2478,14 @@ class ZhilianCdpSource:
                     continue
                 job_id = str(job.get("platform_job_id") or "").strip()
                 key = job_id or f"idx{i}"
-                # 熔断器打开：直接返回 source_blocked，不再调用 runner。
+                # 熔断器打开：不再调用 runner；失败码透传开闸信号（020 US1）。
+                # 逐岗位门点只透传不复位，避免批内 N 次探测。
                 if self.breaker.is_open():
                     results[key] = SourceOutcome.failure(
-                        failed_code="source_blocked",
+                        failed_code=self.breaker.open_failure_code(),
                         safe_log=_zhilian_safe_log(
-                            stage="batch", failed_code="source_blocked",
+                            stage="batch",
+                            failed_code=self.breaker.open_failure_code(),
                             counts={"idx": i, "breaker_open": 1},
                         ),
                         failed_reason="熔断器已打开，连续平台级 signal 触发",
@@ -2517,13 +2560,15 @@ class ZhilianCdpSource:
             valid.append((i, job_id or f"idx{i}"))
         if not valid:
             return results
-        # 熔断器已打开：整批不再调用 runner，全部 source_blocked。
-        if self.breaker.is_open():
+        # 熔断器已打开：整批不再调用 runner；先试恢复（冷却期满 + preflight
+        # 通过才复位），仍开闸则失败码透传开闸信号（020 US1）。
+        if self.breaker.is_open() and not self._try_breaker_recovery():
             for i, key in valid:
                 results[key] = SourceOutcome.failure(
-                    failed_code="source_blocked",
+                    failed_code=self.breaker.open_failure_code(),
                     safe_log=_zhilian_safe_log(
-                        stage="batch", failed_code="source_blocked",
+                        stage="batch",
+                        failed_code=self.breaker.open_failure_code(),
                         counts={"idx": i, "breaker_open": 1},
                     ),
                     failed_reason="熔断器已打开，连续平台级 signal 触发",

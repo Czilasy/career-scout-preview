@@ -2389,6 +2389,214 @@ class ScreenContinueFlowTests(unittest.TestCase):
         self.assertFalse(
             any(event["type"] == "history_snapshot" for event in events))
 
+class ResultRoundRescueTests(unittest.TestCase):
+    """020 US7：终态 succeeded 落库后写结果轮失败 → 重试 → 条件降级 →
+    续跑直达收尾重建结果轮。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _create_scrape(self):
+        jobs = [
+            {"job_id": f"j{i}", "platform_job_id": f"j{i}", "title": "岗位",
+             "source_url": f"https://zhipin.example/j{i}.html"}
+            for i in range(3)
+        ]
+        run_id = f"scrape_{uuid.uuid4().hex[:8]}"
+        self.store.create_screening_run(
+            run_id,
+            frozen_filters={},
+            source_count=len(jobs),
+            execution_params={
+                "platform": "boss",
+                "script_params": {
+                    "keyword": "Python,后端", "city": ["上海"], "pages": 3,
+                },
+                "execution_config": {
+                    "schema_version": 1, "inter_combo_delay": 10,
+                    "detail_batch_size": 15, "detail_interval": 2,
+                    "detail_reset_every": 4, "detail_batch_cooldown": 5,
+                    "detail_tab_pool_size": 5, "screen_batch_size": 50,
+                    "screen_concurrency": 5, "match_batch_size": 4,
+                    "match_concurrency": 10, "config_digest": None,
+                },
+                "frozen_scope": {
+                    "schema_version": 1, "platform": "boss",
+                    "keywords": ["Python"], "scope_kind": "cities",
+                    "cities": ["上海"], "pages_per_combination": 3,
+                    "combination_count": 1, "planned_pages": 3,
+                    "task_size": "small", "scope_digest": None,
+                },
+            },
+            backend_version="test",
+        )
+        self.store.update_screening_run(
+            run_id, status="succeeded", current_stage="done",
+            processed_count=len(jobs), match_count=len(jobs),
+        )
+        self.store.save_scrape_combo_result(
+            run_id, "kw|city", jobs, ["kw|city"])
+        self.app.config["PIPELINE_TASKS"][run_id] = {
+            "kind": "scrape", "status": "done", "progress": {}, "logs": [],
+            "result": {"ok": True, "jobs": jobs, "total_scraped": len(jobs),
+                       "total_matched": 0, "completed_combos": ["kw|city"]},
+            "error": "", "started_at": None, "finished_at": None,
+            "stop_event": threading.Event(), "platform": "boss",
+        }
+        return run_id
+
+    def _start_screen(self, scrape_id):
+        captured = []
+        with mock.patch.object(
+            self.app.config["PIPELINE_EXECUTOR"], "submit",
+            side_effect=lambda fn, *a, **kw: captured.append((fn, a, kw)) or None,
+        ):
+            resp = self.client.post("/api/ai-screen", json={
+                "scrape_task_id": scrape_id,
+                "screening_fields": {"salary": ["20-30K"]},
+                "profile_summary": "测试画像",
+                "profile_facts": {"years": 3},
+                "filter_schema_version": 1,
+            })
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        return captured[0]
+
+    def _run_with_mocks(self, captured_fn, screen_calls, match_calls,
+                        save_side_effect=None):
+        """跑一轮筛选任务；可注入 save_finished_round 替身。"""
+        from webui import pipeline_exec
+        import webui.result_rounds as result_rounds
+
+        def _fake_screen_jobs(jobs_arg, *a, **kw):
+            screen_calls.append([str(j.get("job_id")) for j in jobs_arg])
+            return {
+                "kept": [str(j.get("job_id")) for j in jobs_arg],
+                "dropped": [], "verdicts": {},
+            }
+
+        def _fake_match_jds(jobs_arg, *a, **kw):
+            match_calls.append([str(j["job_id"]) for j in jobs_arg])
+            verdicts = {
+                str(j["job_id"]): {"verdict": "match", "reason": "匹配",
+                                   "caveats": [], "flags": []}
+                for j in jobs_arg
+            }
+            if verdicts and kw.get("on_batch_done"):
+                kw["on_batch_done"](
+                    verdicts, [str(j["job_id"]) for j in jobs_arg])
+            return {"verdicts": verdicts}
+
+        def _fake_fetch_details(chunk, source, **kw):
+            return {
+                "jobs": [dict(j, jd="岗位描述") for j in chunk],
+                "hard_stop": False, "stopped": False,
+            }
+
+        fn, args, kwargs = captured_fn
+        patches = [
+            mock.patch.object(pipeline_exec, "resolve_browser_account",
+                              return_value=""),
+            mock.patch.object(pipeline_exec, "set_active_cdp_data_dir"),
+            mock.patch.object(pipeline_exec, "ensure_chrome_ready",
+                              return_value=(True, "")),
+            mock.patch.object(pipeline_exec, "close_debug_chrome"),
+            mock.patch.object(pipeline_exec, "fetch_job_details",
+                              side_effect=_fake_fetch_details),
+            mock.patch.object(
+                self.store, "get_ai_settings",
+                return_value={"endpoint_url": "http://ai.test", "model": "m",
+                              "is_configured": True}),
+            mock.patch("webui.app.ai_service.is_ai_available",
+                       return_value=True),
+            mock.patch("webui.ai.screen_jobs", side_effect=_fake_screen_jobs),
+            mock.patch("webui.ai.match_jds", side_effect=_fake_match_jds),
+        ]
+        if save_side_effect is not None:
+            patches.append(mock.patch.object(
+                self.store, "save_pipeline_result",
+                side_effect=save_side_effect))
+        for p in patches:
+            p.start()
+        try:
+            fn(*args, **kwargs)
+        finally:
+            for p in patches:
+                p.stop()
+
+    def _new_task_ids(self, before, *known):
+        return set(self.app.config["PIPELINE_TASKS"]) - set(before) - set(known)
+
+    def test_lock_failure_retries_downgrades_and_resume_rebuilds_round(self):
+        import sqlite3
+        scrape_id = self._create_scrape()
+        before = set(self.app.config["PIPELINE_TASKS"])
+
+        # 第一轮：save_finished_round 恒抛瞬时锁错
+        attempts = []
+
+        def always_locked(*a, **kw):
+            attempts.append(1)
+            raise sqlite3.OperationalError("database is locked")
+
+        captured = self._start_screen(scrape_id)
+        screen_calls, match_calls = [], []
+        self._run_with_mocks(captured, screen_calls, match_calls,
+                             save_side_effect=always_locked)
+        new_ids = self._new_task_ids(before, scrape_id)
+        self.assertEqual(len(new_ids), 1, new_ids)
+        task_id = new_ids.pop()
+
+        # 重试 3 次后条件降级
+        self.assertEqual(len(attempts), 3)
+        run = self.store.get_screening_run(task_id)
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["error_code"], "result_round_save_failed")
+        task_mem = self.app.config["PIPELINE_TASKS"][task_id]
+        self.assertEqual(task_mem["status"], "failed")
+        self.assertIn("点继续可重试保存", task_mem["error"])
+        events = [e["type"] for e in self.store.list_task_events(task_id)]
+        self.assertIn("result_round_save_failed", events)
+        # 零结果轮
+        self.assertEqual(self.store.list_history_rounds(), [])
+
+        # 续跑：AI 零重筛、直达收尾、结果轮重建、终态 succeeded
+        screen_calls2, match_calls2 = [], []
+        captured2 = self._start_screen(scrape_id)
+        self._run_with_mocks(captured2, screen_calls2, match_calls2)
+        resumed_ids = self._new_task_ids(before, scrape_id, task_id)
+        resumed_id = resumed_ids.pop() if resumed_ids else task_id
+
+        run2 = self.store.get_screening_run(resumed_id)
+        self.assertEqual(run2["status"], "succeeded", run2)
+        # AI 零调用：粗筛/精筛收到的都是空清单
+        self.assertTrue(screen_calls2 and all(c == [] for c in screen_calls2),
+                        screen_calls2)
+        self.assertTrue(match_calls2 and all(c == [] for c in match_calls2),
+                        match_calls2)
+        # 结果轮成功写入且一条流程一条轮
+        self.assertEqual(len(self.store.list_history_rounds()), 1)
+
+
 class ChromeAccountProfileSwitchTests(unittest.TestCase):
     """账号切换时，端口上旧账号的 Chrome 必须被替换而不是复用。"""
 
@@ -8355,6 +8563,276 @@ class B054LocationApiTests(unittest.TestCase):
             resp = self.client.get("/api/location-catalog?platform=boss&city=上海")
         self.assertEqual(resp.status_code, 503)
         self.assertEqual(resp.get_json()["error_code"], "location_catalog_unavailable")
+
+# ===========================================================================
+# 020 US3：续跑时跨平台重复岗位只进剔除列表（复用 019 集成测试基建）
+# ===========================================================================
+from tests.test_cross_platform_dedupe import (  # noqa: E402
+    CrossPlatformDedupeIntegrationTests,
+    _boss_kept_job,
+    _wait_for_pipeline_task,
+    _zl_job,
+)
+from tests.test_cross_platform_dedupe import EXTRA_KEY  # noqa: E402
+
+
+class ResumeDedupSingleSideTests(CrossPlatformDedupeIntegrationTests):
+    """断点内已保留岗位 + 本轮新命中跨平台重复 → 岗位只在剔除侧。"""
+
+    def _run_first_round_paused_at_fine(self, scrape_task_id, rough_seen):
+        """第一轮：无 BOSS 轮；粗筛全过（判定入断点），精筛限流暂停。"""
+        from webui.ai import AISecurityError, ERROR_RATE_LIMIT
+
+        def rough_ok(jobs, *args, **kwargs):
+            rough_seen.extend(str(j.get("job_id")) for j in jobs)
+            return {"kept": [str(j.get("job_id")) for j in jobs],
+                    "dropped": [],
+                    "verdicts": {str(j.get("job_id")): {
+                        "verdict": "kept", "reason": "符合", "caveats": []}
+                        for j in jobs}}
+
+        def fine_blocked(chunk, *args, **kwargs):
+            raise AISecurityError(ERROR_RATE_LIMIT)
+
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.screen_jobs", side_effect=rough_ok), \
+                mock.patch("webui.ai.match_jds", side_effect=fine_blocked), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                           return_value=(True, "")), \
+                mock.patch("webui.source.ZhilianCdpSource",
+                           return_value=object()), \
+                mock.patch("webui.pipeline_exec.fetch_job_details",
+                           side_effect=lambda chunk, *a, **k: {
+                               "jobs": [{**job, "jd": "职责描述"} for job in chunk],
+                               "hard_stop": False, "hard_stop_code": None,
+                               "stopped": False, "fetched": len(chunk),
+                           }), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            response = self.client.post("/api/ai-screen", json={
+                "screening_fields": {"keyword": "后端"},
+                "profile_summary": "后端工程师",
+                "scrape_task_id": scrape_task_id,
+            }, headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.get_json())
+            task_id = response.get_json()["task_id"]
+            finished = _wait_for_pipeline_task(self.client, task_id)
+        return task_id, finished
+
+    def _continue_recording_fine(self, run_id, rough_seen, fine_seen):
+        """续跑并记录粗筛/精筛实际输入；返回最终快照。"""
+        def rough_ok(jobs, *args, **kwargs):
+            rough_seen.extend(str(j.get("job_id")) for j in jobs)
+            return {"kept": [str(j.get("job_id")) for j in jobs],
+                    "dropped": [], "verdicts": {}}
+
+        def fine_ok(chunk, *args, **kwargs):
+            fine_seen.extend(str(job["job_id"]) for job in chunk)
+            return {"verdicts": {
+                str(job["job_id"]): {"verdict": "match", "reason": "匹配",
+                                     "caveats": []}
+                for job in chunk}}
+
+        self.app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.screen_jobs", side_effect=rough_ok), \
+                mock.patch("webui.ai.match_jds", side_effect=fine_ok), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                           return_value=(True, "")), \
+                mock.patch("webui.source.ZhilianCdpSource",
+                           return_value=object()), \
+                mock.patch("webui.pipeline_exec.fetch_job_details",
+                           side_effect=lambda chunk, *a, **k: {
+                               "jobs": [{**job, "jd": "职责描述"} for job in chunk],
+                               "hard_stop": False, "hard_stop_code": None,
+                               "stopped": False, "fetched": len(chunk),
+                           }), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            response = self.client.post(
+                f"/api/task/continue/{run_id}", headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.get_json())
+            return _wait_for_pipeline_task(self.client, run_id)
+
+    def test_checkpoint_kept_job_hit_by_dedupe_lands_in_dropped_only(self):
+        """断点内已保留 + 暂停期间对端出现同指纹岗位 → 续跑只进剔除侧。"""
+        self._install_zhilian_source(
+            "zl-src", [_zl_job("zl-dup"), _zl_job("zl-keep", company="别的公司")])
+
+        rough_seen: list[str] = []
+        task_id, first = self._run_first_round_paused_at_fine("zl-src", rough_seen)
+        self.assertEqual(first["status"], "paused", first)
+        self.assertEqual(sorted(rough_seen), ["zl-dup", "zl-keep"])
+        # 断点内 zl-dup 已有保留判定
+        verdicts = self.store.load_screening_verdicts(task_id)
+        self.assertIn("zl-dup", verdicts)
+        # 暂停后对端平台出现同指纹岗位
+        self._save_boss_round([_boss_kept_job("boss-x")], days_ago=1)
+
+        rough2: list[str] = []
+        fine2: list[str] = []
+        finished = self._continue_recording_fine(task_id, rough2, fine2)
+
+        self.assertEqual(finished["status"], "completed", finished)
+        # 粗筛不重筛（断点全覆盖）
+        self.assertEqual(rough2, [])
+        # 岗位只在剔除侧：不进保留/幸存者、不进精筛输入
+        self.assertNotIn("zl-dup", fine2)
+        self.assertEqual(fine2, ["zl-keep"])
+        payload = self.store.load_latest_pipeline_result_for_platform("zhilian")
+        kept_ids = [str(j.get("platform_job_id") or j.get("job_id"))
+                    for j in payload["result"]["jobs"]]
+        dropped_ids = [str(e.get("platform_job_id"))
+                       for e in payload["result"]["dropped"]]
+        self.assertNotIn("zl-dup", kept_ids)
+        self.assertEqual(dropped_ids.count("zl-dup"), 1)
+        self.assertIn("跨平台重复",
+                      payload["result"]["dropped"][0]["reason"])
+        # 计数不翻倍
+        self.assertEqual(payload["result"]["total_scraped"], 2)
+        self.assertEqual(payload["result"]["total_dropped"], 1)
+        # 018 收尾契约：一条流程一条轮
+        zhilian_rounds = [
+            r for r in self.store.list_history_rounds("zhilian")
+            if r["status"] in ("done", "partial", "scraped_only")
+        ]
+        self.assertEqual(len(zhilian_rounds), 1)
+
+
+# ===========================================================================
+# 020 US6：判定合并覆盖口径（多 run 链）
+# ===========================================================================
+class ResumeVerdictCoverageChainTests(CrossPlatformDedupeIntegrationTests):
+    """多 run 链：run1 粗筛 dropped → run2 接管只写精筛判定（数量够但
+    键集不覆盖断点）→ run3 续跑。覆盖口径下必须合并，dropped 不复活。"""
+
+    _EXEC_PARAMS = {
+        "platform": "zhilian",
+        "scrape_task_id": "zl-src",
+        "profile_summary": "后端工程师",
+        "profile_facts": None,
+    }
+
+    def _seed_chain_run(self, run_id, *, status, verdicts, checkpoint,
+                        source_count=3):
+        self.store.create_screening_run(
+            run_id,
+            frozen_filters={"keyword": "后端"},
+            source_count=source_count,
+            execution_params=dict(self._EXEC_PARAMS),
+        )
+        self.store.update_screening_run(run_id, status="running")
+        self.store.update_screening_run(run_id, status=status)
+        self.store.save_checkpoint(run_id, "ai_rough", checkpoint)
+        if verdicts:
+            self.store.save_screening_verdicts(run_id, verdicts)
+
+    def _continue_chain(self, run_id, rough_seen, fine_seen):
+        def rough_ok(jobs, *args, **kwargs):
+            rough_seen.extend(str(j.get("job_id")) for j in jobs)
+            return {"kept": [str(j.get("job_id")) for j in jobs],
+                    "dropped": [], "verdicts": {}}
+
+        def fine_ok(chunk, *args, **kwargs):
+            fine_seen.extend(str(job["job_id"]) for job in chunk)
+            return {"verdicts": {
+                str(job["job_id"]): {"verdict": "match", "reason": "匹配",
+                                     "caveats": []}
+                for job in chunk}}
+
+        self.app.config["RESUME_BLOCK_CHECKER"] = lambda _run: (True, "", "")
+        with mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.screen_jobs", side_effect=rough_ok), \
+                mock.patch("webui.ai.match_jds", side_effect=fine_ok), \
+                mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                           return_value=(True, "")), \
+                mock.patch("webui.source.ZhilianCdpSource",
+                           return_value=object()), \
+                mock.patch("webui.pipeline_exec.fetch_job_details",
+                           side_effect=lambda chunk, *a, **k: {
+                               "jobs": [{**job, "jd": "职责描述"} for job in chunk],
+                               "hard_stop": False, "hard_stop_code": None,
+                               "stopped": False, "fetched": len(chunk),
+                           }), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            response = self.client.post(
+                f"/api/task/continue/{run_id}", headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.get_json())
+            return _wait_for_pipeline_task(self.client, run_id)
+
+    def _events_of(self, run_id, event_type):
+        return [e for e in self.store.list_task_events(run_id)
+                if str(e.get("type") or "") == event_type]
+
+    def test_count_enough_but_uncovered_merges_and_dropped_stays_dropped(self):
+        self._install_zhilian_source("zl-src", [
+            _zl_job("zl-a"),
+            _zl_job("zl-b", title="资深后端"),
+            _zl_job("zl-keep", company="别的公司"),
+        ])
+        # run1 粗筛：a 判 dropped
+        self._seed_chain_run(
+            "chain-run1", status="failed",
+            verdicts={"zl-a": {"verdict": "dropped", "reason": "经验不符"}},
+            checkpoint=["zl-a", "zl-b", "zl-keep"])
+        # run2 接管只写了精筛判定：数量 3 >= 断点 3 但 zl-a 无判定
+        self._seed_chain_run(
+            "chain-run2", status="paused",
+            verdicts={
+                "zl-b": {"verdict": "match", "reason": "匹配", "caveats": []},
+                "zl-keep": {"verdict": "match", "reason": "匹配", "caveats": []},
+                "zl-extra": {"verdict": "match", "reason": "历史精筛", "caveats": []},
+            },
+            checkpoint=["zl-a", "zl-b", "zl-keep"])
+
+        rough: list[str] = []
+        fine: list[str] = []
+        finished = self._continue_chain("chain-run2", rough, fine)
+
+        self.assertEqual(finished["status"], "completed", finished)
+        # 覆盖口径触发合并：断点全覆盖、粗筛不重筛
+        self.assertEqual(rough, [])
+        # run1 的 dropped 不复活：不进精筛、只在剔除侧
+        self.assertNotIn("zl-a", fine)
+        payload = self.store.load_latest_pipeline_result_for_platform("zhilian")
+        kept_ids = [str(j.get("platform_job_id") or j.get("job_id"))
+                    for j in payload["result"]["jobs"]]
+        dropped_ids = [str(e.get("platform_job_id"))
+                       for e in payload["result"]["dropped"]]
+        self.assertNotIn("zl-a", kept_ids)
+        self.assertIn("zl-a", dropped_ids)
+        # 合并后断点全覆盖：不再报 resume_inconsistent
+        inconsistent = [
+            e for e in self.store.list_task_events("chain-run2")
+            if str(e.get("type") or "") == "resume_inconsistent"]
+        self.assertEqual(inconsistent, [])
+
+    def test_uncoverable_gap_records_missing_count_event(self):
+        self._install_zhilian_source("zl-src", [
+            _zl_job("zl-a"),
+            _zl_job("zl-keep", company="别的公司"),
+        ])
+        # 链上任何 run 都没有 zl-a 的判定；断点却包含它
+        self._seed_chain_run(
+            "gap-run1", status="failed",
+            verdicts={"zl-b": {"verdict": "match", "reason": "匹配", "caveats": []}},
+            checkpoint=["zl-a", "zl-b"], source_count=2)
+        self._seed_chain_run(
+            "gap-run2", status="paused",
+            verdicts={
+                "zl-keep": {"verdict": "match", "reason": "匹配", "caveats": []},
+                "zl-extra": {"verdict": "match", "reason": "历史精筛", "caveats": []},
+            },
+            checkpoint=["zl-a", "zl-b"], source_count=2)
+
+        rough: list[str] = []
+        fine: list[str] = []
+        finished = self._continue_chain("gap-run2", rough, fine)
+
+        self.assertEqual(finished["status"], "completed", finished)
+        # 数量口径（2 >= 2）不会报；覆盖口径必须报缺失数且不阻断
+        events = self._events_of("gap-run2", "resume_inconsistent")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["payload"]["missing"], 1)
+
 
 if __name__ == "__main__":
 

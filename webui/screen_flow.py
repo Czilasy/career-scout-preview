@@ -127,7 +127,9 @@ def load_resume_verdicts_with_fallback(
     """
     verdicts = store.load_screening_verdicts(run_id)
     checkpoint_ids = list(store.load_checkpoint(run_id, "ai_rough") or [])
-    if not checkpoint_ids or len(verdicts) >= len(checkpoint_ids):
+    # 020 US6：覆盖比较取代数量比较——精筛判定计入总数后"数量够"不代表
+    # "断点全覆盖"；断点内任何无判定记录的岗位都触发同源链合并。
+    if not checkpoint_ids or not (set(checkpoint_ids) - set(verdicts)):
         return verdicts
     merged = {}
     for run in store.latest_screen_runs_for_source(scrape_task_id) or []:

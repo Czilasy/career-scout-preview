@@ -15,10 +15,33 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import time
 from typing import Any
 
 # 历史查询与最新结果判定的可见状态集（US3/US5 唯一口径）
 VISIBLE_STATUSES = ("done", "partial", "scraped_only")
+
+# 020 US7：瞬时锁短退避重试（共 3 次尝试）；sleep 可注入便于测试
+_RETRY_ATTEMPTS = 3
+_default_retry_sleep = time.sleep
+_retry_sleep = _default_retry_sleep
+
+
+def _retry_transient_lock(write):
+    """对 sqlite3.OperationalError（busy/locked）做短退避重试。
+
+    单事务插入失败即未提交，重试无重复轮风险；其他异常不重试直接抛。
+    """
+    last_exc: sqlite3.OperationalError | None = None
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            return write()
+        except sqlite3.OperationalError as exc:
+            last_exc = exc
+            if attempt < _RETRY_ATTEMPTS - 1:
+                _retry_sleep(0.1 * (attempt + 1))
+    raise last_exc
 
 
 def build_undecided_result(
@@ -104,32 +127,37 @@ def save_finished_round(
         profile_facts = result.get("profile_facts")
     merged_script_params = _merge_parent_script_params(
         store, scrape_task_id, script_params)
-    existing = _existing_round_for_flow(store, scrape_task_id, platform)
-    if existing is not None:
-        return store.upgrade_scraped_run(
-            str(existing["id"]),
+
+    def _write():
+        existing = _existing_round_for_flow(store, scrape_task_id, platform)
+        if existing is not None:
+            return store.upgrade_scraped_run(
+                str(existing["id"]),
+                result,
+                merged_script_params,
+                status=status,
+                execution_config=execution_config,
+                platform=platform or str(existing.get("platform") or "boss"),
+                profile_summary=profile_summary,
+                profile_facts=profile_facts,
+                scrape_task_id=str(scrape_task_id),
+                finished_at=finished_at,
+            )
+        return store.save_pipeline_result(
             result,
             merged_script_params,
-            status=status,
-            execution_config=execution_config,
-            platform=platform or str(existing.get("platform") or "boss"),
-            profile_summary=profile_summary,
-            profile_facts=profile_facts,
-            scrape_task_id=str(scrape_task_id),
+            started_at=started_at,
             finished_at=finished_at,
+            execution_config=execution_config,
+            status=status,
+            execution_params={
+                "platform": platform,
+                "scrape_task_id": str(scrape_task_id),
+            },
         )
-    return store.save_pipeline_result(
-        result,
-        merged_script_params,
-        started_at=started_at,
-        finished_at=finished_at,
-        execution_config=execution_config,
-        status=status,
-        execution_params={
-            "platform": platform,
-            "scrape_task_id": str(scrape_task_id),
-        },
-    )
+
+    # 020 US7：终态已落库后的写轮失败代价最大，先扛瞬时锁（短退避重试）。
+    return _retry_transient_lock(_write)
 
 
 def save_scraped_only_round(

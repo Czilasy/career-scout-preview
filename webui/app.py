@@ -2977,6 +2977,8 @@ def create_app(config=None):
                 FrozenTaskScope,
             )
             try:
+                # 020 US7：终态 succeeded 落库后写结果轮失败的救援标记
+                finalized = False
                 # 续跑优先用 paused run 本轮刷新后的配置；新建路径回退父抓取 run 冻结值。
                 if execution_config is None:
                     execution_config = ExecutionConfigSnapshot.from_dict(
@@ -3196,14 +3198,21 @@ def create_app(config=None):
                 j for j in raw_jobs
                 if str(j.get("job_id", "")) in _rough_done_ids
                 and _resume_verdicts.get(str(j.get("job_id", "")), "") != "dropped"
+                # 020 US3：本轮命中跨平台去重的断点岗位只归剔除侧，
+                # 不得同时进保留/幸存者（019 SC-003 续跑反向边）。
+                and str(j.get("job_id", "")) not in _dup_ids
             ] if _rough_done_ids else []
             _rough_completed_ids = set(_rough_done_ids)
-            # 护栏：判定数仍少于断点数说明链上有岗位没有任何判定记录，
-            # 只记事件供排查，不阻断续跑。
-            if resume_from_run_id and len(resume_verdicts) < len(_rough_done_ids):
+            # 护栏（020 US6 覆盖口径）：断点内仍有岗位没有任何判定记录时
+            # 只记事件供排查（负载记缺失岗位数），不阻断续跑。
+            _missing_verdict_ids = (
+                set(_rough_done_ids) - set(_resume_verdicts)
+            ) if _rough_done_ids else set()
+            if resume_from_run_id and _missing_verdict_ids:
                 store.append_task_event(task_id, "resume_inconsistent", {
-                    "verdicts": len(resume_verdicts),
+                    "verdicts": len(_resume_verdicts),
                     "checkpoint": len(_rough_done_ids),
+                    "missing": len(_missing_verdict_ids),
                 })
 
             try:
@@ -3712,6 +3721,7 @@ def create_app(config=None):
                         raise RuntimeError(
                             f"invalid_ai_terminal_status:{final_db_status}"
                         )
+            finalized = True
             # B038: 命中已保存的未筛选轮则原地升级（同一 run_id），否则新建。
             # 017-US2: 写入统一走 result_rounds.save_finished_round（一条流程一条轮）。
             from webui.screen_flow import build_round_script_params
@@ -3787,17 +3797,43 @@ def create_app(config=None):
             _release_worker_resume_claims(_pipeline_tasks.get(task_id))
         except Exception as exc:
             error_message = ai_service.user_facing_error("internal_error")
+            # 020 US7：终态 succeeded 已落库但写结果轮失败 → 先试条件降级
+            #（仅当该流程确无结果轮），让续跑可重建结果轮；已有轮等
+            # 不满足条件时保持 succeeded，只落诊断事件。
+            if finalized and not _is_user_finished(task_id):
+                try:
+                    _downgraded = store.downgrade_succeeded_if_no_result_round(
+                        task_id,
+                        error_code="result_round_save_failed",
+                        error_reason="筛选已完成但结果保存失败，点继续可重试保存",
+                    )
+                except _OPERATIONAL_ERRORS:
+                    _downgraded = False
+                try:
+                    store.append_task_event(task_id, "result_round_save_failed", {
+                        "downgraded": bool(_downgraded),
+                        "error": f"{type(exc).__name__}: {exc}"[:200],
+                    })
+                except _OPERATIONAL_ERRORS:
+                    pass
+                if _downgraded:
+                    error_message = "筛选已完成但结果保存失败，点继续可重试保存"
+            _fail_code = (
+                "result_round_save_failed"
+                if finalized and not _is_user_finished(task_id) and _downgraded
+                else "internal_error"
+            )
             if not _is_user_finished(task_id):
                 record_failure(
                     store, task_id, stage="ai_screen",
-                    error_code="internal_error", reason=error_message,
+                    error_code=_fail_code, reason=error_message,
                     correlation_id=task_id, diagnostics={},
                     exception=exc, include_traceback=True,
                 )
             persistence_error = None
             try:
                 _write_run_unless_finished(
-                    task_id, status="failed", error_code="internal_error",
+                    task_id, status="failed", error_code=_fail_code,
                     error_reason=error_message,
                 )
             except _OPERATIONAL_ERRORS as persist_exc:

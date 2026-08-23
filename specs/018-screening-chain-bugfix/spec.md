@@ -35,8 +35,8 @@
 
 **Acceptance Scenarios**:
 
-1. **Given** 续跑目标 run 的判定数少于断点数且同源链上有历史判定，**When** 加载续跑判定，**Then** 按创建时间从旧到新合并同源链（同抓取、同冻结条件、同画像、同画像事实，排除自身），新的覆盖旧的。
-2. **Given** 续跑场景下合并后的判定数仍少于断点数，**When** 续跑开始，**Then** 追加一条 resume_inconsistent 事件仅作记录，不阻断流程、不加新错误码。
+1. **Given** 断点岗位集合减去现有判定键集非空（存在无判定记录的断点岗位；修订自 020——精筛判定计入总数后"判定数少于断点数"的数量比较会漏判，改为覆盖比较口径）且同源链上有历史判定，**When** 加载续跑判定，**Then** 按创建时间从旧到新合并同源链（同抓取、同冻结条件、同画像、同画像事实，排除自身），新的覆盖旧的。
+2. **Given** 续跑场景下合并后断点内仍有岗位没有判定记录，**When** 续跑开始，**Then** 追加一条 resume_inconsistent 事件仅作记录（负载含缺失岗位数，修订自 020），不阻断流程、不加新错误码。
 3. **Given** 断点中的岗位在判定链上没有 dropped 记录，**When** 计算粗筛幸存者，**Then** 该岗位被保留（旧数据纯字符串 verdict "kept"/"dropped" 与早期误写的 "match" 均兼容）。
 4. **Given** 早期数据只有纯字符串 verdict（无 reason 等结构），**When** 合并判定，**Then** 兼容读取且语义不变。
 
@@ -55,6 +55,7 @@
 1. **Given** 精筛完成但计数对不上（终态校验判 paused），**When** 收尾，**Then** 抛错、任务 failed(internal_error)、历史列表零新增、无 done 轮记录。
 2. **Given** 精筛正常完成，**When** 收尾，**Then** 计数落库 → done 事件 → 终态校验 → 写历史轮 → 历史快照事件 → 清理，一条不少。
 3. **Given** 用户以"结束保存"收尾（partial），**When** 收尾，**Then** 与正常完成一样照常写轮。
+4. **Given** 终态校验通过、succeeded 已落库后写历史轮失败（典型为瞬时数据库锁，修订自 020），**When** 收尾，**Then** 先做短退避重试；重试耗尽且该流程确无结果轮时条件降级为 failed 并提示「点继续可重试保存」，不静默吞掉；已有结果轮时保持 succeeded 落诊断事件。
 
 ---
 
@@ -89,10 +90,10 @@
 - **FR-001**: 精筛响应解析 MUST 对 `results` 字段做类型守卫：仅当值为列表时使用，否则按空列表处理，走既有 missing → 单条重试预算 → uncertain → 熔断链路。
 - **FR-002**: 粗筛响应解析 MUST 对 `dropped` 字段加同款类型守卫（现状存在同款写法，故同样处理）。
 - **FR-003**: 粗筛续跑幸存者计算 MUST 反转为"断点内默认保留、仅判定链上明确 dropped 才移除"；判定来源 MUST 能看到同源链合并后的完整判定（否则链上第一条 run 的 dropped 不可见会被误保留）。
-- **FR-004**: 续跑判定加载的回退段 MUST 替换为同源链合并：取与当前 scrape_task_id 相同的全部非快照 run，逐 run 校验 frozen_filters、profile_summary、profile_facts 一致，排除当前 run，按 created_at 从旧到新合并 screening_results（新覆盖旧）；不保留旧的结果快照回退代码。
+- **FR-004**: 续跑判定加载的回退段 MUST 替换为同源链合并：取与当前 scrape_task_id 相同的全部非快照 run，逐 run 校验 frozen_filters、profile_summary、profile_facts 一致，排除当前 run，按 created_at 从旧到新合并 screening_results（新覆盖旧）；不保留旧的结果快照回退代码。合并触发条件为覆盖比较——断点岗位集合减判定键集非空即合并（修订自 020：数量比较在精筛判定计入总数时会漏判）。
 - **FR-005**: store 的同源 run 查询方法 MUST 以向后兼容的可选参数原地扩展以支持"全部状态按创建时间升序"查询；不新增 store 方法。
-- **FR-006**: 续跑开始时若合并判定数 < 断点数，MUST 追加 `resume_inconsistent` 事件（仅记录，不阻断、不加新错误码）。
-- **FR-007**: `_run_ai_screen_task` 成功收尾段 MUST 换序为：job_events 落库 → run 计数（current_stage="done"）→ done 事件 → finalize 校验（不合法直接抛错，此时无任何历史轮）→ 写历史轮 → history_snapshot 事件 → 历史修剪 → 内存置 done 与清理；纯换序，不新增补偿/回滚逻辑。
+- **FR-006**: 续跑开始时若合并后断点内仍有岗位没有判定记录（覆盖口径，修订自 020），MUST 追加 `resume_inconsistent` 事件（仅记录，不阻断、不加新错误码）。
+- **FR-007**: `_run_ai_screen_task` 成功收尾段 MUST 换序为：job_events 落库 → run 计数（current_stage="done"）→ done 事件 → finalize 校验（不合法直接抛错，此时无任何历史轮）→ 写历史轮 → history_snapshot 事件 → 历史修剪 → 内存置 done 与清理；换序 + scoped 重试与条件降级（修订自 020：写历史轮对瞬时数据库锁做短退避重试，重试耗尽且该流程确无结果轮时允许 succeeded 条件降级为 failed 并提示可续跑重试保存）。
 - **FR-008**: live 库清理 MUST 仅删除 run 828f8807 的 screening_results 与 screening_runs 行；严禁动 03fb82e1/0f0baa1b/94e2c440 及其判定、checkpoint；清理前 MUST 备份库文件；一次性执行，不入库不提交。
 
 ### Key Entities
