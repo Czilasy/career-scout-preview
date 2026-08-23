@@ -24,7 +24,10 @@ import JobWorkspace from "../components/JobWorkspace.vue";
 import LocationPicker from "../components/LocationPicker.vue";
 import HistoryRoundProfile from "../components/HistoryRoundProfile.vue";
 import ResultHistoryDrawer from "../components/ResultHistoryDrawer.vue";
-import OneClickScreenDialog, { type OneClickFilterGroup } from "../components/OneClickScreenDialog.vue";
+import OneClickScreenDialog, {
+  type OneClickFilterGroup,
+  crossPlatformDedupeEnabled,
+} from "../components/OneClickScreenDialog.vue";
 import StepNavigator from "../components/StepNavigator.vue";
 import ContinuePlatformGuide from "../components/ContinuePlatformGuide.vue";
 import ScreenRoundActions from "../components/ScreenRoundActions.vue";
@@ -1808,6 +1811,8 @@ async function startAiScreen(options: AiScreenLaunch = {}) {
         profile_summary: screenProfile,
         profile_facts: profileFacts.value,
         scrape_task_id: scrapeTaskId.value,
+        // 019：跨平台去重开关（对话框本地记忆；后端随 run 冻结，续跑沿用）。
+        cross_platform_dedupe: crossPlatformDedupeEnabled(),
         ...(consumeAutoScreen ? { consume_auto_screen: true } : {}),
       },
     });
@@ -2395,6 +2400,29 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
       total_kept: sum("total_kept"),
       total_dropped: sum("total_dropped"),
     };
+    // 019：跨平台重复簇——剔除行 extra.cross_platform_dup_of 反查合并 jobs 中
+    // 的对端保留条目，命中者挂运行时簇数据（复用 _result_run_id 惯例）；
+    // 未命中（对端条目随轮次顶替不可见）静默跳过，退化为剔除台账条目。
+    const jobsByPlatformKey = new Map<string, JobItem>();
+    for (const job of merged.jobs || []) {
+      if (job?.platform && job.platform_job_id) {
+        jobsByPlatformKey.set(`${job.platform}:${job.platform_job_id}`, job);
+      }
+    }
+    for (const drop of merged.dropped || []) {
+      const dupOf = (drop as JobItem).extra?.cross_platform_dup_of;
+      if (!dupOf || typeof dupOf !== "object") continue;
+      const head = jobsByPlatformKey.get(
+        `${String((dupOf as Record<string, unknown>).platform ?? "")}:${String((dupOf as Record<string, unknown>).platform_job_id ?? "")}`,
+      );
+      if (!head) continue;
+      (head._also_on_copies || (head._also_on_copies = [])).push({
+        platform: ((drop as JobItem).platform || head.platform) as NonNullable<JobItem["platform"]>,
+        salary: drop.salary || "",
+        source_url: String((drop as JobItem).canonical_url || drop.source_url || ""),
+        platform_job_id: drop.platform_job_id,
+      });
+    }
     return { merged, newer };
   } catch (error) {
     notify(errorMessage(error, "上次结果暂时无法恢复"), "warning");

@@ -308,6 +308,17 @@ export interface JobItem {
   _applied?: boolean;
   /** 前端合并多平台结果时标记的来源 run（仅前端使用，供单岗位动作定位来源）。 */
   _result_run_id?: string;
+  /**
+   * 跨平台重复簇成员（019）：合并视图由剔除行 extra.cross_platform_dup_of
+   * 反查保留条目后挂载的运行时数据（复用 _result_run_id 惯例，仅前端使用，
+   * 不持久化、不回写）。成员字段取自本平台剔除行自身。
+   */
+  _also_on_copies?: Array<{
+    platform: Platform;
+    salary?: string;
+    source_url?: string;
+    platform_job_id?: string;
+  }>;
   extra?: Record<string, unknown>;
 }
 

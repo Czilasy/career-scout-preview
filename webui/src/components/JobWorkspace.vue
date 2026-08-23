@@ -49,6 +49,13 @@ function platformLabel(job: JobItem): string {
   return "";
 }
 
+// 019：跨平台重复簇成员的平台短名（与 platformLabel 同一套短名口径）。
+function copyPlatformLabel(platform?: string): string {
+  if (platform === "zhilian") return "智联";
+  if (platform === "boss") return "BOSS";
+  return platform || "";
+}
+
 const visibleCount = ref(props.batchSize);
 const localSelectedId = ref("");
 const detailOpen = ref(true);
@@ -407,6 +414,11 @@ function clearFilters() {
                 :data-platform="job.platform"
                 data-testid="job-row-platform-badge"
               >{{ platformLabel(job) }}</span>
+              <span
+                v-if="job._also_on_copies?.length"
+                class="job-row-dual"
+                data-testid="job-row-dual-platform-badge"
+              >双平台在招</span>
               <span v-if="job._applied" class="job-row-applied" data-testid="job-row-applied-badge">已投</span>
             </span>
             <span class="job-row-company">{{ company(job) }}</span>
@@ -516,6 +528,32 @@ function clearFilters() {
         ><span class="job-extra-fact-label">{{ item.label + ": " }}</span><span class="job-extra-fact-value">{{ item.value }}</span></span>
       </div>
 
+      <!-- 019：跨平台重复簇成组区——对端平台副本并排（平台/薪资/链接），如实展示不合并。 -->
+      <section
+        v-if="selectedJob._also_on_copies?.length"
+        class="job-also-on"
+        data-testid="job-also-on"
+        aria-label="双平台在招"
+      >
+        <h3><span class="sec-mk" aria-hidden="true"></span>双平台在招</h3>
+        <div
+          v-for="(copy, i) in selectedJob._also_on_copies"
+          :key="`${copy.platform}:${copy.platform_job_id}:${i}`"
+          class="job-also-on-copy"
+          :data-platform="copy.platform"
+        >
+          <span class="job-also-on-platform">{{ copyPlatformLabel(copy.platform) }}</span>
+          <span class="job-also-on-salary">{{ copy.salary || "薪资面议" }}</span>
+          <a
+            v-if="copy.source_url"
+            class="job-also-on-link"
+            :href="copy.source_url"
+            target="_blank"
+            rel="noopener noreferrer"
+          >岗位链接 <ArrowUpRight :size="14" aria-hidden="true" /></a>
+        </div>
+      </section>
+
       <section class="jd-content" :data-platform="selectedJob.platform || 'boss'">
         <h3><span class="sec-mk" aria-hidden="true"></span>职位描述</h3>
         <p>{{ selectedJob.jd || selectedJob.jd_excerpt || "尚未获取职位描述。" }}</p>
@@ -545,3 +583,65 @@ function clearFilters() {
       </button>
   </div>
 </template>
+
+<style scoped>
+/* 019：双平台在招徽标 + 详情成组区（复用全局徽标视觉语言）。 */
+.job-row-dual {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.6;
+  letter-spacing: .03em;
+  white-space: nowrap;
+  color: #7c2d12;
+  background: #fed7aa;
+}
+.job-also-on {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: var(--bg-2, var(--bg-1, #f7f8fa));
+}
+.job-also-on h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-1);
+}
+.job-also-on-copy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.job-also-on-platform {
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.6;
+  color: #14532d;
+  background: #b9ecc7;
+}
+.job-also-on-copy[data-platform="zhilian"] .job-also-on-platform {
+  color: #e6efff;
+  background: #1e40af;
+}
+.job-also-on-salary {
+  font-weight: 600;
+}
+.job-also-on-link {
+  color: var(--accent, #2563eb);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.job-also-on-link:hover {
+  text-decoration: underline;
+}
+</style>

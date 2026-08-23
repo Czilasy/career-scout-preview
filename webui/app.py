@@ -2792,7 +2792,8 @@ def create_app(config=None):
 
     def _run_ai_screen_task(task_id, screening_fields, profile_summary,
                             scrape_task_id, resume_from_run_id="",
-                            profile_facts=None, execution_config=None):
+                            profile_facts=None, execution_config=None,
+                            cross_platform_dedupe=True):
         """AI 筛选任务：StageA 字段粗筛 → 批量抓 JD → StageB JD 精筛。
 
         读取最近一次原始抓取结果，两段式 AI 筛选后把带 verdict 的最终结果
@@ -2806,6 +2807,7 @@ def create_app(config=None):
         刷新后的配置快照；未提供时从父抓取 run 读取冻结配置（新建任务路径）。
         """
         from webui.ai import match_jds, screen_jobs
+        from webui.cross_platform_dedupe import apply_to_screening_input
         from webui.pipeline_exec import (
             close_debug_chrome,
             ensure_chrome_ready,
@@ -3005,7 +3007,8 @@ def create_app(config=None):
                                       "platform": frozen_platform,
                                       "cdp_port": frozen_cdp_port,
                                       "profile_key": frozen_profile_key,
-                                      "task_input_digest": ai_task_input_digest},
+                                      "task_input_digest": ai_task_input_digest,
+                                      "cross_platform_dedupe": cross_platform_dedupe},
                     backend_version=_backend_version)
                 store.save_filter_snapshot(
                     task_id,
@@ -3074,6 +3077,7 @@ def create_app(config=None):
                         "cdp_port": frozen_cdp_port,
                         "profile_key": frozen_profile_key,
                         "task_input_digest": ai_task_input_digest,
+                        "cross_platform_dedupe": cross_platform_dedupe,
                     },
                     backend_version=_backend_version,
                 )
@@ -3089,6 +3093,11 @@ def create_app(config=None):
                 resumed_run = store.get_screening_run(task_id)
                 if resumed_run is None or resumed_run.get("status") != "running":
                     raise RuntimeError("resume_run_not_claimed")
+                # 019：续跑沿用提交时冻结的去重开关（run 参数优先）。
+                _frozen_dedupe = (resumed_run.get("execution_params") or {}).get(
+                    "cross_platform_dedupe")
+                if _frozen_dedupe is not None:
+                    cross_platform_dedupe = bool(_frozen_dedupe)
 
             # 载入断点（同一抓取任务、同一筛选条件下的上次进度）
             resume_verdicts = {}
@@ -3118,6 +3127,23 @@ def create_app(config=None):
             resume_fine_verdicts = {}
             if resume_from_run_id:
                 resume_fine_verdicts, _ = _split_resume_verdicts(resume_verdicts)
+
+            # 019：跨平台去重——对端近 30 天可见轮非剔除岗位指纹比对；命中者
+            # 以 dropped 判定落库并入粗筛断点（续跑/重启在本点确定性重放）。
+            _dedupe = apply_to_screening_input(
+                store, raw_jobs, frozen_platform, profile_summary,
+                enabled=cross_platform_dedupe)
+            _dup_entries = _dedupe.dropped_entries
+            _dup_ids = {str(e.get("job_id") or "") for e in _dup_entries}
+            if _dup_entries:
+                store.save_verdict_and_checkpoint_atomic(
+                    task_id, "ai_rough", _dedupe.dup_verdicts,
+                    sorted(_dup_ids | set(store.load_checkpoint(
+                        task_id, "ai_rough"))))
+                emit(stage="screen_a", current=0, total=len(raw_jobs),
+                     message=_dedupe.progress_message)
+                store.append_task_event(
+                    task_id, "cross_platform_dedup", _dedupe.ledger_payload())
 
             # 2) AI 凭据
             settings = store.get_ai_settings()
@@ -3159,7 +3185,10 @@ def create_app(config=None):
                         else str(_vobj or "")
                     )
             _rough_todo = [j for j in raw_jobs
-                           if str(j.get("job_id", "")) not in _rough_done_ids] if _rough_done_ids else raw_jobs
+                           if str(j.get("job_id", "")) not in _rough_done_ids
+                           and str(j.get("job_id", "")) not in _dup_ids] if _rough_done_ids else [
+                j for j in raw_jobs
+                if str(j.get("job_id", "")) not in _dup_ids]
             # 018：断点内的岗位默认保留，仅判定链上明确 dropped 才移除；
             # 判定记录缺失的岗位不再被静默丢弃（旧数据纯字符串与早期
             # 误写的 "match" 在该语义下自动兼容）。
@@ -3254,6 +3283,9 @@ def create_app(config=None):
                     # dropped（重筛结果新于链上旧判定），避免同一岗位双列表。
                     if _drop_jid not in kept_ids:
                         dropped_by_id.setdefault(_drop_jid, item)
+            # 019：跨平台剔除条目显式赋值（覆盖链上无 extra 的重建行，保住追溯）。
+            for _dup_entry in _dup_entries:
+                dropped_by_id[str(_dup_entry.get("job_id") or "")] = _dup_entry
             dropped = list(dropped_by_id.values())
             store.save_checkpoint(
                 task_id,
@@ -3652,9 +3684,16 @@ def create_app(config=None):
                 total_dropped=len(dropped),
                 current_stage="done",
             )
+            # 019：完成文案三数对账（抓取/跨平台重复/实际筛选；0 剔除不打扰）。
+            _dedupe_note = (
+                f"（抓取 {len(raw_jobs)}，跨平台重复 {_dedupe.deduped_count}，"
+                f"实际筛选 {len(raw_jobs) - _dedupe.deduped_count}）"
+                if _dedupe.deduped_count else "")
             terminal_message = (
                 f"筛选完成，但有 {pending_count} 条待确认：匹配 {match_count} 条"
-                if pending_count else f"筛选完成：匹配 {match_count} 条"
+                f"{_dedupe_note}"
+                if pending_count else
+                f"筛选完成：匹配 {match_count} 条{_dedupe_note}"
             )
             # 最终事件也是持久化契约的一部分；先写事件，再提交终态，避免
             # DB 已终态后事件写失败造成内存 failed / DB completed 分裂。
@@ -5205,6 +5244,8 @@ def create_app(config=None):
         body = request.get_json(silent=True) or {}
         screening_fields = body.get("screening_fields") or {}
         profile_summary = str(body.get("profile_summary") or "")
+        # 019：跨平台去重开关（缺省开）；续跑沿用冻结值。
+        cross_platform_dedupe = bool(body.get("cross_platform_dedupe", True))
         profile_facts = body.get("profile_facts")
         if not isinstance(profile_facts, dict) or not profile_facts:
             profile_facts = None
@@ -5369,6 +5410,9 @@ def create_app(config=None):
         claimed_task["task_input_digest"] = ai_digest
         if resume_from_run_id and prev is not None:
             resume_params = dict(prev.get("execution_params") or {})
+            # 019：去重开关随链上冻结值沿用（重启/断链续跑）。
+            cross_platform_dedupe = bool(
+                resume_params.get("cross_platform_dedupe", cross_platform_dedupe))
             if not str(resume_params.get("browser_account") or ""):
                 resume_params["browser_account"] = _account_for_run(prev)
                 store.update_screening_execution_params(resume_from_run_id, resume_params)
@@ -5389,6 +5433,7 @@ def create_app(config=None):
                         "scrape_task_id": scrape_task_id,
                         "browser_account": claimed_task.get("browser_account"),
                         "task_input_digest": ai_digest,
+                        "cross_platform_dedupe": cross_platform_dedupe,
                     },
                     backend_version=_backend_version,
                 )
@@ -5410,7 +5455,7 @@ def create_app(config=None):
             _pipeline_executor.submit(
                 _run_ai_screen_task, task_id, screening_fields,
                 profile_summary, scrape_task_id, resume_from_run_id,
-                profile_facts,
+                profile_facts, cross_platform_dedupe=cross_platform_dedupe,
             )
         except RuntimeError:
             _release_pipeline_claim(task_id, claimed_task, previous_task)
