@@ -136,16 +136,16 @@ function confirm() {
       <p v-if="!groups.length" class="one-click-filter-empty">
         当前平台暂无筛选条件，可直接开始。
       </p>
-
-      <label class="one-click-dedupe-toggle" data-testid="one-click-dedupe-toggle">
-        <input
-          v-model="dedupeEnabled"
-          type="checkbox"
-          data-testid="one-click-dedupe-checkbox"
-        />
-        <span>跨平台去重：另一平台已筛过的相同岗位不再重复筛选</span>
-      </label>
     </div>
+
+    <label class="one-click-dedupe-toggle" data-testid="one-click-dedupe-toggle">
+      <input
+        v-model="dedupeEnabled"
+        type="checkbox"
+        data-testid="one-click-dedupe-checkbox"
+      />
+      <span>跨平台去重：另一平台已筛过的相同岗位不再重复筛选</span>
+    </label>
 
     <template #footer>
       <button
@@ -201,9 +201,7 @@ function confirm() {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--hair);
-  border-radius: 8px;
+  margin: 2px 0 -10px;
   font-size: 13px;
   color: var(--ink-1);
   cursor: pointer;
