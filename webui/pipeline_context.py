@@ -49,7 +49,7 @@ class PipelineContext:
 
     def __init__(self, *, app=None, store=None, tasks=None, lock=None,
                  resume_claims=None, executor=None, write_run=None,
-                 make_cdp_source=None, tuning_round_runner=None):
+                 make_cdp_source=None, tuning_round_runner=None, **extra):
         self.app = app
         self.store = store
         self.tasks = tasks if tasks is not None else {}
@@ -59,6 +59,11 @@ class PipelineContext:
         self.write_run = write_run
         self.make_cdp_source = make_cdp_source
         self.tuning_round_runner = tuning_round_runner
+        # 外迁批次（B4-B6）按实际捕获清单补全的 create_app 级助手/常量
+        # （is_user_finished、record_pause_failure、event_stage_names 等），
+        # 统一落实例属性；不新增语义，只承载引用。
+        for name, value in extra.items():
+            setattr(self, name, value)
 
     def __getattr__(self, name):
         # 动态门面：可 patch 的 webui.app 模块级符号在调用时取用。
