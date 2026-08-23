@@ -8,6 +8,9 @@ import os
 from urllib.request import urlopen
 from scripts.boss.constants import CITY_GROUP_URL, HOT_CITY_URL
 from scripts.boss.constants import log
+import sys as _sys
+def _facade():
+    return _sys.modules.get("scripts.boss_cdp_raw")
 
 # ============================================================
 # 筛选参数映射
@@ -27,7 +30,10 @@ _local_city_map_cache = None
 def _city_data_path():
     """返回 data/city_codes.json 的路径，兼容仓库开发态与 pip 打包态。"""
     # 1. 仓库开发态：脚本在 scripts/，数据在 ../data/
-    repo_data = os.path.join(os.path.dirname(__file__), "..", "data", CITY_DATA_FILENAME)
+    # 021 B8 T026：拆分后本模块位于 scripts/boss/，仓库根需从 __file__ 上溯两级
+    repo_data = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "data", CITY_DATA_FILENAME)
     if os.path.isfile(repo_data):
         return os.path.normpath(repo_data)
     # 2. 打包态：wheel force-include 到包根 data/，用 importlib.resources 兜底
@@ -149,14 +155,14 @@ def resolve_city(city_input):
         return city_input, city_input
 
     # 1. 本地静态码表
-    local_map, local_reverse = load_local_city_map()
+    local_map, local_reverse = _facade().load_local_city_map()
     if city_input in local_map:
         return city_input, local_map[city_input]
     if city_input in local_reverse:
         return local_reverse[city_input], city_input
 
     # 2. 运行时拉 BOSS 接口
-    live_map, live_reverse = load_live_city_maps()
+    live_map, live_reverse = _facade().load_live_city_maps()
     if city_input in live_map:
         return city_input, live_map[city_input]
     if city_input in live_reverse:
@@ -173,10 +179,10 @@ def list_cities(keyword=None, use_live=True):
     """
     name_to_code = {}
     if use_live:
-        live_map, _ = load_live_city_maps()
+        live_map, _ = _facade().load_live_city_maps()
         name_to_code.update(live_map)
     if not name_to_code:
-        local_map, _ = load_local_city_map()
+        local_map, _ = _facade().load_local_city_map()
         name_to_code.update(local_map)
     if not name_to_code:
         print("⚠️ 无法加载城市码表（本地静态文件缺失且网络拉取失败）")

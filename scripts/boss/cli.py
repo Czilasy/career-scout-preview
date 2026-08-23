@@ -8,13 +8,10 @@ import json
 import os
 import sys
 import threading
-from scripts.boss.browser import prepare_cdp_profile, run_setup_chrome, run_stop_chrome, stop_cdp_chrome
 from scripts.boss.city_map import list_cities
 from scripts.boss.constants import DEFAULT_CDP_PORT, DEFAULT_CITY_INPUT, DEFAULT_LOGIN_TIMEOUT, MAX_PAGES
 from scripts.boss.detail_parse import load_existing_details
 from scripts.boss.output import flush_jobs, merge_details, merge_details_from_lists, merge_jobs, write_csv, write_detail_csv, write_json_atomic
-from scripts.boss.session_import import run_import_boss_session
-from scripts.boss.smoke import run_check, run_smoke_test
 from scripts.boss_cdp_signals import emit_failure_line
 import sys as _sys
 def _facade():
@@ -245,10 +242,10 @@ def main():
 
     # --check 模式
     if args.check:
-        sys.exit(run_check(args.cdp_port))
+        sys.exit(_facade().run_check(args.cdp_port))
 
     if args.smoke_test:
-        sys.exit(run_smoke_test(args.cdp_port))
+        sys.exit(_facade().run_smoke_test(args.cdp_port))
 
     # --list-cities 模式（无需 Chrome/网络依赖，本地静态码表兜底）
     if args.list_cities is not None:
@@ -256,7 +253,7 @@ def main():
         sys.exit(0)
 
     if args.import_boss_session:
-        sys.exit(run_import_boss_session(
+        sys.exit(_facade().run_import_boss_session(
             source_cdp_port=args.source_cdp_port,
             target_cdp_port=args.cdp_port,
             authorized=args.confirm_session_import,
@@ -264,7 +261,7 @@ def main():
 
     # --setup-chrome 模式
     if args.setup_chrome:
-        sys.exit(run_setup_chrome(
+        sys.exit(_facade().run_setup_chrome(
             args.cdp_port,
             copy_login_state=args.copy_login_state,
             reset_profile=args.reset_chrome_profile,
@@ -274,7 +271,7 @@ def main():
 
     # --stop-chrome 模式（关闭 BOSS 专用 CDP Chrome，独立命令）
     if args.stop_chrome:
-        sys.exit(run_stop_chrome())
+        sys.exit(_facade().run_stop_chrome())
 
     if not _facade().require_runtime_dependencies("requests", "websocket"):
         emit_failure_line("source_unreachable", "运行时依赖缺失（requests/websocket）")
@@ -409,8 +406,8 @@ def main():
 
     # 抓取正常结束后按需收尾（仅成功路径；异常/登录失败走 sys.exit，不会触发，保留登录态）
     if args.close_chrome:
-        profile = prepare_cdp_profile(copy_login_state=False, reset=False)
-        stopped = stop_cdp_chrome(profile["path"])
+        profile = _facade().prepare_cdp_profile(copy_login_state=False, reset=False)
+        stopped = _facade().stop_cdp_chrome(profile["path"])
         if stopped:
             print(f"\n🧹 已按 --close-chrome 关闭 BOSS 专用 Chrome 进程：{stopped} 个")
         else:
@@ -436,3 +433,6 @@ def print_risk_control_report(err):
     if err.resume_page is not None:
         print(f"  恢复后可用 --start-page {err.resume_page} 从断点续抓，已抓的不会重抓")
     print("!" * 64)
+
+# 021 B8 T026：保真基线模块级副作用（import 时配置编码容错）
+configure_stdio()

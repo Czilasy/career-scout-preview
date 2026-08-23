@@ -157,7 +157,7 @@ def check_list_risk(diagnosis, *, page, consecutive_empty, scraped_count,
 
     016-error-module-rework：
     - 单次拦截（403/429）与结构异常不再定罪，返回 None 由调用方原地重试；
-    - "连续空页"不再作为风控定性理由（聚合刹车语义在 scrape_list 内处理）；
+    - "连续空页"不再作为风控定性理由（聚合刹车语义在 _facade().scrape_list 内处理）；
     - 抛错携带注册表错误码（RiskControlError.code）。
     """
     verdict, code, hint = classify_list_diagnosis(diagnosis, repeated=False)
@@ -316,7 +316,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
     prev_has_more = None  # 上一页 API 返回的 hasMore（None=未知）
     try:
         for pg in range(start_page, max_pages + 1):
-            # programmatic 取消/轮询检查点（与 scrape_details 逐岗位检查点同语义）；
+            # programmatic 取消/轮询检查点（与 _facade().scrape_details 逐岗位检查点同语义）；
             # CLI 不传 cancel_event/on_poll，行为与现状完全一致。
             if cancel_event is not None and cancel_event.is_set():
                 raise SearchCancelled(MSG_USER_CANCELLED_SCRAPE)

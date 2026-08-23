@@ -40,7 +40,7 @@ def probe_login_state(cdp, sid):
     """单次搜索 API 探测 BOSS 登录态（bool 兼容包装）。
 
     三态实现在 probe_login_state_tri；本函数只保留「是否已登录」语义，
-    供 wait_for_login 等既有调用方使用。
+    供 _facade().wait_for_login 等既有调用方使用。
     """
     return probe_login_state_tri(cdp, sid) == "logged_in"
 

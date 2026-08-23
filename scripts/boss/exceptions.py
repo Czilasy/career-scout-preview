@@ -3,6 +3,9 @@
 """异常族（限流/详情/风险控制/CDP/登录）（021 B8 T026 自 scripts/boss_cdp_raw.py 物理搬运）。"""
 
 from scripts.boss.constants import MSG_USER_CANCELLED_SCRAPE
+import sys as _sys
+def _facade():
+    return _sys.modules.get("scripts.boss_cdp_raw")
 
 # ============================================================
 # 运行级请求计数器辅助（B053）
@@ -65,6 +68,6 @@ class SearchCancelled(RuntimeError):
 class LoginRequiredError(RuntimeError):
     """未检测到 BOSS 登录态（programmatic 等价 CLI exit 1）。
 
-    main() 在 check_login_state 返回 False 时 sys.exit(1)；programmatic
+    main() 在 _facade().check_login_state 返回 False 时 sys.exit(1)；programmatic
     入口改为抛出本异常，调用方映射为登录失效失败码。
     """

@@ -5,7 +5,6 @@
 from datetime import datetime
 import json
 import os
-from scripts.boss.browser import prepare_cdp_profile, stop_cdp_chrome
 from scripts.boss.cli import _LineLogBuffer, print_risk_control_report
 from scripts.boss.constants import DEFAULT_CDP_PORT, MAX_PAGES
 from scripts.boss.detail_parse import load_existing_details
@@ -59,7 +58,7 @@ def run_search_programmatic(
     - 参数 dict 直传，不经过 argv 文本往返。
     - on_log 非 None 时，contextlib.redirect_stdout 把既有 print 按行转发；
       on_log=None 时输出走原 stdout（等价 CLI）。
-    - cancel_event 置位时 scrape_list/scrape_details 抛 SearchCancelled，
+    - cancel_event 置位时 _facade().scrape_list/_facade().scrape_details 抛 SearchCancelled，
       已写产物保留；None 时行为与现状完全一致。
     - skip_login_check=True 时跳过组合级登录探测；任务编排层应在任务开始时
       已执行过 preflight（真实 401/登录墙仍由列表接口失败映射）。
@@ -190,8 +189,8 @@ def run_search_programmatic(
 
             # 抓取正常结束后按需收尾（仅成功路径；异常不触发，保留登录态）
             if close_chrome:
-                profile = prepare_cdp_profile(copy_login_state=False, reset=False)
-                stopped = stop_cdp_chrome(profile["path"])
+                profile = _facade().prepare_cdp_profile(copy_login_state=False, reset=False)
+                stopped = _facade().stop_cdp_chrome(profile["path"])
                 if stopped:
                     print(f"\n🧹 已按 close_chrome 关闭 BOSS 专用 Chrome 进程：{stopped} 个")
                 else:

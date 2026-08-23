@@ -2,10 +2,10 @@
 
 """BOSS cookie 会话导入（021 B8 T026 自 scripts/boss_cdp_raw.py 物理搬运）。"""
 
-from scripts.boss.browser import cdp_port_uses_profile
 from scripts.boss.cdp_session import CDPSession
-from scripts.boss.constants import DEFAULT_CDP_DATA_DIR
-from scripts.boss.login import check_login_state
+import sys as _sys
+def _facade():
+    return _sys.modules.get("scripts.boss_cdp_raw")
 
 # ============================================================
 # --setup-chrome 自动启动
@@ -95,7 +95,7 @@ def import_boss_session(source_cdp_port, target_cdp_port, authorized=False,
             "imported_count": 0,
         }
     profile_checker = target_profile_checker or (
-        lambda port: cdp_port_uses_profile(port, DEFAULT_CDP_DATA_DIR)
+        lambda port: _facade().cdp_port_uses_profile(port, _facade().DEFAULT_CDP_DATA_DIR)
     )
     try:
         target_is_dedicated = bool(profile_checker(target_cdp_port))
@@ -135,7 +135,7 @@ def import_boss_session(source_cdp_port, target_cdp_port, authorized=False,
             if not _rollback_boss_cookies(target, source_cookies, target_cookies):
                 return {"status": "failed", "code": "session_import_rollback_failed", "imported_count": 0}
             return {"status": "failed", "code": "session_write_failed", "imported_count": 0}
-        checker = login_checker or check_login_state
+        checker = login_checker or _facade().check_login_state
         try:
             verified = bool(checker(target_cdp_port))
         except Exception:
@@ -167,10 +167,10 @@ def run_import_boss_session(source_cdp_port, target_cdp_port, authorized=False):
         result = {"status": "blocked", "code": "source_cdp_port_required", "imported_count": 0}
     elif source_cdp_port == target_cdp_port:
         result = {"status": "blocked", "code": "source_target_port_conflict", "imported_count": 0}
-    elif not cdp_port_uses_profile(target_cdp_port, DEFAULT_CDP_DATA_DIR):
+    elif not _facade().cdp_port_uses_profile(target_cdp_port, _facade().DEFAULT_CDP_DATA_DIR):
         result = {"status": "blocked", "code": "target_not_dedicated_profile", "imported_count": 0}
     else:
-        result = import_boss_session(
+        result = _facade().import_boss_session(
             source_cdp_port=source_cdp_port,
             target_cdp_port=target_cdp_port,
             authorized=authorized,

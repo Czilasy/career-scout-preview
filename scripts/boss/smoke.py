@@ -172,13 +172,13 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
 
 
 def run_check(cdp_port=DEFAULT_CDP_PORT):
-    """运行环境诊断检查（终端展示层，逻辑见 collect_check_items）"""
+    """运行环境诊断检查（终端展示层，逻辑见 _facade().collect_check_items）"""
     print("=" * 50)
     print("  BOSS直聘 CDP 环境检查")
     print("=" * 50)
     print()
 
-    items, all_pass = collect_check_items(cdp_port)
+    items, all_pass = _facade().collect_check_items(cdp_port)
     for index, item in enumerate(items, start=1):
         mark = {"ok": "✅", "fail": "❌", "skip": "⏭️"}.get(item["status"], "?")
         print(f"[{index}/{len(items)}] {item['name']}...")
