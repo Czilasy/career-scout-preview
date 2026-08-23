@@ -1847,7 +1847,7 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                         pg + 1, snapshot=all_jobs)
 
             if pg < max_pages:
-                d = random.uniform(30, 38)
+                d = random.uniform(12, 22)
                 print(f"  翻页等待 {d:.0f}s...\n")
                 time.sleep(d)
 
