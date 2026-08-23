@@ -1712,8 +1712,8 @@ def create_app(config=None):
     def _run_tuning_manifest_child(manifest_id: str):
         from webui.tuning import TuningController
 
-        controller = TuningController(store)
-        record = store.get_task_manifest(manifest_id)
+        controller = TuningController(ctx.store)
+        record = ctx.store.get_task_manifest(manifest_id)
         manifest = record["manifest"]
         round_id = record["round_id"]
         sink = controller.build_measurement_sink(round_id)
@@ -1728,7 +1728,7 @@ def create_app(config=None):
             controller.validate_consistency_before_execution(
                 manifest_id=manifest_id,
             )
-            result = _tuning_round_runner.execute(
+            result = ctx.tuning_round_runner.execute(
                 manifest, measurement_callback=measured,
             )
         except (
@@ -1778,9 +1778,9 @@ def create_app(config=None):
             evidence["error_counts"] = {
                 **evidence.get("error_counts", {}), error_code: 1,
             }
-        absolute = (Path(store.db_path).resolve().parent.parent / evidence_path).resolve()
+        absolute = (Path(ctx.store.db_path).resolve().parent.parent / evidence_path).resolve()
         expected_root = (
-            Path(store.db_path).resolve().parent.parent / "tuning"
+            Path(ctx.store.db_path).resolve().parent.parent / "tuning"
             / manifest["experiment_id"]
         ).resolve()
         if expected_root not in absolute.parents:
@@ -1790,7 +1790,7 @@ def create_app(config=None):
             evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ), encoding="utf-8")
         controller._save_round_metrics(round_id, evidence)
-        store.update_tuning_round_status(
+        ctx.store.update_tuning_round_status(
             round_id, status="reported", failure_code=error_code,
         )
 
@@ -1923,6 +1923,26 @@ def create_app(config=None):
             return True
         except DiscoveryStoreConflictError:
             return False
+
+    # ------------------------------------------------------------------
+    # 021 B3：共享运行态显式化为 PipelineContext；四个后台 runner 及其
+    # 助手经 ctx 访问（替代闭包捕获）。可 patch 的 webui.app 模块级符号
+    # 不在此绑定——ctx.__getattr__ 动态读取 webui.app，保证 patch 面不变。
+    # ------------------------------------------------------------------
+    from webui.pipeline_context import PipelineContext
+
+    ctx = PipelineContext(
+        app=app,
+        store=store,
+        tasks=_pipeline_tasks,
+        lock=_pipeline_lock,
+        resume_claims=_resume_claims,
+        executor=_pipeline_executor,
+        write_run=_write_run_unless_finished,
+        make_cdp_source=_make_cdp_source,
+        tuning_round_runner=_tuning_round_runner,
+    )
+    app.config["PIPELINE_CONTEXT"] = ctx
 
     def _record_pause_failure(task_id, stage, code, reason, *, processed=0, total=0,
                               extra=None, exception=None, include_traceback=False):
@@ -2275,15 +2295,15 @@ def create_app(config=None):
         task_id, script_params, execution_config=None, frozen_scope=None,
     ):
         from webui.pipeline_exec import expand_combinations, run_search
-        with _pipeline_lock:
-            task = _pipeline_tasks.get(task_id)
+        with ctx.lock:
+            task = ctx.tasks.get(task_id)
             if task is None:
                 task = {
                     "kind": "scrape", "status": "queued", "progress": {},
                     "logs": [], "result": None, "error": "",
                     "started_at": int(time.time() * 1000), "finished_at": None,
                 }
-                _pipeline_tasks[task_id] = task
+                ctx.tasks[task_id] = task
             task["status"] = "running"
             task["script_params"] = script_params  # 断点续抓需要原始参数
             if execution_config is not None:
@@ -2294,18 +2314,18 @@ def create_app(config=None):
             task.setdefault("page_persist_seq", 0)
             task.setdefault("last_page_snapshot_at", 0)
         if _is_user_finished(task_id):
-            with _pipeline_lock:
-                current = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                current = ctx.tasks.get(task_id)
                 if current is not None:
                     current["status"] = "cancelled"
                     current["error"] = _MSG_USER_FINISHED
-            _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+            _release_worker_resume_claims(ctx.tasks.get(task_id))
             return
         _activate_task_browser(task_id)
 
         def on_progress(snapshot):
-            with _pipeline_lock:
-                task = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                task = ctx.tasks.get(task_id)
                 if task is None:
                     return
                 task["progress"] = snapshot
@@ -2316,8 +2336,8 @@ def create_app(config=None):
         try:
             # 取出停止信号传给 run_search；cancel 接口 set 它后，
             # run_search 会在下一个组合边界退出，或因浏览器被关而抛错。
-            with _pipeline_lock:
-                task_ref = _pipeline_tasks.get(task_id, {})
+            with ctx.lock:
+                task_ref = ctx.tasks.get(task_id, {})
                 stop_event = task_ref.get("stop_event")
                 skip_combos = task_ref.get("skip_combos") or None
                 old_jobs = task_ref.get("old_jobs") or []
@@ -2326,8 +2346,8 @@ def create_app(config=None):
                 frozen_cdp_port = task_ref.get("cdp_port")
                 frozen_profile_key = task_ref.get("profile_key")
                 frozen_browser_account = task_ref.get("browser_account")
-            if store.get_screening_run(task_id) is None:
-                store.create_screening_run(
+            if ctx.store.get_screening_run(task_id) is None:
+                ctx.store.create_screening_run(
                     task_id,
                     source_count=len(expand_combinations(script_params)),
                     execution_params={
@@ -2343,10 +2363,10 @@ def create_app(config=None):
                     },
                     backend_version=_backend_version,
                 )
-            _write_run_unless_finished(
+            ctx.write_run(
                 task_id, status="running", current_stage="scrape"
             )
-            store.append_task_event(task_id, "stage_start", {"stage": "scrape"})
+            ctx.store.append_task_event(task_id, "stage_start", {"stage": "scrape"})
             # T403: 从冻结 runtime 创建 source，禁止读取当前 UI/活动账号/默认端口
             source = _make_cdp_source(
                 platform=frozen_platform,
@@ -2358,7 +2378,7 @@ def create_app(config=None):
             if source is None:
                 completed = sorted(skip_combos or [])
                 reason = "连不上调试浏览器，请启动 Chrome 调试端口后继续"
-                _write_run_unless_finished(
+                ctx.write_run(
                     task_id,
                     status="paused",
                     current_stage="scrape",
@@ -2366,8 +2386,8 @@ def create_app(config=None):
                     error_reason=reason,
                     processed_count=len(completed),
                 )
-                store.save_checkpoint(task_id, "scrape", completed)
-                store.append_task_event(task_id, "pause", {
+                ctx.store.save_checkpoint(task_id, "scrape", completed)
+                ctx.store.append_task_event(task_id, "pause", {
                     "stage": "scrape",
                     "code": "source_cdp_unavailable",
                     "completed_combos": len(completed),
@@ -2376,12 +2396,12 @@ def create_app(config=None):
                     task_id, "scrape", "source_cdp_unavailable", reason,
                     processed=len(completed), total=len(completed),
                 )
-                with _pipeline_lock:
-                    task = _pipeline_tasks.get(task_id)
+                with ctx.lock:
+                    task = ctx.tasks.get(task_id)
                     if task is not None:
                         task["status"] = "paused"
                         task["error"] = reason
-                _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                _release_worker_resume_claims(ctx.tasks.get(task_id))
                 return
 
             def on_combo_done(combo_key, jobs, completed_combos, *, outcome=None):
@@ -2389,14 +2409,14 @@ def create_app(config=None):
                 # 持久化失败时抛异常，run_search 会捕获并硬停止。
                 attempt_no = 1
                 try:
-                    latest = store.get_latest_source_attempt(task_id, combo_key)
+                    latest = ctx.store.get_latest_source_attempt(task_id, combo_key)
                     if latest is not None:
                         attempt_no = latest["attempt_no"] + 1
                 except _OPERATIONAL_ERRORS:
                     pass
                 if outcome is not None:
                     outcome_kind = "empty" if outcome.empty_result else "non_empty"
-                    store.append_source_attempt(
+                    ctx.store.append_source_attempt(
                         run_id=task_id,
                         platform=frozen_platform,
                         combo_key=combo_key,
@@ -2407,7 +2427,7 @@ def create_app(config=None):
                         empty_evidence=outcome.empty_evidence,
                     )
                 else:
-                    store.append_source_attempt(
+                    ctx.store.append_source_attempt(
                         run_id=task_id,
                         platform=frozen_platform,
                         combo_key=combo_key,
@@ -2415,10 +2435,10 @@ def create_app(config=None):
                         outcome_kind="non_empty",
                         job_count=len(jobs),
                     )
-                store.save_scrape_combo_result(
+                ctx.store.save_scrape_combo_result(
                     task_id, combo_key, jobs, completed_combos
                 )
-                store.append_task_events(task_id, [
+                ctx.store.append_task_events(task_id, [
                     ("job_success", {
                         "stage": "scrape", "combo_key": combo_key,
                         "job_id": str(job.get("job_id") or job.get("source_url") or ""),
@@ -2429,20 +2449,20 @@ def create_app(config=None):
             def on_page_completed(event):
                 """每完成一页原子保存岗位快照与页级 checkpoint。"""
                 lock = None
-                with _pipeline_lock:
-                    task_ref = _pipeline_tasks.get(task_id)
+                with ctx.lock:
+                    task_ref = ctx.tasks.get(task_id)
                     if task_ref is not None:
                         lock = task_ref.get("page_flush_lock")
                 if lock is not None:
                     lock.acquire()
                 try:
-                    store.save_scrape_page_progress(
+                    ctx.store.save_scrape_page_progress(
                         task_id, str(event.get("combo_key") or ""), event)
                 finally:
                     if lock is not None:
                         lock.release()
-                with _pipeline_lock:
-                    task_ref = _pipeline_tasks.get(task_id)
+                with ctx.lock:
+                    task_ref = ctx.tasks.get(task_id)
                     if task_ref is not None:
                         task_ref["last_page_snapshot_at"] = time.time()
                         task_ref["page_persist_seq"] = int(
@@ -2450,7 +2470,7 @@ def create_app(config=None):
                         task_ref["last_page_progress"] = dict(event)
 
             try:
-                page_rows = store.load_scrape_page_progress(task_id)
+                page_rows = ctx.store.load_scrape_page_progress(task_id)
             except _OPERATIONAL_ERRORS:
                 page_rows = []
             skip_set = set(skip_combos or [])
@@ -2463,7 +2483,7 @@ def create_app(config=None):
                 if row["combo_key"] in skip_set:
                     continue
                 try:
-                    resume_jobs[row["combo_key"]] = store.load_scrape_run_jobs(
+                    resume_jobs[row["combo_key"]] = ctx.store.load_scrape_run_jobs(
                         task_id, combo_key=row["combo_key"])
                 except _OPERATIONAL_ERRORS:
                     resume_jobs[row["combo_key"]] = []
@@ -2471,7 +2491,7 @@ def create_app(config=None):
             def _record_combo_issue(combo_key, entry):
                 """把运行中组合问题（如登录失效复核）写进任务事件日志。"""
                 try:
-                    store.append_task_event(
+                    ctx.store.append_task_event(
                         task_id, "combo_issue",
                         {**(entry or {}), "combo_key": str(combo_key)},
                     )
@@ -2510,10 +2530,10 @@ def create_app(config=None):
             # 续跑会用同一 run_id 重新注册内存任务；旧任务被清理/替换时
             # 内存字段可以跳过同步，但 DB 终态必须照常写入，否则 run 会
             # 永远停在 running（数据已齐却没收尾）。
-            with _pipeline_lock:
-                task = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                task = ctx.tasks.get(task_id)
                 if stop_event is not None and stop_event.is_set():
-                    _write_run_unless_finished(
+                    ctx.write_run(
                         task_id, status="cancelled", current_stage="scrape",
                         processed_count=len(result.get("completed_combos") or []),
                         error_reason=_MSG_USER_STOPPED_SCRAPE,
@@ -2521,13 +2541,13 @@ def create_app(config=None):
                     _terminal_status = "cancelled"
                 elif result.get("ok"):
                     completed = list(result.get("completed_combos") or [])
-                    _write_run_unless_finished(
+                    ctx.write_run(
                         task_id, status="succeeded", current_stage="scrape",
                         processed_count=len(completed),
                         source_count=int(result.get("combinations") or len(completed)),
                         total_scraped=int(result.get("total_scraped") or 0),
                     )
-                    store.append_task_event(task_id, "stage_complete", {"stage": "scrape"})
+                    ctx.store.append_task_event(task_id, "stage_complete", {"stage": "scrape"})
                     _terminal_status = "done"
                 else:
                     # 切片4：列表抓取失败时区分"系统性阻断暂停" vs "真失败"
@@ -2540,15 +2560,15 @@ def create_app(config=None):
                         or _classify_scrape_block(err_msg)
                     )
                     if result.get("hard_stop") and _pause_code:
-                        _write_run_unless_finished(
+                        ctx.write_run(
                             task_id, status="paused", error_code=_pause_code,
                             current_stage="scrape",
                             processed_count=len(completed),
                             source_count=int(result.get("combinations") or 0),
                             error_reason=err_msg,
                             total_scraped=int(result.get("total_scraped") or 0))
-                        store.save_checkpoint(task_id, "scrape", completed)
-                        store.append_task_event(
+                        ctx.store.save_checkpoint(task_id, "scrape", completed)
+                        ctx.store.append_task_event(
                             task_id, "pause",
                             {"stage": "scrape", "code": _pause_code,
                              "completed_combos": len(completed)})
@@ -2559,11 +2579,11 @@ def create_app(config=None):
                         )
                         _terminal_status = "paused"
                     else:
-                        store.append_task_event(task_id, "job_fail", {
+                        ctx.store.append_task_event(task_id, "job_fail", {
                             "stage": "scrape", "error": err_msg,
                             "failed_code": _pause_code or "scrape_failed",
                         })
-                        _write_run_unless_finished(
+                        ctx.write_run(
                             task_id, status="failed", current_stage="scrape",
                             processed_count=len(completed),
                             source_count=int(result.get("combinations") or 0),
@@ -2601,10 +2621,10 @@ def create_app(config=None):
             if _terminal_status in ("cancelled", "failed"):
                 _clear_auto_screen(task_id)
             _schedule_pipeline_task_cleanup(task_id)
-            _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+            _release_worker_resume_claims(ctx.tasks.get(task_id))
         except Exception as exc:
-            with _pipeline_lock:
-                task = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                task = ctx.tasks.get(task_id)
             stop_event = task.get("stop_event") if task is not None else None
             cancelled = stop_event is not None and stop_event.is_set()
             error_message = (
@@ -2613,16 +2633,16 @@ def create_app(config=None):
             )
             if not cancelled:
                 record_failure(
-                    store, task_id, stage="scrape",
+                    ctx.store, task_id, stage="scrape",
                     error_code="internal_error", reason=error_message,
                     correlation_id=task_id,
                     diagnostics={}, exception=exc, include_traceback=True,
                 )
             persistence_error = None
             try:
-                run = store.get_screening_run(task_id)
+                run = ctx.store.get_screening_run(task_id)
                 if run and run.get("status") in ("queued", "running", "paused"):
-                    _write_run_unless_finished(
+                    ctx.write_run(
                         task_id,
                         status="cancelled" if cancelled else "failed",
                         current_stage="scrape",
@@ -2630,8 +2650,8 @@ def create_app(config=None):
                     )
             except _OPERATIONAL_ERRORS as persist_exc:
                 persistence_error = type(persist_exc).__name__
-            with _pipeline_lock:
-                task = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                task = ctx.tasks.get(task_id)
                 if task is not None:
                     if _is_user_finished(task_id):
                         task["status"] = "cancelled"
@@ -2645,7 +2665,7 @@ def create_app(config=None):
                             else f"{error_message}；状态保存失败：{persistence_error}"
                         )
             _schedule_pipeline_task_cleanup(task_id)
-            _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+            _release_worker_resume_claims(ctx.tasks.get(task_id))
 
     def _jd_checkpoint_path(result_dir, run_id):
         return os.path.join(result_dir, f"ai_screen_jd_{run_id}.json")
@@ -2815,8 +2835,8 @@ def create_app(config=None):
             fetch_job_details,
         )
 
-        with _pipeline_lock:
-            task = _pipeline_tasks.get(task_id)
+        with ctx.lock:
+            task = ctx.tasks.get(task_id)
             if task is None:
                 task = {
                     "kind": "ai_screen", "status": "queued", "progress": {},
@@ -2825,7 +2845,7 @@ def create_app(config=None):
                     "started_at": int(time.time() * 1000), "finished_at": None,
                     "stop_event": threading.Event(),
                 }
-                _pipeline_tasks[task_id] = task
+                ctx.tasks[task_id] = task
             if task.get("status") == "cancelled":
                 # 排队期间已被用户取消：直接退出，别把 cancelled 覆盖成 running
                 _release_worker_resume_claims(task)
@@ -2842,7 +2862,7 @@ def create_app(config=None):
         # 空对象等）时回退 execution_params 中的快照值，避免三通道退化。
         if resume_from_run_id and not profile_facts:
             try:
-                _prev_run = store.get_screening_run(resume_from_run_id)
+                _prev_run = ctx.store.get_screening_run(resume_from_run_id)
                 _prev_params = (_prev_run or {}).get("execution_params") or {}
                 if not profile_facts:
                     profile_facts = _prev_params.get("profile_facts")
@@ -2873,9 +2893,9 @@ def create_app(config=None):
                 stage_events.append(("stage_start", {"stage": event_stage}))
                 last_event_stage = event_stage
             if stage_events:
-                store.append_task_events(task_id, stage_events)
-            with _pipeline_lock:
-                task = _pipeline_tasks.get(task_id)
+                ctx.store.append_task_events(task_id, stage_events)
+            with ctx.lock:
+                task = ctx.tasks.get(task_id)
                 if task is None:
                     return
                 task["progress"] = kw
@@ -2886,27 +2906,27 @@ def create_app(config=None):
         def _stop_requested():
             return stop_event is not None and stop_event.is_set()
         def _stop_mode():
-            with _pipeline_lock:
-                t = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                t = ctx.tasks.get(task_id)
                 if t is None or t.get("stop_event") is None or not t["stop_event"].is_set():
                     return None
                 return "pause" if t.get("stop_mode") == "pause" else "cancel"
 
         def _mark_paused():
             """用户暂停：把原 run 写为 paused，不产生历史轮（017-US1）。"""
-            _write_run_unless_finished(
+            ctx.write_run(
                 task_id, status="paused", error_code="user_paused",
                 error_reason="用户已暂停，结果已保留",
             )
-            run = store.get_screening_run(task_id) or {}
+            run = ctx.store.get_screening_run(task_id) or {}
             stage = str(run.get("current_stage") or (task.get("progress") or {}).get("stage") or "")
-            store.append_task_event(task_id, "pause", {
+            ctx.store.append_task_event(task_id, "pause", {
                 "stage": stage, "code": "user_paused",
                 "processed": int(run.get("processed_count") or 0),
                 "total": int(run.get("source_count") or 0),
             })
-            with _pipeline_lock:
-                t = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                t = ctx.tasks.get(task_id)
                 if t is not None:
                     t["status"] = "paused"
                     t["error"] = "任务已暂停，结果已保留"
@@ -2923,11 +2943,11 @@ def create_app(config=None):
 
             017-US1：取消不再写历史快照；底层已抓岗位数据保留。
             """
-            _write_run_unless_finished(
+            ctx.write_run(
                 task_id, status="cancelled", error_reason=_MSG_USER_STOPPED_SCREEN
             )
-            with _pipeline_lock:
-                t = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                t = ctx.tasks.get(task_id)
                 if t is not None:
                     t["status"] = "cancelled"
                     t["error"] = _MSG_USER_STOPPED_SCREEN
@@ -2937,15 +2957,15 @@ def create_app(config=None):
         try:
             # 1) 只读取请求明确绑定的抓取任务，避免另一标签页或另一轮抓取
             # 覆盖全局 latest 文件后导致筛选对象串线。
-            with _pipeline_lock:
-                source_task = _pipeline_tasks.get(scrape_task_id)
+            with ctx.lock:
+                source_task = ctx.tasks.get(scrape_task_id)
                 source_result = (
                     source_task.get("result")
                     if isinstance(source_task, dict) else None
                 )
             if not isinstance(source_result, dict):
                 raise RuntimeError("invalid_scrape_task")
-            source_run = store.get_screening_run(scrape_task_id)
+            source_run = ctx.store.get_screening_run(scrape_task_id)
             source_params = (
                 source_run.get("execution_params")
                 if isinstance(source_run, dict) else None
@@ -2989,14 +3009,14 @@ def create_app(config=None):
                 )
             except (KeyError, TypeError, ValueError) as exc:
                 raise RuntimeError("frozen_snapshot_missing") from exc
-            with _pipeline_lock:
+            with ctx.lock:
                 task["config_digest"] = execution_config.config_digest
                 task["scope_digest"] = frozen_scope.scope_digest
             # 列表抓取遇到系统性阻断（验证码/登录失效/IP风控）：暂停，不标 failed
             if source_result.get("hard_stop"):
                 _hs_code = source_result.get("hard_stop_code") or "source_blocked"
                 _completed_combos = source_result.get("completed_combos") or []
-                store.create_screening_run(
+                ctx.store.create_screening_run(
                     task_id,
                     frozen_filters=screening_fields,
                     source_count=len(source_result.get("jobs") or []),
@@ -3012,20 +3032,20 @@ def create_app(config=None):
                                       "task_input_digest": ai_task_input_digest,
                                       "cross_platform_dedupe": cross_platform_dedupe},
                     backend_version=_backend_version)
-                store.save_filter_snapshot(
+                ctx.store.save_filter_snapshot(
                     task_id,
                     platform=frozen_platform,
                     task_input_digest=ai_task_input_digest,
                 )
-                _write_run_unless_finished(
+                ctx.write_run(
                     task_id, status="running", current_stage="scrape"
                 )
-                _write_run_unless_finished(
+                ctx.write_run(
                     task_id, status="paused", error_code=_hs_code,
                     current_stage="scrape")
                 # 保存已完成组合 checkpoint（继续时跳过）
-                store.save_checkpoint(task_id, "scrape", _completed_combos)
-                store.append_task_event(
+                ctx.store.save_checkpoint(task_id, "scrape", _completed_combos)
+                ctx.store.append_task_event(
                     task_id, "pause",
                     {"stage": "scrape", "code": _hs_code,
                      "completed_combos": len(_completed_combos),
@@ -3037,8 +3057,8 @@ def create_app(config=None):
                     processed=len(_completed_combos),
                     total=int(source_result.get("combinations") or 0),
                 )
-                with _pipeline_lock:
-                    t = _pipeline_tasks.get(task_id)
+                with ctx.lock:
+                    t = ctx.tasks.get(task_id)
                     if t is not None:
                         t["status"] = "paused"
                         t["error"] = (
@@ -3047,7 +3067,7 @@ def create_app(config=None):
                             f"{source_result.get('combinations') or 0} 个组合。"
                             "处理完成后点「继续」"
                         )
-                _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                _release_worker_resume_claims(ctx.tasks.get(task_id))
                 return
             if not source_result.get("ok"):
                 raise RuntimeError("invalid_scrape_task")
@@ -3064,7 +3084,7 @@ def create_app(config=None):
             # 任务身份和断点必须先可靠落库；否则继续调用 AI 会产生无法恢复、
             # 无法审计的孤儿工作。
             if resume_from_run_id != task_id:
-                store.create_screening_run(
+                ctx.store.create_screening_run(
                     task_id,
                     frozen_filters=screening_fields,
                     source_count=len(raw_jobs),
@@ -3083,16 +3103,16 @@ def create_app(config=None):
                     },
                     backend_version=_backend_version,
                 )
-                store.save_filter_snapshot(
+                ctx.store.save_filter_snapshot(
                     task_id,
                     platform=frozen_platform,
                     task_input_digest=ai_task_input_digest,
                 )
-                _write_run_unless_finished(
+                ctx.write_run(
                     task_id, status="running", current_stage="ai_rough"
                 )
             else:
-                resumed_run = store.get_screening_run(task_id)
+                resumed_run = ctx.store.get_screening_run(task_id)
                 if resumed_run is None or resumed_run.get("status") != "running":
                     raise RuntimeError("resume_run_not_claimed")
                 # 019：续跑沿用提交时冻结的去重开关（run 参数优先）。
@@ -3110,14 +3130,14 @@ def create_app(config=None):
                     load_resume_verdicts_with_fallback,
                 )
                 resume_verdicts = load_resume_verdicts_with_fallback(
-                    store, resume_from_run_id, frozen_platform,
+                    ctx.store, resume_from_run_id, frozen_platform,
                     scrape_task_id, screening_fields, profile_summary,
                     profile_facts=profile_facts,
                 )
                 old_jd_path = _jd_checkpoint_path(
                     app.config["RESULT_DIR"], resume_from_run_id)
                 resume_jd = _load_jd_checkpoint(old_jd_path)
-                resume_jd = load_resume_jd(store, old_jd_path, resume_from_run_id)
+                resume_jd = load_resume_jd(ctx.store, old_jd_path, resume_from_run_id)
                 # 新 run 继承旧 run 时删除旧文件；原 run 就地继续时保留同一断点，
                 # 避免在首次新批次落盘前退出导致已抓 JD 丢失。
                 if resume_from_run_id != task_id:
@@ -3133,23 +3153,23 @@ def create_app(config=None):
             # 019：跨平台去重——对端近 30 天可见轮非剔除岗位指纹比对；命中者
             # 以 dropped 判定落库并入粗筛断点（续跑/重启在本点确定性重放）。
             _dedupe = apply_to_screening_input(
-                store, raw_jobs, frozen_platform, profile_summary,
+                ctx.store, raw_jobs, frozen_platform, profile_summary,
                 enabled=cross_platform_dedupe)
             _dup_entries = _dedupe.dropped_entries
             _dup_ids = {str(e.get("job_id") or "") for e in _dup_entries}
             if _dup_entries:
-                store.save_verdict_and_checkpoint_atomic(
+                ctx.store.save_verdict_and_checkpoint_atomic(
                     task_id, "ai_rough", _dedupe.dup_verdicts,
-                    sorted(_dup_ids | set(store.load_checkpoint(
+                    sorted(_dup_ids | set(ctx.store.load_checkpoint(
                         task_id, "ai_rough"))))
                 emit(stage="screen_a", current=0, total=len(raw_jobs),
                      message=_dedupe.progress_message)
-                store.append_task_event(
+                ctx.store.append_task_event(
                     task_id, "cross_platform_dedup", _dedupe.ledger_payload())
 
             # 2) AI 凭据
-            settings = store.get_ai_settings()
-            cred_ref = store.get_credential_ref()
+            settings = ctx.store.get_ai_settings()
+            cred_ref = ctx.store.get_credential_ref()
             api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
             endpoint = settings.get("endpoint_url", "")
             model = settings.get("model", "")
@@ -3175,7 +3195,7 @@ def create_app(config=None):
             _rough_done_ids: set[str] = set()
             _resume_verdicts: dict[str, str] = {}  # job_id → verdict（真实判定）
             if resume_from_run_id:
-                _rough_done_ids = store.load_checkpoint(
+                _rough_done_ids = ctx.store.load_checkpoint(
                     resume_from_run_id, "ai_rough"
                 )
                 # 判定取同源链合并结果（resume_verdicts）：完整判定可能挂在
@@ -3209,7 +3229,7 @@ def create_app(config=None):
                 set(_rough_done_ids) - set(_resume_verdicts)
             ) if _rough_done_ids else set()
             if resume_from_run_id and _missing_verdict_ids:
-                store.append_task_event(task_id, "resume_inconsistent", {
+                ctx.store.append_task_event(task_id, "resume_inconsistent", {
                     "verdicts": len(_resume_verdicts),
                     "checkpoint": len(_rough_done_ids),
                     "missing": len(_missing_verdict_ids),
@@ -3218,7 +3238,7 @@ def create_app(config=None):
             try:
                 def _rough_batch_done(batch_verdicts, completed_job_ids):
                     completed_snapshot = _rough_completed_ids | set(completed_job_ids)
-                    store.save_verdict_and_checkpoint_atomic(
+                    ctx.store.save_verdict_and_checkpoint_atomic(
                         task_id, "ai_rough", batch_verdicts,
                         sorted(completed_snapshot),
                     )
@@ -3231,7 +3251,7 @@ def create_app(config=None):
                                             on_batch_done=_rough_batch_done,
                                             execution_config=execution_config,
                                             correlation_id=task_id)
-                store.save_screening_verdicts(
+                ctx.store.save_screening_verdicts(
                     task_id, screen_result.get("verdicts") or {})
             except (ai_service.AISecurityError, ai_service.AICheckpointError) as _ai_exc:
                 # AISecurityError（systemic）：暂停整任务，保存 checkpoint
@@ -3249,12 +3269,12 @@ def create_app(config=None):
                     # 暂停状态、真实进度、checkpoint 和事件必须全部可靠落库；
                     # 任一步失败都交给外层 internal_error 路径，不能只改内存。
                     _done_keys = sorted(_rough_completed_ids)
-                    _write_run_unless_finished(
+                    ctx.write_run(
                         task_id, status="paused", error_code=_block_code,
                         current_stage="ai_rough",
                         processed_count=len(_done_keys))
-                    store.save_checkpoint(task_id, "ai_rough", _done_keys)
-                    store.append_task_event(
+                    ctx.store.save_checkpoint(task_id, "ai_rough", _done_keys)
+                    ctx.store.append_task_event(
                         task_id, "pause",
                         {"stage": "ai_rough", "code": _block_code,
                          "processed": len(_done_keys), "total": len(raw_jobs)})
@@ -3264,8 +3284,8 @@ def create_app(config=None):
                         processed=len(_done_keys), total=len(raw_jobs),
                         exception=_ai_exc,
                     )
-                    with _pipeline_lock:
-                        t = _pipeline_tasks.get(task_id)
+                    with ctx.lock:
+                        t = ctx.tasks.get(task_id)
                         if t is not None:
                             t["status"] = "paused"
                             t["error"] = (
@@ -3273,7 +3293,7 @@ def create_app(config=None):
                                 f"已处理 {len(_rough_completed_ids)}/{len(raw_jobs)} 条。"
                                 "处理完成后点「继续」"
                             )
-                    _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                    _release_worker_resume_claims(ctx.tasks.get(task_id))
                     return
                 raise  # 非 systemic，往上抛
             if _stop_requested():
@@ -3296,7 +3316,7 @@ def create_app(config=None):
             for _dup_entry in _dup_entries:
                 dropped_by_id[str(_dup_entry.get("job_id") or "")] = _dup_entry
             dropped = list(dropped_by_id.values())
-            store.save_checkpoint(
+            ctx.store.save_checkpoint(
                 task_id,
                 "ai_rough",
                 list(kept_ids | {str(d.get("job_id") or "") for d in dropped}),
@@ -3304,7 +3324,7 @@ def create_app(config=None):
             survivors = [j for j in raw_jobs if str(j.get("job_id", "")) in kept_ids]
             emit(stage="screen_a_done", kept=len(survivors), dropped=len(dropped),
                  message=f"粗筛完成：保留 {len(survivors)} 条，移除 {len(dropped)} 条")
-            _write_run_unless_finished(
+            ctx.write_run(
                 task_id, status="running", source_cursor=0,
                 total_kept=len(survivors), total_dropped=len(dropped),
             )
@@ -3324,15 +3344,15 @@ def create_app(config=None):
                 if not chrome_ok:
                     reason = f"调试浏览器未就绪（{chrome_err}），请处理后继续"
                     _save_jd_checkpoint(jd_path, jd_map)
-                    _write_run_unless_finished(
+                    ctx.write_run(
                         task_id, status="paused", error_code="source_cdp_unavailable",
                         current_stage="jd_detail", processed_count=len(jd_map),
                         error_reason=reason,
                     )
-                    store.save_checkpoint(
+                    ctx.store.save_checkpoint(
                         task_id, "jd_detail", sorted(jd_map)
                     )
-                    store.append_task_event(task_id, "pause", {
+                    ctx.store.append_task_event(task_id, "pause", {
                         "stage": "jd_detail", "code": "source_cdp_unavailable",
                         "processed": len(jd_map), "total": len(survivors),
                     })
@@ -3340,12 +3360,12 @@ def create_app(config=None):
                         task_id, "jd_detail", "source_cdp_unavailable", reason,
                         processed=len(jd_map), total=len(survivors),
                     )
-                    with _pipeline_lock:
-                        t = _pipeline_tasks.get(task_id)
+                    with ctx.lock:
+                        t = ctx.tasks.get(task_id)
                         if t is not None:
                             t["status"] = "paused"
                             t["error"] = reason
-                    _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                    _release_worker_resume_claims(ctx.tasks.get(task_id))
                     return
                 source = _make_cdp_source(
                     platform=frozen_platform,
@@ -3357,15 +3377,15 @@ def create_app(config=None):
                 if source is None:
                     reason = "CDP 抓取源不可用，请确认调试浏览器后继续"
                     _save_jd_checkpoint(jd_path, jd_map)
-                    _write_run_unless_finished(
+                    ctx.write_run(
                         task_id, status="paused", error_code="source_cdp_unavailable",
                         current_stage="jd_detail", processed_count=len(jd_map),
                         error_reason=reason,
                     )
-                    store.save_checkpoint(
+                    ctx.store.save_checkpoint(
                         task_id, "jd_detail", sorted(jd_map)
                     )
-                    store.append_task_event(task_id, "pause", {
+                    ctx.store.append_task_event(task_id, "pause", {
                         "stage": "jd_detail", "code": "source_cdp_unavailable",
                         "processed": len(jd_map), "total": len(survivors),
                     })
@@ -3373,12 +3393,12 @@ def create_app(config=None):
                         task_id, "jd_detail", "source_cdp_unavailable", reason,
                         processed=len(jd_map), total=len(survivors),
                     )
-                    with _pipeline_lock:
-                        t = _pipeline_tasks.get(task_id)
+                    with ctx.lock:
+                        t = ctx.tasks.get(task_id)
                         if t is not None:
                             t["status"] = "paused"
                             t["error"] = reason
-                    _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                    _release_worker_resume_claims(ctx.tasks.get(task_id))
                     return
 
                 todo_jd = [j for j in survivors
@@ -3418,7 +3438,7 @@ def create_app(config=None):
                                 "evidence": str(j.get("jd_failed_evidence") or ""),
                             }
                     _save_jd_checkpoint(jd_path, jd_map)
-                    _write_run_unless_finished(
+                    ctx.write_run(
                         task_id, source_cursor=len(jd_map),
                         processed_count=len(jd_map), current_stage="jd_detail",
                     )
@@ -3441,7 +3461,7 @@ def create_app(config=None):
                             stage="jd_detail",
                             platform=frozen_platform,
                         )
-                        _write_run_unless_finished(
+                        ctx.write_run(
                             task_id, status="paused", error_code=_hs_code,
                             current_stage="jd_detail",
                             processed_count=len(jd_map), error_reason=_hs_reason,
@@ -3450,8 +3470,8 @@ def create_app(config=None):
                             task_id, "jd_detail", _hs_code, _hs_reason,
                             processed=len(jd_map), total=len(survivors),
                         )
-                        with _pipeline_lock:
-                            t = _pipeline_tasks.get(task_id)
+                        with ctx.lock:
+                            t = ctx.tasks.get(task_id)
                             if t is not None:
                                 t["status"] = "paused"
                                 t["error"] = (
@@ -3459,7 +3479,7 @@ def create_app(config=None):
                                     f"{len(jd_map)}/{len(survivors)} 条（已保存）。"
                                     "请在自动化浏览器中处理，完成后点「继续」"
                                 )
-                        _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                        _release_worker_resume_claims(ctx.tasks.get(task_id))
                         return
                     if detail_result.get("stopped"):
                         close_debug_chrome(frozen_cdp_port)
@@ -3496,7 +3516,7 @@ def create_app(config=None):
                 done_verdicts = dict(resume_fine_verdicts)
                 # 切片6：从 checkpoint 恢复已判定 job_id（resume 场景）
                 if resume_from_run_id:
-                    _fine_done = store.load_checkpoint(
+                    _fine_done = ctx.store.load_checkpoint(
                         resume_from_run_id, "ai_fine"
                     )
                     if _fine_done:
@@ -3511,7 +3531,7 @@ def create_app(config=None):
                 todo_match = [j for j in jobs_with_jd
                               if str(j.get("job_id", "")) not in done_verdicts]
                 no_jd_pending = len(enriched) - len(jobs_with_jd)
-                _write_run_unless_finished(
+                ctx.write_run(
                     task_id, current_stage="ai_fine",
                     processed_count=len(done_verdicts),
                     pending_count=no_jd_pending,
@@ -3535,11 +3555,11 @@ def create_app(config=None):
                     next_verdicts.update(batch_verdicts)
                     # verdict 与 checkpoint 同事务提交。任一步失败都必须停止，
                     # 不能继续下一批 AI 后再把内存结果伪装成可恢复进度。
-                    store.save_verdict_and_checkpoint_atomic(
+                    ctx.store.save_verdict_and_checkpoint_atomic(
                         task_id, "ai_fine", batch_verdicts,
                         list(next_verdicts.keys()),
                     )
-                    _write_run_unless_finished(
+                    ctx.write_run(
                         task_id, processed_count=len(next_verdicts))
                     done_verdicts = next_verdicts
                     emit(stage="screen_b",
@@ -3562,13 +3582,13 @@ def create_app(config=None):
                     if isinstance(_ai_exc, AISecurityError):
                         _block_code = map_ai_error_to_block_code(_ai_exc.error_code)
                         if _block_code:
-                            _write_run_unless_finished(
+                            ctx.write_run(
                                 task_id, status="paused", error_code=_block_code,
                                 current_stage="ai_fine",
                                 processed_count=len(done_verdicts))
-                            store.save_checkpoint(
+                            ctx.store.save_checkpoint(
                                 task_id, "ai_fine", list(done_verdicts.keys()))
-                            store.append_task_event(
+                            ctx.store.append_task_event(
                                 task_id, "pause",
                                 {"stage": "ai_fine", "code": _block_code,
                                  "processed": len(done_verdicts),
@@ -3579,8 +3599,8 @@ def create_app(config=None):
                                 processed=len(done_verdicts),
                                 total=len(jobs_with_jd), exception=_ai_exc,
                             )
-                            with _pipeline_lock:
-                                t = _pipeline_tasks.get(task_id)
+                            with ctx.lock:
+                                t = ctx.tasks.get(task_id)
                                 if t is not None:
                                     t["status"] = "paused"
                                     t["error"] = (
@@ -3588,7 +3608,7 @@ def create_app(config=None):
                                         f"已判定 {len(done_verdicts)}/{len(jobs_with_jd)} 条。"
                                         "处理完成后点「继续」"
                                     )
-                            _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                            _release_worker_resume_claims(ctx.tasks.get(task_id))
                             return
                     raise  # 非 systemic，往上抛
                 # 兜底：末轮重试等未触发 on_batch_done 的新判定仍须落库。
@@ -3673,7 +3693,7 @@ def create_app(config=None):
                         } if is_failure else {}),
                     },
                 ))
-            store.append_task_events(task_id, job_events)
+            ctx.store.append_task_events(task_id, job_events)
             mismatch_count = sum(
                 1 for job in enriched if job.get("verdict") == "not_match"
             )
@@ -3682,7 +3702,7 @@ def create_app(config=None):
                 if job.get("verdict") not in ("match", "not_match", "mismatch")
             )
             processed_count = match_count + mismatch_count
-            _write_run_unless_finished(
+            ctx.write_run(
                 task_id,
                 match_count=match_count,
                 mismatch_count=mismatch_count,
@@ -3713,7 +3733,7 @@ def create_app(config=None):
             if _is_user_finished(task_id):
                 final_db_status = "partial"
             else:
-                final_db_status = store.finalize_run_status(task_id)
+                final_db_status = ctx.store.finalize_run_status(task_id)
                 if final_db_status not in ("succeeded", "partial"):
                     if _is_user_finished(task_id):
                         final_db_status = "partial"
@@ -3726,11 +3746,11 @@ def create_app(config=None):
             # 017-US2: 写入统一走 result_rounds.save_finished_round（一条流程一条轮）。
             from webui.screen_flow import build_round_script_params
             from webui.result_rounds import save_finished_round
-            ai_run_for_params = store.get_screening_run(task_id) or {}
+            ai_run_for_params = ctx.store.get_screening_run(task_id) or {}
             saved_script_params = build_round_script_params(
-                store, ai_run_for_params, screening_fields, frozen_platform)
+                ctx.store, ai_run_for_params, screening_fields, frozen_platform)
             source_run_id = save_finished_round(
-                store, result, saved_script_params,
+                ctx.store, result, saved_script_params,
                 scrape_task_id=scrape_task_id,
                 status="done",
                 execution_config=execution_config.to_dict(),
@@ -3740,8 +3760,8 @@ def create_app(config=None):
             )
             result["source_run_id"] = source_run_id
             try:
-                _saved_run = store.get_screening_run(source_run_id) or {}
-                store.append_task_event(task_id, "history_snapshot", {
+                _saved_run = ctx.store.get_screening_run(source_run_id) or {}
+                ctx.store.append_task_event(task_id, "history_snapshot", {
                     "snapshot_run_id": source_run_id,
                     "status": _saved_run.get("status") or "done",
                     "jobs": len(enriched),
@@ -3750,20 +3770,20 @@ def create_app(config=None):
             except _OPERATIONAL_ERRORS:
                 pass
             _prune_history_best_effort()
-            with _pipeline_lock:
-                task = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                task = ctx.tasks.get(task_id)
                 if task is not None:
                     task["result"] = result
                     task["status"] = "done"
             _schedule_pipeline_task_cleanup(task_id)
-            _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+            _release_worker_resume_claims(ctx.tasks.get(task_id))
             # 任务成功：断点文件使命完成（续跑只服务失败/取消/中断）
             _remove_jd_checkpoint(jd_path)
         except ai_service.AISecurityError as exc:
             error_message = ai_service.user_facing_error(exc.error_code)
             if not _is_user_finished(task_id):
                 record_failure(
-                    store, task_id, stage="ai_screen",
+                    ctx.store, task_id, stage="ai_screen",
                     error_code=exc.error_code, reason=error_message,
                     correlation_id=task_id,
                     diagnostics=dict(getattr(exc, "diagnostics", None) or {}),
@@ -3771,14 +3791,14 @@ def create_app(config=None):
                 )
             persistence_error = None
             try:
-                _write_run_unless_finished(
+                ctx.write_run(
                     task_id, status="failed", error_code=exc.error_code,
                     error_reason=error_message,
                 )
             except _OPERATIONAL_ERRORS as persist_exc:
                 persistence_error = type(persist_exc).__name__
-            with _pipeline_lock:
-                task = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                task = ctx.tasks.get(task_id)
                 if task is not None:
                     if _is_user_finished(task_id):
                         task["status"] = "cancelled"
@@ -3790,11 +3810,11 @@ def create_app(config=None):
                             else f"{error_message}；状态保存失败：{persistence_error}"
                         )
             _schedule_pipeline_task_cleanup(task_id)
-            with _pipeline_lock:
-                _terminal_status = (_pipeline_tasks.get(task_id) or {}).get("status")
+            with ctx.lock:
+                _terminal_status = (ctx.tasks.get(task_id) or {}).get("status")
             if _terminal_status in ("cancelled", "failed"):
                 _clear_auto_screen(task_id)
-            _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+            _release_worker_resume_claims(ctx.tasks.get(task_id))
         except Exception as exc:
             error_message = ai_service.user_facing_error("internal_error")
             # 020 US7：终态 succeeded 已落库但写结果轮失败 → 先试条件降级
@@ -3802,7 +3822,7 @@ def create_app(config=None):
             # 不满足条件时保持 succeeded，只落诊断事件。
             if finalized and not _is_user_finished(task_id):
                 try:
-                    _downgraded = store.downgrade_succeeded_if_no_result_round(
+                    _downgraded = ctx.store.downgrade_succeeded_if_no_result_round(
                         task_id,
                         error_code="result_round_save_failed",
                         error_reason="筛选已完成但结果保存失败，点继续可重试保存",
@@ -3810,7 +3830,7 @@ def create_app(config=None):
                 except _OPERATIONAL_ERRORS:
                     _downgraded = False
                 try:
-                    store.append_task_event(task_id, "result_round_save_failed", {
+                    ctx.store.append_task_event(task_id, "result_round_save_failed", {
                         "downgraded": bool(_downgraded),
                         "error": f"{type(exc).__name__}: {exc}"[:200],
                     })
@@ -3825,21 +3845,21 @@ def create_app(config=None):
             )
             if not _is_user_finished(task_id):
                 record_failure(
-                    store, task_id, stage="ai_screen",
+                    ctx.store, task_id, stage="ai_screen",
                     error_code=_fail_code, reason=error_message,
                     correlation_id=task_id, diagnostics={},
                     exception=exc, include_traceback=True,
                 )
             persistence_error = None
             try:
-                _write_run_unless_finished(
+                ctx.write_run(
                     task_id, status="failed", error_code=_fail_code,
                     error_reason=error_message,
                 )
             except _OPERATIONAL_ERRORS as persist_exc:
                 persistence_error = type(persist_exc).__name__
-            with _pipeline_lock:
-                task = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                task = ctx.tasks.get(task_id)
                 if task is not None:
                     if _is_user_finished(task_id):
                         task["status"] = "cancelled"
@@ -3851,7 +3871,7 @@ def create_app(config=None):
                             else f"{error_message}；状态保存失败：{persistence_error}"
                         )
             _schedule_pipeline_task_cleanup(task_id)
-            _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+            _release_worker_resume_claims(ctx.tasks.get(task_id))
 
     @app.route("/api/analyze-resume", methods=["POST"])
     def analyze_resume():
@@ -6920,7 +6940,7 @@ def create_app(config=None):
 
         # 画像兜底：前端刷新后传空，从落盘结果里恢复（跟本轮抓取绑定，下轮覆盖）
         if not profile_summary.strip():
-            payload = store.load_latest_pipeline_result(source_run_id or None)
+            payload = ctx.store.load_latest_pipeline_result(source_run_id or None)
             if payload:
                 profile_summary = str(
                     (payload.get("result") or {}).get("profile_summary", "")
@@ -6929,8 +6949,8 @@ def create_app(config=None):
                     (payload.get("result") or {}).get("profile_facts") or None
                 )
 
-        with _pipeline_lock:
-            task = _pipeline_tasks.get(task_id)
+        with ctx.lock:
+            task = ctx.tasks.get(task_id)
             if task is None:
                 task = {
                     "kind": "recrawl", "status": "queued", "progress": {},
@@ -6938,7 +6958,7 @@ def create_app(config=None):
                     "started_at": int(time.time() * 1000), "finished_at": None,
                     "stop_event": threading.Event(),
                 }
-                _pipeline_tasks[task_id] = task
+                ctx.tasks[task_id] = task
             if task.get("status") == "cancelled":
                 return
             if _is_user_finished(task_id):
@@ -6948,14 +6968,14 @@ def create_app(config=None):
             stop_event = task.get("stop_event")
 
         # T403: 从 task dict 读取冻结平台/浏览器身份，fallback 到 run execution_params
-        with _pipeline_lock:
-            _t_ref = _pipeline_tasks.get(task_id, {})
+        with ctx.lock:
+            _t_ref = ctx.tasks.get(task_id, {})
             frozen_platform = _t_ref.get("platform")
             frozen_cdp_port = _t_ref.get("cdp_port")
             frozen_profile_key = _t_ref.get("profile_key")
             frozen_browser_account = _t_ref.get("browser_account")
         try:
-            _run_ref = store.get_screening_run(task_id)
+            _run_ref = ctx.store.get_screening_run(task_id)
             _params_ref = (_run_ref or {}).get("execution_params") or {}
             frozen_platform = frozen_platform or _params_ref.get("platform") or "boss"
             frozen_cdp_port = frozen_cdp_port or _params_ref.get("cdp_port")
@@ -6999,9 +7019,9 @@ def create_app(config=None):
                 stage_events.append(("stage_start", {"stage": event_stage}))
                 last_event_stage = event_stage
             if stage_events:
-                store.append_task_events(task_id, stage_events)
-            with _pipeline_lock:
-                t = _pipeline_tasks.get(task_id)
+                ctx.store.append_task_events(task_id, stage_events)
+            with ctx.lock:
+                t = ctx.tasks.get(task_id)
                 if t is None:
                     return
                 t["progress"] = kw
@@ -7030,8 +7050,8 @@ def create_app(config=None):
                 source_run_id=source_run_id,
                 platform=frozen_platform,
             )
-            store.save_checkpoint(task_id, "recrawl_jd", sorted(completed))
-            _write_run_unless_finished(
+            ctx.store.save_checkpoint(task_id, "recrawl_jd", sorted(completed))
+            ctx.write_run(
                 task_id,
                 status="paused",
                 error_code=code,
@@ -7039,7 +7059,7 @@ def create_app(config=None):
                 current_stage="recrawl_fetch_jd",
                 processed_count=len(completed),
             )
-            store.append_task_event(
+            ctx.store.append_task_event(
                 task_id,
                 "pause",
                 {
@@ -7054,32 +7074,32 @@ def create_app(config=None):
                 processed=len(completed), total=len(no_jd),
             )
             publish_recrawl_updates()
-            with _pipeline_lock:
-                current = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                current = ctx.tasks.get(task_id)
                 if current is not None:
                     current["status"] = "paused"
                     current["error"] = reason
-            _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+            _release_worker_resume_claims(ctx.tasks.get(task_id))
 
         def _stop_mode():
-            with _pipeline_lock:
-                t = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                t = ctx.tasks.get(task_id)
                 if t is None or t.get("stop_event") is None or not t["stop_event"].is_set():
                     return None
                 return "pause" if t.get("stop_mode") == "pause" else "cancel"
 
         def _mark_recrawl_paused(processed=0, stage="recrawl_ai"):
             """用户暂停重抓：保留 checkpoint 并写为 paused。"""
-            _write_run_unless_finished(
+            ctx.write_run(
                 task_id, status="paused", error_code="user_paused",
                 current_stage=stage, processed_count=processed,
                 error_reason="用户已暂停重抓，结果已保留",
             )
-            store.append_task_event(task_id, "pause", {
+            ctx.store.append_task_event(task_id, "pause", {
                 "stage": stage, "code": "user_paused", "processed": processed,
             })
-            with _pipeline_lock:
-                current = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                current = ctx.tasks.get(task_id)
                 if current is not None:
                     current["status"] = "paused"
                     current["error"] = "重抓已暂停，结果已保留"
@@ -7088,12 +7108,12 @@ def create_app(config=None):
         updates: dict = {}
 
         def publish_recrawl_updates():
-            with _pipeline_lock:
-                task = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                task = ctx.tasks.get(task_id)
                 if task is not None:
                     task["result"] = {"updates": dict(updates)}
         try:
-            payload = store.load_latest_pipeline_result(source_run_id or None)
+            payload = ctx.store.load_latest_pipeline_result(source_run_id or None)
             # 017-US4: 重抓目标由调用方显式指定（source_run_id 必传），不再回退"最新"
             run_id = source_run_id
             jobs = (payload or {}).get("result", {}).get("jobs", []) if payload else []
@@ -7107,7 +7127,7 @@ def create_app(config=None):
             if not profile_summary.strip() and source_run_id:
                 try:
                     profile_summary = str(
-                        (store.get_screening_run(source_run_id) or {}).get("profile_summary")
+                        (ctx.store.get_screening_run(source_run_id) or {}).get("profile_summary")
                         or ""
                     ).strip()
                 except _OPERATIONAL_ERRORS:
@@ -7125,24 +7145,24 @@ def create_app(config=None):
                  message=f"准备重抓 {total} 个待确认岗位…")
             if not targets:
                 emit(stage="done", current=0, total=0, message="没有可重抓的岗位")
-                _write_run_unless_finished(
+                ctx.write_run(
                     task_id, status="failed",
                     error_code="no_recrawlable_targets",
                     error_reason="0 个可重抓岗位",
                     current_stage="done",
                 )
-                with _pipeline_lock:
-                    t = _pipeline_tasks.get(task_id)
+                with ctx.lock:
+                    t = ctx.tasks.get(task_id)
                     if t is not None:
                         t["status"] = "failed"
                         t["error"] = "0 个可重抓岗位"
                         t["result"] = {"updates": {}}
                 _schedule_pipeline_task_cleanup(task_id)
-                _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                _release_worker_resume_claims(ctx.tasks.get(task_id))
                 return
 
-            settings = store.get_ai_settings()
-            cred_ref = store.get_credential_ref()
+            settings = ctx.store.get_ai_settings()
+            cred_ref = ctx.store.get_credential_ref()
             api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
             endpoint = settings.get("endpoint_url", "")
             model = settings.get("model", "")
@@ -7206,7 +7226,7 @@ def create_app(config=None):
                             if jid and jd:
                                 fetched_jd[jid] = jd
                         completed_jd_ids = set(completed_job_ids or set()) | set(fetched_jd)
-                        store.save_recrawl_jd_and_checkpoint(
+                        ctx.store.save_recrawl_jd_and_checkpoint(
                             run_id, task_id, fetched_jd, completed_jd_ids
                         )
                         for jid, jd in fetched_jd.items():
@@ -7231,12 +7251,12 @@ def create_app(config=None):
                                 platform=frozen_platform,
                             )
                             # 切片8：持久化暂停状态 + checkpoint（已抓 JD 的 job_id）
-                            _write_run_unless_finished(
+                            ctx.write_run(
                                 task_id, status="paused", error_code=_hs_code,
                                 current_stage="recrawl_fetch_jd",
                                 processed_count=len(completed_jd_ids),
                                 error_reason=_hs_reason)
-                            store.append_task_event(
+                            ctx.store.append_task_event(
                                 task_id, "pause",
                                 {"stage": "recrawl_fetch_jd", "code": _hs_code,
                                  "fetched": len(fetched_jd), "total": len(no_jd)})
@@ -7244,13 +7264,13 @@ def create_app(config=None):
                                 task_id, "recrawl_fetch_jd", _hs_code, _hs_reason,
                                 processed=len(completed_jd_ids), total=len(no_jd),
                             )
-                            with _pipeline_lock:
-                                t = _pipeline_tasks.get(task_id)
+                            with ctx.lock:
+                                t = ctx.tasks.get(task_id)
                                 if t is not None:
                                     t["status"] = "paused"
                                     t["error"] = (f"重抓 JD 时{_hs_reason}，已抓部分已保存；"
                                                   "请在自动化浏览器中处理，完成后点「继续」")
-                            _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                            _release_worker_resume_claims(ctx.tasks.get(task_id))
                             return
                         if detail.get("stopped"):
                             close_debug_chrome(frozen_cdp_port)
@@ -7259,13 +7279,13 @@ def create_app(config=None):
                                     processed=len(completed_jd_ids),
                                     stage="recrawl_fetch_jd")
                             else:
-                                with _pipeline_lock:
-                                    t = _pipeline_tasks.get(task_id)
+                                with ctx.lock:
+                                    t = ctx.tasks.get(task_id)
                                     if t is not None:
                                         t["status"] = "cancelled"
                                         t["error"] = "用户已停止重抓"
                                 _schedule_pipeline_task_cleanup(task_id)
-                                _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                                _release_worker_resume_claims(ctx.tasks.get(task_id))
                             return
                         close_debug_chrome(frozen_cdp_port)
                     else:
@@ -7301,23 +7321,23 @@ def create_app(config=None):
                     task_id, failed_jobs, stage="recrawl_fetch_jd",
                     source_run_id=source_run_id, platform=frozen_platform,
                 )
-                _write_run_unless_finished(
+                ctx.write_run(
                     task_id, status="paused", error_code="recrawl_no_work",
                     current_stage="recrawl_fetch_jd", processed_count=0,
                     error_reason=reason,
                 )
-                store.append_task_event(task_id, "pause", {
+                ctx.store.append_task_event(task_id, "pause", {
                     "stage": "recrawl_fetch_jd",
                     "code": "recrawl_no_work",
                     "processed": 0, "total": len(no_jd),
                 })
-                with _pipeline_lock:
-                    t = _pipeline_tasks.get(task_id)
+                with ctx.lock:
+                    t = ctx.tasks.get(task_id)
                     if t is not None:
                         t["status"] = "paused"
                         t["error"] = reason
                         t["result"] = {"updates": updates}
-                _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                _release_worker_resume_claims(ctx.tasks.get(task_id))
                 return
 
             # 补抓仍失败的岗位：把具体原因回写前端（验证码/限流等）
@@ -7340,13 +7360,13 @@ def create_app(config=None):
             if not has_ai:
                 reason = "AI 未配置，已保留补抓结果；配置 AI 后可继续判定"
                 emit(stage="screen_b", current=0, total=total, message=reason)
-                _write_run_unless_finished(
+                ctx.write_run(
                     task_id, status="paused", error_code="ai_key_invalid",
                     current_stage="recrawl_ai", processed_count=0,
                     error_reason=reason,
                 )
-                store.save_checkpoint(task_id, "recrawl_ai", [])
-                store.append_task_event(task_id, "pause", {
+                ctx.store.save_checkpoint(task_id, "recrawl_ai", [])
+                ctx.store.append_task_event(task_id, "pause", {
                     "stage": "recrawl_ai", "code": "ai_key_invalid",
                     "processed": 0, "total": total,
                 })
@@ -7354,32 +7374,32 @@ def create_app(config=None):
                     task_id, "recrawl_ai", "ai_key_invalid", reason,
                     processed=0, total=total,
                 )
-                with _pipeline_lock:
-                    t = _pipeline_tasks.get(task_id)
+                with ctx.lock:
+                    t = ctx.tasks.get(task_id)
                     if t is not None:
                         t["status"] = "paused"
                         t["error"] = reason
-                _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                _release_worker_resume_claims(ctx.tasks.get(task_id))
                 return
             elif not profile_summary.strip():
                 reason = "缺少本轮求职画像，无法进行 AI 重判；请回到本轮画像后继续"
                 emit(stage="screen_b", current=0, total=total, message=reason)
-                _write_run_unless_finished(
+                ctx.write_run(
                     task_id, status="paused", error_code="recrawl_profile_missing",
                     current_stage="recrawl_ai", processed_count=0,
                     error_reason=reason,
                 )
-                store.append_task_event(task_id, "pause", {
+                ctx.store.append_task_event(task_id, "pause", {
                     "stage": "recrawl_ai", "code": "recrawl_profile_missing",
                     "processed": 0, "total": total,
                 })
-                with _pipeline_lock:
-                    t = _pipeline_tasks.get(task_id)
+                with ctx.lock:
+                    t = ctx.tasks.get(task_id)
                     if t is not None:
                         t["status"] = "paused"
                         t["error"] = reason
                         t["result"] = {"updates": updates}
-                _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                _release_worker_resume_claims(ctx.tasks.get(task_id))
                 return
             else:
                 to_judge = []
@@ -7398,7 +7418,7 @@ def create_app(config=None):
                     else:
                         match_batch = int(_adv.get("match_batch_size") or 4)
                     recrawl_completed_ids = set(completed_job_ids or set())
-                    verdicts: dict = store.load_screening_verdicts(task_id)
+                    verdicts: dict = ctx.store.load_screening_verdicts(task_id)
                     to_judge = [
                         job for job in to_judge
                         if str(job.get("job_id", "")) not in recrawl_completed_ids
@@ -7407,7 +7427,7 @@ def create_app(config=None):
                     # 三通道：从源 run 快照取筛选条件与画像事实（老轮无画像事实则退化）
                     recrawl_criteria = {}
                     try:
-                        _src_run = store.get_screening_run(run_id)
+                        _src_run = ctx.store.get_screening_run(run_id)
                         _frozen = (_src_run or {}).get("frozen_filters") or {}
                         if isinstance(_frozen, dict):
                             recrawl_criteria = {
@@ -7437,15 +7457,15 @@ def create_app(config=None):
                             if isinstance(_ai_exc, AISecurityError):
                                 _block_code = map_ai_error_to_block_code(_ai_exc.error_code)
                                 if _block_code:
-                                    _write_run_unless_finished(
+                                    ctx.write_run(
                                         task_id, status="paused", error_code=_block_code,
                                         current_stage="recrawl_ai",
                                         processed_count=len(recrawl_completed_ids))
-                                    store.save_checkpoint(
+                                    ctx.store.save_checkpoint(
                                         task_id, "recrawl_ai",
                                         sorted(recrawl_completed_ids),
                                     )
-                                    store.append_task_event(
+                                    ctx.store.append_task_event(
                                         task_id, "pause",
                                         {"stage": "recrawl_ai", "code": _block_code,
                                          "processed": len(recrawl_completed_ids),
@@ -7455,8 +7475,8 @@ def create_app(config=None):
                                         processed=len(recrawl_completed_ids),
                                         total=len(targets), exception=_ai_exc,
                                     )
-                                    with _pipeline_lock:
-                                        t = _pipeline_tasks.get(task_id)
+                                    with ctx.lock:
+                                        t = ctx.tasks.get(task_id)
                                         if t is not None:
                                             t["status"] = "paused"
                                             t["error"] = (
@@ -7472,27 +7492,27 @@ def create_app(config=None):
                         verdicts.update(batch_verdicts)
                         recrawl_completed_ids.update(batch_verdicts)
                         actual_processed += len(batch_verdicts)
-                        store.save_verdict_and_checkpoint_atomic(
+                        ctx.store.save_verdict_and_checkpoint_atomic(
                             task_id, "recrawl_ai", batch_verdicts,
                             sorted(recrawl_completed_ids),
                         )
                         emit(stage="screen_b", current=len(recrawl_completed_ids), total=total,
                              message=f"AI 重判 {len(recrawl_completed_ids)}/{total}")
                     if _recrawl_ai_pause:
-                        _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                        _release_worker_resume_claims(ctx.tasks.get(task_id))
                         return
                     if _stop_mode() == "pause":
                         _mark_recrawl_paused(
                             processed=len(recrawl_completed_ids),
                             stage="recrawl_ai")
-                        _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                        _release_worker_resume_claims(ctx.tasks.get(task_id))
                         return
                     if run_id:
                         # 017-US2: 判定/JD 回写 + pending 移除 + 计数重算 + 定稿时间
                         # 刷新统一走 result_rounds.apply_recrawl_writeback。
                         from webui.result_rounds import apply_recrawl_writeback
                         apply_recrawl_writeback(
-                            store, run_id, verdicts,
+                            ctx.store, run_id, verdicts,
                             source_run_id=source_run_id or "",
                         )
                     for jid, v in verdicts.items():
@@ -7507,32 +7527,32 @@ def create_app(config=None):
                     f"重抓未处理任何岗位（0/{total}），未产生 JD 或 AI 判定；"
                     "请检查自动化浏览器和 AI 配置后点「继续」"
                 )
-                _write_run_unless_finished(
+                ctx.write_run(
                     task_id, status="paused", error_code="recrawl_no_work",
                     current_stage="recrawl_ai", processed_count=0,
                     error_reason=reason,
                 )
-                store.append_task_event(task_id, "pause", {
+                ctx.store.append_task_event(task_id, "pause", {
                     "stage": "recrawl_ai",
                     "code": "recrawl_no_work",
                     "processed": 0, "total": total,
                 })
-                with _pipeline_lock:
-                    t = _pipeline_tasks.get(task_id)
+                with ctx.lock:
+                    t = ctx.tasks.get(task_id)
                     if t is not None:
                         t["status"] = "paused"
                         t["error"] = reason
                         t["result"] = {"updates": updates}
-                _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+                _release_worker_resume_claims(ctx.tasks.get(task_id))
                 return
 
             recrawl_status = "succeeded"
             recount = None
             remaining_uncertain = 0
             if run_id:
-                recount = store.recount_pipeline_result(run_id)
+                recount = ctx.store.recount_pipeline_result(run_id)
                 try:
-                    latest_payload = store.load_latest_pipeline_result(run_id) or {}
+                    latest_payload = ctx.store.load_latest_pipeline_result(run_id) or {}
                     latest_jobs = ((latest_payload.get("result") or {}).get("jobs") or [])
                     remaining_uncertain = sum(
                         1 for job in latest_jobs
@@ -7551,7 +7571,7 @@ def create_app(config=None):
                     if recrawl_status == "partial" else "重抓完成"
                 ),
             )
-            store.append_task_events(task_id, [
+            ctx.store.append_task_events(task_id, [
                 (
                     "job_success" if update.get("verdict") in ("match", "not_match")
                     or bool(update.get("jd")) else "job_fail",
@@ -7563,41 +7583,41 @@ def create_app(config=None):
                 )
                 for job_id, update in updates.items()
             ])
-            _write_run_unless_finished(
+            ctx.write_run(
                 task_id,
                 status="cancelled" if _stop_requested() else recrawl_status,
                 current_stage="done",
             )
-            with _pipeline_lock:
-                t = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                t = ctx.tasks.get(task_id)
                 if t is not None:
                     # Keep the in-memory task status aligned with the DB status.
                     # The polling API prefers this live task over the DB row.
                     t["status"] = "cancelled" if _stop_requested() else recrawl_status
                     t["result"] = {"updates": updates}
             _schedule_pipeline_task_cleanup(task_id)
-            _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+            _release_worker_resume_claims(ctx.tasks.get(task_id))
         except Exception as exc:
             error_message = f"重抓异常：{type(exc).__name__}"
             if not _is_user_finished(task_id):
                 record_failure(
-                    store, task_id, stage="recrawl",
+                    ctx.store, task_id, stage="recrawl",
                     error_code="internal_error", reason=error_message,
                     correlation_id=task_id, diagnostics={},
                     exception=exc, include_traceback=True,
                 )
             persistence_error = None
             try:
-                run = store.get_screening_run(task_id)
+                run = ctx.store.get_screening_run(task_id)
                 if run and run.get("status") in ("queued", "running", "paused"):
-                    _write_run_unless_finished(
+                    ctx.write_run(
                         task_id, status="failed", error_code="internal_error",
                         error_reason=error_message,
                     )
             except _OPERATIONAL_ERRORS as persist_exc:
                 persistence_error = type(persist_exc).__name__
-            with _pipeline_lock:
-                t = _pipeline_tasks.get(task_id)
+            with ctx.lock:
+                t = ctx.tasks.get(task_id)
                 if t is not None:
                     if _is_user_finished(task_id):
                         t["status"] = "cancelled"
@@ -7609,7 +7629,7 @@ def create_app(config=None):
                             else f"{error_message}；状态保存失败：{persistence_error}"
                         )
             _schedule_pipeline_task_cleanup(task_id)
-            _release_worker_resume_claims(_pipeline_tasks.get(task_id))
+            _release_worker_resume_claims(ctx.tasks.get(task_id))
 
     # ===================================================================
     # 010 healthy-pipeline-recovery: 统一接口层（FR-005/FR-020/FR-022/
