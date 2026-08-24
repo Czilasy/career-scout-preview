@@ -21,7 +21,7 @@
 2. **`scripts/boss_cdp_raw.py` 的 `requests`/`websocket` 延迟全局**：运行时经 `require_runtime_dependencies` 注入（B044 既有设计），拆分后保持门面权威 + 子模块 `_facade().X` 动态取用；CLI 直跑/测试 exec 模式均经 `sys.modules["scripts.boss_cdp_raw"]` 自注册与 `__getattr__` 转发保持 patch 面互通——此为拆分适配而非 bug。
 3. **T024 store_migrations 常量多份引用**：`_DDL_*` 常量定义在 `store_migrations_v1.py`，v2-v4 经 import 引用（原单文件一份定义变为 v1 定义 + 跨模块 import），值不变、语义不变。
 4. **T027 let 变量 ref 化**：`pollRetryCount`/`scopePreviewReqId`/`recrawlRetryCount`/`pollTimer` 由模块级 `let` 改为 `ref`（跨 composable 共享必需），读写点统一 `.value`；行为等价。
-5. **全量偶发测试污染**：`test_healthy_pipeline.Slice4ScrapePauseContinueTests.test_resume_survives_stale_pause_cleanup_timer` 在部分全量轮次失败（stage_complete 事件数 0≠1），单跑/类内连跑均稳定通过；系测试间共享状态（`_RecordingTimer`/线程事件）偶发未清，非拆分引入（T029 全量 4 轮中仅第 4 轮出现）。
+5. **全量偶发测试污染**：`test_healthy_pipeline.Slice4ScrapePauseContinueTests.test_resume_survives_stale_pause_cleanup_timer` 在部分全量轮次失败（stage_complete 事件数 0≠1）。根因：状态与 stage_complete 事件分属两个独立事务，worker 先落状态再落事件，测试在状态轮询到 succeeded 后未等待事件落库即断言，高负载下命中可见窗口。**已修**：测试在断言前等待事件落库（产品代码零改动），连跑 5 次 + 类内全组验证通过。
 
 ## 待确认项
 

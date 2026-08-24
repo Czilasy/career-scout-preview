@@ -3753,6 +3753,14 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
                 run = store.get_screening_run(task_id)
                 self.assertEqual(run["status"], "succeeded", run)
                 self.assertEqual(run["current_stage"], "scrape")
+                # 状态与 stage_complete 事件分属两个独立事务：worker 先落状态
+                # 再落事件，高负载下两者间存在可见窗口。等待事件落库后再断言，
+                # 避免偶发读到"状态已 succeeded 但事件未提交"（T029 全量偶发）。
+                for _ in range(200):
+                    events = store.list_task_events(task_id)
+                    if any(e["type"] == "stage_complete" for e in events):
+                        break
+                    time.sleep(0.01)
                 events = store.list_task_events(task_id)
                 self.assertEqual(
                     sum(1 for e in events if e["type"] == "stage_complete"), 1)
