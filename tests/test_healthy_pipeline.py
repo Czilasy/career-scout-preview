@@ -1393,10 +1393,15 @@ class Slice7And9ApiTests(unittest.TestCase):
 
     def test_frontend_active_cancel_uses_unified_route(self):
         """运行中和暂停中的取消按钮必须共享统一状态接口。"""
-        source = (
+        # 021 B8 T027：取消逻辑随 script setup 外迁至 composables，检查对象同步更新。
+        composables_dir = (
             pathlib.Path(__file__).resolve().parents[1]
-            / "webui" / "src" / "views" / "DiscoveryView.vue"
-        ).read_text(encoding="utf-8")
+            / "webui" / "src" / "composables"
+        )
+        source = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in sorted(composables_dir.glob("useDiscovery*.ts"))
+        )
         self.assertNotIn("/api/execute-search/${encodeURIComponent", source)
         self.assertNotIn("/api/ai-screen/${encodeURIComponent", source)
         # 013：AI 筛选取消入口已移除，统一取消仅保留抓取/暂停任务路径。
