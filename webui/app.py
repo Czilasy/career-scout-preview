@@ -345,6 +345,7 @@ def create_app(config=None):
             or path.startswith("/api/env-check")
             or path.startswith("/api/job-reminders")
             or path.startswith("/api/result-history")
+            or path.startswith("/api/logs")
         )
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} or (request.method == "GET" and sensitive_get):
             origin = request.headers.get("Origin")
@@ -494,6 +495,8 @@ def create_app(config=None):
     register_task_state_routes(app, ctx)
     from webui.task_continue_api import register_task_continue_routes
     register_task_continue_routes(app, ctx)
+    from webui.log_api import register_log_routes
+    register_log_routes(app, ctx)
 
     def _run_pipeline_task(
         task_id, script_params, execution_config=None, frozen_scope=None,

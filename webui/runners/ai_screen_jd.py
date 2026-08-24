@@ -22,6 +22,8 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
 
     jd_map = dict(resume_jd)
     jd_failures: dict[str, dict[str, str]] = {}
+    # 022：卡死防护（app_support 创建并挂 ctx；无 guard 时行为与旧版一致）
+    guard = getattr(ctx, "pipeline_guard", None)
     if survivors:
         emit(stage="ensure_chrome", message="启动调试浏览器，准备抓取 JD…")
         chrome_ok, chrome_err = ensure_chrome_ready(
@@ -110,7 +112,55 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                 artifact_dir=ctx.app.config["RESULT_DIR"],
                 stop_event=stop_event,
                 progress=_jd_progress,
-                execution_config=execution_config)
+                execution_config=execution_config,
+                guard=guard,
+                batch_key_prefix=f"jd-{task_id}-{chunk_start}",
+            )
+            # 022：卡死 3 次失败分流收场（环境级暂停 / 偶发跳过进待确认）
+            _stall_divert = detail_result.get("stall_divert")
+            _stall_attempts = detail_result.get("stall_attempts") or 0
+            if _stall_divert == "environment":
+                # 环境级：暂停 + 报错模块接管 + 断点保留可续跑（复用 hard_stop
+                # 暂停路径：不关浏览器，用户处理后点「继续」从断点续跑）。
+                _hs_code = detail_result.get("stall_code") or "internal_error"
+                _hs_label = failed_code_label(_hs_code, frozen_platform) or _hs_code
+                _hs_reason = (
+                    f"抓取批次连续 {_stall_attempts} 次无响应，检测到环境问题"
+                    f"（{_hs_label}）"
+                )
+                ctx.persist_jd_job_failures(
+                    task_id, detail_result.get("jobs") or [],
+                    stage="jd_detail", platform=frozen_platform,
+                )
+                ctx.write_run(
+                    task_id, status="paused", error_code=_hs_code,
+                    current_stage="jd_detail",
+                    processed_count=len(jd_map), error_reason=_hs_reason,
+                )
+                ctx.record_pause_failure(
+                    task_id, "jd_detail", _hs_code, _hs_reason,
+                    processed=len(jd_map), total=len(survivors),
+                )
+                with ctx.lock:
+                    t = ctx.tasks.get(task_id)
+                    if t is not None:
+                        t["status"] = "paused"
+                        t["error"] = (
+                            f"抓取 JD 时{_hs_reason}：已抓 "
+                            f"{len(jd_map)}/{len(survivors)} 条（已保存）。"
+                            "请在自动化浏览器中处理，完成后点「继续」"
+                        )
+                ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
+                return
+            if _stall_divert == "sporadic":
+                # 单批偶发：该批岗位进待确认（补抓机制复用既有 pending），继续下一批
+                ctx.persist_jd_job_failures(
+                    task_id, detail_result.get("jobs") or [],
+                    stage="jd_detail", platform=frozen_platform,
+                )
+                emit(stage="fetch_jd",
+                     current=min(len(jd_map), len(survivors)), total=len(survivors),
+                     message=f"一批岗位连续 {_stall_attempts} 次无响应已跳过，可在待确认中补抓")
             for j in detail_result["jobs"]:
                 jid = str(j.get("job_id", ""))
                 jd = str(j.get("jd", "")).strip()

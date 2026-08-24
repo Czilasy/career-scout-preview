@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Activity, Bot, LoaderCircle, Rocket, UserRound } from "@lucide/vue";
+import { Activity, Bot, LoaderCircle, Rocket, ScrollText, UserRound } from "@lucide/vue";
+import LogViewerDialog from "./LogViewerDialog.vue";
 
 const props = defineProps<{
   open: boolean;
@@ -20,6 +21,7 @@ const emit = defineEmits<{
 
 const menuEl = ref<HTMLElement | null>(null);
 const firstItemEl = ref<HTMLButtonElement | null>(null);
+const logsOpen = ref(false);
 
 function onDocPointerDown(event: PointerEvent) {
   if (!props.open) return;
@@ -93,6 +95,15 @@ onBeforeUnmount(() => {
         class="settings-menu-item"
         type="button"
         role="menuitem"
+        data-testid="logs-trigger"
+        @click="logsOpen = true"
+      >
+        <ScrollText :size="17" aria-hidden="true" /><span>日志</span>
+      </button>
+      <button
+        class="settings-menu-item"
+        type="button"
+        role="menuitem"
         data-testid="manual-update-check"
         :disabled="checking"
         @click="emit('manual-update-check')"
@@ -115,6 +126,7 @@ onBeforeUnmount(() => {
       </button>
     </div>
   </Transition>
+  <LogViewerDialog :open="logsOpen" @close="logsOpen = false" />
 </template>
 
 <style scoped>

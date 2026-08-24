@@ -6,10 +6,11 @@ describe("AppSettingsMenu", () => {
     const wrapper = mount(AppSettingsMenu, {
       props: { open: true, hasUpdate: true, updateVersion: "2.6.0" },
     });
-    expect(wrapper.findAll('[role="menuitem"]')).toHaveLength(5);
+    expect(wrapper.findAll('[role="menuitem"]')).toHaveLength(6);
     expect(wrapper.get('[data-testid="ai-settings-trigger"]').text()).toContain("AI 设置");
     expect(wrapper.get('[data-testid="browser-accounts-trigger"]').text()).toContain("浏览器账号");
     expect(wrapper.get('[data-testid="env-check-trigger"]').text()).toContain("环境检查");
+    expect(wrapper.get('[data-testid="logs-trigger"]').text()).toContain("日志");
     expect(wrapper.get('[data-testid="manual-update-check"]').text()).toContain("检查更新");
     expect(wrapper.get('[data-testid="manual-update-check"]').text()).toContain("v2.6.0");
     expect(wrapper.get('[data-testid="github-link"]').text()).toContain("GitHub 仓库");

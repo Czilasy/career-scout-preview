@@ -31,11 +31,23 @@ class ExecutionResult:
 
 
 class ScraperExecutor:
-    """Execute one command with deadline, cancellation and bounded output."""
+    """Execute one command with deadline, cancellation and bounded output.
 
-    def __init__(self, *, max_output_bytes: int = 1_000_000, poll_seconds: float = 0.05):
+    ``on_spawn`` / ``on_output_probe`` 是可选的实例级钩子（022 卡死防护用）：
+    - ``on_spawn(process)``：Popen 成功后回调，供防护登记子进程句柄以便
+      判定卡死后 taskkill 解出任务线程；
+    - ``on_output_probe(text)``：drain 线程收到子进程 stdout 输出时回调，
+      作为“有产出刷新心跳”的信号源；execute 显式传 ``on_output`` 时优先
+      用显式回调，否则落到实例级探针。
+    """
+
+    def __init__(self, *, max_output_bytes: int = 1_000_000, poll_seconds: float = 0.05,
+                 on_spawn: Callable[[subprocess.Popen], None] | None = None,
+                 on_output_probe: Callable[[str], None] | None = None):
         self.max_output_bytes = max(1, int(max_output_bytes))
         self.poll_seconds = max(0.01, float(poll_seconds))
+        self.on_spawn = on_spawn
+        self.on_output_probe = on_output_probe
 
     def execute(
         self,
@@ -80,6 +92,11 @@ class ScraperExecutor:
             process = subprocess.Popen(command, **popen_kwargs)
         except OSError:
             return ExecutionResult(None, "", "process_unreachable")
+        if self.on_spawn is not None:
+            try:
+                self.on_spawn(process)
+            except Exception:
+                pass
 
         output = bytearray()
         output_limit = threading.Event()
@@ -88,6 +105,7 @@ class ScraperExecutor:
             stream = process.stdout
             if stream is None:
                 return
+            stream_callback = on_output or self.on_output_probe
             try:
                 while True:
                     chunk = stream.read(4096)
@@ -95,8 +113,8 @@ class ScraperExecutor:
                         return
                     remaining = self.max_output_bytes - len(output)
                     accepted = chunk[:max(0, remaining)]
-                    if on_output and accepted:
-                        on_output(accepted.decode("utf-8", errors="replace"))
+                    if stream_callback and accepted:
+                        stream_callback(accepted.decode("utf-8", errors="replace"))
                     if remaining > 0:
                         output.extend(accepted)
                     if len(chunk) > remaining:

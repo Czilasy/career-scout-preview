@@ -538,6 +538,15 @@ def build_app_support(app, store, runner, workbench_runner,
         store, _pipeline_tasks, _pipeline_lock,
         _account_for_run, _activate_run_browser)
 
+    # 022：JD 抓取卡死防护（独立监控线程，批次经 fetch_job_details 登记）
+    from webui.pipeline_guard import PipelineGuard
+    _pipeline_guard = PipelineGuard(
+        write_run=_write_run_unless_finished, store=store,
+        tasks=_pipeline_tasks, lock=_pipeline_lock,
+        record_pause_failure=_record_pause_failure,
+        release_worker_resume_claims=_release_worker_resume_claims,
+    )
+
     ctx = PipelineContext(
         app=app,
         store=store,
@@ -587,6 +596,7 @@ def build_app_support(app, store, runner, workbench_runner,
         job_feedback_service=job_feedback_service,
         history_service=history_service,
         resume_service=resume_service,
+        pipeline_guard=_pipeline_guard,
     )
 
     # 021 B6：定义晚于组装点，原地补绑定（浏览器锁共享助手）

@@ -225,3 +225,34 @@ export const updateApi = {
     );
   },
 };
+
+// ---------------------------------------------------------------------------
+// 日志查看（022-jd-stall-guard US4）：读 career-scout.log 尾部/分页/轮询
+// ---------------------------------------------------------------------------
+export interface LogsResponse {
+  ok: boolean;
+  lines: string[];
+  start: number;
+  end: number;
+  total: number;
+  identity: string;
+  rotated: boolean;
+  empty: boolean;
+}
+
+export interface LogsQuery {
+  tail?: number;
+  offset?: number;
+  since?: number;
+  identity?: string;
+}
+
+export function fetchLogs(params: LogsQuery = {}): Promise<LogsResponse> {
+  const query = new URLSearchParams();
+  if (params.tail) query.set("tail", String(params.tail));
+  if (params.offset) query.set("offset", String(params.offset));
+  if (params.since) query.set("since", String(params.since));
+  if (params.identity) query.set("identity", params.identity);
+  const qs = query.toString();
+  return apiRequest<LogsResponse>(`/api/logs${qs ? `?${qs}` : ""}`);
+}
