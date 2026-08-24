@@ -20,16 +20,6 @@ Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的多平台职位
 
    ![查看与整理岗位](docs/screenshots/results-review.png)
 
-### 更多界面
-
-智联平台 AI 筛选结果页：
-
-![智联筛选结果页](docs/screenshots/results-zhilian.png)
-
-投递过期提醒抽屉（BOSS 与智联岗位统一提醒，不按平台过滤）：
-
-![投递提醒抽屉](docs/screenshots/reminder-drawer.png)
-
 ## 免责声明
 
 本项目仅供学习和技术研究参考。使用前请阅读 [BOSS直聘用户协议](https://www.zhipin.com/about/protocol.html)、智联招聘相关服务条款及相关法律法规，不要用于商业转售、恶意爬取或对目标网站造成负担。使用本项目产生的一切后果由使用者自行承担。
@@ -38,9 +28,9 @@ Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的多平台职位
 
 Windows 与 macOS 用户可直接使用桌面版，无需安装 Python 或 Node.js：
 
-- 最新正式版：v1.7.11
-- Windows 安装包：`CareerScout-v1.7.11.exe`，下载后双击运行
-- macOS 安装包：`CareerScout-v1.7.11.dmg`，首次打开见下方 Gatekeeper 说明
+- 最新正式版：v1.7.10
+- Windows 安装包：`CareerScout-v1.7.10.exe`，下载后双击运行
+- macOS 安装包：`CareerScout-v1.7.10.dmg`，首次打开见下方 Gatekeeper 说明
 - 应用内更新（桌面版）：启动时自动检查新版本，可一键下载、校验并重启完成更新
 
 ### 首次运行准备
@@ -173,7 +163,7 @@ python webui/app.py
 - **浏览器失联自动恢复**：抓取中浏览器/CDP 意外断开时，会自动重启一次并从断点继续；重启失败或重启后仍断开才暂停，验证码、登录失效和限流不会自动重试。
 - **AI 自动重试**：限流、临时故障、超时或网络错误默认连续尝试 3 次，中间等待 30 秒；真正不可恢复的错误立即提示，不空转。
 - **智联稳定性**：详情页 Chrome 错误页只记为单条失败，不再误判平台封禁；暂停的智联筛选继续时恢复冻结账号与浏览器身份，身份缺失时阻断并保持暂停。
-- **浏览器账号**：默认账号不可删除，账号 B 与自定义账号可删除；每个账号使用独立 Chrome profile，登录态持久化且按平台隔离，BOSS 与智联登录窗口可分别打开。
+- **浏览器账号**：默认账号不可删除，Mom 账号（账号 B）与自定义账号可删除；每个账号使用独立 Chrome profile，登录态持久化且按平台隔离，BOSS 与智联登录窗口可分别打开。
 - **高级设置与调优实验**：可调整列表抓取、JD 抓取和 AI 筛选参数；提供实验与验证框架。
 - **历史恢复**：可预演、准备并执行历史任务恢复；旧数据缺少具体失败原因时会明确标注，不猜造分类。
 
