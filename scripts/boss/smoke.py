@@ -5,8 +5,7 @@
 import json
 import time
 from urllib.parse import urlencode
-from scripts.boss.constants import API_JOB_LIST_PATH, BROWSER_NOT_FOUND_HINT, CDP_CMD_ATTACH_TARGET, CDP_CMD_CLOSE_TARGET, CDP_CMD_CREATE_TARGET, DEFAULT_CDP_PORT, DEFAULT_CITY_INPUT, FETCH_API_JS_TEMPLATE, LOGIN_PROBE_QUERY, MSG_BOSS_LOGIN_STATUS, MSG_DEDICATED_BROWSER_STARTED, detect_chromium_browsers
-from scripts.boss.login import check_login_state_tri
+from scripts.boss.constants import API_JOB_LIST_PATH, BROWSER_NOT_FOUND_HINT, CDP_CMD_ATTACH_TARGET, CDP_CMD_CLOSE_TARGET, CDP_CMD_CREATE_TARGET, DEFAULT_CDP_PORT, DEFAULT_CITY_INPUT, FETCH_API_JS_TEMPLATE, LOGIN_PROBE_QUERY, MSG_BOSS_LOGIN_STATUS, MSG_DEDICATED_BROWSER_STARTED
 from scripts.boss.search import build_search_url
 import sys as _sys
 def _facade():
@@ -99,7 +98,7 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
             all_pass = False
 
     # 检查 1: Chromium 浏览器（Chrome / Edge 双探测）
-    browsers = detect_chromium_browsers()
+    browsers = _facade().detect_chromium_browsers()
     found_parts = []
     if browsers.get("chrome"):
         found_parts.append("找到 Chrome ✅")
@@ -153,7 +152,7 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
                "跳过 — 浏览器未就绪，无法探测登录态")
     else:
         try:
-            state = check_login_state_tri(cdp_port)
+            state = _facade().check_login_state_tri(cdp_port)
             if state == "logged_in":
                 append("boss_login", MSG_BOSS_LOGIN_STATUS, "ok",
                        "已登录（接口返回明文薪资）")

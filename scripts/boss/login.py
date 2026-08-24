@@ -115,7 +115,7 @@ def check_login_state(cdp_port=DEFAULT_CDP_PORT):
     Returns:
         True 已登录, False 未登录/受限/CDP 失败
     """
-    return check_login_state_tri(cdp_port) == "logged_in"
+    return _facade().check_login_state_tri(cdp_port) == "logged_in"
 
 
 def check_login_state_tri(cdp_port=DEFAULT_CDP_PORT):
