@@ -323,7 +323,7 @@ def register_results_routes(app, ctx):
                         stored = job_map.get(str(pj["job_id"]))
                         if not stored:
                             continue
-                        url = normalize_job_link(ctx.stored.get("canonical_url", ""))
+                        url = normalize_job_link(stored.get("canonical_url", ""))
                         if not url:
                             continue
                         urls.add(url)

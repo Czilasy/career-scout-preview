@@ -7,6 +7,8 @@ with the rest of ``webui.store.TaskStore``.
 
 from __future__ import annotations
 
+import sqlite3
+import time
 from typing import Any
 
 from webui.store_helpers import _now
@@ -52,22 +54,40 @@ class ResultHistoryStoreMixin:
 
         Archived rows stay visible in history but are no longer returned
         by the default latest-result queries.
+
+        020 US7 模式：归档与 worker 收尾（如 recrawl 回写判定/计数）并发
+        抢 SQLite 写锁时，短退避重试扛瞬时锁冲突（与 result_rounds 的
+        ``_retry_transient_lock`` 一致）；recovery maintenance 锁抛的
+        RuntimeError 不重试（锁未过期前重试无意义）。
         """
-        with self._connection() as conn:
-            self._assert_recovery_writes_allowed(conn)
-            rows = conn.execute(
-                "SELECT id FROM screening_runs "
-                "WHERE record_kind = ? AND archived_at IS NULL",
-                (_RESULT_SNAPSHOT,),
-            ).fetchall()
-            run_ids = [str(row["id"]) for row in rows]
-            now = _now()
-            conn.execute(
-                "UPDATE screening_runs SET archived_at = ?, updated_at = ? "
-                "WHERE record_kind = ? AND archived_at IS NULL",
-                (now, now, _RESULT_SNAPSHOT),
-            )
-        return run_ids
+
+        def _archive() -> list[str]:
+            with self._connection() as conn:
+                self._assert_recovery_writes_allowed(conn)
+                rows = conn.execute(
+                    "SELECT id FROM screening_runs "
+                    "WHERE record_kind = ? AND archived_at IS NULL",
+                    (_RESULT_SNAPSHOT,),
+                ).fetchall()
+                run_ids = [str(row["id"]) for row in rows]
+                now = _now()
+                conn.execute(
+                    "UPDATE screening_runs SET archived_at = ?, updated_at = ? "
+                    "WHERE record_kind = ? AND archived_at IS NULL",
+                    (now, now, _RESULT_SNAPSHOT),
+                )
+            return run_ids
+
+        last_exc: sqlite3.OperationalError | None = None
+        for attempt in range(3):
+            try:
+                return _archive()
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(0.1 * (attempt + 1))
+        assert last_exc is not None
+        raise last_exc
 
     def history_round_exists(self, run_id: str) -> bool:
         """Return True when the run is a result snapshot row."""

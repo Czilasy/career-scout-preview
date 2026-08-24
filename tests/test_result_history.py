@@ -60,6 +60,39 @@ class ResultHistoryStoreTests(unittest.TestCase):
         self.assertEqual(len(zhilian_items), 1)
         self.assertTrue(zhilian_items[0]["is_latest"])
 
+    def test_archive_retries_transient_write_lock(self):
+        """020 US7 模式：归档遇到瞬时 SQLite 写锁冲突时短退避重试，不直接失败。"""
+        import contextlib
+        import sqlite3
+        from unittest import mock
+
+        from webui.store import TaskStore
+
+        _save_round(self.store, "boss", keyword="Python")
+        run_id = self.store.list_history_rounds()[0]["id"]
+        real_connection = TaskStore._connection
+        attempts = {"n": 0}
+        sleeps: list[float] = []
+
+        @contextlib.contextmanager
+        def flaky_connection(self):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            with real_connection(self) as conn:
+                yield conn
+
+        with mock.patch.object(TaskStore, "_connection", flaky_connection), \
+                mock.patch(
+                    "webui.store_result_history_mixin.time.sleep",
+                    side_effect=lambda s: sleeps.append(s),
+                ):
+            archived = self.service.archive_all_current_results()
+
+        self.assertEqual(archived, [run_id])
+        self.assertEqual(attempts["n"], 2, "首次锁冲突后应重试一次")
+        self.assertEqual(sleeps, [0.1])
+
     def test_history_detail_returns_parent_source_outcomes(self):
         parent_id = "scrape-source"
         self.store.create_screening_run(

@@ -37,7 +37,7 @@ import {
   UploadCloud,
   X,
 } from "@lucide/vue";
-import type { TaskSnapshot } from "./useDiscoveryState";
+import type { MergedLatestResult, TaskSnapshot } from "./useDiscoveryState";
 
 export function useDiscoveryTasks(state: DiscoveryState, deps: any = {}) {
   const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, interruptedRunId, isScrapedOnly, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysis, schemaLoader, scopePreview, scopePreviewBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform } = state;
@@ -119,6 +119,17 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
           deps.setPipelineResult(fetched.merged);
           currentRoundStatus.value = fetched.newer.data.status === "scraped_only" ? "scraped_only" : "screened";
           if (isScrapedOnly.value) activeCategory.value = "matched";
+        } else {
+          // B044：合并拉取失败不得让 04 空白——完成响应自带的内存结果
+          //（后端与 status=done 同锁写入，完成瞬间必然携带）立即兜底，
+          // 保证流程完成后 04 页必然有岗位展示；随后后台有界补拉合并
+          // 视图（R2 语义），成功再升级为双平台展示。
+          const inline = data.result;
+          if (inline && Array.isArray(inline.jobs)) {
+            deps.setPipelineResult(inline);
+            currentRoundStatus.value = "screened";
+          }
+          retryMergeUpgrade(taskId, 0);
         }
         activeStep.value = "results";
         deps.notify(
@@ -218,6 +229,33 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
     else screenSnapshot.value = retrying;
     pollTimer.value = window.setTimeout(() => void pollTask(taskId, kind), delay);
   }
+}
+
+// B044：AI 筛选完成瞬间合并拉取失败的补拉升级。任务已完成（04 已用
+// 内嵌内存结果展示），后台再按指数退避补拉双平台合并视图；成功即应用
+// 升级为 R2 双平台展示；期间开始新任务（task id 变化 / 任意 pipeline
+// 占用）立即放弃，绝不串轮。复用 pollTimer 让既有清理路径（resetWorkflow
+// / unmount / cancel / finish）统一收口。
+function retryMergeUpgrade(taskId: string, attempt: number) {
+  if (attempt > POLL_MAX_RETRIES) return;
+  if (pollTimer.value) window.clearTimeout(pollTimer.value);
+  // 新一轮已开始（task id 变化或任意 pipeline 占用）→ 放弃补拉。
+  if (screenTaskId.value !== taskId || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
+  const delay = Math.min(POLL_BASE_DELAY * 2 ** attempt, POLL_MAX_DELAY);
+  pollTimer.value = window.setTimeout(() => {
+    pollTimer.value = undefined;
+    void deps.fetchMergedLatestResult().then((fetched: MergedLatestResult | null) => {
+      if (!fetched) {
+        retryMergeUpgrade(taskId, attempt + 1);
+        return;
+      }
+      // 应用前复查：期间开始新任务则丢弃这次补拉结果。
+      if (screenTaskId.value !== taskId || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
+      deps.setPipelineResult(fetched.merged);
+      currentRoundStatus.value = fetched.newer.data.status === "scraped_only" ? "scraped_only" : "screened";
+      if (isScrapedOnly.value) activeCategory.value = "matched";
+    });
+  }, delay);
 }
 
 // B038：把抓取结果固化为"已抓取，未筛选"轮，供自动保存与手动查看共用。

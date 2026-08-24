@@ -2249,6 +2249,84 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
+  it("B044: completed live screen task still shows the results page when the merge fetch returns nothing at the completion instant", async () => {
+    // 复现：任务完成瞬间 /api/latest-pipeline-result 拉取为空（快照提交前
+    // 的瞬时空窗 / 双平台请求任一失败被吞），但 task-state 完成响应自带
+    // 内存结果。04 页必须立即展示岗位，且步骤条 04 可点。
+    const settings = {
+      pages: 3,
+      inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+      detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+      screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      // 完成瞬间合并拉取恒为空：模拟快照尚未可见 / 请求瞬时失败的窗口
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({
+          ok: true,
+          scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:b044" },
+          deduplicated: {},
+        });
+      }
+      if (url.endsWith("/api/execute-search")) return response({ ok: true, task_id: "scrape-b044" });
+      if (url.endsWith("/api/task-state/scrape-b044")) {
+        return response({ ok: true, status: "completed", progress: {}, logs: [], platform: "boss" });
+      }
+      if (url.endsWith("/api/ai-screen")) return response({ ok: true, task_id: "screen-b044" });
+      if (url.endsWith("/api/task-state/screen-b044")) {
+        // 与真实后端一致：内存完成态响应携带完整 result（与 status=done 同锁写入）
+        return response({
+          ok: true, status: "completed", progress: { message: "筛选完成" }, logs: [], platform: "boss",
+          result: {
+            ok: true,
+            jobs: [{ job_id: "b-1", title: "BOSS岗位", company: "BOSS公司", verdict: "match", platform: "boss" }],
+            dropped: [],
+            total_scraped: 1, total_matched: 1, total_kept: 1, total_dropped: 0,
+            profile_summary: "3年Python后端候选人",
+          },
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("Python");
+    await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await flushPromises();
+    await confirmProfile(wrapper);
+    await wrapper.get('[data-testid="start-scrape"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="confirm-national-scope"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="start-ai-screen"]').trigger("click");
+    await flushPromises();
+
+    // 04 自动进入且立即展示岗位（不得出现"暂无结果"空白页）
+    expect(wrapper.find('[data-testid="latest-result-empty"]').exists()).toBe(false);
+    const rows = wrapper.findAll('[data-testid="job-row"]');
+    const rowText = rows.map((row) => row.text()).join(" | ");
+    expect(rowText).toContain("BOSS岗位");
+    // 步骤条 04 可点（resultLoaded 为 true）
+    const resultsStep = wrapper.findAll("button").find((b) => b.text().includes("查看结果"))!;
+    expect((resultsStep.element as HTMLButtonElement).disabled).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+
   it("R4: saving advanced settings submits pages together with the speed fields", async () => {
     const settings = {
       pages: 3,

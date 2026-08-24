@@ -6,6 +6,22 @@ Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的多平台职位
 
 ## 界面预览
 
+### 三步完成一次岗位筛选
+
+1. **确认关键词与城市**：输入关键词、选择城市，调整列表/JD 抓取与 AI 筛选参数。
+
+   ![确认关键词与城市](docs/screenshots/setup-keywords.png)
+
+2. **确认筛选条件**：六类筛选条件对照简历画像进行粗筛与 AI 精筛。
+
+   ![确认六类筛选条件](docs/screenshots/setup-filters.png)
+
+3. **查看与整理岗位**：匹配、不匹配、待确认与已筛除分开展示，逐条决策。
+
+   ![查看与整理岗位](docs/screenshots/results-review.png)
+
+### 更多界面
+
 智联平台 AI 筛选结果页：
 
 ![智联筛选结果页](docs/screenshots/results-zhilian.png)

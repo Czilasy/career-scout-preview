@@ -19,7 +19,7 @@ BROWSER_ACCOUNTS: dict[str, dict[str, str]] = {
         "profile_dir": os.path.expanduser("~/.career-scout/chrome-profile"),
     },
     "b": {
-        "name": "账号B",
+        "name": "Mom",
         "profile_dir": os.path.normpath(
             os.path.join(str(Path(__file__).resolve().parents[1]), ".chrome-profiles", "account_b")
         ),
