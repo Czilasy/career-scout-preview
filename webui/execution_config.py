@@ -25,6 +25,12 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from webui.mode_configs import (
+    MEDIUM_TASK_MAX,
+    SMALL_TASK_MAX,
+    get_mode_config,
+)
+
 __all__ = [
     "CONFIG_SCHEMA_VERSION",
     "ExecutionConfigSnapshot",
@@ -60,8 +66,9 @@ DEFAULT_DETAIL_TAB_POOL_SIZE = 5
 
 _MIN_PLANNED_PAGES = 1
 _MAX_PLANNED_PAGES = 200
-_SMALL_MAX = 9
-_MEDIUM_MAX = 49
+# 规模阈值新口径（024）：总页数 <15 小 / 15~30 中 / >30 大（定义见 webui.mode_configs）
+_SMALL_MAX = SMALL_TASK_MAX
+_MEDIUM_MAX = MEDIUM_TASK_MAX
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +412,7 @@ def _validate_platform(platform: str) -> str:
 # 任务规模分类 (FR-006, FR-007)
 # ---------------------------------------------------------------------------
 def classify_task_size(planned_pages: int) -> str:
-    """FR-007: 1-9=small, 10-49=medium, 50-200=large。"""
+    """FR-007: 1-14=small, 15-30=medium, 31-200=large（024 新口径，替换旧 9/49）。"""
     if planned_pages < _MIN_PLANNED_PAGES:
         raise ValueError(f"计划页数 {planned_pages} 低于最小值 {_MIN_PLANNED_PAGES}")
     if planned_pages > _MAX_PLANNED_PAGES:
@@ -553,7 +560,7 @@ def normalize_scope(
 
     FR-005: nationwide 与 cities 互斥。
     FR-006: planned_pages = keyword_count × scope_count × pages_per_combination。
-    FR-007: 1-9=small, 10-49=medium, 50-200=large。
+    FR-007: 1-14=small, 15-30=medium, 31-200=large（024 新口径）。
     FR-008: 任务开始前完成分类。
     T008: platform 进入 scope_digest 规范输入；省略时默认 "boss"（BOSS 兼容）。
     """
@@ -662,139 +669,3 @@ def preview_scope(
             "cities": dedup_cities,
         },
     }
-
-
-# ---------------------------------------------------------------------------
-# 模式配置 (FR-051, FR-056, FR-009)
-# ---------------------------------------------------------------------------
-# 默认模式配置 — T007/T008 会将此迁移到 SQLite
-# 这些是参考值，不是已验证结论；pages 不出现在模式配置中
-_MODE_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
-    "stable": {
-        "small": {
-            "inter_combo_delay": 27.0,
-            "detail_batch_size": 7,
-            "detail_interval": 4.5,
-            "detail_reset_every": 2,
-            "detail_batch_cooldown": 9.0,
-            "detail_tab_pool_size": 4,
-            "screen_batch_size": 24,
-            "screen_concurrency": 2,
-            "match_batch_size": 2,
-            "match_concurrency": 4,
-        },
-        "medium": {
-            "inter_combo_delay": 22.0,
-            "detail_batch_size": 8,
-            "detail_interval": 4.0,
-            "detail_reset_every": 3,
-            "detail_batch_cooldown": 7.0,
-            "detail_tab_pool_size": 4,
-            "screen_batch_size": 30,
-            "screen_concurrency": 3,
-            "match_batch_size": 3,
-            "match_concurrency": 5,
-        },
-        "large": {
-            "inter_combo_delay": 18.0,
-            "detail_batch_size": 10,
-            "detail_interval": 3.0,
-            "detail_reset_every": 3,
-            "detail_batch_cooldown": 5.0,
-            "detail_tab_pool_size": 4,
-            "screen_batch_size": 36,
-            "screen_concurrency": 3,
-            "match_batch_size": 3,
-            "match_concurrency": 7,
-        },
-    },
-    "balanced": {
-        "small": {
-            "inter_combo_delay": 15.0,
-            "detail_batch_size": 10,
-            "detail_interval": 3.0,
-            "detail_reset_every": 3,
-            "detail_batch_cooldown": 5.0,
-            "detail_tab_pool_size": 5,
-            "screen_batch_size": 40,
-            "screen_concurrency": 4,
-            "match_batch_size": 3,
-            "match_concurrency": 6,
-        },
-        "medium": {
-            "inter_combo_delay": 12.0,
-            "detail_batch_size": 12,
-            "detail_interval": 2.5,
-            "detail_reset_every": 4,
-            "detail_batch_cooldown": 4.0,
-            "detail_tab_pool_size": 5,
-            "screen_batch_size": 50,
-            "screen_concurrency": 5,
-            "match_batch_size": 4,
-            "match_concurrency": 8,
-        },
-        "large": {
-            "inter_combo_delay": 10.0,
-            "detail_batch_size": 15,
-            "detail_interval": 2.0,
-            "detail_reset_every": 5,
-            "detail_batch_cooldown": 3.0,
-            "detail_tab_pool_size": 5,
-            "screen_batch_size": 60,
-            "screen_concurrency": 5,
-            "match_batch_size": 5,
-            "match_concurrency": 10,
-        },
-    },
-    "extreme": {
-        "small": {
-            "inter_combo_delay": 8.0,
-            "detail_batch_size": 14,
-            "detail_interval": 1.5,
-            "detail_reset_every": 4,
-            "detail_batch_cooldown": 2.5,
-            "detail_tab_pool_size": 6,
-            "screen_batch_size": 60,
-            "screen_concurrency": 6,
-            "match_batch_size": 5,
-            "match_concurrency": 9,
-        },
-        "medium": {
-            "inter_combo_delay": 6.0,
-            "detail_batch_size": 17,
-            "detail_interval": 1.3,
-            "detail_reset_every": 5,
-            "detail_batch_cooldown": 2.0,
-            "detail_tab_pool_size": 6,
-            "screen_batch_size": 75,
-            "screen_concurrency": 8,
-            "match_batch_size": 7,
-            "match_concurrency": 12,
-        },
-        "large": {
-            "inter_combo_delay": 5.0,
-            "detail_batch_size": 21,
-            "detail_interval": 1.0,
-            "detail_reset_every": 7,
-            "detail_batch_cooldown": 1.5,
-            "detail_tab_pool_size": 6,
-            "screen_batch_size": 90,
-            "screen_concurrency": 10,
-            "match_batch_size": 8,
-            "match_concurrency": 15,
-        },
-    },
-}
-
-
-def get_mode_config(mode: str, *, task_size: str) -> ExecutionConfigSnapshot:
-    """FR-051/FR-056: 获取指定模式和规模的配置快照。
-
-    FR-009: pages 不出现在返回结果中。
-    """
-    if mode not in _MODE_CONFIGS:
-        raise ValueError(f"未知模式: {mode}")
-    if task_size not in ("small", "medium", "large"):
-        raise ValueError(f"未知任务规模: {task_size}")
-    config_values = _MODE_CONFIGS[mode][task_size]
-    return ExecutionConfigSnapshot.create(config_values)

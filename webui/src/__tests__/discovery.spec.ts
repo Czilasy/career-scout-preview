@@ -61,10 +61,10 @@ describe("discovery helpers", () => {
 
   it.each([
     [1, "small"],
-    [9, "small"],
-    [10, "medium"],
-    [49, "medium"],
-    [50, "large"],
+    [14, "small"],
+    [15, "medium"],
+    [30, "medium"],
+    [31, "large"],
     [200, "large"],
   ] as const)("classifies %i planned pages as %s", (pages, expected) => {
     expect(classifyTaskSize(pages)).toBe(expected);

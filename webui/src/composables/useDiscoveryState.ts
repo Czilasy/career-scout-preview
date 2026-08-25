@@ -439,7 +439,8 @@ const advancedSettings = ref<Record<string, number | string>>({
 // 字段合法范围（与 input 的 min/max 保持一致）。失焦/回车时才钳到边界，
 // 输入过程中不干预，让用户自由编辑。
 const advancedRanges = ref<Record<string, [number, number]>>({
-  pages: [1, 9999],
+  // 024：pages 范围收紧 1~200（对齐后端 _MAX_PLANNED_PAGES 上限）
+  pages: [1, 200],
   inter_combo_delay: [5, 120],
   detail_batch_size: [1, Number.MAX_SAFE_INTEGER],
   detail_interval: [2, 15],

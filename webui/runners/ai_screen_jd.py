@@ -107,6 +107,19 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                 emit(stage="fetch_jd", current=cur, total=len(survivors),
                      message=f"抓取 JD {cur}/{len(survivors)}")
 
+            # 024：详情人形模拟随当前档位下发（custom 档零仿真，不传参）
+            _active_selection = None
+            try:
+                _active_selection = (
+                    ctx.store.get_advanced_config_state().get("active_selection")
+                )
+            except Exception:
+                _active_selection = None
+            _simulation_mode = (
+                _active_selection
+                if _active_selection in ("stable", "balanced", "extreme")
+                else None
+            )
             detail_result = fetch_job_details(
                 chunk, source,
                 artifact_dir=ctx.app.config["RESULT_DIR"],
@@ -115,6 +128,7 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                 execution_config=execution_config,
                 guard=guard,
                 batch_key_prefix=f"jd-{task_id}-{chunk_start}",
+                simulation_mode=_simulation_mode,
             )
             # 022：卡死 3 次失败分流收场（环境级暂停 / 偶发跳过进待确认）
             _stall_divert = detail_result.get("stall_divert")

@@ -569,6 +569,7 @@ class BossCdpSource(_BossCdpDetailMixin):
         gap_max: float = 15,
         reset_every: int = 3,
         tab_pool_size: int = 5,
+        simulation_mode: str | None = None,
     ) -> list[str]:
         """Build the scraper CLI command for a batched detail fetch.
 
@@ -581,8 +582,11 @@ class BossCdpSource(_BossCdpDetailMixin):
         常驻 tab 池复用省开关开销，错峰+补位节奏防反爬；tab 数默认 5，由调用方传入。
         ``--gap-min/--gap-max``：详情间隔秒数范围（防 code:37）。
         ``--reset-every``：每抓 N 个详情重置一次 session。
+        ``simulation_mode``：024 可选档位（stable/balanced/extreme），非 None 时
+        追加 ``--simulation-mode``，详情加载后执行人形模拟；None 时命令与旧版
+        字节一致（既有命令断言不破坏）。
         """
-        return [
+        command = [
             self.python_executable,
             str(self.scraper_path),
             "--cdp-port", str(self.cdp_port),
@@ -597,6 +601,9 @@ class BossCdpSource(_BossCdpDetailMixin):
             "--gap-max", str(gap_max),
             "--reset-every", str(reset_every),
         ]
+        if simulation_mode:
+            command.extend(["--simulation-mode", str(simulation_mode)])
+        return command
 
     # ------------------------------------------------------------------
     # Subprocess + artifact reading

@@ -326,15 +326,25 @@ class TaskSizeClassificationTests(unittest.TestCase):
         self.assertEqual(scope.planned_pages, 9)
         self.assertEqual(scope.task_size, "small")
 
-    def test_ten_pages_is_medium(self):
-        scope = self._scope(2, 5, 1)  # 2×5×1=10
-        self.assertEqual(scope.planned_pages, 10)
+    def test_fourteen_pages_is_small(self):
+        scope = self._scope(14, 1, 1)  # 14×1×1=14
+        self.assertEqual(scope.planned_pages, 14)
+        self.assertEqual(scope.task_size, "small")
+
+    def test_fifteen_pages_is_medium(self):
+        scope = self._scope(15, 1, 1)  # 15×1×1=15
+        self.assertEqual(scope.planned_pages, 15)
         self.assertEqual(scope.task_size, "medium")
 
-    def test_forty_nine_pages_is_medium(self):
-        scope = self._scope(49, 1, 1)  # 49×1×1=49
-        self.assertEqual(scope.planned_pages, 49)
+    def test_thirty_pages_is_medium(self):
+        scope = self._scope(30, 1, 1)  # 30×1×1=30
+        self.assertEqual(scope.planned_pages, 30)
         self.assertEqual(scope.task_size, "medium")
+
+    def test_thirty_one_pages_is_large(self):
+        scope = self._scope(31, 1, 1)  # 31×1×1=31
+        self.assertEqual(scope.planned_pages, 31)
+        self.assertEqual(scope.task_size, "large")
 
     def test_fifty_pages_is_large(self):
         scope = self._scope(50, 1, 1)  # 50×1×1=50
@@ -651,6 +661,62 @@ class ModeSelectionDoesNotTouchPagesTests(unittest.TestCase):
         for mode in ("stable", "balanced", "extreme"):
             config = execution_config.get_mode_config(mode, task_size="small")
             self.assertNotIn("pages", config.to_dict() if hasattr(config, "to_dict") else config)
+
+
+# ===========================================================================
+# 024 三档数值重设计：一档一套、三规模同值、极限档固化
+# ===========================================================================
+class ModePresetsV2Tests(unittest.TestCase):
+    """024 冻结表 #2-#11：三档新数值、三规模同值、extreme 固化当前自定义值。"""
+
+    # 字段顺序：inter_combo_delay/detail_batch_size/detail_interval/
+    # detail_reset_every/detail_batch_cooldown/detail_tab_pool_size/
+    # screen_batch_size/screen_concurrency/match_batch_size/match_concurrency
+    EXPECTED = {
+        "stable": [20, 15, 15, 2, 15, 2, 30, 3, 3, 3],
+        "balanced": [13, 20, 10, 3, 10, 3, 40, 4, 4, 4],
+        "extreme": [10, 30, 2, 4, 5, 5, 50, 5, 5, 5],  # = 固化当前自定义值
+    }
+    SPEED_FIELDS = (
+        "inter_combo_delay", "detail_batch_size", "detail_interval",
+        "detail_reset_every", "detail_batch_cooldown", "detail_tab_pool_size",
+        "screen_batch_size", "screen_concurrency", "match_batch_size",
+        "match_concurrency",
+    )
+
+    def _snapshot_values(self, mode, task_size):
+        config = execution_config.get_mode_config(mode, task_size=task_size)
+        return [config.to_dict()[f] for f in self.SPEED_FIELDS]
+
+    def test_mode_values_match_frozen_table(self):
+        for mode, expected in self.EXPECTED.items():
+            self.assertEqual(
+                self._snapshot_values(mode, "small"), expected,
+                f"{mode} 档数值与冻结表不一致",
+            )
+
+    def test_three_sizes_share_same_values(self):
+        for mode in self.EXPECTED:
+            small = self._snapshot_values(mode, "small")
+            self.assertEqual(self._snapshot_values(mode, "medium"), small)
+            self.assertEqual(self._snapshot_values(mode, "large"), small)
+
+    def test_extreme_equals_frozen_custom_values(self):
+        # 需求 2：极限档 = 固化当前自定义值（10/10/30/2/4/5/5/50/5/5/5），
+        # 与 custom 解耦——select_mode("extreme") 走 MODE_CONFIGS，不读 last_custom_config。
+        data = execution_config.get_mode_config(
+            "extreme", task_size="large",
+        ).to_dict()
+        self.assertEqual(data["inter_combo_delay"], 10)
+        self.assertEqual(data["detail_batch_size"], 30)
+        self.assertEqual(data["detail_interval"], 2)
+        self.assertEqual(data["detail_reset_every"], 4)
+        self.assertEqual(data["detail_batch_cooldown"], 5)
+        self.assertEqual(data["detail_tab_pool_size"], 5)
+        self.assertEqual(data["screen_batch_size"], 50)
+        self.assertEqual(data["screen_concurrency"], 5)
+        self.assertEqual(data["match_batch_size"], 5)
+        self.assertEqual(data["match_concurrency"], 5)
 
 
 if __name__ == "__main__":

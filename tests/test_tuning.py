@@ -502,7 +502,7 @@ class FrozenInputArtifactTests(unittest.TestCase):
         scopes = [
             ("small", self._scope(1, 3)),
             ("small", self._scope(2, 3)),
-            ("medium", self._scope(2, 5)),
+            ("medium", self._scope(2, 8)),  # 024 新口径：16 页属中规模,
             ("medium", self._scope(3, 5)),
             ("large", self._scope(10, 5)),
             ("large", self._scope(11, 5)),
@@ -644,7 +644,7 @@ class TuningStageArtifactTests(unittest.TestCase):
         }
         scopes = [
             ("small", 1, 3), ("small", 2, 3),
-            ("medium", 2, 5), ("medium", 3, 5),
+            ("medium", 2, 8), ("medium", 3, 5),  # 024 新口径：16/15 页属中规模
             ("large", 10, 5), ("large", 11, 5),
         ]
         self.experiment = self.controller.create_experiment_with_input(
@@ -726,7 +726,7 @@ class CompletionGateTests(unittest.TestCase):
     def test_complete_evidence_allows_exact_candidate_application(self):
         scopes = [
             ("small", self._scope(1, 3)), ("small", self._scope(2, 3)),
-            ("medium", self._scope(2, 5)), ("medium", self._scope(3, 5)),
+            ("medium", self._scope(2, 8)), ("medium", self._scope(3, 5)),  # 024 新口径：16/15 页属中规模
             ("large", self._scope(10, 5)), ("large", self._scope(11, 5)),
         ]
         experiment = self.controller.create_experiment_with_input(
@@ -1766,7 +1766,7 @@ class ManifestReportValidationTests(unittest.TestCase):
         scopes = [
             ("small", CompletionGateTests._scope(1, 3)),
             ("small", CompletionGateTests._scope(2, 3)),
-            ("medium", CompletionGateTests._scope(2, 5)),
+            ("medium", CompletionGateTests._scope(2, 8)),  # 024 新口径：16 页属中规模,
             ("medium", CompletionGateTests._scope(3, 5)),
             ("large", CompletionGateTests._scope(10, 5)),
             ("large", CompletionGateTests._scope(11, 5)),
@@ -4037,7 +4037,7 @@ class LegacyBossProofTests(unittest.TestCase):
         }
         scopes = [
             ("small", 1, 3), ("small", 2, 3),
-            ("medium", 2, 5), ("medium", 3, 5),
+            ("medium", 2, 8), ("medium", 3, 5),  # 024 新口径：16/15 页属中规模
             ("large", 10, 5), ("large", 11, 5),
         ]
         self.experiment = self.controller.create_experiment_with_input(
@@ -4324,7 +4324,7 @@ class TuningPlatformConservationTests(unittest.TestCase):
         }
         scopes = [
             ("small", 1, 3), ("small", 2, 3),
-            ("medium", 2, 5), ("medium", 3, 5),
+            ("medium", 2, 8), ("medium", 3, 5),  # 024 新口径：16/15 页属中规模
             ("large", 10, 5), ("large", 11, 5),
         ]
         self.experiment = self.controller.create_experiment_with_input(
@@ -4652,7 +4652,7 @@ class TuningStageKindGuardTests(unittest.TestCase):
         }
         scopes = [
             ("small", 1, 3), ("small", 2, 3),
-            ("medium", 2, 5), ("medium", 3, 5),
+            ("medium", 2, 8), ("medium", 3, 5),  # 024 新口径：16/15 页属中规模
             ("large", 10, 5), ("large", 11, 5),
         ]
         self.experiment = self.controller.create_experiment_with_input(
@@ -4782,7 +4782,7 @@ class TuningRoughFineSourceInheritanceTests(unittest.TestCase):
         }
         scopes = [
             ("small", 1, 3), ("small", 2, 3),
-            ("medium", 2, 5), ("medium", 3, 5),
+            ("medium", 2, 8), ("medium", 3, 5),  # 024 新口径：16/15 页属中规模
             ("large", 10, 5), ("large", 11, 5),
         ]
         self.experiment = self.controller.create_experiment_with_input(
@@ -4945,7 +4945,7 @@ class TuningDisabledPlatformGuardTests(unittest.TestCase):
         }
         scopes = [
             ("small", 1, 3), ("small", 2, 3),
-            ("medium", 2, 5), ("medium", 3, 5),
+            ("medium", 2, 8), ("medium", 3, 5),  # 024 新口径：16/15 页属中规模
             ("large", 10, 5), ("large", 11, 5),
         ]
         self.experiment = self.controller.create_experiment_with_input(

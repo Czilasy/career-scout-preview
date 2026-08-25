@@ -276,6 +276,70 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
+  it("024 警示区：大任务任何档位显示，极限档追加极限警告（可同时）", async () => {
+    const settings = {
+      pages: 36,
+      inter_combo_delay: 10,
+      detail_batch_size: 15,
+      detail_interval: 2,
+      detail_reset_every: 4,
+      detail_batch_cooldown: 5,
+      detail_tab_pool_size: 5,
+      screen_batch_size: 50,
+      screen_concurrency: 5,
+      match_batch_size: 4,
+      match_concurrency: 10,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "custom", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({
+          ok: true,
+          scope: {
+            keywords: ["AI应用开发"], scope_kind: "cities", cities: ["东莞市"],
+            pages_per_combination: 36, combination_count: 1, planned_pages: 36,
+            task_size: "large", scope_digest: "sha256:scope-large",
+          },
+          deduplicated: { keywords: [], cities: [] },
+        });
+      }
+      if (url.endsWith("/api/advanced-settings/select-mode")) {
+        return response({ ok: true, selection: "extreme", settings, task_size: "large", mode_version_id: null, config_digest: "sha256:extreme" });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text().includes("跳过简历"))!.trigger("click");
+    await wrapper.get('[data-testid="custom-keyword"]').setValue("AI应用开发");
+    await wrapper.get('[data-testid="add-keyword"]').trigger("click");
+    await wrapper.get('[data-testid="custom-city"]').setValue("东莞市");
+    await wrapper.get('[data-testid="add-city"]').trigger("click");
+    await flushPromises();
+
+    // custom 档 + 大任务（>30 页）：仅大任务警告
+    expect(wrapper.find('[data-testid="mode-warning-banner"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="large-task-warning"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="extreme-warning"]').exists()).toBe(false);
+
+    // 切极限档：两条警告同时显示
+    await wrapper.get('[data-mode="extreme"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-mode="extreme"]').attributes("aria-checked")).toBe("true");
+    expect(wrapper.find('[data-testid="extreme-warning"]').text()).toBe("极高概率限流封号");
+    expect(wrapper.find('[data-testid="large-task-warning"]').text()).toBe("任务规模过大可能封号");
+
+    vi.unstubAllGlobals();
+  });
+
   it("restores interrupted AI screen source ids so start is reachable", async () => {
     const settings = {
       inter_combo_delay: 10,

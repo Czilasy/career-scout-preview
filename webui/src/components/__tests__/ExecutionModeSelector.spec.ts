@@ -33,4 +33,18 @@ describe("ExecutionModeSelector", () => {
       expect(control.attributes()).toHaveProperty("disabled");
     }
   });
+
+  it.each([
+    ["stable", "mode-stable"],
+    ["balanced", "mode-balanced"],
+    ["extreme", "mode-extreme"],
+    ["custom", "mode-custom"],
+  ] as const)("024 配色：%s 档激活按钮带 %s 类", (mode, expectedClass) => {
+    const wrapper = mount(ExecutionModeSelector, {
+      props: { modelValue: mode },
+    });
+    const active = wrapper.get(`[data-mode="${mode}"]`);
+    expect(active.classes()).toContain("active");
+    expect(active.classes()).toContain(expectedClass);
+  });
 });

@@ -129,12 +129,13 @@ export function partitionPipelineResult(result: PipelineResult): PipelineGroups 
   return groups;
 }
 
+// 024：总页数 <15 小 / 15~30 中 / >30 大（替换旧 9/49，与后端 classify_task_size 一致）
 export function classifyTaskSize(plannedPages: number): TaskSize {
   if (!Number.isInteger(plannedPages) || plannedPages < 1 || plannedPages > 200) {
     throw new RangeError("planned pages must be an integer from 1 to 200");
   }
-  if (plannedPages <= 9) return "small";
-  if (plannedPages <= 49) return "medium";
+  if (plannedPages <= 14) return "small";
+  if (plannedPages <= 30) return "medium";
   return "large";
 }
 

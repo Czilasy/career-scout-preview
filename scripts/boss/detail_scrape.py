@@ -113,7 +113,7 @@ def _emit_runtime_safe_event(event_callback, event, *, safe_code="ok", safe_hint
 def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
                        sleeper, event_callback, readiness_timeout_seconds,
                        max_readiness_retries, inter_job_gap_range,
-                       is_last_in_run, trailing_wait):
+                       is_last_in_run, trailing_wait, simulation_mode=None):
     """Scrape a single detail page within a reused CDP session.
 
     Emits exactly one terminal safe event via ``event_callback`` (when
@@ -167,6 +167,15 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
         timeout_seconds=readiness_timeout_seconds,
         max_retries=max_readiness_retries,
     )
+
+    # 024：加载后行为仿真（随机等待/人形滚动/概率鼠标移动），仅档位化抓取启用
+    if simulation_mode:
+        from scripts.boss.detail_simulation import resolve_params, simulate_after_load
+        simulate_after_load(
+            ws, sid,
+            params=resolve_params(simulation_mode),
+            sleeper=sleeper, label_prefix="",
+        )
 
     print("  提取 JD...")
     val = ws.eval_js(EXTRACT_DETAIL_JS, sid)
@@ -249,7 +258,7 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
 def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
                           sleeper, event_callback, readiness_timeout_seconds,
                           max_readiness_retries, results_lock, results,
-                          output_path, tab_label):
+                          output_path, tab_label, simulation_mode=None):
     """在已 attach 的常驻 tab 上抓一个详情（复用 tab，不开/关 target）。
 
     spec 007 ⑧：与 ``_scrape_one_detail`` 的区别——
@@ -279,6 +288,15 @@ def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
         timeout_seconds=readiness_timeout_seconds,
         max_retries=max_readiness_retries,
     )
+
+    # 024：加载后行为仿真（仅档位化抓取启用；失败吞掉不影响主流程）
+    if simulation_mode:
+        from scripts.boss.detail_simulation import resolve_params, simulate_after_load
+        simulate_after_load(
+            ws, sid,
+            params=resolve_params(simulation_mode),
+            sleeper=sleeper, label_prefix=f"[{tab_label}] ",
+        )
 
     print(f"[{tab_label}]   提取 JD...")
     val = ws.eval_js(EXTRACT_DETAIL_JS, sid)
@@ -361,7 +379,8 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
                 max_readiness_retries, inter_job_gap_range, stagger_range,
                 tab_id, results_lock, results, output_path, degrade_event,
                 trailing_wait, reset_every=3, degrade_reason=None,
-                cancel_event=None, on_poll=None, worker_errors=None):
+                cancel_event=None, on_poll=None, worker_errors=None,
+                simulation_mode=None):
     """常驻 tab 工作线程：建池 → 错峰启动 → 循环领任务抓详情 → 补位节奏 → 关池。
 
     spec 007 ⑧：每个 tab 配一条独立工作线程 + 独立 CDP 会话（_facade().CDPSession 是
@@ -414,6 +433,7 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
                 max_readiness_retries=max_readiness_retries,
                 results_lock=results_lock, results=results,
                 output_path=output_path, tab_label=tab_label,
+                simulation_mode=simulation_mode,
             )
             if result == "login_required":
                 # 登录墙：设置降级事件，其他线程看到后停止领新任务
@@ -466,7 +486,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
                    trailing_wait=False,
                    enable_parallel=False, tab_pool_size=5,
                    stagger_range=(5, 10), reset_every=3,
-                   cancel_event=None, on_poll=None):
+                   cancel_event=None, on_poll=None, simulation_mode=None):
     """抓取岗位详情页并返回结构化结果。
 
     Policy v2 keyword-only parameters (feature 005) +
@@ -490,6 +510,9 @@ def scrape_details(list_data, max_details=None, output_path=None,
       与 005 合约）；True 走常驻 tab 池并行（webui 调用处显式传 True）。
     - ``tab_pool_size``: 常驻 tab 数，默认 5，上限 10。
     - ``stagger_range``: 错峰启动间隔范围秒，默认 (5, 10)。
+    - ``simulation_mode``: 024 可选档位（stable/balanced/extreme），非 None 时
+      每个详情加载完成后执行人形模拟（随机等待/滚动/鼠标）；None 时零仿真
+      （与现状一致，CLI 直跑等旧路径不受影响）。
 
     实现要点：
     - 串行：每批最多 5 个候选；每批复用一个 CDP 会话，逐岗位开 target。
@@ -585,6 +608,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
                     "cancel_event": cancel_event,
                     "on_poll": on_poll,
                     "worker_errors": worker_errors,
+                    "simulation_mode": simulation_mode,
                 },
                 name=f"detail-tab{tab_id + 1}",
                 daemon=True,
@@ -645,6 +669,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
                         inter_job_gap_range=inter_job_gap_range,
                         is_last_in_run=is_last_in_run,
                         trailing_wait=trailing_wait,
+                        simulation_mode=simulation_mode,
                     )
             finally:
                 ws.close()

@@ -23,7 +23,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                       execution_config=None,
                       measurement_callback=None,
                       emit_terminal_events=True,
-                      guard=None, batch_key_prefix=None):
+                      guard=None, batch_key_prefix=None,
+                      simulation_mode=None):
     """对一批岗位批量抓 JD（调用方需先确保 Chrome 就绪）。
 
     Spec 007 ⑧：改用 fetch_details_batch（≤5 一批）走 --enable-parallel 常驻 tab 池，
@@ -189,6 +190,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                         reset_every=_detail_reset_every,
                         tab_pool_size=_detail_tab_pool_size,
                         on_item_done=_item_progress if with_progress else None,
+                        simulation_mode=simulation_mode,
                     )
                     return results, None
                 except _PIPELINE_OPERATION_ERRORS as exc:

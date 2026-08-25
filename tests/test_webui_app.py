@@ -523,13 +523,14 @@ class SearchScopePreviewTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 422)
 
     def test_preview_page_boundaries(self):
-        """Scenario A: 1/9=small, 10/49=medium, 50/200=large。"""
+        """Scenario A: 024 新口径 <15=small, 15~30=medium, >30=large。"""
         cases = [
             (1, 1, 1, "small"),
             (3, 3, 1, "small"),    # 9
-            (2, 5, 1, "medium"),   # 10
-            (49, 1, 1, "medium"),  # 49
-            (5, 10, 1, "large"),   # 50
+            (14, 1, 1, "small"),   # 14
+            (15, 1, 1, "medium"),  # 15
+            (30, 1, 1, "medium"),  # 30
+            (31, 1, 1, "large"),   # 31
             (200, 1, 1, "large"),  # 200
         ]
         cities = ["北京", "上海", "广州", "深圳", "杭州",
@@ -3294,7 +3295,7 @@ class AdvancedSettingsContractTests(unittest.TestCase):
 
     def test_select_mode_uses_backend_preview_size(self):
         """客户端 task_size 不能覆盖 scope digest 对应的后端规模。"""
-        scope = self._preview_scope(pages=10)
+        scope = self._preview_scope(pages=15)  # 024 新口径：15 页属中规模
         resp = self.client.post("/api/advanced-settings/select-mode", json={
             "mode": "balanced",
             "scope_digest": scope["scope_digest"],
@@ -3564,7 +3565,8 @@ class TuningManifestRouteTests(unittest.TestCase):
             }
         scopes = [
             ("small", scope(1, 3)), ("small", scope(2, 3)),
-            ("medium", scope(2, 5)), ("medium", scope(3, 5)),
+            # 024 规模新口径（<15 小 / 15~30 中 / >30 大）：16 页属中规模
+            ("medium", scope(2, 8)), ("medium", scope(3, 5)),
             ("large", scope(10, 5)), ("large", scope(11, 5)),
         ]
         self.experiment = self.controller.create_experiment_with_input(
@@ -4105,10 +4107,10 @@ class TuningExperimentRouteTests(unittest.TestCase):
                 "cities": ["东莞"], "pages_per_combination": 4}},
             {"task_size": "medium", "structure_index": 1, "scope": {
                 "keywords": ["AI应用开发"], "scope_kind": "cities",
-                "cities": ["东莞", "深圳"], "pages_per_combination": 5}},
+                "cities": ["东莞", "深圳"], "pages_per_combination": 8}},  # 024 新口径：16 页属中规模
             {"task_size": "medium", "structure_index": 2, "scope": {
                 "keywords": ["AI应用开发", "智能体开发"], "scope_kind": "cities",
-                "cities": ["东莞"], "pages_per_combination": 5}},
+                "cities": ["东莞"], "pages_per_combination": 8}},  # 024 新口径：16 页属中规模
             {"task_size": "large", "structure_index": 1, "scope": {
                 "keywords": ["AI应用开发", "智能体开发", "Python后端", "Java后端", "前端开发"], "scope_kind": "cities",
                 "cities": ["东莞", "深圳"], "pages_per_combination": 5}},
@@ -4512,6 +4514,37 @@ class SourceDetailBatchCommandTests(unittest.TestCase):
             inspect.signature(BossCdpSource._build_detail_batch_command)
             .parameters["tab_pool_size"].default,
             5,
+        )
+
+    def test_batch_command_omits_simulation_mode_by_default(self):
+        from webui.source import BossCdpSource
+
+        source = BossCdpSource(
+            python_executable="python",
+            scraper_path="scripts/boss_cdp_raw.py",
+        )
+        command = source._build_detail_batch_command(
+            "batch.input.json", "batch.out.json", "batch.events.jsonl",
+            batch_size=2, gap_min=1, gap_max=2, reset_every=3,
+            tab_pool_size=5,
+        )
+        self.assertNotIn("--simulation-mode", command)
+
+    def test_batch_command_forwards_simulation_mode(self):
+        from webui.source import BossCdpSource
+
+        source = BossCdpSource(
+            python_executable="python",
+            scraper_path="scripts/boss_cdp_raw.py",
+        )
+        command = source._build_detail_batch_command(
+            "batch.input.json", "batch.out.json", "batch.events.jsonl",
+            batch_size=2, gap_min=1, gap_max=2, reset_every=3,
+            tab_pool_size=5, simulation_mode="stable",
+        )
+        self.assertIn("--simulation-mode", command)
+        self.assertEqual(
+            command[command.index("--simulation-mode") + 1], "stable",
         )
 
 class LegacyPlatformGuardTests(unittest.TestCase):

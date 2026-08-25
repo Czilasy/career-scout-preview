@@ -7,6 +7,7 @@ import {
 } from "@lucide/vue";
 import CollapsibleCard from "../components/CollapsibleCard.vue";
 import ExecutionModeSelector from "../components/ExecutionModeSelector.vue";
+import ModeWarningBanner from "../components/ModeWarningBanner.vue";
 import JobLifecycleActions from "../components/JobLifecycleActions.vue";
 import JobWorkspace from "../components/JobWorkspace.vue";
 import LocationPicker from "../components/LocationPicker.vue";
@@ -297,6 +298,13 @@ shared.pollTask = tasks.pollTask;
 shared.saveScrapedOnlySnapshot = tasks.saveScrapedOnlySnapshot;
 shared.enrichPausedSnapshot = tasks.enrichPausedSnapshot;
 shared.isCompletedTaskStatus = tasks.isCompletedTaskStatus;
+
+// 024：档位/规模风险警示（黄色警示区数据源）。
+// 极限警告：仅极限档；大任务警告：任何档位，按新口径总页数 >30（scopePreview 未确认时为 false）。
+const extremeWarning = computed(() => executionSelection.value === "extreme");
+const largeTaskWarning = computed(() => Boolean(
+  scopePreview.value?.planned_pages && scopePreview.value.planned_pages > 30,
+));
 
 // 模板绑定：composable 返回值解构
 const {
@@ -769,6 +777,10 @@ onMounted(() => {
             :busy="advancedBusy"
             :disabled="!scopePreview"
             @update:model-value="selectExecutionMode"
+          />
+          <ModeWarningBanner
+            :extreme-warning="extremeWarning"
+            :large-task-warning="largeTaskWarning"
           />
           <p class="adv-mode-summary" data-testid="adv-mode-summary">{{ executionModeSummary }}</p>
           <div class="adv-fields">

@@ -189,6 +189,10 @@ def main():
                    help="详情间隔最大秒数（默认 15；防 code:37）")
     p.add_argument("--reset-every", type=int, default=3,
                    help="每抓 N 个详情重置一次 session（默认 3；防 code:37）")
+    p.add_argument("--simulation-mode", default=None,
+                   choices=("stable", "balanced", "extreme"),
+                   help="024 详情加载后人形模拟档位（随机等待/滚动/鼠标；"
+                        "不传则零仿真，与旧行为一致）")
     p.add_argument("--events-output", default=None,
                    help="详情 terminal safe event 输出路径 (JSONL；每行一个事件，"
                         "仅含 kind/status/job_id/duration_ms/safe_code，"
@@ -380,6 +384,7 @@ def main():
                 stagger_range=(args.stagger_min, args.stagger_max),
                 inter_job_gap_range=(args.gap_min, args.gap_max),
                 reset_every=args.reset_every,
+                simulation_mode=args.simulation_mode,
             )
         finally:
             if events_file_handle is not None:

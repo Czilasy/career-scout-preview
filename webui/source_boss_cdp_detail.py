@@ -100,6 +100,7 @@ class _BossCdpDetailMixin:
         reset_every: int = 3,
         tab_pool_size: int = 5,
         on_item_done: Callable[[int], None] | None = None,
+        simulation_mode: str | None = None,
     ) -> dict[str, SourceOutcome]:
         """Fetch details for a batch of jobs (≤5) using one scraper subprocess.
 
@@ -232,6 +233,7 @@ class _BossCdpDetailMixin:
             batch_size=len(valid_jobs),
             gap_min=gap_min, gap_max=gap_max, reset_every=reset_every,
             tab_pool_size=tab_pool_size,
+            simulation_mode=simulation_mode,
         )
         safe_log = f"batch_detail job_count={len(valid_jobs)}"
         if self.breaker.is_open() and not self._try_breaker_recovery():
@@ -707,6 +709,7 @@ class _BossCdpDetailMixin:
             "tab_pool_size": int(flags.get("tab-pool-size", "5")),
             "inter_job_gap_range": (gap_min, gap_max),
             "reset_every": int(flags.get("reset-every", "3")),
+            "simulation_mode": flags.get("simulation-mode") or None,
             "cancel_event": self.cancel_event,
         }
         return {"kind": "detail_batch", "params": params}

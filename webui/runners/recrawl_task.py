@@ -309,11 +309,22 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                     def _jd_progress(done, tot):
                         emit(stage="fetch_jd", current=min(done, total), total=total,
                              message=f"抓取 JD {min(done, total)}/{total}")
+                    # 024：详情人形模拟随当前档位下发（custom/取不到时零仿真）
+                    _simulation_mode = None
+                    try:
+                        _sel = ctx.store.get_advanced_config_state().get(
+                            "active_selection"
+                        )
+                        if _sel in ("stable", "balanced", "extreme"):
+                            _simulation_mode = _sel
+                    except Exception:
+                        _simulation_mode = None
                     detail = fetch_job_details(
                         no_jd, source, artifact_dir=ctx.app.config["RESULT_DIR"],
                         stop_event=stop_event, progress=_jd_progress,
                         completed_job_ids=completed_job_ids,
                         execution_config=execution_config,
+                        simulation_mode=_simulation_mode,
                     )
                     detail_jobs = detail.get("jobs", [])
                     for j in detail_jobs:

@@ -38,7 +38,7 @@ function select(value: ExecutionSelection) {
         :data-mode="option.value"
         :aria-checked="modelValue === option.value"
         :disabled="disabled || busy"
-        :class="{ active: modelValue === option.value }"
+        :class="{ active: modelValue === option.value, [`mode-${option.value}`]: modelValue === option.value }"
         @click="select(option.value)"
       >{{ option.label }}</button>
     </div>
@@ -83,6 +83,25 @@ function select(value: ExecutionSelection) {
   border-color: var(--brand-strong);
   background: var(--brand-wash);
   color: var(--brand-ink);
+}
+
+/* 024：档位配色——稳定=绿、平衡=黄、极限=红；自定义保持默认 brand 色 */
+.mode-segments button.active.mode-stable {
+  border-color: #22c55e;
+  background: color-mix(in srgb, #22c55e 18%, transparent);
+  color: #16a34a;
+}
+
+.mode-segments button.active.mode-balanced {
+  border-color: #eab308;
+  background: color-mix(in srgb, #eab308 18%, transparent);
+  color: #a16207;
+}
+
+.mode-segments button.active.mode-extreme {
+  border-color: #ef4444;
+  background: color-mix(in srgb, #ef4444 18%, transparent);
+  color: #dc2626;
 }
 
 .mode-segments button:focus-visible {
