@@ -187,6 +187,8 @@ export interface BrowserAccount {
   id: string;
   name: string;
   builtin?: boolean;
+  // B073：BOSS 任务角色标记（R1 列表/广泛抓取、R2 详情抓取），可同时存在。
+  roles?: string[];
   // GET /api/browser-accounts 不返回 profile 路径或路径摘要（http-api.md L319）。
   platforms?: Partial<Record<Platform, BrowserAccountPlatformSpace>>;
 }

@@ -33,19 +33,19 @@ function fetchMockFor(urlPart: string, payload: unknown) {
   });
 }
 
+async function mountPicker(platform: "boss" | "zhilian" = "boss", modelValue: LocationCondition[] = []) {
+  const wrapper = mount(LocationPicker, {
+    props: { city: "上海", platform, modelValue, disabled: false },
+  });
+  await wrapper.get('[data-testid="city-chip-toggle"]').trigger("click");
+  await flushPromises();
+  return wrapper;
+}
+
 describe("LocationPicker", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
-
-  async function mountPicker(platform: "boss" | "zhilian" = "boss", modelValue: LocationCondition[] = []) {
-    const wrapper = mount(LocationPicker, {
-      props: { city: "上海", platform, modelValue, disabled: false },
-    });
-    await wrapper.get('[data-testid="city-chip-toggle"]').trigger("click");
-    await flushPromises();
-    return wrapper;
-  }
 
   it("opens a district panel and emits a selected district", async () => {
     vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
@@ -129,5 +129,65 @@ describe("LocationPicker", () => {
     document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     await flushPromises();
     expect(wrapper.find('[data-testid="location-panel"]').exists()).toBe(false);
+  });
+});
+
+describe("LocationPicker narrow viewport (B072)", () => {
+  function setInnerWidth(width: number): void {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: width,
+    });
+  }
+
+  function panelMetrics(wrapper: ReturnType<typeof mount<typeof LocationPicker>>) {
+    const style = wrapper.get('[data-testid="location-panel"]').attributes("style") || "";
+    const read = (prop: string) => {
+      const match = style.match(new RegExp(`${prop}:\\s*([-\\d.]+)px`));
+      return match ? Number(match[1]) : NaN;
+    };
+    return { left: read("left"), width: read("width"), top: read("top") };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: 1024,
+    });
+  });
+
+  it.each([500, 360, 300])("keeps the panel inside the viewport at %ipx width", async (width) => {
+    setInnerWidth(width);
+    vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
+    const wrapper = await mountPicker();
+    const { left, width: panelWidth } = panelMetrics(wrapper);
+    expect(left).toBeGreaterThanOrEqual(0);
+    expect(left + panelWidth).toBeLessThanOrEqual(width);
+    expect(panelWidth).toBeLessThanOrEqual(width - 24);
+  });
+
+  it("locks the panel to min width and keeps full district labels at very narrow widths", async () => {
+    setInnerWidth(300);
+    vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
+    const wrapper = await mountPicker();
+    const { width: panelWidth } = panelMetrics(wrapper);
+    expect(panelWidth).toBe(300 - 24);
+    const districtLabel = wrapper.get('[data-testid="location-district-310115"]').text();
+    expect(districtLabel).toContain("浦东新区");
+    expect(wrapper.get('[data-testid="location-district-310104"]').text()).toContain("徐汇区");
+  });
+
+  it("does not squeeze district labels into one character on the business grid (BOSS)", async () => {
+    setInnerWidth(360);
+    vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
+    const wrapper = await mountPicker("boss");
+    await wrapper.get('[data-testid="location-district-310115"]').trigger("click");
+    const selected = wrapper.emitted("update:modelValue")!.at(-1)![0] as LocationCondition[];
+    await wrapper.setProps({ modelValue: selected });
+    const businessLabel = wrapper.get('[data-testid="location-business-310115-154"]').text();
+    expect(businessLabel).toContain("北蔡");
   });
 });

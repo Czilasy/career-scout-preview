@@ -433,3 +433,134 @@ describe("BrowserAccountsDialog", () => {
     expect(confirmSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("BrowserAccountsDialog role assignment (B073)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const accA = { id: "a", name: "账号 A", platforms: { boss: { cdp_port: 9222 } } };
+  const accB = { id: "b", name: "账号 B", platforms: { boss: { cdp_port: 9222 } } };
+
+  // 模拟后端互斥语义：PUT /roles 后其他账号的相同角色被清除。
+  function rolesFetchMock(initial: Array<{ id: string; name: string }> = [accA, accB]) {
+    let accounts = initial.map((a) => ({ ...a, roles: [] as string[] }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/browser-accounts") {
+        return response({ accounts, active_account: "a" });
+      }
+      const rolesMatch = /\/api\/browser-accounts\/([^/]+)\/roles$/.exec(url);
+      if (rolesMatch && init?.method === "PUT") {
+        const body = JSON.parse(String(init?.body)) as { roles: string[] };
+        const id = rolesMatch[1];
+        accounts = accounts.map((account) => {
+          if (account.id === id) return { ...account, roles: body.roles };
+          return { ...account, roles: (account.roles || []).filter((r) => !body.roles.includes(r)) };
+        });
+        return response({ ok: true, account_id: id, roles: body.roles });
+      }
+      return response({});
+    });
+    return fetchMock;
+  }
+
+  it("renders the two role chips in 不指定 state", async () => {
+    const wrapper = await mountOpen(rolesFetchMock());
+    const r1 = wrapper.get('[data-testid="role-chip-R1"]');
+    expect(r1.text()).toContain("R1");
+    expect(r1.text()).toContain("列表/广泛抓取");
+    expect(r1.text()).toContain("不指定");
+    const r2 = wrapper.get('[data-testid="role-chip-R2"]');
+    expect(r2.text()).toContain("R2");
+    expect(r2.text()).toContain("详情抓取");
+    expect(r2.text()).toContain("不指定");
+  });
+
+  it("keeps the 不指定 option visible even before any role is assigned", async () => {
+    const wrapper = await mountOpen(rolesFetchMock());
+    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
+    const menu = wrapper.get('[data-testid="role-menu"]');
+    expect(menu.text()).toContain("不指定");
+  });
+
+  it("assigns a role via PUT and shows the account name on the chip", async () => {
+    const fetchMock = rolesFetchMock();
+    const wrapper = await mountOpen(fetchMock);
+
+    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
+    const menu = wrapper.get('[data-testid="role-menu"]');
+    expect(menu.text()).toContain("账号 A");
+    expect(menu.text()).toContain("账号 B");
+
+    await wrapper.get('[data-testid="role-option-R1-b"]').trigger("click");
+    await flushPromises();
+
+    const putCall = fetchMock.mock.calls.find(([u, i]) => String(u).endsWith("/api/browser-accounts/b/roles"));
+    expect(putCall).toBeTruthy();
+    expect(JSON.parse(String(putCall![1]!.body))).toEqual({ roles: ["R1"] });
+    expect(wrapper.get('[data-testid="role-chip-R1"]').text()).toContain("账号 B");
+    expect(wrapper.get('[data-testid="role-chip-R2"]').text()).toContain("不指定");
+  });
+
+  it("allows the same account to hold both R1 and R2", async () => {
+    const fetchMock = rolesFetchMock();
+    const wrapper = await mountOpen(fetchMock);
+
+    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
+    await wrapper.get('[data-testid="role-option-R1-b"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="role-chip-R2"]').trigger("click");
+    await wrapper.get('[data-testid="role-option-R2-b"]').trigger("click");
+    await flushPromises();
+
+    const puts = fetchMock.mock.calls.filter(([u, i]) => String(u).endsWith("/roles") && i?.method === "PUT");
+    expect(puts.length).toBe(2);
+    expect(wrapper.get('[data-testid="role-chip-R1"]').text()).toContain("账号 B");
+    expect(wrapper.get('[data-testid="role-chip-R2"]').text()).toContain("账号 B");
+  });
+
+  it("moves the role exclusively when another account is chosen", async () => {
+    const fetchMock = rolesFetchMock();
+    const wrapper = await mountOpen(fetchMock);
+
+    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
+    await wrapper.get('[data-testid="role-option-R1-b"]').trigger("click");
+    await flushPromises();
+    // 换选账号 A → PUT a 的 R1；b 的 R1 被后端互斥清除
+    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
+    await wrapper.get('[data-testid="role-option-R1-a"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="role-chip-R1"]').text()).toContain("账号 A");
+    const putB = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/browser-accounts/b/roles"));
+    const putA = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/browser-accounts/a/roles"));
+    expect(JSON.parse(String(putB![1]!.body))).toEqual({ roles: ["R1"] });
+    expect(JSON.parse(String(putA![1]!.body))).toEqual({ roles: ["R1"] });
+  });
+
+  it("clears a role back to 不指定", async () => {
+    const fetchMock = rolesFetchMock();
+    const wrapper = await mountOpen(fetchMock);
+
+    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
+    await wrapper.get('[data-testid="role-option-R1-b"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
+    await wrapper.get('[data-testid="role-clear-R1"]').trigger("click");
+    await flushPromises();
+
+    const putCalls = fetchMock.mock.calls.filter(
+      ([u, i]) => String(u).endsWith("/api/browser-accounts/b/roles") && i?.method === "PUT",
+    );
+    expect(JSON.parse(String(putCalls.at(-1)![1]!.body))).toEqual({ roles: [] });
+    expect(wrapper.get('[data-testid="role-chip-R1"]').text()).toContain("不指定");
+  });
+
+  it("shows an empty hint when there are no accounts", async () => {
+    const wrapper = await mountOpen(rolesFetchMock([]));
+    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
+    expect(wrapper.get('[data-testid="role-menu"]').text()).toContain("暂无账号");
+  });
+});

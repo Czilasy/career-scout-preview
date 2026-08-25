@@ -5968,6 +5968,78 @@ class FrozenConfigDigestTests(unittest.TestCase):
                          "任务启动后修改设置不应改变已冻结的配置摘要")
 
 
+class B073TaskAccountRoleTests(unittest.TestCase):
+    """B073：BOSS 任务按阶段冻结 R1/R2 账号，智联不受影响，未指定/不可用降级当前账号。"""
+
+    def setUp(self):
+        self.app, self.temp = _make_app()
+        self.client = _authed_test_client(self.app)
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        self.temp.cleanup()
+        from webui.pipeline_exec import reset_browser_accounts_path
+        reset_browser_accounts_path()
+
+    def _set_role(self, account_id: str, roles: list[str]) -> None:
+        resp = self.client.put(
+            f"/api/browser-accounts/{account_id}/roles", json={"roles": roles})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+
+    def _create_search_task(self, platform: str):
+        from webui.execution_config import ExecutionConfigSnapshot
+        ExecutionConfigSnapshot.create({
+            "inter_combo_delay": 10.0, "detail_batch_size": 15,
+            "detail_interval": 2.0, "detail_reset_every": 4,
+            "detail_batch_cooldown": 5.0, "detail_tab_pool_size": 5,
+            "screen_batch_size": 50, "screen_concurrency": 5,
+            "match_batch_size": 4, "match_concurrency": 10,
+        })
+        preview = self.client.post("/api/search-scope/preview", json={
+            "keywords": ["Python"], "scope_kind": "cities",
+            "cities": ["上海"], "pages_per_combination": 1,
+            "platform": platform,
+        }).get_json()["scope"]
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit"):
+            resp = self.client.post("/api/execute-search", json={
+                "platform": platform,
+                "script_params": {"keyword": "Python", "city": ["上海"], "pages": 1},
+                "scope_digest": preview["scope_digest"],
+            })
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        task_id = resp.get_json()["task_id"]
+        return self.store.get_screening_run(task_id)
+
+    def test_boss_list_task_freezes_r1_account(self):
+        self._set_role("b", ["R1"])
+        persisted = self._create_search_task("boss")
+        self.assertEqual(
+            persisted["execution_params"]["browser_account"], "b")
+
+    def test_boss_list_task_falls_back_when_role_unassigned(self):
+        persisted = self._create_search_task("boss")
+        self.assertEqual(
+            persisted["execution_params"]["browser_account"], "a")
+
+    def test_boss_list_task_downgrades_when_role_login_missing(self):
+        self._set_role("b", ["R1"])
+        with mock.patch(
+                "scripts.login_state_cache.read_cached_state",
+                return_value="not_logged_in"):
+            persisted = self._create_search_task("boss")
+        self.assertEqual(
+            persisted["execution_params"]["browser_account"], "a")
+
+    def test_zhilian_task_unaffected_by_roles(self):
+        self._set_role("b", ["R1"])
+        persisted = self._create_search_task("zhilian")
+        self.assertEqual(
+            persisted["execution_params"]["browser_account"], "a")
+
+
 class TuningLeaseOrdinaryTaskConflictTests(unittest.TestCase):
     """SPEC011 T015 RED: 实验租约与普通任务启动路径冲突。
 

@@ -4165,4 +4165,75 @@ describe("DiscoveryView", () => {
       vi.unstubAllGlobals();
     });
   });
+
+  // ---------- B074：重抓胶囊「暂不处理」会话内隐藏，仅新结果重载复位 ----------
+  it("B074: dismissed capsule never reappears on platform/tab switches, only on new result epoch", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) {
+        if (url.includes("platform=zhilian")) {
+          return response({
+            ok: true, has_result: true, source_run_id: "run-zhilian", platform: "zhilian",
+            scrape_task_id: "scrape-z", started_at: 1000,
+            result: { jobs: [], total_kept: 0, total_dropped: 0 },
+          });
+        }
+        return response({
+          ok: true, has_result: true, source_run_id: "run-boss", platform: "boss",
+          scrape_task_id: "scrape-b", started_at: 2000,
+          result: { jobs: [{ job_id: "b1", platform: "boss", verdict: "uncertain", verdict_reason: "待确认" }], total_kept: 1, total_dropped: 0 },
+        });
+      }
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("查看结果"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(true);
+
+    // 点「暂不处理」→ 胶囊隐藏
+    await wrapper.get('[data-testid="pending-recrawl-dismiss"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
+
+    // 切平台（全部→智联→BOSS）→ count 抖动，胶囊不得重弹
+    await wrapper.get('[data-testid="result-platform-filter-all"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="result-platform-filter-zhilian"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="result-platform-filter-boss"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
+
+    // 切页签（匹配→待确认）→ 不重弹
+    await wrapper.findAll("button").find((b) => b.text().includes("匹配"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
+    await wrapper.findAll("button").find((b) => b.text().includes("待确认"))!.trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
+
+    // 切到 0 待确认平台视图：胶囊消失，且无绿色「已全部处理」对勾
+    await wrapper.get('[data-testid="result-platform-filter-zhilian"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="pending-recrawl-done"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("已全部处理");
+    await wrapper.get('[data-testid="result-platform-filter-boss"]').trigger("click");
+    await flushPromises();
+
+    // 新结果重载（profileId 变化触发 loadLatestResult → resultEpoch 递增）→ 若仍有待确认，胶囊重现
+    await wrapper.setProps({ profileId: "profile-2" });
+    await flushPromises();
+    expect(wrapper.find('[data-testid="pending-recrawl-capsule"]').exists()).toBe(true);
+    vi.unstubAllGlobals();
+  });
 });

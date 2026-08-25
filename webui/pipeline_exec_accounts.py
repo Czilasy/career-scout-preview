@@ -60,7 +60,7 @@ def _default_browser_accounts() -> dict[str, dict[str, str | bool]]:
     return {
         aid: {
             "id": aid, "name": str(item["name"]), "profile_dir": str(item["profile_dir"]),
-            "builtin": aid == "a",
+            "builtin": aid == "a", "roles": [],
         } for aid, item in BROWSER_ACCOUNTS.items()
     }
 
@@ -87,6 +87,8 @@ def load_browser_accounts(path: str | os.PathLike[str] | None = None) -> dict[st
                         "profile_dir": os.path.abspath(os.path.expanduser(profile_dir)),
                         # 只有默认账号不可删；历史文件里账号 b 的 builtin 标记不再沿用。
                         "builtin": str(aid) == "a",
+                        # B073：角色标记（R1/R2 可同时），旧文件无字段时兼容为空。
+                        "roles": _normalize_roles(item.get("roles")),
                     }
             accounts.setdefault("a", _default_browser_accounts()["a"])
         else:
@@ -108,6 +110,7 @@ def save_browser_accounts(accounts: dict, path: str | os.PathLike[str] | None = 
             "name": str(item.get("name") or "").strip(),
             "profile_dir": os.path.abspath(os.path.expanduser(str(item.get("profile_dir") or ""))),
             "builtin": bool(item.get("builtin", False)),
+            "roles": _normalize_roles(item.get("roles")),
         }
     tmp = accounts_path.with_name(f".{accounts_path.name}.{uuid.uuid4().hex}.tmp")
     try:
@@ -223,3 +226,83 @@ def _cdp_data_dir() -> str:
     accounts = load_browser_accounts()
     account = str(_facade.load_advanced_settings().get("browser_account") or "a")
     return str(accounts.get(account, accounts["a"])["profile_dir"])
+
+
+
+_ROLE_VALUES = ("R1", "R2")
+
+
+def _normalize_roles(roles) -> list[str]:
+    """Normalize a raw roles value to a valid list of R1/R2 tags (dedup, order kept)."""
+    if not isinstance(roles, list):
+        return []
+    seen: list[str] = []
+    for raw in roles:
+        value = str(raw or "").strip()
+        if value in _ROLE_VALUES and value not in seen:
+            seen.append(value)
+    return seen
+
+
+
+def resolve_account_for_role(accounts: dict, role: str) -> str | None:
+    """Return the first account id whose roles contain ``role``; None when unassigned."""
+    role = str(role or "").strip()
+    for aid, item in accounts.items():
+        if role in (item.get("roles") or []):
+            return str(aid)
+    return None
+
+
+
+def assign_account_role(
+        accounts: dict, role: str, account_id_or_none: str | None) -> dict:
+    """Role→account one-to-one tag: clear ``role`` on every account, then tag the target.
+
+    ``account_id_or_none`` of None clears the role entirely (back to 未指定).
+    Returns a new accounts dict for the caller to persist; does not mutate the input.
+    """
+    role = str(role or "").strip()
+    if role not in _ROLE_VALUES:
+        raise ValueError("角色必须是 R1 或 R2")
+    target = None if account_id_or_none is None else str(account_id_or_none)
+    updated = {}
+    for aid, item in accounts.items():
+        roles = [r for r in (item.get("roles") or []) if r != role]
+        if target is not None and str(aid) == target:
+            roles.append(role)
+        updated[str(aid)] = {**item, "roles": roles}
+    return updated
+
+
+
+def account_for_role(
+        role: str,
+        accounts_path: str | os.PathLike[str] | None = None,
+        run: dict | None = None,
+        fallback: str = "a") -> str:
+    """Resolve the browser account for a BOSS task stage role (B073).
+
+    Priority:
+    1. run 冻结值优先——续跑一律沿用任务创建时冻结的 browser_account，
+       不重新按角色解析（冻结需求：运行中改角色不影响当前任务）；
+    2. 角色解析——账号簿中第一个带该角色标记的账号；
+    3. 登录态检测——fresh 缓存为 not_logged_in/restricted 视为不可用，跳过；
+    4. 角色未指定或账号不可用 → fallback（调用方传当前账号），不报错不阻断。
+    """
+    accounts = load_browser_accounts(accounts_path)
+    if isinstance(run, dict):
+        params = run.get("execution_params") or {}
+        if isinstance(params, dict):
+            frozen = str(params.get("browser_account") or "")
+            if frozen in accounts:
+                return frozen
+    account_id = resolve_account_for_role(accounts, role)
+    if account_id is not None:
+        from scripts.login_state_cache import read_cached_state
+        state = read_cached_state(str(account_id), "boss")
+        if state in ("not_logged_in", "restricted"):
+            account_id = None
+    if account_id is None:
+        return fallback if fallback in accounts else "a"
+    return account_id

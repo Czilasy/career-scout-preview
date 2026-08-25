@@ -2789,6 +2789,47 @@ class BrowserAccountApiTests(unittest.TestCase):
         data = self.client.get("/api/browser-accounts").get_json()
         self.assertNotIn("b", [a["id"] for a in data["accounts"]])
 
+    def test_roles_assign_mutually_exclusive_and_clear(self):
+        data = self.client.get("/api/browser-accounts").get_json()
+        self.assertEqual([a["roles"] for a in data["accounts"]], [[], []])
+
+        # 给 b 设 R1
+        resp = self.client.put("/api/browser-accounts/b/roles", json={"roles": ["R1"]})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["roles"], ["R1"])
+        data = self.client.get("/api/browser-accounts").get_json()
+        b = next(a for a in data["accounts"] if a["id"] == "b")
+        self.assertEqual(b["roles"], ["R1"])
+
+        # 同一账号可同时承担 R1 + R2
+        resp = self.client.put("/api/browser-accounts/b/roles", json={"roles": ["R1", "R2"]})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["roles"], ["R1", "R2"])
+
+        # 换选 a 为 R1 → b 的 R1 被清（互斥），R2 保留
+        resp = self.client.put("/api/browser-accounts/a/roles", json={"roles": ["R1"]})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["roles"], ["R1"])
+        data = self.client.get("/api/browser-accounts").get_json()
+        a = next(x for x in data["accounts"] if x["id"] == "a")
+        b = next(x for x in data["accounts"] if x["id"] == "b")
+        self.assertEqual(a["roles"], ["R1"])
+        self.assertEqual(b["roles"], ["R2"])
+
+        # 清空（选回未指定）
+        resp = self.client.put("/api/browser-accounts/b/roles", json={"roles": []})
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        self.assertEqual(resp.get_json()["roles"], [])
+        data = self.client.get("/api/browser-accounts").get_json()
+        b = next(x for x in data["accounts"] if x["id"] == "b")
+        self.assertEqual(b["roles"], [])
+
+        # 校验：非法角色 → 422；不存在的账号 → 404
+        bad = self.client.put("/api/browser-accounts/b/roles", json={"roles": ["R3"]})
+        self.assertEqual(bad.status_code, 422)
+        missing = self.client.put("/api/browser-accounts/nope/roles", json={"roles": ["R1"]})
+        self.assertEqual(missing.status_code, 404)
+
     def _seed_paused_run(self, account="b", run_id="busy-account-run", platform="boss"):
         self.store.create_screening_run(
             run_id, source_count=1,

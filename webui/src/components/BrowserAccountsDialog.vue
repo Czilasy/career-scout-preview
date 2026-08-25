@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import { Check, ExternalLink, LoaderCircle, Plus, Trash2, UserRound } from "@lucide/vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Check, ChevronDown, ExternalLink, LoaderCircle, Plus, Trash2, UserRound } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
 import { ApiError, apiRequest, errorMessage } from "../api";
 import type { BrowserAccount, Notice, Platform } from "../types";
@@ -53,6 +53,80 @@ const localNotice = ref<Notice | null>(null);
 // 切换账号/打开窗口后缓存已失效或待重探的账号：徽章显示「待刷新」。
 const pendingRefresh = ref<Set<string>>(new Set());
 const pendingDelete = ref<BrowserAccount | null>(null);
+
+// B073：BOSS 任务角色（R1 列表/广泛抓取、R2 详情抓取）——每个角色一个小长块
+// 下拉；角色→账号一对一互斥由后端 PUT /roles 保证，前端只发该账号目标角色集。
+const ROLE_SPECS: Record<"R1" | "R2", { label: string; desc: string }> = {
+  R1: { label: "R1", desc: "列表/广泛抓取" },
+  R2: { label: "R2", desc: "详情抓取" },
+};
+type RoleKey = keyof typeof ROLE_SPECS;
+const openRole = ref<RoleKey | null>(null);
+const roleBusy = ref(false);
+const roleRootEl = ref<HTMLElement | null>(null);
+
+function roleHolder(role: RoleKey): BrowserAccount | undefined {
+  return accounts.value.find((account) => (account.roles || []).includes(role));
+}
+function roleChipText(role: RoleKey): string {
+  const holder = roleHolder(role);
+  return holder ? displayName(holder) : "不指定";
+}
+function toggleRoleMenu(role: RoleKey) {
+  if (roleBusy.value) return;
+  openRole.value = openRole.value === role ? null : role;
+}
+function handleRoleMenuPointerDown(event: PointerEvent) {
+  if (!openRole.value) return;
+  const target = event.target as Node | null;
+  if (roleRootEl.value && target && !roleRootEl.value.contains(target)) openRole.value = null;
+}
+onMounted(() => document.addEventListener("pointerdown", handleRoleMenuPointerDown, true));
+onBeforeUnmount(() => document.removeEventListener("pointerdown", handleRoleMenuPointerDown, true));
+
+async function assignRole(role: RoleKey, account: BrowserAccount) {
+  roleBusy.value = true;
+  try {
+    const targetRoles = Array.from(new Set([...(account.roles || []), role]));
+    await apiRequest(`/api/browser-accounts/${encodeURIComponent(account.id)}/roles`, {
+      method: "PUT",
+      json: { roles: targetRoles },
+    });
+    setLocalNotice({
+      message: `已将「${displayName(account)}」设为 ${ROLE_SPECS[role].label}（${ROLE_SPECS[role].desc}）`,
+      tone: "success",
+    });
+    openRole.value = null;
+    await loadAccounts();
+  } catch (error) {
+    setLocalNotice({ message: errorMessage(error, "角色设置失败"), tone: "error" });
+  } finally {
+    roleBusy.value = false;
+  }
+}
+
+async function clearRole(role: RoleKey) {
+  const holder = roleHolder(role);
+  if (!holder) {
+    openRole.value = null;
+    return;
+  }
+  roleBusy.value = true;
+  try {
+    const remaining = (holder.roles || []).filter((item) => item !== role);
+    await apiRequest(`/api/browser-accounts/${encodeURIComponent(holder.id)}/roles`, {
+      method: "PUT",
+      json: { roles: remaining },
+    });
+    setLocalNotice({ message: `${ROLE_SPECS[role].label} 已恢复不指定`, tone: "success" });
+    openRole.value = null;
+    await loadAccounts();
+  } catch (error) {
+    setLocalNotice({ message: errorMessage(error, "角色设置失败"), tone: "error" });
+  } finally {
+    roleBusy.value = false;
+  }
+}
 
 watch(() => props.open, (open) => {
   if (open) {
@@ -292,10 +366,38 @@ async function confirmRemoveAccount() {
     id="browser-accounts"
     :open="open"
     title="账号"
-    description="每个账号使用独立的浏览器环境，BOSS 与智联窗口可分别打开；登录一次后长期有效，任务会使用「当前账号」的登录态抓取。"
+    description="每个账号使用独立的浏览器环境，BOSS 与智联窗口可分别打开；登录一次后长期有效，任务会使用「当前账号」的登录态抓取。BOSS 任务可把列表/广泛抓取（R1）与 JD 详情抓取（R2）分配给不同账号，规避单账号风控；不指定时使用当前账号。"
     size="md"
     @close="$emit('close')"
   >
+    <div class="role-assign" ref="roleRootEl" data-testid="role-assign">
+      <div class="role-chips">
+        <button v-for="role in (['R1', 'R2'] as const)" :key="role" type="button" class="role-chip"
+          :data-testid="`role-chip-${role}`" :aria-expanded="openRole === role" :aria-haspopup="true"
+          :disabled="roleBusy" @click="toggleRoleMenu(role)">
+          <span class="role-chip-tag">{{ ROLE_SPECS[role].label }}</span>
+          <span class="role-chip-desc">{{ ROLE_SPECS[role].desc }}</span>
+          <span class="role-chip-value" :data-unset="!roleHolder(role)">{{ roleChipText(role) }}</span>
+          <ChevronDown :size="14" class="role-chip-caret" aria-hidden="true" />
+        </button>
+      </div>
+      <div v-if="openRole" class="role-menu" data-testid="role-menu" role="listbox" :aria-label="`选择${ROLE_SPECS[openRole].label}账号`">
+        <button v-for="account in accounts" :key="account.id" type="button" class="role-option"
+          :class="{ selected: (account.roles || []).includes(openRole) }"
+          :data-testid="`role-option-${openRole}-${account.id}`" role="option"
+          :aria-selected="(account.roles || []).includes(openRole)" :disabled="roleBusy"
+          @click="assignRole(openRole, account)">
+          <Check v-if="(account.roles || []).includes(openRole)" :size="14" class="role-option-check" aria-hidden="true" />
+          {{ displayName(account) }}
+        </button>
+        <!-- B073：「不指定」常驻选项，始终可把角色恢复为不指定 -->
+        <button type="button" class="role-option role-option-clear"
+          :data-testid="`role-clear-${openRole}`" role="option" :disabled="roleBusy"
+          @click="clearRole(openRole)">不指定</button>
+        <p v-if="!accounts.length" class="role-menu-empty">暂无账号，先添加账号</p>
+      </div>
+    </div>
+
     <div class="browser-account-list">
       <div
         v-if="lockNotice"
@@ -439,6 +541,23 @@ async function confirmRemoveAccount() {
 </template>
 
 <style scoped>
+.role-assign{position:relative;margin-bottom:14px}
+.role-chips{display:flex;flex-wrap:wrap;gap:8px}
+.role-chip{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:4px 10px;border:1px solid var(--hair);border-radius:7px;background:var(--panel-2);color:var(--ink-1);font:inherit;font-size:12px;font-weight:600;line-height:1.2;cursor:pointer;transition:border-color 160ms ease,background 160ms ease}
+.role-chip:hover:not(:disabled),.role-chip[aria-expanded="true"]{border-color:var(--brand-edge);background:var(--brand-wash)}
+.role-chip:disabled{cursor:not-allowed;opacity:.65}
+.role-chip-tag{padding:1px 6px;border-radius:5px;color:var(--brand-ink);background:var(--brand-wash);font-weight:700}
+.role-chip-desc{color:var(--muted);font-weight:500}
+.role-chip-value{color:var(--brand-strong);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.role-chip-value[data-unset="true"]{color:var(--ink-3)}
+.role-chip-caret{flex:0 0 auto;color:var(--muted)}
+.role-menu{position:absolute;z-index:60;top:calc(100% + 6px);left:0;display:grid;gap:2px;min-width:260px;max-height:240px;overflow-y:auto;padding:6px;border:1px solid var(--hair);border-radius:9px;background:var(--panel);box-shadow:0 14px 40px rgba(0,0,0,.18),0 2px 8px rgba(0,0,0,.08)}
+.role-option{display:flex;align-items:center;gap:8px;min-height:34px;padding:5px 10px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--ink-1);font:inherit;font-size:13px;font-weight:500;text-align:left;cursor:pointer}
+.role-option:hover:not(:disabled){background:var(--brand-wash)}
+.role-option.selected{color:var(--brand-strong);font-weight:700}
+.role-option-check{flex:0 0 auto}
+.role-option-clear{margin-top:2px;border-top:1px solid var(--hair);border-radius:0 0 6px 6px;color:var(--ink-3)}
+.role-menu-empty{margin:0;padding:10px;color:var(--muted);font-size:13px;text-align:center}
 .browser-account-list {
   display: grid;
   gap: 10px;

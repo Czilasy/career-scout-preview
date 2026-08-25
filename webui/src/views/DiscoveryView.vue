@@ -171,6 +171,8 @@ const {
   pipelineResultRunId,
   resultPlatformFilter,
   resultEpoch,
+  recrawlCapsuleDismissed,
+  dismissRecrawlCapsule,
   resultRunIds,
   historyStore,
   historyRound,
@@ -963,7 +965,10 @@ onMounted(() => {
           v-if="!historyMode && resultLoaded && !isScrapedOnly"
           :count="groups.uncertain.length"
           :busy="recrawlBusy || Boolean(recrawlSnapshot && (recrawlSnapshot.status === 'running' || recrawlSnapshot.status === 'queued'))"
+          :dismissed="recrawlCapsuleDismissed"
+          :result-epoch="resultEpoch"
           @recrawl="roundFlow.startRecrawl(resultPlatformFilter === 'all' ? undefined : resultPlatformFilter)"
+          @dismiss="dismissRecrawlCapsule()"
         />
         <div class="command-band">
         <div v-if="!historyMode && !resultLoaded" class="latest-empty" data-testid="latest-result-empty">

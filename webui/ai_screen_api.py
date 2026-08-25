@@ -227,7 +227,18 @@ def register_ai_screen_routes(app, ctx):
         account_source = prev if resume_from_run_id else None
         if resume_from_run_id:
             claimed_task["resumed_from"] = resume_from_run_id
-        claimed_task["browser_account"] = ctx.account_for_run(account_source)
+        # B073：BOSS AI 筛选任务（含 JD 详情抓取阶段）按 R2 角色解析账号；
+        # 新建时 account_source=None 走角色解析，续跑时 run 冻结值优先；
+        # 智联平台不受角色影响，保持当前账号。
+        if parent_platform == "boss":
+            from webui.pipeline_exec import account_for_role
+            claimed_task["browser_account"] = account_for_role(
+                "R2", app.config["BROWSER_ACCOUNTS_PATH"],
+                run=account_source,
+                fallback=ctx.account_for_run(account_source),
+            )
+        else:
+            claimed_task["browser_account"] = ctx.account_for_run(account_source)
         claimed_task["platform"] = parent_platform
         # T407: 生成 AI 阶段 task_input_digest
         ai_digest = hashlib.sha256(json.dumps({

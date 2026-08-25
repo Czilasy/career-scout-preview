@@ -249,6 +249,36 @@ def register_settings_routes(app, ctx):
         ctx.save_legacy_advanced_settings(settings)
         return jsonify({"ok": True, "active_account": str(account_id)})
 
+    @app.route("/api/browser-accounts/<account_id>/roles", methods=["PUT"])
+    def set_browser_account_roles(account_id):
+        from webui.pipeline_exec import (
+            assign_account_role,
+            load_browser_accounts,
+            save_browser_accounts,
+        )
+        body = request.get_json(silent=True) or {}
+        roles = body.get("roles")
+        if not isinstance(roles, list) or not all(
+                r in ("R1", "R2") for r in roles):
+            return jsonify({"ok": False, "error": "角色取值必须是 R1/R2"}), 422
+        accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
+        if str(account_id) not in accounts:
+            return jsonify({"ok": False, "error": _MSG_ACCOUNT_NOT_FOUND}), 404
+        # 完整替换语义：该账号先退出全部角色，再对 roles 中每个角色互斥打标
+        # （清全账号该角色 → 打标到该账号），保证角色→账号一对一；保序去重。
+        for aid, item in accounts.items():
+            if str(aid) == str(account_id):
+                item["roles"] = []
+        for role in dict.fromkeys(roles):
+            accounts = assign_account_role(accounts, role, str(account_id))
+        save_browser_accounts(accounts, app.config["BROWSER_ACCOUNTS_PATH"])
+        updated = accounts.get(str(account_id)) or {}
+        return jsonify({
+            "ok": True,
+            "account_id": str(account_id),
+            "roles": list(updated.get("roles") or []),
+        })
+
     @app.route("/api/browser-accounts/<account_id>/open", methods=["POST"])
     def open_browser_account(account_id):
         from webui.pipeline_exec import (

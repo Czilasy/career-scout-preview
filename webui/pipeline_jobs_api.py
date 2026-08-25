@@ -305,7 +305,18 @@ def register_pipeline_jobs_routes(app, ctx):
                 ctx.tasks[task_id]["platform"] = parent_platform
                 ctx.tasks[task_id]["cdp_port"] = parent_cdp_port
                 ctx.tasks[task_id]["profile_key"] = parent_profile_key
-                ctx.tasks[task_id]["browser_account"] = parent_browser_account or ctx.account_for_run()
+                # B073：parent 冻结值优先；BOSS 详情重抓无冻结时按 R2 角色解析，
+                # 智联不受角色影响（保持当前账号）。
+                if parent_browser_account:
+                    ctx.tasks[task_id]["browser_account"] = parent_browser_account
+                elif parent_platform == "boss":
+                    from webui.pipeline_exec import account_for_role
+                    ctx.tasks[task_id]["browser_account"] = account_for_role(
+                        "R2", app.config["BROWSER_ACCOUNTS_PATH"],
+                        fallback=ctx.account_for_run(),
+                    )
+                else:
+                    ctx.tasks[task_id]["browser_account"] = ctx.account_for_run()
                 ctx.tasks[task_id]["task_input_digest"] = parent_task_input_digest
             profile_summary = str(raw.get("profile_summary") or "")
             profile_facts = raw.get("profile_facts") or None
@@ -466,7 +477,18 @@ def register_pipeline_jobs_routes(app, ctx):
                 "error": "已有重抓任务在运行，请等待完成或取消后再试",
                 "existing_task_id": existing_task_id,
             }), 409
-        claimed_task["browser_account"] = parent_browser_account or ctx.account_for_run()
+        # B073：parent 冻结值优先；BOSS 详情重抓无冻结时按 R2 角色解析，
+        # 智联不受角色影响（保持当前账号）。
+        if parent_browser_account:
+            claimed_task["browser_account"] = parent_browser_account
+        elif parent_platform == "boss":
+            from webui.pipeline_exec import account_for_role
+            claimed_task["browser_account"] = account_for_role(
+                "R2", app.config["BROWSER_ACCOUNTS_PATH"],
+                fallback=ctx.account_for_run(),
+            )
+        else:
+            claimed_task["browser_account"] = ctx.account_for_run()
         claimed_task["platform"] = parent_platform
         claimed_task["cdp_port"] = parent_cdp_port
         claimed_task["profile_key"] = parent_profile_key

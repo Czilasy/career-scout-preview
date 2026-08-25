@@ -381,8 +381,10 @@ function removeCity(): void {
 .location-panel-body {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   padding: 12px 14px;
   overflow-y: auto;
+  overflow-x: auto;
 }
 
 .location-panel-section-title {
@@ -406,13 +408,9 @@ function removeCity(): void {
 .location-district-grid,
 .location-business-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
   gap: 8px;
   margin-bottom: 12px;
-}
-
-.location-business-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .location-choice {
@@ -446,6 +444,12 @@ function removeCity(): void {
 
 .location-choice-check {
   flex: none;
+}
+
+.location-choice span {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .location-choice.compact {

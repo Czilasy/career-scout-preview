@@ -150,15 +150,26 @@ function restoreSaved02State(): void {
 
 
 function enterSearchStep() {
-  // B040：抓取运行中切回步骤 2 时保持配置卡收拢。
-  searchPanelsOpen.value = !scrapeBusy.value;
+  // 仅在「步骤 2 尚未抓取完成（首次填写）」且当前无抓取任务、内容还全空时默认展开；
+  // 抓取完成后（含已切到步骤 3 进行 AI 筛选时切回第二步）一律保持收拢。
+  const firstFill = !scrapeCompleted.value
+    && !scrapeBusy.value
+    && selectedKeywords.value.length === 0
+    && !cityText.value.trim()
+    && !profileSummary.value.trim();
+  searchPanelsOpen.value = firstFill;
   activeStep.value = "search";
 }
 
 
 function enterScreenStep() {
-  // B040：AI 筛选运行中切回步骤 3 时保持配置卡收拢。
-  screenPanelOpen.value = !resultLoaded.value && !screenBusy.value;
+  // 仅在「尚未出结果、未在筛选中（首次填写六类条件）」且双平台筛选条件都还全空时默认展开；
+  // 其余情况（含步骤 2/3 间来回切换、已填过条件）一律保持收拢。
+  const hasAnyFilter = Object.values(filterValues.value).some((plat) =>
+    Object.values(plat).some((v) => Array.isArray(v) && v.length > 0),
+  );
+  const firstFill = !resultLoaded.value && !screenBusy.value && !hasAnyFilter;
+  screenPanelOpen.value = firstFill;
   activeStep.value = "screen";
 }
 

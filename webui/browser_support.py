@@ -111,6 +111,7 @@ def build_browser_support(store, tasks, lock, account_for_run, activate_run_brow
                 "id": str(acc.get("id") or ""),
                 "name": str(acc.get("name") or ""),
                 "builtin": bool(acc.get("builtin", False)),
+                "roles": list(acc.get("roles") or []),
                 "platforms": platforms,
             })
         return projected

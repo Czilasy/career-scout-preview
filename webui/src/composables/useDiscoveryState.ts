@@ -1,5 +1,5 @@
 // 021 B8 T027：DiscoveryView 数据层（自 DiscoveryView.vue script 原样搬运）。
-import { computed, reactive, ref, type Ref } from "vue";
+import { computed, reactive, ref, watch, type Ref } from "vue";
 
 import {
   buildSearchScriptParams,
@@ -328,6 +328,18 @@ const resultPlatformFilter = ref<"all" | "boss" | "zhilian">("all");
 // specs/004：结果加载代次。pipelineResult 被新 run 结果替换时递增，
 // JobWorkspace 据此重置列表筛选/排序（切分类/切平台不重置，contracts §6 D3）。
 const resultEpoch = ref(0);
+// B074：重抓胶囊「暂不处理」隐藏态（会话内共享，组件卸载重建不丢）。
+// 仅按 resultEpoch（新结果重载）复位，不按 count 归零复位——
+// 平台/页签切换导致的待确认数抖动不会让胶囊重弹。
+const recrawlCapsuleDismissed = ref(false);
+
+function dismissRecrawlCapsule(): void {
+  recrawlCapsuleDismissed.value = true;
+}
+
+watch(resultEpoch, () => {
+  recrawlCapsuleDismissed.value = false;
+});
 // 合并载入时每个平台各自的结果来源 run：单平台视图下“全部重抓”/导出用对应 run。
 
 // 合并载入时每个平台各自的结果来源 run：单平台视图下“全部重抓”/导出用对应 run。
@@ -461,7 +473,7 @@ const executionModeSummary = computed(() => {
 });
 
 
-const screenPanelOpen = ref(true);
+const screenPanelOpen = ref(false);
 
 
 const oneClickOpen = ref(false);
@@ -802,6 +814,8 @@ return {
   pipelineResultRunId,
   resultPlatformFilter,
   resultEpoch,
+  recrawlCapsuleDismissed,
+  dismissRecrawlCapsule,
   resultRunIds,
   historyStore,
   historyRound,

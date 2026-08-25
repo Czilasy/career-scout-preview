@@ -1,45 +1,30 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { Check, LoaderCircle, RotateCcw } from "@lucide/vue";
+import { computed } from "vue";
+import { LoaderCircle, RotateCcw } from "@lucide/vue";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   count: number;
   busy?: boolean;
-}>();
+  // B074：受控隐藏态由父级共享状态持有（会话内一直隐藏，组件卸载不丢）。
+  // 复位由父级 watch(resultEpoch) 驱动（新结果重载），组件内部不自行复位。
+  dismissed?: boolean;
+  resultEpoch?: number;
+}>(), {
+  busy: false,
+  dismissed: false,
+  resultEpoch: 0,
+});
 
 const emit = defineEmits<{
   recrawl: [];
   dismiss: [];
 }>();
 
-// 全部处理完时短暂展示绿色对勾，然后自动收掉。
-const done = ref(false);
-// 用户点「暂不处理」后隐藏横幅，直到待处理数归零（新一轮/真正清空）再复位。
-const dismissed = ref(false);
-let doneTimer: number | undefined;
-
-watch(
-  () => props.count,
-  (next, prev) => {
-    if (typeof prev === "number" && prev > 0 && next === 0) {
-      done.value = true;
-      dismissed.value = false;
-      if (doneTimer) window.clearTimeout(doneTimer);
-      doneTimer = window.setTimeout(() => {
-        done.value = false;
-      }, 1200);
-    }
-  },
-);
-
-onBeforeUnmount(() => {
-  if (doneTimer) window.clearTimeout(doneTimer);
-});
-
-const showPending = computed(() => !done.value && !dismissed.value && props.count > 0);
+// B074：仅由 dismissed（受控 prop）与 count 驱动显示；
+// 删除 count 归零复位、绿色对勾与 done 定时器——处理完胶囊直接消失。
+const showPending = computed(() => !props.dismissed && props.count > 0);
 
 function onDismiss() {
-  dismissed.value = true;
   emit("dismiss");
 }
 </script>
@@ -82,15 +67,6 @@ function onDismiss() {
         全部重抓（{{ count }}）
       </button>
       </div>
-    </div>
-    <div
-      v-else-if="done"
-      class="pending-capsule pending-capsule--done"
-      data-testid="pending-recrawl-done"
-      role="status"
-    >
-      <Check class="pending-capsule-done-icon" :size="18" aria-hidden="true" />
-      <span>待确认岗位已全部处理</span>
     </div>
   </Transition>
 </template>
@@ -196,16 +172,6 @@ function onDismiss() {
   transition: transform 160ms ease;
 }
 
-.pending-capsule--done {
-  border-color: var(--match-edge);
-  background: var(--match-wash);
-  color: var(--match-deep);
-  animation: capsule-enter 200ms ease both, done-collapse 360ms ease 640ms both;
-}
-.pending-capsule-done-icon {
-  flex: 0 0 auto;
-}
-
 .capsule-enter-active,
 .capsule-leave-active {
   transition: opacity 200ms ease, transform 200ms ease;
@@ -241,13 +207,6 @@ function onDismiss() {
   }
   50% {
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--unsure) 16%, transparent);
-  }
-}
-
-@keyframes done-collapse {
-  to {
-    opacity: 0;
-    transform: translateY(-4px) scale(.98);
   }
 }
 </style>
