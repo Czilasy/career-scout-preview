@@ -127,7 +127,7 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
-  it("uses canonical scope, preserves pages across modes and locks a started task", async () => {
+  it("uses canonical scope, applies mode default pages and locks a started task", async () => {
     const settings = {
       inter_combo_delay: 10,
       detail_batch_size: 15,
@@ -170,7 +170,7 @@ describe("DiscoveryView", () => {
       if (url.endsWith("/api/advanced-settings/select-mode")) {
         expect(JSON.parse(String(init?.body))).toEqual({ mode: "stable", scope_digest: "sha256:scope" });
         return response({
-          ok: true, selection: "stable", settings: { ...settings, detail_batch_size: 6 },
+          ok: true, selection: "stable", settings: { ...settings, detail_batch_size: 6, pages: 2 },
           task_size: "small", mode_version_id: "mode-v1", config_digest: "sha256:stable",
         });
       }
@@ -198,7 +198,8 @@ describe("DiscoveryView", () => {
 
     await wrapper.get('[data-mode="stable"]').trigger("click");
     await flushPromises();
-    expect((pages.element as HTMLInputElement).value).toBe("3");
+    // 稳定档默认翻页数为 2（跟随档位），其他速度字段由档位配置提供。
+    expect((pages.element as HTMLInputElement).value).toBe("2");
     expect((wrapper.get('[data-testid="detail-batch-size"]').element as HTMLInputElement).value).toBe("6");
 
     await confirmProfile(wrapper, "3年Python后端候选人");
@@ -211,7 +212,7 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps the selected mode while editing a speed field", async () => {
+  it("keeps the selected mode while editing pages (preset fields are read-only)", async () => {
     const settings = {
       pages: 3,
       inter_combo_delay: 10,
@@ -263,15 +264,17 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-mode="stable"]').trigger("click");
     await flushPromises();
 
-    const detailBatch = wrapper.get('[data-testid="detail-batch-size"]');
-    await detailBatch.setValue(7);
-    await detailBatch.trigger("change");
+    // 预设档下：速度字段只读（不可聚焦），仅每组翻页数可编辑；编辑翻页数不切换档位。
+    expect((wrapper.get('[data-testid="detail-batch-size"]').element as HTMLInputElement).disabled).toBe(true);
+    const pagesInput = wrapper.get('[data-testid="pages-per-combination"]');
+    await pagesInput.setValue(7);
+    await pagesInput.trigger("change");
     await flushPromises();
 
     expect(wrapper.get('[data-mode="stable"]').attributes("aria-checked")).toBe("true");
     expect(wrapper.get('[data-mode="custom"]').attributes("aria-checked")).toBe("false");
     expect(wrapper.get('[data-testid="adv-mode-summary"]').text()).toContain("稳定");
-    expect(wrapper.get('[data-testid="adv-mode-summary"]').text()).toContain("详情每批 7 个");
+    expect(wrapper.get('[data-testid="adv-mode-summary"]').text()).toContain("详情每批 6 个");
 
     vi.unstubAllGlobals();
   });
@@ -325,17 +328,18 @@ describe("DiscoveryView", () => {
     await wrapper.get('[data-testid="add-city"]').trigger("click");
     await flushPromises();
 
-    // custom 档 + 大任务（>30 页）：仅大任务警告
-    expect(wrapper.find('[data-testid="mode-warning-banner"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="large-task-warning"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="extreme-warning"]').exists()).toBe(false);
+    // custom 档 + 大任务（>30 页）：仅大任务警告（已并入模式说明行内）
+    const summaryText = () => wrapper.get('[data-testid="adv-mode-summary"]').text();
+    expect(wrapper.find('[data-testid="mode-warning-inline"]').exists()).toBe(true);
+    expect(summaryText()).toContain("任务规模过大可能封号");
+    expect(summaryText()).not.toContain("有概率限流");
 
     // 切极限档：两条警告同时显示
     await wrapper.get('[data-mode="extreme"]').trigger("click");
     await flushPromises();
     expect(wrapper.get('[data-mode="extreme"]').attributes("aria-checked")).toBe("true");
-    expect(wrapper.find('[data-testid="extreme-warning"]').text()).toBe("极高概率限流封号");
-    expect(wrapper.find('[data-testid="large-task-warning"]').text()).toBe("任务规模过大可能封号");
+    expect(summaryText()).toContain("有概率限流");
+    expect(summaryText()).toContain("任务规模过大可能封号");
 
     vi.unstubAllGlobals();
   });
@@ -1985,7 +1989,7 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
-  it("B008: keeps screen filter card collapsed when returning from an existing result page", async () => {
+  it("B008: screen filter card expands when returning from an existing result page with no running task", async () => {
     const settings = {
       pages: 3, inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
       detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
@@ -2016,7 +2020,8 @@ describe("DiscoveryView", () => {
     await wrapper.findAll("button").find((b) => b.text().includes("AI 筛选"))!.trigger("click");
     await flushPromises();
     const screenCard = ".workflow-stack > .collapsible-card";
-    expect(wrapper.find(`${screenCard} .collapsible-body.open`).exists()).toBe(false);
+    // 新规则：仅筛选任务运行中才收拢；从已有结果页返回且无任务在跑时默认展开。
+    expect(wrapper.find(`${screenCard} .collapsible-body.open`).exists()).toBe(true);
     vi.unstubAllGlobals();
   });
 
@@ -2418,7 +2423,7 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
     await wrapper.get('[data-testid="pages-per-combination"]').setValue(1);
-    await wrapper.findAll("button").find((b) => b.text().includes("保存高级设置"))!.trigger("click");
+    await wrapper.get(".adv-save-btn").trigger("click");
     await flushPromises();
 
     const putCall = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/advanced-settings/custom"));

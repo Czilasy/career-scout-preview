@@ -84,6 +84,16 @@ MODE_CONFIGS: dict[str, dict[str, dict[str, Any]]] = {
 }
 
 
+# 各预设档默认「每组翻页数」（2026-08 新增）：
+# 切换档位时翻页数跟随档位默认（稳定 2 / 平衡 5 / 极限 10）；
+# pages 仍不进 ExecutionConfigSnapshot（FR-009 维持），由 API 层附加与持久化。
+MODE_DEFAULT_PAGES: dict[str, int] = {
+    "stable": 2,
+    "balanced": 5,
+    "extreme": 10,
+}
+
+
 def get_mode_config(mode: str, *, task_size: str) -> Any:
     """FR-051/FR-056: 获取指定模式和规模的配置快照。
 

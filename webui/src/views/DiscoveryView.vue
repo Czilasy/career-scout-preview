@@ -7,7 +7,6 @@ import {
 } from "@lucide/vue";
 import CollapsibleCard from "../components/CollapsibleCard.vue";
 import ExecutionModeSelector from "../components/ExecutionModeSelector.vue";
-import ModeWarningBanner from "../components/ModeWarningBanner.vue";
 import JobLifecycleActions from "../components/JobLifecycleActions.vue";
 import JobWorkspace from "../components/JobWorkspace.vue";
 import LocationPicker from "../components/LocationPicker.vue";
@@ -305,6 +304,13 @@ const extremeWarning = computed(() => executionSelection.value === "extreme");
 const largeTaskWarning = computed(() => Boolean(
   scopePreview.value?.planned_pages && scopePreview.value.planned_pages > 30,
 ));
+// 档位/规模风险警示：并入「当前模式」说明行内，不占独立警告框。
+const modeWarnings = computed(() => {
+  const list: string[] = [];
+  if (extremeWarning.value) list.push("有概率限流");
+  if (largeTaskWarning.value) list.push("任务规模过大可能封号");
+  return list;
+});
 
 // 模板绑定：composable 返回值解构
 const {
@@ -768,7 +774,7 @@ onMounted(() => {
           <template #actions>
             <button class="button secondary adv-save-btn" type="button" :disabled="advancedBusy" @click="saveAdvancedSettings">
               <LoaderCircle v-if="advancedBusy" class="spin" :size="15" aria-hidden="true" />
-              {{ advancedBusy ? "保存中…" : "保存高级设置" }}
+              {{ advancedBusy ? "保存中…" : (executionSelection === "custom" ? "保存高级设置" : "保存为自定义档") }}
             </button>
           </template>
           <div class="adv-groups">
@@ -778,38 +784,37 @@ onMounted(() => {
             :disabled="!scopePreview"
             @update:model-value="selectExecutionMode"
           />
-          <ModeWarningBanner
-            :extreme-warning="extremeWarning"
-            :large-task-warning="largeTaskWarning"
-          />
-          <p class="adv-mode-summary" data-testid="adv-mode-summary">{{ executionModeSummary }}</p>
+          <p class="adv-mode-summary" data-testid="adv-mode-summary">
+            <span v-if="modeWarnings.length" class="mode-warning-inline" data-testid="mode-warning-inline" role="status">⚠️ {{ modeWarnings.join(" · ") }} ｜</span>
+            {{ executionModeSummary }}
+          </p>
           <div class="adv-fields">
           <div class="adv-group">
             <p class="adv-group-title">列表抓取</p>
             <div class="advanced-grid">
-              <label class="field-label"><span>每组合翻页数 <i class="tip" :data-tip="pagesValue > 10 ? '范围 1~10。每个关键词×城市组合抓多少页，BOSS 最多返回 10 页（300 条），超出可能无新数据' : '范围 1~10。每个关键词×城市组合抓多少页'">?</i></span><input v-model.number="advancedSettings.pages" data-testid="pages-per-combination" type="number" min="1" :disabled="scopeLocked" @change="clampAdvanced('pages')"></label>
-              <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="范围由当前模式版本提供。两个搜索组合之间等待多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" :min="advancedRange('inter_combo_delay')[0]" :max="advancedRange('inter_combo_delay')[1]" @change="clampAdvanced('inter_combo_delay')"></label>
+              <label class="field-label"><span>每组合翻页数 <i class="tip" :data-tip="pagesValue > 10 ? '范围 1~10。每个关键词×城市组合抓多少页。预设档默认：稳定 2 / 平衡 5 / 极限 10，手动修改后保存将进入自定义档。BOSS 最多返回 10 页（300 条），超出可能无新数据' : '范围 1~10。每个关键词×城市组合抓多少页。预设档默认：稳定 2 / 平衡 5 / 极限 10，手动修改后保存将进入自定义档'">?</i></span><input v-model.number="advancedSettings.pages" data-testid="pages-per-combination" type="number" min="1" :disabled="scopeLocked" @change="clampAdvanced('pages')"></label>
+              <label class="field-label"><span>组合间延迟（秒） <i class="tip" data-tip="范围由当前模式版本提供。两个搜索组合之间等待多久，实际会±5秒随机抖动">?</i></span><input v-model.number="advancedSettings.inter_combo_delay" type="number" :min="advancedRange('inter_combo_delay')[0]" :max="advancedRange('inter_combo_delay')[1]" :disabled="scopeLocked || executionSelection !== 'custom'" @change="clampAdvanced('inter_combo_delay')"></label>
             </div>
           </div>
           <!-- 详情抓取 -->
           <div class="adv-group">
             <p class="adv-group-title">详情抓取（JD）</p>
             <div class="advanced-grid">
-              <label class="field-label"><span>每批抓取数量 <i class="tip" data-tip="范围由当前模式版本提供。每批交给浏览器抓JD的岗位数">?</i></span><input v-model.number="advancedSettings.detail_batch_size" data-testid="detail-batch-size" type="number" :min="advancedRange('detail_batch_size')[0]" :max="advancedRange('detail_batch_size')[1]" @change="clampAdvanced('detail_batch_size')"></label>
-              <label class="field-label"><span>岗位间隔（秒） <i class="tip" data-tip="范围由当前模式版本提供。抓完一个岗位详情后等待再抓下一个">?</i></span><input v-model.number="advancedSettings.detail_interval" type="number" :min="advancedRange('detail_interval')[0]" :max="advancedRange('detail_interval')[1]" @change="clampAdvanced('detail_interval')"></label>
-              <label class="field-label"><span>重置频率 <i class="tip" data-tip="范围由当前模式版本提供。每抓多少个详情后重置会话计数器">?</i></span><input v-model.number="advancedSettings.detail_reset_every" type="number" :min="advancedRange('detail_reset_every')[0]" :max="advancedRange('detail_reset_every')[1]" @change="clampAdvanced('detail_reset_every')"></label>
-              <label class="field-label"><span>批次冷却（秒） <i class="tip" data-tip="范围由当前模式版本提供。两批详情抓取之间的休息时间">?</i></span><input v-model.number="advancedSettings.detail_batch_cooldown" type="number" :min="advancedRange('detail_batch_cooldown')[0]" :max="advancedRange('detail_batch_cooldown')[1]" @change="clampAdvanced('detail_batch_cooldown')"></label>
-              <label class="field-label"><span>并发 Tab 数 <i class="tip" data-tip="范围由当前模式版本提供。同时常驻多少个浏览器 tab 抓 JD（1-10）">?</i></span><input v-model.number="advancedSettings.detail_tab_pool_size" data-testid="detail-tab-pool-size" type="number" :min="advancedRange('detail_tab_pool_size')[0]" :max="advancedRange('detail_tab_pool_size')[1]" @change="clampAdvanced('detail_tab_pool_size')"></label>
+              <label class="field-label"><span>每批抓取数量 <i class="tip" data-tip="范围由当前模式版本提供。每批交给浏览器抓JD的岗位数">?</i></span><input v-model.number="advancedSettings.detail_batch_size" data-testid="detail-batch-size" type="number" :min="advancedRange('detail_batch_size')[0]" :max="advancedRange('detail_batch_size')[1]" :disabled="scopeLocked || executionSelection !== 'custom'" @change="clampAdvanced('detail_batch_size')"></label>
+              <label class="field-label"><span>岗位间隔（秒） <i class="tip" data-tip="范围由当前模式版本提供。抓完一个岗位详情后等待再抓下一个">?</i></span><input v-model.number="advancedSettings.detail_interval" type="number" :min="advancedRange('detail_interval')[0]" :max="advancedRange('detail_interval')[1]" :disabled="scopeLocked || executionSelection !== 'custom'" @change="clampAdvanced('detail_interval')"></label>
+              <label class="field-label"><span>重置频率 <i class="tip" data-tip="范围由当前模式版本提供。每抓多少个详情后重置会话计数器">?</i></span><input v-model.number="advancedSettings.detail_reset_every" type="number" :min="advancedRange('detail_reset_every')[0]" :max="advancedRange('detail_reset_every')[1]" :disabled="scopeLocked || executionSelection !== 'custom'" @change="clampAdvanced('detail_reset_every')"></label>
+              <label class="field-label"><span>批次冷却（秒） <i class="tip" data-tip="范围由当前模式版本提供。两批详情抓取之间的休息时间">?</i></span><input v-model.number="advancedSettings.detail_batch_cooldown" type="number" :min="advancedRange('detail_batch_cooldown')[0]" :max="advancedRange('detail_batch_cooldown')[1]" :disabled="scopeLocked || executionSelection !== 'custom'" @change="clampAdvanced('detail_batch_cooldown')"></label>
+              <label class="field-label"><span>并发 Tab 数 <i class="tip" data-tip="范围由当前模式版本提供。同时常驻多少个浏览器 tab 抓 JD（1-10）">?</i></span><input v-model.number="advancedSettings.detail_tab_pool_size" data-testid="detail-tab-pool-size" type="number" :min="advancedRange('detail_tab_pool_size')[0]" :max="advancedRange('detail_tab_pool_size')[1]" :disabled="scopeLocked || executionSelection !== 'custom'" @change="clampAdvanced('detail_tab_pool_size')"></label>
             </div>
           </div>
           <!-- AI 筛选 -->
           <div class="adv-group">
             <p class="adv-group-title">AI 筛选</p>
             <div class="advanced-grid">
-              <label class="field-label"><span>粗筛每批数量 <i class="tip" data-tip="范围由当前模式版本提供。粗筛每次发送的岗位摘要数">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" :min="advancedRange('screen_batch_size')[0]" :max="advancedRange('screen_batch_size')[1]" @change="clampAdvanced('screen_batch_size')"></label>
-              <label class="field-label"><span>粗筛并发数 <i class="tip" data-tip="范围由当前模式版本提供。粗筛同时发送的 AI 请求数">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" :min="advancedRange('screen_concurrency')[0]" :max="advancedRange('screen_concurrency')[1]" @change="clampAdvanced('screen_concurrency')"></label>
-              <label class="field-label"><span>精筛每批数量 <i class="tip" data-tip="范围由当前模式版本提供。精筛每次发送的完整 JD 数">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" :min="advancedRange('match_batch_size')[0]" :max="advancedRange('match_batch_size')[1]" @change="clampAdvanced('match_batch_size')"></label>
-              <label class="field-label"><span>精筛并发数 <i class="tip" data-tip="范围由当前模式版本提供。精筛同时发送的 AI 请求数">?</i></span><input v-model.number="advancedSettings.match_concurrency" type="number" :min="advancedRange('match_concurrency')[0]" :max="advancedRange('match_concurrency')[1]" @change="clampAdvanced('match_concurrency')"></label>
+              <label class="field-label"><span>粗筛每批数量 <i class="tip" data-tip="范围由当前模式版本提供。粗筛每次发送的岗位摘要数">?</i></span><input v-model.number="advancedSettings.screen_batch_size" type="number" :min="advancedRange('screen_batch_size')[0]" :max="advancedRange('screen_batch_size')[1]" :disabled="scopeLocked || executionSelection !== 'custom'" @change="clampAdvanced('screen_batch_size')"></label>
+              <label class="field-label"><span>粗筛并发数 <i class="tip" data-tip="范围由当前模式版本提供。粗筛同时发送的 AI 请求数">?</i></span><input v-model.number="advancedSettings.screen_concurrency" type="number" :min="advancedRange('screen_concurrency')[0]" :max="advancedRange('screen_concurrency')[1]" :disabled="scopeLocked || executionSelection !== 'custom'" @change="clampAdvanced('screen_concurrency')"></label>
+              <label class="field-label"><span>精筛每批数量 <i class="tip" data-tip="范围由当前模式版本提供。精筛每次发送的完整 JD 数">?</i></span><input v-model.number="advancedSettings.match_batch_size" type="number" :min="advancedRange('match_batch_size')[0]" :max="advancedRange('match_batch_size')[1]" :disabled="scopeLocked || executionSelection !== 'custom'" @change="clampAdvanced('match_batch_size')"></label>
+              <label class="field-label"><span>精筛并发数 <i class="tip" data-tip="范围由当前模式版本提供。精筛同时发送的 AI 请求数">?</i></span><input v-model.number="advancedSettings.match_concurrency" type="number" :min="advancedRange('match_concurrency')[0]" :max="advancedRange('match_concurrency')[1]" :disabled="scopeLocked || executionSelection !== 'custom'" @change="clampAdvanced('match_concurrency')"></label>
             </div>
           </div>
           </div>
@@ -1141,7 +1146,7 @@ onMounted(() => {
 </template>
 <style scoped>
 .adv-mode-summary {
-  margin: -6px 0 14px;
+  margin: 0 0 14px;
   padding: 9px 11px;
   border: 1px solid var(--hair-2);
   border-radius: 7px;
@@ -1149,6 +1154,11 @@ onMounted(() => {
   color: var(--ink-3);
   font-size: 12px;
   line-height: 1.55;
+}
+
+.mode-warning-inline {
+  color: #b45309;
+  font-weight: 700;
 }
 
 .history-round-marker {

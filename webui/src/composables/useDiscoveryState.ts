@@ -34,6 +34,14 @@ import OneClickScreenDialog, {
   crossPlatformDedupeEnabled,
 } from "../components/OneClickScreenDialog.vue";
 import type { PipelineResult, RoundStatusPayload } from "../discovery";
+
+// 各预设档默认「每组翻页数」（与后端 webui/mode_configs.py MODE_DEFAULT_PAGES 同步）。
+// 切换档位/开始新一轮时，预设档的翻页数回归该默认；手动修改保存后走自定义档。
+export const MODE_DEFAULT_PAGES: Record<string, number> = {
+  stable: 2,
+  balanced: 5,
+  extreme: 10,
+};
 import {
   Bookmark,
   Check,

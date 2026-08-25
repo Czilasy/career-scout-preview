@@ -514,12 +514,25 @@ def register_settings_routes(app, ctx):
             return jsonify({"ok": False, "error": str(exc)}), 422
         # 同时保存到旧 JSON 文件以保持兼容；切回 custom 也必须恢复
         # 最近自定义值，避免 SQLite 权威状态与旧执行入口分叉。
-        if result.get("config"):
-            ctx.save_legacy_advanced_settings(result["config"])
         from webui.execution_config import SPEED_FIELDS
+        from webui.mode_configs import MODE_DEFAULT_PAGES
         settings = {
             field: result["config"][field] for field in SPEED_FIELDS
         }
+        # 翻页数跟随档位：预设档取档位默认（稳定 2 / 平衡 5 / 极限 10），
+        # custom 档取最近自定义值（save_custom_config 已随 last_custom 持久化）。
+        if mode in MODE_DEFAULT_PAGES:
+            settings["pages"] = MODE_DEFAULT_PAGES[mode]
+        else:
+            settings["pages"] = int(
+                result["config"].get("pages")
+                or (ctx.load_legacy_advanced_settings() or {}).get("pages")
+                or 3
+            )
+        # legacy JSON 一并带 pages，保证刷新后 get /api/advanced-settings 返回档位默认。
+        legacy_config = dict(result["config"])
+        legacy_config["pages"] = settings["pages"]
+        ctx.save_legacy_advanced_settings(legacy_config)
         state = ctx.store.get_advanced_config_state()
         return jsonify({
             "ok": True,

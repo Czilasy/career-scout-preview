@@ -70,7 +70,12 @@ class StoreConfigMixin:
             raise ValueError(f"缺少必填字段: {missing}")
         # 验证配置快照有效性（含物理边界校验）
         snapshot = ExecutionConfigSnapshot.create(config)
-        config_json = json.dumps(snapshot.to_dict(), ensure_ascii=False)
+        # 快照不含 pages（FR-009）；pages 作为用户工作量字段随 custom 持久化，
+        # 附加存进 last_custom_config_json（from_dict 仅读速度字段，不影响摘要校验）。
+        persist = dict(snapshot.to_dict())
+        if "pages" in config:
+            persist["pages"] = int(config["pages"])
+        config_json = json.dumps(persist, ensure_ascii=False)
         with self._connection() as conn:
             conn.execute(
                 "UPDATE advanced_config_state "

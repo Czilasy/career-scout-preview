@@ -19,7 +19,7 @@ import type {
 import type { StepId } from "./useDiscoveryState";
 
 export function useDiscoveryWorkflow(state: DiscoveryState, deps: any = {}) {
-  const { WORKFLOW_STATE_VERSION, activeStep, analysisReady, cityText, currentRoundStatus, enabledSteps, filterValues, finishedPartial, historyMode, interruptedRunId, keywords, pausedRunId, pipelineResult, pipelineResultRunId, profileFacts, profileSummary, recrawlSnapshot, recrawlTaskId, restoredWorkflowSnapshot, resultLoaded, resultsPageSeen, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, unfinishedWorkflowRestored, workflowStateKey, workflowStateRestored } = state;
+  const { WORKFLOW_STATE_VERSION, activeStep, analysisReady, cityText, currentRoundStatus, enabledSteps, filterValues, finishedPartial, historyMode, interruptedRunId, keywords, pausedRunId, pipelineResult, pipelineResultRunId, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, restoredWorkflowSnapshot, resultLoaded, resultsPageSeen, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, unfinishedWorkflowRestored, workflowStateKey, workflowStateRestored } = state;
 
 
 function readWorkflowState(): Record<string, any> | null {
@@ -146,30 +146,30 @@ function restoreSaved02State(): void {
   pipelineResultRunId.value = String(saved.pipelineResultRunId || "");
   currentRoundStatus.value = String(saved.currentRoundStatus || "");
   resultLoaded.value = Boolean(saved.resultLoaded);
+  // 恢复 02 页时套用同一默认展开策略：快照里有运行中/排队的抓取或重抓任务则收拢，否则展开。
+  const hasLiveScrape = ["running", "queued"].includes(String(saved.scrapeSnapshot?.status));
+  const hasLiveRecrawl = ["running", "queued"].includes(String(saved.recrawlSnapshot?.status));
+  searchPanelsOpen.value = !(hasLiveScrape || hasLiveRecrawl);
+  // 恢复 03 页时套用同一默认展开策略：快照里有运行中/排队的筛选任务则收拢，否则展开。
+  if (saved.activeStep === "screen") {
+    const hasLiveScreen = ["running", "queued"].includes(String(saved.screenSnapshot?.status));
+    screenPanelOpen.value = !hasLiveScreen;
+  }
 }
 
 
 function enterSearchStep() {
-  // 仅在「步骤 2 尚未抓取完成（首次填写）」且当前无抓取任务、内容还全空时默认展开；
-  // 抓取完成后（含已切到步骤 3 进行 AI 筛选时切回第二步）一律保持收拢。
-  const firstFill = !scrapeCompleted.value
-    && !scrapeBusy.value
-    && selectedKeywords.value.length === 0
-    && !cityText.value.trim()
-    && !profileSummary.value.trim();
-  searchPanelsOpen.value = firstFill;
+  // 02 页配置面板默认展开策略：仅当有正在运行的抓取/重抓任务时收拢，否则一律展开。
+  // 不依赖关键词/城市/画像是否为空——上传简历后 AI 预填内容不应影响展开状态。
+  searchPanelsOpen.value = !scrapeBusy.value && !recrawlBusy.value;
   activeStep.value = "search";
 }
 
 
 function enterScreenStep() {
-  // 仅在「尚未出结果、未在筛选中（首次填写六类条件）」且双平台筛选条件都还全空时默认展开；
-  // 其余情况（含步骤 2/3 间来回切换、已填过条件）一律保持收拢。
-  const hasAnyFilter = Object.values(filterValues.value).some((plat) =>
-    Object.values(plat).some((v) => Array.isArray(v) && v.length > 0),
-  );
-  const firstFill = !resultLoaded.value && !screenBusy.value && !hasAnyFilter;
-  screenPanelOpen.value = firstFill;
+  // 03 页筛选条件面板默认展开策略：仅当 AI 筛选中（screenBusy）时收拢，否则一律展开。
+  // 不依赖筛选条件是否已填——AI 分析简历会自动预填条件，不应影响展开状态。
+  screenPanelOpen.value = !screenBusy.value;
   activeStep.value = "screen";
 }
 

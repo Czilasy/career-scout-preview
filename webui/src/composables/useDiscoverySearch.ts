@@ -302,7 +302,8 @@ function initializeFromAnalysis(data: AnalyzeResponse) {
         word: String((item as Record<string, unknown>).word || ""),
         recommended: Boolean((item as Record<string, unknown>).recommended),
       })
-    .filter((item) => item.word);
+    .filter((item) => item.word)
+    .sort((a, b) => Number(b.recommended) - Number(a.recommended));
   const recommended = keywords.value.filter((item) => item.recommended).map((item) => item.word);
   selectedKeywords.value = recommended.length ? recommended : keywords.value.map((item) => item.word);
   // 城市由用户选择，AI 不代填；未选择时默认全国。
@@ -433,7 +434,7 @@ async function saveAdvancedSettings() {
     const data = await settingsApi.saveCustom(currentExecutionSettings());
     advancedSettings.value = { ...advancedSettings.value, ...(data.settings || {}) };
     executionSelection.value = "custom";
-    deps.notify("高级设置已保存", "success");
+    deps.notify("已保存为自定义档，当前档位已切换", "success");
   } catch (error) {
     deps.notify(errorMessage(error, "高级设置保存失败"), "error");
   } finally {
@@ -444,6 +445,20 @@ async function saveAdvancedSettings() {
 
 function currentExecutionSettings(): ExecutionSettings {
   return Object.fromEntries(SPEED_FIELDS.map((field) => [field, Number(advancedSettings.value[field])])) as unknown as ExecutionSettings;
+}
+
+
+// 范围预览复用：记录生成 preview 时的范围参数摘要，切档位等场景参数未变则直接复用，
+// 避免重复请求 /api/search-scope/preview。
+let scopePreviewKey = "";
+function currentScopePreviewKey(): string {
+  return JSON.stringify([
+    draftPlatform.value,
+    [...selectedKeywords.value].sort(),
+    [...cityList.value].sort(),
+    locationDraft.allLocations(draftPlatform.value, cityList.value),
+    pagesValue.value,
+  ]);
 }
 
 
@@ -465,6 +480,7 @@ async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
     });
     if (reqId !== scopePreviewReqId.value) return scopePreview.value;
     scopePreview.value = normalizeScopePreview(data);
+    scopePreviewKey = currentScopePreviewKey();
     return scopePreview.value;
   } catch (error) {
     if (reqId !== scopePreviewReqId.value) return scopePreview.value;
@@ -478,7 +494,11 @@ async function refreshScopePreview(): Promise<FrozenSearchScope | null> {
 
 
 async function selectExecutionMode(selection: ExecutionSelection) {
-  const preview = await refreshScopePreview();
+  // 切换档位不改变搜索范围：范围参数未变时直接复用已有 preview，只发一次 select-mode 请求，
+  // 避免每次切档都重复请求 /api/search-scope/preview（消除切档卡顿）。
+  const preview = scopePreview.value && scopePreviewKey === currentScopePreviewKey()
+    ? scopePreview.value
+    : await refreshScopePreview();
   if (!preview) return;
   advancedBusy.value = true;
   try {

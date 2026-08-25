@@ -3291,7 +3291,7 @@ class AdvancedSettingsContractTests(unittest.TestCase):
         self.assertEqual(data["selection"], "stable")
         self.assertEqual(data["task_size"], "small")
         self.assertIn("settings", data)
-        self.assertNotIn("pages", data["settings"])
+        self.assertEqual(data["settings"]["pages"], 2)  # 稳定档默认每组翻页数
 
     def test_select_mode_uses_backend_preview_size(self):
         """客户端 task_size 不能覆盖 scope digest 对应的后端规模。"""
