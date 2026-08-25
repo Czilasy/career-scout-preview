@@ -15,6 +15,16 @@ from urllib.request import urlopen
 from scripts.boss.cdp_session import CDPSession
 from scripts.boss.constants import BROWSER_NOT_FOUND_HINT, CHROME_EXE, DEFAULT_CDP_DATA_DIR, DEFAULT_CDP_PORT, DEFAULT_CHROME_PATH, DEFAULT_LOGIN_TIMEOUT, EDGE_EXE
 import sys as _sys
+
+# CDP Chrome 防膨胀启动参数：
+# - 限制磁盘/媒体缓存上限，避免抓取缓存无限增长；
+# - 禁用 Optimization Guide 本地 AI 模型下载（实测 OptGuideOnDeviceModel 单个账号可膨胀到 4GB+）。
+CDP_LAUNCH_ARGS = [
+    "--disk-cache-size=104857600",
+    "--media-cache-size=52428800",
+    "--disable-features=OptimizationGuideModelDownloading,OptimizationHints",
+]
+
 def _facade():
     return _sys.modules.get("scripts.boss_cdp_raw")
 
@@ -395,7 +405,7 @@ def run_setup_chrome(cdp_port=DEFAULT_CDP_PORT, copy_login_state=False,
         "--no-first-run",
         "--no-default-browser-check",
         "--remote-allow-origins=*",
-    ]
+    ] + CDP_LAUNCH_ARGS
     _facade().launch_chrome(cmd)
 
     if not _facade().wait_for_cdp(cdp_port):

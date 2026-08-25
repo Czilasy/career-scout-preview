@@ -83,7 +83,7 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
         "--no-first-run",
         "--no-default-browser-check",
         "--remote-allow-origins=*",
-    ]
+    ] + list(boss.CDP_LAUNCH_ARGS)
     proc = boss.launch_chrome(cmd)
     launched = True
     # 轮询 CDP，同时检查 Chrome 进程是否还活着
