@@ -190,4 +190,63 @@ describe("LocationPicker narrow viewport (B072)", () => {
     const businessLabel = wrapper.get('[data-testid="location-business-310115-154"]').text();
     expect(businessLabel).toContain("北蔡");
   });
+
+  function stubChipRect(wrapper: ReturnType<typeof mount<typeof LocationPicker>>, top: number, bottom: number): void {
+    // 根节点就是 span.city-chip；jsdom 的 getBoundingClientRect 返回全 0，需 mock 按钮位置以测翻转逻辑
+    wrapper.element.getBoundingClientRect = () =>
+      ({ left: 100, top, right: 142, bottom, width: 42, height: bottom - top, x: 100, y: top, toJSON: () => ({}) }) as DOMRect;
+  }
+
+  function stubPanelHeight(wrapper: ReturnType<typeof mount<typeof LocationPicker>>, height: number): void {
+    Object.defineProperty(wrapper.element.querySelector(".location-panel")!, "offsetHeight", {
+      configurable: true,
+      value: height,
+    });
+  }
+
+  it("keeps the panel below the chip when there is room below (B072, no flip)", async () => {
+    setInnerWidth(880);
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 760 });
+    vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
+    const wrapper = await mountPicker();
+    // 按钮在页面中部、下方空间充足（面板高 223，下方剩 760-430-12≈318）
+    stubChipRect(wrapper, 400, 432);
+    stubPanelHeight(wrapper, 223);
+    // 触发一次重定位（resize 监听会调用 positionPanel）
+    window.dispatchEvent(new Event("resize"));
+    await flushPromises();
+    const { top } = panelMetrics(wrapper);
+    // 应贴在按钮正下方（432+6=438），而不是贴顶 12
+    expect(top).toBe(438);
+  });
+
+  it("flips above the chip when the panel does not fit below (B072)", async () => {
+    setInnerWidth(880);
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 760 });
+    vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
+    const wrapper = await mountPicker();
+    // 按钮贴近底部，下方放不下 400 高的面板（belowSpace=748-438=310 < 400）
+    stubChipRect(wrapper, 400, 432);
+    stubPanelHeight(wrapper, 400);
+    window.dispatchEvent(new Event("resize"));
+    await flushPromises();
+    const { top } = panelMetrics(wrapper);
+    // 上方空间 382 比下方 310 大 → 放上方并压缩 maxHeight；top 贴顶 12
+    expect(top).toBe(12);
+  });
+
+  it("flips above when below is too short but above has room (B072)", async () => {
+    setInnerWidth(880);
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 760 });
+    vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
+    const wrapper = await mountPicker();
+    // 按钮在底部附近但上方空间充足（top=600, bottom=632；下方剩 760-632-12≈116 < 223，上方 600-223-6=371 ≥ 12）
+    stubChipRect(wrapper, 600, 632);
+    stubPanelHeight(wrapper, 223);
+    window.dispatchEvent(new Event("resize"));
+    await flushPromises();
+    const { top } = panelMetrics(wrapper);
+    // 应翻到按钮上方：600-223-6=371
+    expect(top).toBe(371);
+  });
 });

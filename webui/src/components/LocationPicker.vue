@@ -25,6 +25,7 @@ const emit = defineEmits<{
 }>();
 
 const rootEl = ref<HTMLElement | null>(null);
+const panelEl = ref<HTMLElement | null>(null);
 const open = ref(false);
 const districts = ref<LocationCatalogEntry[]>([]);
 const loading = ref(false);
@@ -59,14 +60,31 @@ function positionPanel(): void {
   if (!el) return;
   const rect = el.getBoundingClientRect();
   const width = Math.min(380, window.innerWidth - 24);
-  const maxHeight = Math.min(460, Math.floor(window.innerHeight * 0.6));
+  let maxHeight = Math.min(460, Math.floor(window.innerHeight * 0.6));
+  // B072：用面板实际渲染高度（受 maxHeight 约束）判断翻转，而非理论上限，
+  // 避免内容少的面板在下方明明放得下时被误翻到贴顶。
+  const panel = panelEl.value;
+  const actualHeight = panel ? Math.min(panel.offsetHeight, maxHeight) : maxHeight;
   let left = Math.max(12, rect.left);
   if (left + width > window.innerWidth - 12) {
     left = Math.max(12, window.innerWidth - width - 12);
   }
-  let top = rect.bottom + 6;
-  if (top + maxHeight > window.innerHeight - 12) {
-    top = Math.max(12, rect.top - maxHeight - 6);
+  const below = rect.bottom + 6;
+  const above = rect.top - 6;
+  const belowSpace = window.innerHeight - 12 - below;
+  const aboveSpace = above - 12;
+  let top: number;
+  if (actualHeight <= belowSpace) {
+    top = below;
+  } else if (actualHeight <= aboveSpace) {
+    top = rect.top - actualHeight - 6;
+  } else if (belowSpace >= aboveSpace) {
+    // 两边都放不下完整面板：选空间较大的一侧，压缩 maxHeight 内部滚动兜底
+    top = below;
+    maxHeight = Math.min(maxHeight, belowSpace);
+  } else {
+    top = 12;
+    maxHeight = Math.min(maxHeight, aboveSpace);
   }
   panelStyle.value = {
     position: "fixed",
@@ -157,6 +175,15 @@ watch(open, (value) => {
   }
 });
 
+// B072：面板内容异步加载/商圈块出现后高度变化，需要重新定位
+// （否则按加载前的小高度判断翻转，可能贴顶或与按钮脱节）
+watch(
+  () => [loading.value, districts.value.length, selectedDistrictsWithChildren.value.map((d) => d.code)],
+  () => {
+    if (open.value) void nextTick(positionPanel);
+  },
+);
+
 function toggleDistrict(district: LocationCatalogEntry): void {
   const current = props.modelValue.filter(
     (location) => location.district_code !== district.code,
@@ -232,6 +259,7 @@ function removeCity(): void {
 
     <div
       v-if="open"
+      ref="panelEl"
       class="location-panel"
       :style="panelStyle"
       data-testid="location-panel"
