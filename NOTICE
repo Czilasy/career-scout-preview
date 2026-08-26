@@ -1,0 +1,19 @@
+Career Scout
+Copyright (C) 2026 Czilasy
+
+本软件基于 GNU Affero General Public License v3.0（AGPL-3.0）发布，
+完整许可文本见随附 LICENSE 文件，或访问：
+https://www.gnu.org/licenses/agpl-3.0.html
+
+官方源码仓库（唯一权威发布渠道）：
+https://github.com/Czilasy/career-scout-preview
+
+本项目的正式发布与更新均通过上述 GitHub 仓库的 Releases 进行，
+作者不对任何其他来源的副本提供支持、更新或保证。
+
+再分发要求（依据 AGPL-3.0 第 5 条）：
+1. 任何再分发必须随副本一并提供本 NOTICE 文件与 LICENSE 文件；
+2. 修改后的版本必须保留本 NOTICE 中关于作者与官方仓库的说明，
+   不得删除、篡改或伪造来源信息；
+3. 以网络服务形式向公众提供修改版本时，必须依据 AGPL-3.0
+   第 13 条向该服务的用户提供对应的完整源码。

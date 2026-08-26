@@ -228,4 +228,4 @@ npm run build
 
 ## License
 
-Apache License 2.0，详见 [LICENSE](./LICENSE)。
+GNU Affero General Public License v3.0（AGPL-3.0），详见 [LICENSE](./LICENSE) 与 [NOTICE](./NOTICE)。
