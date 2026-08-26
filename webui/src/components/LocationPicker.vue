@@ -69,22 +69,24 @@ function positionPanel(): void {
   if (left + width > window.innerWidth - 12) {
     left = Math.max(12, window.innerWidth - width - 12);
   }
+  // B072b：下方空间只要还有基本可用值（>=160px），就优先贴按钮正下方，
+  // 把 maxHeight 压缩到下方空间、面板内部滚动，而不是翻到顶部贴顶（不美观）。
+  // 只有下方几乎没空间（<160px）才翻到上方。
+  const MIN_USABLE_SPACE = 160;
   const below = rect.bottom + 6;
   const above = rect.top - 6;
   const belowSpace = window.innerHeight - 12 - below;
   const aboveSpace = above - 12;
   let top: number;
-  if (actualHeight <= belowSpace) {
-    top = below;
-  } else if (actualHeight <= aboveSpace) {
-    top = rect.top - actualHeight - 6;
-  } else if (belowSpace >= aboveSpace) {
-    // 两边都放不下完整面板：选空间较大的一侧，压缩 maxHeight 内部滚动兜底
+  if (belowSpace >= MIN_USABLE_SPACE) {
     top = below;
     maxHeight = Math.min(maxHeight, belowSpace);
+  } else if (aboveSpace >= MIN_USABLE_SPACE) {
+    top = rect.top - Math.min(actualHeight, maxHeight) - 6;
+    maxHeight = Math.min(maxHeight, aboveSpace);
   } else {
     top = 12;
-    maxHeight = Math.min(maxHeight, aboveSpace);
+    maxHeight = Math.min(maxHeight, Math.max(belowSpace, aboveSpace));
   }
   panelStyle.value = {
     position: "fixed",

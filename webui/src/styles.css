@@ -2716,6 +2716,17 @@ body,
     gap: 28px;
     min-height: 0;
   }
+  /* 方案3：窄屏（单列）下隐藏上传页左侧卖点对勾列表，上传区上移更紧凑；全屏保留 */
+  .upload-layout .feature-list {
+    display: none;
+  }
+  .upload-layout .workflow-copy {
+    padding: 8px 4px 0;
+    border-right: none;
+  }
+  .upload-layout .workflow-copy h2 {
+    margin: 4px 0 6px;
+  }
 }
 
 @media (max-width: 760px) {.app-header {

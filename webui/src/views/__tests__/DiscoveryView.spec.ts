@@ -1849,6 +1849,54 @@ describe("DiscoveryView", () => {
 
     vi.unstubAllGlobals();
   });
+  it("方案2: 窄屏（单列）下两个抽屉独立开关，互不影响", async () => {
+    (globalThis as any).__setNarrowMatchMedia(true);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({ ok: true, has_task: false });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/search-scope/preview")) {
+        return response({ ok: true, scope: { keywords: ["Python"], scope_kind: "cities", cities: ["上海"], pages_per_combination: 3, combination_count: 1, planned_pages: 3, task_size: "small", scope_digest: "sha256:panels-narrow" }, deduplicated: { keywords: ["python"], cities: ["上海"] } });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, {
+      props: { profileId: "p1" },
+      global: { stubs: { LocationPicker: true, TaskProgress: true } },
+    });
+    await flushPromises();
+    await wrapper.findAll("button").find((b) => b.text().includes("跳过简历"))!.trigger("click");
+    await flushPromises();
+
+    const keywordCard = ".search-layout > .collapsible-card:first-child";
+    const advancedCard = ".advanced-panel";
+
+    // ① 窄屏默认：两卡都展开（与宽屏一致）
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(true);
+    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(true);
+
+    // ② 点「高级执行设置」头部：只收起自己，广泛抓取保持展开
+    await wrapper.get(`${advancedCard} .collapsible-header`).trigger("click");
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(true);
+    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(false);
+
+    // ③ 再点「广泛抓取」头部：只收起自己，高级执行保持收起
+    await wrapper.get(`${keywordCard} .collapsible-header`).trigger("click");
+    await flushPromises();
+    expect(wrapper.find(`${keywordCard} .collapsible-body.open`).exists()).toBe(false);
+    expect(wrapper.find(`${advancedCard} .collapsible-body.open`).exists()).toBe(false);
+
+    vi.unstubAllGlobals();
+    (globalThis as any).__setNarrowMatchMedia(false);
+  });
   it("B040: search drawers stay collapsed when returning to step 2 while scraping", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

@@ -220,27 +220,26 @@ describe("LocationPicker narrow viewport (B072)", () => {
     expect(top).toBe(438);
   });
 
-  it("flips above the chip when the panel does not fit below (B072)", async () => {
+  it("keeps the panel below with compressed maxHeight when below space is still usable (B072b)", async () => {
     setInnerWidth(880);
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 760 });
     vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
     const wrapper = await mountPicker();
-    // 按钮贴近底部，下方放不下 400 高的面板（belowSpace=748-438=310 < 400）
+    // 面板 400 高 > 下方空间 310，但 310 >= 160 阈值：应贴下方并压缩 maxHeight，不翻顶
     stubChipRect(wrapper, 400, 432);
     stubPanelHeight(wrapper, 400);
     window.dispatchEvent(new Event("resize"));
     await flushPromises();
     const { top } = panelMetrics(wrapper);
-    // 上方空间 382 比下方 310 大 → 放上方并压缩 maxHeight；top 贴顶 12
-    expect(top).toBe(12);
+    expect(top).toBe(438);
   });
 
-  it("flips above when below is too short but above has room (B072)", async () => {
+  it("flips above only when below space is unusable (<160px) (B072b)", async () => {
     setInnerWidth(880);
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 760 });
     vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
     const wrapper = await mountPicker();
-    // 按钮在底部附近但上方空间充足（top=600, bottom=632；下方剩 760-632-12≈116 < 223，上方 600-223-6=371 ≥ 12）
+    // 按钮在底部附近：下方剩 110 < 160 → 翻上方；上方空间 582 充足
     stubChipRect(wrapper, 600, 632);
     stubPanelHeight(wrapper, 223);
     window.dispatchEvent(new Event("resize"));
@@ -248,5 +247,19 @@ describe("LocationPicker narrow viewport (B072)", () => {
     const { top } = panelMetrics(wrapper);
     // 应翻到按钮上方：600-223-6=371
     expect(top).toBe(371);
+  });
+
+  it("pins to top only when neither side has usable space (B072b)", async () => {
+    setInnerWidth(880);
+    Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 250 });
+    vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
+    const wrapper = await mountPicker();
+    // 极小窗口：下方 82 < 160、上方 96 < 160 → 贴顶 12 兜底
+    stubChipRect(wrapper, 120, 150);
+    stubPanelHeight(wrapper, 400);
+    window.dispatchEvent(new Event("resize"));
+    await flushPromises();
+    const { top } = panelMetrics(wrapper);
+    expect(top).toBe(12);
   });
 });

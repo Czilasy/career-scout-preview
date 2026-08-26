@@ -527,9 +527,11 @@ const oneClickDisabled = computed(() => Boolean(draftPlatformDisabled.value || p
 // 步骤 2 两个面板（关键词配置 / 高级执行设置）共用同一受控状态：
 // 默认收拢、手动展开/收起联动（一个 ref 天然同步两卡）；开始抓取后自动收拢。
 
-// 步骤 2 两个面板（关键词配置 / 高级执行设置）共用同一受控状态：
-// 默认收拢、手动展开/收起联动（一个 ref 天然同步两卡）；开始抓取后自动收拢。
+// 步骤 2 两个面板（关键词配置 / 高级执行设置）：
+// 宽屏双栏时联动开关（一个 ref 天然同步两卡）；窄屏单列时各自独立，
+// 由 DiscoveryView 按 matchMedia(1050) 分别控制联动/独立。
 const searchPanelsOpen = ref(false);
+const advancedPanelsOpen = ref(false);
 
 const pollTimer = ref<number | undefined>(undefined);
 
@@ -861,6 +863,7 @@ return {
   pipelineBusy,
   oneClickDisabled,
   searchPanelsOpen,
+  advancedPanelsOpen,
   pollTimer,
   scopeLocked,
   enabledSteps,

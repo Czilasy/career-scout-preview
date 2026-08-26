@@ -39,3 +39,25 @@ const mockIntersectionObservers: MockIntersectionObserver[] = [];
 (globalThis as unknown as { __mockIntersectionObservers: MockIntersectionObserver[] })
   .__mockIntersectionObservers = mockIntersectionObservers;
 (globalThis as any).IntersectionObserver = MockIntersectionObserver;
+
+// jsdom 不实现 matchMedia；提供可配置替身（默认宽屏 matches=false）。
+// 测试可通过 __setNarrowMatchMedia(true/false) 切换，并触发 change 事件。
+type MatchMediaListener = (e: { matches: boolean }) => void;
+let narrowMedia = false;
+const mediaListeners = new Set<MatchMediaListener>();
+
+(globalThis as any).matchMedia = (query: string) => ({
+  get matches() { return narrowMedia; },
+  media: query,
+  addEventListener: (_type: string, cb: MatchMediaListener) => mediaListeners.add(cb),
+  removeEventListener: (_type: string, cb: MatchMediaListener) => mediaListeners.delete(cb),
+  addListener: (cb: MatchMediaListener) => mediaListeners.add(cb),
+  removeListener: (cb: MatchMediaListener) => mediaListeners.delete(cb),
+  onchange: null,
+  dispatchEvent: () => true,
+});
+
+(globalThis as any).__setNarrowMatchMedia = (narrow: boolean) => {
+  narrowMedia = narrow;
+  for (const cb of [...mediaListeners]) cb({ matches: narrow });
+};

@@ -19,7 +19,7 @@ import type {
 import type { StepId } from "./useDiscoveryState";
 
 export function useDiscoveryWorkflow(state: DiscoveryState, deps: any = {}) {
-  const { WORKFLOW_STATE_VERSION, activeStep, analysisReady, cityText, currentRoundStatus, enabledSteps, filterValues, finishedPartial, historyMode, interruptedRunId, keywords, pausedRunId, pipelineResult, pipelineResultRunId, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, restoredWorkflowSnapshot, resultLoaded, resultsPageSeen, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, unfinishedWorkflowRestored, workflowStateKey, workflowStateRestored } = state;
+  const { WORKFLOW_STATE_VERSION, activeStep, advancedPanelsOpen, analysisReady, cityText, currentRoundStatus, enabledSteps, filterValues, finishedPartial, historyMode, interruptedRunId, keywords, pausedRunId, pipelineResult, pipelineResultRunId, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, restoredWorkflowSnapshot, resultLoaded, resultsPageSeen, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, unfinishedWorkflowRestored, workflowStateKey, workflowStateRestored } = state;
 
 
 function readWorkflowState(): Record<string, any> | null {
@@ -150,6 +150,7 @@ function restoreSaved02State(): void {
   const hasLiveScrape = ["running", "queued"].includes(String(saved.scrapeSnapshot?.status));
   const hasLiveRecrawl = ["running", "queued"].includes(String(saved.recrawlSnapshot?.status));
   searchPanelsOpen.value = !(hasLiveScrape || hasLiveRecrawl);
+  advancedPanelsOpen.value = searchPanelsOpen.value;
   // 恢复 03 页时套用同一默认展开策略：快照里有运行中/排队的筛选任务则收拢，否则展开。
   if (saved.activeStep === "screen") {
     const hasLiveScreen = ["running", "queued"].includes(String(saved.screenSnapshot?.status));
@@ -162,6 +163,7 @@ function enterSearchStep() {
   // 02 页配置面板默认展开策略：仅当有正在运行的抓取/重抓任务时收拢，否则一律展开。
   // 不依赖关键词/城市/画像是否为空——上传简历后 AI 预填内容不应影响展开状态。
   searchPanelsOpen.value = !scrapeBusy.value && !recrawlBusy.value;
+  advancedPanelsOpen.value = searchPanelsOpen.value;
   activeStep.value = "search";
 }
 

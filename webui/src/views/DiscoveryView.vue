@@ -209,6 +209,7 @@ const {
   pipelineBusy,
   oneClickDisabled,
   searchPanelsOpen,
+  advancedPanelsOpen,
   pollTimer,
   scopeLocked,
   enabledSteps,
@@ -451,6 +452,46 @@ const roundFlow = reactive(useScreenRoundFlow({
   },
 }));
 shared.roundFlow = roundFlow;
+
+// 方案2：两个配置抽屉（广泛抓取/高级执行设置）——宽屏双栏联动、窄屏单列独立。
+// 与 CSS `@media (max-width: 1050px)` 单列断点对齐，同阈值。
+function createSearchLayoutMedia(): {
+  matches: boolean;
+  addEventListener: (type: string, cb: (e: { matches: boolean }) => void) => void;
+} | null {
+  if (typeof window.matchMedia !== "function") return null;
+  const mq = window.matchMedia("(max-width: 1050px)");
+  return {
+    get matches() {
+      return mq.matches;
+    },
+    addEventListener(type, cb) {
+      if (typeof mq.addEventListener === "function") {
+        mq.addEventListener(type, cb as (e: MediaQueryListEvent) => void);
+      } else if (typeof mq.addListener === "function") {
+        mq.addListener(cb as (e: MediaQueryListEvent) => void);
+      }
+    },
+  };
+}
+const searchLayoutMq = createSearchLayoutMedia();
+const isNarrowSearchLayout = ref(Boolean(searchLayoutMq?.matches));
+function handleSearchLayoutChange(e: { matches: boolean }): void {
+  isNarrowSearchLayout.value = e.matches;
+}
+searchLayoutMq?.addEventListener("change", handleSearchLayoutChange);
+
+// 宽屏：两卡联动（点一个两个一起开关）；窄屏：各自独立。
+watch([searchPanelsOpen, advancedPanelsOpen], ([newS, newA], [oldS, oldA]) => {
+  if (isNarrowSearchLayout.value) return;
+  if (newS !== oldS) {
+    // 用户改了 search → 同步 advanced 跟随
+    advancedPanelsOpen.value = newS;
+  } else if (newA !== oldA) {
+    // 用户改了 advanced → 同步 search 跟随
+    searchPanelsOpen.value = newA;
+  }
+});
 
 watch(activeStep, (step) => {
   if (step === "results") {
@@ -767,7 +808,7 @@ onMounted(() => {
           </label>
         </CollapsibleCard>
 
-        <CollapsibleCard class="advanced-panel" title="高级执行设置" v-model="searchPanelsOpen">
+        <CollapsibleCard class="advanced-panel" title="高级执行设置" v-model="advancedPanelsOpen">
           <template #prefix>
             <SlidersHorizontal :size="17" aria-hidden="true" />
           </template>

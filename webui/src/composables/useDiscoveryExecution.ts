@@ -42,7 +42,7 @@ import type { OneClickLaunch } from "./useDiscoveryState";
 import type { TaskSnapshot } from "./useDiscoveryState";
 
 export function useDiscoveryExecution(state: DiscoveryState, deps: any = {}) {
-  const { activeCategory, activeStep, activeTaskRestored, analysisReady, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityList, currentRoundStatus, draftPlatform, effectiveSearchCities, filterValues, finishSaveBusy, finishedPartial, historyDetail, historyMode, historyRound, historyScreenBusy, interruptedRunId, locationDraft, nationalScopeConfirm, oneClickOpen, pausedRunId, pipelineBusy, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, pollRetryCount, pollTimer, profileConfirmed, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, restoredTaskHint, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, schemaRef, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, switchAccountId, switchAccounts } = state;
+  const { activeCategory, activeStep, activeTaskRestored, advancedPanelsOpen, analysisReady, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityList, currentRoundStatus, draftPlatform, effectiveSearchCities, filterValues, finishSaveBusy, finishedPartial, historyDetail, historyMode, historyRound, historyScreenBusy, interruptedRunId, locationDraft, nationalScopeConfirm, oneClickOpen, pausedRunId, pipelineBusy, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, pollRetryCount, pollTimer, profileConfirmed, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, restoredTaskHint, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, schemaRef, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, switchAccountId, switchAccounts } = state;
   const { clearWorkflowState, enrichPausedSnapshot, enterScreenStep, enterSearchStep, isCompletedTaskStatus, isLoginErrorCode, loadCityCatalog, loadFilterLabels, loadLatestResult, notify, pollRecrawl, pollTask, refreshScopePreview, requireProfileConfirmed, restoreLocationsFromContext, returnToLatest, saveScrapedOnlySnapshot, setDraftPlatform, setPipelineResult, showLoginGuide, validateProfileForScreen } = deps;
 
 
@@ -359,6 +359,7 @@ async function startScrape(options: OneClickLaunch = {}) {
   autoScreenProfile.value = options.profile || "";
   profileError.value = "";
   searchPanelsOpen.value = false;
+  advancedPanelsOpen.value = false;
   scrapeBusy.value = true;
   scrapeCompleted.value = false;
   resultLoaded.value = false;
