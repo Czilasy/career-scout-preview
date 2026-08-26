@@ -167,6 +167,15 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             batch_done_before = done
 
             def _item_progress(n: int, _base: int = batch_done_before, _total: int = total) -> None:
+                # 022/026：条级进度同时刷新 guard 心跳。智联 in-process 串行
+                # 路径由 source 逐条回调（无子进程 stdout 心跳源），否则批次
+                # 超过 300s 会被卡死防护误判强杀/跳批；BOSS 子进程模式在批
+                # 返回时一次性回调，此处 touch 幂等无害。
+                if guard is not None:
+                    try:
+                        guard.touch(batch_key)
+                    except Exception:
+                        pass
                 if progress is None:
                     return
                 try:

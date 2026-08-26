@@ -69,11 +69,13 @@ def _default_zhilian_batch_detail_runner(
     list_data: dict, *,
     cdp_port: int, tab_pool_size: int,
     inter_job_gap_range: tuple[float, float], reset_every: int,
+    event_callback=None,
 ) -> tuple[list[tuple[str, dict]], str | None]:
     """默认 batch runner：调用 zhilian_cdp_raw.scrape_details_batch 并行分支。
 
     返回 ``(per_item, degrade_signal)``；ImportError（环境缺脚本）时全部按
     skipped + unreachable 降级，不伪造成功。
+    ``event_callback``：逐条完成心跳（026），透传给 scraper 的 worker。
     """
     try:
         from scripts import zhilian_cdp_raw as zha
@@ -86,6 +88,7 @@ def _default_zhilian_batch_detail_runner(
         tab_pool_size=tab_pool_size,
         inter_job_gap_range=inter_job_gap_range,
         reset_every=reset_every,
+        event_callback=event_callback,
     )
     normalized = []
     for signal, detail in per_item:

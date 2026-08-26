@@ -685,7 +685,8 @@ def _detail_tab_worker(cdp_port: int, connector: Any, work_queue: Any,
                        stagger_range: tuple[float, float], tab_id: int,
                        reset_every: int, degrade_event: Any,
                        degrade_reason: dict[str, str], results_lock: Any,
-                       results: dict[int, tuple[str, dict]]) -> None:
+                       results: dict[int, tuple[str, dict]],
+                       event_callback: Any = None) -> None:
     """常驻 tab 工作线程：建池 → 错峰启动 → 循环领任务抓详情 → 重置 → 关池。
 
     与 BOSS ``_tab_worker`` 同构，连接走智联 page 级 WS（无 sessionId）：
@@ -731,6 +732,13 @@ def _detail_tab_worker(cdp_port: int, connector: Any, work_queue: Any,
             signal = str(signal or "invalid_output")
             with results_lock:
                 results[orig_idx] = (signal, dict(detail or {}))
+            # 026：逐条完成回调（仅作卡死防护心跳，in-process 无子进程 stdout）。
+            # 调用方传 on_item_done 时每条实时触发；异常一律吞掉不中断抓取。
+            if event_callback is not None:
+                try:
+                    event_callback()
+                except Exception:
+                    pass
             if signal in _DEGRADE_SIGNALS:
                 print(f"[{tab_label}] ⚠ 命中平台级信号 {signal}，触发降级停工")
                 degrade_reason["reason"] = signal
@@ -776,7 +784,7 @@ def scrape_details_batch(list_data, max_details=None, output_path=None,
     结果，不写盘、不产出事件文件（与 ``fetch_detail`` 现状一致）。单条失败
     不中断整体；平台级 signal 触发全体停工，已抓结果保留。
     """
-    del output_path, event_callback  # 兼容参数：直接返回结果，不写盘、不产出事件文件
+    del output_path  # 兼容参数：直接返回结果，不写盘
     import queue as _queue_mod
     import threading
 
@@ -842,6 +850,7 @@ def scrape_details_batch(list_data, max_details=None, output_path=None,
                 "degrade_reason": degrade_reason,
                 "results_lock": results_lock,
                 "results": results,
+                "event_callback": event_callback,
             },
             name=f"zhilian-detail-tab{tab_id + 1}",
             daemon=True,

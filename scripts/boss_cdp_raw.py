@@ -23,7 +23,7 @@ re-export 全部既有符号（经 __getattr__ 动态代理，保持旧 import �
 CLI 行为不变（宪法 VI）。
 """
 
-__version__ = "1.8.0"
+__version__ = "1.7.10"
 
 import os
 import random
@@ -42,6 +42,8 @@ if _PROJECT_ROOT not in sys.path:
 websocket = None
 requests = None
 _run_active = False  # 是否正在 run_search_programmatic 组合运行内
+
+from scripts.boss.exceptions import CDPUnavailableError
 
 from scripts.boss_cdp_signals import (
     RATE_LIMIT_KEYWORDS,
@@ -106,4 +108,16 @@ def __getattr__(name):
 
 
 if __name__ == "__main__":
-    sys.modules[__name__].main()  # main 经 __getattr__ 代理解析（LOAD_GLOBAL 不触发模块 __getattr__）
+    try:
+        sys.modules[__name__].main()  # main 经 __getattr__ 代理解析（LOAD_GLOBAL 不触发模块 __getattr__）
+    except CDPUnavailableError as exc:
+        # 026：浏览器失联统一映射退出码 2（source_cdp_unavailable），
+        # 让编排层走 is_browser_lost → 自动重启 / 重启失败暂停，
+        # 而不是裸退出 1 被分类成 source_unknown_error 静默标待确认。
+        emit_failure_line("source_cdp_unavailable", str(exc))
+        sys.exit(2)
+    except ConnectionError as exc:
+        # CDPSession.send 在运行中 WebSocket 断开时抛内置 ConnectionError
+        # （cdp_session.py）；同样归入浏览器失联退出码 2。
+        emit_failure_line("source_cdp_unavailable", str(exc))
+        sys.exit(2)

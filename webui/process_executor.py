@@ -108,16 +108,25 @@ class ScraperExecutor:
             stream_callback = on_output or self.on_output_probe
             try:
                 while True:
-                    chunk = stream.read(4096)
-                    if not chunk:
+                    # 逐行读取而非 read(n)：Windows pipe 上 read(n) 会阻塞到
+                    # 填满 n 字节或子进程退出（EOF），子进程即使实时输出也
+                    # 收不到 → 卡死防护心跳（on_output_probe）失效，正常批次
+                    # 会被 300s 误判卡死强杀。readline 在每行换行后立即返回，
+                    # 配合子进程 PYTHONUNBUFFERED 即可实时刷新心跳。
+                    # limit 65536 兜底超长行（无换行输出），防内存膨胀。
+                    line = stream.readline(65536)
+                    if not line:
                         return
                     remaining = self.max_output_bytes - len(output)
-                    accepted = chunk[:max(0, remaining)]
-                    if stream_callback and accepted:
-                        stream_callback(accepted.decode("utf-8", errors="replace"))
                     if remaining > 0:
+                        accepted = line[:remaining]
+                        if stream_callback and accepted:
+                            stream_callback(accepted.decode("utf-8", errors="replace"))
                         output.extend(accepted)
-                    if len(chunk) > remaining:
+                        if len(line) > remaining:
+                            output_limit.set()
+                            return
+                    else:
                         output_limit.set()
                         return
             finally:

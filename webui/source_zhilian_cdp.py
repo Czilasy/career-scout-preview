@@ -658,6 +658,7 @@ class ZhilianCdpSource:
                 tab_pool_size=tab_pool_size,
                 inter_job_gap_range=(gap_min, gap_max),
                 reset_every=reset_every,
+                event_callback=on_item_done,
             )
         except Exception:
             per_item, degrade_signal = [], "unreachable"

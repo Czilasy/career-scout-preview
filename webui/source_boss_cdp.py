@@ -82,7 +82,8 @@ class BossCdpSource(_BossCdpDetailMixin):
         self.python_executable = python_executable or sys.executable or "python"
         self.cwd = Path(cwd) if cwd else PROJECT_ROOT
         self.scraper_path = Path(scraper_path) if scraper_path else SCRAPER
-        self.env = env or {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", **os.environ}
+        self.env = env or {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8",
+                           "PYTHONUNBUFFERED": "1", **os.environ}
         self.timeout_seconds = int(timeout_seconds)
         self._executor = executor or ScraperExecutor()
         self.cancel_event = cancel_event

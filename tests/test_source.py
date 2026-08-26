@@ -1964,6 +1964,57 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertTrue(all(o.ok for o in results.values()))
 
+    def test_nonzero_exit_rescues_partial_details(self):
+        """returncode!=0（子进程被强杀/异常退出）时抢救已落盘产物，缺失的才标失败。
+
+        子进程边抓边原子写盘，被杀时 output 文件保存着已完成岗位的 JD；
+        已抓到的标成功、缺失的标失败，不整批丢弃（不重抓已抓到的部分）。
+        """
+        source = self._make_source()
+        detail_path = str(self.artifact_root / "batch_rescue.json")
+        jobs = [
+            {"job_id": "j1", "source_url": "https://www.zhipin.com/job/1",
+             "job_link": "https://www.zhipin.com/job/1"},
+            {"job_id": "j2", "source_url": "https://www.zhipin.com/job/2",
+             "job_link": "https://www.zhipin.com/job/2"},
+        ]
+        # 子进程被强杀时 output 文件已保存 j1 的 JD，j2 尚未完成
+        self._write_json(detail_path, [
+            {"job_id": "j1", "jd": "已抓到的JD内容",
+             "job_link": "https://www.zhipin.com/job/1"},
+        ])
+        with mock.patch.object(source, "_run_command",
+                               return_value=(1, "模拟异常退出（被强杀）")):
+            results = source.fetch_details_batch(
+                jobs, detail_output_path=detail_path)
+
+        self.assertEqual(len(results), 2)
+        # j1 已落盘 → 抢救成功，jd 原样返回
+        self.assertTrue(results["j1"].ok, results["j1"].safe_log)
+        self.assertEqual(results["j1"].detail.get("jd"), "已抓到的JD内容")
+        self.assertIn("rescued_partial", results["j1"].safe_log)
+        # j2 缺失 → 按退出码分类失败，仅重抓缺失部分
+        self.assertFalse(results["j2"].ok)
+        self.assertEqual(results["j2"].failed_code, "source_unknown_error")
+        self.assertIn("returncode=1", results["j2"].safe_log)
+
+    def test_nonzero_exit_no_partial_keeps_whole_batch_failed(self):
+        """returncode!=0 且产物文件无任何记录：整批按退出码分类失败（原语义）。"""
+        source = self._make_source()
+        detail_path = str(self.artifact_root / "batch_rescue_empty.json")
+        jobs = [
+            {"job_id": "j1", "source_url": "https://www.zhipin.com/job/1",
+             "job_link": "https://www.zhipin.com/job/1"},
+        ]
+        with mock.patch.object(source, "_run_command",
+                               return_value=(1, "模拟异常退出（被强杀）")):
+            results = source.fetch_details_batch(
+                jobs, detail_output_path=detail_path)
+
+        self.assertFalse(results["j1"].ok)
+        self.assertEqual(results["j1"].failed_code, "source_unknown_error")
+        self.assertNotIn("rescued_partial", results["j1"].safe_log)
+
     def test_list_empty_without_events_maps_to_cdp_lost(self):
         """退出码 0 + 0 结果 + 0 事件：列表阶段视为浏览器/CDP 失联。"""
         source = self._make_source()
@@ -2117,6 +2168,30 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         }
         with mock.patch.object(_boss_for_inprocess, "run_search_programmatic",
                                side_effect=_boss_for_inprocess.CDPUnavailableError("cdp down")):
+            outcome = source.fetch_list(plan_item)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_cdp_unavailable")
+
+    def test_connection_error_maps_to_returncode_2(self):
+        """运行中 WebSocket 断开（内置 ConnectionError）→ (2, ...) → source_cdp_unavailable。
+
+        026：CDPSession.send 把 WebSocketException 转成内置 ConnectionError，
+        必须与连接失败同语义（浏览器失联），而非落入通用 Exception 分支
+        被分类成 source_unknown_error 静默标待确认。
+        """
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_cdp_conn.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {},
+            "target_pages": 1,
+            "input_hash": _boss_input_hash({
+                "keyword": "AI", "city": "上海",
+                "source_filters": {}, "target_pages": 1,
+            }),
+            "list_output_path": list_path,
+        }
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic",
+                               side_effect=ConnectionError("CDP 连接异常")):
             outcome = source.fetch_list(plan_item)
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.failed_code, "source_cdp_unavailable")

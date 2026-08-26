@@ -279,14 +279,31 @@ class _BossCdpDetailMixin:
         # 5. Subprocess non-zero exit: whole batch failed; partial results are kept in the output file.
         if returncode != 0:
             failed_code = _classify_failed_code(returncode, captured)
-            for job_id in expected_urls_by_job_id:
-                results[job_id] = SourceOutcome.failure(
-                    failed_code=failed_code,
-                    safe_log=f"{safe_log} returncode={returncode} "
-                             f"stderr_tail_safe={_safe_tail(captured)}",
-                )
-            # One batch-level signal (the whole batch was blocked).
-            self.breaker.record_signal(failed_code)
+            # 抢救已落盘产物：子进程边抓边原子写盘（write_json_atomic），
+            # 被强杀/异常退出时 output 文件保存着已完成岗位的 JD。已抓到的
+            # 标成功、缺失的才标失败，只重抓缺失部分，不整批丢弃（021 既有
+            # 注释承诺 "partial results are kept in the output file"）。
+            saved = self._read_combined_details(detail_output_path)
+            missing = 0
+            for job_id, source_url in expected_urls_by_job_id.items():
+                detail = saved.get(source_url)
+                if detail:
+                    results[job_id] = SourceOutcome.success(
+                        detail=detail,
+                        safe_log=f"{safe_log} rescued_partial status=completed "
+                                 f"fields={sorted(detail.keys())[:5]}",
+                    )
+                    self.breaker.record_success()
+                else:
+                    missing += 1
+                    results[job_id] = SourceOutcome.failure(
+                        failed_code=failed_code,
+                        safe_log=f"{safe_log} returncode={returncode} "
+                                 f"stderr_tail_safe={_safe_tail(captured)}",
+                    )
+            if missing:
+                # One batch-level signal (the whole batch was blocked).
+                self.breaker.record_signal(failed_code)
             return results
 
         # 6. Parse events JSONL; validate each event; dispatch valid events.
@@ -569,6 +586,12 @@ class _BossCdpDetailMixin:
         except boss.SearchCancelled:
             return (-1, "cancelled")
         except boss.CDPUnavailableError as exc:
+            return (2, str(exc))
+        except ConnectionError as exc:
+            # 026：运行中 WebSocket 断开（CDPSession.send 转内置 ConnectionError）
+            # 与连接失败同语义 → 退出码 2 → source_cdp_unavailable →
+            # 编排层 is_browser_lost 自动重启/暂停，而非落入通用 Exception 分支
+            # 被分类成 source_unknown_error 静默标待确认。
             return (2, str(exc))
         except boss.RequestLimitExceededError as exc:
             return (11, str(exc))
