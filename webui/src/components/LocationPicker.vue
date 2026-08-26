@@ -61,18 +61,19 @@ function positionPanel(): void {
   const rect = el.getBoundingClientRect();
   const width = Math.min(380, window.innerWidth - 24);
   let maxHeight = Math.min(460, Math.floor(window.innerHeight * 0.6));
-  // B072：用面板实际渲染高度（受 maxHeight 约束）判断翻转，而非理论上限，
-  // 避免内容少的面板在下方明明放得下时被误翻到贴顶。
+  // B072：用面板内容自然总高（scrollHeight，不受上次 maxHeight 压缩影响）
+  // 判断翻转，而非理论上限，避免内容少的面板在下方明明放得下时被误翻到贴顶。
   const panel = panelEl.value;
-  const actualHeight = panel ? Math.min(panel.offsetHeight, maxHeight) : maxHeight;
+  const naturalHeight = panel ? panel.scrollHeight : 0;
+  const actualHeight = Math.min(naturalHeight || maxHeight, maxHeight);
   let left = Math.max(12, rect.left);
   if (left + width > window.innerWidth - 12) {
     left = Math.max(12, window.innerWidth - width - 12);
   }
-  // B072b：下方空间只要还有基本可用值（>=160px），就优先贴按钮正下方，
+  // B072b：下方空间只要还有基本可用值（>=60px），就优先贴按钮正下方，
   // 把 maxHeight 压缩到下方空间、面板内部滚动，而不是翻到顶部贴顶（不美观）。
-  // 只有下方几乎没空间（<160px）才翻到上方。
-  const MIN_USABLE_SPACE = 160;
+  // 只有下方几乎没空间（<60px，面板标题都放不下）才翻到上方。
+  const MIN_USABLE_SPACE = 60;
   const below = rect.bottom + 6;
   const above = rect.top - 6;
   const belowSpace = window.innerHeight - 12 - below;

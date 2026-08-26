@@ -198,7 +198,8 @@ describe("LocationPicker narrow viewport (B072)", () => {
   }
 
   function stubPanelHeight(wrapper: ReturnType<typeof mount<typeof LocationPicker>>, height: number): void {
-    Object.defineProperty(wrapper.element.querySelector(".location-panel")!, "offsetHeight", {
+    // positionPanel 读 scrollHeight（内容自然总高，不受 maxHeight 压缩污染）
+    Object.defineProperty(wrapper.element.querySelector(".location-panel")!, "scrollHeight", {
       configurable: true,
       value: height,
     });
@@ -234,19 +235,18 @@ describe("LocationPicker narrow viewport (B072)", () => {
     expect(top).toBe(438);
   });
 
-  it("flips above only when below space is unusable (<160px) (B072b)", async () => {
+  it("flips above only when below space is truly gone (<60px) (B072b)", async () => {
     setInnerWidth(880);
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 760 });
     vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
     const wrapper = await mountPicker();
-    // 按钮在底部附近：下方剩 110 < 160 → 翻上方；上方空间 582 充足
-    stubChipRect(wrapper, 600, 632);
+    // 按钮贴近底部：下方只剩 50 < 60 → 翻上方（700-223-6=471；上方空间 700-6-12=682 充足）
+    stubChipRect(wrapper, 700, 732);
     stubPanelHeight(wrapper, 223);
     window.dispatchEvent(new Event("resize"));
     await flushPromises();
     const { top } = panelMetrics(wrapper);
-    // 应翻到按钮上方：600-223-6=371
-    expect(top).toBe(371);
+    expect(top).toBe(471);
   });
 
   it("pins to top only when neither side has usable space (B072b)", async () => {
@@ -254,12 +254,12 @@ describe("LocationPicker narrow viewport (B072)", () => {
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 250 });
     vi.stubGlobal("fetch", fetchMockFor("/api/location-catalog", BOSS_CATALOG));
     const wrapper = await mountPicker();
-    // 极小窗口：下方 82 < 160、上方 96 < 160 → 贴顶 12 兜底
+    // 极小窗口：下方 82 >= 60 → 贴下方 156（不再贴顶）
     stubChipRect(wrapper, 120, 150);
     stubPanelHeight(wrapper, 400);
     window.dispatchEvent(new Event("resize"));
     await flushPromises();
     const { top } = panelMetrics(wrapper);
-    expect(top).toBe(12);
+    expect(top).toBe(156);
   });
 });

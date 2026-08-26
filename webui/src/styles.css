@@ -604,7 +604,7 @@ button:disabled {
 @media (max-width: 1050px) {
   .workflow-stack.search-layout {
     grid-template-columns: 1fr;
-  }.search-layout > .collapsible-card:first-child,
+  }  .search-layout > .collapsible-card:first-child,
   .search-layout > .collapsible-card.advanced-panel {
     grid-column: 1;
     grid-row: auto;
@@ -2721,7 +2721,7 @@ body,
     display: none;
   }
   .upload-layout .workflow-copy {
-    padding: 8px 4px 0;
+    padding: 20px 24px 0;
     border-right: none;
   }
   .upload-layout .workflow-copy h2 {
@@ -3462,4 +3462,30 @@ body,
 .keyword-chip-remove:disabled {
   opacity: .38;
   cursor: not-allowed;
+}
+
+/* 问题2：窄屏单列下高级设置面板 body 高度塌陷修复。
+   通用规则 .advanced-panel .collapsible-body 依赖 align-self:stretch 与左栏等高，
+   窄屏单列无参照物且 inner 为 absolute 脱离文档流 → body 0 高、内容不可见。
+   本块放在文件末尾（通用规则之后）以同特异性覆盖；仅窄屏生效，全屏不受影响。 */
+@media (max-width: 1050px) {
+  .advanced-panel.collapsible-card {
+    align-self: auto;
+  }
+  .advanced-panel .collapsible-body {
+    flex: none;
+    position: static;
+    min-height: 0;
+  }
+  .advanced-panel .collapsible-body .collapsible-inner,
+  .advanced-panel .collapsible-body.open .collapsible-inner {
+    position: static;
+    inset: auto;
+    overflow-y: visible;
+  }
+  .advanced-panel .collapsible-body:not(.open) .collapsible-inner {
+    visibility: hidden;
+    overflow: hidden;
+    pointer-events: none;
+  }
 }
