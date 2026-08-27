@@ -41,7 +41,7 @@ import { MODE_DEFAULT_PAGES } from "./useDiscoveryState";
 import type { MergedLatestResult, TaskSnapshot } from "./useDiscoveryState";
 
 export function useDiscoveryTasks(state: DiscoveryState, deps: any = {}) {
-  const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, interruptedRunId, isScrapedOnly, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysis, schemaLoader, scopePreview, scopePreviewBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform } = state;
+  const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, activeTaskRestored, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, interruptedRunId, isScrapedOnly, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysis, schemaLoader, scopePreview, scopePreviewBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform, unfinishedWorkflowRestored } = state;
   const { cancelScrape, clearLatestResult, clearWorkflowState, continueAiScreen, enterScreenStep, fetchMergedLatestResult, finishPausedTask, isLoginErrorCode, jobId, loadLatestResult, notify, restoreRunningTask, setPipelineResult, showLoginGuide, startAiScreen } = deps;
 
 
@@ -661,6 +661,56 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
  */
 
 
+/**
+ * 025 B078：完成态启动/刷新自动「开始新一轮」——复用 resetWorkflow（「开始新一轮」
+ * 按钮背后的既有逻辑），不新写恢复/重置代码。判定：
+ * - 有未完成流程（本地未完成快照 / 进行中、暂停、中断任务）→ 恢复现场（B068 不变）；
+ * - 无进行中任务（含 latest-running-task 返回已完成终态任务）且上一轮已正常走完、
+ *   结果已落历史 → 自动 resetWorkflow（01 页开放、02/03/04 自然灰色）。
+ */
+
+
+async function maybeAutoStartNewRound(): Promise<void> {
+  // 未完成流程（本地有未完成快照）→ 恢复现场（B068 行为保留，不改）
+  if (unfinishedWorkflowRestored.value) return;
+  // 有恢复的活动任务：仅已完成终态属于完成态 → 自动新一轮；否则恢复现场
+  if (activeTaskRestored.value) {
+    const taskStatus = String(
+      screenSnapshot.value?.status || scrapeSnapshot.value?.status || "",
+    );
+    const completedTask = ["completed", "completed_with_pending", "partial", "succeeded"]
+      .includes(taskStatus);
+    if (!completedTask) return;
+  }
+  // 无进行中任务（或已完成终态）：查最新历史轮（只查不设，不糊脸）
+  try {
+    const fetched = await deps.fetchMergedLatestResult();
+    if (!fetched) return;  // 无历史轮（全新用户）→ 保持干净 01 页
+    const completedStatuses = [
+      "completed", "completed_with_pending", "partial", "succeeded",
+    ];
+    // 025 B078：任一平台最新轮为未完成态（暂停/中断/已抓未筛选/未知）→
+    // 属"有未完成流程"→ 恢复现场（B068 不变）；全部完成态才自动新一轮。
+    const platformStatuses = Object.values(fetched.platformStatuses ?? {})
+      .map((s) => String(s ?? ""));
+    const anyUnfinished = platformStatuses.some(
+      (s) => !s || !completedStatuses.includes(s),
+    );
+    if (platformStatuses.length && !anyUnfinished) {
+      // 上一轮已正常走完、结果已落历史 → 自动「开始新一轮」
+      //（复用按钮背后逻辑，不糊脸；想看结论去历史）
+      await resetWorkflow();
+      return;
+    }
+    // 未完成态（暂停/中断/已抓未筛选/status 缺失）→ 恢复现场（原 loadLatestResult）
+    await deps.loadLatestResult();
+  } catch {
+    // 历史轮查询失败：回退原恢复行为，不误重置
+    await deps.loadLatestResult();
+  }
+}
+
+
 async function resetWorkflow() {
   if (!(await cancelActiveTasksForNewRound())) return;
   if (!(await deps.clearLatestResult())) return;
@@ -737,6 +787,7 @@ return {
   continueRecrawl,
   pollRecrawl,
   mergeRecrawlUpdates,
+  maybeAutoStartNewRound,
   resetWorkflow,
 };
 }

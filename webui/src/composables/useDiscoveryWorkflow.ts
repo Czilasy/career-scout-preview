@@ -1,4 +1,5 @@
 // 021 B8 T027：DiscoveryView workflow 动作层（自 DiscoveryView.vue script 原样搬运，函数体零改动，跨域引用经 deps 调用时解析）。
+import { watch } from "vue";
 import type { Ref } from "vue";
 import type { DiscoveryState } from "./useDiscoveryState";
 import type {
@@ -146,32 +147,21 @@ function restoreSaved02State(): void {
   pipelineResultRunId.value = String(saved.pipelineResultRunId || "");
   currentRoundStatus.value = String(saved.currentRoundStatus || "");
   resultLoaded.value = Boolean(saved.resultLoaded);
-  // 恢复 02 页时套用同一默认展开策略：快照里有运行中/排队的抓取或重抓任务则收拢，否则展开。
-  const hasLiveScrape = ["running", "queued"].includes(String(saved.scrapeSnapshot?.status));
-  const hasLiveRecrawl = ["running", "queued"].includes(String(saved.recrawlSnapshot?.status));
-  searchPanelsOpen.value = !(hasLiveScrape || hasLiveRecrawl);
-  advancedPanelsOpen.value = searchPanelsOpen.value;
-  // 恢复 03 页时套用同一默认展开策略：快照里有运行中/排队的筛选任务则收拢，否则展开。
-  if (saved.activeStep === "screen") {
-    const hasLiveScreen = ["running", "queued"].includes(String(saved.screenSnapshot?.status));
-    screenPanelOpen.value = !hasLiveScreen;
-  }
+  // 恢复 02/03 页时面板默认关闭：任务运行中/完成后不自动展开，
+  // 只有简历分析完成（analysisReady watch）才自动打开一次。
 }
 
 
 function enterSearchStep() {
-  // 02 页配置面板默认展开策略：仅当有正在运行的抓取/重抓任务时收拢，否则一律展开。
-  // 不依赖关键词/城市/画像是否为空——上传简历后 AI 预填内容不应影响展开状态。
-  searchPanelsOpen.value = !scrapeBusy.value && !recrawlBusy.value;
-  advancedPanelsOpen.value = searchPanelsOpen.value;
+  // 面板不再无任务自动展开：任务运行中/完成后保持关闭，只有简历分析完成
+  // （analysisReady 触发 watch）时才自动打开一次，展示 AI 预填内容。
   activeStep.value = "search";
 }
 
 
 function enterScreenStep() {
-  // 03 页筛选条件面板默认展开策略：仅当 AI 筛选中（screenBusy）时收拢，否则一律展开。
-  // 不依赖筛选条件是否已填——AI 分析简历会自动预填条件，不应影响展开状态。
-  screenPanelOpen.value = !screenBusy.value;
+  // 面板默认关闭：AI 筛选中或任务完成后都不自动展开，只有简历分析完成时
+  // 由 analysisReady watch 自动打开一次。
   activeStep.value = "screen";
 }
 
@@ -191,6 +181,17 @@ function selectStep(step: string) {
 function notify(message: string, tone: Notice["tone"] = "info") {
   deps.emit("notify", { message, tone });
 }
+
+// 简历分析完成（AI 预填搜索词/筛选条件）时自动打开 02/03 页配置面板，
+// 让用户看到并修改预填内容；任务运行中/完成后不再自动展开。
+// 仅在 analysisReady 由 false 变 true 的瞬间触发一次，用户手动开关不被打断。
+watch(analysisReady, (ready) => {
+  if (ready) {
+    searchPanelsOpen.value = true;
+    advancedPanelsOpen.value = true;
+    screenPanelOpen.value = true;
+  }
+});
 
 return {
   readWorkflowState,

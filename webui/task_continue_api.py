@@ -18,6 +18,7 @@ from webui.app import (
     _refresh_paused_run_execution_config,
 )
 from webui.store import DiscoveryStoreConflictError
+from webui.task_pause_support import cancel_task_cleanup, pause_with_mode
 from webui.task_runners import _iso_epoch_ms
 
 def register_task_continue_routes(app, ctx):
@@ -428,43 +429,14 @@ def register_task_continue_routes(app, ctx):
 
     @app.route("/api/task/pause/<run_id>", methods=["POST"])
     def api_task_pause(run_id: str):
-        """013：安全暂停 AI 筛选任务。
+        """013：安全暂停 AI 筛选任务（025：支持 mode=immediate 批中立即停止）。
 
-        设置内存任务 stop_mode="pause" 并触发停止信号；worker 在安全边界
-        落库后把 DB run 写为 paused，并生成 04 可查看的部分结果快照。
+        body 可选 ``{"mode": "immediate" | "graceful"}``，缺省 graceful。
+        编排逻辑在 task_pause_support（本文件超行数预警线，api 层只做组装）。
         """
-        with ctx.lock:
-            task = ctx.tasks.get(run_id)
-            if task is None:
-                return jsonify({
-                    "ok": False, "error": "run_not_found",
-                    "message": _MSG_TASK_NOT_FOUND,
-                }), 404
-            if task.get("kind") not in ("ai_screen", "recrawl"):
-                return jsonify({
-                    "ok": False, "error": "not_pausable_task",
-                    "message": "只有 AI 筛选或重抓任务可以暂停",
-                }), 409
-            if task["status"] not in ("queued", "running"):
-                return jsonify({
-                    "ok": False, "error": "task_not_active",
-                    "message": f"任务当前状态（{task['status']}）不能暂停",
-                }), 409
-            run = ctx.store.get_screening_run(run_id)
-            if run is not None and run.get("status") not in ("queued", "running"):
-                return jsonify({
-                    "ok": False, "error": "task_not_active",
-                    "message": f"任务当前状态（{run.get('status')}）不能暂停",
-                }), 409
-            stop_event = task.get("stop_event")
-            if stop_event is None:
-                return jsonify({
-                    "ok": False, "error": "stop_signal_unavailable",
-                    "message": "任务缺少停止信号，无法暂停",
-                }), 409
-            task["stop_mode"] = "pause"
-            stop_event.set()
-        return jsonify({"ok": True, "run_id": run_id, "status": "pausing"})
+        body = request.get_json(silent=True) or {}
+        return pause_with_mode(
+            ctx, run_id, str(body.get("mode") or "graceful"))
 
     @app.route("/api/task/cancel/<run_id>", methods=["POST"])
     def api_task_cancel(run_id: str):
@@ -550,6 +522,8 @@ def register_task_continue_routes(app, ctx):
                 close_debug_chrome()
             except (OSError, RuntimeError):
                 pass  # best-effort 关闭浏览器；取消状态已经可靠提交。
+        # 025：取消也清理 guard 批次登记（避免「继续」后被误判卡死重抓）
+        cancel_task_cleanup(ctx, run_id)
         return jsonify({
             "ok": True,
             "run_id": run_id,

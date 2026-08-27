@@ -982,4 +982,6 @@ interface MergedLatestResult {
       round_context?: Partial<RoundContext> | null;
     };
   };
+  /** 025 B078：各平台最新轮状态（供完成态判定；无该平台轮则缺省）。 */
+  platformStatuses?: Partial<Record<"boss" | "zhilian", string>>;
 }

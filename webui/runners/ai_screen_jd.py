@@ -107,6 +107,20 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                 emit(stage="fetch_jd", current=cur, total=len(survivors),
                      message=f"抓取 JD {cur}/{len(survivors)}")
 
+            # 025：批内信号（前端暂停弹窗判定「正处抓 JD 批次中」）；
+            # cur_batch=None 表示批结束/停止，信号清除。
+            def _jd_batch_progress(cur_batch, total_batches,
+                                   _base=_jd_base):
+                _cur = min(_base, len(survivors))
+                if cur_batch is None:
+                    emit(stage="fetch_jd", current=_cur,
+                         total=len(survivors), jd_batch=None)
+                else:
+                    emit(stage="fetch_jd", current=_cur,
+                         total=len(survivors),
+                         jd_batch={"current": cur_batch,
+                                   "total": total_batches})
+
             # 024：详情人形模拟随当前档位下发（custom 档零仿真，不传参）
             _active_selection = None
             try:
@@ -129,6 +143,7 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                 guard=guard,
                 batch_key_prefix=f"jd-{task_id}-{chunk_start}",
                 simulation_mode=_simulation_mode,
+                batch_progress=_jd_batch_progress,
             )
             # 022：卡死 3 次失败分流收场（环境级暂停 / 偶发跳过进待确认）
             _stall_divert = detail_result.get("stall_divert")
@@ -187,7 +202,9 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                         "reason": str(j.get("jd_failed_reason") or ""),
                         "evidence": str(j.get("jd_failed_evidence") or ""),
                     }
-            save_jd_checkpoint(jd_path, jd_map)
+            # 025 B077：暂停返回时绝不把空结果写进断点（无已抓则跳过落盘）
+            if jd_map:
+                save_jd_checkpoint(jd_path, jd_map)
             ctx.write_run(
                 task_id, source_cursor=len(jd_map),
                 processed_count=len(jd_map), current_stage="jd_detail",

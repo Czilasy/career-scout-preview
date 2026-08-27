@@ -248,7 +248,12 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
         platform_job_id: drop.platform_job_id,
       });
     }
-    return { merged, newer };
+    // 025 B078：暴露各平台最新轮状态（完成态判定用；无该平台轮则缺省）
+    const platformStatuses: Partial<Record<"boss" | "zhilian", string>> = {};
+    for (const part of parts) {
+      platformStatuses[part.platform] = String(part.data.status ?? "");
+    }
+    return { merged, newer, platformStatuses };
   } catch (error) {
     deps.notify(errorMessage(error, "上次结果暂时无法恢复"), "warning");
     return null;

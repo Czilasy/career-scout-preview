@@ -309,6 +309,15 @@ async function restoreRunningTask() {
       screenTaskId.value = data.task_id;
       scrapeTaskId.value = data.scrape_task_id || "";
       scrapeCompleted.value = true;
+      // 025 B078：已完成终态任务不当作运行中恢复（不设 busy、不 poll）——
+      // 由 maybeAutoStartNewRound 判定为完成态自动「开始新一轮」。
+      const terminalDone = ["completed", "completed_with_pending", "partial", "succeeded"]
+        .includes(String(data.status));
+      if (terminalDone) {
+        screenSnapshot.value = snapshot;
+        analysisReady.value = true;
+        return;
+      }
       screenBusy.value = true;
       screenSnapshot.value = snapshot;
       restoredTaskHint.value = "检测到 AI 筛选任务仍在后台运行，已自动接回";

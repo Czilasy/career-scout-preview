@@ -18,6 +18,7 @@ import OneClickScreenDialog, {
 } from "../components/OneClickScreenDialog.vue";
 import StepNavigator from "../components/StepNavigator.vue";
 import ContinuePlatformGuide from "../components/ContinuePlatformGuide.vue";
+import PauseBatchChoiceDialog from "../components/PauseBatchChoiceDialog.vue";
 import ScreenRoundActions from "../components/ScreenRoundActions.vue";
 import ScreenRecrawlProgress from "../components/ScreenRecrawlProgress.vue";
 import PendingRecrawlCapsule from "../components/PendingRecrawlCapsule.vue";
@@ -467,9 +468,9 @@ function createSearchLayoutMedia(): {
     },
     addEventListener(type, cb) {
       if (typeof mq.addEventListener === "function") {
-        mq.addEventListener(type, cb as (e: MediaQueryListEvent) => void);
+        mq.addEventListener(type, cb as unknown as EventListener);
       } else if (typeof mq.addListener === "function") {
-        mq.addListener(cb as (e: MediaQueryListEvent) => void);
+        mq.addListener(cb as unknown as EventListener);
       }
     },
   };
@@ -569,9 +570,10 @@ onMounted(() => {
   void loadCityCatalog();
   void restoreRunningTask().finally(() => {
     restoreSaved02State();
-    if (!unfinishedWorkflowRestored.value && !activeTaskRestored.value
-      && !scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
-      void loadLatestResult();
+    // 025 B078：完成态启动/刷新自动「开始新一轮」——判定在 composable
+    //（未完成流程/进行中任务不触发，B068 恢复现场不变）；busy 保护防误重置。
+    if (!scrapeBusy.value && !screenBusy.value && !recrawlBusy.value) {
+      void tasks.maybeAutoStartNewRound();
     }
   });
 });
@@ -1182,6 +1184,14 @@ onMounted(() => {
       :has-old-result="hasOldResult"
       @close="oneClickOpen = false"
       @confirm="confirmOneClick"
+    />
+
+    <!-- 025 B076：批中暂停二选一弹窗（立即停止 / 等这批抓完） -->
+    <PauseBatchChoiceDialog
+      :open="roundFlow.pauseDialogOpen"
+      :batch-info="roundFlow.pauseBatchInfo"
+      @close="roundFlow.closePauseDialog()"
+      @choose="roundFlow.confirmPauseChoice"
     />
   </main>
 </template>

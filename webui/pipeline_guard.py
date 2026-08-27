@@ -207,6 +207,27 @@ class PipelineGuard:
         """重抓前等待时长（3~5s，可配置）。"""
         return random.uniform(self._retry_min, self._retry_max)
 
+    def immediate_stop_task(self, task_id: str) -> None:
+        """立即停止：终止该任务全部活动批次的子进程并清理批次登记（025 B076）。
+
+        供暂停 API immediate 模式与取消路径调用；判定/监控逻辑零改动。
+        终止后任务线程从 poll 等待解出；批次登记清空避免「继续」后被旧登记
+        误判卡死触发额外重抓。
+        """
+        with self._mutex:
+            keys = [k for k, s in self._batches.items()
+                    if str(s.task_id) == str(task_id) and not s.terminal]
+        for key in keys:
+            self._kill_process(self.batch_state(key) or {})
+        with self._mutex:
+            for key in keys:
+                state = self._batches.get(key)
+                if state is not None:
+                    state.terminal = True
+            for key in list(self._batches):
+                if str(self._batches[key].task_id) == str(task_id):
+                    del self._batches[key]
+
     # ------------------------------------------------------------------
     # 独立监控
     # ------------------------------------------------------------------

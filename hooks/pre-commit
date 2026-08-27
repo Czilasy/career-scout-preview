@@ -5,7 +5,26 @@
 set -e
 
 echo "==> Repo hygiene check"
-if ! uv run python -m unittest tests.test_repo_hygiene; then
+run_hygiene() {
+    # 首选：项目 venv 的标准入口
+    if uv run python -m unittest tests.test_repo_hygiene 2>/dev/null; then
+        return 0
+    fi
+    # 回退：uv 在部分环境（如 d: 装入点）无法解析 venv 时，显式指定解释器
+    for py in \
+        "D:/ana/python.exe" \
+        "C:/Python311/python.exe" \
+        "C:/Python312/python.exe" \
+        "C:/Python313/python.exe" \
+        "$LOCALAPPDATA/uv/python/cpython-3.12-windows-x86_64-none/python.exe" \
+        "$LOCALAPPDATA/uv/python/cpython-3.11-windows-x86_64-none/python.exe"; do
+        if [ -x "$py" ] && uv run --no-project --python "$py" python -m unittest tests.test_repo_hygiene 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+if ! run_hygiene; then
     echo "!! Repo hygiene check failed. Fix the issues above, then commit again."
     exit 1
 fi

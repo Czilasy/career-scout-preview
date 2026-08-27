@@ -24,7 +24,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                       measurement_callback=None,
                       emit_terminal_events=True,
                       guard=None, batch_key_prefix=None,
-                      simulation_mode=None):
+                      simulation_mode=None,
+                      batch_progress=None):
     """对一批岗位批量抓 JD（调用方需先确保 Chrome 就绪）。
 
     Spec 007 ⑧：改用 fetch_details_batch（≤5 一批）走 --enable-parallel 常驻 tab 池，
@@ -42,6 +43,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     ``guard`` / ``batch_key_prefix``: 022 卡死防护 — 传入 PipelineGuard 时对该函数
     内的每个抓取批次做 300s 无产出卡死判定、自动重抓（最多 3 次）、第 3 次失败分流
     收场。batch_key_prefix 用于生成跨 chunk 唯一的批次键（run_jd_stage 传 task_id+chunk）。
+
+    ``batch_progress``: 025 批内信号 — 可选回调，每批开始时调用
+    ``(current_batch, total_batches)``、批结束/停止时调用 ``(None, None)``，
+    供前端判定「正处抓 JD 批次中」（暂停弹窗二选一）。
 
     返回 {"jobs": 带 jd 的岗位列表, "hard_stop": bool, "hard_stop_code": str|None,
            "stopped": bool, "fetched": int}：
@@ -128,6 +133,60 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     stall_divert: str | None = None
     stall_code = ""
     stall_attempts = 0
+
+    def _apply_batch_outcomes(batch_entries, batch_outcomes, batch_exc_code,
+                              *, count_done=True):
+        """处理一批 outcomes 并入 jd_by_idx / jd_fail（025 B077：批返回后立即处理，
+        抢救出的已抓不再被重抓分支丢弃；成功时清除既有失败标记）。"""
+        nonlocal done, fetched, hard_stop, hard_stop_code
+        for idx, jid, _ in batch_entries:
+            outcome = batch_outcomes.get(jid)
+            jd = ""
+            if outcome is not None and outcome.ok and isinstance(outcome.detail, dict):
+                jd = str(outcome.detail.get("jd", "")).strip()
+            elif outcome is not None and _jd_is_hard_stop(outcome.failed_code):
+                # 源级硬信号：停后续批次并上报（别继续抓空气还装完成）
+                hard_stop = True
+                hard_stop_code = outcome.failed_code
+            if not jd and batch_exc_code:
+                jd_fail_by_idx[idx] = batch_exc_code
+                jd_fail_reason_by_idx[idx] = taxonomy_reason(
+                    batch_exc_code, getattr(source, "platform", ""),
+                    fallback="抓取失败",
+                )
+            elif not jd and outcome is not None and outcome.failed_code:
+                jd_fail_by_idx[idx] = outcome.failed_code
+                jd_fail_reason_by_idx[idx] = (
+                    outcome.failed_reason
+                    or failed_code_label(
+                        outcome.failed_code, getattr(source, "platform", "")
+                    ) or "岗位详情抓取失败"
+                )
+                jd_fail_evidence_by_idx[idx] = str(getattr(outcome, "safe_log", "") or "")
+            jd_by_idx[idx] = jd
+            if jd:
+                fetched += 1
+                # 成功覆盖失败标记（重抓场景：抢救失败 → 重抓成功）
+                jd_fail_by_idx.pop(idx, None)
+                jd_fail_reason_by_idx.pop(idx, None)
+                jd_fail_evidence_by_idx.pop(idx, None)
+            # T018: 记录 item_terminal 事件（SC-007 终态守恒）
+            if measurement_callback is not None:
+                try:
+                    _status = "success" if jd else "failed"
+                    measurement_callback("item_terminal", "detail", 0,
+                                         counts={"item_index": idx, "status": _status,
+                                                 "input_count": total})
+                except Exception:
+                    pass
+            if count_done:
+                done += 1
+                if progress is not None:
+                    try:
+                        progress(done, total)
+                    except Exception:
+                        pass
+
     for batch_start in range(0, len(indexed_jobs), BATCH_SIZE):
         if stop_event is not None and stop_event.is_set():
             stopped = True
@@ -137,7 +196,14 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             cooldown = _detail_batch_cooldown + random.uniform(-5, 5)
             print(f"[fetch_jd] 批次间冷却 {cooldown:.0f}s（防 code:37）...")
             _t0_cooldown = time.time()
-            time.sleep(max(cooldown, 5))
+            # 025 B076：冷却分段响应停止信号——批间点暂停不用干等冷却结束
+            _cooldown_remaining = max(cooldown, 5)
+            while _cooldown_remaining > 0:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                _step = min(_cooldown_remaining, 1.0)
+                time.sleep(_step)
+                _cooldown_remaining -= _step
             # T018: 记录 wait 事件（冷却时间计入总耗时）
             if measurement_callback is not None and emit_terminal_events:
                 try:
@@ -154,6 +220,11 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         # 022：批次键跨 chunk 唯一（run_jd_stage 传 task_id+chunk_start 前缀）。
         batch_key = f"{batch_key_prefix or 'jd'}:{batch_start}"
         attempt = 1
+        # 025：批内信号置位（前端据此判定「正处抓 JD 批次中」，暂停弹窗二选一）
+        if batch_progress is not None:
+            batch_progress(
+                batch_start // BATCH_SIZE + 1,
+                (len(indexed_jobs) + BATCH_SIZE - 1) // BATCH_SIZE)
         while True:
             if stop_event is not None and stop_event.is_set():
                 stopped = True
@@ -230,13 +301,33 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                     _executor.on_output_probe = None
                 except Exception:
                     pass
+            # 025 B076：立即停止 → 当前批一律作废（结果不处理、不保全；FR-012）
+            if (stop_event is not None and stop_event.is_set()
+                    and getattr(stop_event, "immediate", False)):
+                stopped = True
+                break
             if guard is not None and guard.should_retry(batch_key):
-                # 卡死：等 3~5s 后整批重抓（接受重复抓取，冻结需求 3）
+                # 025 B077：批返回后立即处理结果——抢救出的已抓并入 jd_by_idx，
+                # 不再被重抓分支丢弃；重抓剔除已抓成功岗位、只抓缺失，避免重复抓。
+                _apply_batch_outcomes(batch, outcomes, batch_exception_code)
+                remaining = [entry for entry in batch
+                             if not jd_by_idx.get(entry[0], "")]
+                if not remaining:
+                    # 卡死前该批已全部抓完（抢救全成功）：不重抓直接完成
+                    guard.complete_batch(batch_key)
+                    break
+                # 卡死：等 3~5s 后重抓缺失岗位（接受重复抓取已抓部分以外的内容）
                 _delay = guard.next_retry_delay()
                 print(f"[fetch_jd] 批次 {batch_key} 判定卡死，"
                       f"{_delay:.0f}s 后重抓（第 {attempt + 1} 次）...")
                 time.sleep(_delay)
                 attempt += 1
+                batch = remaining
+                batch_jobs = [job for _, _, job in remaining]
+                # 025 B077：重抓用新产物文件，不覆盖已抓产物
+                batch_path = os.path.join(
+                    artifact_dir,
+                    f"pipeline_batch_{batch_start}_{time.time_ns()}.json")
                 continue
             if guard is not None and guard.should_giveup(batch_key):
                 # 第 3 次仍卡死：分流收场（环境级由调用方暂停 / 偶发跳过进待确认）
@@ -252,21 +343,17 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                     + ("，检测到环境问题" if stall_divert == "environment"
                        else "，已跳过该批，可在待确认中补抓")
                 )
+                # 025 B077：抢救已抓已并入（count_done=False，done 已在首次处理计数）；
+                # 只对仍无 JD 的岗位覆盖 giveup 失败码，已抓的不丢
+                _apply_batch_outcomes(batch, outcomes, batch_exception_code,
+                                      count_done=False)
                 for idx, jid, _ in batch:
+                    if jd_by_idx.get(idx, ""):
+                        continue
                     jd_fail_by_idx[idx] = _giveup_code
                     jd_fail_reason_by_idx[idx] = _giveup_reason
-                    jd_by_idx[idx] = ""
-                    done += 1
-                    if progress is not None:
-                        try:
-                            progress(done, total)
-                        except Exception:
-                            pass
                 guard.complete_batch(batch_key)
                 break
-            if guard is not None:
-                guard.complete_batch(batch_key)
-                guard.touch(batch_key)  # 批次结果返回也是产出
             if batch_exception_code is not None and not recovery.is_browser_lost(batch_exception_code):
                 hard_stop = True
                 hard_stop_code = batch_exception_code
@@ -337,48 +424,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                                          error_code=batch_exception_code)
                 except Exception:
                     pass
-            for idx, jid, _ in batch:
-                outcome = outcomes.get(jid)
-                jd = ""
-                if outcome is not None and outcome.ok and isinstance(outcome.detail, dict):
-                    jd = str(outcome.detail.get("jd", "")).strip()
-                elif outcome is not None and _jd_is_hard_stop(outcome.failed_code):
-                    # 源级硬信号：停后续批次并上报（别继续抓空气还装完成）
-                    hard_stop = True
-                    hard_stop_code = outcome.failed_code
-                if not jd and batch_exception_code:
-                    jd_fail_by_idx[idx] = batch_exception_code
-                    jd_fail_reason_by_idx[idx] = taxonomy_reason(
-                        batch_exception_code, getattr(source, "platform", ""),
-                        fallback="抓取失败",
-                    )
-                elif not jd and outcome is not None and outcome.failed_code:
-                    jd_fail_by_idx[idx] = outcome.failed_code
-                    jd_fail_reason_by_idx[idx] = (
-                        outcome.failed_reason
-                        or failed_code_label(
-                            outcome.failed_code, getattr(source, "platform", "")
-                        ) or "岗位详情抓取失败"
-                    )
-                    jd_fail_evidence_by_idx[idx] = str(getattr(outcome, "safe_log", "") or "")
-                jd_by_idx[idx] = jd
-                if jd:
-                    fetched += 1
-                # T018: 记录 item_terminal 事件（SC-007 终态守恒）
-                if measurement_callback is not None:
-                    try:
-                        _status = "success" if jd else "failed"
-                        measurement_callback("item_terminal", "detail", 0,
-                                             counts={"item_index": idx, "status": _status,
-                                                     "input_count": total})
-                    except Exception:
-                        pass
-                done += 1
-                if progress is not None:
-                    try:
-                        progress(done, total)
-                    except Exception:
-                        pass
+            # 025 B077：批返回后立即处理结果（抢救的已抓并入；成功清除失败标记）
+            _apply_batch_outcomes(batch, outcomes, batch_exception_code)
             # T018: 记录 batch 事件
             if measurement_callback is not None:
                 try:
@@ -389,10 +436,20 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                                                  "batch_index": batch_start // BATCH_SIZE})
                 except Exception:
                     pass
+            # 025 B076/B077：批返回窗口普通停止 → 已并入的已抓保全
+            if stop_event is not None and stop_event.is_set():
+                stopped = True
+                break
+            if guard is not None:
+                guard.complete_batch(batch_key)
+                guard.touch(batch_key)  # 批次结果返回也是产出
             if hard_stop:
                 break
             # 正常完成（未卡死、未硬停）：退出本批重抓循环
             break
+        # 025：批内信号清除（批结束/停止/重抓循环退出，任何 break 都会落到这里）
+        if batch_progress is not None:
+            batch_progress(None, None)
         if stopped:
             break
         if hard_stop:

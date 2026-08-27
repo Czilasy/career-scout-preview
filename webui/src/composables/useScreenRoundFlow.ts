@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type { Ref } from "vue";
 import { apiRequest, errorMessage } from "../api";
 import {
@@ -78,6 +78,9 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   const continueGuide = ref<{ boss: boolean; zhilian: boolean } | null>(null);
   const busyAction = ref("");
   const suppressProfileWatch = ref(false);
+  // 025 B076：批中暂停二选一弹窗状态（批内信号 → 弹窗；任务状态变化自动关闭）
+  const pauseDialogOpen = ref(false);
+  const pauseBatchInfo = ref<{ current: number; total: number } | null>(null);
 
   const screenStatus = computed(() => {
     const ctx = roundContext.value;
@@ -210,10 +213,43 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     continueGuide.value = null;
   }
 
-  async function pauseScreen(): Promise<void> {
+  // 025 B076：判定「正处抓 JD 批次中」——stage=fetch_jd 且批内信号 jd_batch 非空，
+  // 且任务未进入暂停/终态（弹窗竞态边界：批完成或任务已停视为不在批内）。
+  function inJdBatch(): boolean {
+    const snapshot = deps.refs.screenSnapshot.value;
+    const status = String(snapshot?.status || "");
+    if (["paused", "failed", "cancelled", "interrupted"].includes(status)) return false;
+    const progress = snapshot?.progress as Record<string, unknown> | undefined;
+    if (String(progress?.stage) !== "fetch_jd") return false;
+    const batch = progress?.jd_batch;
+    return Boolean(batch && typeof batch === "object");
+  }
+
+  function openPauseDialog(): void {
+    const progress = deps.refs.screenSnapshot.value?.progress as Record<string, unknown> | undefined;
+    const batch = (progress?.jd_batch ?? {}) as { current?: number; total?: number };
+    pauseBatchInfo.value = {
+      current: Number(batch.current || 0),
+      total: Number(batch.total || 0),
+    };
+    pauseDialogOpen.value = true;
+  }
+
+  function closePauseDialog(): void {
+    pauseDialogOpen.value = false;
+  }
+
+  // 弹窗打开期间任务状态变化（批次完成/任务已暂停等）→ 自动关闭（竞态边界）
+  watch(
+    () => deps.refs.screenSnapshot.value,
+    () => {
+      if (pauseDialogOpen.value && !inJdBatch()) closePauseDialog();
+    },
+    { deep: true },
+  );
+
+  async function doPause(runId: string, mode: "immediate" | "graceful"): Promise<void> {
     if (busyAction.value) return;
-    const runId = deps.refs.screenTaskId.value;
-    if (!runId) return;
     busyAction.value = "pause";
     deps.refs.screenBusy.value = true;
     deps.refs.pausingScreen.value = true;
@@ -224,7 +260,10 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       error: "",
     };
     try {
-      await apiRequest(`/api/task/pause/${encodeURIComponent(runId)}`, { method: "POST" });
+      await apiRequest(`/api/task/pause/${encodeURIComponent(runId)}`, {
+        method: "POST",
+        json: { mode },
+      });
       let paused = false;
       let terminalOther = false;
       for (let i = 0; i < 15; i += 1) {
@@ -268,6 +307,26 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     } finally {
       busyAction.value = "";
     }
+  }
+
+  async function pauseScreen(): Promise<void> {
+    if (busyAction.value) return;
+    const runId = deps.refs.screenTaskId.value;
+    if (!runId) return;
+    // 025 B076：正处抓 JD 批次中 → 弹二选一（立即停止 / 等这批抓完），暂停动作挂起；
+    // 粗筛/精筛/批间（无批内信号）→ 不弹窗，直接暂停（graceful 现状行为）。
+    if (inJdBatch()) {
+      openPauseDialog();
+      return;
+    }
+    await doPause(runId, "graceful");
+  }
+
+  async function confirmPauseChoice(mode: "immediate" | "graceful"): Promise<void> {
+    closePauseDialog();
+    const runId = deps.refs.screenTaskId.value;
+    if (!runId) return;
+    await doPause(runId, mode);
   }
 
   async function continueScreen(platform?: Platform): Promise<void> {
@@ -446,6 +505,11 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     registerRoundContext,
     clearRoundContext,
     pauseScreen,
+    doPause,
+    confirmPauseChoice,
+    closePauseDialog,
+    pauseDialogOpen,
+    pauseBatchInfo,
     continueScreen,
     chooseContinuePlatform,
     cancelContinueGuide,

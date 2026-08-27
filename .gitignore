@@ -143,3 +143,5 @@ design/
 
 # Source maps are build-time only; dist release snapshots stay tracked
 webui/dist/**/*.map
+# 本地运行数据/测试产物（AGENTS.md：测试产物禁止进仓库）
+tmp/

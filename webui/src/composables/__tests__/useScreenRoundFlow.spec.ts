@@ -121,7 +121,7 @@ describe("useScreenRoundFlow", () => {
       await flushPromises();
       await promise;
       expect(apiRequestMock).toHaveBeenCalledWith(
-        "/api/task/pause/screen-1", { method: "POST" },
+        "/api/task/pause/screen-1", { method: "POST", json: { mode: "graceful" } },
       );
       expect(refs.screenBusy.value).toBe(false);
       expect(refs.screenSnapshot.value?.status).toBe("paused");
@@ -390,5 +390,149 @@ describe("useScreenRoundFlow", () => {
     expect(confirmMock).not.toHaveBeenCalled();
     expect(api.resetWorkflow).toHaveBeenCalled();
     confirmMock.mockRestore();
+  });
+});
+
+describe("pauseScreen 批中弹窗分支（025 B076）", () => {
+  function jdBatchSnapshot(batch: unknown) {
+    return {
+      status: "running",
+      progress: { stage: "fetch_jd", current: 30, total: 57, jd_batch: batch },
+    };
+  }
+
+  it("批中（stage=fetch_jd 且 jd_batch 非空）→ 打开二选一弹窗，不直接调暂停 API", async () => {
+    const { refs, api } = makeDeps();
+    refs.screenTaskId.value = "screen-1";
+    refs.screenSnapshot.value = jdBatchSnapshot({ current: 2, total: 4 });
+    const flow = useScreenRoundFlow({ refs, api });
+    await flow.pauseScreen();
+    expect(flow.pauseDialogOpen.value).toBe(true);
+    expect(flow.pauseBatchInfo.value).toEqual({ current: 2, total: 4 });
+    expect(apiRequestMock).not.toHaveBeenCalled();
+  });
+
+  it("非批中（无 jd_batch / 非 fetch_jd 阶段）→ 不弹窗，直接调暂停 API（graceful）", async () => {
+    vi.useFakeTimers();
+    try {
+      const { refs, api } = makeDeps();
+      refs.screenTaskId.value = "screen-1";
+      // 粗筛阶段：无 jd_batch
+      refs.screenSnapshot.value = {
+        status: "running",
+        progress: { stage: "ai_rough", current: 1, total: 10 },
+      };
+      apiRequestMock
+        .mockResolvedValueOnce({ ok: true, run_id: "screen-1", status: "pausing" })
+        .mockResolvedValueOnce({ status: "paused" });
+      const flow = useScreenRoundFlow({ refs, api });
+      const promise = flow.pauseScreen();
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+      await promise;
+      expect(flow.pauseDialogOpen.value).toBe(false);
+      expect(apiRequestMock).toHaveBeenCalledWith(
+        "/api/task/pause/screen-1", { method: "POST", json: { mode: "graceful" } },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("批内信号存在但无进度字段（jd_batch 空对象）→ 视为非批中直接暂停", async () => {
+    vi.useFakeTimers();
+    try {
+      const { refs, api } = makeDeps();
+      refs.screenTaskId.value = "screen-1";
+      refs.screenSnapshot.value = jdBatchSnapshot(null);
+      apiRequestMock
+        .mockResolvedValueOnce({ ok: true, run_id: "screen-1", status: "pausing" })
+        .mockResolvedValueOnce({ status: "paused" });
+      const flow = useScreenRoundFlow({ refs, api });
+      const promise = flow.pauseScreen();
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+      await promise;
+      expect(flow.pauseDialogOpen.value).toBe(false);
+      expect(apiRequestMock).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("选立即停止 → 调暂停 API mode=immediate", async () => {
+    vi.useFakeTimers();
+    try {
+      const { refs, api } = makeDeps();
+      refs.screenTaskId.value = "screen-1";
+      refs.screenSnapshot.value = jdBatchSnapshot({ current: 2, total: 4 });
+      apiRequestMock
+        .mockResolvedValueOnce({ ok: true, run_id: "screen-1", status: "pausing" })
+        .mockResolvedValueOnce({ status: "paused" });
+      const flow = useScreenRoundFlow({ refs, api });
+      await flow.pauseScreen();
+      expect(flow.pauseDialogOpen.value).toBe(true);
+      const promise = flow.confirmPauseChoice("immediate");
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+      await promise;
+      expect(flow.pauseDialogOpen.value).toBe(false);
+      expect(apiRequestMock).toHaveBeenCalledWith(
+        "/api/task/pause/screen-1", { method: "POST", json: { mode: "immediate" } },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("选等这批抓完 → 调暂停 API mode=graceful", async () => {
+    vi.useFakeTimers();
+    try {
+      const { refs, api } = makeDeps();
+      refs.screenTaskId.value = "screen-1";
+      refs.screenSnapshot.value = jdBatchSnapshot({ current: 2, total: 4 });
+      apiRequestMock
+        .mockResolvedValueOnce({ ok: true, run_id: "screen-1", status: "pausing" })
+        .mockResolvedValueOnce({ status: "paused" });
+      const flow = useScreenRoundFlow({ refs, api });
+      await flow.pauseScreen();
+      const promise = flow.confirmPauseChoice("graceful");
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+      await promise;
+      expect(apiRequestMock).toHaveBeenCalledWith(
+        "/api/task/pause/screen-1", { method: "POST", json: { mode: "graceful" } },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("弹窗打开期间批内信号消失（批次完成）→ 弹窗自动关闭（竞态边界）", async () => {
+    const { refs, api } = makeDeps();
+    refs.screenTaskId.value = "screen-1";
+    refs.screenSnapshot.value = jdBatchSnapshot({ current: 2, total: 4 });
+    const flow = useScreenRoundFlow({ refs, api });
+    await flow.pauseScreen();
+    expect(flow.pauseDialogOpen.value).toBe(true);
+    // 批次完成：jd_batch 清除
+    refs.screenSnapshot.value = {
+      status: "running",
+      progress: { stage: "fetch_jd", current: 57, total: 57, jd_batch: null },
+    };
+    await flushPromises();
+    expect(flow.pauseDialogOpen.value).toBe(false);
+  });
+
+  it("弹窗打开期间任务已暂停 → 弹窗自动关闭", async () => {
+    const { refs, api } = makeDeps();
+    refs.screenTaskId.value = "screen-1";
+    refs.screenSnapshot.value = jdBatchSnapshot({ current: 2, total: 4 });
+    const flow = useScreenRoundFlow({ refs, api });
+    await flow.pauseScreen();
+    expect(flow.pauseDialogOpen.value).toBe(true);
+    refs.screenSnapshot.value = { status: "paused", progress: { stage: "fetch_jd", jd_batch: { current: 2, total: 4 } } };
+    await flushPromises();
+    expect(flow.pauseDialogOpen.value).toBe(false);
   });
 });
