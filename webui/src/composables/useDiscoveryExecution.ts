@@ -42,7 +42,7 @@ import type { OneClickLaunch } from "./useDiscoveryState";
 import type { TaskSnapshot } from "./useDiscoveryState";
 
 export function useDiscoveryExecution(state: DiscoveryState, deps: any = {}) {
-  const { activeCategory, activeStep, activeTaskRestored, advancedPanelsOpen, analysisReady, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityList, currentRoundStatus, draftPlatform, effectiveSearchCities, filterValues, finishSaveBusy, finishedPartial, historyDetail, historyMode, historyRound, historyScreenBusy, interruptedRunId, locationDraft, nationalScopeConfirm, oneClickOpen, pausedRunId, pipelineBusy, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, pollRetryCount, pollTimer, profileConfirmed, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, restoredTaskHint, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, schemaRef, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, switchAccountId, switchAccounts } = state;
+  const { activeCategory, activeStep, activeTaskRestored, advancedPanelsOpen, analysisReady, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityList, currentRoundStatus, draftPlatform, effectiveSearchCities, filterValues, finishSaveBusy, finishedPartial, historyDetail, historyMode, historyRound, historyScreenBusy, interruptedRunId, locationDraft, nationalScopeConfirm, oneClickOpen, pausedRunId, pipelineBusy, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, pollRetryCount, pollTimer, profileConfirmed, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, restoredTaskHint, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, schemaRef, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, switchAccountId, switchAccounts } = state;
   const { clearWorkflowState, enrichPausedSnapshot, enterScreenStep, enterSearchStep, isCompletedTaskStatus, isLoginErrorCode, loadCityCatalog, loadFilterLabels, loadLatestResult, notify, pollRecrawl, pollTask, refreshScopePreview, requireProfileConfirmed, restoreLocationsFromContext, returnToLatest, saveScrapedOnlySnapshot, setDraftPlatform, setPipelineResult, showLoginGuide, validateProfileForScreen } = deps;
 
 
@@ -79,6 +79,11 @@ async function restoreRunningTask() {
       round_context?: Partial<RoundContext> | null;
     }>("/api/latest-running-task");
     if (!data.has_task || !data.task_id) return;
+    // 026 B078：已进 04 页（或结束保存）＝上次流程已结束。后端残留的任何
+    // 任务（interrupted/paused/failed/completed scrape）都不得触发恢复或
+    // "服务重启被中断"提示，保持 01 页；统一由 maybeAutoStartNewRound 重置
+    //（spec FR-002/FR-003/FR-004；判据为持久化的已结束事实）。
+    if (resultsPageSeen.value || finishedPartial.value) return;
     activeTaskRestored.value = true;
     // T509：先设置任务自身平台，再加载对应 schema/城市（platform-schema.md L157）。
     // 不改草稿平台（不变式 2：setTaskPlatform 不改 draft/result）。
@@ -633,6 +638,9 @@ async function finishPausedTask(runId: string) {
     interruptedRunId.value = "";
     autoScreenArmed.value = false;
     finishedPartial.value = true;
+    // 026 B078：结束保存同样视为流程已结束，持久化已结束事实，
+    // 刷新后不被后端残留 run 误恢复。
+    deps.persistFinishedState?.();
     deps.clearWorkflowState();
     const totalScraped = Number(data.result?.total_scraped ?? 0);
     const finished: TaskSnapshot = {

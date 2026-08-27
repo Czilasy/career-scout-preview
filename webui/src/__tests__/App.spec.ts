@@ -28,7 +28,11 @@ describe("App", () => {
         });
       }
       if (url.endsWith("/api/check")) return response({ connected: true });
-      if (url.endsWith("/api/profiles")) return response({ profiles: [] });
+      if (url.endsWith("/api/profiles")) {
+        // 026 B078：DiscoveryView 在 currentProfileId 就绪后才挂载（v-if），
+        // 空 profiles 会导致工作台不渲染——测试需提供至少一个 profile。
+        return response({ profiles: [{ id: "profile-1", name: "测试" }] });
+      }
       if (url.endsWith("/api/latest-pipeline-result")) {
         return response({ ok: true, has_result: false });
       }
@@ -410,7 +414,7 @@ describe("App", () => {
 
   it("cancels a favorite with only the internal job id (no partial identity fields)", async () => {
     // 回归：收藏抽屉点 X 取消收藏此前附带 job_link 但缺 platform，
-    // 后端权威解析报“岗位身份信息不完整”422；修复后只传内部 job_id。
+    // 后端权威解析报"岗位身份信息不完整"422；修复后只传内部 job_id。
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/api/favorites")) {

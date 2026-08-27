@@ -516,6 +516,9 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                 if jd:
                     jj = dict(j)
                     jj["job_id"] = jid
+                    # 026 B080：补抓到的 JD 必须写入精筛输入，否则
+                    # has_usable_jd 对空 jd 判 false → 永远"未抓到 JD 无法精筛"。
+                    jj["jd"] = jd
                     to_judge.append(jj)
             if to_judge:
                 _adv = ctx.load_legacy_advanced_settings()

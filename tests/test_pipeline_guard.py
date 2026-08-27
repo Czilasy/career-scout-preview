@@ -300,6 +300,53 @@ class FetchJobDetailsGuardTests(unittest.TestCase):
         st = self.guard.batch_state("jd-t1-0:0")
         self.assertEqual(st["attempt"], 2)
 
+    def test_batch_registers_real_run_id_not_batch_key_prefix(self):
+        """回归：guard 批次登记的 task_id 必须是真 run_id，而非 batch_key_prefix。
+
+        历史 bug：pipeline_exec_details 把 task_id 传成 ``jd-<runid>-<chunk>``，
+        导致卡死兜底 _pause_task 用错误 id 写 screening_runs 抛 KeyError、任务
+        永久悬死；immediate_stop_task(run_id) 也匹配不到批次。修复后 begin_batch
+        必须收到真正的 run_id。
+        """
+        from webui.pipeline_exec_details import fetch_job_details
+        run_id = "REAL-RUN-ID-123"
+
+        class _FakeSource:
+            platform = "boss"
+            cdp_port = 9222
+
+            def __init__(self):
+                self._executor = mock.Mock()
+
+            def fetch_details_batch(self, jobs, **kwargs):
+                return {
+                    str(job.get("job_id")): SourceOutcome.success(
+                        detail={"jd": "x"}, safe_log="ok",
+                    )
+                    for job in jobs
+                }
+
+        jobs = [
+            {"platform_job_id": "1", "job_id": "1", "title": "A"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            fetch_job_details(
+                jobs, _FakeSource(),
+                artifact_dir=tmp,
+                execution_config=SimpleNamespace(
+                    detail_batch_size=5, detail_interval=0,
+                    detail_reset_every=0, detail_batch_cooldown=0,
+                    detail_tab_pool_size=1,
+                ),
+                guard=self.guard,
+                batch_key_prefix=f"jd-{run_id}-30",
+                task_id=run_id,
+            )
+        st = self.guard.batch_state(f"jd-{run_id}-30:0")
+        self.assertIsNotNone(st, "批次应已被 guard 登记")
+        self.assertEqual(st["task_id"], run_id,
+                         "guard 批次 task_id 必须是真 run_id，不得是 jd- 前缀的批次键")
+
 
 if __name__ == "__main__":
     unittest.main()

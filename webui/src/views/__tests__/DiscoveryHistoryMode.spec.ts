@@ -28,6 +28,9 @@ describe("DiscoveryView history mode", () => {
   beforeEach(() => {
     setBuildIdentity(expectedBackendBuildHash);
     setThemePlatform("boss");
+    // 026 B078：已结束事实持久化在 localStorage，须随测试隔离清空
+    sessionStorage.clear();
+    localStorage.clear();
   });
 
   it("opens a round, locks platform/rewrite actions, and returns to latest", async () => {

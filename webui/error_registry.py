@@ -143,6 +143,13 @@ _SOURCE_CODES: dict[str, dict[str, Any]] = {
         retryable=True,
         user_message="未知抓取错误",
     ),
+    "source_result_write_failed": _entry(
+        "source_result_write_failed", "source",
+        retryable=True,
+        user_message="结果文件写入失败",
+        impact="independent",
+        resume_condition="可重试抓取",
+    ),
 }
 
 

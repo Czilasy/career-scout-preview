@@ -596,7 +596,13 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
     />
 
     <div class="app-content">
+      <!-- 026 B078：profileId 确定前不挂载 DiscoveryView——否则首次挂载时
+           profileId 为空，restoreWorkflowState 用空 key 读不到「已结束」标记，
+           会把已结束流程误恢复成 02/03 页（刷新闪现）。等 currentProfileId
+           从 /api/profiles 就绪后再挂载，恢复判定才拿到正确的 key。 -->
+      <div v-if="!currentProfileId" class="app-content-placeholder">正在加载工作台…</div>
       <DiscoveryView
+        v-else
         :profile-id="currentProfileId"
         ref="discoveryRef"
         @notify="showNotice"
@@ -655,5 +661,14 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
   height: 8px;
   border-radius: 50%;
   background: var(--danger);
+}
+
+.app-content-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+  color: var(--text-muted, #888);
+  font-size: 14px;
 }
 </style>

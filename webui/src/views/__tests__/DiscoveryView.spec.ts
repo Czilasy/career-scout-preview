@@ -16,6 +16,8 @@ describe("DiscoveryView", () => {
     // 确保当前测试引用的 api 模块实例处于已验证状态（setup.ts 的验证可能落在另一个模块实例上）
     setBuildIdentity(expectedBackendBuildHash);
     sessionStorage.clear();
+    // 026 B078：已结束事实持久化在 localStorage，须随测试隔离清空
+    localStorage.clear();
   });
 
   it("B068: refresh keeps the unfinished 02 page state and does not load an old result over a live task", async () => {
@@ -4481,6 +4483,8 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
 
   afterEach(() => {
     sessionStorage.clear();
+    // 026 B078：localStorage 已结束事实也随测试隔离清空
+    localStorage.clear();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -4558,5 +4562,34 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
     // 恢复现场：不回归 01 页上传
     expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(false);
     wrapper.unmount();
+  });
+
+  it("T005: 026 B078——已进 04 页（已结束）+ 后端残留 interrupted → 只显示 01 页、无被中断提示", async () => {
+    // 已结束事实独立持久化（localStorage）：上次进过 04 页
+    localStorage.clear();
+    localStorage.setItem(
+      "career-scout-workflow:profile-b078-026:finished",
+      JSON.stringify({ resultsPageSeen: true, finishedPartial: false }),
+    );
+    const fetchMock = baseFetch({
+      latestTask: {
+        ok: true, has_task: true, task_id: "interrupted-026", kind: "ai_screen",
+        status: "interrupted", platform: "boss", scrape_task_id: "scrape-026",
+        scrape_completed: true, frozen_filters: { salary: ["406"] },
+        profile_summary: "3年Python后端",
+        progress: { stage: "ai_fine", message: "已中断" }, logs: [],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-b078-026" } });
+    await flushPromises();
+    // 01 页上传区可见（自动新一轮回到干净起点）
+    expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
+    // 02 页不出现、无"服务重启被中断"提示、无恢复横幅
+    expect(wrapper.find('[data-testid="custom-keyword"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("服务重启被中断");
+    expect(wrapper.find(".restore-banner").exists()).toBe(false);
+    wrapper.unmount();
+    localStorage.clear();
   });
 });

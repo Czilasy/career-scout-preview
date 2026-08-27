@@ -56,6 +56,31 @@ def write_detail_csv(csv_path, details):
 # ============================================================
 # 增量写入 JSON
 # ============================================================
+def _replace_with_retry(temp_path, path, retries=3, delay=0.05):
+    """os.replace 短暂重试（Windows 下目标文件被占用偶发 OSError）。
+
+    杀软/索引/OneDrive 瞬时锁定通常一次重试即过；重试耗尽抛专门异常
+    ``ResultFileWriteError``，供 CLI 顶层映射为独立退出码，绝不误报登录失效。
+    """
+    from scripts.boss.exceptions import ResultFileWriteError
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            os.replace(temp_path, path)
+            return
+        except OSError as exc:
+            last_error = exc
+            if attempt >= retries:
+                raise ResultFileWriteError(
+                    f"结果文件写入失败（{path}）：{exc}"
+                ) from exc
+            time.sleep(delay * (attempt + 1))
+    if last_error is not None:
+        raise ResultFileWriteError(
+            f"结果文件写入失败（{path}）：{last_error}"
+        ) from last_error
+
+
 def write_json_atomic(path, payload):
     """Write a complete sibling file and atomically replace the destination."""
     directory = os.path.dirname(path) or "."
@@ -66,7 +91,7 @@ def write_json_atomic(path, payload):
             json.dump(payload, handle, ensure_ascii=False, indent=2)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_path, path)
+        _replace_with_retry(temp_path, path)
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)

@@ -39,6 +39,49 @@ function clearWorkflowState(): void {
   try { sessionStorage.removeItem(workflowStateKey.value); } catch { /* storage unavailable */ }
 }
 
+// 026 B078：已结束事实独立持久化（localStorage，跨会话）。
+// "是否进过 04 页（结果页）"是流程是否结束的唯一判据（spec FR-001/A1）。
+// 与 workflow 快照（sessionStorage）分离：进 04 页/结束保存时置位并持久化，
+// 开始新一轮时清除；刷新/重启后 restoreWorkflowState 据此恢复，即使后端
+// 残留历史 interrupted run，也不把已结束流程误恢复成半截流程。
+function finishedStateKey(): string {
+  return `${workflowStateKey.value}:finished`;
+}
+
+function readFinishedState(): { resultsPageSeen: boolean; finishedPartial: boolean } {
+  try {
+    const raw = localStorage.getItem(finishedStateKey());
+    if (!raw) return { resultsPageSeen: false, finishedPartial: false };
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      resultsPageSeen: Boolean(parsed.resultsPageSeen),
+      finishedPartial: Boolean(parsed.finishedPartial),
+    };
+  } catch {
+    return { resultsPageSeen: false, finishedPartial: false };
+  }
+}
+
+function persistFinishedState(): void {
+  try {
+    localStorage.setItem(finishedStateKey(), JSON.stringify({
+      resultsPageSeen: resultsPageSeen.value,
+      finishedPartial: finishedPartial.value,
+    }));
+  } catch { /* best effort */ }
+}
+
+function clearFinishedState(): void {
+  try { localStorage.removeItem(finishedStateKey()); } catch { /* best effort */ }
+}
+
+function markResultsPageSeen(): void {
+  resultsPageSeen.value = true;
+  // 进 04 页即流程结束：清空未完成快照（既有行为），并持久化已结束事实。
+  clearWorkflowState();
+  persistFinishedState();
+}
+
 // D7：未登录类错误码（BOSS/智联 preflight 与任务暂停的稳定错误码）。
 
 
@@ -93,14 +136,30 @@ function persistWorkflowState(): void {
 
 
 function restoreWorkflowState(): void {
+  // 026 B078：已结束事实独立持久化（localStorage），作为恢复判定的唯一闸门。
+  const finished = readFinishedState();
+  if (finished.resultsPageSeen) resultsPageSeen.value = true;
+  if (finished.finishedPartial) finishedPartial.value = true;
   const saved = readWorkflowState();
   if (!saved?.unfinished) {
     workflowStateRestored.value = true;
     return;
   }
+  // 026 B078：已结束（进过 04 页/结束保存）的流程，即使 sessionStorage 残留
+  // 未完成快照，也不恢复任何步骤状态——否则刷新瞬间会短暂恢复 02/03 页
+  //（随后被 maybeAutoStartNewRound 的 resetWorkflow 纠正，产生脏过渡窗口）。
+  if (resultsPageSeen.value || finishedPartial.value) {
+    workflowStateRestored.value = true;
+    return;
+  }
   unfinishedWorkflowRestored.value = true;
   restoredWorkflowSnapshot.value = saved;
-  resultsPageSeen.value = Boolean(saved.resultsPageSeen);
+  // 026 B078：已结束事实（localStorage，line 上方已恢复）优先；快照内的
+  // resultsPageSeen 仅作未结束时兜底（未结束快照里该值恒 false），
+  // 不得覆盖"已进 04 页"判定，否则异常态下会复发 B078。
+  if (!resultsPageSeen.value) {
+    resultsPageSeen.value = Boolean(saved.resultsPageSeen);
+  }
   if (saved.activeStep) activeStep.value = saved.activeStep as StepId;
   analysisReady.value = Boolean(saved.analysisReady);
   keywords.value = Array.isArray(saved.keywords) ? saved.keywords : [];
@@ -204,5 +263,9 @@ return {
   enterScreenStep,
   selectStep,
   notify,
+  // 026 B078：已结束事实持久化
+  markResultsPageSeen,
+  persistFinishedState,
+  clearFinishedState,
 };
 }

@@ -5,6 +5,7 @@
 import json
 import os
 import random
+import threading
 import time
 from scripts.boss.constants import CDP_ABOUT_BLANK, CDP_CMD_ADD_SCRIPT_ON_NEW_DOC, CDP_CMD_ATTACH_TARGET, CDP_CMD_CLOSE_TARGET, CDP_CMD_CREATE_TARGET, CDP_CMD_PAGE_NAVIGATE, DEFAULT_CDP_PORT, EXTRACT_DETAIL_JS, HIDDEN_DEFINE_JS, MSG_USER_CANCELLED_SCRAPE, _READINESS_PROBE_JS, _VISIBILITY_STATE_JS
 from scripts.boss.detail_parse import build_detail_url, extract_job_description
@@ -468,13 +469,30 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
         else:
             raise
     finally:
-        # 结束一次性关 tab + 关会话（限流停工时限流页保留不关）
-        if tid is not None and not keep_tab_open:
+        # 结束一次性关 tab + 关会话（限流停工时限流页保留不关）。
+        # 026 修复：CDP 收尾偶发卡死会让 worker 永久挂起，主线程 join 超时后
+        # daemon worker 被杀、finally 中断 → tab 残留（回归）。收尾放带超时的
+        # 子线程：正常秒级关闭；卡死 10s 后强制结束（记录不静默）。
+        _fini_done = threading.Event()
+
+        def _finalize_close():
             try:
-                ws.send(CDP_CMD_CLOSE_TARGET, {"targetId": tid})
+                if tid is not None and not keep_tab_open:
+                    ws.send(CDP_CMD_CLOSE_TARGET, {"targetId": tid})
             except Exception:
                 pass
-        ws.close()
+            try:
+                ws.close()
+            except Exception:
+                pass
+            finally:
+                _fini_done.set()
+
+        _closer = threading.Thread(target=_finalize_close, daemon=True)
+        _closer.start()
+        _closer.join(timeout=10)
+        if not _fini_done.is_set():
+            print(f"[{tab_label}] 收尾超时（CDP 卡死），已强制结束")
         print(f"[{tab_label}] 已关闭")
 
 
@@ -486,7 +504,8 @@ def scrape_details(list_data, max_details=None, output_path=None,
                    trailing_wait=False,
                    enable_parallel=False, tab_pool_size=5,
                    stagger_range=(5, 10), reset_every=3,
-                   cancel_event=None, on_poll=None, simulation_mode=None):
+                   cancel_event=None, on_poll=None, simulation_mode=None,
+                   finalize_timeout=600):
     """抓取岗位详情页并返回结构化结果。
 
     Policy v2 keyword-only parameters (feature 005) +
@@ -615,8 +634,20 @@ def scrape_details(list_data, max_details=None, output_path=None,
             )
             t.start()
             threads.append(t)
+        # 收尾防静默挂起：worker 是 daemon 线程，收尾已在 _tab_worker 内部用带超时
+        # 的收尾线程保护（防 CDP 收尾卡死）。主线程 join 的 timeout 覆盖「整批抓取
+        # 预期时长」（finalize_timeout，默认 600s，与上层子进程整体超时一致），只
+        # 兜底极端卡死；超时只记录、不把已抓数据判失败（回归修复：原先 90s 固定超时
+        # 从 worker 启动即开始计时、覆盖整个抓取过程，稳定/平衡档必然超时 → 大批
+        # 岗位被误标 source_unknown_error →「未抓到 JD」）。
+        _finalize_incomplete = False
+        _finalize_deadline = time.time() + finalize_timeout
         for t in threads:
-            t.join()
+            t.join(timeout=max(1.0, _finalize_deadline - time.time()))
+            if t.is_alive():
+                print(f"[detail_scrape] 警告：worker {t.name} 超时未退出"
+                      f"（已抓 {len(results)}/{total}），继续等待其余线程后收场...")
+                _finalize_incomplete = True
         # B050：worker 异常必须透出到主流程，不能静默死亡后把空批次当成功。
         if worker_errors:
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -626,6 +657,10 @@ def scrape_details(list_data, max_details=None, output_path=None,
                 None,
             )
             raise limit_error if limit_error is not None else worker_errors[0]
+        # 收尾超时（worker 卡在抓取/CDP 收尾）：已抓结果逐条原子落盘保留，
+        # 只记录、不抛致命错——否则整批被上游判 source_unknown_error（回归）。
+        if _finalize_incomplete:
+            print("\n⚠ 详情抓取超时：部分 worker 未在预期时间内退出，已抓结果已保存。")
         # programmatic 取消：线程退出后 flush 已抓 results 并抛 SearchCancelled
         if cancel_event is not None and cancel_event.is_set():
             write_json_atomic(output_path, results)

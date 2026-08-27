@@ -53,8 +53,27 @@ class ErrorRegistryTests(unittest.TestCase):
             frozenset({"job_offline", "detail_timeout", "detail_invalid",
                        "ai_missing_job", "source_status_unclear"}),
         )
-        self.assertEqual(len(SAFE_FAILURE_CODES), 14)
+        self.assertEqual(len(SAFE_FAILURE_CODES), 15)
         self.assertTrue(set(ERROR_TAXONOMY) <= ERROR_CODES)
+
+    def test_source_result_write_failed_is_registered(self):
+        """T013：026 B079 结果文件写失败码已注册、文案与语义正确（FR-007）。"""
+        from webui.error_registry import (
+            FAILED_CODE_LABELS,
+            INDEPENDENT_FAILURE_CODES,
+            REGISTRY,
+            resolve_code,
+        )
+        self.assertIn("source_result_write_failed", ERROR_CODES)
+        entry = REGISTRY["source_result_write_failed"]
+        self.assertEqual(entry["category"], "source")
+        self.assertEqual(entry["user_message"], "结果文件写入失败")
+        self.assertTrue(entry["retryable"])
+        self.assertFalse(entry["blocking"])
+        self.assertEqual(FAILED_CODE_LABELS["source_result_write_failed"],
+                         "结果文件写入失败")
+        self.assertEqual(resolve_code("source_result_write_failed"),
+                         "source_result_write_failed")
 
     def test_legacy_taxonomy_codes_resolve_to_canonical(self):
         from webui.error_registry import ALIAS_TO_CODE

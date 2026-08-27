@@ -2,6 +2,13 @@ import { expectedBackendBuildHash, setBuildIdentity } from "../api";
 
 setBuildIdentity(expectedBackendBuildHash);
 
+// 026 B078：已结束事实持久化在 localStorage（进 04 页置位），
+// 所有测试用例间统一隔离，防止跨用例污染 Discovery 恢复判定。
+beforeEach(() => {
+  localStorage.clear();
+  sessionStorage.clear();
+});
+
 const values = new Map<string, string>();
 const storage: Storage = {
   get length() { return values.size; },

@@ -71,3 +71,11 @@ class LoginRequiredError(RuntimeError):
     main() 在 _facade().check_login_state 返回 False 时 sys.exit(1)；programmatic
     入口改为抛出本异常，调用方映射为登录失效失败码。
     """
+
+
+class ResultFileWriteError(RuntimeError):
+    """结果文件落盘失败（os.replace 重试耗尽仍被占用/锁定）。
+
+    与登录失效严格区分：CLI 顶层捕获后映射为独立退出码 + 结构化失败行
+    ``source_result_write_failed``，禁止回退为退出码 1 的通用兜底文案。
+    """

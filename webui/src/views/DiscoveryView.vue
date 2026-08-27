@@ -270,6 +270,10 @@ shared.notify = workflow.notify;
 shared.enterSearchStep = workflow.enterSearchStep;
 shared.enterScreenStep = workflow.enterScreenStep;
 shared.clearWorkflowState = workflow.clearWorkflowState;
+// 026 B078：已结束事实持久化（进 04 页置位 / 结束保存 / 新一轮清除）
+shared.markResultsPageSeen = workflow.markResultsPageSeen;
+shared.persistFinishedState = workflow.persistFinishedState;
+shared.clearFinishedState = workflow.clearFinishedState;
 shared.startScrape = execution.startScrape;
 shared.openOneClickDialog = execution.openOneClickDialog;
 shared.restoreRunningTask = execution.restoreRunningTask;
@@ -326,6 +330,9 @@ const {
   enterScreenStep,
   selectStep,
   notify,
+  markResultsPageSeen,
+  persistFinishedState,
+  clearFinishedState,
   showLoginGuide,
   isLoginErrorCode,
   confirmNationalScope,
@@ -496,8 +503,8 @@ watch([searchPanelsOpen, advancedPanelsOpen], ([newS, newA], [oldS, oldA]) => {
 
 watch(activeStep, (step) => {
   if (step === "results") {
-    resultsPageSeen.value = true;
-    clearWorkflowState();
+    // 026 B078：进 04 页＝流程结束，置位并持久化已结束事实（唯一判据）。
+    markResultsPageSeen();
   }
 });
 

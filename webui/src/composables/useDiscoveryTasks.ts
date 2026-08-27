@@ -673,6 +673,12 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
 async function maybeAutoStartNewRound(): Promise<void> {
   // 未完成流程（本地有未完成快照）→ 恢复现场（B068 行为保留，不改）
   if (unfinishedWorkflowRestored.value) return;
+  // 026 B078：已进 04 页（或结束保存）＝上次流程已结束 → 直接开始新一轮，
+  // 不再依赖后端历史轮状态/时间戳推断（spec FR-001/FR-005）。
+  if (resultsPageSeen.value || finishedPartial.value) {
+    await resetWorkflow();
+    return;
+  }
   // 有恢复的活动任务：仅已完成终态属于完成态 → 自动新一轮；否则恢复现场
   if (activeTaskRestored.value) {
     const taskStatus = String(
@@ -715,6 +721,8 @@ async function resetWorkflow() {
   if (!(await cancelActiveTasksForNewRound())) return;
   if (!(await deps.clearLatestResult())) return;
   deps.clearWorkflowState();
+  // 026 B078：开始新一轮即清除持久化的已结束事实。
+  deps.clearFinishedState?.();
   resultsPageSeen.value = false;
   if (pollTimer.value) window.clearTimeout(pollTimer.value);
   activeStep.value = "upload";

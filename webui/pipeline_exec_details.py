@@ -24,6 +24,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                       measurement_callback=None,
                       emit_terminal_events=True,
                       guard=None, batch_key_prefix=None,
+                      task_id=None,
                       simulation_mode=None,
                       batch_progress=None):
     """对一批岗位批量抓 JD（调用方需先确保 Chrome 就绪）。
@@ -278,11 +279,14 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                     # 级故障，不能伪装成一批空结果继续推进。
                     return {}, _classify_detail_batch_exception(exc)
 
-            # 022：批次登记 + 挂 spawn 钩子（登记子进程供卡死 kill）+ 心跳透传
+            # 022：批次登记 + 挂 spawn 钩子（登记子进程供卡死 kill）+ 心跳透传。
+            # task_id 必须是真正的 run_id（不是带 jd- 前缀的 batch_key_prefix），
+            # 否则 guard 兜底暂停 _pause_task 用错误 id 写 screening_runs 会抛
+            # KeyError，任务永久悬死；immediate_stop_task(run_id) 也匹配不到批次。
             _executor = None
             if guard is not None:
                 guard.begin_batch(
-                    batch_key, task_id=batch_key_prefix or "",
+                    batch_key, task_id=task_id or "",
                     attempt=attempt, env_probe=_make_env_probe(source),
                 )
                 _executor = getattr(source, "_executor", None)

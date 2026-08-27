@@ -43,7 +43,7 @@ websocket = None
 requests = None
 _run_active = False  # 是否正在 run_search_programmatic 组合运行内
 
-from scripts.boss.exceptions import CDPUnavailableError
+from scripts.boss.exceptions import CDPUnavailableError, ResultFileWriteError
 
 from scripts.boss_cdp_signals import (
     RATE_LIMIT_KEYWORDS,
@@ -121,3 +121,8 @@ if __name__ == "__main__":
         # （cdp_session.py）；同样归入浏览器失联退出码 2。
         emit_failure_line("source_cdp_unavailable", str(exc))
         sys.exit(2)
+    except ResultFileWriteError as exc:
+        # 026 B079：结果文件写失败重试耗尽——专门退出码 + 结构化失败行
+        # （source_result_write_failed），绝不回退退出码 1 误报登录失效。
+        emit_failure_line("source_result_write_failed", str(exc))
+        sys.exit(4)

@@ -95,9 +95,14 @@ function mountWithFetch(plan: FetchPlan) {
 describe("DiscoveryView B038 跳过 AI 直接查看", () => {
   beforeEach(() => {
     setBuildIdentity(expectedBackendBuildHash);
+    // 026 B078：已结束事实持久化在 localStorage，须随测试隔离清空
+    sessionStorage.clear();
+    localStorage.clear();
   });
 
   afterEach(() => {
+    sessionStorage.clear();
+    localStorage.clear();
     vi.unstubAllGlobals();
   });
 

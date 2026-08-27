@@ -112,12 +112,18 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
             def _jd_batch_progress(cur_batch, total_batches,
                                    _base=_jd_base):
                 _cur = min(_base, len(survivors))
+                # 026 修复：批开始/结束的 emit 都带数字 message，前端持续显示
+                # 「抓取 JD n/total」，而不是 fallback 成「抓取 JD 中…」（原行为：
+                # 无 message → 前端轮询基本看不到中间数字，只有最后一刻闪现）。
                 if cur_batch is None:
                     emit(stage="fetch_jd", current=_cur,
-                         total=len(survivors), jd_batch=None)
+                         total=len(survivors),
+                         message=f"抓取 JD {_cur}/{len(survivors)}",
+                         jd_batch=None)
                 else:
                     emit(stage="fetch_jd", current=_cur,
                          total=len(survivors),
+                         message=f"抓取 JD {_cur}/{len(survivors)}",
                          jd_batch={"current": cur_batch,
                                    "total": total_batches})
 
@@ -142,6 +148,7 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                 execution_config=execution_config,
                 guard=guard,
                 batch_key_prefix=f"jd-{task_id}-{chunk_start}",
+                task_id=task_id,
                 simulation_mode=_simulation_mode,
                 batch_progress=_jd_batch_progress,
             )

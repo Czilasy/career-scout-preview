@@ -6,6 +6,9 @@ import TaskProgress from "../TaskProgress.vue";
 // 本文件引用的 api 模块实例可能未被 setup.ts 验证过（vitest 模块实例隔离），逐用例重新验证
 beforeEach(() => {
   setBuildIdentity(expectedBackendBuildHash);
+  // 026 B078：已结束事实持久化在 localStorage，须随测试隔离清空
+  sessionStorage.clear();
+  localStorage.clear();
 });
 
 function response(body: unknown, status = 200): Response {

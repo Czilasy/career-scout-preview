@@ -26,6 +26,12 @@ describe("errorCodes mirror (B043)", () => {
     }
   });
 
+  it("026 B079: mirrors source_result_write_failed with a distinct message", () => {
+    // 结果文件写失败必须与"登录态失效"严格区分（spec FR-007）。
+    expect(ERROR_CODES).toContain("source_result_write_failed");
+    expect(ERROR_MESSAGES["source_result_write_failed"]).toBe("结果文件写入失败");
+  });
+
   it("exposes the mirror type for API payloads", () => {
     const code: ErrorCode = "internal_error";
     expect(code).toBe("internal_error");
