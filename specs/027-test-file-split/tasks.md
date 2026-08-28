@@ -97,9 +97,9 @@ description: "Task list for 027 测试大文件拆分重构"
 
 ## Phase 7: B7 webui_app [US1][US2]
 
-- [ ] T021 [US1] 盘点 `tests/test_webui_app.py`(8913、44 类) 域簇，定约 6 文件切分线（草案：核心路由 / 流程续跑 / 账号与高级设置 / 调优路由 / 平台感知 / 集成契约与续跑去重；以实测行数平衡为准）；`_tuning_quality_context`、`_make_valid_manifest_payload_web` 随 TuningManifestRouteTests 整组搬（实测仅该类使用，不进共享模块）；中段 `from tests.test_cross_platform_dedupe import ...` 与 `ResumeDedupSingleSideTests`、`ResumeVerdictCoverageChainTests` 两个继承类连 import 同迁一个文件
-- [ ] T022 [US1] 创建 `tests/webui_app/__init__.py` + 域文件，逐字搬迁
-- [ ] T023 [US2] 删除 `tests/test_webui_app.py`；B7 验证收口 → `refactor(tests)` 提交
+- [X] T021 [US1] 盘点 `tests/test_webui_app.py`(8913、44 类) 域簇，定约 6 文件切分线（实测 41 类 6 域：core 6 类 / platform 11 类 / runtime 10 类 / semantics 6 类（含 2 个继承类与跨模块 import 连迁）/ taskrun 3 类 / tuning 5 类；`_tuning_quality_context`、`_make_valid_manifest_payload_web` 随 TuningManifestRouteTests 整组搬入 tuning 域）；原文件无模块 docstring，6 个域文件均为溯源说明
+- [X] T022 [US1] 创建 `tests/webui_app/__init__.py` + 域文件，逐字搬迁（`test_webui_app_core.py` 819 行、`test_webui_app_platform.py` 1764 行、`test_webui_app_runtime.py` 1736 行、`test_webui_app_semantics.py` 1432 行、`test_webui_app_taskrun.py` 1778 行、`test_webui_app_tuning.py` 1461 行；`from tests.test_cross_platform_dedupe import ...`（含 `# noqa: E402`）与 ResumeDedupSingleSideTests、ResumeVerdictCoverageChainTests 同迁 semantics）
+- [X] T023 [US2] 删除 `tests/test_webui_app.py`；B7 验证收口 → `refactor(tests)` 提交（聚焦 `discover -s tests/webui_app` Ran 352 OK——原文件模块级 unittest 收集数经程序化核对同为 352（328 定义 + 2 继承类各继承 8 + import 进命名空间的基类被重复收集 8，均为既有语义，见 BACKLOG B083）；全量 Ran 2561 failures=1 skipped=3 与基线构成一致；清单对账零差异）
 
 ---
 
