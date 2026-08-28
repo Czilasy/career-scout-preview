@@ -180,7 +180,7 @@ def create_app(config=None):
         RESUME_DIR=str(DEFAULT_STATE_DIR / "resumes"),
         # 上传前由 Flask 直接拦截超大请求体，避免先把文件读入内存再校验。
         MAX_CONTENT_LENGTH=11 * 1024 * 1024,
-        # 构建身份拦截默认关闭：本地单机工具，防的“旧页面跑新接口”
+        # 构建身份拦截默认关闭：防的"旧页面跑新接口"
         # 风险远小于误拦体验；启动时自动重建前端（见下方 sync）+ pre-push
         # 钩子已足够。测试可显式传 REQUIRE_BUILD_IDENTITY=True 验证拦截逻辑。
         REQUIRE_BUILD_IDENTITY=False,
@@ -317,7 +317,7 @@ def create_app(config=None):
         trusted_hosts = set(app.config["TRUSTED_HOSTS"])
         if _request_hostname(request.host) not in trusted_hosts:
             return jsonify({"error": "拒绝不受信任的 Host"}), 403
-        # 本地单用户工具：读取本地任务、画像、收藏、下载状态等 GET 也
+        # 读取本地任务、画像、收藏、下载状态等 GET 也
         # 需要会话令牌；仅平台/版本/环境探测等公开端点保持匿名可读。
         path = request.path
         sensitive_get = (
@@ -463,8 +463,7 @@ def create_app(config=None):
 
     # Stage-3 execution: in-memory progress tracker + single-worker executor.
     # Each run is keyed by a task_id; progress snapshots and final results are
-    # stored here and polled by the frontend. Local single-user app, so an
-    # in-memory dict is sufficient.
+    # stored here and polled by the frontend.
     from webui.app_support import build_app_support
     ctx = build_app_support(
         app, store, runner, workbench_runner,
