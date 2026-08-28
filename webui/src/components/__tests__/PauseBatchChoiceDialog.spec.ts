@@ -2,9 +2,10 @@ import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import PauseBatchChoiceDialog from "../PauseBatchChoiceDialog.vue";
 
-describe("PauseBatchChoiceDialog（025 B076 批中暂停二选一）", () => {
+describe("PauseBatchChoiceDialog（025 B076 批中暂停二选一，BaseDialog 外壳）", () => {
   afterEach(() => {
     document.body.innerHTML = "";
+    document.body.classList.remove("dialog-open");
   });
 
   function mountDialog(props: Record<string, unknown> = {}) {
@@ -14,12 +15,21 @@ describe("PauseBatchChoiceDialog（025 B076 批中暂停二选一）", () => {
         batchInfo: null,
         ...props,
       },
-      global: { stubs: { teleport: true } },
       attachTo: document.body,
     });
   }
 
-  it("渲染二选一按钮 + 当前批进度 + 平实提示文案", async () => {
+  // 真实时序：组件常驻挂载（open=false），打开靠 prop 翻转 → BaseDialog 的
+  // 初始聚焦 watch 只在 open 变化时触发
+  async function openDialog(batchInfo: { current: number; total: number } | null = null) {
+    const wrapper = mountDialog({ batchInfo });
+    await wrapper.setProps({ open: true });
+    await nextTick();
+    await nextTick();
+    return wrapper;
+  }
+
+  it("渲染三按钮 + 当前批进度 + 平实提示文案", async () => {
     const wrapper = mountDialog({
       open: true,
       batchInfo: { current: 2, total: 4 },
@@ -27,6 +37,7 @@ describe("PauseBatchChoiceDialog（025 B076 批中暂停二选一）", () => {
     await nextTick();
     expect(wrapper.get('[data-testid="pause-immediate"]').text()).toContain("立即停止");
     expect(wrapper.get('[data-testid="pause-graceful"]').text()).toContain("等这批抓完");
+    expect(wrapper.get('[data-testid="pause-cancel"]').text()).toContain("取消");
     // 当前批进度（第几批/共几批）
     expect(wrapper.text()).toContain("第 2/4 批");
     // 平实提示文案，不渲染严重性/警告
@@ -38,8 +49,7 @@ describe("PauseBatchChoiceDialog（025 B076 批中暂停二选一）", () => {
   });
 
   it("「立即停止」默认聚焦（回车可直接触发）", async () => {
-    const wrapper = mountDialog({ open: true, batchInfo: { current: 1, total: 2 } });
-    await nextTick();
+    const wrapper = await openDialog({ current: 1, total: 2 });
     const btn = wrapper.get('[data-testid="pause-immediate"]').element as HTMLButtonElement;
     expect(document.activeElement).toBe(btn);
   });
@@ -56,8 +66,25 @@ describe("PauseBatchChoiceDialog（025 B076 批中暂停二选一）", () => {
     expect(wrapper.emitted("choose")?.[0]).toEqual(["graceful"]);
   });
 
-  it("open=false 时不渲染", () => {
+  it("点击「取消」→ emit close（不暂停，任务继续跑）", async () => {
+    const wrapper = mountDialog({ open: true, batchInfo: { current: 1, total: 2 } });
+    await wrapper.get('[data-testid="pause-cancel"]').trigger("click");
+    expect(wrapper.emitted("close")).toHaveLength(1);
+    expect(wrapper.emitted("choose")).toBeUndefined();
+  });
+
+  it("Esc 关闭 → emit close", async () => {
+    const wrapper = mountDialog({ open: true, batchInfo: { current: 1, total: 2 } });
+    await nextTick();
+    const panel = wrapper.get('[role="dialog"]');
+    await panel.trigger("keydown", { key: "Escape" });
+    expect(wrapper.emitted("close")).toHaveLength(1);
+    expect(wrapper.emitted("choose")).toBeUndefined();
+  });
+
+  it("open=false 时不渲染面板（transition-stub 会带 fallthrough 属性，只认面板）", () => {
     const wrapper = mountDialog({ open: false });
-    expect(wrapper.find('[data-testid="pause-batch-dialog"]').exists()).toBe(false);
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+    expect(document.querySelector(".dialog-backdrop")).toBeNull();
   });
 });

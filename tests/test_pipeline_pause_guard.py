@@ -268,6 +268,89 @@ class FetchJobDetailsRescueTests(unittest.TestCase):
         self.assertEqual(jds["2"], "")
 
 
+class ImmediateCancelWiringTests(unittest.TestCase):
+    """025 修复回归：stop_event 以「仅立即停止」适配器接到抓取源的 cancel_event。
+
+    in-process（EXE）模式没有子进程可杀，scrape_details 的逐条检查点是批内
+    唯一中断手段——信号断接会让「立即停止」退化成等整批跑完（线上已复现）。
+    """
+
+    def _fetch(self, source, stop_event):
+        from webui.pipeline_exec_details import fetch_job_details
+        jobs = [{"platform_job_id": "1", "job_id": "1", "title": "A"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            return fetch_job_details(
+                jobs, source,
+                artifact_dir=tmp,
+                stop_event=stop_event,
+                execution_config=_exec_config(),
+            )
+
+    def test_cancel_event_wired_and_responds_only_to_immediate(self):
+        class _Source:
+            platform = "boss"
+            cancel_event = None
+
+            def __init__(self):
+                self.fetch_calls = 0
+
+            def fetch_details_batch(self, jobs, **kwargs):
+                self.fetch_calls += 1
+                return {}
+
+        source = _Source()
+        stop_event = threading.Event()
+        stop_event.set()  # 预置位：首批边界即停，批内不真正抓取
+        self._fetch(source, stop_event)
+        adapter = source.cancel_event
+        self.assertIsNotNone(adapter, "抓取源的 cancel_event 必须被接线")
+        self.assertFalse(adapter.is_set(), "graceful（无 immediate 标记）不得触发批内取消")
+        stop_event.immediate = True
+        self.assertTrue(adapter.is_set(), "立即停止必须触发批内取消检查点")
+        self.assertEqual(source.fetch_calls, 0)
+
+    def test_adapter_set_is_noop_and_semantics(self):
+        from webui.task_pause_support import ImmediateOnlyCancelEvent
+        stop_event = threading.Event()
+        adapter = ImmediateOnlyCancelEvent(stop_event)
+        adapter.set()
+        self.assertFalse(stop_event.is_set(), "适配器 set() 不得回写 stop_event（超时≠用户暂停）")
+        self.assertFalse(adapter.is_set())
+        stop_event.set()
+        self.assertFalse(adapter.is_set(), "仅 stop_event 置位（graceful）不触发")
+        stop_event.immediate = True
+        self.assertTrue(adapter.is_set(), "stop_event + immediate 标记才触发")
+
+    def test_source_without_cancel_attr_untouched(self):
+        class _Source:
+            platform = "boss"
+
+            def __init__(self):
+                self.fetch_calls = 0
+
+            def fetch_details_batch(self, jobs, **kwargs):
+                self.fetch_calls += 1
+                return {}
+
+        source = _Source()
+        stop_event = threading.Event()
+        stop_event.set()
+        result = self._fetch(source, stop_event)
+        self.assertFalse(hasattr(source, "cancel_event"), "无 cancel_event 属性的源不得被强加属性")
+        self.assertTrue(result["stopped"])
+
+    def test_zhilian_source_wired_via_shared_code_path(self):
+        """025 修复回归：智联源走同一 fetch_job_details 接线，批内可中断。"""
+        from webui.source_zhilian_cdp import ZhilianCdpSource
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223)
+        stop_event = threading.Event()
+        stop_event.set()
+        stop_event.immediate = True
+        self._fetch(source, stop_event)
+        self.assertIsNotNone(source.cancel_event, "智联源的 cancel_event 必须被接线")
+        self.assertTrue(source.cancel_event.is_set())
+
+
 class RunJdStageCheckpointTests(unittest.TestCase):
     """US3 T004：run_jd_stage stopped 路径——有已抓才落盘断点、绝不写空。"""
 

@@ -251,12 +251,17 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   async function doPause(runId: string, mode: "immediate" | "graceful"): Promise<void> {
     if (busyAction.value) return;
     busyAction.value = "pause";
+    const isImmediate = mode === "immediate";
+    const pauseMessage = isImmediate ? "正在立即停止…" : "正在暂停…";
+    // immediate 覆盖一个岗位收尾（逐条检查点中断，可能数十秒）；graceful 本就
+    // 等批边界，短轮询后转提示文案即可。
+    const maxPolls = isImmediate ? 240 : 15;
     deps.refs.screenBusy.value = true;
     deps.refs.pausingScreen.value = true;
     deps.refs.screenSnapshot.value = {
       ...(deps.refs.screenSnapshot.value || {}),
       status: "pausing",
-      progress: { ...((deps.refs.screenSnapshot.value || {}).progress || {}), message: "正在暂停…" },
+      progress: { ...((deps.refs.screenSnapshot.value || {}).progress || {}), message: pauseMessage },
       error: "",
     };
     try {
@@ -266,7 +271,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       });
       let paused = false;
       let terminalOther = false;
-      for (let i = 0; i < 15; i += 1) {
+      for (let i = 0; i < maxPolls; i += 1) {
         await delay(300);
         const data = await apiRequest<TaskSnapshot>(
           `/api/task-state/${encodeURIComponent(runId)}`,
@@ -287,7 +292,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
         deps.refs.screenSnapshot.value = {
           ...data,
           status: "pausing",
-          progress: { ...(data.progress || {}), message: "正在暂停…" },
+          progress: { ...(data.progress || {}), message: pauseMessage },
         };
       }
       deps.refs.screenBusy.value = false;
@@ -297,7 +302,12 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       } else {
         if (!terminalOther) {
           deps.refs.screenBusy.value = true;
-          deps.api.notify("正在等待当前批次结束，完成后会自动暂停", "warning");
+          deps.api.notify(
+            isImmediate
+              ? "仍在停止当前批次，完成后会自动暂停"
+              : "正在等待当前批次结束，完成后会自动暂停",
+            "warning",
+          );
         }
       }
     } catch (error) {

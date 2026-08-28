@@ -24,6 +24,31 @@ _logger = get_logger("task_pause_support")
 _MSG_TASK_NOT_FOUND = "任务不存在或已被移除"
 
 
+class ImmediateOnlyCancelEvent:
+    """把任务 stop_event 适配成抓取源的 cancel_event：仅立即停止时视为置位。
+
+    in-process（EXE）模式没有子进程，guard 杀不到，scrape_details 的逐条
+    检查点是批内唯一中断手段——信号必须接到 source.cancel_event。graceful
+    （等这批抓完）不置位，批次照常跑完批边界停止，语义不变。
+
+    ``set()`` 刻意不回写 stop_event：run_with_deadline 超时路径会调 set()
+    请求协作停止，超时≠用户暂停，保持 no-op 与历史行为（cancel_event=None）一致。
+    """
+
+    def __init__(self, stop_event):
+        self._stop_event = stop_event
+
+    def is_set(self) -> bool:
+        return bool(
+            self._stop_event is not None
+            and self._stop_event.is_set()
+            and getattr(self._stop_event, "immediate", False)
+        )
+
+    def set(self) -> None:
+        return None
+
+
 def pause_with_mode(ctx, run_id: str, mode: str):
     """暂停 AI 筛选/重抓任务（025：支持 mode=immediate 批中立即停止）。
 

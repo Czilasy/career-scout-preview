@@ -943,6 +943,65 @@ class ZhilianCdpSourceBatchTests(unittest.TestCase):
         self.assertEqual(kwargs["cdp_port"], 9223)
         self.assertEqual(len(detail_calls), 0, "并行分支不得调用单条 detail_runner")
 
+    def test_batch_parallel_forwards_cancel_event_to_batch_runner(self):
+        """025 立即停止：source.cancel_event 必须透传 _batch_detail_runner。"""
+        import threading
+
+        cancel_event = threading.Event()
+        seen = {}
+
+        def batch_runner(list_data, **kw):
+            seen["cancel_event"] = kw.get("cancel_event")
+            jobs = list_data.get("jobs", [])
+            return [("ok", {"jd": "fake-jd"}) for _ in jobs], None
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            batch_detail_runner=batch_runner,
+            cancel_event=cancel_event,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(2)
+        ]
+        source.fetch_details_batch(
+            jobs, detail_output_path="out.json", max_batch_size=5,
+            gap_min=0, gap_max=0, reset_every=3, tab_pool_size=4,
+        )
+        self.assertIs(seen["cancel_event"], cancel_event,
+                      "取消信号必须原样透传给批 runner（worker 检查点用）")
+
+    def test_batch_serial_stops_mid_batch_on_cancel(self):
+        """025 立即停止：串行路径批内检查点——置位后剩余岗位不再抓取。"""
+        import threading
+
+        cancel_event = threading.Event()
+        detail_calls = []
+
+        def detail_runner(job, **kw):
+            detail_calls.append(job)
+            cancel_event.set()  # 第 1 条抓完即模拟用户立即停止
+            return _fake_detail(signal="ok")
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            detail_runner=detail_runner,
+            cancel_event=cancel_event,
+        )
+        jobs = [
+            {"platform": "zhilian", "platform_job_id": f"j{i}",
+             "canonical_url": f"https://www.zhaopin.com/jobdetail/j{i}.htm"}
+            for i in range(3)
+        ]
+        results = source.fetch_details_batch(
+            jobs, detail_output_path="out.json", max_batch_size=5,
+            gap_min=0, gap_max=0, reset_every=3, tab_pool_size=1,
+        )
+        self.assertEqual(len(detail_calls), 1, "取消置位后不得继续抓剩余岗位")
+        self.assertEqual(set(results.keys()), {"j0"})
+        self.assertTrue(results["j0"].ok)
+
     def test_batch_serial_default_when_tab_pool_size_absent(self):
         """不传 tab_pool_size 必须走串行（现有测试零回归前提）。"""
         batch_calls = []

@@ -309,9 +309,18 @@ const cancelBusy = ref(false);
 
 const historyScreenBusy = ref(false);
 // 刷新后接回任务时显示的恢复提示条；任务结束后清空
-
-// 刷新后接回任务时显示的恢复提示条；任务结束后清空
 const restoredTaskHint = ref("");
+// 025 反馈：恢复提示改为悬浮浮窗，8s 自动关闭，不再钉顶占位推挤页面
+let restoreHintTimer: ReturnType<typeof setTimeout> | undefined;
+watch(restoredTaskHint, (value) => {
+  if (restoreHintTimer !== undefined) clearTimeout(restoreHintTimer);
+  restoreHintTimer = undefined;
+  if (value) {
+    restoreHintTimer = setTimeout(() => {
+      restoredTaskHint.value = "";
+    }, 8000);
+  }
+});
 // 切片7：从 DB 恢复的 paused 任务 run_id（无内存工作线程，不能 poll）
 
 // 切片7：从 DB 恢复的 paused 任务 run_id（无内存工作线程，不能 poll）

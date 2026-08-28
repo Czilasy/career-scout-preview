@@ -7,6 +7,8 @@ const props = defineProps<{
   title: string;
   description?: string;
   size?: "sm" | "md" | "lg";
+  /** 打开时初始聚焦元素的 CSS 选择器；缺省聚焦面板内第一个可聚焦元素。 */
+  initialFocus?: string;
 }>();
 
 const emit = defineEmits<{ close: [] }>();
@@ -55,7 +57,10 @@ watch(() => props.open, async (open) => {
     previousFocus.value = document.activeElement as HTMLElement | null;
     document.body.classList.add("dialog-open");
     await nextTick();
-    const first = panel.value?.querySelector<HTMLElement>(focusableSelector);
+    const targeted = props.initialFocus
+      ? panel.value?.querySelector<HTMLElement>(props.initialFocus)
+      : null;
+    const first = targeted || panel.value?.querySelector<HTMLElement>(focusableSelector);
     (first || panel.value)?.focus();
   } else {
     document.body.classList.remove("dialog-open");

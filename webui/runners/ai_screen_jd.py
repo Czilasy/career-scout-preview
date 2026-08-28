@@ -109,8 +109,15 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
 
             # 025：批内信号（前端暂停弹窗判定「正处抓 JD 批次中」）；
             # cur_batch=None 表示批结束/停止，信号清除。
+            # 批计数用跨 chunk 全局值：fetch_job_details 回报的是 chunk 内值
+            # （每 chunk 恰一个批次，恒为 1/1），加 chunk 偏移才是用户可感知的
+            # 「第几批/共几批」。
+            _chunk_index = chunk_start // DETAIL_CHUNK
+            _total_chunks = (len(todo_jd) + DETAIL_CHUNK - 1) // DETAIL_CHUNK
+
             def _jd_batch_progress(cur_batch, total_batches,
-                                   _base=_jd_base):
+                                   _base=_jd_base, _chunk=_chunk_index,
+                                   _chunks=_total_chunks):
                 _cur = min(_base, len(survivors))
                 # 026 修复：批开始/结束的 emit 都带数字 message，前端持续显示
                 # 「抓取 JD n/total」，而不是 fallback 成「抓取 JD 中…」（原行为：
@@ -124,8 +131,8 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                     emit(stage="fetch_jd", current=_cur,
                          total=len(survivors),
                          message=f"抓取 JD {_cur}/{len(survivors)}",
-                         jd_batch={"current": cur_batch,
-                                   "total": total_batches})
+                         jd_batch={"current": min(_chunk + max(cur_batch, 1), _chunks),
+                                   "total": _chunks})
 
             # 024：详情人形模拟随当前档位下发（custom 档零仿真，不传参）
             _active_selection = None

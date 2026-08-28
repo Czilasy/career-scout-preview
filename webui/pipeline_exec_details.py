@@ -14,6 +14,7 @@ from webui.pipeline_exec_status import (
 from webui.browser_recovery import BrowserRecovery
 from webui.error_registry import SYSTEMIC_BLOCK_CODES as _HARD_STOP_CODES
 from webui.error_registry import resolve_code
+from webui.task_pause_support import ImmediateOnlyCancelEvent
 
 
 
@@ -188,6 +189,11 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                     except Exception:
                         pass
 
+    # 025 修复：把「仅立即停止」的取消信号接到抓取源。in-process（EXE）模式
+    # 没有子进程可杀，scrape_details 的逐条检查点是批内唯一中断手段；graceful
+    # 不置位（适配器 is_set() 为假），批照常跑完批边界停止，语义不变。
+    if stop_event is not None and hasattr(source, "cancel_event"):
+        source.cancel_event = ImmediateOnlyCancelEvent(stop_event)
     for batch_start in range(0, len(indexed_jobs), BATCH_SIZE):
         if stop_event is not None and stop_event.is_set():
             stopped = True

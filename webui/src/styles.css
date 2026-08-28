@@ -2952,17 +2952,26 @@ body,
 
 /* 刷新后接回任务的恢复提示条：页面最顶部，accent 色调 */
 .restore-banner {
-  grid-column: 1 / -1; /* 横跨 view-shell 的两列布局，避免只推挤左侧窄栏 */
+  /* 025 反馈：浮窗化——固定悬浮在顶栏下方，不再占据文档流推挤页面内容；
+     8s 自动关闭（useDiscoveryState），× 仅作提前手动关闭 */
+  position: fixed;
+  z-index: 50;
+  top: 72px;
+  left: 50%;
   display: flex;
   align-items: center;
   gap: 8px;
+  width: max-content;
+  max-width: min(560px, calc(100vw - 32px));
   padding: 8px 14px;
-  background: var(--brand-wash);
+  /* wash 令牌是半透明色（暗色下仅 12% 不透明度），悬浮于内容之上会透底；
+     浮窗底色必须用实心面板色，品牌色只留描边与文字 */
+  background: var(--panel);
   border: 1px solid var(--brand-edge);
   border-radius: 8px;
+  box-shadow: var(--shadow);
   color: var(--brand-ink);
   font-size: 13px;
-  margin-bottom: 10px;
 }
 .restore-banner .spin {
   animation: spin 1.2s linear infinite;
@@ -3352,6 +3361,12 @@ body,
     opacity: 1;
     transform: none;
   }
+}
+
+/* 025 反馈：恢复横幅浮窗化后需要 -50% 居中位移的入场动画；
+   必须写在上面选择器组之后，同特异性靠源码顺序覆盖 */
+.restore-banner {
+  animation: notice-in .2s ease both;
 }
 
 @keyframes notice-in {

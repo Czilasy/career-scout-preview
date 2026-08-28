@@ -226,6 +226,7 @@ class ZhilianCdpSource:
         detail_runner: Callable[[dict], tuple[str, dict]] | None = None,
         batch_detail_runner: Callable[[dict], tuple[list[tuple[str, dict]], str | None]] | None = None,
         run_id: str = "",
+        cancel_event=None,
     ):
         if not browser_account or not str(browser_account).strip():
             raise ValueError("browser_account 必须非空")
@@ -254,6 +255,9 @@ class ZhilianCdpSource:
         self._list_runner = list_runner or _default_zhilian_list_runner
         self._detail_runner = detail_runner or _default_zhilian_detail_runner
         self._batch_detail_runner = batch_detail_runner or _default_zhilian_batch_detail_runner
+        # 025 立即停止：编排层（fetch_job_details）会以 ImmediateOnlyCancelEvent
+        # 覆写此属性；批内检查点据此中断。graceful 时恒不置位，批照常跑完。
+        self.cancel_event = cancel_event
 
     def _record_risk_signal(self, failed_code: str, reason: str = "") -> None:
         """高置信智联风控信号写 restricted 缓存与冷却，来源带 run_id。"""
@@ -529,6 +533,10 @@ class ZhilianCdpSource:
             # 串行路径：复用现有逐条抓取（_detail_runner 替身），
             # gap_min/gap_max 作为条间间隔。
             for i, job in enumerate(jobs):
+                # 025 立即停止检查点：置位即中断，剩余岗位不产出 outcome；
+                # 上游（fetch_job_details）批返回后按停止语义作废整批。
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    break
                 if not isinstance(job, dict):
                     results[f"idx{i}"] = SourceOutcome.failure(
                         failed_code="source_invalid_output",
@@ -659,6 +667,7 @@ class ZhilianCdpSource:
                 inter_job_gap_range=(gap_min, gap_max),
                 reset_every=reset_every,
                 event_callback=on_item_done,
+                cancel_event=self.cancel_event,
             )
         except Exception:
             per_item, degrade_signal = [], "unreachable"

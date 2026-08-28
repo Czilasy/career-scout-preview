@@ -686,7 +686,8 @@ def _detail_tab_worker(cdp_port: int, connector: Any, work_queue: Any,
                        reset_every: int, degrade_event: Any,
                        degrade_reason: dict[str, str], results_lock: Any,
                        results: dict[int, tuple[str, dict]],
-                       event_callback: Any = None) -> None:
+                       event_callback: Any = None,
+                       cancel_event: Any = None) -> None:
     """常驻 tab 工作线程：建池 → 错峰启动 → 循环领任务抓详情 → 重置 → 关池。
 
     与 BOSS ``_tab_worker`` 同构，连接走智联 page 级 WS（无 sessionId）：
@@ -695,6 +696,8 @@ def _detail_tab_worker(cdp_port: int, connector: Any, work_queue: Any,
       ``results[orig_idx]``，主线程 join 后按原顺序聚合
     - 平台级 signal 置 ``degrade_event`` 全体停工；单条失败
       （not_found/invalid_output/timeout/unreachable）不中断
+    - ``cancel_event``（025 立即停止）：循环头检查点，置位即停工退出；
+      与 degrade 同粒度（下一条边界生效），已抓结果保留
     """
     tab_label = f"tab{tab_id + 1}"
     ws = None
@@ -717,6 +720,9 @@ def _detail_tab_worker(cdp_port: int, connector: Any, work_queue: Any,
             sleeper(stagger, label="stagger")
         jobs_done_on_tab = 0
         while not degrade_event.is_set():
+            # 025 立即停止检查点：置位即停工，剩余任务由调用方按 skipped 占位
+            if cancel_event is not None and cancel_event.is_set():
+                break
             try:
                 job, seq, orig_idx = work_queue.get_nowait()
             except Exception:
@@ -768,7 +774,8 @@ def scrape_details_batch(list_data, max_details=None, output_path=None,
                          cdp_port=DEFAULT_CDP_PORT, *,
                          tab_pool_size=5, inter_job_gap_range=(2, 9),
                          stagger_range=(3, 8), reset_every=4,
-                         event_callback=None, sleeper=None, connector=None):
+                         event_callback=None, sleeper=None, connector=None,
+                         cancel_event=None):
     """tab 池并行抓取岗位详情；返回 ``(per_item, degrade_signal)``。
 
     - ``per_item``：按输入顺序的 ``[(signal, detail), ...]``，每条独立成败；
@@ -779,6 +786,8 @@ def scrape_details_batch(list_data, max_details=None, output_path=None,
     - ``tab_pool_size``：常驻 tab 数，1-10；``reset_every``：每抓 N 条导航回
       首页重置；``inter_job_gap_range``/``stagger_range``：条间间隔与错峰
       启动范围；``sleeper``/``connector``：测试注入点（等待替身 / 建池替身）。
+    - ``cancel_event``：可选取消信号（025 立即停止）。置位后 worker 在下一条
+      边界停工退出，剩余任务按 skipped 占位；不回写、不影响已抓结果。
 
     ``output_path``/``event_callback`` 为兼容参数：智联 in-process 直接返回
     结果，不写盘、不产出事件文件（与 ``fetch_detail`` 现状一致）。单条失败
@@ -851,6 +860,7 @@ def scrape_details_batch(list_data, max_details=None, output_path=None,
                 "results_lock": results_lock,
                 "results": results,
                 "event_callback": event_callback,
+                "cancel_event": cancel_event,
             },
             name=f"zhilian-detail-tab{tab_id + 1}",
             daemon=True,
