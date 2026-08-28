@@ -55,9 +55,9 @@ description: "Task list for 027 测试大文件拆分重构"
 
 ## Phase 2: B2 webui_store [US1][US2]
 
-- [ ] T004 [US1] 盘点 `tests/test_webui_store.py`(2739) 域簇，定 2 文件切分线
-- [ ] T005 [US1] 创建 `tests/webui_store/__init__.py` + 2 个域文件，逐字搬迁
-- [ ] T006 [US2] 删除 `tests/test_webui_store.py`；B2 验证收口 → `refactor(tests)` 提交
+- [X] T004 [US1] 盘点 `tests/test_webui_store.py`(2739) 域簇，定 2 文件切分线（迁移合同域 6 类 / 存储业务域 17 类；原文件无模块级共享符号，无需共享模块）
+- [X] T005 [US1] 创建 `tests/webui_store/__init__.py` + 2 个域文件，逐字搬迁（`test_store_migrations.py` 947 行、`test_store_domains.py` 1799 行；`MigrationBootstrapBackupTests` 的 `__file__` 锚点 `parent.parent`→`parent.parent.parent` 深度修正）
+- [X] T006 [US2] 删除 `tests/test_webui_store.py`；B2 验证收口 → `refactor(tests)` 提交（聚焦 `discover -s tests/webui_store` Ran 139 OK(skipped=1)；全量 Ran 2561 与基线构成一致；清单对账零差异）
 
 ---
 
