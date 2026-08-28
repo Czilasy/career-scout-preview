@@ -34,9 +34,9 @@ description: "Task list for 027 测试大文件拆分重构"
 
 ## Phase 0: 基线 [US2]
 
-- [ ] T000 工作区清零：`git status` 必须干净——当前 9 个脏文件（`README.md`、`specs/008~014` 的 6 个 `plan.md`、`webui/app.py`）为用户在办工作，处置方式（单独提交或还原）由用户确认后执行，本 Spec 不擅自处置、不卷入拆分提交
-- [ ] T000b 全量基线：实测确认全量入口命令并跑一次全量，记录结果；**基线必须全绿才开工**，红了先停并查明原因（区分既有失败，记录在案）
-- [ ] T000c 拍快照：按 quickstart 步骤 0 第 3 条命令生成 `$TEMP/cs_tests_inventory_baseline.txt`，记录总数（2026-08-28 实测 1786，以本次重测为准）；快照文件全程只读
+- [X] T000 工作区清零：`git status` 必须干净——当前 9 个脏文件（`README.md`、`specs/008~014` 的 6 个 `plan.md`、`webui/app.py`）为用户在办工作，处置方式（单独提交或还原）由用户确认后执行，本 Spec 不擅自处置、不卷入拆分提交（已由用户自行提交 8f58e90 / 40fdb57，本 Spec 文档为 ecd3fe9）
+- [X] T000b 全量基线：实测确认全量入口命令并跑一次全量，记录结果；**基线必须全绿才开工**，红了先停并查明原因（区分既有失败，记录在案）（`uv run python -m unittest discover -s tests`：Ran 2561，failures=2 均为既有——`test_public_assets` 断言已重写的旧版 CHANGELOG 2.8.5/2.8.4 段落、`test_repo_hygiene` 未跟踪文件；后者随暂存消除，前者记录在案不修）
+- [X] T000c 拍快照：按 quickstart 步骤 0 第 3 条命令生成 `$TEMP/cs_tests_inventory_baseline.txt`，记录总数（2026-08-28 实测 1786，以本次重测为准）；快照文件全程只读（重测总数 2561，快照首行即 2561）
 
 ---
 
@@ -45,9 +45,9 @@ description: "Task list for 027 测试大文件拆分重构"
 **Goal**: `tests/test_chrome_setup.py`(2350) → `tests/chrome_setup/` 2 个域文件；同时首跑实证子目录收集、聚焦命令、清单对账全链路。
 **Independent Test**: 清单对账零差异 + 全量全绿 + `discover -s tests/chrome_setup` 可用。
 
-- [ ] T001 [US1] 盘点 `tests/test_chrome_setup.py` 类簇结构，按被测域定 2 文件切分线，切分方案写入批次提交说明
-- [ ] T002 [US1] 创建 `tests/chrome_setup/__init__.py`（空）与 2 个域文件，类与模块级 import/常量按使用归属逐字搬迁
-- [ ] T003 [US2] 删除 `tests/test_chrome_setup.py`；B1 验证收口（quickstart 步骤 1-6 全序）→ `refactor(tests)` 提交；本批提交说明记录机制实证结论（聚焦命令形态、收集数核对）
+- [X] T001 [US1] 盘点 `tests/test_chrome_setup.py` 类簇结构，按被测域定 2 文件切分线，切分方案写入批次提交说明（11 类实测盘点：`load_module`×8 类、`tempfile_profile`×5 类共用 → 2 域文件 + `harness.py` 共享模块；切分线=Chrome 装配域 1 类 / 抓取契约域 10 类）
+- [X] T002 [US1] 创建 `tests/chrome_setup/__init__.py`（空）与 2 个域文件，类与模块级 import/常量按使用归属逐字搬迁（`test_chrome_setup.py` 1304 行、`test_scraper_contracts.py` 895 行、`harness.py` 176 行）
+- [X] T003 [US2] 删除 `tests/test_chrome_setup.py`；B1 验证收口（quickstart 步骤 1-6 全序）→ `refactor(tests)` 提交；本批提交说明记录机制实证结论（聚焦命令形态 `discover -s tests/chrome_setup` 128 项 OK；收集数 2561 与基线快照零差异；计划值 1786 系陈旧数字）
 
 **Checkpoint**: 机制全链路验证通过，后续批次照此复制。
 
