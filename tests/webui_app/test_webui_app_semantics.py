@@ -1428,5 +1428,10 @@ class ResumeVerdictCoverageChainTests(CrossPlatformDedupeIntegrationTests):
         self.assertEqual(events[0]["payload"]["missing"], 1)
 
 
+# 删除基类名字，避免 unittest 把 import 进命名空间的基类再收集一遍
+# （子类仍经 __bases__ 持有它，继承重跑不受影响）
+del CrossPlatformDedupeIntegrationTests
+
+
 if __name__ == "__main__":
     unittest.main()

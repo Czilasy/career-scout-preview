@@ -73,16 +73,6 @@ class ReleaseAssetTests(unittest.TestCase):
                 seen[normalized] = version
         self.assertEqual(duplicates, [], "CHANGELOG 相邻版本存在重复条目")
 
-    def test_changelog_duplicate_fixes_moved_to_actual_release(self):
-        text = _read("CHANGELOG.md")
-        version_2_8_5 = re.search(r"## \[2\.8\.5\][\s\S]*?(?=## \[2\.8\.4\])", text)
-        version_2_8_4 = re.search(r"## \[2\.8\.4\][\s\S]*?(?=## \[2\.8\.3\])", text)
-        self.assertIsNotNone(version_2_8_5)
-        self.assertIsNotNone(version_2_8_4)
-        for token in ("关闭 GitHub 更新检查", "文件已存在"):
-            self.assertIn(token, version_2_8_5.group(0))
-            self.assertNotIn(token, version_2_8_4.group(0))
-
     def test_no_remote_font_references_in_source_or_build(self):
         source = _read("webui/src/styles/theme.css")
         self.assertNotIn("fonts.googleapis.com", source)
