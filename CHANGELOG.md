@@ -2,6 +2,11 @@
 
 本文件记录 Career Scout 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.7.11] - 2026-08-29
+
+修复：
+- 新装首次启动不再一直卡在「正在加载工作台」
+
 ## [1.7.10] - 2026-08-28
 
 增加：
