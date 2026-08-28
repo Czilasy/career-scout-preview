@@ -63,9 +63,9 @@ description: "Task list for 027 测试大文件拆分重构"
 
 ## Phase 3: B3 source [US1][US2]
 
-- [ ] T007 [US1] 盘点 `tests/test_source.py`(2925) 域簇，定 2 文件切分线
-- [ ] T008 [US1] 创建 `tests/source/__init__.py` + 2 个域文件，逐字搬迁
-- [ ] T009 [US2] 删除 `tests/test_source.py`；B3 验证收口 → `refactor(tests)` 提交
+- [X] T007 [US1] 盘点 `tests/test_source.py`(2925) 域簇，定 2 文件切分线（BOSS 域 / 智联域；模块级共享辅助 `_LoginCacheIsolated` 归域共享模块 `tests/source/harness.py`）
+- [X] T008 [US1] 创建 `tests/source/__init__.py` + 2 个域文件，逐字搬迁（`test_source_boss.py` 1408 行、`test_source_zhilian.py` 1538 行、`harness.py` 20 行；原模块 docstring 随 BOSS 域文件保留，智联域文件改为溯源说明；`_json_for_inprocess` 等文件中部 import 随使用类就近落位）
+- [X] T009 [US2] 删除 `tests/test_source.py`；B3 验证收口 → `refactor(tests)` 提交（聚焦 `discover -s tests/source` Ran 169 OK；全量 Ran 2561 failures=1 skipped=3 与基线构成一致；清单对账零差异）
 
 ---
 
