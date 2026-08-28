@@ -159,7 +159,6 @@ class RepoHygieneTests(unittest.TestCase):
             "node_modules",
             "__pycache__",
             "logs",
-            "tuning",
             ".trash",
             ".agents",
             ".uploads",
@@ -187,6 +186,10 @@ class RepoHygieneTests(unittest.TestCase):
         bad = []
         for rel in paths:
             path = pathlib.PurePosixPath(rel)
+            # 调优实验运行数据只禁止仓库根目录下的 tuning/（tests/tuning 是测试包）。
+            if path.parts and path.parts[0] == "tuning":
+                bad.append(rel)
+                continue
             if any(part in forbidden_dir_parts for part in path.parts) or path.name in forbidden_names or path.name.endswith(forbidden_suffixes):
                 bad.append(rel)
         self.assertEqual(bad, [])

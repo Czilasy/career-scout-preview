@@ -295,13 +295,18 @@ class PlatformAwareLinkNormalizationTests(unittest.TestCase):
     def test_zhilian_not_registered_raises(self):
         """智联已知但未注册（真实 fixture 未核验）时拒绝，不回退 BOSS。"""
         from webui.workbench import normalize_job_link_for_platform
-        from webui.platforms import PlatformNotRegisteredError
+        from webui.platforms import PlatformNotRegisteredError, _REGISTRY
 
-        with self.assertRaises(PlatformNotRegisteredError):
-            normalize_job_link_for_platform(
-                "https://www.zhaopin.com/jobdetail/abc.htm",
-                platform="zhilian",
-            )
+        previous_zhilian = _REGISTRY.pop("zhilian", None)
+        try:
+            with self.assertRaises(PlatformNotRegisteredError):
+                normalize_job_link_for_platform(
+                    "https://www.zhaopin.com/jobdetail/abc.htm",
+                    platform="zhilian",
+                )
+        finally:
+            if previous_zhilian is not None:
+                _REGISTRY["zhilian"] = previous_zhilian
 
     def test_zhilian_normalizes_when_registered(self):
         """注册测试用智联平台后，链接按 zhaopin 规则归一化。"""
@@ -335,6 +340,8 @@ class PlatformAwareLinkNormalizationTests(unittest.TestCase):
             normalize_job_url_fn=normalize_zhilian_job_url,
             resolve_login_space_fn=resolve_zhilian_login_space,
         )
+        from webui.platforms import _REGISTRY
+        previous_zhilian = _REGISTRY.get("zhilian")
         try:
             register_platform(reg)
             url = "https://www.zhaopin.com/jobdetail/abc123.htm?lid=x#frag"
@@ -367,9 +374,12 @@ class PlatformAwareLinkNormalizationTests(unittest.TestCase):
                 "",
             )
         finally:
-            # 清理注册表，避免污染其它测试。
+            # 清理注册表，避免污染其它测试；若原本已注册则还原。
             from webui.platforms import _REGISTRY
-            _REGISTRY.pop("zhilian", None)
+            if previous_zhilian is not None:
+                _REGISTRY["zhilian"] = previous_zhilian
+            else:
+                _REGISTRY.pop("zhilian", None)
 
 
 class PlatformAwareCardProjectionTests(unittest.TestCase):

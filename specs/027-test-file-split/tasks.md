@@ -79,10 +79,10 @@ description: "Task list for 027 测试大文件拆分重构"
 
 ## Phase 5: B5 tuning [US1][US2][US3]
 
-- [ ] T013 [US3] 创建 `tests/tuning/builders.py`：逐字抽离 `_sample_nine_fields`、`_expected_path_digest`、`_make_valid_manifest_payload`、`_make_valid_report_payload`、`_CleanContextFakeExecutor` 及其依赖的模块级常量（以搬迁时实测依赖为准）；抽离前先 grep 复核共用位置清单
-- [ ] T014 [US1] 盘点 `tests/test_tuning.py`(5103) 域簇，定 3 文件切分线（草案：实验配置与租约 / manifest 校验 / runner 与漏斗守卫；以实测行数平衡为准，各 ≤2000）
-- [ ] T015 [US1] 创建 `tests/tuning/__init__.py` + 3 个域文件，逐字搬迁；原文件内对 5 个共享符号的引用统一改为 `from tests.tuning.builders import ...`（引用处逐字等价，仅改取用路径）
-- [ ] T016 [US2] 删除 `tests/test_tuning.py`；B5 验证收口，附加核对：拆分文件之间零互相 import、共享符号仅经 `builders` 取用 → `refactor(tests)` 提交
+- [X] T013 [US3] 创建 `tests/tuning/builders.py`：逐字抽离 `_sample_nine_fields`、`_expected_path_digest`、`_make_valid_manifest_payload`、`_make_valid_report_payload`、`_CleanContextFakeExecutor` 及其依赖的模块级常量（573 行；另抽离两域共用的 `_scope` 结构域辅助）
+- [X] T014 [US1] 盘点 `tests/test_tuning.py`(5103) 域簇，定 3 文件切分线（实验配置与租约/状态 7 类 → `test_tuning_state.py` 1089 行；manifest 校验与 runner 6 类 → `test_tuning_manifest.py` 1811 行；漏斗检索与平台守卫 7 类 → `test_tuning_funnel.py` 1672 行，均 ≤2000）
+- [X] T015 [US1] 创建 `tests/tuning/__init__.py` + 3 个域文件，逐字搬迁；原文件内对共享符号的引用统一改为 `from tests.tuning.builders import ...`（引用处逐字等价，仅改取用路径；原模块 docstring 随 state 域文件保留，其余两域改为溯源说明）
+- [X] T016 [US2] 删除 `tests/test_tuning.py`；B5 验证收口，附加核对：拆分文件之间零互相 import、共享符号仅经 `builders` 取用 → `refactor(tests)` 提交（聚焦 `discover -s tests/tuning` Ran 193 OK；全量 Ran 2561 failures=1 skipped=3 与基线一致；清单对账零差异。附带最小修复：`.gitignore` 与卫生测试的 `tuning` 规则收紧为仅仓库根目录；`test_workbench.py` 智联注册改为快照/还原，消除拆分后暴露的顺序污染）
 
 ---
 

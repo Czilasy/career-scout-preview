@@ -83,7 +83,7 @@ test-results/
 *.code-workspace
 
 # Tuning experiment runtime data (machine-specific, contains DB evidence)
-tuning/
+/tuning/
 
 # Local skill tooling config (baoyu-image-gen etc.)
 .baoyu-skills/
