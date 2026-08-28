@@ -108,7 +108,7 @@ description: "Task list for 027 测试大文件拆分重构"
 - [X] T024 [US1] 全仓测试文件行数终检：实测 `wc -l tests/*.py tests/*/*.py` 最大 1811 行（`tests/tuning/test_tuning_manifest.py`），无 >2000 文件、无需豁免；终检清单即各批提交说明所载行数（chrome_setup 1304/895、webui_store 947/1799、source 1408/1538、ai 1184/1680、tuning 1089/1811/1672、healthy_pipeline 821/1257/1119/1518/1464、webui_app 819/1764/1736/1432/1778/1461）
 - [X] T025 [US2] 清单终对账 + 全量终跑：终跑 Ran 2561 failures=1 skipped=3，唯一失败为既有 `test_public_assets` changelog 旧段落断言（基线既有，记 BACKLOG B082）；清单与基线快照 2561 条目逐行零差异
 - [X] T026 [US2] 产品代码零改动复核：`git diff 049d09d^..HEAD -- webui/ scripts/ webui/src/ .github/ hooks/ pyproject.toml uv.lock` 为空（基线提交取 B1 前一笔 40fdb57）
-- [X] T027 [US4] 落位复核与文档同步：7 子目录落位核对无误（chrome_setup 4 文件 / webui_store 3 / source 4 / ai 4 / tuning 5 / healthy_pipeline 7 / webui_app 7，合计 22 个域测试文件 + 4 个域内共享模块 + 7 个 `__init__.py`）；`roadmap/BACKLOG.md`（本地文件不入库）B075 移入已完成归档（第 64 项）、订正旧数字 2525→2561、新增既有缺陷 B082（changelog 旧段落断言恒红）与 B083（TestCase 基类 import 进命名空间被 unittest 重复收集）；`specs/021-large-file-split/BACKLOG.md` 未动
+- [X] T027 [US4] 落位复核与文档同步：7 子目录落位核对无误（chrome_setup 4 文件 / webui_store 3 / source 4 / ai 4 / tuning 5 / healthy_pipeline 7 / webui_app 7，合计 22 个域测试文件 + 5 个域内共享模块（harness×4 + builders×1）+ 7 个 `__init__.py`）；`roadmap/BACKLOG.md`（本地文件不入库）B075 移入已完成归档（第 64 项）、订正旧数字 2525→2561、新增既有缺陷 B082（changelog 旧段落断言恒红）与 B083（TestCase 基类 import 进命名空间被 unittest 重复收集）；`specs/021-large-file-split/BACKLOG.md` 未动
 - [X] T028 卫生收口：`uv run python -m unittest tests.test_repo_hygiene` 通过、`git diff --check` 干净、`git status` 仅本文件改动；收尾提交即本 tasks.md 勾选（chore(speckit)）；不 push、不提升版本、不触发打包发布
 
 ---
