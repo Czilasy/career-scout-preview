@@ -29,7 +29,7 @@ B042-B045 一起交付：B042 统一空城市两个开始入口的“确认后�
 - 不改变系统性暂停语义；`invalid_response` 只给精筛单条 1 次重试。
 - 日志只写 `~/.career-scout/logs/`，不进入仓库；不记录 API Key/Cookie。
 
-**Scale/Scope**: 单用户本地工具；B042 前端交互，B043 跨后端/前端重构，B044/B045 集中在 AI 调用链路。
+**Scale/Scope**: B042 前端交互，B043 跨后端/前端重构，B044/B045 集中在 AI 调用链路。
 
 ## Constitution Check
 

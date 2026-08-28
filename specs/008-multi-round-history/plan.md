@@ -26,7 +26,7 @@
 
 **Constraints**: 不扩大超大文件；`webui/store.py` 只允许最小 mixin 继承与 `archived_at IS NULL` 过滤；`webui/store_migrations.py` 只允许 migration 030；`webui/source.py`、`webui/pipeline_exec.py`、`scripts/boss_cdp_raw.py` 不修改。
 
-**Scale/Scope**: 单用户本地工具，历史轮次按平台最多 30 轮。
+**Scale/Scope**: 历史轮次按平台最多 30 轮。
 
 ## Constitution Check
 

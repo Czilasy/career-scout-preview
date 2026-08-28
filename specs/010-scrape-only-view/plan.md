@@ -26,7 +26,7 @@ B038 本质是"跳过 AI 筛选"：抓取自然完成后，步骤 2 出现"进�
 
 **Constraints**: 不扩大超大文件；`webui/store.py` 只允许最新结果白名单两处最小改动；`webui/app.py` 只允许注册 1 个薄路由 + AI 完成点 1 行替换；`webui/store_migrations.py`、`webui/source.py`、`webui/pipeline_exec.py`、`scripts/boss_cdp_raw.py` 不修改。
 
-**Scale/Scope**: 单用户本地工具；单轮岗位量级与现有抓取一致。
+**Scale/Scope**: 单轮岗位量级与现有抓取一致。
 
 ## Constitution Check
 

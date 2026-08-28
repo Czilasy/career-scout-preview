@@ -22,7 +22,7 @@ Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的多平台职位
 
 ## 免责声明
 
-本项目仅供学习和技术研究参考。使用前请阅读 [BOSS直聘用户协议](https://www.zhipin.com/about/protocol.html)、智联招聘相关服务条款及相关法律法规，不要用于商业转售、恶意爬取或对目标网站造成负担。使用本项目产生的一切后果由使用者自行承担。
+使用前请阅读 [BOSS直聘用户协议](https://www.zhipin.com/about/protocol.html)、智联招聘相关服务条款及相关法律法规，不要用于商业转售、恶意爬取或对目标网站造成负担。使用本项目产生的一切后果由使用者自行承担。
 
 ## 桌面版
 

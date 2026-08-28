@@ -26,7 +26,7 @@
 
 **Constraints**: 不扩大超大文件；`webui/store.py` 只允许 INSERT/读取加列；`webui/store_migrations.py` 只允许 migration 031；`webui/app.py` 除 API 透传需要外不修改；初筛判定逻辑不修改。
 
-**Scale/Scope**: 单用户本地工具；特征清单 20 条为常量表，后续可扩展。
+**Scale/Scope**: 特征清单 20 条为常量表，后续可扩展。
 
 ## Constitution Check
 
