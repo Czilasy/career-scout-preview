@@ -48,6 +48,34 @@ describe("App", () => {
     vi.unstubAllGlobals();
   });
 
+  it("auto-creates the first profile on an empty database", async () => {
+    // 回归：026 B078 后 DiscoveryView 只在 currentProfileId 就绪后挂载，
+    // 空库首启若不自动建画像，工作台会永远停在「正在加载工作台…」。
+    const createdBodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/session")) {
+        return response({ status: "ok", build_hash: expectedBackendBuildHash });
+      }
+      if (url.endsWith("/api/profiles")) {
+        if ((init?.method || "GET") === "POST") {
+          createdBodies.push(String(init?.body || ""));
+          return response({ id: "profile-auto", name: "我的求职画像" });
+        }
+        return response({ profiles: [] });
+      }
+      return response({});
+    }));
+
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(createdBodies).toHaveLength(1);
+    expect(JSON.parse(createdBodies[0])).toEqual({ name: "我的求职画像", confirmed_fields: {} });
+    expect(wrapper.find(".app-content-placeholder").exists()).toBe(false);
+    expect(wrapper.findComponent(DiscoveryView).props("profileId")).toBe("profile-auto");
+  });
+
   it("keeps AI settings reachable", async () => {
     const wrapper = mount(App);
     await flushPromises();

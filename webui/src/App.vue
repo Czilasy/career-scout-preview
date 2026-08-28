@@ -203,6 +203,16 @@ onMounted(async () => {
     runtimeMode.value = currentRuntimeMode() === "exe" ? "exe" : "source";
     const profileData = await apiRequest<{ profiles?: CandidateProfile[] }>("/api/profiles");
     profiles.value = profileData.profiles || [];
+    if (!profiles.value.length) {
+      // 空库首启兜底：创建画像的入口全在 DiscoveryView 内部，而它只在
+      // currentProfileId 就绪后才挂载——不在这里自动建首个画像，
+      // 新装用户会永远停在「正在加载工作台…」。
+      const created = await apiRequest<CandidateProfile>("/api/profiles", {
+        method: "POST",
+        json: { name: "我的求职画像", confirmed_fields: {} },
+      });
+      profiles.value = [created];
+    }
     const saved = localStorage.getItem("career-scout-current-profile") || "";
     currentProfileId.value = profiles.value.some((profile) => profile.id === saved)
       ? saved
