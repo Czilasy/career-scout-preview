@@ -88,10 +88,10 @@ description: "Task list for 027 测试大文件拆分重构"
 
 ## Phase 6: B6 healthy_pipeline [US1][US2][US3]
 
-- [ ] T017 [US3] 创建 `tests/healthy_pipeline/harness.py`：逐字抽离 `_load_boss_cdp_raw`、`_load_sc015_viewport_check`、`_make_app`、`_authed_test_client`、`_wait_for_pipeline_task`、`_pause_run` 及其依赖的模块级常量（如 `_SCRIPT_PATH`、`_SC015_PATH`，以实测为准）
-- [ ] T018 [US1] 盘点 `tests/test_healthy_pipeline.py`(6174) 域簇，定约 5 文件切分线（草案：切片状态与异常分类 / 收敛恢复 / 收敛统一与事件 / 暂停续跑 / 语义杂项；约 1562 行的 ConvergencePendingPersistence 类簇整体单置不强切）
-- [ ] T019 [US1] 创建 `tests/healthy_pipeline/__init__.py` + 域文件，逐字搬迁；harness 符号引用统一改为 `from tests.healthy_pipeline.harness import ...`
-- [ ] T020 [US2] 删除 `tests/test_healthy_pipeline.py`；B6 验证收口（附加核对同 T016）→ `refactor(tests)` 提交
+- [X] T017 [US3] 创建 `tests/healthy_pipeline/harness.py`：逐字抽离 `_load_boss_cdp_raw`、`_load_sc015_viewport_check`、`_make_app`、`_authed_test_client`、`_wait_for_pipeline_task`、`_pause_run` 及其依赖的模块级常量（实测 71 行：6 helper + `_SCRIPT_PATH`、`_SC015_PATH`）
+- [X] T018 [US1] 盘点 `tests/test_healthy_pipeline.py`(6174) 域簇，定约 5 文件切分线（实测 29 类切 5 域：切片状态与异常分类 8 类 / 待定收敛 1 类整体单置 / 统一收敛 5 类 / 暂停续跑 8 类 / 语义杂项 7 类）
+- [X] T019 [US1] 创建 `tests/healthy_pipeline/__init__.py` + 域文件，逐字搬迁；harness 符号引用统一改为 `from tests.healthy_pipeline.harness import ...`（`test_pipeline_state.py` 821 行、`test_pipeline_convergence_pending.py` 1257 行、`test_pipeline_convergence_unified.py` 1119 行、`test_pipeline_pause_resume.py` 1518 行、`test_pipeline_semantics.py` 1464 行；原模块 docstring 随 state 域文件保留，其余 4 域改为溯源说明）
+- [X] T020 [US2] 删除 `tests/test_healthy_pipeline.py`；B6 验证收口（附加核对同 T016）→ `refactor(tests)` 提交（聚焦 `discover -s tests/healthy_pipeline` Ran 211 OK(skipped=2)；全量 Ran 2561 failures=1 skipped=3 与基线构成一致；清单对账零差异；域文件间零互相 import）
 
 ---
 
