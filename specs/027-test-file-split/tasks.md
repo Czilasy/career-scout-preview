@@ -71,9 +71,9 @@ description: "Task list for 027 测试大文件拆分重构"
 
 ## Phase 4: B4 ai [US1][US2]
 
-- [ ] T010 [US1] 盘点 `tests/test_ai.py`(2880) 域簇，定 2 文件切分线；标记 `tests.test_workbench_fixtures` import 的使用类集合
-- [ ] T011 [US1] 创建 `tests/ai/__init__.py` + 2 个域文件，逐字搬迁；`from tests.test_workbench_fixtures import ...` 随使用类搬入，导入路径不变
-- [ ] T012 [US2] 删除 `tests/test_ai.py`；B4 验证收口 → `refactor(tests)` 提交
+- [X] T010 [US1] 盘点 `tests/test_ai.py`(2880) 域簇，定 2 文件切分线；标记 `tests.test_workbench_fixtures` import 的使用类集合（调用合同域 10 类 / 匹配排序域 13 类；共享流式 mock 辅助 `_mock_chat_response`、`_mock_stream_raw` 归域共享模块 `tests/ai/harness.py`）
+- [X] T011 [US1] 创建 `tests/ai/__init__.py` + 2 个域文件，逐字搬迁；`from tests.test_workbench_fixtures import ...` 随使用类搬入，导入路径不变（`test_ai_calls.py` 1184 行、`test_ai_match.py` 1680 行、`harness.py` 46 行；原模块 docstring 随 calls 域文件保留，match 域文件改为溯源说明）
+- [X] T012 [US2] 删除 `tests/test_ai.py`；B4 验证收口 → `refactor(tests)` 提交（聚焦 `discover -s tests/ai` Ran 164 OK；全量 Ran 2561 failures=1 skipped=3 与基线构成一致；清单对账零差异）
 
 ---
 
