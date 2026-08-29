@@ -94,6 +94,7 @@ jobs:
       - name: 同步 DMG 到更新镜像
         if: env.MIRROR_SSH_KEY != ''
         continue-on-error: true
+        timeout-minutes: 45
         env:
           MIRROR_SSH_KEY: ${{ secrets.MIRROR_SSH_KEY }}
         run: |
