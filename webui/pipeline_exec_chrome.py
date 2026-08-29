@@ -9,8 +9,34 @@ from __future__ import annotations
 import os
 import time
 
-from webui.pipeline_exec_accounts import _cdp_data_dir, load_browser_accounts
+from webui.pipeline_exec_accounts import (
+    _cdp_data_dir,
+    effective_data_dir,
+    load_browser_accounts,
+)
 from scripts import boss_cdp_raw as boss
+from scripts.boss.browser_registry import (
+    fetch_cdp_browser_field,
+    is_chromium_cdp_browser,
+    resolve_executable,
+    selection_data_dir_key,
+)
+
+
+
+
+# ---------------------------------------------------------------------------
+# 内核校验（029 FR-013：所选浏览器必须是 Chromium 内核）
+# ---------------------------------------------------------------------------
+def _kernel_check_error(cdp_port: int) -> str | None:
+    """CDP 内核判定；不兼容返回用户可读错误，取不到字段放行（不阻断）。"""
+    field = fetch_cdp_browser_field(cdp_port)
+    if field is not None and not is_chromium_cdp_browser(field):
+        return (
+            f"所选浏览器内核不兼容（调试端点报告：{field}）。"
+            "抓取仅支持 Chromium 内核浏览器，请在 设置 → 浏览器 中重新选择。"
+        )
+    return None
 
 
 
@@ -40,10 +66,15 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
     port = cdp_port or boss.DEFAULT_CDP_PORT
     if boss.is_cdp_ready(port):
         cdp_data_dir = _cdp_data_dir()
+        kernel_error = _kernel_check_error(port)
+        if kernel_error:
+            return False, kernel_error
         if boss.cdp_port_uses_profile(port, cdp_data_dir):
             return True, ""
+        data_dir_key = selection_data_dir_key()
         known_profiles = {
-            boss.normalize_profile_path(str(info["profile_dir"]))
+            boss.normalize_profile_path(effective_data_dir(
+                str(info["profile_dir"]), data_dir_key))
             for info in load_browser_accounts().values()
         }
         try:
@@ -53,8 +84,9 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
             zhilian_port = 9223
         if port == zhilian_port:
             known_profiles.update(
-                boss.normalize_profile_path(derive_zhilian_profile_dir(
-                    str(info["profile_dir"])))
+                boss.normalize_profile_path(effective_data_dir(
+                    derive_zhilian_profile_dir(str(info["profile_dir"])),
+                    data_dir_key))
                 for info in load_browser_accounts().values()
                 if str(info.get("profile_dir") or "").strip()
             )
@@ -76,8 +108,12 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
         boss.stop_cdp_chrome(cdp_data_dir)
     except Exception:
         pass
+    # 029：启动 exe 按设置中的浏览器选择解析（auto/registry/manual）
+    exe_path, exe_reason = resolve_executable()
+    if exe_path is None:
+        return False, exe_reason or "未找到可用的 Chromium 浏览器"
     cmd = [
-        boss.DEFAULT_CHROME_PATH,
+        exe_path,
         f"--remote-debugging-port={port}",
         f"--user-data-dir={cdp_data_dir}",
         "--no-first-run",
@@ -99,6 +135,11 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
     PARENT_EXIT_GRACE = 10  # 主进程退出后给 CDP 10s 宽限期
     while time.time() < deadline:
         if boss.is_cdp_ready(port):
+            # 内核校验：非 Chromium 内核（如 Firefox/魔改壳）立即报错，
+            # 不做重试等待（换内核不会自愈，避免无反馈等待）
+            kernel_error = _kernel_check_error(port)
+            if kernel_error:
+                return False, kernel_error
             if launched and minimize_after_launch:
                 # 最小化是锦上添花，失败不阻断任务流程
                 try:

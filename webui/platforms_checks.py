@@ -135,10 +135,18 @@ def check_login_space_conflict(
     if not browser_account:
         raise ValueError(_MSG_BROWSER_ACCOUNT_REQUIRED)
 
+    # 029：端口实际目录已按浏览器命名空间化（effective_data_dir），
+    # expected/known 须同样翻译后再比对，否则恒不匹配 → 误判 login_space_conflict
+    from webui.pipeline_exec_accounts import effective_data_dir
+    from scripts.boss.browser_registry import selection_data_dir_key
+
+    data_dir_key = selection_data_dir_key()
     if platform == "boss":
-        expected = str(boss_profile_dir)
+        expected = effective_data_dir(str(boss_profile_dir), data_dir_key)
     else:  # zhilian
-        expected = derive_zhilian_profile_dir(boss_profile_dir)
+        expected = effective_data_dir(
+            derive_zhilian_profile_dir(boss_profile_dir), data_dir_key
+        )
 
     if not port_profile_paths:
         return True, ""
@@ -146,7 +154,10 @@ def check_login_space_conflict(
     if expected in port_profile_paths:
         return True, ""
 
-    known_set = set(known_profile_paths)
+    known_set = {
+        effective_data_dir(str(path), data_dir_key)
+        for path in known_profile_paths
+    }
     for port_path in port_profile_paths:
         if port_path in known_set:
             return True, ""
@@ -185,12 +196,22 @@ def check_browser_account_delete(
             kind = lock.get("kind", "unknown")
             return False, f"browser_busy: {kind} lock"
 
-    if boss_profile_dir and boss_profile_dir in port_profiles_boss:
-        return False, "browser_in_use: boss profile"
+    # 029：与 check_login_space_conflict 同理，账号原始目录须先翻译到
+    # 当前浏览器命名空间，再与端口实际目录比对
+    from webui.pipeline_exec_accounts import effective_data_dir
+    from scripts.boss.browser_registry import selection_data_dir_key
 
-    zhilian_dir = derive_zhilian_profile_dir(boss_profile_dir)
-    if zhilian_dir in port_profiles_zhilian:
-        return False, "browser_in_use: zhilian profile"
+    data_dir_key = selection_data_dir_key()
+    if boss_profile_dir:
+        boss_dir = effective_data_dir(str(boss_profile_dir), data_dir_key)
+        if boss_dir in port_profiles_boss:
+            return False, "browser_in_use: boss profile"
+
+        zhilian_dir = effective_data_dir(
+            derive_zhilian_profile_dir(boss_profile_dir), data_dir_key
+        )
+        if zhilian_dir in port_profiles_zhilian:
+            return False, "browser_in_use: zhilian profile"
 
     return True, ""
 

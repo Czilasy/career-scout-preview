@@ -11,20 +11,19 @@ T035 接线点（冻结合同 ``specs/003-desktop-exe/contracts/desktop-shell.md
    PYTHON_EXECUTABLE=sys.executable, START_TASKS=True})``，
    ``app.run(use_reloader=False, threaded=True)`` 在独立 daemon 线程。
 4. **就绪轮询**（§4）：``GET /api/session`` 直到 200，超时 ≤30s → 错误退出。
-5. **窗口**（§5）：标题 ``Career Scout v{version}``（pyproject.toml 读版本），
-   默认 1280×800，``min_size=(1024,700)``，``resizable=True``，
-   从 ``~/.career-scout/desktop_window.json`` 恢复状态（越界回退居中）。
-6. **closing 生命周期**（§6）：``events.closing`` → 保存窗口状态 →
-   ``cancel_running_tasks``（set 所有 ``_cancel_events``）→
-   ``run_desktop_shell`` 返回退出码；``main()`` 调用方负责 ``os._exit(code)``
-   兜底（合同 §6 要求 ``webview.start()`` 返回后 ``os._exit`` 确保无残留线程）。
+5. **窗口**（§5，029 修订）：普通态默认 1545×900 居中（小屏钳回），
+   ``min_size=(1024,700)``，``resizable=True``；从 ``~/.career-scout/desktop_window.json``
+   （schema 3）恢复普通矩形与最大化标记——无记忆/损坏/污染记忆一律首开
+   最大化；事件维护普通矩形（窗口状态域 ``packaging/window_state.py``）。
+6. **closing 生命周期**（§6）：``events.closing`` → 按 Tracker 快照落盘
+   （最大化 → 最后普通矩形 + ``maximized:true``）→ ``cancel_running_tasks``
+   → 返回退出码；``main()`` 调用方 ``os._exit(code)`` 兜底（合同 §6）。
 7. **错误路径**（§7）：MessageBox + ``~/.career-scout/desktop.log`` 追加记录 + 非零退出。
 
 所有外部依赖（mutex/messagebox/webview/create_app/pick_free_port/http_get/logger）
 通过 ``run_desktop_shell(deps)`` 注入，便于纯逻辑单测；``main()`` 组装默认依赖。
 """
 
-import json
 import os
 import sys
 import threading
@@ -46,22 +45,36 @@ def _resolve_project_root():
     return Path(__file__).resolve().parent.parent
 
 _PROJECT_ROOT = _resolve_project_root()
-DEFAULT_STATE_DIR = Path(os.path.expanduser("~/.career-scout"))
-WINDOW_STATE_FILENAME = "desktop_window.json"
 LOG_FILENAME = "desktop.log"
 MUTEX_NAME = "CareerScout-SingleInstance"
 ERROR_ALREADY_EXISTS = 183
-# 默认窗口尺寸（用户可通过 desktop_window.json 的 default_* 字段自定义，
-# 见 contracts/desktop-shell.md §5；无记忆或未配置时使用此处常量）
-DEFAULT_WIDTH = 1366
-DEFAULT_HEIGHT = 768
-MIN_WIDTH = 1024
-MIN_HEIGHT = 700
-MAX_WIDTH = 8192
-MAX_HEIGHT = 8192
 BACKEND_READY_TIMEOUT = 30.0
 BACKEND_READY_POLL_INTERVAL = 0.2
-_WINDOW_STATE_SCHEMA_VERSION = 2
+
+# 窗口状态域（029 分流）：常量与读写实现全部在 window_state.py，
+# 此处 re-export 保持旧调用面（tests/test_desktop_shell.py 等既有引用）。
+try:  # 包导入（unittest/PyInstaller 模块分析）
+    from packaging import window_state as _ws
+except ImportError:  # 脚本直跑（python packaging/desktop.py）时的同目录回退
+    import window_state as _ws  # type: ignore
+
+DEFAULT_HEIGHT = _ws.DEFAULT_HEIGHT
+DEFAULT_STATE_DIR = _ws.DEFAULT_STATE_DIR
+DEFAULT_WIDTH = _ws.DEFAULT_WIDTH
+MAX_HEIGHT = _ws.MAX_HEIGHT
+MAX_WIDTH = _ws.MAX_WIDTH
+MIN_HEIGHT = _ws.MIN_HEIGHT
+MIN_WIDTH = _ws.MIN_WIDTH
+WINDOW_STATE_FILENAME = _ws.WINDOW_STATE_FILENAME
+WindowStateTracker = _ws.WindowStateTracker
+default_normal_rect = _ws.default_normal_rect
+default_workarea_provider = _ws.default_workarea_provider
+size_fits_workareas = _ws.size_fits_workareas
+load_window_state = _ws.load_window_state
+save_window_state = _ws.save_window_state
+wire_window_events = _ws.wire_window_events
+
+_default_workarea_provider = default_workarea_provider  # 兼容别名（旧符号）
 
 
 # ---------------------------------------------------------------------------
@@ -152,117 +165,7 @@ def release_single_instance_mutex(handle):
         pass
 
 
-# ---------------------------------------------------------------------------
-# 窗口状态文件（T037 / 合同 §5）
-# ---------------------------------------------------------------------------
-def _window_state_path(state_dir):
-    base = Path(state_dir) if state_dir else DEFAULT_STATE_DIR
-    return base / WINDOW_STATE_FILENAME
-
-
-def _read_default_size(state_dir):
-    """读取用户配置的默认尺寸（schema 2 的 default_width/default_height）。
-
-    文件缺失/字段非法/越界 → 回退常量 DEFAULT_WIDTH/DEFAULT_HEIGHT。
-    只读不写；用于「无记忆时打开什么尺寸」的判定（合同 §5）。
-    """
-    path = _window_state_path(state_dir)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-    if not isinstance(data, dict):
-        return (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-    try:
-        width = int(data["default_width"])
-        height = int(data["default_height"])
-    except (KeyError, ValueError, TypeError):
-        return (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-    if not (MIN_WIDTH <= width <= MAX_WIDTH) or not (MIN_HEIGHT <= height <= MAX_HEIGHT):
-        return (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-    return (width, height)
-
-
-def load_window_state(state_dir=None, workarea_provider=None):
-    """读取并校验窗口状态。
-
-    返回 ``(width, height, x, y)``：
-
-    - 文件缺失/JSON 非法/schema 不匹配 → ``(default_w, default_h, None, None)``，
-      default 取文件内用户配置（schema 2 的 default_* 字段），未配置用常量；
-    - 记忆字段（width/height/x/y）任一缺失或非法 → 视为**无记忆**，
-      同样以 default 尺寸打开（用户删掉记忆字段即可回到默认尺寸）；
-    - 位置越出显示器工作区 → 回退居中（用第一个工作区）；
-    - workarea_provider 为 None → 不做越界检查，直接返回原始 x/y。
-    """
-    default_w, default_h = _read_default_size(state_dir)
-    default = (default_w, default_h, None, None)
-    path = _window_state_path(state_dir)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return default
-
-    if not isinstance(data, dict) or data.get("schema") != _WINDOW_STATE_SCHEMA_VERSION:
-        return default
-
-    try:
-        width = int(data["width"])
-        height = int(data["height"])
-        x = int(data["x"])
-        y = int(data["y"])
-    except (KeyError, ValueError, TypeError):
-        # 记忆字段不完整 → 无记忆，用用户配置的默认尺寸
-        return default
-
-    if not (MIN_WIDTH <= width <= MAX_WIDTH) or not (MIN_HEIGHT <= height <= MAX_HEIGHT):
-        return default
-
-    if workarea_provider is None:
-        return (width, height, x, y)
-
-    try:
-        workareas = workarea_provider()
-    except Exception:
-        return (width, height, x, y)
-
-    for (ax, ay, aw, ah) in workareas:
-        if ax <= x < ax + aw and ay <= y < ay + ah:
-            return (width, height, x, y)
-
-    if workareas:
-        ax, ay, aw, ah = workareas[0]
-        return (width, height, ax + (aw - width) // 2, ay + (ah - height) // 2)
-    return (width, height, x, y)
-
-
-def save_window_state(width, height, x, y, state_dir=None):
-    """保存窗口状态到 ``{state_dir}/desktop_window.json``。
-
-    schema 2：保留用户配置的 default_width/default_height（读旧文件回退常量），
-    只更新记忆的 width/height/x/y——用户自定义默认尺寸不会被覆盖（合同 §5）。
-    """
-    default_w, default_h = _read_default_size(state_dir)
-    path = _window_state_path(state_dir)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "schema": _WINDOW_STATE_SCHEMA_VERSION,
-                    "default_width": default_w,
-                    "default_height": default_h,
-                    "width": int(width),
-                    "height": int(height),
-                    "x": int(x),
-                    "y": int(y),
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-    except OSError:
-        pass
+# 窗口状态文件（T037/合同 §5）029 起迁移至 packaging/window_state.py（re-export 兼容）
 
 
 # ---------------------------------------------------------------------------
@@ -393,54 +296,6 @@ def _default_messagebox(title, text):
         except Exception:
             pass
     print(f"[{title}] {text}")
-
-
-def _default_workarea_provider():
-    """返回所有显示器工作区 ``[(x, y, w, h)]``；非 Windows 或失败返回 ``[]``。
-
-    通过 ``EnumDisplayMonitors`` + ``GetMonitorInfoW`` 枚举每个显示器的
-    ``rcWork``（排除任务栏的可用区域），覆盖副屏场景——窗口在副屏上
-    不被误判为越界（合同 §5「任一可见显示器工作区」）。
-    """
-    if sys.platform != "win32":
-        return []
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        class _MonitorInfo(ctypes.Structure):
-            _fields_ = [
-                ("cbSize", wintypes.DWORD),
-                ("rcMonitor", wintypes.RECT),
-                ("rcWork", wintypes.RECT),
-                ("dwFlags", wintypes.DWORD),
-            ]
-
-        user32 = ctypes.windll.user32
-        workareas: list[tuple[int, int, int, int]] = []
-
-        monitor_enum_proc = ctypes.WINFUNCTYPE(
-            wintypes.BOOL,
-            wintypes.HMONITOR,
-            wintypes.HDC,
-            ctypes.POINTER(wintypes.RECT),
-            wintypes.LPARAM,
-        )
-
-        def _callback(hmonitor, hdc, rect_ptr, lparam):
-            info = _MonitorInfo()
-            info.cbSize = ctypes.sizeof(_MonitorInfo)
-            if user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
-                rect = info.rcWork
-                workareas.append(
-                    (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
-                )
-            return True
-
-        user32.EnumDisplayMonitors(None, None, monitor_enum_proc(_callback), 0)
-        return workareas
-    except Exception:
-        return []
 
 
 def _run_flask_server(app, port):
@@ -602,9 +457,15 @@ def run_desktop_shell(deps):
         )
         return 1
 
-    # 5. 窗口状态
-    width, height, x, y = load_window_state(
+    # 5. 窗口状态（schema 3：普通矩形 + maximized 标记；无记忆 = 首开最大化）
+    width, height, x, y, start_maximized = load_window_state(
         state_dir=state_dir, workarea_provider=workarea_provider
+    )
+    # macOS 全屏动画先发 resized（全屏尺寸）后发 maximized：守卫拒绝装不进
+    # 工作区的尺寸，防止 last_normal 被全屏矩形污染（029 审查修复）
+    tracker = WindowStateTracker(
+        default_rect_fn=lambda: default_normal_rect(workarea_provider),
+        size_guard=lambda w, h: size_fits_workareas(w, h, workarea_provider),
     )
     title = f"Career Scout v{version}"
 
@@ -630,6 +491,8 @@ def run_desktop_shell(deps):
         "min_size": (MIN_WIDTH, MIN_HEIGHT),
         "background_color": "#0d1113",
         "shadow": False,
+        # 记忆 maximized=True → 启动即真最大化（还原落回普通矩形参数）
+        "maximized": bool(start_maximized),
         # 前端通过 window.pywebview.api 调用（外链打开/退出应用）
         "js_api": js_api,
     }
@@ -642,18 +505,23 @@ def run_desktop_shell(deps):
 
     def _on_closing():
         try:
-            # window.x/y 在未显式设置时可能为 None（首启），此时回退到
-            # 本次启动用的默认值，保证首次关闭也能写入状态文件。
-            win_w = getattr(window, "width", None)
-            win_h = getattr(window, "height", None)
-            win_x = getattr(window, "x", None)
-            win_y = getattr(window, "y", None)
+            # Tracker 快照 = 普通矩形语义：最大化 → 冻结普通矩形，普通态 →
+            # 当前窗口值（缺项逐级回退）；全屏矩形永不写入（029 契约）。
+            save_w, save_h, save_x, save_y, was_maximized = (
+                tracker.snapshot_for_save(
+                    getattr(window, "width", None),
+                    getattr(window, "height", None),
+                    getattr(window, "x", None),
+                    getattr(window, "y", None),
+                )
+            )
             save_window_state(
-                win_w if win_w is not None else width,
-                win_h if win_h is not None else height,
-                win_x if win_x is not None else (x or 0),
-                win_y if win_y is not None else (y or 0),
+                save_w,
+                save_h,
+                save_x,
+                save_y,
                 state_dir=state_dir,
+                maximized=was_maximized,
             )
         except Exception:
             pass
@@ -668,6 +536,7 @@ def run_desktop_shell(deps):
         events = getattr(window, "events", None)
         if events is not None and hasattr(events, "closing"):
             events.closing += _on_closing
+            wire_window_events(events, window, tracker)
         else:
             # pywebview <6 没有 events API：窗口状态记忆与关闭时任务取消
             # 都会静默失效，必须明示（README 约束 pywebview>=6.0）

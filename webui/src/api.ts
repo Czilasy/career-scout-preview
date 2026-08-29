@@ -256,3 +256,51 @@ export function fetchLogs(params: LogsQuery = {}): Promise<LogsResponse> {
   const qs = query.toString();
   return apiRequest<LogsResponse>(`/api/logs${qs ? `?${qs}` : ""}`);
 }
+
+// ---------------------------------------------------------------------------
+// 浏览器注册表（029 B082③）：抓取用 Chromium 浏览器探测/选择/手动路径校验
+// ---------------------------------------------------------------------------
+export interface BrowserRegistryEntryState {
+  key: string;
+  name: string;
+  installed: boolean;
+  path: string | null;
+}
+
+export interface BrowserSelection {
+  mode: "auto" | "registry" | "manual";
+  key?: string;
+  manual_path?: string;
+}
+
+export interface BrowserRegistryResponse {
+  registry: BrowserRegistryEntryState[];
+  selection: BrowserSelection;
+  effective_path: string | null;
+}
+
+export type BrowserSelectionSave =
+  | { mode: "auto" }
+  | { mode: "registry"; key: string }
+  | { mode: "manual"; path: string };
+
+export type BrowserPathValidation =
+  | { ok: true; version: string }
+  | { ok: false; error: string; message: string };
+
+export const browserRegistryApi = {
+  get() {
+    return apiRequest<BrowserRegistryResponse>("/api/browser-registry");
+  },
+  save(payload: BrowserSelectionSave) {
+    return apiRequest<BrowserRegistryResponse & { ok: boolean }>(
+      "/api/browser-registry", { method: "PUT", json: payload },
+    );
+  },
+  /** 手动路径即时校验：失败时后端返回 400，抛 ApiError（message 用户可读）。 */
+  validatePath(path: string) {
+    return apiRequest<BrowserPathValidation>(
+      "/api/browser-registry/validate-path", { method: "POST", json: { path } },
+    );
+  },
+};

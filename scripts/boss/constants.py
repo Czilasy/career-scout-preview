@@ -35,7 +35,10 @@ MAX_PAGES = 10          # 单次最大页数
 MAX_API_REQUESTS = 999  # 单次抓取运行最大 API 请求数（B053：按运行隔离，不跨轮累计）
 
 
-BROWSER_NOT_FOUND_HINT = "请安装 Chrome 或使用系统自带 Edge"
+BROWSER_NOT_FOUND_HINT = (
+    "未找到可用的 Chromium 浏览器：请安装 Chrome、使用系统自带 Edge，"
+    "或在设置 → 浏览器中选择/手动指定浏览器路径"
+)
 
 
 CHROME_EXE = "chrome.exe"
@@ -75,55 +78,20 @@ MSG_USER_CANCELLED_SCRAPE = "用户取消抓取"
 
 
 def detect_chromium_browsers():
-    """探测本机 Chromium 系浏览器（Chrome / Edge），返回结构化结果。
+    """探测本机 Chromium 系浏览器（029 起委托注册表域，保持旧双键返回）。
 
     Returns:
         {"chrome": 可执行文件路径或 None, "edge": 可执行文件路径或 None}
 
-    Windows 依次查 LOCALAPPDATA / PROGRAMFILES / PROGRAMFILES(X86) 下的
-    chrome.exe 与 msedge.exe；macOS / Linux 顺带支持常见安装路径。
-    两类浏览器各保留第一个命中的路径；两者都找不到时返回两个 None。
+    完整 8 家注册表探测见 ``scripts/boss/browser_registry.detect_browsers``；
+    此处只投影 chrome/edge 两键，兼容既有调用面（Chrome 优先、Edge 次之）。
     """
-    system = platform.system()
+    from scripts.boss.browser_registry import detect_browsers
+
     found = {"chrome": None, "edge": None}
-    if system == "Windows":
-        candidates = (
-            ("chrome", "LOCALAPPDATA", "Google", "Chrome", "Application", CHROME_EXE),
-            ("chrome", "PROGRAMFILES", "Google", "Chrome", "Application", CHROME_EXE),
-            ("chrome", "PROGRAMFILES(X86)", "Google", "Chrome", "Application", CHROME_EXE),
-            ("edge", "PROGRAMFILES", "Microsoft", "Edge", "Application", EDGE_EXE),
-            ("edge", "PROGRAMFILES(X86)", "Microsoft", "Edge", "Application", EDGE_EXE),
-            ("edge", "LOCALAPPDATA", "Microsoft", "Edge", "Application", EDGE_EXE),
-        )
-        for kind, env_name, *parts in candidates:
-            if found[kind]:
-                continue
-            base = os.environ.get(env_name)
-            if not base:
-                continue
-            candidate = ntpath.join(base, *parts)
-            if os.path.exists(candidate):
-                found[kind] = candidate
-        return found
-    if system == "Darwin":
-        for kind, path in (
-            ("chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-            ("edge", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
-        ):
-            if os.path.exists(path):
-                found[kind] = path
-        return found
-    for kind, candidates in (
-        ("chrome", (
-            "/usr/bin/google-chrome", "/usr/bin/chromium-browser",
-            "/usr/bin/chromium", "/snap/bin/chromium",
-        )),
-        ("edge", ("/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable")),
-    ):
-        for candidate in candidates:
-            if os.path.exists(candidate):
-                found[kind] = candidate
-                break
+    for item in detect_browsers():
+        if item["key"] in found and item["installed"]:
+            found[item["key"]] = item["path"]
     return found
 
 
