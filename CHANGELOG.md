@@ -2,6 +2,11 @@
 
 本文件记录 Career Scout 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.8.3] - 2026-08-29
+
+修复：
+- 应用内更新优先走国内镜像，检查与下载不再依赖 GitHub 连通性
+
 ## [1.8.2] - 2026-08-29
 
 优化：
