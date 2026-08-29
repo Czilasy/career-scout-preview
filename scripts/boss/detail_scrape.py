@@ -8,7 +8,7 @@ import random
 import threading
 import time
 from scripts.boss.constants import CDP_ABOUT_BLANK, CDP_CMD_ADD_SCRIPT_ON_NEW_DOC, CDP_CMD_ATTACH_TARGET, CDP_CMD_CLOSE_TARGET, CDP_CMD_CREATE_TARGET, CDP_CMD_PAGE_NAVIGATE, DEFAULT_CDP_PORT, EXTRACT_DETAIL_JS, HIDDEN_DEFINE_JS, MSG_USER_CANCELLED_SCRAPE, _READINESS_PROBE_JS, _VISIBILITY_STATE_JS
-from scripts.boss.detail_parse import build_detail_url, extract_job_description
+from scripts.boss.detail_parse import build_detail_url, extract_job_description, extract_recruiter_activity_text
 from scripts.boss.exceptions import DetailExtractionError, DetailLoginRequiredError, DetailRateLimitedError, DetailVerificationRequiredError, RequestLimitExceededError, RiskControlError, SearchCancelled
 from scripts.boss.output import default_output_path, write_detail_csv, write_json_atomic
 from scripts.boss.rate_limit import begin_request_run
@@ -34,6 +34,10 @@ def build_detail_record(job, extracted):
         "link": link,
         "skill_tags": extracted.get("tags", []),
         "jd": extracted.get("jd", ""),
+        # 028 B081：名片活跃文本截获（归一化与判定在 webui.recruiter_activity）
+        "recruiter_activity_text": extract_recruiter_activity_text(
+            str(extracted.get("page_text") or "")
+        ),
     }
 
 

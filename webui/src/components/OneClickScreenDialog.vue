@@ -16,11 +16,14 @@ export function crossPlatformDedupeEnabled(): boolean {
 import { ref, watch } from "vue";
 import { Sparkles } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
+import { singleSelectNextValue } from "../discovery";
 import type { Platform } from "../types";
 
 export interface OneClickFilterGroup {
   key: string;
   label: string;
+  /** 028：单选字段（第 7 类招聘者上次活跃）点新值替换、点已选值取消。 */
+  multiple?: boolean;
   sentinel: { label: string; code: string } | null;
   options: Array<[string, string]>;
 }
@@ -72,6 +75,13 @@ watch(
 
 function toggle(key: string, code: string) {
   const current = values.value[key] || [];
+  // 028：单选字段点新值替换、点已选值取消；多选字段维持增删。
+  const group = props.groups.find((group) => group.key === key);
+  const single = singleSelectNextValue(group?.multiple, current, code);
+  if (single !== null) {
+    values.value[key] = single;
+    return;
+  }
   values.value[key] = current.includes(code)
     ? current.filter((item) => item !== code)
     : [...current, code];

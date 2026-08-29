@@ -31,7 +31,8 @@ ZHILIAN_DEFAULT_CDP_PORT = 9223
 
 
 #: BOSS AI 筛选 schema 版本。字段集合或稳定值/标签变化时递增。
-BOSS_FILTER_SCHEMA_VERSION = 1
+#: 028：新增第 7 类公共字段 recruiter_activity（1 → 2）。
+BOSS_FILTER_SCHEMA_VERSION = 2
 
 
 
@@ -41,7 +42,8 @@ BOSS_CITY_MAPPING_VERSION = 2
 
 
 #: 智联 AI 筛选 schema 版本。字段集合或稳定值/标签核验后变化时递增。
-ZHILIAN_FILTER_SCHEMA_VERSION = 2
+#: 028：新增第 7 类公共字段 recruiter_activity（2 → 3）。
+ZHILIAN_FILTER_SCHEMA_VERSION = 3
 
 
 
@@ -51,8 +53,10 @@ ZHILIAN_CITY_MAPPING_VERSION = 2
 
 
 # BOSS AI 筛选公共字段顺序（contracts/platform-schema.md 字段集合表）。
+# 028：recruiter_activity（招聘者上次活跃）为两平台公共第 7 类，平台无关、
+# 纯本地判定，options 由 webui.recruiter_activity 统一供给。
 _BOSS_COMMON_FIELDS: tuple[str, ...] = (
-    "salary", "experience", "degree", "industry", "scale",
+    "salary", "experience", "degree", "industry", "scale", "recruiter_activity",
 )
 
 

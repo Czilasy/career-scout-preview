@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from webui.platforms_registry import register_platform
+from webui import recruiter_activity
 from webui.platforms_schema import (
     CityEntry,
     FilterField,
@@ -35,6 +36,7 @@ from webui.platforms_urls import (
 # 智联 AI 筛选字段顺序（contracts/platform-schema.md 字段集合表）。
 _ZHILIAN_FILTER_FIELDS: tuple[str, ...] = (
     "salary", "experience", "degree", "industry", "scale", "company_nature",
+    "recruiter_activity",
 )
 
 
@@ -46,6 +48,7 @@ _ZHILIAN_FIELD_LABELS: dict[str, str] = {
     "industry": "行业",
     "scale": "公司规模",
     "company_nature": "公司性质",
+    "recruiter_activity": "招聘者上次活跃",
 }
 
 
@@ -149,6 +152,19 @@ def _build_zhilian_filter_schema() -> PlatformFilterSchema:
     """构建智联 AI 筛选 schema（2026-08-04 真实元数据核验后启用）。"""
     fields: list[FilterField] = []
     for key in _ZHILIAN_FILTER_FIELDS:
+        # 028 第 7 类：平台无关、单选、档位 options 由判定域统一供给，
+        # 不走平台码映射（智联搜索不支持按招聘者活跃过滤，纯本地判定）。
+        if key == recruiter_activity.FIELD_KEY:
+            fields.append(FilterField(
+                key=key,
+                label=_ZHILIAN_FIELD_LABELS[key],
+                multiple=False,
+                options=tuple(
+                    FilterOption(value=value, label=label)
+                    for value, label in recruiter_activity.filter_option_pairs()
+                ),
+            ))
+            continue
         options = tuple(
             FilterOption(value=value, label=label)
             for value, label in _ZHILIAN_FIELD_OPTIONS.get(key, ())

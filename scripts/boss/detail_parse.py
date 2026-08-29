@@ -152,6 +152,47 @@ def extract_job_description(extracted):
     return jd
 
 
+def extract_recruiter_activity_text(page_text):
+    """截获招聘者名片活跃文本（028 B081 第 7 类）。
+
+    名片区块紧邻竞争力分析/安全提示标记，行结构为
+    「姓名 | 活跃文本 | 公司 | · | 头衔」，活跃行 = "在线" 或以"活跃"结尾。
+    无「·」分隔的裸名片（实测 18 例中 1 例）、无活跃行、定位失败一律返回
+    ""（未知兜底，不误拦）。与 ``extract_job_description`` 同样的描述标记
+    切分口径，避免 JD 正文出现标记词时错定位。只截获原文；文本 → 天数
+    区间的归一化在 ``webui.recruiter_activity`` 完成。
+    """
+    if not isinstance(page_text, str) or not page_text:
+        return ""
+    text = page_text
+    if DETAIL_DESCRIPTION_MARKER in text:
+        text = text.split(DETAIL_DESCRIPTION_MARKER, 1)[1]
+    stripped_lines = [line.strip() for line in text.replace("\r\n", "\n").splitlines()]
+    end = len(stripped_lines)
+    while end and not stripped_lines[end - 1]:
+        end -= 1
+
+    def activity_from_card(card_end):
+        while card_end and not stripped_lines[card_end - 1]:
+            card_end -= 1
+        if card_end < 4 or stripped_lines[card_end - 2] != "·":
+            return None
+        candidate = stripped_lines[card_end - 4]
+        if candidate == "在线" or candidate.endswith("活跃"):
+            return candidate
+        return ""
+
+    for marker in (DETAIL_COMPETITIVENESS_MARKER, DETAIL_SAFETY_MARKER):
+        try:
+            marker_index = stripped_lines.index(marker)
+        except ValueError:
+            continue
+        result = activity_from_card(marker_index)
+        if result is not None:
+            return result
+    return activity_from_card(end) or ""
+
+
 def build_detail_url(job):
     """Build the URL used for detail navigation without mutating job_link."""
     link = job.get("job_link", "")

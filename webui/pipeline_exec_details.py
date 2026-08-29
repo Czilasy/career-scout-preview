@@ -15,6 +15,7 @@ from webui.browser_recovery import BrowserRecovery
 from webui.error_registry import SYSTEMIC_BLOCK_CODES as _HARD_STOP_CODES
 from webui.error_registry import resolve_code
 from webui.task_pause_support import ImmediateOnlyCancelEvent
+from webui import recruiter_activity
 
 
 
@@ -135,6 +136,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     stall_divert: str | None = None
     stall_code = ""
     stall_attempts = 0
+    # 028 B081：详情成功时归一化的招聘者活跃事实（idx → fact 或 None）
+    activity_by_idx: dict = {}
 
     def _apply_batch_outcomes(batch_entries, batch_outcomes, batch_exc_code,
                               *, count_done=True):
@@ -146,6 +149,14 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             jd = ""
             if outcome is not None and outcome.ok and isinstance(outcome.detail, dict):
                 jd = str(outcome.detail.get("jd", "")).strip()
+                # 028：详情产物带活跃字段时归一化为统一事实（无字段不写键）。
+                # 归一化失败内部兜底为 known=False，不抛错。
+                try:
+                    activity_by_idx[idx] = recruiter_activity.normalize_detail_activity(
+                        getattr(source, "platform", ""), outcome.detail
+                    )
+                except Exception:  # pragma: no cover - 防御性兜底
+                    activity_by_idx[idx] = None
             elif outcome is not None and _jd_is_hard_stop(outcome.failed_code):
                 # 源级硬信号：停后续批次并上报（别继续抓空气还装完成）
                 hard_stop = True
@@ -476,6 +487,14 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             enriched.append(e)
             continue
         e["jd"] = jd_by_idx.get(idx, "")
+        # 028：活跃事实并入 extra（浅拷贝 extra，避免污染抓取结果原 dict）。
+        # 仅本次详情抓取成功的岗位带事实；失败/断点续抓岗位交由
+        # 「活跃时间未知 → 不拦截」兜底（028 US2），跨 run 事实回填见 tasks.md T015 偏差记录。
+        _fact = activity_by_idx.get(idx)
+        if _fact is not None:
+            _extra = dict(e.get("extra")) if isinstance(e.get("extra"), dict) else {}
+            _extra[recruiter_activity.FIELD_KEY] = _fact
+            e["extra"] = _extra
         if not e["jd"] and idx in jd_fail_by_idx:
             e["jd_failed_code"] = jd_fail_by_idx[idx]
             e["jd_failed_reason"] = jd_fail_reason_by_idx[idx]

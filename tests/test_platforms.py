@@ -125,12 +125,14 @@ class BossRegistrationTests(unittest.TestCase):
         self.assertEqual(ZHILIAN_DEFAULT_CDP_PORT, 9223)
 
     def test_boss_filter_schema_fields_order(self):
-        """BOSS schema 字段顺序：salary, experience, degree, industry, scale, stage。"""
+        """BOSS schema 字段顺序：salary, experience, degree, industry, scale,
+        recruiter_activity（028 第 7 类）, stage。"""
         boss = get_platform("boss")
         keys = [f.key for f in boss.filter_schema.fields]
         self.assertEqual(
             keys,
-            ["salary", "experience", "degree", "industry", "scale", "stage"],
+            ["salary", "experience", "degree", "industry", "scale",
+             "recruiter_activity", "stage"],
         )
 
     def test_boss_filter_schema_version(self):
@@ -145,9 +147,12 @@ class BossRegistrationTests(unittest.TestCase):
         self.assertNotIn("company_nature", keys)
 
     def test_boss_filter_schema_all_fields_multiple(self):
-        """BOSS 所有筛选字段为多选。"""
+        """BOSS 除第 7 类外所有筛选字段为多选；recruiter_activity 单选（028）。"""
         boss = get_platform("boss")
         for f in boss.filter_schema.fields:
+            if f.key == "recruiter_activity":
+                self.assertFalse(f.multiple, "字段 recruiter_activity 应为单选")
+                continue
             self.assertTrue(f.multiple, f"字段 {f.key} 应为 multiple=True")
 
     def test_boss_filter_options_non_empty_values(self):
@@ -410,7 +415,8 @@ class ProjectFilterSchemaTests(unittest.TestCase):
         keys = [f["key"] for f in schema["fields"]]
         self.assertEqual(
             keys,
-            ["salary", "experience", "degree", "industry", "scale", "stage"],
+            ["salary", "experience", "degree", "industry", "scale",
+             "recruiter_activity", "stage"],
         )
 
     def test_boss_schema_projection_options_non_empty(self):
@@ -431,7 +437,8 @@ class ProjectFilterSchemaTests(unittest.TestCase):
         keys = [f["key"] for f in schema["fields"]]
         self.assertEqual(
             keys,
-            ["salary", "experience", "degree", "industry", "scale", "company_nature"],
+            ["salary", "experience", "degree", "industry", "scale",
+             "company_nature", "recruiter_activity"],
         )
         # fixture 未核验前所有字段 options 为空
         for f in schema["fields"]:
@@ -479,6 +486,91 @@ class ValidateFilterValuesTests(unittest.TestCase):
                 schema_version=BOSS_FILTER_SCHEMA_VERSION,
                 screening_fields={"salary": ["NONEXISTENT_VALUE"]},
             )
+
+
+class RecruiterActivityFieldTests(unittest.TestCase):
+    """028 第 7 类「招聘者上次活跃」：两平台公共字段、单选四档、版本递增。"""
+
+    def test_boss_field_definition(self):
+        boss = get_platform("boss")
+        field = boss.filter_schema.get_field("recruiter_activity")
+        self.assertIsNotNone(field)
+        self.assertEqual(field.label, "招聘者上次活跃")
+        self.assertFalse(field.multiple)
+        self.assertEqual(
+            [(opt.value, opt.label) for opt in field.options],
+            [
+                ("week", "近一周"),
+                ("month", "近一个月"),
+                ("quarter", "近三个月"),
+                ("half_year", "近半年"),
+            ],
+        )
+
+    def test_zhilian_field_definition(self):
+        zhilian = get_platform("zhilian")
+        field = zhilian.filter_schema.get_field("recruiter_activity")
+        self.assertIsNotNone(field)
+        self.assertEqual(field.label, "招聘者上次活跃")
+        self.assertFalse(field.multiple)
+        self.assertEqual(
+            [opt.value for opt in field.options],
+            ["week", "month", "quarter", "half_year"],
+        )
+
+    def test_schema_versions_bumped(self):
+        """028 字段集合变化：BOSS 1→2、智联 2→3（旧冻结条件按版本失配重提）。"""
+        self.assertEqual(BOSS_FILTER_SCHEMA_VERSION, 2)
+        self.assertEqual(ZHILIAN_FILTER_SCHEMA_VERSION, 3)
+
+    def test_validate_accepts_single_threshold(self):
+        for platform in ("boss", "zhilian"):
+            version = (
+                BOSS_FILTER_SCHEMA_VERSION if platform == "boss"
+                else ZHILIAN_FILTER_SCHEMA_VERSION
+            )
+            result = validate_filter_values(
+                platform,
+                schema_version=version,
+                screening_fields={"recruiter_activity": ["quarter"]},
+            )
+            self.assertEqual(result, {"recruiter_activity": ["quarter"]})
+
+    def test_validate_rejects_multiple_thresholds(self):
+        for platform in ("boss", "zhilian"):
+            version = (
+                BOSS_FILTER_SCHEMA_VERSION if platform == "boss"
+                else ZHILIAN_FILTER_SCHEMA_VERSION
+            )
+            with self.assertRaises(ValueError) as ctx:
+                validate_filter_values(
+                    platform,
+                    schema_version=version,
+                    screening_fields={
+                        "recruiter_activity": ["week", "month"],
+                    },
+                )
+            self.assertIn("不允许多选", str(ctx.exception))
+
+    def test_validate_rejects_unknown_threshold(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_filter_values(
+                "boss",
+                schema_version=BOSS_FILTER_SCHEMA_VERSION,
+                screening_fields={"recruiter_activity": ["five_months"]},
+            )
+        self.assertIn("filter_validation_failed", str(ctx.exception))
+
+    def test_validate_allows_missing_field(self):
+        """缺省 = 不限；两平台都可通过。"""
+        for platform, version in (
+            ("boss", BOSS_FILTER_SCHEMA_VERSION),
+            ("zhilian", ZHILIAN_FILTER_SCHEMA_VERSION),
+        ):
+            result = validate_filter_values(
+                platform, schema_version=version, screening_fields={}
+            )
+            self.assertEqual(result, {})
 
 
 class BuildFilterSnapshotTests(unittest.TestCase):
@@ -544,12 +636,14 @@ class ZhilianRegistrationTests(unittest.TestCase):
     """智联平台注册项字段集合（T204）。"""
 
     def test_zhilian_filter_schema_fields_order(self):
-        """智联 schema 字段顺序：salary, experience, degree, industry, scale, company_nature。"""
+        """智联 schema 字段顺序：salary, experience, degree, industry, scale,
+        company_nature, recruiter_activity（028 第 7 类）。"""
         zhilian = get_platform("zhilian")
         keys = [f.key for f in zhilian.filter_schema.fields]
         self.assertEqual(
             keys,
-            ["salary", "experience", "degree", "industry", "scale", "company_nature"],
+            ["salary", "experience", "degree", "industry", "scale",
+             "company_nature", "recruiter_activity"],
         )
 
     def test_zhilian_filter_schema_version(self):
@@ -564,9 +658,12 @@ class ZhilianRegistrationTests(unittest.TestCase):
         self.assertNotIn("stage", keys)
 
     def test_zhilian_filter_schema_all_fields_multiple(self):
-        """智联所有筛选字段为多选。"""
+        """智联除第 7 类外所有筛选字段为多选；recruiter_activity 单选（028）。"""
         zhilian = get_platform("zhilian")
         for f in zhilian.filter_schema.fields:
+            if f.key == "recruiter_activity":
+                self.assertFalse(f.multiple, "字段 recruiter_activity 应为单选")
+                continue
             self.assertTrue(f.multiple, f"字段 {f.key} 应为 multiple=True")
 
     def test_zhilian_all_options_empty_before_verification(self):

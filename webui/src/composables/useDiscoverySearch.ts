@@ -29,6 +29,7 @@ import {
   partitionPipelineResult,
   projectResumeSuggestionToSchema,
   shouldConfirmNationalScope,
+  singleSelectNextValue,
 } from "../discovery";
 import { setThemePlatform } from "../composables/useTheme";
 import type { AnalyzeResponse } from "./useDiscoveryState";
@@ -208,6 +209,13 @@ function removeCity(city: string) {
 function toggleFilter(key: string, code: string) {
   const drafts = filterValues.value[draftPlatform.value];
   const values = drafts[key] || [];
+  // 028：单选字段（第 7 类招聘者上次活跃）点新值替换、点已选值取消。
+  const group = filterGroups.value.find((group) => group.key === key);
+  const single = singleSelectNextValue(group?.multiple, values, code);
+  if (single !== null) {
+    drafts[key] = single;
+    return;
+  }
   drafts[key] = values.includes(code)
     ? values.filter((value) => value !== code)
     : [...values, code];

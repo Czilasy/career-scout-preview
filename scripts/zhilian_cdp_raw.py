@@ -26,6 +26,10 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+# 028 B081：staff 活跃字段提取常量与合并（逻辑在 scripts/zhilian/detail_fields，
+# 本文件超红线仅引用级接线，不追加逻辑）。
+from scripts.zhilian.detail_fields import STAFF_CONST_JS, STAFF_FIELD_JS, merge_staff_fields
+
 DEFAULT_CDP_PORT = 9223
 
 # 智联平台岗位 URL host allowlist（与 webui/platforms.py 注册规则一致）。
@@ -521,12 +525,13 @@ def _scrape_detail_on_ws(
         "const p=((s.jobDetail||{}).detailedPosition)||{};"
         "const c=((s.jobDetail||{}).detailedCompany)||{};"
         "const clean=(p.jobDesc||'').replace(/<br\\s*\\/?>/gi,'\\n').replace(/<[^>]+>/g,'').trim();"
+        + STAFF_CONST_JS +
         "return {number:p.number||p.positionNumber||'',name:p.name||'',salary:p.salary||'',"
         "workingExp:p.workingExp||'',education:p.education||'',"
         "workCity:p.workCity||'',cityDistrict:p.cityDistrict||'',"
         "companyName:p.companyName||'',companySize:c.companySize||'',"
         "industry:c.industryName||'',jd:clean,positionStatus:p.positionStatus||0,"
-        "jobStatus:p.jobStatus||0};})()"
+        "jobStatus:p.jobStatus||0," + STAFF_FIELD_JS + "};})()"
     ))
     if not isinstance(value, dict):
         return "invalid_output", {}
@@ -555,7 +560,8 @@ def _scrape_detail_on_ws(
         "source_url": _canonical_job_url(detail_id or job_id),
         "extra": dict(job.get("extra") or {}),
     }
-    return "ok", detail
+    # 028 B081：staff 活跃字段（文本+lastOnlineTime 毫秒），逻辑在 detail_fields
+    return "ok", merge_staff_fields(detail, value)
 
 
 def fetch_detail(job: dict, *, detail_output_path: str | None = None) -> tuple[str | None, dict]:

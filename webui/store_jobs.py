@@ -149,6 +149,36 @@ class StoreJobsMixin:
 
     # -- T113: 结果快照读写 API -------------------------------------------
 
+    def update_job_extra(self, platform: str, platform_job_id: str,
+                         patch: dict) -> bool:
+        """合并 patch 进既有岗位的 extra_json（028 B081 原语）。
+
+        按 (platform, platform_job_id) 定位；读现有 extra_json → dict 合并 →
+        原子写回。行不存在或 patch 为空返回 False，不抛错（调用方仅记日志）。
+        保留 extra 内既有键，仅覆盖 patch 提供的键。
+        """
+        if not isinstance(patch, dict) or not patch:
+            return False
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT id, extra_json FROM jobs WHERE platform = ? AND platform_job_id = ?",
+                (platform, platform_job_id),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                current = json.loads(row["extra_json"]) if row["extra_json"] else {}
+            except (TypeError, ValueError):
+                current = {}
+            if not isinstance(current, dict):
+                current = {}
+            current.update(patch)
+            conn.execute(
+                "UPDATE jobs SET extra_json = ? WHERE id = ?",
+                (json.dumps(current, ensure_ascii=False), row["id"]),
+            )
+            return True
+
     def save_result_snapshot(
         self,
         *,

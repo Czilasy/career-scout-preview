@@ -51,7 +51,8 @@ def find_resumable_screen_run(
     """按优先级找同一来源可续跑的 AI 筛选 run。
 
     顺序：paused → failed → interrupted(restart/user_finished) → partial。
-    只有六类条件、画像、画像事实全部一致才返回。
+    只有已冻结筛选条件全量一致（含 028 第 7 类，全字典相等比对）、画像、
+    画像事实全部一致才返回。
     """
     candidates = store.latest_screen_runs_for_source(
         scrape_task_id, statuses=RESUMABLE_STATUSES,

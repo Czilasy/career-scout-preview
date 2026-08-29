@@ -34,7 +34,9 @@ from webui.ai_filters import (
     _adv_setting,
     _build_criteria_description,
     _job_criteria_hard_mismatch,
+    job_hard_mismatch,
 )
+from webui import recruiter_activity
 
 
 
@@ -445,9 +447,10 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         return {"verdicts": verdicts}
     # 已选筛选字段是硬约束：结构化标签/JD 明确值与筛选条件冲突时直接 not_match，
     # 不交给 AI 各批自判；字段未知或未标明的岗位保留给 AI 判断。
+    # 028：精筛同时启用第 7 类招聘者活跃判定（详情抓取后已有事实，见 job_hard_mismatch）。
     _hard_kept = []
     for _idx, _job in enumerate(jobs_with_jd):
-        _field, _reason = _job_criteria_hard_mismatch(_job, criteria)
+        _field, _reason = job_hard_mismatch(_job, criteria, include_recruiter=True)
         if _field:
             verdicts[str(_job.get("job_id", ""))] = {
                 "verdict": "not_match", "reason": _reason,
@@ -650,4 +653,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 _safe_progress(len(futures[fut]))
 
 
+    # 028 US2：选中第 7 类但拿不到活跃事实的岗位附未知 caveat（不拦截，无噪音）
+    for _jid in recruiter_activity.unknown_job_ids(jobs_with_jd, criteria):
+        recruiter_activity.merge_unknown_caveat(verdicts.get(_jid))
     return {"verdicts": verdicts}

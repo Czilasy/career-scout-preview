@@ -606,6 +606,7 @@ const filterGroups = computed(() => {
       return {
         key: field.key,
         label: field.label,
+        multiple: field.multiple,
         sentinel: sentinelOpt ? { label: sentinelOpt.label, code: sentinelOpt.value } : null,
         options: field.options
           .filter((opt) => !sentinelOpt || opt.value !== sentinelOpt.value)

@@ -1538,9 +1538,9 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         resp = self.client.get("/api/platforms")
         data = resp.get_json()
         platforms = {p["key"]: p for p in data["platforms"]}
-        self.assertEqual(platforms["boss"]["filter_schema_version"], 1)
+        self.assertEqual(platforms["boss"]["filter_schema_version"], 2)
         self.assertEqual(platforms["boss"]["city_mapping_version"], 2)
-        self.assertEqual(platforms["zhilian"]["filter_schema_version"], 2)
+        self.assertEqual(platforms["zhilian"]["filter_schema_version"], 3)
         self.assertEqual(platforms["zhilian"]["city_mapping_version"], 2)
 
     # -- /api/options -------------------------------------------------
@@ -1722,20 +1722,24 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         data = resp.get_json()
         self.assertTrue(data.get("ok"))
         self.assertEqual(data["platform"], "zhilian")
-        self.assertEqual(data["schema_version"], 2)
+        self.assertEqual(data["schema_version"], 3)
         # 智联真实元数据核验后启用
         self.assertTrue(data["enabled_for_new_tasks"])
         field_keys = [f["key"] for f in data["fields"]]
-        # 字段顺序：salary/experience/degree/industry/scale/company_nature
+        # 字段顺序：salary/experience/degree/industry/scale/company_nature/
+        # recruiter_activity（028 第 7 类）
         self.assertEqual(field_keys, [
             "salary", "experience", "degree", "industry", "scale", "company_nature",
+            "recruiter_activity",
         ])
         self.assertNotIn("stage", field_keys)
-        # 智联 options 未核验，应为空数组
-        # 智联 options 已由真实元数据核验，全部非空
+        # 智联 options 已由真实元数据核验，全部非空；第 7 类单选（028）
         for f in data["fields"]:
             self.assertGreater(len(f["options"]), 0, f"字段 {f['key']} options 应已核验")
-            self.assertTrue(f["multiple"])
+            if f["key"] == "recruiter_activity":
+                self.assertFalse(f["multiple"])
+            else:
+                self.assertTrue(f["multiple"])
 
     def test_filter_labels_with_platform_boss_returns_stage(self):
         """/api/filter-labels?platform=boss 返回 stage，不含 company_nature。"""
@@ -1746,9 +1750,11 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         self.assertEqual(data["platform"], "boss")
         self.assertTrue(data["enabled_for_new_tasks"])
         field_keys = [f["key"] for f in data["fields"]]
-        # BOSS 字段顺序：salary/experience/degree/industry/scale/stage
+        # BOSS 字段顺序：salary/experience/degree/industry/scale/
+        # recruiter_activity（028 第 7 类）/stage
         self.assertEqual(field_keys, [
-            "salary", "experience", "degree", "industry", "scale", "stage",
+            "salary", "experience", "degree", "industry", "scale",
+            "recruiter_activity", "stage",
         ])
         self.assertNotIn("company_nature", field_keys)
 

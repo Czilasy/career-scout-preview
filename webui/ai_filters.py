@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from scripts import boss_cdp_raw as boss
+from webui import recruiter_activity
 from webui.core import salary_monthly_bounds
 
 
@@ -276,4 +277,35 @@ def _job_criteria_hard_mismatch(job, criteria):
     salary_codes = _criteria_codes(criteria.get("salary"), boss.SALARY_MAP)
     if salary_codes and _salary_hard_mismatch(job.get("salary"), salary_codes):
         return "salary", f"薪资{job.get('salary', '')}不在筛选范围"
+    return None, ""
+
+
+
+def job_hard_mismatch(job, criteria, *, include_recruiter=False):
+    """组合硬规则入口：六类码值冲突 +（仅精筛）第 7 类招聘者活跃。
+
+    第 7 类事实读 ``job["extra"]["recruiter_activity"]``（028 详情抓取产出）。
+    粗筛在列表阶段拿不到活跃数据，MUST 恒以 include_recruiter=False 调用
+    （028 FR-008）。返回 (field, reason)；field="recruiter_activity" 表示
+    第 7 类命中，reason 由判定域模板生成（「负责人上次活跃X，超过要求的Y」）。
+    """
+    field, reason = _job_criteria_hard_mismatch(job, criteria)
+    if field:
+        return field, reason
+    if not include_recruiter or not isinstance(criteria, dict):
+        return None, ""
+    selected = criteria.get(recruiter_activity.FIELD_KEY)
+    codes = selected if isinstance(selected, list) else [selected]
+    days = next(
+        (recruiter_activity.THRESHOLD_DAYS[str(c)] for c in codes
+         if str(c) in recruiter_activity.THRESHOLD_DAYS),
+        None,
+    )
+    if days is None:
+        return None, ""
+    extra = job.get("extra")
+    fact = extra.get(recruiter_activity.FIELD_KEY) if isinstance(extra, dict) else None
+    verdict = recruiter_activity.evaluate(fact, days)
+    if verdict:
+        return recruiter_activity.FIELD_KEY, verdict["reason"]
     return None, ""

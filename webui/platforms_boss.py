@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 from webui.platforms_registry import register_platform
+from webui import recruiter_activity
 from webui.platforms_schema import (
     _BOSS_COMMON_FIELDS,
     _BOSS_EXCLUSIVE_FIELDS,
@@ -71,8 +72,22 @@ def _build_boss_filter_schema(
         "industry": "行业",
         "scale": "公司规模",
         "stage": "融资阶段",
+        "recruiter_activity": "招聘者上次活跃",
     }
     for key in _BOSS_COMMON_FIELDS + _BOSS_EXCLUSIVE_FIELDS:
+        # 028 第 7 类：平台无关、单选、档位 options 由判定域统一供给，
+        # 不走平台码映射（BOSS 搜索不支持按招聘者活跃过滤，纯本地判定）。
+        if key == recruiter_activity.FIELD_KEY:
+            fields.append(FilterField(
+                key=key,
+                label=field_labels[key],
+                multiple=False,
+                options=tuple(
+                    FilterOption(value=value, label=label)
+                    for value, label in recruiter_activity.filter_option_pairs()
+                ),
+            ))
+            continue
         mapping = filter_maps.get(key, {})
         options = _build_boss_filter_options(mapping)
         fields.append(FilterField(

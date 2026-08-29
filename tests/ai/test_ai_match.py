@@ -749,6 +749,171 @@ class MatchJdsResumeAndTruncationTests(unittest.TestCase):
                 )
 
 
+class RecruiterActivityScreenRuleTests(unittest.TestCase):
+    """028 第 7 类精筛硬规则：命中拦 / 拿不准不拦 / 未知不拦附 caveat / 粗筛不接。"""
+
+    _FACT_HALF_YEAR = {
+        "source": "boss", "text": "半年前活跃", "last_online_ms": None,
+        "age_lower_days": 180.0, "age_upper_days": None, "known": True,
+    }
+    _FACT_CROSSING = {
+        "source": "boss", "text": "2周内活跃", "last_online_ms": None,
+        "age_lower_days": 0.0, "age_upper_days": 14.0, "known": True,
+    }
+    _FACT_UNKNOWN_TEXT = {
+        "source": "boss", "text": "长期未上线", "last_online_ms": None,
+        "age_lower_days": None, "age_upper_days": None, "known": False,
+    }
+
+    @staticmethod
+    def _job(job_id, fact=None):
+        job = {"job_id": job_id, "title": "陈年岗", "salary": "10-15K", "jd": "JD"}
+        if fact is not None:
+            job["extra"] = {"recruiter_activity": fact}
+        return job
+
+    def test_lower_bound_blocks_without_ai(self):
+        from webui.ai import match_jds
+
+        jobs = [self._job("stale", self._FACT_HALF_YEAR)]
+        with patch("webui.ai.call_ai") as call:
+            result = match_jds(
+                jobs, "画像", "https://x", "key",
+                batch_size=10, concurrency=1,
+                criteria={"recruiter_activity": ["week"]},
+            )
+
+        self.assertEqual(result["verdicts"]["stale"]["verdict"], "not_match")
+        self.assertIn("半年前", result["verdicts"]["stale"]["reason"])
+        self.assertIn("近一周", result["verdicts"]["stale"]["reason"])
+        call.assert_not_called()
+
+    def test_boundary_threshold_not_blocked(self):
+        """半年前活跃 [180,∞) vs 近半年（180）：严格大于才拦 → 交 AI 正常判。"""
+        from webui.ai import match_jds
+
+        jobs = [self._job("edge", self._FACT_HALF_YEAR)]
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "匹配"},
+        ]}) as call:
+            result = match_jds(
+                jobs, "画像", "https://x", "key",
+                batch_size=10, concurrency=1,
+                criteria={"recruiter_activity": ["half_year"]},
+            )
+
+        self.assertEqual(result["verdicts"]["edge"]["verdict"], "match")
+        self.assertNotIn(
+            "招聘者活跃时间未知", result["verdicts"]["edge"].get("caveats") or [],
+        )
+        self.assertEqual(call.call_count, 1)
+
+    def test_interval_crossing_not_blocked(self):
+        """2周内活跃 [0,14] vs 近一周：区间跨档位拿不准 → 保守不拦。"""
+        from webui.ai import match_jds
+
+        jobs = [self._job("cross", self._FACT_CROSSING)]
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "匹配"},
+        ]}):
+            result = match_jds(
+                jobs, "画像", "https://x", "key",
+                batch_size=10, concurrency=1,
+                criteria={"recruiter_activity": ["week"]},
+            )
+
+        self.assertEqual(result["verdicts"]["cross"]["verdict"], "match")
+        self.assertNotIn(
+            "招聘者活跃时间未知", result["verdicts"]["cross"].get("caveats") or [],
+        )
+
+    def test_missing_fact_attaches_unknown_caveat(self):
+        """存量岗位无事实：不拦截 + 附「活跃时间未知」caveat。"""
+        from webui.ai import match_jds
+
+        jobs = [self._job("legacy")]
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "匹配"},
+        ]}):
+            result = match_jds(
+                jobs, "画像", "https://x", "key",
+                batch_size=10, concurrency=1,
+                criteria={"recruiter_activity": ["month"]},
+            )
+
+        self.assertEqual(result["verdicts"]["legacy"]["verdict"], "match")
+        self.assertEqual(
+            result["verdicts"]["legacy"]["caveats"],
+            ["招聘者活跃时间未知，未按第 7 类拦截"],
+        )
+
+    def test_unknown_text_attaches_caveat(self):
+        from webui.ai import match_jds
+
+        jobs = [self._job("weird", self._FACT_UNKNOWN_TEXT)]
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "匹配"},
+        ]}):
+            result = match_jds(
+                jobs, "画像", "https://x", "key",
+                batch_size=10, concurrency=1,
+                criteria={"recruiter_activity": ["week"]},
+            )
+
+        self.assertEqual(result["verdicts"]["weird"]["verdict"], "match")
+        self.assertEqual(
+            result["verdicts"]["weird"]["caveats"],
+            ["招聘者活跃时间未知，未按第 7 类拦截"],
+        )
+
+    def test_not_selected_no_caveat_noise(self):
+        """未选第 7 类：无 fact 也无 caveat（不限 = 与现状行为一致）。"""
+        from webui.ai import match_jds
+
+        jobs = [self._job("plain")]
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "匹配"},
+        ]}):
+            result = match_jds(
+                jobs, "画像", "https://x", "key",
+                batch_size=10, concurrency=1, criteria={},
+            )
+
+        self.assertEqual(result["verdicts"]["plain"]["verdict"], "match")
+        self.assertNotIn(
+            "招聘者活跃时间未知", result["verdicts"]["plain"].get("caveats") or [],
+        )
+
+    def test_coarse_stage_never_uses_recruiter(self):
+        """粗筛（列表阶段）MUST NOT 启用第 7 类：含下界事实的岗位不硬剔除。"""
+        from webui.ai import screen_jobs
+
+        jobs = [self._job("stale", self._FACT_HALF_YEAR)]
+        with patch("webui.ai.call_ai", return_value={"results": [
+            {"i": 0, "match": True, "reason": "匹配"},
+        ]}) as call:
+            result = screen_jobs(
+                jobs, {"recruiter_activity": ["week"]},
+                "https://x", "key", batch_size=10,
+            )
+
+        dropped = {item["job_id"] for item in result.get("dropped", [])}
+        self.assertNotIn("stale", dropped)
+        self.assertEqual(result["verdicts"]["stale"]["verdict"], "kept")
+        self.assertEqual(call.call_count, 1)
+
+    def test_criteria_description_excludes_recruiter(self):
+        """第 7 类不进 AI 条件描述（粗筛/精筛共用同一构建函数）。"""
+        from webui.ai_filters import _build_criteria_description
+
+        base = {"salary": ["405"]}
+        with_key = dict(base, recruiter_activity=["week"])
+        self.assertEqual(
+            _build_criteria_description(base),
+            _build_criteria_description(with_key),
+        )
+
+
 class MatchJdsFlagsTests(unittest.TestCase):
     """精筛 flags（B033 靠谱判定）：结构化解析、分级判定、高危强制 not_match。"""
 

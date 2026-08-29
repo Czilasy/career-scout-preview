@@ -334,3 +334,17 @@ export function createSchemaLoader(): SchemaLoader {
 export function createCityCatalogLoader(): CityCatalogLoader {
   return createAsyncResourceLoader<PlatformCityCatalog>();
 }
+
+/**
+ * 028：单选筛选字段（第 7 类「招聘者上次活跃」）点选后的新取值。
+ * 点已选值 = 取消（清空）、点新值 = 替换；多选字段（multiple 非 false）
+ * 返回 null，调用方走原有多选增删逻辑。
+ */
+export function singleSelectNextValue(
+  multiple: boolean | undefined,
+  current: string[],
+  code: string,
+): string[] | null {
+  if (multiple !== false) return null;
+  return current.includes(code) ? [] : [code];
+}
