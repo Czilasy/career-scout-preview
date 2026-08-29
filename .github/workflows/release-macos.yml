@@ -102,11 +102,22 @@ jobs:
           VERSION="${DMG#*v}"; VERSION="${VERSION%.dmg}"
           SHA="$(shasum -a 256 "$DMG" | awk '{print $1}')"
           SIZE="$(stat -f%z "$DMG")"
+          SSH_OPTS="-i ~/.ssh/mirror_deploy -o ConnectTimeout=15 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
           mkdir -p ~/.ssh
           printf '%s\n' "$MIRROR_SSH_KEY" > ~/.ssh/mirror_deploy
           chmod 600 ~/.ssh/mirror_deploy
           ssh-keyscan -H 49.232.60.135 >> ~/.ssh/known_hosts 2>/dev/null
-          scp -i ~/.ssh/mirror_deploy "$DMG" "$DMG.sha256" root@49.232.60.135:/var/www/career-scout/
-          ssh -i ~/.ssh/mirror_deploy root@49.232.60.135 \
+          # 跨境链路不稳：限时长、断线即退，传完必须远程校验哈希，防止半截文件
+          for attempt in 1 2 3; do
+            scp $SSH_OPTS "$DMG" "$DMG.sha256" root@49.232.60.135:/var/www/career-scout/ && break
+            [ "$attempt" = 3 ] && { echo "镜像上传三次均失败"; exit 1; }
+            echo "上传失败（第 $attempt 次），10 秒后重试"; sleep 10
+          done
+          FILE="$(basename "$DMG")"
+          REMOTE_SHA="$(ssh $SSH_OPTS root@49.232.60.135 "sha256sum /var/www/career-scout/'$FILE'" | awk '{print $1}')"
+          if [ "$REMOTE_SHA" != "$SHA" ]; then
+            echo "远程 DMG 哈希不一致（$REMOTE_SHA != $SHA），中止同步"; exit 1
+          fi
+          ssh $SSH_OPTS root@49.232.60.135 \
             "python3 /root/update_manifest.py '$VERSION' mac '$(basename "$DMG")' '$SHA' $SIZE"
           echo "镜像已同步 mac 条目：v$VERSION"
