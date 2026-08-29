@@ -103,7 +103,7 @@ jobs:
           SHA="$(shasum -a 256 "$DMG" | awk '{print $1}')"
           SIZE="$(stat -f%z "$DMG")"
           mkdir -p ~/.ssh
-          printf '%s' "$MIRROR_SSH_KEY" > ~/.ssh/mirror_deploy
+          printf '%s\n' "$MIRROR_SSH_KEY" > ~/.ssh/mirror_deploy
           chmod 600 ~/.ssh/mirror_deploy
           ssh-keyscan -H 49.232.60.135 >> ~/.ssh/known_hosts 2>/dev/null
           scp -i ~/.ssh/mirror_deploy "$DMG" "$DMG.sha256" root@49.232.60.135:/var/www/career-scout/
