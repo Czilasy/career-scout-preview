@@ -113,6 +113,12 @@ npm run build
    - 上传 `CareerScout-v{version}.exe.sha256`（构建脚本自动生成；
      **应用内更新强制依赖该文件，缺失时用户端会拒绝自动安装**）
    - 上传 SHA256 校验值（粘贴到发布说明或单独 `.sha256` 文件）
+
+4. **同步国内更新镜像（必做，不可跳过）**：执行
+   `pwsh scripts/publish_mirror.ps1 -Version {version}`。
+   应用内更新优先读镜像 manifest；Release 挂完不更新 manifest，
+   用户端会一直显示"已是最新"，新版会静默漏发。macOS DMG 由
+   GitHub Actions 构建后自动同步镜像，无需手动处理。
 4. **发布说明**：按 `.github/release-template.md` 模板填写，版本号与 `pyproject.toml` 一致；模板覆盖安装包、SHA256、前置条件、已知限制与常见排错入口，发布时从模板带入，不在本手册重复维护；格式按 `AGENTS.md`「文档卫生」简单列表。
 5. **发布**：确认无误后点击 "Publish release"。
 6. **macOS DMG 自动挂接**：推同一个 `v{version}` tag 后，
