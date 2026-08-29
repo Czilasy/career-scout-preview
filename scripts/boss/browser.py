@@ -14,7 +14,18 @@ import time
 from urllib.request import urlopen
 from scripts.boss.cdp_session import CDPSession
 from scripts.boss.constants import BROWSER_NOT_FOUND_HINT, CHROME_EXE, DEFAULT_CDP_DATA_DIR, DEFAULT_CDP_PORT, DEFAULT_CHROME_PATH, DEFAULT_LOGIN_TIMEOUT, EDGE_EXE
+from scripts.boss.browser_registry import all_registry_exe_names
 import sys as _sys
+
+
+def _registry_command_tokens():
+    """注册表全部浏览器命令行标识（exe 全名 + 去掉 .exe 的词干，小写）。"""
+    tokens = set()
+    for exe in all_registry_exe_names():
+        tokens.add(exe)
+        if exe.endswith(".exe"):
+            tokens.add(exe[:-4])
+    return tokens
 
 # CDP Chrome 防膨胀启动参数：
 # - 限制磁盘/媒体缓存上限，避免抓取缓存无限增长；
@@ -64,7 +75,7 @@ def is_cdp_ready(cdp_port):
 
 def is_chrome_command(command):
     lower = (command or "").lower()
-    return any(token in lower for token in (
+    tokens = _registry_command_tokens() | {
         "google chrome",
         "google-chrome",
         "chromium",
@@ -72,7 +83,8 @@ def is_chrome_command(command):
         "microsoft edge",
         "msedge",
         EDGE_EXE,
-    ))
+    }
+    return any(token in lower for token in tokens)
 
 
 def normalize_profile_path(path):
@@ -90,11 +102,18 @@ def extract_user_data_dir(command):
 
 
 def iter_chrome_process_commands():
-    """Return (pid, command line) tuples for Chrome-like browser processes."""
+    """Return (pid, command line) tuples for Chrome-like browser processes.
+
+    029：进程名过滤器按浏览器注册表全部 exe 名单生成（不再硬编码
+    chrome.exe/msedge.exe），Brave/Vivaldi/360/QQ 等同样纳入进程管理面。
+    """
     if platform.system() == "Windows":
+        name_filter = " or ".join(
+            f"name = '{exe}'" for exe in sorted(all_registry_exe_names())
+        )
         ps_script = (
             "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-            "Get-CimInstance Win32_Process -Filter \"name = 'chrome.exe' or name = 'msedge.exe'\" | "
+            f"Get-CimInstance Win32_Process -Filter \"{name_filter}\" | "
             "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
         )
         try:

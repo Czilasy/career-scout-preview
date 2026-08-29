@@ -196,6 +196,48 @@ def delete_browser_account(account_id: str, path: str | os.PathLike[str] | None 
 _ACTIVE_CDP_DATA_DIR: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# 按浏览器命名空间的数据目录派生（029 research D6）
+# ---------------------------------------------------------------------------
+def effective_data_dir(profile_dir, browser_key) -> str:
+    """按所选浏览器派生生效数据目录（纯函数，不触碰文件系统）。
+
+    - ``chrome`` / ``edge``（及空/未知键）→ 原样返回：存量账号登录态无损，
+      chrome↔edge 之间切换免重登（与 029 前行为一致）；
+    - 其他浏览器 → ``<profile_dir 父目录>/chrome-profile-<data_dir_key>/<目录名>``：
+      切过去 = 各账号空目录（重新登录一次），旧目录原样保留、切回免重登；
+    - 手动指定路径模式由调用方传 ``"manual"`` 作为命名空间键。
+    """
+    profile_dir = os.path.abspath(os.path.expanduser(str(profile_dir or "")))
+    key = str(browser_key or "").strip().lower()
+    if not profile_dir or key in ("", "chrome", "edge", "auto"):
+        return profile_dir
+    parent = os.path.dirname(profile_dir)
+    name = os.path.basename(profile_dir) or "profile"
+    return os.path.join(parent, f"chrome-profile-{key}", name)
+
+
+def browser_data_dir_key() -> str | None:
+    """当前浏览器选择对应的命名空间键；解析失败返回 None（恒等映射）。"""
+    try:
+        from scripts.boss import browser_registry as _br
+
+        selection = _br.load_browser_selection()
+        mode = selection.get("mode")
+        if mode == "manual":
+            return "manual"
+        if mode == "registry":
+            entry = _br.registry_entry(selection.get("key"))
+            return entry["data_dir_key"] if entry else None
+        for item in _br.detect_browsers():
+            if item["installed"]:
+                entry = _br.registry_entry(item["key"])
+                return entry["data_dir_key"] if entry else None
+    except Exception:
+        return None
+    return None
+
+
 
 def set_active_cdp_data_dir(account_or_dir: str) -> None:
     """Set the browser profile directory used by Chrome helpers."""
@@ -219,13 +261,18 @@ def set_active_cdp_data_dir(account_or_dir: str) -> None:
 
 
 def _cdp_data_dir() -> str:
-    """Resolve the active browser profile directory."""
+    """Resolve the active browser profile directory.
+
+    029：返回值经 :func:`effective_data_dir` 按当前浏览器选择翻译到对应
+    命名空间——启动、关闭、profile 校验共用本漏斗，保证三者指向一致。
+    """
     from webui import pipeline_exec as _facade
     if _ACTIVE_CDP_DATA_DIR:
-        return _ACTIVE_CDP_DATA_DIR
+        return effective_data_dir(_ACTIVE_CDP_DATA_DIR, browser_data_dir_key())
     accounts = load_browser_accounts()
     account = str(_facade.load_advanced_settings().get("browser_account") or "a")
-    return str(accounts.get(account, accounts["a"])["profile_dir"])
+    profile_dir = str(accounts.get(account, accounts["a"])["profile_dir"])
+    return effective_data_dir(profile_dir, browser_data_dir_key())
 
 
 

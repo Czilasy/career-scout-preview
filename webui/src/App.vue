@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { Bell, History, LoaderCircle, Moon, Settings, Star, Sun, X } from "@lucide/vue";
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
 import BrowserAccountsDialog from "./components/BrowserAccountsDialog.vue";
+import BrowserSettingsDialog from "./components/BrowserSettingsDialog.vue";
 import EnvCheckDialog from "./components/EnvCheckDialog.vue";
 import NoticeBar from "./components/NoticeBar.vue";
 import ReminderDrawer from "./components/ReminderDrawer.vue";
@@ -62,6 +63,7 @@ watch(pageTitle, (title) => { document.title = title; }, { immediate: true });
 
 const aiSettingsOpen = ref(false);
 const browserAccountsOpen = ref(false);
+const browserSettingsOpen = ref(false);
 const envCheckOpen = ref(false);
 const settingsMenuOpen = ref(false);
 const updateChecking = ref(false);
@@ -89,6 +91,10 @@ function openAiSettingsFromMenu() {
 function openBrowserAccountsFromMenu() {
   settingsMenuOpen.value = false;
   browserAccountsOpen.value = true;
+}
+function openBrowserSettingsFromMenu() {
+  settingsMenuOpen.value = false;
+  browserSettingsOpen.value = true;
 }
 function openEnvCheckFromMenu() {
   settingsMenuOpen.value = false;
@@ -631,6 +637,10 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
       :open="browserAccountsOpen"
       @close="browserAccountsOpen = false"
     />
+    <BrowserSettingsDialog
+      :open="browserSettingsOpen"
+      @close="browserSettingsOpen = false"
+    />
     <EnvCheckDialog
       :open="envCheckOpen"
       @close="envCheckOpen = false"
@@ -651,6 +661,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
       @close="settingsMenuOpen = false"
       @open-ai-settings="openAiSettingsFromMenu"
       @open-browser-accounts="openBrowserAccountsFromMenu"
+      @open-browser-settings="openBrowserSettingsFromMenu"
       @open-env-check="openEnvCheckFromMenu"
       @manual-update-check="manualUpdateFromMenu"
       @open-github="openGitHub"

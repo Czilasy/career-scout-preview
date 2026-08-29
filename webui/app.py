@@ -496,6 +496,8 @@ def create_app(config=None):
     register_task_continue_routes(app, ctx)
     from webui.log_api import register_log_routes
     register_log_routes(app, ctx)
+    from webui.browser_registry_api import register_browser_registry_routes
+    register_browser_registry_routes(app, ctx)
 
     def _run_pipeline_task(
         task_id, script_params, execution_config=None, frozen_scope=None,

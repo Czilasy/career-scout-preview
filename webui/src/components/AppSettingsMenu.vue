@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Activity, Bot, LoaderCircle, Rocket, ScrollText, UserRound } from "@lucide/vue";
+import { Activity, Bot, Globe, LoaderCircle, Rocket, ScrollText, UserRound } from "@lucide/vue";
 import LogViewerDialog from "./LogViewerDialog.vue";
 
 const props = defineProps<{
@@ -14,6 +14,7 @@ const emit = defineEmits<{
   close: [];
   "open-ai-settings": [];
   "open-browser-accounts": [];
+  "open-browser-settings": [];
   "open-env-check": [];
   "manual-update-check": [];
   "open-github": [];
@@ -81,6 +82,15 @@ onBeforeUnmount(() => {
         @click="emit('open-browser-accounts')"
       >
         <UserRound :size="17" aria-hidden="true" /><span>浏览器账号</span>
+      </button>
+      <button
+        class="settings-menu-item"
+        type="button"
+        role="menuitem"
+        data-testid="browser-settings-trigger"
+        @click="emit('open-browser-settings')"
+      >
+        <Globe :size="17" aria-hidden="true" /><span>浏览器</span>
       </button>
       <button
         class="settings-menu-item"
