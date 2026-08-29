@@ -103,6 +103,26 @@ class ScreenFlowTests(unittest.TestCase):
         self.assertIsNone(self._find(profile="其它画像"))
         self.assertIsNone(self._find(facts={"stable_key": "city", "value": "上海"}))
 
+    def test_find_resumable_recruiter_activity_full_dict_compare(self):
+        """028 FR-009：第 7 类随 frozen_filters 全字典比对——选档位差异即不复用。
+
+        未选第 7 类时 frozen_filters 与旧形态一致，既有复用行为不变（不限=等价）。
+        """
+        _make_ai_run(self.store, "paused-run", status="paused")
+        # 旧 run 未选第 7 类；本次选中 → 不复用
+        self.assertIsNone(self._find(filters=dict(
+            FILTERS, recruiter_activity=["week"])))
+        # 旧 run 选中档位；本次档位不同 → 不复用
+        _make_ai_run(
+            self.store, "paused-run-week", status="paused",
+            filters=dict(FILTERS, recruiter_activity=["week"]),
+        )
+        self.assertIsNone(self._find(filters=dict(
+            FILTERS, recruiter_activity=["quarter"])))
+        # 档位一致 → 复用
+        self.assertIsNotNone(self._find(filters=dict(
+            FILTERS, recruiter_activity=["week"])))
+
     def test_find_resumable_normalizes_facts_order(self):
         _make_ai_run(self.store, "paused-run", status="paused")
         reordered = {"value": "3", "stable_key": "years"}
