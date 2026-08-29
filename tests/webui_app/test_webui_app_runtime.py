@@ -18,6 +18,8 @@ class ChromeAccountProfileSwitchTests(unittest.TestCase):
         from webui import pipeline_exec
         launched = mock.Mock()
         launched.poll.return_value = None
+        # 028 审查修复：load_browser_accounts 读用户全局账号簿（与仓库检出路径
+        # 耦合，非本仓 checkout 必败）；改为注入默认账号簿使测试环境无关。
         with mock.patch.object(
             pipeline_exec.boss, "is_cdp_ready", side_effect=[True, True],
         ), mock.patch.object(
@@ -25,6 +27,9 @@ class ChromeAccountProfileSwitchTests(unittest.TestCase):
         ) as uses, mock.patch.object(
             pipeline_exec.boss, "chrome_user_data_dirs_for_cdp_port",
             return_value=[pipeline_exec.BROWSER_ACCOUNTS["b"]["profile_dir"]],
+        ), mock.patch(
+            "webui.pipeline_exec_chrome.load_browser_accounts",
+            return_value=dict(pipeline_exec.BROWSER_ACCOUNTS),
         ), mock.patch.object(
             pipeline_exec.boss, "close_cdp_chrome",
         ) as close, mock.patch.object(

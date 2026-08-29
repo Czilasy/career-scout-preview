@@ -1,4 +1,5 @@
 import gc
+import importlib
 import json
 import pathlib
 import re
@@ -722,40 +723,52 @@ class RiskControlTests(unittest.TestCase):
         self.assertIsNone(at)
 
     def test_cdp_session_wraps_connection_failure_in_plain_language(self):
-        module = load_module()
+        # 028 审查修复：CDPSession._facade() 读 sys.modules 里的真实 facade，且
+        # require_runtime_dependencies 首次惰性导入时会把真实 requests/websocket
+        # 同步回写 facade（runtime.py L35-39），覆盖测试注入。因此必须同时 patch
+        # runtime 与 facade 两处同名属性；此前只打装饰性副本，9222 有活 CDP 时必败。
+        module = importlib.import_module("scripts.boss_cdp_raw")
+        runtime = importlib.import_module("scripts.boss.runtime")
 
         class FakeConnError(Exception):
             pass
 
-        # 脚本的 requests/websocket 是惰性导入的全局变量（初始 None），测试直接注入
-        module.requests = mock.Mock()
-        module.requests.ConnectionError = FakeConnError
-        module.requests.Timeout = TimeoutError
-        module.requests.get.side_effect = FakeConnError("refused")
-
-        with self.assertRaises(module.CDPUnavailableError) as ctx:
-            module.CDPSession(9222)
+        requests_mock = mock.Mock()
+        requests_mock.ConnectionError = FakeConnError
+        requests_mock.Timeout = TimeoutError
+        requests_mock.get.side_effect = FakeConnError("refused")
+        with mock.patch.object(runtime, "requests", requests_mock), \
+                mock.patch.object(runtime, "websocket", mock.Mock()), \
+                mock.patch.object(module, "requests", requests_mock, create=True), \
+                mock.patch.object(module, "websocket", mock.Mock(), create=True):
+            with self.assertRaises(module.CDPUnavailableError) as ctx:
+                module.CDPSession(9222)
         self.assertIn("--setup-chrome", str(ctx.exception))
 
     def test_cdp_session_wraps_websocket_failure_in_plain_language(self):
-        module = load_module()
+        # 同上：runtime + facade 双注入，杜绝「9222 有活 CDP 时误绿/误红」。
+        module = importlib.import_module("scripts.boss_cdp_raw")
+        runtime = importlib.import_module("scripts.boss.runtime")
 
         class FakeWsError(Exception):
             pass
 
-        module.requests = mock.Mock()
+        requests_mock = mock.Mock()
         # except 子句会求值 requests.ConnectionError/Timeout，必须是真异常类
-        module.requests.ConnectionError = ConnectionError
-        module.requests.Timeout = TimeoutError
-        module.requests.get.return_value.json.return_value = {
+        requests_mock.ConnectionError = ConnectionError
+        requests_mock.Timeout = TimeoutError
+        requests_mock.get.return_value.json.return_value = {
             "webSocketDebuggerUrl": "ws://127.0.0.1:9222/x"
         }
-        module.websocket = mock.Mock()
-        module.websocket.WebSocketException = FakeWsError
-        module.websocket.create_connection.side_effect = FakeWsError("broken")
-
-        with self.assertRaises(module.CDPUnavailableError):
-            module.CDPSession(9222)
+        websocket_mock = mock.Mock()
+        websocket_mock.WebSocketException = FakeWsError
+        websocket_mock.create_connection.side_effect = FakeWsError("broken")
+        with mock.patch.object(runtime, "requests", requests_mock), \
+                mock.patch.object(runtime, "websocket", websocket_mock), \
+                mock.patch.object(module, "requests", requests_mock, create=True), \
+                mock.patch.object(module, "websocket", websocket_mock, create=True):
+            with self.assertRaises(module.CDPUnavailableError):
+                module.CDPSession(9222)
 
 
 class CdpMeasurementEventTests(unittest.TestCase):
