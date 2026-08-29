@@ -15,6 +15,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import requests
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -439,6 +441,127 @@ class ExternalLinkWhitelistTests(unittest.TestCase):
         self.assertFalse(desktop.is_allowed_external_url("https://evil.com"))
         self.assertFalse(desktop.is_allowed_external_url("https://github.com.evil.com"))
         self.assertFalse(desktop.is_allowed_external_url(""))
+
+
+class _MirrorManifestResponse:
+    """镜像 manifest 假响应（.json）；GitHub 兜底假响应带 tag_name。"""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def _mirror_manifest(latest="1.8.1", files=None):
+    if files is None:
+        files = {
+            "win": {"name": "CareerScout-v1.8.1.exe", "size": 29931838,
+                    "sha256": "a" * 64},
+            "mac": {"name": "CareerScout-v1.8.1.dmg", "size": 23465579,
+                    "sha256": "b" * 64},
+        }
+    return {"latest": latest, "released": "2026-08-29", "files": files}
+
+
+_GITHUB_PAYLOAD = {
+    "tag_name": "v1.8.1", "html_url": "https://github.com/x/y/releases/tag/v1.8.1",
+    "assets": [
+        {"name": "CareerScout-v1.8.1.exe",
+         "browser_download_url": "https://github.com/x/y/releases/download/v1.8.1/a.exe",
+         "size": 100},
+        {"name": "CareerScout-v1.8.1.exe.sha256",
+         "browser_download_url": "https://github.com/x/y/releases/download/v1.8.1/a.exe.sha256",
+         "size": 1},
+    ],
+}
+
+
+class MirrorFirstTests(unittest.TestCase):
+    """镜像优先：可达即用镜像，不碰 GitHub；不可达/非法回退 GitHub。"""
+
+    def test_mirror_reachable_returns_mirror_info_without_github(self):
+        with patch.object(updater.requests, "get",
+                          return_value=_MirrorManifestResponse(_mirror_manifest())) as get:
+            info = updater.check_for_update("1.7.10")
+        self.assertTrue(info.ok)
+        self.assertEqual(info.latest, "1.8.1")
+        self.assertTrue(info.has_update)
+        self.assertEqual(info.asset_name, "CareerScout-v1.8.1.exe")
+        self.assertEqual(info.asset_url, "http://49.232.60.135/CareerScout-v1.8.1.exe")
+        self.assertEqual(info.asset_size, 29931838)
+        self.assertEqual(info.sha256_url,
+                         "http://49.232.60.135/CareerScout-v1.8.1.exe.sha256")
+        self.assertTrue(info.release_url.endswith("/releases/tag/v1.8.1"))
+        get.assert_called_once_with(updater.MIRROR_MANIFEST_URL, timeout=10)
+
+    def test_mirror_up_to_date_no_update(self):
+        with patch.object(updater.requests, "get",
+                          return_value=_MirrorManifestResponse(_mirror_manifest())):
+            info = updater.check_for_update("1.8.1")
+        self.assertFalse(info.has_update)
+        self.assertEqual(info.asset_url, "")
+
+    def test_mirror_platform_missing_reports_no_asset(self):
+        files = {"win": _mirror_manifest()["files"]["win"]}
+        with patch.object(updater.requests, "get",
+                          return_value=_MirrorManifestResponse(_mirror_manifest(files=files))), \
+             patch.object(updater, "detect_update_platform", return_value="macos"):
+            info = updater.check_for_update("1.7.10")
+        self.assertTrue(info.has_update)
+        self.assertEqual(info.reason, "no_asset")
+
+    def test_mirror_invalid_version_falls_back_to_github(self):
+        bad = _MirrorManifestResponse(_mirror_manifest(latest="not-a-version"))
+        good = _MirrorManifestResponse(_GITHUB_PAYLOAD)
+        with patch.object(updater.requests, "get", side_effect=[bad, good]):
+            info = updater.check_for_update("1.7.10")
+        self.assertEqual(info.latest, "1.8.1")
+        self.assertTrue(info.asset_url.startswith("https://github.com/"))
+
+    def test_mirror_unreachable_falls_back_to_github(self):
+        good = _MirrorManifestResponse(_GITHUB_PAYLOAD)
+        with patch.object(updater.requests, "get",
+                          side_effect=[requests.ConnectionError("timeout"), good]):
+            info = updater.check_for_update("1.7.10")
+        self.assertTrue(info.has_update)
+        self.assertTrue(info.asset_url.startswith("https://github.com/"))
+
+    def test_explicit_fetcher_skips_mirror(self):
+        fetch = lambda: _MirrorManifestResponse(_GITHUB_PAYLOAD)
+        with patch.object(updater.requests, "get") as get:
+            info = updater.check_for_update("1.7.10", fetcher=fetch)
+        get.assert_not_called()
+        self.assertEqual(info.latest, "1.8.1")
+
+    def test_mirror_download_urls_pass_whitelist_others_rejected(self):
+        self.assertTrue(updater._is_allowed_download_url(
+            "http://49.232.60.135/CareerScout-v1.8.1.exe"))
+        self.assertTrue(updater._is_allowed_download_url(
+            "http://49.232.60.135/CareerScout-v1.8.1.exe.sha256"))
+        self.assertFalse(updater._is_allowed_download_url(
+            "http://49.232.60.135:8080/CareerScout-v1.8.1.exe"))
+        self.assertFalse(updater._is_allowed_download_url(
+            "http://user@49.232.60.135/CareerScout-v1.8.1.exe"))
+        self.assertFalse(updater._is_allowed_download_url(
+            "http://49.232.60.135.evil.com/CareerScout-v1.8.1.exe"))
+        self.assertTrue(updater._is_allowed_download_url(
+            "https://github.com/x/y/releases/download/v1.8.1/a.exe"))
+
+    def test_fetch_expected_sha256_from_mirror(self):
+        class Resp:
+            text = ("868b9bc8e088a5f27bec4d29d115dcfbf67e1fe77abb455d5a2e1ab55f29614b"
+                    "  CareerScout-v1.8.1.dmg")
+
+            def raise_for_status(self):
+                return None
+        with patch.object(updater.requests, "get", return_value=Resp()):
+            digest = updater.fetch_expected_sha256(
+                "http://49.232.60.135/CareerScout-v1.8.1.dmg.sha256",
+                "CareerScout-v1.8.1.dmg",
+            )
+        self.assertEqual(digest,
+                         "868b9bc8e088a5f27bec4d29d115dcfbf67e1fe77abb455d5a2e1ab55f29614b")
 
 
 if __name__ == "__main__":

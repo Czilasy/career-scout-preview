@@ -2,12 +2,15 @@
 
 流程（quitAndInstall 模式，对齐 Electron autoUpdater 四阶段）：
 
-1. ``check_for_update``：每次实时查 GitHub Releases API（latest），与
-   当前版本比较；更新检查缓存已关闭，启动和手动检查都会拿到最新发布。
+1. ``check_for_update``：先查国内自建更新镜像（固定 IP 的静态
+   manifest.json，直连可达、无 API 配额），镜像不可达或内容非法时
+   回退 GitHub Releases API（latest）。两边都与当前版本比较；更新
+   检查缓存已关闭，启动和手动检查都会拿到最新发布。``fetcher`` 参数
+   用于测试注入 GitHub 响应，显式提供时跳过镜像路径（纯 GitHub 行为）。
    ``force``/``state_dir`` 参数保留兼容，不再影响行为。
 2. ``UpdateDownloader.download_async``：后台线程流式下载对应平台资产
    （exe/dmg）到 ``~/.career-scout/downloads/``，进度可查。
-3. ``verify_downloaded``：SHA256 校验（Release 必须附 ``.sha256``
+3. ``verify_downloaded``：SHA256 校验（Release/镜像必须附 ``.sha256``
    资产；缺失或校验失败一律拒绝，绝不静默替换）。
 4. ``build_updater_script``：生成平台替换脚本（Windows PowerShell /
    macOS sh），由调用方在主进程退出前 detached 启动；脚本等 PID 死透
@@ -38,13 +41,20 @@ logger = logging.getLogger(__name__)
 
 GITHUB_REPO = "Czilasy/career-scout-preview"
 GITHUB_LATEST_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+# 国内自建更新镜像（固定 IP 静态分发）。HTTP 明文是该源的已知取舍：
+# 安装包传输完整性由强制 SHA256 校验兜底（manifest 与安装包同源），
+# 写权限锁在服务器 SSH 密钥上，公开可读是设计预期。
+MIRROR_HOST = "49.232.60.135"
+MIRROR_BASE_URL = f"http://{MIRROR_HOST}"
+MIRROR_MANIFEST_URL = f"{MIRROR_BASE_URL}/manifest.json"
+_MIRROR_PLATFORM_KEYS = {"windows": "win", "macos": "mac"}
 DEFAULT_STATE_DIR = Path(
     os.environ.get("BOSS_WEBUI_STATE_DIR")
     or os.path.expanduser("~/.career-scout")
 )
 DOWNLOAD_TIMEOUT = 10
 _CHUNK_SIZE = 256 * 1024
-# 下载 URL 仅信任 GitHub 官方域，防重定向到任意地址
+# 下载 URL 仅信任 GitHub 官方域与自建镜像源，防重定向到任意地址
 _ALLOWED_DOWNLOAD_HOSTS = (
     "github.com",
     "objects.githubusercontent.com",
@@ -150,8 +160,50 @@ def _select_assets(assets: list[dict], update_platform: str) -> tuple[UpdateAsse
 
 
 # ---------------------------------------------------------------------------
-# 检查更新（不落盘缓存，每次实时请求 GitHub）
+# 检查更新（不落盘缓存，每次实时请求：先镜像，不可达再 GitHub）
 # ---------------------------------------------------------------------------
+def _check_mirror(
+    current_version: str, update_platform: str, *, checked_at: float = 0.0,
+) -> UpdateInfo | None:
+    """查自建镜像 manifest 并构建 UpdateInfo；不可达/内容非法返回 None。
+
+    manifest 形状（服务器 /root/update_manifest.py 生成）::
+
+        {"latest": "1.8.1", "released": "...",
+         "files": {"win": {"name", "sha256", "size"}, "mac": {...}}}
+    """
+    try:
+        resp = requests.get(MIRROR_MANIFEST_URL, timeout=DOWNLOAD_TIMEOUT)
+        payload = resp.json()
+        latest = str(payload["latest"]).strip()
+        files = payload["files"]
+    except Exception:
+        return None
+    # 版本号格式非法的 manifest 视为不可信，回退 GitHub，绝不据此判"已是最新"
+    if not re.fullmatch(r"v?\d+(?:\.\d+){1,2}", latest):
+        return None
+    info = UpdateInfo(
+        current=current_version,
+        latest=latest.lstrip("vV"),
+        release_url=f"https://github.com/{GITHUB_REPO}/releases/tag/v{latest.lstrip('vV')}",
+        checked_at=checked_at,
+    )
+    info.has_update = is_newer(latest, current_version)
+    if not info.has_update:
+        return info
+    entry = files.get(_MIRROR_PLATFORM_KEYS.get(update_platform, "")) \
+        if isinstance(files, dict) else None
+    if not isinstance(entry, dict) or not str(entry.get("name") or "").strip():
+        info.reason = "no_asset"
+        return info
+    name = str(entry["name"])
+    info.asset_name = name
+    info.asset_url = f"{MIRROR_BASE_URL}/{name}"
+    info.asset_size = int(entry.get("size") or 0)
+    info.sha256_url = f"{MIRROR_BASE_URL}/{name}.sha256"
+    return info
+
+
 def check_for_update(
     current_version: str,
     *,
@@ -159,17 +211,25 @@ def check_for_update(
     state_dir: Path | str | None = None,
     fetcher=None,
 ) -> UpdateInfo:
-    """查 GitHub latest release 并与当前版本比较。
+    """查最新发布（先自建镜像，不可达再 GitHub）并与当前版本比较。
 
-    - 更新检查缓存已关闭：每次调用都实时请求 GitHub latest release；
-      ``force``/``state_dir`` 参数保留兼容，不再影响行为；
-    - 网络/API 失败 → ``ok=False, reason="check_failed"``（启动检查静默降级，
-      手动检查由前端提示）；
+    - 更新检查缓存已关闭：每次调用都实时请求；``force``/``state_dir``
+      参数保留兼容，不再影响行为；
+    - ``fetcher`` 用于测试注入 GitHub 响应；显式提供时跳过镜像路径
+      （保持纯 GitHub 行为，既有测试确定性不受影响）；
+    - 两路都失败 → ``ok=False, reason="check_failed"``（启动检查静默
+      降级，手动检查由前端提示）；
     - 当前平台无对应资产 → ``has_update=True`` 但 ``reason="no_asset"``，
       前端引导去 Release 页手动下载。
     """
     del force, state_dir  # 缓存已关闭，保留兼容签名
     update_platform = detect_update_platform()
+    if fetcher is None:
+        mirror_info = _check_mirror(
+            current_version, update_platform, checked_at=time.time(),
+        )
+        if mirror_info is not None:
+            return mirror_info
     getter = fetcher or (lambda: requests.get(
         GITHUB_LATEST_URL, timeout=DOWNLOAD_TIMEOUT,
         headers={"Accept": "application/vnd.github+json"},
@@ -246,10 +306,23 @@ def _is_allowed_download_url(url: str) -> bool:
         parsed = urlparse(url)
     except ValueError:
         return False
+    if _is_mirror_download_url(parsed):
+        return True
     from webui.url_safety import is_safe_https_authority
 
     return is_safe_https_authority(
         parsed, allowed_hosts=_ALLOWED_DOWNLOAD_HOSTS, allow_subdomains=True
+    )
+
+
+def _is_mirror_download_url(parsed) -> bool:
+    """镜像源精确放行：仅自建固定 IP、仅 80 端口、无 userinfo 的 http URL。"""
+    return (
+        parsed.scheme == "http"
+        and (parsed.hostname or "").lower() == MIRROR_HOST
+        and parsed.port in (None, 80)
+        and parsed.username is None
+        and parsed.password is None
     )
 
 
