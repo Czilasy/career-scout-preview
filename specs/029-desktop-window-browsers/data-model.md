@@ -39,8 +39,9 @@ BrowserRegistryEntry:
 
 | 键 | 类型 | 语义 | 校验 |
 |---|---|---|---|
-| `browser` | str | 注册表 key；缺省 = 自动探测（chrome→edge） | 不在注册表 → 视同缺省 |
-| `browser_manual_path` | str | `browser == "__manual__"` 时的可执行文件路径 | 保存时 `--version` 探活通过才允许保存；启动时再经 CDP 内核校验 |
+| `mode` | str | `auto`（缺省，按注册表顺序探测）/ `registry` / `manual` | 其他值视同 auto |
+| `key` | str | `mode=registry` 时的注册表 key | 不在注册表 → 视同 auto |
+| `manual_path` | str | `mode=manual` 时的可执行文件路径 | 保存时 `--version` 探活通过才允许保存；启动时再经 CDP 内核校验 |
 
 **关系**：选择 → 启动解析（`pipeline_exec_chrome.py`）→ 可执行文件路径；选择 + 账号 → 生效数据目录（D6 派生规则）。
 

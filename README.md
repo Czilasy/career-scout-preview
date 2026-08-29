@@ -28,15 +28,16 @@ Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的多平台职位
 
 Windows 与 macOS 用户可直接使用桌面版，无需安装 Python 或 Node.js：
 
-- 最新正式版：v1.7.10
-- Windows 安装包：`CareerScout-v1.7.10.exe`，下载后双击运行
-- macOS 安装包：`CareerScout-v1.7.10.dmg`，首次打开见下方 Gatekeeper 说明
+- 最新正式版：v1.7.11
+- Windows 安装包：`CareerScout-v1.7.11.exe`，下载后双击运行
+- macOS 安装包：`CareerScout-v1.7.11.dmg`，首次打开见下方 Gatekeeper 说明
 - 应用内更新（桌面版）：启动时自动检查新版本，可一键下载、校验并重启完成更新
 
 ### 首次运行准备
 
-- **浏览器**：请先安装 Chrome 或 Edge；桌面版使用独立的专用 Chrome profile，不复制主浏览器 Cookie。首次使用请在专用 Chrome/浏览器账号中完成一次 BOSS 直聘 / 智联招聘登录，登录态会持久化保存。登录方式与源码版一致，见下方“启动专用 Chrome 并登录”与“浏览器账号”说明。
+- **浏览器**：支持 Chrome、Edge 及其他 Chromium 内核浏览器（Brave、Vivaldi、Opera、360 极速、QQ 浏览器、夸克等），可在应用「设置 → 浏览器」中自动探测选择，或手动指定可执行文件路径；桌面版使用独立的专用浏览器 profile，不复制主浏览器 Cookie。首次使用请在专用 Chrome/浏览器账号中完成一次 BOSS 直聘 / 智联招聘登录，登录态会持久化保存。登录方式与源码版一致，见下方“启动专用 Chrome 并登录”与“浏览器账号”说明。
 - **Windows WebView2**：Windows 11 预装 WebView2；Windows 10 如果缺失，桌面版可能无法显示界面，请到 Microsoft 官方页面安装 WebView2 运行时（[developer.microsoft.com/microsoft-edge/webview2](https://developer.microsoft.com/microsoft-edge/webview2/)）。
+- **窗口记忆**：首次启动直接最大化打开；拖拽/缩放后的普通窗口大小与位置会被记住（最大化关闭不丢失），任何情况下窗口都不会超出屏幕。
 - **首次启动偏慢**：Windows 安装包为单文件解压模式，首次启动会先解压，等待时间较长属于正常现象，请勿在界面出现前关闭窗口。
 - **数据目录**：所有本地数据（任务、结果、浏览器账号资料、更新包等）保存在 `~/.career-scout`，卸载或删除软件不会自动清空该目录。
 

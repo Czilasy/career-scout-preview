@@ -16,7 +16,7 @@
 
 **Primary Dependencies**: Flask（后端）、pywebview 6.2.1 WinForms 后端（桌面壳）、PyInstaller（打包）、Vitest（前端测试）
 
-**Storage**: 本地 JSON 文件：`~/.career-scout/desktop_window.json`（窗口记忆，schema 3）、`~/.career-scout/advanced_settings.json`（浏览器选择新键，经现有读写通道）——实施修订：选择持久化改为注册表域自持 `browser_selection.json`（白名单文件不在允许清单内，见 research D5 修订注）；浏览器账号 `profile_dir` 为显式路径存储（现有机制，不改账号结构）。**无数据库 schema 变更。**
+**Storage**: 本地 JSON 文件：`~/.career-scout/desktop_window.json`（窗口记忆，schema 3）、`~/.career-scout/advanced_settings.json`（浏览器选择新键，经现有读写通道）——实施修订（用户已批准）：选择持久化改为注册表域自持 `browser_selection.json`（原计划依赖的键白名单位于允许清单外的 settings 域文件，经批准维持绕开方案）；浏览器账号 `profile_dir` 为显式路径存储（现有机制，不改账号结构）。**无数据库 schema 变更。**
 
 **Testing**: unittest（后端，含 deps 注入式纯逻辑单测）+ Vitest（前端组件测试）
 

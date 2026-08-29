@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { Check, CircleAlert, LoaderCircle } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
 import { browserRegistryApi, errorMessage } from "../api";
@@ -13,7 +13,14 @@ const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
 
 const entries = ref<BrowserRegistryEntryState[]>([]);
-const selectedKey = ref("");
+const selectedKey = computed(() =>
+  selection.value.mode === "registry" ? (selection.value.key || "") : ""
+);
+
+// 零安装指引（FR-010/US3 场景 7）：清单内一个都没探测到且未选手动时提示
+const noneInstalled = computed(() =>
+  entries.value.length > 0 && entries.value.every((entry) => !entry.installed)
+);
 const selection = ref<BrowserSelection>({ mode: "auto" });
 const effectivePath = ref<string | null>(null);
 const loading = ref(false);
@@ -117,9 +124,8 @@ function optionClass(key: string) {
   return selectedKey.value === key && !manualMode.value ? "browser-option selected" : "browser-option";
 }
 
-watch(selection, () => {
-  selectedKey.value = selection.value.mode === "registry" ? (selection.value.key || "") : "";
-}, { immediate: true, deep: true });
+
+
 </script>
 
 <template>
@@ -157,6 +163,13 @@ watch(selection, () => {
           <span v-else class="browser-option-hint browser-missing">未安装</span>
           <Check v-if="selectedKey === entry.key && !manualMode" class="browser-check" :size="16" />
         </button>
+        <p
+          v-if="noneInstalled && !manualMode"
+          class="browser-zero-hint"
+          data-testid="browser-zero-hint"
+        >
+          未探测到已安装的浏览器，请在下方手动指定路径。
+        </p>
         <button
           type="button"
           :class="manualMode ? 'browser-option selected' : 'browser-option'"
@@ -173,7 +186,7 @@ watch(selection, () => {
             v-model="manualPath"
             type="text"
             class="browser-manual-input"
-            placeholder="例如 C:\\Program Files\\Mozilla Firefox\\firefox.exe"
+            placeholder="浏览器可执行文件完整路径（如 chrome.exe / brave.exe）"
             data-testid="browser-manual-input"
             @input="validationText = ''"
           />
@@ -277,6 +290,12 @@ watch(selection, () => {
   font-size: 12px;
   color: var(--text-muted, #8b949e);
   word-break: break-all;
+}
+
+.browser-zero-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--warning, #d29922);
 }
 
 .browser-missing {

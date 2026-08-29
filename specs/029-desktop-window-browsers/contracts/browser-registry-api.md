@@ -21,7 +21,7 @@
 ```
 
 - `registry`：注册表全量 8 条（`installed=false` 也要返回，供前端展示全清单）；`path` 为探测命中路径或 null。
-- `selection.mode`：`"registry"`（`key` 有效）| `"manual"`（`browser_manual_path` 有效）| `"auto"`（缺省 = 自动探测 chrome→edge，向后兼容现状）。
+- `selection.mode`：`"registry"`（`key` 有效）| `"manual"`（`manual_path` 有效；实施字段名，原契约草稿作 `browser_manual_path`）| `"auto"`（缺省 = 按注册表顺序自动探测，chrome/edge 优先，向后兼容现状）。
 - `effective_path`：按当前选择解析出的可执行文件路径；解析失败为 `null`。
 
 ## PUT /api/browser-registry
@@ -50,11 +50,11 @@
 
 手动路径即时校验（保存前反馈用，不落盘）。
 
-**Request**: `{"path": "..."}`  **Response 200**: `{"ok": true, "version": "126.0.6478.126"}` 或 `{"ok": false, "error": "path_validation_failed|kernel_incompatible", "message": "..."}`
+**Request**: `{"path": "..."}`  **Response**: 成功 200 `{"ok": true, "version": "..."}`；失败 400 `{"ok": false, "error": "path_validation_failed|kernel_incompatible", "message": "..."}`（实施口径：失败走 400，前端 ApiError.message 直显）。
 
 ## 启动链路内核二次校验（非 HTTP）
 
-抓取启动后调试端点 `/json/version` 的 `Browser` 字段不含 `Chrome/` → 中止并报"浏览器内核不兼容"（现有失败码体系新增明确原因），不得进入无反馈等待（spec FR-013）。
+抓取启动后调试端点 `/json/version` 的 `Browser` 字段不含 `Chrome/`/`Chromium`/`Edg` → 中止并报"浏览器内核不兼容"（注：若某国产壳的 Browser 字段只报自家名，会被判定不兼容——夸克本就预期可能不兼容，报错明确即可）（现有失败码体系新增明确原因），不得进入无反馈等待（spec FR-013）。
 
 ## 数据目录派生（非 HTTP，账号维度联动）
 

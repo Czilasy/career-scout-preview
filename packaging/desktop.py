@@ -11,17 +11,13 @@ T035 接线点（冻结合同 ``specs/003-desktop-exe/contracts/desktop-shell.md
    PYTHON_EXECUTABLE=sys.executable, START_TASKS=True})``，
    ``app.run(use_reloader=False, threaded=True)`` 在独立 daemon 线程。
 4. **就绪轮询**（§4）：``GET /api/session`` 直到 200，超时 ≤30s → 错误退出。
-5. **窗口**（§5，029 修订）：标题 ``Career Scout v{version}``，
-   普通态默认 1545×900 居中（小屏钳回工作区），``min_size=(1024,700)``，
-   ``resizable=True``；从 ``~/.career-scout/desktop_window.json``（schema 3）
-   恢复普通矩形与最大化标记——无记忆/损坏/污染记忆一律首开最大化；
-   运行时经 ``resized/moved/maximized/restored`` 事件维护普通矩形
-   （窗口状态域见 ``packaging/window_state.py``）。
-6. **closing 生命周期**（§6）：``events.closing`` → 按 Tracker 快照保存窗口
-   状态（最大化 → 最后普通矩形 + ``maximized:true``，普通态 → 当前矩形）→
-   ``cancel_running_tasks``（set 所有 ``_cancel_events``）→
-   ``run_desktop_shell`` 返回退出码；``main()`` 调用方负责 ``os._exit(code)``
-   兜底（合同 §6 要求 ``webview.start()`` 返回后 ``os._exit`` 确保无残留线程）。
+5. **窗口**（§5，029 修订）：普通态默认 1545×900 居中（小屏钳回），
+   ``min_size=(1024,700)``，``resizable=True``；从 ``~/.career-scout/desktop_window.json``
+   （schema 3）恢复普通矩形与最大化标记——无记忆/损坏/污染记忆一律首开
+   最大化；事件维护普通矩形（窗口状态域 ``packaging/window_state.py``）。
+6. **closing 生命周期**（§6）：``events.closing`` → 按 Tracker 快照落盘
+   （最大化 → 最后普通矩形 + ``maximized:true``）→ ``cancel_running_tasks``
+   → 返回退出码；``main()`` 调用方 ``os._exit(code)`` 兜底（合同 §6）。
 7. **错误路径**（§7）：MessageBox + ``~/.career-scout/desktop.log`` 追加记录 + 非零退出。
 
 所有外部依赖（mutex/messagebox/webview/create_app/pick_free_port/http_get/logger）
@@ -73,6 +69,7 @@ WINDOW_STATE_FILENAME = _ws.WINDOW_STATE_FILENAME
 WindowStateTracker = _ws.WindowStateTracker
 default_normal_rect = _ws.default_normal_rect
 default_workarea_provider = _ws.default_workarea_provider
+size_fits_workareas = _ws.size_fits_workareas
 load_window_state = _ws.load_window_state
 save_window_state = _ws.save_window_state
 wire_window_events = _ws.wire_window_events
@@ -464,8 +461,11 @@ def run_desktop_shell(deps):
     width, height, x, y, start_maximized = load_window_state(
         state_dir=state_dir, workarea_provider=workarea_provider
     )
+    # macOS 全屏动画先发 resized（全屏尺寸）后发 maximized：守卫拒绝装不进
+    # 工作区的尺寸，防止 last_normal 被全屏矩形污染（029 审查修复）
     tracker = WindowStateTracker(
-        default_rect_fn=lambda: default_normal_rect(workarea_provider)
+        default_rect_fn=lambda: default_normal_rect(workarea_provider),
+        size_guard=lambda w, h: size_fits_workareas(w, h, workarea_provider),
     )
     title = f"Career Scout v{version}"
 

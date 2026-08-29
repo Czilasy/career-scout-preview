@@ -16,9 +16,19 @@ class ChromeAccountProfileSwitchTests(unittest.TestCase):
 
     def test_ensure_chrome_ready_replaces_wrong_profile(self):
         from webui import pipeline_exec
+        from webui import pipeline_exec_chrome
         launched = mock.Mock()
         launched.poll.return_value = None
+        # 已知账号簿必须封闭：默认实现读真实用户账号簿文件（~/.career-scout），
+        # 在非主检出路径的 worktree 里与 BROWSER_ACCOUNTS 默认值不一致导致误判
+        hermetic_accounts = {
+            aid: {"profile_dir": str(info["profile_dir"])}
+            for aid, info in pipeline_exec.BROWSER_ACCOUNTS.items()
+        }
         with mock.patch.object(
+            pipeline_exec_chrome, "load_browser_accounts",
+            return_value=hermetic_accounts,
+        ), mock.patch.object(
             pipeline_exec.boss, "is_cdp_ready", side_effect=[True, True],
         ), mock.patch.object(
             pipeline_exec.boss, "cdp_port_uses_profile", return_value=False,

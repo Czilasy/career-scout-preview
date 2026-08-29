@@ -105,6 +105,17 @@ description: "Task list for 029 桌面壳窗口记忆修复批"
 
 ---
 
+## Addendum: 全量审查修复批（2026-08-29，提交 1d2ad62 后）
+
+用户批准放宽文件边界（原允许清单外的文件可按需修改）后，对双轴审查发现逐项修复：
+
+- [x] T032 [US1] `packaging/window_state.py` + `packaging/desktop.py`：WindowStateTracker 增加 `size_guard` 尺寸守卫——macOS cocoa 全屏动画先发 `resized`（全屏尺寸）后发 `maximized`，守卫拒绝装不进工作区的尺寸，堵住"全屏矩形污染 last_normal"在 macOS 复现核心 Bug（cocoa.py:121-143 时序已核）；附 3 项守卫单测 + 1 项 cocoa 顺序编排回归
+- [x] T033 `webui/platforms_checks.py`：登录空间冲突/账号删除检查的 profile 比对接入浏览器命名空间翻译（拆雷：未来端口目录命名空间化后不再恒不匹配）；`effective_data_dir` 恒等分支改为原样返回（不做 abspath 改写）
+- [x] T034 前端：手动路径示例修正（原 Firefox 示例必被内核校验拒绝）、零安装指引（FR-010 场景 7）、`selectedKey` 改 computed；组件测试 +1
+- [x] T035 P1/P2 清理：`_MANUAL_KEY` 死常量删除、`selection_data_dir_key` 下沉注册表域（accounts 留兼容别名）、进程枚举 token 集合模块级缓存、PUT 校验收敛（ValueError→400）、README 同步（浏览器能力 + 首开窗口记忆 + 版本串 1.7.10→1.7.11 既有滞留）、契约字段名/状态码/`maximized` 缺失口径对齐、`test_webui_app_runtime` 账号簿 hermetic 化
+
+---
+
 ## Dependencies & Execution Order
 
 ```text

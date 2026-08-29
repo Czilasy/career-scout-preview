@@ -42,7 +42,7 @@
 
 ## D5 浏览器选择持久化与校验
 
-**Decision**: 【实施修订 2026-08-29】持久化改为注册表域自持 `~/.career-scout/browser_selection.json`（原方案搭 `advanced_settings.json` 通道，但其键白名单位于 `pipeline_exec_settings.py`，不在本批次允许修改的文件清单内，按文件边界绕开）：键 `browser`：值为注册表 `key` 或 `"__manual__"` + `browser_manual_path`（同文件另键）。缺省 = 现状自动探测（chrome 优先、edge 次之）。手动路径保存时执行 `<exe> --version` 探活（超时 10s）：进程能启动且输出含版本号 → 通过；输出含 `Firefox` 或不可执行 → 明确报错。启动后二次校验：调试端点 `/json/version` 的 `Browser` 字段含 `Chrome/`（Chromium 系均满足）方可继续，否则报"内核不兼容"。
+**Decision**: 【实施修订 2026-08-29】持久化改为注册表域自持 `~/.career-scout/browser_selection.json`（原方案搭 `advanced_settings.json` 通道，但其键白名单位于 `pipeline_exec_settings.py`，不在本批次允许修改的文件清单内，按文件边界绕开）：最终布局（用户已批准该偏差）：`{"mode": "auto|registry|manual", "key": "<注册表key>", "manual_path": "<手动路径>"}`，缺省/损坏 = `{"mode": "auto"}`（按注册表顺序探测，chrome/edge 优先）。手动路径保存时执行 `<exe> --version` 探活（超时 10s）：进程能启动且输出含版本号 → 通过；输出含 `Firefox` 或不可执行 → 明确报错。启动后二次校验：调试端点 `/json/version` 的 `Browser` 字段含 `Chrome/`（Chromium 系均满足）方可继续，否则报"内核不兼容"。
 
 **Rationale**: `--version` 输出可区分内核家族（Firefox 明示自己的名字；Chromium 系输出版本串），不开浏览器即可做保存时校验；CDP 端点校验兜住"伪装路径/魔改内核"，两层各有分工。`settings_api.py` 568 行近预警线 → 端点开新路由域 `webui/browser_registry_api.py`（022 log_api 先例），经 `app.py` 一行注册。
 

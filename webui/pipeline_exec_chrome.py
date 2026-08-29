@@ -11,7 +11,6 @@ import time
 
 from webui.pipeline_exec_accounts import (
     _cdp_data_dir,
-    browser_data_dir_key,
     effective_data_dir,
     load_browser_accounts,
 )
@@ -20,6 +19,7 @@ from scripts.boss.browser_registry import (
     fetch_cdp_browser_field,
     is_chromium_cdp_browser,
     resolve_executable,
+    selection_data_dir_key,
 )
 
 
@@ -71,7 +71,7 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
             return False, kernel_error
         if boss.cdp_port_uses_profile(port, cdp_data_dir):
             return True, ""
-        data_dir_key = browser_data_dir_key()
+        data_dir_key = selection_data_dir_key()
         known_profiles = {
             boss.normalize_profile_path(effective_data_dir(
                 str(info["profile_dir"]), data_dir_key))

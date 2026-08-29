@@ -503,6 +503,32 @@ class TrackerTests(unittest.TestCase):
         self.assertFalse(self.tracker.maximized)
         self.assertEqual(self.tracker.last_normal, (1200, 800, None, None))
 
+    def test_size_guard_rejects_oversized_resized(self):
+        """守卫拒绝装不进工作区的尺寸（macOS 全屏动画先于 maximized 的 resized）。"""
+        tracker = ws.WindowStateTracker(
+            default_rect_fn=lambda: self.default_rect,
+            size_guard=lambda w, h: w <= 1920 and h <= 1040,
+        )
+        tracker.on_resized(1200, 800)
+        # 全屏动画的中间/最终尺寸被守卫拒绝，普通矩形不被污染
+        tracker.on_resized(1936, 1056)
+        self.assertEqual(tracker.last_normal, (1200, 800, None, None))
+
+    def test_size_guard_exception_allows_update(self):
+        """守卫自身抛异常 → 放行（不误杀正常追踪）。"""
+        tracker = ws.WindowStateTracker(
+            default_rect_fn=lambda: self.default_rect,
+            size_guard=lambda w, h: 1 / 0,
+        )
+        tracker.on_resized(1300, 850)
+        self.assertEqual(tracker.last_normal, (1300, 850, None, None))
+
+    def test_size_guard_not_set_accepts_everything(self):
+        """未设守卫 → 行为与旧版一致（全部接受）。"""
+        tracker = ws.WindowStateTracker(default_rect_fn=lambda: self.default_rect)
+        tracker.on_resized(1936, 1056)
+        self.assertEqual(tracker.last_normal, (1936, 1056, None, None))
+
     def test_snapshot_normal_uses_current_values(self):
         self.tracker.on_resized(1200, 800)
         result = self.tracker.snapshot_for_save(1300, 850, 20, 30)

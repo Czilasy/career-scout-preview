@@ -18,6 +18,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Callable, NamedTuple, Optional
 
 # 路径与常量（desktop.py re-export 保持旧调用面）
 DEFAULT_STATE_DIR = Path(os.path.expanduser("~/.career-scout"))
@@ -30,6 +31,21 @@ MIN_HEIGHT = 700
 MAX_WIDTH = 8192
 MAX_HEIGHT = 8192
 _WINDOW_STATE_SCHEMA_VERSION = 3
+
+
+class NormalRect(NamedTuple):
+    """普通矩形（宽、高、位置）；Tracker 内部承载"最后一次普通矩形"。"""
+
+    width: int
+    height: int
+    x: Optional[int]
+    y: Optional[int]
+
+
+def _centered(workarea, width, height):
+    """在单个工作区 ``(x, y, w, h)`` 内居中的位置。"""
+    ax, ay, aw, ah = workarea
+    return (ax + max(0, (aw - width) // 2), ay + max(0, (ah - height) // 2))
 
 
 # ---------------------------------------------------------------------------
@@ -88,9 +104,22 @@ def default_normal_rect(workarea_provider=None):
             workareas = []
         if workareas:
             width, height = _clamp_size_to_workareas(width, height, workareas)
-            ax, ay, aw, ah = workareas[0]
-            return (width, height, ax + max(0, (aw - width) // 2), ay + max(0, (ah - height) // 2))
+            x, y = _centered(workareas[0], width, height)
+            return (width, height, x, y)
     return (width, height, 0, 0)
+
+
+def size_fits_workareas(width, height, workarea_provider=None):
+    """尺寸能否装进任一显示器工作区；provider 不可用/异常时放行（不误杀）。"""
+    if workarea_provider is None:
+        return True
+    try:
+        workareas = workarea_provider()
+    except Exception:
+        return True
+    if not workareas:
+        return True
+    return any(width <= aw and height <= ah for (_ax, _ay, aw, ah) in workareas)
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +141,7 @@ def load_window_state(state_dir=None, workarea_provider=None):
     - workarea_provider 为 None → 不做钳制/越界判定，原样返回。
     """
     default_w, default_h = _read_default_size(state_dir)
+    workareas = None
     if workarea_provider is not None:
         try:
             workareas = workarea_provider()
@@ -149,13 +179,7 @@ def load_window_state(state_dir=None, workarea_provider=None):
 
     maximized = bool(data.get("maximized")) if schema == _WINDOW_STATE_SCHEMA_VERSION else False
 
-    if workarea_provider is None:
-        return (width, height, x, y, maximized)
-    try:
-        workareas = workarea_provider()
-    except Exception:
-        return (width, height, x, y, maximized)
-    if not workareas:
+    if workareas is None:
         return (width, height, x, y, maximized)
 
     fits_any = any(width <= aw and height <= ah for (_ax, _ay, aw, ah) in workareas)
@@ -171,14 +195,8 @@ def load_window_state(state_dir=None, workarea_provider=None):
     if inside_any:
         return (width, height, x, y, maximized)
 
-    ax, ay, aw, ah = workareas[0]
-    return (
-        width,
-        height,
-        ax + max(0, (aw - width) // 2),
-        ay + max(0, (ah - height) // 2),
-        maximized,
-    )
+    x, y = _centered(workareas[0], width, height)
+    return (width, height, x, y, maximized)
 
 
 # ---------------------------------------------------------------------------
@@ -231,12 +249,22 @@ class WindowStateTracker:
     以窗口实际矩形续记。
     """
 
-    def __init__(self, default_rect_fn=None):
+    def __init__(
+        self,
+        default_rect_fn=None,
+        size_guard: "Optional[Callable[[int, int], bool]]" = None,
+    ):
         """``default_rect_fn() -> (w, h, x, y)``：最大化且无普通记忆时的落盘
-        回退（默认接 :func:`default_normal_rect`）；不传用常量 ``(0, 0)`` 位置。"""
-        self._last_normal = None  # (w, h, x, y) | None
+        回退（默认接 :func:`default_normal_rect`）；不传用常量 ``(0, 0)`` 位置。
+
+        ``size_guard(width, height) -> bool``：普通态尺寸守卫（029 审查修复）。
+        macOS cocoa 后端在全屏动画期间先发 ``resized``（含全屏尺寸）后发
+        ``maximized``——不设守卫时 ``last_normal`` 会被全屏矩形污染，核心 Bug
+        在 macOS 复现；守卫拒绝装不进工作区的尺寸（desktop.py 接线注入）。"""
+        self._last_normal: Optional[NormalRect] = None
         self._maximized = False
         self._default_rect_fn = default_rect_fn
+        self._size_guard = size_guard
 
     @property
     def maximized(self):
@@ -257,18 +285,26 @@ class WindowStateTracker:
         return (DEFAULT_WIDTH, DEFAULT_HEIGHT, 0, 0)
 
     def on_resized(self, width, height):
-        """窗口尺寸变化。最大化期间忽略（普通矩形冻结）。"""
+        """窗口尺寸变化。最大化期间忽略；守卫拒绝的尺寸（如全屏矩形）忽略。"""
         if self._maximized or not (_is_number(width) and _is_number(height)):
             return
-        _w, _h, x, y = self._last_normal or (None, None, None, None)
-        self._last_normal = (int(width), int(height), x, y)
+        if self._size_guard is not None:
+            try:
+                if not self._size_guard(int(width), int(height)):
+                    return
+            except Exception:
+                pass
+        x = self._last_normal.x if self._last_normal else None
+        y = self._last_normal.y if self._last_normal else None
+        self._last_normal = NormalRect(int(width), int(height), x, y)
 
     def on_moved(self, x, y):
         """窗口位置变化。最大化期间忽略。"""
         if self._maximized or not (_is_number(x) and _is_number(y)):
             return
-        w, h, _x, _y = self._last_normal or (None, None, None, None)
-        self._last_normal = (w, h, int(x), int(y))
+        w = self._last_normal.width if self._last_normal else None
+        h = self._last_normal.height if self._last_normal else None
+        self._last_normal = NormalRect(w, h, int(x), int(y))
 
     def on_maximized(self):
         """进入最大化：冻结当前普通矩形。"""
@@ -278,7 +314,7 @@ class WindowStateTracker:
         """还原为普通态：解除冻结；窗口实际矩形可得时以其续记。"""
         self._maximized = False
         if all(_is_number(v) for v in (width, height, x, y)):
-            self._last_normal = (int(width), int(height), int(x), int(y))
+            self._last_normal = NormalRect(int(width), int(height), int(x), int(y))
 
     def snapshot_for_save(self, current_w, current_h, current_x, current_y):
         """产出 closing 时刻的落盘内容 ``(w, h, x, y, maximized)``。
@@ -369,8 +405,7 @@ def wire_window_events(events, window, tracker):
     pywebview 各后端事件回调参数不总是一致：优先取回调参数（数值），
     缺省回退读 window 属性。单个事件缺失只降级对应追踪，不阻断启动。
     """
-    def _num(value):
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    _num = _is_number
 
     def _on_resized(*args):
         w = args[0] if len(args) > 0 and _num(args[0]) else getattr(window, "width", None)

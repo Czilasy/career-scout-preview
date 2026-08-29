@@ -141,7 +141,6 @@ REGISTRY_KEYS = tuple(entry["key"] for entry in BROWSER_REGISTRY)
 # 不走 advanced_settings.json——其键白名单在 settings 域内，保持边界）
 # ---------------------------------------------------------------------------
 SELECTION_FILENAME = "browser_selection.json"
-_MANUAL_KEY = "__manual__"
 
 
 def _selection_path(path=None):
@@ -370,6 +369,29 @@ def fetch_cdp_browser_field(port, timeout=3, urlopen=None):
         return str((data or {}).get("Browser") or "") or None
     except Exception:
         return None
+
+
+def selection_data_dir_key():
+    """当前选择对应的浏览器命名空间键；解析失败返回 None（恒等映射）。
+
+    manual 模式返回 ``"manual"``；auto 按注册表顺序取第一个已安装条目；
+    registry 模式取该条目 ``data_dir_key``。供数据目录派生（research D6）。
+    """
+    try:
+        selection = load_browser_selection()
+        mode = selection.get("mode")
+        if mode == "manual":
+            return "manual"
+        if mode == "registry":
+            entry = registry_entry(selection.get("key"))
+            return entry["data_dir_key"] if entry else None
+        for item in detect_browsers():
+            if item["installed"]:
+                entry = registry_entry(item["key"])
+                return entry["data_dir_key"] if entry else None
+    except Exception:
+        return None
+    return None
 
 
 def all_registry_exe_names():

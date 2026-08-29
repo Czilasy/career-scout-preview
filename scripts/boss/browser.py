@@ -18,14 +18,23 @@ from scripts.boss.browser_registry import all_registry_exe_names
 import sys as _sys
 
 
+_REGISTRY_COMMAND_TOKENS: frozenset | None = None
+
+
 def _registry_command_tokens():
-    """注册表全部浏览器命令行标识（exe 全名 + 去掉 .exe 的词干，小写）。"""
-    tokens = set()
-    for exe in all_registry_exe_names():
-        tokens.add(exe)
-        if exe.endswith(".exe"):
-            tokens.add(exe[:-4])
-    return tokens
+    """注册表全部浏览器命令行标识（exe 全名 + 去掉 .exe 的词干，小写）。
+
+    不可变集合，模块级缓存（029 审查修复：进程枚举高频调用不再重建）。
+    """
+    global _REGISTRY_COMMAND_TOKENS
+    if _REGISTRY_COMMAND_TOKENS is None:
+        tokens = set()
+        for exe in all_registry_exe_names():
+            tokens.add(exe)
+            if exe.endswith(".exe"):
+                tokens.add(exe[:-4])
+        _REGISTRY_COMMAND_TOKENS = frozenset(tokens)
+    return _REGISTRY_COMMAND_TOKENS
 
 # CDP Chrome 防膨胀启动参数：
 # - 限制磁盘/媒体缓存上限，避免抓取缓存无限增长；

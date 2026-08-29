@@ -208,34 +208,24 @@ def effective_data_dir(profile_dir, browser_key) -> str:
       切过去 = 各账号空目录（重新登录一次），旧目录原样保留、切回免重登；
     - 手动指定路径模式由调用方传 ``"manual"`` 作为命名空间键。
     """
-    profile_dir = os.path.abspath(os.path.expanduser(str(profile_dir or "")))
+    raw = str(profile_dir or "")
     key = str(browser_key or "").strip().lower()
-    if not profile_dir or key in ("", "chrome", "edge", "auto"):
-        return profile_dir
+    if not raw.strip() or key in ("", "chrome", "edge", "auto"):
+        # 恒等分支原样返回：不做 abspath 规范化（调用方契约是字符串恒等，
+        # POSIX 风格路径在 Windows 上规范化会改变字面值）
+        return raw
+    profile_dir = os.path.abspath(os.path.expanduser(raw))
     parent = os.path.dirname(profile_dir)
     name = os.path.basename(profile_dir) or "profile"
     return os.path.join(parent, f"chrome-profile-{key}", name)
 
 
 def browser_data_dir_key() -> str | None:
-    """当前浏览器选择对应的命名空间键；解析失败返回 None（恒等映射）。"""
-    try:
-        from scripts.boss import browser_registry as _br
+    """当前浏览器选择对应的命名空间键（029 审查修复：实现下沉注册表域，
+    此处保留兼容别名，见 ``scripts.boss.browser_registry.selection_data_dir_key``）。"""
+    from scripts.boss.browser_registry import selection_data_dir_key
 
-        selection = _br.load_browser_selection()
-        mode = selection.get("mode")
-        if mode == "manual":
-            return "manual"
-        if mode == "registry":
-            entry = _br.registry_entry(selection.get("key"))
-            return entry["data_dir_key"] if entry else None
-        for item in _br.detect_browsers():
-            if item["installed"]:
-                entry = _br.registry_entry(item["key"])
-                return entry["data_dir_key"] if entry else None
-    except Exception:
-        return None
-    return None
+    return selection_data_dir_key()
 
 
 

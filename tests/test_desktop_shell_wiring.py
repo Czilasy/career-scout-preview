@@ -359,6 +359,27 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
         self.assertEqual((kwargs["x"], kwargs["y"]), (50, 60))
         self.assertTrue(kwargs["maximized"])
 
+    def test_macos_fullscreen_animation_does_not_pollute_normal_rect(self):
+        """审查修复回归：cocoa 全屏动画先发 resized（全屏尺寸）后发 maximized，
+        守卫拒绝全屏尺寸，关窗落盘的是用户真实普通矩形而非全屏矩形。"""
+        state_dir = tempfile.mkdtemp()
+        webview_mod = _FakeWebview()
+        deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
+        desktop.run_desktop_shell(deps)
+        win = webview_mod.windows[0]
+        # 用户拖好普通矩形
+        win.width, win.height, win.x, win.y = 1200, 800, 50, 60
+        win.events.resized.fire()
+        win.events.moved.fire()
+        # macOS 顺序：全屏动画期间 resized 先到（全屏尺寸），maximized 后到
+        win.width, win.height, win.x, win.y = 1936, 1056, -8, -8
+        win.events.resized.fire()  # 守卫拒绝（1936×1056 装不进 1920×1080 工作区）
+        win.events.maximized.fire()
+        for handler in list(win.events.closing.handlers):
+            handler()
+        result = desktop.load_window_state(state_dir=state_dir)
+        self.assertEqual(result, (1200, 800, 50, 60, True))
+
     def test_events_partial_only_closing_still_saves(self):
         """仅 closing 可用（部分事件缺失）→ 其余事件降级跳过，closing 兜底仍保存。"""
         state_dir = tempfile.mkdtemp()

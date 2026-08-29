@@ -39,28 +39,27 @@ def register_browser_registry_routes(app, ctx):
     def browser_registry_save():
         payload = request.get_json(silent=True) or {}
         mode = str(payload.get("mode") or "")
-        if mode == "registry":
-            key = payload.get("key")
-            if key not in br.REGISTRY_KEYS:
-                return jsonify({
-                    "ok": False,
-                    "error": "invalid_selection",
-                    "message": f"未知浏览器：{key}",
-                }), 400
-            br.save_browser_selection("registry", key=key)
-        elif mode == "manual":
-            manual_path = str(payload.get("path") or "").strip()
-            ok, info = br.validate_manual_path(manual_path)
-            if not ok:
-                return jsonify({"ok": False, **info}), 400
-            br.save_browser_selection("manual", manual_path=manual_path)
-        elif mode == "auto":
-            br.save_browser_selection("auto")
-        else:
+        try:
+            if mode == "registry":
+                # key 合法性由 save_browser_selection 校验（ValueError → 400）
+                br.save_browser_selection("registry", key=payload.get("key"))
+            elif mode == "manual":
+                manual_path = str(payload.get("path") or "").strip()
+                if not manual_path:
+                    raise ValueError("手动模式必须提供浏览器可执行文件路径")
+                ok, info = br.validate_manual_path(manual_path)
+                if not ok:
+                    return jsonify({"ok": False, **info}), 400
+                br.save_browser_selection("manual", manual_path=manual_path)
+            elif mode == "auto":
+                br.save_browser_selection("auto")
+            else:
+                raise ValueError("mode 必须是 auto/registry/manual")
+        except ValueError as exc:
             return jsonify({
                 "ok": False,
                 "error": "invalid_selection",
-                "message": "mode 必须是 auto/registry/manual",
+                "message": str(exc),
             }), 400
         return jsonify({"ok": True, **_selection_payload()})
 

@@ -136,6 +136,29 @@ describe("BrowserSettingsDialog", () => {
     expect(wrapper.get('[data-testid="browser-save-notice"]').text()).toContain("已保存");
   });
 
+  it("shows zero-install guidance when nothing detected", async () => {
+    const emptyPayload = {
+      registry: registryPayload.registry.map((item) => ({
+        ...item,
+        installed: false,
+        path: null,
+      })),
+      selection: { mode: "auto" },
+      effective_path: null,
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/browser-registry") return response(emptyPayload);
+      return response({});
+    });
+    const wrapper = await mountOpen(fetchMock);
+
+    const hint = wrapper.get('[data-testid="browser-zero-hint"]');
+    expect(hint.text()).toContain("手动指定路径");
+    // 手动分支展开后指引退场
+    await findButton(wrapper, "browser-option-manual").trigger("click");
+    expect(wrapper.find('[data-testid="browser-zero-hint"]').exists()).toBe(false);
+  });
+
   it("shows error notice when save fails", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
