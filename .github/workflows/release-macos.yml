@@ -88,3 +88,25 @@ jobs:
             .release/*.sha256
           draft: false
           prerelease: false
+
+      # 同步到自建国内更新镜像（静态分发，应用内更新优先源）。
+      # 密钥在仓库 Secret MIRROR_SSH_KEY；未配置或失败不阻断发布。
+      - name: 同步 DMG 到更新镜像
+        if: env.MIRROR_SSH_KEY != ''
+        continue-on-error: true
+        env:
+          MIRROR_SSH_KEY: ${{ secrets.MIRROR_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          DMG="$(ls .release/*.dmg | head -n1)"
+          VERSION="${DMG#*v}"; VERSION="${VERSION%.dmg}"
+          SHA="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+          SIZE="$(stat -f%z "$DMG")"
+          mkdir -p ~/.ssh
+          printf '%s' "$MIRROR_SSH_KEY" > ~/.ssh/mirror_deploy
+          chmod 600 ~/.ssh/mirror_deploy
+          ssh-keyscan -H 49.232.60.135 >> ~/.ssh/known_hosts 2>/dev/null
+          scp -i ~/.ssh/mirror_deploy "$DMG" "$DMG.sha256" root@49.232.60.135:/var/www/career-scout/
+          ssh -i ~/.ssh/mirror_deploy root@49.232.60.135 \
+            "python3 /root/update_manifest.py '$VERSION' mac '$(basename "$DMG")' '$SHA' $SIZE"
+          echo "镜像已同步 mac 条目：v$VERSION"
