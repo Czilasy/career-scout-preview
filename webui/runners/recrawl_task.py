@@ -291,6 +291,7 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                     "canonical_url": url,
                 })
         fetched_jd: dict = {}
+        extra_by_job: dict = {}
         detail_jobs: list = []
         actual_processed = 0
         if no_jd:
@@ -325,6 +326,7 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                         completed_job_ids=completed_job_ids,
                         execution_config=execution_config,
                         simulation_mode=_simulation_mode,
+                        store=ctx.store,
                     )
                     detail_jobs = detail.get("jobs", [])
                     for j in detail_jobs:
@@ -332,9 +334,16 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                         jd = str(j.get("jd", "")).strip()
                         if jid and jd:
                             fetched_jd[jid] = jd
+                            # 028 B084：重抓详情的招聘者活跃事实随 JD 一并回写
+                            _fact = (j.get("extra") or {}).get(
+                                "recruiter_activity"
+                            ) if isinstance(j.get("extra"), dict) else None
+                            if _fact is not None:
+                                extra_by_job[jid] = _fact
                     completed_jd_ids = set(completed_job_ids or set()) | set(fetched_jd)
                     ctx.store.save_recrawl_jd_and_checkpoint(
-                        run_id, task_id, fetched_jd, completed_jd_ids
+                        run_id, task_id, fetched_jd, completed_jd_ids,
+                        extra_by_job=extra_by_job,
                     )
                     for jid, jd in fetched_jd.items():
                         updates.setdefault(jid, {})["jd"] = jd
@@ -519,6 +528,13 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                     # 026 B080：补抓到的 JD 必须写入精筛输入，否则
                     # has_usable_jd 对空 jd 判 false → 永远"未抓到 JD 无法精筛"。
                     jj["jd"] = jd
+                    # 028 B084：补抓的招聘者活跃事实写入精筛输入（targets 为
+                    # 重抓前快照、无事实；本轮重判据此可正常启用第 7 类）。
+                    _fact = extra_by_job.get(jid)
+                    if _fact is not None:
+                        _ex = dict(j.get("extra")) if isinstance(j.get("extra"), dict) else {}
+                        _ex["recruiter_activity"] = _fact
+                        jj["extra"] = _ex
                     to_judge.append(jj)
             if to_judge:
                 _adv = ctx.load_legacy_advanced_settings()

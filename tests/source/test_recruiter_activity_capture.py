@@ -216,6 +216,75 @@ class PipelineDetailExtraMergeTests(unittest.TestCase):
         self.assertAlmostEqual(fact["age_lower_days"], 10.0, delta=0.01)
 
 
+class _RecordingStore:
+    """028 B084：记录 update_job_extra 调用的最小替身。"""
+
+    def __init__(self, raise_on_update=False):
+        self.calls = []
+        self.raise_on_update = raise_on_update
+
+    def update_job_extra(self, platform, platform_job_id, patch):
+        if self.raise_on_update:
+            raise RuntimeError("store down")
+        self.calls.append((platform, platform_job_id, patch))
+
+
+class PipelineDetailStorePersistTests(unittest.TestCase):
+    """fetch_job_details(store=...) → update_job_extra 岗位目录持久化（028 B084）。"""
+
+    def _run(self, jobs, outcomes, platform="boss", store=None):
+        from webui.pipeline_exec_details import fetch_job_details
+        source = _FakeSource(outcomes, platform=platform)
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                        return_value=(True, "")):
+            return fetch_job_details(
+                jobs, source, artifact_dir=tmp,
+                execution_config=_exec_config(), store=store,
+            )
+
+    def test_store_receives_normalized_fact(self):
+        store = _RecordingStore()
+        jobs = [{"platform_job_id": "1", "job_id": "1", "title": "A"}]
+        outcomes = {"1": SourceOutcome.success(
+            detail={"jd": "JD", "recruiter_activity_text": "半年前活跃"},
+        )}
+        self._run(jobs, outcomes, store=store)
+        self.assertEqual(len(store.calls), 1)
+        platform, job_id, patch = store.calls[0]
+        self.assertEqual(platform, "boss")
+        self.assertEqual(job_id, "1")
+        self.assertTrue(patch["recruiter_activity"]["known"])
+
+    def test_store_failure_does_not_break_fetch(self):
+        store = _RecordingStore(raise_on_update=True)
+        jobs = [{"platform_job_id": "1", "job_id": "1", "title": "A"}]
+        outcomes = {"1": SourceOutcome.success(
+            detail={"jd": "JD", "recruiter_activity_text": "半年前活跃"},
+        )}
+        result = self._run(jobs, outcomes, store=store)
+        self.assertEqual(result["jobs"][0]["jd"], "JD")
+        fact = result["jobs"][0]["extra"]["recruiter_activity"]
+        self.assertTrue(fact["known"], "落库失败不影响内存链路事实")
+
+    def test_store_none_keeps_legacy_behavior(self):
+        jobs = [{"platform_job_id": "1", "job_id": "1", "title": "A"}]
+        outcomes = {"1": SourceOutcome.success(
+            detail={"jd": "JD", "recruiter_activity_text": "刚刚活跃"},
+        )}
+        result = self._run(jobs, outcomes, store=None)
+        self.assertEqual(result["jobs"][0]["jd"], "JD")
+
+    def test_failed_detail_skips_store(self):
+        store = _RecordingStore()
+        jobs = [{"platform_job_id": "1", "job_id": "1", "title": "A"}]
+        outcomes = {"1": SourceOutcome.failure(
+            failed_code="source_timeout", safe_log="timeout",
+        )}
+        self._run(jobs, outcomes, store=store)
+        self.assertEqual(store.calls, [])
+
+
 # ---------------------------------------------------------------------------
 # store.update_job_extra 原语（028 B081）
 # ---------------------------------------------------------------------------

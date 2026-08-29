@@ -158,6 +158,7 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                 task_id=task_id,
                 simulation_mode=_simulation_mode,
                 batch_progress=_jd_batch_progress,
+                store=ctx.store,
             )
             # 022：卡死 3 次失败分流收场（环境级暂停 / 偶发跳过进待确认）
             _stall_divert = detail_result.get("stall_divert")

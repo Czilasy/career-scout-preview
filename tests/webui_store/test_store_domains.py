@@ -640,6 +640,52 @@ class ScreeningRunStoreTests(unittest.TestCase):
         self.assertEqual(verdicts["job-1"]["verdict"], "match")
         self.assertEqual(verdicts["job-2"]["verdict"], "uncertain")
 
+    def test_save_recrawl_jd_and_checkpoint_merges_activity_extra(self):
+        """028 B084：重抓回写 JD 时把活跃事实合并进 extra_json（保留既有键）。"""
+        run_id = self.store.save_pipeline_result({
+            "jobs": [
+                {"job_id": "j1", "platform_job_id": "j1", "title": "岗位",
+                 "extra": {"welfare_list": ["五险"]}},
+            ],
+            "dropped": [],
+            "total_scraped": 1, "total_kept": 1, "total_matched": 0,
+            "total_dropped": 0, "profile_summary": "",
+        }, {})
+        fact = {"source": "boss", "text": "半年前活跃", "known": True,
+                "age_lower_days": 180.0, "age_upper_days": None,
+                "last_online_ms": None}
+        self.store.save_recrawl_jd_and_checkpoint(
+            run_id, run_id, {"j1": "补抓 JD"}, ["j1"],
+            extra_by_job={"j1": fact},
+        )
+        loaded = self.store.load_latest_pipeline_result(run_id)
+        jobs = (loaded.get("result") or {}).get("jobs") or []
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].get("jd"), "补抓 JD")
+        extra = jobs[0].get("extra") or {}
+        self.assertEqual(extra.get("welfare_list"), ["五险"], "既有键保留")
+        self.assertEqual(extra.get("recruiter_activity"), fact)
+
+    def test_save_recrawl_jd_without_extra_keeps_row_untouched(self):
+        """无事实的重抓回写不触碰 extra_json（向后兼容）。"""
+        run_id = self.store.save_pipeline_result({
+            "jobs": [
+                {"job_id": "j1", "platform_job_id": "j1", "title": "岗位",
+                 "extra": {"welfare_list": ["五险"]}},
+            ],
+            "dropped": [],
+            "total_scraped": 1, "total_kept": 1, "total_matched": 0,
+            "total_dropped": 0, "profile_summary": "",
+        }, {})
+        self.store.save_recrawl_jd_and_checkpoint(
+            run_id, run_id, {"j1": "补抓 JD"}, ["j1"],
+        )
+        loaded = self.store.load_latest_pipeline_result(run_id)
+        jobs = (loaded.get("result") or {}).get("jobs") or []
+        self.assertEqual(jobs[0].get("jd"), "补抓 JD")
+        self.assertEqual((jobs[0].get("extra") or {}).get("welfare_list"), ["五险"])
+        self.assertNotIn("recruiter_activity", jobs[0].get("extra") or {})
+
     def test_result_snapshot_verdict_writeback_keeps_reason_and_caveats(self):
         run_id = self.store.save_pipeline_result({
             "jobs": [

@@ -95,7 +95,7 @@
 ### Implementation for User Story 3
 
 - [ ] T014 [US3] `webui/store_jobs.py` 新增 `update_job_extra(platform, platform_job_id, patch: dict) -> bool`：读行 `extra_json` → 合并 patch → 原子写回（行不存在返回 False）；在 `tests/webui_store/` 既有 store 测试文件扩展：合并语义（保留既有键）、空 extra_json 起步、行缺失 False
-- [ ] T015 [US3] **偏差（2026-08-29 实现期发现）**：`fetch_job_details` 的三个调用方（`runners/ai_screen_jd.py`、`runners/recrawl_task.py`、`pipeline_exec_tuning.py`）与 store 无可达路径（source 按设计不落库、runners 在禁改清单、无全局 ctx 句柄），Allowed 清单内无法接线 `update_job_extra`。本批降级为：事实随运行内 extra 链路判定（T011 已实现，覆盖主筛选链路）+ 结果行 `screening_results.extra_json` 自然持久化；`update_job_extra` 原语已实现并有测试（T014）；跨 run 重抓事实回填（recrawl 的 `fetched_jd` 仅携带 jd，extra 在 runner 内被丢弃）记 BACKLOG，待解除一处 runner 禁改后接线
+- [x] T015 [US3] ~~偏差~~ **已修复（2026-08-29 用户授权放开 runners 禁改后接线，B084 同批关闭）**：`fetch_job_details` 的三个调用方（`runners/ai_screen_jd.py`、`runners/recrawl_task.py`、`pipeline_exec_tuning.py`）与 store 无可达路径（source 按设计不落库、runners 在禁改清单、无全局 ctx 句柄），Allowed 清单内无法接线 `update_job_extra`。本批降级为：事实随运行内 extra 链路判定（T011 已实现，覆盖主筛选链路）+ 结果行 `screening_results.extra_json` 自然持久化；`update_job_extra` 原语已实现并有测试（T014）；跨 run 重抓事实回填（recrawl 的 `fetched_jd` 仅携带 jd，extra 在 runner 内被丢弃）记 BACKLOG，待解除一处 runner 禁改后接线。→ 用户随后授权，修复落地：`fetch_job_details` 增可选 `store` 参数（update_job_extra 岗位目录持久化），`recrawl_task.py` 携带 extra 进重判输入并经 `save_recrawl_jd_and_checkpoint(extra_by_job=...)` 合并进结果行 extra_json；ai_screen_jd/tuning 调用方同步；测试见 RecrawlActivityFactTests、PipelineDetailStorePersistTests、store 域两例
 
 **Checkpoint**: US3 独立可验：新抓取落库、存量零触碰（无 migration 变更，`git diff` 证明）
 

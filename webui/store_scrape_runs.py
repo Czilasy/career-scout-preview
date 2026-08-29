@@ -264,16 +264,43 @@ class StoreScrapeRunsMixin:
         ]
 
     def save_recrawl_jd_and_checkpoint(
-            self, source_run_id, recrawl_run_id, jd_by_job, completed_job_ids):
-        """Atomically persist partial recrawl JDs and their resume checkpoint."""
+            self, source_run_id, recrawl_run_id, jd_by_job, completed_job_ids,
+            *, extra_by_job=None):
+        """Atomically persist partial recrawl JDs and their resume checkpoint.
+
+        ``extra_by_job``（028 B084）：job_id → 招聘者活跃事实字典；提供的岗位
+        在写回 JD 的同一事务里把事实合并进 screening_results.extra_json
+        （只覆盖 recruiter_activity 键，保留既有键），供后续轮次读取判定。
+        """
         ts = _now()
         with self._connection() as conn:
             self._assert_recovery_writes_allowed(conn)
             for job_id, jd in (jd_by_job or {}).items():
-                conn.execute(
-                    "UPDATE screening_results SET jd = ? "
+                fact = (extra_by_job or {}).get(str(job_id))
+                if fact is None:
+                    conn.execute(
+                        "UPDATE screening_results SET jd = ? "
+                        "WHERE run_id = ? AND platform_job_id = ?",
+                        (str(jd), str(source_run_id), str(job_id)),
+                    )
+                    continue
+                row = conn.execute(
+                    "SELECT extra_json FROM screening_results "
                     "WHERE run_id = ? AND platform_job_id = ?",
-                    (str(jd), str(source_run_id), str(job_id)),
+                    (str(source_run_id), str(job_id)),
+                ).fetchone()
+                try:
+                    current = json.loads(row["extra_json"]) if row and row["extra_json"] else {}
+                except (TypeError, ValueError):
+                    current = {}
+                if not isinstance(current, dict):
+                    current = {}
+                current.update({"recruiter_activity": fact})
+                conn.execute(
+                    "UPDATE screening_results SET jd = ?, extra_json = ? "
+                    "WHERE run_id = ? AND platform_job_id = ?",
+                    (str(jd), json.dumps(current, ensure_ascii=False),
+                     str(source_run_id), str(job_id)),
                 )
             conn.execute(
                 "INSERT INTO pipeline_checkpoints "

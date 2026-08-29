@@ -199,5 +199,88 @@ class RecrawlJdPassThroughTests(unittest.TestCase):
         self.assertEqual(len(match_calls[0]), 1)
 
 
+class RecrawlActivityFactTests(unittest.TestCase):
+    """028 B084：重抓补抓的招聘者活跃事实必须写入精筛输入并回写结果行。"""
+
+    _FACT = {
+        "source": "boss", "text": "半年前活跃", "last_online_ms": None,
+        "age_lower_days": 180.0, "age_upper_days": None, "known": True,
+    }
+
+    def _run(self, targets, detail_jobs):
+        task_id = "recrawl-b084"
+        ctx = _FakeCtx(targets, task_id)
+        match_calls = []
+        save_calls = []
+
+        def fake_match_jds(chunk, profile_summary, endpoint, api_key, **kwargs):
+            match_calls.append(list(chunk))
+            return {
+                "verdicts": {
+                    str(j.get("job_id")): {
+                        "verdict": "match", "reason": "OK", "caveats": [],
+                    }
+                    for j in chunk
+                }
+            }
+
+        def fake_save_recrawl(source_run_id, recrawl_run_id, jd_by_job,
+                              completed_job_ids, **kwargs):
+            save_calls.append(kwargs)
+
+        store = ctx.store
+        store.save_recrawl_jd_and_checkpoint = fake_save_recrawl
+
+        with mock.patch("webui.ai.match_jds", side_effect=fake_match_jds), \
+                mock.patch(
+                    "webui.pipeline_exec.ensure_chrome_ready",
+                    return_value=(True, None),
+                ), \
+                mock.patch(
+                    "webui.pipeline_exec.fetch_job_details",
+                    return_value={"jobs": detail_jobs},
+                ), \
+                mock.patch(
+                    "webui.pipeline_exec.failed_code_label",
+                    return_value="抓取失败",
+                ), \
+                mock.patch("webui.pipeline_exec.close_debug_chrome"), \
+                mock.patch("webui.result_rounds.apply_recrawl_writeback"):
+            run_recrawl_task(
+                ctx, task_id,
+                job_ids=[str(t.get("job_id")) for t in targets],
+                profile_summary="3 年 Python 后端",
+                source_run_id="src-b084",
+            )
+        return match_calls, save_calls
+
+    def test_activity_fact_reaches_ai_input_and_writeback(self):
+        """补抓详情带活跃事实 → 精筛输入与结果行回写都携带（028 FR-003）。"""
+        targets = [{"job_id": "J1", "jd": "", "source_url": TARGET_URL}]
+        match_calls, save_calls = self._run(
+            targets,
+            detail_jobs=[{
+                "job_id": "J1", "jd": "补抓 JD",
+                "extra": {"recruiter_activity": self._FACT},
+            }],
+        )
+        judged = match_calls[0][0]
+        self.assertEqual(
+            judged.get("extra", {}).get("recruiter_activity"), self._FACT,
+        )
+        self.assertEqual(len(save_calls), 1)
+        self.assertEqual(save_calls[0].get("extra_by_job", {}).get("J1"), self._FACT)
+
+    def test_no_fact_keeps_writeback_compatible(self):
+        """无活跃事实的重抓走原路径：extra_by_job 为空、精筛输入无该键。"""
+        targets = [{"job_id": "J1", "jd": "", "source_url": TARGET_URL}]
+        match_calls, save_calls = self._run(
+            targets,
+            detail_jobs=[{"job_id": "J1", "jd": "补抓 JD"}],
+        )
+        self.assertNotIn("extra", match_calls[0][0])
+        self.assertEqual(save_calls[0].get("extra_by_job", {}), {})
+
+
 if __name__ == "__main__":
     unittest.main()

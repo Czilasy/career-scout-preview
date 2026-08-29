@@ -28,7 +28,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                       guard=None, batch_key_prefix=None,
                       task_id=None,
                       simulation_mode=None,
-                      batch_progress=None):
+                      batch_progress=None,
+                      store=None):
     """对一批岗位批量抓 JD（调用方需先确保 Chrome 就绪）。
 
     Spec 007 ⑧：改用 fetch_details_batch（≤5 一批）走 --enable-parallel 常驻 tab 池，
@@ -50,6 +51,9 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     ``batch_progress``: 025 批内信号 — 可选回调，每批开始时调用
     ``(current_batch, total_batches)``、批结束/停止时调用 ``(None, None)``，
     供前端判定「正处抓 JD 批次中」（暂停弹窗二选一）。
+
+    ``store``: 028 B084 — 可选 TaskStore；提供时把归一化的招聘者活跃事实
+    经 ``update_job_extra`` 合并进 jobs.extra_json（岗位目录），失败仅记日志。
 
     返回 {"jobs": 带 jd 的岗位列表, "hard_stop": bool, "hard_stop_code": str|None,
            "stopped": bool, "fetched": int}：
@@ -152,11 +156,23 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 # 028：详情产物带活跃字段时归一化为统一事实（无字段不写键）。
                 # 归一化失败内部兜底为 known=False，不抛错。
                 try:
-                    activity_by_idx[idx] = recruiter_activity.normalize_detail_activity(
+                    _fact = recruiter_activity.normalize_detail_activity(
                         getattr(source, "platform", ""), outcome.detail
                     )
                 except Exception:  # pragma: no cover - 防御性兜底
-                    activity_by_idx[idx] = None
+                    _fact = None
+                activity_by_idx[idx] = _fact
+                # 028 B084：岗位目录持久化（调用方传 store 时启用）；
+                # 失败仅记日志不中断抓取（内存链路事实仍可用）。
+                if store is not None and _fact is not None:
+                    try:
+                        store.update_job_extra(
+                            str(getattr(source, "platform", "")), str(jid),
+                            {recruiter_activity.FIELD_KEY: _fact},
+                        )
+                    except Exception as exc:
+                        print(f"[fetch_jd] jobs.extra_json 活跃事实更新失败 "
+                              f"{jid}: {type(exc).__name__}: {exc}")
             elif outcome is not None and _jd_is_hard_stop(outcome.failed_code):
                 # 源级硬信号：停后续批次并上报（别继续抓空气还装完成）
                 hard_stop = True
