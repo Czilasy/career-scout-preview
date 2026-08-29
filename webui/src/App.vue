@@ -3,7 +3,6 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { Bell, History, LoaderCircle, Moon, Settings, Star, Sun, X } from "@lucide/vue";
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
 import BrowserAccountsDialog from "./components/BrowserAccountsDialog.vue";
-import BrowserSettingsDialog from "./components/BrowserSettingsDialog.vue";
 import EnvCheckDialog from "./components/EnvCheckDialog.vue";
 import NoticeBar from "./components/NoticeBar.vue";
 import ReminderDrawer from "./components/ReminderDrawer.vue";
@@ -63,7 +62,6 @@ watch(pageTitle, (title) => { document.title = title; }, { immediate: true });
 
 const aiSettingsOpen = ref(false);
 const browserAccountsOpen = ref(false);
-const browserSettingsOpen = ref(false);
 const envCheckOpen = ref(false);
 const settingsMenuOpen = ref(false);
 const updateChecking = ref(false);
@@ -91,10 +89,6 @@ function openAiSettingsFromMenu() {
 function openBrowserAccountsFromMenu() {
   settingsMenuOpen.value = false;
   browserAccountsOpen.value = true;
-}
-function openBrowserSettingsFromMenu() {
-  settingsMenuOpen.value = false;
-  browserSettingsOpen.value = true;
 }
 function openEnvCheckFromMenu() {
   settingsMenuOpen.value = false;
@@ -444,9 +438,15 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
         @click.prevent="updateInfo ? (updateDialogOpen = true) : undefined"
       >
         <svg class="brand-mark" width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-          <path d="M25.5 6.5 L18.3 18.3 L6.5 25.5 Z" fill="var(--logo-a)" />
-          <path d="M25.5 6.5 L13.7 13.7 L6.5 25.5 Z" fill="var(--logo-b)" />
-          <circle cx="16" cy="16" r="1.9" fill="var(--logo-dot)" />
+          <!-- 航海双色玫瑰（定稿）：四芒等长劈半、明暗相间，北芒左半=品牌色 -->
+          <path d="M16 3.5 L14 14 L16 16 Z" fill="var(--logo-north)" />
+          <path d="M16 3.5 L16 16 L18 14 Z" fill="var(--logo-a)" />
+          <path d="M28.5 16 L16 16 L18 18 Z" fill="var(--logo-a)" />
+          <path d="M28.5 16 L18 14 L16 16 Z" fill="var(--logo-b)" />
+          <path d="M16 28.5 L18 18 L16 16 Z" fill="var(--logo-b)" />
+          <path d="M16 28.5 L16 16 L14 18 Z" fill="var(--logo-a)" />
+          <path d="M3.5 16 L14 18 L16 16 Z" fill="var(--logo-b)" />
+          <path d="M3.5 16 L16 16 L14 14 Z" fill="var(--logo-a)" />
         </svg>
         <span class="brand-name">Career<span class="tick">·</span>Scout</span>
         <span
@@ -637,10 +637,6 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
       :open="browserAccountsOpen"
       @close="browserAccountsOpen = false"
     />
-    <BrowserSettingsDialog
-      :open="browserSettingsOpen"
-      @close="browserSettingsOpen = false"
-    />
     <EnvCheckDialog
       :open="envCheckOpen"
       @close="envCheckOpen = false"
@@ -661,7 +657,6 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
       @close="settingsMenuOpen = false"
       @open-ai-settings="openAiSettingsFromMenu"
       @open-browser-accounts="openBrowserAccountsFromMenu"
-      @open-browser-settings="openBrowserSettingsFromMenu"
       @open-env-check="openEnvCheckFromMenu"
       @manual-update-check="manualUpdateFromMenu"
       @open-github="openGitHub"

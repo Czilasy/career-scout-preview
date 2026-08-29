@@ -277,7 +277,7 @@ def resolve_executable(selection_loader=None, detect_fn=None, exists=None):
     for item in (detect_fn or detect_browsers)():
         if item["installed"]:
             return item["path"], None
-    return None, "未找到可用的 Chromium 浏览器：请安装 Chrome，或在设置 → 浏览器中选择/手动指定路径"
+    return None, "未找到可用的 Chromium 浏览器：请安装 Chrome，或在设置 → 浏览器与账号中选择/手动指定路径"
 
 
 # ---------------------------------------------------------------------------

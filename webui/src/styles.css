@@ -107,14 +107,13 @@ input {
   flex: 0 0 auto;
 }.brand-name {
   font-family: var(--font-brand);
-  font-style: italic;
-  font-weight: 800;
+  font-style: normal;
+  font-weight: 700;
   font-size: 19px;
-  letter-spacing: -.03em;
+  letter-spacing: -.015em;
   color: var(--ink-1);
 }.brand-name .tick {
   color: var(--brand);
-  font-style: normal;
 }
 /* 更新红点：新版本存在时挂在项目名右上角；点击项目名打开更新弹窗 */
 .brand-update-dot {

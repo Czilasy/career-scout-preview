@@ -34,7 +34,7 @@ def _kernel_check_error(cdp_port: int) -> str | None:
     if field is not None and not is_chromium_cdp_browser(field):
         return (
             f"所选浏览器内核不兼容（调试端点报告：{field}）。"
-            "抓取仅支持 Chromium 内核浏览器，请在 设置 → 浏览器 中重新选择。"
+            "抓取仅支持 Chromium 内核浏览器，请在 设置 → 浏览器与账号 中重新选择。"
         )
     return None
 

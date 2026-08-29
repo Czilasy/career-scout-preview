@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Check, ChevronDown, ExternalLink, LoaderCircle, Plus, Trash2, UserRound } from "@lucide/vue";
+import { Check, ChevronDown, ExternalLink, Globe, LoaderCircle, Plus, Trash2, UserRound } from "@lucide/vue";
 import BaseDialog from "./BaseDialog.vue";
-import { ApiError, apiRequest, errorMessage } from "../api";
+import BrowserKernelPicker from "./BrowserKernelPicker.vue";
+import { ApiError, apiRequest, browserRegistryApi, errorMessage } from "../api";
+import type { BrowserRegistryEntryState, BrowserSelection } from "../api";
 import type { BrowserAccount, Notice, Platform } from "../types";
 
 // 平台展示标签；与后端 platform-schema display_name 解耦，前端只做稳定键→短标签映射。
@@ -65,6 +67,56 @@ const openRole = ref<RoleKey | null>(null);
 const roleBusy = ref(false);
 const roleRootEl = ref<HTMLElement | null>(null);
 
+// 抓取浏览器（原独立「浏览器」设置合并至此）：清单/选择/生效路径随弹窗打开加载，
+// chip 常显当前选择，展开后由 BrowserKernelPicker 选即存。
+const kernelEntries = ref<BrowserRegistryEntryState[]>([]);
+const kernelSelection = ref<BrowserSelection>({ mode: "auto" });
+const kernelEffectivePath = ref<string | null>(null);
+const kernelOpen = ref(false);
+
+// 与账号操作同一把锁：任务运行中锁定，暂停时仍可切换。
+const kernelLocked = computed(() => serverBusy.value && busyKind.value !== "paused");
+
+const kernelChipLabel = computed(() => {
+  const selection = kernelSelection.value;
+  if (selection.mode === "registry" && selection.key) {
+    const entry = kernelEntries.value.find((item) => item.key === selection.key);
+    return entry?.name || selection.key;
+  }
+  if (selection.mode === "manual") return "手动指定";
+  return "自动探测";
+});
+
+const kernelChipTitle = computed(() =>
+  kernelEffectivePath.value
+    ? `抓取浏览器：当前生效 ${kernelEffectivePath.value}`
+    : "选择抓取使用的 Chromium 内核浏览器",
+);
+
+async function loadKernel() {
+  try {
+    const data = await browserRegistryApi.get();
+    kernelEntries.value = data.registry || [];
+    kernelSelection.value = data.selection || { mode: "auto" };
+    kernelEffectivePath.value = data.effective_path || null;
+  } catch (error) {
+    setLocalNotice({ message: errorMessage(error, "抓取浏览器信息加载失败"), tone: "error" });
+  }
+}
+
+function onKernelChanged(payload: { selection: BrowserSelection; effectivePath: string | null }) {
+  kernelSelection.value = payload.selection;
+  kernelEffectivePath.value = payload.effectivePath;
+  kernelOpen.value = false;
+  setLocalNotice({ message: "抓取浏览器已更新", tone: "success" });
+}
+
+function toggleKernel() {
+  if (kernelLocked.value) return;
+  openRole.value = null;
+  kernelOpen.value = !kernelOpen.value;
+}
+
 function roleHolder(role: RoleKey): BrowserAccount | undefined {
   return accounts.value.find((account) => (account.roles || []).includes(role));
 }
@@ -74,15 +126,35 @@ function roleChipText(role: RoleKey): string {
 }
 function toggleRoleMenu(role: RoleKey) {
   if (roleBusy.value) return;
+  kernelOpen.value = false;
   openRole.value = openRole.value === role ? null : role;
+}
+
+// 抓取浏览器浮层：点浮层与 chip 之外的地方收起（不影响原有布局）。
+const kernelPopEl = ref<HTMLElement | null>(null);
+const kernelChipEl = ref<HTMLElement | null>(null);
+
+function handleKernelPointerDown(event: PointerEvent) {
+  if (!kernelOpen.value) return;
+  const target = event.target as Node | null;
+  if (!target) return;
+  if (kernelPopEl.value?.contains(target)) return;
+  if (kernelChipEl.value?.contains(target)) return;
+  kernelOpen.value = false;
 }
 function handleRoleMenuPointerDown(event: PointerEvent) {
   if (!openRole.value) return;
   const target = event.target as Node | null;
   if (roleRootEl.value && target && !roleRootEl.value.contains(target)) openRole.value = null;
 }
-onMounted(() => document.addEventListener("pointerdown", handleRoleMenuPointerDown, true));
-onBeforeUnmount(() => document.removeEventListener("pointerdown", handleRoleMenuPointerDown, true));
+onMounted(() => {
+  document.addEventListener("pointerdown", handleRoleMenuPointerDown, true);
+  document.addEventListener("pointerdown", handleKernelPointerDown, true);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", handleRoleMenuPointerDown, true);
+  document.removeEventListener("pointerdown", handleKernelPointerDown, true);
+});
 
 async function assignRole(role: RoleKey, account: BrowserAccount) {
   roleBusy.value = true;
@@ -137,10 +209,13 @@ watch(() => props.open, (open) => {
     busyKind.value = "";
     lockedAccount.value = "";
     lockedPlatform.value = "";
+    kernelOpen.value = false;
     void loadAccounts();
+    void loadKernel();
   } else {
     localNotice.value = null;
     busyAccount.value = "";
+    kernelOpen.value = false;
   }
 });
 
@@ -371,14 +446,32 @@ async function confirmRemoveAccount() {
     @close="$emit('close')"
   >
     <div class="role-assign" ref="roleRootEl" data-testid="role-assign">
-      <div class="role-chips">
-        <button v-for="role in (['R1', 'R2'] as const)" :key="role" type="button" class="role-chip"
-          :data-testid="`role-chip-${role}`" :aria-expanded="openRole === role" :aria-haspopup="true"
-          :disabled="roleBusy" @click="toggleRoleMenu(role)">
-          <span class="role-chip-tag">{{ ROLE_SPECS[role].label }}</span>
-          <span class="role-chip-desc">{{ ROLE_SPECS[role].desc }}</span>
-          <span class="role-chip-value" :data-unset="!roleHolder(role)">{{ roleChipText(role) }}</span>
-          <ChevronDown :size="14" class="role-chip-caret" aria-hidden="true" />
+      <div class="config-row">
+        <div class="role-chips">
+          <button v-for="role in (['R1', 'R2'] as const)" :key="role" type="button" class="role-chip"
+            :data-testid="`role-chip-${role}`" :aria-expanded="openRole === role" :aria-haspopup="true"
+            :title="`${ROLE_SPECS[role].label} · ${ROLE_SPECS[role].desc}`"
+            :disabled="roleBusy" @click="toggleRoleMenu(role)">
+            <span class="role-chip-tag">{{ ROLE_SPECS[role].label }}</span>
+            <span class="role-chip-value" :data-unset="!roleHolder(role)">{{ roleChipText(role) }}</span>
+            <ChevronDown :size="14" class="role-chip-caret" aria-hidden="true" />
+          </button>
+        </div>
+        <button
+          ref="kernelChipEl"
+          type="button"
+          class="kernel-chip"
+          data-testid="browser-kernel-chip"
+          :aria-expanded="kernelOpen"
+          :aria-haspopup="true"
+          :title="kernelChipTitle"
+          :disabled="kernelLocked"
+          @click="toggleKernel"
+        >
+          <Globe :size="14" aria-hidden="true" />
+          <span class="kernel-chip-label">抓取浏览器</span>
+          <span class="kernel-chip-value">{{ kernelChipLabel }}</span>
+          <ChevronDown :size="14" class="kernel-chip-caret" aria-hidden="true" />
         </button>
       </div>
       <div v-if="openRole" class="role-menu" data-testid="role-menu" role="listbox" :aria-label="`选择${ROLE_SPECS[openRole].label}账号`">
@@ -395,6 +488,20 @@ async function confirmRemoveAccount() {
           :data-testid="`role-clear-${openRole}`" role="option" :disabled="roleBusy"
           @click="clearRole(openRole)">不指定</button>
         <p v-if="!accounts.length" class="role-menu-empty">暂无账号，先添加账号</p>
+      </div>
+      <div
+        v-if="kernelOpen"
+        ref="kernelPopEl"
+        class="kernel-popover"
+        data-testid="browser-kernel-popover"
+      >
+        <BrowserKernelPicker
+          :entries="kernelEntries"
+          :selection="kernelSelection"
+          :effective-path="kernelEffectivePath"
+          :locked="kernelLocked"
+          @changed="onKernelChanged"
+        />
       </div>
     </div>
 
@@ -542,15 +649,21 @@ async function confirmRemoveAccount() {
 
 <style scoped>
 .role-assign{position:relative;margin-bottom:14px}
+.config-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .role-chips{display:flex;flex-wrap:wrap;gap:8px}
 .role-chip{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:4px 10px;border:1px solid var(--hair);border-radius:7px;background:var(--panel-2);color:var(--ink-1);font:inherit;font-size:12px;font-weight:600;line-height:1.2;cursor:pointer;transition:border-color 160ms ease,background 160ms ease}
 .role-chip:hover:not(:disabled),.role-chip[aria-expanded="true"]{border-color:var(--brand-edge);background:var(--brand-wash)}
 .role-chip:disabled{cursor:not-allowed;opacity:.65}
 .role-chip-tag{padding:1px 6px;border-radius:5px;color:var(--brand-ink);background:var(--brand-wash);font-weight:700}
-.role-chip-desc{color:var(--muted);font-weight:500}
 .role-chip-value{color:var(--brand-strong);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .role-chip-value[data-unset="true"]{color:var(--ink-3)}
 .role-chip-caret{flex:0 0 auto;color:var(--muted)}
+.kernel-chip{display:inline-flex;align-items:center;gap:6px;margin-left:auto;min-height:30px;padding:4px 10px;border:1px solid var(--hair);border-radius:7px;background:var(--panel-2);color:var(--ink-1);font:inherit;font-size:12px;font-weight:600;line-height:1.2;cursor:pointer;transition:border-color 160ms ease,background 160ms ease}
+.kernel-chip:hover:not(:disabled),.kernel-chip[aria-expanded="true"]{border-color:var(--brand-edge);background:var(--brand-wash)}
+.kernel-chip:disabled{cursor:not-allowed;opacity:.65}
+.kernel-chip-label{color:var(--muted);font-weight:500}
+.kernel-chip-value{color:var(--brand-strong);max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kernel-popover{position:absolute;z-index:60;top:calc(100% + 6px);right:0;width:min(340px,calc(100% - 4px));max-height:min(460px,60vh);overflow-y:auto;padding:10px;border:1px solid var(--hair);border-radius:9px;background:var(--panel);box-shadow:0 14px 40px rgba(0,0,0,.18),0 2px 8px rgba(0,0,0,.08)}
 .role-menu{position:absolute;z-index:60;top:calc(100% + 6px);left:0;display:grid;gap:2px;min-width:260px;max-height:240px;overflow-y:auto;padding:6px;border:1px solid var(--hair);border-radius:9px;background:var(--panel);box-shadow:0 14px 40px rgba(0,0,0,.18),0 2px 8px rgba(0,0,0,.08)}
 .role-option{display:flex;align-items:center;gap:8px;min-height:34px;padding:5px 10px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--ink-1);font:inherit;font-size:13px;font-weight:500;text-align:left;cursor:pointer}
 .role-option:hover:not(:disabled){background:var(--brand-wash)}

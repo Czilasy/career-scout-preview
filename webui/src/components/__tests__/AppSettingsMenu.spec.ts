@@ -6,10 +6,9 @@ describe("AppSettingsMenu", () => {
     const wrapper = mount(AppSettingsMenu, {
       props: { open: true, hasUpdate: true, updateVersion: "2.6.0" },
     });
-    expect(wrapper.findAll('[role="menuitem"]')).toHaveLength(7);
+    expect(wrapper.findAll('[role="menuitem"]')).toHaveLength(6);
     expect(wrapper.get('[data-testid="ai-settings-trigger"]').text()).toContain("AI 设置");
-    expect(wrapper.get('[data-testid="browser-accounts-trigger"]').text()).toContain("浏览器账号");
-    expect(wrapper.get('[data-testid="browser-settings-trigger"]').text()).toContain("浏览器");
+    expect(wrapper.get('[data-testid="browser-accounts-trigger"]').text()).toContain("浏览器与账号");
     expect(wrapper.get('[data-testid="env-check-trigger"]').text()).toContain("环境检查");
     expect(wrapper.get('[data-testid="logs-trigger"]').text()).toContain("日志");
     expect(wrapper.get('[data-testid="manual-update-check"]').text()).toContain("检查更新");
@@ -23,13 +22,11 @@ describe("AppSettingsMenu", () => {
     });
     await wrapper.get('[data-testid="ai-settings-trigger"]').trigger("click");
     await wrapper.get('[data-testid="browser-accounts-trigger"]').trigger("click");
-    await wrapper.get('[data-testid="browser-settings-trigger"]').trigger("click");
     await wrapper.get('[data-testid="env-check-trigger"]').trigger("click");
     await wrapper.get('[data-testid="manual-update-check"]').trigger("click");
     await wrapper.get('[data-testid="github-link"]').trigger("click");
     expect(wrapper.emitted("open-ai-settings")).toHaveLength(1);
     expect(wrapper.emitted("open-browser-accounts")).toHaveLength(1);
-    expect(wrapper.emitted("open-browser-settings")).toHaveLength(1);
     expect(wrapper.emitted("open-env-check")).toHaveLength(1);
     expect(wrapper.emitted("manual-update-check")).toHaveLength(1);
     expect(wrapper.emitted("open-github")).toHaveLength(1);

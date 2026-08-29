@@ -470,11 +470,12 @@ describe("BrowserAccountsDialog role assignment (B073)", () => {
     const wrapper = await mountOpen(rolesFetchMock());
     const r1 = wrapper.get('[data-testid="role-chip-R1"]');
     expect(r1.text()).toContain("R1");
-    expect(r1.text()).toContain("列表/广泛抓取");
+    // 描述字降级为悬停提示（与抓取浏览器 chip 同一行）
+    expect(r1.attributes("title")).toContain("列表/广泛抓取");
     expect(r1.text()).toContain("不指定");
     const r2 = wrapper.get('[data-testid="role-chip-R2"]');
     expect(r2.text()).toContain("R2");
-    expect(r2.text()).toContain("详情抓取");
+    expect(r2.attributes("title")).toContain("详情抓取");
     expect(r2.text()).toContain("不指定");
   });
 
@@ -562,5 +563,82 @@ describe("BrowserAccountsDialog role assignment (B073)", () => {
     const wrapper = await mountOpen(rolesFetchMock([]));
     await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
     expect(wrapper.get('[data-testid="role-menu"]').text()).toContain("暂无账号");
+  });
+});
+
+describe("BrowserAccountsDialog kernel chip（抓取浏览器合并）", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const accA = { id: "a", name: "账号 A", platforms: { boss: { cdp_port: 9222 } } };
+
+  const registryPayload = {
+    registry: [
+      { key: "chrome", name: "Chrome", installed: true, path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" },
+      { key: "edge", name: "Edge", installed: true, path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" },
+    ],
+    selection: { mode: "registry", key: "chrome" },
+    effective_path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  };
+
+  it("shows the current browser on the chip and expands the picker", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/browser-accounts") {
+        return response({ accounts: [accA], active_account: "a" });
+      }
+      if (url === "/api/browser-registry") return response(registryPayload);
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    const chip = wrapper.get('[data-testid="browser-kernel-chip"]');
+    expect(chip.text()).toContain("抓取浏览器");
+    expect(chip.text()).toContain("Chrome");
+    expect(chip.attributes("title")).toContain("chrome.exe");
+
+    await chip.trigger("click");
+    expect(wrapper.find('[data-testid="browser-kernel-picker"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="browser-effective-path"]').text()).toContain("chrome.exe");
+
+    // 悬浮窗：点浮层外收起
+    document.dispatchEvent(new Event("pointerdown"));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="browser-kernel-popover"]').exists()).toBe(false);
+  });
+
+  it("falls back to 自动探测 when the registry endpoint returns nothing", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/browser-accounts") {
+        return response({ accounts: [accA], active_account: "a" });
+      }
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    expect(wrapper.get('[data-testid="browser-kernel-chip"]').text()).toContain("自动探测");
+  });
+
+  it("locks the kernel chip while a task is running and allows it while paused", async () => {
+    for (const [busyKind, locked] of [["running", true], ["paused", false]] as const) {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/browser-accounts") {
+          return response({ accounts: [accA], active_account: "a", busy: true, busy_kind: busyKind });
+        }
+        return response({});
+      });
+
+      const wrapper = await mountOpen(fetchMock);
+      const chip = wrapper.get('[data-testid="browser-kernel-chip"]');
+      // disabled 属性渲染为空串，必须按存在性断言
+      if (locked) expect(chip.attributes("disabled")).toBeDefined();
+      else expect(chip.attributes("disabled")).toBeUndefined();
+      await wrapper.unmount();
+    }
   });
 });

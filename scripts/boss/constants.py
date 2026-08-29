@@ -37,7 +37,7 @@ MAX_API_REQUESTS = 999  # 单次抓取运行最大 API 请求数（B053：按运
 
 BROWSER_NOT_FOUND_HINT = (
     "未找到可用的 Chromium 浏览器：请安装 Chrome、使用系统自带 Edge，"
-    "或在设置 → 浏览器中选择/手动指定浏览器路径"
+    "或在设置 → 浏览器与账号中选择/手动指定浏览器路径"
 )
 
 
