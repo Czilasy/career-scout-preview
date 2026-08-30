@@ -341,7 +341,6 @@ def create_app(config=None):
             or path.startswith("/api/update-status")
             or path.startswith("/api/runs/")
             or path.startswith("/api/task-state/")
-            or path.startswith("/api/recovery/")
             or path.startswith("/api/check")
             or path.startswith("/api/env-check")
             or path.startswith("/api/job-reminders")

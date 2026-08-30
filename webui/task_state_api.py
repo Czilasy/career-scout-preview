@@ -1,16 +1,17 @@
-"""任务状态 / 诊断 / 恢复预览 API 路由（021 B6 T019 外迁自 webui/app.py）。
+"""任务状态 / 诊断 API 路由（021 B6 T019 外迁自 webui/app.py）。
 
-run 诊断摘要、task-state 聚合快照（011 healthy-pipeline 统一接口层）、
-恢复三段（preview/prepare/execute）。路由体纯搬运：HTTP 契约零改动；
-共享断言/任务表经 ctx 取用。
+run 诊断摘要、task-state 聚合快照（011 healthy-pipeline 统一接口层）。
+路由体纯搬运：HTTP 契约零改动；共享断言/任务表经 ctx 取用。
+
+031 B7：恢复三段（preview/prepare/execute）已撤除出生产 API 面，能力迁为
+手动运维工具 ``scripts/maintenance/historical_recovery.py``。
 """
 
 from __future__ import annotations
 
-import sqlite3
 import time
 
-from flask import jsonify, request
+from flask import jsonify
 
 from webui.constants import (
     LOG_TAIL_LINES,
@@ -330,56 +331,6 @@ def register_task_state_routes(app, ctx):
             ),
         })
 
-    @app.route("/api/recovery/preview/<run_id>", methods=["GET"])
-    def api_recovery_preview(run_id: str):
-        """FR-041：历史恢复只读预演接口。run_id 参数仅作占位，
-        实际预演两个历史 run（15847d27 + e6250f0e）。
-        """
-        from webui.historical_recovery import (
-            FINE_RUN_ID,
-            ROUGH_RUN_ID,
-            preview_recovery,
-        )
-        try:
-            result = preview_recovery(
-                ctx.store,
-                rough_run_id=ROUGH_RUN_ID,
-                fine_run_id=FINE_RUN_ID,
-                result_dir=app.config["RESULT_DIR"],
-            )
-            return jsonify({"ok": True, "preview": result})
-        except (OSError, sqlite3.Error, RuntimeError, ValueError, KeyError) as exc:
-            return jsonify({"ok": False, "error": str(exc),
-                            "error_type": type(exc).__name__}), 500
-
-    @app.route("/api/recovery/prepare/<run_id>", methods=["POST"])
-    def api_recovery_prepare(run_id: str):
-        """Create the server-owned SQLite backup and manifest for recovery."""
-        from webui.historical_recovery import prepare_recovery
-        try:
-            prepared = prepare_recovery(ctx.store)
-            return jsonify({"ok": True, **prepared}), 201
-        except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
-            return jsonify({
-                "ok": False, "error": str(exc),
-                "error_type": type(exc).__name__,
-            }), 409
-
-    @app.route("/api/recovery/execute/<run_id>", methods=["POST"])
-    def api_recovery_execute(run_id: str):
-        """Execute a prepared recovery by opaque server-generated backup id."""
-        from webui.historical_recovery import execute_recovery
-        body = request.get_json(silent=True) or {}
-        backup_id = str(body.get("backup_id") or "").strip()
-        if not backup_id:
-            return jsonify({
-                "ok": False, "error": "missing_backup_id",
-                "message": "请先调用 prepare 接口创建恢复备份",
-            }), 400
-        try:
-            result = execute_recovery(backup_id, store=ctx.store)
-            status = 200 if result.get("ok") else 409
-            return jsonify({"ok": result.get("ok", False), "result": result}), status
-        except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
-            return jsonify({"ok": False, "error": str(exc),
-                            "error_type": type(exc).__name__}), 500
+    # 031 B7：/api/recovery/{preview,prepare,execute}/<run_id> 三条路由已撤除。
+    # 事故恢复能力迁为手动运维工具 scripts/maintenance/historical_recovery.py
+    # （preview/prepare/execute 三子命令 + --confirm 安全栏），不再驻留生产 API 面。

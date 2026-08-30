@@ -163,6 +163,7 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/workbench_runner.py` — WorkbenchRunner：父搜索运行 + 子查询编排、详情预算切片、增量入库与父状态推导（031 B6）
 - `scripts/zhilian_cdp_raw.py` — 智联抓取兼容门面：re-export 全部既有符号（__getattr__ 代理到 `scripts/zhilian/` 四域），无实现逻辑（031 B6）
 - `webui/task_runners.py` — TaskRunner 核心 + 兼容 re-export：助手落 `task_runner_support.py`、工作台编排落 `workbench_runner.py`（031 B6）
+- `scripts/maintenance/historical_recovery.py` — 2026-07-28 事故恢复手动运维工具：只读预演 / 服务端 SQLite 备份与不可变 manifest / 门禁恢复三子命令 CLI 与 `--confirm` 安全栏（031 B7，自 `webui/historical_recovery.py` 整体迁入；原 `/api/recovery/*` 三条生产路由已撤除）
 
 ## 文件布局约束
 

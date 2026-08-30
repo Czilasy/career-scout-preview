@@ -95,7 +95,8 @@ class Slice7And9ApiTests(unittest.TestCase):
 
         self.assertEqual(response.get_json()["build_hash"], expected)
         self.assertIn(root / "webui" / "store.py", files)
-        self.assertIn(root / "webui" / "historical_recovery.py", files)
+        # 031 B7：webui/historical_recovery.py 已迁出为 scripts/maintenance 手动
+        # 工具，构建身份清单不再覆盖恢复模块（清单仍为 webui/*.py + 两个 raw 脚本）。
 
     def test_task_state_api_returns_complete_picture(self):
         """/api/task-state/<run_id> 返回完整状态（FR-037）。"""

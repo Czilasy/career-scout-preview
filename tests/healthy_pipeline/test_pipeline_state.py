@@ -735,7 +735,8 @@ class Sc015AcceptanceHarnessTests(unittest.TestCase):
         """Public recovery and SC-015 entrypoints follow project conventions."""
         root = pathlib.Path(__file__).resolve().parents[2]
         required = {
-            root / "webui" / "historical_recovery.py": {
+            # 031 B7：恢复能力已迁出 webui，改手动运维工具，不再驻留生产 API 面。
+            root / "scripts" / "maintenance" / "historical_recovery.py": {
                 "preview_recovery", "prepare_recovery", "execute_recovery",
             },
             _SC015_PATH: {

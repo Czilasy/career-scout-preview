@@ -1,11 +1,27 @@
-"""Auditable preview, backup, and recovery for the 2026-07-28 runs."""
+"""Auditable preview, backup, and recovery for the 2026-07-28 runs.
+
+2026-07-28 事故的一次性修复工具（031 B7 自 ``webui/historical_recovery.py``
+整体迁入）。**只作手动运维工具使用**：原 ``/api/recovery/*`` 三条生产路由
+已撤除，能力改由命令行显式执行，破坏性动作需 ``--confirm`` 安全栏。
+
+用法::
+
+    uv run python -m scripts.maintenance.historical_recovery preview  [--db PATH]
+    uv run python -m scripts.maintenance.historical_recovery prepare  [--db PATH]
+    uv run python -m scripts.maintenance.historical_recovery execute --backup-id ID --confirm [--db PATH]
+
+修复逻辑、审计输出与 manifest 结构与迁出前逐行等价；唯一新增是 argparse
+外壳与 ``--confirm`` 栏（契约 contracts/recovery-cli.md）。
+"""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
 import pathlib
 import sqlite3
+import sys
 import uuid
 from datetime import datetime
 from typing import Any
@@ -988,3 +1004,158 @@ def repair_committed_pending_metadata(backup_id: str, *, store) -> dict:
         return result
     finally:
         store.release_recovery_lock(owner_token=owner_token)
+
+
+# ---------------------------------------------------------------------------
+# 031 B7：手动运维 CLI（替代原 /api/recovery/* 三条生产路由）
+# ---------------------------------------------------------------------------
+
+# execute/prepare 失败时归入「数据校验失败（退出码 3）」的错误码；
+# 其余失败（缺少 --confirm、锁竞争、环境错误等）按参数/校验失败退出码 2。
+_DATA_VALIDATION_ERRORS = frozenset({
+    "unknown_backup_id", "invalid_backup_id", "backup_id_mismatch",
+    "invalid_manifest", "backup_hash_mismatch", "source_fingerprint_mismatch",
+    "committed_recovery_invalid",
+})
+_DATA_VALIDATION_MARKERS = (
+    "gate_not_passed", "jd_762_protection_failed", "post_recovery_gate_failed",
+)
+
+
+def _resolve_db_path(explicit: str | None) -> pathlib.Path:
+    """解析目标库：--db > CAREER_SCOUT_DB > 状态目录环境变量 > 默认正式库。
+
+    与 ``scripts/db_info.py`` 同一口径，保证"查库"与"修库"指向同一个文件。
+    """
+    if explicit:
+        return pathlib.Path(explicit).expanduser()
+    configured = os.environ.get("CAREER_SCOUT_DB")
+    if configured:
+        return pathlib.Path(configured).expanduser()
+    for var in ("CAREER_SCOUT_STATE_DIR", "BOSS_WEBUI_STATE_DIR"):
+        value = os.environ.get(var)
+        if value:
+            path = pathlib.Path(value).expanduser()
+            return path if path.name == "webui.db" else path / "webui.db"
+    return pathlib.Path.home() / ".career-scout" / "webui" / "webui.db"
+
+
+def _open_store(db_path: pathlib.Path):
+    """按给定库路径打开 TaskStore（延迟 import，仅 CLI 路径需要）。"""
+    project_root = pathlib.Path(__file__).resolve().parents[2]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from webui.store import TaskStore
+    return TaskStore(str(db_path))
+
+
+def _emit(payload: dict) -> None:
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+
+
+def _cmd_preview(args: argparse.Namespace) -> int:
+    """只读预演：输出与迁出前 /api/recovery/preview 的 preview 载荷一致。"""
+    store = _open_store(_resolve_db_path(getattr(args, "db", None)))
+    try:
+        result = preview_recovery(
+            store, rough_run_id=ROUGH_RUN_ID, fine_run_id=FINE_RUN_ID,
+            result_dir=getattr(args, "result_dir", None),
+        )
+    except (OSError, sqlite3.Error, RuntimeError, ValueError, KeyError) as exc:
+        _emit({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
+        return 2
+    _emit(result)
+    return 0
+
+
+def _cmd_prepare(args: argparse.Namespace) -> int:
+    """生成服务端 SQLite 备份与不可变 manifest，输出 backup_id。"""
+    # prepare 不写结果目录；--result-dir 由公共选项提供，此处忽略。
+    store = _open_store(_resolve_db_path(getattr(args, "db", None)))
+    try:
+        prepared = prepare_recovery(store)
+    except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+        _emit({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
+        return 3
+    _emit({"ok": True, **prepared})
+    return 0
+
+
+def _cmd_execute(args: argparse.Namespace) -> int:
+    """按 backup_id 执行恢复；破坏性，必须显式 --confirm。"""
+    if not args.confirm:
+        print(
+            "错误：execute 会写正式数据库，必须显式追加 --confirm 才会执行。\n"
+            "建议先跑 preview 核对门禁，再跑 prepare 生成备份。",
+            file=sys.stderr,
+        )
+        return 2
+    store = _open_store(_resolve_db_path(getattr(args, "db", None)))
+    result = execute_recovery(str(args.backup_id).strip(), store=store)
+    _emit(result)
+    if result.get("ok"):
+        return 0
+    error = str(result.get("error") or "")
+    if error in _DATA_VALIDATION_ERRORS or any(
+        marker in error for marker in _DATA_VALIDATION_MARKERS
+    ):
+        return 3
+    return 2
+
+
+def _add_common_options(parser: argparse.ArgumentParser) -> None:
+    """挂公共选项；``SUPPRESS`` 保证子命令缺省时不覆盖顶层已解析的值。
+
+    argparse 子 parser 默认值会回写父 namespace（会把 ``--db X preview``
+    的 X 冲成 None），用 SUPPRESS 让未出现的选项不落属性，两种书写顺序
+    （``--db X preview`` 与 ``preview --db X``）都可用。
+    """
+    parser.add_argument(
+        "--db", default=argparse.SUPPRESS,
+        help="SQLite 数据库路径（默认 ~/.career-scout/webui/webui.db）",
+    )
+    parser.add_argument(
+        "--result-dir", default=argparse.SUPPRESS,
+        help="结果目录（仅 preview 读取，默认不使用）",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """构建三子命令 CLI：preview / prepare / execute。"""
+    parser = argparse.ArgumentParser(
+        prog="python -m scripts.maintenance.historical_recovery",
+        description="2026-07-28 事故恢复手动工具（preview/prepare/execute）",
+    )
+    _add_common_options(parser)
+    sub = parser.add_subparsers(dest="command", required=True)
+    preview = sub.add_parser("preview", help="只读预演：输出门禁证据，不写库")
+    _add_common_options(preview)
+    prepare = sub.add_parser(
+        "prepare", help="生成服务端备份与 manifest，输出 backup_id",
+    )
+    _add_common_options(prepare)
+    execute = sub.add_parser("execute", help="按 backup_id 执行恢复（破坏性）")
+    _add_common_options(execute)
+    execute.add_argument("--backup-id", required=True, help="prepare 输出的服务端备份 id")
+    execute.add_argument(
+        "--confirm", action="store_true",
+        help="显式确认执行写库（缺省则拒绝执行）",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI 入口：0 成功；2 参数/校验失败；3 数据校验失败。
+
+    退出码语义与 contracts/recovery-cli.md 一致。
+    """
+    args = build_parser().parse_args(argv)
+    if args.command == "preview":
+        return _cmd_preview(args)
+    if args.command == "prepare":
+        return _cmd_prepare(args)
+    return _cmd_execute(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
