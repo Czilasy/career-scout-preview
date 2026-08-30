@@ -5,6 +5,7 @@
 ## 设计前必读
 
 - 本地开发设计新东西前，先查看 `roadmap/` 下本地参考文档（如 `REFERENCE_GET_JOBS.md`、`REFERENCE_BOSS_ZHIPIN_SCRAPER.md`；该目录仅本地存在且已 `.gitignore`，公开仓库不含）。有可借鉴零件就借鉴，没有现成方案再自由发挥。
+- 做前端视觉设计（新主题、换肤、改版式、新页面、调色）前，先看 `design/` 下的界面设计图，**以图为准、不从代码推断视觉**（该目录仅本地存在且已 `.gitignore`；页面编号与规则见 `design/README.md`）。
 
 ## 功能开发流程与架构边界
 

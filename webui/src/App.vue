@@ -293,6 +293,16 @@ async function manualCheckUpdate() {
 }
 
 function handleThemeToggle(event: MouseEvent) {
+  if (themeLongPressFired) {
+    // 长按蓄力结束后浏览器补发的 click，吞掉：避免选择框弹出的同时误切明暗。
+    themeLongPressFired = false;
+    return;
+  }
+  if (themePickerOpen.value) {
+    // 选择框开着时再点按钮：只收起选择框，不切换明暗。
+    themePickerOpen.value = false;
+    return;
+  }
   if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
     toggleTheme();
     return;
@@ -309,6 +319,103 @@ function handleThemeToggle(event: MouseEvent) {
   ripple.addEventListener("animationend", () => ripple.remove(), { once: true });
 }
 
+// ---- 主题长按蓄力（彩蛋主题入口；普通点击仍是明暗切换，互不干扰）----
+// 视觉契约：图标小幅发抖且抖动幅度随进度增大、图标本身略微放大，图标线条与
+// 按钮外框逐渐发亮；外框只发光不抖动。1 秒蓄满弹出选择框并整体还原（单向动画）。
+const THEME_CHARGE_MS = 1000;
+const themeCharging = ref(false);
+const themePickerOpen = ref(false);
+const themeToggleEl = ref<HTMLElement | null>(null);
+const themePickerEl = ref<HTMLElement | null>(null);
+let themeChargeTimer: number | null = null;
+let themeChargeRaf: number | null = null;
+let themeChargeStart = 0;
+let themeLongPressFired = false;
+
+function applyChargeVisual(now: number) {
+  const btn = themeToggleEl.value;
+  if (!btn) return;
+  const t = Math.min(1, (now - themeChargeStart) / THEME_CHARGE_MS);
+  // 抖动幅度随进度增大；系统声明"减少动态"时保留发光、去掉抖动与放大
+  const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  const amp = reduce ? 0 : 1.7 * t;
+  btn.style.setProperty("--charge", t.toFixed(3));
+  btn.style.setProperty("--charge-jx", `${(Math.sin(now / 26) * amp).toFixed(2)}px`);
+  btn.style.setProperty("--charge-jy", `${(Math.cos(now / 21) * amp * 0.8).toFixed(2)}px`);
+  btn.style.setProperty("--charge-scale", (reduce ? 1 : 1 + 0.12 * t).toFixed(3));
+}
+
+function clearChargeVisual() {
+  const btn = themeToggleEl.value;
+  if (!btn) return;
+  for (const name of ["--charge", "--charge-jx", "--charge-jy", "--charge-scale"]) {
+    btn.style.removeProperty(name);
+  }
+}
+
+function stopChargeLoop() {
+  if (themeChargeTimer !== null) {
+    window.clearTimeout(themeChargeTimer);
+    themeChargeTimer = null;
+  }
+  if (themeChargeRaf !== null && typeof window.cancelAnimationFrame === "function") {
+    window.cancelAnimationFrame(themeChargeRaf);
+    themeChargeRaf = null;
+  }
+}
+
+function startThemeCharge(event: PointerEvent) {
+  if (event.button !== 0) return; // 只响应主键，右键/触控笔附加键不蓄力
+  themeLongPressFired = false;
+  cancelThemeCharge();
+  themeCharging.value = true;
+  themeChargeStart = performance.now();
+  const step = (now: number) => {
+    if (!themeCharging.value) return;
+    applyChargeVisual(now);
+    themeChargeRaf = window.requestAnimationFrame(step);
+  };
+  if (typeof window.requestAnimationFrame === "function") {
+    themeChargeRaf = window.requestAnimationFrame(step);
+  }
+  themeChargeTimer = window.setTimeout(() => {
+    themeChargeTimer = null;
+    finishThemeCharge();
+  }, THEME_CHARGE_MS);
+}
+
+function finishThemeCharge() {
+  stopChargeLoop();
+  themeCharging.value = false;
+  clearChargeVisual(); // 蓄满即还原：抖动停止、大小回原、光晕收回，随后弹框
+  themeLongPressFired = true;
+  themePickerOpen.value = true; // 占位空白框，下一阶段填充主题列表
+}
+
+function cancelThemeCharge() {
+  stopChargeLoop();
+  themeCharging.value = false;
+  clearChargeVisual();
+}
+
+// 点击选择框与触发按钮之外的任意区域自动收起（与收藏抽屉的点外部关闭一致）。
+function onThemePickerDocPointerDown(event: PointerEvent) {
+  if (!themePickerOpen.value) return;
+  const target = event.target as Node | null;
+  if (!target) return;
+  if (themePickerEl.value && themePickerEl.value.contains(target)) return;
+  if (themeToggleEl.value && themeToggleEl.value.contains(target)) return;
+  themePickerOpen.value = false;
+}
+
+watch(themePickerOpen, (open) => {
+  if (open) {
+    document.addEventListener("pointerdown", onThemePickerDocPointerDown);
+  } else {
+    document.removeEventListener("pointerdown", onThemePickerDocPointerDown);
+  }
+});
+
 function openGitHub() {
   void openExternalLink(GITHUB_REPO_URL);
 }
@@ -316,6 +423,8 @@ function openGitHub() {
 onBeforeUnmount(() => {
   if (noticeTimer) window.clearTimeout(noticeTimer);
   document.removeEventListener("pointerdown", onDocPointerDown);
+  cancelThemeCharge();
+  document.removeEventListener("pointerdown", onThemePickerDocPointerDown);
 });
 
 function selectProfile(profileId: string) {
@@ -526,12 +635,19 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           ></em>
         </button>
         <button
+          ref="themeToggleEl"
           class="icon-button theme-toggle"
           type="button"
           data-testid="theme-toggle"
           :aria-label="themeToggleLabel"
           :title="themeToggleLabel"
+          :class="{ charging: themeCharging }"
           @click="handleThemeToggle"
+          @pointerdown="startThemeCharge"
+          @pointerup="cancelThemeCharge"
+          @pointerleave="cancelThemeCharge"
+          @pointercancel="cancelThemeCharge"
+          @contextmenu.prevent
         >
           <span class="theme-icon" aria-hidden="true">
             <Transition name="theme-icon" mode="out-in">
@@ -540,6 +656,16 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
             </Transition>
           </span>
         </button>
+        <Transition name="theme-picker">
+          <div
+            v-if="themePickerOpen"
+            ref="themePickerEl"
+            class="theme-picker"
+            data-testid="theme-picker"
+          >
+            <!-- 占位：彩蛋主题列表下一阶段填充 -->
+          </div>
+        </Transition>
       </div>
     </header>
 

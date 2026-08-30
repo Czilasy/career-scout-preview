@@ -586,6 +586,50 @@ describe("App", () => {
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
 
+  it("长按主题按钮 1 秒蓄满弹出选择框，且不误触明暗切换", async () => {
+    vi.useFakeTimers();
+    try {
+      toggleTheme("light");
+      document.documentElement.removeAttribute("data-theme");
+      const wrapper = mount(App);
+      await flushPromises();
+
+      const toggle = wrapper.get('[data-testid="theme-toggle"]');
+      await toggle.trigger("pointerdown");
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushPromises();
+
+      expect(wrapper.find('[data-testid="theme-picker"]').exists()).toBe(true);
+      // 长按蓄力结束后浏览器补发的 click 必须被吞掉，明暗保持不变。
+      await toggle.trigger("click");
+      expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("蓄力中途松手取消弹出，点击仍正常切换明暗", async () => {
+    vi.useFakeTimers();
+    try {
+      toggleTheme("light");
+      document.documentElement.removeAttribute("data-theme");
+      const wrapper = mount(App);
+      await flushPromises();
+
+      const toggle = wrapper.get('[data-testid="theme-toggle"]');
+      await toggle.trigger("pointerdown");
+      await vi.advanceTimersByTimeAsync(400);
+      await toggle.trigger("pointerup");
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(wrapper.find('[data-testid="theme-picker"]').exists()).toBe(false);
+      await toggle.trigger("click");
+      expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // ---------- 更新提示：自动弹窗 / 忽略 / 项目名红点 ----------
 
   function updateResponse() {
