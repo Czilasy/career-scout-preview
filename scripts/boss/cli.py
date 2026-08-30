@@ -19,8 +19,14 @@ from webui.logging_setup import get_logger
 
 _logger = get_logger(__name__)
 
-def _facade():
-    return _sys.modules.get("scripts.boss_cdp_raw")
+from scripts.boss import runtime
+from scripts.boss import browser as _run_browser
+from scripts.boss import detail_analyze as _run_analyze_mod
+from scripts.boss import detail_scrape as _run_details_mod
+from scripts.boss import search as _run_search_mod
+from scripts.boss import session_import as _run_session_mod
+from scripts.boss import smoke as _run_smoke_mod
+from scripts.boss import login
 
 def configure_stdio():
     """Keep console output usable when the active code page cannot encode emoji."""
@@ -112,8 +118,10 @@ class _LineLogBuffer(_ThreadAwareStdout):
 # main
 # ============================================================
 def main():
+    facade_version = getattr(
+        _sys.modules.get("scripts.boss_cdp_raw"), "__version__", "")
     p = argparse.ArgumentParser(
-        description=f"BOSS直聘抓取 + 分析 (CDP Raw) v{_facade().__version__}",
+        description=f"BOSS直聘抓取 + 分析 (CDP Raw) v{{facade_version}}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 筛选参数示例:
@@ -154,7 +162,7 @@ def main():
   # 启动 Chrome CDP
   %(prog)s --setup-chrome
         """)
-    p.add_argument("--version", action="version", version=f"%(prog)s {_facade().__version__}")
+    p.add_argument("--version", action="version", version=f"%(prog)s {{facade_version}}")
     p.add_argument("--keyword", default="AI Agent", help="搜索关键词")
     p.add_argument("--city", default=DEFAULT_CITY_INPUT, help=f"城市 (中文名或代码，默认 {DEFAULT_CITY_INPUT})")
     p.add_argument("--pages", type=int, default=3, help=f"抓取页数 (最大 {MAX_PAGES})")
@@ -253,10 +261,10 @@ def main():
 
     # --check 模式
     if args.check:
-        sys.exit(_facade().run_check(args.cdp_port))
+        sys.exit(_run_smoke_mod.run_check(args.cdp_port))
 
     if args.smoke_test:
-        sys.exit(_facade().run_smoke_test(args.cdp_port))
+        sys.exit(_run_smoke_mod.run_smoke_test(args.cdp_port))
 
     # --list-cities 模式（无需 Chrome/网络依赖，本地静态码表兜底）
     if args.list_cities is not None:
@@ -264,7 +272,7 @@ def main():
         sys.exit(0)
 
     if args.import_boss_session:
-        sys.exit(_facade().run_import_boss_session(
+        sys.exit(_run_session_mod.run_import_boss_session(
             source_cdp_port=args.source_cdp_port,
             target_cdp_port=args.cdp_port,
             authorized=args.confirm_session_import,
@@ -272,7 +280,7 @@ def main():
 
     # --setup-chrome 模式
     if args.setup_chrome:
-        sys.exit(_facade().run_setup_chrome(
+        sys.exit(_run_browser.run_setup_chrome(
             args.cdp_port,
             copy_login_state=args.copy_login_state,
             reset_profile=args.reset_chrome_profile,
@@ -282,9 +290,9 @@ def main():
 
     # --stop-chrome 模式（关闭 BOSS 专用 CDP Chrome，独立命令）
     if args.stop_chrome:
-        sys.exit(_facade().run_stop_chrome())
+        sys.exit(_run_browser.run_stop_chrome())
 
-    if not _facade().require_runtime_dependencies("requests", "websocket"):
+    if not runtime.require_runtime_dependencies("requests", "websocket"):
         emit_failure_line("source_unreachable", "运行时依赖缺失（requests/websocket）")
         sys.exit(1)
 
@@ -315,7 +323,7 @@ def main():
         # 登录状态检测：--skip-login-check 仅用于任务编排层已做 preflight 的调用
         if not args.skip_login_check:
             print("检测登录状态...")
-            if not _facade().check_login_state(args.cdp_port):
+            if not login.check_login_state(args.cdp_port):
                 print("❌ 未检测到 BOSS直聘登录状态。请先在 Chrome 中登录 zhipin.com。")
                 print("   可运行 --check 检查环境，或 --setup-chrome 启动 Chrome。")
                 emit_failure_line("source_login_required", "未检测到 BOSS直聘登录状态")
@@ -324,7 +332,7 @@ def main():
         else:
             print("跳过登录状态检测（任务预检已处理）")
 
-        list_data = _facade().scrape_list(
+        list_data = _run_search_mod.scrape_list(
             args.keyword, args.city, args.pages, filters, args.output,
             cdp_port=args.cdp_port, fmt=args.format,
             allow_dom_fallback=args.allow_dom_fallback,
@@ -382,7 +390,7 @@ def main():
                         pass
                     events_file_handle = None
         try:
-            details = _facade().scrape_details(
+            details = _run_details_mod.scrape_details(
                 list_data, args.max_details, args.detail_output,
                 cdp_port=args.cdp_port, fmt=args.format,
                 event_callback=events_callback,
@@ -414,12 +422,12 @@ def main():
         # 如果有详情文件也加载
         if not details:
             details = load_existing_details(args.input, args.detail_output)
-        _facade().analyze(list_data, details, search_keyword=args.keyword)
+        _run_analyze_mod.analyze(list_data, details, search_keyword=args.keyword)
 
     # 抓取正常结束后按需收尾（仅成功路径；异常/登录失败走 sys.exit，不会触发，保留登录态）
     if args.close_chrome:
-        profile = _facade().prepare_cdp_profile(copy_login_state=False, reset=False)
-        stopped = _facade().stop_cdp_chrome(profile["path"])
+        profile = _run_browser.prepare_cdp_profile(copy_login_state=False, reset=False)
+        stopped = _run_browser.stop_cdp_chrome(profile["path"])
         if stopped:
             print(f"\n🧹 已按 --close-chrome 关闭 BOSS 专用 Chrome 进程：{stopped} 个")
         else:

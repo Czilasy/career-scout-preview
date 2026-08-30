@@ -5,6 +5,9 @@ import subprocess
 import sys
 import unittest
 from unittest import mock
+from scripts.boss import browser, cdp_session, city_map
+from scripts.boss import constants as boss_constants
+from scripts.boss import login, runtime
 
 from tests.chrome_setup.harness import SCRIPT_PATH, load_module, tempfile_profile, fake_run
 
@@ -16,7 +19,7 @@ class ChromeSetupTests(unittest.TestCase):
 
         with tempfile_profile() as paths:
             paths["cdp_profile"].mkdir(parents=True, exist_ok=True)
-            with mock.patch.object(module, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
+            with mock.patch.object(boss_constants, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
                     mock.patch.object(module.subprocess, "Popen", return_value=spawned) as popen:
                 result = module.launch_chrome(["chrome", "--headless"])
                 stderr_handle = popen.call_args.kwargs["stderr"]
@@ -452,9 +455,9 @@ class ChromeSetupTests(unittest.TestCase):
         """本地码表没有时降级到运行时拉取（mock）。"""
         module = load_module()
 
-        with mock.patch.object(module, "load_local_city_map",
+        with mock.patch.object(city_map, "load_local_city_map",
                                return_value=({}, {})), \
-             mock.patch.object(module, "load_live_city_maps",
+             mock.patch.object(city_map, "load_live_city_maps",
                                return_value=({"长春": "101060100"},
                                              {"101060100": "长春"})):
             self.assertEqual(module.resolve_city("长春"), ("长春", "101060100"))
@@ -464,9 +467,9 @@ class ChromeSetupTests(unittest.TestCase):
         """本地和实时都查不到时，原样返回（兼容用户传裸 code）。"""
         module = load_module()
 
-        with mock.patch.object(module, "load_local_city_map",
+        with mock.patch.object(city_map, "load_local_city_map",
                                return_value=({}, {})), \
-             mock.patch.object(module, "load_live_city_maps",
+             mock.patch.object(city_map, "load_live_city_maps",
                                return_value=({}, {})):
             self.assertEqual(module.resolve_city("999999999"), ("999999999", "999999999"))
 
@@ -481,7 +484,7 @@ class ChromeSetupTests(unittest.TestCase):
         """--list-cities 打印全部城市（用本地码表，mock 掉联网）。"""
         module = load_module()
 
-        with mock.patch.object(module, "load_live_city_maps",
+        with mock.patch.object(city_map, "load_live_city_maps",
                                return_value=({}, {})):
             with mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
                 module.list_cities(keyword=None)
@@ -494,7 +497,7 @@ class ChromeSetupTests(unittest.TestCase):
         """关键词过滤只打印匹配的城市。"""
         module = load_module()
 
-        with mock.patch.object(module, "load_live_city_maps",
+        with mock.patch.object(city_map, "load_live_city_maps",
                                return_value=({}, {})):
             with mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
                 module.list_cities(keyword="江")
@@ -507,7 +510,7 @@ class ChromeSetupTests(unittest.TestCase):
         """联网失败时回退本地静态码表，不报错。"""
         module = load_module()
 
-        with mock.patch.object(module, "load_live_city_maps",
+        with mock.patch.object(city_map, "load_live_city_maps",
                                return_value=({}, {})):
             with mock.patch("sys.stdout", new_callable=__import__("io").StringIO) as out:
                 module.list_cities(keyword=None)
@@ -820,7 +823,7 @@ class ChromeSetupTests(unittest.TestCase):
     def test_check_login_state_unknown_on_cdp_failure(self):
         module = load_module()
         import requests as _requests
-        with mock.patch.object(module, "CDPSession",
+        with mock.patch.object(cdp_session, "CDPSession",
                                side_effect=_requests.ConnectionError("down")):
             self.assertEqual(module.check_login_state_tri(9333), "unknown")
             self.assertFalse(module.check_login_state(9333))
@@ -1012,7 +1015,7 @@ class ChromeSetupTests(unittest.TestCase):
 
         with tempfile_profile() as paths:
             output = paths["cdp_profile"] / "details.json"
-            with mock.patch.object(module, "CDPSession", return_value=session), \
+            with mock.patch.object(cdp_session, "CDPSession", return_value=session), \
                     mock.patch.object(module.time, "sleep"):
                 with self.assertRaisesRegex(RuntimeError, "login expired"):
                     module.scrape_details({"jobs": [job]}, output_path=str(output))
@@ -1040,15 +1043,15 @@ class ChromeSetupTests(unittest.TestCase):
 
         with tempfile_profile() as paths:
             expected_profile_arg = f"--user-data-dir={paths['cdp_profile']}"
-            with mock.patch.object(module, "DEFAULT_PROFILE_DIR", str(paths["source_profile"])), \
-                    mock.patch.object(module, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
-                    mock.patch.object(module, "requests", fake_requests), \
+            with mock.patch.object(boss_constants, "DEFAULT_PROFILE_DIR", str(paths["source_profile"])), \
+                    mock.patch.object(boss_constants, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
+                    mock.patch.object(runtime, "requests", fake_requests), \
                     mock.patch.object(module.shutil, "copy2", side_effect=lambda src, dst: calls["copy2"].append((src, dst))), \
                     mock.patch.object(module.subprocess, "run", side_effect=lambda *args, **kwargs: fake_run(calls, *args, **kwargs)), \
                     mock.patch.object(module.subprocess, "Popen", side_effect=lambda cmd, **kwargs: calls["popen"].append(cmd)), \
                     mock.patch.object(module.time, "sleep", return_value=None), \
-                    mock.patch.object(module, "wait_for_login", return_value=True) as wait_login, \
-                    mock.patch.object(module, "wait_for_cdp", return_value=True):
+                    mock.patch.object(login, "wait_for_login", return_value=True) as wait_login, \
+                    mock.patch.object(browser, "wait_for_cdp", return_value=True):
                 fake_requests.get.side_effect = fake_get
                 self.assertEqual(module.run_setup_chrome(cdp_port=9333), 0)
 
@@ -1061,11 +1064,11 @@ class ChromeSetupTests(unittest.TestCase):
 
     def test_copy_login_state_is_rejected_without_copying_browser_databases(self):
         module = load_module()
-        with mock.patch.object(module, "require_runtime_dependencies", return_value=True), \
+        with mock.patch.object(runtime, "require_runtime_dependencies", return_value=True), \
                 mock.patch.object(module.shutil, "copy2") as copy2, \
-                mock.patch.object(module, "is_cdp_ready", return_value=False), \
-                mock.patch.object(module, "stop_cdp_chrome", return_value=0), \
-                mock.patch.object(module, "wait_for_cdp", return_value=False), \
+                mock.patch.object(browser, "is_cdp_ready", return_value=False), \
+                mock.patch.object(browser, "stop_cdp_chrome", return_value=0), \
+                mock.patch.object(browser, "wait_for_cdp", return_value=False), \
                 mock.patch.object(module.subprocess, "Popen") as popen:
             result = module.run_setup_chrome(copy_login_state=True)
 
@@ -1100,11 +1103,11 @@ class ChromeSetupTests(unittest.TestCase):
                 "--remote-debugging-port=9333 --user-data-dir=/tmp/chrome-cdp-data\n"
             )
             with mock.patch.object(module.platform, "system", return_value="Darwin"), \
-                    mock.patch.object(module, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
-                    mock.patch.object(module, "is_cdp_ready", return_value=True), \
+                    mock.patch.object(boss_constants, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
+                    mock.patch.object(browser, "is_cdp_ready", return_value=True), \
                     mock.patch.object(module.subprocess, "run", return_value=type("Completed", (), {"stdout": ps_output, "returncode": 0})()), \
                     mock.patch.object(module.subprocess, "Popen") as popen, \
-                    mock.patch.object(module, "terminate_process"):
+                    mock.patch.object(browser, "terminate_process"):
                 self.assertEqual(module.run_setup_chrome(cdp_port=9333), 1)
 
         popen.assert_not_called()
@@ -1118,12 +1121,12 @@ class ChromeSetupTests(unittest.TestCase):
                 f"--remote-debugging-port=9333 --user-data-dir={paths['cdp_profile']}\n"
             )
             with mock.patch.object(module.platform, "system", return_value="Darwin"), \
-                    mock.patch.object(module, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
-                    mock.patch.object(module, "is_cdp_ready", return_value=True), \
+                    mock.patch.object(boss_constants, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
+                    mock.patch.object(browser, "is_cdp_ready", return_value=True), \
                     mock.patch.object(module.subprocess, "run", return_value=type("Completed", (), {"stdout": ps_output, "returncode": 0})()), \
                     mock.patch.object(module.subprocess, "Popen") as popen, \
-                    mock.patch.object(module, "wait_for_login", return_value=True) as wait_login, \
-                    mock.patch.object(module, "terminate_process"):
+                    mock.patch.object(login, "wait_for_login", return_value=True) as wait_login, \
+                    mock.patch.object(browser, "terminate_process"):
                 self.assertEqual(module.run_setup_chrome(cdp_port=9333), 0)
 
         popen.assert_not_called()
@@ -1138,11 +1141,11 @@ class ChromeSetupTests(unittest.TestCase):
                 f"--remote-debugging-port=9333 --user-data-dir={paths['cdp_profile']}\n"
             )
             with mock.patch.object(module.platform, "system", return_value="Darwin"), \
-                    mock.patch.object(module, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
-                    mock.patch.object(module, "is_cdp_ready", return_value=True), \
+                    mock.patch.object(boss_constants, "DEFAULT_CDP_DATA_DIR", str(paths["cdp_profile"])), \
+                    mock.patch.object(browser, "is_cdp_ready", return_value=True), \
                     mock.patch.object(module.subprocess, "run", return_value=type("Completed", (), {"stdout": ps_output, "returncode": 0})()), \
-                    mock.patch.object(module, "wait_for_login") as wait_login, \
-                    mock.patch.object(module, "terminate_process"):
+                    mock.patch.object(login, "wait_for_login") as wait_login, \
+                    mock.patch.object(browser, "terminate_process"):
                 self.assertEqual(module.run_setup_chrome(cdp_port=9333, wait_login=False), 0)
 
         wait_login.assert_not_called()
@@ -1172,9 +1175,9 @@ class ChromeSetupTests(unittest.TestCase):
         # （按 user-data-dir 过滤出 111、不关其它 profile 的进程，该过滤逻辑由
         #   test_chrome_process_parsing_matches_unquoted_user_data_dir 独立覆盖）
         pid_lookups = iter([[111], []])
-        with mock.patch.object(module, "chrome_pids_for_user_data_dir",
+        with mock.patch.object(browser, "chrome_pids_for_user_data_dir",
                                side_effect=lambda _dir: next(pid_lookups)), \
-             mock.patch.object(module, "terminate_process",
+             mock.patch.object(browser, "terminate_process",
                                side_effect=lambda pid, force=False: terminated.append((pid, force))), \
              mock.patch.object(module.time, "sleep"):
             stopped = module.stop_cdp_chrome("/fake/scraper-profile")
@@ -1186,7 +1189,7 @@ class ChromeSetupTests(unittest.TestCase):
     def test_stop_cdp_chrome_no_processes_returns_zero(self):
         module = load_module()
 
-        with mock.patch.object(module, "chrome_pids_for_user_data_dir", return_value=[]):
+        with mock.patch.object(browser, "chrome_pids_for_user_data_dir", return_value=[]):
             stopped = module.stop_cdp_chrome("/fake/scraper-profile")
         self.assertEqual(stopped, 0)
 
@@ -1195,8 +1198,8 @@ class ChromeSetupTests(unittest.TestCase):
 
         terminated = []
         # SIGTERM 后进程始终在 -> 轮询 10 次都不为空 -> 升级 SIGKILL
-        with mock.patch.object(module, "chrome_pids_for_user_data_dir", return_value=[333]), \
-             mock.patch.object(module, "terminate_process",
+        with mock.patch.object(browser, "chrome_pids_for_user_data_dir", return_value=[333]), \
+             mock.patch.object(browser, "terminate_process",
                                side_effect=lambda pid, force=False: terminated.append((pid, force))), \
              mock.patch.object(module.time, "sleep"):
             stopped = module.stop_cdp_chrome("/fake/scraper-profile")
@@ -1223,9 +1226,9 @@ class ChromeSetupTests(unittest.TestCase):
                 captured["stopped_dir"] = directory
                 return 1
 
-            with mock.patch.object(module, "require_runtime_dependencies", return_value=True), \
-                 mock.patch.object(module, "prepare_cdp_profile", side_effect=fake_prepare), \
-                 mock.patch.object(module, "stop_cdp_chrome", side_effect=fake_stop):
+            with mock.patch.object(runtime, "require_runtime_dependencies", return_value=True), \
+                 mock.patch.object(browser, "prepare_cdp_profile", side_effect=fake_prepare), \
+                 mock.patch.object(browser, "stop_cdp_chrome", side_effect=fake_stop):
                 rc = module.run_stop_chrome()
 
             self.assertEqual(rc, 0)
@@ -1239,11 +1242,11 @@ class ChromeSetupTests(unittest.TestCase):
 
         with tempfile_profile() as paths:
             scraper_dir = str(paths["cdp_profile"])
-            with mock.patch.object(module, "require_runtime_dependencies", return_value=True), \
-                 mock.patch.object(module, "prepare_cdp_profile",
+            with mock.patch.object(runtime, "require_runtime_dependencies", return_value=True), \
+                 mock.patch.object(browser, "prepare_cdp_profile",
                                    return_value={"path": scraper_dir, "copied": 0,
                                                  "reset": False, "copy_login_state": False}), \
-                 mock.patch.object(module, "stop_cdp_chrome", return_value=0):
+                 mock.patch.object(browser, "stop_cdp_chrome", return_value=0):
                 rc = module.run_stop_chrome()
             self.assertEqual(rc, 0)
 

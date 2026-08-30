@@ -6,8 +6,8 @@ import threading
 from scripts.boss.exceptions import RequestLimitExceededError
 from scripts.boss.constants import log
 import sys as _sys
-def _facade():
-    return _sys.modules.get("scripts.boss_cdp_raw")
+from scripts.boss import constants as boss_constants
+from scripts.boss import runtime
 
 # 全局请求计数器
 # 运行级请求计数器（B053）：in-process 模式下多轮任务共处同一进程，必须按单次抓取运行隔离；
@@ -33,8 +33,8 @@ def incr_request():
             _request_counter = 0
         _request_counter += 1
         current = _request_counter
-        if current > _facade().MAX_API_REQUESTS:
+        if current > boss_constants.MAX_API_REQUESTS:
             raise RequestLimitExceededError(
-                f"已达到单次最大请求数 {_facade().MAX_API_REQUESTS}，停止抓取")
-        if current >= _facade().MAX_API_REQUESTS * 0.8:
-            log.warning(f"⚠️ 请求次数接近上限: {current}/{_facade().MAX_API_REQUESTS}")
+                f"已达到单次最大请求数 {boss_constants.MAX_API_REQUESTS}，停止抓取")
+        if current >= boss_constants.MAX_API_REQUESTS * 0.8:
+            log.warning(f"⚠️ 请求次数接近上限: {current}/{boss_constants.MAX_API_REQUESTS}")

@@ -16,8 +16,11 @@ from scripts.boss.rate_limit import begin_request_run
 from scripts.boss_cdp_signals import RATE_LIMIT_KEYWORDS, RISK_CONTROL_KEYWORDS, VERDICT_CONFIRMED, VERDICT_RETRY, api_code_diagnosis, classify_list_diagnosis
 from scripts.boss.constants import log
 import sys as _sys
-def _facade():
-    return _sys.modules.get("scripts.boss_cdp_raw")
+from scripts.boss import city_map
+from scripts.boss import cdp_session
+from scripts.boss import login
+from scripts.boss import rate_limit
+from scripts.boss import runtime
 
 # ============================================================
 # 构建搜索 URL
@@ -157,7 +160,7 @@ def check_list_risk(diagnosis, *, page, consecutive_empty, scraped_count,
 
     016-error-module-rework：
     - 单次拦截（403/429）与结构异常不再定罪，返回 None 由调用方原地重试；
-    - "连续空页"不再作为风控定性理由（聚合刹车语义在 _facade().scrape_list 内处理）；
+    - "连续空页"不再作为风控定性理由（聚合刹车语义在 scrape_list 内处理）；
     - 抛错携带注册表错误码（RiskControlError.code）。
     """
     verdict, code, hint = classify_list_diagnosis(diagnosis, repeated=False)
@@ -176,10 +179,10 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 cdp_port=DEFAULT_CDP_PORT, fmt="json", allow_dom_fallback=False,
                 start_page=1, *, cancel_event=None, on_poll=None,
                 combo_key=None, on_page_completed=None, list_events_output=None):
-    if not _facade()._run_active:
+    if not runtime._run_active:
         begin_request_run()
-    city_name, city_code = _facade().resolve_city(city_input)
-    cdp = _facade().CDPSession(cdp_port)
+    city_name, city_code = city_map.resolve_city(city_input)
+    cdp = cdp_session.CDPSession(cdp_port)
     all_jobs = []
     seen = set()
     if not output_path:
@@ -316,14 +319,14 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
     prev_has_more = None  # 上一页 API 返回的 hasMore（None=未知）
     try:
         for pg in range(start_page, max_pages + 1):
-            # programmatic 取消/轮询检查点（与 _facade().scrape_details 逐岗位检查点同语义）；
+            # programmatic 取消/轮询检查点（与 scrape_details 逐岗位检查点同语义）；
             # CLI 不传 cancel_event/on_poll，行为与现状完全一致。
             if cancel_event is not None and cancel_event.is_set():
                 raise SearchCancelled(MSG_USER_CANCELLED_SCRAPE)
             if on_poll is not None:
                 on_poll()
             print(f"--- [{pg}/{max_pages} 页, {len(all_jobs)} 条已抓] ---")
-            _facade().incr_request()
+            rate_limit.incr_request()
 
             # 每 4 页重新导航一次：BOSS 对同一页面上下文连续 API 调用约 4-5 次后
             # 返回 code:37（环境异常）。重新导航 + 滚动可重置 session 计数器，

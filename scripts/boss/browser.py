@@ -50,15 +50,17 @@ CDP_LAUNCH_ARGS = [
     "--disable-features=OptimizationGuideModelDownloading,OptimizationHints",
 ]
 
-def _facade():
-    return _sys.modules.get("scripts.boss_cdp_raw")
+from scripts.boss import cdp_session
+from scripts.boss import constants as boss_constants
+from scripts.boss import runtime
+from scripts.boss import login
 
 def prepare_cdp_profile(copy_login_state=False, reset=False, data_dir=None):
     """Prepare an isolated persistent Chrome profile for CDP."""
     if copy_login_state:
         raise ValueError("copy_login_state_deprecated")
     cdp_data_dir = os.path.abspath(os.path.expanduser(
-        str(data_dir or _facade().DEFAULT_CDP_DATA_DIR)
+        str(data_dir or boss_constants.DEFAULT_CDP_DATA_DIR)
     ))
     cdp_default = os.path.join(cdp_data_dir, "Default")
 
@@ -77,8 +79,8 @@ def prepare_cdp_profile(copy_login_state=False, reset=False, data_dir=None):
 
 def is_cdp_ready(cdp_port):
     # 用标准库 urllib 而不是模块级 requests —— requests 默认是 None，
-    # 只有 _facade().require_runtime_dependencies 被调用后才会 import。
-    # ensure_chrome_ready 在 preflight 之前调用 _facade().is_cdp_ready，此时 requests
+    # 只有 runtime.require_runtime_dependencies 被调用后才会 import。
+    # ensure_chrome_ready 在 preflight 之前调用 is_cdp_ready，此时 requests
     # 可能尚未初始化，用 requests 会导致永远返回 False（90s 超时）。
     try:
         resp = urlopen(f"http://127.0.0.1:{cdp_port}/json/version", timeout=2)
@@ -152,7 +154,7 @@ def iter_chrome_process_commands():
         processes = []
         for item in data:
             command = item.get("CommandLine") or ""
-            if not _facade().is_chrome_command(command):
+            if not is_chrome_command(command):
                 continue
             try:
                 processes.append((int(item.get("ProcessId")), command))
@@ -167,7 +169,7 @@ def iter_chrome_process_commands():
 
     processes = []
     for line in r.stdout.splitlines():
-        if not _facade().is_chrome_command(line):
+        if not is_chrome_command(line):
             continue
         try:
             pid_text, command = line.strip().split(None, 1)
@@ -181,12 +183,12 @@ def iter_chrome_process_commands():
 def chrome_pids_for_user_data_dir(user_data_dir):
     """Return Chrome PIDs using the given user-data-dir."""
     pids = []
-    real_dir = _facade().normalize_profile_path(user_data_dir)
-    for pid, command in _facade().iter_chrome_process_commands():
+    real_dir = normalize_profile_path(user_data_dir)
+    for pid, command in iter_chrome_process_commands():
         if "--user-data-dir=" not in command:
             continue
-        path = _facade().extract_user_data_dir(command)
-        if path and _facade().normalize_profile_path(path) == real_dir:
+        path = extract_user_data_dir(command)
+        if path and normalize_profile_path(path) == real_dir:
             pids.append(pid)
     return pids
 
@@ -195,18 +197,18 @@ def chrome_user_data_dirs_for_cdp_port(cdp_port):
     """Return user-data-dir paths for Chrome processes using the given CDP port."""
     dirs = []
     port_arg = f"--remote-debugging-port={cdp_port}"
-    for _pid, command in _facade().iter_chrome_process_commands():
+    for _pid, command in iter_chrome_process_commands():
         if port_arg not in command:
             continue
-        path = _facade().extract_user_data_dir(command)
+        path = extract_user_data_dir(command)
         if path:
             dirs.append(path)
     return dirs
 
 
 def cdp_port_uses_profile(cdp_port, cdp_data_dir):
-    expected = _facade().normalize_profile_path(cdp_data_dir)
-    return any(_facade().normalize_profile_path(path) == expected for path in _facade().chrome_user_data_dirs_for_cdp_port(cdp_port))
+    expected = normalize_profile_path(cdp_data_dir)
+    return any(normalize_profile_path(path) == expected for path in chrome_user_data_dirs_for_cdp_port(cdp_port))
 
 
 def terminate_process(pid, force=False):
@@ -224,23 +226,23 @@ def terminate_process(pid, force=False):
 
 def stop_cdp_chrome(cdp_data_dir):
     """Stop only Chrome processes that use the scraper's isolated profile."""
-    pids = _facade().chrome_pids_for_user_data_dir(cdp_data_dir)
+    pids = chrome_pids_for_user_data_dir(cdp_data_dir)
     if not pids:
         return 0
 
     for pid in pids:
         try:
-            _facade().terminate_process(pid, force=False)
+            terminate_process(pid, force=False)
         except ProcessLookupError:
             pass
     for _ in range(10):
         time.sleep(0.5)
-        if not _facade().chrome_pids_for_user_data_dir(cdp_data_dir):
+        if not chrome_pids_for_user_data_dir(cdp_data_dir):
             return len(pids)
 
-    for pid in _facade().chrome_pids_for_user_data_dir(cdp_data_dir):
+    for pid in chrome_pids_for_user_data_dir(cdp_data_dir):
         try:
-            _facade().terminate_process(pid, force=True)
+            terminate_process(pid, force=True)
         except ProcessLookupError:
             pass
     time.sleep(0.5)
@@ -251,12 +253,12 @@ def close_cdp_chrome(cdp_port=DEFAULT_CDP_PORT, cdp_data_dir=DEFAULT_CDP_DATA_DI
                      profile_checker=None, session_factory=CDPSession,
                      process_stopper=None, ready_checker=None, sleeper=None):
     """Close only a Chrome CDP instance using the expected dedicated profile."""
-    checker = profile_checker or _facade().cdp_port_uses_profile
+    checker = profile_checker or cdp_port_uses_profile
     if not checker(cdp_port, cdp_data_dir):
         return False
 
-    is_ready = ready_checker or _facade().is_cdp_ready
-    stop_processes = process_stopper or _facade().stop_cdp_chrome
+    is_ready = ready_checker or is_cdp_ready
+    stop_processes = process_stopper or stop_cdp_chrome
     pause = sleeper or time.sleep
     session = None
     try:
@@ -339,7 +341,7 @@ def wait_for_cdp(cdp_port, timeout=30):
     for _ in range(timeout):
         time.sleep(1)
         print(".", end="", flush=True)
-        if _facade().is_cdp_ready(cdp_port):
+        if is_cdp_ready(cdp_port):
             print(f"\n✅ CDP 已就绪 (端口 {cdp_port})")
             return True
     print(f"\n❌ 等待超时 ({timeout}s)，CDP 未就绪")
@@ -355,13 +357,13 @@ def launch_chrome(cmd):
     """
     # 把 Chrome 的 stderr 写到日志文件，启动失败时能直接看到原因
     # （Chrome 是 GUI 程序，但启动失败信息会进 stderr）
-    log_dir = os.path.dirname(_facade().DEFAULT_CDP_DATA_DIR)
+    log_dir = os.path.dirname(boss_constants.DEFAULT_CDP_DATA_DIR)
     try:
         os.makedirs(log_dir, exist_ok=True)
     except Exception:
         _logger.debug("调试日志目录创建失败（沿用现有目录）", exc_info=True)
 
-    log_path = os.path.join(_facade().DEFAULT_CDP_DATA_DIR, "chrome_stderr.log")
+    log_path = os.path.join(boss_constants.DEFAULT_CDP_DATA_DIR, "chrome_stderr.log")
     try:
         stderr_fh = open(log_path, "ab", buffering=0)
     except Exception:
@@ -401,7 +403,7 @@ def run_setup_chrome(cdp_port=DEFAULT_CDP_PORT, copy_login_state=False,
         print("❌ --copy-login-state 已停用：不会复制 Chrome 数据库。")
         print("   请改用 --import-boss-session + --confirm-session-import。")
         return 1
-    if not _facade().require_runtime_dependencies("requests"):
+    if not runtime.require_runtime_dependencies("requests"):
         return 1
 
     if not DEFAULT_CHROME_PATH:
@@ -413,24 +415,24 @@ def run_setup_chrome(cdp_port=DEFAULT_CDP_PORT, copy_login_state=False,
     print("=" * 50)
     print()
 
-    profile = _facade().prepare_cdp_profile(copy_login_state=copy_login_state, reset=reset_profile)
+    profile = prepare_cdp_profile(copy_login_state=copy_login_state, reset=reset_profile)
     cdp_data_dir = profile["path"]
     print(f"✅ 使用独立 Chrome profile: {cdp_data_dir}")
     if reset_profile:
         print("   已按 --reset-chrome-profile 重建 profile")
     print("   默认、首次启动、重复启动都不复制主 Chrome Cookie；首次使用请在此专用 Chrome 中登录 zhipin.com")
 
-    if _facade().is_cdp_ready(cdp_port):
-        if _facade().cdp_port_uses_profile(cdp_port, cdp_data_dir):
+    if is_cdp_ready(cdp_port):
+        if cdp_port_uses_profile(cdp_port, cdp_data_dir):
             print(f"\n✅ CDP 已就绪 (端口 {cdp_port})")
             if wait_login:
-                return 0 if _facade().wait_for_login(cdp_port, timeout=login_timeout) else 1
+                return 0 if login.wait_for_login(cdp_port, timeout=login_timeout) else 1
             return 0
         print(f"\n❌ 端口 {cdp_port} 已被其他 Chrome CDP profile 占用")
         print("   请关闭旧 CDP Chrome，或改用 --cdp-port 指定其他端口")
         return 1
 
-    stopped = _facade().stop_cdp_chrome(cdp_data_dir)
+    stopped = stop_cdp_chrome(cdp_data_dir)
     if stopped:
         print(f"\n已关闭 {stopped} 个旧的 BOSS CDP Chrome 进程")
 
@@ -443,16 +445,16 @@ def run_setup_chrome(cdp_port=DEFAULT_CDP_PORT, copy_login_state=False,
         "--no-default-browser-check",
         "--remote-allow-origins=*",
     ] + CDP_LAUNCH_ARGS
-    _facade().launch_chrome(cmd)
+    launch_chrome(cmd)
 
-    if not _facade().wait_for_cdp(cdp_port):
+    if not wait_for_cdp(cdp_port):
         return 1
 
     print()
     print("Chrome 已启动。请在这个专用浏览器中登录 zhipin.com。")
     if wait_login:
         print()
-        if not _facade().wait_for_login(cdp_port, timeout=login_timeout):
+        if not login.wait_for_login(cdp_port, timeout=login_timeout):
             return 1
     print()
     print("示例:")
@@ -465,7 +467,7 @@ def run_setup_chrome(cdp_port=DEFAULT_CDP_PORT, copy_login_state=False,
 
 def run_stop_chrome():
     """关闭 BOSS 专用 CDP Chrome（按隔离 user-data-dir 精准匹配，不碰主 Chrome）。"""
-    if not _facade().require_runtime_dependencies("requests"):
+    if not runtime.require_runtime_dependencies("requests"):
         return 1
 
     print("=" * 50)
@@ -474,10 +476,10 @@ def run_stop_chrome():
     print()
 
     # 只定位 scraper 专用 profile 目录，不复制、不重置
-    profile = _facade().prepare_cdp_profile(copy_login_state=False, reset=False)
+    profile = prepare_cdp_profile(copy_login_state=False, reset=False)
     cdp_data_dir = profile["path"]
 
-    stopped = _facade().stop_cdp_chrome(cdp_data_dir)
+    stopped = stop_cdp_chrome(cdp_data_dir)
     if stopped:
         print(f"\n✅ 已关闭 {stopped} 个 BOSS 专用 Chrome 进程 (profile: {cdp_data_dir})")
     else:

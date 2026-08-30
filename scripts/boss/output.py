@@ -10,8 +10,6 @@ import time
 from scripts.boss.constants import CSV_COLUMNS, DEFAULT_RESULT_DIR, DETAIL_CSV_COLUMNS
 from scripts.boss.constants import log
 import sys as _sys
-def _facade():
-    return _sys.modules.get("scripts.boss_cdp_raw")
 
 def default_output_path(kind):
     filename = f"boss_{kind}_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
@@ -158,7 +156,7 @@ def merge_jobs(external_path, new_jobs):
 def merge_details(external_path, new_details):
     """从外部 JSON 加载详情，与 new_details 按 job_id 合并去重。
 
-    详情文件本身可能是列表结构（_facade().scrape_details 输出）或带 jobs/details 键的字典，
+    详情文件本身可能是列表结构（scrape_details 输出）或带 jobs/details 键的字典，
     这里都做兼容。优先保留 new_details 中的同名记录（更新覆盖旧值）。
 
     Args:

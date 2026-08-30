@@ -14,8 +14,8 @@ from webui.logging_setup import get_logger
 
 _logger = get_logger(__name__)
 
-def _facade():
-    return _sys.modules.get("scripts.boss_cdp_raw")
+from scripts.boss import cdp_session
+from scripts.boss import runtime
 
 def is_logged_in_search_response(data):
     """Return True only when BOSS returns jobs with plaintext salary."""
@@ -45,7 +45,7 @@ def probe_login_state(cdp, sid):
     """单次搜索 API 探测 BOSS 登录态（bool 兼容包装）。
 
     三态实现在 probe_login_state_tri；本函数只保留「是否已登录」语义，
-    供 _facade().wait_for_login 等既有调用方使用。
+    供 wait_for_login 等既有调用方使用。
     """
     return probe_login_state_tri(cdp, sid) == "logged_in"
 
@@ -120,7 +120,7 @@ def check_login_state(cdp_port=DEFAULT_CDP_PORT):
     Returns:
         True 已登录, False 未登录/受限/CDP 失败
     """
-    return _facade().check_login_state_tri(cdp_port) == "logged_in"
+    return check_login_state_tri(cdp_port) == "logged_in"
 
 
 def check_login_state_tri(cdp_port=DEFAULT_CDP_PORT):
@@ -131,7 +131,7 @@ def check_login_state_tri(cdp_port=DEFAULT_CDP_PORT):
         "restricted" 受限中 / "unknown" CDP 连接失败或超时
     """
     try:
-        cdp = _facade().CDPSession(cdp_port)
+        cdp = cdp_session.CDPSession(cdp_port)
         # 后台创建标签页，不抢占前台焦点，避免检测登录时弹窗
         r = cdp.send(CDP_CMD_CREATE_TARGET, {"url": CDP_ABOUT_BLANK, "background": True})
         tid = r["result"]["targetId"]
@@ -172,7 +172,7 @@ def wait_for_login(cdp_port=DEFAULT_CDP_PORT, timeout=DEFAULT_LOGIN_TIMEOUT, int
     account_id 非空时，登录成功会失效该账号的登录态缓存（D3 信号回写），
     下次探测重新判定，避免沿用登录前的旧状态。
     """
-    cdp = _facade().CDPSession(cdp_port)
+    cdp = cdp_session.CDPSession(cdp_port)
     r = cdp.send(CDP_CMD_CREATE_TARGET, {"url": "https://www.zhipin.com/web/user/"})
     tid = r["result"]["targetId"]
     r = cdp.send(CDP_CMD_ATTACH_TARGET, {"targetId": tid, "flatten": True})

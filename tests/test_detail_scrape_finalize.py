@@ -73,19 +73,18 @@ def _slow_sleep(seconds, label=None):
 
 
 def _run(list_data, *, tab_pool_size=2, finalize_timeout=600, sleeper=_no_sleep):
-    facade = mock.Mock()
-    facade._run_active = False
+    # 031 B5：boss 子模块去门面回溯，_facade patch 面撤销；会话经
+    # session_factory 注入替身，运行态走 scripts.boss.runtime 真实默认值。
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "details.json")
-        with mock.patch.object(ds, "_facade", return_value=facade):
-            results = ds.scrape_details(
-                list_data, output_path=out,
-                enable_parallel=True, tab_pool_size=tab_pool_size,
-                session_factory=lambda cdp_port=None: _FakeSession(),
-                sleeper=sleeper,
-                inter_job_gap_range=(0.02, 0.05),
-                finalize_timeout=finalize_timeout,
-            )
+        results = ds.scrape_details(
+            list_data, output_path=out,
+            enable_parallel=True, tab_pool_size=tab_pool_size,
+            session_factory=lambda cdp_port=None: _FakeSession(),
+            sleeper=sleeper,
+            inter_job_gap_range=(0.02, 0.05),
+            finalize_timeout=finalize_timeout,
+        )
         exists = os.path.exists(out)
         persisted = 0
         if exists:

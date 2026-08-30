@@ -8,8 +8,11 @@ from urllib.parse import urlencode
 from scripts.boss.constants import API_JOB_LIST_PATH, BROWSER_NOT_FOUND_HINT, CDP_CMD_ATTACH_TARGET, CDP_CMD_CLOSE_TARGET, CDP_CMD_CREATE_TARGET, DEFAULT_CDP_PORT, DEFAULT_CITY_INPUT, FETCH_API_JS_TEMPLATE, LOGIN_PROBE_QUERY, MSG_BOSS_LOGIN_STATUS, MSG_DEDICATED_BROWSER_STARTED
 from scripts.boss.search import build_search_url
 import sys as _sys
-def _facade():
-    return _sys.modules.get("scripts.boss_cdp_raw")
+from scripts.boss import city_map
+from scripts.boss import constants as boss_constants
+from scripts.boss import login
+from scripts.boss import runtime
+from scripts.boss import cdp_session
 
 def parse_jobs_eval_value(value):
     if not value:
@@ -37,12 +40,12 @@ def has_usable_smoke_jobs(jobs):
 
 def run_smoke_test(cdp_port=DEFAULT_CDP_PORT):
     """Run a real browser/API smoke test without writing result files."""
-    if not _facade().require_runtime_dependencies("requests", "websocket"):
+    if not runtime.require_runtime_dependencies("requests", "websocket"):
         return 1
 
     try:
-        cdp = _facade().CDPSession(cdp_port)
-        city_name, city_code = _facade().resolve_city(DEFAULT_CITY_INPUT)
+        cdp = cdp_session.CDPSession(cdp_port)
+        city_name, city_code = city_map.resolve_city(DEFAULT_CITY_INPUT)
         search_url = build_search_url(LOGIN_PROBE_QUERY, city_code, 1, {})
         r = cdp.send(CDP_CMD_CREATE_TARGET, {"url": search_url})
         tid = r["result"]["targetId"]
@@ -63,8 +66,8 @@ def run_smoke_test(cdp_port=DEFAULT_CDP_PORT):
             return 0
         print("❌ Smoke test 未拿到可用职位；请检查登录态或 BOSS API 返回")
         return 1
-    except (_facade().requests.ConnectionError, _facade().requests.Timeout, KeyError,
-            json.JSONDecodeError, _facade().websocket.WebSocketException, TimeoutError) as e:
+    except (runtime.requests.ConnectionError, runtime.requests.Timeout, KeyError,
+            json.JSONDecodeError, runtime.websocket.WebSocketException, TimeoutError) as e:
         print(f"❌ Smoke test 失败: {e}")
         return 1
 
@@ -98,7 +101,7 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
             all_pass = False
 
     # 检查 1: Chromium 浏览器（Chrome / Edge 双探测）
-    browsers = _facade().detect_chromium_browsers()
+    browsers = boss_constants.detect_chromium_browsers()
     found_parts = []
     if browsers.get("chrome"):
         found_parts.append("找到 Chrome ✅")
@@ -112,32 +115,32 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
                "未找到 Chrome 或 Edge", BROWSER_NOT_FOUND_HINT)
 
     # 检查 2: Python 依赖
-    deps_ok = _facade().require_runtime_dependencies("websocket", "requests")
+    deps_ok = runtime.require_runtime_dependencies("websocket", "requests")
     if deps_ok:
         append("deps", "Python 依赖", "ok", "requests / websocket 可导入")
     else:
         missing = []
-        if _facade().requests is None:
+        if runtime.requests is None:
             missing.append("requests")
-        if _facade().websocket is None:
+        if runtime.websocket is None:
             missing.append("websocket")
         append("deps", "Python 依赖", "fail",
                f"缺少依赖: {', '.join(missing)}，请运行 uv sync 或 pip install -r requirements.txt")
 
     # 检查 3: CDP 端口连通性（专用浏览器是否已启动）
     cdp_status = "skip"
-    if _facade().requests is None:
+    if runtime.requests is None:
         append("cdp", MSG_DEDICATED_BROWSER_STARTED, "skip",
                f"跳过 — 缺少 requests（无法探测 127.0.0.1:{cdp_port}）")
     else:
         try:
-            resp = _facade().requests.get(f"http://127.0.0.1:{cdp_port}/json/version", timeout=5)
+            resp = runtime.requests.get(f"http://127.0.0.1:{cdp_port}/json/version", timeout=5)
             data = resp.json()
             browser = data.get("Browser", "未知")
             cdp_status = "ok"
             append("cdp", MSG_DEDICATED_BROWSER_STARTED, "ok",
                    f"CDP 端口 {cdp_port} 就绪 — {browser}")
-        except (_facade().requests.ConnectionError, _facade().requests.Timeout):
+        except (runtime.requests.ConnectionError, runtime.requests.Timeout):
             cdp_status = "fail"
             append("cdp", MSG_DEDICATED_BROWSER_STARTED, "fail",
                    f"无法连接 127.0.0.1:{cdp_port}（启动任务时会自动拉起浏览器）")
@@ -152,7 +155,7 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
                "跳过 — 浏览器未就绪，无法探测登录态")
     else:
         try:
-            state = _facade().check_login_state_tri(cdp_port)
+            state = login.check_login_state_tri(cdp_port)
             if state == "logged_in":
                 append("boss_login", MSG_BOSS_LOGIN_STATUS, "ok",
                        "已登录（接口返回明文薪资）")
@@ -171,13 +174,13 @@ def collect_check_items(cdp_port=DEFAULT_CDP_PORT):
 
 
 def run_check(cdp_port=DEFAULT_CDP_PORT):
-    """运行环境诊断检查（终端展示层，逻辑见 _facade().collect_check_items）"""
+    """运行环境诊断检查（终端展示层，逻辑见 collect_check_items）"""
     print("=" * 50)
     print("  BOSS直聘 CDP 环境检查")
     print("=" * 50)
     print()
 
-    items, all_pass = _facade().collect_check_items(cdp_port)
+    items, all_pass = collect_check_items(cdp_port)
     for index, item in enumerate(items, start=1):
         mark = {"ok": "✅", "fail": "❌", "skip": "⏭️"}.get(item["status"], "?")
         print(f"[{index}/{len(items)}] {item['name']}...")

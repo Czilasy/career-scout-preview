@@ -20,6 +20,10 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
+from scripts.boss import cdp_session, city_map, detail_analyze, detail_scrape
+from scripts.boss import login as boss_login
+from scripts.boss import rate_limit, runtime, search
+from scripts.boss import constants as boss_constants
 
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "boss_cdp_raw.py"
@@ -144,16 +148,14 @@ class ParamEquivalenceTests(unittest.TestCase):
         list_data = list_data if list_data is not None else {"jobs": _make_jobs(2)}
         details = details if details is not None else []
         patches = [
-            mock.patch.object(self.module, "check_login_state", return_value=login),
-            mock.patch.object(
-                self.module, "scrape_list",
+            mock.patch.object(boss_login, "check_login_state", return_value=login),
+            mock.patch.object(search, "scrape_list",
                 mock.Mock(return_value=list_data, __name__="scrape_list"),
             ),
-            mock.patch.object(
-                self.module, "scrape_details",
+            mock.patch.object(detail_scrape, "scrape_details",
                 mock.Mock(return_value=details, __name__="scrape_details"),
             ),
-            mock.patch.object(self.module, "require_runtime_dependencies", return_value=True),
+            mock.patch.object(runtime, "require_runtime_dependencies", return_value=True),
         ]
         for p in patches:
             p.start()
@@ -177,7 +179,7 @@ class ParamEquivalenceTests(unittest.TestCase):
             keyword="AI Agent", city="101020100", pages=4,
             filters={"scale": "305"}, output_path="/tmp/list.json", start_page=2,
         )
-        args, kwargs = self.module.scrape_list.call_args
+        args, kwargs = search.scrape_list.call_args
         # scrape_list(keyword, city_input, max_pages, filters, output_path, ...)
         self.assertEqual(args[0], "AI Agent")
         self.assertEqual(args[1], "101020100")
@@ -193,8 +195,8 @@ class ParamEquivalenceTests(unittest.TestCase):
             keyword="Java", city="上海", pages=1, cdp_port=9333,
         )
         # check_login_state 用位置参数（与 main 一致）；scrape_list 用 kwargs
-        self.assertEqual(self.module.check_login_state.call_args.args[0], 9333)
-        self.assertEqual(self.module.scrape_list.call_args.kwargs.get("cdp_port"), 9333)
+        self.assertEqual(boss_login.check_login_state.call_args.args[0], 9333)
+        self.assertEqual(search.scrape_list.call_args.kwargs.get("cdp_port"), 9333)
 
     def test_passes_detail_and_max_details_to_scrape_details(self):
         """detail=True 时 scrape_details 收到 max_details / detail_output_path。"""
@@ -203,8 +205,8 @@ class ParamEquivalenceTests(unittest.TestCase):
             keyword="Java", city="上海", pages=1,
             detail=True, max_details=5, detail_output_path="/tmp/det.json",
         )
-        args, kwargs = self.module.scrape_details.call_args
-        self.assertEqual(args[0], self.module.scrape_list.return_value)
+        args, kwargs = detail_scrape.scrape_details.call_args
+        self.assertEqual(args[0], search.scrape_list.return_value)
         self.assertEqual(args[1], 5)
         self.assertEqual(args[2], "/tmp/det.json")
 
@@ -214,7 +216,7 @@ class ParamEquivalenceTests(unittest.TestCase):
         result = self.module.run_search_programmatic(
             keyword="Java", city="上海", pages=1, detail=False,
         )
-        self.module.scrape_details.assert_not_called()
+        detail_scrape.scrape_details.assert_not_called()
         self.assertIsNone(result["details"])
 
     def test_scrape_details_skipped_when_no_jobs(self):
@@ -223,7 +225,7 @@ class ParamEquivalenceTests(unittest.TestCase):
         result = self.module.run_search_programmatic(
             keyword="Java", city="上海", pages=1, detail=True,
         )
-        self.module.scrape_details.assert_not_called()
+        detail_scrape.scrape_details.assert_not_called()
         self.assertIsNone(result["details"])
 
     def test_parallel_params_forwarded_to_scrape_details(self):
@@ -234,7 +236,7 @@ class ParamEquivalenceTests(unittest.TestCase):
             enable_parallel=True, tab_pool_size=3,
             stagger_range=(2.0, 4.0), inter_job_gap_range=(5.0, 8.0), reset_every=2,
         )
-        kwargs = self.module.scrape_details.call_args.kwargs
+        kwargs = detail_scrape.scrape_details.call_args.kwargs
         self.assertTrue(kwargs.get("enable_parallel"))
         self.assertEqual(kwargs.get("tab_pool_size"), 3)
         self.assertEqual(kwargs.get("stagger_range"), (2.0, 4.0))
@@ -249,13 +251,13 @@ class ParamEquivalenceTests(unittest.TestCase):
             self.module.run_search_programmatic(
                 keyword="Java", city="上海", pages=1, events_output=events_path,
             )
-            kwargs = self.module.scrape_details.call_args.kwargs
+            kwargs = detail_scrape.scrape_details.call_args.kwargs
             self.assertIsNotNone(kwargs.get("event_callback"))
 
     def test_analysis_flag_invokes_analyze(self):
         """analysis=True 时调用 analyze，并传入 list_data/details/keyword。"""
         list_data, details = self._patch_pipeline(details=[{"job_id": "x"}])
-        with mock.patch.object(self.module, "analyze", mock.Mock()) as m_analyze:
+        with mock.patch.object(detail_analyze, "analyze", mock.Mock()) as m_analyze:
             self.module.run_search_programmatic(
                 keyword="Java", city="上海", pages=1, analysis=True,
             )
@@ -285,10 +287,10 @@ class LogForwardingTests(unittest.TestCase):
             print("line-2")
             return {"jobs": _make_jobs(1)}
 
-        with mock.patch.object(self.module, "check_login_state", return_value=True), \
-                mock.patch.object(self.module, "scrape_list", side_effect=fake_scrape_list), \
-                mock.patch.object(self.module, "scrape_details", return_value=[]), \
-                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+        with mock.patch.object(boss_login, "check_login_state", return_value=True), \
+                mock.patch.object(search, "scrape_list", side_effect=fake_scrape_list), \
+                mock.patch.object(detail_scrape, "scrape_details", return_value=[]), \
+                mock.patch.object(runtime, "require_runtime_dependencies", return_value=True):
             self.module.run_search_programmatic(
                 keyword="Java", city="上海", pages=1,
                 on_log=received.append,
@@ -298,12 +300,11 @@ class LogForwardingTests(unittest.TestCase):
 
     def test_on_log_none_does_not_raise(self):
         """on_log=None 时 print 走原 stdout，不报错。"""
-        with mock.patch.object(self.module, "check_login_state", return_value=True), \
-                mock.patch.object(
-                    self.module, "scrape_list",
+        with mock.patch.object(boss_login, "check_login_state", return_value=True), \
+                mock.patch.object(search, "scrape_list",
                     mock.Mock(return_value={"jobs": []}),
                 ), \
-                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+                mock.patch.object(runtime, "require_runtime_dependencies", return_value=True):
             # 用真实 stdout 跑一次，不应抛异常
             result = self.module.run_search_programmatic(
                 keyword="Java", city="上海", pages=1, detail=False,
@@ -320,9 +321,9 @@ class LogForwardingTests(unittest.TestCase):
         def fake_scrape_list(*args, **kwargs):
             raise err
 
-        with mock.patch.object(self.module, "check_login_state", return_value=True), \
-                mock.patch.object(self.module, "scrape_list", side_effect=fake_scrape_list), \
-                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+        with mock.patch.object(boss_login, "check_login_state", return_value=True), \
+                mock.patch.object(search, "scrape_list", side_effect=fake_scrape_list), \
+                mock.patch.object(runtime, "require_runtime_dependencies", return_value=True):
             with self.assertRaises(self.module.RiskControlError):
                 self.module.run_search_programmatic(
                     keyword="Java", city="上海", pages=3,
@@ -346,27 +347,25 @@ class PollCallbackTests(unittest.TestCase):
     def test_on_poll_forwarded_to_scrape_list_and_scrape_details(self):
         """on_poll 作为 kwarg 传给 scrape_list 与 scrape_details。"""
         on_poll = mock.Mock()
-        with mock.patch.object(self.module, "check_login_state", return_value=True), \
-                mock.patch.object(
-                    self.module, "scrape_list",
+        with mock.patch.object(boss_login, "check_login_state", return_value=True), \
+                mock.patch.object(search, "scrape_list",
                     mock.Mock(return_value={"jobs": _make_jobs(2)}),
                 ), \
-                mock.patch.object(self.module, "scrape_details", return_value=[]), \
-                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+                mock.patch.object(detail_scrape, "scrape_details", return_value=[]), \
+                mock.patch.object(runtime, "require_runtime_dependencies", return_value=True):
             self.module.run_search_programmatic(
                 keyword="Java", city="上海", pages=1, on_poll=on_poll,
             )
-            self.assertEqual(self.module.scrape_list.call_args.kwargs.get("on_poll"), on_poll)
-            self.assertEqual(self.module.scrape_details.call_args.kwargs.get("on_poll"), on_poll)
+            self.assertEqual(search.scrape_list.call_args.kwargs.get("on_poll"), on_poll)
+            self.assertEqual(detail_scrape.scrape_details.call_args.kwargs.get("on_poll"), on_poll)
 
     def test_on_poll_none_does_not_raise(self):
         """on_poll=None 时编排正常完成。"""
-        with mock.patch.object(self.module, "check_login_state", return_value=True), \
-                mock.patch.object(
-                    self.module, "scrape_list",
+        with mock.patch.object(boss_login, "check_login_state", return_value=True), \
+                mock.patch.object(search, "scrape_list",
                     mock.Mock(return_value={"jobs": []}),
                 ), \
-                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+                mock.patch.object(runtime, "require_runtime_dependencies", return_value=True):
             self.module.run_search_programmatic(
                 keyword="Java", city="上海", pages=1, detail=False, on_poll=None,
             )
@@ -384,30 +383,28 @@ class CancelEventForwardingTests(unittest.TestCase):
 
     def test_cancel_event_forwarded_to_scrape_list(self):
         cancel = threading.Event()
-        with mock.patch.object(self.module, "check_login_state", return_value=True), \
-                mock.patch.object(
-                    self.module, "scrape_list",
+        with mock.patch.object(boss_login, "check_login_state", return_value=True), \
+                mock.patch.object(search, "scrape_list",
                     mock.Mock(return_value={"jobs": []}),
                 ), \
-                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+                mock.patch.object(runtime, "require_runtime_dependencies", return_value=True):
             self.module.run_search_programmatic(
                 keyword="Java", city="上海", pages=1, detail=False, cancel_event=cancel,
             )
-            self.assertEqual(self.module.scrape_list.call_args.kwargs.get("cancel_event"), cancel)
+            self.assertEqual(search.scrape_list.call_args.kwargs.get("cancel_event"), cancel)
 
     def test_cancel_event_forwarded_to_scrape_details(self):
         cancel = threading.Event()
-        with mock.patch.object(self.module, "check_login_state", return_value=True), \
-                mock.patch.object(
-                    self.module, "scrape_list",
+        with mock.patch.object(boss_login, "check_login_state", return_value=True), \
+                mock.patch.object(search, "scrape_list",
                     mock.Mock(return_value={"jobs": _make_jobs(2)}),
                 ), \
-                mock.patch.object(self.module, "scrape_details", return_value=[]), \
-                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+                mock.patch.object(detail_scrape, "scrape_details", return_value=[]), \
+                mock.patch.object(runtime, "require_runtime_dependencies", return_value=True):
             self.module.run_search_programmatic(
                 keyword="Java", city="上海", pages=1, cancel_event=cancel,
             )
-            self.assertEqual(self.module.scrape_details.call_args.kwargs.get("cancel_event"), cancel)
+            self.assertEqual(detail_scrape.scrape_details.call_args.kwargs.get("cancel_event"), cancel)
 
 
 class ScrapeListCancelCheckpointTests(unittest.TestCase):
@@ -419,8 +416,8 @@ class ScrapeListCancelCheckpointTests(unittest.TestCase):
     def _patch_deps(self):
         """patch scrape_list 的外部依赖，让循环能在 fake CDP 上跑起来。"""
         patches = [
-            mock.patch.object(self.module, "resolve_city", return_value=("上海", "101020100")),
-            mock.patch.object(self.module, "incr_request"),
+            mock.patch.object(city_map, "resolve_city", return_value=("上海", "101020100")),
+            mock.patch.object(rate_limit, "incr_request"),
             mock.patch.object(self.module.time, "sleep", _no_sleep),
             mock.patch.object(self.module.random, "uniform", lambda a, b: 0.0),
             mock.patch.object(self.module.random, "randint", lambda a, b: 1),
@@ -444,7 +441,7 @@ class ScrapeListCancelCheckpointTests(unittest.TestCase):
             if len(poll_calls) >= 2:
                 cancel.set()
 
-        with mock.patch.object(self.module, "CDPSession", lambda cdp_port=None: fake_session):
+        with mock.patch.object(cdp_session, "CDPSession", lambda cdp_port=None: fake_session):
             with tempfile.TemporaryDirectory() as tmp:
                 output = str(pathlib.Path(tmp) / "list.json")
                 with self.assertRaises(self.module.SearchCancelled):
@@ -464,7 +461,7 @@ class ScrapeListCancelCheckpointTests(unittest.TestCase):
         jobs_payload = _list_payload(_make_jobs(2))
         fake_session = _FakeListCDPSession(jobs_payload)
 
-        with mock.patch.object(self.module, "CDPSession", lambda cdp_port=None: fake_session):
+        with mock.patch.object(cdp_session, "CDPSession", lambda cdp_port=None: fake_session):
             with tempfile.TemporaryDirectory() as tmp:
                 output = str(pathlib.Path(tmp) / "list.json")
                 # 不应抛 SearchCancelled
@@ -536,8 +533,8 @@ class ExceptionMappingTests(unittest.TestCase):
 
     def test_login_required_raised_when_check_login_state_false(self):
         """check_login_state 返回 False 时抛 LoginRequiredError。"""
-        with mock.patch.object(self.module, "check_login_state", return_value=False), \
-                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+        with mock.patch.object(boss_login, "check_login_state", return_value=False), \
+                mock.patch.object(runtime, "require_runtime_dependencies", return_value=True):
             with self.assertRaises(self.module.LoginRequiredError):
                 self.module.run_search_programmatic(
                     keyword="Java", city="上海", pages=1,
@@ -545,9 +542,9 @@ class ExceptionMappingTests(unittest.TestCase):
 
     def test_skip_login_check_skips_login_probe(self):
         """skip_login_check=True 时不调用 check_login_state，直接进 scrape_list。"""
-        with mock.patch.object(self.module, "check_login_state") as m_check, \
-                mock.patch.object(self.module, "scrape_list", return_value={"jobs": []}) as m_list, \
-                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+        with mock.patch.object(boss_login, "check_login_state") as m_check, \
+                mock.patch.object(search, "scrape_list", return_value={"jobs": []}) as m_list, \
+                mock.patch.object(runtime, "require_runtime_dependencies", return_value=True):
             self.module.run_search_programmatic(
                 keyword="Java", city="上海", pages=1, skip_login_check=True,
             )
@@ -561,9 +558,9 @@ class ExceptionMappingTests(unittest.TestCase):
         def boom(*args, **kwargs):
             raise err
 
-        with mock.patch.object(self.module, "check_login_state", return_value=True), \
-                mock.patch.object(self.module, "scrape_list", side_effect=boom), \
-                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+        with mock.patch.object(boss_login, "check_login_state", return_value=True), \
+                mock.patch.object(search, "scrape_list", side_effect=boom), \
+                mock.patch.object(runtime, "require_runtime_dependencies", return_value=True):
             with self.assertRaises(self.module.CDPUnavailableError) as ctx:
                 self.module.run_search_programmatic(
                     keyword="Java", city="上海", pages=1,
@@ -579,9 +576,9 @@ class ExceptionMappingTests(unittest.TestCase):
         def boom(*args, **kwargs):
             raise err
 
-        with mock.patch.object(self.module, "check_login_state", return_value=True), \
-                mock.patch.object(self.module, "scrape_list", side_effect=boom), \
-                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+        with mock.patch.object(boss_login, "check_login_state", return_value=True), \
+                mock.patch.object(search, "scrape_list", side_effect=boom), \
+                mock.patch.object(runtime, "require_runtime_dependencies", return_value=True):
             with self.assertRaises(self.module.RiskControlError) as ctx:
                 self.module.run_search_programmatic(
                     keyword="Java", city="上海", pages=3,
@@ -598,9 +595,9 @@ class ExceptionMappingTests(unittest.TestCase):
         def boom(*args, **kwargs):
             raise err
 
-        with mock.patch.object(self.module, "check_login_state", return_value=True), \
-                mock.patch.object(self.module, "scrape_list", side_effect=boom), \
-                mock.patch.object(self.module, "require_runtime_dependencies", return_value=True):
+        with mock.patch.object(boss_login, "check_login_state", return_value=True), \
+                mock.patch.object(search, "scrape_list", side_effect=boom), \
+                mock.patch.object(runtime, "require_runtime_dependencies", return_value=True):
             with self.assertRaises(self.module.SearchCancelled) as ctx:
                 self.module.run_search_programmatic(
                     keyword="Java", city="上海", pages=1,
@@ -620,8 +617,8 @@ class EmptyPageNotRiskControlTests(unittest.TestCase):
 
     def _patch_deps(self):
         patches = [
-            mock.patch.object(self.module, "resolve_city", return_value=("上海", "101020100")),
-            mock.patch.object(self.module, "incr_request"),
+            mock.patch.object(city_map, "resolve_city", return_value=("上海", "101020100")),
+            mock.patch.object(rate_limit, "incr_request"),
             mock.patch.object(self.module.time, "sleep", _no_sleep),
             mock.patch.object(self.module.random, "uniform", lambda a, b: 0.0),
             mock.patch.object(self.module.random, "randint", lambda a, b: 1),
@@ -636,7 +633,7 @@ class EmptyPageNotRiskControlTests(unittest.TestCase):
         session = _FakeListCDPSession(payload)
         with tempfile.TemporaryDirectory() as tmp:
             output = str(pathlib.Path(tmp) / "list.json")
-            with mock.patch.object(self.module, "CDPSession",
+            with mock.patch.object(cdp_session, "CDPSession",
                                    lambda cdp_port=None: session):
                 result = self.module.scrape_list("Java", "上海", 3, {}, output)
         return result, session
@@ -666,7 +663,7 @@ class EmptyPageNotRiskControlTests(unittest.TestCase):
         session = _FakeListCDPSession(payload)
         with tempfile.TemporaryDirectory() as tmp:
             output = str(pathlib.Path(tmp) / "list.json")
-            with mock.patch.object(self.module, "CDPSession",
+            with mock.patch.object(cdp_session, "CDPSession",
                                    lambda cdp_port=None: session):
                 with self.assertRaises(self.module.RiskControlError):
                     self.module.scrape_list("Java", "上海", 3, {}, output)

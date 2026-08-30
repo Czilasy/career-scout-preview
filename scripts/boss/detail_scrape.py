@@ -19,8 +19,11 @@ from webui.logging_setup import get_logger
 
 _logger = get_logger(__name__)
 
-def _facade():
-    return _sys.modules.get("scripts.boss_cdp_raw")
+from scripts.boss import cdp_session
+from scripts.boss import constants as boss_constants
+from scripts.boss import rate_limit
+from scripts.boss import runtime
+from scripts.boss import search
 
 # ============================================================
 # 抓取详情
@@ -146,7 +149,7 @@ def _scrape_one_detail(ws, job, global_idx, total, results, output_path, *,
     company = job.get("boss_name", "")
     print(f"[{global_idx + 1}/{total}] {company} - {title}")
 
-    _facade().incr_request()
+    rate_limit.incr_request()
 
     # 后台创建标签页，不抢占前台焦点，避免抓取时反复弹窗
     r = ws.send(CDP_CMD_CREATE_TARGET, {"url": CDP_ABOUT_BLANK, "background": True})
@@ -274,7 +277,7 @@ def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
     spec 007 ⑧：与 ``_scrape_one_detail`` 的区别——
     - 不 createTarget/attach（tab 已由 ``_tab_worker`` 建池）
     - 不 closeTarget（抓完留给下一个 job 复用）
-    - ``results.append`` + ``write_json_atomic`` + ``_facade().incr_request`` 在 ``results_lock`` 内
+    - ``results.append`` + ``write_json_atomic`` + ``rate_limit.incr_request`` 在 ``results_lock`` 内
     - 日志带 ``tab_label`` 前缀，多路汇总进进度框不混乱
 
     返回 True=成功，False=isolated failure，"login_required"=登录墙（触发降级）。
@@ -283,9 +286,9 @@ def _scrape_detail_on_tab(ws, sid, job, global_idx, total, *,
     company = job.get("boss_name", "")
     print(f"[{tab_label}] [{global_idx + 1}/{total}] {company} - {title}")
 
-    # _facade().incr_request 操作全局 _request_counter，非线程安全，加锁
+    # rate_limit.incr_request 操作全局 _request_counter，非线程安全，加锁
     with results_lock:
-        _facade().incr_request()
+        rate_limit.incr_request()
 
     detail_url = build_detail_url(job)
     ws.send(CDP_CMD_PAGE_NAVIGATE, {"url": detail_url}, sid)
@@ -393,9 +396,9 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
                 simulation_mode=None):
     """常驻 tab 工作线程：建池 → 错峰启动 → 循环领任务抓详情 → 补位节奏 → 关池。
 
-    spec 007 ⑧：每个 tab 配一条独立工作线程 + 独立 CDP 会话（_facade().CDPSession 是
+    spec 007 ⑧：每个 tab 配一条独立工作线程 + 独立 CDP 会话（cdp_session.CDPSession 是
     WebSocket 连接，不能多线程共享）。线程安全通过 ``results_lock`` 保护共享
-   状态（results/output_path/_facade().incr_request），``degrade_event`` 用于 login 墙降级。
+   状态（results/output_path/rate_limit.incr_request），``degrade_event`` 用于 login 墙降级。
     """
     tab_label = f"tab{tab_id + 1}"
     ws = session_factory(cdp_port)
@@ -523,8 +526,8 @@ def scrape_details(list_data, max_details=None, output_path=None,
     spec 007 ⑧ 并行化（常驻 tab 池 + 工作线程 + 错峰/补位/降级）：
 
     - ``batch_size``: 串行模式每批最多 5 个候选岗位（默认 5，上限 5）。
-    - ``session_factory``: 返回 CDP 会话的可调用对象，默认 ``_facade().CDPSession``。
-      测试可通过它注入 fake 会话；CLI 调用不传该参数时走真实 ``_facade().CDPSession``。
+    - ``session_factory``: 返回 CDP 会话的可调用对象，默认 ``cdp_session.CDPSession``。
+      测试可通过它注入 fake 会话；CLI 调用不传该参数时走真实 ``cdp_session.CDPSession``。
     - ``sleeper``: ``sleeper(seconds, label=None)`` 用于所有受控等待，
       默认委托 ``time.sleep``。``label`` 用于测试区分 readiness_wait /
       inter_job_gap 等不同等待类型。
@@ -557,7 +560,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
             f"batch_size must be an integer between 1 and 5, got {batch_size!r}"
         )
     if session_factory is None:
-        session_factory = _facade().CDPSession
+        session_factory = cdp_session.CDPSession
     if sleeper is None:
         sleeper = _default_scrape_sleeper
     if not inter_job_gap_range or len(inter_job_gap_range) != 2:
@@ -577,7 +580,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
     if stg_lo < 0 or stg_hi < stg_lo:
         raise ValueError(f"stagger_range invalid: {stagger_range!r}")
 
-    if not _facade()._run_active:
+    if not runtime._run_active:
         begin_request_run()
     raw_jobs = list_data.get("jobs", [])
     if max_details:
@@ -698,7 +701,7 @@ def scrape_details(list_data, max_details=None, output_path=None,
             try:
                 for i, job in enumerate(batch):
                     global_idx = batch_start + i
-                    # programmatic 取消/轮询检查点（与 _facade().scrape_list 逐页检查点同语义）；
+                    # programmatic 取消/轮询检查点（与 search.scrape_list 逐页检查点同语义）；
                     # CLI 不传 cancel_event/on_poll，行为与现状完全一致。
                     if cancel_event is not None and cancel_event.is_set():
                         write_json_atomic(output_path, results)

@@ -25,6 +25,8 @@ from webui.source import (
 
 import json as _json_for_inprocess
 from scripts import boss_cdp_raw as _boss_for_inprocess
+from scripts.boss import constants as boss_constants
+from scripts.boss import login, search
 from webui.source import _input_hash as _boss_input_hash
 
 from tests.source.harness import _LoginCacheIsolated
@@ -769,7 +771,7 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
 
     def test_request_counter_is_isolated_per_run(self):
         """B053：命中上限后新一轮 begin_request_run 从 0 重新计数。"""
-        with mock.patch.object(_boss_for_inprocess, "MAX_API_REQUESTS", 3):
+        with mock.patch.object(boss_constants, "MAX_API_REQUESTS", 3):
             _boss_for_inprocess.begin_request_run()
             for _ in range(3):
                 _boss_for_inprocess.incr_request()
@@ -848,7 +850,7 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
 
     def test_programmatic_run_resets_counter_between_runs(self):
         """B053：run_search_programmatic 每轮独立计数，组合流程内不重复重置。"""
-        with mock.patch.object(_boss_for_inprocess, "MAX_API_REQUESTS", 3):
+        with mock.patch.object(boss_constants, "MAX_API_REQUESTS", 3):
             output = self.artifact_root / "prog_run.json"
 
             def fake_list(*_args, **_kwargs):
@@ -857,9 +859,9 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
                 return {"jobs": [], "total": 0}
 
             with mock.patch.object(
-                _boss_for_inprocess, "scrape_list", side_effect=fake_list,
+                search, "scrape_list", side_effect=fake_list,
             ), mock.patch.object(
-                _boss_for_inprocess, "check_login_state", return_value=True,
+                login, "check_login_state", return_value=True,
             ):
                 _boss_for_inprocess.run_search_programmatic(
                     keyword="AI", city="上海", pages=1,

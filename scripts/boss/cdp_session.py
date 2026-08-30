@@ -8,22 +8,21 @@ from scripts.boss.constants import DEFAULT_CDP_PORT
 from scripts.boss.exceptions import CDPUnavailableError
 from scripts.boss.constants import log
 import sys as _sys
-def _facade():
-    return _sys.modules.get("scripts.boss_cdp_raw")
+from scripts.boss import runtime
 
 # ============================================================
 # CDP 连接
 # ============================================================
 class CDPSession:
     def __init__(self, cdp_port=DEFAULT_CDP_PORT):
-        if not _facade().require_runtime_dependencies("requests", "websocket"):
+        if not runtime.require_runtime_dependencies("requests", "websocket"):
             raise RuntimeError("缺少 CDP 运行依赖")
         self.cdp_port = cdp_port
         try:
-            resp = _facade().requests.get(f"http://127.0.0.1:{cdp_port}/json/version", timeout=10)
+            resp = runtime.requests.get(f"http://127.0.0.1:{cdp_port}/json/version", timeout=10)
             ws_url = resp.json()["webSocketDebuggerUrl"]
-            self.ws = _facade().websocket.create_connection(ws_url, timeout=60)
-        except (_facade().requests.ConnectionError, _facade().requests.Timeout) as e:
+            self.ws = runtime.websocket.create_connection(ws_url, timeout=60)
+        except (runtime.requests.ConnectionError, runtime.requests.Timeout) as e:
             raise CDPUnavailableError(
                 f"连不上调试浏览器（127.0.0.1:{cdp_port}）。\n"
                 "请先运行 --setup-chrome 启动带调试端口的 Chrome，并登录 BOSS直聘；\n"
@@ -34,7 +33,7 @@ class CDPSession:
                 f"端口 {cdp_port} 上的服务不是 Chrome 调试端口（返回内容无法识别）。\n"
                 "请用 --setup-chrome 启动专用 Chrome，不要占用该端口。"
             ) from e
-        except _facade().websocket.WebSocketException as e:
+        except runtime.websocket.WebSocketException as e:
             raise CDPUnavailableError(
                 f"调试浏览器（127.0.0.1:{cdp_port}）的 WebSocket 连接失败。\n"
                 "请关闭该 Chrome 后重新运行 --setup-chrome。"
@@ -76,9 +75,9 @@ class CDPSession:
 
             try:
                 raw = self.ws.recv()
-            except _facade().websocket.WebSocketTimeoutException:
+            except runtime.websocket.WebSocketTimeoutException:
                 raise TimeoutError(f"CDP WebSocket recv 超时, method={method}")
-            except _facade().websocket.WebSocketException as exc:
+            except runtime.websocket.WebSocketException as exc:
                 raise ConnectionError(f"CDP 连接异常：{exc}")
 
             try:

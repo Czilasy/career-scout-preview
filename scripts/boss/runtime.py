@@ -3,12 +3,19 @@
 """运行时依赖注入 require_runtime_dependencies（021 B8 T026 自 scripts/boss_cdp_raw.py 物理搬运）。"""
 
 import sys
-import sys as _sys
-def _facade():
-    return _sys.modules.get("scripts.boss_cdp_raw")
 
 requests = None
 websocket = None
+_run_active = False  # 是否正在 run_search_programmatic 组合运行内（031 B5 自门面迁居）
+
+
+def set_run_active(value: bool) -> None:
+    """置位/清除组合运行活动标志，并镜像到门面命名空间（旧读取方兼容）。"""
+    global _run_active
+    _run_active = value
+    facade_mod = sys.modules.get('scripts.boss_cdp_raw')
+    if facade_mod is not None:
+        facade_mod._run_active = value
 
 def require_runtime_dependencies(*names):
     global requests, websocket

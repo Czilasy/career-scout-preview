@@ -14,6 +14,8 @@ import tempfile
 import unittest
 from contextlib import ExitStack
 from unittest import mock
+from scripts.boss import constants as boss_constants
+from scripts.boss import login, runtime, smoke
 
 import requests as real_requests
 
@@ -132,11 +134,11 @@ class CollectCheckItemsTests(unittest.TestCase):
                 raise real_requests.ConnectionError("no")
 
         patchers = [
-            mock.patch.object(module, "require_runtime_dependencies", return_value=deps_ok),
-            mock.patch.object(module, "requests", FakeRequests),
-            mock.patch.object(module, "detect_chromium_browsers",
+            mock.patch.object(runtime, "require_runtime_dependencies", return_value=deps_ok),
+            mock.patch.object(runtime, "requests", FakeRequests),
+            mock.patch.object(boss_constants, "detect_chromium_browsers",
                               return_value={"chrome": "C:/chrome.exe", "edge": None}),
-            mock.patch.object(module, "check_login_state_tri",
+            mock.patch.object(login, "check_login_state_tri",
                               return_value="logged_in" if logged_in else "not_logged_in"),
         ]
         for patcher in patchers:
@@ -181,11 +183,11 @@ class CollectCheckItemsTests(unittest.TestCase):
     def test_missing_browser_fails_with_hint(self):
         load_module()
         module2 = load_module()
-        with mock.patch.object(module2, "require_runtime_dependencies", return_value=True), \
-                mock.patch.object(module2, "detect_chromium_browsers",
+        with mock.patch.object(runtime, "require_runtime_dependencies", return_value=True), \
+                mock.patch.object(boss_constants, "detect_chromium_browsers",
                                   return_value={"chrome": None, "edge": None}), \
-                mock.patch.object(module2, "requests", mock.Mock()), \
-                mock.patch.object(module2, "check_login_state_tri", return_value="logged_in"):
+                mock.patch.object(runtime, "requests", mock.Mock()), \
+                mock.patch.object(login, "check_login_state_tri", return_value="logged_in"):
             items, all_pass = module2.collect_check_items(cdp_port=9333)
         self.assertFalse(all_pass)
         self.assertEqual(items[0]["status"], "fail")
@@ -193,7 +195,7 @@ class CollectCheckItemsTests(unittest.TestCase):
 
     def test_run_check_prints_items_and_returns_exit_code(self):
         module = load_module()
-        with mock.patch.object(module, "collect_check_items",
+        with mock.patch.object(smoke, "collect_check_items",
                                return_value=([{
                                    "id": "browsers", "name": "Chromium 浏览器",
                                    "status": "ok", "detail": "找到 Chrome ✅", "fix": None,
