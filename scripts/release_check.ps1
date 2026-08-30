@@ -15,7 +15,8 @@
 #>
 param(
     [string]$Version = "",
-    [switch]$RequireArtifact
+    [switch]$RequireArtifact,
+    [switch]$SkipTagCheck
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +25,24 @@ Set-Location -LiteralPath $root
 
 Write-Host "==> Release closure checks (no full test suite)"
 Write-Host "Root: $root"
+
+# 版本-标签纪律（FR-025）：CHANGELOG 最新版本必须已打 v* 标签，
+# 防止"先发版后打标"脱节导致应用内更新与 Release 资产错位。
+if ($SkipTagCheck) {
+    Write-Host "==> Tag discipline: SKIPPED (-SkipTagCheck 显式豁免；发布完成前请补打标签)"
+} else {
+    Write-Host "==> Tag discipline: CHANGELOG latest vs git tags"
+    $latest = $null
+    foreach ($line in Get-Content -LiteralPath (Join-Path $root "CHANGELOG.md")) {
+        if ($line -match '^## \[(\d+\.\d+\.\d+)\]') { $latest = $Matches[1]; break }
+    }
+    if (-not $latest) { throw "CHANGELOG 中找不到版本标题（## [x.y.z]）" }
+    & git rev-parse --verify --quiet "refs/tags/v$latest" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "版本与标签脱节：CHANGELOG 最新版本 $latest 缺少对应标签 v$latest"
+    }
+    Write-Host "==> Tag discipline: v$latest OK"
+}
 
 if ($Version -ne "") {
     Write-Host "==> Version consistency: $Version"

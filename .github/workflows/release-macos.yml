@@ -14,7 +14,31 @@ permissions:
   contents: write
 
 jobs:
+  # 发布前测试门禁：后端全量不过，不进入 DMG 构建与上传（FR-024）
+  test-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: 安装项目依赖
+        run: uv sync --python 3.11
+
+      - name: 后端全量测试
+        run: uv run python -m unittest discover -s tests
+
   build-dmg:
+    needs: test-gate
     runs-on: macos-latest
     steps:
       - name: 检出代码

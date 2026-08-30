@@ -40,3 +40,40 @@ jobs:
       - name: 前端测试
         working-directory: webui
         run: npm test
+
+  # Windows 运行器（自带 Chrome）：抓住只有 Windows 平台才暴露的问题
+  # （路径分隔、编码、CDP/浏览器行为差异），与 test 作业同构。
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: 安装项目依赖
+        run: uv sync --python 3.11
+
+      - name: 后端测试
+        run: uv run python -m unittest discover -s tests
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 安装前端依赖
+        working-directory: webui
+        run: npm ci
+
+      - name: 前端测试
+        working-directory: webui
+        run: npm test
