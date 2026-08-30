@@ -507,7 +507,7 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
                     return _first_search(*_args, **_kwargs)
                 return _resumed_search(*_args, **_kwargs)
 
-            with mock.patch("webui.app.threading.Timer", new=_RecordingTimer), \
+            with mock.patch("threading.Timer", new=_RecordingTimer), \
                     mock.patch("webui.pipeline_exec.ensure_chrome_ready",
                                return_value=(True, "")), \
                     mock.patch("webui.pipeline_exec.run_search",

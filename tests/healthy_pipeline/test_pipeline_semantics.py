@@ -455,7 +455,7 @@ class Slice8RecrawlTests(unittest.TestCase):
                 ).status_code
 
         executor = self.app.config["PIPELINE_EXECUTOR"]
-        with mock.patch("webui.app.uuid.uuid4", side_effect=synchronized_uuid4), \
+        with mock.patch("uuid.uuid4", side_effect=synchronized_uuid4), \
                 mock.patch.object(executor, "submit") as submit, \
                 ThreadPoolExecutor(max_workers=2) as requests:
             statuses = sorted(f.result(timeout=3) for f in (

@@ -66,7 +66,7 @@ class ConvergenceUnifiedRecoveryTests(unittest.TestCase):
         """executor 拒绝提交时不得留下 DB running / 内存 queued 分裂。"""
         executor = self.app.config["PIPELINE_EXECUTOR"]
         fixed_uuid = mock.Mock(hex="abcdef1234567890")
-        with mock.patch("webui.app.uuid.uuid4", return_value=fixed_uuid), \
+        with mock.patch("uuid.uuid4", return_value=fixed_uuid), \
                 mock.patch.object(
                     executor, "submit", side_effect=RuntimeError("executor rejected")
                 ):

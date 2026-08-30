@@ -1167,7 +1167,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "webui.pipeline_exec.fetch_job_details", side_effect=details,
                 ) as fetch_details, \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"), \
-                mock.patch("webui.app.os.replace", side_effect=OSError("disk full")):
+                mock.patch("os.replace", side_effect=OSError("disk full")):
             response = self._post_ai_screen(scrape_task_id, profile_summary="")
             task_id = response.get_json()["task_id"]
             finished = _wait_for_pipeline_task(self.client, task_id)

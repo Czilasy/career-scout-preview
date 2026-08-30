@@ -33,7 +33,7 @@ class PipelineTasksCleanupTests(unittest.TestCase):
 
     def test_cleanup_schedules_timer_on_terminal_status(self):
         """终态后 30 分钟定时器被注册，daemon=True。"""
-        with mock.patch("webui.app.threading.Timer") as MockTimer:
+        with mock.patch("threading.Timer") as MockTimer:
             mock_timer = mock.MagicMock()
             MockTimer.return_value = mock_timer
             self.schedule_cleanup("task-done-123")
@@ -46,7 +46,7 @@ class PipelineTasksCleanupTests(unittest.TestCase):
     def test_cleanup_callback_removes_task(self):
         """Timer 回调执行后任务从 _pipeline_tasks 移除。"""
         self.pipeline_tasks["task-done-456"] = {"status": "done"}
-        with mock.patch("webui.app.threading.Timer") as MockTimer:
+        with mock.patch("threading.Timer") as MockTimer:
             self.schedule_cleanup("task-done-456")
             cleanup_callback = MockTimer.call_args[0][1]
             cleanup_callback()
@@ -54,7 +54,7 @@ class PipelineTasksCleanupTests(unittest.TestCase):
 
     def test_cleanup_nonexistent_task_no_error(self):
         """清理不存在的 task_id 不报错。"""
-        with mock.patch("webui.app.threading.Timer") as MockTimer:
+        with mock.patch("threading.Timer") as MockTimer:
             self.schedule_cleanup("nonexistent-task")
             cleanup_callback = MockTimer.call_args[0][1]
             # 不应抛异常

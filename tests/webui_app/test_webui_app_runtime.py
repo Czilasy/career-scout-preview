@@ -827,7 +827,7 @@ class ContractCompliancePatchTests(unittest.TestCase):
             "failure_code": None,
             "ok": True,
         })()
-        with mock.patch("webui.app.ScraperExecutor.execute",
+        with mock.patch("webui.process_executor.ScraperExecutor.execute",
                         return_value=completed):
             resp = self.client.get("/api/check")
         self.assertEqual(resp.status_code, 200)
@@ -839,7 +839,7 @@ class ContractCompliancePatchTests(unittest.TestCase):
     def test_check_zhilian_returns_preflight_without_boss_scraper(self):
         """契约 L334-336：智联检查走自身 preflight，不调用旧 BOSS scraper。"""
         with (
-            mock.patch("webui.app.ScraperExecutor.execute") as exec_mock,
+            mock.patch("webui.process_executor.ScraperExecutor.execute") as exec_mock,
             mock.patch("webui.source.ZhilianCdpSource") as source_cls,
         ):
             source_cls.return_value.preflight.return_value = mock.Mock(

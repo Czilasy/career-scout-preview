@@ -160,7 +160,7 @@ class _E2EBase(unittest.TestCase):
                 self.store, "get_ai_settings",
                 return_value={"endpoint_url": "http://ai.test", "model": "m",
                               "is_configured": True}),
-            mock.patch("webui.app.ai_service.is_ai_available",
+            mock.patch("webui.ai.is_ai_available",
                        return_value=True),
             mock.patch("webui.ai.screen_jobs", side_effect=_fake_screen_jobs),
             mock.patch("webui.ai.match_jds", side_effect=_fake_match_jds),

@@ -206,7 +206,7 @@ class WebUIAppTests(unittest.TestCase):
             "failure_code": "process_failed",
             "ok": False,
         })()
-        with mock.patch("webui.app.ScraperExecutor.execute", return_value=completed):
+        with mock.patch("webui.process_executor.ScraperExecutor.execute", return_value=completed):
             response = self.client.get("/api/check")
 
         payload = response.get_json()
