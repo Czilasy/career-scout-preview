@@ -131,6 +131,11 @@ a = Analysis(
     ] + (
         # 图标收集进包，desktop.py 运行时用它设置窗口/任务栏图标
         [(str(_APP_ICON), "packaging/assets")] if _APP_ICON.exists() else []
+    ) + (
+        # 应用内更新镜像地址：维护者打包前放置的本地文件（不入 git），
+        # 收集到 _MEIPASS 根，updater 运行时读取；缺失则镜像停用走 GitHub
+        ([(str(PROJECT_ROOT / "webui" / "mirror_host.txt"), ".")]
+         if (PROJECT_ROOT / "webui" / "mirror_host.txt").exists() else [])
     ),
     hiddenimports=[
         "flask",

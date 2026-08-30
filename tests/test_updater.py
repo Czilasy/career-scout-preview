@@ -23,6 +23,10 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from webui import updater
 
+# RFC 5737 文档测试地址，替代真实镜像地址（FR-005：公开仓库不出现镜像地址）。
+# 镜像相关用例在 setUp 统一注入三元组，保持原断言语义不变。
+_TEST_MIRROR_HOST = "203.0.113.7"
+
 
 class VersionTests(unittest.TestCase):
     def test_parse_version_strips_v_and_takes_three(self):
@@ -480,6 +484,16 @@ _GITHUB_PAYLOAD = {
 class MirrorFirstTests(unittest.TestCase):
     """镜像优先：可达即用镜像，不碰 GitHub；不可达/非法回退 GitHub。"""
 
+    def setUp(self):
+        for target, value in (
+            ("MIRROR_HOST", _TEST_MIRROR_HOST),
+            ("MIRROR_BASE_URL", f"http://{_TEST_MIRROR_HOST}"),
+            ("MIRROR_MANIFEST_URL", f"http://{_TEST_MIRROR_HOST}/manifest.json"),
+        ):
+            p = patch.object(updater, target, value)
+            p.start()
+            self.addCleanup(p.stop)
+
     def test_mirror_reachable_returns_mirror_info_without_github(self):
         with patch.object(updater.requests, "get",
                           return_value=_MirrorManifestResponse(_mirror_manifest())) as get:
@@ -488,10 +502,10 @@ class MirrorFirstTests(unittest.TestCase):
         self.assertEqual(info.latest, "1.8.1")
         self.assertTrue(info.has_update)
         self.assertEqual(info.asset_name, "CareerScout-v1.8.1.exe")
-        self.assertEqual(info.asset_url, "http://49.232.60.135/CareerScout-v1.8.1.exe")
+        self.assertEqual(info.asset_url, f"http://{_TEST_MIRROR_HOST}/CareerScout-v1.8.1.exe")
         self.assertEqual(info.asset_size, 29931838)
         self.assertEqual(info.sha256_url,
-                         "http://49.232.60.135/CareerScout-v1.8.1.exe.sha256")
+                         f"http://{_TEST_MIRROR_HOST}/CareerScout-v1.8.1.exe.sha256")
         self.assertTrue(info.release_url.endswith("/releases/tag/v1.8.1"))
         get.assert_called_once_with(updater.MIRROR_MANIFEST_URL, timeout=10)
 
@@ -536,15 +550,15 @@ class MirrorFirstTests(unittest.TestCase):
 
     def test_mirror_download_urls_pass_whitelist_others_rejected(self):
         self.assertTrue(updater._is_allowed_download_url(
-            "http://49.232.60.135/CareerScout-v1.8.1.exe"))
+            f"http://{_TEST_MIRROR_HOST}/CareerScout-v1.8.1.exe"))
         self.assertTrue(updater._is_allowed_download_url(
-            "http://49.232.60.135/CareerScout-v1.8.1.exe.sha256"))
+            f"http://{_TEST_MIRROR_HOST}/CareerScout-v1.8.1.exe.sha256"))
         self.assertFalse(updater._is_allowed_download_url(
-            "http://49.232.60.135:8080/CareerScout-v1.8.1.exe"))
+            f"http://{_TEST_MIRROR_HOST}:8080/CareerScout-v1.8.1.exe"))
         self.assertFalse(updater._is_allowed_download_url(
-            "http://user@49.232.60.135/CareerScout-v1.8.1.exe"))
+            f"http://user@{_TEST_MIRROR_HOST}/CareerScout-v1.8.1.exe"))
         self.assertFalse(updater._is_allowed_download_url(
-            "http://49.232.60.135.evil.com/CareerScout-v1.8.1.exe"))
+            f"http://{_TEST_MIRROR_HOST}.evil.com/CareerScout-v1.8.1.exe"))
         self.assertTrue(updater._is_allowed_download_url(
             "https://github.com/x/y/releases/download/v1.8.1/a.exe"))
 
@@ -557,7 +571,7 @@ class MirrorFirstTests(unittest.TestCase):
                 return None
         with patch.object(updater.requests, "get", return_value=Resp()):
             digest = updater.fetch_expected_sha256(
-                "http://49.232.60.135/CareerScout-v1.8.1.dmg.sha256",
+                f"http://{_TEST_MIRROR_HOST}/CareerScout-v1.8.1.dmg.sha256",
                 "CareerScout-v1.8.1.dmg",
             )
         self.assertEqual(digest,

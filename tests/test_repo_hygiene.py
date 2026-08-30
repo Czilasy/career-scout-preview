@@ -229,12 +229,16 @@ class RepoHygieneTests(unittest.TestCase):
         ] + [re.compile(re.escape(p), re.IGNORECASE) for p in local_env]
         issues = []
         for rel in paths:
-            if rel.startswith("webui/dist/"):
-                continue
-            if pathlib.PurePosixPath(rel).suffix.lower() not in text_suffixes:
+            suffix = pathlib.PurePosixPath(rel).suffix.lower()
+            if suffix not in text_suffixes:
                 continue
             text = (ROOT / rel).read_text(encoding="utf-8", errors="replace")
-            for rx in patterns:
+            # dist 文本产物豁免本地路径规则（构建机路径会回显进产物），
+            # 但凭据模式（sk-/PEM/AKIA）对 dist 同样全量生效（FR-009）
+            active = patterns
+            if rel.startswith("webui/dist/"):
+                active = patterns[:3]
+            for rx in active:
                 m = rx.search(text)
                 if m:
                     issues.append(f"{rel}: 命中 {m.group(0)!r}")

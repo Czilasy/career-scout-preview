@@ -90,15 +90,32 @@ jobs:
           prerelease: false
 
       # 同步到自建国内更新镜像（静态分发，应用内更新优先源）。
-      # 密钥在仓库 Secret MIRROR_SSH_KEY；未配置或失败不阻断发布。
+      # 配置经仓库 vars/secrets 注入（FR-005：地址与账号不写进公开仓库）：
+      #   vars.MIRROR_HOST / vars.MIRROR_USER / vars.MIRROR_PATH
+      #   secrets.MIRROR_SSH_KEY / secrets.MIRROR_KNOWN_HOSTS（固化主机指纹，替代 ssh-keyscan）
+      # 任一缺失或同步失败不阻断发布，输出醒目提示。
       - name: 同步 DMG 到更新镜像
-        if: env.MIRROR_SSH_KEY != ''
         continue-on-error: true
         timeout-minutes: 45
         env:
           MIRROR_SSH_KEY: ${{ secrets.MIRROR_SSH_KEY }}
+          MIRROR_KNOWN_HOSTS: ${{ secrets.MIRROR_KNOWN_HOSTS }}
+          MIRROR_HOST: ${{ vars.MIRROR_HOST }}
+          MIRROR_USER: ${{ vars.MIRROR_USER }}
+          MIRROR_PATH: ${{ vars.MIRROR_PATH }}
         run: |
           set -euo pipefail
+          missing=""
+          for v in MIRROR_SSH_KEY MIRROR_KNOWN_HOSTS MIRROR_HOST MIRROR_USER MIRROR_PATH; do
+            [ -n "${!v:-}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "=========================================================="
+            echo "!! 镜像同步跳过：仓库未配置以下 vars/secrets（不阻断发布） !!"
+            echo "!! 缺失项：$missing"
+            echo "=========================================================="
+            exit 0
+          fi
           DMG="$(ls .release/*.dmg | head -n1)"
           VERSION="${DMG#*v}"; VERSION="${VERSION%.dmg}"
           SHA="$(shasum -a 256 "$DMG" | awk '{print $1}')"
@@ -107,18 +124,18 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$MIRROR_SSH_KEY" > ~/.ssh/mirror_deploy
           chmod 600 ~/.ssh/mirror_deploy
-          ssh-keyscan -H 49.232.60.135 >> ~/.ssh/known_hosts 2>/dev/null
+          printf '%s\n' "$MIRROR_KNOWN_HOSTS" >> ~/.ssh/known_hosts
           # 跨境链路不稳：限时长、断线即退，传完必须远程校验哈希，防止半截文件
           for attempt in 1 2 3; do
-            scp $SSH_OPTS "$DMG" "$DMG.sha256" root@49.232.60.135:/var/www/career-scout/ && break
+            scp $SSH_OPTS "$DMG" "$DMG.sha256" "$MIRROR_USER@$MIRROR_HOST:$MIRROR_PATH/" && break
             [ "$attempt" = 3 ] && { echo "镜像上传三次均失败"; exit 1; }
             echo "上传失败（第 $attempt 次），10 秒后重试"; sleep 10
           done
           FILE="$(basename "$DMG")"
-          REMOTE_SHA="$(ssh $SSH_OPTS root@49.232.60.135 "sha256sum /var/www/career-scout/'$FILE'" | awk '{print $1}')"
+          REMOTE_SHA="$(ssh $SSH_OPTS "$MIRROR_USER@$MIRROR_HOST" "sha256sum '$MIRROR_PATH/$FILE'" | awk '{print $1}')"
           if [ "$REMOTE_SHA" != "$SHA" ]; then
             echo "远程 DMG 哈希不一致（$REMOTE_SHA != $SHA），中止同步"; exit 1
           fi
-          ssh $SSH_OPTS root@49.232.60.135 \
-            "python3 /root/update_manifest.py '$VERSION' mac '$(basename "$DMG")' '$SHA' $SIZE"
+          ssh $SSH_OPTS "$MIRROR_USER@$MIRROR_HOST" \
+            "python3 ~/update_manifest.py '$VERSION' mac '$FILE' '$SHA' $SIZE"
           echo "镜像已同步 mac 条目：v$VERSION"

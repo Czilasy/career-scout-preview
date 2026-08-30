@@ -133,7 +133,11 @@ CODE_REVIEW.md
 spec011-*.yaml
 .trash/
 .devlog/
-.specify/
+# 宪法公开入库（FR-007）：仅放行 memory/constitution.md 精确路径
+.specify/*
+!.specify/memory/
+.specify/memory/*
+!.specify/memory/constitution.md
 
 # Per-machine implementation batch records
 specs/**/batch-record.md
@@ -143,5 +147,7 @@ design/
 
 # Source maps are build-time only; dist release snapshots stay tracked
 webui/dist/**/*.map
+# 应用内更新镜像地址：打包前由维护者放置（FR-005 地址不入公开仓库）
+webui/mirror_host.txt
 # 本地运行数据/测试产物（AGENTS.md：测试产物禁止进仓库）
 tmp/

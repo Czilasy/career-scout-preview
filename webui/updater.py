@@ -2,7 +2,7 @@
 
 流程（quitAndInstall 模式，对齐 Electron autoUpdater 四阶段）：
 
-1. ``check_for_update``：先查国内自建更新镜像（固定 IP 的静态
+1. ``check_for_update``：先查国内自建更新镜像（地址经部署配置注入的静态
    manifest.json，直连可达、无 API 配额），镜像不可达或内容非法时
    回退 GitHub Releases API（latest）。两边都与当前版本比较；更新
    检查缓存已关闭，启动和手动检查都会拿到最新发布。``fetcher`` 参数
@@ -30,6 +30,7 @@ import logging
 import os
 import platform
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -41,12 +42,31 @@ logger = logging.getLogger(__name__)
 
 GITHUB_REPO = "Czilasy/career-scout-preview"
 GITHUB_LATEST_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-# 国内自建更新镜像（固定 IP 静态分发）。HTTP 明文是该源的已知取舍：
-# 安装包传输完整性由强制 SHA256 校验兜底（manifest 与安装包同源），
-# 写权限锁在服务器 SSH 密钥上，公开可读是设计预期。
-MIRROR_HOST = "49.232.60.135"
-MIRROR_BASE_URL = f"http://{MIRROR_HOST}"
-MIRROR_MANIFEST_URL = f"{MIRROR_BASE_URL}/manifest.json"
+# 国内自建更新镜像。HTTP 明文是该源的已知取舍：安装包传输完整性由强制
+# SHA256 校验兜底（manifest 与安装包同源），写权限锁在服务器 SSH 密钥上，
+# 公开可读是设计预期。镜像地址不写入公开仓库（FR-005），来源按序：
+# 环境变量 CAREER_SCOUT_MIRROR_HOST → 打包时随 EXE 注入的 mirror_host.txt
+# （维护者放置的本地文件，不入 git，PyInstaller spec 收集到 _MEIPASS 根）。
+# 都缺失时镜像停用，更新检查直接走 GitHub 兜底。
+def _load_mirror_host() -> str:
+    host = os.environ.get("CAREER_SCOUT_MIRROR_HOST", "").strip()
+    if host:
+        return host
+    for base in (getattr(sys, "_MEIPASS", None), Path(__file__).resolve().parent):
+        if not base:
+            continue
+        try:
+            host = (Path(base) / "mirror_host.txt").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if host:
+            return host
+    return ""
+
+
+MIRROR_HOST = _load_mirror_host()
+MIRROR_BASE_URL = f"http://{MIRROR_HOST}" if MIRROR_HOST else ""
+MIRROR_MANIFEST_URL = f"{MIRROR_BASE_URL}/manifest.json" if MIRROR_BASE_URL else ""
 _MIRROR_PLATFORM_KEYS = {"windows": "win", "macos": "mac"}
 DEFAULT_STATE_DIR = Path(
     os.environ.get("BOSS_WEBUI_STATE_DIR")
@@ -167,11 +187,13 @@ def _check_mirror(
 ) -> UpdateInfo | None:
     """查自建镜像 manifest 并构建 UpdateInfo；不可达/内容非法返回 None。
 
-    manifest 形状（服务器 /root/update_manifest.py 生成）::
+    manifest 形状（服务器部署账号 home 下 update_manifest.py 生成）::
 
         {"latest": "1.8.1", "released": "...",
          "files": {"win": {"name", "sha256", "size"}, "mac": {...}}}
     """
+    if not MIRROR_HOST:
+        return None
     try:
         resp = requests.get(MIRROR_MANIFEST_URL, timeout=DOWNLOAD_TIMEOUT)
         payload = resp.json()
@@ -316,9 +338,10 @@ def _is_allowed_download_url(url: str) -> bool:
 
 
 def _is_mirror_download_url(parsed) -> bool:
-    """镜像源精确放行：仅自建固定 IP、仅 80 端口、无 userinfo 的 http URL。"""
+    """镜像源精确放行：仅配置的镜像地址、仅 80 端口、无 userinfo 的 http URL。"""
     return (
-        parsed.scheme == "http"
+        bool(MIRROR_HOST)
+        and parsed.scheme == "http"
         and (parsed.hostname or "").lower() == MIRROR_HOST
         and parsed.port in (None, 80)
         and parsed.username is None

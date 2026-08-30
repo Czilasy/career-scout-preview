@@ -11,7 +11,7 @@
 
 - 用户述说完需求后，先完成 grill-me 边界质询并冻结需求；冻结后进入完整 Spec Kit 流程：`speckit-constitution → speckit-clarify（按需）→ speckit-specify → speckit-plan → speckit-tasks → speckit-implement → speckit-converge`。
 - 项目架构原则、文件边界与职责分层以 `.specify/memory/constitution.md` 为准；Plan/Tasks 必须写明允许修改、禁止修改、新增文件和引用方向。
-- 已有超大文件（如 `webui/app.py`、`webui/store.py`、`scripts/boss_cdp_raw.py`）在未拆完前，普通功能不得继续向其中追加新逻辑；拆分必须单独建立 Spec。
+- 实测超限文件（宪法红线 Python ≤800 / Vue ≤1200 行）——未拆完前，普通功能不得继续向其中追加新逻辑；拆分必须单独建立 Spec：`webui/historical_recovery.py` 990 / `scripts/zhilian_cdp_raw.py` 900 / `webui/task_runners.py` 864 / `webui/src/views/DiscoveryView.vue` 1249（2026-08-30 实测，工程还债 Spec 031 处理中）。
 
 ## DB 标识与查库
 
