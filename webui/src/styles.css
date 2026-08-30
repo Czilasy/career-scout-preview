@@ -231,7 +231,7 @@ input {
   border-color: var(--brand);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 20%, transparent);
 }/* 徽标出现：轻微弹入 */
-}.fav-badge {
+.fav-badge {
   display: inline-grid;
   place-items: center;
   min-width: 18px;
