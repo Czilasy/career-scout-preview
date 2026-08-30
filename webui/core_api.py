@@ -15,19 +15,17 @@ from flask import jsonify, request, send_from_directory
 
 from scripts import job_summary
 from webui import desktop_runtime
-from webui.app import (
+from webui.constants import (
     FRONTEND_DIST,
     LIST_LIMIT,
     PROJECT_ROOT,
     _MSG_BOSS_LOGIN_STATUS,
     _MSG_UNSUPPORTED_PLATFORM,
-    _env,
-    _task_payload,
-    legacy_platform_guard,
 )
-from webui.task_runners import SCRAPER
+from webui.task_runners import SCRAPER, _env, _task_payload
 from webui.core import (
     build_filter_options,
+    legacy_platform_guard,
     match_jobs,
     normalize_profile,
     validate_search_params,

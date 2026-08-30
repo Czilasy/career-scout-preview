@@ -348,7 +348,7 @@ class WebUIAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(
             response.get_json(),
-            {"error_code": "not_found", "user_message": "任务不存在"},
+            {"error_code": "not_found", "user_message": "任务不存在或已被移除"},
         )
 
     def test_mutations_require_token_and_reject_untrusted_hosts_and_origins(self):

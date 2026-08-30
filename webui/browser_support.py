@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from webui.app import _OPERATIONAL_ERRORS
+from webui.constants import _OPERATIONAL_ERRORS
 
 
 def build_browser_support(store, tasks, lock, account_for_run, activate_run_browser):

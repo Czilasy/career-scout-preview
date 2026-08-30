@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from flask import jsonify, request
 
-from webui.app import _MSG_UNSUPPORTED_PLATFORM, legacy_platform_guard
+from webui.constants import _MSG_UNSUPPORTED_PLATFORM
+from webui.core import legacy_platform_guard
 
 def register_resume_fields_routes(app, ctx):
     @app.route("/api/analyze-resume", methods=["POST"])

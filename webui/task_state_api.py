@@ -12,9 +12,11 @@ import time
 
 from flask import jsonify, request
 
-from webui.app import (
+from webui.constants import (
     LOG_TAIL_LINES,
     _MSG_TASK_NOT_FOUND,
+)
+from webui.task_status import (
     _active_elapsed_ms,
     _pipeline_kind_for_stage,
     _public_task_status,

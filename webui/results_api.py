@@ -13,9 +13,9 @@ import time
 
 from flask import jsonify, request
 
-from webui.app import LOG_TAIL_LINES, _MSG_TASK_NOT_FOUND
+from webui.constants import LOG_TAIL_LINES, _MSG_TASK_NOT_FOUND
 from webui.result_rounds import save_scraped_only_round
-from webui.app import _public_task_status
+from webui.task_status import _public_task_status
 from webui.task_runners import _iso_epoch_ms
 from webui.workbench import normalize_job_link
 

@@ -13,6 +13,8 @@ from contextlib import contextmanager
 
 from flask import jsonify
 
+from webui.constants import _FEEDBACK_ERROR_STATUS, _OPERATIONAL_ERRORS
+
 def _public_task_status(status: str, interruption_kind: str | None = None) -> str:
     """Canonical DB/内存状态 → 公共 API 状态（http-api.md 公共状态映射）。"""
     mapping = {
@@ -45,7 +47,7 @@ def _pipeline_kind_for_stage(stage: str) -> str:
 
 
 def _active_elapsed_ms(started_at_ms, finished_at_ms, events):
-    from webui.task_runners import _iso_epoch_ms  # 延迟：避免与 webui.app 循环
+    from webui.task_runners import _iso_epoch_ms  # 延迟：避免与 webui.task_runners 循环
     """从 pause/resume 事件推导累计实际运行时长（排除暂停），单位毫秒。
 
     暂停时间不计入"已用"：暂停区间以 task_logs 的 pause/resume 事件为准，
@@ -81,7 +83,6 @@ def _resolve_run_scope(run, store):
     AI 筛选/抓取 run 自带 frozen_scope；补抓（recrawl）run 没有，从
     source_run_id 指向的父抓取 run 继承（同一批岗位，规模一致）。
     """
-    from webui.app import _OPERATIONAL_ERRORS  # 延迟：避免与 webui.app 循环
     from webui.execution_config import FrozenTaskScope
     params = run.get("execution_params") or {}
     candidates = [params.get("frozen_scope")]
@@ -111,7 +112,6 @@ def _refresh_paused_run_execution_config(run, store):
     pages/frozen_scope 不在 execution_config 中，保持不变。
     返回新 ExecutionConfigSnapshot；scope 缺失或配置解析失败时返回 None。
     """
-    from webui.app import _OPERATIONAL_ERRORS  # 延迟：避免与 webui.app 循环
     from webui.execution_config import ExecutionConfigSnapshot
     frozen_scope = _resolve_run_scope(run, store)
     if frozen_scope is None:
@@ -167,7 +167,6 @@ class _SharedConnectionStore:
 
 
 def _feedback_error_response(code, user_message, details=None, status=None):
-    from webui.app import _FEEDBACK_ERROR_STATUS  # 延迟：避免与 webui.app 循环
     """稳定错误体（contracts/http-api.md），不泄露 SQL/路径。"""
     if status is None:
         status = _FEEDBACK_ERROR_STATUS.get(code, 500)

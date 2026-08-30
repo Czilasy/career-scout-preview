@@ -9,6 +9,7 @@ import pathlib
 import sqlite3
 import tempfile
 import unittest
+from types import SimpleNamespace
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -46,7 +47,7 @@ class JobFeedbackApiTestCase(unittest.TestCase):
         self.app.json.sort_keys = False
         register_job_feedback_routes(
             self.app,
-            self.store,
+            SimpleNamespace(store=self.store),
             advice_provider=self._advice_provider,
             ai_credentials_provider=self._ai_credentials,
         )
@@ -673,7 +674,7 @@ class AdviceTests(JobFeedbackApiTestCase):
 
         app = Flask(__name__)
         register_job_feedback_routes(
-            app, self.store, advice_provider=_broken,
+            app, SimpleNamespace(store=self.store), advice_provider=_broken,
             ai_credentials_provider=self._ai_credentials,
         )
         body = app.test_client().post(
@@ -723,7 +724,7 @@ class AdviceTests(JobFeedbackApiTestCase):
         job_id, _, _ = self.create_job(jd="有 JD")
         self.mark_overdue(job_id)
         app = Flask(__name__)
-        register_job_feedback_routes(app, self.store)  # real store credentials path
+        register_job_feedback_routes(app, SimpleNamespace(store=self.store))  # real store credentials path
         response = app.test_client().post(
             f"/api/profile-jobs/{self.profile['id']}/{job_id}/advice",
         )

@@ -15,11 +15,13 @@ from pathlib import Path
 
 from flask import jsonify
 
-from webui.app import (
+from webui.constants import (
     _MSG_USER_FINISHED,
     _MSG_USER_STOPPED_SCRAPE,
     _MSG_USER_STOPPED_SCREEN,
     _OPERATIONAL_ERRORS,
+)
+from webui.task_status import (
     _recrawl_overall_percent,
     _screen_overall_percent,
 )

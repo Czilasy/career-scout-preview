@@ -12,8 +12,8 @@ import sqlite3
 
 from flask import jsonify
 
-from webui.app import LOG_TAIL_LINES
-from webui.app import _pipeline_kind_for_stage
+from webui.constants import LOG_TAIL_LINES
+from webui.task_status import _pipeline_kind_for_stage
 from webui.task_runners import _iso_epoch_ms
 
 

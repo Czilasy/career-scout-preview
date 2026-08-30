@@ -11,7 +11,7 @@ import json
 
 from flask import jsonify, request
 
-from webui.app import (
+from webui.constants import (
     _MSG_TASK_ALREADY_RUNNING,
     _MSG_TASK_NOT_FOUND,
     _MSG_USER_STOPPED_SCREEN,

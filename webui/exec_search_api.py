@@ -13,13 +13,13 @@ import sqlite3
 
 from flask import jsonify, request
 
-from webui.app import (
+from webui.constants import (
     _MSG_TASK_ALREADY_RUNNING,
     _MSG_TASK_NOT_FOUND,
     _MSG_UNSUPPORTED_PLATFORM,
     _MSG_USER_STOPPED_SCRAPE,
 )
-from webui.app import _public_task_status
+from webui.task_status import _public_task_status
 from webui.resume_identity import (
     append_account_switch_log_line,
     ensure_frozen_browser_account,

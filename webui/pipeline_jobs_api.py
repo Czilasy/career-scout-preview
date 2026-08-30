@@ -12,12 +12,12 @@ from pathlib import Path
 
 from flask import jsonify, request
 
-from webui.app import (
+from webui.constants import (
     _MSG_PROFILE_ID_REQUIRED,
     _MSG_PROFILE_NOT_FOUND,
     _ZHILIAN_HOST_TOKEN,
-    _pipeline_identity_payload,
 )
+from webui.task_status import _pipeline_identity_payload
 from webui.pipeline_job_identity import (
     JobIdentityError,
     parse_identity_payload,

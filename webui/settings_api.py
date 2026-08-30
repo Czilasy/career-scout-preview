@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from flask import jsonify, request
 
-from webui.app import _MSG_ACCOUNT_NOT_FOUND, _MSG_UNSUPPORTED_PLATFORM
+from webui.constants import _MSG_ACCOUNT_NOT_FOUND, _MSG_UNSUPPORTED_PLATFORM
 from webui.task_runners import _mask_key
 
 def register_settings_routes(app, ctx):

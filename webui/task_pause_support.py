@@ -16,12 +16,12 @@ from __future__ import annotations
 
 from flask import jsonify
 
+from webui.constants import _MSG_TASK_NOT_FOUND
 from webui.logging_setup import get_logger
 
 _logger = get_logger("task_pause_support")
 
-#: 与 task_continue_api 一致的文案（外迁复制，避免反向 import 造成循环）。
-_MSG_TASK_NOT_FOUND = "任务不存在或已被移除"
+
 
 
 class ImmediateOnlyCancelEvent:

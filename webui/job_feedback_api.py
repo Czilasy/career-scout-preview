@@ -38,27 +38,9 @@ __all__ = [
     "register_job_feedback_routes",
 ]
 
-# Frozen contract: error_code -> HTTP status.
-_ERROR_STATUS = {
-    "invalid_action": 400,
-    "invalid_action_payload": 400,
-    "invalid_limit": 400,
-    "invalid_request": 400,
-    "profile_not_found": 404,
-    "job_not_found": 404,
-    "not_found": 404,
-    "profile_job_not_found": 404,
-    "idempotency_conflict": 409,
-    "job_identity_conflict": 409,
-    "state_precondition_failed": 409,
-    "reminder_not_eligible": 409,
-    "job_identity_incomplete": 422,
-    "platform_url_mismatch": 422,
-    "applied_at_required": 422,
-    "applied_at_invalid": 422,
-    "applied_at_in_future": 422,
-    "follow_up_before_application": 422,
-}
+# Frozen contract: error_code -> HTTP status. 031 B3 起唯一来源在
+# webui/constants.py（_FEEDBACK_ERROR_STATUS），此处保留历史别名。
+from webui.constants import _FEEDBACK_ERROR_STATUS as _ERROR_STATUS
 
 
 _MSG_PROFILE_ID_REQUIRED = "profile_id 不能为空"
@@ -324,12 +306,14 @@ def create_job_feedback_blueprint(
     return blueprint
 
 
-def register_job_feedback_routes(app, store, **options) -> Blueprint:
-    """Register the registrar on any Flask app (isolated fixture or Task 008).
+def register_job_feedback_routes(app, ctx, **options) -> Blueprint:
+    """Register the registrar on any Flask app (isolated fixture or app.py).
 
-    The hosting app's ``before_request`` session/build-identity guards apply
-    to these routes automatically, which is the intended auth boundary.
+    ``ctx`` 是应用装配上下文（真实装配传 PipelineContext，隔离夹具可传任意
+    带 ``store`` 属性的对象）。The hosting app's ``before_request``
+    session/build-identity guards apply to these routes automatically, which
+    is the intended auth boundary.
     """
-    blueprint = create_job_feedback_blueprint(store, **options)
+    blueprint = create_job_feedback_blueprint(ctx.store, **options)
     app.register_blueprint(blueprint)
     return blueprint

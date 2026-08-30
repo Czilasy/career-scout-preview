@@ -10,7 +10,6 @@ import json
 import os
 import re
 import secrets
-import sqlite3
 import sys
 import threading
 import time
@@ -21,12 +20,12 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+# 直跑引导（python webui/app.py）：webui 包可导入前需先把项目根放进
+# sys.path，PROJECT_ROOT/FRONTEND_DIST 在此就地计算（与 webui.constants 同值，
+# 模块消费方一律从 webui.constants 取）。
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 FRONTEND_DIST = HERE / "dist"
-
-
-_ZHILIAN_HOST_TOKEN = "zhaopin.com"
 
 
 def _resolve_python_executable() -> str:
@@ -60,11 +59,33 @@ from scripts import job_summary
 from webui import ai as ai_service
 from webui import desktop_runtime
 from webui import resume as resume_service
+# ---------------------------------------------------------------------------
+# 兼容 re-export 块（031 B3）：共享常量已迁居 webui/constants.py，函数与
+# 服务符号一律从其定义模块（task_runners / task_status / core / workbench）
+# 导入。本块仅为存量 patch("webui.app.X") 测试与旧导入路径保活——兼容层勿新增。
+# ---------------------------------------------------------------------------
 from webui.constants import (
     CLEANUP_EXPIRED_DAYS,
     FEEDBACK_THRESHOLD,
+    FRONTEND_DIST,
     LIST_LIMIT,
     LOG_TAIL_LINES,
+    PROJECT_ROOT,
+    _FEEDBACK_ERROR_STATUS,
+    _MSG_ACCOUNT_NOT_FOUND,
+    _MSG_BOSS_LOGIN_STATUS,
+    _MSG_EXPERIMENT_NOT_FOUND,
+    _MSG_MANIFEST_NOT_FOUND,
+    _MSG_PROFILE_ID_REQUIRED,
+    _MSG_PROFILE_NOT_FOUND,
+    _MSG_TASK_ALREADY_RUNNING,
+    _MSG_TASK_NOT_FOUND,
+    _MSG_UNSUPPORTED_PLATFORM,
+    _MSG_USER_FINISHED,
+    _MSG_USER_STOPPED_SCRAPE,
+    _MSG_USER_STOPPED_SCREEN,
+    _OPERATIONAL_ERRORS,
+    _ZHILIAN_HOST_TOKEN,
 )
 from webui.core import (
     LegacyPlatformNotSupportedError,
@@ -103,32 +124,7 @@ from webui.workbench import (
     select_keywords,
 )
 
-_MSG_USER_FINISHED = "用户已结束任务"
-_MSG_UNSUPPORTED_PLATFORM = "不支持的招聘平台"
-_MSG_BOSS_LOGIN_STATUS = "BOSS 登录状态"
-_MSG_TASK_NOT_FOUND = "任务不存在"
-_MSG_TASK_ALREADY_RUNNING = "该任务正在继续，请勿重复点击"
-_MSG_ACCOUNT_NOT_FOUND = "账号不存在"
-_MSG_EXPERIMENT_NOT_FOUND = "实验不存在"
-_MSG_MANIFEST_NOT_FOUND = "任务单不存在"
-_MSG_USER_STOPPED_SCRAPE = "用户已停止抓取"
-_MSG_USER_STOPPED_SCREEN = "用户已停止筛选"
-_MSG_PROFILE_NOT_FOUND = "画像不存在"
-_MSG_PROFILE_ID_REQUIRED = "profile_id 不能为空"
-
-
-_OPERATIONAL_ERRORS = (
-    OSError,
-    sqlite3.Error,
-    RuntimeError,
-    ValueError,
-    KeyError,
-    TypeError,
-    ai_service.AISecurityError,
-)
-
-
-from webui.task_runners import (
+from webui.task_runners import (  # noqa: F401  兼容 re-export，见上块注释
     DEFAULT_STATE_DIR,
     SCRAPER,
     TaskRunner,
@@ -145,7 +141,7 @@ from webui.task_runners import (
 )
 
 
-from webui.task_status import (  # noqa: F401  re-export 保持兼容
+from webui.task_status import (  # noqa: F401  兼容 re-export，见上块注释
     _SharedConnectionStore,
     _active_elapsed_ms,
     _feedback_error_response,
@@ -763,12 +759,12 @@ def create_app(config=None):
     # Task 008：注册 lifecycle/state/events/reminders/advice 路由（Task 005）。
     # before_request 的 Host/会话令牌/build identity 防护自动覆盖这些路由；
     # 提醒/生命周期规则平台无关，无 platform 过滤。
-    register_job_feedback_routes(app, store)
+    register_job_feedback_routes(app, ctx)
 
     register_result_history_routes(app, store)
 
-    from webui.location_api import bp as location_api_bp
-    app.register_blueprint(location_api_bp)
+    from webui.location_api import register_location_routes
+    register_location_routes(app, ctx)
 
     return app
 

@@ -12,7 +12,7 @@ from datetime import datetime
 
 from flask import jsonify, request
 
-from webui.app import _MSG_EXPERIMENT_NOT_FOUND, _MSG_MANIFEST_NOT_FOUND
+from webui.constants import _MSG_EXPERIMENT_NOT_FOUND, _MSG_MANIFEST_NOT_FOUND
 
 def register_tuning_routes(app, ctx):
     @app.route("/api/tuning/experiments", methods=["POST"])
