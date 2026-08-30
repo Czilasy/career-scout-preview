@@ -17,6 +17,11 @@ from webui.app import (
     _public_task_status,
     _refresh_paused_run_execution_config,
 )
+from webui.resume_identity import (
+    append_account_switch_log_line,
+    apply_continue_account_switch,
+    decide_auto_account_switch,
+)
 from webui.store import DiscoveryStoreConflictError
 from webui.task_pause_support import cancel_task_cleanup, pause_with_mode
 from webui.task_runners import _iso_epoch_ms
@@ -148,70 +153,31 @@ def register_task_continue_routes(app, ctx):
                 "status": _public_task_status(run["status"], run.get("interruption_kind")),
                 "message": "只有 paused 状态的任务才能继续",
             }), 409
-        # B057：限流后可指定另一个已登录账号继续同一断点。
-        # 未显式指定时使用当前 active 账号；只替换执行账号与浏览器身份，
-        # 任务身份/断点/结果保持不变。
+        # B057：限流后可指定另一个已登录账号继续同一断点（显式指定，行为不变）。
+        # 030：未显式指定时收紧为双门槛自动换号——仅当用户暂停期间主动换过
+        # 全局账号（当前 ≠ 创建时快照）且暂停码非 AI 类；快照缺失（存量任务）
+        # 一律沿用冻结身份。决策/留痕在续跑身份域，此处只接线。
         _continue_body = request.get_json(silent=True) or {}
         target_account = str(_continue_body.get("target_account") or "").strip()
+        auto_switch: tuple[bool, str, str] | None = None
         if not target_account:
             active_account = str(
                 (ctx.load_legacy_advanced_settings() or {}).get("browser_account") or "a"
             )
-            frozen_account = str(
-                ((run.get("execution_params") or {}).get("browser_account") or "")
-                or ctx.account_for_run(run)
-            )
-            if active_account and active_account != frozen_account:
-                target_account = active_account
+            auto_switch = decide_auto_account_switch(
+                run, current_active_account=active_account)
+            if auto_switch[0]:
+                target_account = auto_switch[2]
         if target_account:
-            from webui.pipeline_exec import load_browser_accounts, resolve_browser_account
-            from webui.platforms import resolve_login_space
-            from webui.resume_identity import persist_frozen_identity
-            accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
-            if target_account not in accounts:
-                return jsonify({
-                    "ok": False, "error": "target_account_not_found",
-                    "message": "目标账号不存在，请刷新账号列表后重试",
-                    "status": "paused",
-                }), 404
-            platform = str(run.get("platform") or (run.get("execution_params") or {}).get("platform") or "boss")
-            target_dir = resolve_browser_account(
-                target_account, app.config["BROWSER_ACCOUNTS_PATH"]) or "unresolved"
-            try:
-                _login_space = resolve_login_space(
-                    platform, target_account, boss_profile_dir=target_dir)
-            except ValueError:
-                return jsonify({
-                    "ok": False, "error": "target_account_invalid",
-                    "message": "目标账号浏览器身份不可用，请确认该账号已配置",
-                    "status": "paused",
-                }), 409
-            candidate = {
-                "platform": platform,
-                "browser_account": target_account,
-                "cdp_port": _login_space.cdp_port,
-                "profile_key": _login_space.profile_key,
-            }
-            candidate_params = dict(run.get("execution_params") or {})
-            candidate_params.update(
-                {k: v for k, v in candidate.items() if v not in (None, "")})
-            candidate_run = dict(run)
-            candidate_run["execution_params"] = candidate_params
-            candidate_run["platform"] = platform
-            passed, code, reason = ctx.check_resume_block(candidate_run)
-            if not passed:
-                return jsonify({
-                    "ok": False, "error": "block_not_resolved",
-                    "error_code": code, "error_reason": reason,
-                    "target_account": target_account,
-                    "status": "paused",
-                    "message": (
-                        f"目标账号「{accounts[target_account].get('name') or target_account}」"
-                        f"暂不可用：{reason}"
-                    ),
-                }), 409
-            persist_frozen_identity(ctx.store, run_id, candidate)
-            run = ctx.store.get_screening_run(run_id) or run
+            # 030：目标账号校验/登录空间/阻断检查/持久化/留痕整段收口到续跑身份域
+            applied = apply_continue_account_switch(
+                ctx.store, run, run_id=run_id, target_account=target_account,
+                auto_switch=auto_switch,
+                accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
+                check_resume_block=ctx.check_resume_block)
+            if applied["status"] != "ok":
+                return jsonify(applied["body"]), applied["http_status"]
+            run = applied["run"]
         # FR-022：检查内存中是否已有该 run 的工作
         ctx.activate_run_browser(run)
         with ctx.lock:
@@ -233,11 +199,23 @@ def register_task_continue_routes(app, ctx):
                 "current_version": ctx.backend_version,
             }), 409
         from webui.resume_identity import (
+            ensure_frozen_browser_account,
             invalidate_login_cache_for_resume,
             persist_frozen_identity,
             resolve_frozen_identity,
         )
         identity = resolve_frozen_identity(ctx.store, run)
+        # 030：存量 run 缺冻结账号时按角色感知兜底（BOSS=R2，智联=当前账号），
+        # 与筛选提交续跑同口径并写回；不再借父抓取 run 的 R1 账号或静默全局回退。
+        if not str((run.get("execution_params") or {}).get("browser_account") or ""):
+            effective_account = ensure_frozen_browser_account(
+                ctx.store, run_id, run,
+                platform=str(identity.get("platform") or ""),
+                fallback_account=ctx.account_for_run(run),
+                accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
+                role="R2")
+            if effective_account:
+                identity["browser_account"] = effective_account
         missing = [
             key for key in ("platform", "browser_account", "cdp_port", "profile_key")
             if identity.get(key) in (None, "")
@@ -278,7 +256,11 @@ def register_task_continue_routes(app, ctx):
                     "status": "paused",
                 }), 409
             _refresh_run_config()
-            return ctx.continue_recrawl(run_id, _block_checked=True)
+            return ctx.continue_recrawl(
+                run_id, _block_checked=True,
+                account_switch_note=(
+                    (auto_switch[1], auto_switch[2])
+                    if auto_switch is not None and auto_switch[0] else None))
         if stage == "scrape":
             passed, code, reason = ctx.check_resume_block(run)
             if not passed:
@@ -288,7 +270,11 @@ def register_task_continue_routes(app, ctx):
                     "status": "paused",
                 }), 409
             _refresh_run_config()
-            return ctx.continue_execute_search(run_id, _block_checked=True)
+            return ctx.continue_execute_search(
+                run_id, _block_checked=True,
+                account_switch_note=(
+                    (auto_switch[1], auto_switch[2])
+                    if auto_switch is not None and auto_switch[0] else None))
 
         passed, code, reason = ctx.check_resume_block(run)
         if not passed:
@@ -347,21 +333,21 @@ def register_task_continue_routes(app, ctx):
                 "message": _MSG_TASK_ALREADY_RUNNING,
             }), 409
         claimed_task["source_task_id"] = scrape_task_id
-        claimed_task["browser_account"] = ctx.account_for_run(run)
         claimed_task["resumed_from"] = run_id
         resume_params = dict(run.get("execution_params") or {})
-        if not str(resume_params.get("browser_account") or ""):
-            resume_params["browser_account"] = ctx.account_for_run(run)
-            ctx.store.update_screening_execution_params(run_id, resume_params)
         claimed_task["platform"] = identity["platform"]
         claimed_task["cdp_port"] = identity.get("cdp_port")
         claimed_task["profile_key"] = identity.get("profile_key")
         claimed_task["browser_account"] = identity["browser_account"]
-        resume_params = dict(run.get("execution_params") or {})
         for key in ("platform", "browser_account", "cdp_port", "profile_key"):
             if resume_params.get(key) in (None, ""):
                 resume_params[key] = identity.get(key)
         ctx.store.update_screening_execution_params(run_id, resume_params)
+        if auto_switch is not None and auto_switch[0]:
+            # 030 FR-005：自动换号在续跑启动日志留一行中文说明
+            append_account_switch_log_line(
+                claimed_task,
+                from_account=auto_switch[1], to_account=auto_switch[2])
         start_gate = ctx.threading.Event()
         abort_start = ctx.threading.Event()
 

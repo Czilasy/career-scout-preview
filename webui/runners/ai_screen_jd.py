@@ -26,6 +26,9 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
     guard = getattr(ctx, "pipeline_guard", None)
     if survivors:
         emit(stage="ensure_chrome", message="启动调试浏览器，准备抓取 JD…")
+        # 030：抓 JD 前把浏览器身份重绑到任务冻结账号——粗筛阶段耗时较长，
+        # 期间全局活动目录可能被其它请求改写，此处重绑消除污染窗口
+        ctx.activate_task_browser(task_id)
         chrome_ok, chrome_err = ensure_chrome_ready(
             frozen_cdp_port, minimize_after_launch=True,
         )

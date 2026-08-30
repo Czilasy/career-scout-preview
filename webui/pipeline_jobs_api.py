@@ -23,6 +23,11 @@ from webui.pipeline_job_identity import (
     parse_identity_payload,
     resolve_job_identity,
 )
+from webui.resume_identity import (
+    append_account_switch_log_line,
+    ensure_frozen_browser_account,
+    inherit_parent_frozen_identity,
+)
 from webui.task_runners import _iso_epoch_ms
 from webui.workbench import normalize_job_link_for_platform
 
@@ -63,40 +68,28 @@ def register_pipeline_jobs_routes(app, ctx):
         if not job_id or not raw_source_url.strip():
             return jsonify({"ok": False, "error": "缺少 job_id 或 source_url"}), 400
 
-        # T417: 从 source run 继承冻结平台
-        frozen_platform = "boss"
-        frozen_browser_account = None
-        frozen_cdp_port = None
-        frozen_profile_key = None
-        parent_run = None
-        if source_run_id:
-            try:
-                identity = ctx.store.get_run_checkpoint_identity(source_run_id)
-                parent_run = ctx.store.get_screening_run(source_run_id)
-            except ctx.operational_errors:
-                identity = parent_run = None
-            if identity is not None:
-                frozen_platform = str(identity.get("platform") or "boss")
-            parent_params = (parent_run or {}).get("execution_params") or {}
-            frozen_browser_account = str(parent_params.get("browser_account") or "") or None
-            frozen_cdp_port = parent_params.get("cdp_port")
-            frozen_profile_key = parent_params.get("profile_key")
-            gp_task_id = str(parent_params.get("scrape_task_id") or "")
-            if (not frozen_cdp_port or not frozen_profile_key) and gp_task_id:
-                try:
-                    gp = ctx.store.get_screening_run(gp_task_id)
-                    gp_params = (gp or {}).get("execution_params") or {}
-                    frozen_cdp_port = frozen_cdp_port or gp_params.get("cdp_port")
-                    frozen_profile_key = frozen_profile_key or gp_params.get("profile_key")
-                except ctx.operational_errors:
-                    pass
-        else:
-            if _ZHILIAN_HOST_TOKEN in raw_source_url.lower():
-                return jsonify({
-                    "ok": False, "error": "run_identity_conflict",
-                    "error_code": "run_identity_conflict",
-                    "message": "智联单 JD 必须携带 source_run_id，不能按 URL 猜测来源",
-                }), 409
+        # 030：任务运行/排队期间拒绝单岗位 JD 抓取——单岗位抓取会改写全局
+        # 浏览器目录并占用 CDP 端口，与运行中任务的冻结身份冲突。
+        if ctx.has_active_pipeline_task():
+            return jsonify({
+                "ok": False, "error": "browser_busy",
+                "message": "当前已有任务在运行，请等待任务完成或结束后再抓取岗位详情",
+            }), 409
+
+        # T417: 从 source run 继承冻结平台（030：继承逻辑收口到续跑身份域）
+        parent = inherit_parent_frozen_identity(
+            ctx.store, source_run_id, ctx.operational_errors)
+        frozen_platform = parent["platform"]
+        frozen_browser_account = parent["browser_account"]
+        frozen_cdp_port = parent["cdp_port"]
+        frozen_profile_key = parent["profile_key"]
+        parent_run = parent["parent_run"]
+        if not source_run_id and _ZHILIAN_HOST_TOKEN in raw_source_url.lower():
+            return jsonify({
+                "ok": False, "error": "run_identity_conflict",
+                "error_code": "run_identity_conflict",
+                "message": "智联单 JD 必须携带 source_run_id，不能按 URL 猜测来源",
+            }), 409
         source_url = normalize_job_link_for_platform(
             raw_source_url, platform=frozen_platform
         )
@@ -330,6 +323,7 @@ def register_pipeline_jobs_routes(app, ctx):
                     "profile_facts": profile_facts,
                     "single_retry": True,
                     "browser_account": ctx.tasks[task_id]["browser_account"],
+                    "active_account_at_freeze": ctx.account_for_run(),
                     "platform": parent_platform,
                     "cdp_port": parent_cdp_port,
                     "profile_key": parent_profile_key,
@@ -504,6 +498,7 @@ def register_pipeline_jobs_routes(app, ctx):
                     "profile_summary": profile_summary,
                     "profile_facts": profile_facts,
                     "browser_account": claimed_task["browser_account"],
+                    "active_account_at_freeze": ctx.account_for_run(),
                     "platform": parent_platform,
                     "cdp_port": parent_cdp_port,
                     "profile_key": parent_profile_key,
@@ -544,7 +539,8 @@ def register_pipeline_jobs_routes(app, ctx):
         return jsonify({"ok": True, "task_id": task_id, "source_run_id": source_run_id}), 202
 
     @app.route("/api/recrawl/continue/<task_id>", methods=["POST"])
-    def continue_recrawl(task_id, _block_checked=False):
+    def continue_recrawl(task_id, _block_checked=False,
+                         account_switch_note=None):
         """Resume a paused recrawl in place using its persisted checkpoint.
 
         SPEC011 T015: 实验租约持有时拒绝继续（FR-035）。
@@ -601,12 +597,22 @@ def register_pipeline_jobs_routes(app, ctx):
         )
         if claimed_task is None:
             return jsonify({"ok": False, "error": "already_running"}), 409
+        if account_switch_note:
+            # 030 FR-005：自动换号在续跑启动日志留一行中文说明
+            append_account_switch_log_line(
+                claimed_task,
+                from_account=account_switch_note[0],
+                to_account=account_switch_note[1])
         claimed_task["source_run_id"] = source_run_id
-        claimed_task["browser_account"] = ctx.account_for_run(run)
         resume_params = dict(run.get("execution_params") or {})
-        if not str(resume_params.get("browser_account") or ""):
-            resume_params["browser_account"] = ctx.account_for_run(run)
-            ctx.store.update_screening_execution_params(task_id, resume_params)
+        # 030：缺冻结账号时按角色感知兜底（BOSS=R2，智联=当前账号），口径与
+        # 筛选提交续跑一致；已有冻结账号原样沿用。
+        claimed_task["browser_account"] = ensure_frozen_browser_account(
+            ctx.store, task_id, run,
+            platform=str(resume_params.get("platform") or "boss"),
+            fallback_account=ctx.account_for_run(run),
+            accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
+            role="R2")
         # T406: 继续时从 run 的 execution_params 恢复冻结平台身份
         claimed_task["platform"] = resume_params.get("platform") or "boss"
         claimed_task["cdp_port"] = resume_params.get("cdp_port")

@@ -3,8 +3,8 @@
 参考 roadmap/boss-zhipin-scraper 的 ``human_scroll`` / ``human_mouse_jitter``
 实现，按 024 冻结表 #12-#14 以档位（stable/balanced/extreme）给出参数：
 - 详情加载等待（随机区间）：stable 5-10s / balanced 3-6s / extreme 1-2s
-- 详情滚动（次数）：stable 3-7 / balanced 2-4 / extreme 0-1
-- 鼠标移动概率：stable 50% / balanced 30% / extreme 无
+- 详情滚动（次数）：stable 3-7 / balanced 2-4 / extreme 1-2
+- 鼠标移动概率：stable 50% / balanced 30% / extreme 20%
 
 custom 档与未传参路径不调用本模块（零仿真，与现状一致）。本模块为内部
 行为域，不 import ``detail_scrape``，由 detail_scrape 仅做接线调用。
@@ -30,8 +30,8 @@ SIMULATION_PARAMS: dict[str, dict[str, Any]] = {
     },
     "extreme": {
         "wait_range": (1.0, 2.0),
-        "scroll_range": (0, 1),
-        "mouse_prob": 0.0,
+        "scroll_range": (1, 2),
+        "mouse_prob": 0.2,
     },
 }
 

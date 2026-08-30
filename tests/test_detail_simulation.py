@@ -50,8 +50,8 @@ class SimulationParamsTableTests(unittest.TestCase):
 
     def test_extreme_params_match_frozen_table(self):
         self.assertEqual(SIMULATION_PARAMS["extreme"]["wait_range"], (1.0, 2.0))
-        self.assertEqual(SIMULATION_PARAMS["extreme"]["scroll_range"], (0, 1))
-        self.assertEqual(SIMULATION_PARAMS["extreme"]["mouse_prob"], 0.0)
+        self.assertEqual(SIMULATION_PARAMS["extreme"]["scroll_range"], (1, 2))
+        self.assertEqual(SIMULATION_PARAMS["extreme"]["mouse_prob"], 0.2)
 
     def test_resolve_params_returns_table_entry(self):
         self.assertIs(resolve_params("stable"), SIMULATION_PARAMS["stable"])
@@ -91,7 +91,8 @@ class SimulateAfterLoadTests(unittest.TestCase):
 
     def test_extreme_scroll_bounded(self):
         session, waits = self._run(resolve_params("extreme"), seed=7)
-        self.assertLessEqual(len(session.scrolls), 1)
+        self.assertGreaterEqual(len(session.scrolls), 1)
+        self.assertLessEqual(len(session.scrolls), 2)
         first_wait = waits[0][0]
         self.assertGreaterEqual(first_wait, 1.0)
         self.assertLessEqual(first_wait, 2.0)

@@ -16,6 +16,7 @@ from webui.app import (
     _MSG_TASK_NOT_FOUND,
     _MSG_USER_STOPPED_SCREEN,
 )
+from webui.resume_identity import ensure_frozen_browser_account
 from webui.task_runners import _iso_epoch_ms
 
 def register_ai_screen_routes(app, ctx):
@@ -240,6 +241,9 @@ def register_ai_screen_routes(app, ctx):
         else:
             claimed_task["browser_account"] = ctx.account_for_run(account_source)
         claimed_task["platform"] = parent_platform
+        # 030：新建路径把创建时全局当前账号随任务透传给 runner 落库为快照
+        # （runner 的 INSERT OR REPLACE 会覆盖 API 预建行，快照必须随之写入）
+        claimed_task["active_account_at_freeze"] = ctx.account_for_run()
         # T407: 生成 AI 阶段 task_input_digest
         ai_digest = hashlib.sha256(json.dumps({
             "platform": parent_platform,
@@ -255,9 +259,14 @@ def register_ai_screen_routes(app, ctx):
             # 019：去重开关随链上冻结值沿用（重启/断链续跑）。
             cross_platform_dedupe = bool(
                 resume_params.get("cross_platform_dedupe", cross_platform_dedupe))
-            if not str(resume_params.get("browser_account") or ""):
-                resume_params["browser_account"] = ctx.account_for_run(prev)
-                ctx.store.update_screening_execution_params(resume_from_run_id, resume_params)
+            # 030：缺冻结账号时按角色感知兜底（BOSS=R2，智联=当前账号），
+            # 与统一继续接口同口径，消除两条续跑路径的账号分歧。
+            ensure_frozen_browser_account(
+                ctx.store, resume_from_run_id, prev,
+                platform=parent_platform,
+                fallback_account=ctx.account_for_run(prev),
+                accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
+                role="R2")
         ctx.activate_run_browser(account_source)
         # T407: 创建 AI run 时保存平台身份和筛选快照
         if not resume_from_run_id:

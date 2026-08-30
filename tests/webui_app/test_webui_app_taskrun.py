@@ -1218,7 +1218,11 @@ class ScreenContinueFlowTests(unittest.TestCase):
         self.assertEqual(params.get("browser_account"), "a")
 
     def test_b057_continue_uses_active_account_without_target(self):
-        """暂停中切换 active 账号后，不带 target_account 继续沿用新账号。"""
+        """暂停中切换 active 账号后，不带 target_account 继续沿用新账号。
+
+        030 双门槛口径：创建时全局账号为 a（快照），暂停期间用户把全局切到
+        b → 当前 ≠ 快照 → 继续沿用新账号 b；语义与 B057 原始行为一致。
+        """
         task_id = "b057-active-switch"
         self.store.create_screening_run(
             task_id, source_count=1,
@@ -1226,6 +1230,7 @@ class ScreenContinueFlowTests(unittest.TestCase):
                 "platform": "boss",
                 "script_params": {"keyword": "前端", "city": ["上海"], "pages": 3},
                 "browser_account": "a", "cdp_port": 9222, "profile_key": "boss:a",
+                "active_account_at_freeze": "a",
             },
         )
         if self.store.get_screening_run(task_id)["status"] == "queued":
@@ -1772,6 +1777,226 @@ class ResultRoundRescueTests(unittest.TestCase):
                         match_calls2)
         # 结果轮成功写入且一条流程一条轮
         self.assertEqual(len(self.store.list_history_rounds()), 1)
+
+
+class ResumeAccountGateIntegrationTests(unittest.TestCase):
+    """030：统一继续接口双门槛自动换号集成回归。
+
+    核心场景（用户原始缺陷）：全局账号 a、R2 冻结账号 b、用户未动任何
+    设置，任务报错暂停后点继续——必须继续用 b，不得被静默改写为 a。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+        self.app.config["RESUME_BLOCK_CHECKER"] = lambda run: (True, "", "")
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _seed_paused_run(self, task_id, *, browser_account, snapshot,
+                          error_code, current_stage="jd_detail"):
+        """种子一个 BOSS paused run：冻结账号/快照/暂停码可控。"""
+        scrape_id = f"{task_id}-src"
+        jobs = [
+            {"job_id": "j001", "title": "岗位1",
+             "source_url": "https://zhipin.example/j001.html"},
+        ]
+        self.store.create_screening_run(scrape_id, source_count=1)
+        self.store.save_scrape_combo_result(scrape_id, "kw|city", jobs, ["kw|city"])
+        params = {
+            "platform": "boss",
+            "scrape_task_id": scrape_id,
+            "profile_summary": "测试画像",
+            "browser_account": browser_account,
+            "cdp_port": 9222,
+            "profile_key": f"boss:{browser_account}",
+        }
+        if snapshot is not None:
+            params["active_account_at_freeze"] = snapshot
+        self.store.create_screening_run(task_id, source_count=1,
+                                        execution_params=params)
+        self.store.update_screening_run(task_id, status="running")
+        self.store.update_screening_run(
+            task_id, status="paused", current_stage=current_stage,
+            error_code=error_code, error_reason="测试暂停",
+        )
+        return task_id
+
+    def _continue(self, task_id):
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(executor, "submit"):
+            return self.client.post(f"/api/task/continue/{task_id}", json={})
+
+    def _account_switch_events(self, task_id):
+        return [e for e in self.store.list_task_events(task_id)
+                if e.get("type") == "account_switch"]
+
+    def test_untouched_global_keeps_r2_frozen_account(self):
+        """核心回归：用户未动全局账号（当前=快照），继续沿用冻结 b 不改写。"""
+        task_id = self._seed_paused_run(
+            "gate-untouched", browser_account="b", snapshot="a",
+            error_code="source_rate_limited")
+        resp = self._continue(task_id)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        params = (self.store.get_screening_run(task_id) or {}).get(
+            "execution_params") or {}
+        self.assertEqual(params.get("browser_account"), "b")
+        self.assertEqual(params.get("active_account_at_freeze"), "a")
+        self.assertEqual(self._account_switch_events(task_id), [])
+
+    def test_missing_snapshot_keeps_frozen_account(self):
+        """存量任务无快照 → 不自动换号，沿用冻结身份。"""
+        task_id = self._seed_paused_run(
+            "gate-legacy", browser_account="b", snapshot=None,
+            error_code="source_rate_limited")
+        resp = self._continue(task_id)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        params = (self.store.get_screening_run(task_id) or {}).get(
+            "execution_params") or {}
+        self.assertEqual(params.get("browser_account"), "b")
+        self.assertEqual(self._account_switch_events(task_id), [])
+
+    def test_switch_writes_event_and_log_line(self):
+        """B057 场景（暂停期间激活 b）→ 换号发生且事件+日志行留痕。"""
+        task_id = self._seed_paused_run(
+            "gate-switch", browser_account="a", snapshot="a",
+            error_code="source_rate_limited", current_stage="scrape")
+        with mock.patch("webui.pipeline_exec.close_debug_chrome"):
+            activated = self.client.post("/api/browser-accounts/b/activate")
+        self.assertEqual(activated.status_code, 200, activated.get_json())
+        resp = self._continue(task_id)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        params = (self.store.get_screening_run(task_id) or {}).get(
+            "execution_params") or {}
+        self.assertEqual(params.get("browser_account"), "b")
+        events = self._account_switch_events(task_id)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["payload"].get("from_account"), "a")
+        self.assertEqual(events[0]["payload"].get("to_account"), "b")
+        logs = " ".join(self.app.config["PIPELINE_TASKS"][task_id]["logs"])
+        self.assertIn("切换到账号", logs)
+
+    def test_no_switch_leaves_no_audit_trace(self):
+        """未换号的续跑零留痕（无事件、日志无换号行）。"""
+        task_id = self._seed_paused_run(
+            "gate-clean", browser_account="b", snapshot="a",
+            error_code="source_rate_limited")
+        resp = self._continue(task_id)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        logs = " ".join(self.app.config["PIPELINE_TASKS"][task_id]["logs"])
+        self.assertNotIn("切换到账号", logs)
+
+
+class JobDetailConcurrencyGuardTests(unittest.TestCase):
+    """030 US4：任务运行中单岗位 JD 抓取被拒 + JD 阶段浏览器身份重绑。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = pathlib.Path(self.temp.name)
+        self.app = create_app({
+            "TESTING": True,
+            "START_TASKS": False,
+            "RESULT_DIR": str(root / "results"),
+            "DB_PATH": str(root / "state" / "webui.db"),
+            "PYTHON_EXECUTABLE": sys.executable,
+        })
+        self.client = self.app.test_client()
+        token = self.client.get("/api/session").get_json()["token"]
+        self.client.environ_base["HTTP_X_BOSS_TOKEN"] = token
+        self.store = self.app.config["TASK_STORE"]
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.temp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def test_job_detail_rejected_while_task_running(self):
+        """任务运行中 POST /api/job-detail → 409 中文提示，无浏览器副作用。"""
+        self.app.config["PIPELINE_TASKS"]["busy-task"] = {
+            "kind": "ai_screen", "status": "running", "progress": {}, "logs": [],
+        }
+        with mock.patch("webui.pipeline_exec.set_active_cdp_data_dir") as set_dir:
+            resp = self.client.post("/api/job-detail", json={
+                "job_id": "j001",
+                "source_url": "https://zhipin.example/j001.html",
+                "source_run_id": "some-run",
+            })
+        self.assertEqual(resp.status_code, 409, resp.get_json())
+        body = resp.get_json()
+        self.assertEqual(body.get("error"), "browser_busy")
+        self.assertIn("任务", body.get("message") or "")
+        set_dir.assert_not_called()
+
+    def test_jd_stage_rebinds_task_browser_before_chrome(self):
+        """JD 阶段启动浏览器前以任务冻结身份重绑（消除并发污染窗口）。"""
+        from types import SimpleNamespace
+        from webui.runners.ai_screen_jd import run_jd_stage
+        import threading
+
+        calls = []
+
+        class _FakeStore:
+            def append_task_events(self, run_id, events):
+                pass
+
+        class _FakeCtx:
+            lock = threading.Lock()
+            tasks = {}
+            pipeline_guard = None
+            screen_stage_messages = {}
+            event_stage_names = {}
+
+            def screen_overall_percent(self, stage, current, total):
+                return 0
+
+            def activate_task_browser(self, task_id, **kwargs):
+                calls.append(("rebind", task_id))
+
+            def make_cdp_source(self, **kwargs):
+                return object()
+
+            def write_run(self, run_id, **kwargs):
+                pass
+
+        ctx = _FakeCtx()
+        ctx.app = SimpleNamespace(config={"RESULT_DIR": self.temp.name})
+        ctx.store = _FakeStore()
+        job = {"job_id": "j001", "title": "岗位1",
+               "source_url": "https://zhipin.example/j001.html"}
+        with mock.patch("webui.pipeline_exec.ensure_chrome_ready",
+                        return_value=(True, "")) as chrome, \
+             mock.patch("webui.pipeline_exec.close_debug_chrome"), \
+             mock.patch("webui.pipeline_exec.fetch_job_details",
+                        return_value={"jobs": []}):
+            outcome = run_jd_stage(
+                ctx, "gate-jd-run", [dict(job)], [dict(job)], {}, "jd-path",
+                "boss", 9222, "boss:b", "b",
+                SimpleNamespace(detail_batch_size=1), None,
+                lambda **kw: None, lambda: False, lambda: None,
+                lambda *a, **kw: None)
+        self.assertIsNotNone(outcome)
+        self.assertEqual(calls, [("rebind", "gate-jd-run")])
+        chrome.assert_called_once()
 
 
 if __name__ == "__main__":

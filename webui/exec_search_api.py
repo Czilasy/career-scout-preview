@@ -20,6 +20,10 @@ from webui.app import (
     _MSG_USER_STOPPED_SCRAPE,
 )
 from webui.app import _public_task_status
+from webui.resume_identity import (
+    append_account_switch_log_line,
+    ensure_frozen_browser_account,
+)
 from webui.task_runners import _iso_epoch_ms
 
 def register_exec_search_routes(app, ctx):
@@ -404,6 +408,8 @@ def register_exec_search_routes(app, ctx):
                 "auto_screen_facts": auto_screen_facts,
                 "profile_summary": profile_summary,
                 "profile_facts": profile_facts,
+                # 030：创建时全局当前账号快照，续跑判定"用户是否主动换号"用
+                "active_account_at_freeze": ctx.account_for_run(),
             },
             backend_version=ctx.backend_version,
         )
@@ -439,7 +445,8 @@ def register_exec_search_routes(app, ctx):
         })
 
     @app.route("/api/execute-search/continue/<old_task_id>", methods=["POST"])
-    def continue_execute_search(old_task_id, _block_checked=False):
+    def continue_execute_search(old_task_id, _block_checked=False,
+                                account_switch_note=None):
         """断点续抓：从上次失败的组合接着跑，跳过已完成的组合。
 
         切片4：支持 paused 状态继续（FR-020）。优先从 DB checkpoint 恢复
@@ -484,10 +491,11 @@ def register_exec_search_routes(app, ctx):
                     "status": "paused",
                 }), 409
         if db_run is not None:
-            resume_params = dict(db_run.get("execution_params") or {})
-            if not str(resume_params.get("browser_account") or ""):
-                resume_params["browser_account"] = ctx.account_for_run(db_run)
-                ctx.store.update_screening_execution_params(old_task_id, resume_params)
+            # 030：缺冻结账号时回退填充收口到续跑身份域（口径不变：沿用当前全局账号）
+            ensure_frozen_browser_account(
+                ctx.store, old_task_id, db_run,
+                platform=str((db_run.get("execution_params") or {}).get("platform") or "boss"),
+                fallback_account=ctx.account_for_run(db_run))
         # 3) 收集 script_params（内存优先，DB 兜底）
         script_params = (old_snapshot or {}).get("script_params")
         if not script_params and db_run:
@@ -530,6 +538,12 @@ def register_exec_search_routes(app, ctx):
                 "ok": False, "error": "already_running",
                 "message": _MSG_TASK_ALREADY_RUNNING,
             }), 409
+        if account_switch_note:
+            # 030 FR-005：自动换号在续跑启动日志留一行中文说明
+            append_account_switch_log_line(
+                claimed_task,
+                from_account=account_switch_note[0],
+                to_account=account_switch_note[1])
         # 把续抓信息存进 task，ctx.run_pipeline_task 会读取
         # T403: 从 DB 恢复冻结 runtime（platform/cdp_port/profile_key/
         # task_input_digest），不读当前 UI 或活动账号

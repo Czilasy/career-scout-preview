@@ -59,9 +59,14 @@ class _FakeCtx:
         self.write_run_calls = []
         self.pause_failures = []
         self.release_calls = []
+        # 030：JD 阶段启动浏览器前会重绑任务冻结身份，这里记录调用
+        self.rebind_calls = []
 
     def write_run(self, task_id, **kwargs):
         self.write_run_calls.append((task_id, kwargs))
+
+    def activate_task_browser(self, task_id, **kwargs):
+        self.rebind_calls.append(task_id)
 
     def record_pause_failure(self, task_id, stage, code, reason, **kwargs):
         self.pause_failures.append((task_id, stage, code, reason))

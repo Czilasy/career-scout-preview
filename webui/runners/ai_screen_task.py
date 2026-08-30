@@ -225,6 +225,8 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary,
                                   "profile_summary": profile_summary or "",
                                   "profile_facts": profile_facts,
                                   "browser_account": frozen_browser_account or ctx.account_for_run(),
+                                  # 030：创建时全局账号快照（续跑换号判定基准）
+                                  "active_account_at_freeze": str(task.get("active_account_at_freeze") or "") or ctx.account_for_run(),
                                   "execution_config": execution_config.to_dict(),
                                   "frozen_scope": frozen_scope.to_dict(),
                                   "platform": frozen_platform,
@@ -294,6 +296,9 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary,
                     "profile_summary": profile_summary,
                     "profile_facts": profile_facts,
                     "browser_account": frozen_browser_account or ctx.account_for_run(),
+                    # 030：创建时全局账号快照；本行 INSERT OR REPLACE 覆盖 API 预建行，
+                    # 快照必须随此落库（否则续跑换号判定基准丢失）
+                    "active_account_at_freeze": str(task.get("active_account_at_freeze") or "") or ctx.account_for_run(),
                     "execution_config": execution_config.to_dict(),
                     "frozen_scope": frozen_scope.to_dict(),
                     "platform": frozen_platform,
