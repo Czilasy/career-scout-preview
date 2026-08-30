@@ -438,3 +438,181 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---- §6 遗漏修补：浅色残留清零（用户全面排查 2026-08-30） ---- */
+
+/* 平台分段：激活=绿玻璃透光，非激活=暗玻璃 */
+[data-theme="kaleido"] .platform-segment-btn {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.035);
+  color: #a9bcc8;
+}
+[data-theme="kaleido"] .platform-segment-btn.active {
+  border-color: rgba(94, 230, 168, 0.5);
+  background: linear-gradient(165deg, rgba(94, 230, 168, 0.3),
+      rgba(94, 230, 168, 0.08));
+  color: #dcffec;
+  font-weight: 700;
+}
+
+/* ① 徽章：绿玻璃 + 光谱流边 */
+[data-theme="kaleido"] .card-kicker {
+  border: 1.4px solid transparent;
+  border-radius: 0;
+  clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%,
+      0 100%, 0 6px);
+  background:
+    linear-gradient(165deg, rgba(94, 230, 168, 0.32), rgba(94, 230, 168, 0.1)) padding-box,
+    var(--k-dispb) border-box;
+  background-size: 100% 100%, 300% 100%;
+  animation: kaleido-edge-flow 3.6s linear infinite;
+  color: #bff8dc;
+  font-weight: 700;
+}
+
+/* 拖放区图标：光谱流动菱形（用户点名） */
+[data-theme="kaleido"] .file-drop > svg {
+  width: 46px;
+  height: 46px;
+  padding: 9px;
+  clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
+  background:
+    linear-gradient(168deg, #f6fcff, #d6edf8 55%, #b3daec) padding-box,
+    var(--k-dispb) border-box;
+  background-size: 100% 100%, 300% 100%;
+  animation: kaleido-edge-flow 3.2s linear infinite;
+  color: #07222e;
+  box-shadow: 0 0 16px rgba(214, 238, 250, 0.3);
+  margin-bottom: 10px;
+}
+[data-theme="kaleido"] .file-drop > strong {
+  color: var(--k-text-hi);
+  font-size: 16px;
+}
+[data-theme="kaleido"] .file-drop > span {
+  color: var(--ink-3);
+}
+
+/* 进度条模块（运行中）：暗膛玻璃切面 + 光谱流动进度 */
+[data-theme="kaleido"] .task-progress {
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 0;
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%,
+      0 100%);
+  background:
+    linear-gradient(180deg, rgba(210, 232, 244, 0.05), rgba(255, 255, 255, 0.01) 50px),
+    var(--k-panel-glass);
+}
+[data-theme="kaleido"] .task-progress .task-percentage {
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  color: var(--k-text-hi);
+  text-shadow: 0 0 12px rgba(214, 238, 250, 0.4);
+}
+[data-theme="kaleido"] .task-progress .progress-track {
+  height: 6px;
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+[data-theme="kaleido"] .task-progress .progress-track > span {
+  display: block;
+  height: 100%;
+  background: var(--k-dispb);
+  background-size: 300% 100%;
+  animation: kaleido-edge-flow 2.6s linear infinite;
+  box-shadow: 0 0 10px rgba(126, 255, 178, 0.45);
+}
+[data-theme="kaleido"] .task-progress .task-platform {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--k-text-hi);
+}
+[data-theme="kaleido"] .task-progress .task-combo-issue {
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  color: var(--ink-2);
+}
+[data-theme="kaleido"] .task-progress .task-combo-issue-key {
+  color: var(--k-text-hi);
+  font-weight: 600;
+}
+
+/* 执行档位选择器：选中=光谱流边亮玻璃 */
+[data-theme="kaleido"] .mode-segments button {
+  border-radius: 0;
+  clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%,
+      0 100%, 0 7px);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #9db2c0;
+}
+[data-theme="kaleido"] .mode-segments button.active {
+  color: var(--k-text-hi) !important;
+  font-weight: 700;
+  border: 1.5px solid transparent !important;
+  background:
+    linear-gradient(165deg, rgba(240, 246, 250, 0.16), rgba(240, 246, 250, 0.03)) padding-box,
+    var(--k-dispb) border-box !important;
+  background-size: 100% 100%, 300% 100% !important;
+  animation: kaleido-edge-flow 3.2s linear infinite;
+}
+[data-theme="kaleido"] .mode-segments button.active.mode-stable {
+  background:
+    linear-gradient(165deg, rgba(94, 230, 168, 0.2), rgba(94, 230, 168, 0.04)) padding-box,
+    var(--k-flowg) border-box !important;
+  color: #b8f0d0 !important;
+}
+[data-theme="kaleido"] .mode-segments button.active.mode-balanced {
+  background:
+    linear-gradient(165deg, rgba(255, 184, 77, 0.22), rgba(255, 184, 77, 0.05)) padding-box,
+    var(--k-flowa) border-box !important;
+  color: #ffe2ae !important;
+}
+[data-theme="kaleido"] .mode-segments button.active.mode-extreme {
+  background:
+    linear-gradient(165deg, rgba(255, 108, 108, 0.2), rgba(255, 108, 108, 0.04)) padding-box,
+    var(--k-flowr) border-box !important;
+  color: #ffc9c9 !important;
+}
+[data-theme="kaleido"] .mode-segments button.active {
+  border-radius: 0;
+  clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%,
+      0 100%, 0 7px);
+}
+
+/* 我已确认：琥珀玻璃 */
+[data-theme="kaleido"] .profile-confirm-btn {
+  background: linear-gradient(165deg, rgba(242, 194, 128, 0.24),
+      rgba(242, 194, 128, 0.06)) !important;
+  color: #ffe6bd !important;
+  border-radius: 0;
+  clip-path: polygon(6px 0, calc(100% - 6px) 0, 100% 50%, calc(100% - 6px) 100%,
+      6px 100%, 0 50%);
+  background: linear-gradient(165deg, rgba(242, 194, 128, 0.24),
+      rgba(242, 194, 128, 0.06));
+  border: 1px solid rgba(242, 194, 128, 0.5);
+  color: #ffe6bd;
+  font-weight: 600;
+}
+
+/* 折叠卡前缀方块：暗玻璃 */
+[data-theme="kaleido"] .collapsible-prefix {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 0;
+  color: var(--ink-1);
+}
+
+/* 结果页 vtab 计数等宽字 */
+[data-theme="kaleido"] .result-tabs .vtab-count {
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  color: var(--k-text-hi);
+}
+
+/* 步骤器未达步提亮（此前过暗不可读） */
+[data-theme="kaleido"] .step-nav button:disabled {
+  color: #a9bcc8;
+  opacity: 1;
+}
