@@ -12,6 +12,11 @@ from collections.abc import Callable
 from webui.source_breaker import SourceOutcome
 from webui.source_boss_helpers import _input_hash
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 
 class FakeJobSource:
     """In-memory JobSource for tests. Never invokes a real subprocess.
@@ -168,7 +173,9 @@ class FakeJobSource:
                     try:
                         on_item_done(i + 1)
                     except Exception:
+                        # 吞噬白名单（031 B4）：测试替身的进度回调，失败无需留痕
                         pass
+
                 continue
             job_id = str(job.get("job_id") or job.get("id") or "").strip()
             key = job_id or f"idx{i}"
@@ -177,5 +184,7 @@ class FakeJobSource:
                 try:
                     on_item_done(i + 1)
                 except Exception:
+                    # 吞噬白名单（031 B4）：测试替身的进度回调，失败无需留痕
                     pass
+
         return results

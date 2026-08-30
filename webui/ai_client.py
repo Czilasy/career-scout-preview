@@ -24,6 +24,10 @@ from webui.ai_errors import (
     _is_quota_exhausted_response,
     _looks_truncated,
 )
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
 
 
 KEYRING_SERVICE = "boss-workbench"
@@ -362,7 +366,8 @@ def _read_stream_with_timeout(response, budget):
         try:
             response.close()
         except Exception:
-            pass
+            _logger.debug("HTTP 响应清理关闭失败（best-effort 忽略）", exc_info=True)
+
         raise requests.Timeout(
             f"流式响应总时长超过 {budget}s 上限（读取线程仍阻塞）"
         )
@@ -427,7 +432,8 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
                 metadata=details,
             )
         except Exception:
-            pass
+            _logger.debug("指标回调执行失败（不阻断重试流程）", exc_info=True)
+
 
     content = ""
     finish_reason = ""

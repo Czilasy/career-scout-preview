@@ -25,6 +25,11 @@ from typing import Any, Callable
 from webui.logging_setup import get_logger
 from webui.process_executor import ScraperExecutor
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 #: 兜底暂停写入的暂停码（复用既有 internal 语义，不新建错误码体系）。
 FALLBACK_PAUSE_CODE = "internal_error"
 #: 兜底暂停的用户可读原因（FR-007）。
@@ -349,12 +354,14 @@ class PipelineGuard:
                     {"stage": "jd_detail", "code": code, "reason": reason},
                 )
             except Exception:
-                pass
+                _logger.warning("暂停事件登记失败（主流程继续）", exc_info=True)
+
         if self._record_pause_failure is not None:
             try:
                 self._record_pause_failure(task_id, "jd_detail", code, reason)
             except Exception:
-                pass
+                _logger.warning("暂停失败登记回调执行失败（主流程继续）", exc_info=True)
+
         if self._tasks is not None and self._lock is not None:
             try:
                 with self._lock:
@@ -363,13 +370,15 @@ class PipelineGuard:
                         task["status"] = "paused"
                         task["error"] = reason
             except Exception:
-                pass
+                _logger.warning("任务状态迁移为 paused 失败（主流程继续）", exc_info=True)
+
         if self._release_worker_resume_claims is not None:
             try:
                 task = self._tasks.get(task_id) if self._tasks is not None else None
                 self._release_worker_resume_claims(task)
             except Exception:
-                pass
+                _logger.warning("worker 简历占位释放失败（主流程继续）", exc_info=True)
+
 
     def _log_event(self, event: str, st: dict | _BatchState, *, result: str = "", extra: dict | None = None) -> None:
         try:
@@ -385,7 +394,8 @@ class PipelineGuard:
                 )
             self._logger.info(line)
         except Exception:
-            pass
+            _logger.debug("日志行组装失败（忽略）", exc_info=True)
+
 
     # ------------------------------------------------------------------
     # 收尾

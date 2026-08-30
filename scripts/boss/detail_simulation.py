@@ -15,6 +15,11 @@ from __future__ import annotations
 import random
 from typing import Any
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 # 024 冻结表 #12-#14：wait_range=加载等待区间（秒）、scroll_range=滚动次数
 # 区间（含两端）、mouse_prob=鼠标移动概率。
 SIMULATION_PARAMS: dict[str, dict[str, Any]] = {
@@ -70,7 +75,8 @@ def simulate_after_load(ws, sid, *, params: dict[str, Any], sleeper, label_prefi
         try:
             ws.eval_js(f"window.scrollBy(0,{delta}); void(0);", sid)
         except Exception:
-            pass
+            _logger.debug("模拟滚动注入失败（不阻断模拟流程）", exc_info=True)
+
         if random.random() < 0.3:
             sleeper(random.uniform(2.0, 4.0), label=f"{label_prefix}sim_scroll_pause")
         else:
@@ -85,4 +91,4 @@ def simulate_after_load(ws, sid, *, params: dict[str, Any], sleeper, label_prefi
                 "y": random.randint(100, 600),
             }, sid)
         except Exception:
-            pass
+            _logger.debug("模拟鼠标移动注入失败（不阻断模拟流程）", exc_info=True)

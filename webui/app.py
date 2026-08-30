@@ -87,6 +87,10 @@ from webui.constants import (
     _OPERATIONAL_ERRORS,
     _ZHILIAN_HOST_TOKEN,
 )
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
 from webui.core import (
     LegacyPlatformNotSupportedError,
     build_filter_options,
@@ -241,7 +245,8 @@ def create_app(config=None):
 
             ensure_frontend_sync.main()
         except Exception:
-            pass
+            _logger.warning("前端产物同步失败，界面可能不是最新构建", exc_info=True)
+
     _execution_mode = "in_process" if _runtime_mode == "exe" else "subprocess"
     runner = TaskRunner(
         store,

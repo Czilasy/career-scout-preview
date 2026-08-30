@@ -38,6 +38,11 @@ from webui.ai_filters import (
 )
 from webui import recruiter_activity
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 
 
 def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
@@ -277,7 +282,8 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 try:
                     progress(min(processed, len(jobs)), len(jobs))
                 except Exception:
-                    pass
+                    _logger.debug("进度回调执行失败（不阻断筛选主流程）", exc_info=True)
+
     else:
         # 并发（换不限流端点时启用）
         import threading
@@ -294,7 +300,8 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
             try:
                 progress(cur, len(jobs))
             except Exception:
-                pass
+                _logger.debug("进度回调执行失败（不阻断筛选主流程）", exc_info=True)
+
 
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = {pool.submit(_process_batch, batch): batch for batch in batches}
@@ -618,7 +625,8 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 try:
                     progress(min(processed, len(jobs_with_jd)), len(jobs_with_jd))
                 except Exception:
-                    pass
+                    _logger.debug("进度回调执行失败（不阻断筛选主流程）", exc_info=True)
+
     else:
         # 并发（换不限流端点时启用）
         import threading
@@ -635,7 +643,8 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             try:
                 progress(cur, len(jobs_with_jd))
             except Exception:
-                pass
+                _logger.debug("进度回调执行失败（不阻断筛选主流程）", exc_info=True)
+
 
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = {pool.submit(_match_one_batch, batch): batch for batch in batches}

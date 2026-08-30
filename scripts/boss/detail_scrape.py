@@ -14,6 +14,11 @@ from scripts.boss.output import default_output_path, write_detail_csv, write_jso
 from scripts.boss.rate_limit import begin_request_run
 from scripts.boss_cdp_signals import detail_page_hint
 import sys as _sys
+
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
 def _facade():
     return _sys.modules.get("scripts.boss_cdp_raw")
 
@@ -484,11 +489,13 @@ def _tab_worker(cdp_port, session_factory, work_queue, total, *,
                 if tid is not None and not keep_tab_open:
                     ws.send(CDP_CMD_CLOSE_TARGET, {"targetId": tid})
             except Exception:
-                pass
+                _logger.debug("CDP 标签关闭请求失败（收尾线程兜底）", exc_info=True)
+
             try:
                 ws.close()
             except Exception:
-                pass
+                _logger.debug("CDP 会话关闭失败（收尾线程兜底）", exc_info=True)
+
             finally:
                 _fini_done.set()
 

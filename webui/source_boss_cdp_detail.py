@@ -54,7 +54,8 @@ class _InProcessCapture(boss._ThreadAwareStdout):
                 try:
                     self._fallback.write(text)
                 except Exception:
-                    pass
+                    _logger.debug("降级输出通道写入失败（忽略）", exc_info=True)
+
             return len(text)
         if self._size < self._max:
             take = text[: self._max - self._size]
@@ -353,7 +354,8 @@ class _BossCdpDetailMixin:
                 except Exception:
                     # The callback must never crash the batch; swallow and
                     # continue. The outcome is built from the event itself.
-                    pass
+                    _logger.debug("事件回调执行失败（不阻断抓取）", exc_info=True)
+
 
         # 7. Read the combined detail JSON and index by job_link/source_url.
         details_by_url = self._read_combined_details(detail_output_path)
@@ -428,7 +430,8 @@ class _BossCdpDetailMixin:
             try:
                 on_item_done(len(jobs))
             except Exception:
-                pass
+                _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+
 
         return results
 

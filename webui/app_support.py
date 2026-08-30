@@ -31,6 +31,11 @@ from webui.error_registry import resolve_code
 from webui.pipeline_context import PipelineContext
 from webui.store import SYSTEMIC_BLOCK_CODES, DiscoveryStoreConflictError
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 
 def build_app_support(app, store, runner, workbench_runner,
                       job_feedback_service, history_service, resume_service,
@@ -285,7 +290,8 @@ def build_app_support(app, store, runner, workbench_runner,
             from scripts.login_state_cache import invalidate_login_state
             invalidate_login_state(str(account_id), str(platform))
         except Exception:
-            pass
+            _logger.debug("登录态缓存失效操作失败（best-effort 忽略）", exc_info=True)
+
 
     def _activate_run_browser(run=None) -> None:
         """Point the shared CDP helper at the selected profile."""

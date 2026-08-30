@@ -12,6 +12,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 # 030：任务创建时的全局当前账号快照键（execution_params 内字段，无表结构
 # 变更）。续跑时比对"当前全局账号 ≠ 快照"判定用户是否主动换过号；快照
 # 缺失（存量任务）一律不自动换号，沿用冻结身份。
@@ -89,7 +94,8 @@ def record_account_switch_event(store: Any, run_id: str, *,
     try:
         store.append_task_event(run_id, "account_switch", payload)
     except Exception:
-        pass
+        _logger.debug("账号切换事件落库失败（不影响切换主流程）", exc_info=True)
+
 
 
 def append_account_switch_log_line(task: dict[str, Any] | None, *,
@@ -292,4 +298,4 @@ def invalidate_login_cache_for_resume(account_id: str, platform: str) -> None:
         from scripts.login_state_cache import invalidate_login_state
         invalidate_login_state(str(account_id), str(platform))
     except Exception:
-        pass
+        _logger.debug("登录态缓存失效操作失败（best-effort 忽略）", exc_info=True)

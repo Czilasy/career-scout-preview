@@ -81,9 +81,11 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/store_tuning_reports.py` — 调优测量/质量参照/任务单与执行者报告域 mixin（021 B2）
 - `webui/pipeline_context.py` — create_app 共享运行态载体 PipelineContext；可 patch 的 webui.app 模块级符号经 __getattr__ 动态门面调用时读取（021 B3）
 - `webui/runners/` — 后台任务 runner 包（021 B4-B6）：tuning_manifest.py（调优任务单子进程）、recrawl_task.py（批量重抓）、pipeline_task.py（列表抓取）、ai_screen_task.py（AI 筛选编排）+ ai_screen_rough/jd/fine.py 三段模块（task 单向 import 段模块，段间不互相 import）
-- `webui/task_status.py` — 任务状态口径与共享纯助手（公共状态映射、run scope 解析、暂停配置刷新、legacy PATCH 连接代理、进度权重）；webui.app re-export 保持旧 import 兼容（021 B6）
+- `webui/task_status.py` — 任务状态口径与共享纯助手（公共状态映射、run scope 解析、暂停配置刷新、legacy PATCH 连接代理、进度权重）；常量与错误元组自 webui.constants 导入，反向依赖清零（021 B6，031 B3 更新）
+- `webui/constants.py` — 共享常量家：数值常量、消息文案、可恢复错误元组、反馈状态表、路径锚点（031 B3 起为跨层唯一来源）
 - `webui/app_support.py` — create_app 管线支撑工厂 build_app_support：任务表/锁/执行器、调优 runner、声明与租约、终态写入、清理定时、账号激活、续跑断言、PipelineContext 组装；可 patch 符号经 webui.app 属性动态取用（021 B6）
 - `webui/browser_support.py` — 浏览器锁共享助手工厂（活动任务锁口径、暂停 run 浏览器关闭、账号投影）（021 B6）
+- `webui/logging_setup.py` — 日志统一配置：career_scout 旋转文件 + 凭据脱敏 + 任务上下文；子 logger 约定 `get_logger(__name__)`；pass-only 吞噬基线执法对象（031 B4）
 - `webui/*_api.py` 路由域模块（021 B6 T019，register_*(app, ctx) 模式）：version_update_api（版本/更新/主题）、tuning_api（调优实验/manifest/decision）、settings_api（AI/高级设置/浏览器账号）、pipeline_jobs_api（岗位操作/批量重抓）、results_api（结果/进度/导出）、running_task_api（最新运行任务快照）、resume_fields_api（简历解析/字段确认）、exec_search_api（搜索执行/续跑/取消）、ai_screen_api（筛选提交/取消）、core_api（入口/静态/平台/选项/任务查询）、profiles_api（画像/搜索运行/岗位反馈）、task_state_api（状态/诊断/恢复预览）、task_continue_api（续跑/暂停/取消/结束）
 - `webui/app.py` — 薄装配门面（021 B6 后 ≤800 行）：入口 + 配置 + ctx（经 build_app_support）+ runner 包装 + 路由注册 + re-export
 - `webui/tuning.py` — 调优域门面：TuningController = 五域 mixin MRO 组装 + re-export（021 B7 T021）

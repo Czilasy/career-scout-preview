@@ -32,6 +32,10 @@ from webui.workbench import (
     allocate_detail_budget,
     normalize_job_link,
 )
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
 
 _MSG_USER_CANCELLED_TASK = "用户取消任务"
 
@@ -44,7 +48,8 @@ def _has_unlock_signal(text: str) -> bool:
         if boss.parse_unlock_time(text) is not None:
             return True
     except Exception:
-        pass
+        _logger.debug("解封时间解析失败，回退关键词判定", exc_info=True)
+
     lowered = str(text).lower()
     return any(kw in lowered for kw in ("解封时间", "解封后", "解封于", "解锁时间"))
 
@@ -123,7 +128,8 @@ class _StdoutToLogBuffer(boss._ThreadAwareStdout):
                 try:
                     self._fallback.write(text)
                 except Exception:
-                    pass
+                    _logger.debug("降级输出通道写入失败（忽略）", exc_info=True)
+
             return len(text)
         parts = text.splitlines(keepends=True)
         for part in parts:

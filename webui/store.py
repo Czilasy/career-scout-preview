@@ -80,6 +80,11 @@ from webui.store_tuning_experiments import StoreTuningExperimentsMixin
 from webui.store_tuning_rounds import StoreTuningRoundsMixin
 from webui.store_tuning_reports import StoreTuningReportsMixin
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 
 
 def _db_env(db_path) -> str:
@@ -209,11 +214,15 @@ class TaskStore(
             try:
                 source_conn.close()
             except Exception:
+                # 吞噬白名单（031 B4）：finally 连接关闭清理，无上下文可留痕
                 pass
+
             try:
                 backup_conn.close()
             except Exception:
+                # 吞噬白名单（031 B4）：finally 连接关闭清理，无上下文可留痕
                 pass
+
 
         source_size = os.path.getsize(self.db_path)
         backup_size = os.path.getsize(backup_path)

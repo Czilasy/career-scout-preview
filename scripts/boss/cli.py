@@ -14,6 +14,11 @@ from scripts.boss.detail_parse import load_existing_details
 from scripts.boss.output import flush_jobs, merge_details, merge_details_from_lists, merge_jobs, write_csv, write_detail_csv, write_json_atomic
 from scripts.boss_cdp_signals import emit_failure_line
 import sys as _sys
+
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
 def _facade():
     return _sys.modules.get("scripts.boss_cdp_raw")
 
@@ -52,7 +57,8 @@ class _ThreadAwareStdout:
             try:
                 self._fallback.flush()
             except Exception:
-                pass
+                _logger.debug("控制台输出通道刷新失败（忽略）", exc_info=True)
+
 
     def __enter__(self):
         self._previous = sys.stdout
@@ -84,7 +90,8 @@ class _LineLogBuffer(_ThreadAwareStdout):
                 try:
                     self._fallback.write(s)
                 except Exception:
-                    pass
+                    _logger.debug("控制台输出通道写入失败（忽略）", exc_info=True)
+
             return len(s)
         self._buf += s
         while "\n" in self._buf:

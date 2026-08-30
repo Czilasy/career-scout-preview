@@ -23,6 +23,11 @@ from webui.browser_recovery import BrowserRecovery
 from webui.error_registry import SYSTEMIC_BLOCK_CODES as _HARD_STOP_CODES
 from webui.error_registry import resolve_code
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 
 
 
@@ -105,7 +110,8 @@ def run_search(params: dict, source, *, pages: int = 3,
             try:
                 progress(kw)
             except Exception:
-                pass
+                _logger.debug("进度回调执行失败（不阻断搜索主流程）", exc_info=True)
+
 
     if not combos:
         return {"ok": False, "jobs": [], "total_scraped": 0,
@@ -284,7 +290,8 @@ def run_search(params: dict, source, *, pages: int = 3,
             try:
                 on_issue(combo_key, entry)
             except Exception:
-                pass
+                _logger.debug("问题上报回调失败（不阻断搜索主流程）", exc_info=True)
+
 
         def _secondary_login_probe():
             recheck = getattr(source, "recheck_login", None)
@@ -487,7 +494,8 @@ def run_search(params: dict, source, *, pages: int = 3,
                                                  "output_count": len(outcome.jobs),
                                                  "batch_index": idx + 1})
                 except Exception:
-                    pass
+                    _logger.debug("观测回调执行失败（不阻断搜索主流程）", exc_info=True)
+
 
         # Delay between combinations (not after the last one).
         if idx < len(combos) - 1:
@@ -507,7 +515,8 @@ def run_search(params: dict, source, *, pages: int = 3,
                                          int((time.time() - _t0_wait) * 1000),
                                          counts={"combo_index": idx + 1})
                 except Exception:
-                    pass
+                    _logger.debug("观测回调执行失败（不阻断搜索主流程）", exc_info=True)
+
 
     # 广搜策略：不做本地硬筛选，全量返回，筛选交给后续 AI 步骤。
     all_jobs = list(merged.values())

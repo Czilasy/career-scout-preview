@@ -14,6 +14,10 @@ from webui.pipeline_exec_accounts import (
     effective_data_dir,
     load_browser_accounts,
 )
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
 from scripts import boss_cdp_raw as boss
 from scripts.boss.browser_registry import (
     fetch_cdp_browser_field,
@@ -107,7 +111,8 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
     try:
         boss.stop_cdp_chrome(cdp_data_dir)
     except Exception:
-        pass
+        _logger.debug("CDP Chrome 停止失败（可能已自行退出）", exc_info=True)
+
     # 029：启动 exe 按设置中的浏览器选择解析（auto/registry/manual）
     exe_path, exe_reason = resolve_executable()
     if exe_path is None:
@@ -145,7 +150,8 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
                 try:
                     boss.minimize_chrome_window(port)
                 except Exception:
-                    pass
+                    _logger.debug("窗口最小化失败（锦上添花步骤，忽略）", exc_info=True)
+
             return True, ""
         try:
             rc = proc.poll()
@@ -164,7 +170,8 @@ def ensure_chrome_ready(cdp_port: int | None = None, *,
                     try:
                         boss.stop_cdp_chrome(cdp_data_dir)
                     except Exception:
-                        pass
+                        _logger.debug("CDP Chrome 停止失败（可能已自行退出）", exc_info=True)
+
                     time.sleep(2)
                     proc = boss.launch_chrome(cmd)
                     parent_exited_at = None

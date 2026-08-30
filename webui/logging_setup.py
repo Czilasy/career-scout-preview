@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 from typing import Iterator
 
+
 LOGGER_NAME = "career_scout"
 DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_BACKUP_COUNT = 10
@@ -108,7 +109,8 @@ def configure_logging(
             try:
                 existing.close()
             except Exception:
-                pass
+                _logger.debug("旧日志句柄关闭失败（force 重配场景，忽略）", exc_info=True)
+
     logger.addHandler(handler)
     return logger
 
@@ -134,3 +136,5 @@ def is_configured() -> bool:
 def get_logger(name: str = LOGGER_NAME) -> logging.Logger:
     """Return a child logger of the configured local logger."""
     return logging.getLogger(f"{LOGGER_NAME}.{name}" if name != LOGGER_NAME else LOGGER_NAME)
+
+_logger = get_logger(__name__)

@@ -16,6 +16,11 @@ from typing import Callable
 
 from webui.runtime_audit import record_runtime_event
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 
 BROWSER_LOST_CODES = frozenset({"cdp_unavailable", "source_cdp_unavailable"})
 
@@ -55,7 +60,8 @@ class BrowserRecovery:
                 try:
                     self.on_restart()
                 except Exception:
-                    pass
+                    _logger.warning("浏览器重启回调执行失败", exc_info=True)
+
             ensure = self.ensure_chrome_ready
             if ensure is None:
                 from webui.pipeline_exec import ensure_chrome_ready

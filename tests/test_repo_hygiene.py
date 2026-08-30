@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import pathlib
@@ -243,3 +244,42 @@ class RepoHygieneTests(unittest.TestCase):
                 if m:
                     issues.append(f"{rel}: 命中 {m.group(0)!r}")
         self.assertEqual(issues, [], "已跟踪文本文件不得包含本地路径或凭据")
+
+    def test_silent_except_pass_baseline(self):
+        """pass-only 吞噬基线（031 B4 / FR-012）：只许下降，白名单与代码注释一一对应。
+
+        口径：AST ExceptHandler，type ∈ {Exception, BaseException, 裸}，body 为单
+        ``pass``。非白名单文件出现即失败（新增吞噬 = 测试失败）。
+        """
+        allowed = {"store.py", "source_fake.py"}
+        marker = "吞噬白名单"
+        total = 0
+        for base in ("webui", "scripts"):
+            for p in (ROOT / base).rglob("*.py"):
+                if "__pycache__" in str(p):
+                    continue
+                src = p.read_text(encoding="utf-8", errors="replace")
+                tree = ast.parse(src)
+                lines = src.splitlines()
+                for x in ast.walk(tree):
+                    if not (
+                        isinstance(x, ast.ExceptHandler)
+                        and len(x.body) == 1
+                        and isinstance(x.body[0], ast.Pass)
+                    ):
+                        continue
+                    ty = ast.unparse(x.type) if x.type else "bare"
+                    if ty not in ("Exception", "BaseException", "bare"):
+                        continue
+                    rel = p.relative_to(ROOT).as_posix()
+                    total += 1
+                    if p.name not in allowed:
+                        self.fail(
+                            f"{rel}:{x.lineno} 出现未治理的 pass-only 吞噬"
+                            "（显式返回 / 留痕 / 白名单+注释 三档必居其一）"
+                        )
+                    ctx = "\n".join(lines[max(0, x.lineno - 3): x.lineno + 1])
+                    self.assertIn(
+                        marker, ctx, f"{rel}:{x.lineno} 白名单条目缺少「{marker}」注释"
+                    )
+        self.assertLessEqual(total, 4, "pass-only 吞噬总数不得超过白名单基线 4")

@@ -9,6 +9,7 @@ SHA256 解析与校验、下载状态恢复、替换脚本生成、下载器 URL
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import tempfile
 import unittest
@@ -576,6 +577,21 @@ class MirrorFirstTests(unittest.TestCase):
             )
         self.assertEqual(digest,
                          "868b9bc8e088a5f27bec4d29d115dcfbf67e1fe77abb455d5a2e1ab55f29614b")
+
+
+class StateDirEnvTests(unittest.TestCase):
+    """BOSS_WEBUI_STATE_DIR 环境变量真实生效（031 B4 / FR-014）。"""
+
+    def test_boss_webui_state_dir_overrides_default_state_dir(self):
+        import importlib
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"BOSS_WEBUI_STATE_DIR": tmp}):
+                reloaded = importlib.reload(updater)
+                try:
+                    self.assertEqual(reloaded.DEFAULT_STATE_DIR, Path(tmp))
+                finally:
+                    importlib.reload(updater)  # 还原模块级状态，避免影响其他用例
 
 
 if __name__ == "__main__":

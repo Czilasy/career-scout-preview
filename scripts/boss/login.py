@@ -9,6 +9,11 @@ from scripts.boss.constants import API_JOB_LIST_PATH, CDP_ABOUT_BLANK, CDP_CMD_A
 from scripts.boss_cdp_signals import looks_like_risk_control
 from scripts.boss.constants import log
 import sys as _sys
+
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
 def _facade():
     return _sys.modules.get("scripts.boss_cdp_raw")
 
@@ -186,7 +191,8 @@ def wait_for_login(cdp_port=DEFAULT_CDP_PORT, timeout=DEFAULT_LOGIN_TIMEOUT, int
                         from scripts.login_state_cache import invalidate_login_state
                         invalidate_login_state(account_id, "boss")
                     except Exception:
-                        pass
+                        _logger.debug("登录态缓存失效操作失败（best-effort 忽略）", exc_info=True)
+
                 return True
             print(".", end="", flush=True)
             time.sleep(interval)

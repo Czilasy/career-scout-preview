@@ -22,7 +22,15 @@ from webui.source_zhilian_defaults import (
     _default_zhilian_list_runner,
     _default_zhilian_preflight_runner,
     _zhilian_failed_reason,
+
+
+
 )
+
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
 
 
 # ===========================================================================
@@ -549,7 +557,8 @@ class ZhilianCdpSource:
                         try:
                             on_item_done(i + 1)
                         except Exception:
-                            pass
+                            _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+
                     continue
                 job_id = str(job.get("platform_job_id") or "").strip()
                 key = job_id or f"idx{i}"
@@ -569,14 +578,16 @@ class ZhilianCdpSource:
                         try:
                             on_item_done(i + 1)
                         except Exception:
-                            pass
+                            _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+
                     continue
                 results[key] = self.fetch_detail(job, detail_output_path=detail_output_path)
                 if on_item_done is not None:
                     try:
                         on_item_done(i + 1)
                     except Exception:
-                        pass
+                        _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+
                 if gap_min > 0 and i + 1 < len(jobs):
                     time.sleep(random.uniform(gap_min, gap_max))
             return results
@@ -596,7 +607,8 @@ class ZhilianCdpSource:
                     try:
                         on_item_done(i + 1)
                     except Exception:
-                        pass
+                        _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+
                 continue
             job_id = str(job.get("platform_job_id") or "").strip()
             # 并行 runner 按 canonical_url 去重；缺失/重复会导致 per_item 与
@@ -615,7 +627,8 @@ class ZhilianCdpSource:
                     try:
                         on_item_done(i + 1)
                     except Exception:
-                        pass
+                        _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+
                 continue
             if any(str(jobs[j].get("canonical_url") or "").strip() == canonical
                    for j, _ in valid):
@@ -630,7 +643,8 @@ class ZhilianCdpSource:
                     try:
                         on_item_done(i + 1)
                     except Exception:
-                        pass
+                        _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+
                 continue
             valid.append((i, job_id or f"idx{i}"))
         if not valid:
@@ -652,7 +666,8 @@ class ZhilianCdpSource:
                     try:
                         on_item_done(i + 1)
                     except Exception:
-                        pass
+                        _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+
             return results
         runner_jobs = []
         for i, _ in valid:
@@ -722,5 +737,6 @@ class ZhilianCdpSource:
                 try:
                     on_item_done(i + 1)
                 except Exception:
-                    pass
+                    _logger.debug("进度回调执行失败（不阻断抓取）", exc_info=True)
+
         return results

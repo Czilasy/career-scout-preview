@@ -17,6 +17,11 @@ from webui.error_registry import resolve_code
 from webui.task_pause_support import ImmediateOnlyCancelEvent
 from webui import recruiter_activity
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 
 
 
@@ -207,14 +212,16 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                                          counts={"item_index": idx, "status": _status,
                                                  "input_count": total})
                 except Exception:
-                    pass
+                    _logger.debug("观测回调执行失败（不阻断详情抓取主流程）", exc_info=True)
+
             if count_done:
                 done += 1
                 if progress is not None:
                     try:
                         progress(done, total)
                     except Exception:
-                        pass
+                        _logger.debug("进度回调执行失败（不阻断详情抓取主流程）", exc_info=True)
+
 
     # 025 修复：把「仅立即停止」的取消信号接到抓取源。in-process（EXE）模式
     # 没有子进程可杀，scrape_details 的逐条检查点是批内唯一中断手段；graceful
@@ -245,7 +252,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                                          int((time.time() - _t0_cooldown) * 1000),
                                          counts={"batch_index": batch_start // BATCH_SIZE})
                 except Exception:
-                    pass
+                    _logger.debug("观测回调执行失败（不阻断详情抓取主流程）", exc_info=True)
+
         batch = indexed_jobs[batch_start:batch_start + BATCH_SIZE]
         batch_jobs = [job for _, _, job in batch]
         batch_path = os.path.join(
@@ -280,13 +288,15 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                     try:
                         guard.touch(batch_key)
                     except Exception:
-                        pass
+                        _logger.debug("guard 心跳触碰失败（忽略）", exc_info=True)
+
                 if progress is None:
                     return
                 try:
                     progress(min(_base + n, _total), _total)
                 except Exception:
-                    pass
+                    _logger.debug("进度回调执行失败（不阻断详情抓取主流程）", exc_info=True)
+
 
             recovery = BrowserRecovery(
                 cdp_port=getattr(source, "cdp_port", None),
@@ -337,7 +347,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                     _executor.on_spawn = None
                     _executor.on_output_probe = None
                 except Exception:
-                    pass
+                    _logger.debug("执行器探针注销失败（忽略）", exc_info=True)
+
             # 025 B076：立即停止 → 当前批一律作废（结果不处理、不保全；FR-012）
             if (stop_event is not None and stop_event.is_set()
                     and getattr(stop_event, "immediate", False)):
@@ -460,7 +471,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                                          counts={"batch_size": len(batch)},
                                          error_code=batch_exception_code)
                 except Exception:
-                    pass
+                    _logger.debug("观测回调执行失败（不阻断详情抓取主流程）", exc_info=True)
+
             # 025 B077：批返回后立即处理结果（抢救的已抓并入；成功清除失败标记）
             _apply_batch_outcomes(batch, outcomes, batch_exception_code)
             # T018: 记录 batch 事件
@@ -472,7 +484,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                                                  "output_count": _batch_fetched,
                                                  "batch_index": batch_start // BATCH_SIZE})
                 except Exception:
-                    pass
+                    _logger.debug("观测回调执行失败（不阻断详情抓取主流程）", exc_info=True)
+
             # 025 B076/B077：批返回窗口普通停止 → 已并入的已抓保全
             if stop_event is not None and stop_event.is_set():
                 stopped = True

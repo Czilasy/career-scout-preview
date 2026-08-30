@@ -11,6 +11,11 @@ import time
 from webui.error_registry import AI_TAXONOMY_TARGETS, ERROR_USER_MESSAGES
 from webui.error_registry import resolve_code
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 
 
 
@@ -83,7 +88,9 @@ def _emit_request_event(callback, stage: str, t0: float, *,
         callback("request", stage=stage, duration_ms=duration_ms,
                  counts=counts, error_code=error_code, metadata=metadata)
     except Exception:
-        pass  # measurement must never break the pipeline
+        # measurement must never break the pipeline
+        _logger.debug("观测回调执行失败（不阻断主流程）", exc_info=True)
+
 
 
 
@@ -102,7 +109,8 @@ def _emit_batch_event(callback, stage: str, *,
         callback("batch", stage=stage, duration_ms=0,
                  counts=counts, error_code=error_code)
     except Exception:
-        pass
+        _logger.debug("观测回调执行失败（不阻断主流程）", exc_info=True)
+
 
 
 
@@ -116,7 +124,8 @@ def _emit_retry_event(callback, stage: str, backoff_ms: int, *,
         callback("retry", stage=stage, duration_ms=max(0, int(backoff_ms)),
                  metadata=metadata)
     except Exception:
-        pass
+        _logger.debug("观测回调执行失败（不阻断主流程）", exc_info=True)
+
 
 
 
@@ -132,7 +141,8 @@ def _emit_item_terminal_event(callback, stage: str, *,
                  counts={"item_index": item_index, "status": status,
                          "input_count": input_count})
     except Exception:
-        pass
+        _logger.debug("观测回调执行失败（不阻断主流程）", exc_info=True)
+
 
 
 

@@ -30,6 +30,11 @@ from typing import Any
 # 本文件超红线仅引用级接线，不追加逻辑）。
 from scripts.zhilian.detail_fields import STAFF_CONST_JS, STAFF_FIELD_JS, merge_staff_fields
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 DEFAULT_CDP_PORT = 9223
 
 # 智联平台岗位 URL host allowlist（与 webui/platforms.py 注册规则一致）。
@@ -161,7 +166,8 @@ def _wait_expression(
             if bool(_evaluate(ws, expression)):
                 return True
         except Exception:
-            pass
+            _logger.debug("就绪探测求值失败，按未就绪处理", exc_info=True)
+
         (sleeper or time.sleep)(interval)
     return False
 
@@ -315,7 +321,8 @@ def check_login_state_tri(cdp_port: int = DEFAULT_CDP_PORT) -> str:
         try:
             ws.close()
         except Exception:
-            pass
+            _logger.debug("CDP 会话关闭失败（best-effort 忽略）", exc_info=True)
+
     low = body.lower()
     if any(m.lower() in low for m in _LOGIN_MARKERS) or _ZHILIAN_PASSPORT_HOST in url:
         return "not_logged_in"
@@ -370,7 +377,8 @@ def preflight(cdp_port: int = DEFAULT_CDP_PORT) -> str | None:
         try:
             ws.close()
         except Exception:
-            pass
+            _logger.debug("CDP 会话关闭失败（best-effort 忽略）", exc_info=True)
+
 
 
 def fetch_list(plan_item: dict, *, on_page_completed=None) -> tuple[str | None, list[dict], dict | None]:
@@ -443,7 +451,8 @@ def fetch_list(plan_item: dict, *, on_page_completed=None) -> tuple[str | None, 
         try:
             ws.close()
         except Exception:
-            pass
+            _logger.debug("CDP 会话关闭失败（best-effort 忽略）", exc_info=True)
+
 
 
 def _has_empty_marker(ws: Any, city_code: str, keyword: str) -> bool:
@@ -586,7 +595,8 @@ def fetch_detail(job: dict, *, detail_output_path: str | None = None) -> tuple[s
         try:
             ws.close()
         except Exception:
-            pass
+            _logger.debug("CDP 会话关闭失败（best-effort 忽略）", exc_info=True)
+
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +641,8 @@ def _create_background_tab(port: int) -> tuple[Any, str]:
         try:
             browser_ws.close()
         except Exception:
-            pass
+            _logger.debug("浏览器会话关闭失败（best-effort 忽略）", exc_info=True)
+
     if not target_id:
         raise RuntimeError("create_target_failed")
     # /json/list 的 entry id 即 targetId，从中取新 tab 的 page 级 WS URL
@@ -656,7 +667,8 @@ def _close_background_tab(port: int, target_id: str) -> None:
             method="PUT",
         )
     except Exception:
-        pass
+        _logger.debug("后台标签关闭请求失败（best-effort 忽略）", exc_info=True)
+
 
 
 def _default_sleeper(seconds: float, label: str | None = None) -> None:
@@ -750,7 +762,8 @@ def _detail_tab_worker(cdp_port: int, connector: Any, work_queue: Any,
                 try:
                     event_callback()
                 except Exception:
-                    pass
+                    _logger.debug("事件回调执行失败（不阻断抓取）", exc_info=True)
+
             if signal in _DEGRADE_SIGNALS:
                 print(f"[{tab_label}] ⚠ 命中平台级信号 {signal}，触发降级停工")
                 degrade_reason["reason"] = signal
@@ -770,7 +783,8 @@ def _detail_tab_worker(cdp_port: int, connector: Any, work_queue: Any,
             try:
                 ws.close()
             except Exception:
-                pass
+                _logger.debug("CDP 会话关闭失败（best-effort 忽略）", exc_info=True)
+
         if target_id is not None:
             _close_background_tab(cdp_port, target_id)
         print(f"[{tab_label}] 已关闭")

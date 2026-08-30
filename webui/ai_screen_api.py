@@ -19,6 +19,11 @@ from webui.constants import (
 from webui.resume_identity import ensure_frozen_browser_account
 from webui.task_runners import _iso_epoch_ms
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 def register_ai_screen_routes(app, ctx):
     @app.route("/api/ai-screen/<task_id>/cancel", methods=["POST"])
     def cancel_ai_screen(task_id):
@@ -50,7 +55,8 @@ def register_ai_screen_routes(app, ctx):
             from webui.pipeline_exec import close_debug_chrome
             close_debug_chrome()
         except Exception:
-            pass
+            _logger.warning("调试 Chrome 关闭失败（不影响本次响应）", exc_info=True)
+
         # T412 契约 http-api.md L223-229：DB run 存在时以 DB platform 为权威；
         # 仅 DB 创建前内存窗口用注册 task 的不可变平台快照。
         if not cancel_platform:

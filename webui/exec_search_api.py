@@ -26,6 +26,11 @@ from webui.resume_identity import (
 )
 from webui.task_runners import _iso_epoch_ms
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 def register_exec_search_routes(app, ctx):
     @app.route("/api/search-scope/preview", methods=["POST"])
     def search_scope_preview():
@@ -639,7 +644,8 @@ def register_exec_search_routes(app, ctx):
             from webui.pipeline_exec import close_debug_chrome
             close_debug_chrome()
         except Exception:
-            pass
+            _logger.warning("调试 Chrome 关闭失败（不影响本次响应）", exc_info=True)
+
         ctx.clear_auto_screen(task_id)
         # T412 契约 http-api.md L223-229：DB run 存在时以 DB platform 为权威；
         # 仅 DB 创建前内存窗口用注册 task 的不可变平台快照。

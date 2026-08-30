@@ -17,6 +17,11 @@ from scripts.boss.constants import BROWSER_NOT_FOUND_HINT, CHROME_EXE, DEFAULT_C
 from scripts.boss.browser_registry import all_registry_exe_names
 import sys as _sys
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 
 _REGISTRY_COMMAND_TOKENS: frozenset | None = None
 
@@ -260,13 +265,15 @@ def close_cdp_chrome(cdp_port=DEFAULT_CDP_PORT, cdp_data_dir=DEFAULT_CDP_DATA_DI
             session.send("Browser.close", timeout=5)
         except Exception:
             # Chrome may close the WebSocket before acknowledging Browser.close.
-            pass
+            _logger.debug("Browser.close 请求失败（可能已退出）", exc_info=True)
+
     finally:
         if session is not None:
             try:
                 session.close()
             except Exception:
-                pass
+                _logger.debug("会话关闭失败（best-effort 忽略）", exc_info=True)
+
 
     for _ in range(10):
         if not is_ready(cdp_port):
@@ -321,7 +328,8 @@ def minimize_chrome_window(cdp_port=DEFAULT_CDP_PORT, *,
             try:
                 session.close()
             except Exception:
-                pass
+                _logger.debug("会话关闭失败（best-effort 忽略）", exc_info=True)
+
     except Exception:
         return False
 
@@ -351,7 +359,8 @@ def launch_chrome(cmd):
     try:
         os.makedirs(log_dir, exist_ok=True)
     except Exception:
-        pass
+        _logger.debug("调试日志目录创建失败（沿用现有目录）", exc_info=True)
+
     log_path = os.path.join(_facade().DEFAULT_CDP_DATA_DIR, "chrome_stderr.log")
     try:
         stderr_fh = open(log_path, "ab", buffering=0)

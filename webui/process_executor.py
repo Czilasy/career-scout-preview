@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable, Iterable
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 
 @dataclass(frozen=True)
 class ArtifactSpec:
@@ -96,7 +101,8 @@ class ScraperExecutor:
             try:
                 self.on_spawn(process)
             except Exception:
-                pass
+                _logger.debug("on_spawn 探针回调失败（不阻断子进程启动）", exc_info=True)
+
 
         output = bytearray()
         output_limit = threading.Event()

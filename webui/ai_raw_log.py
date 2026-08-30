@@ -16,6 +16,11 @@ import threading
 
 from webui.logging_setup import default_log_dir, redact
 
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
+
 LOGGER_NAME = "career_scout.ai_raw"
 DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_BACKUP_COUNT = 10
@@ -36,7 +41,8 @@ def _resolve_handler(log_dir: Path | None) -> logging.Handler:
         try:
             _handler.close()
         except Exception:
-            pass
+            _logger.debug("原始日志句柄关闭失败（best-effort 忽略）", exc_info=True)
+
     target.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(
         target / "ai_raw.log",
@@ -57,7 +63,8 @@ def _close_handler() -> None:
         try:
             _handler.close()
         except Exception:
-            pass
+            _logger.debug("原始日志句柄关闭失败（best-effort 忽略）", exc_info=True)
+
     _handler = None
     _handler_dir = None
 

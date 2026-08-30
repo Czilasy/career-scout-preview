@@ -4,6 +4,11 @@
 
 from scripts.boss.cdp_session import CDPSession
 import sys as _sys
+
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
+
 def _facade():
     return _sys.modules.get("scripts.boss_cdp_raw")
 
@@ -153,7 +158,8 @@ def import_boss_session(source_cdp_port, target_cdp_port, authorized=False,
                 try:
                     session.close()
                 except Exception:
-                    pass
+                    _logger.debug("会话关闭失败（best-effort 忽略）", exc_info=True)
+
 
 
 def run_import_boss_session(source_cdp_port, target_cdp_port, authorized=False):
