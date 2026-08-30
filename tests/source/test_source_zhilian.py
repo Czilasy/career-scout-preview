@@ -1030,6 +1030,10 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
     通过 patch ``_scrape_detail_on_ws``（按 job 查表返回，线程安全）与
     ``_reset_detail_session``（记录导航次数）隔离 CDP 细节，只测并行编排：
     错峰、条间 gap、reset、单条失败不中断、平台级信号降级、顺序恢复、去重。
+
+    031 B6 起实现在 ``scripts/zhilian/detail.py``；调用仍走兼容门面
+    ``scripts.zhilian_cdp_raw``（顺带验证门面代理可用），但 patch 必须落
+    域模块——门面只做读取代理，域内互调不看门面命名空间（同 boss B5）。
     """
 
     def _make_waits(self):
@@ -1089,8 +1093,8 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
 
         waits, sleeper = self._make_waits()
         ws_list = []
-        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws", side_effect=fake_scrape), \
-             mock.patch("scripts.zhilian_cdp_raw._reset_detail_session"):
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws", side_effect=fake_scrape), \
+             mock.patch("scripts.zhilian.detail._reset_detail_session"):
             per_item, degrade = zha.scrape_details_batch(
                 {"jobs": jobs}, tab_pool_size=2,
                 sleeper=sleeper, connector=self._connector(ws_list),
@@ -1117,7 +1121,7 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
             return "ok", {"jd": "jd"}
 
         waits, sleeper = self._make_waits()
-        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws", side_effect=fake_scrape):
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws", side_effect=fake_scrape):
             per_item, degrade = zha.scrape_details_batch(
                 {"jobs": jobs}, tab_pool_size=2,
                 sleeper=sleeper, connector=self._connector([]),
@@ -1138,7 +1142,7 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
 
         waits, sleeper = self._make_waits()
         # tab=1 保证 degrade 后剩余任务确定留在队列（单 worker 串行领任务）
-        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws", side_effect=fake_scrape):
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws", side_effect=fake_scrape):
             per_item, degrade = zha.scrape_details_batch(
                 {"jobs": jobs}, tab_pool_size=1,
                 sleeper=sleeper, connector=self._connector([]),
@@ -1153,9 +1157,9 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
         import scripts.zhilian_cdp_raw as zha
 
         waits, sleeper = self._make_waits()
-        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws",
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws",
                         side_effect=lambda ws, job, *, sleeper=None: ("ok", {"jd": "jd"})), \
-             mock.patch("scripts.zhilian_cdp_raw._reset_detail_session") as reset_mock:
+             mock.patch("scripts.zhilian.detail._reset_detail_session") as reset_mock:
             zha.scrape_details_batch(
                 {"jobs": self._jobs(3)}, tab_pool_size=1, reset_every=2,
                 sleeper=sleeper, connector=self._connector([]),
@@ -1168,9 +1172,9 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
         import scripts.zhilian_cdp_raw as zha
 
         waits, sleeper = self._make_waits()
-        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws",
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws",
                         side_effect=lambda ws, job, *, sleeper=None: ("ok", {"jd": "jd"})), \
-             mock.patch("scripts.zhilian_cdp_raw._reset_detail_session") as reset_mock:
+             mock.patch("scripts.zhilian.detail._reset_detail_session") as reset_mock:
             zha.scrape_details_batch(
                 {"jobs": self._jobs(4)}, tab_pool_size=1, reset_every=2,
                 sleeper=sleeper, connector=self._connector([]),
@@ -1184,9 +1188,9 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
 
         jobs = self._jobs(3)
         waits, sleeper = self._make_waits()
-        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws",
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws",
                         side_effect=lambda ws, job, *, sleeper=None: ("ok", {"jd": "jd"})), \
-             mock.patch("scripts.zhilian_cdp_raw._reset_detail_session"):
+             mock.patch("scripts.zhilian.detail._reset_detail_session"):
             zha.scrape_details_batch(
                 {"jobs": jobs}, tab_pool_size=2, reset_every=99,
                 sleeper=sleeper, connector=self._connector([]),
@@ -1201,9 +1205,9 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
 
         ws_list = []
         waits, sleeper = self._make_waits()
-        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws",
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws",
                         side_effect=lambda ws, job, *, sleeper=None: ("ok", {"jd": "jd"})), \
-             mock.patch("scripts.zhilian_cdp_raw._reset_detail_session"):
+             mock.patch("scripts.zhilian.detail._reset_detail_session"):
             zha.scrape_details_batch(
                 {"jobs": self._jobs(2)}, tab_pool_size=2,
                 sleeper=sleeper, connector=self._connector(ws_list),
@@ -1228,7 +1232,7 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
             return "ok", {"jd": "jd"}
 
         waits, sleeper = self._make_waits()
-        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws", side_effect=fake_scrape):
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws", side_effect=fake_scrape):
             per_item, degrade = zha.scrape_details_batch(
                 {"jobs": jobs}, tab_pool_size=2,
                 sleeper=sleeper, connector=self._connector([]),
@@ -1296,7 +1300,7 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
             return "ok", {"jd": "jd"}
 
         waits, sleeper = self._make_waits()
-        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws", side_effect=fake_scrape):
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws", side_effect=fake_scrape):
             per_item, degrade = zha.scrape_details_batch(
                 {"jobs": jobs}, tab_pool_size=2,
                 sleeper=sleeper, connector=self._connector([]),
@@ -1316,9 +1320,9 @@ class ZhilianScrapeDetailsBatchTests(unittest.TestCase):
 
         jobs = self._jobs(3)
         # gap/stagger 置 0 避免真实等待；reset_every 放大避免触发首页重置
-        with mock.patch("scripts.zhilian_cdp_raw._scrape_detail_on_ws",
+        with mock.patch("scripts.zhilian.detail._scrape_detail_on_ws",
                         return_value=("ok", {"jd": "jd"})), \
-             mock.patch("scripts.zhilian_cdp_raw._reset_detail_session"):
+             mock.patch("scripts.zhilian.detail._reset_detail_session"):
             per_item, degrade = zha.scrape_details_batch(
                 {"jobs": jobs}, tab_pool_size=2,
                 inter_job_gap_range=(0, 0), stagger_range=(0, 0),

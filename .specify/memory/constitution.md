@@ -155,6 +155,14 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/themes/kaleido/kaleido.css` — 万花筒主题样式：kaleido 令牌降级基座＋四页视觉＋流动层（032）
 - `webui/src/themes/kaleido/KaleidoField.vue` — 万花筒光场组件：光轮/碎玻璃/注视之眼（032）
 - `webui/src/themes/kaleido/useKaleidoMotion.ts` — 万花筒交互动效：转筒/瞳孔/逃生舱/首启转场（032）
+- `scripts/zhilian/cdp.py` — 智联 CDP 原语与平台常量：HTTP/WS 连接、求值/导航/就绪探测、后台标签建销、端口与 host allowlist、探测 URL/提取 JS/风险 marker（031 B6）
+- `scripts/zhilian/search.py` — 智联列表域：登录态探测/preflight/fetch_list/空结果 marker 确认、风险信号判定与岗位字段归一（031 B6）
+- `scripts/zhilian/detail.py` — 智联详情域：单条详情提取、tab 池并行批量抓取、会话重置与默认等待器（031 B6）
+- `scripts/zhilian/urls.py` — 智联纯函数域：host allowlist 判定与计划项 input_hash（031 B6）
+- `webui/task_runner_support.py` — 任务运行支撑域：stdout 转日志缓冲、硬停/风控原因分类、产物读取与时间解析、载荷组装与 key 脱敏、路径常量（031 B6）
+- `webui/workbench_runner.py` — WorkbenchRunner：父搜索运行 + 子查询编排、详情预算切片、增量入库与父状态推导（031 B6）
+- `scripts/zhilian_cdp_raw.py` — 智联抓取兼容门面：re-export 全部既有符号（__getattr__ 代理到 `scripts/zhilian/` 四域），无实现逻辑（031 B6）
+- `webui/task_runners.py` — TaskRunner 核心 + 兼容 re-export：助手落 `task_runner_support.py`、工作台编排落 `workbench_runner.py`（031 B6）
 
 ## 文件布局约束
 

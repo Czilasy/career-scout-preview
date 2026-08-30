@@ -259,15 +259,20 @@ class EnvCheckApiTests(unittest.TestCase):
 
 
 class ZhilianLoginProbeTests(unittest.TestCase):
-    """D4: 智联登录态 DOM marker 探测（fixture 兜底，真实冒烟结论见代码注释）。"""
+    """D4: 智联登录态 DOM marker 探测（fixture 兜底，真实冒烟结论见代码注释）。
+
+    031 B6 起探测实现在 ``scripts/zhilian/search.py``：patch 必须落域模块——
+    ``scripts/zhilian_cdp_raw.py`` 已改为只做读取代理的兼容门面，patch
+    门面不会影响域内互调（同 boss B5）。
+    """
 
     def _probe(self, body="", url="https://www.zhaopin.com/sou/", loaded=True):
-        from scripts import zhilian_cdp_raw as zha
-        with mock.patch.object(zha, "_connect", return_value=object()), \
-                mock.patch.object(zha, "_navigate"), \
-                mock.patch.object(zha, "_wait_expression", return_value=loaded), \
-                mock.patch.object(zha, "_evaluate", side_effect=[body, url]):
-            return zha.check_login_state_tri(9223)
+        from scripts.zhilian import search
+        with mock.patch.object(search, "_connect", return_value=object()), \
+                mock.patch.object(search, "_navigate"), \
+                mock.patch.object(search, "_wait_expression", return_value=loaded), \
+                mock.patch.object(search, "_evaluate", side_effect=[body, url]):
+            return search.check_login_state_tri(9223)
 
     def test_login_marker_means_not_logged_in(self):
         self.assertEqual(
@@ -300,27 +305,27 @@ class ZhilianLoginProbeTests(unittest.TestCase):
         )
 
     def test_cdp_failure_means_unknown(self):
-        from scripts import zhilian_cdp_raw as zha
-        with mock.patch.object(zha, "_connect", side_effect=RuntimeError("down")):
-            self.assertEqual(zha.check_login_state_tri(9223), "unknown")
+        from scripts.zhilian import search
+        with mock.patch.object(search, "_connect", side_effect=RuntimeError("down")):
+            self.assertEqual(search.check_login_state_tri(9223), "unknown")
 
     def test_page_not_loaded_means_unknown(self):
         self.assertEqual(self._probe(body="", loaded=False), "unknown")
 
     def test_api_city_code_nationwide_is_empty(self):
         """全国（jl0）映射为空串：fe-api 不传城市字段才是全国搜索。"""
-        from scripts import zhilian_cdp_raw as zha
-        self.assertEqual(zha._api_city_code("jl0"), "")
-        self.assertEqual(zha._api_city_code("779"), "779")
+        from scripts.zhilian import search
+        self.assertEqual(search._api_city_code("jl0"), "")
+        self.assertEqual(search._api_city_code("779"), "779")
 
     def test_search_expression_omits_city_for_nationwide(self):
-        from scripts import zhilian_cdp_raw as zha
-        expr = zha._search_fetch_expression("Java 开发", "", 1)
+        from scripts.zhilian import search
+        expr = search._search_fetch_expression("Java 开发", "", 1)
         self.assertNotIn("S_SOU_WORK_CITY", expr)
 
     def test_search_expression_includes_specific_city(self):
-        from scripts import zhilian_cdp_raw as zha
-        expr = zha._search_fetch_expression("Java 开发", "779", 1)
+        from scripts.zhilian import search
+        expr = search._search_fetch_expression("Java 开发", "779", 1)
         self.assertIn("S_SOU_WORK_CITY", expr)
         self.assertIn("779", expr)
 

@@ -37,7 +37,7 @@ _logger = get_logger(__name__)
 # tasks004 — ZhilianCdpSource adapter（2026-08-04 真实页面核验后启用）
 #
 #   - 构造校验（T301/T302）：显式冻结端口、profile_key 边界、不回退 BOSS；
-#   - preflight（T303）：zhilian_cdp_raw.preflight 真实登录/DOM 判定；
+#   - preflight（T303）：zhilian.search.preflight 真实登录/DOM 判定；
 #   - fetch_list（T306/T307/T308）：真实 API 列表、统一字段、空结果证据；
 #   - fetch_detail（T311）：真实 __INITIAL_STATE__ JD，不伪造正文；
 #   - fetch_details_batch（T312）：熔断器复用；
@@ -67,7 +67,7 @@ _ZHILIAN_AI_FILTER_KEYS = frozenset({
     "scale", "stage", "company_nature",
 })
 
-# zhilian_cdp_raw.preflight signal → SAFE_FAILURE_CODES 映射。
+# zhilian.search.preflight signal → SAFE_FAILURE_CODES 映射。
 _ZHILIAN_PREFLIGHT_SIGNAL_MAP = {
     "ok": None,
     "cdp_unavailable": "source_cdp_unavailable",
@@ -92,7 +92,7 @@ _STATE_TO_SIGNAL = {
     "not_logged_in": "login_required",
 }
 
-# zhilian_cdp_raw.fetch_detail signal → SAFE_FAILURE_CODES 映射。
+# zhilian.detail.fetch_detail signal → SAFE_FAILURE_CODES 映射。
 _ZHILIAN_DETAIL_SIGNAL_MAP = {
     "ok": None,
     "not_found": "source_not_found",
@@ -105,7 +105,7 @@ _ZHILIAN_DETAIL_SIGNAL_MAP = {
     "unreachable": "source_unreachable",
 }
 
-# zhilian_cdp_raw.fetch_list signal → SAFE_FAILURE_CODES 映射。
+# zhilian.search.fetch_list signal → SAFE_FAILURE_CODES 映射。
 _ZHILIAN_LIST_SIGNAL_MAP = {
     "ok": None,
     "empty": None,  # 真实空结果走 empty_success 路径，由 marker fixture 解锁
@@ -257,7 +257,7 @@ class ZhilianCdpSource:
         self.profile_key = expected_profile_key
         self.breaker = breaker or SourceCircuitBreaker()
         self.run_id = str(run_id or "").strip()
-        # runner 注入：默认调用 zhilian_cdp_raw 的真实函数；测试通过替身绕过真实 CDP。
+        # runner 注入：默认调用 scripts/zhilian/ 域模块的真实函数；测试通过替身绕过真实 CDP。
         # 测试通过注入替身绕过真实 CDP 调用。
         self._preflight_runner = preflight_runner or _default_zhilian_preflight_runner
         self._list_runner = list_runner or _default_zhilian_list_runner
@@ -316,7 +316,7 @@ class ZhilianCdpSource:
     def preflight(self) -> SourceOutcome:
         """检查智联冻结 CDP 端口、profile、登录态和平台可访问性。
 
-        调用 ``_preflight_runner``（默认 zhilian_cdp_raw.preflight），按返回的
+        调用 ``_preflight_runner``（默认 zhilian.search.preflight），按返回的
         signal 字符串映射到错误矩阵（登录/验证/限流/封禁/CDP/超时）。
 
         登录判定缓存优先（D3）：账号 × 平台 15 分钟 TTL 内命中直接复用
@@ -405,7 +405,7 @@ class ZhilianCdpSource:
             )
         signal = str(signal or "invalid_output")
         if signal == "ok":
-            # 字段归一化由 zhilian_cdp_raw._normalize_job 完成，这里透传。
+            # 字段归一化由 zhilian.search._normalize_job 完成，这里透传。
             return SourceOutcome.success(
                 jobs=list(jobs or []),
                 safe_log=_zhilian_safe_log(

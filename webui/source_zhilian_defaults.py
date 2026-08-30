@@ -1,41 +1,43 @@
 """智联默认 runner 与失败原因映射（021 拆分自 webui/source.py）。
 
-调用 scripts/zhilian_cdp_raw.py 真实函数的默认 preflight/list/detail/
-batch runner，以及智联 failed_code → 用户可读原因的映射。测试通过向
-ZhilianCdpSource 注入替身绕开真实 CDP；本模块不依赖 webui 其他模块。
+调用 scripts/zhilian/ 域模块（search 的 preflight/fetch_list、detail 的
+fetch_detail/scrape_details_batch）真实函数的默认 runner，以及智联
+failed_code → 用户可读原因的映射。测试通过向 ZhilianCdpSource 注入替身
+绕开真实 CDP；本模块不依赖 webui 其他模块。
 """
 
 from __future__ import annotations
 
 
 # ---------------------------------------------------------------------------
-# 默认 runner：调用 scripts/zhilian_cdp_raw.py 的真实函数。
+# 默认 runner：调用 scripts/zhilian/ 域模块的真实函数（031 B6 起直连域模块，
+# 不再经 scripts/zhilian_cdp_raw.py 兼容门面）。
 # preflight/list/detail 分别调用真实登录判定、搜索 API 与详情页抓取。
 # ---------------------------------------------------------------------------
 
 def _default_zhilian_preflight_runner(cdp_port: int) -> str:
-    """默认 preflight runner：调用 zhilian_cdp_raw.preflight。
+    """默认 preflight runner：调用 zhilian.search.preflight。
 
-    zhilian_cdp_raw.preflight 返回稳定 signal；
-    本函数把 None 转为 "unreachable"，避免伪造成功。
+    preflight 返回稳定 signal；本函数把 None 转为 "unreachable"，
+    避免伪造成功。
     """
     try:
-        from scripts import zhilian_cdp_raw as zha
+        from scripts.zhilian.search import preflight
     except ImportError:
         return "unreachable"
-    result = zha.preflight(cdp_port=cdp_port)
+    result = preflight(cdp_port=cdp_port)
     if result is None:
         return "unreachable"
     return str(result)
 
 
 def _default_zhilian_list_runner(plan_item: dict) -> tuple[str, list[dict], dict | None]:
-    """默认 list runner：调用 zhilian_cdp_raw.fetch_list 真实分支。"""
+    """默认 list runner：调用 zhilian.search.fetch_list 真实分支。"""
     try:
-        from scripts import zhilian_cdp_raw as zha
+        from scripts.zhilian.search import fetch_list
     except ImportError:
         return "unreachable", [], None
-    result = zha.fetch_list(
+    result = fetch_list(
         plan_item,
         on_page_completed=plan_item.get("on_page_completed"),
     )
@@ -50,16 +52,16 @@ def _default_zhilian_list_runner(plan_item: dict) -> tuple[str, list[dict], dict
 
 
 def _default_zhilian_detail_runner(job: dict, *, detail_output_path: str | None = None) -> tuple[str, dict]:
-    """默认 detail runner：调用 zhilian_cdp_raw.fetch_detail。
+    """默认 detail runner：调用 zhilian.detail.fetch_detail。
 
-    zhilian_cdp_raw.fetch_detail 返回真实 signal；
-    本函数把 None 转为 "not_found"，不伪造 JD。
+    fetch_detail 返回真实 signal；本函数把 None 转为 "not_found"，
+    不伪造 JD。
     """
     try:
-        from scripts import zhilian_cdp_raw as zha
+        from scripts.zhilian.detail import fetch_detail
     except ImportError:
         return "unreachable", {}
-    signal, detail = zha.fetch_detail(job, detail_output_path=detail_output_path)
+    signal, detail = fetch_detail(job, detail_output_path=detail_output_path)
     if signal is None:
         return "not_found", {}
     return str(signal), dict(detail or {})
@@ -71,7 +73,7 @@ def _default_zhilian_batch_detail_runner(
     inter_job_gap_range: tuple[float, float], reset_every: int,
     event_callback=None, cancel_event=None,
 ) -> tuple[list[tuple[str, dict]], str | None]:
-    """默认 batch runner：调用 zhilian_cdp_raw.scrape_details_batch 并行分支。
+    """默认 batch runner：调用 zhilian.detail.scrape_details_batch 并行分支。
 
     返回 ``(per_item, degrade_signal)``；ImportError（环境缺脚本）时全部按
     skipped + unreachable 降级，不伪造成功。
@@ -79,11 +81,11 @@ def _default_zhilian_batch_detail_runner(
     ``cancel_event``：025 立即停止取消信号，透传给 scraper 的 worker 检查点。
     """
     try:
-        from scripts import zhilian_cdp_raw as zha
+        from scripts.zhilian.detail import scrape_details_batch
     except ImportError:
         count = len(list_data.get("jobs", []))
         return [("skipped", {})] * count, "unreachable"
-    per_item, degrade_signal = zha.scrape_details_batch(
+    per_item, degrade_signal = scrape_details_batch(
         list_data,
         cdp_port=cdp_port,
         tab_pool_size=tab_pool_size,
