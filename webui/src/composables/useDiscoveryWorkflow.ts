@@ -1,4 +1,5 @@
 // 021 B8 T027：DiscoveryView workflow 动作层（自 DiscoveryView.vue script 原样搬运，函数体零改动，跨域引用经 deps 调用时解析）。
+// 031 B8：deps 形参类型 = discoveryDeps.ts 的 WorkflowNeeds（跨域依赖契约）。
 import { watch } from "vue";
 import type { Ref } from "vue";
 import type { DiscoveryState } from "./useDiscoveryState";
@@ -18,8 +19,9 @@ import type {
   TaskSnapshot as ApiTaskSnapshot,
 } from "../types";
 import type { StepId } from "./useDiscoveryState";
+import type { WorkflowNeeds } from "./discoveryDeps";
 
-export function useDiscoveryWorkflow(state: DiscoveryState, deps: any = {}) {
+export function useDiscoveryWorkflow(state: DiscoveryState, deps: WorkflowNeeds) {
   const { WORKFLOW_STATE_VERSION, activeStep, advancedPanelsOpen, analysisReady, cityText, currentRoundStatus, enabledSteps, filterValues, finishedPartial, historyMode, interruptedRunId, keywords, pausedRunId, pipelineResult, pipelineResultRunId, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, restoredWorkflowSnapshot, resultLoaded, resultsPageSeen, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, unfinishedWorkflowRestored, workflowStateKey, workflowStateRestored } = state;
 
 

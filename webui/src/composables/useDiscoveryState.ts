@@ -63,7 +63,7 @@ import { historyStatusLabel } from "../discovery";
 import { useLocationDraft } from "../composables/useLocationDraft";
 import { useResultHistory } from "../composables/resultHistory";
 
-export function useDiscoveryState(props: { profileId: string }, emit: (event: any, ...args: any[]) => void) {
+export function useDiscoveryState(props: DiscoveryProps, emit: DiscoveryEmit) {
 
 
 const WORKFLOW_STATE_VERSION = 1;
@@ -919,6 +919,21 @@ return {
 }
 
 export type DiscoveryState = ReturnType<typeof useDiscoveryState>;
+
+// 031 B8：emit/props 形状固定为类型，替代原未类型化的 emit 参数
+// 签名（data-model E6 基线最后一处未类型化签名）。成员与 DiscoveryView 的
+// defineEmits/defineProps 逐项对应，跨域调用从此受 vue-tsc 检查。
+export interface DiscoveryEmit {
+  (event: "notify", notice: Notice): void;
+  (event: "profile-created", profile: CandidateProfile): void;
+  (event: "job-feedback-changed", payload: { profileId: string; jobId: string }): void;
+  (event: "round-status", payload: RoundStatusPayload | null): void;
+  (event: "open-browser-accounts"): void;
+}
+
+export interface DiscoveryProps {
+  profileId: string;
+}
 
 export type StepId = "upload" | "search" | "screen" | "results";
 

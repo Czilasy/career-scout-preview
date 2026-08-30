@@ -1,6 +1,8 @@
 // 021 B8 T027：DiscoveryView search 动作层（自 DiscoveryView.vue script 原样搬运，函数体零改动，跨域引用经 deps 调用时解析）。
+// 031 B8：deps 形参类型 = discoveryDeps.ts 的 SearchNeeds（跨域依赖契约）。
 import type { Ref } from "vue";
 import type { DiscoveryState } from "./useDiscoveryState";
+import type { SearchNeeds } from "./discoveryDeps";
 import { nextTick } from "vue";
 import type {
   AdvancedSettingsState,
@@ -34,7 +36,7 @@ import {
 import { setThemePlatform } from "../composables/useTheme";
 import type { AnalyzeResponse } from "./useDiscoveryState";
 
-export function useDiscoverySearch(state: DiscoveryState, deps: any = {}) {
+export function useDiscoverySearch(state: DiscoveryState, deps: SearchNeeds) {
   const { LOGIN_ERROR_CODES, SPEED_FIELDS, activeCategory, advancedBusy, advancedRanges, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, cityCatalogBusy, cityCatalogRef, cityList, cityLoader, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, dragActive, executionSelection, fieldLabels, filterGroups, filterValues, finishedPartial, historyBackToLatest, historyRound, interruptedRunId, keywords, locationDraft, loginGuide, nationalScopeConfirm, oneClickOpen, pagesValue, pausedRunId, pendingPlatformSwitch, pipelineResult, pipelineResultRunId, platformState, profileConfirmed, profileError, profileFacts, profileInputEl, profileSummary, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resumeAnalysis, resumeError, schemaBusy, schemaLoader, schemaRef, scopePreview, scopePreviewBusy, scopePreviewReqId, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uploadBusy } = state;
   const { cancelActiveTasksForNewRound, clearLatestResult, enterSearchStep, notify, openOneClickDialog, restoreRunningTask, startScrape } = deps;
 

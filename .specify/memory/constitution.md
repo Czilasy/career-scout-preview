@@ -164,6 +164,9 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `scripts/zhilian_cdp_raw.py` — 智联抓取兼容门面：re-export 全部既有符号（__getattr__ 代理到 `scripts/zhilian/` 四域），无实现逻辑（031 B6）
 - `webui/task_runners.py` — TaskRunner 核心 + 兼容 re-export：助手落 `task_runner_support.py`、工作台编排落 `workbench_runner.py`（031 B6）
 - `scripts/maintenance/historical_recovery.py` — 2026-07-28 事故恢复手动运维工具：只读预演 / 服务端 SQLite 备份与不可变 manifest / 门禁恢复三子命令 CLI 与 `--confirm` 安全栏（031 B7，自 `webui/historical_recovery.py` 整体迁入；原 `/api/recovery/*` 三条生产路由已撤除）
+- `webui/src/composables/discoveryDeps.ts` — Discovery 跨域依赖契约：五域提供接口（Workflow/Search/Execution/Tasks/Results）与消费接口（*Needs）、容器建/接线函数（createDiscoveryDeps / wireDiscoveryDeps / attachRoundFlow）（031 B8）
+- `webui/src/composables/useModeWarnings.ts` — 档位/规模风险警示文案：极限档与总页数 >30 两条警示的合并计算（031 B8 自 DiscoveryView.vue 抽出）
+- `webui/src/composables/useNarrowSearchLayout.ts` — 窄屏布局断点判定：`max-width: 1050px` 媒体查询订阅，供两个配置抽屉的联动/独立切换（031 B8 自 DiscoveryView.vue 抽出）
 
 ## 文件布局约束
 

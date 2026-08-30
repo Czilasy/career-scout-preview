@@ -1,6 +1,8 @@
 // 021 B8 T027：DiscoveryView results 动作层（自 DiscoveryView.vue script 原样搬运，函数体零改动，跨域引用经 deps 调用时解析）。
+// 031 B8：deps 形参类型 = discoveryDeps.ts 的 ResultsNeeds（跨域依赖契约）。
 import type { Ref } from "vue";
 import type { DiscoveryState } from "./useDiscoveryState";
+import type { ResultsNeeds } from "./discoveryDeps";
 import { ApiError, apiRequest, errorMessage, settingsApi, userFacingMessage } from "../api";
 import type {
   AdvancedSettingsState,
@@ -52,7 +54,7 @@ import {
 import { setThemePlatform } from "../composables/useTheme";
 import type { MergedLatestResult } from "./useDiscoveryState";
 
-export function useDiscoveryResults(state: DiscoveryState, deps: any = {}) {
+export function useDiscoveryResults(state: DiscoveryState, deps: ResultsNeeds) {
   const { activeCategory, activeStep, analysisReady, archiveHistoryLatest, currentRoundStatus, draftPlatform, exportBusy, feedbackBusyIds, groups, hideHistory, historyBackToLatest, historyMode, historyOpen, historyRound, interruptedRunId, isScrapedOnly, jdBusyIds, lifecycleDialogJob, lifecycleDialogOpen, locationDraft, pausedRunId, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, rejectedIds, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, showHistory, unfinishedWorkflowRestored } = state;
   const { notify, pollRecrawl, pollTask, setDraftPlatform } = deps;
 

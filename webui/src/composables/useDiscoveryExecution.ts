@@ -1,6 +1,8 @@
 // 021 B8 T027：DiscoveryView execution 动作层（自 DiscoveryView.vue script 原样搬运，函数体零改动，跨域引用经 deps 调用时解析）。
+// 031 B8：deps 形参类型 = discoveryDeps.ts 的 ExecutionNeeds（跨域依赖契约）。
 import type { Ref } from "vue";
 import type { DiscoveryState } from "./useDiscoveryState";
+import type { ExecutionNeeds } from "./discoveryDeps";
 import { nextTick } from "vue";
 import { ApiError, apiRequest, errorMessage, settingsApi, userFacingMessage } from "../api";
 import type { PipelineResult, RoundStatusPayload } from "../discovery";
@@ -41,7 +43,7 @@ import type { AiScreenLaunch } from "./useDiscoveryState";
 import type { OneClickLaunch } from "./useDiscoveryState";
 import type { TaskSnapshot } from "./useDiscoveryState";
 
-export function useDiscoveryExecution(state: DiscoveryState, deps: any = {}) {
+export function useDiscoveryExecution(state: DiscoveryState, deps: ExecutionNeeds) {
   const { activeCategory, activeStep, activeTaskRestored, advancedPanelsOpen, analysisReady, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityList, currentRoundStatus, draftPlatform, effectiveSearchCities, filterValues, finishSaveBusy, finishedPartial, historyDetail, historyMode, historyRound, historyScreenBusy, interruptedRunId, locationDraft, nationalScopeConfirm, oneClickOpen, pausedRunId, pipelineBusy, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, pollRetryCount, pollTimer, profileConfirmed, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, restoredTaskHint, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, schemaRef, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords, switchAccountId, switchAccounts } = state;
   const { clearWorkflowState, enrichPausedSnapshot, enterScreenStep, enterSearchStep, isCompletedTaskStatus, isLoginErrorCode, loadCityCatalog, loadFilterLabels, loadLatestResult, notify, pollRecrawl, pollTask, refreshScopePreview, requireProfileConfirmed, restoreLocationsFromContext, returnToLatest, saveScrapedOnlySnapshot, setDraftPlatform, setPipelineResult, showLoginGuide, validateProfileForScreen } = deps;
 

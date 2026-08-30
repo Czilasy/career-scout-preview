@@ -1,6 +1,8 @@
 // 021 B8 T027：DiscoveryView tasks 动作层（自 DiscoveryView.vue script 原样搬运，函数体零改动，跨域引用经 deps 调用时解析）。
+// 031 B8：deps 形参类型 = discoveryDeps.ts 的 TasksNeeds（跨域依赖契约）。
 import type { Ref } from "vue";
 import type { DiscoveryState } from "./useDiscoveryState";
+import type { TasksNeeds } from "./discoveryDeps";
 import { ApiError, apiRequest, errorMessage, settingsApi, userFacingMessage } from "../api";
 import type {
   AdvancedSettingsState,
@@ -40,7 +42,7 @@ import {
 import { MODE_DEFAULT_PAGES } from "./useDiscoveryState";
 import type { MergedLatestResult, TaskSnapshot } from "./useDiscoveryState";
 
-export function useDiscoveryTasks(state: DiscoveryState, deps: any = {}) {
+export function useDiscoveryTasks(state: DiscoveryState, deps: TasksNeeds) {
   const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, activeTaskRestored, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, interruptedRunId, isScrapedOnly, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysis, schemaLoader, scopePreview, scopePreviewBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform, unfinishedWorkflowRestored } = state;
   const { cancelScrape, clearLatestResult, clearWorkflowState, continueAiScreen, enterScreenStep, fetchMergedLatestResult, finishPausedTask, isLoginErrorCode, jobId, loadLatestResult, notify, restoreRunningTask, setPipelineResult, showLoginGuide, startAiScreen } = deps;
 

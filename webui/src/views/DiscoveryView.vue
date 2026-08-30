@@ -24,6 +24,13 @@ import ScreenRecrawlProgress from "../components/ScreenRecrawlProgress.vue";
 import PendingRecrawlCapsule from "../components/PendingRecrawlCapsule.vue";
 import TaskProgress from "../components/TaskProgress.vue";
 import { useScreenRoundFlow } from "../composables/useScreenRoundFlow";
+import {
+  attachRoundFlow,
+  createDiscoveryDeps,
+  wireDiscoveryDeps,
+} from "../composables/discoveryDeps";
+import { useModeWarnings } from "../composables/useModeWarnings";
+import { useNarrowSearchLayout } from "../composables/useNarrowSearchLayout";
 import { withoutRecrawl } from "../screenFlow";
 import type { PipelineResult, RoundStatusPayload } from "../discovery";
 import type {
@@ -254,71 +261,28 @@ const {
   archiveHistoryLatest,
 } = state;
 
-// 共享依赖容器：跨域函数经 deps 调用时解析（roundFlow 最后回填）。
-const shared: Record<string, unknown> = {
-  emit,
-  props,
-};
-const workflow = useDiscoveryWorkflow(state, shared);
-const search = useDiscoverySearch(state, shared);
-const execution = useDiscoveryExecution(state, shared);
-const tasks = useDiscoveryTasks(state, shared);
-const results = useDiscoveryResults(state, shared);
+// 共享依赖容器（031 B8：类型化容器 + 一次成型接线，替代原 Record<string, unknown>
+// 共享袋 + 37 处逐行回填）。跨域函数经 deps.X 调用时解析：composable 只在调用
+// 时读取，故先建容器、后接线，语义与逐行回填完全一致。
+const deps = createDiscoveryDeps({ emit, props });
+const workflow = useDiscoveryWorkflow(state, deps);
+const search = useDiscoverySearch(state, deps);
+const execution = useDiscoveryExecution(state, deps);
+const tasks = useDiscoveryTasks(state, deps);
+const results = useDiscoveryResults(state, deps);
 
-// 跨域函数接线（composable 内经 deps.X 调用时解析，此处赋值生效）
-shared.notify = workflow.notify;
-shared.enterSearchStep = workflow.enterSearchStep;
-shared.enterScreenStep = workflow.enterScreenStep;
-shared.clearWorkflowState = workflow.clearWorkflowState;
-// 026 B078：已结束事实持久化（进 04 页置位 / 结束保存 / 新一轮清除）
-shared.markResultsPageSeen = workflow.markResultsPageSeen;
-shared.persistFinishedState = workflow.persistFinishedState;
-shared.clearFinishedState = workflow.clearFinishedState;
-shared.startScrape = execution.startScrape;
-shared.openOneClickDialog = execution.openOneClickDialog;
-shared.restoreRunningTask = execution.restoreRunningTask;
-shared.finishPausedTask = execution.finishPausedTask;
-shared.continueAiScreen = execution.continueAiScreen;
-shared.cancelScrape = execution.cancelScrape;
-shared.startAiScreen = execution.startAiScreen;
-shared.cancelActiveTasksForNewRound = tasks.cancelActiveTasksForNewRound;
-shared.clearLatestResult = results.clearLatestResult;
-shared.loadLatestResult = results.loadLatestResult;
-shared.setPipelineResult = results.setPipelineResult;
-shared.fetchMergedLatestResult = results.fetchMergedLatestResult;
-shared.returnToLatest = results.returnToLatest;
-shared.restoreLocationsFromContext = results.restoreLocationsFromContext;
-shared.jobId = results.jobId;
-shared.setDraftPlatform = search.setDraftPlatform;
-shared.loadCityCatalog = search.loadCityCatalog;
-shared.loadFilterLabels = search.loadFilterLabels;
-shared.refreshScopePreview = search.refreshScopePreview;
-shared.requireProfileConfirmed = search.requireProfileConfirmed;
-shared.validateProfileForScreen = search.validateProfileForScreen;
-shared.showLoginGuide = search.showLoginGuide;
-shared.isLoginErrorCode = search.isLoginErrorCode;
-shared.mergeRecrawlUpdates = tasks.mergeRecrawlUpdates;
-shared.pollRecrawl = tasks.pollRecrawl;
-shared.pollTask = tasks.pollTask;
-shared.saveScrapedOnlySnapshot = tasks.saveScrapedOnlySnapshot;
-shared.enrichPausedSnapshot = tasks.enrichPausedSnapshot;
-shared.isCompletedTaskStatus = tasks.isCompletedTaskStatus;
-
-// 024：档位/规模风险警示（黄色警示区数据源）。
-// 极限警告：仅极限档；大任务警告：任何档位，按新口径总页数 >30（scopePreview 未确认时为 false）。
-const extremeWarning = computed(() => executionSelection.value === "extreme");
-const largeTaskWarning = computed(() => Boolean(
-  scopePreview.value?.planned_pages && scopePreview.value.planned_pages > 30,
-));
-// 档位/规模风险警示：并入「当前模式」说明行内，不占独立警告框。
-const modeWarnings = computed(() => {
-  const list: string[] = [];
-  if (extremeWarning.value) list.push("有概率限流");
-  if (largeTaskWarning.value) list.push("任务规模过大可能封号");
-  return list;
+// 跨域函数接线：一次成型，缺任一成员即编译错误（契约 discovery-deps.md 约定 2）。
+wireDiscoveryDeps(deps, {
+  workflow,
+  search,
+  execution,
+  tasks,
+  results,
 });
 
 // 模板绑定：composable 返回值解构
+// （024 档位/规模风险警示已抽为 useModeWarnings，在下方解构出 scopePreview
+// 之后调用——它依赖解构产物，必须晚于本块。）
 const {
   readWorkflowState,
   clearWorkflowState,
@@ -423,6 +387,10 @@ const {
   handleLifecycleDialogKeydown,
 } = { ...workflow, ...search, ...execution, ...tasks, ...results };
 
+// 024 档位/规模风险警示：并入「当前模式」说明行内，不占独立警告框
+// （依赖上面解构出的 executionSelection / scopePreview，故在此调用）。
+const modeWarnings = useModeWarnings(executionSelection, scopePreview);
+
 const roundFlow = reactive(useScreenRoundFlow({
   refs: {
     filterValues,
@@ -459,35 +427,12 @@ const roundFlow = reactive(useScreenRoundFlow({
     notify: workflow.notify,
   },
 }));
-shared.roundFlow = roundFlow;
+// roundFlow 的 api 段依赖五域产物，必须晚于五域构造；就地回写同一容器。
+attachRoundFlow(deps, roundFlow);
 
 // 方案2：两个配置抽屉（广泛抓取/高级执行设置）——宽屏双栏联动、窄屏单列独立。
-// 与 CSS `@media (max-width: 1050px)` 单列断点对齐，同阈值。
-function createSearchLayoutMedia(): {
-  matches: boolean;
-  addEventListener: (type: string, cb: (e: { matches: boolean }) => void) => void;
-} | null {
-  if (typeof window.matchMedia !== "function") return null;
-  const mq = window.matchMedia("(max-width: 1050px)");
-  return {
-    get matches() {
-      return mq.matches;
-    },
-    addEventListener(type, cb) {
-      if (typeof mq.addEventListener === "function") {
-        mq.addEventListener(type, cb as unknown as EventListener);
-      } else if (typeof mq.addListener === "function") {
-        mq.addListener(cb as unknown as EventListener);
-      }
-    },
-  };
-}
-const searchLayoutMq = createSearchLayoutMedia();
-const isNarrowSearchLayout = ref(Boolean(searchLayoutMq?.matches));
-function handleSearchLayoutChange(e: { matches: boolean }): void {
-  isNarrowSearchLayout.value = e.matches;
-}
-searchLayoutMq?.addEventListener("change", handleSearchLayoutChange);
+// 断点判定抽为 useNarrowSearchLayout（阈值与 CSS 单列断点对齐，同文件内注明）。
+const isNarrowSearchLayout = useNarrowSearchLayout();
 
 // 宽屏：两卡联动（点一个两个一起开关）；窄屏：各自独立。
 watch([searchPanelsOpen, advancedPanelsOpen], ([newS, newA], [oldS, oldA]) => {
