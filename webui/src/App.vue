@@ -13,6 +13,9 @@ import { apiRequest, currentRuntimeMode, errorMessage, GITHUB_REPO_URL, initiali
 import { getJobReminderCount, safeCanonicalUrl } from "./jobFeedback";
 import type { RoundStatusPayload } from "./discovery";
 import { useTheme } from "./composables/useTheme";
+import ThemePickerOptions from "./themes/ThemePickerOptions.vue";
+import KaleidoField from "./themes/kaleido/KaleidoField.vue";
+import { isThemeId } from "./themes/registry";
 import { cleanJobLocation } from "./location";
 import type { CandidateProfile, Notice } from "./types";
 
@@ -319,6 +322,13 @@ function handleThemeToggle(event: MouseEvent) {
   ripple.addEventListener("animationend", () => ripple.remove(), { once: true });
 }
 
+// 长按弹层选择（032）：亮/暗直切；万花筒经 useTheme 值域扩展生效。
+function handleThemePick(id: string) {
+  themePickerOpen.value = false;
+  if (!isThemeId(id) || id === mode.value) return;
+  toggleTheme(id);
+}
+
 // ---- 主题长按蓄力（彩蛋主题入口；普通点击仍是明暗切换，互不干扰）----
 // 视觉契约：图标小幅发抖且抖动幅度随进度增大、图标本身略微放大，图标线条与
 // 按钮外框逐渐发亮；外框只发光不抖动。1 秒蓄满弹出选择框并整体还原（单向动画）。
@@ -539,6 +549,8 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
 
 <template>
   <div class="app-shell">
+    <!-- 万花筒彩蛋主题：整站光场衬底（032，仅该主题挂载） -->
+    <KaleidoField v-if="mode === 'kaleido'" />
     <header class="app-header">
       <a
         class="brand"
@@ -663,7 +675,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
             class="theme-picker"
             data-testid="theme-picker"
           >
-            <!-- 占位：彩蛋主题列表下一阶段填充 -->
+            <ThemePickerOptions :current="mode" @select="handleThemePick" />
           </div>
         </Transition>
       </div>

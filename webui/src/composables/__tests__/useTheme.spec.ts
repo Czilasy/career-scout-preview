@@ -144,4 +144,33 @@ describe("useTheme", () => {
     const body = JSON.parse((putCall![1] as RequestInit).body as string);
     expect(body.mode).toBe("dark");
   });
+
+  it("accepts kaleido as an explicit easter egg mode and persists it", async () => {
+    const { toggleTheme } = await loadModule();
+    const next = toggleTheme("kaleido");
+    expect(next).toBe("kaleido");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("kaleido");
+    expect(localStorage.getItem("career-scout-theme-mode")).toBe("kaleido");
+  });
+
+  it("restores saved kaleido mode from localStorage on first access", async () => {
+    localStorage.setItem("career-scout-theme-mode", "kaleido");
+    const { useTheme } = await loadModule();
+    const { mode } = useTheme();
+    expect(mode.value).toBe("kaleido");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("kaleido");
+  });
+
+  it("lets backend restore kaleido mode before user interaction", async () => {
+    global.fetch = vi.fn(
+      async () =>
+        ({ ok: true, json: async () => ({ mode: "kaleido" }) }) as Response,
+    );
+    const { useTheme } = await loadModule();
+    const { mode } = useTheme();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mode.value).toBe("kaleido");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("kaleido");
+  });
+
 });

@@ -146,6 +146,12 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `scripts/boss/browser_registry.py` — 浏览器注册表域：8 家 Chromium 浏览器配置/探测/选择持久化（browser_selection.json）/手动路径校验/CDP 内核判定（029，b082 分支）
 - `webui/browser_registry_api.py` — 浏览器注册表路由域：探测清单/保存选择/路径校验端点（029，b082 分支）
 - `webui/src/components/BrowserSettingsDialog.vue` — 浏览器选择对话框：注册表清单/手动路径即时校验/当前生效路径展示（029，b082 分支）
+- `webui/src/themes/registry.ts` — 主题注册口：light/dark/kaleido 三态登记与值校验（032）
+- `webui/src/themes/ThemePickerOptions.vue` — 长按弹层选项列表：三主题标本与当前态标识（032）
+- `webui/src/themes/__tests__/registry.spec.ts` — 注册口聚焦测试（032）
+- `webui/src/themes/kaleido/kaleido.css` — 万花筒主题样式：kaleido 令牌降级基座＋四页视觉＋流动层（032）
+- `webui/src/themes/kaleido/KaleidoField.vue` — 万花筒光场组件：光轮/碎玻璃/注视之眼（032）
+- `webui/src/themes/kaleido/useKaleidoMotion.ts` — 万花筒交互动效：转筒/瞳孔/逃生舱/首启转场（032）
 
 ## 文件布局约束
 

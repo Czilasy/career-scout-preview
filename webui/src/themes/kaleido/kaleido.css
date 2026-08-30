@@ -1,0 +1,435 @@
+/* ===========================================================================
+ * 万花筒彩蛋主题样式层（032）
+ *
+ * 视觉唯一权威：design/kaleido/page1-4.html（design/README：图优先于代码）。
+ * 作用域纪律：全部规则限定在 [data-theme="kaleido"] 作用域（或模块组件内），
+ * 亮/暗主题零回归；移除本文件与注册项即卸载主题。
+ *
+ * 结构：
+ *   §1 令牌基座   —— 暗色令牌为降级底座（未覆盖界面自动获得暗色观感）
+ *   §2 画布与分层 —— 筒身画布 + 光场组件的层序契约
+ *   §3 共享 chrome —— 顶栏/胶囊/按钮/输入/卡片切面/弹层
+ *   §4 流动色层   —— 光谱流与方向色流
+ *   §5 reduced-motion
+ * =========================================================================== */
+
+/* ---- §1 令牌基座 ---- */
+
+[data-theme="kaleido"] {
+  color-scheme: dark;
+
+  /* 铭牌衬线标题：系统字体栈（离线不打包字体，research D8） */
+  --k-serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, serif;
+
+  /* 暗膛：镜筒筒身，不是"深色模式背景" */
+  --k-bg: #050608;
+  --k-panel-glass: rgba(13, 17, 21, 0.78);
+  --k-hair: rgba(255, 255, 255, 0.08);
+
+  /* 透光文字 */
+  --k-text-hi: #f0f6fa;
+  --k-text: #d5e1e9;
+
+  /* 玻璃语义色 */
+  --k-green: #8df2cc;
+  --k-green-mid: #5ddba4;
+  --k-amber: #f2c280;
+
+  /* 色散棱线（首尾同色，流光无缝） */
+  --k-dispb: linear-gradient(90deg, #ff8a7a, #ffc94d, #5effa0, #5f9bff,
+      #d06cff, #ff8a7a);
+
+  /* 方向色流：稳定绿 / 平衡琥珀 / 极限红 / 自定义紫 */
+  --k-flowg: linear-gradient(90deg, #2bd689, #9dffcf, #31d8b8, #2bd689);
+  --k-flowa: linear-gradient(90deg, #ffb84d, #ffeaa4, #ff9d3d, #ffb84d);
+
+  /* 覆盖结构令牌：面板半透明玻璃，透出身后光场（值域对齐 theme.css 命名） */
+  --canvas: #050608;
+  --panel: rgba(13, 17, 21, 0.78);
+  --panel-2: rgba(255, 255, 255, 0.03);
+  --panel-3: rgba(14, 19, 24, 0.85);
+  --hover-row: rgba(255, 255, 255, 0.045);
+  --ink-1: #eef5f9;
+  --ink-2: #a9bcc8;
+  --ink-3: #8ba1af;
+  --hair: rgba(255, 255, 255, 0.09);
+  --hair-2: rgba(255, 255, 255, 0.14);
+  --canvas-tint: #0a1114;
+  --dot-rgba: rgba(94, 230, 168, 0.04);
+  --bg: #050608; /* 兼容层旧名：body 画布 */
+
+  /* 万花筒下的语义色微调（玻璃透光感） */
+  --match: #5ddba4;
+  --match-deep: #8df2cc;
+  --match-wash: rgba(94, 230, 168, 0.13);
+  --unsure: #f2c280;
+  --reject: #f79a96;
+}
+
+/* ---- §2 画布与分层 ---- */
+
+[data-theme="kaleido"] body {
+  background: var(--k-bg);
+}
+
+/* 光场组件：fixed 衬底，负 z 序画在画布之上、内容之下（KaleidoField.vue） */
+.kaleido-field {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+.kaleido-field svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  animation: kaleido-hue-cycle 3.5s linear infinite;
+  will-change: filter;
+}
+@keyframes kaleido-hue-cycle {
+  from { filter: hue-rotate(0deg) saturate(1.35); }
+  to { filter: hue-rotate(360deg) saturate(1.35); }
+}
+.kaleido-field .k-spin-a { animation: kaleido-rot 46s linear infinite; transform-origin: 50% 31.7%; }
+.kaleido-field .k-spin-b { animation: kaleido-rot-rev 34s linear infinite; transform-origin: 50% 31.7%; }
+.kaleido-field .k-spin-c { animation: kaleido-rot 26s linear infinite; transform-origin: 50% 31.7%; }
+.kaleido-field .k-drift { animation: kaleido-rot-rev 120s linear infinite; transform-origin: 50% 50%; }
+.kaleido-field .k-core { animation: kaleido-breathe 3.2s ease-in-out infinite; }
+.kaleido-field .k-spinner {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+  transform: rotate(var(--k-spin, 0deg));
+  transition: transform 0.95s cubic-bezier(0.3, 1.65, 0.5, 1);
+  will-change: transform;
+}
+.kaleido-field .k-weave { animation: kaleido-weave 21s ease-in-out infinite; will-change: transform; }
+.kaleido-field .k-zoom { transform-box: view-box; transform-origin: 50% 50%; animation: kaleido-zoom 8s ease-in-out infinite; will-change: transform; }
+@keyframes kaleido-rot { to { transform: rotate(360deg); } }
+@keyframes kaleido-rot-rev { to { transform: rotate(-360deg); } }
+@keyframes kaleido-breathe { 0%, 100% { opacity: 0.82; } 50% { opacity: 1; } }
+@keyframes kaleido-weave {
+  0% { transform: translate(0, -14px); }
+  25% { transform: translate(12px, 0); }
+  50% { transform: translate(0, 14px); }
+  75% { transform: translate(-12px, 0); }
+  100% { transform: translate(0, -14px); }
+}
+@keyframes kaleido-zoom { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.03); } }
+
+/* 转筒（点击空白）：JS 累计 --k-spin，弹性过冲一整圈 */
+[data-theme="kaleido"].kaleido-ready {
+  cursor: default;
+}
+[data-theme="kaleido"].kaleido-ready .kaleido-field {
+  cursor: pointer;
+}
+
+/* 逃生舱：点 logo 后全场静止 3 秒 */
+[data-theme="kaleido"].kaleido-calm .kaleido-field svg,
+[data-theme="kaleido"].kaleido-calm .kaleido-field g {
+  animation-play-state: paused !important;
+}
+[data-theme="kaleido"].kaleido-calm .kaleido-field {
+  opacity: 0.72;
+  transition: opacity 0.3s ease;
+}
+
+/* ---- §3 共享 chrome ---- */
+
+/* 顶栏：暗膛玻璃 + 光谱发丝底线 */
+[data-theme="kaleido"] .app-header {
+  background: rgba(7, 9, 12, 0.82);
+  border-bottom: 1px solid;
+  border-image: linear-gradient(90deg, rgba(255, 138, 122, 0.4),
+      rgba(255, 214, 116, 0.4), rgba(126, 255, 178, 0.4),
+      rgba(111, 168, 255, 0.4), rgba(208, 138, 255, 0.35)) 1;
+  backdrop-filter: blur(6px);
+}
+[data-theme="kaleido"] .brand-name {
+  font-family: var(--k-serif);
+  letter-spacing: 0.08em;
+  color: var(--k-text-hi);
+}
+
+/* 本轮胶囊：切面胶囊 + 光谱流边（用户点名的"xx个岗位已判定"） */
+[data-theme="kaleido"] .round-pill {
+  border: 1.5px solid transparent;
+  border-radius: 0;
+  clip-path: polygon(12px 0, calc(100% - 12px) 0, 100% 50%,
+      calc(100% - 12px) 100%, 12px 100%, 0 50%);
+  background:
+    linear-gradient(rgba(13, 16, 20, 0.85), rgba(13, 16, 20, 0.85)) padding-box,
+    var(--k-dispb) border-box;
+  background-size: 100% 100%, 300% 100%;
+  animation: kaleido-edge-flow 3.2s linear infinite;
+  color: var(--k-text);
+}
+[data-theme="kaleido"] .round-pill .pf {
+  font-weight: 700;
+  color: var(--k-text-hi);
+}
+[data-theme="kaleido"] .round-pill .round-status-text {
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  color: var(--k-text-hi);
+  text-shadow: 0 0 12px rgba(214, 238, 250, 0.35);
+}
+
+/* 顶栏按钮：暗玻璃切面 */
+[data-theme="kaleido"] .header-actions .button.secondary,
+[data-theme="kaleido"] .header-actions .icon-button {
+  border-radius: 0;
+  clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%,
+      0 100%, 0 7px);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--k-text);
+}
+[data-theme="kaleido"] .header-actions .button.secondary:hover,
+[data-theme="kaleido"] .header-actions .icon-button:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+/* 主按钮：亮玻璃 + 光谱流边（双背景 border-box 技法，无需伪元素） */
+[data-theme="kaleido"] .button.primary,
+[data-theme="kaleido"] .button.primary.wide-button {
+  border: 1.6px solid transparent;
+  border-radius: 0;
+  clip-path: polygon(9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%,
+      0 100%, 0 9px);
+  background:
+    linear-gradient(168deg, #f6fcff, #d6edf8 55%, #b3daec) padding-box,
+    var(--k-dispb) border-box;
+  background-size: 100% 100%, 300% 100%;
+  animation: kaleido-edge-flow 3.2s linear infinite;
+  color: #07222e;
+  font-weight: 700;
+  box-shadow: 0 0 16px rgba(214, 238, 250, 0.28);
+}
+[data-theme="kaleido"] .button.secondary {
+  border-radius: 0;
+  clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%,
+      0 100%, 0 7px);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.17);
+  color: #b4c7d3;
+}
+[data-theme="kaleido"] .button.danger {
+  border-radius: 0;
+  clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%,
+      0 100%, 0 7px);
+  background: linear-gradient(165deg, rgba(247, 154, 150, 0.22),
+      rgba(247, 154, 150, 0.06));
+  border: 1px solid rgba(247, 154, 150, 0.45);
+  color: #ffd9d6;
+}
+
+/* 卡片：暗膛玻璃大切角 */
+[data-theme="kaleido"] .content-card,
+[data-theme="kaleido"] .workflow-card,
+[data-theme="kaleido"] .filter-group,
+[data-theme="kaleido"] .adv-group,
+[data-theme="kaleido"] .advanced-panel {
+  border-radius: 0;
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 20px), calc(100% - 20px) 100%,
+      0 100%);
+  background:
+    linear-gradient(180deg, rgba(210, 232, 244, 0.05), rgba(255, 255, 255, 0.01) 60px),
+    var(--k-panel-glass);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+}
+
+/* 眉题：等宽字 + 光谱流光细线 */
+[data-theme="kaleido"] .eyebrow {
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  letter-spacing: 0.32em;
+  color: #93a9b7;
+  padding-bottom: 8px;
+  position: relative;
+}
+[data-theme="kaleido"] .eyebrow::after {
+  content: "";
+  position: absolute;
+  left: 1px;
+  bottom: 0;
+  width: 132px;
+  height: 2px;
+  background: var(--k-dispb);
+  background-size: 200% 100%;
+  animation: kaleido-spectrum-flow 2.6s linear infinite;
+}
+
+/* 标题：宋体铭牌 */
+[data-theme="kaleido"] .stage-header h1,
+[data-theme="kaleido"] .view-shell h1,
+[data-theme="kaleido"] h1 {
+  font-family: var(--k-serif);
+  letter-spacing: 0.08em;
+  color: var(--k-text-hi);
+}
+[data-theme="kaleido"] h2,
+[data-theme="kaleido"] .up-left h2 {
+  font-family: var(--k-serif);
+  letter-spacing: 0.04em;
+}
+
+/* 输入框/文本域：暗玻璃切面 */
+[data-theme="kaleido"] .app-shell input:not([type="checkbox"]):not([type="radio"]),
+[data-theme="kaleido"] .app-shell textarea,
+[data-theme="kaleido"] .app-shell select {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 0;
+  color: var(--ink-1);
+}
+[data-theme="kaleido"] .app-shell input::placeholder,
+[data-theme="kaleido"] .app-shell textarea::placeholder {
+  color: var(--ink-3);
+}
+
+/* chips：切面小胶囊 */
+[data-theme="kaleido"] .choice-chip,
+[data-theme="kaleido"] .keyword-chip,
+[data-theme="kaleido"] .summary-chip,
+[data-theme="kaleido"] .lock-chip {
+  border-radius: 0;
+  clip-path: polygon(6px 0, calc(100% - 6px) 0, 100% 50%,
+      calc(100% - 6px) 100%, 6px 100%, 0 50%);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #b4c7d3;
+}
+[data-theme="kaleido"] .choice-chip.selected,
+[data-theme="kaleido"] .choice-chip[aria-pressed="true"],
+[data-theme="kaleido"] .keyword-chip.selected {
+  border: 1.6px solid transparent;
+  background:
+    linear-gradient(165deg, rgba(94, 230, 168, 0.34), rgba(94, 230, 168, 0.07)) padding-box,
+    var(--k-dispb) border-box;
+  background-size: 100% 100%, 300% 100%;
+  animation: kaleido-edge-flow 3.6s linear infinite;
+  color: #dcffec;
+  font-weight: 700;
+}
+
+/* 拖放区：虚线切面 */
+[data-theme="kaleido"] .file-drop {
+  border: 1.5px dashed rgba(214, 236, 248, 0.32);
+  border-radius: 0;
+  background:
+    radial-gradient(320px 130px at 50% 40%, rgba(196, 220, 238, 0.08), transparent 70%);
+}
+
+/* 结果页：job 行与详情玻璃 */
+[data-theme="kaleido"] .job-row:hover {
+  background: var(--hover-row);
+}
+[data-theme="kaleido"] .job-detail-pane,
+[data-theme="kaleido"] .job-list-pane {
+  background: var(--k-panel-glass);
+  border-color: rgba(255, 255, 255, 0.11);
+}
+
+/* 弹窗/抽屉：暗色降级底座（未主题化界面自动落入） */
+[data-theme="kaleido"] .dialog-panel {
+  background: var(--k-panel-glass);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--ink-1);
+}
+[data-theme="kaleido"] .dialog-backdrop {
+  background: rgba(2, 3, 4, 0.6);
+}
+
+/* 万花筒下的主题弹层本体：暗膛 + 光谱边 */
+[data-theme="kaleido"] .theme-picker {
+  background: rgba(10, 13, 17, 0.92);
+  border: 1px solid;
+  border-image: linear-gradient(90deg, rgba(255, 138, 122, 0.45),
+      rgba(255, 214, 116, 0.45), rgba(126, 255, 178, 0.45),
+      rgba(111, 168, 255, 0.45), rgba(208, 138, 255, 0.4)) 1;
+  border-image-slice: 1;
+}
+
+/* 流程器（StepNavigator）：当前步光谱流边、完成步绿勾玻璃 */
+[data-theme="kaleido"] .step-nav button {
+  border-radius: 0;
+  clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%,
+      0 100%, 0 7px);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--ink-2);
+}
+[data-theme="kaleido"] .step-nav button:disabled {
+  color: var(--ink-3);
+  opacity: 0.6;
+}
+[data-theme="kaleido"] .step-nav button.complete {
+  background: linear-gradient(165deg, rgba(94, 230, 168, 0.16),
+      rgba(94, 230, 168, 0.04));
+  border-color: rgba(94, 230, 168, 0.4);
+  color: var(--k-green);
+}
+[data-theme="kaleido"] .step-nav button.active {
+  border: 1.6px solid transparent;
+  background:
+    linear-gradient(180deg, rgba(240, 246, 250, 0.14), rgba(240, 246, 250, 0.03)) padding-box,
+    var(--k-dispb) border-box;
+  background-size: 100% 100%, 300% 100%;
+  animation: kaleido-edge-flow 3.2s linear infinite;
+  color: var(--k-text-hi);
+  font-weight: 700;
+}
+[data-theme="kaleido"] .step-nav .step-index {
+  font-family: "IBM Plex Mono", Consolas, monospace;
+}
+
+/* 结果页判定 tab：激活项玻璃流边 */
+[data-theme="kaleido"] .result-tabs button {
+  border-radius: 0;
+  clip-path: polygon(8px 0, calc(100% - 8px) 0, 100% 8px, 100% 100%,
+      8px 100%, 0 calc(100% - 8px));
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--ink-2);
+}
+[data-theme="kaleido"] .result-tabs button[aria-selected="true"] {
+  border: 1.6px solid transparent;
+  background:
+    linear-gradient(165deg, rgba(94, 230, 168, 0.34), rgba(94, 230, 168, 0.06) 78%,
+        rgba(10, 20, 15, 0.5)) padding-box,
+    var(--k-dispb) border-box;
+  background-size: 100% 100%, 300% 100%;
+  animation: kaleido-edge-flow 3.2s linear infinite;
+  color: #dcffec;
+  font-weight: 700;
+  box-shadow: 0 0 14px rgba(80, 225, 160, 0.25);
+}
+
+/* 平台分段（BOSS｜智联） */
+[data-theme="kaleido"] .platform-segment {
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+}
+[data-theme="kaleido"] .platform-segment .button.secondary {
+  border: none;
+  clip-path: none;
+  background: none;
+}
+
+/* ---- §4 流动色层 ---- */
+
+@keyframes kaleido-edge-flow { to { background-position: -300% 0; } }
+@keyframes kaleido-spectrum-flow { to { background-position: -200% 0; } }
+
+/* ---- §5 reduced-motion ---- */
+
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="kaleido"] *,
+  [data-theme="kaleido"] *::before,
+  [data-theme="kaleido"] *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

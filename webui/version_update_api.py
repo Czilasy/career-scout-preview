@@ -131,7 +131,7 @@ def register_version_update_routes(app, ctx):
         mode = "light"
         try:
             data = json.loads(ctx._theme_path().read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data.get("mode") in ("light", "dark"):
+            if isinstance(data, dict) and data.get("mode") in ("light", "dark", "kaleido"):
                 mode = data["mode"]
         except (OSError, ValueError):
             pass
@@ -141,8 +141,8 @@ def register_version_update_routes(app, ctx):
     def api_theme_put():
         body = request.get_json(silent=True) or {}
         mode = str(body.get("mode") or "")
-        if mode not in ("light", "dark"):
-            return jsonify({"ok": False, "error": "mode 必须为 light 或 dark"}), 400
+        if mode not in ("light", "dark", "kaleido"):
+            return jsonify({"ok": False, "error": "mode 必须为 light、dark 或 kaleido"}), 400
         try:
             path = ctx._theme_path()
             path.parent.mkdir(parents=True, exist_ok=True)

@@ -15,7 +15,7 @@
 import { computed, ref, watch } from "vue";
 import type { Platform } from "../types";
 
-export type ThemeMode = "light" | "dark";
+export type ThemeMode = "light" | "dark" | "kaleido";
 
 const MODE_STORAGE_KEY = "career-scout-theme-mode";
 const THEME_API = "/api/theme";
@@ -39,7 +39,7 @@ async function loadFromBackend() {
     const resp = await fetch(THEME_API, { headers: { Accept: "application/json" } });
     if (!resp.ok) return;
     const data = (await resp.json()) as { mode?: string };
-    if (!userInteracted && (data.mode === "light" || data.mode === "dark")) {
+      if (!userInteracted && (data.mode === "light" || data.mode === "dark" || data.mode === "kaleido")) {
       mode.value = data.mode;
       applyAttributes();
     }
@@ -66,7 +66,7 @@ function initFromStorage() {
   initialized = true;
   try {
     const saved = window.localStorage.getItem(MODE_STORAGE_KEY);
-    if (saved === "light" || saved === "dark") {
+    if (saved === "light" || saved === "dark" || saved === "kaleido") {
       mode.value = saved;
     } else if (window.matchMedia?.("(prefers-color-scheme: dark)").matches) {
       // 首次访问跟随系统偏好
