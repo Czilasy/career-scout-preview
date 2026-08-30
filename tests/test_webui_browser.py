@@ -68,12 +68,17 @@ class VueBrowserContractTests(unittest.TestCase):
         self.assertIn("@media (max-width: 720px)", settings_menu)
         self.assertIn("width: min(230px, calc(100vw - 16px))", settings_menu)
 
-    def test_profile_switcher_is_reachable_on_narrow_screens(self):
+    def test_favorites_drawer_profiles_are_reachable_on_narrow_screens(self):
+        # 档案切换 UI 已由收藏抽屉聚合（a24bece）：所有档案的收藏在同一条
+        # 抽屉内直达，不再有独立的 profile-picker。窄屏契约跟随事实迁移：
+        # 触发钮保持在头部可见，抽屉为视口约束的 fixed 覆盖层。
+        self.assertIn('class="button secondary favorites-trigger"', APP)
+        self.assertIn('aria-label="查看收藏"', APP)
+        self.assertIn("position: fixed", CSS)
+        self.assertIn("width: min(380px, calc(100vw - 32px))", CSS)
         mobile = CSS.split("@media (max-width: 760px)")[-1]
-        profile = mobile.split(".profile-picker", 1)[1].split("}", 1)[0]
-        self.assertNotIn("display: none", profile)
-        self.assertIn("grid-row: 3", profile)
-        self.assertIn("width: 100%", mobile.split(".profile-picker select", 1)[1].split("}", 1)[0])
+        header_actions = mobile.split(".header-actions", 1)[1].split("}", 1)[0]
+        self.assertIn("display: contents", header_actions)
 
     def test_touch_targets_and_focus_states_are_explicit(self):
         self.assertIn("min-height: 44px", CSS)
