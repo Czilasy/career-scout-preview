@@ -232,10 +232,10 @@ description: "Tasks for feature implementation"
 
 **Purpose**: 全单总检与文档收尾
 
-- [ ] T081 关单总检：quickstart「关单总检」四项全过（B1-B9 清单、三道保险复核含 styles.css diff 为空、宪法红线全仓 wc -l 复核、每批 revert 可行性抽查）
-- [ ] T082 [P] spec.md 状态 Draft → 可交付；checklists/requirements.md 复核勾选；本单 quickstart/research 与实施事实不一致处回写更正
-- [ ] T083 [P] 向用户交付 roadmap/server-ops-031.md 操作单并核对"需用户提供"项（服务器命令由用户执行）（FR-021）
-- [ ] T084 关单汇报：9 批次对照冻结清单逐项"完成证据"（SC-001~009 对照）；推送 GitHub 与后续发布由用户指令触发
+- [x] T081 关单总检：quickstart「关单总检」四项全过（B1-B9 清单、三道保险复核含 styles.css diff 为空、宪法红线全仓 wc -l 复核、每批 revert 可行性抽查）
+- [x] T082 [P] spec.md 状态 Draft → 可交付；checklists/requirements.md 复核勾选；本单 quickstart/research 与实施事实不一致处回写更正
+- [x] T083 [P] 向用户交付 roadmap/server-ops-031.md 操作单并核对"需用户提供"项（服务器命令由用户执行）（FR-021）
+- [x] T084 关单汇报：9 批次对照冻结清单逐项"完成证据"（SC-001~009 对照）；推送 GitHub 与后续发布由用户指令触发
 
 ---
 
