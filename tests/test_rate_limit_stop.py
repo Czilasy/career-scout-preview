@@ -18,11 +18,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_module():
+    """加载 boss_cdp_raw 模块（034 修复：exec 后恢复 sys.modules，避免污染后续测试）。"""
     path = ROOT / "scripts" / "boss_cdp_raw.py"
+    original = sys.modules.get("scripts.boss_cdp_raw")
     spec = importlib.util.spec_from_file_location("boss_cdp_raw_probe", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if original is not None:
+            sys.modules["scripts.boss_cdp_raw"] = original
+        else:
+            sys.modules.pop("scripts.boss_cdp_raw", None)
     return module
 
 

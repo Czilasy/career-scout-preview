@@ -28,6 +28,7 @@ from webui.source_boss_helpers import (
     _format_inprocess_failure,
     _safe_tail,
 )
+from webui.source_boss_detail_events import event_outcome_code, index_events_by_url
 
 _logger = get_logger(__name__)
 
@@ -277,15 +278,16 @@ class _BossCdpDetailMixin:
             except OSError:
                 pass
 
-        # 5. Subprocess non-zero exit: whole batch failed; partial results are kept in the output file.
+        # 5. Non-zero exit: 034 读事件文件按真实 safe_code 逐岗位归类（账号级 vs 软失败）。
         if returncode != 0:
-            failed_code = _classify_failed_code(returncode, captured)
+            fallback_code = _classify_failed_code(returncode, captured)
+            events = self._read_events_file(events_output_path)
+            event_by_url = index_events_by_url(events, set(expected_urls_by_job_id.values()))
             # 抢救已落盘产物：子进程边抓边原子写盘（write_json_atomic），
             # 被强杀/异常退出时 output 文件保存着已完成岗位的 JD。已抓到的
             # 标成功、缺失的才标失败，只重抓缺失部分，不整批丢弃（021 既有
             # 注释承诺 "partial results are kept in the output file"）。
             saved = self._read_combined_details(detail_output_path)
-            missing = 0
             for job_id, source_url in expected_urls_by_job_id.items():
                 detail = saved.get(source_url)
                 if detail:
@@ -295,16 +297,17 @@ class _BossCdpDetailMixin:
                                  f"fields={sorted(detail.keys())[:5]}",
                     )
                     self.breaker.record_success()
-                else:
-                    missing += 1
-                    results[job_id] = SourceOutcome.failure(
-                        failed_code=failed_code,
-                        safe_log=f"{safe_log} returncode={returncode} "
-                                 f"stderr_tail_safe={_safe_tail(captured)}",
-                    )
-            if missing:
-                # One batch-level signal (the whole batch was blocked).
-                self.breaker.record_signal(failed_code)
+                    continue
+                event = event_by_url.get(source_url)
+                code = event_outcome_code(event, fallback_code)
+                results[job_id] = SourceOutcome.failure(
+                    failed_code=code,
+                    safe_log=f"{safe_log} returncode={returncode} "
+                             f"stderr_tail_safe={_safe_tail(captured)}",
+                    failed_reason=str(event.get("safe_hint") or "") if event else "",
+                )
+                if code in SourceCircuitBreaker.SIGNAL_CODES:
+                    self.breaker.record_signal(code)
             return results
 
         # 6. Parse events JSONL; validate each event; dispatch valid events.

@@ -43,7 +43,13 @@ websocket = None
 requests = None
 _run_active = False  # 是否正在 run_search_programmatic 组合运行内
 
-from scripts.boss.exceptions import CDPUnavailableError, ResultFileWriteError
+from scripts.boss.exceptions import (
+    CDPUnavailableError,
+    LoginRequiredError,
+    RequestLimitExceededError,
+    ResultFileWriteError,
+    RiskControlError,
+)
 
 from scripts.boss_cdp_signals import (
     RATE_LIMIT_KEYWORDS,
@@ -58,6 +64,7 @@ from scripts.boss_cdp_signals import (
     detail_page_hint,
     emit_failure_line,
     is_risk_api_code,
+    map_block_exception,
     looks_like_detail_rate_limited,
     looks_like_rate_limited,
     looks_like_risk_control,
@@ -126,3 +133,10 @@ if __name__ == "__main__":
         # （source_result_write_failed），绝不回退退出码 1 误报登录失效。
         emit_failure_line("source_result_write_failed", str(exc))
         sys.exit(4)
+    except (RiskControlError, LoginRequiredError, RequestLimitExceededError) as exc:
+        # 034：账号级阻断（风控/限流/验证码/登录失效/请求上限）——结构化失败行
+        # 带精确码 + 对应退出码，让 webui 分类成账号级阻断 → 熔断/暂停，而不是
+        # 裸 traceback exit 1 被兜底成 source_unknown_error 静默标待确认。
+        code, exit_code = map_block_exception(exc)
+        emit_failure_line(code, str(exc))
+        sys.exit(exit_code)

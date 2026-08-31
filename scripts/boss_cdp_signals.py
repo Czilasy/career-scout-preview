@@ -52,6 +52,28 @@ def emit_failure_line(code: str, hint: str = "") -> None:
     print(f"{FAILURE_LINE_PREFIX} code={code} hint={safe_hint}")
 
 
+def map_block_exception(exc: BaseException) -> tuple[str, int]:
+    """账号级阻断异常 → (失败行 code, 退出码)。034 脚本主入口薄映射用。
+
+    - ``RiskControlError``（风控/限流/验证码/登录失效）→ code 取异常自带码，
+      缺码回退 ``source_status_unclear``，退出码 10；
+    - ``LoginRequiredError`` → ``source_login_required``，退出码 1；
+    - ``RequestLimitExceededError`` → ``source_request_limit_exceeded``，退出码 11。
+    失败行是 webui 唯一权威分类来源，退出码只作缺失败行时的兜底。
+    """
+    from scripts.boss.exceptions import (
+        LoginRequiredError, RequestLimitExceededError, RiskControlError,
+    )
+    if isinstance(exc, RiskControlError):
+        code = getattr(exc, "code", "") or "source_status_unclear"
+        return code, 10
+    if isinstance(exc, LoginRequiredError):
+        return "source_login_required", 1
+    if isinstance(exc, RequestLimitExceededError):
+        return "source_request_limit_exceeded", 11
+    raise TypeError(f"unsupported block exception: {type(exc).__name__}")
+
+
 def parse_failure_line(text: Any) -> tuple[str, str] | None:
     """从输出全文取最后一行失败标记；无标记返回 None。"""
     if not text:

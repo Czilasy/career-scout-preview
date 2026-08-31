@@ -23,12 +23,25 @@ SCRIPT_PATH = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "boss_cd
 
 
 def load_module():
+    """加载 boss_cdp_raw 模块，mock 掉 websocket/requests 两个可选依赖。
+
+    034 修复：exec 加载期间 boss_cdp_raw 的 ``__name__ != "scripts.boss_cdp_raw"``
+    分支会把 ``sys.modules["scripts.boss_cdp_raw"]`` 替换成 exec 实例；结束后必须
+    恢复原始引用，避免全量顺序下污染后续测试。
+    """
     sys.modules.setdefault("websocket", mock.Mock())
     sys.modules.setdefault("requests", mock.Mock())
+    original = sys.modules.get("scripts.boss_cdp_raw")
     spec = importlib.util.spec_from_file_location("boss_cdp_raw", SCRIPT_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if original is not None:
+            sys.modules["scripts.boss_cdp_raw"] = original
+        else:
+            sys.modules.pop("scripts.boss_cdp_raw", None)
     return module
 
 
