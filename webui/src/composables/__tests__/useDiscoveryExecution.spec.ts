@@ -4,8 +4,10 @@
 // - 未进 04 页 → 走既有 interrupted 恢复续跑（FR-004，B068 行为不变）。
 import { ref } from "vue";
 import { apiRequest } from "../../api";
-import { createPlatformState } from "../../discovery";
 import { useDiscoveryExecution } from "../useDiscoveryExecution";
+import { useDiscoveryState } from "../useDiscoveryState";
+import type { DiscoveryState } from "../useDiscoveryState";
+import type { ExecutionNeeds } from "../discoveryDeps";
 
 vi.mock("../../api", () => ({
   apiRequest: vi.fn(),
@@ -17,75 +19,15 @@ vi.mock("../../composables/useTheme", () => ({
 
 const apiRequestMock = apiRequest as unknown as ReturnType<typeof vi.fn>;
 
-function makeState(overrides: Record<string, unknown> = {}) {
-  const base: Record<string, unknown> = {
-    activeCategory: ref("matched"),
-    activeStep: ref("upload"),
-    activeTaskRestored: ref(false),
-    advancedPanelsOpen: ref(false),
-    analysisReady: ref(false),
-    autoScreenArmed: ref(false),
-    autoScreenFields: ref<Record<string, string[]>>({}),
-    autoScreenProfile: ref(""),
-    cancelBusy: ref(false),
-    cityList: ref<string[]>([]),
-    currentRoundStatus: ref(""),
-    draftPlatform: ref<"boss" | "zhilian">("boss"),
-    effectiveSearchCities: ref<string[]>(["上海"]),
-    filterValues: ref<Record<string, Record<string, string[]>>>({
-      boss: {}, zhilian: {},
-    }),
-    finishSaveBusy: ref(false),
-    finishedPartial: ref(false),
-    historyDetail: ref(null),
-    historyMode: ref(false),
-    historyRound: ref(null),
-    historyScreenBusy: ref(false),
-    interruptedRunId: ref(""),
-    locationDraft: { allLocations: () => [] },
-    nationalScopeConfirm: ref(null),
-    oneClickOpen: ref(false),
-    pausedRunId: ref(""),
-    pipelineBusy: ref(false),
-    pipelineResult: ref(null),
-    pipelineResultRunId: ref(""),
-    platformBeforeHistory: ref(null),
-    platformState: createPlatformState("boss"),
-    pollRetryCount: ref(0),
-    pollTimer: ref<number | undefined>(undefined),
-    profileConfirmed: ref(false),
-    profileError: ref(""),
-    profileFacts: ref<Record<string, unknown>>({}),
-    profileSummary: ref(""),
-    recrawlBusy: ref(false),
-    recrawlPlatformGuide: ref(null),
-    recrawlSnapshot: ref(null),
-    recrawlTaskId: ref(""),
-    restoredTaskHint: ref(""),
-    resultEpoch: ref(0),
-    resultLoaded: ref(false),
-    resultPlatformFilter: ref("all"),
-    resultRunIds: ref({ boss: "", zhilian: "" }),
-    resultsPageSeen: ref(false),
-    schemaRef: ref(null),
-    scrapeBusy: ref(false),
-    scrapeCompleted: ref(false),
-    scrapeSnapshot: ref(null),
-    scrapeTaskId: ref(""),
-    screenBusy: ref(false),
-    screenPanelOpen: ref(false),
-    screenSnapshot: ref(null),
-    screenTaskId: ref(""),
-    searchPanelsOpen: ref(false),
-    selectedKeywords: ref<string[]>([]),
-    switchAccountId: ref(""),
-    switchAccounts: ref([]),
-  };
-  return { ...base, ...overrides } as any;
+// 031 B8 补遗：state fake = 真实状态工厂 + overrides（字段永齐全、类型真实，
+// 消除 as any 兜底）；deps fake 按 ExecutionNeeds 全量类型化。
+function makeState(overrides: Partial<DiscoveryState> = {}): DiscoveryState {
+  const state = useDiscoveryState({ profileId: "test" }, () => {});
+  return Object.assign(state, overrides);
 }
 
-function makeDeps(overrides: Record<string, unknown> = {}) {
-  return {
+function makeDeps(overrides: Partial<ExecutionNeeds> = {}): ExecutionNeeds {
+  return Object.assign({
     clearWorkflowState: vi.fn(),
     enrichPausedSnapshot: vi.fn(async () => {}),
     enterScreenStep: vi.fn(),
@@ -96,19 +38,29 @@ function makeDeps(overrides: Record<string, unknown> = {}) {
     loadFilterLabels: vi.fn(async () => {}),
     loadLatestResult: vi.fn(async () => {}),
     notify: vi.fn(),
+    persistFinishedState: vi.fn(),
     pollRecrawl: vi.fn(async () => {}),
     pollTask: vi.fn(async () => {}),
+    refreshScopePreview: vi.fn(async () => null),
     requireProfileConfirmed: vi.fn(() => true),
     restoreLocationsFromContext: vi.fn(),
     returnToLatest: vi.fn(async () => {}),
-    saveScrapedOnlySnapshot: vi.fn(async () => {}),
+    roundFlow: {
+      busyAction: "",
+      roundContext: null,
+      roundContexts: {},
+      suppressProfileWatch: false,
+      startRecrawl: vi.fn(async () => {}),
+      clearRoundContext: vi.fn(),
+      restoreRoundContext: vi.fn(() => false),
+      registerRoundContext: vi.fn(),
+    },
+    saveScrapedOnlySnapshot: vi.fn(async () => "saved" as const),
     setDraftPlatform: vi.fn(),
     setPipelineResult: vi.fn(),
-    showLoginGuide: vi.fn(),
+    showLoginGuide: vi.fn(async () => {}),
     validateProfileForScreen: vi.fn(() => true),
-    roundFlow: { restoreRoundContext: vi.fn() },
-    ...overrides,
-  } as any;
+  }, overrides);
 }
 
 const interruptedScreenResponse = {

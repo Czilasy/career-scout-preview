@@ -5,6 +5,9 @@
 import { ref } from "vue";
 import { apiRequest } from "../../api";
 import { useDiscoveryTasks } from "../useDiscoveryTasks";
+import { useDiscoveryState } from "../useDiscoveryState";
+import type { DiscoveryState } from "../useDiscoveryState";
+import type { RoundFlowLike, TasksNeeds } from "../discoveryDeps";
 
 vi.mock("../../api", () => ({
   apiRequest: vi.fn(),
@@ -15,84 +18,44 @@ vi.mock("../../api", () => ({
 
 const apiRequestMock = apiRequest as unknown as ReturnType<typeof vi.fn>;
 
-function makeState(overrides: Record<string, unknown> = {}) {
-  const base: Record<string, unknown> = {
-    activeCategory: ref("matched"),
-    activeStep: ref("upload"),
-    activeTaskRestored: ref(false),
-    advancedSettings: ref({ pages: 2 }),
-    aiConsent: ref(false),
-    analysisReady: ref(false),
-    appliedResumePlatforms: ref(new Set()),
-    autoScreenArmed: ref(false),
-    autoScreenFields: ref({}),
-    autoScreenProfile: ref(""),
-    cityText: ref(""),
-    customCity: ref(""),
-    customKeyword: ref(""),
-    currentRoundStatus: ref(""),
-    draftPlatform: ref("boss"),
-    executionSelection: ref("balanced"),
-    filterValues: ref({ boss: {}, zhilian: {} }),
-    finishedPartial: ref(false),
-    groups: ref({ uncertain: [] }),
-    historyBackToLatest: vi.fn(),
-    historyMode: ref(false),
-    historyRound: ref(null),
-    interruptedRunId: ref(""),
-    isScrapedOnly: ref(false),
-    keywords: ref([]),
-    locationDraft: { reset: vi.fn(), allLocations: () => [] },
-    oneClickOpen: ref(false),
-    pausedRunId: ref(""),
-    pausingScreen: ref(false),
-    pipelineResult: ref(null),
-    pipelineResultRunId: ref(""),
-    pollRetryCount: ref(0),
-    pollTimer: ref<number | undefined>(undefined),
-    profileError: ref(""),
-    profileFacts: ref({}),
-    profileSummary: ref(""),
-    recrawlBusy: ref(false),
-    recrawlPlatformGuide: ref(null),
-    recrawlRetryCount: ref(0),
-    recrawlSnapshot: ref(null),
-    recrawlTaskId: ref(""),
-    rejectedIds: ref(new Set()),
-    restoredTaskHint: ref(""),
-    resultLoaded: ref(false),
-    resultPlatformFilter: ref("all"),
-    resultRunIds: ref({ boss: "", zhilian: "" }),
-    resultsPageSeen: ref(false),
-    resumeAnalysis: ref(null),
-    scopePreview: ref(null),
-    scopePreviewBusy: ref(false),
-    scrapeBusy: ref(false),
-    scrapeCompleted: ref(false),
-    scrapeSnapshot: ref(null),
-    scrapeTaskId: ref(""),
-    screenBusy: ref(false),
-    screenPanelOpen: ref(true),
-    screenSnapshot: ref(null),
-    screenTaskId: ref(""),
-    selectedFile: ref(null),
-    selectedKeywords: ref([]),
-    uncertainByPlatform: ref({ boss: 0, zhilian: 0 }),
-    unfinishedWorkflowRestored: ref(false),
-  };
-  return { ...base, ...overrides } as any;
+const roundFlowFake: RoundFlowLike = {
+  busyAction: "",
+  roundContext: null,
+  roundContexts: {},
+  suppressProfileWatch: false,
+  startRecrawl: vi.fn(async () => {}),
+  clearRoundContext: vi.fn(),
+  restoreRoundContext: vi.fn(() => false),
+  registerRoundContext: vi.fn(),
+};
+
+// 031 B8 补遗：state fake = 真实状态工厂 + overrides（字段永齐全、类型真实，
+// 消除 as any 兜底）；deps fake 按 TasksNeeds 全量类型化。
+function makeState(overrides: Partial<DiscoveryState> = {}): DiscoveryState {
+  const state = useDiscoveryState({ profileId: "test" }, () => {});
+  return Object.assign(state, overrides);
 }
 
-function makeDeps(overrides: Record<string, unknown> = {}) {
-  return {
+function makeDeps(overrides: Partial<TasksNeeds> = {}): TasksNeeds {
+  return Object.assign({
+    cancelScrape: vi.fn(async () => {}),
+    clearFinishedState: vi.fn(),
     clearLatestResult: vi.fn(async () => true),
     clearWorkflowState: vi.fn(),
+    continueAiScreen: vi.fn(async () => {}),
+    enterScreenStep: vi.fn(),
     fetchMergedLatestResult: vi.fn(async () => null),
+    finishPausedTask: vi.fn(async () => {}),
+    isLoginErrorCode: vi.fn(() => false),
+    jobId: vi.fn(() => ""),
     loadLatestResult: vi.fn(async () => {}),
     notify: vi.fn(),
-    roundFlow: { clearRoundContext: vi.fn() },
-    ...overrides,
-  } as any;
+    restoreRunningTask: vi.fn(async () => {}),
+    roundFlow: roundFlowFake,
+    setPipelineResult: vi.fn(),
+    showLoginGuide: vi.fn(async () => {}),
+    startAiScreen: vi.fn(async () => {}),
+  }, overrides);
 }
 
 describe("useDiscoveryTasks.maybeAutoStartNewRound（026 B078）", () => {
@@ -140,7 +103,7 @@ describe("useDiscoveryTasks.maybeAutoStartNewRound（026 B078）", () => {
     const deps = makeDeps({
       fetchMergedLatestResult: vi.fn(async () => ({
         merged: { ok: true, jobs: [] },
-        newer: { platform: "boss", data: { status: "succeeded" } },
+        newer: { platform: "boss" as const, data: { status: "succeeded" } },
         platformStatuses: { boss: "succeeded", zhilian: "succeeded" },
       })),
     });
@@ -156,7 +119,7 @@ describe("useDiscoveryTasks.maybeAutoStartNewRound（026 B078）", () => {
     const deps = makeDeps({
       fetchMergedLatestResult: vi.fn(async () => ({
         merged: { ok: true, jobs: [] },
-        newer: { platform: "boss", data: { status: "paused" } },
+        newer: { platform: "boss" as const, data: { status: "paused" } },
         platformStatuses: { boss: "paused", zhilian: "succeeded" },
       })),
     });

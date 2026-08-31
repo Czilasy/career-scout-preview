@@ -3,56 +3,26 @@
 //   已结束时快照不残留未完成语义（FR-001）。
 // - 进 04 页（markResultsPageSeen）与结束保存（persistFinishedState）的
 //   已结束事实独立持久化（localStorage），restoreWorkflowState 据此恢复。
-import { computed, ref } from "vue";
+import { ref } from "vue";
+import { useDiscoveryState } from "../useDiscoveryState";
+import type { DiscoveryState } from "../useDiscoveryState";
 import { useDiscoveryWorkflow } from "../useDiscoveryWorkflow";
+import type { WorkflowNeeds } from "../discoveryDeps";
 
 const WORKFLOW_KEY = "career-scout-workflow:test";
 const FINISHED_KEY = "career-scout-workflow:test:finished";
 
-function makeState(overrides: Record<string, unknown> = {}) {
-  const base: Record<string, unknown> = {
-    WORKFLOW_STATE_VERSION: 1,
-    activeStep: ref("upload"),
-    advancedPanelsOpen: ref(false),
-    analysisReady: ref(false),
-    cityText: ref(""),
-    currentRoundStatus: ref(""),
-    enabledSteps: ref(["upload"]),
-    filterValues: ref({ boss: {}, zhilian: {} }),
-    finishedPartial: ref(false),
-    historyMode: ref(false),
-    interruptedRunId: ref(""),
-    keywords: ref([]),
-    pausedRunId: ref(""),
-    pipelineResult: ref(null),
-    pipelineResultRunId: ref(""),
-    profileFacts: ref({}),
-    profileSummary: ref(""),
-    recrawlBusy: ref(false),
-    recrawlSnapshot: ref(null),
-    recrawlTaskId: ref(""),
-    restoredWorkflowSnapshot: ref(null),
-    resultLoaded: ref(false),
-    resultsPageSeen: ref(false),
-    scrapeBusy: ref(false),
-    scrapeCompleted: ref(false),
-    scrapeSnapshot: ref(null),
-    scrapeTaskId: ref(""),
-    screenBusy: ref(false),
-    screenPanelOpen: ref(false),
-    screenSnapshot: ref(null),
-    screenTaskId: ref(""),
-    searchPanelsOpen: ref(false),
-    selectedKeywords: ref([]),
-    unfinishedWorkflowRestored: ref(false),
-    workflowStateKey: computed(() => WORKFLOW_KEY),
-    workflowStateRestored: ref(true),
-  };
-  return { ...base, ...overrides } as any;
+// 031 B8 补遗：state fake = 真实状态工厂 + overrides（字段永齐全、类型真实，
+// 消除 as any 兜底）；workflowStateRestored 置 true 对齐 persist 闸门的测试
+// 前置（真实默认 false，persistWorkflowState 会被闸门跳过）。
+function makeState(overrides: Partial<DiscoveryState> = {}): DiscoveryState {
+  const state = useDiscoveryState({ profileId: "test" }, () => {});
+  state.workflowStateRestored.value = true;
+  return Object.assign(state, overrides);
 }
 
-function makeDeps(overrides: Record<string, unknown> = {}) {
-  return { emit: vi.fn(), ...overrides } as any;
+function makeDeps(overrides: Partial<WorkflowNeeds> = {}): WorkflowNeeds {
+  return Object.assign({ emit: vi.fn() }, overrides);
 }
 
 describe("useDiscoveryWorkflow（026 B078）", () => {
