@@ -858,6 +858,7 @@ class ChromeSetupTests(unittest.TestCase):
 
         self.assertEqual(details, [{"job_id": "abc123"}])
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 默认路径语义")
     def test_windows_default_paths_use_localappdata(self):
         module = load_module()
         env = {

@@ -1461,8 +1461,8 @@ class TuningRoundRunnerTests(unittest.TestCase):
             runner.execute(self._manifest("list"))
 
         self.assertEqual(
-            pathlib.Path(captured["artifact_root"]),
-            self.root / "tuning" / "exp-run" / "artifacts" / "round-list",
+            pathlib.Path(captured["artifact_root"]).resolve(),
+            (self.root / "tuning" / "exp-run" / "artifacts" / "round-list").resolve(),
         )
         self.assertEqual(captured.get("platform"), "boss")
 

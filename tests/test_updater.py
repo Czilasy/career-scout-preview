@@ -494,6 +494,11 @@ class MirrorFirstTests(unittest.TestCase):
             p = patch.object(updater, target, value)
             p.start()
             self.addCleanup(p.stop)
+        # 平台固定为 windows：镜像 manifest 只有 win/mac 条目，避免在
+        # Linux/CI 上 detect_update_platform 返回 other 导致无资产断言失败。
+        p = patch.object(updater, "detect_update_platform", return_value="windows")
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_mirror_reachable_returns_mirror_info_without_github(self):
         with patch.object(updater.requests, "get",

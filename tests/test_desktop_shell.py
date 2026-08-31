@@ -288,6 +288,7 @@ class ErrorPathTests(unittest.TestCase):
             )
         )
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "WebView2 文案为 Windows 专属")
     def test_webview_init_failure_messagebox_includes_download_url(self):
         """合同 §7：WebView2 缺失提示必须给出微软下载指引。"""
         messagebox = _RecordingMessageBox()

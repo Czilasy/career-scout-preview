@@ -106,6 +106,7 @@ class DetectTests(unittest.TestCase):
             self.assertFalse(item["installed"])
             self.assertIsNone(item["path"])
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 候选路径语义")
     def test_detect_windows_candidate_hit(self):
         env = {"PROGRAMFILES": r"C:\Program Files"}
         exists = lambda p: "Chrome" in p  # noqa: E731
@@ -115,6 +116,7 @@ class DetectTests(unittest.TestCase):
         self.assertTrue(chrome["path"].endswith("chrome.exe"))
         self.assertIn("Google", chrome["path"])
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 候选路径语义")
     def test_detect_candidate_order_env_fallback(self):
         """候选按顺序：PROGRAMFILES 缺环境变量时回退 LOCALAPPDATA 命中。"""
         env = {"LOCALAPPDATA": r"C:\cs-test\AppData\Local"}
@@ -124,6 +126,7 @@ class DetectTests(unittest.TestCase):
         self.assertTrue(edge["installed"])
         self.assertIn("AppData", edge["path"])
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 候选路径语义")
     def test_detect_missing_env_skipped(self):
         env = {"LOCALAPPDATA": r"C:\cs-test\AppData\Local"}
         exists = lambda p: "360Chrome" in p  # noqa: E731
@@ -182,6 +185,7 @@ class ResolveExecutableTests(unittest.TestCase):
         self.assertIn("Vivaldi", reason)
         self.assertIn("重新选择", reason)
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 候选路径语义")
     def test_manual_mode_existing_path(self):
         exists = lambda p: p.endswith("mybrowser.exe")  # noqa: E731
         path, reason = br.resolve_executable(
@@ -392,6 +396,7 @@ class EffectiveDataDirTests(unittest.TestCase):
         profile = r"C:\cs-test\.career-scout\chrome-profile"
         self.assertEqual(effective_data_dir(profile, "edge"), profile)
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 候选路径语义")
     def test_third_party_namespaced(self):
         profile = r"C:\cs-test\.career-scout\chrome-profile"
         result = effective_data_dir(profile, "brave")

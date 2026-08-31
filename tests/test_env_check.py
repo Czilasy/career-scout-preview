@@ -62,6 +62,7 @@ class BrowserDetectionTests(unittest.TestCase):
         with self._within_windows_env(module, exists_map):
             return module.get_default_chrome_path()
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 路径探测语义")
     def test_detects_both_browsers(self):
         module = load_module()
         found = self._detect(module, {
@@ -69,11 +70,13 @@ class BrowserDetectionTests(unittest.TestCase):
         })
         self.assertEqual(found, {"chrome": self.CHROME_LOCAL, "edge": self.EDGE_PF})
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 路径探测语义")
     def test_chrome_only(self):
         module = load_module()
         found = self._detect(module, {self.CHROME_PF: True})
         self.assertEqual(found, {"chrome": self.CHROME_PF, "edge": None})
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 路径探测语义")
     def test_edge_only(self):
         module = load_module()
         found = self._detect(module, {self.EDGE_LOCAL: True})
@@ -93,6 +96,7 @@ class BrowserDetectionTests(unittest.TestCase):
             found = module.detect_chromium_browsers()
         self.assertEqual(found, {"chrome": chrome, "edge": edge})
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 路径探测语义")
     def test_default_path_prefers_chrome_over_edge(self):
         module = load_module()
         path = self._default_path(module, {
@@ -100,6 +104,7 @@ class BrowserDetectionTests(unittest.TestCase):
         })
         self.assertEqual(path, self.CHROME_LOCAL)
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 路径探测语义")
     def test_default_path_falls_back_to_edge(self):
         module = load_module()
         path = self._default_path(module, {self.EDGE_LOCAL: True})
