@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 import platform
 import re
@@ -38,7 +37,9 @@ from pathlib import Path
 
 import requests
 
-logger = logging.getLogger(__name__)
+from webui.logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 GITHUB_REPO = "Czilasy/career-scout-preview"
 GITHUB_LATEST_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"

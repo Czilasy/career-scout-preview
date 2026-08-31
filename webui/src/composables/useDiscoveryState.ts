@@ -167,7 +167,7 @@ const stepCopy: Record<StepId, { eyebrow: string; title: string; description: st
   },
   screen: {
     eyebrow: "03 · 两阶段判断",
-    title: "确认六类筛选条件",
+    title: "确认七类筛选条件",
     description: "先按列表字段粗筛，再抓取 JD 与简历画像精筛。",
   },
   results: {

@@ -233,6 +233,7 @@ class TaskRunner:
                     task_id, "failed", returncode=outcome[1], error=message,
                 )
         except Exception as exc:
+            _logger.exception("任务执行兜底异常 task=%s type=%s", task_id, type(exc).__name__)
             try:
                 self.store.append_log(task_id, f"任务失败：{exc}")
                 self.store.update_task(task_id, "failed", returncode=-1, error=str(exc))

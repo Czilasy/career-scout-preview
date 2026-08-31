@@ -9,8 +9,9 @@ mapping.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
+
+from webui.logging_setup import get_logger
 
 # AI internal error codes kept as module-level names for compatibility.
 ERROR_TIMEOUT = "timeout"
@@ -27,7 +28,7 @@ ERROR_SERVER = "server_error"
 class UnknownErrorCode(ValueError):
     """Raised when a code is not present in the registry."""
 
-_LOGGER = logging.getLogger("career_scout.error_registry")
+_LOGGER = get_logger("error_registry")
 
 
 def _entry(

@@ -365,12 +365,22 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             jobs, api_diagnosis, api_meta = _fetch_api_page()
             verdict, verdict_code, verdict_hint = classify_list_diagnosis(
                 api_diagnosis, repeated=False)
+            if verdict is not None:
+                log.warning(
+                    "风控/限流判定 verdict=%s code=%s hint=%s",
+                    verdict, verdict_code, verdict_hint,
+                )
             if verdict == VERDICT_RETRY:
                 print(f"  ⚠️ {verdict_hint}；重新导航后重试本页一次…")
                 _renavigate_and_wait()
                 jobs, api_diagnosis, api_meta = _fetch_api_page()
                 verdict, verdict_code, verdict_hint = classify_list_diagnosis(
                     api_diagnosis, repeated=True)
+                if verdict is not None:
+                    log.warning(
+                        "风控/限流判定（重试后）verdict=%s code=%s hint=%s",
+                        verdict, verdict_code, verdict_hint,
+                    )
                 if verdict == VERDICT_CONFIRMED:
                     verdict_hint = verdict_hint + "（重试后复现）"
 

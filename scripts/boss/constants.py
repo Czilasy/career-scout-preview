@@ -2,11 +2,12 @@
 
 """平台常量、JS 模板与筛选参数映射（021 B8 T026 自 scripts/boss_cdp_raw.py 物理搬运）。"""
 
-import logging
 import ntpath
 import os
 import platform
 import re
+
+from webui.logging_setup import get_logger
 
 _VISIBILITY_STATE_JS = "Object.defineProperty(document, 'visibilityState', {get: () => 'visible'});"
 
@@ -390,4 +391,4 @@ _READINESS_PROBE_JS = (
 )
 
 
-log = logging.getLogger("boss_cdp")
+log = get_logger("boss_cdp")

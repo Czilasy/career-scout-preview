@@ -282,7 +282,7 @@ class DownloaderTests(unittest.TestCase):
         d = updater.UpdateDownloader(state_dir=tempfile.mkdtemp())
         info = updater.UpdateInfo(asset_url="https://github.com/x/x.exe")
         d._target = d.download_dir / "x.exe"
-        with self.assertLogs("webui.updater", level="ERROR") as logs, \
+        with self.assertLogs("career_scout.webui.updater", level="ERROR") as logs, \
              patch.object(updater.requests, "get",
                           side_effect=OSError("connection reset by peer")):
             d._run(info)

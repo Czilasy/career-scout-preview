@@ -49,6 +49,12 @@ def record_runtime_event(
     if is_configured():
         with bind_task_context(task_id, correlation_id):
             _log.warning("runtime_audit=%s", json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        # 白箱：日志未就绪时不得静默跳过——显式降级标记到 stderr。
+        import sys
+        sys.stderr.write(
+            f"runtime_audit degraded (log not configured) event={event} stage={stage}\n"
+        )
     if store is not None and task_id:
         try:
             store.append_task_event(task_id, "runtime_audit", payload)

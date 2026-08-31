@@ -283,3 +283,68 @@ class RepoHygieneTests(unittest.TestCase):
                         marker, ctx, f"{rel}:{x.lineno} 白名单条目缺少「{marker}」注释"
                     )
         self.assertLessEqual(total, 4, "pass-only 吞噬总数不得超过白名单基线 4")
+
+    def test_no_bare_logging_getlogger(self):
+        """白箱（033）：禁止直接使用 logging.getLogger；统一走 get_logger 封装。
+
+        豁免：logging_setup.py（定义处）、ai_raw_log.py（内部取用 career_scout.ai_raw）。
+        """
+        exempt = {"logging_setup.py", "ai_raw_log.py"}
+        bad = []
+        for base in ("webui", "scripts"):
+            for p in (ROOT / base).rglob("*.py"):
+                if "__pycache__" in str(p):
+                    continue
+                if p.name in exempt:
+                    continue
+                src = p.read_text(encoding="utf-8", errors="replace")
+                tree = ast.parse(src)
+                for x in ast.walk(tree):
+                    if not isinstance(x, ast.Call):
+                        continue
+                    func = x.func
+                    if isinstance(func, ast.Attribute) and func.attr == "getLogger":
+                        bad.append(f"{p.relative_to(ROOT).as_posix()}:{x.lineno}")
+        self.assertEqual(bad, [], "禁止直接使用 logging.getLogger（统一用 webui.logging_setup.get_logger）")
+
+    def test_no_silent_except_without_trace(self):
+        """白箱（033）：except 块不留痕即失败。
+
+        口径：ExceptHandler body ≤2 条，且所有语句均为 pass（单 pass 由既有基线管）
+        或无副作用裸表达式 → 判定为"吞异常不留痕"。赋值兜底（except: x = None）、
+        raise/return/continue/break、函数调用、复合语句（if/with/for 等）都视为有行为。
+        带「吞噬白名单」注释的块豁免（与 pass-only 基线同一机制）。
+        """
+        marker = "吞噬白名单"
+        bad = []
+        for base in ("webui", "scripts"):
+            for p in (ROOT / base).rglob("*.py"):
+                if "__pycache__" in str(p):
+                    continue
+                src = p.read_text(encoding="utf-8", errors="replace")
+                lines = src.splitlines()
+                tree = ast.parse(src)
+                for x in ast.walk(tree):
+                    if not isinstance(x, ast.ExceptHandler):
+                        continue
+                    if len(x.body) > 2:
+                        continue
+                    # 单 pass 由 test_silent_except_pass_baseline 治理，此处跳过避免重复报
+                    if len(x.body) == 1 and isinstance(x.body[0], ast.Pass):
+                        continue
+
+                    def _is_trace(stmt):
+                        if isinstance(stmt, ast.Pass):
+                            return False
+                        if isinstance(stmt, ast.Expr) and not isinstance(stmt.value, ast.Call):
+                            return False
+                        return True
+
+                    if any(_is_trace(s) for s in x.body):
+                        continue
+                    rel = p.relative_to(ROOT).as_posix()
+                    ctx = "\n".join(lines[max(0, x.lineno - 3): x.lineno + 1])
+                    if marker in ctx:
+                        continue
+                    bad.append(f"{rel}:{x.lineno}")
+        self.assertEqual(bad, [], "except 块需留痕（日志/raise/return/continue/break/副作用/复合语句）或显式「吞噬白名单」注释")

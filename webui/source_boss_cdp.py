@@ -8,7 +8,6 @@ source_boss_cdp_detail（以 mixin 组装）。共享助手见 source_boss_helpe
 from __future__ import annotations
 
 import json
-import logging
 import os
 import subprocess
 import sys
@@ -31,8 +30,6 @@ from webui.source_boss_helpers import (
     SCRAPER_FILTER_FIELDS,
 )
 from webui.source_boss_cdp_detail import _BossCdpDetailMixin
-
-logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
@@ -83,7 +80,8 @@ class BossCdpSource(_BossCdpDetailMixin):
         self.cwd = Path(cwd) if cwd else PROJECT_ROOT
         self.scraper_path = Path(scraper_path) if scraper_path else SCRAPER
         self.env = env or {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8",
-                           "PYTHONUNBUFFERED": "1", **os.environ}
+                           "PYTHONUNBUFFERED": "1",
+                           "CAREER_SCOUT_LOG_LEVEL": "INFO", **os.environ}
         self.timeout_seconds = int(timeout_seconds)
         self._executor = executor or ScraperExecutor()
         self.cancel_event = cancel_event

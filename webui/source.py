@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 import random
 import subprocess
@@ -94,8 +93,6 @@ from webui.source_zhilian_defaults import (
     _zhilian_failed_reason,
 )
 from webui.source_fake import FakeJobSource
-
-logger = logging.getLogger(__name__)
 
 # The scraper loads optional dependencies lazily for its CLI.  The web adapter
 # needs requests available before tests and preflight can patch/use it.

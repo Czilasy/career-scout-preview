@@ -631,6 +631,11 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
 
     # 重试耗尽仍未拿到内容
     if not content and last_error is not None:
+        _logger.warning(
+            "AI 调用失败（重试耗尽）type=%s code=%s",
+            type(last_error).__name__,
+            getattr(last_error, "error_code", "") or "",
+        )
         raise last_error from None
     if not content and response is None:
         raise AISecurityError(ERROR_NETWORK) from None

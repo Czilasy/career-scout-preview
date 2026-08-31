@@ -45,17 +45,20 @@ _logger = get_logger(__name__)
 
 def _risk_signal(text: str, url: str = "") -> str | None:
     low = text.lower()
+    signal = None
     if url.startswith("chrome-error://chromewebdata/") or url.startswith("data:text/html,chromewebdata"):
-        return "unreachable"
-    if any(m.lower() in low for m in _VERIFY_MARKERS):
-        return "verification"
-    if any(m.lower() in low for m in _RATE_MARKERS):
-        return "rate_limited"
-    if any(m.lower() in low for m in _BLOCK_MARKERS):
-        return "blocked"
-    if any(m.lower() in low for m in _LOGIN_MARKERS) or _ZHILIAN_PASSPORT_HOST in url:
-        return "login_required"
-    return None
+        signal = "unreachable"
+    elif any(m.lower() in low for m in _VERIFY_MARKERS):
+        signal = "verification"
+    elif any(m.lower() in low for m in _RATE_MARKERS):
+        signal = "rate_limited"
+    elif any(m.lower() in low for m in _BLOCK_MARKERS):
+        signal = "blocked"
+    elif any(m.lower() in low for m in _LOGIN_MARKERS) or _ZHILIAN_PASSPORT_HOST in url:
+        signal = "login_required"
+    if signal is not None:
+        _logger.warning("智联风险信号 signal=%s", signal)
+    return signal
 
 
 def _normalize_job(item: dict) -> dict:

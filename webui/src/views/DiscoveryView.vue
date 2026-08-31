@@ -612,10 +612,10 @@ onMounted(() => {
         <div class="workflow-copy">
           <span class="card-kicker">简历只会发往你配置的 AI 服务</span>
           <h2>上传后生成建议，不替你做最终决定</h2>
-          <p>分析会得到关键词、城市和六类筛选条件。每一项都可以在后续步骤调整。</p>
+          <p>分析会得到关键词、城市和七类筛选条件。每一项都可以在后续步骤调整。</p>
           <ul class="feature-list">
             <li><Check :size="17" aria-hidden="true" />抓取前确认关键词和城市</li>
-            <li><Check :size="17" aria-hidden="true" />筛选前确认六类业务条件</li>
+            <li><Check :size="17" aria-hidden="true" />筛选前确认七类业务条件</li>
             <li><Check :size="17" aria-hidden="true" />AI 失败进入待确认，不伪装成匹配</li>
           </ul>
         </div>

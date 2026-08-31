@@ -9,7 +9,6 @@ BossCdpSource 的批量详情抓取（fetch_details_batch）、终端安全事�
 from __future__ import annotations
 
 import json
-import logging
 import subprocess
 import threading
 from collections.abc import Callable
@@ -17,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts import boss_cdp_raw as boss
+from webui.logging_setup import get_logger
 from webui.process_executor import run_with_deadline
 from webui.runtime_audit import record_runtime_event
 from webui.task_runners import _classify_risk_control_reason
@@ -29,7 +29,7 @@ from webui.source_boss_helpers import (
     _safe_tail,
 )
 
-logger = logging.getLogger(__name__)
+_logger = get_logger(__name__)
 
 
 class _InProcessCapture(boss._ThreadAwareStdout):
@@ -610,8 +610,8 @@ class _BossCdpDetailMixin:
             raise
         except ValueError as exc:
             return (3, str(exc))
-        except Exception:
-            logger.exception("in-process 抓取执行失败（已对外脱敏）")
+        except Exception as exc:
+            _logger.exception("in-process 抓取执行失败 type=%s", type(exc).__name__)
             return (-1, "抓取执行失败")
         if not completed:
             # 与 _default_run 的 TimeoutExpired 语义一致 → source_timeout

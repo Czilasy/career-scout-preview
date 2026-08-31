@@ -80,6 +80,7 @@ test-results/
 
 # IDE/tool config
 .trae/
+.codebuddy/
 *.code-workspace
 
 # Tuning experiment runtime data (machine-specific, contains DB evidence)

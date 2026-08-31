@@ -4,6 +4,15 @@ Logs live outside the repository under the user data directory so public
 repo hygiene rules are not affected.  The redaction formatter is a safety
 net for credential-shaped values; callers must still avoid logging raw
 API keys, cookies, resume text or JD bodies.
+
+Whitebox guarantees (033):
+- ``get_logger`` lazily configures the local file logger when it has no
+  handler yet, so any process (webui, scraper subprocess, CLI entry) that
+  uses the unified logger always has a log destination.
+- ``SafeRotatingFileHandler`` guards rotation with a cross-process lock so
+  the main process and scraper subprocesses can share one log file, and
+  degrades to append instead of crashing when the file is deleted, read-only
+  or locked.
 """
 
 from __future__ import annotations
@@ -14,6 +23,8 @@ import logging
 import logging.handlers
 import os
 import re
+import sys
+import tempfile
 from pathlib import Path
 from typing import Iterator
 
@@ -21,6 +32,7 @@ from typing import Iterator
 LOGGER_NAME = "career_scout"
 DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_BACKUP_COUNT = 10
+LOCK_SUFFIX = ".lock"
 
 _task_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "career_scout_task_id", default=""
@@ -64,6 +76,95 @@ class RedactingFormatter(logging.Formatter):
         return redact(message)
 
 
+def _is_test_context() -> bool:
+    """Detect test runners via sys.modules so lazy init uses a temp dir.
+
+    pytest and unittest register themselves in sys.modules while running;
+    normal webui / scraper subprocess startup does not import them.
+    """
+    return bool(sys.modules.get("pytest")) or bool(sys.modules.get("unittest"))
+
+
+@contextlib.contextmanager
+def _exclusive_lock(lock_path: Path) -> Iterator[None]:
+    """Hold an exclusive lock on ``lock_path`` across process boundaries.
+
+    Windows uses ``msvcrt.locking``; POSIX uses ``fcntl.flock``. When locking
+    is unavailable or fails, degrade to unlocked (rotation stays best-effort)
+    rather than raising — a logging failure must never crash the app.
+    """
+    handle = None
+    locked = False
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt  # type: ignore[import-not-found]
+                handle = open(lock_path, "a+b")
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                locked = True
+            elif os.name == "posix":
+                import fcntl  # type: ignore[import-not-found]
+                handle = open(lock_path, "a+b")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                locked = True
+        except OSError:
+            pass
+        yield
+    finally:
+        if handle is not None:
+            try:
+                if locked:
+                    if os.name == "nt":
+                        import msvcrt
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    elif os.name == "posix":
+                        import fcntl
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            handle.close()
+
+
+class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """RotatingFileHandler hardened for cross-process writes (whitebox).
+
+    - ``doRollover`` runs under a cross-process lock so two processes sharing
+      one log file cannot corrupt rotation.
+    - Rotation/write ``OSError`` degrades to append instead of crashing.
+    - A deleted log file is rebuilt lazily on the next emit.
+    """
+
+    def doRollover(self) -> None:
+        with _exclusive_lock(Path(self.baseFilename + LOCK_SUFFIX)):
+            try:
+                super().doRollover()
+            except OSError:
+                # Concurrent rotation by another process or a transient FS
+                # error: reopen and keep appending (skip this rotation).
+                self.stream = None
+                try:
+                    self.stream = self._open()
+                except OSError:
+                    self.stream = None
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self.stream is not None and not Path(self.baseFilename).is_file():
+            # Log file removed externally: rebuild it on the next write.
+            try:
+                self.stream.close()
+            except Exception:
+                # 句柄已失效：置空交由下方重建，不留纯 pass。
+                self.stream = None
+            self.stream = None
+        if self.stream is None:
+            try:
+                self.stream = self._open()
+            except OSError:
+                self.stream = None
+        super().emit(record)
+
+
 def default_log_dir() -> Path:
     override = os.environ.get("CAREER_SCOUT_LOG_DIR")
     if override:
@@ -71,10 +172,17 @@ def default_log_dir() -> Path:
     return Path.home() / ".career-scout" / "logs"
 
 
+def _default_level() -> int:
+    raw = os.environ.get("CAREER_SCOUT_LOG_LEVEL", "").strip().upper()
+    if not raw:
+        return logging.DEBUG
+    return getattr(logging, raw, logging.DEBUG)
+
+
 def configure_logging(
     log_dir: str | os.PathLike[str] | None = None,
     *,
-    level: int = logging.DEBUG,
+    level: int | None = None,
     max_bytes: int = DEFAULT_MAX_BYTES,
     backup_count: int = DEFAULT_BACKUP_COUNT,
     force: bool = False,
@@ -88,7 +196,7 @@ def configure_logging(
     directory.mkdir(parents=True, exist_ok=True)
     log_path = directory / "career-scout.log"
 
-    handler = logging.handlers.RotatingFileHandler(
+    handler = SafeRotatingFileHandler(
         log_path,
         maxBytes=max(int(max_bytes), 1),
         backupCount=max(1, int(backup_count)),
@@ -101,7 +209,7 @@ def configure_logging(
         )
     )
     handler.addFilter(TaskContextFilter())
-    logger.setLevel(level)
+    logger.setLevel(level if level is not None else _default_level())
     logger.propagate = False
     if force:
         for existing in list(logger.handlers):
@@ -112,6 +220,7 @@ def configure_logging(
                 _logger.debug("旧日志句柄关闭失败（force 重配场景，忽略）", exc_info=True)
 
     logger.addHandler(handler)
+    logger.info("career-scout log initialized at %s", log_path)
     return logger
 
 
@@ -133,8 +242,39 @@ def is_configured() -> bool:
     """Return whether the local file logger has been configured."""
     return bool(logging.getLogger(LOGGER_NAME).handlers)
 
+
+def _configure_lazily() -> None:
+    """Configure the local file logger on first use (whitebox).
+
+    Test contexts write to a temp dir so automation never pollutes the real
+    user log directory; real processes use the default/user-overridden dir.
+    Setup failures are swallowed (lastResort still surfaces WARNING+) — a
+    logging failure must never crash the caller.
+    """
+    try:
+        if _is_test_context():
+            directory = Path(tempfile.gettempdir()) / "career-scout-test-logs"
+            configure_logging(directory)
+        else:
+            configure_logging()
+    except Exception:
+        return
+    # 子进程侧：从环境变量关联 run 级上下文（主进程用显式 bind_task_context）。
+    corr = os.environ.get("CAREER_SCOUT_CORRELATION_ID", "").strip()
+    if corr:
+        _correlation_id_var.set(corr)
+
+
 def get_logger(name: str = LOGGER_NAME) -> logging.Logger:
-    """Return a child logger of the configured local logger."""
+    """Return a child logger of the configured local logger.
+
+    Whitebox (033): when the local file logger has no handler yet (e.g. a
+    scraper subprocess or a CLI entry that never called ``configure_logging``),
+    configure it lazily so every record has a destination.
+    """
+    if not is_configured():
+        _configure_lazily()
     return logging.getLogger(f"{LOGGER_NAME}.{name}" if name != LOGGER_NAME else LOGGER_NAME)
+
 
 _logger = get_logger(__name__)

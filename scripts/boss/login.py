@@ -185,6 +185,7 @@ def wait_for_login(cdp_port=DEFAULT_CDP_PORT, timeout=DEFAULT_LOGIN_TIMEOUT, int
         while time.time() <= deadline:
             if probe_login_state(cdp, sid):
                 logged_in = True
+                log.info("BOSS 登录态已确认（接口返回明文薪资）")
                 print("\n✅ 已检测到 BOSS 登录态，且接口返回明文薪资")
                 if account_id:
                     try:

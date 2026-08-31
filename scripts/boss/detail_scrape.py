@@ -98,9 +98,11 @@ def _emit_detail_safe_event(event_callback, job, status, safe_code, started_at,
     producer kind, terminal status, job identity (job_link), duration and
     a safe code.
     """
+    # 现场日志先于事件回调判断：单条详情抓取（无 event_callback）也要留痕（033）。
+    duration_ms = int((time.time() - started_at) * 1000)
+    _logger.info("detail job_id=%s status=%s safe_code=%s", job.get("job_link", ""), status, safe_code)
     if event_callback is None:
         return
-    duration_ms = int((time.time() - started_at) * 1000)
     event = {
         "kind": "detail",
         "status": status,
