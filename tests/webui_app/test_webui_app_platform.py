@@ -1597,7 +1597,6 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
     def test_analyze_resume_boss_projects_stage_and_common_fields(self):
         """BOSS 简历分析返回 stage 语义，不出现 company_nature。"""
         import io
-        from webui import app as app_module
         fields = {
             "keyword": [{"word": "Python 后端", "recommended": True}],
             "city": ["上海"], "salary": ["406"], "experience": ["105"],
@@ -1608,7 +1607,7 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         with mock.patch.object(store, "get_ai_settings", return_value={
             "is_configured": True, "endpoint_url": "https://api.example.com", "model": "test",
         }), mock.patch.object(store, "get_credential_ref", return_value="ref"), \
-                mock.patch.object(app_module.ai_service, "retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
                 mock.patch("webui.ai.analyze_resume_to_fields", return_value=fields):
             resp = self.client.post(
                 "/api/analyze-resume",
@@ -1629,7 +1628,6 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
     def test_analyze_resume_passes_through_profile_facts(self):
         """B033：简历分析响应透传 profile_facts（画像事实链路源头）。"""
         import io
-        from webui import app as app_module
         facts = {
             "core_skills": ["Python", "Django"],
             "projects": [{"name": "订单系统", "role": "后端开发"}],
@@ -1647,7 +1645,7 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         with mock.patch.object(store, "get_ai_settings", return_value={
             "is_configured": True, "endpoint_url": "https://api.example.com", "model": "test",
         }), mock.patch.object(store, "get_credential_ref", return_value="ref"), \
-                mock.patch.object(app_module.ai_service, "retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
                 mock.patch("webui.ai.analyze_resume_to_fields", return_value=fields):
             resp = self.client.post(
                 "/api/analyze-resume",
@@ -1661,7 +1659,6 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
     def test_analyze_resume_zhilian_projects_company_nature_and_drops_stage(self):
         """智联简历分析返回 company_nature 语义，不出现 stage。"""
         import io
-        from webui import app as app_module
         fields = {
             "keyword": [{"word": "Python 后端", "recommended": True}],
             "city": ["上海"], "salary": [], "experience": ["0305"], "degree": ["4"],
@@ -1672,7 +1669,7 @@ class PlatformAwareEndpointsTests(unittest.TestCase):
         with mock.patch.object(store, "get_ai_settings", return_value={
             "is_configured": True, "endpoint_url": "https://api.example.com", "model": "test",
         }), mock.patch.object(store, "get_credential_ref", return_value="ref"), \
-                mock.patch.object(app_module.ai_service, "retrieve_api_key", return_value="key"), \
+                mock.patch("webui.ai.retrieve_api_key", return_value="key"), \
                 mock.patch("webui.ai.analyze_resume_to_fields", return_value=fields):
             resp = self.client.post(
                 "/api/analyze-resume",

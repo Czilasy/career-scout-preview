@@ -6,7 +6,7 @@ recrawl / ai_screen）及其嵌套助手经本对象访问共享状态，替代�
 
 031 B9（FR-020）：动态门面已拆除。可 patch 符号（``boss`` /
 ``_BossCdpSource`` / ``ai_service`` / ``ScraperExecutor`` / ``threading`` /
-``uuid`` / ``os`` / ``_theme_path``）不再经 ``__getattr__`` 回读
+``uuid`` / ``os`` / ``_theme_path``）不再经动态属性回读
 ``webui.app``——``source_class`` / ``theme_path`` 为构造期显式注入字段，
 其余符号由生产模块直连真实家（``scripts.boss_cdp_raw`` / ``webui.ai`` /
 标准库）。测试打桩一律指向真实家（如 ``webui.ai.X``、

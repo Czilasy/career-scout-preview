@@ -358,8 +358,8 @@ class BrowserAccountApiTests(unittest.TestCase):
         resp = self.client.post("/api/browser-accounts", json={"name": "账号 Z"})
         account = resp.get_json()["account"]
         zhilian_dir = account["profile_dir"].rstrip("/\\") + ".zhilian"
-        with mock.patch("webui.app.boss.is_cdp_ready", side_effect=[False, True]), \
-                mock.patch("webui.app.boss.chrome_user_data_dirs_for_cdp_port",
+        with mock.patch("scripts.boss.browser.is_cdp_ready", side_effect=[False, True]), \
+                mock.patch("scripts.boss.browser.chrome_user_data_dirs_for_cdp_port",
                            side_effect=lambda port: [] if port == 9222 else [zhilian_dir]):
             deleted = self.client.delete(f"/api/browser-accounts/{account['id']}")
         self.assertEqual(deleted.status_code, 409, deleted.get_json())
@@ -391,8 +391,8 @@ class BrowserAccountApiTests(unittest.TestCase):
         def is_ready(port):
             ready_calls["n"] += 1
             return ready_calls["n"] == 1 and port == 9222
-        with mock.patch("webui.app.boss.is_cdp_ready", side_effect=is_ready), \
-                mock.patch("webui.app.boss.chrome_user_data_dirs_for_cdp_port",
+        with mock.patch("scripts.boss.browser.is_cdp_ready", side_effect=is_ready), \
+                mock.patch("scripts.boss.browser.chrome_user_data_dirs_for_cdp_port",
                            side_effect=lambda port: [profile_dir] if port == 9222 else []), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome",
                            return_value=True) as mock_close:
@@ -405,8 +405,8 @@ class BrowserAccountApiTests(unittest.TestCase):
         account = resp.get_json()["account"]
         profile_dir = account["profile_dir"]
         self._seed_paused_run(account="b")
-        with mock.patch("webui.app.boss.is_cdp_ready", side_effect=[True, False]), \
-                mock.patch("webui.app.boss.chrome_user_data_dirs_for_cdp_port",
+        with mock.patch("scripts.boss.browser.is_cdp_ready", side_effect=[True, False]), \
+                mock.patch("scripts.boss.browser.chrome_user_data_dirs_for_cdp_port",
                            side_effect=lambda port: [profile_dir] if port == 9222 else []), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome",
                            return_value=False):
@@ -440,8 +440,8 @@ class BrowserAccountApiTests(unittest.TestCase):
         resp = self.client.post("/api/browser-accounts", json={"name": "账号 C"})
         account = resp.get_json()["account"]
         profile_dir = account["profile_dir"]
-        with mock.patch("webui.app.boss.is_cdp_ready", side_effect=[True, False]), \
-                mock.patch("webui.app.boss.chrome_user_data_dirs_for_cdp_port",
+        with mock.patch("scripts.boss.browser.is_cdp_ready", side_effect=[True, False]), \
+                mock.patch("scripts.boss.browser.chrome_user_data_dirs_for_cdp_port",
                            side_effect=lambda port: [profile_dir] if port == 9222 else []):
             deleted = self.client.delete(f"/api/browser-accounts/{account['id']}")
         self.assertEqual(deleted.status_code, 409, deleted.get_json())
@@ -1621,7 +1621,7 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
     def test_source_mode_returns_runtime_mode_source(self):
         """源码模式：runtime_mode='source'，local 组无 webview2 项。"""
         app, client = self._make_app("source")
-        with mock.patch("webui.app.boss.collect_check_items",
+        with mock.patch("scripts.boss.smoke.collect_check_items",
                         return_value=self._fake_check_items()):
             payload = client.get("/api/env-check").get_json()
         self.assertEqual(payload["runtime_mode"], "source")
@@ -1632,7 +1632,7 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
     def test_exe_mode_returns_runtime_mode_exe(self):
         """EXE 模式：runtime_mode='exe'。"""
         app, client = self._make_app("exe")
-        with mock.patch("webui.app.boss.collect_check_items",
+        with mock.patch("scripts.boss.smoke.collect_check_items",
                         return_value=self._fake_check_items()), \
                 mock.patch("webui.desktop_runtime.check_webview2",
                            return_value={"installed": True, "available": True,
@@ -1643,7 +1643,7 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
     def test_exe_mode_deps_item_is_builtin_runtime(self):
         """EXE 模式：deps 项名称改「内置运行时」，状态恒 ok，fix 为 null。"""
         app, client = self._make_app("exe")
-        with mock.patch("webui.app.boss.collect_check_items",
+        with mock.patch("scripts.boss.smoke.collect_check_items",
                         return_value=self._fake_check_items()), \
                 mock.patch("webui.desktop_runtime.check_webview2",
                            return_value={"installed": True, "available": True,
@@ -1658,7 +1658,7 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
     def test_exe_mode_webview2_item_present(self):
         """EXE 模式：local 组含 webview2 项（注入检测替身）。"""
         app, client = self._make_app("exe")
-        with mock.patch("webui.app.boss.collect_check_items",
+        with mock.patch("scripts.boss.smoke.collect_check_items",
                         return_value=self._fake_check_items()), \
                 mock.patch("webui.desktop_runtime.check_webview2",
                            return_value={"installed": True, "available": True,
@@ -1672,7 +1672,7 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
     def test_exe_mode_webview2_not_installed(self):
         """EXE 模式：webview2 未安装时 status=fail，fix 文案含「安装 WebView2」。"""
         app, client = self._make_app("exe")
-        with mock.patch("webui.app.boss.collect_check_items",
+        with mock.patch("scripts.boss.smoke.collect_check_items",
                         return_value=self._fake_check_items()), \
                 mock.patch("webui.desktop_runtime.check_webview2",
                            return_value={"installed": False, "available": True,
@@ -1686,7 +1686,7 @@ class EnvCheckRuntimeModeTests(unittest.TestCase):
     def test_env_check_has_no_cooldown_payload(self):
         # 016：冷却功能删除；env-check 不再返回 cooldowns 字段
         app, client = self._make_app("source")
-        with mock.patch("webui.app.boss.collect_check_items",
+        with mock.patch("scripts.boss.smoke.collect_check_items",
                         return_value=self._fake_check_items()):
             payload = client.get("/api/env-check").get_json()
         self.assertNotIn("cooldowns", payload)

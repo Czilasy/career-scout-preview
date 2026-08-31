@@ -13,7 +13,6 @@ import secrets
 import sys
 import threading
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
@@ -56,13 +55,12 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from scripts import boss_cdp_raw as boss
 from scripts import job_summary
-from webui import ai as ai_service
 from webui import desktop_runtime
 from webui import resume as resume_service
 # ---------------------------------------------------------------------------
 # 兼容 re-export 块（031 B3）：共享常量已迁居 webui/constants.py，函数与
 # 服务符号一律从其定义模块（task_runners / task_status / core / workbench）
-# 导入。本块仅为存量 patch("webui.app.X") 测试与旧导入路径保活——兼容层勿新增。
+# 导入。本块仅旧导入路径保活（031 B9 后存量 patch("webui.app.X") 已清零）——兼容层勿新增。
 # ---------------------------------------------------------------------------
 from webui.constants import (
     CLEANUP_EXPIRED_DAYS,
@@ -112,7 +110,6 @@ from webui.pipeline_job_identity import (
     resolve_job_identity,
 )
 from webui.platforms import UnknownPlatformError
-from webui.process_executor import ScraperExecutor
 from webui.source import BossCdpSource as _BossCdpSource
 from webui.logging_setup import configure_logging
 from webui.error_registry import resolve_code
@@ -141,7 +138,6 @@ from webui.task_runners import (  # noqa: F401  兼容 re-export，见上块注�
     _resume_dropped_from_verdicts,
     _split_resume_verdicts,
     _task_payload,
-    _theme_path,
 )
 
 

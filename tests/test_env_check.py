@@ -231,7 +231,7 @@ class EnvCheckApiTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_env_check_returns_grouped_items(self):
-        with mock.patch("webui.app.boss.collect_check_items", return_value=([
+        with mock.patch("scripts.boss.smoke.collect_check_items", return_value=([
             {"id": "browsers", "name": "Chromium 浏览器", "status": "ok",
              "detail": "找到 Chrome ✅", "fix": None},
             {"id": "deps", "name": "Python 依赖", "status": "ok",
