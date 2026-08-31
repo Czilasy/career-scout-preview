@@ -502,7 +502,7 @@ class ReadVersionTests(unittest.TestCase):
 
     def test_reads_version_from_pyproject(self):
         version = desktop.read_version()
-        self.assertEqual(version, "1.8.3")
+        self.assertEqual(version, "1.8.4")
 
     def test_read_version_returns_string(self):
         self.assertIsInstance(desktop.read_version(), str)
