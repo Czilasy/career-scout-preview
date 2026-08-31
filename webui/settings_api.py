@@ -1,11 +1,12 @@
 """AI 设置 / 高级设置 / 浏览器账号 API 路由（021 B6 T019 外迁自 webui/app.py）。
 
 路由体纯搬运：HTTP 契约零改动。store / 旧版高级设置读写 / 登录缓存失效 /
-浏览器锁助手经 ctx 取用；可 patch 符号（ai_service / boss 等）经 ctx 动态
-门面保住 patch("webui.app.X") 面。
+浏览器锁助手经 ctx 取用；ai_service / boss 模块级直连（031 B9 门面拆除）。
 """
 
 from __future__ import annotations
+from webui import ai as ai_service
+from scripts import boss_cdp_raw as boss
 
 
 from flask import jsonify, request
@@ -32,7 +33,7 @@ def register_settings_routes(app, ctx):
             endpoint_url = settings.get("endpoint_url") or ""
         if not api_key:
             cred_ref = ctx.store.get_credential_ref()
-            api_key = ctx.ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
+            api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
         if not model:
             model = settings.get("model", "")
 
@@ -48,7 +49,7 @@ def register_settings_routes(app, ctx):
             settings = ctx.store.get_ai_settings()
             # 返回打码后的 key 预览（保留首尾，中间星号），供前端展示
             cred_ref = ctx.store.get_credential_ref() if settings.get("is_configured") else ""
-            real_key = ctx.ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
+            real_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
             settings["masked_key"] = _mask_key(real_key) if real_key else ""
             return jsonify(settings)
         raw = request.get_json(silent=True) or {}
@@ -60,10 +61,10 @@ def register_settings_routes(app, ctx):
         # key 为空时尝试复用已存的 key（允许只改 model 不重填 key）
         if not api_key:
             existing_ref = ctx.store.get_credential_ref()
-            api_key = ctx.ai_service.retrieve_api_key(existing_ref) if existing_ref else ""
+            api_key = ai_service.retrieve_api_key(existing_ref) if existing_ref else ""
             if not api_key:
                 raise ValueError("api_key 不能为空（尚未保存过 key）")
-        credential_ref = ctx.ai_service.store_api_key(endpoint_url, api_key)
+        credential_ref = ai_service.store_api_key(endpoint_url, api_key)
         settings = ctx.store.save_ai_settings(
             endpoint_url, credential_ref, status="unconfigured", model=model,
         )
@@ -73,13 +74,13 @@ def register_settings_routes(app, ctx):
     def ai_settings_test():
         # 优先用请求 body 里当前对话框填的值；缺的再用已保存设置兜底
         endpoint_url, api_key, model = _resolve_credentials_from_request()
-        capability = ctx.ai_service.test_connection(endpoint_url, api_key, model=model)
+        capability = ai_service.test_connection(endpoint_url, api_key, model=model)
         new_status = "ready" if capability["ok"] else "failed"
         error_code = capability["warning_codes"][0] if not capability["ok"] and capability["warning_codes"] else None
         ctx.store.update_ai_status(new_status, last_error_code=error_code)
         payload = dict(capability)
         if not capability.get("ok") and error_code:
-            payload["user_message"] = ctx.ai_service.user_facing_error(error_code)
+            payload["user_message"] = ai_service.user_facing_error(error_code)
         else:
             payload["user_message"] = ""
         return jsonify(payload)
@@ -94,14 +95,14 @@ def register_settings_routes(app, ctx):
         """
         endpoint_url, api_key, _model = _resolve_credentials_from_request()
         try:
-            models = ctx.ai_service.list_models(endpoint_url, api_key)
-        except ctx.ai_service.AISecurityError as exc:
+            models = ai_service.list_models(endpoint_url, api_key)
+        except ai_service.AISecurityError as exc:
             # 语义修正：AISecurityError 是失败，不应返回 200。
             # 前端 fetchModels 通过 response.ok 判断，502 不影响行为。
             return jsonify({
                 "ok": False,
                 "error_code": exc.error_code,
-                "user_message": ctx.ai_service.user_facing_error(exc.error_code),
+                "user_message": ai_service.user_facing_error(exc.error_code),
                 "models": [],
             }), 502
         return jsonify({"ok": True, "models": models})
@@ -381,49 +382,49 @@ def register_settings_routes(app, ctx):
         )
 
         def _port_profiles(port: int) -> list[str]:
-            if not ctx.boss.is_cdp_ready(port):
+            if not boss.is_cdp_ready(port):
                 return []
-            return [ctx.boss.normalize_profile_path(p) for p in ctx.boss.chrome_user_data_dirs_for_cdp_port(port) if p]
+            return [boss.normalize_profile_path(p) for p in boss.chrome_user_data_dirs_for_cdp_port(port) if p]
 
-        port_profiles_boss = _port_profiles(ctx.boss.DEFAULT_CDP_PORT)
+        port_profiles_boss = _port_profiles(boss.DEFAULT_CDP_PORT)
         port_profiles_zhilian = _port_profiles(zhilian_port)
         known_boss = {
-            ctx.boss.normalize_profile_path(str(a.get("profile_dir") or ""))
+            boss.normalize_profile_path(str(a.get("profile_dir") or ""))
             for a in accounts.values() if str(a.get("profile_dir") or "").strip()
         }
         known_zhilian = {
-            ctx.boss.normalize_profile_path(derive_zhilian_profile_dir(
+            boss.normalize_profile_path(derive_zhilian_profile_dir(
                 str(a.get("profile_dir") or "")))
             for a in accounts.values() if str(a.get("profile_dir") or "").strip()
         }
-        if boss_profile_dir and ctx.boss.normalize_profile_path(boss_profile_dir) in port_profiles_boss:
+        if boss_profile_dir and boss.normalize_profile_path(boss_profile_dir) in port_profiles_boss:
             set_active_cdp_data_dir(boss_profile_dir)
-            if not close_debug_chrome(ctx.boss.DEFAULT_CDP_PORT):
+            if not close_debug_chrome(boss.DEFAULT_CDP_PORT):
                 return jsonify({
                     "ok": False, "error": "browser_in_use",
                     "message": "该账号的 BOSS 自动化浏览器正在运行，请先打开其他账号或手动关闭后再删除",
                 }), 409
-        if zhilian_profile_dir and ctx.boss.normalize_profile_path(zhilian_profile_dir) in port_profiles_zhilian:
+        if zhilian_profile_dir and boss.normalize_profile_path(zhilian_profile_dir) in port_profiles_zhilian:
             set_active_cdp_data_dir(zhilian_profile_dir)
             if not close_debug_chrome(zhilian_port):
                 return jsonify({
                     "ok": False, "error": "browser_in_use",
                     "message": "该账号的智联自动化浏览器正在运行，请先打开其他账号或手动关闭后再删除",
                 }), 409
-        port_profiles_boss = _port_profiles(ctx.boss.DEFAULT_CDP_PORT)
+        port_profiles_boss = _port_profiles(boss.DEFAULT_CDP_PORT)
         port_profiles_zhilian = _port_profiles(zhilian_port)
-        if boss_profile_dir and ctx.boss.normalize_profile_path(boss_profile_dir) in port_profiles_boss:
+        if boss_profile_dir and boss.normalize_profile_path(boss_profile_dir) in port_profiles_boss:
             return jsonify({
                 "ok": False, "error": "browser_in_use",
                 "message": "该账号的 BOSS 自动化浏览器正在运行，请先打开其他账号或手动关闭后再删除",
             }), 409
-        if zhilian_profile_dir and ctx.boss.normalize_profile_path(zhilian_profile_dir) in port_profiles_zhilian:
+        if zhilian_profile_dir and boss.normalize_profile_path(zhilian_profile_dir) in port_profiles_zhilian:
             return jsonify({
                 "ok": False, "error": "browser_in_use",
                 "message": "该账号的智联自动化浏览器正在运行，请先打开其他账号或手动关闭后再删除",
             }), 409
         for port, profiles, known, label in (
-            (ctx.boss.DEFAULT_CDP_PORT, port_profiles_boss, known_boss, "boss"),
+            (boss.DEFAULT_CDP_PORT, port_profiles_boss, known_boss, "boss"),
             (zhilian_port, port_profiles_zhilian, known_zhilian, "zhilian"),
         ):
             unknown = [p for p in profiles if p and p not in known]

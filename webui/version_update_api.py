@@ -1,11 +1,12 @@
 """版本 / 应用内更新 / 主题 API 路由（021 B6 T019 外迁自 webui/app.py）。
 
 路由体纯搬运：HTTP 契约与响应结构零改动。共享运行态（backend_version /
-product_version / runtime_mode 等）经 ctx 取用；可 patch 符号（os /
-_theme_path）经 ctx 动态门面保住 patch("webui.app.X") 面。
+product_version / runtime_mode 等）经 ctx 取用；os 模块级直连，主题
+路径经 ctx.theme_path 显式注入（031 B9 门面拆除）。
 """
 
 from __future__ import annotations
+import os
 
 import json
 from pathlib import Path
@@ -97,7 +98,7 @@ def register_version_update_routes(app, ctx):
         runner, script = updater_mod.build_updater_script(
             installer_path=installer_path,
             install_target=install_target,
-            pid=ctx.os.getpid(),
+            pid=os.getpid(),
             script_dir=updater_mod.DEFAULT_STATE_DIR,
         )
         try:
@@ -130,7 +131,7 @@ def register_version_update_routes(app, ctx):
     def api_theme_get():
         mode = "light"
         try:
-            data = json.loads(ctx._theme_path().read_text(encoding="utf-8"))
+            data = json.loads(ctx.theme_path().read_text(encoding="utf-8"))
             if isinstance(data, dict) and data.get("mode") in ("light", "dark", "kaleido"):
                 mode = data["mode"]
         except (OSError, ValueError):
@@ -144,7 +145,7 @@ def register_version_update_routes(app, ctx):
         if mode not in ("light", "dark", "kaleido"):
             return jsonify({"ok": False, "error": "mode 必须为 light、dark 或 kaleido"}), 400
         try:
-            path = ctx._theme_path()
+            path = ctx.theme_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({"mode": mode}, ensure_ascii=False), encoding="utf-8")
         except OSError:

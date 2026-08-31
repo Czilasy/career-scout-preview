@@ -5,6 +5,8 @@
 """
 
 from __future__ import annotations
+from webui.process_executor import ScraperExecutor
+from scripts import boss_cdp_raw as boss
 
 import csv
 import io
@@ -101,7 +103,7 @@ def register_core_routes(app, ctx):
         platform_raw = request.args.get("platform")
         if not platform_raw:
             # 旧 BOSS 兼容形状（不动一行，保护 test_options_come_from_scraper_maps）
-            cities = [{"label": name, "value": name} for name in ctx.boss.CITY_MAP]
+            cities = [{"label": name, "value": name} for name in boss.CITY_MAP]
             return jsonify({"filters": build_filter_options(), "cities": cities})
         # 新平台感知形状
         from webui.platforms import (
@@ -174,12 +176,12 @@ def register_core_routes(app, ctx):
         if not platform_raw:
             # 旧 BOSS 兼容形状（不动一行，保护 DiscoveryView.vue 现有调用）
             return jsonify({"labels": {
-                "salary": ("薪资范围", [], ctx.boss.SALARY_MAP),
-                "experience": ("经验要求", [], ctx.boss.EXPERIENCE_MAP),
-                "degree": ("学历", [], ctx.boss.DEGREE_MAP),
-                "industry": ("行业", [], ctx.boss.INDUSTRY_MAP),
-                "scale": ("公司规模", [], ctx.boss.SCALE_MAP),
-                "stage": ("融资阶段", [], ctx.boss.STAGE_MAP),
+                "salary": ("薪资范围", [], boss.SALARY_MAP),
+                "experience": ("经验要求", [], boss.EXPERIENCE_MAP),
+                "degree": ("学历", [], boss.DEGREE_MAP),
+                "industry": ("行业", [], boss.INDUSTRY_MAP),
+                "scale": ("公司规模", [], boss.SCALE_MAP),
+                "stage": ("融资阶段", [], boss.STAGE_MAP),
             }})
         # 新平台感知形状：复用 platforms.project_filter_schema
         from webui.platforms import (
@@ -263,8 +265,8 @@ def register_core_routes(app, ctx):
             })
         if ctx.runtime_mode == "exe":
             # 合同 inprocess-runner §6：EXE 模式不 spawn 子进程，复用
-            # ctx.boss.collect_check_items 库式路径；返回结构与源码模式一致。
-            items, all_pass = ctx.boss.collect_check_items(cdp_port=ctx.boss.DEFAULT_CDP_PORT)
+            # boss.collect_check_items 库式路径；返回结构与源码模式一致。
+            items, all_pass = boss.collect_check_items(cdp_port=boss.DEFAULT_CDP_PORT)
             lines = []
             for index, item in enumerate(items, start=1):
                 mark = {"ok": "✅", "fail": "❌", "skip": "⏭️"}.get(item["status"], "?")
@@ -283,7 +285,7 @@ def register_core_routes(app, ctx):
                 "returncode": 0 if all_pass else 1,
                 "output": output,
             })
-        result = ctx.ScraperExecutor(max_output_bytes=64_000).execute(
+        result = ScraperExecutor(max_output_bytes=64_000).execute(
             [app.config["PYTHON_EXECUTABLE"], str(SCRAPER), "--check"],
             cwd=PROJECT_ROOT, timeout_seconds=30, env=_env(),
         )
@@ -300,12 +302,12 @@ def register_core_routes(app, ctx):
     def env_check():
         """结构化环境检查：浏览器 / AI / 本地 三组，逐项返回状态。
 
-        检查逻辑与 CLI ``--check`` 共用 ctx.boss.collect_check_items；
+        检查逻辑与 CLI ``--check`` 共用 boss.collect_check_items；
         BOSS 登录项优先读激活账号的登录态缓存（D3），未命中才真实探测；
         AI Key 只判配置是否齐全（不验有效性，连通性由前端单独按钮触发）；
         冷却记录随响应返回（D6：面板显示「建议等待至 XX 点」）。
         """
-        items, _ = ctx.boss.collect_check_items(cdp_port=ctx.boss.DEFAULT_CDP_PORT)
+        items, _ = boss.collect_check_items(cdp_port=boss.DEFAULT_CDP_PORT)
         by_id = {item["id"]: item for item in items}
 
         # BOSS 登录状态：激活账号走缓存优先（TTL 15 分钟），
@@ -518,7 +520,7 @@ def register_core_routes(app, ctx):
             row = dict(job)
             for key in ("matched_skills", "missing_skills", "risk_flags"):
                 row[key] = " | ".join(row.get(key) or [])
-            writer.writerow({key: ctx.boss.csv_safe_cell(row.get(key, "")) for key in columns})
+            writer.writerow({key: boss.csv_safe_cell(row.get(key, "")) for key in columns})
 
         def _write_section(label, jobs):
             section_row = {column: "" for column in columns}

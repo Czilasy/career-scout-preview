@@ -1,10 +1,11 @@
 """AI 筛选提交 / 取消 API 路由（021 B6 T019 外迁自 webui/app.py）。
 
 筛选任务提交（含断点续跑识别）与取消。路由体纯搬运：HTTP 契约零改动；
-任务声明 / runner 包装经 ctx 取用；可 patch 符号经 ctx 动态门面。
+任务声明 / runner 包装经 ctx 取用。
 """
 
 from __future__ import annotations
+import uuid
 
 import hashlib
 import json
@@ -154,7 +155,7 @@ def register_ai_screen_routes(app, ctx):
                         "existing_task_id": existing_id,
                         "message": "同一抓取任务已有 AI 筛选在运行",
                     }), 409
-        task_id = ctx.uuid.uuid4().hex
+        task_id = uuid.uuid4().hex
 
         # 逻辑隔离：AI 筛选也不能与其它 pipeline 任务（抓取/重抓/暂停）并发。
         if ctx.has_active_pipeline_task():

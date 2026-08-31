@@ -327,7 +327,7 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
             "total_matched": 0, "combinations": 1,
             "completed_combos": ["Python|上海"], "error": "",
         }
-        with mock.patch("webui.app._BossCdpSource",
+        with mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class",
                         return_value=mock.MagicMock()) as mock_cls, \
                 mock.patch("webui.pipeline_exec.run_search",
                            return_value=fake_result) as mock_search:
@@ -456,7 +456,7 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
             call_order.append("save_scrape_combo_result")
             return orig_save(*args, **kw)
 
-        with mock.patch("webui.app._BossCdpSource", return_value=fake_source), \
+        with mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=fake_source), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready",
                            return_value=(True, "")), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"), \
@@ -514,7 +514,7 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
             nonlocal save_called
             save_called = True
 
-        with mock.patch("webui.app._BossCdpSource", return_value=fake_source), \
+        with mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=fake_source), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready",
                            return_value=(True, "")), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"), \
@@ -558,7 +558,7 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
             safe_log="list job_count=1",
             input_hash="sha256-fake",
         )
-        with mock.patch("webui.app._BossCdpSource", return_value=fake_source), \
+        with mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=fake_source), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready",
                            return_value=(True, "")), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"):

@@ -1,10 +1,11 @@
 """简历解析 / 字段确认 API 路由（021 B6 T019 外迁自 webui/app.py）。
 
 analyze-resume 上传解析与 confirm-fields 确认转换。路由体纯搬运：
-HTTP 契约零改动；可 patch 符号经 ctx 动态门面。
+HTTP 契约零改动。
 """
 
 from __future__ import annotations
+from webui import ai as ai_service
 
 from flask import jsonify, request
 
@@ -64,7 +65,7 @@ def register_resume_fields_routes(app, ctx):
         cred_ref = ctx.store.get_credential_ref()
         if not cred_ref:
             return jsonify({"ok": False, "error": "未找到 API 密钥"}), 400
-        api_key = ctx.ai_service.retrieve_api_key(cred_ref)
+        api_key = ai_service.retrieve_api_key(cred_ref)
         if not api_key:
             return jsonify({"ok": False, "error": "API 密钥读取失败"}), 400
 

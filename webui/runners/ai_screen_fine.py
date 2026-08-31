@@ -2,10 +2,11 @@
 
 JD 精筛执行体：断点恢复已判定集合、无画像跳过精筛、分段精筛与
 判定/checkpoint 原子落库、未抓到 JD 岗位的待定标记、systemic 阻断
-暂停。共享运行态与可 patch 符号（ai_service 等）经 ctx 取用。
+暂停。共享运行态经 ctx 取用；ai_service 模块级直连（031 B9 门面拆除）。
 """
 
 from __future__ import annotations
+from webui import ai as ai_service
 
 
 def run_fine_stage(ctx, task_id, enriched, profile_summary, criteria,
@@ -97,7 +98,7 @@ def run_fine_stage(ctx, task_id, enriched, profile_summary, criteria,
                 on_batch_done=_fine_batch_done,
                 execution_config=execution_config,
                 correlation_id=task_id)
-        except ctx.ai_service.AISecurityError as _ai_exc:
+        except ai_service.AISecurityError as _ai_exc:
             # 切片6：systemic 错误暂停整任务（不批量变 uncertain 后完成）
             from webui.ai import AISecurityError, map_ai_error_to_block_code
             if isinstance(_ai_exc, AISecurityError):

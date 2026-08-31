@@ -1,12 +1,14 @@
 """批量重抓后台任务 runner（021 B4 外迁自 webui/app.py）。
 
 补 JD + 重判的批量重抓执行体：冻结平台/浏览器身份激活、逐岗位详情抓取、
-AI 重判、进度事件与检查点持久化、暂停/续跑。共享运行态与可 patch 符号
-（ai_service/threading 等）经 ctx 取用；延迟 import（match_jds、
-fetch_job_details 等）保持原位原语义。
+AI 重判、进度事件与检查点持久化、暂停/续跑。共享运行态经 ctx 取用；
+ai_service / threading 模块级直连（031 B9 门面拆除）；延迟 import
+（match_jds、fetch_job_details 等）保持原位原语义。
 """
 
 from __future__ import annotations
+from webui import ai as ai_service
+import threading
 
 import time
 
@@ -52,7 +54,7 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                 "kind": "recrawl", "status": "queued", "progress": {},
                 "logs": [], "result": None, "error": "",
                 "started_at": int(time.time() * 1000), "finished_at": None,
-                "stop_event": ctx.threading.Event(),
+                "stop_event": threading.Event(),
             }
             ctx.tasks[task_id] = task
         if task.get("status") == "cancelled":
@@ -259,7 +261,7 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
 
         settings = ctx.store.get_ai_settings()
         cred_ref = ctx.store.get_credential_ref()
-        api_key = ctx.ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
+        api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
         endpoint = settings.get("endpoint_url", "")
         model = settings.get("model", "")
         has_ai = bool(api_key and endpoint)
@@ -574,7 +576,7 @@ def run_recrawl_task(ctx, task_id, job_ids, profile_summary, source_run_id="",
                             profile_facts=profile_facts,
                             execution_config=execution_config,
                         )
-                    except ctx.ai_service.AISecurityError as _ai_exc:
+                    except ai_service.AISecurityError as _ai_exc:
                         # 切片8：systemic 错误暂停（不批量变 uncertain 后完成）
                         from webui.ai import (
                             AISecurityError,

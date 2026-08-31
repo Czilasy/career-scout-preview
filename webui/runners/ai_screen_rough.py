@@ -1,11 +1,12 @@
 """AI 筛选 Stage A 粗筛段（021 B6 外迁自 webui/app.py）。
 
 字段粗筛执行体：断点恢复已判定集合、跨平台去重幸存者过滤、分批粗筛
-与判定/checkpoint 原子落库、systemic 阻断暂停。共享运行态与可 patch
-符号（ai_service 等）经 ctx 取用；screen_jobs 延迟 import 保持原语义。
+与判定/checkpoint 原子落库、systemic 阻断暂停。共享运行态经 ctx 取用；
+ai_service 模块级直连（031 B9 门面拆除）；screen_jobs 延迟 import 保持原语义。
 """
 
 from __future__ import annotations
+from webui import ai as ai_service
 
 from webui.task_runners import _resume_dropped_from_verdicts
 
@@ -88,7 +89,7 @@ def run_rough_stage(ctx, task_id, raw_jobs, criteria, endpoint, api_key,
                                     correlation_id=task_id)
         ctx.store.save_screening_verdicts(
             task_id, screen_result.get("verdicts") or {})
-    except (ctx.ai_service.AISecurityError, ctx.ai_service.AICheckpointError) as _ai_exc:
+    except (ai_service.AISecurityError, ai_service.AICheckpointError) as _ai_exc:
         # AISecurityError（systemic）：暂停整任务，保存 checkpoint
         from webui.ai import (
             AICheckpointError,

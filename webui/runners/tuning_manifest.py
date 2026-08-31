@@ -1,11 +1,12 @@
 """调优任务单子进程 runner（021 B4 外迁自 webui/app.py）。
 
 执行单张调优任务单：一致性校验 → 调优轮次执行 → 测量聚合 → 证据落盘 →
-轮次状态回写。共享运行态经 ctx 访问；ai_service 可被 patch，MUST 走
-ctx.ai_service 动态门面。
+轮次状态回写。共享运行态经 ctx 访问；ai_service 模块级直连（031 B9
+门面拆除，patch webui.ai）。
 """
 
 from __future__ import annotations
+from webui import ai as ai_service
 
 import json
 from pathlib import Path
@@ -35,12 +36,12 @@ def run_tuning_manifest_child(ctx, manifest_id: str):
         )
     except (
         OSError, RuntimeError, ValueError, KeyError, TypeError,
-        ctx.ai_service.AISecurityError,
+        ai_service.AISecurityError,
     ) as exc:
         result = None
         error_code = (
             exc.error_code
-            if isinstance(exc, ctx.ai_service.AISecurityError)
+            if isinstance(exc, ai_service.AISecurityError)
             else getattr(exc, "error_code", type(exc).__name__.lower())
         )
     if isinstance(result, dict):

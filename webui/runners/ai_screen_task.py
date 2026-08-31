@@ -4,11 +4,13 @@
 读取、续跑断点装载、跨平台去重、AI 凭据校验、终态判定与结果轮落库、
 异常救援（systemic 暂停 / 结果轮保存失败降级）。三段执行体分别在
 ai_screen_rough / ai_screen_jd / ai_screen_fine 段模块（单向 import，
-段模块间不互相 import）；共享运行态与可 patch 符号（ai_service /
-threading 等）经 ctx 取用；延迟 import 保持原位原语义。
+段模块间不互相 import）；共享运行态经 ctx 取用；ai_service /
+threading 模块级直连（031 B9 门面拆除）；延迟 import 保持原位原语义。
 """
 
 from __future__ import annotations
+from webui import ai as ai_service
+import threading
 
 import time
 
@@ -44,7 +46,7 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary,
                 "logs": [], "result": None, "error": "",
                 "source_task_id": scrape_task_id,
                 "started_at": int(time.time() * 1000), "finished_at": None,
-                "stop_event": ctx.threading.Event(),
+                "stop_event": threading.Event(),
             }
             ctx.tasks[task_id] = task
         if task.get("status") == "cancelled":
@@ -376,11 +378,11 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary,
         # 2) AI 凭据
         settings = ctx.store.get_ai_settings()
         cred_ref = ctx.store.get_credential_ref()
-        api_key = ctx.ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
+        api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
         endpoint = settings.get("endpoint_url", "")
         model = settings.get("model", "")
-        if not ctx.ai_service.is_ai_available(settings, cred_ref, api_key) or not endpoint:
-            raise ctx.ai_service.AISecurityError(ctx.ai_service.ERROR_NOT_CONFIGURED)
+        if not ai_service.is_ai_available(settings, cred_ref, api_key) or not endpoint:
+            raise ai_service.AISecurityError(ai_service.ERROR_NOT_CONFIGURED)
 
         criteria = dict(screening_fields or {})
         criteria["profile_summary"] = profile_summary or ""
@@ -548,8 +550,8 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary,
         ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
         # 任务成功：断点文件使命完成（续跑只服务失败/取消/中断）
         ctx.remove_jd_checkpoint(jd_path)
-    except ctx.ai_service.AISecurityError as exc:
-        error_message = ctx.ai_service.user_facing_error(exc.error_code)
+    except ai_service.AISecurityError as exc:
+        error_message = ai_service.user_facing_error(exc.error_code)
         if not ctx.is_user_finished(task_id):
             record_failure(
                 ctx.store, task_id, stage="ai_screen",
@@ -585,7 +587,7 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary,
             ctx.clear_auto_screen(task_id)
         ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
     except Exception as exc:
-        error_message = ctx.ai_service.user_facing_error("internal_error")
+        error_message = ai_service.user_facing_error("internal_error")
         # 020 US7：终态 succeeded 已落库但写结果轮失败 → 先试条件降级
         #（仅当该流程确无结果轮），让续跑可重建结果轮；已有轮等
         # 不满足条件时保持 succeeded，只落诊断事件。

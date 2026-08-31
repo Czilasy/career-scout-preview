@@ -4,32 +4,20 @@ create_app 内共享运行态（任务表、锁、store、run 写入助手、调
 source 工厂等）的显式载体；四个后台 runner（tuning_manifest / pipeline /
 recrawl / ai_screen）及其嵌套助手经本对象访问共享状态，替代闭包捕获。
 
-monkeypatch 红线：测试大量使用 ``patch("webui.app.X")``，实测清单为
-``_BossCdpSource``、``boss``、``threading``、``ai_service``、
-``ScraperExecutor``、``uuid``、``os``、``_theme_path``。这些符号不落为
-实例属性（否则 import 时固化，补丁打不到真实执行路径），统一经
-``__getattr__`` 动态门面在每次访问时读取 ``webui.app`` 模块属性；
-runner 模块内对它们的使用 MUST 写作 ``ctx.boss`` / ``ctx.ai_service`` 等，
-禁止自有 import 固化。
+031 B9（FR-020）：动态门面已拆除。可 patch 符号（``boss`` /
+``_BossCdpSource`` / ``ai_service`` / ``ScraperExecutor`` / ``threading`` /
+``uuid`` / ``os`` / ``_theme_path``）不再经 ``__getattr__`` 回读
+``webui.app``——``source_class`` / ``theme_path`` 为构造期显式注入字段，
+其余符号由生产模块直连真实家（``scripts.boss_cdp_raw`` / ``webui.ai`` /
+标准库）。测试打桩一律指向真实家（如 ``webui.ai.X``、
+``webui.process_executor.ScraperExecutor.execute``、``threading.Timer``），
+不再隔空改主文件。
 
 字段集以四个 runner 的完整闭包捕获清单为验收基准（2026-08-23 提取），
 随 B4-B6 外迁批次按实际捕获补全，不新增语义。
 """
 
 from __future__ import annotations
-
-# webui.app 模块级、可被 patch("webui.app.X") 替换的符号。
-# ctx.X 每次访问都动态读取 webui.app 模块属性，保证补丁生效。
-_PATCHABLE_APP_SYMBOLS = frozenset({
-    "boss",
-    "_BossCdpSource",
-    "ai_service",
-    "ScraperExecutor",
-    "threading",
-    "uuid",
-    "os",
-    "_theme_path",
-})
 
 
 class PipelineContext:
@@ -45,11 +33,13 @@ class PipelineContext:
     - ``write_run``：_write_run_unless_finished 终态安全写入助手
     - ``make_cdp_source``：冻结身份 source 工厂
     - ``tuning_round_runner``：调优轮次执行器
+    - ``source_class``：BOSS 数据源类（031 B9 构造期注入）
     """
 
     def __init__(self, *, app=None, store=None, tasks=None, lock=None,
                  resume_claims=None, executor=None, write_run=None,
-                 make_cdp_source=None, tuning_round_runner=None, **extra):
+                 make_cdp_source=None, tuning_round_runner=None,
+                 source_class=None, theme_path=None, **extra):
         self.app = app
         self.store = store
         self.tasks = tasks if tasks is not None else {}
@@ -59,19 +49,14 @@ class PipelineContext:
         self.write_run = write_run
         self.make_cdp_source = make_cdp_source
         self.tuning_round_runner = tuning_round_runner
+        # 031 B9：BOSS 数据源类显式注入（原先经 webui.app._BossCdpSource 模块
+        # 全局在调用时取用，测试靠 patch 主文件替换；改为构造期注入后，测试
+        # 直接替换本字段即可，不必再隔空改主文件）。
+        self.source_class = source_class
+        # 031 B9：主题文件路径函数显式注入（原经动态门面取 webui.app._theme_path）。
+        self.theme_path = theme_path
         # 外迁批次（B4-B6）按实际捕获清单补全的 create_app 级助手/常量
         # （is_user_finished、record_pause_failure、event_stage_names 等），
         # 统一落实例属性；不新增语义，只承载引用。
         for name, value in extra.items():
             setattr(self, name, value)
-
-    def __getattr__(self, name):
-        # 动态门面：可 patch 的 webui.app 模块级符号在调用时取用。
-        # __getattr__ 只在常规属性查找失败时触发，实例字段不受影响。
-        if name in _PATCHABLE_APP_SYMBOLS:
-            import webui.app as _app_module
-
-            return getattr(_app_module, name)
-        raise AttributeError(
-            f"{type(self).__name__!r} object has no attribute {name!r}"
-        )

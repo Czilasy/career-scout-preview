@@ -109,7 +109,7 @@ class Slice8RecrawlTests(unittest.TestCase):
         source_run_id = self._save_pending_source()
         with mock.patch(
             "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
-        ), mock.patch("webui.app._BossCdpSource", return_value=None):
+        ), mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=None):
             task_id = self._post_recrawl(source_run_id)
             paused = _wait_for_pipeline_task(self.client, task_id)
 
@@ -131,8 +131,9 @@ class Slice8RecrawlTests(unittest.TestCase):
         }
         with mock.patch(
             "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
-        ), mock.patch(
-            "webui.app._BossCdpSource", return_value=object()
+        ), mock.patch.object(
+            self.app.config["PIPELINE_CONTEXT"], "source_class",
+            return_value=object(),
         ), mock.patch(
             "webui.pipeline_exec.fetch_job_details", return_value=detail_result
         ):
@@ -314,7 +315,7 @@ class Slice8RecrawlTests(unittest.TestCase):
         }
         with mock.patch(
             "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
-        ), mock.patch("webui.app._BossCdpSource", return_value=object()), \
+        ), mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch(
                     "webui.pipeline_exec.fetch_job_details", return_value=detail_failure
                 ), mock.patch.object(
@@ -565,7 +566,7 @@ class Slice11RecrawlResumeTests(unittest.TestCase):
 
         with mock.patch("webui.pipeline_exec.ensure_chrome_ready",
                         return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value={
                     "jobs": [{"job_id": "j1", "jd": "岗位职责：负责前端开发"}],
                     "hard_stop": True,
@@ -613,7 +614,7 @@ class Slice11RecrawlResumeTests(unittest.TestCase):
         }
 
         with mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_failure):
             response = self.client.post(
                 "/api/pipeline/recrawl",

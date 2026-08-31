@@ -5,6 +5,7 @@ paused/中断 run 的续跑分发（抓取/筛选/重抓三向）、用户暂停
 """
 
 from __future__ import annotations
+import threading
 
 import sqlite3
 import time
@@ -319,7 +320,7 @@ def register_task_continue_routes(app, ctx):
                     "error": "",
                 },
                 "error": "", "started_at": None, "finished_at": None,
-                "stop_event": ctx.threading.Event(),
+                "stop_event": threading.Event(),
             }
 
         task_id = run_id
@@ -350,8 +351,8 @@ def register_task_continue_routes(app, ctx):
             append_account_switch_log_line(
                 claimed_task,
                 from_account=auto_switch[1], to_account=auto_switch[2])
-        start_gate = ctx.threading.Event()
-        abort_start = ctx.threading.Event()
+        start_gate = threading.Event()
+        abort_start = threading.Event()
 
         def run_after_claim_commits(
                 task_id, frozen_filters, frozen_profile, source_task_id,

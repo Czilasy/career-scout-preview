@@ -370,7 +370,7 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
         try:
             client = _authed_test_client(app)
             token = app.config["API_TOKEN"]
-            with mock.patch("webui.app._BossCdpSource", return_value=None):
+            with mock.patch.object(app.config["PIPELINE_CONTEXT"], "source_class", return_value=None):
                 response = client.post(
                     "/api/execute-search",
                     json={"script_params": {"keyword": "后端", "city": ["上海"]}},

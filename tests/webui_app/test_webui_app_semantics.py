@@ -633,7 +633,7 @@ class PauseElapsedAndResumeConfigTests(unittest.TestCase):
             },
         ), mock.patch("webui.pipeline_exec.resolve_browser_account", return_value=""), \
            mock.patch("webui.pipeline_exec.set_active_cdp_data_dir"), \
-           mock.patch("webui.app._BossCdpSource"):
+           mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class"):
             fn()
         self.assertEqual(len(run_search_calls), 1)
         self.assertEqual(run_search_calls[0]["execution_config"].inter_combo_delay, 10.0)

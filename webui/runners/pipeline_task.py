@@ -2,11 +2,12 @@
 
 组合抓取执行体：冻结运行时读取、CDP source 创建、逐组合抓取与页级
 checkpoint 持久化、断点续抓合并、终态判定（成功/取消/阻断暂停/失败）与
-内存任务状态同步。共享运行态与可 patch 符号（threading 等）经 ctx 取用；
-延迟 import（run_search、expand_combinations）保持原位原语义。
+内存任务状态同步。共享运行态经 ctx 取用；threading 模块级直连（031 B9
+门面拆除）；延迟 import（run_search、expand_combinations）保持原位原语义。
 """
 
 from __future__ import annotations
+import threading
 
 import time
 
@@ -32,7 +33,7 @@ def run_pipeline_task(ctx,
             task["config_digest"] = execution_config.config_digest
         if frozen_scope is not None:
             task["scope_digest"] = frozen_scope.scope_digest
-        task.setdefault("page_flush_lock", ctx.threading.Lock())
+        task.setdefault("page_flush_lock", threading.Lock())
         task.setdefault("page_persist_seq", 0)
         task.setdefault("last_page_snapshot_at", 0)
     if ctx.is_user_finished(task_id):

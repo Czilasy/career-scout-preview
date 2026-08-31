@@ -215,14 +215,14 @@ description: "Tasks for feature implementation"
 
 **Independent Test**: quickstart B9（patch 形态=0、__getattr__=0、全量全绿）
 
-- [ ] T073 [US8] 规划核对：_PATCHABLE_APP_SYMBOLS 8 符号（boss、_BossCdpSource、ai_service、ScraperExecutor、threading、uuid、os、_theme_path）的测试使用点全量清单（**61 处 / 12 文件，见 data-model E9**）；`_theme_path` 出仓 webui/task_runner_support.py 既有定义对齐（data-model E4）
-- [ ] T074 [US8] 符号迁移：boss 与 _BossCdpSource → PipelineContext 构造期注入（make_cdp_source 既有工厂路径优先）；tests 中相应 patch 改注入 fake / patch.object(ctx)；独立提交
-- [ ] T075 [US8] 符号迁移：ai_service 与 ScraperExecutor → ctx 注入；tests 同步；独立提交
-- [ ] T076 [US8] 符号迁移：threading、uuid、os → ctx 注入（时钟/随机源注入点）；tests 同步；独立提交
-- [ ] T077 [US8] 符号迁移：_theme_path → ctx 注入；tests 同步；独立提交
-- [ ] T078 [US8] webui/pipeline_context.py 删除 `__getattr__` 动态门面与 `_PATCHABLE_APP_SYMBOLS`；webui/app_support.py 组装处同步；webui/app.py 相关模块级符号清理（FR-020）
-- [ ] T079 [US8] 验证门禁：quickstart B9 + 后端全量 + 前端 + 构建 + 卫生；通过后提交 commit（`test: 猴补丁后门拆除，可替换符号显式注入（031 B9）`）
-- [ ] T080 [US8] 宪法模块地图更新 pipeline_context.py 条目（移除"动态门面"表述）（FR-022）
+- [x] T073 [US8] 规划核对：_PATCHABLE_APP_SYMBOLS 8 符号（boss、_BossCdpSource、ai_service、ScraperExecutor、threading、uuid、os、_theme_path）的测试使用点全量清单（**61 处 / 12 文件，见 data-model E9**）；`_theme_path` 出仓 webui/task_runner_support.py 既有定义对齐（data-model E4）
+- [x] T074 [US8] 符号迁移：boss 与 _BossCdpSource → PipelineContext 构造期注入（make_cdp_source 既有工厂路径优先）；tests 中相应 patch 改注入 fake / patch.object(ctx)；独立提交
+- [x] T075 [US8] 符号迁移：ai_service 与 ScraperExecutor → ctx 注入；tests 同步；独立提交
+- [x] T076 [US8] 符号迁移：threading、uuid、os → ctx 注入（时钟/随机源注入点）；tests 同步；独立提交
+- [x] T077 [US8] 符号迁移：_theme_path → ctx 注入；tests 同步；独立提交
+- [x] T078 [US8] webui/pipeline_context.py 删除 `__getattr__` 动态门面与 `_PATCHABLE_APP_SYMBOLS`；webui/app_support.py 组装处同步；webui/app.py 相关模块级符号清理（FR-020）
+- [x] T079 [US8] 验证门禁：quickstart B9 + 后端全量 + 前端 + 构建 + 卫生；通过后提交 commit（`test: 猴补丁后门拆除，可替换符号显式注入（031 B9）`）
+- [x] T080 [US8] 宪法模块地图更新 pipeline_context.py 条目（移除"动态门面"表述）（FR-022）
 
 **Checkpoint**: 生产代码不再为测试变形；松绑收尾完成
 

@@ -77,8 +77,6 @@ class _FakeCtx:
         self.threading = threading
         self.store = _FakeStore(jobs)
         self.operational_errors = (Exception,)
-        self.ai_service = mock.Mock()
-        self.ai_service.retrieve_api_key.return_value = "sk-test"
         self.app = mock.Mock()
         self.app.config = {"RESULT_DIR": "tmp"}
         self.screen_stage_messages = {}
@@ -139,6 +137,10 @@ class RecrawlJdPassThroughTests(unittest.TestCase):
             }
 
         with mock.patch("webui.ai.match_jds", side_effect=fake_match_jds), \
+                mock.patch(
+                    "webui.ai.retrieve_api_key",
+                    return_value="sk-test",
+                ), \
                 mock.patch(
                     "webui.pipeline_exec.ensure_chrome_ready",
                     return_value=(True, None),
@@ -232,6 +234,10 @@ class RecrawlActivityFactTests(unittest.TestCase):
         store.save_recrawl_jd_and_checkpoint = fake_save_recrawl
 
         with mock.patch("webui.ai.match_jds", side_effect=fake_match_jds), \
+                mock.patch(
+                    "webui.ai.retrieve_api_key",
+                    return_value="sk-test",
+                ), \
                 mock.patch(
                     "webui.pipeline_exec.ensure_chrome_ready",
                     return_value=(True, None),

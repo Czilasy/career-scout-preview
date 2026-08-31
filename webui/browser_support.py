@@ -2,10 +2,11 @@
 
 活动任务锁口径（running/queued 锁全部账号、paused 锁冻结账号）、
 暂停 run 浏览器 best-effort 关闭、账号投影。闭包语义原样搬运；
-可 patch 符号（boss）经 webui.app 模块属性动态取用。
+boss 模块级直连（031 B9 门面拆除）。
 """
 
 from __future__ import annotations
+from scripts import boss_cdp_raw as boss
 
 import sqlite3
 
@@ -13,7 +14,6 @@ from webui.constants import _OPERATIONAL_ERRORS
 
 
 def build_browser_support(store, tasks, lock, account_for_run, activate_run_browser):
-    import webui.app as _app_module  # 可 patch 符号动态门面
 
     def _browser_lock() -> tuple[str | None, str | None, str | None]:
         """Return the active browser lock as (kind, account id).
@@ -87,7 +87,7 @@ def build_browser_support(store, tasks, lock, account_for_run, activate_run_brow
             pass
         try:
             close_debug_chrome(
-                frozen_port if frozen_port is not None else _app_module.boss.DEFAULT_CDP_PORT)
+                frozen_port if frozen_port is not None else boss.DEFAULT_CDP_PORT)
         except (OSError, RuntimeError):
             pass
 

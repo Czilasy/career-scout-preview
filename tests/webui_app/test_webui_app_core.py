@@ -27,7 +27,9 @@ class ThemeApiTests(unittest.TestCase):
         session = self.client.get("/api/session")
         self.token = session.get_json()["token"]
         self.client.environ_base["HTTP_X_BOSS_TOKEN"] = self.token
-        self._patcher = mock.patch("webui.app._theme_path", return_value=self.theme_path)
+        self._patcher = mock.patch.object(
+            self.app.config["PIPELINE_CONTEXT"], "theme_path",
+            return_value=self.theme_path)
         self._patcher.start()
 
     def tearDown(self):

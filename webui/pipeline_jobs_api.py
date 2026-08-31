@@ -2,10 +2,11 @@
 
 单岗位 JD 按需抓取、感兴趣/不感兴趣标记与撤销、批量重抓提交与续跑。
 路由体纯搬运：HTTP 契约零改动；store / 任务声明 / 重抓 runner 经 ctx
-取用；可 patch 符号（uuid / threading / boss 等）经 ctx 动态门面。
+取用。
 """
 
 from __future__ import annotations
+import uuid
 
 import sqlite3
 from pathlib import Path
@@ -268,7 +269,7 @@ def register_pipeline_jobs_routes(app, ctx):
                             "ok": False, "error": "already_running",
                             "existing_task_id": existing_id,
                         }), 409
-            task_id = f"recrawl-{ctx.uuid.uuid4().hex[:12]}"
+            task_id = f"recrawl-{uuid.uuid4().hex[:12]}"
             # T406: 从父 run 读取冻结平台身份和浏览器身份
             parent_identity = None
             parent_run = None
@@ -461,7 +462,7 @@ def register_pipeline_jobs_routes(app, ctx):
                 parent_profile_key = parent_profile_key or gp_params.get("profile_key")
             except ctx.operational_errors:
                 pass
-        task_id = f"recrawl-{ctx.uuid.uuid4().hex[:12]}"
+        task_id = f"recrawl-{uuid.uuid4().hex[:12]}"
         claimed_task, existing_task_id = ctx.claim_recrawl_start(
             task_id, source_run_id
         )

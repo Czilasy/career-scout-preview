@@ -928,7 +928,7 @@ class ContractCompliancePatchTests(unittest.TestCase):
             detail={"jd": "岗位职责：负责后端业务开发与 API 设计。"},
             safe_log="detail ok",
         )
-        with mock.patch("webui.app._BossCdpSource",
+        with mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class",
                         return_value=fake_source), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready",
                            return_value=(True, "")):

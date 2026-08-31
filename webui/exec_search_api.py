@@ -1,11 +1,12 @@
 """搜索执行 API 路由（021 B6 T019 外迁自 webui/app.py）。
 
 搜索范围预览、组合抓取提交/续跑/取消。路由体纯搬运：HTTP 契约零改动；
-任务声明 / 断言 / runner 包装经 ctx 取用；可 patch 符号（uuid /
-threading / ai_service 等）经 ctx 动态门面。
+任务声明 / 断言 / runner 包装经 ctx 取用。
 """
 
 from __future__ import annotations
+import threading
+import uuid
 
 import hashlib
 import json
@@ -379,7 +380,7 @@ def register_exec_search_routes(app, ctx):
             "profile_key": login_space.profile_key,
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
-        task_id = ctx.uuid.uuid4().hex
+        task_id = uuid.uuid4().hex
         task = ctx.register_pipeline_task(task_id, "scrape")
         # 把冻结配置摘要存入任务记录，供进度查询返回
         with ctx.lock:
@@ -582,8 +583,8 @@ def register_exec_search_routes(app, ctx):
             task["profile_key"] = db_ep.get("profile_key")
             task["task_input_digest"] = db_ep.get("task_input_digest")
             task["auto_screen"] = bool(db_ep.get("auto_screen"))
-        start_gate = ctx.threading.Event()
-        abort_start = ctx.threading.Event()
+        start_gate = threading.Event()
+        abort_start = threading.Event()
 
         def run_after_claim_commits():
             start_gate.wait()

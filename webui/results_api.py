@@ -2,10 +2,11 @@
 
 抓取结果保存、搜索进度、最新运行任务快照、最新 pipeline 结果与 CSV
 导出。路由体纯搬运：HTTP 契约零改动；store / 任务表 / 断言助手经 ctx
-取用；可 patch 符号（boss 等）经 ctx 动态门面。
+取用。
 """
 
 from __future__ import annotations
+from scripts import boss_cdp_raw as boss
 
 import csv
 import io
@@ -447,7 +448,7 @@ def register_results_routes(app, ctx):
             writer.writerow(section_row)
             for row in rows:
                 writer.writerow({
-                    key: ctx.boss.csv_safe_cell(row.get(key, "")) for key in columns
+                    key: boss.csv_safe_cell(row.get(key, "")) for key in columns
                 })
 
         matched_rows = [

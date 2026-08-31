@@ -3,11 +3,12 @@
 任务表/锁/执行器、调优 runner、任务声明与租约、终态安全写入、暂停
 失败记录、清理定时、账号激活、auto_screen 消费、续跑阻断断言、JD
 失败持久化、浏览器锁助手与 PipelineContext 组装。闭包语义原样搬运；
-可 patch 符号（threading / ai_service）经 webui.app 模块属性动态取用，
-保住 patch("webui.app.X") 面。
+threading / ai_service 模块级直连（031 B9 门面拆除）。
 """
 
 from __future__ import annotations
+from webui import ai as ai_service
+import threading
 
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +31,7 @@ from webui.diagnostics import record_failure
 from webui.error_registry import resolve_code
 from webui.pipeline_context import PipelineContext
 from webui.store import SYSTEMIC_BLOCK_CODES, DiscoveryStoreConflictError
+from webui.task_runner_support import _theme_path
 
 from webui.logging_setup import get_logger
 
@@ -41,11 +43,10 @@ def build_app_support(app, store, runner, workbench_runner,
                       job_feedback_service, history_service, resume_service,
                       _prune_history_best_effort, _load_legacy_advanced_settings,
                       _save_legacy_advanced_settings, _make_cdp_source,
-                      scope_previews, _runtime_mode):
-    import webui.app as _app_module  # 可 patch 符号动态门面
+                      scope_previews, _runtime_mode, source_class):
 
     _pipeline_tasks = {}
-    _pipeline_lock = _app_module.threading.RLock()
+    _pipeline_lock = threading.RLock()
     _resume_claims = set()
     _pipeline_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="boss-pipeline")
     app.config["PIPELINE_TASKS"] = _pipeline_tasks
@@ -56,7 +57,7 @@ def build_app_support(app, store, runner, workbench_runner,
         settings = store.get_ai_settings()
         credential_ref = store.get_credential_ref()
         api_key = (
-            _app_module.ai_service.retrieve_api_key(credential_ref) if credential_ref else ""
+            ai_service.retrieve_api_key(credential_ref) if credential_ref else ""
         )
         return {**settings, "api_key": api_key}
 
@@ -90,7 +91,7 @@ def build_app_support(app, store, runner, workbench_runner,
             # 停止信号：cancel 接口 set 它，run_search 循环检查到后退出。
             # 不放进 task 的 JSON 序列化里（threading.Event 不可序列化），
             # 只在服务进程内存中存活。
-            "stop_event": _app_module.threading.Event(),
+            "stop_event": threading.Event(),
         }
         if source_task_id:
             task["source_task_id"] = source_task_id
@@ -239,7 +240,7 @@ def build_app_support(app, store, runner, workbench_runner,
                 if _pipeline_tasks.get(task_id) is task:
                     _pipeline_tasks.pop(task_id, None)
 
-        timer = _app_module.threading.Timer(30 * 60, _cleanup)
+        timer = threading.Timer(30 * 60, _cleanup)
         timer.daemon = True
         timer.start()
 
@@ -361,7 +362,7 @@ def build_app_support(app, store, runner, workbench_runner,
                 "error": "",
             },
             "error": "", "started_at": None, "finished_at": None,
-            "stop_event": _app_module.threading.Event(),
+            "stop_event": threading.Event(),
             "auto_screen": bool((source_run.get("execution_params") or {}).get("auto_screen")),
         }
         with _pipeline_lock:
@@ -448,14 +449,14 @@ def build_app_support(app, store, runner, workbench_runner,
                     settings = store.get_ai_settings()
                     credential_ref = store.get_credential_ref()
                     api_key = (
-                        _app_module.ai_service.retrieve_api_key(credential_ref)
+                        ai_service.retrieve_api_key(credential_ref)
                         if credential_ref else ""
                     )
-                    if not _app_module.ai_service.is_ai_available(settings, credential_ref, api_key):
+                    if not ai_service.is_ai_available(settings, credential_ref, api_key):
                         passed = False
                         reason = "AI 配置或额度问题尚未处理，请更新后再继续"
                     else:
-                        capability = _app_module.ai_service.test_connection(
+                        capability = ai_service.test_connection(
                             str(settings.get("endpoint_url") or ""),
                             api_key,
                             model=str(settings.get("model") or ""),
@@ -565,6 +566,8 @@ def build_app_support(app, store, runner, workbench_runner,
         write_run=_write_run_unless_finished,
         make_cdp_source=_make_cdp_source,
         tuning_round_runner=_tuning_round_runner,
+        source_class=source_class,
+        theme_path=_theme_path,
         is_user_finished=_is_user_finished,
         release_worker_resume_claims=_release_worker_resume_claims,
         record_pause_failure=_record_pause_failure,

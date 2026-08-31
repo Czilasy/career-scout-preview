@@ -5,6 +5,8 @@
 """
 
 from __future__ import annotations
+from webui import ai as ai_service
+import uuid
 
 import re
 import sqlite3
@@ -73,7 +75,7 @@ def register_profiles_routes(app, ctx):
                     if not file_path.is_file():
                         continue
                     trash_dir.mkdir(parents=True, exist_ok=True)
-                    trash_path = trash_dir / f"{file_path.name}.{ctx.uuid.uuid4().hex}.trash"
+                    trash_path = trash_dir / f"{file_path.name}.{uuid.uuid4().hex}.trash"
                     file_path.replace(trash_path)
                     moved.append((trash_path, file_path))
             except Exception as exc:
@@ -170,10 +172,10 @@ def register_profiles_routes(app, ctx):
         consent = request.form.get("ai_consent") == "true"
         if settings.get("is_configured") and consent:
             cred_ref = ctx.store.get_credential_ref()
-            api_key = ctx.ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
+            api_key = ai_service.retrieve_api_key(cred_ref) if cred_ref else ""
             if api_key:
                 try:
-                    ai_suggestion = ctx.ai_service.parse_resume(
+                    ai_suggestion = ai_service.parse_resume(
                         record["extracted_text"],
                         settings["endpoint_url"], api_key, settings.get("model", ""),
                     )
@@ -312,15 +314,15 @@ def register_profiles_routes(app, ctx):
         settings = ctx.store.get_ai_settings()
         if feedback_count and feedback_count % FEEDBACK_THRESHOLD == 0 and settings.get("is_configured"):
             credential_ref = ctx.store.get_credential_ref()
-            api_key = ctx.ai_service.retrieve_api_key(credential_ref) if credential_ref else ""
+            api_key = ai_service.retrieve_api_key(credential_ref) if credential_ref else ""
             if api_key:
                 try:
-                    preference = ctx.ai_service.update_preference(
+                    preference = ai_service.update_preference(
                         ctx.store.get_profile(profile_id), ctx.store.list_feedback(profile_id),
                         settings["endpoint_url"], api_key, settings.get("model", ""),
                     )
                     ctx.store.save_preference_version(profile_id, feedback_count, preference)
-                except (ctx.ai_service.AISecurityError, ValueError):
+                except (ai_service.AISecurityError, ValueError):
                     # Feedback remains valid; a failed optional preference update
                     # must not alter the user's feedback or task state.
                     ctx.store.update_ai_status("failed", last_error_code="preference_failed")

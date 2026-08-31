@@ -116,7 +116,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": ["job-1"], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_result), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"):
             response = self._post_ai_screen(scrape_task_id)
@@ -149,7 +149,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": ["job-1"], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_result), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"):
             response = self._post_ai_screen(scrape_task_id)
@@ -232,7 +232,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": [job["job_id"] for job in jobs], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value={
                     "jobs": [{**jobs[0], "jd": "负责后端开发"}],
                     "hard_stop": False, "hard_stop_code": None,
@@ -445,7 +445,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": [], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_result), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"), \
                 mock.patch("webui.ai.match_jds", return_value={
@@ -525,7 +525,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": [], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_result), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"), \
                 mock.patch("webui.ai.match_jds", return_value={"verdicts": {}}) as match_jds:
@@ -581,7 +581,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": [job["job_id"] for job in jobs], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", side_effect=details), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"), \
                 mock.patch("webui.ai.match_jds", side_effect=matched) as match_jds, \
@@ -621,7 +621,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": [job["job_id"] for job in jobs], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value={
                     "jobs": [{**jobs[0], "jd": "负责后端开发"}],
                     "hard_stop": False, "hard_stop_code": None,
@@ -664,7 +664,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": [job["job_id"] for job in jobs], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value={
                     "jobs": [
                         {**jobs[0], "jd": "负责后端开发"},
@@ -717,7 +717,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": [job["job_id"] for job in jobs], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", side_effect=details), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"), \
                 mock.patch("webui.ai.match_jds", side_effect=matched):
@@ -758,7 +758,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": ["job-1"], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_result), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"), \
                 mock.patch.object(
@@ -851,7 +851,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": ["job-1"], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_result), \
                 mock.patch("webui.ai.match_jds", return_value={
                     "verdicts": {"job-1": {
@@ -895,7 +895,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": ["job-1"], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_failure):
             response = self.client.post(
                 "/api/ai-screen",
@@ -1008,7 +1008,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": ["job-1"], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_failure), \
                 mock.patch.object(
                     self.store, "update_screening_run", side_effect=fail_pause
@@ -1058,7 +1058,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                 mock.patch(
                     "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
                 ), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch(
                     "webui.pipeline_exec.fetch_job_details",
                     return_value=detail_result,
@@ -1111,7 +1111,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                 mock.patch(
                     "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
                 ), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch(
                     "webui.pipeline_exec.fetch_job_details",
                     return_value=detail_result,
@@ -1162,7 +1162,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                 mock.patch(
                     "webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")
                 ), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch(
                     "webui.pipeline_exec.fetch_job_details", side_effect=details,
                 ) as fetch_details, \
@@ -1237,7 +1237,7 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
                     "kept": ["job-1"], "dropped": [],
                 }), \
                 mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
-                mock.patch("webui.app._BossCdpSource", return_value=object()), \
+                mock.patch.object(self.app.config["PIPELINE_CONTEXT"], "source_class", return_value=object()), \
                 mock.patch("webui.pipeline_exec.fetch_job_details", return_value=detail_result), \
                 mock.patch("webui.ai.match_jds", side_effect=AISecurityError(
                     ERROR_RATE_LIMIT

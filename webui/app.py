@@ -288,7 +288,9 @@ def create_app(config=None):
             # BOSS — 显式传入冻结 cdp_port
             # EXE 模式传 in_process=True（合同 inprocess-runner §4.3）；
             # 源码模式保持 in_process=False（子进程路径零改动）。
-            return _BossCdpSource(
+            # 031 B9：数据源类经 ctx 注入（闭包延迟解析，ctx 在下方构造），
+            # 测试替换 ctx.source_class 即可，不再隔空改主文件。
+            return ctx.source_class(
                 python_executable=app.config["PYTHON_EXECUTABLE"],
                 artifact_root=artifact,
                 cdp_port=int(cdp_port) if cdp_port else boss.DEFAULT_CDP_PORT,
@@ -470,7 +472,7 @@ def create_app(config=None):
         job_feedback_service, history_service, resume_service,
         _prune_history_best_effort, _load_legacy_advanced_settings,
         _save_legacy_advanced_settings, _make_cdp_source,
-        scope_previews, _runtime_mode)
+        scope_previews, _runtime_mode, _BossCdpSource)
     app.config["PIPELINE_CONTEXT"] = ctx
     from webui.settings_api import register_settings_routes
     register_settings_routes(app, ctx)
