@@ -38,6 +38,13 @@ import type {
 // 保持 discoveryDeps 单一来源：视图与各 composable 都从这里取类型。
 export type { DiscoveryEmit, DiscoveryProps };
 
+// 035：liveTaskStep 为 useDiscoveryState 只读派生（未结束任务的真实进度页：
+// 抓取活→02，筛选/重抓活→03，无活任务→空），经契约转出供跨域消费——
+// useScreenRoundFlow（refs 判定面 deriveLiveTaskStep）、useDiscoverySearch /
+// useDiscoveryResults（liveTaskStep(state)）的入口守卫与回最新落点统一取用。
+export { deriveLiveTaskStep, liveTaskStep } from "./useDiscoveryState";
+export type { LiveTaskProbe } from "./useDiscoveryState";
+
 /** roundFlow 被跨域消费的最小面（useScreenRoundFlow 经 reactive 包装后的形状）。 */
 export interface RoundFlowLike {
   busyAction: string;

@@ -56,8 +56,12 @@ def register_log_routes(app, ctx):
         offset = _parse_int(request.args.get("offset"), 0)
         since = _parse_int(request.args.get("since"), 0)
         client_identity = str(request.args.get("identity") or "").strip()
+        # 035：按任务过滤（运行日志）——仅保留包含该 task_id 的日志行。
+        task_id = str(request.args.get("task_id") or "").strip()
 
         lines, identity = _read_file()
+        if task_id:
+            lines = [line for line in lines if task_id in line]
         total = len(lines)
         rotated = bool(client_identity and identity and identity != client_identity)
         if not lines:

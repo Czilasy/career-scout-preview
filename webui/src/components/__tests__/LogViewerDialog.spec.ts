@@ -153,4 +153,57 @@ describe("LogViewerDialog", () => {
     const wrapper = await mountOpen(fetchMock);
     expect(wrapper.text()).toContain("暂无日志");
   });
+
+  it("035: opens run logs directly for an external task id (history round)", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/session")) return response({});
+      if (url.startsWith("/api/logs")) {
+        if (url.includes("task_id=round-1")) {
+          return response(tailPayload(["round-line"], "size:3"));
+        }
+        return response(tailPayload(["global-line"], "size:2"));
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(LogViewerDialog, {
+      props: { open: false, initialTaskId: "round-1" },
+      global: { stubs: { teleport: true } },
+    });
+    await wrapper.setProps({ open: true });
+    await flushPromises();
+    // 外部指定任务：直接进入运行日志模式，请求带该任务 id 并只显示其日志
+    expect(wrapper.text()).toContain("运行日志");
+    expect(wrapper.findAll(".log-line").map((n) => n.text())).toEqual(["round-line"]);
+    vi.unstubAllGlobals();
+  });
+
+  it("035: switches between global and run logs via mode tabs", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/session")) return response({});
+      if (url.startsWith("/api/latest-running-task")) {
+        return response({ has_task: true, task_id: "task-1" });
+      }
+      if (url.startsWith("/api/logs")) {
+        if (url.includes("task_id=task-1")) {
+          return response(tailPayload(["run-line1"], "size:9"));
+        }
+        return response(tailPayload(["global-line1", "global-line2"], "size:8"));
+      }
+      return response({});
+    });
+    const wrapper = await mountOpen(fetchMock);
+    // 默认全局日志
+    expect(wrapper.findAll(".log-line").map((n) => n.text())).toEqual(["global-line1", "global-line2"]);
+    // 切到运行日志：按任务过滤返回运行日志
+    await wrapper.get('[data-testid="log-mode-run"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll(".log-line").map((n) => n.text())).toEqual(["run-line1"]);
+    // 切回全局日志
+    await wrapper.get('[data-testid="log-mode-global"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll(".log-line").map((n) => n.text())).toEqual(["global-line1", "global-line2"]);
+  });
 });

@@ -53,9 +53,10 @@ import {
 } from "../discovery";
 import { setThemePlatform } from "../composables/useTheme";
 import type { MergedLatestResult } from "./useDiscoveryState";
+import { liveTaskStep } from "./useDiscoveryState";
 
 export function useDiscoveryResults(state: DiscoveryState, deps: ResultsNeeds) {
-  const { activeCategory, activeStep, analysisReady, archiveHistoryLatest, currentRoundStatus, draftPlatform, exportBusy, feedbackBusyIds, groups, hideHistory, historyBackToLatest, historyMode, historyOpen, historyRound, interruptedRunId, isScrapedOnly, jdBusyIds, lifecycleDialogJob, lifecycleDialogOpen, locationDraft, pausedRunId, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, rejectedIds, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, showHistory, unfinishedWorkflowRestored } = state;
+  const { activeCategory, activeStep, analysisReady, archiveHistoryLatest, currentRoundStatus, draftPlatform, exportBusy, feedbackBusyIds, groups, hideHistory, historyBackToLatest, historyMode, historyOpen, historyRound, interruptedRunId, isScrapedOnly, jdBusyIds, lifecycleDialogJob, lifecycleDialogOpen, locationDraft, pausedRunId, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, profileFacts, profileSummary, recrawlBusy, recrawlSnapshot, recrawlTaskId, rejectedIds, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, returningFromHistory, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, showHistory, unfinishedWorkflowRestored } = state;
   const { notify, pollRecrawl, pollTask, setDraftPlatform } = deps;
 
 
@@ -293,9 +294,22 @@ function closeHistoryDrawer() {
 function enterHistoryRound(detail: HistoryRoundDetail) {
   // 首次进入历史时记住进入前的草稿平台，返回最新时还原。
   if (!historyRound.value) platformBeforeHistory.value = platformState.draft;
-  // 先退出历史模式，再装载新轮详情；同一时刻只有一个历史轮处于激活态。
-  historyRound.value = null;
-  setPipelineResult(detail.result || {});
+  // 035（真机问题③，FR-012）：历史浏览只读——先挂历史轮标记（同一时刻只有一个
+  // 历史轮激活），展示数据直接装载，不经 setPipelineResult 的当前轮置位路径：
+  // scrapeCompleted/resultLoaded/analysisReady 不因历史轮被置位。
+  historyRound.value = {
+    runId: detail.source_run_id || "",
+    platform: detail.platform,
+    status: detail.status,
+    jobCount: Number(detail.result?.total_kept || (detail.result?.jobs || []).length || 0),
+  };
+  pipelineResult.value = detail.result || {};
+  resultEpoch.value += 1;
+  const historyGroups = partitionPipelineResult(detail.result || {});
+  activeCategory.value = historyGroups.matched.length ? "matched"
+    : historyGroups.uncertain.length ? "uncertain"
+    : historyGroups.unmatched.length ? "unmatched"
+    : "dropped";
   pipelineResultRunId.value = detail.source_run_id || "";
   resultRunIds.value[detail.platform] = detail.source_run_id || "";
   resultPlatformFilter.value = detail.platform;
@@ -304,12 +318,6 @@ function enterHistoryRound(detail: HistoryRoundDetail) {
   draftPlatform.value = detail.platform;
   setThemePlatform(detail.platform);
   activeStep.value = "results";
-  historyRound.value = {
-    runId: detail.source_run_id || "",
-    platform: detail.platform,
-    status: detail.status,
-    jobCount: Number(detail.result?.total_kept || (detail.result?.jobs || []).length || 0),
-  };
   // B038：历史轮原始状态透传，scraped_only 轮进入"待筛选"展示模式。
   currentRoundStatus.value = detail.status;
   if (isScrapedOnly.value) activeCategory.value = "matched";
@@ -333,8 +341,23 @@ async function returnToLatest() {
     draftPlatform.value = restorePlatform;
     setThemePlatform(restorePlatform);
   }
+  // 035：未结束任务存在时回最新＝回到该任务的真实进度页（抓取→02、筛选/重抓→03），
+  // 不得落到空结果页、不得触发「已结束」；并按任务真实状态重算 scrapeCompleted
+  //（防御层，FR-012：抓取活 = 未完成；筛选/重抓活 = 抓取已完成）。
+  const liveStep = liveTaskStep(state);
+  if (liveStep) {
+    scrapeCompleted.value = liveStep === "screen";
+    activeStep.value = liveStep;
+    return;
+  }
+  // 任务已结束：回结果页展示本轮成果；过渡期间防御性拦截重复置位。
+  returningFromHistory.value = true;
   activeStep.value = "results";
-  await loadLatestResult();
+  try {
+    await loadLatestResult();
+  } finally {
+    returningFromHistory.value = false;
+  }
 }
 
 // B038：历史未筛选轮补筛——退出历史模式，挂载父抓取任务与画像后

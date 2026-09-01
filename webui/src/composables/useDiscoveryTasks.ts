@@ -39,11 +39,11 @@ import {
   UploadCloud,
   X,
 } from "@lucide/vue";
-import { MODE_DEFAULT_PAGES } from "./useDiscoveryState";
+import { hasLiveTaskState, MODE_DEFAULT_PAGES } from "./useDiscoveryState";
 import type { MergedLatestResult, TaskSnapshot } from "./useDiscoveryState";
 
 export function useDiscoveryTasks(state: DiscoveryState, deps: TasksNeeds) {
-  const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, activeTaskRestored, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, interruptedRunId, isScrapedOnly, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysis, schemaLoader, scopePreview, scopePreviewBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform, unfinishedWorkflowRestored } = state;
+  const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, activeTaskRestored, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, historyStore, interruptedRunId, isScrapedOnly, taskCompletedToast, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysis, schemaLoader, scopePreview, scopePreviewBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform, unfinishedWorkflowRestored } = state;
   const { cancelScrape, clearLatestResult, clearWorkflowState, continueAiScreen, enterScreenStep, fetchMergedLatestResult, finishPausedTask, isLoginErrorCode, jobId, loadLatestResult, notify, restoreRunningTask, setPipelineResult, showLoginGuide, startAiScreen } = deps;
 
 
@@ -134,7 +134,14 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
           }
           retryMergeUpgrade(taskId, 0);
         }
-        activeStep.value = "results";
+        if (historyMode.value) {
+          // 035：后台任务跑完时用户在看历史——不切走历史视图，顶部冒泡提示本轮完成。
+          taskCompletedToast.value = { visible: true };
+          // 刷新历史列表，让刚完成的轮次以已完成状态出现在历史中。
+          void historyStore.loadHistory({ silent: true });
+        } else {
+          activeStep.value = "results";
+        }
         deps.notify(
           data.status === "completed_with_pending"
             ? "AI 筛选完成，但有岗位待确认"
@@ -675,6 +682,8 @@ function mergeRecrawlUpdates(updates: Record<string, unknown>) {
 async function maybeAutoStartNewRound(): Promise<void> {
   // 未完成流程（本地有未完成快照）→ 恢复现场（B068 行为保留，不改）
   if (unfinishedWorkflowRestored.value) return;
+  // 035：未结束任务真实存在时，刷新/启动优先恢复现场，不自动开始新一轮、不取消任务。
+  if (hasLiveTaskState(state)) return;
   // 026 B078：已进 04 页（或结束保存）＝上次流程已结束 → 直接开始新一轮，
   // 不再依赖后端历史轮状态/时间戳推断（spec FR-001/FR-005）。
   if (resultsPageSeen.value || finishedPartial.value) {

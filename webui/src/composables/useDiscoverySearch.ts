@@ -34,10 +34,11 @@ import {
   singleSelectNextValue,
 } from "../discovery";
 import { setThemePlatform } from "../composables/useTheme";
+import { liveTaskStep } from "./useDiscoveryState";
 import type { AnalyzeResponse } from "./useDiscoveryState";
 
 export function useDiscoverySearch(state: DiscoveryState, deps: SearchNeeds) {
-  const { LOGIN_ERROR_CODES, SPEED_FIELDS, activeCategory, advancedBusy, advancedRanges, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, cityCatalogBusy, cityCatalogRef, cityList, cityLoader, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, dragActive, executionSelection, fieldLabels, filterGroups, filterValues, finishedPartial, historyBackToLatest, historyRound, interruptedRunId, keywords, locationDraft, loginGuide, nationalScopeConfirm, oneClickOpen, pagesValue, pausedRunId, pendingPlatformSwitch, pipelineResult, pipelineResultRunId, platformState, profileConfirmed, profileError, profileFacts, profileInputEl, profileSummary, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resumeAnalysis, resumeError, schemaBusy, schemaLoader, schemaRef, scopePreview, scopePreviewBusy, scopePreviewReqId, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uploadBusy } = state;
+  const { LOGIN_ERROR_CODES, SPEED_FIELDS, activeCategory, activeStep, advancedBusy, advancedRanges, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, cityCatalogBusy, cityCatalogRef, cityList, cityLoader, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, dragActive, executionSelection, fieldLabels, filterGroups, filterValues, finishedPartial, historyBackToLatest, historyRound, interruptedRunId, keywords, locationDraft, loginGuide, nationalScopeConfirm, oneClickOpen, pagesValue, pausedRunId, pendingPlatformSwitch, pipelineResult, pipelineResultRunId, platformState, profileConfirmed, profileError, profileFacts, profileInputEl, profileSummary, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resumeAnalysis, resumeError, schemaBusy, schemaLoader, schemaRef, scopePreview, scopePreviewBusy, scopePreviewReqId, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uploadBusy } = state;
   const { cancelActiveTasksForNewRound, clearLatestResult, enterSearchStep, notify, openOneClickDialog, restoreRunningTask, startScrape } = deps;
 
 
@@ -248,6 +249,14 @@ async function analyzeResume() {
   }
   uploadBusy.value = true;
   try {
+    // 035：未结束任务存在时，上传简历不取消旧任务、不开新一轮，直接跳回任务视图。
+    // 跳回落点按任务类型分派（FR-011）：抓取活 → 02；筛选/重抓活 → 03。
+    const liveStep = liveTaskStep(state);
+    if (liveStep) {
+      activeStep.value = liveStep;
+      deps.notify("当前还有任务在跑，已回到任务进度", "warning");
+      return;
+    }
     if (!(await deps.cancelActiveTasksForNewRound())) return;
     if (!(await deps.clearLatestResult())) return;
     const form = new FormData();

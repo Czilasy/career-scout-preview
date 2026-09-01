@@ -12,6 +12,8 @@ import JobWorkspace from "../components/JobWorkspace.vue";
 import LocationPicker from "../components/LocationPicker.vue";
 import HistoryRoundProfile from "../components/HistoryRoundProfile.vue";
 import ResultHistoryDrawer from "../components/ResultHistoryDrawer.vue";
+import TaskCompletedToast from "../components/TaskCompletedToast.vue";
+import LogViewerDialog from "../components/LogViewerDialog.vue";
 import OneClickScreenDialog, {
   type OneClickFilterGroup,
   crossPlatformDedupeEnabled,
@@ -186,6 +188,8 @@ const {
   historyRound,
   platformBeforeHistory,
   historyMode,
+  returningFromHistory,
+  taskCompletedToast,
   currentRoundStatus,
   isScrapedOnly,
   historyStatusText,
@@ -400,7 +404,7 @@ const roundFlow = reactive(useScreenRoundFlow({
     profileSummary,
     profileFacts,
     profileConfirmed,
-    scrapeTaskId,
+    scrapeTaskId, scrapeBusy, scrapeSnapshot: scrapeSnapshot as unknown as Ref<ApiTaskSnapshot | null>,
     screenTaskId,
     pausedRunId,
     interruptedRunId,
@@ -411,7 +415,7 @@ const roundFlow = reactive(useScreenRoundFlow({
     recrawlTaskId,
     recrawlSnapshot: recrawlSnapshot as unknown as Ref<ApiTaskSnapshot | null>,
     finishedPartial,
-    activeStep,
+    activeStep, historyRound,
     currentRoundStatus,
     resultPlatformFilter,
     uncertainCount: computed(() => groups.value.uncertain.length),
@@ -423,7 +427,7 @@ const roundFlow = reactive(useScreenRoundFlow({
     continueRecrawl: tasks.continueRecrawl,
     finishPausedTask: execution.finishPausedTask,
     resetWorkflow: tasks.resetWorkflow,
-    loadLatestResult: results.loadLatestResult,
+    loadLatestResult: results.loadLatestResult, returnToLatest: results.returnToLatest,
     notify: workflow.notify,
   },
 }));
@@ -447,8 +451,10 @@ watch([searchPanelsOpen, advancedPanelsOpen], ([newS, newA], [oldS, oldA]) => {
 });
 
 watch(activeStep, (step) => {
-  if (step === "results") {
-    // 026 B078：进 04 页＝流程结束，置位并持久化已结束事实（唯一判据）。
+  // 026 B078：进当前轮 04 页＝流程结束，置位并持久化已结束事实（唯一判据）。
+  // 035：历史轮浏览、从历史「回到最新」过渡期间，以及未结束任务存在时
+  //（含刷新恢复把 activeStep 恢复为 results 的路径）一律不得置位。
+  if (step === "results" && !historyMode && !returningFromHistory && !hasLiveTaskState()) {
     markResultsPageSeen();
   }
 });
@@ -505,6 +511,16 @@ watch(historyDetail, (detail, prev) => {
 });
 
 defineExpose({ openHistoryDrawer, toggleHistoryDrawer, closeHistoryDrawer });
+
+// 035：历史轮「查看该轮运行日志」——复用日志界面，按该轮抓取任务过滤。
+const historyLogOpen = ref(false);
+const historyLogTaskId = ref("");
+
+function openHistoryLog(item: { scrape_task_id?: string }) {
+  if (!item.scrape_task_id) return;
+  historyLogTaskId.value = item.scrape_task_id;
+  historyLogOpen.value = true;
+}
 
 watch(lifecycleDialogOpen, (open) => {
   if (open) document.addEventListener("keydown", handleLifecycleDialogKeydown);
@@ -896,7 +912,7 @@ onMounted(() => {
           <button v-if="scrapeCompleted" class="button secondary" type="button" data-testid="continue-to-screen" @click="enterScreenStep()">
             进行确认AI筛选条件
           </button>
-          <button v-if="scrapeCompleted && !resultLoaded && !screenBusy" class="button primary" type="button" data-testid="view-scraped-only" @click="viewScrapedOnly">
+          <button v-if="scrapeCompleted && !resultLoaded && !screenBusy && !hasLiveTaskState()" class="button primary" type="button" data-testid="view-scraped-only" @click="viewScrapedOnly">
             直接查看结果
           </button>
           </div>
@@ -1096,6 +1112,19 @@ onMounted(() => {
       @confirm-delete="confirmHistoryDelete"
       @cancel-delete="cancelHistoryDelete"
       @delete-round="deleteHistoryRound"
+      @view-log="openHistoryLog"
+    />
+
+    <TaskCompletedToast
+      :visible="taskCompletedToast.visible"
+      @click="taskCompletedToast.visible = false; void returnToLatest()"
+      @close="taskCompletedToast.visible = false"
+    />
+
+    <LogViewerDialog
+      :open="historyLogOpen"
+      :initial-task-id="historyLogTaskId"
+      @close="historyLogOpen = false"
     />
 
     <!-- 岗位轨迹浮窗：居中弹窗，内容为原生命周期卡片全部能力 -->

@@ -168,6 +168,10 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/composables/discoveryDeps.ts` — Discovery 跨域依赖契约：五域提供接口（Workflow/Search/Execution/Tasks/Results）与消费接口（*Needs）、容器建/接线函数（createDiscoveryDeps / wireDiscoveryDeps / attachRoundFlow）（031 B8）
 - `webui/src/composables/useModeWarnings.ts` — 档位/规模风险警示文案：极限档与总页数 >30 两条警示的合并计算（031 B8 自 DiscoveryView.vue 抽出）
 - `webui/src/composables/useNarrowSearchLayout.ts` — 窄屏布局断点判定：`max-width: 1050px` 媒体查询订阅，供两个配置抽屉的联动/独立切换（031 B8 自 DiscoveryView.vue 抽出）
+- `webui/src/components/TaskCompletedToast.vue` — 顶部冒泡提示组件：后台任务跑完时用户在看历史的完成提示，点击回最新（035）
+- `packaging/window_controls.py` — 窗口控制 Win32 助手：无边框窗口控制原语与最大化避让任务栏适配（036）
+- `webui/src/components/WindowTitleBar.vue` — 自绘标题栏组件：桌面版窗口标题栏（文字+三按钮+拖拽区+主题配色，仅 EXE 渲染）（036）
+- `webui/src/components/DynamicIsland.vue` — 顶栏胶囊灵动岛组件：四态渲染/动画/点击直达（036）
 
 ## 文件布局约束
 

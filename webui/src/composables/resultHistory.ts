@@ -7,6 +7,8 @@ export interface HistoryRoundItem {
   run_id: string;
   platform: Platform;
   status: string;
+  /** 035：该轮的抓取任务 id，供「查看该轮运行日志」按任务过滤。 */
+  scrape_task_id?: string;
   created_at: string;
   started_at?: string | null;
   finished_at?: string | null;

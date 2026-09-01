@@ -17,6 +17,7 @@ dependencies = [
     "keyring>=24.0.0,<26.0.0",
     "pypdf>=4.0.0,<6.0.0",
     "python-docx>=1.1.0,<2.0.0",
+    "pywebview>=6.0.0,<7.0.0",
 ]
 
 [project.optional-dependencies]

@@ -100,6 +100,48 @@ class LogApiTests(unittest.TestCase):
         data = self.client.get("/api/logs?tail=9999").get_json()
         self.assertLessEqual(len(data["lines"]), 500)
 
+    def test_task_id_filters_lines(self):
+        _write_log(self.log_dir, [
+            "2026-09-01 10:00:00 [task-1] start",
+            "2026-09-01 10:00:01 [task-2] start",
+            "2026-09-01 10:00:02 [task-1] done",
+        ])
+        resp = self.client.get("/api/logs?tail=10&task_id=task-1")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["lines"], [
+            "2026-09-01 10:00:00 [task-1] start",
+            "2026-09-01 10:00:02 [task-1] done",
+        ])
+        self.assertEqual(data["total"], 2)
+
+    def test_task_id_with_since_uses_filtered_set(self):
+        _write_log(self.log_dir, [
+            "line-a-task-9",
+            "line-b-other",
+            "line-c-task-9",
+        ])
+        first = self.client.get("/api/logs?tail=3&task_id=task-9").get_json()
+        self.assertEqual(first["total"], 2)
+        self.assertEqual(first["end"], 2)
+        _write_log(self.log_dir, [
+            "line-a-task-9",
+            "line-b-other",
+            "line-c-task-9",
+            "line-d-task-9",
+        ])
+        resp = self.client.get(f"/api/logs?since={first['end']}&task_id=task-9")
+        data = resp.get_json()
+        self.assertEqual(data["lines"], ["line-d-task-9"])
+
+    def test_no_task_id_behaves_as_before(self):
+        _write_log(self.log_dir, ["global1", "global2"])
+        resp = self.client.get("/api/logs?tail=5")
+        data = resp.get_json()
+        self.assertEqual(data["total"], 2)
+        self.assertEqual(data["lines"], ["global1", "global2"])
+
 
 if __name__ == "__main__":
     unittest.main()

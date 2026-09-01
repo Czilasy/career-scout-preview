@@ -9,6 +9,7 @@ import {
   roundConditionsRestored,
   type ScreenPrimaryAction,
 } from "../screenFlow";
+import { deriveLiveTaskStep } from "./useDiscoveryState";
 import type { Notice, Platform, RoundContext, TaskSnapshot } from "../types";
 
 export interface ScreenRoundFlowDeps {
@@ -21,6 +22,11 @@ export interface ScreenRoundFlowDeps {
     profileFacts: Ref<Record<string, unknown>>;
     profileConfirmed: Ref<boolean>;
     scrapeTaskId: Ref<string>;
+    // 035：抓取侧判定面（confirmNewRound 顶部守卫用——抓取活也属未结束任务）。
+    scrapeBusy: Ref<boolean>;
+    scrapeSnapshot: Ref<TaskSnapshot | null>;
+    /** 035：历史模式标记（历史模式 04 页触发守卫时需完整退出历史再跳回）。 */
+    historyRound?: Ref<{ runId: string; platform: Platform; status: string; jobCount: number } | null>;
     screenTaskId: Ref<string>;
     pausedRunId: Ref<string>;
     interruptedRunId: Ref<string>;
@@ -48,6 +54,8 @@ export interface ScreenRoundFlowDeps {
     finishPausedTask: (runId: string) => Promise<void>;
     resetWorkflow: () => Promise<void>;
     loadLatestResult: () => Promise<void>;
+    /** 035：历史模式触发守卫时完整退出历史（含平台还原/展示清理/落进度页）。 */
+    returnToLatest: () => Promise<void>;
     notify: (message: string, tone?: Notice["tone"]) => void;
   };
 }
@@ -468,6 +476,26 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
   }
 
   async function confirmNewRound(): Promise<boolean> {
+    // 035（真机问题②，FR-011）：未结束任务存在（含抓取运行中/暂停/中断）时，
+    // 一律跳回该任务的真实进度页（抓取→02、筛选/重抓→03），不 reset、不取消、不弹窗。
+    // 守卫先于 resumable 计算——历史模式 04 页入口同样被此覆盖。
+    const liveStep = deriveLiveTaskStep({
+      scrapeBusy: deps.refs.scrapeBusy.value,
+      scrapeSnapshot: deps.refs.scrapeSnapshot.value,
+      screenBusy: deps.refs.screenBusy.value,
+      screenSnapshot: deps.refs.screenSnapshot.value,
+      recrawlBusy: deps.refs.recrawlBusy.value,
+      recrawlSnapshot: deps.refs.recrawlSnapshot.value,
+      pausedRunId: deps.refs.pausedRunId.value,
+      interruptedRunId: deps.refs.interruptedRunId.value,
+    });
+    if (liveStep) {
+      // 历史模式下先完整退出历史（还原平台、清理历史展示），再落到任务进度页。
+      if (deps.refs.historyRound?.value) await deps.api.returnToLatest();
+      deps.refs.activeStep.value = liveStep;
+      deps.api.notify("当前还有任务在跑，已回到任务进度", "info");
+      return false;
+    }
     const snapshotStatus = String(deps.refs.screenSnapshot.value?.status || "");
     const resumable = Boolean(
       deps.refs.pausedRunId.value
@@ -487,17 +515,10 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       }
       return true;
     }
-    const confirmed = window.confirm(
-      "当前仍有可续跑的筛选任务，开始新一轮会先归档 BOSS 和智联当前结果，断点将不可再续。确定开始新一轮吗？",
-    );
-    if (!confirmed) return false;
-    busyAction.value = "new-round";
-    try {
-      await deps.api.resetWorkflow();
-    } finally {
-      busyAction.value = "";
-    }
-    return true;
+    // 035：未结束任务存在时，一律跳回未完成的任务视图，不弹确认、不开始新一轮、不取消任务。
+    deps.refs.activeStep.value = "screen";
+    deps.api.notify("当前还有任务在跑，已回到任务进度", "info");
+    return false;
   }
 
   return {

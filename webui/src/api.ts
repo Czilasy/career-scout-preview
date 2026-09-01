@@ -245,6 +245,8 @@ export interface LogsQuery {
   offset?: number;
   since?: number;
   identity?: string;
+  /** 035：按任务过滤（运行日志），仅返回包含该 task_id 的日志行。 */
+  task_id?: string;
 }
 
 export function fetchLogs(params: LogsQuery = {}): Promise<LogsResponse> {
@@ -253,6 +255,7 @@ export function fetchLogs(params: LogsQuery = {}): Promise<LogsResponse> {
   if (params.offset) query.set("offset", String(params.offset));
   if (params.since) query.set("since", String(params.since));
   if (params.identity) query.set("identity", params.identity);
+  if (params.task_id) query.set("task_id", params.task_id);
   const qs = query.toString();
   return apiRequest<LogsResponse>(`/api/logs${qs ? `?${qs}` : ""}`);
 }

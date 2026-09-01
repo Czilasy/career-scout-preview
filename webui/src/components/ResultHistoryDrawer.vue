@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Check, LoaderCircle, Trash2, X } from "@lucide/vue";
+import { Check, LoaderCircle, ScrollText, Trash2, X } from "@lucide/vue";
 import { formatHistoryTime, type HistoryRoundItem } from "../composables/resultHistory";
 import type { HistoryRoundDetail } from "../composables/resultHistory";
 import { historyStatusLabel } from "../discovery";
@@ -21,6 +21,7 @@ const emit = defineEmits<{
   "confirm-delete": [item: HistoryRoundItem];
   "cancel-delete": [];
   "delete-round": [item: HistoryRoundItem];
+  "view-log": [item: HistoryRoundItem];
 }>();
 
 const closeEl = ref<HTMLButtonElement | null>(null);
@@ -235,6 +236,16 @@ const countParts = (item: HistoryRoundItem) => [
                   class="history-row-actions"
                   @click.stop
                 >
+                  <button
+                    v-if="item.scrape_task_id"
+                    class="icon-button history-log"
+                    type="button"
+                    :aria-label="`查看 ${formatHistoryTime(item.finished_at || item.created_at) || '该轮次'} 运行日志`"
+                    data-testid="history-log-trigger"
+                    @click="emit('view-log', item)"
+                  >
+                    <ScrollText :size="16" aria-hidden="true" />
+                  </button>
                   <button
                     class="icon-button history-delete"
                     type="button"

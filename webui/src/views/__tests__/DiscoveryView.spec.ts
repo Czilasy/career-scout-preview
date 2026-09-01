@@ -3127,7 +3127,7 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
-  it("013: starting a new round confirms resumable rounds and clears the continue guide", async () => {
+  it("013/035: starting a new round with resumable rounds jumps back to the task view, no confirm", async () => {
     const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(true);
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -3189,9 +3189,9 @@ describe("DiscoveryView", () => {
     await flushPromises();
     await wrapper.findAll("button").find((b) => b.text().includes("开始新一轮"))!.trigger("click");
     await flushPromises();
-    expect(confirmMock).toHaveBeenCalled();
-    expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(false);
-    expect(wrapper.text()).toContain("上传简历");
+    // 035：未结束任务存在时开始新一轮跳回任务视图，不弹确认、不取消任务
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(wrapper.find('[data-testid="continue-platform-guide"]').exists()).toBe(true);
     vi.unstubAllGlobals();
     confirmMock.mockRestore();
   });
@@ -4546,6 +4546,32 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
     wrapper.unmount();
   });
 
+  it("035: 运行中任务 + 快照 activeStep=results → 刷新恢复不写「已结束」标记（B086 刷新路径）", async () => {
+    // 构造运行中任务的未完成快照：恢复时 activeStep 会被还原为 results
+    sessionStorage.setItem(
+      "career-scout-workflow:profile-b078-f",
+      JSON.stringify({
+        version: 1, unfinished: true, activeStep: "results",
+        analysisReady: true, screenTaskId: "screen-live",
+        screenSnapshot: { status: "running", progress: {}, logs: [] },
+        scrapeCompleted: true, resultLoaded: false, resultsPageSeen: false,
+      }),
+    );
+    const fetchMock = baseFetch({
+      latestTask: {
+        ok: true, has_task: true, task_id: "screen-live", kind: "ai_screen",
+        status: "running", platform: "boss", scrape_task_id: "scrape-live",
+        scrape_completed: true, progress: { stage: "fetch_jd", message: "AI 筛选中" }, logs: [],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-b078-f" } });
+    await flushPromises();
+    // 运行中任务存在：不得因恢复 activeStep=results 而写「已结束」标记（否则再次刷新会取消任务）
+    expect(localStorage.getItem("career-scout-workflow:profile-b078-f:finished")).toBeNull();
+    wrapper.unmount();
+  });
+
   it("T030b: 未完成态——paused 任务 → 恢复现场可继续，不自动新一轮", async () => {
     const fetchMock = baseFetch({
       latestTask: {
@@ -4591,5 +4617,139 @@ describe("DiscoveryView 完成态自动新一轮（025 B078）", () => {
     expect(wrapper.find(".restore-banner").exists()).toBe(false);
     wrapper.unmount();
     localStorage.clear();
+  });
+});
+
+// 035 界面收口（重拆版）：三个真机问题的界面级验收——测试以「用户看到的界面」为准。
+describe("DiscoveryView 035 界面收口（US1/US2 界面级）", () => {
+  const settings035 = {
+    inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+    detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+    screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+  };
+
+  function bossSchema035() {
+    return {
+      ok: true, platform: "boss", schema_version: 1, enabled_for_new_tasks: true,
+      fields: [{ key: "stage", label: "融资阶段", multiple: false, options: [{ value: "804", label: "B轮" }] }],
+    };
+  }
+
+  function historyItem035(runId: string) {
+    return {
+      run_id: runId, platform: "boss", status: "done",
+      created_at: "2026-09-01 10:00:00",
+      total_scraped: 10, total_kept: 1, total_matched: 1, mismatch_count: 0,
+      total_dropped: 9, pending_count: 0,
+      keyword_summary: "Python 后端 / 上海", profile_summary_preview: "3年Python后端",
+      archived_at: null, is_latest: false,
+    };
+  }
+
+  function historyDetail035(runId: string) {
+    return {
+      ok: true, has_result: true, source_run_id: runId, platform: "boss", status: "done",
+      started_at: 1_720_000_000_000, finished_at: 1_720_000_036_000,
+      result: {
+        jobs: [{ job_id: "j1", platform: "boss", verdict: "match", title: "历史岗位" }],
+        dropped: [], total_kept: 1, total_dropped: 9,
+        profile_summary: "完整画像文本",
+      },
+    };
+  }
+
+  // T006（真机问题①，FR-010）：抓取中刷新恢复 → 03 页不残留旧一轮 AI 筛选内容。
+  it("035 T006: 抓取运行中刷新恢复 → 03 页无旧一轮筛选内容（真机问题①）", async () => {
+    sessionStorage.setItem("career-scout-workflow:profile-035-t006", JSON.stringify({
+      version: 1, unfinished: true, activeStep: "search", analysisReady: true,
+      keywords: [{ word: "Python", recommended: true }], selectedKeywords: ["Python"], cityText: "上海",
+      filterValues: { boss: {}, zhilian: {} }, profileSummary: "3年Python", profileFacts: {},
+      scrapeTaskId: "scrape-035-t006", screenTaskId: "screen-old", scrapeCompleted: true,
+      scrapeSnapshot: { status: "completed", progress: {}, logs: [] },
+      screenSnapshot: { status: "completed", progress: { message: "旧一轮 AI 筛选完成" }, logs: [], total: 42, kept_count: 20, dropped_count: 22 },
+      resultLoaded: false, resultsPageSeen: false,
+    }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({
+        ok: true, has_task: true, task_id: "scrape-035-t006", kind: "scrape",
+        status: "running", platform: "boss", progress: { message: "正在抓取" }, logs: [],
+      });
+      if (url.endsWith("/api/task-state/scrape-035-t006")) return response({
+        status: "running", progress: { message: "正在抓取" }, logs: [],
+      });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.includes("/api/filter-labels")) return response(bossSchema035());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: settings035, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-035-t006" } });
+    await flushPromises();
+
+    // 02 页显示抓取运行中的真实进度
+    expect(wrapper.get('[data-testid="start-scrape"]').text()).toContain("停止抓取");
+    // 进入 03 页（scrapeCompleted 由旧快照带入 true，步骤可达——真机踩中路径）
+    await wrapper.get('[data-testid="continue-to-screen"]').trigger("click");
+    await flushPromises();
+    // 03 页不得渲染旧一轮筛选进度卡与旧轮计数/文案
+    expect(wrapper.find('[data-testid="task-progress-announcement"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("旧一轮 AI 筛选完成");
+
+    wrapper.unmount();
+    sessionStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
+  // T012（真机问题②，FR-011）：后台抓取运行中 + 历史模式 04 页点「开始新一轮」
+  // → 跳回 02 抓取进度页，任务未被取消、未开新一轮。
+  it("035 T012: 历史模式 04 页点「开始新一轮」→ 跳回 02、任务未被取消（真机问题②）", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/latest-running-task")) return response({
+        ok: true, has_task: true, task_id: "scrape-035-t012", kind: "scrape",
+        status: "running", platform: "boss", progress: { message: "正在抓取" }, logs: [],
+      });
+      if (url.endsWith("/api/task-state/scrape-035-t012")) return response({
+        status: "running", progress: { message: "正在抓取" }, logs: [],
+      });
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.endsWith("/api/result-history")) return response({ ok: true, items: [historyItem035("h1")] });
+      if (url.endsWith("/api/result-history/h1")) return response(historyDetail035("h1"));
+      if (url.includes("/api/filter-labels")) return response(bossSchema035());
+      if (url.includes("/api/options")) return response({ ok: true, platform: "boss", city_mapping_version: 1, cities: [] });
+      if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: settings035, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-035-t012" } });
+    await flushPromises();
+
+    // 后台抓取运行中（02 页为当前进度页）
+    expect(wrapper.get('[data-testid="start-scrape"]').text()).toContain("停止抓取");
+
+    // 进历史模式，查看旧一轮 04 页
+    (wrapper.vm as unknown as { openHistoryDrawer(): void }).openHistoryDrawer();
+    await flushPromises();
+    await wrapper.get('[data-testid="history-round-row"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="history-round-marker"]').exists()).toBe(true);
+
+    // 在历史模式 04 页点「开始新一轮」
+    await wrapper.findAll("button").find((b) => b.text().includes("开始新一轮"))!.trigger("click");
+    await flushPromises();
+
+    // 跳回 02 抓取进度页（真机问题②验收），并退出历史模式
+    expect(wrapper.get('[data-testid="start-scrape"]').text()).toContain("停止抓取");
+    expect(wrapper.find('[data-testid="history-round-marker"]').exists()).toBe(false);
+    // 任务未被取消、未开新一轮、未归档最新结果
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/api/task/cancel"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/api/execute-search"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/api/result-history/archive-latest"))).toBe(false);
+
+    wrapper.unmount();
+    sessionStorage.clear();
+    vi.unstubAllGlobals();
   });
 });

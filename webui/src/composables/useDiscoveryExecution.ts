@@ -163,6 +163,16 @@ async function restoreRunningTask() {
       await deps.saveScrapedOnlySnapshot();
       return;
     }
+    // 035（真机问题①，FR-010）：恢复到活的抓取任务（运行/排队/暂停/失败/中断）时，
+    // 本轮进度必在 02——screen 侧任何展示数据必属旧轮，同步清空（含 sessionStorage
+    // 整包恢复带入的 screenSnapshot 残留），03 页回「未开始」。
+    if (kind === "scrape" && ["running", "queued", "paused", "failed", "interrupted"].includes(String(data.status))) {
+      screenTaskId.value = "";
+      screenSnapshot.value = null;
+      recrawlTaskId.value = "";
+      recrawlSnapshot.value = null;
+      currentRoundStatus.value = "";
+    }
     if (data.status === "interrupted") {
       // 服务重启打断的任务：工作线程已死不能 poll；提示用户重开（后端会自动接着上次进度）
       interruptedRunId.value = data.task_id;
@@ -384,6 +394,13 @@ async function startScrape(options: OneClickLaunch = {}) {
   scrapeSnapshot.value = { status: "running", progress: { message: "正在创建抓取任务…" }, logs: [] };
   finishedPartial.value = false;
   recrawlPlatformGuide.value = null;
+  // 035（真机问题①，FR-010 场景 5）：新一轮开始即清空上一轮 AI 筛选/重抓展示状态，
+  // 03 页不保留旧一轮内容。
+  screenTaskId.value = "";
+  screenSnapshot.value = null;
+  recrawlTaskId.value = "";
+  recrawlSnapshot.value = null;
+  currentRoundStatus.value = "";
   try {
     const data = await apiRequest<{ task_id: string }>("/api/execute-search", {
       method: "POST",

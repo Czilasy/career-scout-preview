@@ -22,6 +22,9 @@ function makeDeps() {
     profileFacts: ref<Record<string, unknown>>({}),
     profileConfirmed: ref(false),
     scrapeTaskId: ref("scrape-1"),
+    scrapeBusy: ref(false),
+    scrapeSnapshot: ref<any>(null),
+    historyRound: ref<any>(null),
     screenTaskId: ref("screen-1"),
     pausedRunId: ref(""),
     interruptedRunId: ref(""),
@@ -47,6 +50,7 @@ function makeDeps() {
     finishPausedTask: vi.fn(async () => {}),
     resetWorkflow: vi.fn(async () => {}),
     loadLatestResult: vi.fn(async () => {}),
+    returnToLatest: vi.fn(async () => {}),
     notify: vi.fn(),
   };
   return { refs, api };
@@ -224,7 +228,7 @@ describe("useScreenRoundFlow", () => {
     expect(flow.continueTargetList.value).toEqual(["boss"]);
   });
 
-  it("confirmNewRound asks when an older platform is still resumable", async () => {
+  it("035: confirmNewRound jumps back to the task view when an older platform is still resumable", async () => {
     const { refs, api } = makeDeps();
     const flow = useScreenRoundFlow({ refs, api });
     flow.registerRoundContext("boss", roundContext());
@@ -235,8 +239,9 @@ describe("useScreenRoundFlow", () => {
     const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(false);
     confirmMock.mockClear();
     await flow.confirmNewRound();
-    expect(confirmMock).toHaveBeenCalled();
+    expect(confirmMock).not.toHaveBeenCalled();
     expect(api.resetWorkflow).not.toHaveBeenCalled();
+    expect(refs.activeStep.value).toBe("screen");
     confirmMock.mockRestore();
   });
 
@@ -322,17 +327,15 @@ describe("useScreenRoundFlow", () => {
     expect(api.resetWorkflow).toHaveBeenCalled();
   });
 
-  it("confirmNewRound asks before resetting a resumable round", async () => {
+  it("035: confirmNewRound jumps back to the task view instead of asking for a resumable round", async () => {
     const { refs, api } = makeDeps();
     const flow = useScreenRoundFlow({ refs, api });
     flow.restoreRoundContext(roundContext());
     const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(false);
     await flow.confirmNewRound();
-    expect(confirmMock).toHaveBeenCalled();
+    expect(confirmMock).not.toHaveBeenCalled();
     expect(api.resetWorkflow).not.toHaveBeenCalled();
-    confirmMock.mockReturnValue(true);
-    await flow.confirmNewRound();
-    expect(api.resetWorkflow).toHaveBeenCalled();
+    expect(refs.activeStep.value).toBe("screen");
   });
 
   it("derives pause/continue actions from snapshot status", () => {
@@ -390,6 +393,78 @@ describe("useScreenRoundFlow", () => {
     expect(confirmMock).not.toHaveBeenCalled();
     expect(api.resetWorkflow).toHaveBeenCalled();
     confirmMock.mockRestore();
+  });
+
+  // 035 US2（真机问题②，FR-011）：未结束任务存在时（含抓取运行中），
+  // confirmNewRound 顶部守卫必须先于 resumable 计算命中：跳回任务真实进度页、
+  // 不 resetWorkflow（不取消任务）、不弹窗。
+  it("035: 抓取运行中（screen 侧全空）→ 跳回 02 search，不 reset、不取消", async () => {
+    const { refs, api } = makeDeps();
+    refs.scrapeTaskId.value = "scrape-live";
+    refs.scrapeSnapshot.value = { status: "running", progress: {}, logs: [] };
+    refs.screenTaskId.value = "";
+    refs.screenSnapshot.value = null;
+    refs.activeStep.value = "results";
+    const flow = useScreenRoundFlow({ refs, api });
+    await flow.confirmNewRound();
+    expect(api.resetWorkflow).not.toHaveBeenCalled();
+    expect(api.notify).toHaveBeenCalled();
+    expect(refs.activeStep.value).toBe("search");
+  });
+
+  it("035: 历史模式（historyRound 挂着）+ 后台抓取运行中 → 完整退出历史并跳回 02", async () => {
+    const { refs, api } = makeDeps();
+    refs.scrapeTaskId.value = "scrape-live";
+    refs.scrapeSnapshot.value = { status: "running", progress: {}, logs: [] };
+    refs.screenTaskId.value = "";
+    refs.screenSnapshot.value = null;
+    refs.activeStep.value = "results";
+    refs.historyRound.value = { runId: "h1", platform: "boss", status: "done", jobCount: 1 };
+    const flow = useScreenRoundFlow({ refs, api });
+    await flow.confirmNewRound();
+    expect(api.returnToLatest).toHaveBeenCalled();
+    expect(api.resetWorkflow).not.toHaveBeenCalled();
+    expect(refs.activeStep.value).toBe("search");
+  });
+
+  it("035: 历史模式 + 抓取运行中 + 存在可续跑筛选上下文 → 守卫仍先命中，跳回 02", async () => {
+    const { refs, api } = makeDeps();
+    refs.scrapeTaskId.value = "scrape-live";
+    refs.scrapeSnapshot.value = { status: "running", progress: {}, logs: [] };
+    refs.screenTaskId.value = "";
+    refs.screenSnapshot.value = null;
+    refs.activeStep.value = "results";
+    refs.historyRound.value = { runId: "h1", platform: "boss", status: "done", jobCount: 1 };
+    const flow = useScreenRoundFlow({ refs, api });
+    flow.registerRoundContext("boss", roundContext());
+    await flow.confirmNewRound();
+    expect(api.returnToLatest).toHaveBeenCalled();
+    expect(api.resetWorkflow).not.toHaveBeenCalled();
+    expect(refs.activeStep.value).toBe("search");
+  });
+
+  it("035: 抓取暂停（scrapeSnapshot paused）→ 跳回 02 search", async () => {
+    const { refs, api } = makeDeps();
+    refs.scrapeSnapshot.value = { status: "paused", progress: {}, logs: [] };
+    refs.screenTaskId.value = "";
+    refs.screenSnapshot.value = null;
+    refs.activeStep.value = "results";
+    const flow = useScreenRoundFlow({ refs, api });
+    await flow.confirmNewRound();
+    expect(api.resetWorkflow).not.toHaveBeenCalled();
+    expect(refs.activeStep.value).toBe("search");
+  });
+
+  it("035: 筛选运行中 → 跳回落点按任务类型分派为 03 screen", async () => {
+    const { refs, api } = makeDeps();
+    refs.scrapeSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    refs.screenTaskId.value = "screen-live";
+    refs.screenSnapshot.value = { status: "running", progress: {}, logs: [] };
+    refs.activeStep.value = "results";
+    const flow = useScreenRoundFlow({ refs, api });
+    await flow.confirmNewRound();
+    expect(api.resetWorkflow).not.toHaveBeenCalled();
+    expect(refs.activeStep.value).toBe("screen");
   });
 });
 

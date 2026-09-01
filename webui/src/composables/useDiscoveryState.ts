@@ -386,6 +386,10 @@ const {
 
 
 const historyRound = ref<{ runId: string; platform: Platform; status: string; jobCount: number } | null>(null);
+// 035：从历史「回到最新」的过渡标记：过渡期间切到 04 页不得触发「已结束」置位。
+const returningFromHistory = ref(false);
+// 035：后台任务跑完时用户在看历史的顶部冒泡提示状态。
+const taskCompletedToast = ref<{ visible: boolean }>({ visible: false });
 
 
 const platformBeforeHistory = ref<Platform | null>(null);
@@ -522,13 +526,14 @@ const profileConfirmed = ref(false);
 
 // 任意 pipeline 任务占用中（运行/暂停/待恢复）都禁止再启动新任务。
 
-// 任意 pipeline 任务占用中（运行/暂停/待恢复）都禁止再启动新任务。
+// 任意 pipeline 任务占用中（运行/暂停/失败/中断待处理）都禁止再启动新任务。
+// 035：与 hasLiveTaskState 口径对齐——failed/interrupted 快照也视为未结束，防止
+// 「上传简历被挡、开始抓取不挡」等入口行为打架。
 const pipelineBusy = computed(() => Boolean(
   scrapeBusy.value || screenBusy.value || recrawlBusy.value
   || pausedRunId.value || interruptedRunId.value
-  || scrapeSnapshot.value?.status === "paused"
-  || screenSnapshot.value?.status === "paused"
-  || recrawlSnapshot.value?.status === "paused",
+  || [scrapeSnapshot.value?.status, screenSnapshot.value?.status, recrawlSnapshot.value?.status]
+    .some((s) => s && ["paused", "failed", "interrupted"].includes(String(s))),
 ));
 
 
@@ -842,6 +847,8 @@ return {
   historyRound,
   platformBeforeHistory,
   historyMode,
+  returningFromHistory,
+  taskCompletedToast,
   currentRoundStatus,
   isScrapedOnly,
   historyStatusText,
@@ -919,6 +926,69 @@ return {
 }
 
 export type DiscoveryState = ReturnType<typeof useDiscoveryState>;
+
+/** 035：未结束任务真实存在判定（浏览历史不改变任务状态；供开新一轮入口守卫复用）。 */
+export function hasLiveTaskState(state: DiscoveryState): boolean {
+  if (state.pausedRunId.value || state.interruptedRunId.value) return true;
+  const liveStatuses = new Set(["running", "queued", "paused", "failed", "interrupted"]);
+  for (const snap of [
+    state.screenSnapshot.value,
+    state.scrapeSnapshot.value,
+    state.recrawlSnapshot.value,
+  ]) {
+    if (snap && liveStatuses.has(String(snap.status))) return true;
+  }
+  return false;
+}
+
+/** 035：跨域共享派生的最小判定面（接受任意携带 status 的快照形状）。 */
+export interface LiveTaskProbe {
+  scrapeBusy?: boolean;
+  scrapeSnapshot?: { status?: string | null } | null;
+  screenBusy?: boolean;
+  screenSnapshot?: { status?: string | null } | null;
+  recrawlBusy?: boolean;
+  recrawlSnapshot?: { status?: string | null } | null;
+  pausedRunId?: string;
+  interruptedRunId?: string;
+}
+
+const LIVE_TASK_STATUSES = new Set(["running", "queued", "paused", "failed", "interrupted"]);
+
+function snapshotLive(snapshot?: { status?: string | null } | null): boolean {
+  return Boolean(snapshot && LIVE_TASK_STATUSES.has(String(snapshot.status || "")));
+}
+
+/**
+ * 035：未结束任务的「真实进度页」只读派生（US2/US3 共享）：
+ * 抓取活（运行/排队/暂停/失败/中断）→ "search"（02，抓取任务的真实进度页）；
+ * 筛选/重抓活（含 pausedRunId/interruptedRunId）→ "screen"（03）；无活任务 → ""。
+ * 抓取+筛选同时活时以抓取为准（一键链路筛选接续时抓取快照已终态，自然落 03）。
+ */
+export function deriveLiveTaskStep(probe: LiveTaskProbe): StepId | "" {
+  if (probe.scrapeBusy || snapshotLive(probe.scrapeSnapshot)) return "search";
+  if (
+    probe.screenBusy || probe.recrawlBusy
+    || snapshotLive(probe.screenSnapshot)
+    || snapshotLive(probe.recrawlSnapshot)
+    || probe.pausedRunId || probe.interruptedRunId
+  ) return "screen";
+  return "";
+}
+
+/** 035：liveTaskStep(state)——持有 state 的域（search/results 等）直接取用。 */
+export function liveTaskStep(state: DiscoveryState): StepId | "" {
+  return deriveLiveTaskStep({
+    scrapeBusy: state.scrapeBusy.value,
+    scrapeSnapshot: state.scrapeSnapshot.value,
+    screenBusy: state.screenBusy.value,
+    screenSnapshot: state.screenSnapshot.value,
+    recrawlBusy: state.recrawlBusy.value,
+    recrawlSnapshot: state.recrawlSnapshot.value,
+    pausedRunId: state.pausedRunId.value,
+    interruptedRunId: state.interruptedRunId.value,
+  });
+}
 
 // 031 B8：emit/props 形状固定为类型，替代原未类型化的 emit 参数
 // 签名（data-model E6 基线最后一处未类型化签名）。成员与 DiscoveryView 的

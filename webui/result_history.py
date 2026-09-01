@@ -109,6 +109,8 @@ class ResultHistoryService:
         items = []
         for row in rows:
             platform_key = str(row.get("platform") or "")
+            # 035：暴露该轮的抓取任务 id，供「查看该轮运行日志」按任务过滤。
+            params = _decode_json(row.get("execution_params_json"), {})
             items.append({
                 "run_id": str(row["id"]),
                 "platform": row.get("platform"),
@@ -126,6 +128,7 @@ class ResultHistoryService:
                 "profile_summary_preview": _preview(row.get("profile_summary")),
                 "archived_at": row.get("archived_at"),
                 "is_latest": bool(latest_ids.get(platform_key) == str(row["id"])),
+                "scrape_task_id": str(params.get("scrape_task_id") or ""),
             })
         return items
 

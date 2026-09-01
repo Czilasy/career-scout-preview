@@ -4,6 +4,7 @@
 // - 未进 04 页 → 走既有 interrupted 恢复续跑（FR-004，B068 行为不变）。
 import { ref } from "vue";
 import { apiRequest } from "../../api";
+import type { FrozenSearchScope } from "../../types";
 import { useDiscoveryExecution } from "../useDiscoveryExecution";
 import { useDiscoveryState } from "../useDiscoveryState";
 import type { DiscoveryState } from "../useDiscoveryState";
@@ -180,5 +181,107 @@ describe("useDiscoveryExecution.restoreRunningTask（026 B078）", () => {
     expect(state.activeTaskRestored.value).toBe(false);
     expect(state.activeStep.value).toBe("upload");
     expect(deps.loadLatestResult).not.toHaveBeenCalled();
+  });
+});
+
+// 035 US1（真机问题①，FR-010）：新一轮开始 / 恢复到活的抓取任务时，
+// screen 侧旧一轮展示状态（screenSnapshot 等 5 项）必须同步清空——03 页不残留旧轮内容。
+describe("useDiscoveryExecution screen 侧清空（035 FR-010）", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset();
+  });
+
+  function seedStaleScreenSide(state: DiscoveryState) {
+    state.screenTaskId.value = "screen-old";
+    state.screenSnapshot.value = {
+      status: "completed",
+      progress: { message: "旧一轮 AI 筛选完成" },
+      logs: [],
+      total: 42,
+      kept_count: 20,
+      dropped_count: 22,
+    };
+    state.recrawlTaskId.value = "recrawl-old";
+    state.recrawlSnapshot.value = { status: "completed", progress: {}, logs: [] };
+    state.currentRoundStatus.value = "screened";
+  }
+
+  it("T005-①: startScrape 开新一轮时清空 screen 侧展示状态", async () => {
+    const state = makeState();
+    seedStaleScreenSide(state);
+    state.selectedKeywords.value = ["Python"];
+    apiRequestMock.mockResolvedValue({ task_id: "scrape-new-1" });
+    const deps = makeDeps({
+      refreshScopePreview: vi.fn(async () => ({ scope_digest: "digest-1" } as unknown as FrozenSearchScope)),
+    });
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.startScrape();
+
+    expect(state.scrapeBusy.value).toBe(true);
+    expect(state.screenTaskId.value).toBe("");
+    expect(state.screenSnapshot.value).toBeNull();
+    expect(state.recrawlTaskId.value).toBe("");
+    expect(state.recrawlSnapshot.value).toBeNull();
+    expect(state.currentRoundStatus.value).toBe("");
+  });
+
+  it("T005-②: restoreRunningTask 检测到活的抓取任务时清空 screen 侧残留（含 sessionStorage 整包恢复带入）", async () => {
+    apiRequestMock.mockResolvedValue({
+      ok: true, has_task: true, task_id: "scrape-live-1", kind: "scrape",
+      status: "running", platform: "boss", progress: { message: "正在抓取" }, logs: [],
+    });
+    const state = makeState();
+    seedStaleScreenSide(state);
+    const deps = makeDeps();
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.restoreRunningTask();
+
+    expect(state.scrapeBusy.value).toBe(true);
+    expect(state.activeStep.value).toBe("search");
+    expect(state.screenTaskId.value).toBe("");
+    expect(state.screenSnapshot.value).toBeNull();
+    expect(state.recrawlTaskId.value).toBe("");
+    expect(state.recrawlSnapshot.value).toBeNull();
+    expect(state.currentRoundStatus.value).toBe("");
+  });
+
+  it("恢复到活的抓取暂停任务（paused）时同样清空 screen 侧残留", async () => {
+    apiRequestMock.mockResolvedValue({
+      ok: true, has_task: true, task_id: "scrape-pause-1", kind: "scrape",
+      status: "paused", platform: "boss", progress: { message: "已暂停" }, logs: [],
+      pause_info: { error_code: "x", error_reason: "手动暂停" },
+    });
+    const state = makeState();
+    seedStaleScreenSide(state);
+    const deps = makeDeps();
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.restoreRunningTask();
+
+    expect(state.pausedRunId.value).toBe("scrape-pause-1");
+    expect(state.screenSnapshot.value).toBeNull();
+    expect(state.currentRoundStatus.value).toBe("");
+  });
+
+  it("恢复到活的筛选任务时不清空 screen 侧（那是任务本体，不能误删）", async () => {
+    apiRequestMock.mockResolvedValue({
+      ok: true, has_task: true, task_id: "screen-live-1", kind: "ai_screen",
+      status: "running", platform: "boss", scrape_task_id: "scrape-live-0",
+      scrape_completed: true, progress: { message: "AI 筛选中" }, logs: [],
+    });
+    const state = makeState();
+    state.screenTaskId.value = "screen-live-1";
+    state.screenSnapshot.value = {
+      status: "running", progress: { message: "AI 筛选中" }, logs: [],
+    };
+    const deps = makeDeps();
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.restoreRunningTask();
+
+    expect(state.screenSnapshot.value?.status).toBe("running");
+    expect(state.screenTaskId.value).toBe("screen-live-1");
   });
 });
