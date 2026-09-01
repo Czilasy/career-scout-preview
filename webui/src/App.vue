@@ -8,6 +8,9 @@ import NoticeBar from "./components/NoticeBar.vue";
 import ReminderDrawer from "./components/ReminderDrawer.vue";
 import UpdateDialog from "./components/UpdateDialog.vue";
 import AppSettingsMenu from "./components/AppSettingsMenu.vue";
+import WindowTitleBar from "./components/WindowTitleBar.vue";
+import DynamicIsland from "./components/DynamicIsland.vue";
+import { requestCapsuleNavigation, type CapsuleStatusPayload, type CapsuleNavigationTarget } from "./composables/useDiscoveryState";
 import DiscoveryView from "./views/DiscoveryView.vue";
 import { apiRequest, currentRuntimeMode, errorMessage, GITHUB_REPO_URL, initializeSession, openExternalLink, updateApi, type UpdateCheckResult } from "./api";
 import { getJobReminderCount, safeCanonicalUrl } from "./jobFeedback";
@@ -26,31 +29,18 @@ const themeToggleLabel = computed(() =>
   mode.value === "light" ? "切换到暗色模式" : "切换到浅色模式");
 
 // ---------------------------------------------------------------------------
-// 顶栏本轮状态胶囊：纯展示。数据来自 DiscoveryView 上抛的 round-status，
-// 空闲（无任务上下文且无结果）时不渲染。
+// 顶栏本轮状态胶囊（036 灵动岛）：数据来自 DiscoveryView 上抛的 round-status，
+// 空闲常驻显示平台名（FR-012）。点击经 requestCapsuleNavigation 派发导航。
 // ---------------------------------------------------------------------------
-const roundStatus = ref<RoundStatusPayload | null>(null);
-const roundStatusRunning = computed(() =>
-  roundStatus.value?.phase === "scraping" || roundStatus.value?.phase === "screening");
-const roundPillLabel = computed(() => {
-  const status = roundStatus.value;
-  if (!status) return "";
-  if (status.scope === "all") return "全部";
-  if (status.scope === "history") return "历史轮次";
-  return status.platform === "boss" ? "BOSS" : "智联";
-});
-const roundStatusText = computed(() => {
-  if (!roundStatus.value) return "";
-  const status = roundStatus.value;
-  if (status.phase === "scraping") return "抓取进行中";
-  if (status.phase === "screening") return "筛选进行中";
-  const platform = status.platform === "zhilian" ? "智联" : "BOSS";
-  // B038：未筛选轮顶栏显示"已抓取 N 个岗位"，不显示"已判定 N"。
-  if (status.phase === "scraped") return `已抓取 ${status.judged} 个岗位`;
-  if (status.scope === "all") return `${status.judged} 个岗位已判定`;
-  if (status.scope === "history") return `${platform} · ${status.judged} 个岗位已判定`;
-  return `${platform} · ${status.judged} 个岗位已判定`;
-});
+const roundStatus = ref<CapsuleStatusPayload | null>(null);
+
+function handleRoundStatus(payload: RoundStatusPayload | null) {
+  roundStatus.value = payload as CapsuleStatusPayload | null;
+}
+
+function handleCapsuleNavigate(target: CapsuleNavigationTarget) {
+  requestCapsuleNavigation(target);
+}
 
 // 页面标题随平台与页面状态变化；结果/双平台场景使用通用标题，不出现平台独占文案。
 const pageTitle = computed(() => {
@@ -495,14 +485,43 @@ async function refreshReminderCount() {
   }
 }
 
+// 036 B088（FR-021）：提醒按钮通用化——徽标显示各类提醒数量汇总
+//（投递 + 待确认 + 出错 + 跑完）。投递为服务端权威（reminderTotal）；
+// 待确认/出错/跑完来自胶囊状态（状态层汇总，不在前端伪造）。
+const reminderBreakdown = computed(() => {
+  const capsule = roundStatus.value?.capsule;
+  let pending = 0;
+  let error = 0;
+  let completed = 0;
+  if (capsule) {
+    if (capsule.state === "completed") {
+      pending = capsule.results.pending;
+      completed = 1; // 本轮跑完待查看
+    } else if (capsule.state === "attention" && capsule.attention.kind === "error") {
+      error = 1;
+    }
+  }
+  return { delivery: reminderTotal.value, pending, error, completed };
+});
+
+const reminderTotalAll = computed(() => {
+  const b = reminderBreakdown.value;
+  return b.delivery + b.pending + b.error + b.completed;
+});
+
 const reminderBadgeText = computed(() =>
-  reminderTotal.value >= 100 ? "99+" : String(reminderTotal.value));
+  reminderTotalAll.value >= 100 ? "99+" : String(reminderTotalAll.value));
 
 // 可访问名称始终包含真实总数；100+ 时视觉显示 99+。
-const reminderAriaLabel = computed(() =>
-  reminderTotal.value > 0
-    ? `查看投递提醒，共 ${reminderTotal.value} 个逾期岗位`
-    : "查看投递提醒");
+const reminderAriaLabel = computed(() => {
+  const b = reminderBreakdown.value;
+  if (reminderTotalAll.value === 0) return "查看提醒";
+  const parts = [`投递 ${b.delivery}`];
+  if (b.pending > 0) parts.push(`待确认 ${b.pending}`);
+  if (b.error > 0) parts.push(`出错 ${b.error}`);
+  if (b.completed > 0) parts.push(`跑完 ${b.completed}`);
+  return `查看提醒，共 ${reminderTotalAll.value} 项：${parts.join("、")}`;
+});
 
 function toggleReminderDrawer() {
   if (reminderDrawerOpen.value) {
@@ -551,6 +570,8 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
   <div class="app-shell">
     <!-- 万花筒彩蛋主题：整站光场衬底（032，仅该主题挂载） -->
     <KaleidoField v-if="mode === 'kaleido'" />
+    <!-- 036 自绘标题栏：仅桌面 EXE 渲染（浏览器模式不显示），页面最顶部 -->
+    <WindowTitleBar />
     <header class="app-header">
       <a
         class="brand"
@@ -580,13 +601,10 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
         ></span>
       </a>
 
-      <div v-if="roundStatus" class="round-pill" data-testid="round-status-pill">
-        <span v-if="roundStatusRunning" class="live" aria-hidden="true"></span>
-        <span class="pf">{{ roundPillLabel }}</span>
-        <span class="sep" aria-hidden="true"></span>
-        <span class="round-status-text">{{ roundStatusText }}</span>
-      </div>
-      <span v-else aria-hidden="true"></span>
+      <DynamicIsland
+        :status="roundStatus"
+        @navigate="handleCapsuleNavigate"
+      />
 
       <div class="header-actions">
         <button
@@ -601,7 +619,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
         >
           <Bell :size="18" aria-hidden="true" /><span>提醒</span>
           <em
-            v-if="reminderTotal > 0"
+            v-if="reminderTotalAll > 0"
             class="fav-badge reminder-badge"
             data-testid="reminder-badge"
             aria-hidden="true"
@@ -762,7 +780,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
         @notify="showNotice"
         @profile-created="acceptCreatedProfile"
         @job-feedback-changed="handleJobFeedbackChanged"
-        @round-status="roundStatus = $event"
+        @round-status="handleRoundStatus"
         @open-browser-accounts="browserAccountsOpen = true"
       />
     </div>

@@ -659,3 +659,10 @@ return {
   handleLifecycleDialogKeydown,
 };
 }
+
+// ---------------------------------------------------------------------------
+// 036 B088：顶栏胶囊结果数字提取由 useDiscoveryState 数据层提供（实现在
+// 数据层，避免 results→state 反向运行时依赖）。本域 re-export 标记「结果
+// 数字源自流水线结果」，消费方（roundStatusPayload 派生）统一经此处取用。
+// ---------------------------------------------------------------------------
+export { resultCountsFromPipeline } from "./useDiscoveryState";

@@ -7,6 +7,7 @@ import { apiRequest } from "../../api";
 import { useDiscoveryTasks } from "../useDiscoveryTasks";
 import { useDiscoverySearch } from "../useDiscoverySearch";
 import { useDiscoveryState } from "../useDiscoveryState";
+import { taskProgressFromSnapshot } from "../useDiscoveryState";
 import type { DiscoveryState } from "../useDiscoveryState";
 import type { RoundFlowLike, TasksNeeds } from "../discoveryDeps";
 
@@ -314,5 +315,39 @@ describe("useDiscoverySearch.analyzeResume（035 入口守卫落点）", () => {
 
     expect(deps.cancelActiveTasksForNewRound).toHaveBeenCalled();
     expect(apiRequestMock).toHaveBeenCalledWith("/api/analyze-resume", expect.anything());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 036 B088：taskProgressFromSnapshot 进度数字提取（供胶囊 running 态）。
+// ---------------------------------------------------------------------------
+describe("taskProgressFromSnapshot（036 胶囊进度提取）", () => {
+  it("null 快照 → done 0", () => {
+    expect(taskProgressFromSnapshot(null)).toEqual({ done: 0 });
+  });
+
+  it("progress.current + progress.total → done/total", () => {
+    expect(taskProgressFromSnapshot({ status: "running", progress: { current: 12, total: 50 }, logs: [] }))
+      .toEqual({ done: 12, total: 50 });
+  });
+
+  it("total 缺省（未知总量）→ 省略分母", () => {
+    expect(taskProgressFromSnapshot({ status: "running", progress: { current: 5 }, logs: [] }))
+      .toEqual({ done: 5 });
+  });
+
+  it("total 为 0 → 省略分母（不显示假分母）", () => {
+    expect(taskProgressFromSnapshot({ status: "running", progress: { current: 5, total: 0 }, logs: [] }))
+      .toEqual({ done: 5 });
+  });
+
+  it("缺 progress 时回退 success_count/source_total", () => {
+    expect(taskProgressFromSnapshot({ status: "running", progress: {}, logs: [], success_count: 3, source_total: 20 }))
+      .toEqual({ done: 3, total: 20 });
+  });
+
+  it("done 非数字 → 0", () => {
+    expect(taskProgressFromSnapshot({ status: "running", progress: {}, logs: [], success_count: undefined }))
+      .toEqual({ done: 0 });
   });
 });

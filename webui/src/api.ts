@@ -20,6 +20,10 @@ declare global {
       api?: {
         open_external?: (url: string) => Promise<{ ok: boolean; error?: string }>;
         quit_app?: () => Promise<{ ok: boolean; error?: string }>;
+        // 036 自绘标题栏窗口控制（desktop.py DesktopJsApi 提供）
+        window_minimize?: () => Promise<{ ok: boolean; error?: string }>;
+        window_toggle_maximize?: () => Promise<{ ok: boolean; error?: string }>;
+        window_close?: () => Promise<{ ok: boolean; error?: string }>;
       };
     };
   }

@@ -36,9 +36,9 @@
 
 **Purpose**: 无边框窗口控制域（US1 前置）+ 胶囊数据契约（US2 前置）
 
-- [ ] T001 真机验证 pywebview frameless 行为（Windows）：`frameless=True` + `easy_drag=True` 下最大化是否天然避让任务栏、拖拽与双击行为，把结论写入 `packaging/window_controls.py` 与 `specs/036-titlebar-dynamic-island/research.md`（决定最大化避让是否需 Win32 处理；阻塞 T002）
-- [ ] T002 [P] 新建 `packaging/window_controls.py`：窗口控制原语（minimize/maximize/restore、最大化避让任务栏适配位），仅依赖注入的 window 对象，纯逻辑可单测
-- [ ] T003 [P] 新建 `tests/test_window_controls.py`：窗口控制聚焦测试（mock window 对象验证各原语调用与错误路径）
+- [x] T001 真机验证 pywebview frameless 行为（Windows）：`frameless=True` + `easy_drag=True` 下最大化是否天然避让任务栏、拖拽与双击行为，把结论写入 `packaging/window_controls.py` 与 `specs/036-titlebar-dynamic-island/research.md`（决定最大化避让是否需 Win32 处理；阻塞 T002）
+- [x] T002 [P] 新建 `packaging/window_controls.py`：窗口控制原语（minimize/maximize/restore、最大化避让任务栏适配位），仅依赖注入的 window 对象，纯逻辑可单测
+- [x] T003 [P] 新建 `tests/test_window_controls.py`：窗口控制聚焦测试（mock window 对象验证各原语调用与错误路径）
 
 **Checkpoint**: 窗口控制域就绪；US1 可开工
 
@@ -52,12 +52,12 @@
 
 ### Implementation for User Story 1
 
-- [ ] T004 [P] [US1] `packaging/desktop.py`：`create_window` 加 `frameless=True`（仅 Windows）+ `easy_drag=True`；`DesktopJsApi` 新增 `window_minimize()`/`window_toggle_maximize()`/`window_close()`（调用 `window_controls.py` 原语与既有优雅退出），净增 ≤150 行
-- [ ] T005 [P] [US1] 新建 `webui/src/components/WindowTitleBar.vue`：自绘标题栏（左侧 `Career Scout` 文字、右侧最小化/最大化还原/关闭三按钮、标题栏空白区加 `pywebview-drag-region` 类拖拽区、双击显式绑定最大化、主题跟随：浅色白/暗色暗/特殊主题透明、特殊主题下半透明磨砂按钮 + X 悬停红底 + 其余悬停线条变深），仅 `window.pywebview` 存在时渲染，~120 行
-- [ ] T006 [P] [US1] 新建 `webui/src/components/__tests__/WindowTitleBar.spec.ts`：渲染条件（有/无 pywebview）、三按钮点击触发正确 js_api 调用、主题类名随主题变化
-- [ ] T007 [US1] `webui/src/App.vue`：挂载 `WindowTitleBar`（页面最顶部，仅桌面版），现有业务顶栏下移，净增 ≤30 行
-- [ ] T008 [P] [US1] `tests/test_desktop_shell.py` / `tests/test_desktop_shell_wiring.py`：无边框参数断言、js_api 窗口控制方法接线与错误路径测试
-- [ ] T009 [US1] 回归验证：`tests/test_desktop_window_state.py` 全绿（窗口记忆不回归：位置/大小/最大化/多屏钳制）
+- [x] T004 [P] [US1] `packaging/desktop.py`：`create_window` 加 `frameless=True`（仅 Windows）+ `easy_drag=True`；`DesktopJsApi` 新增 `window_minimize()`/`window_toggle_maximize()`/`window_close()`（调用 `window_controls.py` 原语与既有优雅退出），净增 ≤150 行
+- [x] T005 [P] [US1] 新建 `webui/src/components/WindowTitleBar.vue`：自绘标题栏（左侧 `Career Scout` 文字、右侧最小化/最大化还原/关闭三按钮、标题栏空白区加 `pywebview-drag-region` 类拖拽区、双击显式绑定最大化、主题跟随：浅色白/暗色暗/特殊主题透明、特殊主题下半透明磨砂按钮 + X 悬停红底 + 其余悬停线条变深），仅 `window.pywebview` 存在时渲染，~120 行
+- [x] T006 [P] [US1] 新建 `webui/src/components/__tests__/WindowTitleBar.spec.ts`：渲染条件（有/无 pywebview）、三按钮点击触发正确 js_api 调用、主题类名随主题变化
+- [x] T007 [US1] `webui/src/App.vue`：挂载 `WindowTitleBar`（页面最顶部，仅桌面版），现有业务顶栏下移，净增 ≤30 行
+- [x] T008 [P] [US1] `tests/test_desktop_shell.py` / `tests/test_desktop_shell_wiring.py`：无边框参数断言、js_api 窗口控制方法接线与错误路径测试
+- [x] T009 [US1] 回归验证：`tests/test_desktop_window_state.py` 全绿（窗口记忆不回归：位置/大小/最大化/多屏钳制）
 
 **Checkpoint**: B084 完成——无边框标题栏功能可用、窗口记忆不回归
 
@@ -71,14 +71,14 @@
 
 ### Implementation for User Story 2
 
-- [ ] T010 [P] [US2] `webui/src/composables/useDiscoveryTasks.ts`：将抓取/筛选进度（done/total）并入上抛状态（`round-status` 扩展，无新轮询）
-- [ ] T011 [P] [US2] `webui/src/composables/useDiscoveryResults.ts`：将结果态（matched/pending）并入上抛状态
-- [ ] T012 [P] [US2] `webui/src/composables/useDiscoveryState.ts`：胶囊状态派生（四态 + "attention > running > completed > idle" 优先级、空闲平台名默认 boss、total 未知省略分母、pending=0 不显示）
-- [ ] T013 [P] [US2] 新建 `webui/src/components/DynamicIsland.vue`：胶囊组件（四态渲染、呼吸点、点击派发 home/task/results/attention、动画：数字跳动/展开收缩/醒的过程/待确认标亮、`prefers-reduced-motion` 降级、特殊主题半透明），~250 行
-- [ ] T014 [P] [US2] 新建 `webui/src/components/__tests__/DynamicIsland.spec.ts`：四态渲染、优先级（多态并存取最高一件）、点击行为、数字变化、减少动态降级
-- [ ] T015 [US2] `webui/src/App.vue`：将现有 `round-pill` 替换为 `DynamicIsland`，接入上抛状态与点击跳转（依赖 T007 已挂载标题栏；同文件冲突，串行）
-- [ ] T016 [US2] `webui/src/App.vue` + `webui/src/api.ts`：提醒按钮通用化（显示各类提醒数量：投递/待确认/出错/跑完，数量来自状态层汇总，点击仍打开提醒抽屉）
-- [ ] T017 [US2] 更新既有前端测试：`webui/src/__tests__/App.spec.ts` 等适配胶囊替换与提醒扩展
+- [x] T010 [P] [US2] `webui/src/composables/useDiscoveryTasks.ts`：将抓取/筛选进度（done/total）并入上抛状态（`round-status` 扩展，无新轮询）
+- [x] T011 [P] [US2] `webui/src/composables/useDiscoveryResults.ts`：将结果态（matched/pending）并入上抛状态
+- [x] T012 [P] [US2] `webui/src/composables/useDiscoveryState.ts`：胶囊状态派生（四态 + "attention > running > completed > idle" 优先级、空闲平台名默认 boss、total 未知省略分母、pending=0 不显示）
+- [x] T013 [P] [US2] 新建 `webui/src/components/DynamicIsland.vue`：胶囊组件（四态渲染、呼吸点、点击派发 home/task/results/attention、动画：数字跳动/展开收缩/醒的过程/待确认标亮、`prefers-reduced-motion` 降级、特殊主题半透明），~250 行
+- [x] T014 [P] [US2] 新建 `webui/src/components/__tests__/DynamicIsland.spec.ts`：四态渲染、优先级（多态并存取最高一件）、点击行为、数字变化、减少动态降级
+- [x] T015 [US2] `webui/src/App.vue`：将现有 `round-pill` 替换为 `DynamicIsland`，接入上抛状态与点击跳转（依赖 T007 已挂载标题栏；同文件冲突，串行）
+- [x] T016 [US2] `webui/src/App.vue` + `webui/src/api.ts`：提醒按钮通用化（显示各类提醒数量：投递/待确认/出错/跑完，数量来自状态层汇总，点击仍打开提醒抽屉）
+- [x] T017 [US2] 更新既有前端测试：`webui/src/__tests__/App.spec.ts` 等适配胶囊替换与提醒扩展
 
 **Checkpoint**: B088 完成——四态灵动岛可独立验证
 
@@ -88,9 +88,9 @@
 
 **Purpose**: 收尾、登记、门禁
 
-- [ ] T018 确认宪法模块地图登记：`.specify/memory/constitution.md` 已含 `window_controls.py`/`WindowTitleBar.vue`/`DynamicIsland.vue` 三条目（plan 阶段已登记，核对无遗漏）
-- [ ] T019 检查 README/文档是否需同步（新增桌面无边框行为说明，若需则更新 `README.md`、`packaging/README.md`）
-- [ ] T020 全量门禁：后端全量测试（`uv run python -m unittest discover`）+ 前端全量（`npx vitest run`）+ `npm run build` + 仓库卫生（`uv run python -m unittest tests.test_repo_hygiene`）
+- [x] T018 确认宪法模块地图登记：`.specify/memory/constitution.md` 已含 `window_controls.py`/`WindowTitleBar.vue`/`DynamicIsland.vue` 三条目（plan 阶段已登记，核对无遗漏）
+- [x] T019 检查 README/文档是否需同步（新增桌面无边框行为说明，若需则更新 `README.md`、`packaging/README.md`）
+- [x] T020 全量门禁：后端全量测试（`uv run python -m unittest discover -s tests -t tests`，2808 用例，除卫生测试 1 例未跟踪新文件预期失败外全绿）+ 前端全量（`npx vitest --run`，47 文件 635 用例全绿）+ `npm run build`（vue-tsc + vite 通过）+ 仓库卫生（未提交新文件导致 1 例失败，如实报告）
 - [ ] T021 交付后用户端到端真跑清单核对：按 `specs/036-titlebar-dynamic-island/quickstart.md` 的 EXE 验证项逐条走查并记录结果
 
 ---

@@ -424,5 +424,84 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
         self.assertTrue(any("事件" in msg for msg in logger.calls))
 
 
+# ===========================================================================
+# 036 窗口控制 js_api 接线（B084 自绘标题栏）
+# ===========================================================================
+class WindowControlJsApiTests(unittest.TestCase):
+    """自绘标题栏三按钮的 js_api 接线（契约 §2/§3）。"""
+
+    def _run_with_api(self, js_api=None):
+        js_api = js_api or desktop.DesktopJsApi()
+        webview_mod = _FakeWebview()
+        deps = _make_deps(webview_module=webview_mod, js_api=js_api)
+        desktop.run_desktop_shell(deps)
+        return js_api, webview_mod.windows[0]
+
+    def test_window_reference_injected(self):
+        """窗口创建后 js_api.window 注入真实 window 引用。"""
+        js_api, win = self._run_with_api()
+        self.assertIs(js_api.window, win)
+
+    def test_window_minimize_delegates_to_window(self):
+        """window_minimize → window.minimize()。"""
+        js_api, win = self._run_with_api()
+        win.calls = []
+        win.minimize = lambda: win.calls.append("minimize")
+        result = js_api.window_minimize()
+        self.assertEqual(result, {"ok": True, "error": None})
+        self.assertEqual(win.calls, ["minimize"])
+
+    def test_window_toggle_maximize_from_normal(self):
+        """普通态 window_toggle_maximize → maximize()。"""
+        js_api, win = self._run_with_api()
+        win.calls = []
+        win.maximized = False
+        win.maximize = lambda: win.calls.append("maximize")
+        win.restore = lambda: win.calls.append("restore")
+        result = js_api.window_toggle_maximize()
+        self.assertEqual(result, {"ok": True, "error": None})
+        self.assertEqual(win.calls, ["maximize"])
+
+    def test_window_toggle_maximize_from_maximized(self):
+        """最大化态 window_toggle_maximize → restore()。"""
+        js_api, win = self._run_with_api()
+        win.calls = []
+        win.maximized = True
+        win.maximize = lambda: win.calls.append("maximize")
+        win.restore = lambda: win.calls.append("restore")
+        result = js_api.window_toggle_maximize()
+        self.assertEqual(result, {"ok": True, "error": None})
+        self.assertEqual(win.calls, ["restore"])
+
+    def test_window_control_without_window_returns_no_window(self):
+        """未注入 window → {ok: False, error: no_window}。"""
+        js_api = desktop.DesktopJsApi()
+        js_api.window = None
+        self.assertEqual(
+            js_api.window_minimize(), {"ok": False, "error": "no_window"}
+        )
+        self.assertEqual(
+            js_api.window_toggle_maximize(), {"ok": False, "error": "no_window"}
+        )
+
+    def test_window_close_reuses_quit_handler(self):
+        """window_close → 复用 quit_handler 优雅退出链路（等价关闭按钮）。"""
+        called = []
+        js_api = desktop.DesktopJsApi()
+        js_api.window = object()
+        js_api.quit_handler = lambda: called.append("quit")
+        result = js_api.window_close()
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(called, ["quit"])
+
+    def test_window_close_without_handler_returns_error(self):
+        js_api = desktop.DesktopJsApi()
+        js_api.window = object()
+        js_api.quit_handler = None
+        self.assertEqual(
+            js_api.window_close(), {"ok": False, "error": "no_quit_handler"}
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

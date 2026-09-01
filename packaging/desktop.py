@@ -58,6 +58,12 @@ try:  # 包导入（unittest/PyInstaller 模块分析）
 except ImportError:  # 脚本直跑（python packaging/desktop.py）时的同目录回退
     import window_state as _ws  # type: ignore
 
+# 窗口控制域（036 自绘标题栏）：无边框窗口的最小化/最大化/还原原语
+try:
+    from packaging import window_controls as _wc
+except ImportError:  # 脚本直跑时的同目录回退
+    import window_controls as _wc  # type: ignore
+
 DEFAULT_HEIGHT = _ws.DEFAULT_HEIGHT
 DEFAULT_STATE_DIR = _ws.DEFAULT_STATE_DIR
 DEFAULT_WIDTH = _ws.DEFAULT_WIDTH
@@ -336,11 +342,44 @@ class DesktopJsApi:
     - ``quit_app()``：应用内更新重启前的优雅退出：先保存窗口
       状态、取消运行中任务，再销毁窗口。清理逻辑由
       ``run_desktop_shell`` 在窗口创建后注入 ``quit_handler``。
+    - ``window_minimize()`` / ``window_toggle_maximize()``：
+      自绘标题栏最小化 / 最大化-还原 切换（036）。
+    - ``window_close()``：自绘标题栏关闭按钮，走既有优雅退出
+      （保存窗口状态 + 取消运行中任务），等价系统关闭按钮。
     """
 
     def __init__(self):
         # run_desktop_shell 创建窗口后注入（保存状态 + 取消任务 + 关窗）
         self.quit_handler = None
+        # 窗口创建后注入：window_controls 原语依赖注入的 window 对象
+        self.window = None
+
+    def _window(self):
+        """返回当前注入的 pywebview Window；缺失时返回 None。"""
+        return getattr(self, "window", None)
+
+    def window_minimize(self):
+        win = self._window()
+        if win is None:
+            return {"ok": False, "error": "no_window"}
+        return _wc.minimize(win)
+
+    def window_toggle_maximize(self):
+        win = self._window()
+        if win is None:
+            return {"ok": False, "error": "no_window"}
+        return _wc.toggle_maximize(win)
+
+    def window_close(self):
+        """关闭按钮：复用 quit_app 的既有优雅退出链路（等价关闭按钮）。"""
+        handler = getattr(self, "quit_handler", None)
+        if callable(handler):
+            try:
+                handler()
+                return {"ok": True}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": "no_quit_handler"}
 
     def open_external(self, url=""):
         target = str(url or "").strip() or EXTERNAL_REPO_URL
@@ -491,9 +530,14 @@ def run_desktop_shell(deps):
         "min_size": (MIN_WIDTH, MIN_HEIGHT),
         "background_color": "#0d1113",
         "shadow": False,
+        # 036 自绘标题栏：仅 Windows 开无边框，macOS 保持原生标题栏（A3）。
+        # easy_drag 是 pywebview 6.x 无边框拖拽机制（前端标题栏空白区加
+        # pywebview-drag-region 类即成为拖拽区）。
+        "frameless": sys.platform == "win32",
+        "easy_drag": True,
         # 记忆 maximized=True → 启动即真最大化（还原落回普通矩形参数）
         "maximized": bool(start_maximized),
-        # 前端通过 window.pywebview.api 调用（外链打开/退出应用）
+        # 前端通过 window.pywebview.api 调用（外链打开/退出应用/窗口控制）
         "js_api": js_api,
     }
     if x is not None and y is not None:
@@ -532,6 +576,9 @@ def run_desktop_shell(deps):
 
     try:
         window = webview_module.create_window(**window_kwargs)
+        # 036 自绘标题栏：窗口控制原语依赖 window 对象，创建后注入 js_api
+        if hasattr(js_api, "window"):
+            js_api.window = window
         # pywebview 6.x 事件 API：window.events.closing += handler
         events = getattr(window, "events", None)
         if events is not None and hasattr(events, "closing"):

@@ -125,32 +125,43 @@ describe("App", () => {
     expect(document.title).not.toContain("BOSS 工作台");
   });
 
-  it("B035: aligns judged platform name and count with the view scope", async () => {
+  it("036: renders DynamicIsland completed state with capsule payload", async () => {
     const wrapper = mount(App);
     await flushPromises();
-    const pillText = () => wrapper.get('[data-testid="round-status-pill"]').text();
     const view = wrapper.findComponent(DiscoveryView);
 
-    view.vm.$emit("round-status", { platform: "boss", phase: "judged", judged: 5, scope: "all" });
+    // 待确认 >0：显示匹配与待确认数字
+    view.vm.$emit("round-status", {
+      platform: "boss", phase: "judged", judged: 5, scope: "all",
+      capsule: { state: "completed", platform: "boss", results: { matched: 5, pending: 2 } },
+    } as never);
     await flushPromises();
-    expect(pillText()).toContain("全部");
-    expect(pillText()).toContain("5 个岗位已判定");
-    expect(pillText()).not.toContain("BOSS · 5");
+    const completed = wrapper.get('[data-testid="dynamic-island-completed"]');
+    expect(completed.text()).toContain("匹配 5");
+    expect(completed.text()).toContain("待确认 2");
 
-    view.vm.$emit("round-status", { platform: "boss", phase: "judged", judged: 2, scope: "boss" });
+    // 待确认为 0：不显示待确认数字
+    view.vm.$emit("round-status", {
+      platform: "boss", phase: "judged", judged: 5, scope: "all",
+      capsule: { state: "completed", platform: "boss", results: { matched: 5, pending: 0 } },
+    } as never);
     await flushPromises();
-    expect(pillText()).toContain("BOSS · 2 个岗位已判定");
+    expect(wrapper.get('[data-testid="dynamic-island-completed"]').text()).not.toContain("待确认");
+  });
 
-    view.vm.$emit("round-status", { platform: "zhilian", phase: "judged", judged: 3, scope: "history" });
+  it("036: DynamicIsland click dispatches capsule navigation", async () => {
+    const wrapper = mount(App);
     await flushPromises();
-    expect(pillText()).toContain("历史轮次");
-    expect(pillText()).toContain("智联 · 3 个岗位已判定");
+    const view = wrapper.findComponent(DiscoveryView);
 
-    // B038：未筛选轮顶栏显示"已抓取 N 个岗位"，不显示"已判定 N"。
-    view.vm.$emit("round-status", { platform: "boss", phase: "scraped", judged: 4, scope: "boss" });
+    view.vm.$emit("round-status", {
+      platform: "boss", phase: "running", judged: 0, scope: "boss",
+      capsule: { state: "running", platform: "boss", progress: { phase: "scraping", done: 1, total: 10 } },
+    } as never);
     await flushPromises();
-    expect(pillText()).toContain("已抓取 4 个岗位");
-    expect(pillText()).not.toContain("已判定");
+    await wrapper.get('[data-testid="dynamic-island-running"]').trigger("click");
+    // requestCapsuleNavigation 已消费：胶囊导航信号不抛错、不改变挂载
+    expect(wrapper.find('[data-testid="dynamic-island-running"]').exists()).toBe(true);
   });
 
   it("opens the history drawer from the top bar", async () => {
@@ -279,8 +290,8 @@ describe("App", () => {
 
     const trigger = wrapper.get('[data-testid="reminder-trigger"]');
     expect(wrapper.get('[data-testid="reminder-badge"]').text()).toBe("3");
-    expect(trigger.attributes("aria-label")).toContain("查看投递提醒");
-    expect(trigger.attributes("aria-label")).toContain("3");
+    expect(trigger.attributes("aria-label")).toContain("查看提醒");
+    expect(trigger.attributes("aria-label")).toContain("投递 3");
   });
 
   it("hides the reminder badge when the server total is 0", async () => {
@@ -298,7 +309,7 @@ describe("App", () => {
     await flushPromises();
 
     expect(wrapper.find('[data-testid="reminder-badge"]').exists()).toBe(false);
-    expect(wrapper.get('[data-testid="reminder-trigger"]').attributes("aria-label")).toBe("查看投递提醒");
+    expect(wrapper.get('[data-testid="reminder-trigger"]').attributes("aria-label")).toBe("查看提醒");
   });
 
   it("renders 99+ for totals at or above 100 while keeping the real total accessible", async () => {

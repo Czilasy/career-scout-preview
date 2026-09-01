@@ -452,6 +452,35 @@ class ShellOrchestrationTests(unittest.TestCase):
         desktop.run_desktop_shell(deps)
         self.assertTrue(webview_mod.create_window_calls[0]["resizable"])
 
+    def test_window_frameless_only_windows(self):
+        """036 无边框：仅 Windows 传 frameless=True，非 Windows 保持原生标题栏（A3）。"""
+        webview_mod = _FakeWebview()
+        desktop.run_desktop_shell(
+            _make_deps(webview_module=webview_mod)
+        )
+        calls = webview_mod.create_window_calls
+        self.assertTrue(calls)
+        self.assertEqual(
+            calls[0]["frameless"], sys.platform == "win32",
+        )
+
+    def test_window_easy_drag_true(self):
+        """036 无边框拖拽：easy_drag=True（pywebview 6.x 拖拽区机制）。"""
+        webview_mod = _FakeWebview()
+        desktop.run_desktop_shell(
+            _make_deps(webview_module=webview_mod)
+        )
+        self.assertTrue(webview_mod.create_window_calls[0]["easy_drag"])
+
+    def test_js_api_receives_window_reference(self):
+        """036 窗口控制：js_api 在窗口创建后被注入 window 引用。"""
+        webview_mod = _FakeWebview()
+        js_api = desktop.DesktopJsApi()
+        deps = _make_deps(webview_module=webview_mod, js_api=js_api)
+        desktop.run_desktop_shell(deps)
+        self.assertIsNotNone(js_api.window)
+        self.assertIs(js_api.window, webview_mod.windows[0])
+
     def test_window_url_uses_random_port(self):
         """窗口 URL 使用随机端口（合同 §3）。"""
         webview_mod = _FakeWebview()

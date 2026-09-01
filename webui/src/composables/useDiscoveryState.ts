@@ -63,6 +63,20 @@ import { historyStatusLabel } from "../discovery";
 import { useLocationDraft } from "../composables/useLocationDraft";
 import { useResultHistory } from "../composables/resultHistory";
 
+// ---------------------------------------------------------------------------
+// 036 B088：胶囊点击导航信号（App.vue 经 DynamicIsland 派发，本域消费）。
+// 用模块级 ref + requestCapsuleNavigation 而非 defineExpose：
+// DiscoveryView.vue 是超限红线文件禁止修改，胶囊点击需要从 App 侧驱动
+// Discovery 内部 activeStep，故经此模块级信号解耦（App 只发目标，本域响应）。
+// ---------------------------------------------------------------------------
+export type CapsuleNavigationTarget = "home" | "task" | "results" | "attention";
+const capsuleNavigationTarget = ref<CapsuleNavigationTarget | null>(null);
+
+/** 请求顶栏胶囊导航（App.vue 在 DynamicIsland 点击时调用）。 */
+export function requestCapsuleNavigation(target: CapsuleNavigationTarget): void {
+  capsuleNavigationTarget.value = target;
+}
+
 export function useDiscoveryState(props: DiscoveryProps, emit: DiscoveryEmit) {
 
 
@@ -738,36 +752,143 @@ const lifecycleDialogJob = ref<JobItem | null>(null);
 
 // ---------------------------------------------------------------------------
 // 顶栏本轮状态胶囊数据（纯派生，不发请求）：
-// 运行中（抓取/筛选/补抓）显示进行中态；有结果时显示已判定数；其余空闲态上抛 null。
-// 平台优先取任务自身平台（恢复任务快照携带），缺省时用草稿平台。
+// 四态按 spec FR-013 优先级判定；平台优先取任务自身平台（恢复任务快照携带），
+// 缺省时用草稿平台。空闲常驻（idle），不再上抛 null（spec FR-012）。
 // ---------------------------------------------------------------------------
-const roundStatusPayload = computed(() => {
+const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
   const platform: Platform = scrapeSnapshot.value?.platform
     || screenSnapshot.value?.platform
     || draftPlatform.value;
+
+  // ---- attention（最高）：暂停 / 出错 / 中断 ----
+  const snapshots = [scrapeSnapshot.value, screenSnapshot.value, recrawlSnapshot.value];
+  const failed = snapshots.find((s) => s && String(s.status) === "failed");
+  if (failed) {
+    return {
+      platform, phase: "scraping" as const, judged: 0, scope: platform,
+      capsule: {
+        state: "attention", platform,
+        attention: { kind: "error", message: failed.error || "任务执行出错" },
+      },
+    };
+  }
+  const hasPaused = pausedRunId.value || interruptedRunId.value
+    || snapshots.some((s) => s && (String(s.status) === "paused" || String(s.status) === "interrupted"));
+  if (hasPaused) {
+    return {
+      platform, phase: "scraping" as const, judged: 0, scope: platform,
+      capsule: {
+        state: "attention", platform,
+        attention: { kind: "paused", message: "任务已暂停，请处理后继续" },
+      },
+    };
+  }
+
+  // ---- running：抓取 / 筛选 / 补抓进行中 ----
+  const scrapeLive = scrapeBusy.value || recrawlBusy.value
+    || snapshots.some((s) => s && ["running", "queued"].includes(String(s.status)));
+  const screenLive = screenBusy.value
+    || Boolean(screenSnapshot.value && ["running", "queued"].includes(String(screenSnapshot.value.status)));
+  if (scrapeLive || screenLive) {
+    const phase = scrapeLive ? "scraping" as const : "screening" as const;
+    const snapshot = scrapeLive
+      ? (scrapeSnapshot.value || recrawlSnapshot.value)
+      : screenSnapshot.value;
+    const progress = taskProgressFromSnapshot(snapshot);
+    return {
+      platform, phase, judged: progress.done, scope: platform,
+      capsule: { state: "running", platform, progress: { phase, ...progress } },
+    };
+  }
+
+  // ---- completed：有结果（当前轮或历史轮）----
   if (historyRound.value) {
     if (isScrapedOnly.value) {
-      return { platform: historyRound.value.platform, phase: "scraped" as const, judged: historyRound.value.jobCount, scope: "history" as const };
+      const total = historyRound.value.jobCount;
+      return {
+        platform: historyRound.value.platform, phase: "scraped" as const, judged: total, scope: "history" as const,
+        capsule: {
+          state: "completed", platform: historyRound.value.platform,
+          results: { matched: total, pending: 0 },
+        },
+      };
     }
+    const counts = resultCountsFromPipeline(pipelineResult.value);
     const g = groups.value;
     const judged = g.matched.length + g.unmatched.length + g.uncertain.length + g.dropped.length;
-    return { platform: historyRound.value.platform, phase: "judged" as const, judged, scope: "history" as const };
+    return {
+      platform: historyRound.value.platform, phase: "judged" as const, judged, scope: "history" as const,
+      capsule: {
+        state: "completed", platform: historyRound.value.platform,
+        results: counts,
+      },
+    };
   }
-  if (scrapeBusy.value || recrawlBusy.value) {
-    return { platform, phase: "scraping" as const, judged: 0, scope: platform };
-  }
-  if (screenBusy.value) return { platform, phase: "screening" as const, judged: 0, scope: platform };
   if (resultLoaded.value && pipelineResult.value) {
     const scope = resultPlatformFilter.value === "all" ? "all" as const : resultPlatformFilter.value;
     if (isScrapedOnly.value) {
       const total = (filteredPipelineResult.value.jobs || []).length;
-      return { platform, phase: "scraped" as const, judged: total, scope };
+      return {
+        platform, phase: "scraped" as const, judged: total, scope,
+        capsule: {
+          state: "completed", platform,
+          results: { matched: total, pending: 0 },
+        },
+      };
     }
+    const counts = resultCountsFromPipeline(pipelineResult.value);
     const g = groups.value;
     const judged = g.matched.length + g.unmatched.length + g.uncertain.length + g.dropped.length;
-    return { platform, phase: "judged" as const, judged, scope };
+    return {
+      platform, phase: "judged" as const, judged, scope,
+      capsule: { state: "completed", platform, results: counts },
+    };
   }
-  return null;
+
+  // ---- idle（常驻，最低优先级）：无任务无结果 ----
+  return {
+    platform, phase: "scraped" as const, judged: 0, scope: platform,
+    capsule: { state: "idle", platform },
+  };
+});
+
+// ---------------------------------------------------------------------------
+// 036 B088：消费胶囊点击导航信号（App.vue 经 requestCapsuleNavigation 派发）。
+// home → 01 上传页；task → 任务真实进度页（liveTaskStep 优先）；results → 04；
+// attention → 处理现场（liveTaskStep 优先）。
+//
+// 历史模式：不在此同步置空 historyRound/returningFromHistory——直接调
+// historyBackToLatest()（state.detail=null），由 DiscoveryView 既有
+// watch(historyDetail) 分支触发 returnToLatest() 完整清理（还原草稿平台、
+// 重置结果页筛选、重载最新结果），避免跳过清理残留历史轮状态（SC-010）。
+// returnToLatest 内部按 liveTaskStep 或结果页落点设置 activeStep。
+// ---------------------------------------------------------------------------
+watch(capsuleNavigationTarget, (target) => {
+  if (!target) return;
+  capsuleNavigationTarget.value = null;  // 消费本次请求
+  if (historyMode.value) {
+    historyBackToLatest();
+    return;
+  }
+  const liveStep = deriveLiveTaskStep({
+    scrapeBusy: scrapeBusy.value,
+    scrapeSnapshot: scrapeSnapshot.value,
+    screenBusy: screenBusy.value,
+    screenSnapshot: screenSnapshot.value,
+    recrawlBusy: recrawlBusy.value,
+    recrawlSnapshot: recrawlSnapshot.value,
+    pausedRunId: pausedRunId.value,
+    interruptedRunId: interruptedRunId.value,
+  });
+  if (target === "home") {
+    activeStep.value = "upload";
+  } else if (target === "task") {
+    activeStep.value = liveStep || "search";
+  } else if (target === "results") {
+    activeStep.value = "results";
+  } else if (target === "attention") {
+    activeStep.value = liveStep || "screen";
+  }
 });
 
 return {
@@ -1079,4 +1200,69 @@ interface MergedLatestResult {
   };
   /** 025 B078：各平台最新轮状态（供完成态判定；无该平台轮则缺省）。 */
   platformStatuses?: Partial<Record<"boss" | "zhilian", string>>;
+}
+
+// ---------------------------------------------------------------------------
+// 036 B088 顶栏胶囊（灵动岛）状态类型：四态 + 派生优先级
+// attention > running > completed > idle（spec FR-013）。
+// ---------------------------------------------------------------------------
+
+/** 胶囊四态（多态并存取优先级最高一件，不堆叠）。 */
+export type DynamicIslandState =
+  | { state: "idle"; platform: Platform }
+  | {
+      state: "running";
+      platform: Platform;
+      progress: { phase: "scraping" | "screening"; done: number; total?: number };
+    }
+  | {
+      state: "completed";
+      platform: Platform;
+      results: { matched: number; pending: number };
+    }
+  | {
+      state: "attention";
+      platform: Platform;
+      attention: { kind: "paused" | "error" | "pending"; message: string };
+    };
+
+/** round-status 上抛 payload：既有展示字段 + 胶囊状态（App 供 DynamicIsland 消费）。 */
+export interface CapsuleStatusPayload extends RoundStatusPayload {
+  capsule: DynamicIslandState;
+}
+
+// ---------------------------------------------------------------------------
+// 036 B088：顶栏胶囊进度/结果数字提取（纯函数，数据层唯一实现）。
+// tasks/results 域 re-export 本函数，避免数据层反向依赖动作层。
+// 进度：progress.current/success_count 为已处理数，total/source_total 为总数；
+// total 未知（缺省/0）时省略分母（spec 边界 B088-进度数字缺失）。
+// 结果：matched = 明确匹配；pending = 待确认（verdict 非 match/not_match/mismatch）。
+// ---------------------------------------------------------------------------
+
+export function taskProgressFromSnapshot(
+  snapshot: TaskSnapshot | null,
+): { done: number; total?: number } {
+  if (!snapshot) return { done: 0 };
+  const progress = (snapshot.progress || {}) as Record<string, unknown>;
+  const doneRaw = progress.current ?? snapshot.success_count ?? snapshot.scraped_count;
+  const totalRaw = progress.total ?? snapshot.total ?? snapshot.source_total;
+  const done = typeof doneRaw === "number" && Number.isFinite(doneRaw) ? doneRaw : 0;
+  const total = typeof totalRaw === "number" && totalRaw > 0 ? totalRaw : undefined;
+  return total === undefined ? { done } : { done, total };
+}
+
+export function resultCountsFromPipeline(
+  result: PipelineResult | null,
+): { matched: number; pending: number } {
+  if (!result) return { matched: 0, pending: 0 };
+  const jobs = Array.isArray(result.jobs) ? result.jobs : [];
+  let matched = 0;
+  let pending = 0;
+  for (const job of jobs) {
+    // 与结果页 partitionPipelineResult 同源：match→匹配；not_match→不匹配；
+    // 其余（uncertain/mismatch/缺省）全部计入待确认，保证胶囊数字与结果页一致（SC-009）。
+    if (job.verdict === "match") matched += 1;
+    else if (job.verdict !== "not_match") pending += 1;
+  }
+  return { matched, pending };
 }

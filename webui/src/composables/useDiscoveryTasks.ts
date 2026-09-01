@@ -810,3 +810,10 @@ return {
   resetWorkflow,
 };
 }
+
+// ---------------------------------------------------------------------------
+// 036 B088：顶栏胶囊进度数字提取由 useDiscoveryState 数据层提供（实现在
+// 数据层，避免 tasks→state 反向运行时依赖）。本域 re-export 标记「进度
+// 数据源自任务快照」，消费方（roundStatusPayload 派生）统一经此处取用。
+// ---------------------------------------------------------------------------
+export { taskProgressFromSnapshot } from "./useDiscoveryState";

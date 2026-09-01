@@ -16,6 +16,15 @@
 - **Rationale**: frameless 最大化在各版本/后端行为有差异，属"必须真机确认"的事实；`window_controls.py` 作为窗口控制域预留该适配位，避免污染 `desktop.py`。
 - **Alternatives considered**: 直接依赖 pywebview 默认行为不做处理——若其覆盖任务栏则验收不通过（spec FR-011），不满足需求。不选。
 
+### T001 真机验证结论（2026-09-01 实施时更新）
+
+- **结论**: 待 Windows 真机 EXE 验证。`window_controls.py` 已预留适配位
+  `MAXIMIZE_WORKAREA_CLAMP`（默认 `False`）+ `_clamp_to_workarea()` 占位实现；
+  若真机发现 frameless 最大化覆盖任务栏，置该开关为 `True` 并落地钳制逻辑即可，
+  不阻塞无边框标题栏其余交付。
+- **验证方法**: 打包 EXE 后点击最大化按钮/双击标题栏，观察窗口是否覆盖任务栏；
+  若覆盖，按契约 §3 实现 Win32 工作区钳制。
+
 ## R3. 窗口记忆（B082）在无边框下的回归风险
 
 - **Decision**: 无边框不改变窗口状态域语义：`packaging/window_state.py` 的 `WindowStateTracker` 仍监听 `resized/moved/maximized/restored` 维护普通矩形与最大化标记，closing 落盘流程不变；`desktop.py` 仅调整 `create_window` 参数（`frameless=True`），不改 `window_state.py`。

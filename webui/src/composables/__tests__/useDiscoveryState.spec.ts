@@ -5,6 +5,7 @@ import { ref } from "vue";
 import {
   deriveLiveTaskStep,
   liveTaskStep,
+  resultCountsFromPipeline,
   useDiscoveryState,
 } from "../useDiscoveryState";
 import type { DiscoveryState } from "../useDiscoveryState";
@@ -84,5 +85,102 @@ describe("useDiscoveryState.liveTaskStep（035 真实进度页派生）", () => 
     expect(deriveLiveTaskStep({ screenSnapshot: { status: "paused" } })).toBe("screen");
     expect(deriveLiveTaskStep({ recrawlSnapshot: { status: "running" } })).toBe("screen");
     expect(deriveLiveTaskStep({})).toBe("");
+  });
+});
+
+describe("resultCountsFromPipeline（036 胶囊结果提取）", () => {
+  it("null 结果 → 全 0", () => {
+    expect(resultCountsFromPipeline(null)).toEqual({ matched: 0, pending: 0 });
+  });
+
+  it("按 verdict 统计 matched 与 pending（待确认，与结果页 partitionPipelineResult 同源）", () => {
+    // mismatch 与 uncertain 同属结果页「待确认」tab（discovery.ts partitionPipelineResult），
+    // 胶囊 pending 必须与之一致（SC-009）。
+    const result = {
+      ok: true,
+      jobs: [
+        { verdict: "match" },
+        { verdict: "match" },
+        { verdict: "uncertain" },
+        { verdict: "not_match" },
+        { verdict: "mismatch" },
+      ],
+    } as never;
+    expect(resultCountsFromPipeline(result as never)).toEqual({ matched: 2, pending: 2 });
+  });
+
+  it("无 jobs 字段 → 全 0", () => {
+    expect(resultCountsFromPipeline({ ok: true } as never)).toEqual({ matched: 0, pending: 0 });
+  });
+
+  it("jobs 非数组 → 全 0", () => {
+    expect(resultCountsFromPipeline({ ok: true, jobs: "bad" } as never)).toEqual({ matched: 0, pending: 0 });
+  });
+});
+
+describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () => {
+  const jobs = [
+    { verdict: "match", platform: "boss" },
+    { verdict: "uncertain", platform: "boss" },
+  ];
+
+  it("空闲 → idle，平台为当前草稿平台", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    const payload = state.roundStatusPayload.value;
+    expect(payload).not.toBeNull();
+    expect(payload?.capsule.state).toBe("idle");
+  });
+
+  it("抓取中 → running + 进度数字", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.scrapeBusy.value = true;
+    state.scrapeSnapshot.value = {
+      status: "running", progress: { current: 12, total: 50 }, logs: [],
+    };
+    const capsule = state.roundStatusPayload.value?.capsule;
+    expect(capsule?.state).toBe("running");
+    if (capsule?.state === "running") {
+      expect(capsule.progress.phase).toBe("scraping");
+      expect(capsule.progress.done).toBe(12);
+      expect(capsule.progress.total).toBe(50);
+    }
+  });
+
+  it("筛选完成有结果 → completed + 结果数字", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.resultLoaded.value = true;
+    state.pipelineResult.value = { ok: true, jobs } as never;
+    const capsule = state.roundStatusPayload.value?.capsule;
+    expect(capsule?.state).toBe("completed");
+    if (capsule?.state === "completed") {
+      expect(capsule.results.matched).toBe(1);
+      expect(capsule.results.pending).toBe(1);
+    }
+  });
+
+  it("暂停 → attention（优先级高于运行/结果）", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.pausedRunId.value = "run-1";
+    state.resultLoaded.value = true;
+    state.pipelineResult.value = { ok: true, jobs } as never;
+    state.scrapeBusy.value = true;
+    const capsule = state.roundStatusPayload.value?.capsule;
+    expect(capsule?.state).toBe("attention");
+    if (capsule?.state === "attention") {
+      expect(capsule.attention.kind).toBe("paused");
+    }
+  });
+
+  it("失败 → attention error", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.screenSnapshot.value = {
+      status: "failed", progress: {}, logs: [], error: "boom",
+    };
+    const capsule = state.roundStatusPayload.value?.capsule;
+    expect(capsule?.state).toBe("attention");
+    if (capsule?.state === "attention") {
+      expect(capsule.attention.kind).toBe("error");
+      expect(capsule.attention.message).toBe("boom");
+    }
   });
 });
