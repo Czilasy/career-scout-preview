@@ -99,9 +99,9 @@ class RepoHygieneTests(unittest.TestCase):
             ".career-scout/webui.db",
             "webui/node_modules/pkg/index.js",
             "docs/private.md",
+            "webui/dist/assets/app.js",
         ]
         must_not_ignore = [
-            "webui/dist/assets/app.js",
             ".env.example",
             "hooks/pre-commit",
             "hooks/pre-push",

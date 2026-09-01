@@ -1,5 +1,5 @@
 #!/bin/sh
-# Push 前自动运行仓库卫生、待推送差异、提交身份和前端构建同步检查。
+# Push 前自动运行仓库卫生、待推送差异、提交身份和前端现场构建校验。
 # 发布收口请复用 scripts/release_check.ps1；本钩子不运行全量测试。
 # 启用：git config core.hooksPath hooks
 set -e
@@ -36,11 +36,11 @@ if git log "$BASE..HEAD" --format='%ae|%ce' | grep -v '^czyooutzilas@gmail.com|c
 fi
 echo "==> Pending commit identity check passed"
 
-echo "==> Frontend dist sync check"
-if ! uv run python webui/ensure_frontend_sync.py --check; then
-    echo "!! webui/dist is out of sync with source. Rebuild before push."
+echo "==> Frontend rebuild check"
+if ! uv run python webui/ensure_frontend_sync.py; then
+    echo "!! Frontend build failed. Fix the build errors, then push again."
     exit 1
 fi
-echo "==> Frontend dist sync check passed"
+echo "==> Frontend rebuild check passed"
 
 echo "==> Pre-push checks passed"

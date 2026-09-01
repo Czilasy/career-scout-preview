@@ -31,21 +31,21 @@ fi
 echo "Career Scout 版本：$VERSION"
 
 # ---------------------------------------------------------------------------
-# 2. 前端构建产物校验（缺失则自动构建）
+# 2. 前端构建（产物不入库，发布前始终用最新源码现场构建）
 # ---------------------------------------------------------------------------
-if [[ ! -f 'webui/dist/index.html' ]]; then
-    echo 'webui/dist/index.html 缺失，执行前端构建...'
-    (
-        cd webui
+echo '使用最新源码构建前端（产物不入库，发布前现场构建）...'
+(
+    cd webui
+    if [[ ! -d 'node_modules' ]]; then
         echo '> npm ci'
         npm ci
-        echo '> npm run build'
-        npm run build
-    )
-    if [[ ! -f 'webui/dist/index.html' ]]; then
-        echo "错误：前端构建后仍无 webui/dist/index.html" >&2
-        exit 1
     fi
+    echo '> npm run build'
+    npm run build
+)
+if [[ ! -f 'webui/dist/index.html' ]]; then
+    echo "错误：前端构建后仍无 webui/dist/index.html" >&2
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------

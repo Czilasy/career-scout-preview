@@ -3,7 +3,7 @@
   Release closure verification for Career Scout.
 
 .DESCRIPTION
-  Runs only hygiene/diff/sync/artifact checks. It deliberately does NOT run full
+  Runs only hygiene/diff/rebuild/artifact checks. It deliberately does NOT run full
   backend or frontend test suites. Release closure tasks must use this script
   instead of inventing a verification matrix.
 
@@ -54,9 +54,9 @@ if ($Version -ne "") {
     if ($LASTEXITCODE -ne 0) { throw "Version consistency check failed" }
 }
 
-Write-Host "==> Frontend dist sync"
-& uv run python webui/ensure_frontend_sync.py --check
-if ($LASTEXITCODE -ne 0) { throw "Frontend dist is out of sync" }
+Write-Host "==> Frontend rebuild"
+& uv run python webui/ensure_frontend_sync.py
+if ($LASTEXITCODE -ne 0) { throw "Frontend rebuild failed" }
 
 Write-Host "==> Repo hygiene"
 & uv run python -m unittest tests.test_repo_hygiene

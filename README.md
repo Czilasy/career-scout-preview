@@ -195,14 +195,14 @@ python webui/app.py
 ```text
 scripts/boss_cdp_raw.py      # BOSS CLI 抓取主入口
 scripts/job_summary.py       # 抓取结果 → 求职摘要与提示词
-scripts/release_check.ps1    # 发布收口验证（卫生、diff、前端同步、产物）
+scripts/release_check.ps1    # 发布收口验证（卫生、diff、前端重建、产物）
 data/city_codes.json         # BOSS 城市码表
 data/zhilian_city_codes.json # 智联城市码表
 webui/                       # Flask 后端 + Vue 3 前端源码
 webui/platforms.py           # 平台注册表、筛选 schema 与城市目录
 webui/job_feedback*.py       # 生命周期、提醒与反馈 API
 webui/job_advice.py          # 按需 AI 行动建议
-webui/dist/                  # 已构建的前端产物，普通用户无需 Node.js
+webui/dist/                  # 前端构建产物（不入库，本地/发布时用最新源码现场构建）
 tests/                       # unittest，全 mock，无需真实 Chrome/网络
 docs/screenshots/            # README 所用界面截图
 packaging/                   # 桌面版打包配置与构建脚本
@@ -223,9 +223,9 @@ npm test
 npm run build
 ```
 
-修改前端源码后必须重新构建并提交 `webui/dist`，否则 Web 工作台可能使用旧构建产物。
+前端产物（`webui/dist`）不入库：修改前端源码后，本地运行、推送校验、发布打包都会用最新源码现场构建，无需手动提交产物。
 
-发布收口默认不跑全量测试，只执行卫生测试、hooks、`git diff --check`、`git status` 与前端同步检查。构建完成后可用 `scripts/release_check.ps1 -Version <版本> -RequireArtifact` 做收口验证。
+发布收口默认不跑全量测试，只执行卫生测试、hooks、`git diff --check`、`git status` 与前端重建检查。构建完成后可用 `scripts/release_check.ps1 -Version <版本> -RequireArtifact` 做收口验证。
 
 想参与贡献请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)；发现安全问题请阅读 [SECURITY.md](./SECURITY.md)。
 

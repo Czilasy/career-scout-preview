@@ -111,7 +111,7 @@ def main() -> int:
 
     check_only = "--check" in sys.argv[1:]
     if check_only:
-        print("webui/dist 与源码不同步，请先运行 npm run build 并提交", file=sys.stderr)
+        print("webui/dist 与源码不同步，请先运行 npm run build", file=sys.stderr)
         return 1
 
     print("检测到代码变化，正在自动构建前端...")

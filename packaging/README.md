@@ -36,7 +36,7 @@ pwsh packaging/build_exe.ps1
 脚本会自动：
 
 1. 从 `pyproject.toml` 读取版本号
-2. 校验 `webui/dist/index.html`，缺失则自动 `npm ci` + `npm run build`
+2. 使用最新源码现场构建前端（`npm ci` 仅依赖缺失时执行 + `npm run build`），产物不入库
 3. 校验 `PyInstaller` 与 `pywebview` 可导入
 4. 执行 `uv run pyinstaller packaging/career_scout.spec --noconfirm`
 5. 将 `dist/CareerScout.exe` 重命名为 `.release/CareerScout-v{version}.exe`
@@ -79,9 +79,9 @@ HKCU\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5
 
 缺失时下载安装：<https://developer.microsoft.com/microsoft-edge/webview2/>
 
-### 前端未构建
+### 前端构建
 
-脚本会自动检测并构建前端；若需手动构建：
+发布脚本会用最新源码现场构建前端（产物不入库）；若需手动构建：
 
 ```powershell
 cd webui
@@ -97,7 +97,7 @@ npm run build
 ## Release 发布流程
 
 1. **本地构建 Windows EXE**：执行 `pwsh packaging/build_exe.ps1`，确认 `.release/` 下产物可双击启动。
-> 发布收口默认不跑全量测试；使用 `scripts/release_check.ps1` 做卫生、diff、前端同步与产物验证。
+> 发布收口默认不跑全量测试；使用 `scripts/release_check.ps1` 做卫生、diff、前端重建与产物验证。
 
    **macOS DMG 无需本地构建**：推 tag 后 GitHub Actions 自动构建（见下节）。
 2. **计算 SHA256**：
@@ -153,7 +153,7 @@ npm run build
   ```
 
   前置：macOS ≥ 11、Python ≥ 3.10、Node.js ≥ 20、uv。
-  脚本自动：读版本 → 构建前端（缺时）→ 安装打包依赖（缺时）→
+  脚本自动：读版本 → 构建前端（现场构建）→ 安装打包依赖（缺时）→
   PyInstaller 产出 `CareerScout.app` → `hdiutil` 打包为
   `.release/CareerScout-v{version}.dmg`。
 

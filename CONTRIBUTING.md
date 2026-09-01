@@ -27,7 +27,7 @@ npm test
 npm run build
 ```
 
-修改前端源码后必须重新构建并提交 `webui/dist`，否则推送会被 `hooks/pre-push` 拦截。
+前端产物（`webui/dist`）不入库：本地运行、推送校验、发布打包都会用最新源码现场构建，无需手动提交产物。
 
 ## 提交
 

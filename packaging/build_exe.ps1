@@ -32,26 +32,26 @@ $version = $versionMatch.Matches[0].Groups[1].Value
 Write-Host "Career Scout 版本：$version"
 
 # ---------------------------------------------------------------------------
-# 2. 前端构建产物校验（FR-016：前端未构建则失败并明确提示）
+# 2. 前端构建（FR-016：产物不入库，发布前始终用最新源码现场构建）
 # ---------------------------------------------------------------------------
-if (-not (Test-Path 'webui/dist/index.html')) {
-    Write-Host 'webui/dist/index.html 缺失，执行前端构建...'
-    Push-Location 'webui'
-    try {
+Write-Host '使用最新源码构建前端（产物不入库，发布前现场构建）...'
+Push-Location 'webui'
+try {
+    if (-not (Test-Path 'node_modules')) {
         Write-Host '> npm ci'
         & npm ci
         if ($LASTEXITCODE -ne 0) { Write-Error 'npm ci 失败'; exit $LASTEXITCODE }
-        Write-Host '> npm run build'
-        & npm run build
-        if ($LASTEXITCODE -ne 0) { Write-Error 'npm run build 失败'; exit $LASTEXITCODE }
     }
-    finally {
-        Pop-Location
-    }
-    if (-not (Test-Path 'webui/dist/index.html')) {
-        Write-Error '前端构建后仍无 webui/dist/index.html'
-        exit 1
-    }
+    Write-Host '> npm run build'
+    & npm run build
+    if ($LASTEXITCODE -ne 0) { Write-Error 'npm run build 失败'; exit $LASTEXITCODE }
+}
+finally {
+    Pop-Location
+}
+if (-not (Test-Path 'webui/dist/index.html')) {
+    Write-Error '前端构建后仍无 webui/dist/index.html'
+    exit 1
 }
 
 # ---------------------------------------------------------------------------
