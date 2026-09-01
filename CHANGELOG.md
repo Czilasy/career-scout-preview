@@ -2,6 +2,11 @@
 
 本文件记录 Career Scout 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+修复：
+- 抓取中遇到验证码、限流、登录失效时能正确停下并说明原因，不再静默把岗位塞进「待确认」
+
 ## [1.7.10] - 2026-08-31
 
 增加：

@@ -29,6 +29,7 @@ import os
 import random
 import sys
 import time
+import traceback
 
 # Direct execution (`python scripts/boss_cdp_raw.py`) puts only `scripts/` on
 # sys.path. Add the repository root before importing the package-qualified
@@ -140,3 +141,10 @@ if __name__ == "__main__":
         code, exit_code = map_block_exception(exc)
         emit_failure_line(code, str(exc))
         sys.exit(exit_code)
+    except Exception as exc:
+        # 033 白箱：认不出来的异常不许裸奔。结构化失败行保证分类精确落到
+        # source_unknown_error（不再靠关键词猜登录失效），完整堆栈走 stderr
+        # 由主进程捕获后进主日志，事后可查真实原因。
+        emit_failure_line("source_unknown_error", f"{type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        sys.exit(1)

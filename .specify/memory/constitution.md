@@ -62,6 +62,7 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/source_boss_helpers.py` — BOSS source 共享助手：失败分类、字段归一化、登录事实回写、脱敏日志、SCRAPER_FILTER_FIELDS（021 B1）
 - `webui/source_boss_cdp.py` — BossCdpSource 主体：preflight / recheck_login / fetch_list / fetch_detail / CLI 命令构建（021 B1）
 - `webui/source_boss_cdp_detail.py` — BossCdpSource 的 detail mixin：批量详情、终端事件校验、in-process 翻译执行、产物读取（021 B1）
+- `webui/source_boss_detail_events.py` — BOSS 详情事件归类纯助手：非零退出时按事件文件真实 safe_code 逐岗位归类，区分账号级阻断与单条软失败（034 拆分，纯函数）
 - `webui/source_zhilian_cdp.py` — ZhilianCdpSource 主体与智联 signal 映射/输入校验助手（021 B1）
 - `webui/source_zhilian_defaults.py` — 智联默认 CLI runner 与 failed_code → 用户可读原因映射（021 B1）
 - `webui/source_fake.py` — FakeJobSource 内存测试替身（021 B1）

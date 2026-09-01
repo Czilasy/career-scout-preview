@@ -40,13 +40,13 @@
 
 ---
 
-## R3: 行数门禁与潜在迁出（`source_boss_cdp_detail.py` 797 行）
+## R3: 行数门禁与迁出（`source_boss_cdp_detail.py` 800 行，贴线）
 
 **Decision**:
-- `fetch_details_batch` 非零退出分支内部改造，净增行数 ≤15，控制在 800 红线内；不新增独立方法（内联复用既有 `_read_events_file` 与 `_validate_detail_event`）。
-- 若实现时净增将超 800：把事件归类逻辑（含 `_read_events_file` / `_validate_detail_event` / 归类循环）整体等价迁出到新模块 `webui/source_boss_detail_events.py`（等价搬运，不改行为，同 033 先例），`source_boss_cdp_detail.py` 保留调用入口。
+- `fetch_details_batch` 非零退出分支内部改造，净增行数 ≤15，控制在 800 红线内；不新增独立方法（内联复用既有 `_read_events_file`，并复用既有 `_validate_detail_event` 的语义）。
+- **已实施迁出**：事件归类纯函数（`index_events_by_url` / `event_outcome_code`）落在新模块 `webui/source_boss_detail_events.py`（等价搬运，不改行为，同 033 先例），`source_boss_cdp_detail.py` 保留调用入口；非零退出路径用新模块做索引与归类，`_validate_detail_event` 完整校验仍由成功路径（returncode==0）承担。
 
-**Rationale**: 033 已验证该先例（行数紧贴红线时等价迁出）；事件归类属于 detail mixin 既有域，迁出到新模块不改变模块地图职责。
+**Rationale**: 033 已验证该先例（行数紧贴红线时等价迁出）；事件归类属于 detail mixin 既有域，迁出到新模块不改变模块地图职责。实测 `source_boss_cdp_detail.py` 800 行贴线，迁出保证后续改动不破红线。
 
 **Alternatives considered**:
 - 不设上限直接改：违反宪法 II 单文件尺寸红线。
@@ -78,5 +78,5 @@
 |---|---|
 | R1 脚本补捕获 | `__main__` 薄映射三类异常 → 失败行 + 退出码 10/1/11；失败行为分类权威 |
 | R2 非零退出归类 | 读事件文件按真实 safe_code 逐岗位归类；无事件回退退出码；账号级码走熔断器 |
-| R3 行数门禁 | ≤800；超线则等价迁出事件归类逻辑到 `webui/source_boss_detail_events.py` |
+| R3 行数门禁 | ≤800；事件归类纯函数已迁出至 `webui/source_boss_detail_events.py`（等价搬运，实测主文件 800 贴线） |
 | R4 测试策略 | 假样本回归（脚本+webui+非零退出+兜底）+ 真实账号正常冒烟 |

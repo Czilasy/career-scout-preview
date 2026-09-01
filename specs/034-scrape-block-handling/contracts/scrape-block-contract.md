@@ -21,7 +21,7 @@
 ## C2: 详情批非零退出 → 事件文件逐岗位归类（新增，webui/source_boss_cdp_detail.py）
 
 - 子进程 `returncode != 0` 时：
-  1. 读 `.events.jsonl`（复用 `_read_events_file`，文件不存在/过大/解析失败 → 空列表）
+  1. 读 `.events.jsonl`（复用 `_read_events_file`，文件不存在/过大/解析失败 → 空列表）；事件索引与归类由 `webui/source_boss_detail_events.py` 的 `index_events_by_url` / `event_outcome_code` 承担（034 拆分，纯函数；`_validate_detail_event` 完整校验由成功路径承担）
   2. 逐岗位按事件归类：
      - `status=completed` 且 detail 记录存在 → `success`
      - `status=unavailable|failed` → `failed_code = event.safe_code`

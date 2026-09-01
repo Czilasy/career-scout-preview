@@ -193,6 +193,10 @@ def configure_logging(
         return logger
 
     directory = Path(log_dir).expanduser() if log_dir else default_log_dir()
+    if log_dir is None and _is_test_context():
+        # 测试上下文且未显式指定目录：一律落到系统临时目录，防测试噪音
+        # 灌进正式日志目录（033 白箱边缘情况）。显式传 log_dir 的调用不受影响。
+        directory = Path(tempfile.gettempdir()) / "career-scout-test-logs"
     directory.mkdir(parents=True, exist_ok=True)
     log_path = directory / "career-scout.log"
 
@@ -263,6 +267,10 @@ def _configure_lazily() -> None:
     corr = os.environ.get("CAREER_SCOUT_CORRELATION_ID", "").strip()
     if corr:
         _correlation_id_var.set(corr)
+    # 任务编号同理：子进程现场日志要能归属到具体任务（033 白箱）。
+    task = os.environ.get("CAREER_SCOUT_TASK_ID", "").strip()
+    if task:
+        _task_id_var.set(task)
 
 
 def get_logger(name: str = LOGGER_NAME) -> logging.Logger:

@@ -66,7 +66,7 @@ from webui.source_boss_cdp import (
     SCRAPER_FILTER_FIELDS,
     BossCdpSource,
 )
-from webui.source_boss_cdp_detail import _InProcessCapture
+from webui.source_boss_cdp_inprocess import _InProcessCapture
 from webui.source_zhilian_cdp import (
     _BOSS_DEFAULT_CDP_PORT,
     _SIGNAL_TO_STATE,

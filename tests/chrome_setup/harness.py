@@ -1,7 +1,9 @@
 import importlib.util
 import json
+import os
 import pathlib
 import sys
+import tempfile
 from unittest import mock
 
 # 基线全量运行时，其他测试模块（webui、sc015_viewport_check 等）已先把真实
@@ -13,6 +15,14 @@ import websocket  # noqa: F401
 
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "boss_cdp_raw.py"
+
+# 测试真实 spawn 的 CLI 子进程（--help/--check/session-import 等）会经
+# get_logger 懒初始化写日志；统一把日志目录指到系统临时目录，防测试噪音
+# 灌进正式日志目录（033 白箱边缘情况）。
+os.environ.setdefault(
+    "CAREER_SCOUT_LOG_DIR",
+    str(pathlib.Path(tempfile.gettempdir()) / "career-scout-test-logs"),
+)
 
 
 def load_module():

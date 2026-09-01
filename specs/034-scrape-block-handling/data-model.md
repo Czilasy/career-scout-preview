@@ -35,6 +35,7 @@
 
 - 写入：`scripts/boss/detail_scrape.py::_emit_detail_safe_event`
 - 读取/校验：`webui/source_boss_cdp_detail.py::_read_events_file` / `_validate_detail_event`（隐私字段拒绝：JD body、凭据、PII）
+- 非零退出路径的事件索引与归类：`webui/source_boss_detail_events.py::index_events_by_url` / `event_outcome_code`（034 拆分，纯函数）
 - `safe_code` 允许值：`source_login_required`、`source_rate_limited`、`source_verification_required`、`source_invalid_output`、`ok`（cancelled 时的语义标记）等
 
 ### 1.4 错误码注册表（既有，webui/error_registry.py）
@@ -66,7 +67,7 @@ RiskControlError/LoginRequiredError/RequestLimitExceededError
 
 ```
 returncode != 0
-  → 读 .events.jsonl（复用 _read_events_file / _validate_detail_event）
+  → 读 .events.jsonl（_read_events_file + source_boss_detail_events 的 index_events_by_url / event_outcome_code）
   → 逐岗位：
      事件 status=completed 且有 detail → success
      事件 status=unavailable/failed → failed_code = 事件 safe_code

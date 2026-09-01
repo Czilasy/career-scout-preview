@@ -120,6 +120,49 @@ Resolved from plan.md（用户已确认 2026-09-01）：
 
 ---
 
+## Phase 7: 审查返修（2026-09-01 验收审查后补）
+
+**Purpose**: 对照用户原话做验收审查后发现的缺口修复，对应 spec.md 新增的 FR-010、FR-011 与 SC-006。
+
+- [X] T029 [FR-010] 在 `webui/source_boss_cdp.py`：列表与详情两条子进程出口各补 `_logger.error`，把 returncode、failed_code 与 stderr 尾部（2000 字符）写进主日志；补 `get_logger` import 与 `_logger` 定义（净增 ≤12 行，远低于红线）
+- [X] T030 [FR-011] 在 `scripts/boss_cdp_raw.py` 主入口补通用 `except Exception` 兜底：结构化失败行 `source_unknown_error` + `traceback.print_exc()` + 退出码 1；补 `import traceback`
+- [X] T031 [SC-001] 在 `webui/source_boss_cdp.py` 子进程 env 注入 `CAREER_SCOUT_TASK_ID`；`webui/logging_setup.py` 的 `_configure_lazily` 从 env 恢复到 `_task_id_var`
+- [X] T032 [T019] 在 `tests/test_repo_hygiene.py`：AST 检查同时匹配 `ast.Attribute`（logging.getLogger）与 `ast.Name`（导入后直接调用）两种形式
+- [X] T033 [FR-008] 在 `webui/ai_client.py`：补网络失败、鉴权失败、服务端拒绝、响应截断、响应无法解析五条失败路径的 `_logger.warning`
+- [X] T034 新增聚焦测试（tests/test_logging_whitebox.py）：子进程失败现场进主日志、env 携带任务编号、懒初始化从 env 恢复任务编号
+- [X] T035 门禁：后端全量 2782 通过；仓库卫生检查 14 项全绿；前端 `npm run build` 通过（本轮零前端改动，构建后产物已还原）
+
+**Checkpoint**: 修复项均有聚焦测试覆盖；卫生自检用探针实测两种违规写法均被拦下并指出位置。
+
+---
+
+## Phase 8: 超线文件拆分（2026-09-01，用户直接授权，未单独立 Spec）
+
+**Purpose**: `webui/source_boss_cdp_detail.py` 恰抵宪法红线 800 行，无法再追加批量详情退出留痕；将 in-process 执行专用逻辑等价搬出。
+
+- [X] T036 新建 `webui/source_boss_cdp_inprocess.py`：`_InProcessCapture`（stdout 收集器）与 `_BossCdpInProcessMixin`（`_IN_PROCESS_BOOL_FLAGS`、`_run_command`、`_run_in_process`、`_run_in_process_impl`、`_translate_argv`、`_translate_list_argv`、`_translate_detail_argv`、`_translate_detail_batch_argv`）整体搬运，行为零改动
+- [X] T037 修改 `webui/source_boss_cdp_detail.py`：裁剪不再需要的 import（`threading`、`boss`、`run_with_deadline`、`_classify_risk_control_reason`、`_format_inprocess_failure`、`SCRAPER_FILTER_FIELDS`、`PageEventPersistenceError`）；`_BossCdpDetailMixin` 改为继承 `_BossCdpInProcessMixin`；删除已迁出的两个代码块（800→567 行）
+- [X] T038 修改 `webui/source.py`：`_InProcessCapture` 导入来源改为 `source_boss_cdp_inprocess`
+- [X] T039 在 `webui/source_boss_cdp_detail.py` 批量详情子进程出口补 `_logger.error`（stage=detail_batch，FR-010 全链路闭环）
+- [X] T040 验证：in-process 聚焦测试 40 个通过；后端全量 2782 个通过（唯一红项为「新文件未纳入版本管理」的开发中间态，非代码问题）；卫生检查行数红线与引用方向检查通过
+
+**Checkpoint**: 拆分等价无破坏；`source_boss_cdp_detail.py` 567 行回归红线内。
+
+---
+
+## Phase 9: 测试噪音治理（2026-09-01，审查遗留第三件）
+
+**Purpose**: 测试 spawn 的子进程把日志写进正式目录（`~/.career-scout/logs/career-scout.log`），治理为落系统临时目录。定位证据：跑 `tests.chrome_setup.test_chrome_setup`（76 用例）前后对比，正式日志新增 4 行 `log initialized`。
+
+- [X] T041 在 `webui/logging_setup.py`：`configure_logging` 未显式指定目录且 `_is_test_context()` 为真时，目录改走系统临时目录（覆盖测试进程内启动应用路径；显式传目录的测试不受影响）
+- [X] T042 在 `webui/source_boss_cdp.py`：测试上下文构造子进程时，env 注入 `CAREER_SCOUT_LOG_DIR=临时目录`（覆盖抓取子进程路径）
+- [X] T043 在 `tests/chrome_setup/harness.py`：顶层 `os.environ.setdefault("CAREER_SCOUT_LOG_DIR", 临时目录)`（覆盖测试真实 spawn 的 CLI 子进程）
+- [X] T044 验证：chrome_setup 单跑正式日志零新增；后端全量 2783 个通过，期间正式日志零新增；测试日志正确落系统临时目录
+
+**Checkpoint**: 测试噪音不再进正式日志；全量回归通过。
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

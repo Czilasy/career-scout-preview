@@ -303,7 +303,15 @@ class RepoHygieneTests(unittest.TestCase):
                     if not isinstance(x, ast.Call):
                         continue
                     func = x.func
-                    if isinstance(func, ast.Attribute) and func.attr == "getLogger":
+                    # 「logging.getLogger(...)」与「from logging import getLogger」后的
+                    # 「getLogger(...)」等价违规，两种形式都要拦（033 T019）。
+                    if isinstance(func, ast.Attribute):
+                        name = func.attr
+                    elif isinstance(func, ast.Name):
+                        name = func.id
+                    else:
+                        name = ""
+                    if name == "getLogger":
                         bad.append(f"{p.relative_to(ROOT).as_posix()}:{x.lineno}")
         self.assertEqual(bad, [], "禁止直接使用 logging.getLogger（统一用 webui.logging_setup.get_logger）")
 

@@ -11,11 +11,13 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 from scripts import boss_cdp_raw as boss
+from webui.logging_setup import _is_test_context, get_logger
 from webui.process_executor import ScraperExecutor
 from webui.workbench import normalize_job_link
 from webui.source_breaker import SourceCircuitBreaker, SourceOutcome
@@ -34,6 +36,8 @@ from webui.source_boss_cdp_detail import _BossCdpDetailMixin
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 SCRAPER = PROJECT_ROOT / "scripts" / "boss_cdp_raw.py"
+
+_logger = get_logger(__name__)
 
 # BOSS 预检真实探测第一次被判 restricted 时，等待该时长后重试一次。
 PREFLIGHT_RETRY_DELAY_SECONDS = 10.0
@@ -94,8 +98,16 @@ class BossCdpSource(_BossCdpDetailMixin):
             str(browser_account).strip() if browser_account else None
         )
         self.run_id = str(run_id or "").strip()
-        if self.run_id and "CAREER_SCOUT_CORRELATION_ID" not in self.env:
-            self.env = {**self.env, "CAREER_SCOUT_CORRELATION_ID": self.run_id}
+        # 子进程现场日志靠这两个变量带上任务编号（033 白箱：现场可归属到具体任务）
+        if self.run_id:
+            for key in ("CAREER_SCOUT_CORRELATION_ID", "CAREER_SCOUT_TASK_ID"):
+                if key not in self.env:
+                    self.env = {**self.env, key: self.run_id}
+        # 测试上下文里构造的抓取子进程：日志目录指到系统临时目录，防测试
+        # 噪音灌进正式日志（033 白箱边缘情况；生产场景 _is_test_context 为假不受影响）。
+        if _is_test_context() and "CAREER_SCOUT_LOG_DIR" not in self.env:
+            test_log_dir = Path(tempfile.gettempdir()) / "career-scout-test-logs"
+            self.env = {**self.env, "CAREER_SCOUT_LOG_DIR": str(test_log_dir)}
         # in_process 模式（合同 inprocess-runner §4.3）：True 时内部执行器把
         # 本类构建的 argv 翻译为 run_search_programmatic / scrape_details
         # 库式调用，不 spawn 子进程；其余行为零改动。
@@ -351,6 +363,9 @@ class BossCdpSource(_BossCdpDetailMixin):
         lost_empty_batch = not page_events
         if returncode != 0:
             failed_code = _classify_failed_code(returncode, captured)
+            # 白箱（033）：子进程失败的现场原文必须进主日志，否则事后只剩对外文案
+            _logger.error("抓取子进程异常退出 stage=list returncode=%s failed_code=%s stderr_tail=%s",
+                          returncode, failed_code, _safe_tail(captured, max_chars=2000))
             self.breaker.record_signal(failed_code)
             reason = _exit_reason(returncode, captured)
             # 经门面运行时取用：保住 patch("webui.source._record_risk_signals") 面
@@ -475,6 +490,9 @@ class BossCdpSource(_BossCdpDetailMixin):
                 pass
         if returncode != 0:
             failed_code = _classify_failed_code(returncode, captured)
+            # 白箱（033）：子进程失败的现场原文必须进主日志，否则事后只剩对外文案
+            _logger.error("抓取子进程异常退出 stage=detail returncode=%s failed_code=%s stderr_tail=%s",
+                          returncode, failed_code, _safe_tail(captured, max_chars=2000))
             self.breaker.record_signal(failed_code)
             # 经门面运行时取用：保住 patch("webui.source._record_risk_signals") 面
             from webui import source as _facade

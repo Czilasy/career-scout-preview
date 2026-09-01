@@ -43,6 +43,23 @@
 2. 将日志目录设为只读 → 程序不崩溃，行为可感知（日志行可见降级或写失败有迹）。
 3. 预期：不崩溃。
 
+## 验证 6：子进程失败现场进主日志（FR-010 / SC-006，审查返修后补）
+
+1. 自动化：跑 `uv run python -m unittest tests.test_logging_whitebox`，其中
+   `test_subprocess_failure_field_reaches_main_log`（列表）与
+   `test_batch_detail_subprocess_failure_reaches_main_log`（批量详情）构造子进程
+   非 0 退出，断言主日志出现「抓取子进程异常退出」且含子进程 stderr 原文
+   （测试桩，非真实抓取）。
+2. 真实（可选）：触发一次真实抓取失败后打开日志页，除错误码与对外文案外，
+   还应能读到子进程侧的异常类型与消息原文。
+3. 预期：自动化用例命中；真实场景可查到原文而非只有文案。
+
+## 验证 7：脚本主入口兜底未识别异常（FR-011，审查返修后补）
+
+1. 自动化：无自动化覆盖（`__main__` 分支不便单测）。已验证
+   `emit_failure_line("source_unknown_error", ...)` 的失败行能被主进程正确解析。
+2. 真实：待触发一次非已知类型的抓取异常后核对日志；本轮尚无真实运行证据。
+
 ## 回归
 
 - 后端全量：`uv run python -m unittest discover -s tests`
@@ -53,3 +70,7 @@
 
 - 真实风控/验证码触发的端到端路径依赖外部平台状态，本次仅验证日志落盘机制（验证码识别→暂停属 Spec A，不在本功能）。
 - macOS 平台日志行为未实测（本项目主开发在 Windows；SafeRotatingFileHandler 的 POSIX 分支有单测覆盖）。
+- 审查返修阶段仍未做真实抓取演练：子进程现场留痕与脚本兜底均有自动化覆盖，但缺少真实运行证据（用户当期无法模拟验证码场景）。
+- Windows 下"日志文件被外部删除后自动重建"无自动化覆盖（该用例仅在非 Windows 平台执行）。
+- 拆分已解除红线约束：`source_boss_cdp_detail.py` 由 800 行拆至 567 行，批量详情整体退出留痕已补并自动化覆盖。
+- 测试噪音治理已验证：跑任意测试后，正式日志目录零新增；测试子进程日志落在系统临时目录 `%TEMP%/career-scout-test-logs`。

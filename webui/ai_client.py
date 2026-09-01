@@ -638,11 +638,14 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
         )
         raise last_error from None
     if not content and response is None:
+        # 白箱（033）：AI 失败原因必须能在日志查到，不能只有对外文案
+        _logger.warning("AI 调用失败（无响应）code=%s", ERROR_NETWORK)
         raise AISecurityError(ERROR_NETWORK) from None
 
     # 不可重试 4xx 错误处理（与之前一致）
     if response is not None and response.status_code != 200:
         if response.status_code in RETRYABLE_STATUS:
+            _logger.warning("AI 调用失败（可重试状态重试耗尽）status=%s", response.status_code)
             raise (last_error or AISecurityError(ERROR_SERVER)) from None
         if response.status_code in (401, 403):
             provider_info = _extract_provider_error(response)
@@ -653,6 +656,8 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
             )
             emit_attempt(attempt_index, attempt_started_at,
                          error_code=error.error_code, metadata=error.diagnostics)
+            _logger.warning("AI 调用失败（鉴权）status=%s code=%s",
+                            response.status_code, error.error_code)
             raise error
         if response.status_code >= 400:
             provider_info = _extract_provider_error(response)
@@ -663,6 +668,8 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
             )
             emit_attempt(attempt_index, attempt_started_at,
                          error_code=error.error_code, metadata=error.diagnostics)
+            _logger.warning("AI 调用失败（服务端拒绝）status=%s code=%s",
+                            response.status_code, error.error_code)
             raise error
 
     # 流式拿到的 content 为空（端点返回了 200 但没出字）
@@ -678,6 +685,8 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
         )
         emit_attempt(attempt_index, attempt_started_at,
                      error_code=error.error_code, metadata=error.diagnostics)
+        _logger.warning("AI 调用失败（空响应）code=%s finish_reason=%s",
+                        error.error_code, finish_reason or "")
         raise error from None
 
     try:
@@ -706,6 +715,8 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
             )
             emit_attempt(attempt_index, attempt_started_at,
                          error_code=error.error_code, metadata=error.diagnostics)
+            _logger.warning("AI 调用失败（响应截断）code=%s length=%s",
+                            error.error_code, len(content))
             raise error from None
         error = AISecurityError(
             ERROR_INVALID,
@@ -720,4 +731,6 @@ def call_ai(endpoint_url: str, api_key: str, messages: list, timeout: int = DEFA
         )
         emit_attempt(attempt_index, attempt_started_at,
                      error_code=error.error_code, metadata=error.diagnostics)
+        _logger.warning("AI 调用失败（响应无法解析）code=%s parse_error=%s",
+                        error.error_code, type(exc).__name__)
         raise error from None

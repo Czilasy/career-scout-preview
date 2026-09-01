@@ -40,9 +40,9 @@
 - **原则 I 职责分层**：脚本主入口补捕获是"薄映射"（异常→失败行→退出码），与 026 的 `except ResultFileWriteError` 同性质、同落点（`__main__` 块），不向门面追加业务逻辑；webui 侧改动复用既有 `_read_events_file` 分类方法，不新增路由/业务层。不违反。
 - **原则 II 单文件尺寸**：`source_boss_cdp_detail.py` 797 行——只改既有分支内部、净增 ≤15 行，若超 800 则按 033 先例将事件归类逻辑迁出到新模块（等价搬运）；`scripts/boss_cdp_raw.py` 129 行（薄映射豁免）；不违反。
 - **原则 III 引用方向**：webui 侧 `source_boss_cdp_detail.py` → `_read_events_file`（自身方法）；脚本侧 `boss_cdp_raw.py` → `emit_failure_line`（既有 import）；无新增跨层反向依赖。不违反。
-- **原则 IV 拆分与重构纪律**：本功能是"接线"而非拆分，不新建业务模块；唯一可能的新文件是行数超线时的事件归类 helper（等价搬运）。不违反。
+- **原则 IV 拆分与重构纪律**：本功能是"接线"而非拆分，不新建业务模块；事件归类纯函数按兜底选项迁出至 `webui/source_boss_detail_events.py`（等价搬运，纯函数无实例依赖），已登记进宪法模块地图。不违反。
 - **原则 V 验证门禁**：按门禁执行聚焦测试、后端全量、卫生检查；无前端改动则前端构建照常执行；不违反。
-- **原则 VI 模块地图与落位**：改动全部落在既有域模块（`scripts/boss_cdp_raw.py` 门面薄映射、`webui/source_boss_cdp_detail.py` detail mixin），不产生新业务域模块。对超预警线文件 `source_boss_cdp_detail.py`（797）：改动限于既有分支内部、净增最小化，超线则等价迁出（同 033 先例）；不违反。
+- **原则 VI 模块地图与落位**：改动落在既有域模块（`scripts/boss_cdp_raw.py` 门面薄映射、`webui/source_boss_cdp_detail.py` detail mixin），不产生新业务域模块；事件归类纯助手 `webui/source_boss_detail_events.py` 为既有域内的等价搬运（非新业务域），已登记模块地图。对超预警线文件 `source_boss_cdp_detail.py`（800 贴线）：事件归类逻辑已迁出至新模块，本文件保留调用入口。不违反。
 
 ## File Boundaries
 
@@ -55,7 +55,7 @@
 - **Forbidden files**：白箱 033 已改文件（`webui/logging_setup.py`、`webui/runtime_audit.py`、`webui/source.py`、`webui/source_boss_cdp.py`、`webui/updater.py`、`webui/error_registry.py`、`webui/ai_client.py`、`scripts/boss/constants.py`、`scripts/boss/search.py`、`scripts/boss/login.py`、`scripts/boss/detail_scrape.py`、`webui/task_runners.py`）；`webui/error_registry.py`（错误码/文案已完备，本次不新增）；`webui/src/` 全部前端；`webui/app.py`、`webui/store.py`；数据库；roadmap/、`.codebuddy/`
 - **New files**：`tests/test_scrape_block_classification.py`（聚焦测试，~150-250 行）；若 `source_boss_cdp_detail.py` 超线则新 `webui/source_boss_detail_events.py`（事件归类 helper，等价搬运）；本 spec 目录下文档（research.md、data-model.md、quickstart.md、contracts/）
 - **Reference direction**: 脚本侧 `scripts/boss_cdp_raw.py`（`__main__` 薄映射）→ `scripts/boss_cdp_signals.emit_failure_line`（既有）；webui 侧 `source_boss_cdp_detail.py` → `_read_events_file` / `_classify_failed_code`（既有，本文件内/同域 helpers）；tests → 被测代码。无新增跨模块引用。
-- **Line gate**: `scripts/boss_cdp_raw.py` ≤140（净增 ≤10，薄映射）；`source_boss_cdp_detail.py` ≤800（仅改既有分支内部、净增 ≤15；超线则迁出事件归类逻辑）；`tests/test_scrape_block_classification.py` ≤300
+- **Line gate**: `scripts/boss_cdp_raw.py` ≤140（实测 135，达标；033 在途改动另含异常兜底 +7 行）；`source_boss_cdp_detail.py` ≤800（实测 800 贴线，事件归类纯函数已迁出至 `webui/source_boss_detail_events.py`）；`tests/test_scrape_block_classification.py` ≤300（实测 283）
 - **Rationale**: 改动全部是既有断线的接线，复用已有错误码体系、失败行契约、熔断器、事件文件，不产生新业务机制；对紧贴红线的文件只做分支内最小改动，拆分责任归 031 工程还债（033 同口径）
 
 ## Verification Gate
@@ -89,7 +89,8 @@ specs/034-scrape-block-handling/
 
 ```text
 scripts/boss_cdp_raw.py  # [改] __main__ 补捕获三类异常 → 失败行 + 退出码
-webui/source_boss_cdp_detail.py # [改] fetch_details_batch 非零退出读事件文件归类
+webui/source_boss_cdp_detail.py # [改] fetch_details_batch 非零退出读事件文件归类（调用新模块）
+webui/source_boss_detail_events.py # [新] 事件归类纯助手（index_events_by_url / event_outcome_code，等价迁出）
 tests/test_scrape_block_classification.py # [新] 假样本回归聚焦测试
 ```
 
