@@ -156,22 +156,22 @@ class LoadSaveTests(unittest.TestCase):
         """desktop 模块 re-export 窗口状态符号（旧调用面兼容）。"""
         self.assertIs(desktop.load_window_state, ws.load_window_state)
         self.assertIs(desktop.save_window_state, ws.save_window_state)
-        self.assertEqual(desktop.DEFAULT_WIDTH, 1545)
+        self.assertEqual(desktop.DEFAULT_WIDTH, 1400)
         self.assertEqual(desktop.DEFAULT_HEIGHT, 800)
 
     def test_save_load_roundtrip_normal(self):
         """写入后读取返回相同普通矩形 + maximized=False。"""
-        ws.save_window_state(1280, 800, 200, 150, state_dir=self.state_dir)
+        ws.save_window_state(1400, 800, 200, 150, state_dir=self.state_dir)
         result = ws.load_window_state(state_dir=self.state_dir)
-        self.assertEqual(result, (1280, 800, 200, 150, False))
+        self.assertEqual(result, (1400, 800, 200, 150, False))
 
     def test_save_load_roundtrip_maximized(self):
         """maximized=True 写读往返。"""
         ws.save_window_state(
-            1200, 800, 50, 60, state_dir=self.state_dir, maximized=True
+            1400, 800, 50, 60, state_dir=self.state_dir, maximized=True
         )
         result = ws.load_window_state(state_dir=self.state_dir)
-        self.assertEqual(result, (1200, 800, 50, 60, True))
+        self.assertEqual(result, (1400, 800, 50, 60, True))
 
     def test_load_missing_file_first_open_maximized(self):
         """文件不存在 → 首开处理：默认普通矩形 + maximized=True。"""
@@ -244,31 +244,31 @@ class LoadSaveTests(unittest.TestCase):
         """位置越出工作区 → 主工作区居中（schema 3）。"""
         _write_state(
             self.state_dir,
-            {"schema": 3, "width": 1280, "height": 800, "x": 5000, "y": 5000},
+            {"schema": 3, "width": 1400, "height": 800, "x": 5000, "y": 5000},
         )
         result = ws.load_window_state(
             state_dir=self.state_dir,
             workarea_provider=lambda: [(0, 0, 1920, 1080)],
         )
-        self.assertEqual(result, (1280, 800, 320, 140, False))
+        self.assertEqual(result, (1400, 800, 260, 140, False))
 
     def test_load_position_inside_workarea_kept(self):
         """位置在工作区内 → 保留。"""
         _write_state(
             self.state_dir,
-            {"schema": 3, "width": 1280, "height": 800, "x": 100, "y": 100},
+            {"schema": 3, "width": 1400, "height": 800, "x": 100, "y": 100},
         )
         result = ws.load_window_state(
             state_dir=self.state_dir,
             workarea_provider=lambda: [(0, 0, 1920, 1080)],
         )
-        self.assertEqual(result, (1280, 800, 100, 100, False))
+        self.assertEqual(result, (1400, 800, 100, 100, False))
 
     def test_load_position_on_secondary_monitor_kept(self):
         """多显示器：副屏工作区位置保留，不拉回主屏。"""
         _write_state(
             self.state_dir,
-            {"schema": 3, "width": 1280, "height": 800, "x": 2000, "y": 200},
+            {"schema": 3, "width": 1400, "height": 800, "x": 2000, "y": 200},
         )
         result = ws.load_window_state(
             state_dir=self.state_dir,
@@ -277,19 +277,19 @@ class LoadSaveTests(unittest.TestCase):
                 (1920, 0, 1920, 1040),
             ],
         )
-        self.assertEqual(result, (1280, 800, 2000, 200, False))
+        self.assertEqual(result, (1400, 800, 2000, 200, False))
 
     def test_load_negative_position_centers(self):
         """位置为负且不在工作区 → 居中。"""
         _write_state(
             self.state_dir,
-            {"schema": 3, "width": 1280, "height": 800, "x": -9999, "y": -9999},
+            {"schema": 3, "width": 1400, "height": 800, "x": -9999, "y": -9999},
         )
         result = ws.load_window_state(
             state_dir=self.state_dir,
             workarea_provider=lambda: [(0, 0, 1920, 1080)],
         )
-        self.assertEqual(result, (1280, 800, 320, 140, False))
+        self.assertEqual(result, (1400, 800, 260, 140, False))
 
     def test_no_provider_returns_raw(self):
         """无 workarea_provider → 不钳制不判越界，原样返回（含 maximized）。"""
@@ -304,10 +304,10 @@ class LoadSaveTests(unittest.TestCase):
     def test_state_dir_injectable_no_real_user_dir(self):
         """目录可注入，测试不写真实 ~/.career-scout。"""
         isolated = Path(tempfile.mkdtemp())
-        ws.save_window_state(1400, 900, 50, 50, state_dir=isolated)
+        ws.save_window_state(1400, 800, 50, 50, state_dir=isolated)
         self.assertTrue((isolated / ws.WINDOW_STATE_FILENAME).exists())
         result = ws.load_window_state(state_dir=isolated)
-        self.assertEqual(result, (1400, 900, 50, 50, False))
+        self.assertEqual(result, (1400, 800, 50, 50, False))
 
 
 class Schema2UpgradeTests(unittest.TestCase):
@@ -320,13 +320,13 @@ class Schema2UpgradeTests(unittest.TestCase):
         """schema 2 正常记忆（装得进工作区）→ 继承为普通矩形，maximized=False。"""
         _write_state(
             self.state_dir,
-            {"schema": 2, "width": 1280, "height": 800, "x": 100, "y": 100},
+            {"schema": 2, "width": 1400, "height": 800, "x": 100, "y": 100},
         )
         result = ws.load_window_state(
             state_dir=self.state_dir,
             workarea_provider=lambda: [(0, 0, 1920, 1080)],
         )
-        self.assertEqual(result, (1280, 800, 100, 100, False))
+        self.assertEqual(result, (1400, 800, 100, 100, False))
 
     def test_schema2_polluted_memory_treated_as_first_open(self):
         """schema 2 全屏污染矩形（1936×1056 @ -8,-8）→ 视同无记忆，首开处理。"""
@@ -360,13 +360,13 @@ class Schema2UpgradeTests(unittest.TestCase):
         """无 provider 时无法判定污染 → schema 2 正常限内值原样继承。"""
         _write_state(
             self.state_dir,
-            {"schema": 2, "width": 1400, "height": 900, "x": 10, "y": 10},
+            {"schema": 2, "width": 1400, "height": 800, "x": 10, "y": 10},
         )
         result = ws.load_window_state(state_dir=self.state_dir)
-        self.assertEqual(result, (1400, 900, 10, 10, False))
+        self.assertEqual(result, (1400, 800, 10, 10, False))
 
-    def test_schema3_oversize_clamped_not_discarded(self):
-        """schema 3 超屏（外力污染/换小屏）→ 钳回主工作区，不作废。"""
+    def test_schema3_oversize_rejected_as_first_open(self):
+        """schema 3 超限尺寸（超出 MIN/MAX）→ 视同无记忆，首开处理。"""
         _write_state(
             self.state_dir,
             {"schema": 3, "width": 5000, "height": 3000, "x": 5000, "y": 5000},
@@ -375,8 +375,8 @@ class Schema2UpgradeTests(unittest.TestCase):
             state_dir=self.state_dir,
             workarea_provider=lambda: [(0, 0, 1920, 1040)],
         )
-        # 尺寸钳 (1920,1040)；位置越界 → 主工作区居中 (0,0)
-        self.assertEqual(result, (1920, 1040, 0, 0, False))
+        # 超出 MAX → no_memory：默认尺寸 + 首开最大化
+        self.assertEqual(result, (1400, 800, None, None, True))
 
     def test_schema2_missing_memory_uses_configured_default(self):
         """schema 2 缺记忆字段 → 用用户配置的 default 尺寸 + 首开最大化。"""
@@ -385,7 +385,8 @@ class Schema2UpgradeTests(unittest.TestCase):
             {"schema": 2, "default_width": 1440, "default_height": 900},
         )
         result = ws.load_window_state(state_dir=self.state_dir)
-        self.assertEqual(result, (1440, 900, None, None, True))
+        # default 超出 MIN/MAX → 回退常量 1400×800
+        self.assertEqual(result, (1400, 800, None, None, True))
 
     def test_schema2_invalid_default_falls_back_constant(self):
         """default 字段非法 → 常量默认。"""
@@ -404,8 +405,8 @@ class Schema2UpgradeTests(unittest.TestCase):
             self.state_dir,
             {
                 "schema": 2,
-                "default_width": 1440,
-                "default_height": 900,
+                "default_width": 1400,
+                "default_height": 800,
                 "width": 1200,
                 "height": 700,
                 "x": 5,
@@ -415,8 +416,8 @@ class Schema2UpgradeTests(unittest.TestCase):
         ws.save_window_state(1280, 720, 100, 100, state_dir=self.state_dir)
         data = _read_state(self.state_dir)
         self.assertEqual(data["schema"], 3)
-        self.assertEqual(data["default_width"], 1440)
-        self.assertEqual(data["default_height"], 900)
+        self.assertEqual(data["default_width"], 1400)
+        self.assertEqual(data["default_height"], 800)
         self.assertEqual((data["width"], data["height"]), (1280, 720))
         self.assertFalse(data["maximized"])
 
@@ -426,12 +427,12 @@ class DefaultRectTests(unittest.TestCase):
 
     def test_default_normal_rect_without_provider(self):
         """无 provider → 常量尺寸 + (0,0) 位置。"""
-        self.assertEqual(ws.default_normal_rect(None), (1545, 800, 0, 0))
+        self.assertEqual(ws.default_normal_rect(None), (1400, 800, 0, 0))
 
     def test_default_normal_rect_centered(self):
         """有 provider → 默认尺寸 + 主工作区居中。"""
         rect = ws.default_normal_rect(lambda: [(0, 0, 1920, 1080)])
-        self.assertEqual(rect, (1545, 800, 187, 140))
+        self.assertEqual(rect, (1400, 800, 260, 140))
 
     def test_default_normal_rect_clamped_on_small_screen(self):
         """小屏 → 默认尺寸钳到工作区。"""
@@ -451,7 +452,7 @@ class DefaultRectTests(unittest.TestCase):
         def boom():
             raise RuntimeError("monitor gone")
 
-        self.assertEqual(ws.default_normal_rect(boom), (1545, 800, 0, 0))
+        self.assertEqual(ws.default_normal_rect(boom), (1400, 800, 0, 0))
 
 
 # ===========================================================================
@@ -461,7 +462,7 @@ class TrackerTests(unittest.TestCase):
     """运行时普通矩形追踪与落盘快照。"""
 
     def setUp(self):
-        self.default_rect = (1545, 800, 187, 140)
+        self.default_rect = (1400, 800, 260, 140)
         self.tracker = ws.WindowStateTracker(
             default_rect_fn=lambda: self.default_rect
         )
@@ -542,7 +543,7 @@ class TrackerTests(unittest.TestCase):
 
     def test_snapshot_normal_no_data_uses_default_rect(self):
         result = self.tracker.snapshot_for_save(None, None, None, None)
-        self.assertEqual(result, (1545, 800, 187, 140, False))
+        self.assertEqual(result, (1400, 800, 260, 140, False))
 
     def test_snapshot_maximized_uses_frozen_rect(self):
         self.tracker.on_resized(1200, 800)
@@ -555,13 +556,13 @@ class TrackerTests(unittest.TestCase):
     def test_snapshot_maximized_without_normal_rect_uses_default(self):
         self.tracker.on_maximized()
         result = self.tracker.snapshot_for_save(1936, 1056, -8, -8)
-        self.assertEqual(result, (1545, 800, 187, 140, True))
+        self.assertEqual(result, (1400, 800, 260, 140, True))
 
     def test_snapshot_maximized_partial_rect_uses_default(self):
         self.tracker.on_resized(1200, 800)  # 位置仍缺
         self.tracker.on_maximized()
         result = self.tracker.snapshot_for_save(1936, 1056, -8, -8)
-        self.assertEqual(result, (1545, 800, 187, 140, True))
+        self.assertEqual(result, (1400, 800, 260, 140, True))
 
     def test_snapshot_without_default_fn_falls_back_constants(self):
         tracker = ws.WindowStateTracker()

@@ -436,13 +436,13 @@ class ShellOrchestrationTests(unittest.TestCase):
             webview_mod.create_window_calls[0]["title"], "Career Scout v2.4.0"
         )
 
-    def test_window_min_size_is_1024_700(self):
-        """min_size = (1024, 700)（合同 §5）。"""
+    def test_window_min_size_is_1400_800(self):
+        """min_size = (1400, 800)（frameless 不可拉伸，min=max=default）。"""
         webview_mod = _FakeWebview()
         deps = _make_deps(webview_module=webview_mod)
         desktop.run_desktop_shell(deps)
         self.assertEqual(
-            webview_mod.create_window_calls[0]["min_size"], (1024, 700)
+            webview_mod.create_window_calls[0]["min_size"], (1400, 800)
         )
 
     def test_window_resizable_true(self):

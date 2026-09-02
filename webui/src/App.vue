@@ -11,9 +11,11 @@ import AppSettingsMenu from "./components/AppSettingsMenu.vue";
 import WindowTitleBar from "./components/WindowTitleBar.vue";
 import DynamicIsland from "./components/DynamicIsland.vue";
 import { requestCapsuleNavigation, type CapsuleStatusPayload, type CapsuleNavigationTarget } from "./composables/useDiscoveryState";
+import { createIslandNotices } from "./composables/useIslandNotices";
+import { useReminderBadge } from "./composables/useReminderBadge";
 import DiscoveryView from "./views/DiscoveryView.vue";
 import { apiRequest, currentRuntimeMode, errorMessage, GITHUB_REPO_URL, initializeSession, openExternalLink, updateApi, type UpdateCheckResult } from "./api";
-import { getJobReminderCount, safeCanonicalUrl } from "./jobFeedback";
+import { safeCanonicalUrl } from "./jobFeedback";
 import type { RoundStatusPayload } from "./discovery";
 import { useTheme } from "./composables/useTheme";
 import ThemePickerOptions from "./themes/ThemePickerOptions.vue";
@@ -64,8 +66,19 @@ const discoveryRef = ref<{
   closeHistoryDrawer: () => void;
 } | null>(null);
 
+// ---------------------------------------------------------------------------
+// 037 灵动岛 v2：通知池由胶囊状态跃迁派生（App 持有）；面板开闭由
+// DynamicIsland 内部 open 状态控制；面板与三抽屉互斥（开任一即 collapse）。
+// ---------------------------------------------------------------------------
+const islandNotices = createIslandNotices(roundStatus);
+const islandRef = ref<{ collapse: () => void } | null>(null);
+function collapseIsland() {
+  islandRef.value?.collapse?.();
+}
+
 function toggleHistoryDrawer() {
   // 与收藏/提醒互斥：打开历史时收起另外两个抽屉。
+  collapseIsland();
   favoritesOpen.value = false;
   reminderDrawerOpen.value = false;
   discoveryRef.value?.toggleHistoryDrawer?.();
@@ -78,6 +91,17 @@ function closeHistoryDrawer() {
 function openAiSettingsFromMenu() {
   settingsMenuOpen.value = false;
   aiSettingsOpen.value = true;
+}
+
+// 037 复审 B3：设置菜单与灵动岛/主题选择框互斥——打开时收起岛与主题框。
+function toggleSettingsMenu() {
+  if (settingsMenuOpen.value) {
+    settingsMenuOpen.value = false;
+    return;
+  }
+  collapseIsland();
+  themePickerOpen.value = false;
+  settingsMenuOpen.value = true;
 }
 function openBrowserAccountsFromMenu() {
   settingsMenuOpen.value = false;
@@ -127,6 +151,7 @@ function toggleFavorites() {
   } else {
     favoritesOpen.value = true;
     // 两个抽屉互斥：打开收藏时收起提醒，避免叠加导致点空白“回落到收藏”。
+    collapseIsland();
     reminderDrawerOpen.value = false;
     closeHistoryDrawer();
     void loadFavorites();
@@ -395,7 +420,10 @@ function finishThemeCharge() {
   themeCharging.value = false;
   clearChargeVisual(); // 蓄满即还原：抖动停止、大小回原、光晕收回，随后弹框
   themeLongPressFired = true;
-  themePickerOpen.value = true; // 占位空白框，下一阶段填充主题列表
+  // 037 复审 B3：主题选择框与灵动岛互斥，弹出前收起岛与设置菜单。
+  collapseIsland();
+  settingsMenuOpen.value = false;
+  themePickerOpen.value = true;
 }
 
 function cancelThemeCharge() {
@@ -464,70 +492,12 @@ function acceptCreatedProfile(profile: CandidateProfile) {
 }
 
 // ---------------------------------------------------------------------------
-// 提醒入口（Task 009）：App 持有当前 profile 的提醒状态。
-// count/list/state 全部以服务端响应为唯一来源；不在前端计算 720h 资格，
-// 不传 platform 过滤，不做乐观更新。
+// 037 提醒入口回退：角标单源 = 服务端 /api/job-reminders/count 的 total；
+// 列表/total 同源（002 合同），数字与抽屉天然一致；不再合成胶囊派生数。
 // ---------------------------------------------------------------------------
 
 const reminderDrawerOpen = ref(false);
-const reminderTotal = ref(0);
-/** 请求序号：profile 切换后，旧 profile 的 count 响应不得覆盖新 profile。 */
-let reminderCountSeq = 0;
-
-async function refreshReminderCount() {
-  const profileId = currentProfileId.value;
-  if (!profileId) {
-    reminderTotal.value = 0;
-    return;
-  }
-  const seq = ++reminderCountSeq;
-  try {
-    const data = await getJobReminderCount(profileId);
-    // 丢弃旧 profile 的陈旧响应；徽标只采用当前 profile 的服务端总数。
-    if (seq !== reminderCountSeq || profileId !== currentProfileId.value) return;
-    reminderTotal.value = data.total;
-  } catch {
-    // 加载失败：保留上次已知数量，不清零也不伪造（下次变更时再刷新）。
-  }
-}
-
-// 036 B088（FR-021）：提醒按钮通用化——徽标显示各类提醒数量汇总
-//（投递 + 待确认 + 出错 + 跑完）。投递为服务端权威（reminderTotal）；
-// 待确认/出错/跑完来自胶囊状态（状态层汇总，不在前端伪造）。
-const reminderBreakdown = computed(() => {
-  const capsule = roundStatus.value?.capsule;
-  let pending = 0;
-  let error = 0;
-  let completed = 0;
-  if (capsule) {
-    if (capsule.state === "completed") {
-      pending = capsule.results.pending;
-      completed = 1; // 本轮跑完待查看
-    } else if (capsule.state === "attention" && capsule.attention.kind === "error") {
-      error = 1;
-    }
-  }
-  return { delivery: reminderTotal.value, pending, error, completed };
-});
-
-const reminderTotalAll = computed(() => {
-  const b = reminderBreakdown.value;
-  return b.delivery + b.pending + b.error + b.completed;
-});
-
-const reminderBadgeText = computed(() =>
-  reminderTotalAll.value >= 100 ? "99+" : String(reminderTotalAll.value));
-
-// 可访问名称始终包含真实总数；100+ 时视觉显示 99+。
-const reminderAriaLabel = computed(() => {
-  const b = reminderBreakdown.value;
-  if (reminderTotalAll.value === 0) return "查看提醒";
-  const parts = [`投递 ${b.delivery}`];
-  if (b.pending > 0) parts.push(`待确认 ${b.pending}`);
-  if (b.error > 0) parts.push(`出错 ${b.error}`);
-  if (b.completed > 0) parts.push(`跑完 ${b.completed}`);
-  return `查看提醒，共 ${reminderTotalAll.value} 项：${parts.join("、")}`;
-});
+const reminderBadge = useReminderBadge(currentProfileId);
 
 function toggleReminderDrawer() {
   if (reminderDrawerOpen.value) {
@@ -536,6 +506,7 @@ function toggleReminderDrawer() {
   }
   // profile 为空时不请求也不打开抽屉。
   if (!currentProfileId.value) return;
+  collapseIsland();
   reminderDrawerOpen.value = true;
   // 两个抽屉互斥：打开提醒时收起收藏。
   favoritesOpen.value = false;
@@ -553,12 +524,18 @@ function handleDrawerTrigger(trigger: () => void, event: MouseEvent) {
   if (event.detail === 0) trigger();
 }
 
-// profile 初始化/切换：关闭并重置旧抽屉，废弃在途旧请求，重新加载 count。
+// 037 灵动岛收起（dismiss）→ 只把"关闭瞬间已在面板里的通知"标已读；
+// 关闭窗口期（leaving 220ms）新到达的通知不在快照内，保持未读（复审二 N2）。
+function handleIslandDismiss(ids: string[]) {
+  islandNotices.markReadBatch(ids);
+}
+
+// profile 初始化/切换：收起岛面板、关提醒抽屉、清空岛通知池；badge 由
+// composable 内部 watch 自刷新（seq 自守卫），App 不再重复调用，避免双请求。
 watch(currentProfileId, (profileId) => {
+  collapseIsland();
   reminderDrawerOpen.value = false;
-  reminderTotal.value = 0;
-  reminderCountSeq += 1;
-  if (profileId) void refreshReminderCount();
+  islandNotices.reset();
 });
 
 // 详情动作（DiscoveryView）或抽屉快捷动作（ReminderDrawer）成功后刷新 count。
@@ -566,9 +543,20 @@ watch(currentProfileId, (profileId) => {
 function handleJobFeedbackChanged(payload?: { profileId?: string }) {
   // profile 已切换时丢弃旧 action 触发的刷新，不代旧 profile 发请求。
   if (payload?.profileId && payload.profileId !== currentProfileId.value) return;
-  void refreshReminderCount();
+  void reminderBadge.refreshReminderCount();
   // 收藏/取消收藏属于 interest 变更，同步刷新收藏数量。
   void loadFavorites();
+}
+
+// 037 灵动岛展开面板 → 关闭全部顶栏浮层（三抽屉 + 设置菜单 + 主题选择框）。
+// 已读不在打开时标记：面板行以未读态渲染（修"未读高亮死代码"），收起
+// （dismiss，带 id 快照）时由 handleIslandDismiss 标记快照内通知为已读。
+function handleIslandExpand() {
+  settingsMenuOpen.value = false;
+  themePickerOpen.value = false;
+  favoritesOpen.value = false;
+  reminderDrawerOpen.value = false;
+  closeHistoryDrawer();
 }
 </script>
 
@@ -608,8 +596,12 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
       </a>
 
       <DynamicIsland
+        ref="islandRef"
         :status="roundStatus"
+        :notices="islandNotices.notices.value"
         @navigate="handleCapsuleNavigate"
+        @expand="handleIslandExpand"
+        @dismiss="handleIslandDismiss"
       />
 
       <div class="header-actions">
@@ -617,19 +609,19 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           class="button secondary reminder-trigger"
           type="button"
           data-testid="reminder-trigger"
-          :aria-label="reminderAriaLabel"
-          :title="reminderAriaLabel"
+          :aria-label="reminderBadge.ariaLabel.value"
+          :title="reminderBadge.ariaLabel.value"
           :disabled="!currentProfileId"
           @mousedown="handleDrawerTrigger(toggleReminderDrawer, $event)"
           @click="handleDrawerTrigger(toggleReminderDrawer, $event)"
         >
           <Bell :size="18" aria-hidden="true" /><span>提醒</span>
           <em
-            v-if="reminderTotalAll > 0"
+            v-if="reminderBadge.reminderTotal.value > 0"
             class="fav-badge reminder-badge"
             data-testid="reminder-badge"
             aria-hidden="true"
-          >{{ reminderBadgeText }}</em>
+          >{{ reminderBadge.badgeText.value }}</em>
         </button>
         <button
           ref="favTriggerEl"
@@ -660,7 +652,7 @@ function handleJobFeedbackChanged(payload?: { profileId?: string }) {
           data-testid="settings-trigger"
           aria-label="设置"
           title="设置"
-          @click="settingsMenuOpen = !settingsMenuOpen"
+          @click="toggleSettingsMenu"
         >
           <Settings :size="18" aria-hidden="true" />
           <em

@@ -171,7 +171,10 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/components/TaskCompletedToast.vue` — 顶部冒泡提示组件：后台任务跑完时用户在看历史的完成提示，点击回最新（035）
 - `packaging/window_controls.py` — 窗口控制 Win32 助手：无边框窗口控制原语与最大化避让任务栏适配（036）
 - `webui/src/components/WindowTitleBar.vue` — 自绘标题栏组件：桌面版窗口标题栏（文字+三按钮+拖拽区+主题配色，仅 EXE 渲染）（036）
-- `webui/src/components/DynamicIsland.vue` — 顶栏胶囊灵动岛组件：四态渲染/动画/点击直达（036）
+- `webui/src/components/DynamicIsland.vue` — 顶栏胶囊灵动岛组件：四态渲染/motion-v 弹簧动画/未读红点/通知面板开闭与 collapse 暴露（036 立；037 v2 重写为通知池消费方）
+- `webui/src/composables/useIslandNotices.ts` — 灵动岛通知池：roundStatus capsule 跃迁派生 completed/error/paused 通知（sync watch、同 kind 内容级替换、running/idle 清空、初始观察不产幽灵）（037）
+- `webui/src/composables/useReminderBadge.ts` — 提醒角标单源：服务端 /api/job-reminders/count total 与 seq 守卫/99+ 截断/aria（037 自 App.vue 036 通用化块回退抽出）
+- `webui/src/components/IslandNoticePanel.vue` — 灵动岛通知面板：胶囊下方弹出、error→paused→completed 排序、未读高亮/已读淡化、行点击直达（037）
 
 ## 文件布局约束
 

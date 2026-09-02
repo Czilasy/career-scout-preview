@@ -11,10 +11,12 @@ T035 接线点（冻结合同 ``specs/003-desktop-exe/contracts/desktop-shell.md
    PYTHON_EXECUTABLE=sys.executable, START_TASKS=True})``，
    ``app.run(use_reloader=False, threaded=True)`` 在独立 daemon 线程。
 4. **就绪轮询**（§4）：``GET /api/session`` 直到 200，超时 ≤30s → 错误退出。
-5. **窗口**（§5，029 修订）：普通态默认 1545×800 居中（小屏钳回），
-   ``min_size=(1024,700)``，``resizable=True``；从 ``~/.career-scout/desktop_window.json``
+5. **窗口**（§5，029 修订）：固定 1400×800（frameless 不可拉伸，
+   min=max=default），``resizable=True``；从 ``~/.career-scout/desktop_window.json``
    （schema 3）恢复普通矩形与最大化标记——无记忆/损坏/污染记忆一律首开
    最大化；事件维护普通矩形（窗口状态域 ``packaging/window_state.py``）。
+   shown 后 ``_fix_frameless_size`` 修正 pywebview 先设 Size 后去边框导致
+   的窗口缩水（Win32 SetWindowPlacement 修正 rcNormalPosition）。
 6. **closing 生命周期**（§6）：``events.closing`` → 按 Tracker 快照落盘
    （最大化 → 最后普通矩形 + ``maximized:true``）→ ``cancel_running_tasks``
    → 返回退出码；``main()`` 调用方 ``os._exit(code)`` 兜底（合同 §6）。
@@ -611,6 +613,87 @@ def _install_maximize_clamp(window, state_dir=None, logger=None):
         _diag(f"EXC {type(e).__name__}: {e}")
 
 
+def _fix_frameless_size(window, target_w, target_h, state_dir=None, logger=None):
+    """修正 pywebview WinForms frameless 窗口尺寸缩水。
+
+    根因：pywebview winforms.py 先 ``self.Size = Size(w, h)``（此时窗口
+    有系统边框+标题栏），后 ``FormBorderStyle = None``（去边框）。WinForms
+    切换 FormBorderStyle 时保持客户区不变，边框消失后外框 = 客户区，
+    比设入值小了边框+标题栏的量（约 16px×39px，见 desktop.log 1529×761）。
+
+    修正：用 Win32 ``GetWindowPlacement`` / ``SetWindowPlacement`` 修正
+    ``rcNormalPosition`` 到目标物理尺寸（含 DPI 缩放）。当前最大化时只
+    更新还原矩形不改当前显示；当前普通态时窗口立即跳到正确尺寸。
+    任何失败静默降级（不阻断启动）。
+    """
+    if sys.platform != "win32":
+        return
+    _diag = lambda msg: log_error(f"[fixsize] {msg}", state_dir=state_dir, logger=logger) if (state_dir or logger) else None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+
+        hwnd, _title = _find_main_hwnd_pid()
+        if not hwnd:
+            _diag("find_hwnd FAIL")
+            return
+
+        user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+        user32.GetDpiForWindow.restype = wintypes.UINT
+        dpi = user32.GetDpiForWindow(hwnd)
+        scale = dpi / 96.0 if dpi else 1.0
+        phys_w = int(target_w * scale)
+        phys_h = int(target_h * scale)
+
+        class WINDOWPLACEMENT(ctypes.Structure):
+            _fields_ = [
+                ("length", wintypes.UINT),
+                ("flags", wintypes.UINT),
+                ("showCmd", wintypes.UINT),
+                ("ptMinPosition", wintypes.POINT),
+                ("ptMaxPosition", wintypes.POINT),
+                ("rcNormalPosition", wintypes.RECT),
+            ]
+
+        user32.GetWindowPlacement.argtypes = [
+            wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT)
+        ]
+        user32.GetWindowPlacement.restype = wintypes.BOOL
+        user32.SetWindowPlacement.argtypes = [
+            wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT)
+        ]
+        user32.SetWindowPlacement.restype = wintypes.BOOL
+
+        placement = WINDOWPLACEMENT()
+        placement.length = ctypes.sizeof(WINDOWPLACEMENT)
+        if not user32.GetWindowPlacement(hwnd, ctypes.byref(placement)):
+            _diag("GetWindowPlacement FAIL")
+            return
+
+        rc = placement.rcNormalPosition
+        cur_w = rc.right - rc.left
+        cur_h = rc.bottom - rc.top
+        if cur_w == phys_w and cur_h == phys_h:
+            _diag(f"already correct {phys_w}x{phys_h}")
+            return
+
+        workareas = default_workarea_provider()
+        if workareas:
+            ax, ay, aw, ah = workareas[0]
+            x = ax + max(0, (aw - phys_w) // 2)
+            y = ay + max(0, (ah - phys_h) // 2)
+        else:
+            x, y = rc.left, rc.top
+
+        placement.rcNormalPosition = wintypes.RECT(x, y, x + phys_w, y + phys_h)
+        user32.SetWindowPlacement(hwnd, ctypes.byref(placement))
+        _diag(f"fixed {cur_w}x{cur_h} -> {phys_w}x{phys_h} @ {x},{y}")
+    except Exception as e:
+        _diag(f"EXC {type(e).__name__}: {e}")
+
+
 def run_desktop_shell(deps):
     """桌面壳主编排。所有外部依赖通过 ``deps`` 注入。
 
@@ -842,6 +925,10 @@ def run_desktop_shell(deps):
                 def _on_shown():
                     _install_maximize_clamp(
                         window, state_dir=state_dir, logger=logger
+                    )
+                    _fix_frameless_size(
+                        window, DEFAULT_WIDTH, DEFAULT_HEIGHT,
+                        state_dir=state_dir, logger=logger
                     )
                     # [diag] 打开瞬间窗口状态（hook 装完、重切后读真值）
                     try:

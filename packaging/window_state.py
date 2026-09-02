@@ -23,15 +23,13 @@ from typing import Callable, NamedTuple, Optional
 # 路径与常量（desktop.py re-export 保持旧调用面）
 DEFAULT_STATE_DIR = Path(os.path.expanduser("~/.career-scout"))
 WINDOW_STATE_FILENAME = "desktop_window.json"
-# 默认窗口尺寸 = 普通态默认（首开直接最大化；从最大化还原落到该尺寸居中）
-DEFAULT_WIDTH = 1545
-# 800 = 2026-09-02 用户定稿：从最大化还原时内容区不出滚动条（1000 实测
-# 偏高仍滚动）；800 在 1920×1080 工作区（约 1032）内留足余量不被钳回。
+# 窗口尺寸：frameless 不可拉伸，最小 = 最大 = 默认，固定 1400×800。
+DEFAULT_WIDTH = 1400
 DEFAULT_HEIGHT = 800
-MIN_WIDTH = 1024
-MIN_HEIGHT = 700
-MAX_WIDTH = 8192
-MAX_HEIGHT = 8192
+MIN_WIDTH = 1400
+MIN_HEIGHT = 800
+MAX_WIDTH = 1400
+MAX_HEIGHT = 800
 _WINDOW_STATE_SCHEMA_VERSION = 3
 
 

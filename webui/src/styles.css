@@ -2502,7 +2502,17 @@ body,
     height: 26px;
   }.header-actions {
     display: contents;
-}.ai-settings-trigger {
+  }
+  /* 037 复审二 N4：display:contents 不产生盒、z-index 失效（岛 backdrop 65 会盖住
+     按钮需两击）；这里直接给操作按钮提层，岛展开时窄屏也一次直达。 */
+  .header-actions > button {
+    position: relative;
+    z-index: 66;
+  }
+  /* 复审三 N2：窄屏 theme-picker 非 button 仍 z60，会在岛退场窗口被 backdrop 盖住 */
+  .header-actions .theme-picker {
+    z-index: 67;
+  }.ai-settings-trigger {
     grid-column: 3;
     grid-row: 1;
     width: 44px;
@@ -2914,8 +2924,11 @@ body,
 
 /* 主题按钮长按蓄力：图标发抖并略微放大，图标线条与外框逐渐发亮；
  * 外框只发光不抖动；进度变量由 App.vue 每帧写入（--charge: 0~1） */
+/* 037 复审 B3：header 操作区提到灵动岛 backdrop(65) 之上、面板(75) 之下，
+ * 岛展开时点提醒/收藏/设置一次直达（由各自 handler 先收岛再开浮层）。 */
 .header-actions {
   position: relative;
+  z-index: 66;
 }
 .theme-toggle.charging .theme-icon {
   transform: translate(var(--charge-jx, 0px), var(--charge-jy, 0px))

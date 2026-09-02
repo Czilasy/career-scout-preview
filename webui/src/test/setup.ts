@@ -47,24 +47,63 @@ const mockIntersectionObservers: MockIntersectionObserver[] = [];
   .__mockIntersectionObservers = mockIntersectionObservers;
 (globalThis as any).IntersectionObserver = MockIntersectionObserver;
 
+// 037 D 批：jsdom 不实现 Web Animations API；提供记录用 no-op 桩。
+// 灵动岛弹跳走 Element.animate（CSS attribute 递增不会重启动画），
+// 动画开启态测试用 vi.spyOn(Element.prototype, "animate") 计数调用。
+if (typeof (Element.prototype as unknown as { animate?: unknown }).animate !== "function") {
+  (Element.prototype as unknown as { animate: unknown }).animate = function () {
+    return { cancel() {} };
+  };
+}
+
 // jsdom 不实现 matchMedia；提供可配置替身（默认宽屏 matches=false）。
 // 测试可通过 __setNarrowMatchMedia(true/false) 切换，并触发 change 事件。
+//
+// 037：按 query 分流（island 动画要靠 prefers-reduced-motion）。
+// 默认行为：(prefers-reduced-motion: reduce) 返回 true（动画静态），
+//          (max-width: ...) 返回 false（宽屏），其它返回 false。
 type MatchMediaListener = (e: { matches: boolean }) => void;
 let narrowMedia = false;
-const mediaListeners = new Set<MatchMediaListener>();
+let reducedMedia = true; // 测试默认减少动态：保证元素直接渲染最终态。
+const mediaListeners = new Map<string, Set<MatchMediaListener>>();
 
-(globalThis as any).matchMedia = (query: string) => ({
-  get matches() { return narrowMedia; },
-  media: query,
-  addEventListener: (_type: string, cb: MatchMediaListener) => mediaListeners.add(cb),
-  removeEventListener: (_type: string, cb: MatchMediaListener) => mediaListeners.delete(cb),
-  addListener: (cb: MatchMediaListener) => mediaListeners.add(cb),
-  removeListener: (cb: MatchMediaListener) => mediaListeners.delete(cb),
-  onchange: null,
-  dispatchEvent: () => true,
-});
+function listenersFor(query: string): Set<MatchMediaListener> {
+  let set = mediaListeners.get(query);
+  if (!set) {
+    set = new Set();
+    mediaListeners.set(query, set);
+  }
+  return set;
+}
+
+function matchesFor(query: string): boolean {
+  const q = query.toLowerCase();
+  if (q.includes("prefers-reduced-motion")) return reducedMedia;
+  if (q.startsWith("(max-width")) return narrowMedia;
+  return false;
+}
+
+(globalThis as any).matchMedia = (query: string) => {
+  let current = matchesFor(query);
+  return {
+    get matches() { return current; },
+    media: query,
+    onchange: null,
+    addEventListener: (_type: string, cb: MatchMediaListener) => listenersFor(query).add(cb),
+    removeEventListener: (_type: string, cb: MatchMediaListener) => listenersFor(query).delete(cb),
+    addListener: (cb: MatchMediaListener) => listenersFor(query).add(cb),
+    removeListener: (cb: MatchMediaListener) => listenersFor(query).delete(cb),
+    dispatchEvent: () => true,
+    // 给 useReducedMotion 用的 ref 实例触发器：
+    _setMatches(m: boolean) { current = m; },
+  };
+};
 
 (globalThis as any).__setNarrowMatchMedia = (narrow: boolean) => {
   narrowMedia = narrow;
-  for (const cb of [...mediaListeners]) cb({ matches: narrow });
+  for (const cb of listenersFor("(max-width: 760px)")) cb({ matches: narrow });
+};
+(globalThis as any).__setReducedMotionMatchMedia = (reduced: boolean) => {
+  reducedMedia = reduced;
+  for (const cb of listenersFor("(prefers-reduced-motion: reduce)")) cb({ matches: reduced });
 };

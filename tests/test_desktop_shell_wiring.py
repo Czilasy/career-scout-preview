@@ -152,7 +152,7 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
         def create_window(**kwargs):
             win = original_create(**kwargs)
             win.width = 1400
-            win.height = 900
+            win.height = 800
             win.x = 200
             win.y = 150
             return win
@@ -161,7 +161,7 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
         result = desktop.load_window_state(state_dir=state_dir)
-        self.assertEqual(result, (1400, 900, 200, 150, False))
+        self.assertEqual(result, (1400, 800, 200, 150, False))
 
     def test_closing_saves_state_when_window_xy_none(self):
         """首启（window.x/y 为 None）closing 也能保存：缺项回退默认普通矩形位置。"""
@@ -173,16 +173,16 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
             win = original_create(**kwargs)
             win.x = None
             win.y = None
-            win.width = 1366
-            win.height = 768
+            win.width = 1400
+            win.height = 800
             return win
 
         webview_mod.create_window = create_window
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
         result = desktop.load_window_state(state_dir=state_dir)
-        # 位置缺项 → default_normal_rect 居中 (187, 140)
-        self.assertEqual(result, (1366, 768, 187, 140, False))
+        # 位置缺项 → default_normal_rect 居中 (260, 140)
+        self.assertEqual(result, (1400, 800, 260, 140, False))
 
     def test_maximized_close_saves_last_normal_not_fullscreen(self):
         """US1 核心场景：拖好 → 最大化 → 关窗，落盘为普通矩形而非全屏矩形。"""
@@ -221,7 +221,7 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
         for handler in list(win.events.closing.handlers):
             handler()
         result = desktop.load_window_state(state_dir=state_dir)
-        self.assertEqual(result, (1545, 800, 187, 140, True))
+        self.assertEqual(result, (1400, 800, 260, 140, True))
 
     def test_restore_back_to_normal_saves_normal_rect(self):
         """US1 场景 2：最大化 → 还原 → 关窗，落盘普通矩形 maximized=False。"""
@@ -230,17 +230,17 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
         win = webview_mod.windows[0]
-        win.width, win.height, win.x, win.y = 1200, 800, 50, 60
+        win.width, win.height, win.x, win.y = 1400, 800, 50, 60
         win.events.resized.fire()
         win.events.moved.fire()
         win.events.maximized.fire()
         # 还原回普通矩形
-        win.width, win.height, win.x, win.y = 1200, 800, 50, 60
+        win.width, win.height, win.x, win.y = 1400, 800, 50, 60
         win.events.restored.fire()
         for handler in list(win.events.closing.handlers):
             handler()
         result = desktop.load_window_state(state_dir=state_dir)
-        self.assertEqual(result, (1200, 800, 50, 60, False))
+        self.assertEqual(result, (1400, 800, 50, 60, False))
 
     def test_quit_handler_injected_reuses_closing_path(self):
         """应用内更新重启路径（quit_app）注入 quit_handler，复用 closing 落盘。"""
@@ -258,26 +258,26 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
         self.assertTrue(callable(js_api.quit_handler))
         # quit_handler 内部即 closing 同一落盘逻辑：行为由 closing 用例覆盖
         win = webview_mod.windows[0]
-        win.width, win.height, win.x, win.y = 1300, 850, 20, 30
+        win.width, win.height, win.x, win.y = 1400, 800, 20, 30
         win.events.resized.fire()
         win.events.moved.fire()
         for handler in list(win.events.closing.handlers):
             handler()
         result = desktop.load_window_state(state_dir=state_dir)
-        self.assertEqual(result, (1300, 850, 20, 30, False))
+        self.assertEqual(result, (1400, 800, 20, 30, False))
 
 
 class StartupMaximizedOrchestrationTests(unittest.TestCase):
     """启动 maximized 接线（US2 场景 1/4/5 + US1 场景 1 重启段）。"""
 
     def test_first_open_no_memory_maximized_default_size(self):
-        """无记忆 → 1545×800 + maximized=True，位置交给窗口管理器居中。"""
+        """无记忆 → 1400×800 + maximized=True，位置交给窗口管理器居中。"""
         state_dir = tempfile.mkdtemp()
         webview_mod = _FakeWebview()
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
         kwargs = webview_mod.create_window_calls[0]
-        self.assertEqual((kwargs["width"], kwargs["height"]), (1545, 800))
+        self.assertEqual((kwargs["width"], kwargs["height"]), (1400, 800))
         self.assertTrue(kwargs["maximized"])
         self.assertNotIn("x", kwargs)
         self.assertNotIn("y", kwargs)
@@ -286,30 +286,30 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
         """记忆 maximized=True → 按普通矩形开窗并最大化（可还原回该矩形）。"""
         state_dir = tempfile.mkdtemp()
         ws.save_window_state(
-            1200, 800, 50, 60, state_dir=state_dir, maximized=True
+            1400, 800, 50, 60, state_dir=state_dir, maximized=True
         )
         webview_mod = _FakeWebview()
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
         kwargs = webview_mod.create_window_calls[0]
-        self.assertEqual((kwargs["width"], kwargs["height"]), (1200, 800))
+        self.assertEqual((kwargs["width"], kwargs["height"]), (1400, 800))
         self.assertEqual((kwargs["x"], kwargs["y"]), (50, 60))
         self.assertTrue(kwargs["maximized"])
 
     def test_startup_normal_memory_not_maximized(self):
         """普通记忆 → maximized=False 显式传入。"""
         state_dir = tempfile.mkdtemp()
-        ws.save_window_state(1400, 900, 200, 150, state_dir=state_dir)
+        ws.save_window_state(1400, 800, 200, 150, state_dir=state_dir)
         webview_mod = _FakeWebview()
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
         kwargs = webview_mod.create_window_calls[0]
-        self.assertEqual((kwargs["width"], kwargs["height"]), (1400, 900))
+        self.assertEqual((kwargs["width"], kwargs["height"]), (1400, 800))
         self.assertEqual((kwargs["x"], kwargs["y"]), (200, 150))
         self.assertFalse(kwargs["maximized"])
 
     def test_startup_schema2_polluted_treated_as_first_open(self):
-        """schema 2 污染记忆 → 按首开处理（1545×800 最大化）。"""
+        """schema 2 污染记忆 → 按首开处理（1400×800 最大化）。"""
         state_dir = tempfile.mkdtemp()
         _write_state(
             state_dir,
@@ -319,7 +319,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
         kwargs = webview_mod.create_window_calls[0]
-        self.assertEqual((kwargs["width"], kwargs["height"]), (1545, 800))
+        self.assertEqual((kwargs["width"], kwargs["height"]), (1400, 800))
         self.assertTrue(kwargs["maximized"])
 
     def test_first_open_small_screen_default_clamped(self):
@@ -344,7 +344,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
         win = webview_mod.windows[0]
-        win.width, win.height, win.x, win.y = 1200, 800, 50, 60
+        win.width, win.height, win.x, win.y = 1400, 800, 50, 60
         win.events.resized.fire()
         win.events.moved.fire()
         win.events.maximized.fire()
@@ -355,7 +355,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
         deps2 = _make_deps(webview_module=webview_mod2, state_dir=state_dir)
         desktop.run_desktop_shell(deps2)
         kwargs = webview_mod2.create_window_calls[0]
-        self.assertEqual((kwargs["width"], kwargs["height"]), (1200, 800))
+        self.assertEqual((kwargs["width"], kwargs["height"]), (1400, 800))
         self.assertEqual((kwargs["x"], kwargs["y"]), (50, 60))
         self.assertTrue(kwargs["maximized"])
 
@@ -368,7 +368,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
         desktop.run_desktop_shell(deps)
         win = webview_mod.windows[0]
         # 用户拖好普通矩形
-        win.width, win.height, win.x, win.y = 1200, 800, 50, 60
+        win.width, win.height, win.x, win.y = 1400, 800, 50, 60
         win.events.resized.fire()
         win.events.moved.fire()
         # macOS 顺序：全屏动画期间 resized 先到（全屏尺寸），maximized 后到
@@ -378,7 +378,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
         for handler in list(win.events.closing.handlers):
             handler()
         result = desktop.load_window_state(state_dir=state_dir)
-        self.assertEqual(result, (1200, 800, 50, 60, True))
+        self.assertEqual(result, (1400, 800, 50, 60, True))
 
     def test_events_partial_only_closing_still_saves(self):
         """仅 closing 可用（部分事件缺失）→ 其余事件降级跳过，closing 兜底仍保存。"""
@@ -390,7 +390,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
             win = original_create(**kwargs)
             # 模拟事件面不全：只有 closing
             win.events = type("Events", (), {"closing": _FakeEvent()})()
-            win.width, win.height, win.x, win.y = 1300, 850, 20, 30
+            win.width, win.height, win.x, win.y = 1400, 800, 20, 30
             return win
 
         webview_mod.create_window = create_window
@@ -401,7 +401,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
         code = desktop.run_desktop_shell(deps)
         self.assertEqual(code, 0)
         result = desktop.load_window_state(state_dir=state_dir)
-        self.assertEqual(result, (1300, 850, 20, 30, False))
+        self.assertEqual(result, (1400, 800, 20, 30, False))
 
     def test_events_api_missing_logs_warning(self):
         """events API 整体不可用（<6.0）→ 记日志明示，不阻断启动。"""
