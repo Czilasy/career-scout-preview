@@ -11,7 +11,7 @@ T035 接线点（冻结合同 ``specs/003-desktop-exe/contracts/desktop-shell.md
    PYTHON_EXECUTABLE=sys.executable, START_TASKS=True})``，
    ``app.run(use_reloader=False, threaded=True)`` 在独立 daemon 线程。
 4. **就绪轮询**（§4）：``GET /api/session`` 直到 200，超时 ≤30s → 错误退出。
-5. **窗口**（§5，029 修订）：普通态默认 1545×1000 居中（小屏钳回），
+5. **窗口**（§5，029 修订）：普通态默认 1545×800 居中（小屏钳回），
    ``min_size=(1024,700)``，``resizable=True``；从 ``~/.career-scout/desktop_window.json``
    （schema 3）恢复普通矩形与最大化标记——无记忆/损坏/污染记忆一律首开
    最大化；事件维护普通矩形（窗口状态域 ``packaging/window_state.py``）。
@@ -424,6 +424,27 @@ class DesktopJsApi:
 # ---------------------------------------------------------------------------
 # 主编排（T039）
 # ---------------------------------------------------------------------------
+def _window_maximized_now(window):
+    """读窗口当前真实最大化态（events 时序修复 + [diag] 诊断日志用）。
+
+    优先读 WinForms 原生 ``native.WindowState``（FormWindowState：
+    Normal=0 / Minimized=1 / Maximized=2，最真实）；不可用（非 Windows
+    后端 / 测试替身无 native）回退 :func:`window_controls.is_maximized`
+    的 ``_cs_maximized`` 实时标记 → 构造快照链，皆缺视为普通态。
+    """
+    native = getattr(window, "native", None)
+    state = getattr(native, "WindowState", None)
+    if state is not None:
+        try:
+            return int(state) == 2
+        except (TypeError, ValueError):
+            return str(state).endswith("Maximized")
+    try:
+        return bool(_wc.is_maximized(window))
+    except Exception:
+        return False
+
+
 def run_desktop_shell(deps):
     """桌面壳主编排。所有外部依赖通过 ``deps`` 注入。
 
@@ -577,6 +598,23 @@ def run_desktop_shell(deps):
 
     def _on_closing():
         try:
+            # [diag] 关窗诊断日志（2026-09-02 最大化时序问题排查）：snapshot
+            # 前记录原生窗口态 + tracker 状态，snapshot 后记录落盘结果，用于
+            # 校验「最大化关窗 → 落盘普通矩形」链路是否按 029 契约工作。
+            try:
+                _native = getattr(window, "native", None)
+                log_error(
+                    "[diag] closing: native="
+                    f"{getattr(_native, 'WindowState', None)}/"
+                    f"{getattr(_native, 'Size', None)}; "
+                    f"tracker max={tracker.maximized} "
+                    f"last={tracker.last_normal}; "
+                    f"window=({getattr(window, 'width', None)},"
+                    f"{getattr(window, 'height', None)})",
+                    state_dir=state_dir, logger=logger,
+                )
+            except Exception:
+                pass
             # Tracker 快照 = 普通矩形语义：最大化 → 冻结普通矩形，普通态 →
             # 当前窗口值（缺项逐级回退）；全屏矩形永不写入（029 契约）。
             save_w, save_h, save_x, save_y, was_maximized = (
@@ -587,6 +625,14 @@ def run_desktop_shell(deps):
                     getattr(window, "y", None),
                 )
             )
+            try:
+                log_error(
+                    f"[diag] snapshot=({save_w},{save_h},{save_x},{save_y},"
+                    f"{was_maximized})",
+                    state_dir=state_dir, logger=logger,
+                )
+            except Exception:
+                pass
             save_window_state(
                 save_w,
                 save_h,
@@ -615,6 +661,14 @@ def run_desktop_shell(deps):
         if events is not None and hasattr(events, "closing"):
             events.closing += _on_closing
             wire_window_events(events, window, tracker)
+            # 事件时序修复（2026-09-02 根因诊断）：WinForms 后端在窗口构造
+            # 期间（create_window 返回前）即设 WindowState=Maximized，显示
+            # 时的 on_resize 触发 events.maximized 早于上方订阅——事件丢失，
+            # tracker._maximized 停在初始 False，closing 快照误走普通态分支、
+            # 拿最大化中的窗口矩形当普通矩形落盘（029 契约禁止）。订阅完成
+            # 后立即按当前真实最大化态补一次同步，兜住订阅前已丢失的事件。
+            if _window_maximized_now(window):
+                tracker.on_maximized()
             # T022 修复：window.maximized 是构造快照、不随真实状态更新，
             # 直接读它会让 toggle_maximize 永远走最大化、还原失效。这里订阅
             # pywebview 的真实状态事件，刷新 window_controls 的实时标记。

@@ -181,8 +181,8 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
         result = desktop.load_window_state(state_dir=state_dir)
-        # 位置缺项 → default_normal_rect 居中 (187, 40)
-        self.assertEqual(result, (1366, 768, 187, 40, False))
+        # 位置缺项 → default_normal_rect 居中 (187, 140)
+        self.assertEqual(result, (1366, 768, 187, 140, False))
 
     def test_maximized_close_saves_last_normal_not_fullscreen(self):
         """US1 核心场景：拖好 → 最大化 → 关窗，落盘为普通矩形而非全屏矩形。"""
@@ -221,7 +221,7 @@ class ClosingSaveOrchestrationTests(unittest.TestCase):
         for handler in list(win.events.closing.handlers):
             handler()
         result = desktop.load_window_state(state_dir=state_dir)
-        self.assertEqual(result, (1545, 1000, 187, 40, True))
+        self.assertEqual(result, (1545, 800, 187, 140, True))
 
     def test_restore_back_to_normal_saves_normal_rect(self):
         """US1 场景 2：最大化 → 还原 → 关窗，落盘普通矩形 maximized=False。"""
@@ -271,13 +271,13 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
     """启动 maximized 接线（US2 场景 1/4/5 + US1 场景 1 重启段）。"""
 
     def test_first_open_no_memory_maximized_default_size(self):
-        """无记忆 → 1545×1000 + maximized=True，位置交给窗口管理器居中。"""
+        """无记忆 → 1545×800 + maximized=True，位置交给窗口管理器居中。"""
         state_dir = tempfile.mkdtemp()
         webview_mod = _FakeWebview()
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
         kwargs = webview_mod.create_window_calls[0]
-        self.assertEqual((kwargs["width"], kwargs["height"]), (1545, 1000))
+        self.assertEqual((kwargs["width"], kwargs["height"]), (1545, 800))
         self.assertTrue(kwargs["maximized"])
         self.assertNotIn("x", kwargs)
         self.assertNotIn("y", kwargs)
@@ -309,7 +309,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
         self.assertFalse(kwargs["maximized"])
 
     def test_startup_schema2_polluted_treated_as_first_open(self):
-        """schema 2 污染记忆 → 按首开处理（1545×1000 最大化）。"""
+        """schema 2 污染记忆 → 按首开处理（1545×800 最大化）。"""
         state_dir = tempfile.mkdtemp()
         _write_state(
             state_dir,
@@ -319,7 +319,7 @@ class StartupMaximizedOrchestrationTests(unittest.TestCase):
         deps = _make_deps(webview_module=webview_mod, state_dir=state_dir)
         desktop.run_desktop_shell(deps)
         kwargs = webview_mod.create_window_calls[0]
-        self.assertEqual((kwargs["width"], kwargs["height"]), (1545, 1000))
+        self.assertEqual((kwargs["width"], kwargs["height"]), (1545, 800))
         self.assertTrue(kwargs["maximized"])
 
     def test_first_open_small_screen_default_clamped(self):

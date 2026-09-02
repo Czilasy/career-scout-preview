@@ -25,9 +25,9 @@ DEFAULT_STATE_DIR = Path(os.path.expanduser("~/.career-scout"))
 WINDOW_STATE_FILENAME = "desktop_window.json"
 # 默认窗口尺寸 = 普通态默认（首开直接最大化；从最大化还原落到该尺寸居中）
 DEFAULT_WIDTH = 1545
-# 1000 = 1920×1080 桌面下：工作区约 1032（任务栏 48），留 32 余量避免被钳回；
-# 比 900 +100 像素，从最大化还原时能装下完整内容不滚动。
-DEFAULT_HEIGHT = 1000
+# 800 = 2026-09-02 用户定稿：从最大化还原时内容区不出滚动条（1000 实测
+# 偏高仍滚动）；800 在 1920×1080 工作区（约 1032）内留足余量不被钳回。
+DEFAULT_HEIGHT = 800
 MIN_WIDTH = 1024
 MIN_HEIGHT = 700
 MAX_WIDTH = 8192
