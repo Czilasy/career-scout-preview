@@ -16,14 +16,61 @@
 - **Rationale**: frameless 最大化在各版本/后端行为有差异，属"必须真机确认"的事实；`window_controls.py` 作为窗口控制域预留该适配位，避免污染 `desktop.py`。
 - **Alternatives considered**: 直接依赖 pywebview 默认行为不做处理——若其覆盖任务栏则验收不通过（spec FR-011），不满足需求。不选。
 
-### T001 真机验证结论（2026-09-01 实施时更新）
+### T001 真机验证结论（2026-09-02 真机确认更新）
 
-- **结论**: 待 Windows 真机 EXE 验证。`window_controls.py` 已预留适配位
-  `MAXIMIZE_WORKAREA_CLAMP`（默认 `False`）+ `_clamp_to_workarea()` 占位实现；
+- **结论（2026-09-01 初版）**: 待 Windows 真机 EXE 验证。`window_controls.py` 已预留
+  适配位 `MAXIMIZE_WORKAREA_CLAMP`（默认 `False`）+ `_clamp_to_workarea()` 占位实现；
   若真机发现 frameless 最大化覆盖任务栏，置该开关为 `True` 并落地钳制逻辑即可，
   不阻塞无边框标题栏其余交付。
+- **真机结论（2026-09-02，T021 走查发现并修复）**:
+  - `easy_drag=True` 在 pywebview 6.2.1（WinForms/WebView2）真机会**全窗口监听
+    mousedown**（`DRAG_REGION_DIRECT_TARGET_ONLY` 默认 `False`），点击页面任意位置
+    都被当成拖窗口，表现为"卡死"。**修复：`desktop.py` 关 `easy_drag`**，标题栏拖拽
+    改由前端 `pywebview-drag-region` 类的 body 级监听完成（点击页面其它区域不触发拖拽）。
+  - 前端 `WindowTitleBar` 曾以 setup 一次性判断 `window.pywebview` 是否存在作为渲染
+    条件，而该对象由 pywebview 在页面导航完成后才异步注入 → 真机整条标题栏不渲染。
+    **修复：改为响应式 ref + 监听 `pywebviewready` 事件补渲染。**
+  - 上述两处修复后标题栏正常渲染、拖拽/三按钮/双击可用、页面点击不再卡死；
+    frameless 最大化避让任务栏未发现覆盖问题，`MAXIMIZE_WORKAREA_CLAMP` 保持 `False`。
+  - **修复落地状态（2026-09-02）**：两处修复已落地代码并重新构建 EXE 供用户实测——
+    `desktop.py` `easy_drag: False`；`WindowTitleBar.vue` `isDesktop` 响应式 ref +
+    监听 `pywebviewready` 补渲染。聚焦测试（window_controls/desktop_shell 系
+    113 用例 + WindowTitleBar.spec 10 用例）全绿。
 - **验证方法**: 打包 EXE 后点击最大化按钮/双击标题栏，观察窗口是否覆盖任务栏；
   若覆盖，按契约 §3 实现 Win32 工作区钳制。
+
+### T022 用户真机反馈（2026-09-02，需求修订与缺陷确认）
+
+用户真机反馈三项问题，逐项确认根因后修订 spec：
+
+1. **无边框窗口边缘无法拖拽 resize**（spec FR-011 要求"边缘可调整大小"，实现缺失）：
+   根因：pywebview 6.2.1 无边框窗口 = `FormBorderStyle.None`（`winforms.py`），
+   该样式无系统 resize 边框；pywebview Windows 后端未为无边框实现边缘命中
+   （无 `WndProc`/`WM_NCHITTEST`）。`resizable=True` 对无边框窗口不生效。
+   修订：FR-011 明确"鼠标在窗口边缘拖拽调整大小"，需补充无边框边缘 resize 方案。
+   **实现方案尝试与回退（2026-09-02）**：曾尝试两种实现，真机均不达预期，已回退：
+   - 方案 A（WS_THICKFRAME 改窗口样式）：给无边框窗口加回系统厚边框样式，
+     真机导致自绘标题栏消失、交互卡顿（系统非客户区被激活）。**已回退**。
+   - 方案 B（前端边缘热区手柄 + pywebview 原生 resize/move）：不碰窗口样式，
+     但透明手柄不可见、边缘热区干扰边缘交互（启动慢/点击粘连体感），不达预期。
+     **已回退**。
+   当前状态：用户 2026-09-02 确认**取消边缘拉伸**——窗口固定大小，仅保留
+   全屏/还原切换（frameless 无系统拉伸边框 + 不实现热区 = 事实固定大小）。
+2. **最大化后无法还原**（spec FR-003/FR-004 要求最大化/还原切换，实现有 bug）：
+   根因：`toggle_maximize` 用 `window.maximized` 判断当前状态，但 pywebview 6.2.1
+   `Window.maximized` 是**构造参数快照**（`window.py` 构造时 `self.maximized = maximized`），
+   窗口真实最大化后该值不更新 → 判断失效，第二次点击仍走最大化。
+   修订：最大化/还原状态判断必须基于真实窗口状态（事件或原生查询），
+   并补充按钮图标随状态切换（FR-004）。
+   **修复落地（2026-09-02）**：`desktop.py` 订阅 `events.maximized/restored` →
+   `window_controls.note_maximized` 维护实时标记，`toggle_maximize` 以此为准切换，
+   双击/按钮最大化-还原往返可用；按钮图标随状态切换（FR-004）待补。
+3. **磨砂 / X 红底效果未达预期**（需求修订）：
+   用户确认：磨砂玻璃属于**特殊主题大类**（万花筒及后续特殊主题）的统一样式，
+   明/暗主题窗口控制条保持现状；特殊主题下窗口控制条整体为半透明深色毛玻璃磨砂
+   （强模糊、图案不可辨），三按钮悬停 X 红底白字、其余悬停变深（FR-008/FR-009 修订）。
+   待确认疑点：万花筒光场 `KaleidoField` 为 `position: fixed; z-index: 0`，而窗口控制条
+   为普通流内元素（未设 z-index），存在光场盖住窗口控制条的可能，需实现期核实。
 
 ## R3. 窗口记忆（B082）在无边框下的回归风险
 

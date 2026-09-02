@@ -22,7 +22,8 @@ declare global {
         quit_app?: () => Promise<{ ok: boolean; error?: string }>;
         // 036 自绘标题栏窗口控制（desktop.py DesktopJsApi 提供）
         window_minimize?: () => Promise<{ ok: boolean; error?: string }>;
-        window_toggle_maximize?: () => Promise<{ ok: boolean; error?: string }>;
+        window_toggle_maximize?: () => Promise<{ ok: boolean; maximized?: boolean; error?: string }>;
+        window_is_maximized?: () => Promise<{ ok: boolean; maximized?: boolean; error?: string }>;
         window_close?: () => Promise<{ ok: boolean; error?: string }>;
       };
     };

@@ -14,6 +14,7 @@
 
 import { computed, ref, watch } from "vue";
 import type { Platform } from "../types";
+import { THEME_CATEGORIES } from "../themes/registry";
 
 export type ThemeMode = "light" | "dark" | "kaleido";
 
@@ -31,6 +32,9 @@ function applyAttributes() {
   if (typeof document === "undefined") return;
   document.documentElement.setAttribute("data-theme", mode.value);
   document.documentElement.setAttribute("data-platform", platform.value);
+  // 主题大类标记：base=明/暗，special=特殊主题大类（spec 036 A9 磨砂等
+  // 大类统一样式的选择器依据，不绑定具体主题 id，新特殊主题自动继承）。
+  document.documentElement.setAttribute("data-theme-category", THEME_CATEGORIES[mode.value]);
 }
 
 /** 从后端读主题偏好（桌面版随机端口导致 localStorage 不可靠，后端为准）。 */

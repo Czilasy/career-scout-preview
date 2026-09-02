@@ -1,3 +1,9 @@
+/* 036 自绘标题栏偏移：EXE 模式（html 有 data-desktop="true"）下顶部 fixed
+   浮窗需要下移标题栏高度 36px，避免被磨砂条遮挡。浏览器模式不变。
+   浮窗 top 用 calc(原值 + var(--titlebar-offset)) 即可两态复用。 */
+:root { --titlebar-offset: 0px; }
+[data-desktop="true"] { --titlebar-offset: 36px; }
+
 * {
   box-sizing: border-box;
 }

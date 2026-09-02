@@ -35,7 +35,7 @@ defineEmits<{ click: []; close: [] }>();
 <style scoped>
 .task-completed-toast {
   position: fixed;
-  top: 72px;
+  top: calc(72px + var(--titlebar-offset));
   left: 50%;
   transform: translateX(-50%);
   z-index: 80;

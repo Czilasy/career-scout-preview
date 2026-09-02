@@ -91,7 +91,42 @@
 - [x] T018 确认宪法模块地图登记：`.specify/memory/constitution.md` 已含 `window_controls.py`/`WindowTitleBar.vue`/`DynamicIsland.vue` 三条目（plan 阶段已登记，核对无遗漏）
 - [x] T019 检查 README/文档是否需同步（新增桌面无边框行为说明，若需则更新 `README.md`、`packaging/README.md`）
 - [x] T020 全量门禁：后端全量测试（`uv run python -m unittest discover -s tests -t tests`，2808 用例，除卫生测试 1 例未跟踪新文件预期失败外全绿）+ 前端全量（`npx vitest --run`，47 文件 635 用例全绿）+ `npm run build`（vue-tsc + vite 通过）+ 仓库卫生（未提交新文件导致 1 例失败，如实报告）
-- [ ] T021 交付后用户端到端真跑清单核对：按 `specs/036-titlebar-dynamic-island/quickstart.md` 的 EXE 验证项逐条走查并记录结果
+- [x] T021 交付后用户端到端真跑清单核对：2026-09-02 用户真机走查发现两处缺陷
+      并已修复落地——①`desktop.py` 关 `easy_drag`（True→False，全局 mousedown 拖窗
+      导致点击卡死）；②`WindowTitleBar.vue` 渲染条件改响应式 + 监听 `pywebviewready`
+      补渲染（setup 一次性判断导致标题栏整条不渲染、窗口手柄消失）。聚焦测试已过，
+      重新构建 EXE 供用户实测中。
+
+---
+
+## Phase 5: B084 返工（2026-09-02 用户真机反馈，spec 修订后）
+
+**Purpose**: 兑现 Windows 原版窗口基础功能 + 特殊主题大类毛玻璃磨砂
+
+- [x] T022 [US1] 无边框窗口边缘 resize：用户 2026-09-02 确认**取消**（不再实现）。
+      窗口固定大小，仅保留全屏/还原切换（frameless 本无系统拉伸边框 + 不实现
+      热区 = 事实固定大小，`resizable` 参数在 frameless 下无实际效果）。
+      此前方案 A（WS_THICKFRAME 改样式）与方案 B（前端边缘手柄）真机不达预期的
+      尝试记录保留在 research.md T022。
+- [x] T023 [US1] 最大化/还原切换：真实状态判断**已修复**（T022 事件驱动实时标记
+      ——desktop.py 订阅 `events.maximized/restored` → `window_controls.note_maximized`，
+      toggle_maximize 不再依赖 `window.maximized` 构造快照；双击/按钮切换可用）。
+      按钮图标随状态切换**已补**（FR-004）：`window_controls.is_maximized` +
+      js_api `window_is_maximized()` 查询初始态，`toggle_maximize` 返回切换后
+      `maximized` 供前端同步；`WindowTitleBar.vue` 单方框 ↔ 重叠方块（Copy）切换。
+- [x] T024 [US1] 特殊主题大类窗口控制条毛玻璃磨砂：明/暗主题保持现状；
+      特殊主题大类（`data-theme-category="special"`，挂大类标记不绑定具体主题 id，
+      新特殊主题自动继承 A9）整条半透明深色毛玻璃磨砂（blur 22px 强模糊）+
+      三按钮悬停反馈（X 红底白字通用 / 特殊主题下最小化/最大化悬停变深色）；
+      `.window-titlebar` 抬升 z-index 确保 KaleidoField 光场（z-index 0）不遮挡
+      （FR-008/FR-009/FR-022）。自动化测试过，磨砂视觉效果待用户真机 EXE 走查。
+- [~] T025 [US1] 回归验证：`tests/test_window_controls.py`（72）/`tests/test_desktop_shell.py`
+      /`tests/test_desktop_shell_wiring.py`（72 合跑）/`tests/test_desktop_window_state.py`（46）
+      /`WindowTitleBar.spec.ts`+`useTheme.spec.ts`（29）/`App.spec.ts`（27）全绿。
+      Windows 真机 EXE 走查（最大化-还原往返/图标切换/磨砂/光场遮挡）待用户实测。
+- [ ] T026 收口：本阶段与 T021 未提交修复（easy_drag 关闭、pywebviewready 补渲染）
+      一并提交并重新构建 EXE 供用户实测（T021 后续交付核对）。已重建 EXE 供本轮
+      实测；提交待用户明确授权。
 
 ---
 

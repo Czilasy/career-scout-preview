@@ -279,7 +279,7 @@ const countParts = (item: HistoryRoundItem) => [
 
 .history-drawer {
   position: fixed;
-  top: 80px;
+  top: calc(80px + var(--titlebar-offset));
   right: 16px;
   bottom: 16px;
   z-index: 61;

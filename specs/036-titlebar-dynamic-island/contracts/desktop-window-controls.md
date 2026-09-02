@@ -14,7 +14,8 @@
 | 方法 | 参数 | 返回 | 行为 |
 |---|---|---|---|
 | `window_minimize()` | 无 | `{ok: bool, error?: string}` | 调用 `window.minimize()` |
-| `window_toggle_maximize()` | 无 | `{ok: bool, error?: string}` | 当前非最大化→`maximize()`；最大化→`restore()` |
+| `window_toggle_maximize()` | 无 | `{ok: bool, maximized?: bool, error?: string}` | 当前非最大化→`maximize()`；最大化→`restore()`；`maximized` 为切换后的真实状态（FR-004 图标同步） |
+| `window_is_maximized()` | 无 | `{ok: bool, maximized?: bool, error?: string}` | 查询窗口当前是否最大化（基于 `window_controls.is_maximized`：优先 `_cs_maximized` 实时标记，回退构造快照） |
 | `window_close()` | 无 | `{ok: bool, error?: string}` | 走既有优雅退出（保存窗口状态→取消运行中任务→退出），等价关闭按钮 |
 
 错误语义：窗口句柄不可用返回 `{ok: false, error: "no_window"}`；异常返回 `{ok: false, error: <msg>}`。
@@ -33,4 +34,5 @@
 - 布局：左侧 `Career Scout` 文字；右侧最小化 / 最大化/还原 / 关闭三按钮。
 - 拖拽：标题栏空白区元素加 `pywebview-drag-region` 类（pywebview 6.x easy_drag 机制）；按钮不在该类内，点击正常。
 - 双击标题栏：显式绑定 `dblclick` → 调 `js_api.window_toggle_maximize()`（easy_drag 只处理拖拽，不处理双击）。
-- 主题：背景跟随主题（浅色=白、暗色=暗、特殊主题=透明）；按钮在特殊主题下半透明磨砂、X 悬停红底、其余悬停线条变深。
+- 主题：背景跟随主题（浅色=白、暗色=暗）；特殊主题大类（`data-theme-category="special"`，万花筒及后续特殊主题）窗口控制条为半透明深色毛玻璃磨砂（强模糊、背后图案不可辨）、X 悬停红底白字、最小化/最大化悬停变深色；磨砂样式挂在大类标记上而非具体主题 id，新特殊主题自动继承（A9）。
+- 图标：最大化/还原按钮图标随窗口真实状态切换（FR-004，最大化=单方框、还原=重叠方块）；初始挂载经 `window_is_maximized()` 查询，toggle/双击后用 `window_toggle_maximize()` 返回的 `maximized` 同步。

@@ -124,6 +124,9 @@ Thumbs.db
 # Roadmap (local-only directions and progress, not for public release)
 roadmap/
 
+# Debug sagas (personal hard-case root-cause notes, not for public release)
+debuglog/
+
 # Local agent/tool state and archived internal docs
 .agents/
 .uploads/

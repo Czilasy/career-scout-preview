@@ -11,6 +11,7 @@ async function loadModule() {
 function resetRootAttributes() {
   document.documentElement.removeAttribute("data-theme");
   document.documentElement.removeAttribute("data-platform");
+  document.documentElement.removeAttribute("data-theme-category");
 }
 
 describe("useTheme", () => {
@@ -26,6 +27,7 @@ describe("useTheme", () => {
     const { mode } = useTheme();
     expect(mode.value).toBe("light");
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    expect(document.documentElement.getAttribute("data-theme-category")).toBe("base");
   });
 
   it("toggles mode between light and dark and persists to localStorage", async () => {
@@ -150,6 +152,8 @@ describe("useTheme", () => {
     const next = toggleTheme("kaleido");
     expect(next).toBe("kaleido");
     expect(document.documentElement.getAttribute("data-theme")).toBe("kaleido");
+    // 特殊主题大类标记：万花筒归 special（spec 036 A9 大类统一样式的依据）
+    expect(document.documentElement.getAttribute("data-theme-category")).toBe("special");
     expect(localStorage.getItem("career-scout-theme-mode")).toBe("kaleido");
   });
 

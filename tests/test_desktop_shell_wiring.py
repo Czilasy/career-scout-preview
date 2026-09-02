@@ -438,9 +438,10 @@ class WindowControlJsApiTests(unittest.TestCase):
         return js_api, webview_mod.windows[0]
 
     def test_window_reference_injected(self):
-        """窗口创建后 js_api.window 注入真实 window 引用。"""
+        """窗口创建后 js_api._window 注入真实 window 引用（下划线属性，
+        防 pywebview API 枚举爬取窗口对象图导致加载卡死）。"""
         js_api, win = self._run_with_api()
-        self.assertIs(js_api.window, win)
+        self.assertIs(js_api._window, win)
 
     def test_window_minimize_delegates_to_window(self):
         """window_minimize → window.minimize()。"""
@@ -452,43 +453,58 @@ class WindowControlJsApiTests(unittest.TestCase):
         self.assertEqual(win.calls, ["minimize"])
 
     def test_window_toggle_maximize_from_normal(self):
-        """普通态 window_toggle_maximize → maximize()。"""
+        """普通态 window_toggle_maximize → maximize()，返回 maximized=True。"""
         js_api, win = self._run_with_api()
         win.calls = []
         win.maximized = False
         win.maximize = lambda: win.calls.append("maximize")
         win.restore = lambda: win.calls.append("restore")
         result = js_api.window_toggle_maximize()
-        self.assertEqual(result, {"ok": True, "error": None})
+        self.assertEqual(
+            result, {"ok": True, "error": None, "maximized": True}
+        )
         self.assertEqual(win.calls, ["maximize"])
 
     def test_window_toggle_maximize_from_maximized(self):
-        """最大化态 window_toggle_maximize → restore()。"""
+        """最大化态 window_toggle_maximize → restore()，返回 maximized=False。"""
         js_api, win = self._run_with_api()
         win.calls = []
         win.maximized = True
         win.maximize = lambda: win.calls.append("maximize")
         win.restore = lambda: win.calls.append("restore")
         result = js_api.window_toggle_maximize()
-        self.assertEqual(result, {"ok": True, "error": None})
+        self.assertEqual(
+            result, {"ok": True, "error": None, "maximized": False}
+        )
         self.assertEqual(win.calls, ["restore"])
+
+    def test_window_is_maximized_reads_window_state(self):
+        """window_is_maximized 返回窗口当前最大化状态（FR-004 图标切换）。"""
+        js_api, win = self._run_with_api()
+        win.maximized = True
+        self.assertEqual(js_api.window_is_maximized(), {"ok": True, "maximized": True})
+        win.maximized = False
+        self.assertEqual(js_api.window_is_maximized(), {"ok": True, "maximized": False})
 
     def test_window_control_without_window_returns_no_window(self):
         """未注入 window → {ok: False, error: no_window}。"""
         js_api = desktop.DesktopJsApi()
-        js_api.window = None
+        js_api._window = None
         self.assertEqual(
             js_api.window_minimize(), {"ok": False, "error": "no_window"}
         )
         self.assertEqual(
             js_api.window_toggle_maximize(), {"ok": False, "error": "no_window"}
         )
+        self.assertEqual(
+            js_api.window_is_maximized(), {"ok": False, "error": "no_window"}
+        )
 
     def test_window_close_reuses_quit_handler(self):
         """window_close → 复用 quit_handler 优雅退出链路（等价关闭按钮）。"""
         called = []
         js_api = desktop.DesktopJsApi()
-        js_api.window = object()
+        js_api._window = object()
         js_api.quit_handler = lambda: called.append("quit")
         result = js_api.window_close()
         self.assertEqual(result, {"ok": True})
@@ -496,7 +512,7 @@ class WindowControlJsApiTests(unittest.TestCase):
 
     def test_window_close_without_handler_returns_error(self):
         js_api = desktop.DesktopJsApi()
-        js_api.window = object()
+        js_api._window = object()
         js_api.quit_handler = None
         self.assertEqual(
             js_api.window_close(), {"ok": False, "error": "no_quit_handler"}

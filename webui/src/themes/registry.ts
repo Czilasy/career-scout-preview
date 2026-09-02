@@ -12,6 +12,17 @@ import "./kaleido/kaleido.css";
 
 export type ThemeId = "light" | "dark" | "kaleido";
 
+/** 主题大类：base = 明/暗基座；special = 特殊主题大类（万花筒及后续
+ *  所有特殊主题）。特殊主题大类的统一样式（如窗口控制条半透明毛玻璃磨砂，
+ *  spec 036 A9）挂在大类上，新增特殊主题登记时标为 special 即自动继承。 */
+export type ThemeCategory = "base" | "special";
+
+export const THEME_CATEGORIES: Record<ThemeId, ThemeCategory> = {
+  light: "base",
+  dark: "base",
+  kaleido: "special",
+};
+
 export interface ThemeRegistration {
   id: ThemeId;
   label: string;

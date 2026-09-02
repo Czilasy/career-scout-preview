@@ -132,7 +132,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .settings-menu {
   position: fixed;
-  top: 64px;
+  top: calc(64px + var(--titlebar-offset));
   right: 12px;
   z-index: 70;
   display: flex;

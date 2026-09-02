@@ -88,29 +88,83 @@ class MaximizeTests(unittest.TestCase):
         self.assertIn("boom-max", result["error"])
 
 
+class IsMaximizedTests(unittest.TestCase):
+    def test_is_maximized_reads_live_flag(self):
+        """is_maximized 优先读实时标记（事件维护）。"""
+        win = _FakeWindow(maximized=False)
+        self.assertFalse(window_controls.is_maximized(win))
+        window_controls.note_maximized(win, True)
+        self.assertTrue(window_controls.is_maximized(win))
+
+    def test_is_maximized_falls_back_to_snapshot(self):
+        """未接线时回退读构造快照。"""
+        win = _FakeWindow(maximized=True)
+        self.assertTrue(window_controls.is_maximized(win))
+
+    def test_is_maximized_no_attribute_treats_as_normal(self):
+        """无 maximized 属性按普通态处理。"""
+        win = _FakeWindow(maximized=True, maximized_attr=False)
+        self.assertFalse(window_controls.is_maximized(win))
+
+
 class ToggleMaximizeTests(unittest.TestCase):
     def test_toggle_from_normal_maximizes(self):
         win = _FakeWindow(maximized=False)
         result = window_controls.toggle_maximize(win)
         self.assertEqual(win.calls, ["maximize"])
-        self.assertEqual(result, {"ok": True, "error": None})
+        self.assertEqual(
+            result, {"ok": True, "error": None, "maximized": True}
+        )
 
     def test_toggle_from_maximized_restores(self):
+        """T022 修复：以实时标记（事件维护）为准，最大化态切换走还原。"""
+        win = _FakeWindow(maximized=False)
+        window_controls.note_maximized(win, True)
+        result = window_controls.toggle_maximize(win)
+        self.assertEqual(win.calls, ["restore"])
+        self.assertEqual(
+            result, {"ok": True, "error": None, "maximized": False}
+        )
+
+    def test_live_state_overrides_constructor_snapshot(self):
+        """实时标记优先于构造快照：快照说最大化但事件说已还原 → 走最大化。"""
+        win = _FakeWindow(maximized=True)
+        window_controls.note_maximized(win, False)
+        result = window_controls.toggle_maximize(win)
+        self.assertEqual(win.calls, ["maximize"])
+        self.assertEqual(
+            result, {"ok": True, "error": None, "maximized": True}
+        )
+
+    def test_note_maximized_sets_live_flag(self):
+        win = _FakeWindow(maximized=False)
+        window_controls.note_maximized(win, True)
+        self.assertTrue(win._cs_maximized)
+        window_controls.note_maximized(win, False)
+        self.assertFalse(win._cs_maximized)
+
+    def test_toggle_no_live_state_falls_back_to_snapshot(self):
+        """未接线（无实时标记）时回退读构造快照，兼容老替身。"""
         win = _FakeWindow(maximized=True)
         result = window_controls.toggle_maximize(win)
         self.assertEqual(win.calls, ["restore"])
-        self.assertEqual(result, {"ok": True, "error": None})
+        self.assertEqual(
+            result, {"ok": True, "error": None, "maximized": False}
+        )
 
     def test_toggle_no_maximized_attribute_treats_as_normal(self):
         """无 maximized 属性的替身（老版本/测试）按未最大化处理。"""
         win = _FakeWindow(maximized=True, maximized_attr=False)
         result = window_controls.toggle_maximize(win)
         self.assertEqual(win.calls, ["maximize"])
-        self.assertEqual(result, {"ok": True, "error": None})
+        self.assertEqual(
+            result, {"ok": True, "error": None, "maximized": True}
+        )
 
     def test_toggle_error_returns_ok_false(self):
         result = window_controls.toggle_maximize(_BoomWindow())
         self.assertFalse(result["ok"])
+        self.assertNotIn("maximized", result)
 
 
 class WorkareaClampFlagTests(unittest.TestCase):

@@ -464,22 +464,40 @@ class ShellOrchestrationTests(unittest.TestCase):
             calls[0]["frameless"], sys.platform == "win32",
         )
 
-    def test_window_easy_drag_true(self):
-        """036 无边框拖拽：easy_drag=True（pywebview 6.x 拖拽区机制）。"""
+    def test_window_easy_drag_false(self):
+        """036 无边框拖拽：easy_drag=False（T021 真机修复，全局 mousedown 会
+        导致点击页面卡死；拖拽改由前端 drag-region body 级监听完成）。"""
         webview_mod = _FakeWebview()
         desktop.run_desktop_shell(
             _make_deps(webview_module=webview_mod)
         )
-        self.assertTrue(webview_mod.create_window_calls[0]["easy_drag"])
+        self.assertFalse(webview_mod.create_window_calls[0]["easy_drag"])
 
     def test_js_api_receives_window_reference(self):
-        """036 窗口控制：js_api 在窗口创建后被注入 window 引用。"""
+        """036 窗口控制：js_api 在窗口创建后被注入 window 引用（下划线属性）。"""
         webview_mod = _FakeWebview()
         js_api = desktop.DesktopJsApi()
         deps = _make_deps(webview_module=webview_mod, js_api=js_api)
         desktop.run_desktop_shell(deps)
-        self.assertIsNotNone(js_api.window)
-        self.assertIs(js_api.window, webview_mod.windows[0])
+        self.assertIsNotNone(js_api._window)
+        self.assertIs(js_api._window, webview_mod.windows[0])
+
+    def test_js_api_window_not_publicly_reachable(self):
+        """036 回归防护：Window 引用不得出现在任何公开属性。pywebview 页面
+        加载后会递归枚举 js_api 公开属性生成前端 API 清单，公开持有 Window
+        对象会让枚举爬进整个窗口对象图——真机实测页面加载 20s 起步、有概率
+        永久卡死（2026-09-02 py-spy 实拍定位，本轮卡死根因）。"""
+        webview_mod = _FakeWebview()
+        js_api = desktop.DesktopJsApi()
+        deps = _make_deps(webview_module=webview_mod, js_api=js_api)
+        desktop.run_desktop_shell(deps)
+        for name in dir(js_api):
+            if name.startswith("_"):
+                continue
+            self.assertIsNot(
+                getattr(js_api, name, None), webview_mod.windows[0],
+                f"公开属性 {name} 持有 window 引用，会触发 pywebview 枚举卡死",
+            )
 
     def test_window_url_uses_random_port(self):
         """窗口 URL 使用随机端口（合同 §3）。"""
@@ -531,7 +549,7 @@ class ReadVersionTests(unittest.TestCase):
 
     def test_reads_version_from_pyproject(self):
         version = desktop.read_version()
-        self.assertEqual(version, "1.7.10")
+        self.assertEqual(version, "1.8.1")
 
     def test_read_version_returns_string(self):
         self.assertIsInstance(desktop.read_version(), str)

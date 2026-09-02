@@ -3,6 +3,22 @@ import App from "./App.vue";
 import "./styles.css";
 import "./styles/theme.css";
 
+// 036 桌面 EXE 模式标记：window.pywebview 存在即 EXE 模式，给 <html> 挂
+// data-desktop="true"。CSS 用 [data-desktop="true"] 把顶部 fixed 浮窗下移
+// 标题栏高度（styles.css --titlebar-offset），避免被磨砂条遮挡。
+// pywebview 异步注入（晚于 Vue 挂载），需监听 pywebviewready 补挂；
+// 属性变化后 CSS 选择器自动重新匹配，浮窗位置即时更新，无需 Vue 重渲染。
+function markDesktopMode() {
+  if (typeof window === "undefined") return;
+  const apply = () => document.documentElement.setAttribute("data-desktop", "true");
+  if (window.pywebview) {
+    apply();
+  } else {
+    window.addEventListener("pywebviewready", apply, { once: true });
+  }
+}
+markDesktopMode();
+
 // 全局 tooltip：.tip[data-tip] 的提示以 fixed 浮层挂在 body 上，
 // 不再受滚动容器 overflow 裁剪（高级设置面板内提示曾被遮挡）。
 function initTooltips() {

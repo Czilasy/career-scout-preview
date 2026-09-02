@@ -27,9 +27,37 @@ def _ok(error=None):
 
 
 def _is_maximized(window):
-    """读取窗口最大化状态；替身/旧版无该属性时返回 None（视为未最大化）。"""
-    value = getattr(window, "maximized", None)
-    return bool(value) if value is not None else None
+    """读取窗口最大化状态。
+
+    T022 修复：pywebview 6.x 的 ``Window.maximized`` 是构造参数快照、不随
+    真实状态更新，直接读它会导致 toggle_maximize 永远走最大化、还原失效。
+    优先读 ``_cs_maximized``（desktop.py 经 ``events.maximized/restored``
+    维护的实时标记）；未接线（老替身/测试替身）时回退读构造快照。
+    """
+    live = getattr(window, "_cs_maximized", None)
+    if live is not None:
+        return bool(live)
+    snapshot = getattr(window, "maximized", None)
+    return bool(snapshot) if snapshot is not None else None
+
+
+def note_maximized(window, value):
+    """pywebview ``events.maximized``/``events.restored`` 回调入口。
+
+    T022 修复：窗口真实最大化/还原后由 desktop.py 调用本函数刷新实时标记，
+    toggle_maximize 以此为准做最大化 <-> 还原切换。
+    """
+    setattr(window, "_cs_maximized", bool(value))
+
+
+def is_maximized(window):
+    """查询窗口是否处于最大化（前端按钮图标切换用，FR-004）。
+
+    与 ``_is_maximized`` 一致：优先读 ``_cs_maximized`` 实时标记（desktop.py
+    经 ``events.maximized/restored`` 维护），未接线时回退读构造快照；
+    两者皆缺视为普通态。
+    """
+    return bool(_is_maximized(window))
 
 
 def minimize(window):
@@ -60,15 +88,21 @@ def maximize(window):
 
 
 def toggle_maximize(window):
-    """最大化 <-> 还原切换（标题栏双击/按钮共用）。"""
+    """最大化 <-> 还原切换（标题栏双击/按钮共用）。
+
+    返回体带 ``maximized`` 字段（切换后的真实状态），供前端同步
+    最大化/还原按钮图标（spec FR-004）。
+    """
     try:
         if _is_maximized(window):
             window.restore()
+            maximized = False
         else:
             window.maximize()
-        return _ok()
+            maximized = True
+        return {"ok": True, "error": None, "maximized": maximized}
     except Exception as exc:  # noqa: BLE001
-        return _ok(str(exc))
+        return {"ok": False, "error": str(exc)}
 
 
 def _clamp_to_workarea(window):

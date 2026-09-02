@@ -351,24 +351,32 @@ class DesktopJsApi:
     def __init__(self):
         # run_desktop_shell 创建窗口后注入（保存状态 + 取消任务 + 关窗）
         self.quit_handler = None
-        # 窗口创建后注入：window_controls 原语依赖注入的 window 对象
-        self.window = None
-
-    def _window(self):
-        """返回当前注入的 pywebview Window；缺失时返回 None。"""
-        return getattr(self, "window", None)
+        # 窗口创建后注入：window_controls 原语依赖注入的 window 对象。
+        # 属性名必须下划线开头：pywebview 页面加载完成后会递归枚举 js_api
+        # 全部公开属性生成前端 API 清单（webview/util.py get_functions），
+        # 公开持有 Window 会让枚举爬进整个窗口/.NET 窗体对象图——真机实测
+        # 页面加载 20 秒起步、有概率永久卡死（036 回归根因，2026-09-02
+        # py-spy 实拍定位）；下划线属性被枚举跳过，注入与调用不受影响。
+        self._window = None
 
     def window_minimize(self):
-        win = self._window()
+        win = self._window
         if win is None:
             return {"ok": False, "error": "no_window"}
         return _wc.minimize(win)
 
     def window_toggle_maximize(self):
-        win = self._window()
+        win = self._window
         if win is None:
             return {"ok": False, "error": "no_window"}
         return _wc.toggle_maximize(win)
+
+    def window_is_maximized(self):
+        """查询窗口是否最大化（前端按钮图标随状态切换，FR-004）。"""
+        win = self._window
+        if win is None:
+            return {"ok": False, "error": "no_window"}
+        return {"ok": True, "maximized": bool(_wc.is_maximized(win))}
 
     def window_close(self):
         """关闭按钮：复用 quit_app 的既有优雅退出链路（等价关闭按钮）。"""
@@ -427,6 +435,16 @@ def run_desktop_shell(deps):
     - mutex_factory, messagebox, create_app, pick_free_port, http_get
     - logger, state_dir, workarea_provider, version, webview_module, ready_timeout
     """
+    # 启动耗时定位（036 真机反馈「打开后卡、标题栏晚出现」排查）：
+    # 记录各阶段耗时到 desktop.log，前缀 [timing]。
+    _launch_t0 = time.monotonic()
+
+    def _timing(label):
+        log_error(
+            f"[timing] {label}: {time.monotonic() - _launch_t0:.2f}s",
+            state_dir=state_dir, logger=logger,
+        )
+
     mutex_factory = deps.get("mutex_factory")
     messagebox = deps.get("messagebox") or _default_messagebox
     create_app = deps.get("create_app")
@@ -484,17 +502,20 @@ def run_desktop_shell(deps):
         daemon=True,
     )
     server_thread.start()
+    _timing("create_app")
 
     # 4. 就绪轮询
     if not wait_for_backend_ready(
         port, timeout=ready_timeout, http_get=http_get
     ):
+        _timing("backend_ready_timeout")
         log_error(f"后端就绪超时（端口 {port}）", state_dir=state_dir, logger=logger)
         messagebox(
             "Career Scout",
             f"启动失败：后端未在 {int(ready_timeout)}s 内就绪",
         )
         return 1
+    _timing("backend_ready")
 
     # 5. 窗口状态（schema 3：普通矩形 + maximized 标记；无记忆 = 首开最大化）
     width, height, x, y, start_maximized = load_window_state(
@@ -531,10 +552,17 @@ def run_desktop_shell(deps):
         "background_color": "#0d1113",
         "shadow": False,
         # 036 自绘标题栏：仅 Windows 开无边框，macOS 保持原生标题栏（A3）。
-        # easy_drag 是 pywebview 6.x 无边框拖拽机制（前端标题栏空白区加
-        # pywebview-drag-region 类即成为拖拽区）。
+        # easy_drag=False（T021 真机修复）：pywebview 6.2.1 在 easy_drag=True
+        # 时全局监听 mousedown（DRAG_REGION_DIRECT_TARGET_ONLY 默认 False），
+        # 页面任意位置按下鼠标都会被当成拖窗口 → 点击卡死。关闭后标题栏
+        # 拖拽由前端 .pywebview-drag-region 类的 body 级监听完成，点击页面
+        # 其它区域不触发拖拽。
+        # 另：T022 需求修订后不实现边缘拉伸——frameless 窗口本无系统拉伸
+        # 边框，resizable 在此无实际效果，窗口事实上固定大小（仅全屏/还原）。
+        # 诊断实验（2026-09-02）已排除无边框与卡死的关联（换原生框照样卡，
+        # 根因为 js_api 公开属性持有 window，见 DesktopJsApi._window），恢复。
         "frameless": sys.platform == "win32",
-        "easy_drag": True,
+        "easy_drag": False,
         # 记忆 maximized=True → 启动即真最大化（还原落回普通矩形参数）
         "maximized": bool(start_maximized),
         # 前端通过 window.pywebview.api 调用（外链打开/退出应用/窗口控制）
@@ -576,14 +604,28 @@ def run_desktop_shell(deps):
 
     try:
         window = webview_module.create_window(**window_kwargs)
-        # 036 自绘标题栏：窗口控制原语依赖 window 对象，创建后注入 js_api
-        if hasattr(js_api, "window"):
-            js_api.window = window
+        _timing("create_window")
+        # 036 自绘标题栏：窗口控制原语依赖 window 对象，创建后注入 js_api。
+        # 必须注入到下划线属性（见 DesktopJsApi._window 注释）：公开属性会被
+        # pywebview 的 API 枚举递归爬取，是「打开卡死/顶栏不出」的根因。
+        if hasattr(js_api, "_window"):
+            js_api._window = window
         # pywebview 6.x 事件 API：window.events.closing += handler
         events = getattr(window, "events", None)
         if events is not None and hasattr(events, "closing"):
             events.closing += _on_closing
             wire_window_events(events, window, tracker)
+            # T022 修复：window.maximized 是构造快照、不随真实状态更新，
+            # 直接读它会让 toggle_maximize 永远走最大化、还原失效。这里订阅
+            # pywebview 的真实状态事件，刷新 window_controls 的实时标记。
+            if getattr(events, "maximized", None) is not None:
+                events.maximized += lambda: _wc.note_maximized(window, True)
+            if getattr(events, "restored", None) is not None:
+                events.restored += lambda: _wc.note_maximized(window, False)
+            # 页面加载完成（pywebview 注入 window.pywebview 并触发 ready）
+            # 的耗时点：create_window 到此段即 WebView2+页面+注入的耗时。
+            if getattr(events, "loaded", None) is not None:
+                events.loaded += lambda: _timing("page_loaded")
         else:
             # pywebview <6 没有 events API：窗口状态记忆与关闭时任务取消
             # 都会静默失效，必须明示（README 约束 pywebview>=6.0）
@@ -599,13 +641,14 @@ def run_desktop_shell(deps):
                 _on_closing()
             except Exception:
                 pass
-            # 不能立即 destroy + os._exit：pywebview 还来不及把 {"ok": true}
-            # 回传给前端 JS，用户会看到"退出失败"报错。这里保留窗口、先让
-            # 返回值回传（毫秒级），再由 Timer 兜底强制退出进程。
+            # 关闭按钮延迟修复（036 真机反馈「点 X 没反应」）：清理动作
+            # （保存窗口状态 + 取消任务）为毫秒级同步操作，完成后立即退出
+            # 进程，点 X 即关，不再人为延迟。前端 window_close 的 await 拿
+            # 不到返回值会静默（callWindow catch），无需等待回传。
             # 注：不调用 destroy，webview.start() 不会因本路径返回（WinForms
-            # 事件循环不结束），因此必须由本 Timer 退出，替换脚本才能等到
+            # 事件循环不结束），必须由本处 os._exit 退出，替换脚本才能等到
             # 主进程 PID 消失并接棒替换。
-            threading.Timer(1.5, lambda: os._exit(0)).start()
+            os._exit(0)
 
         js_api.quit_handler = _quit_and_cleanup
         webview_module.start()
