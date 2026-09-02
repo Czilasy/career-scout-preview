@@ -256,7 +256,9 @@ input {
 }
 .fav-drawer {
   position: fixed;
-  top: 80px;
+  /* 桌面无框模式：自绘标题栏占 36px，与提醒/历史抽屉同款偏移公式
+     （calc(原值 + var(--titlebar-offset))），否则面板顶部被标题栏挡住 */
+  top: calc(80px + var(--titlebar-offset));
   right: 16px;
   bottom: 16px;
   z-index: 51;
@@ -408,7 +410,8 @@ button:disabled {
 }.notice-bar {
   position: fixed;
   z-index: 50;
-  top: 72px;
+  /* 桌面无框模式：自绘标题栏占 36px，与 TaskCompletedToast 同款偏移公式 */
+  top: calc(72px + var(--titlebar-offset));
   left: 50%;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -2692,7 +2695,8 @@ body,
      8s 自动关闭（useDiscoveryState），× 仅作提前手动关闭 */
   position: fixed;
   z-index: 50;
-  top: 72px;
+  /* 桌面无框模式：自绘标题栏占 36px，与 notice-bar 同款偏移公式 */
+  top: calc(72px + var(--titlebar-offset));
   left: 50%;
   display: flex;
   align-items: center;

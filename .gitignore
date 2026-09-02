@@ -23,6 +23,8 @@ ENV/
 build/
 dist/
 .release/
+# 本地归档的旧版本 EXE（桌面替换下来的历史产物，不入库）
+_archive/
 # PyInstaller intermediate output (build/, dist/) and release artifacts (.release/) covered above
 webui/node_modules/
 node_modules/
