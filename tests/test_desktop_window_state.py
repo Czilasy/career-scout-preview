@@ -157,7 +157,7 @@ class LoadSaveTests(unittest.TestCase):
         self.assertIs(desktop.load_window_state, ws.load_window_state)
         self.assertIs(desktop.save_window_state, ws.save_window_state)
         self.assertEqual(desktop.DEFAULT_WIDTH, 1545)
-        self.assertEqual(desktop.DEFAULT_HEIGHT, 900)
+        self.assertEqual(desktop.DEFAULT_HEIGHT, 1000)
 
     def test_save_load_roundtrip_normal(self):
         """写入后读取返回相同普通矩形 + maximized=False。"""
@@ -426,12 +426,12 @@ class DefaultRectTests(unittest.TestCase):
 
     def test_default_normal_rect_without_provider(self):
         """无 provider → 常量尺寸 + (0,0) 位置。"""
-        self.assertEqual(ws.default_normal_rect(None), (1545, 900, 0, 0))
+        self.assertEqual(ws.default_normal_rect(None), (1545, 1000, 0, 0))
 
     def test_default_normal_rect_centered(self):
         """有 provider → 默认尺寸 + 主工作区居中。"""
         rect = ws.default_normal_rect(lambda: [(0, 0, 1920, 1080)])
-        self.assertEqual(rect, (1545, 900, 187, 90))
+        self.assertEqual(rect, (1545, 1000, 187, 40))
 
     def test_default_normal_rect_clamped_on_small_screen(self):
         """小屏 → 默认尺寸钳到工作区。"""
@@ -451,7 +451,7 @@ class DefaultRectTests(unittest.TestCase):
         def boom():
             raise RuntimeError("monitor gone")
 
-        self.assertEqual(ws.default_normal_rect(boom), (1545, 900, 0, 0))
+        self.assertEqual(ws.default_normal_rect(boom), (1545, 1000, 0, 0))
 
 
 # ===========================================================================
@@ -461,7 +461,7 @@ class TrackerTests(unittest.TestCase):
     """运行时普通矩形追踪与落盘快照。"""
 
     def setUp(self):
-        self.default_rect = (1545, 900, 187, 90)
+        self.default_rect = (1545, 1000, 187, 40)
         self.tracker = ws.WindowStateTracker(
             default_rect_fn=lambda: self.default_rect
         )
@@ -542,7 +542,7 @@ class TrackerTests(unittest.TestCase):
 
     def test_snapshot_normal_no_data_uses_default_rect(self):
         result = self.tracker.snapshot_for_save(None, None, None, None)
-        self.assertEqual(result, (1545, 900, 187, 90, False))
+        self.assertEqual(result, (1545, 1000, 187, 40, False))
 
     def test_snapshot_maximized_uses_frozen_rect(self):
         self.tracker.on_resized(1200, 800)
@@ -555,13 +555,13 @@ class TrackerTests(unittest.TestCase):
     def test_snapshot_maximized_without_normal_rect_uses_default(self):
         self.tracker.on_maximized()
         result = self.tracker.snapshot_for_save(1936, 1056, -8, -8)
-        self.assertEqual(result, (1545, 900, 187, 90, True))
+        self.assertEqual(result, (1545, 1000, 187, 40, True))
 
     def test_snapshot_maximized_partial_rect_uses_default(self):
         self.tracker.on_resized(1200, 800)  # 位置仍缺
         self.tracker.on_maximized()
         result = self.tracker.snapshot_for_save(1936, 1056, -8, -8)
-        self.assertEqual(result, (1545, 900, 187, 90, True))
+        self.assertEqual(result, (1545, 1000, 187, 40, True))
 
     def test_snapshot_without_default_fn_falls_back_constants(self):
         tracker = ws.WindowStateTracker()

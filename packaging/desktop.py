@@ -11,7 +11,7 @@ T035 接线点（冻结合同 ``specs/003-desktop-exe/contracts/desktop-shell.md
    PYTHON_EXECUTABLE=sys.executable, START_TASKS=True})``，
    ``app.run(use_reloader=False, threaded=True)`` 在独立 daemon 线程。
 4. **就绪轮询**（§4）：``GET /api/session`` 直到 200，超时 ≤30s → 错误退出。
-5. **窗口**（§5，029 修订）：普通态默认 1545×900 居中（小屏钳回），
+5. **窗口**（§5，029 修订）：普通态默认 1545×1000 居中（小屏钳回），
    ``min_size=(1024,700)``，``resizable=True``；从 ``~/.career-scout/desktop_window.json``
    （schema 3）恢复普通矩形与最大化标记——无记忆/损坏/污染记忆一律首开
    最大化；事件维护普通矩形（窗口状态域 ``packaging/window_state.py``）。
