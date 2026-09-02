@@ -24,7 +24,8 @@
 5. scripts/boss_cdp_raw.py  ``__version__``
 6. tests/test_desktop_shell.py  版本断言
 7. README.md  标题版本号
-8. CHANGELOG.md  新增条目（默认「修复」分组，如需「增加/优化」发布前改分组标签）
+8. README.md  桌面版段落（最新正式版 / exe / dmg 三处，与标题同版）
+9. CHANGELOG.md  新增条目（默认「修复」分组，如需「增加/优化」发布前改分组标签）
 """
 
 from __future__ import annotations
@@ -48,6 +49,10 @@ VERSION_PATTERNS: list[tuple[Path, re.Pattern[str]]] = [
     (ROOT / "tests" / "test_desktop_shell.py", re.compile(r'^\s*self\.assertEqual\(version,\s*"([^"]+)"\)', re.MULTILINE)),
     (ROOT / "README.md", re.compile(r'^# Career Scout v([\d.]+)(?= ·)', re.MULTILINE)),
 ]
+
+# README「桌面版」段落的安装包版本（最新正式版 / exe / dmg 三处）。
+# 与标题同版同步：该段落版本由 CI 测试断言，漏改会让发布门禁失败。
+README_DESKTOP_PATTERN = re.compile(r'(?:最新正式版：v|CareerScout-v)(\d+\.\d+\.\d+)')
 
 UV_LOCK_PATTERN = re.compile(r'^name = "career-scout"\nversion = "([^"]+)"', re.MULTILINE)
 PACKAGE_LOCK_PATTERN = re.compile(r'^(\s*"version"\s*:\s*")[^"]+(")', re.MULTILINE)
@@ -96,6 +101,12 @@ def check_versions(expected: str) -> int:
         match = pattern.search(path.read_text(encoding="utf-8"))
         if not match or match.group(1) != expected:
             problems.append(f"{path.relative_to(ROOT)} 应为 {expected}")
+    readme_desktop = _readme_desktop_versions()
+    if not readme_desktop:
+        problems.append("README.md 桌面版段落未找到版本字段")
+    for value in readme_desktop:
+        if value != expected:
+            problems.append(f"README.md 桌面版段落应为 {expected}（当前 {value}）")
     if PACKAGE_LOCK.exists():
         for value in _package_lock_versions():
             if value != expected:
@@ -124,6 +135,23 @@ def _replace_single(path: Path, pattern: re.Pattern[str], next_version: str) -> 
         raise SystemExit(f"{path.relative_to(ROOT)} 中未找到版本字段，未做任何修改")
     path.write_text(updated, encoding="utf-8")
     print(f"已更新 {path.relative_to(ROOT)} -> {next_version}")
+
+
+def _readme_desktop_versions() -> list[str]:
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    return README_DESKTOP_PATTERN.findall(text)
+
+
+def _replace_readme_desktop(next_version: str) -> None:
+    path = ROOT / "README.md"
+    text = path.read_text(encoding="utf-8")
+    updated, count = README_DESKTOP_PATTERN.subn(
+        lambda m: m.group(0).replace(m.group(1), next_version, 1), text
+    )
+    if count == 0:
+        raise SystemExit("README.md 桌面版段落未找到版本字段，未做任何修改")
+    path.write_text(updated, encoding="utf-8")
+    print(f"已更新 README.md 桌面版段落 -> {next_version}（{count} 处）")
 
 
 def _update_package_lock(next_version: str) -> None:
@@ -201,6 +229,7 @@ def main() -> int:
         print(f"{current} -> {next_version}")
     for path, pattern in VERSION_PATTERNS:
         _replace_single(path, pattern, next_version)
+    _replace_readme_desktop(next_version)
     _update_package_lock(next_version)
     _update_uv_lock(next_version)
     prepend_changelog(next_version, args.message)

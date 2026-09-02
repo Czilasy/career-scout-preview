@@ -37,6 +37,21 @@ jobs:
       - name: 配置本地钩子路径（卫生测试依赖）
         run: git config core.hooksPath hooks
 
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 安装前端依赖
+        working-directory: webui
+        run: npm ci
+
+      # 前端产物 dist 不入库，用时现场构建；后端测试中有一组用例断言 dist 存在，
+      # 少了这一步会以 frontend_not_built 失败，DMG 门禁永远过不去。
+      - name: 构建前端产物（后端全量测试前置）
+        working-directory: webui
+        run: npm run build
+
       - name: 后端全量测试
         run: uv run python -m unittest discover -s tests
 

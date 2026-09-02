@@ -28,9 +28,9 @@ Career Scout 是一个基于 Chrome DevTools Protocol（CDP）的多平台职位
 
 Windows 与 macOS 用户可直接使用桌面版，无需安装 Python 或 Node.js：
 
-- 最新正式版：v1.7.10
-- Windows 安装包：`CareerScout-v1.7.10.exe`，下载后双击运行
-- macOS 安装包：`CareerScout-v1.7.10.dmg`，首次打开见下方 Gatekeeper 说明
+- 最新正式版：v1.8.1
+- Windows 安装包：`CareerScout-v1.8.1.exe`，下载后双击运行
+- macOS 安装包：`CareerScout-v1.8.1.dmg`，首次打开见下方 Gatekeeper 说明
 - 应用内更新（桌面版）：启动时自动检查新版本，可一键下载、校验并重启完成更新；检查与下载优先走国内自建更新镜像（直连可达），镜像不可达时自动回退 GitHub，安装包均经 SHA256 校验后才替换
 
 ### 首次运行准备
