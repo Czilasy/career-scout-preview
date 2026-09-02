@@ -483,7 +483,7 @@ _GITHUB_PAYLOAD = {
 
 
 class MirrorFirstTests(unittest.TestCase):
-    """镜像优先：可达即用镜像，不碰 GitHub；不可达/非法回退 GitHub。"""
+    """镜像优先：有更新即用镜像；镜像不可达/非法/无更新时回退 GitHub 复核。"""
 
     def setUp(self):
         for target, value in (
@@ -515,12 +515,16 @@ class MirrorFirstTests(unittest.TestCase):
         self.assertTrue(info.release_url.endswith("/releases/tag/v1.8.1"))
         get.assert_called_once_with(updater.MIRROR_MANIFEST_URL, timeout=10)
 
-    def test_mirror_up_to_date_no_update(self):
-        with patch.object(updater.requests, "get",
-                          return_value=_MirrorManifestResponse(_mirror_manifest())):
+    def test_mirror_up_to_date_no_update_falls_back_to_github(self):
+        # 镜像 latest == 当前版本：不据此判"已最新"，回退 GitHub 复核。
+        # GitHub 也说无更新 → has_update=False；防镜像滞后的锁死隐患。
+        mirror = _MirrorManifestResponse(_mirror_manifest(latest="1.8.1"))
+        github = _MirrorManifestResponse(_GITHUB_PAYLOAD)
+        with patch.object(updater.requests, "get", side_effect=[mirror, github]) as get:
             info = updater.check_for_update("1.8.1")
         self.assertFalse(info.has_update)
         self.assertEqual(info.asset_url, "")
+        self.assertEqual(get.call_count, 2, "镜像无更新时应回退 GitHub 复核")
 
     def test_mirror_platform_missing_reports_no_asset(self):
         files = {"win": _mirror_manifest()["files"]["win"]}
@@ -545,6 +549,29 @@ class MirrorFirstTests(unittest.TestCase):
                           side_effect=[requests.ConnectionError("timeout"), good]):
             info = updater.check_for_update("1.7.10")
         self.assertTrue(info.has_update)
+        self.assertTrue(info.asset_url.startswith("https://github.com/"))
+
+    def test_mirror_stale_falls_back_to_github_for_real_update(self):
+        # 镜像 manifest 滞后（停在旧版本）：回退 GitHub 拿到真正的新版提示，
+        # 不被镜像旧数据锁死。这是本次修复的核心场景。
+        stale_mirror = _MirrorManifestResponse(_mirror_manifest(latest="1.7.10"))
+        fresh_github = _MirrorManifestResponse({
+            **_GITHUB_PAYLOAD,
+            "tag_name": "v1.9.0",
+            "html_url": "https://github.com/x/y/releases/tag/v1.9.0",
+            "assets": [
+                {"name": "CareerScout-v1.9.0.exe",
+                 "browser_download_url": "https://github.com/x/y/releases/download/v1.9.0/a.exe",
+                 "size": 200},
+                {"name": "CareerScout-v1.9.0.exe.sha256",
+                 "browser_download_url": "https://github.com/x/y/releases/download/v1.9.0/a.exe.sha256",
+                 "size": 1},
+            ],
+        })
+        with patch.object(updater.requests, "get", side_effect=[stale_mirror, fresh_github]):
+            info = updater.check_for_update("1.8.1")
+        self.assertTrue(info.has_update)
+        self.assertEqual(info.latest, "1.9.0")
         self.assertTrue(info.asset_url.startswith("https://github.com/"))
 
     def test_explicit_fetcher_skips_mirror(self):

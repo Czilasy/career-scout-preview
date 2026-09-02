@@ -268,14 +268,20 @@ function ignoreThisVersion() {
 
 // 手动检查更新：始终实时请求 GitHub latest release，无更新时给出明确反馈。
 async function manualCheckUpdate() {
+  // 弹 UpdateDialog 前先清旧 notice，避免"已是最新"残留与新对话框自相矛盾
+  if (noticeTimer) { window.clearTimeout(noticeTimer); noticeTimer = undefined; }
+  notice.value = null;
   updateChecking.value = true;
   try {
     const result = await updateApi.check();
     if (result?.ok && result.has_update) {
       updateInfo.value = result;
       updateDialogOpen.value = true;
-    } else {
+    } else if (result?.ok && !result.has_update) {
       showNotice({ message: "已是最新版本", tone: "success" });
+    } else {
+      // result.ok=false：检查失败（限速/网络异常/后端错误），不再误报"已是最新"
+      showNotice({ message: "检查更新失败，请稍后重试", tone: "warning" });
     }
   } catch {
     showNotice({ message: "检查更新失败，请检查网络后重试", tone: "warning" });

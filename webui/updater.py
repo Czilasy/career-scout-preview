@@ -213,7 +213,10 @@ def _check_mirror(
     )
     info.has_update = is_newer(latest, current_version)
     if not info.has_update:
-        return info
+        # 镜像可达但 latest 不新于当前版本：不据此判"已最新"，返回 None
+        # 让 check_for_update 回退 GitHub 复核。防止镜像 manifest 滞后
+        # （同步漏跑）时锁死所有走镜像的老版本，拿不到真正的新版提示。
+        return None
     entry = files.get(_MIRROR_PLATFORM_KEYS.get(update_platform, "")) \
         if isinstance(files, dict) else None
     if not isinstance(entry, dict) or not str(entry.get("name") or "").strip():

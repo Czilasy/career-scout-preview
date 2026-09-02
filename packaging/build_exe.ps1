@@ -64,6 +64,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ---------------------------------------------------------------------------
+# 3.5 注入更新镜像地址（FR-005：mirror_host.txt 不入 git，打包前临时写入，
+#     spec 收集到 _MEIPASS 根，updater 运行时读取；构建后清理保持工作区干净）
+# ---------------------------------------------------------------------------
+$mirrorHostPath = Join-Path $ProjectRoot 'webui\mirror_host.txt'
+$mirrorHost = '49.232.60.135'
+Set-Content -Path $mirrorHostPath -Value $mirrorHost -Encoding ascii -NoNewline
+Write-Host "已注入更新镜像地址：$mirrorHost"
+
+# ---------------------------------------------------------------------------
 # 4. PyInstaller 构建
 # ---------------------------------------------------------------------------
 # 在临时目录执行：项目根 packaging/ 目录（本项目的桌面壳包）会遮蔽 PyPI
@@ -120,6 +129,11 @@ if (Test-Path 'dist') {
 }
 if (Test-Path 'build') {
     Remove-Item -Recurse -Force 'build' -ErrorAction SilentlyContinue
+}
+
+# 清理临时注入的更新镜像地址文件（不入 git，仅打包时存在，构建后回收）
+if (Test-Path $mirrorHostPath) {
+    Remove-Item -LiteralPath $mirrorHostPath -Force
 }
 
 Write-Host "构建成功：$releasePath"
