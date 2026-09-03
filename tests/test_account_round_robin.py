@@ -463,5 +463,26 @@ class EngagementTests(unittest.TestCase):
         self.assertIsNone(make_list_robin(src))
 
 
+class WiringTests(unittest.TestCase):
+    """R1/R2 接线契约：防 advance 调用被误删回归（Spec 038 收口）。"""
+
+    def test_fetch_job_details_calls_advance(self):
+        """契约：R2 批次成功后必须调 detail_robin.advance 推进配额轮转。"""
+        import inspect
+        from webui import pipeline_exec_details
+        src = inspect.getsource(pipeline_exec_details.fetch_job_details)
+        self.assertIn(
+            "detail_robin.advance", src,
+            "R2 接线必须调 detail_robin.advance（Spec 038 FR-003/005）",
+        )
+
+    def test_search_wiring_uses_list_robin(self):
+        """契约：R1 列表抓取接线 make_list_robin 调用。"""
+        import inspect
+        from webui import pipeline_exec_search
+        src = inspect.getsource(pipeline_exec_search)
+        self.assertIn("make_list_robin", src, "R1 接线必须调 make_list_robin")
+
+
 if __name__ == "__main__":
     unittest.main()
