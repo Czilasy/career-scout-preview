@@ -267,12 +267,19 @@ def register_settings_routes(app, ctx):
         :func:`update_account_pool` clamp 处理（不抛错）。
         """
         from webui.pipeline_exec_accounts import (
+            _BROWSER_ACCOUNTS_LOCK,
             load_browser_accounts, save_browser_accounts, update_account_pool,
+            parse_bool,
         )
         body = request.get_json(silent=True) or {}
         kwargs: dict = {}
         if "selected" in body:
-            kwargs["selected"] = bool(body["selected"])
+            selected = parse_bool(body["selected"])
+            if selected is None:
+                return jsonify({
+                    "ok": False, "error": "selected 必须是布尔值",
+                }), 422
+            kwargs["selected"] = selected
         for field in ("order", "r1_quota", "r2_quota"):
             if field in body:
                 try:
@@ -281,14 +288,15 @@ def register_settings_routes(app, ctx):
                     return jsonify({
                         "ok": False, "error": f"{field} 必须是整数",
                     }), 422
-        accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
-        if str(account_id) not in accounts:
-            return jsonify({"ok": False, "error": _MSG_ACCOUNT_NOT_FOUND}), 404
-        try:
-            accounts = update_account_pool(accounts, str(account_id), **kwargs)
-        except KeyError:
-            return jsonify({"ok": False, "error": _MSG_ACCOUNT_NOT_FOUND}), 404
-        save_browser_accounts(accounts, app.config["BROWSER_ACCOUNTS_PATH"])
+        with _BROWSER_ACCOUNTS_LOCK:
+            accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
+            if str(account_id) not in accounts:
+                return jsonify({"ok": False, "error": _MSG_ACCOUNT_NOT_FOUND}), 404
+            try:
+                accounts = update_account_pool(accounts, str(account_id), **kwargs)
+            except KeyError:
+                return jsonify({"ok": False, "error": _MSG_ACCOUNT_NOT_FOUND}), 404
+            save_browser_accounts(accounts, app.config["BROWSER_ACCOUNTS_PATH"])
         updated = accounts.get(str(account_id)) or {}
         return jsonify({
             "ok": True,

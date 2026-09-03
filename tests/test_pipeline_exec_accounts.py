@@ -30,7 +30,9 @@ from webui.pipeline_exec_accounts import (
     add_browser_account,
     assign_account_role,
     delete_browser_account,
+    has_selected_account,
     load_browser_accounts,
+    parse_bool,
     resolve_account_for_role,
     save_browser_accounts,
     set_account_rate_limited,
@@ -168,6 +170,31 @@ class ResolveAccountForRoleTests(unittest.TestCase):
         self.assertEqual(resolve_account_for_role(accounts, "R1"), "a")
         self.assertEqual(resolve_account_for_role(accounts, "R2"), "a")
         self.assertEqual(resolve_account_for_role(accounts, "any-role"), "a")
+
+    def test_returns_selected_account_in_persisted_pool_order(self):
+        accounts = _accounts()
+        accounts["a"]["pool"]["order"] = 10
+        accounts["b"]["pool"]["order"] = 2
+        self.assertEqual(resolve_account_for_role(accounts, "R1"), "b")
+
+
+class SelectedAccountGuardTests(unittest.TestCase):
+    def test_has_selected_account_tracks_pool_selection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = str(Path(temp) / "browser_accounts.json")
+            accounts = _accounts()
+            save_browser_accounts(accounts, path)
+            self.assertTrue(has_selected_account(path))
+            accounts["a"]["pool"]["selected"] = False
+            accounts["b"]["pool"]["selected"] = False
+            save_browser_accounts(accounts, path)
+            self.assertFalse(has_selected_account(path))
+
+    def test_parse_bool_does_not_accept_false_string_as_true(self):
+        self.assertIs(parse_bool(False), False)
+        self.assertIs(parse_bool("false"), False)
+        self.assertIs(parse_bool("true"), True)
+        self.assertIsNone(parse_bool("not-a-bool"))
 
 
 class AssignAccountRoleStubTests(unittest.TestCase):

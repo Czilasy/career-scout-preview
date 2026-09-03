@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from typing import Any, Callable
 
 from webui.logging_setup import get_logger
@@ -54,6 +55,14 @@ class Segment:
     account_id: str
     start: int
     count: int
+
+
+@dataclass(frozen=True)
+class DetailAllocation:
+    """一次 R2 请求被分给一个账号的岗位片段及尚未领取的尾部。"""
+    account_id: str
+    entries: list[Any]
+    tail: list[Any]
 
 
 def plan_round_robin(total: int, entries: list[PoolEntry]) -> list[Segment]:
@@ -145,12 +154,19 @@ class RotationQueue:
 
     def block_head(self) -> PoolEntry | None:
         """队首撞墙：移出队列（不再轮转）。返回被移除账号，队空返回 None。"""
-        if not self._entries:
-            return None
-        e = self._entries.pop(0)
-        self._remaining.pop(0)
-        self._blocked.append(e)
-        return e
+        return self.block_account(self.head_account)
+
+    def block_account(self, account_id: str | None) -> PoolEntry | None:
+        """移出指定账号，即使它已因预留耗尽而不再是队首。"""
+        wanted = str(account_id or "")
+        for index, entry in enumerate(self._entries):
+            if entry.account_id != wanted:
+                continue
+            removed = self._entries.pop(index)
+            self._remaining.pop(index)
+            self._blocked.append(removed)
+            return removed
+        return None
 
     def has_alternative(self) -> bool:
         """当前是否还有别的账号可换（撞墙换号是否有意义）。"""
@@ -291,6 +307,12 @@ def clone_source(source: Any, account_id: str, *, run_id: str = "") -> Any:
         return ZhilianCdpSource(
             browser_account=str(account_id),
             cdp_port=int(getattr(source, "cdp_port", 9223) or 9223),
+            profile_key=f"zhilian:{account_id}",
+            breaker=getattr(source, "breaker", None),
+            preflight_runner=getattr(source, "_preflight_runner", None),
+            list_runner=getattr(source, "_list_runner", None),
+            detail_runner=getattr(source, "_detail_runner", None),
+            batch_detail_runner=getattr(source, "_batch_detail_runner", None),
             run_id=str(run_id or getattr(source, "run_id", "") or ""),
             cancel_event=cancel_event,
         )
@@ -303,14 +325,36 @@ def clone_source(source: Any, account_id: str, *, run_id: str = "") -> Any:
     cdp_port = getattr(source, "cdp_port", None)
     if cdp_port is not None:
         kwargs["cdp_port"] = int(cdp_port)
-    for attr, key in (
-        ("python_executable", "python_executable"),
-        ("artifact_root", "artifact_root"),
-        ("in_process", "in_process"),
-        ("timeout_seconds", "timeout_seconds"),
-    ):
-        if hasattr(source, attr):
-            kwargs[key] = getattr(source, attr)
+    # 复制构造器接受且会影响抓取行为的配置，尤其是测试/生产注入的
+    # runner、breaker、cwd 与 artifact 限制；不把仅存在于实例上的字段盲传给
+    # 兼容 source，避免替身和旧 adapter 构造失败。
+    try:
+        parameters = inspect.signature(cls).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    aliases = {
+        "executor": "_executor",
+        "runner": "_runner",
+    }
+    for name, parameter in parameters.items():
+        if name in {"self", "browser_account", "run_id", "cancel_event", "cdp_port"}:
+            continue
+        if parameter.kind not in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY):
+            continue
+        attr = aliases.get(name, name)
+        if not hasattr(source, attr):
+            continue
+        if name == "runner" and getattr(source, "_use_default_runner", False):
+            continue
+        value = getattr(source, attr)
+        if name == "env" and isinstance(value, dict) and run_id:
+            value = {
+                **value,
+                "CAREER_SCOUT_CORRELATION_ID": str(run_id),
+                "CAREER_SCOUT_TASK_ID": str(run_id),
+            }
+        if value is not None:
+            kwargs[name] = value
     return cls(**kwargs)
 
 
@@ -361,21 +405,23 @@ class ListRobin:
         # 当前账号的 source 缓存：首个账号直接用传入 source（避免无谓克隆）。
         self._sources: dict[str, Any] = {}
         head = self._queue.head_account
+        self._active_account = head
         if head is not None:
             self._sources[head] = source
         self._progress: dict[str, int] = {}  # combo_key → 已抓到的下一页
 
     def _source_for(self, account_id: str, template: Any) -> Any:
-        """取该账号的 source：已缓存直返；新账号先切 profile 再克隆。"""
+        """取该账号的 source：每次跨账号使用前重新绑定 profile。"""
         src = self._sources.get(account_id)
+        if self._active_account != account_id:
+            if not _switch_browser_account(account_id, self._platform, self._cdp_port):
+                return None
+            self._active_account = account_id
         if src is not None:
             return src
-        # 新账号（轮转到）：切换 profile + 克隆；首个账号已在 __init__ 缓存
-        if _switch_browser_account(account_id, self._platform, self._cdp_port):
-            src = clone_source(template, account_id, run_id=self._run_id)
-            self._sources[account_id] = src
-            return src
-        return None
+        src = clone_source(template, account_id, run_id=self._run_id)
+        self._sources[account_id] = src
+        return src
 
     def fetch_list(self, source: Any, plan_item: dict, *,
                    on_page_completed: Callable[[dict], None] | None = None) -> Any:
@@ -405,13 +451,26 @@ class ListRobin:
                 sub_plan["existing_jobs"] = list(existing_jobs)
             src = self._source_for(entry.account_id, source)
             if src is None:
-                # 切换失败：当作撞墙处理
-                mark_account_rate_limited(entry.account_id)
-                self._queue.block_head()
-                if not self._queue.has_alternative() and not self._queue.head_account:
-                    return last_outcome if last_outcome is not None else _failure(source)
+                # profile/Chrome 绑定失败是环境问题，不得误标平台限流。
+                self._queue.block_account(entry.account_id)
+                if not self._queue.head_account:
+                    return _source_unavailable()
                 continue
-            outcome = src.fetch_list(sub_plan, on_page_completed=on_page_completed)
+
+            def _page_event(event: dict | None) -> None:
+                nonlocal start, existing_jobs
+                event = dict(event or {})
+                checkpoint = int(event.get("resume_page") or 0)
+                if checkpoint > start:
+                    start = min(target + 1, checkpoint)
+                    self._progress[combo_key] = start
+                snapshot = event.get("jobs_snapshot")
+                if isinstance(snapshot, list) and snapshot:
+                    existing_jobs = list(snapshot)
+                if on_page_completed is not None:
+                    on_page_completed(event)
+
+            outcome = src.fetch_list(sub_plan, on_page_completed=_page_event)
             if getattr(outcome, "ok", False):
                 start = sub_end + 1
                 self._progress[combo_key] = start
@@ -426,7 +485,7 @@ class ListRobin:
             # 失败：撞墙→顺次换预选账号；浏览器失联/软失败→原样上交
             if is_wall_code(getattr(outcome, "failed_code", "")):
                 mark_account_rate_limited(entry.account_id)
-                self._queue.block_head()
+                self._queue.block_account(entry.account_id)
                 if self._queue.head_account is None:
                     return outcome  # 全撞完
                 continue  # 同 start 重抓，剩余份额接力
@@ -443,6 +502,15 @@ def _failure(template: Any):
     return SourceOutcome.failure(
         failed_code="source_blocked",
         safe_log="round_robin_all_accounts_walled",
+    )
+
+
+def _source_unavailable():
+    """所有候选账号都无法绑定 profile 时交给既有环境暂停路径。"""
+    from webui.source_breaker import SourceOutcome
+    return SourceOutcome.failure(
+        failed_code="source_cdp_unavailable",
+        safe_log="round_robin_account_binding_failed",
     )
 
 
@@ -466,34 +534,57 @@ class DetailRobin:
       （交既有 ``hard_stop``→暂停路径，FR-013）。
     """
 
-    def __init__(self, source: Any, entries: list[PoolEntry], *, run_id: str = ""):
+    def __init__(self, source: Any, entries: list[PoolEntry], *, run_id: str = "",
+                 on_account_switch: Callable[[str, str], None] | None = None):
         if not entries:
             raise ValueError("DetailRobin 需至少一个预选账号")
         self._queue = RotationQueue(entries)
         self._run_id = str(run_id or getattr(source, "run_id", "") or "")
         self._platform = str(getattr(source, "platform", "boss") or "boss")
         self._cdp_port = getattr(source, "cdp_port", None)
+        self._on_account_switch = on_account_switch
         self._sources: dict[str, Any] = {}
         head = self._queue.head_account
+        self._active_account = head
         if head is not None:
             self._sources[head] = source
 
-    def current_source(self) -> Any:
-        """返回当前队首账号的 source；队空返回 None。"""
-        head = self._queue.head_account
-        if head is None:
+    def source_for(self, account_id: str | None = None) -> Any:
+        """返回指定账号的 source，并确保进程级 profile 已绑定该账号。"""
+        account_id = str(account_id or self._queue.head_account or "")
+        if not account_id:
             return None
-        src = self._sources.get(head)
+        src = self._sources.get(account_id)
+        if self._active_account != account_id:
+            if not _switch_browser_account(account_id, self._platform, self._cdp_port):
+                return None
+            self._active_account = account_id
         if src is not None:
             return src
-        # 队首变了：切换 profile + 克隆
-        if not _switch_browser_account(head, self._platform, self._cdp_port):
-            return None
-        # 取一个模板（任一已克隆的 source）用于克隆同参数
+        # 取一个模板（任一已缓存 source）用于克隆同参数
         template = next(iter(self._sources.values()))
-        src = clone_source(template, head, run_id=self._run_id)
-        self._sources[head] = src
+        src = clone_source(template, account_id, run_id=self._run_id)
+        self._sources[account_id] = src
         return src
+
+    def current_source(self) -> Any:
+        """返回当前队首账号的 source；队空返回 None。"""
+        return self.source_for()
+
+    def reserve(self, n: int) -> tuple[PoolEntry | None, int]:
+        """为一次详情请求预留当前账号配额。"""
+        return self._queue.reserve(n)
+
+    def allocate(self, pending_entries: list[Any]) -> DetailAllocation | None:
+        """按当前账号配额从待抓队列领取一次实际请求。"""
+        entry, take = self.reserve(len(pending_entries))
+        if entry is None or take <= 0:
+            return None
+        return DetailAllocation(
+            account_id=entry.account_id,
+            entries=list(pending_entries[:take]),
+            tail=list(pending_entries[take:]),
+        )
 
     def advance(self, n: int) -> None:
         """一批成功后推进配额；耗尽则轮转，跨账号累计扣完 n。"""
@@ -502,13 +593,79 @@ class DetailRobin:
             _, taken = self._queue.reserve(remaining)
             remaining -= taken
 
-    def switch_next(self) -> bool:
+    def mark_success(self, account_id: str | None = None) -> None:
+        """成功使用后清除该账号的限流标记（自愈）。"""
+        clear_account_rate_limited(
+            str(account_id or self._queue.head_account or "")
+        )
+
+    def switch_next(self, account_id: str | None = None) -> bool:
         """撞墙换号：当前队首移出并切下一个。全撞完返回 False。"""
-        head = self._queue.head_account
-        if head is None:
+        failed_account = str(account_id or self._queue.head_account or "")
+        if not failed_account:
             return False
-        mark_account_rate_limited(head)
-        self._queue.block_head()
+        mark_account_rate_limited(failed_account)
+        self._queue.block_account(failed_account)
+        next_account = self._queue.head_account
+        if next_account and self._on_account_switch is not None:
+            try:
+                self._on_account_switch(failed_account, next_account)
+            except Exception:
+                _logger.debug("账号轮询切换留痕失败（不阻断主流程）", exc_info=True)
+        return next_account is not None
+
+    def skip_account(self, account_id: str | None = None) -> bool:
+        """移除无法绑定运行时 source 的账号，不将其误记为平台限流。"""
+        wanted = str(account_id or self._queue.head_account or "")
+        if not wanted:
+            return False
+        self._queue.block_account(wanted)
+        return self._queue.head_account is not None
+
+    def retry_after_binding_failure(
+            self, allocation: DetailAllocation) -> list[Any] | None:
+        """账号 profile 绑定失败后跳过该账号，返回交给下一个的待抓项。"""
+        if not self.skip_account(allocation.account_id):
+            return None
+        return list(allocation.entries) + list(allocation.tail)
+
+    @staticmethod
+    def keep_unfinished(
+            allocation: DetailAllocation, entries: list[Any],
+    ) -> DetailAllocation:
+        """将守护重试收窄到未完成项，保留尚未领取的账号配额尾部。"""
+        return DetailAllocation(
+            account_id=allocation.account_id,
+            entries=list(entries),
+            tail=list(allocation.tail),
+        )
+
+    def retry_after_wall(
+            self, allocation: DetailAllocation, outcomes: dict,
+            batch_exception_code: object, *, outcome_key: Callable[[Any], Any],
+    ) -> tuple[bool, list[Any] | None]:
+        """处理一段 R2 撞墙，返回 ``(是否接管, 下一账号待抓项)``。
+
+        已成功或软失败的岗位不在下一段中；批调用自身撞墙且无条级结果时，
+        当前分段全部接力。无可换账号时仍返回已接管、但待抓项为 ``None``，
+        让调用方保留既有暂停结果。
+        """
+        if not is_wall_code(batch_exception_code):
+            wall_entries = [
+                item for item in allocation.entries
+                if (outcome := outcomes.get(outcome_key(item))) is not None
+                and is_wall_code(getattr(outcome, "failed_code", ""))
+            ]
+        else:
+            wall_entries = list(allocation.entries)
+        if not wall_entries:
+            return False, None
+        if not self.switch_next(allocation.account_id):
+            return True, None
+        return True, wall_entries + list(allocation.tail)
+
+    @property
+    def has_account(self) -> bool:
         return self._queue.head_account is not None
 
     @property
@@ -554,9 +711,22 @@ def make_list_robin(source: Any, *, run_id: str = "") -> ListRobin | None:
     return ListRobin(source, entries, run_id=run_id)
 
 
-def make_detail_robin(source: Any, *, run_id: str = "") -> DetailRobin | None:
+def make_detail_robin(source: Any, *, run_id: str = "",
+                      on_account_switch: Callable[[str, str], None] | None = None,
+                      switch_event_store: Any = None) -> DetailRobin | None:
     """R2 接线入口：返回 DetailRobin 或 None（legacy 透传）。"""
     entries = _engaged_entries(source, "R2")
     if not entries:
         return None
-    return DetailRobin(source, entries, run_id=run_id)
+    if on_account_switch is None and switch_event_store is not None and run_id:
+        def on_account_switch(from_account: str, to_account: str) -> None:
+            # B057 的换号事件由 resume_identity 统一落盘，R2 撞墙不另起一套。
+            from webui.resume_identity import record_account_switch_event
+            record_account_switch_event(
+                switch_event_store, run_id,
+                from_account=from_account, to_account=to_account,
+            )
+    return DetailRobin(
+        source, entries, run_id=run_id,
+        on_account_switch=on_account_switch,
+    )

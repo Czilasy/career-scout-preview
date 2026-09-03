@@ -142,6 +142,7 @@ def register_exec_search_routes(app, ctx):
             FrozenTaskScope,
             preview_scope,
         )
+        from webui.pipeline_exec_accounts import has_selected_account
         from webui.pipeline_exec import resolve_browser_account
         from webui.platforms import (
             UnknownPlatformError,
@@ -198,6 +199,16 @@ def register_exec_search_routes(app, ctx):
                 "error_code": "platform_validation_failed",
                 "user_message": "平台未注册",
             }), 400
+
+        # Spec 038 FR-019：账号池为空时在任务创建入口硬阻断，不能依赖
+        # account_for_role 的旧 fallback 启动到未勾选账号。
+        if not has_selected_account(app.config["BROWSER_ACCOUNTS_PATH"]):
+            return jsonify({
+                "ok": False,
+                "error_code": "account_pool_empty",
+                "error": "请至少勾选一个账号参与轮询后再开抓",
+                "user_message": "请至少勾选一个账号参与轮询后再开抓",
+            }), 422
 
         # T402: 非空 AI filters 拒绝（零副作用，先于租约和 scope 检查）
         offending = [
