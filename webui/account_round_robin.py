@@ -477,7 +477,6 @@ class DetailRobin:
         head = self._queue.head_account
         if head is not None:
             self._sources[head] = source
-        self._bound = head  # 当前已切换到的账号
 
     def current_source(self) -> Any:
         """返回当前队首账号的 source；队空返回 None。"""
@@ -494,13 +493,14 @@ class DetailRobin:
         template = next(iter(self._sources.values()))
         src = clone_source(template, head, run_id=self._run_id)
         self._sources[head] = src
-        self._bound = head
         return src
 
     def advance(self, n: int) -> None:
-        """一批成功后推进配额。耗尽则轮转（队尾重置配额，下一轮生效）。"""
-        if n and n > 0:
-            self._queue.reserve(n)  # 复用 reserve 的轮转语义（取数=推进量）
+        """一批成功后推进配额；耗尽则轮转，跨账号累计扣完 n。"""
+        remaining = int(n) if n and n > 0 else 0
+        while remaining > 0 and self._queue.head_account is not None:
+            _, taken = self._queue.reserve(remaining)
+            remaining -= taken
 
     def switch_next(self) -> bool:
         """撞墙换号：当前队首移出并切下一个。全撞完返回 False。"""

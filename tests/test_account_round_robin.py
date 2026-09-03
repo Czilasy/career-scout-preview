@@ -405,6 +405,23 @@ class DetailRobinTests(unittest.TestCase):
         r.advance(2)  # a 配额耗尽 → 轮转 b 成队首
         self.assertEqual(r._queue.head_account, "b")
 
+    def test_advance_spans_accounts_when_n_exceeds_quota(self):
+        # advance(3) 配额 a=2,b=2 → a 扣2轮转, b 扣1，跨账号累计扣完
+        book = _make_book(("a", "A"), ("b", "B"), r2=2)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+        src = _FakeSource("a", [], platform="boss", cdp_port=9222)
+        entries = robin_mod._engaged_entries(src, "R2")
+        r = DetailRobin(src, entries, run_id="r")
+        r.advance(3)  # a:2 耗尽轮转, b:扣1
+        self.assertEqual(r._queue.head_account, "b")
+        # b 还剩 1 配额（2-1），再 advance(1) 扣完轮转回 a
+        r.advance(1)
+        self.assertEqual(r._queue.head_account, "a")
+
 
 # ---------------------------------------------------------------------------
 # engagement 规则：保护既有替身零行为变更

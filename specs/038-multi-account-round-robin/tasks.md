@@ -36,9 +36,9 @@
 
 **Purpose**: 轮询分摊调度域（US1 前置）+ 账号池配置 schema 变更（全部 US 前置）
 
-- [ ] T001 [P] 新建 `webui/account_round_robin.py`：轮询分摊调度域——配额分摊（R1 按页/R2 按 JD 条）、多轮覆盖（总量不够自动回到 1 号再来一轮）、勾选顺序轮转、末轮零头由下一个账号自然抓完、撞墙换号接力编排入口，纯逻辑可单测，~250 行
-- [ ] T002 [P] 新建 `tests/test_account_round_robin.py`：轮询调度聚焦测试（配额分摊/多轮覆盖/勾选顺序/末轮零头/撞墙换号接力），~150 行
-- [ ] T003 [P] `webui/pipeline_exec_accounts.py`：账号池配置 schema 变更——角色→单账号互斥 → 多账号池 + 每账号配额 + 全选标记；旧配置不兼容，清空旧数据，新 schema 直接上（不走迁移）
+- [x] T001 [P] 新建 `webui/account_round_robin.py`：轮询分摊调度域——配额分摊（R1 按页/R2 按 JD 条）、多轮覆盖（总量不够自动回到 1 号再来一轮）、勾选顺序轮转、末轮零头由下一个账号自然抓完、撞墙换号接力编排入口，纯逻辑可单测，~250 行
+- [x] T002 [P] 新建 `tests/test_account_round_robin.py`：轮询调度聚焦测试（配额分摊/多轮覆盖/勾选顺序/末轮零头/撞墙换号接力），~150 行
+- [x] T003 [P] `webui/pipeline_exec_accounts.py`：账号池配置 schema 变更——角色→单账号互斥 → 多账号池 + 每账号配额 + 全选标记；旧配置不兼容，清空旧数据，新 schema 直接上（不走迁移）
 
 **Checkpoint**: 轮询调度域 + 账号簿新 schema 就绪；US1–US4 可开工
 
@@ -52,10 +52,10 @@
 
 ### Implementation for User Story 1
 
-- [ ] T004 [P] [US1] `webui/pipeline_exec_search.py`：R1 列表抓取接线调用 `account_round_robin` 分摊页数（每轮每账号抓固定页配额就换下一个，总量不够自动多轮），净增 ≤30 行
-- [ ] T005 [P] [US1] `webui/pipeline_exec_details.py`：R2 详情抓取接线调用 `account_round_robin` 分摊 JD（每轮每账号抓固定 JD 配额就换下一个，总量不够自动多轮），净增 ≤30 行
-- [ ] T006 [P] [US1] `webui/src/components/BrowserAccountsDialog.vue`：R1/R2 角色选择从"单选互斥"改"多选 + 共用账号池"；每账号配额输入框 placeholder 灰字提示范围（R1 1–50 / R2 1–200，不暴露每页条数）；净增控制，超 900 预警则抽 `AccountPoolSelector.vue` 子组件
-- [ ] T007 [US1] 回归验证：`tests/test_account_round_robin.py` 全绿（分摊/多轮/顺序/末轮零头）+ R1/R2 接线不破坏既有抓取测试
+- [x] T004 [P] [US1] `webui/pipeline_exec_search.py`：R1 列表抓取接线调用 `account_round_robin` 分摊页数（每轮每账号抓固定页配额就换下一个，总量不够自动多轮），净增 ≤30 行
+- [x] T005 [P] [US1] `webui/pipeline_exec_details.py`：R2 详情抓取接线调用 `account_round_robin` 分摊 JD（每轮每账号抓固定 JD 配额就换下一个，总量不够自动多轮），净增 ≤30 行
+- [x] T006 [P] [US1] `webui/src/components/BrowserAccountsDialog.vue`：R1/R2 角色选择从"单选互斥"改"多选 + 共用账号池"；每账号配额输入框 placeholder 灰字提示范围（R1 1–50 / R2 1–200，不暴露每页条数）；净增控制，超 900 预警则抽 `AccountPoolSelector.vue` 子组件
+- [x] T007 [US1] 回归验证：`tests/test_account_round_robin.py` 全绿（分摊/多轮/顺序/末轮零头）+ R1/R2 接线不破坏既有抓取测试
 
 **Checkpoint**: US1 完成——多选开抓轮询分摊可用
 
@@ -69,9 +69,9 @@
 
 ### Implementation for User Story 2
 
-- [ ] T008 [P] [US2] `webui/resume_identity.py`：撞墙换号取号范围从"系统全池自动挑"限定为"用户预选池顺次切"（复用 B057 现有换号逻辑，只改取号范围；剩余份额接力转下一个不丢）
-- [ ] T009 [US2] `webui/account_round_robin.py`：撞墙信号（验证码/限流/硬阻断）触发时调用 `resume_identity` 顺次换号 + 剩余份额接力编排（依赖 T001 调度域、T008 取号范围）
-- [ ] T010 [US2] `tests/test_account_round_robin.py`：撞墙换号顺次接力 + 剩余份额不丢 + 只取预选池账号（不取未选账号）测试
+- [x] T008 [P] [US2] `webui/resume_identity.py`：撞墙换号取号范围从"系统全池自动挑"限定为"用户预选池顺次切"（复用 B057 现有换号逻辑，只改取号范围；剩余份额接力转下一个不丢）
+- [x] T009 [US2] `webui/account_round_robin.py`：撞墙信号（验证码/限流/硬阻断）触发时调用 `resume_identity` 顺次换号 + 剩余份额接力编排（依赖 T001 调度域、T008 取号范围）
+- [x] T010 [US2] `tests/test_account_round_robin.py`：撞墙换号顺次接力 + 剩余份额不丢 + 只取预选池账号（不取未选账号）测试
 
 **Checkpoint**: US2 完成——撞墙顺次换号兜底可用
 
@@ -85,9 +85,9 @@
 
 ### Implementation for User Story 3
 
-- [ ] T011 [P] [US3] `webui/account_round_robin.py`：所有预选账号撞墙时任务停下走现有"暂停"状态（不新增报错字段/弹窗/文案体系）
-- [ ] T012 [P] [US3] `webui/src/components/BrowserAccountsDialog.vue`：撞墙账号列表项字体颜色变红 + 后缀小方框标"限流"字样，作为唯一视觉标识（不新增专门报错 UI）
-- [ ] T013 [US3] `tests/test_account_round_robin.py` + `webui/src/components/__tests__/BrowserAccountsDialog.spec.ts`：全撞完走暂停 + 限流标识渲染测试
+- [x] T011 [P] [US3] `webui/account_round_robin.py`：所有预选账号撞墙时任务停下走现有"暂停"状态（不新增报错字段/弹窗/文案体系）
+- [x] T012 [P] [US3] `webui/src/components/BrowserAccountsDialog.vue`：撞墙账号列表项字体颜色变红 + 后缀小方框标"限流"字样，作为唯一视觉标识（不新增专门报错 UI）
+- [x] T013 [US3] `tests/test_account_round_robin.py` + `webui/src/components/__tests__/BrowserAccountsDialog.spec.ts`：全撞完走暂停 + 限流标识渲染测试
 
 **Checkpoint**: US3 完成——全撞完即停 + 限流标识可用
 
@@ -101,9 +101,9 @@
 
 ### Implementation for User Story 4
 
-- [ ] T014 [P] [US4] `webui/pipeline_exec_accounts.py`：登录账号默认全进 R1/R2 池 + 新增账号自动加入两池 + 默认全选 + 每账号默认配额（R1 25 页/R2 100 条，取范围中值）
-- [ ] T015 [P] [US4] `webui/src/composables/useDiscoveryExecution.ts`：开抓前校验至少 1 账号选中，全取消所有账号勾选时阻止开抓
-- [ ] T016 [US4] `tests/test_pipeline_exec_accounts*.py` + 前端测试：默认全进池/新增自动加入/默认全选/默认配额/全取消阻止开抓测试
+- [x] T014 [P] [US4] `webui/pipeline_exec_accounts.py`：登录账号默认全进 R1/R2 池 + 新增账号自动加入两池 + 默认全选 + 每账号默认配额（R1 25 页/R2 100 条，取范围中值）
+- [x] T015 [P] [US4] `webui/src/composables/useDiscoveryExecution.ts`：开抓前校验至少 1 账号选中，全取消所有账号勾选时阻止开抓
+- [x] T016 [US4] `tests/test_pipeline_exec_accounts*.py` + 前端测试：默认全进池/新增自动加入/默认全选/默认配额/全取消阻止开抓测试
 
 **Checkpoint**: US4 完成——零配置可用
 
@@ -113,11 +113,11 @@
 
 **Purpose**: 收尾、登记、门禁
 
-- [ ] T017 `.specify/memory/constitution.md`：模块地图登记 `webui/account_round_robin.py`（+ `AccountPoolSelector.vue` 如抽）
-- [ ] T018 检查 `webui/src/components/BrowserAccountsDialog.vue` 净增是否超 900 预警，超则抽 `AccountPoolSelector.vue` 子组件（多选 + 配额输入 + 限流标识），原组件只挂载
-- [ ] T019 `roadmap/BACKLOG.md`：B091 标题"BOSS 任务"误写修正为通用（BOSS + 智联都做）
-- [ ] T020 检查 README/文档是否需同步（账号弹窗多选行为变化，若需则更新 `README.md`）
-- [ ] T021 全量门禁：后端全量测试（`uv run python -m unittest discover -s tests -t tests`）+ 前端全量（`cd webui && npx vitest --run`）+ `npm run build`（`cd webui && npm run build`）+ 仓库卫生（`uv run python -m unittest tests.test_repo_hygiene`）；FR-020 BOSS + 智联两平台轮询分摊/撞墙换号/默认配置均覆盖（调度域平台无关，R1/R2 执行栈两平台既有，聚焦测试 + 用户端到端真跑两平台都验）
+- [x] T017 `.specify/memory/constitution.md`：模块地图登记 `webui/account_round_robin.py`（+ `AccountPoolSelector.vue` 如抽）
+- [x] T018 检查 `webui/src/components/BrowserAccountsDialog.vue` 净增是否超 900 预警，超则抽 `AccountPoolSelector.vue` 子组件（多选 + 配额输入 + 限流标识），原组件只挂载
+- [x] T019 `roadmap/BACKLOG.md`：B091 标题"BOSS 任务"误写修正为通用（BOSS + 智联都做）
+- [x] T020 检查 README/文档是否需同步（账号弹窗多选行为变化，若需则更新 `README.md`）
+- [x] T021 全量门禁：后端全量测试（`uv run python -m unittest discover -s tests -t tests`）+ 前端全量（`cd webui && npx vitest --run`）+ `npm run build`（`cd webui && npm run build`）+ 仓库卫生（`uv run python -m unittest tests.test_repo_hygiene`）；FR-020 BOSS + 智联两平台轮询分摊/撞墙换号/默认配置均覆盖（调度域平台无关，R1/R2 执行栈两平台既有，聚焦测试 + 用户端到端真跑两平台都验）
 
 ---
 

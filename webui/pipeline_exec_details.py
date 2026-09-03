@@ -522,8 +522,12 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 continue
             if hard_stop:
                 break
-            # 正常完成（未卡死、未硬停）：退出本批重抓循环
-            break
+            # Spec 038 B091 R2：批次成功推进配额，耗尽轮转下一账号（FR-003/005）
+            if detail_robin is not None:
+                _adv = sum(1 for _, jid, _ in batch if outcomes.get(jid) and outcomes[jid].ok)
+                if _adv:
+                    detail_robin.advance(_adv)
+            break  # 正常完成（未卡死、未硬停）
         # 025：批内信号清除（批结束/停止/重抓循环退出，任何 break 都会落到这里）
         if batch_progress is not None:
             batch_progress(None, None)

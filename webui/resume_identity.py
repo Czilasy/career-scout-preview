@@ -97,37 +97,6 @@ def record_account_switch_event(store: Any, run_id: str, *,
         _logger.debug("账号切换事件落库失败（不影响切换主流程）", exc_info=True)
 
 
-def record_inflight_account_switch(store: Any, run_id: str, *,
-                                   from_account: str, to_account: str,
-                                   accounts_path: Any = None) -> None:
-    """R1/R2 抓取中撞墙顺次换号的留痕（Spec 038 B091 T008）。
-
-    与续跑路径的 :func:`record_account_switch_event` 同事件结构，复用其
-    落库实现；区别在于触发时机——本函数在抓取 in-flight 撞墙（验证码/
-    限流/硬阻断）自动顺次换预选账号时调用，``from_account``→``to_account``
-    已由 :mod:`webui.account_round_robin` 的 ``RotationQueue.block_head``
-    决定（取号范围限定到用户预选池顺次切，不再从全池自动挑）。
-
-    best-effort：``store`` 或 ``run_id`` 为空 / 事件落库失败均仅记日志，
-    不影响撞墙换号主流程。``accounts_path`` 为空时账号展示名走默认账号簿。
-    """
-    if not store or not str(run_id or "").strip():
-        return
-    accounts = None
-    if accounts_path is not None:
-        try:
-            from webui.pipeline_exec_accounts import load_browser_accounts
-            accounts = load_browser_accounts(accounts_path)
-        except Exception:
-            _logger.debug("加载账号簿失败，换号留痕退化为 id 展示", exc_info=True)
-    record_account_switch_event(
-        store, run_id,
-        from_account=from_account, to_account=to_account,
-        accounts=accounts,
-    )
-
-
-
 def append_account_switch_log_line(task: dict[str, Any] | None, *,
                                    from_account: str, to_account: str,
                                    accounts: dict[str, Any] | None = None) -> None:
