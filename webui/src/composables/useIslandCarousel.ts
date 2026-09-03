@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// 038 灵动岛 v3 · 转盘轮播状态机。
+// 037 灵动岛 v3 · 转盘轮播状态机。
 //
 // 设计要点：
 // - mainLaneState 直接读 roundStatus.capsule（computed），永不冻结——
@@ -8,12 +8,11 @@
 // - 打断队列 FIFO；pushInterrupt 展示位永远切到最新一条（US-3"多条积压只转
 //   最新一条"）：旧的非 sticky 打断留在队列由各自 timer 到点沉入 panel——
 //   这是"被动响应新打断"的切换，不是"自动轮播"（dismiss 后不补转下一条）。
-// - 展示位被 sticky 打断占据（等用户手动处理）时新打断不抢位：非 sticky 只
-//   入队+timer；新 sticky 无 timer 也无展示位，直接沉入 panel（未读），
-//   永不滞留队列卡死角标（复审 P2-3）。
+// - 当前产品来源均不使用 sticky；保留 sticky 分支只作内部防御：若误传，
+//   新 sticky 无 timer 也无展示位时直接沉入 panel，永不滞留队列卡死角标。
 // - 非 sticky interrupt：定时 duration ms 后自动沉入 notice panel（经
 //   onSinkInterrupt 回调），并回 lane 0。
-// - sticky interrupt：不自动回，等 dismissActive()。
+// - sticky interrupt：仅内部防御路径不自动回，等 dismissActive()。
 // - reset()：清队列+清 timer+回 lane 0（跨 profile 切换调）。
 // - badgeCount = interruptQueue 长度（pill 上未沉入 panel 的打断数）；
 //   pill 总未读 = notices.unreadCount + badgeCount（DynamicIsland 组合）。
@@ -23,7 +22,7 @@ import { computed, ref, type ComputedRef, type Ref } from "vue";
 import type { CapsuleStatusPayload, DynamicIslandState } from "./useDiscoveryState";
 import type { Platform } from "../types";
 
-/** 038 复审：新增 "jd"（JD 详情抓取阶段），与 scraping/screening 并列。 */
+/** 037 复审：新增 "jd"（JD 详情抓取阶段），与 scraping/screening 并列。 */
 export type IslandPhase = "scraping" | "jd" | "screening" | "completed" | "idle" | "attention";
 
 /** pill lane 0（主流程）内容，派生自 roundStatus.capsule。 */
@@ -38,12 +37,12 @@ export interface IslandLiveState {
   platform: Platform;
 }
 
-/** 打断 lane 内容（投递提醒 / NoticeBar warning/error）。 */
+/** 打断 lane 内容（投递提醒 / NoticeBar 重要打断；普通反馈由接线层归一）。 */
 export interface IslandInterruptContent {
   title: string;
   detail?: string;
   tone: "warning" | "error";
-  /** 038：沉入 panel 后行点击直达目标（缺省 "task"；投递提醒给 "reminders"
+  /** 037：沉入 panel 后行点击直达目标（缺省 "task"；投递提醒给 "reminders"
    *  开提醒抽屉——复审 P2-8：打断行目标按打断类型语义分流，不再一律 task）。 */
   target?: "task" | "results" | "attention" | "reminders";
 }

@@ -1,12 +1,14 @@
-// 038 灵动岛 v3 组件测试：
-// - 四态渲染沿用（标签 038 更新：正在抓取/AI精筛）+ completed 彩色芯片；
+// 037 灵动岛 v3 组件测试：
+// - 四态渲染沿用（标签 037 更新：正在抓取/AI精筛）+ completed 彩色芯片；
 // - carousel 转一次（pushInterrupt → activeLaneIndex 变化）；
 // - 红光层（attention 时 data-glow 出现，离开移除）；
-// - 038 组件级：宽度 spring data-pill-width / 数字弹动 playPop / labelStack 旧值淡出 / FR-011 主流程数字推进 / P2-1 completed 直达；
+// - 037 组件级：宽度 spring data-pill-width / 数字弹动 playPop / labelStack 旧值淡出 / FR-011 主流程数字推进 / P2-1 completed 直达；
 // - 037 保留：点击语义/dismiss 快照/焦点圈闭/aria-live 播报。
 import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { nextTick, ref } from "vue";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import DynamicIsland from "../DynamicIsland.vue";
 import { useIslandCarousel, type IslandCarouselApi } from "../../composables/useIslandCarousel";
 import type { CapsuleStatusPayload, DynamicIslandState } from "../../composables/useDiscoveryState";
@@ -288,7 +290,7 @@ describe("DynamicIsland 通知池联动（037 保留）", () => {
       expect(panel.attributes("role")).toBe("dialog");
       expect(panel.attributes("aria-modal")).toBe("true");
       await nextTick();
-      expect(panel.element).toBe(document.activeElement);
+      expect(row.element).toBe(document.activeElement);
     } finally {
       wrapper.unmount();
     }
@@ -391,7 +393,7 @@ describe("DynamicIsland 通知池联动（037 保留）", () => {
   });
 });
 
-describe("DynamicIsland 038 carousel + 红光 + 芯片", () => {
+describe("DynamicIsland 037 carousel + 红光 + 芯片", () => {
   it("reduce-motion 下（默认）：弹跳不调用 WAAPI", async () => {
     const animateSpy = vi.spyOn(Element.prototype, "animate")
       .mockImplementation(function () { return fakeAnimation(); });
@@ -462,7 +464,7 @@ describe("DynamicIsland 038 carousel + 红光 + 芯片", () => {
     }
   });
 
-  it("038 completed 芯片：匹配绿 + 待确认琥珀（kaleido 适配）", async () => {
+  it("037 completed 芯片：匹配绿 + 待确认琥珀（kaleido 适配）", async () => {
     document.documentElement.setAttribute("data-theme", "kaleido");
     try {
       const wrapper = mountIsland(makeStatus({
@@ -478,7 +480,7 @@ describe("DynamicIsland 038 carousel + 红光 + 芯片", () => {
     }
   });
 
-  it("038 红光层：attention 时出现，离开时移除", async () => {
+  it("037 红光层：attention 时出现，离开时移除", async () => {
     const wrapper = mountIsland(makeStatus({
       state: "running", platform: "boss",
       progress: { phase: "scraping", done: 5, total: 10 },
@@ -500,7 +502,7 @@ describe("DynamicIsland 038 carousel + 红光 + 芯片", () => {
   });
 });
 
-describe("DynamicIsland 038 组件级 carousel + 宽度 spring + 数字弹动", () => {
+describe("DynamicIsland 037 组件级 carousel + 宽度 spring + 数字弹动", () => {
   it("pushInterrupt → interrupt lane 渲染（title/detail/data-tone）+ activeLaneIndex 切换", async () => {
     vi.useFakeTimers();
     try {
@@ -644,6 +646,7 @@ describe("DynamicIsland 038 组件级 carousel + 宽度 spring + 数字弹动", 
   });
 
   it("SC-001：labelStack 旧值上滑淡出，400ms 后出栈", async () => {
+    (globalThis as any).__setReducedMotionMatchMedia(false);
     vi.useFakeTimers();
     try {
       const wrapper = mountIsland(makeStatus({
@@ -672,12 +675,99 @@ describe("DynamicIsland 038 组件级 carousel + 宽度 spring + 数字弹动", 
       wrapper.unmount();
     } finally {
       vi.useRealTimers();
+      (globalThis as any).__setReducedMotionMatchMedia(true);
     }
   });
 
-  // 038 复审：JD 抓取（phase=jd）必须有专属文案与圆点色，旧版与 AI 精筛
+  it("通知面板焦点从首条通知开始，Shift+Tab 不会逃回胶囊", async () => {
+    const wrapper = mountIsland(
+      makeStatus({ state: "idle", platform: "boss" }),
+      [
+        makeNotice({ id: "n-error", kind: "error", title: "任务出错", target: "attention" }),
+        makeNotice({ id: "n-paused", kind: "paused", title: "任务已暂停", target: "attention" }),
+      ],
+      true,
+    );
+    try {
+      await wrapper.get('[data-testid="dynamic-island-idle"]').trigger("click");
+      await nextTick();
+
+      const first = wrapper.get('[data-testid="island-notice-row-error"]').element;
+      const last = wrapper.get('[data-testid="island-notice-row-paused"]').element;
+      expect(document.activeElement).toBe(first);
+
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true }));
+      await nextTick();
+      expect(document.activeElement).toBe(last);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("037 修订：completed 数字变化保留旧摘要退场，新摘要继续入场", async () => {
+    (globalThis as any).__setReducedMotionMatchMedia(false);
+    vi.useFakeTimers();
+    try {
+      const wrapper = mountIsland(makeStatus({
+        state: "completed", platform: "boss",
+        results: { matched: 5, pending: 2 },
+      }));
+      await nextTick();
+
+      await updateStatus(wrapper, makeStatus({
+        state: "completed", platform: "boss",
+        results: { matched: 6, pending: 3 },
+      }));
+      await nextTick();
+
+      const old = wrapper.get('[data-testid="island-completed-value-out"]');
+      expect(old.text()).toContain("匹配 5");
+      expect(wrapper.get('[data-testid="dynamic-island-completed"]').text()).toContain("匹配 6");
+      expect(wrapper.get('[data-testid="dynamic-island-completed"]').text()).toContain("待确认 3");
+
+      await vi.advanceTimersByTimeAsync(400);
+      await nextTick();
+      expect(wrapper.find('[data-testid="island-completed-value-out"]').exists()).toBe(false);
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+      (globalThis as any).__setReducedMotionMatchMedia(true);
+    }
+  });
+
+  it("037 修订：completed 离开后重新进入不携带旧退场摘要", async () => {
+    (globalThis as any).__setReducedMotionMatchMedia(false);
+    vi.useFakeTimers();
+    try {
+      const wrapper = mountIsland(makeStatus({
+        state: "completed", platform: "boss",
+        results: { matched: 5, pending: 0 },
+      }));
+      await nextTick();
+
+      await updateStatus(wrapper, makeStatus({
+        state: "running", platform: "boss",
+        progress: { phase: "scraping", done: 1, total: 10 },
+      }));
+      await nextTick();
+      await updateStatus(wrapper, makeStatus({
+        state: "completed", platform: "boss",
+        results: { matched: 6, pending: 0 },
+      }));
+      await nextTick();
+
+      expect(wrapper.find('[data-testid="island-completed-value-out"]').exists()).toBe(false);
+      expect(wrapper.get('[data-testid="dynamic-island-completed"]').text()).toContain("匹配 6");
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+      (globalThis as any).__setReducedMotionMatchMedia(true);
+    }
+  });
+
+  // 037 复审：JD 抓取（phase=jd）必须有专属文案与圆点色，旧版与 AI 精筛
   // 共用 "AI精筛" 文案（用户实测：抓 JD 时显示成 AI 精筛）。
-  it("038 复审：JD 抓取阶段显示「抓取 JD」文案 + phase-jd 圆点", async () => {
+  it("037 复审：JD 抓取阶段显示「抓取 JD」文案 + phase-jd 圆点", async () => {
     const wrapper = mountIsland(makeStatus({
       state: "running", platform: "boss",
       progress: { phase: "jd", done: 7, total: 20 },
@@ -694,7 +784,7 @@ describe("DynamicIsland 038 组件级 carousel + 宽度 spring + 数字弹动", 
       const wrapper = mountIsland(makeStatus({ state: "idle", platform: "boss" }));
       const pill = wrapper.get('[data-testid="dynamic-island-idle"]');
       await nextTick();
-      // onMounted remeasureWidth 已跑：pillWidth = max(0+32, 56) = 56
+      // jsdom 没有布局：pillWidth 会落到 PILL_MIN_W 的兜底值。
       const initial = pill.attributes("data-pill-width");
       expect(initial).toBeTruthy();
       expect(Number(initial)).toBeGreaterThanOrEqual(56);
@@ -717,6 +807,123 @@ describe("DynamicIsland 038 组件级 carousel + 宽度 spring + 数字弹动", 
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("037 修订：胶囊宽度包含边框，BOSS 文案不被右侧裁剪", async () => {
+    const offsetWidth = vi
+      .spyOn(HTMLElement.prototype, "offsetWidth", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains("island-lane-main") ? 32 : 0;
+      });
+    try {
+      const wrapper = mountIsland(makeStatus({ state: "idle", platform: "boss" }));
+      await nextTick();
+
+      // 内容 32px + 左右内边距 36px + 左右边框 2px，不能再少 1px。
+      expect(Number(wrapper.get(".island-pill").attributes("data-pill-width"))).toBeGreaterThanOrEqual(70);
+      wrapper.unmount();
+    } finally {
+      offsetWidth.mockRestore();
+    }
+  });
+
+  it("037 修订：字体就绪后重新测量胶囊宽度", async () => {
+    let laneWidth = 30;
+    const offsetWidth = vi
+      .spyOn(HTMLElement.prototype, "offsetWidth", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains("island-lane-main") ? laneWidth : 0;
+      });
+    let resolveFonts!: () => void;
+    const fontsReady = new Promise<void>((resolve) => { resolveFonts = resolve; });
+    const originalFonts = Object.getOwnPropertyDescriptor(document, "fonts");
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: { ready: fontsReady },
+    });
+    try {
+      const wrapper = mountIsland(makeStatus({ state: "idle", platform: "boss" }));
+      await nextTick();
+      expect(Number(wrapper.get(".island-pill").attributes("data-pill-width"))).toBe(68);
+
+      laneWidth = 32;
+      resolveFonts();
+      await fontsReady;
+      await nextTick();
+      await nextTick();
+
+      expect(Number(wrapper.get(".island-pill").attributes("data-pill-width"))).toBeGreaterThanOrEqual(70);
+      wrapper.unmount();
+    } finally {
+      offsetWidth.mockRestore();
+      if (originalFonts) {
+        Object.defineProperty(document, "fonts", originalFonts);
+      } else {
+        delete (document as unknown as { fonts?: unknown }).fonts;
+      }
+    }
+  });
+
+  it("FR-007：窗口 resize 后重新测量胶囊宽度", async () => {
+    let laneWidth = 30;
+    const offsetWidth = vi
+      .spyOn(HTMLElement.prototype, "offsetWidth", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains("island-lane-main") ? laneWidth : 0;
+      });
+    try {
+      const wrapper = mountIsland(makeStatus({ state: "idle", platform: "boss" }));
+      await nextTick();
+      const pill = wrapper.get(".island-pill");
+      expect(Number(pill.attributes("data-pill-width"))).toBe(68);
+
+      laneWidth = 48;
+      window.dispatchEvent(new Event("resize"));
+      await nextTick();
+
+      expect(Number(pill.attributes("data-pill-width"))).toBeGreaterThanOrEqual(86);
+      wrapper.unmount();
+    } finally {
+      offsetWidth.mockRestore();
+    }
+  });
+
+  it("037 修订：胶囊边界采用自然小数宽度，左右内容不被裁剪", async () => {
+    const naturalWidth = 32.75;
+    const offsetWidth = vi
+      .spyOn(HTMLElement.prototype, "offsetWidth", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains("island-lane-main") ? Math.floor(naturalWidth) : 0;
+      });
+    const originalGetComputedStyle = window.getComputedStyle.bind(window);
+    const computedStyle = vi
+      .spyOn(window, "getComputedStyle")
+      .mockImplementation((element, pseudoElement) => {
+        const style = originalGetComputedStyle(element, pseudoElement);
+        if (element instanceof HTMLElement && element.classList.contains("island-lane-main")) {
+          Object.defineProperty(style, "width", { configurable: true, value: `${naturalWidth}px` });
+        }
+        return style;
+      });
+    try {
+      const wrapper = mountIsland(makeStatus({ state: "idle", platform: "boss" }));
+      await nextTick();
+
+      // 32.75px 内容 + 36px 内边距 + 2px 边框，左右边界都必须完整保留。
+      expect(Number(wrapper.get(".island-pill").attributes("data-pill-width"))).toBeGreaterThanOrEqual(70.75);
+      wrapper.unmount();
+    } finally {
+      computedStyle.mockRestore();
+      offsetWidth.mockRestore();
+    }
+  });
+
+  it("037 修订：入场缩放只沿垂直轴，左右边界不被动画撑出", () => {
+    const source = readFileSync(resolve(process.cwd(), "src/components/DynamicIsland.vue"), "utf8");
+
+    expect(source).toContain("scaleY: 0.92");
+    expect(source).toContain("scaleY: 1.08");
+    expect(source).not.toMatch(/scale:\s*(?:0\.92|1\.08)/);
   });
 
   it("P2-1 回归：completed + read:true 通知，点 pill 直达 results（不展开 panel）", async () => {

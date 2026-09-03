@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
-// 038 灵动岛 v3 通知池：037 骨架 + 三项增强。
+// 037 灵动岛 v3 通知池：旧版通知骨架 + 三项增强。
 //
-// 038 变更：
-// - running 态不再 clearAll（037 L93 主动丢弃 running 数据 → 038 改为保留，
+// 037 变更：
+// - running 态不再 clearAll（旧版曾主动丢弃 running 数据 → 当前版改为保留，
 //   running 期间的 live state 由 useIslandCarousel 直接读 roundStatus 派生，
 //   useIslandNotices 只负责终态历史 + interrupt 沉入）；idle 仍 clearAll。
 // - IslandNoticeKind 增加 "interrupt"（carousel 转完一条打断后沉入此处）。
@@ -16,7 +16,7 @@
 //   被"自己刚发的未读通知"拦住，直达结果页（等价被删 toast 的一键直达）。
 //   error/paused/interrupt 保持未读（用户没看过的告警仍要角标提示）。
 //
-// 037 不变：
+// 既有行为：
 // - 终态事件（completed/error/paused 跃迁）仍 upsert 进 notices（panel 历史）。
 // - 同 kind 替换（仅终态通知）；scope="history" 不派生；初始 prev=null
 //   不弹幽灵；已读会话级。
@@ -31,11 +31,11 @@ export interface IslandNotice {
   kind: IslandNoticeKind;
   title: string;
   detail?: string;
-  /** 038：interrupt 行 tone 染色（warning 琥珀 / error 红）；终态 kind 不填。
+  /** 037：interrupt 行 tone 染色（warning 琥珀 / error 红）；终态 kind 不填。
    *  sinkInterrupt 把 IslandInterruptContent.tone 透传过来，面板按此渲染行边框/背景。 */
   tone?: "warning" | "error";
-  /** 038：打断行点击直达目标（"reminders"=提醒抽屉 / "task"=任务页）；
-   *  终态通知沿用 037 的 task/results/attention。 */
+  /** 037：打断行点击直达目标（"reminders"=提醒抽屉 / "task"=任务页）；
+   *  终态通知沿用既有的 task/results/attention。 */
   target: IslandNoticeTarget;
   at: number;
   read: boolean;
@@ -51,7 +51,7 @@ export interface IslandNoticesApi {
   markAllRead(): void;
   markRead(id: string): void;
   markReadBatch(ids: readonly string[]): void;
-  /** 038：打断沉入——carousel 转完一条后把该打断加入 notices（未读，进 panel）。 */
+  /** 037：打断沉入——carousel 转完一条后把该打断加入 notices（未读，进 panel）。 */
   sinkInterrupt(notice: Omit<IslandNotice, "at" | "read">): void;
   reset(): void;
 }
@@ -112,7 +112,7 @@ export function createIslandNotices(
     if (scope === "history") {
       return;
     }
-    // 038：running 态不再 clearAll（live state 由 useIslandCarousel 直接读
+    // 037：running 态不再 clearAll（live state 由 useIslandCarousel 直接读
     // roundStatus 派生，useIslandNotices 只管终态历史 + interrupt 沉入）。
     // idle 态仍清空（无主流程，旧轮终态通知归零）。
     if (next.state === "idle") {
@@ -198,7 +198,7 @@ export function createIslandNotices(
     markReadBatch(notices.value.map((n) => n.id));
   }
 
-  /** 038：打断沉入——carousel 转完一条后调此方法，把打断加入 panel 未读。
+  /** 037：打断沉入——carousel 转完一条后调此方法，把打断加入 panel 未读。
    *  append 而非 upsert：打断是逐条事件流（id 唯一，interrupt-N 递增），
    *  不适用终态通知"同 kind 只保留最新一条"的去重语义（复审 P1-1：
    *  多条打断连沉时 upsert 会互相吞掉，panel 只剩 1 条）。 */
@@ -209,6 +209,9 @@ export function createIslandNotices(
   function reset(): void {
     prev = null;
     clearAll();
+    // profile 切换由 App 调用 reset；先清掉旧胶囊源状态，避免新 profile
+    // 的 roundStatus 到达前继续展示旧 profile 的运行进度/结果/错误。
+    if (roundStatus.value !== null) roundStatus.value = null;
   }
 
   return { notices, unreadCount, markAllRead, markRead, markReadBatch, sinkInterrupt, reset };

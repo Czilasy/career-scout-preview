@@ -178,7 +178,7 @@ describe("App", () => {
     } as never);
   }
 
-  // 038 P1-2：completed 通知 read:true（"完成"信号由 pill 彩色芯片展示，
+  // 037 P1-2：completed 通知 read:true（"完成"信号由 pill 彩色芯片展示，
   // panel 行只是历史）；测试需要"未读 → 点击展开 panel"流程时改用 attention
   // 过渡（paused/error 仍 read:false，是仅剩的 panel 未读来源）。
   function emitAttentionTransition(
@@ -200,7 +200,7 @@ describe("App", () => {
     await flushPromises();
     const view = wrapper.findComponent(DiscoveryView);
 
-    // 038 P1-2：completed 通知 read:true，改用 attention（paused）触发未读。
+    // 037 P1-2：completed 通知 read:true，改用 attention（paused）触发未读。
     emitAttentionTransition(view);
     await flushPromises();
 
@@ -241,7 +241,7 @@ describe("App", () => {
     await flushPromises();
     const view = wrapper.findComponent(DiscoveryView);
 
-    // 038 P1-2：completed 通知 read:true，改用 attention 触发未读。
+    // 037 P1-2：completed 通知 read:true，改用 attention 触发未读。
     emitAttentionTransition(view, "首次暂停");
     await flushPromises();
     await wrapper.get('[data-testid="dynamic-island-attention"]').trigger("click");
@@ -280,7 +280,7 @@ describe("App", () => {
     await flushPromises();
     const view = wrapper.findComponent(DiscoveryView);
 
-    // 038 P1-2：completed 通知 read:true，改用 attention 触发未读。
+    // 037 P1-2：completed 通知 read:true，改用 attention 触发未读。
     emitAttentionTransition(view);
     await flushPromises();
     expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
@@ -294,6 +294,26 @@ describe("App", () => {
     await flushPromises();
     expect(wrapper.find('[data-testid="island-notice-panel"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="island-unread"]').exists()).toBe(false);
+  });
+
+  it("037 修订：切换 profile 立即清除旧胶囊状态", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const view = wrapper.findComponent(DiscoveryView);
+
+    view.vm.$emit("round-status", {
+      platform: "boss", phase: "judged", judged: 5, scope: "all",
+      capsule: { state: "completed", platform: "boss", results: { matched: 5, pending: 0 } },
+    } as never);
+    await flushPromises();
+    expect(wrapper.find('[data-testid="dynamic-island-completed"]').exists()).toBe(true);
+
+    view.vm.$emit("profile-created", { id: "profile-2", name: "画像B" });
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.find('[data-testid="dynamic-island-completed"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="dynamic-island-idle"]').exists()).toBe(true);
+    wrapper.unmount();
   });
 
   it("037 regression: completed capsule never feeds the reminder badge (single source)", async () => {
@@ -321,7 +341,7 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="reminder-trigger"]').attributes("aria-label")).toBe("查看提醒");
     // 胶囊本身照常显示本轮结果。
     expect(wrapper.get('[data-testid="dynamic-island-completed"]').text()).toContain("匹配 5");
-    // 038 P1-2：completed 通知 read:true（"完成"信号由 pill 彩色芯片实时展示，
+    // 037 P1-2：completed 通知 read:true（"完成"信号由 pill 彩色芯片实时展示，
     // panel 行只是历史不计未读），pill 不显示未读角标——投递/待确认数字不会
     // 反向漏进 island-unread。
     expect(wrapper.find('[data-testid="island-unread"]').exists()).toBe(false);
@@ -654,7 +674,7 @@ describe("App", () => {
     await flushPromises();
     // 取消成功后卡片移除，抽屉保持打开；提示是成功态，不弹错误。
     expect(wrapper.find(".fav-card-remove").exists()).toBe(false);
-    // 038 复审：取消收藏成功提示进灵动岛打断队列，不再走 notice-bar 浮窗。
+    // 037 复审：取消收藏成功提示进灵动岛打断队列，不再走 notice-bar 浮窗。
     expect(wrapper.find(".notice-bar").exists()).toBe(false);
     expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
   });
@@ -937,9 +957,9 @@ describe("App", () => {
     expect(wrapper.get(".fav-card-main").attributes("href")).toBe("#");
   });
 
-  // ---------- 038：灵动岛 v3 接线（NoticeBar 分流 / 提醒打断 / carousel reset）----------
+  // ---------- 037：灵动岛 v3 接线（NoticeBar 全量接入 / 提醒打断 / carousel reset）----------
 
-  it("038: warning notice 折进 island 打断队列，NoticeBar 不渲染", async () => {
+  it("037: warning notice 折进 island 打断队列，NoticeBar 不渲染", async () => {
     const wrapper = mount(App);
     await flushPromises();
     const view = wrapper.findComponent(DiscoveryView);
@@ -954,7 +974,7 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
   });
 
-  it("038: error notice 折进 island 打断队列", async () => {
+  it("037: error notice 折进 island 打断队列", async () => {
     const wrapper = mount(App);
     await flushPromises();
     const view = wrapper.findComponent(DiscoveryView);
@@ -966,7 +986,7 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
   });
 
-  it("038 复审：info/success notice 也融入 island 打断队列（不再保留 NoticeBar 浮窗）", async () => {
+  it("037 复审：info/success notice 也融入 island 打断队列（不再保留 NoticeBar 浮窗）", async () => {
     const wrapper = mount(App);
     await flushPromises();
     const view = wrapper.findComponent(DiscoveryView);
@@ -974,13 +994,13 @@ describe("App", () => {
     view.vm.$emit("notify", { message: "已保存", tone: "success" });
     await flushPromises();
 
-    // 038 复审：info/success 不再走 NoticeBar 浮窗，统一进灵动岛打断队列
+    // 037 复审：info/success 不再走 NoticeBar 浮窗，统一进灵动岛打断队列
     // （用户要求「信息性浮窗全部进灵动岛，不要弹出小条幅」）。
     expect(wrapper.find(".notice-bar").exists()).toBe(false);
     expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
   });
 
-  it("038: 投递提醒 0→N 推一条打断进 carousel", async () => {
+  it("037: 投递提醒 0→N 推一条打断进 carousel", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/job-reminders/count")) {
@@ -999,7 +1019,7 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
   });
 
-  it("038: 投递提醒 N→M（都 >0）不重复推打断", async () => {
+  it("037: 投递提醒 N→M（都 >0）不重复推打断", async () => {
     let countTotal = 3;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -1025,7 +1045,7 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
   });
 
-  it("038: profile 切换清空 carousel 打断队列", async () => {
+  it("037: profile 切换清空 carousel 打断队列", async () => {
     const wrapper = mount(App);
     await flushPromises();
     const view = wrapper.findComponent(DiscoveryView);
@@ -1041,7 +1061,7 @@ describe("App", () => {
     expect(wrapper.find('[data-testid="island-unread"]').exists()).toBe(false);
   });
 
-  it("038: TaskCompletedToast 删除——completed 态不弹独立 toast，由 pill 接管", async () => {
+  it("037: TaskCompletedToast 删除——completed 态不弹独立 toast，由 pill 接管", async () => {
     const wrapper = mount(App);
     await flushPromises();
     const view = wrapper.findComponent(DiscoveryView);
@@ -1055,9 +1075,9 @@ describe("App", () => {
     expect(wrapper.find('[data-testid="dynamic-island-completed"]').exists()).toBe(true);
   });
 
-  // ---------- 038 复审 P2-1 / P2-5 / P2-8 ----------
+  // ---------- 037 复审 P2-1 / P2-5 / P2-8 ----------
 
-  it("038 P2-1: completed 通知 read:true，点 pill 直达结果页（不展开 panel）", async () => {
+  it("037 P2-1: completed 通知 read:true，点 pill 直达结果页（不展开 panel）", async () => {
     const wrapper = mount(App);
     await flushPromises();
     const view = wrapper.findComponent(DiscoveryView);
@@ -1075,7 +1095,7 @@ describe("App", () => {
     expect(wrapper.find('[data-testid="dynamic-island-completed"]').exists()).toBe(true);
   });
 
-  it("038 P2-5: history 浏览期间 notify 暂停消费，回最新时 flush", async () => {
+  it("037 P2-5: history 浏览期间 notify 暂停消费，回最新时 flush", async () => {
     vi.useFakeTimers();
     try {
       const wrapper = mount(App);
@@ -1111,7 +1131,7 @@ describe("App", () => {
     }
   });
 
-  it("038 P2-8: 投递提醒打断沉入 panel 后行点击直达 reminders（开提醒抽屉）", async () => {
+  it("037 P2-8: 投递提醒打断沉入 panel 后行点击直达 reminders（开提醒抽屉）", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

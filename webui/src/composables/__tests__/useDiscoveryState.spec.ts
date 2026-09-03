@@ -146,9 +146,9 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
     }
   });
 
-  // 038 复审：screen 任务内部分阶段——旧版一律落 screening，抓 JD 与
+  // 037 复审：screen 任务内部分阶段——旧版一律落 screening，抓 JD 与
   // 真·AI 精筛显示同一文案（用户实测「抓 JD 时显示成 AI 精筛」）。
-  it("038 复审：抓 JD（stage=fetch_jd）→ phase 为 jd，不再误报 AI 精筛", () => {
+  it("037 复审：抓 JD（stage=fetch_jd）→ phase 为 jd，不再误报 AI 精筛", () => {
     const state = useDiscoveryState({ profileId: "test" }, () => {});
     state.screenBusy.value = true;
     state.screenSnapshot.value = {
@@ -163,7 +163,26 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
     }
   });
 
-  it("038 复审：AI 精筛（stage=screen_b）→ phase 仍为 screening", () => {
+  it("037 修订：补抓 JD（recrawl_fetch_jd）优先使用补抓快照并显示 jd", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.scrapeSnapshot.value = {
+      status: "completed", progress: { current: 99, total: 99 }, logs: [],
+    };
+    state.recrawlBusy.value = true;
+    state.recrawlSnapshot.value = {
+      status: "running", progress: { stage: "recrawl_fetch_jd", current: 7, total: 20 }, logs: [],
+    };
+
+    const capsule = state.roundStatusPayload.value?.capsule;
+    expect(capsule?.state).toBe("running");
+    if (capsule?.state === "running") {
+      expect(capsule.progress.phase).toBe("jd");
+      expect(capsule.progress.done).toBe(7);
+      expect(capsule.progress.total).toBe(20);
+    }
+  });
+
+  it("037 复审：AI 精筛（stage=screen_b）→ phase 仍为 screening", () => {
     const state = useDiscoveryState({ profileId: "test" }, () => {});
     state.screenBusy.value = true;
     state.screenSnapshot.value = {

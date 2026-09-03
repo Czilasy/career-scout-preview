@@ -1,4 +1,4 @@
-// 038 useIslandCarousel 测试：转盘轮播状态机
+// 037 useIslandCarousel 测试：转盘轮播状态机
 // - mainLaneState 实时跟随 roundStatus（不冻结，硬不变式 FR-011）
 // - pushInterrupt 转 activeLaneIndex 0→1，duration 后回 0 + sink
 // - 多条积压：只转最新一条（展示位切到最新 push 的，US-3 复审 P2-2 修正）

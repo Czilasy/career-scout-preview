@@ -529,7 +529,7 @@ watch(roundStatusPayload, (payload) => {
   emit("round-status", payload);
 });
 
-// 038 复审补齐：restoredTaskHint（刷新接回任务的恢复提示）原为独立 restore-banner
+// 037 复审补齐：restoredTaskHint（刷新接回任务的恢复提示）原为独立 restore-banner
 // 浮窗，用户要求"信息性提示全部融入灵动岛、不再有独立浮窗"。改走 emit notify →
 // App.vue showNotice 已把所有 tone（info/success/warning/error）折进 island 打断
 // 队列。tone 按文案推断：失败→error、被中断/暂停中→warning、其余 info。
@@ -563,7 +563,7 @@ onMounted(() => {
     :class="{ 'results-view': activeStep === 'results' }"
     data-testid="discovery-view"
   >
-    <!-- 038 复审：restoredTaskHint 恢复提示已融入灵动岛（见 script watch），不再渲染独立 restore-banner 浮窗 -->
+    <!-- 037 复审：restoredTaskHint 恢复提示已融入灵动岛（见 script watch），不再渲染独立 restore-banner 浮窗 -->
     <div
       class="platform-segment"
       role="tablist"

@@ -34,7 +34,7 @@ export interface PipelineGroups {
 
 export type ResultPlatformFilter = "all" | "boss" | "zhilian";
 
-// 038 复审：新增 "jd"（JD 详情抓取）。旧枚举只有 scraping/screening，
+// 037 复审：新增 "jd"（JD 详情抓取）。旧枚举只有 scraping/screening，
 // 后端 stage=fetch_jd（抓 JD）与 screen_b（AI 精筛）都落进 screening，
 // 灵动岛无法区分（用户实测：抓 JD 时显示"AI精筛"）。
 export type RoundStatusPhase = "scraping" | "jd" | "screening" | "judged" | "scraped";

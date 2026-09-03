@@ -1,8 +1,8 @@
 <script setup lang="ts">
 // ---------------------------------------------------------------------------
-// 038 灵动岛 v3：live 仪表盘 + 转盘轮播 + 彩色芯片 + 红光 live state。
+// 037 灵动岛 v3：live 仪表盘 + 转盘轮播 + 两色芯片 + 红光 live state。
 //
-// 038 核心变更（在 037 骨架上叠加，不回退 037 行为）：
+// 037 核心变更（在旧版骨架上叠加，不回退既有行为）：
 // - pill 内部改为 vertical spring carousel（lane 0=主流程 live state pinned，
 //   lane 1+=打断队列 FIFO）；translateY 用 motion-v spring 有 overshoot 才"弹"。
 // - running 态显示 live 进度（正在抓取/AI精筛 N/M），数字跳动有弹性：
@@ -27,6 +27,7 @@ import type {
   IslandInterruptContent,
   IslandLiveState,
 } from "../composables/useIslandCarousel";
+import { useIslandValueTransition } from "../composables/useIslandValueTransition";
 import IslandNoticePanel from "./IslandNoticePanel.vue";
 
 export type CapsuleTarget = "home" | "task" | "results" | "attention" | "reminders";
@@ -80,7 +81,7 @@ const platformLabel = computed(() =>
 const isScrapedPhase = computed(() => props.status?.phase === "scraped");
 
 const runningLabel = computed(() => {
-  // 038 复审：三种阶段文案——列表抓取 / JD 抓取 / AI 精筛（旧版只有前两种，
+  // 037 复审：三种阶段文案——列表抓取 / JD 抓取 / AI 精筛（旧版只有前两种，
   // 抓 JD 阶段被显示成"AI精筛"，与真·AI 精筛撞车）。
   if (!["scraping", "jd", "screening"].includes(livePhase.value)) return "";
   const prefix =
@@ -91,6 +92,14 @@ const runningLabel = computed(() => {
   return liveTotal.value === undefined
     ? `${prefix} ${done}`
     : `${prefix} ${done}/${liveTotal.value}`;
+});
+
+const completedSummary = computed(() => {
+  if (livePhase.value !== "completed") return "";
+  if (isScrapedPhase.value) return `待筛选 ${liveCounts.value?.matched ?? 0}`;
+  const matched = liveCounts.value?.matched ?? 0;
+  const pending = liveCounts.value?.pending ?? 0;
+  return pending > 0 ? `匹配 ${matched} · 待确认 ${pending}` : `匹配 ${matched}`;
 });
 
 const attentionMessage = computed(() =>
@@ -106,7 +115,7 @@ const stateTarget = computed<CapsuleTarget>(() => {
   }
 });
 
-// 038：总未读 = panel 未读（终态通知 + 已沉入的打断） + carousel 队列（未沉入的打断）
+// 037：总未读 = panel 未读（终态通知 + 已沉入的打断） + carousel 队列（未沉入的打断）
 const unread = computed(() =>
   props.notices.filter((n) => !n.read).length + badgeCount.value,
 );
@@ -120,18 +129,28 @@ const hoverSpring = computed(() =>
   reduced.value ? { duration: 0 } : { type: "spring" as const, stiffness: 460, damping: 18 },
 );
 const valueSpring = computed(() =>
-  // 038 复审：stiffness 380 → 520（收敛更快）——数字跳动动画窗口越长，
+  // 037 复审：stiffness 380 → 520（收敛更快）——数字跳动动画窗口越长，
   // 文字停留在亚像素位移+半透明状态越久越"糊"（用户反馈）。
   reduced.value ? { duration: 0 } : { type: "spring" as const, stiffness: 520, damping: 32 },
 );
 
-// ---- 038 FR-007：pill 宽度 spring 弹性伸缩（"弹弹的"） ----
-// 测量展示位 lane 的自然宽（inline-flex nowrap，offsetWidth 即内容宽），
-// Motion 以 spring 过渡到 目标宽 = lane 宽 + 左右 padding + 角标占位。
+const runningValueTransition = useIslandValueTransition(runningLabel, {
+  enabled: () => animOn.value,
+});
+const completedValueTransition = useIslandValueTransition(completedSummary, {
+  enabled: () => animOn.value,
+});
+const runningExitValues = runningValueTransition.exiting;
+const completedExitValues = completedValueTransition.exiting;
+
+// ---- 037 FR-007：pill 宽度 spring 弹性伸缩（"弹弹的"） ----
+// 测量展示位 lane 的自然宽（inline-flex nowrap，优先保留 CSS 计算出的亚像素宽度），
+// Motion 以 spring 过渡到目标宽 = lane 宽 + 左右 padding + 左右边框 + 角标占位。
 // 上限 100vw - 32px（窄屏边角）；reduce-motion 瞬时（widthSpring duration 0）。
 const PILL_PAD_X = 36; // 左右 padding 18*2（与 .island-pill padding 同口径）
+const PILL_BORDER_W = 2; // 左右边框 1*2（.island-pill 使用 border-box）
 const BADGE_W = 30; // 未读角标占位（含 margin）
-/* 038 复审：56 → 60——短文案（如 idle 的"BOSS"）时 pill 不过窄，
+/* 037 复审：56 → 60——短文案（如 idle 的"BOSS"）时 pill 不过窄，
    内容左右留出可见的呼吸空间，不再"截断一丢丢"。
    约束：必须小于 PILL_PAD_X + BADGE_W（36+30=66）。否则 jsdom 下
    （无布局、offsetWidth 恒为 0）目标宽全部被最小值夹住，"角标出现后
@@ -153,7 +172,9 @@ function remeasureWidth() {
   const el = track.children[activeLaneIndex.value] as HTMLElement | undefined;
   if (!el) return;
   const extra = unread.value > 0 ? BADGE_W : 0;
-  const target = el.offsetWidth + PILL_PAD_X + extra;
+  const cssWidth = Number.parseFloat(window.getComputedStyle(el).width);
+  const naturalWidth = Number.isFinite(cssWidth) && cssWidth > 0 ? cssWidth : el.offsetWidth;
+  const target = naturalWidth + PILL_PAD_X + PILL_BORDER_W + extra;
   pillWidth.value = Math.min(Math.max(target, PILL_MIN_W), window.innerWidth - 32);
 }
 
@@ -165,7 +186,7 @@ const contentKey = computed(() => {
     return `int:${c.title}:${c.detail ?? ""}`;
   }
   switch (livePhase.value) {
-    // 038 复审：加上 "jd"——漏掉它会落进 default（idle 口径），JD 抓取阶段
+    // 037 复审：加上 "jd"——漏掉它会落进 default（idle 口径），JD 抓取阶段
     // 文案变化触发不了宽度重测，pill 不跟着撑宽，文字被裁。
     case "scraping":
     case "jd":
@@ -187,6 +208,11 @@ watch([contentKey, unread], async () => {
 
 onMounted(() => {
   remeasureWidth();
+  window.addEventListener("resize", remeasureWidth);
+  // 首帧可能仍使用回退字体；字体就绪后正文宽度会变化，必须重新测量，
+  // 否则短文案也可能因 pill 的 overflow:hidden 被右侧裁掉。
+  const fontsReady = document.fonts?.ready;
+  if (fontsReady) void fontsReady.then(() => remeasureWidth());
 });
 
 function playPop() {
@@ -234,7 +260,7 @@ watch(
   { immediate: true },
 );
 
-// ---- 038 打断反馈：watch badgeCount 增长 → playPop + announce ----
+// ---- 037 打断反馈：watch badgeCount 增长 → playPop + announce ----
 let badgeBoot = true;
 let seenBadge = 0;
 
@@ -258,23 +284,6 @@ watch(badgeCount, (count) => {
   }
 });
 
-// ---- 038 数字跳动（SC-001）：done 变化 → playPop 弹动 + 旧值上滑淡出 ----
-// 新值下滑淡入由 runningLabel Motion 的 :key 重建承担（y:8→0 淡入）；
-// 旧值经 labelStack 短暂保留渲染（absolute + 上滑淡出 keyframes），
-// 400ms 后出栈（jsdom 不跑 CSS animation，用 setTimeout 保证测试可推进）。
-const labelStack = ref<string[]>([]);
-let labelOutTimer: number | undefined;
-
-watch(runningLabel, (next, prev) => {
-  if (!prev || prev === next) return;
-  labelStack.value = [prev];
-  if (labelOutTimer !== undefined) window.clearTimeout(labelOutTimer);
-  labelOutTimer = window.setTimeout(() => {
-    labelStack.value = [];
-    labelOutTimer = undefined;
-  }, 400);
-});
-
 watch(liveDone, (_next, prev) => {
   if (prev === undefined || prev === _next) return;
   // 数字推进时"啵"一下（reduce-motion 由 playPop 内部 animOn 守卫短路）。
@@ -295,7 +304,9 @@ function openPanel() {
     anchorEl.value.style.setProperty("--panel-top", `${Math.max(top, 8)}px`);
   }
   void nextTick(() => {
-    anchorEl.value?.querySelector<HTMLElement>('[data-testid="island-notice-panel"]')?.focus({ preventScroll: true });
+    const panel = anchorEl.value?.querySelector<HTMLElement>('[data-testid="island-notice-panel"]');
+    const first = panel?.querySelector<HTMLElement>('button:not(:disabled), [tabindex]:not([tabindex="-1"])');
+    (first ?? panel)?.focus({ preventScroll: true });
   });
 }
 
@@ -357,17 +368,26 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key === "Tab" && open.value && !leaving.value) {
     const anchor = anchorEl.value;
     if (!anchor) return;
+    const panel = anchor.querySelector<HTMLElement>('[data-testid="island-notice-panel"]');
+    if (!panel) return;
     const focusables = Array.from(
-      anchor.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex]:not([tabindex="-1"])'),
+      panel.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex]:not([tabindex="-1"])'),
     );
-    if (focusables.length === 0) return;
+    if (focusables.length === 0) {
+      event.preventDefault();
+      panel.focus();
+      return;
+    }
     const first = focusables[0];
     const last = focusables[focusables.length - 1];
     const active = document.activeElement;
-    if (event.shiftKey && (active === first || active === pillRef.value)) {
+    if (!panel.contains(active)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && (active === first || active === panel)) {
       event.preventDefault();
       last.focus();
-    } else if (!event.shiftKey && active === last) {
+    } else if (!event.shiftKey && (active === last || active === panel)) {
       event.preventDefault();
       first.focus();
     }
@@ -385,8 +405,8 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
+  window.removeEventListener("resize", remeasureWidth);
   if (leaveTimer !== undefined) window.clearTimeout(leaveTimer);
-  if (labelOutTimer !== undefined) window.clearTimeout(labelOutTimer);
   popAnim?.cancel();
 });
 // Motion 组件实例 → 真实 DOM（$el）；普通元素直接用。pill/track 的 ref 均经此适配。
@@ -420,7 +440,7 @@ function setTrackRef(el: unknown): void {
       :while-press="animOn ? { scale: 0.96 } : undefined"
       @click="onPillClick"
     >
-      <!-- 038 红光层（attention live state，subtle glow） -->
+      <!-- 037 红光层（attention live state，subtle glow） -->
       <span
         v-if="glow !== 'none'"
         class="island-glow"
@@ -428,8 +448,8 @@ function setTrackRef(el: unknown): void {
         aria-hidden="true"
       ></span>
 
-      <!-- 038 转盘轮播：viewport（clip 窗口）与 track（被 translate 的轨道）分离。
-           038 复审根因修复：旧版把 overflow:hidden 直接放在被 translate 的 track 上，
+      <!-- 037 转盘轮播：viewport（clip 窗口）与 track（被 translate 的轨道）分离。
+           037 复审根因修复：旧版把 overflow:hidden 直接放在被 translate 的 track 上，
            CSS overflow clip 区随 transform 一起移动，translateY 只把整块内容推出
            pill（被外层裁掉），永远只显示 lane0——打断 lane 从不进入可视区（用户实测
            打断弹开但内容空白）。现固定 viewport 高 34 + overflow hidden 不移动，
@@ -448,27 +468,28 @@ function setTrackRef(el: unknown): void {
           <Motion
             v-if="livePhase === 'idle'"
             :key="`idle-${capsule.platform}`"
-            :initial="animOn ? { y: 6, opacity: 0, scale: 0.92 } : false"
-            :animate="{ y: 0, opacity: 1, scale: 1 }"
+             :initial="animOn ? { y: 6, opacity: 0, scaleY: 0.92 } : false"
+             :animate="{ y: 0, opacity: 1, scaleY: 1 }"
             :transition="valueSpring"
             as="span"
             class="island-idle-label"
             data-testid="island-idle"
           >{{ platformLabel }}</Motion>
 
-          <!-- running：正在抓取 / 抓取 JD / AI精筛 + live dot；旧值上滑淡出（labelStack 栈） -->
+          <!-- running：正在抓取 / 抓取 JD / AI精筛 + live dot；旧值上滑淡出 -->
           <template v-else-if="['scraping', 'jd', 'screening'].includes(livePhase)">
             <span class="island-live" :class="`phase-${livePhase}`" aria-hidden="true"></span>
             <span
-              v-for="old in labelStack"
+              v-for="old in runningExitValues"
               :key="`out-${old}`"
               class="island-value is-value-out"
+              data-testid="island-running-value-out"
               aria-hidden="true"
             >{{ old }}</span>
             <Motion
               :key="runningLabel"
-              :initial="animOn ? { y: 5, opacity: 0 } : false"
-              :animate="{ y: 0, opacity: 1 }"
+               :initial="animOn ? { y: 5, opacity: 0, scaleY: 1.08 } : false"
+               :animate="{ y: 0, opacity: 1, scaleY: 1 }"
               :transition="valueSpring"
               as="span"
               class="island-value"
@@ -478,23 +499,39 @@ function setTrackRef(el: unknown): void {
 
           <!-- completed：彩色芯片（匹配绿 / 待确认琥珀）；scraped 显示"待筛选 N" -->
           <template v-else-if="livePhase === 'completed'">
-            <span v-if="isScrapedPhase" class="island-value" data-testid="island-completed-value">{{ `待筛选 ${liveCounts?.matched ?? 0}` }}</span>
-            <span v-else class="island-chips">
-              <span class="island-chip c-green" data-testid="island-completed-value">匹配 {{ liveCounts?.matched ?? 0 }}</span>
-              <span
-                v-if="(liveCounts?.pending ?? 0) > 0"
-                class="island-chip c-amber island-pending-dot"
-                data-testid="island-pending-chip"
-              >待确认 {{ liveCounts?.pending }}</span>
-            </span>
+            <span
+              v-for="old in completedExitValues"
+              :key="`completed-out-${old}`"
+              class="island-value is-value-out"
+              data-testid="island-completed-value-out"
+              aria-hidden="true"
+            >{{ old }}</span>
+            <Motion
+              :key="completedSummary"
+               :initial="animOn ? { y: 5, opacity: 0, scaleY: 1.08 } : false"
+               :animate="{ y: 0, opacity: 1, scaleY: 1 }"
+              :transition="valueSpring"
+              as="span"
+              class="island-completed-content"
+            >
+              <span v-if="isScrapedPhase" class="island-value" data-testid="island-completed-value">{{ `待筛选 ${liveCounts?.matched ?? 0}` }}</span>
+              <span v-else class="island-chips">
+                <span class="island-chip c-green" data-testid="island-completed-value">匹配 {{ liveCounts?.matched ?? 0 }}</span>
+                <span
+                  v-if="(liveCounts?.pending ?? 0) > 0"
+                  class="island-chip c-amber island-pending-dot"
+                  data-testid="island-pending-chip"
+                >待确认 {{ liveCounts?.pending }}</span>
+              </span>
+            </Motion>
           </template>
 
           <!-- attention：提醒色 + 文案 -->
           <template v-else-if="livePhase === 'attention'">
             <Motion
               :key="`att-${glow}-${attentionMessage}`"
-              :initial="animOn ? { y: 6, opacity: 0, scale: 0.92 } : false"
-              :animate="{ y: 0, opacity: 1, scale: 1 }"
+               :initial="animOn ? { y: 6, opacity: 0, scaleY: 0.92 } : false"
+               :animate="{ y: 0, opacity: 1, scaleY: 1 }"
               :transition="valueSpring"
               as="span"
               class="island-attention-row"
@@ -522,7 +559,7 @@ function setTrackRef(el: unknown): void {
       </Motion>
       </span>
 
-      <!-- 未读角标（037 badge + 038 carousel queue） -->
+      <!-- 未读角标（037 badge + 037 carousel queue） -->
       <span
         v-if="unread > 0"
         class="island-unread"
@@ -577,7 +614,7 @@ function setTrackRef(el: unknown): void {
   align-items: center;
   gap: 9px;
   height: 34px;
-  /* 038 复审：0 16 → 0 18——用户反馈内容"左右截断一丢丢"（贴边框）。
+  /* 037 复审：0 16 → 0 18——用户反馈内容"左右截断一丢丢"（贴边框）。
      注意 PILL_PAD_X 必须与此处左右 padding 之和同口径（18*2=36），
      否则 remeasureWidth 测出的目标宽会偏窄、内容仍显贴边。 */
   padding: 0 18px;
@@ -590,7 +627,7 @@ function setTrackRef(el: unknown): void {
   white-space: nowrap;
   cursor: pointer;
   overflow: hidden;
-  /* 038 窄屏边角：pill 宽度上限不超屏宽 -32px（宽度 spring 由 Motion 驱动，
+  /* 037 窄屏边角：pill 宽度上限不超屏宽 -32px（宽度 spring 由 Motion 驱动，
      目标宽 JS 侧同口径 clamp，此处兜底防溢出视口）。 */
   max-width: calc(100vw - 32px);
   transition:
@@ -622,7 +659,7 @@ function setTrackRef(el: unknown): void {
   border-color: var(--brand);
 }
 
-/* 038 红光层：attention 时 pill 背景隐隐闪光泛红 */
+/* 037 红光层：attention 时 pill 背景隐隐闪光泛红 */
 .island-glow {
   position: absolute;
   inset: 0;
@@ -644,8 +681,8 @@ function setTrackRef(el: unknown): void {
   50%      { opacity: 1; }
 }
 
-/* 038 转盘轮播：viewport 与 track 分离。
-   038 复审根因修复：viewport 固定单 lane 视口高 + overflow:hidden，clip 窗口
+/* 037 转盘轮播：viewport 与 track 分离。
+   037 复审根因修复：viewport 固定单 lane 视口高 + overflow:hidden，clip 窗口
    不随 transform 移动；内层 track 是纯 flex column 轨道（高=内容自然堆叠），
    以 translateY=-activeLaneIndex*LANE_HEIGHT 轮播，打断 lane 才能进入视口。
    旧版把 height:34 + overflow:hidden 直接放在被 translate 的 track 上：CSS
@@ -670,7 +707,7 @@ function setTrackRef(el: unknown): void {
   gap: 0;
   flex: none;
   transform-origin: center center;
-  /* 038 复审：去掉 will-change: transform——它把 track 常驻提升为合成层，
+  /* 037 复审：去掉 will-change: transform——它把 track 常驻提升为合成层，
      文字走纹理渲染配合 spring 的亚像素位移（实测 -20.36/-34.13）会明显发虚
      （用户反馈"灵动岛里的字是真的糊"）。小元素无需常驻提示。 */
 }
@@ -692,8 +729,8 @@ function setTrackRef(el: unknown): void {
   display: inline-block;
 }
 
-/* 038 SC-001 数字跳动：旧值上滑淡出（新值由 :key 重建的 Motion 下滑淡入）。
-   038 复审：0.32s → 0.18s、位移 -10px → -6px——抓取中数字频繁刷新，动画
+/* 037 SC-001 数字跳动：旧值上滑淡出（新值由 :key 重建的 Motion 下滑淡入）。
+   037 复审：0.32s → 0.18s、位移 -10px → -6px——抓取中数字频繁刷新，动画
    窗口越长文字停留在亚像素位移+半透明状态越久，看上去"糊"（用户反馈）。
    缩短并减幅后清晰，跳动感保留。 */
 .island-value.is-value-out {
@@ -713,11 +750,11 @@ function setTrackRef(el: unknown): void {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  /* 038 复审：color 从 var(--brand-ink) 改 var(--ink-1)——dark boss 下
+  /* 037 复审：color 从 var(--brand-ink) 改 var(--ink-1)——dark boss 下
      --brand-ink=#005e53 深青色与深色 pill 背景撞色看不见（用户反馈）。
      --ink-1 在 dark/light 都与 pill --panel 对比够。 */
   color: var(--ink-1);
-  /* 038 复审：去掉 idle label 自己的 wash 底色块（background/padding/
+  /* 037 复审：去掉 idle label 自己的 wash 底色块（background/padding/
      border-radius）——用户反馈"不要带方块"：pill 本身就是圆角胶囊框，
      内部再嵌一个青色小药丸显得零碎；改为纯文字，视觉更干净。 */
   display: inline-block;
@@ -728,7 +765,7 @@ function setTrackRef(el: unknown): void {
   height: 7px;
   border-radius: 50%;
   flex: 0 0 auto;
-  /* 038 复审：圆点只做不透明度呼吸，不再 scale（island-breathe 的
+  /* 037 复审：圆点只做不透明度呼吸，不再 scale（island-breathe 的
      scale 1→1.18 让用户觉得"弹弹嫩嫩"太跳）；未读角标保留原动画。 */
   animation: island-live-breathe 1.8s ease-in-out infinite;
 }
@@ -736,7 +773,7 @@ function setTrackRef(el: unknown): void {
   background: #3b82f6;
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
 }
-/* 038 复审：JD 抓取阶段专用色（青色，介于抓取蓝与精筛紫之间，三阶段可辨）。 */
+/* 037 复审：JD 抓取阶段专用色（青色，介于抓取蓝与精筛紫之间，三阶段可辨）。 */
 .island-live.phase-jd {
   background: #00d4bc;
   box-shadow: 0 0 0 3px rgba(0, 212, 188, 0.22);
@@ -746,7 +783,7 @@ function setTrackRef(el: unknown): void {
   box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
 }
 
-/* 038 completed 彩色芯片 */
+/* 037 completed 彩色芯片 */
 .island-chips {
   display: inline-flex;
   align-items: center;
@@ -795,7 +832,7 @@ function setTrackRef(el: unknown): void {
   background: var(--text-muted, #888);
 }
 
-/* 038 打断 lane */
+/* 037 打断 lane */
 .island-interrupt-mark {
   width: 7px;
   height: 7px;
@@ -816,7 +853,7 @@ function setTrackRef(el: unknown): void {
   font-weight: 700;
   color: var(--ink-1);
 }
-/* 038 复审：打断 title 按 tone 染色——warning 琥珀 / error 红，比 --ink-1
+/* 037 复审：打断 title 按 tone 染色——warning 琥珀 / error 红，比 --ink-1
    更醒目且不与 pill 背景撞色（用户反馈打断弹开后字看不见，--ink-1 在某些
    theme 下对比不足）。pill 内打断 lane 直接用 tone 色，沉入 panel 的
    notice-title 同步染色（见 IslandNoticePanel）。 */
@@ -871,7 +908,7 @@ function setTrackRef(el: unknown): void {
   0%, 100% { opacity: 1; transform: scale(1); }
   50%      { opacity: 0.6; transform: scale(1.18); }
 }
-/* 038 复审：idle 呼吸不再用 transform scale（scale 1→1.006 无限循环，让 pill
+/* 037 复审：idle 呼吸不再用 transform scale（scale 1→1.006 无限循环，让 pill
    内容一直处于非整数倍缩放 → 文字渲染发虚，实测 computed transform 恒为
    matrix(1.00224,...)）。改为只呼吸边框光晕：不动 transform，文字保持清晰，
    呼吸感仍保留（用户反馈"灵动岛里的字是真的糊"）。 */
@@ -879,7 +916,7 @@ function setTrackRef(el: unknown): void {
   0%, 100% { box-shadow: 0 0 0 0 rgba(0, 212, 188, 0); }
   50%      { box-shadow: 0 0 10px 0 rgba(0, 212, 188, 0.3); }
 }
-/* 038 复审：运行指示点只呼吸不透明度、不缩放（原 island-breathe 的
+/* 037 复审：运行指示点只呼吸不透明度、不缩放（原 island-breathe 的
    scale 1→1.18 即用户说的"弹弹嫩嫩"）；未读角标仍用 island-breathe。 */
 @keyframes island-live-breathe {
   0%, 100% { opacity: 1; }
@@ -902,7 +939,7 @@ function setTrackRef(el: unknown): void {
   color: #fff;
 }
 :global([data-theme="kaleido"]) .island-idle-label {
-  /* 038 复审：与主主题一致去掉 wash 底色块（"不要带方块"），只保留字色。 */
+  /* 037 复审：与主主题一致去掉 wash 底色块（"不要带方块"），只保留字色。 */
   color: rgba(255, 255, 255, 0.92);
 }
 :global([data-theme="kaleido"]) .island-chip.c-green {

@@ -1,6 +1,8 @@
-# Career Scout 发布卫生规则
+# Career Scout 项目规则
 
-本仓库公开。以下规则约束所有人与所有 AI 代理。`AGENTS.md` 是项目规则唯一权威；`CONTRIBUTING.md` 面向人类贡献者，`packaging/README.md` 面向打包发布操作，二者只保留各自特有内容并引用本文件。
+本仓库公开。以下规则约束所有人与所有 AI 代理。`AGENTS.md` 是本项目规则唯一权威；`CONTRIBUTING.md` 面向人类贡献者，`packaging/README.md` 面向打包发布操作，二者只保留各自特有内容并引用本文件。
+
+本文件继承 Codex 全局个人规则，只补充 Career Scout 的项目专属约束。项目规则可以细化全局规则，但不构成提交、推送、发布、删除文件或修改外部数据的授权；这些动作仍需遵守全局授权边界。
 
 ## 设计前必读
 
@@ -9,9 +11,17 @@
 
 ## 功能开发流程与架构边界
 
-- 用户述说完需求后，先完成 grill-me 边界质询并冻结需求；冻结后进入完整 Spec Kit 流程：`speckit-constitution → speckit-clarify（按需）→ speckit-specify → speckit-plan → speckit-tasks → speckit-implement → speckit-converge`。
+- 本项目的功能需求必须先完成 grill-me 边界质询并冻结需求；冻结后进入完整 Spec Kit 流程：`speckit-constitution → speckit-clarify（按需）→ speckit-specify → speckit-plan → speckit-tasks → speckit-implement → speckit-converge`。该项目硬性流程不替代全局授权边界。
 - 项目架构原则、文件边界与职责分层以 `.specify/memory/constitution.md` 为准；Plan/Tasks 必须写明允许修改、禁止修改、新增文件和引用方向。
-- 实测超限文件（宪法红线 Python ≤800 / Vue ≤1200 行）——未拆完前，普通功能不得继续向其中追加新逻辑；拆分必须单独建立 Spec：`webui/historical_recovery.py` 990 / `scripts/zhilian_cdp_raw.py` 900 / `webui/task_runners.py` 864 / `webui/src/views/DiscoveryView.vue` 1249（2026-08-30 实测，工程还债 Spec 031 处理中）。
+- 文件规模红线：Python 文件原则上不超过 800 行，Vue 文件原则上不超过 1200 行。超过红线的文件在未拆分前，普通功能不得继续向其中追加新逻辑；拆分必须单独建立 Spec。以下为最后一次记录的定位线索，不代表当前实时行数，修改前必须重新测量：`webui/historical_recovery.py`、`scripts/zhilian_cdp_raw.py`、`webui/task_runners.py`、`webui/src/views/DiscoveryView.vue`（2026-08-30 实测，工程还债 Spec 031 处理中）。
+
+## 开发验证命令
+
+- 后端回归：`uv run python -m unittest discover -s tests`。
+- 前端测试：在 `webui/` 执行 `npm test`。
+- 前端构建：在 `webui/` 执行 `npm run build`。
+- `tests/test_e2e_smoke.py` 是使用临时数据库、测试客户端和外部边界桩的跨层自动化冒烟，不得冒充真实浏览器、真实账号和真实数据的端到端验收。
+- 本项目暂不把某个测试文件指定为真实 E2E 命令；用户要求真实端到端测试时，必须经由项目对外入口使用项目已就绪的真实环境，无法执行时明确报告未执行。
 
 ## DB 标识与查库
 
@@ -32,6 +42,7 @@
 - 启用方式：`git config core.hooksPath hooks`；卫生测试校验该配置已启用。
 
 ## 收口任务验证与命令边界
+- 本节只定义已获授权后的动作范围、顺序和检查，不自动授予提交、推送、上传、发布、推 tag 或删除产物的权限。
 - 提交、推送、打包、发布、删旧产物等收口任务默认只运行：`uv run python -m unittest tests.test_repo_hygiene`、hooks、`git diff --check`、`git status`、`scripts/release_check.ps1`（若已生成）。
 - 收口任务默认不跑全量后端测试、全量前端测试或额外 `npm run build`；只有用户明确要求“全量/全部测试/完整验证”时才执行。
 - 命令意图映射：
@@ -57,7 +68,7 @@
 - 版本提升必须用 `scripts/bump_version.py`（`patch|minor|major` 或用户指定 `--set x.y.z`），同步：`pyproject.toml`、`webui/package.json`、`webui/package-lock.json`、`uv.lock`、`scripts/boss_cdp_raw.py`、`tests/test_desktop_shell.py`、`README.md` 标题，并生成 CHANGELOG 条目。
 - 语义：patch=bug 修复/文案/样式等小改动；minor=新功能且向后兼容；major=重构/大功能/里程碑。
 - 构建产物命名 `CareerScout-v<version>.*`；`.release/` 已有同名产物时，`packaging/build_exe.ps1` 必须显式传 `-Force` 才允许覆盖。
-- 上传 Windows EXE 后必须推送 `v*` tag，触发 `.github/workflows/release-macos.yml` 构建 dmg；发布后核对该 tag 的 Release 上 EXE、DMG 及各自 `.sha256` 均已挂载。
+- 在用户分别授权上传 Windows EXE 和推送 `v*` tag 后，按项目流程触发 `.github/workflows/release-macos.yml` 构建 dmg；发布后核对该 tag 的 Release 上 EXE、DMG 及各自 `.sha256` 均已挂载。
 
 ## 方向类记录写法
 

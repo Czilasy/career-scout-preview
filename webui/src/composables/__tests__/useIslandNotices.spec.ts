@@ -164,7 +164,7 @@ describe("useIslandNotices — 状态跃迁派生通知", () => {
     );
     const api = createIslandNotices(status);
     expect(api.notices.value).toHaveLength(0);
-    // 新一轮真实任务：running 不清池（038，但此时池本就空）→ completed 派生通知。
+    // 新一轮真实任务：running 不清池（037，但此时池本就空）→ completed 派生通知。
     status.value = makeStatus({ state: "running", platform: "boss", progress: { phase: "scraping", done: 1, total: 20 } });
     expect(api.notices.value).toHaveLength(0);
     status.value = makeStatus({ state: "completed", platform: "boss", results: { matched: 3, pending: 0 } });
@@ -189,19 +189,19 @@ describe("useIslandNotices — 状态跃迁派生通知", () => {
     expect(api.unreadCount.value).toBe(0);
   });
 
-  it("038: 进入 running 不再清空通知池（终态历史保留，live state 由 carousel 派生）", () => {
+  it("037: 进入 running 不再清空通知池（终态历史保留，live state 由 carousel 派生）", () => {
     const status = ref<CapsuleStatusPayload | null>(
       makeStatus({ state: "running", platform: "boss", progress: { phase: "scraping", done: 1 } }),
     );
     const api = createIslandNotices(status);
     status.value = makeStatus({ state: "completed", platform: "boss", results: { matched: 5, pending: 2 } });
     expect(api.notices.value).toHaveLength(1);
-    // 038：running 不再 clearAll — 终态通知保留在 panel 历史
+    // 037：running 不再 clearAll — 终态通知保留在 panel 历史
     status.value = makeStatus({ state: "running", platform: "boss", progress: { phase: "scraping", done: 0, total: 100 } });
     expect(api.notices.value).toHaveLength(1); // 仍保留
   });
 
-  it("038: sinkInterrupt 把打断沉入 panel（kind=interrupt，未读；append 语义，P1-1）", () => {
+  it("037: sinkInterrupt 把打断沉入 panel（kind=interrupt，未读；append 语义，P1-1）", () => {
     const status = ref<CapsuleStatusPayload | null>(
       makeStatus({ state: "idle", platform: "boss" }),
     );
@@ -341,6 +341,7 @@ describe("useIslandNotices — 状态跃迁派生通知", () => {
     expect(api.notices.value).toHaveLength(1);
     api.reset();
     expect(api.notices.value).toHaveLength(0);
+    expect(status.value).toBeNull();
     // reset 后即便直接给一个 completed 也不应产通知（prev=null 初始观察语义）
     status.value = makeStatus({ state: "completed", platform: "boss", results: { matched: 9, pending: 0 } });
     expect(api.notices.value).toHaveLength(0);

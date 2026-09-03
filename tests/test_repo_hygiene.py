@@ -230,10 +230,15 @@ class RepoHygieneTests(unittest.TestCase):
         ] + [re.compile(re.escape(p), re.IGNORECASE) for p in local_env]
         issues = []
         for rel in paths:
+            # 删除中的已跟踪文件不再存在于工作树，跳过内容扫描；删除本身由
+            # Git 差异和收口检查负责确认。
+            path = ROOT / rel
+            if not path.exists():
+                continue
             suffix = pathlib.PurePosixPath(rel).suffix.lower()
             if suffix not in text_suffixes:
                 continue
-            text = (ROOT / rel).read_text(encoding="utf-8", errors="replace")
+            text = path.read_text(encoding="utf-8", errors="replace")
             # dist 文本产物豁免本地路径规则（构建机路径会回显进产物），
             # 但凭据模式（sk-/PEM/AKIA）对 dist 同样全量生效（FR-009）
             active = patterns

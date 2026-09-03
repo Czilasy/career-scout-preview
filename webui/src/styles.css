@@ -2699,7 +2699,7 @@ body,
   }
 }
 
-/* 038 复审：restore-banner 浮窗已移除，恢复提示融入灵动岛；CSS 同步清理 */
+/* 037 复审：restore-banner 浮窗已移除，恢复提示融入灵动岛；CSS 同步清理 */
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
@@ -3198,7 +3198,7 @@ body,
   }
 }
 
-/* 038 复审：restore-banner 浮窗已移除，notice-in 入场覆盖块同步清理；
+/* 037 复审：restore-banner 浮窗已移除，notice-in 入场覆盖块同步清理；
    @keyframes notice-in 保留（styles.css 别处仍在用）。 */
 
 @keyframes notice-in {

@@ -1,16 +1,22 @@
-// 037/038 灵动岛通知面板测试。
+// 037 灵动岛通知面板测试。
 // 037：排序（error→paused→completed）、已读/未读样式钩子、行点击 emit
 // row-click、空态文案、role=dialog 无障碍。动画路径已被 setup.ts 的
 // reduced-motion 默认短路（:initial=false 直接渲染终态），只断言结构与语义。
-// 038：interrupt kind 排序位 2、tone 染色、Bell 图标、completed counts 时
+// 037：interrupt kind 排序位 2、tone 染色、Bell 图标、completed counts 时
 // 四色 chip 渲染（counts 缺省回退 detail 文字）。
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import IslandNoticePanel from "../IslandNoticePanel.vue";
 import type { DynamicIslandState } from "../../composables/useDiscoveryState";
 import type { IslandNotice } from "../../composables/useIslandNotices";
 
 const capsule: DynamicIslandState = { state: "idle", platform: "boss" };
+const panelSource = readFileSync(
+  resolve(process.cwd(), "src/components/IslandNoticePanel.vue"),
+  "utf8",
+);
 
 function makeNotice(overrides: Partial<IslandNotice> = {}): IslandNotice {
   return {
@@ -83,6 +89,11 @@ describe("IslandNoticePanel 无障碍与退场（037 复审 C 批）", () => {
     expect(panel.attributes("tabindex")).toBe("-1");
   });
 
+  it("037 修订：kaleido 面板 blur 与胶囊统一为 6px", () => {
+    expect(panelSource).toContain("backdrop-filter: blur(6px)");
+    expect(panelSource).not.toContain("backdrop-filter: blur(12px)");
+  });
+
   it("leaving=true 时根挂 is-leaving（退场两阶段由父驱动）", async () => {
     const wrapper = mountPanel([makeNotice()]);
     expect(wrapper.get('[data-testid="island-notice-panel"]').classes()).not.toContain("is-leaving");
@@ -119,7 +130,7 @@ describe("IslandNoticePanel 行点击", () => {
   });
 });
 
-describe("IslandNoticePanel 038 interrupt 行", () => {
+describe("IslandNoticePanel 037 interrupt 行", () => {
   it("interrupt 排在 paused 与 completed 之间（操作告警优先于终态成功）", () => {
     const wrapper = mountPanel([
       makeNotice({ kind: "completed", id: "n-done", title: "本轮任务已完成" }),
@@ -196,7 +207,7 @@ describe("IslandNoticePanel 038 interrupt 行", () => {
   });
 });
 
-describe("IslandNoticePanel 038 completed 行（两色现实口径）", () => {
+describe("IslandNoticePanel 037 completed 行（两色现实口径）", () => {
   // 复审 P1-2 裁决：counts 四色 chip 渲染已删（capsule 仅上抛 matched+pending，
   // useDiscoveryState 禁改，全链路无生产数据源）；completed 行回退 detail 文字。
   it("completed 行渲染 detail 文字（不渲染 chip 容器）", () => {

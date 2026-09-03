@@ -1,8 +1,8 @@
 <script setup lang="ts">
 // ---------------------------------------------------------------------------
-// 038 灵动岛通知面板：037 骨架 + interrupt 行 + 四色 chip 前向兼容。
+// 037 灵动岛通知面板：旧版骨架 + interrupt 行 + 当前两色口径。
 //
-// 038 变更：
+// 037 变更：
 // - KIND_ORDER 增 "interrupt"（位 2，paused 与 completed 之间）——打断类（投递
 //   提醒/NoticeBar warning/error）属操作告警，比终态成功事件更需先看到。
 // - iconFor：interrupt → Bell（@lucide/vue）。
@@ -37,7 +37,7 @@ const emit = defineEmits<{
   "row-click": [notice: IslandNotice];
 }>();
 
-// 038：interrupt 在 paused 与 completed 之间——打断类（投递提醒/NoticeBar
+// 037：interrupt 在 paused 与 completed 之间——打断类（投递提醒/NoticeBar
 // warning/error）属操作告警，比终态成功事件更需用户先看到，故排在 completed 前。
 const KIND_ORDER: Record<string, number> = { error: 0, paused: 1, interrupt: 2, completed: 3 };
 
@@ -185,7 +185,7 @@ function onRowClick(notice: IslandNotice) {
 .notice-icon.notice-completed {
   background: var(--match, #12905f);
 }
-/* 038：interrupt 图标按 tone 染色（warning 琥珀 / error 红）。无 tone 时退灰。 */
+/* 037：interrupt 图标按 tone 染色（warning 琥珀 / error 红）。无 tone 时退灰。 */
 .notice-icon.notice-interrupt {
   background: #6b7280;
 }
@@ -196,7 +196,7 @@ function onRowClick(notice: IslandNotice) {
   background: var(--reject, #a85751);
 }
 
-/* 038：interrupt 行边框/底色按 tone 染色——比终态行更显眼，比 error 略柔。 */
+/* 037：interrupt 行边框/底色按 tone 染色——比终态行更显眼，比 error 略柔。 */
 .notice-row.notice-interrupt[data-tone="warning"] {
   border-color: #e5a13a;
   background: rgba(229, 161, 58, 0.10);
@@ -232,7 +232,7 @@ function onRowClick(notice: IslandNotice) {
   color: var(--text-soft, #9fb0c3);
   overflow-wrap: anywhere;
 }
-/* 038 复审：interrupt 行 title 按 tone 染色（与 pill 内打断 lane 一致）——
+/* 037 复审：interrupt 行 title 按 tone 染色（与 pill 内打断 lane 一致）——
    warning 琥珀 / error 红，醒目不撞 panel 背景。 */
 .notice-row.notice-interrupt[data-tone="warning"] .notice-title { color: #e5a13a; }
 .notice-row.notice-interrupt[data-tone="error"] .notice-title { color: #e5484d; }
@@ -256,7 +256,7 @@ function onRowClick(notice: IslandNotice) {
 :global([data-theme="kaleido"]) .island-panel {
   background: rgba(20, 18, 30, 0.72);
   border-color: rgba(255, 255, 255, 0.22);
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(6px);
 }
 :global([data-theme="kaleido"]) .notice-row {
   background: rgba(255, 255, 255, 0.06);
@@ -273,7 +273,7 @@ function onRowClick(notice: IslandNotice) {
   background: rgba(255, 255, 255, 0.16);
   border-color: rgba(255, 255, 255, 0.35);
 }
-/* 038：kaleido 下 interrupt tone 行在半透明毛玻璃上保持可见。 */
+/* 037：kaleido 下 interrupt tone 行在半透明毛玻璃上保持可见。 */
 :global([data-theme="kaleido"]) .notice-row.notice-interrupt[data-tone="warning"] {
   background: rgba(229, 161, 58, 0.18);
   border-color: rgba(229, 161, 58, 0.45);

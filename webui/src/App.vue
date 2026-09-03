@@ -40,7 +40,7 @@ function handleRoundStatus(payload: RoundStatusPayload | null) {
   roundStatus.value = payload as CapsuleStatusPayload | null;
 }
 
-// 038 复审 P2-8：岛 navigate 分流——"reminders"（投递提醒打断行）开提醒抽屉；
+// 037 复审 P2-8：岛 navigate 分流——"reminders"（投递提醒打断行）开提醒抽屉；
 // requestCapsuleNavigation 不认识它（useDiscoveryState 禁改），分流在 App 层做。
 function handleIslandNavigate(target: CapsuleTarget) {
   if (target === "reminders") {
@@ -73,9 +73,9 @@ const discoveryRef = ref<{
 } | null>(null);
 
 // ---------------------------------------------------------------------------
-// 037 灵动岛 v2：通知池由胶囊状态跃迁派生（App 持有）；面板开闭由
+// 037 灵动岛 v3：通知池由胶囊状态跃迁派生（App 持有）；面板开闭由
 // DynamicIsland 内部 open 状态控制；面板与三抽屉互斥（开任一即 collapse）。
-// 038 灵动岛 v3：carousel 状态机接管打断轮转；onSinkInterrupt 把转完的打断
+// 037 灵动岛 v3：carousel 状态机接管打断轮转；onSinkInterrupt 把转完的打断
 // 沉入 islandNotices 作未读条目（kind:"interrupt" + tone 染色），角标由
 // DynamicIsland 组合 notices 未读 + badgeCount 显示。
 // ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ const islandCarousel = useIslandCarousel(roundStatus, {
   },
 });
 
-// 038 边角（复审 P2-5）：scope=history（浏览历史轮）期间打断暂停消费——
+// 037 边角（复审 P2-5）：scope=history（浏览历史轮）期间打断暂停消费——
 // 先攒入缓冲，回到最新（scope 离开 history）时逐条 flush：最后一条占据展示位
 // （"只转最新一条"），余数照常计时沉入 panel；不打断历史轮的浏览。
 const historyPendingInterrupts: Omit<IslandLane, "id" | "type">[] = [];
@@ -496,7 +496,7 @@ function openGitHub() {
 }
 
 onBeforeUnmount(() => {
-  // 038：清 carousel 打断队列的残留 timer，避免组件卸载后 fake/real timer
+  // 037：清 carousel 打断队列的残留 timer，避免组件卸载后 fake/real timer
   // 回调在死队列上 mutate（虽无观察者，但属卫生）。
   islandCarousel.reset();
   document.removeEventListener("pointerdown", onDocPointerDown);
@@ -510,7 +510,7 @@ function selectProfile(profileId: string) {
 }
 
 function showNotice(next: Notice) {
-  // 038 复审补齐：所有信息提示融入灵动岛，不再有独立 notice toast 浮窗
+  // 037 复审补齐：所有信息提示融入灵动岛，不再有独立 notice toast 浮窗
   // （用户要求「信息性小条幅全部进灵动岛，不要弹出浮窗」，按钮自带即时
   // 反馈不在此列）。warning/error 保留原 tone；info/success 映射 warning
   // （琥珀提示色），打断展示 ~2.2s 后沉入 panel 未读；history 浏览期间
@@ -538,7 +538,7 @@ function acceptCreatedProfile(profile: CandidateProfile) {
 const reminderDrawerOpen = ref(false);
 const reminderBadge = useReminderBadge(currentProfileId);
 
-// 038：投递提醒 0→N 推一条打断进 carousel（只转一次展示，转完沉入 panel 未读）。
+// 037：投递提醒 0→N 推一条打断进 carousel（只转一次展示，转完沉入 panel 未读）。
 // 仅在从 0 跳到 N 时推——避免每次 +1 都打扰；N→M（都 >0）不推。
 // target:"reminders"——沉入 panel 的行点击直达提醒抽屉（复审 P2-8）；
 // history 浏览期间经 pushInterruptOrDefer 顺延（复审 P2-5）。
@@ -586,7 +586,7 @@ function handleIslandDismiss(ids: string[]) {
 }
 
 // profile 初始化/切换：收起岛面板、关提醒抽屉、清空岛通知池 + carousel 打断
-// 队列 + history 期间积压的未消费打断（038）；badge 由 composable 内部 watch
+// 队列 + history 期间积压的未消费打断（037）；badge 由 composable 内部 watch
 // 自刷新（seq 自守卫），App 不再重复调用，避免双请求。
 watch(currentProfileId, (profileId) => {
   collapseIsland();
@@ -815,7 +815,7 @@ function handleIslandExpand() {
       </div>
     </Transition>
 
-    <!-- 038 复审：所有信息提示（含 info/success）都融入灵动岛，不再有独立
+    <!-- 037 复审：所有信息提示（含 info/success）都融入灵动岛，不再有独立
          notice toast 浮窗（showNotice 统一走 pushInterruptOrDefer）。 -->
 
     <ReminderDrawer
