@@ -443,126 +443,100 @@ describe("BrowserAccountsDialog role assignment (B073)", () => {
   const accA = { id: "a", name: "账号 A", platforms: { boss: { cdp_port: 9222 } } };
   const accB = { id: "b", name: "账号 B", platforms: { boss: { cdp_port: 9222 } } };
 
-  // 模拟后端互斥语义：PUT /roles 后其他账号的相同角色被清除。
-  function rolesFetchMock(initial: Array<{ id: string; name: string }> = [accA, accB]) {
-    let accounts = initial.map((a) => ({ ...a, roles: [] as string[] }));
+  // Spec 038 B091：模拟后端 pool 配置端点（PUT /api/browser-accounts/<id>/pool）。
+  // 默认每账号都进池、默认全选、默认配额取中值（R1 25 / R2 100）。
+  function poolFetchMock(initial: Array<{ id: string; name: string }> = [accA, accB]) {
+    let accounts = initial.map((a, i) => ({
+      ...a,
+      pool: { selected: true, order: i, r1_quota: 25, r2_quota: 100 },
+      rate_limited: false,
+    }));
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/browser-accounts") {
         return response({ accounts, active_account: "a" });
       }
-      const rolesMatch = /\/api\/browser-accounts\/([^/]+)\/roles$/.exec(url);
-      if (rolesMatch && init?.method === "PUT") {
-        const body = JSON.parse(String(init?.body)) as { roles: string[] };
-        const id = rolesMatch[1];
+      const poolMatch = /\/api\/browser-accounts\/([^/]+)\/pool$/.exec(url);
+      if (poolMatch && init?.method === "PUT") {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        const id = poolMatch[1];
         accounts = accounts.map((account) => {
-          if (account.id === id) return { ...account, roles: body.roles };
-          return { ...account, roles: (account.roles || []).filter((r) => !body.roles.includes(r)) };
+          if (account.id !== id) return account;
+          const next = { ...account };
+          if (typeof body.selected === "boolean") {
+            next.pool = { ...next.pool, selected: body.selected };
+          }
+          if (typeof body.r1_quota === "number") {
+            next.pool = { ...next.pool, r1_quota: body.r1_quota };
+          }
+          if (typeof body.r2_quota === "number") {
+            next.pool = { ...next.pool, r2_quota: body.r2_quota };
+          }
+          return next;
         });
-        return response({ ok: true, account_id: id, roles: body.roles });
+        return response({ ok: true, account_id: id, pool: accounts.find((a) => a.id === id)!.pool });
       }
       return response({});
     });
     return fetchMock;
   }
 
-  it("renders the two role chips in 不指定 state", async () => {
-    const wrapper = await mountOpen(rolesFetchMock());
-    const r1 = wrapper.get('[data-testid="role-chip-R1"]');
-    expect(r1.text()).toContain("R1");
-    // 描述字降级为悬停提示（与抓取浏览器 chip 同一行）
-    expect(r1.attributes("title")).toContain("列表/广泛抓取");
-    expect(r1.text()).toContain("不指定");
-    const r2 = wrapper.get('[data-testid="role-chip-R2"]');
-    expect(r2.text()).toContain("R2");
-    expect(r2.attributes("title")).toContain("详情抓取");
-    expect(r2.text()).toContain("不指定");
+  it("renders every account with default pool selection and quota", async () => {
+    const wrapper = await mountOpen(poolFetchMock());
+    const cbA = wrapper.get('[data-testid="pool-selected-a"]');
+    const cbB = wrapper.get('[data-testid="pool-selected-b"]');
+    expect((cbA.element as HTMLInputElement).checked).toBe(true);
+    expect((cbB.element as HTMLInputElement).checked).toBe(true);
+    // 默认配额 25/100
+    expect((wrapper.get('[data-testid="pool-r1-quota-a"]').element as HTMLInputElement).value).toBe("25");
+    expect((wrapper.get('[data-testid="pool-r2-quota-a"]').element as HTMLInputElement).value).toBe("100");
   });
 
-  it("keeps the 不指定 option visible even before any role is assigned", async () => {
-    const wrapper = await mountOpen(rolesFetchMock());
-    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
-    const menu = wrapper.get('[data-testid="role-menu"]');
-    expect(menu.text()).toContain("不指定");
-  });
-
-  it("assigns a role via PUT and shows the account name on the chip", async () => {
-    const fetchMock = rolesFetchMock();
+  it("toggles pool selected via PUT /pool", async () => {
+    const fetchMock = poolFetchMock();
     const wrapper = await mountOpen(fetchMock);
-
-    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
-    const menu = wrapper.get('[data-testid="role-menu"]');
-    expect(menu.text()).toContain("账号 A");
-    expect(menu.text()).toContain("账号 B");
-
-    await wrapper.get('[data-testid="role-option-R1-b"]').trigger("click");
+    await wrapper.get('[data-testid="pool-selected-b"]').trigger("change");
     await flushPromises();
-
-    const putCall = fetchMock.mock.calls.find(([u, i]) => String(u).endsWith("/api/browser-accounts/b/roles"));
+    const putCall = fetchMock.mock.calls.find(([u, i]) =>
+      String(u).endsWith("/api/browser-accounts/b/pool") && i?.method === "PUT");
     expect(putCall).toBeTruthy();
-    expect(JSON.parse(String(putCall![1]!.body))).toEqual({ roles: ["R1"] });
-    expect(wrapper.get('[data-testid="role-chip-R1"]').text()).toContain("账号 B");
-    expect(wrapper.get('[data-testid="role-chip-R2"]').text()).toContain("不指定");
+    expect(JSON.parse(String(putCall![1]!.body))).toEqual({ selected: false });
   });
 
-  it("allows the same account to hold both R1 and R2", async () => {
-    const fetchMock = rolesFetchMock();
+  it("updates r1 quota via PUT /pool", async () => {
+    const fetchMock = poolFetchMock();
     const wrapper = await mountOpen(fetchMock);
-
-    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
-    await wrapper.get('[data-testid="role-option-R1-b"]').trigger("click");
+    const input = wrapper.get('[data-testid="pool-r1-quota-a"]');
+    await input.setValue("10");
+    await input.trigger("change");
     await flushPromises();
-    await wrapper.get('[data-testid="role-chip-R2"]').trigger("click");
-    await wrapper.get('[data-testid="role-option-R2-b"]').trigger("click");
-    await flushPromises();
-
-    const puts = fetchMock.mock.calls.filter(([u, i]) => String(u).endsWith("/roles") && i?.method === "PUT");
-    expect(puts.length).toBe(2);
-    expect(wrapper.get('[data-testid="role-chip-R1"]').text()).toContain("账号 B");
-    expect(wrapper.get('[data-testid="role-chip-R2"]').text()).toContain("账号 B");
+    const putCall = fetchMock.mock.calls.find(([u, i]) =>
+      String(u).endsWith("/api/browser-accounts/a/pool") && i?.method === "PUT");
+    expect(putCall).toBeTruthy();
+    expect(JSON.parse(String(putCall![1]!.body))).toEqual({ r1_quota: 10 });
   });
 
-  it("moves the role exclusively when another account is chosen", async () => {
-    const fetchMock = rolesFetchMock();
+  it("shows rate-limited badge when account.rate_limited is true", async () => {
+    const fetchMock = poolFetchMock();
+    // 改 mock：让 b 撞墙限流
+    fetchMock.mockImplementationOnce(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/browser-accounts") {
+        return response({
+          accounts: [
+            { ...accA, pool: { selected: true, order: 0, r1_quota: 25, r2_quota: 100 }, rate_limited: false },
+            { ...accB, pool: { selected: true, order: 1, r1_quota: 25, r2_quota: 100 }, rate_limited: true },
+          ],
+          active_account: "a",
+        });
+      }
+      return response({});
+    });
     const wrapper = await mountOpen(fetchMock);
-
-    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
-    await wrapper.get('[data-testid="role-option-R1-b"]').trigger("click");
-    await flushPromises();
-    // 换选账号 A → PUT a 的 R1；b 的 R1 被后端互斥清除
-    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
-    await wrapper.get('[data-testid="role-option-R1-a"]').trigger("click");
-    await flushPromises();
-
-    expect(wrapper.get('[data-testid="role-chip-R1"]').text()).toContain("账号 A");
-    const putB = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/browser-accounts/b/roles"));
-    const putA = fetchMock.mock.calls.find(([u]) => String(u).endsWith("/api/browser-accounts/a/roles"));
-    expect(JSON.parse(String(putB![1]!.body))).toEqual({ roles: ["R1"] });
-    expect(JSON.parse(String(putA![1]!.body))).toEqual({ roles: ["R1"] });
-  });
-
-  it("clears a role back to 不指定", async () => {
-    const fetchMock = rolesFetchMock();
-    const wrapper = await mountOpen(fetchMock);
-
-    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
-    await wrapper.get('[data-testid="role-option-R1-b"]').trigger("click");
-    await flushPromises();
-    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
-    await wrapper.get('[data-testid="role-clear-R1"]').trigger("click");
-    await flushPromises();
-
-    const putCalls = fetchMock.mock.calls.filter(
-      ([u, i]) => String(u).endsWith("/api/browser-accounts/b/roles") && i?.method === "PUT",
-    );
-    expect(JSON.parse(String(putCalls.at(-1)![1]!.body))).toEqual({ roles: [] });
-    expect(wrapper.get('[data-testid="role-chip-R1"]').text()).toContain("不指定");
-  });
-
-  it("shows an empty hint when there are no accounts", async () => {
-    const wrapper = await mountOpen(rolesFetchMock([]));
-    await wrapper.get('[data-testid="role-chip-R1"]').trigger("click");
-    expect(wrapper.get('[data-testid="role-menu"]').text()).toContain("暂无账号");
+    const badge = wrapper.get('[data-testid="rate-limited-b"]');
+    expect(badge.text()).toContain("限流");
+    // 撞墙账号名变红（card 上 data-rate-limited="true"）
+    const card = wrapper.find('.browser-account-card[data-rate-limited="true"]');
+    expect(card.exists()).toBe(true);
   });
 });
 

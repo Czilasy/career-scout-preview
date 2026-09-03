@@ -55,17 +55,11 @@ const localNotice = ref<Notice | null>(null);
 // 切换账号/打开窗口后缓存已失效或待重探的账号：徽章显示「待刷新」。
 const pendingRefresh = ref<Set<string>>(new Set());
 const pendingDelete = ref<BrowserAccount | null>(null);
-
-// B073：BOSS 任务角色（R1 列表/广泛抓取、R2 详情抓取）——每个角色一个小长块
-// 下拉；角色→账号一对一互斥由后端 PUT /roles 保证，前端只发该账号目标角色集。
-const ROLE_SPECS: Record<"R1" | "R2", { label: string; desc: string }> = {
-  R1: { label: "R1", desc: "列表/广泛抓取" },
-  R2: { label: "R2", desc: "详情抓取" },
-};
-type RoleKey = keyof typeof ROLE_SPECS;
-const openRole = ref<RoleKey | null>(null);
-const roleBusy = ref(false);
-const roleRootEl = ref<HTMLElement | null>(null);
+// Spec 038 B091：账号池配置（多选 + 每账号配额）+ 撞墙限流视觉标识。
+// 旧 R1/R2 角色互斥 schema 已弃用（FR-021），统一为 R1/R2 共用账号池。
+const poolBusy = ref(false);
+const POOL_R1_RANGE = { min: 1, max: 50, default: 25 } as const;
+const POOL_R2_RANGE = { min: 1, max: 200, default: 100 } as const;
 
 // 抓取浏览器（原独立「浏览器」设置合并至此）：清单/选择/生效路径随弹窗打开加载，
 // chip 常显当前选择，展开后由 BrowserKernelPicker 选即存。
@@ -113,21 +107,7 @@ function onKernelChanged(payload: { selection: BrowserSelection; effectivePath: 
 
 function toggleKernel() {
   if (kernelLocked.value) return;
-  openRole.value = null;
   kernelOpen.value = !kernelOpen.value;
-}
-
-function roleHolder(role: RoleKey): BrowserAccount | undefined {
-  return accounts.value.find((account) => (account.roles || []).includes(role));
-}
-function roleChipText(role: RoleKey): string {
-  const holder = roleHolder(role);
-  return holder ? displayName(holder) : "不指定";
-}
-function toggleRoleMenu(role: RoleKey) {
-  if (roleBusy.value) return;
-  kernelOpen.value = false;
-  openRole.value = openRole.value === role ? null : role;
 }
 
 // 抓取浏览器浮层：点浮层与 chip 之外的地方收起（不影响原有布局）。
@@ -142,61 +122,46 @@ function handleKernelPointerDown(event: PointerEvent) {
   if (kernelChipEl.value?.contains(target)) return;
   kernelOpen.value = false;
 }
-function handleRoleMenuPointerDown(event: PointerEvent) {
-  if (!openRole.value) return;
-  const target = event.target as Node | null;
-  if (roleRootEl.value && target && !roleRootEl.value.contains(target)) openRole.value = null;
-}
 onMounted(() => {
-  document.addEventListener("pointerdown", handleRoleMenuPointerDown, true);
   document.addEventListener("pointerdown", handleKernelPointerDown, true);
 });
 onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", handleRoleMenuPointerDown, true);
   document.removeEventListener("pointerdown", handleKernelPointerDown, true);
 });
 
-async function assignRole(role: RoleKey, account: BrowserAccount) {
-  roleBusy.value = true;
+// Spec 038 B091：账号池配置（部分更新，复用 PUT /pool 端点）。
+async function togglePoolSelected(account: BrowserAccount) {
+  if (poolBusy.value) return;
+  // account.pool 在后端投影里总是存在；防御性兜底用 true（默认进池）
+  const currentSelected = account.pool?.selected ?? true;
+  const next = !currentSelected;
+  poolBusy.value = true;
   try {
-    const targetRoles = Array.from(new Set([...(account.roles || []), role]));
-    await apiRequest(`/api/browser-accounts/${encodeURIComponent(account.id)}/roles`, {
+    await apiRequest(`/api/browser-accounts/${encodeURIComponent(account.id)}/pool`, {
       method: "PUT",
-      json: { roles: targetRoles },
+      json: { selected: next },
     });
-    setLocalNotice({
-      message: `已将「${displayName(account)}」设为 ${ROLE_SPECS[role].label}（${ROLE_SPECS[role].desc}）`,
-      tone: "success",
-    });
-    openRole.value = null;
     await loadAccounts();
   } catch (error) {
-    setLocalNotice({ message: errorMessage(error, "角色设置失败"), tone: "error" });
+    setLocalNotice({ message: errorMessage(error, "账号池设置失败"), tone: "error" });
   } finally {
-    roleBusy.value = false;
+    poolBusy.value = false;
   }
 }
 
-async function clearRole(role: RoleKey) {
-  const holder = roleHolder(role);
-  if (!holder) {
-    openRole.value = null;
-    return;
-  }
-  roleBusy.value = true;
+async function updateQuota(account: BrowserAccount, field: "r1_quota" | "r2_quota", value: number) {
+  if (poolBusy.value) return;
+  poolBusy.value = true;
   try {
-    const remaining = (holder.roles || []).filter((item) => item !== role);
-    await apiRequest(`/api/browser-accounts/${encodeURIComponent(holder.id)}/roles`, {
+    await apiRequest(`/api/browser-accounts/${encodeURIComponent(account.id)}/pool`, {
       method: "PUT",
-      json: { roles: remaining },
+      json: { [field]: value },
     });
-    setLocalNotice({ message: `${ROLE_SPECS[role].label} 已恢复不指定`, tone: "success" });
-    openRole.value = null;
     await loadAccounts();
   } catch (error) {
-    setLocalNotice({ message: errorMessage(error, "角色设置失败"), tone: "error" });
+    setLocalNotice({ message: errorMessage(error, "配额设置失败"), tone: "error" });
   } finally {
-    roleBusy.value = false;
+    poolBusy.value = false;
   }
 }
 
@@ -441,54 +406,27 @@ async function confirmRemoveAccount() {
     id="browser-accounts"
     :open="open"
     title="账号"
-    description="每个账号使用独立的浏览器环境，BOSS 与智联窗口可分别打开；登录一次后长期有效，任务会使用「当前账号」的登录态抓取。BOSS 任务可把列表/广泛抓取（R1）与 JD 详情抓取（R2）分配给不同账号，规避单账号风控；不指定时使用当前账号。"
+    description="每个账号使用独立的浏览器环境，BOSS 与智联窗口可分别打开；登录一次后长期有效，任务会使用「当前账号」的登录态抓取。多账号勾选进 R1/R2 共用账号池后，开抓会按勾选顺序轮询分摊（每轮每账号抓固定配额就换下一个，总量不够自动多轮覆盖），撞墙顺次切下一个预选账号继续。"
     size="md"
     @close="$emit('close')"
   >
-    <div class="role-assign" ref="roleRootEl" data-testid="role-assign">
-      <div class="config-row">
-        <div class="role-chips">
-          <button v-for="role in (['R1', 'R2'] as const)" :key="role" type="button" class="role-chip"
-            :data-testid="`role-chip-${role}`" :aria-expanded="openRole === role" :aria-haspopup="true"
-            :title="`${ROLE_SPECS[role].label} · ${ROLE_SPECS[role].desc}`"
-            :disabled="roleBusy" @click="toggleRoleMenu(role)">
-            <span class="role-chip-tag">{{ ROLE_SPECS[role].label }}</span>
-            <span class="role-chip-value" :data-unset="!roleHolder(role)">{{ roleChipText(role) }}</span>
-            <ChevronDown :size="14" class="role-chip-caret" aria-hidden="true" />
-          </button>
-        </div>
-        <button
-          ref="kernelChipEl"
-          type="button"
-          class="kernel-chip"
-          data-testid="browser-kernel-chip"
-          :aria-expanded="kernelOpen"
-          :aria-haspopup="true"
-          :title="kernelChipTitle"
-          :disabled="kernelLocked"
-          @click="toggleKernel"
-        >
-          <Globe :size="14" aria-hidden="true" />
-          <span class="kernel-chip-label">抓取浏览器</span>
-          <span class="kernel-chip-value">{{ kernelChipLabel }}</span>
-          <ChevronDown :size="14" class="kernel-chip-caret" aria-hidden="true" />
-        </button>
-      </div>
-      <div v-if="openRole" class="role-menu" data-testid="role-menu" role="listbox" :aria-label="`选择${ROLE_SPECS[openRole].label}账号`">
-        <button v-for="account in accounts" :key="account.id" type="button" class="role-option"
-          :class="{ selected: (account.roles || []).includes(openRole) }"
-          :data-testid="`role-option-${openRole}-${account.id}`" role="option"
-          :aria-selected="(account.roles || []).includes(openRole)" :disabled="roleBusy"
-          @click="assignRole(openRole, account)">
-          <Check v-if="(account.roles || []).includes(openRole)" :size="14" class="role-option-check" aria-hidden="true" />
-          {{ displayName(account) }}
-        </button>
-        <!-- B073：「不指定」常驻选项，始终可把角色恢复为不指定 -->
-        <button type="button" class="role-option role-option-clear"
-          :data-testid="`role-clear-${openRole}`" role="option" :disabled="roleBusy"
-          @click="clearRole(openRole)">不指定</button>
-        <p v-if="!accounts.length" class="role-menu-empty">暂无账号，先添加账号</p>
-      </div>
+    <div class="config-row" data-testid="config-row">
+      <button
+        ref="kernelChipEl"
+        type="button"
+        class="kernel-chip"
+        data-testid="browser-kernel-chip"
+        :aria-expanded="kernelOpen"
+        :aria-haspopup="true"
+        :title="kernelChipTitle"
+        :disabled="kernelLocked"
+        @click="toggleKernel"
+      >
+        <Globe :size="14" aria-hidden="true" />
+        <span class="kernel-chip-label">抓取浏览器</span>
+        <span class="kernel-chip-value">{{ kernelChipLabel }}</span>
+        <ChevronDown :size="14" class="kernel-chip-caret" aria-hidden="true" />
+      </button>
       <div
         v-if="kernelOpen"
         ref="kernelPopEl"
@@ -519,13 +457,53 @@ async function confirmRemoveAccount() {
         :key="account.id"
         class="browser-account-card"
         :data-active="account.id === activeAccount || undefined"
+        :data-rate-limited="account.rate_limited ? 'true' : undefined"
       >
         <div class="browser-account-info">
           <div class="browser-account-head">
             <span class="browser-account-icon" aria-hidden="true"><UserRound :size="17" /></span>
-            <strong>{{ displayName(account) }}</strong>
-            <span v-if="account.id === activeAccount" class="browser-account-badge">当前账号</span>
+            <strong :class="{ 'rate-limited-name': account.rate_limited }">{{ displayName(account) }}</strong>
+            <span v-if="account.rate_limited" class="browser-account-badge rate-limited" :data-testid="`rate-limited-${account.id}`">限流</span>
+            <span v-else-if="account.id === activeAccount" class="browser-account-badge">当前账号</span>
             <span v-else class="browser-account-badge muted">非当前账号</span>
+          </div>
+          <div class="browser-account-pool" :data-testid="`pool-config-${account.id}`">
+            <label class="pool-toggle">
+              <input
+                type="checkbox"
+                :checked="account.pool?.selected ?? true"
+                :disabled="poolBusy"
+                :data-testid="`pool-selected-${account.id}`"
+                @change="togglePoolSelected(account)"
+              >
+              <span class="pool-toggle-label">参与轮询</span>
+            </label>
+            <label class="pool-quota">
+              <span class="pool-quota-label">R1 配额</span>
+              <input
+                type="number"
+                :min="POOL_R1_RANGE.min"
+                :max="POOL_R1_RANGE.max"
+                :value="account.pool?.r1_quota ?? POOL_R1_RANGE.default"
+                :placeholder="`${POOL_R1_RANGE.min}-${POOL_R1_RANGE.max}`"
+                :disabled="poolBusy"
+                :data-testid="`pool-r1-quota-${account.id}`"
+                @change="updateQuota(account, 'r1_quota', Number(($event.target as HTMLInputElement).value))"
+              >
+            </label>
+            <label class="pool-quota">
+              <span class="pool-quota-label">R2 配额</span>
+              <input
+                type="number"
+                :min="POOL_R2_RANGE.min"
+                :max="POOL_R2_RANGE.max"
+                :value="account.pool?.r2_quota ?? POOL_R2_RANGE.default"
+                :placeholder="`${POOL_R2_RANGE.min}-${POOL_R2_RANGE.max}`"
+                :disabled="poolBusy"
+                :data-testid="`pool-r2-quota-${account.id}`"
+                @change="updateQuota(account, 'r2_quota', Number(($event.target as HTMLInputElement).value))"
+              >
+            </label>
           </div>
           <ul class="browser-account-platforms" :data-testid="`account-platforms-${account.id}`">
             <li
@@ -648,29 +626,13 @@ async function confirmRemoveAccount() {
 </template>
 
 <style scoped>
-.role-assign{position:relative;margin-bottom:14px}
-.config-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.role-chips{display:flex;flex-wrap:wrap;gap:8px}
-.role-chip{display:inline-flex;align-items:center;gap:7px;min-height:30px;padding:4px 10px;border:1px solid var(--hair);border-radius:7px;background:var(--panel-2);color:var(--ink-1);font:inherit;font-size:12px;font-weight:600;line-height:1.2;cursor:pointer;transition:border-color 160ms ease,background 160ms ease}
-.role-chip:hover:not(:disabled),.role-chip[aria-expanded="true"]{border-color:var(--brand-edge);background:var(--brand-wash)}
-.role-chip:disabled{cursor:not-allowed;opacity:.65}
-.role-chip-tag{padding:1px 6px;border-radius:5px;color:var(--brand-ink);background:var(--brand-wash);font-weight:700}
-.role-chip-value{color:var(--brand-strong);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.role-chip-value[data-unset="true"]{color:var(--ink-3)}
-.role-chip-caret{flex:0 0 auto;color:var(--muted)}
+.config-row{position:relative;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px}
 .kernel-chip{display:inline-flex;align-items:center;gap:6px;margin-left:auto;min-height:30px;padding:4px 10px;border:1px solid var(--hair);border-radius:7px;background:var(--panel-2);color:var(--ink-1);font:inherit;font-size:12px;font-weight:600;line-height:1.2;cursor:pointer;transition:border-color 160ms ease,background 160ms ease}
 .kernel-chip:hover:not(:disabled),.kernel-chip[aria-expanded="true"]{border-color:var(--brand-edge);background:var(--brand-wash)}
 .kernel-chip:disabled{cursor:not-allowed;opacity:.65}
 .kernel-chip-label{color:var(--muted);font-weight:500}
 .kernel-chip-value{color:var(--brand-strong);max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kernel-popover{position:absolute;z-index:60;top:calc(100% + 6px);right:0;width:min(340px,calc(100% - 4px));max-height:min(460px,60vh);overflow-y:auto;padding:10px;border:1px solid var(--hair);border-radius:9px;background:var(--panel);box-shadow:0 14px 40px rgba(0,0,0,.18),0 2px 8px rgba(0,0,0,.08)}
-.role-menu{position:absolute;z-index:60;top:calc(100% + 6px);left:0;display:grid;gap:2px;min-width:260px;max-height:240px;overflow-y:auto;padding:6px;border:1px solid var(--hair);border-radius:9px;background:var(--panel);box-shadow:0 14px 40px rgba(0,0,0,.18),0 2px 8px rgba(0,0,0,.08)}
-.role-option{display:flex;align-items:center;gap:8px;min-height:34px;padding:5px 10px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--ink-1);font:inherit;font-size:13px;font-weight:500;text-align:left;cursor:pointer}
-.role-option:hover:not(:disabled){background:var(--brand-wash)}
-.role-option.selected{color:var(--brand-strong);font-weight:700}
-.role-option-check{flex:0 0 auto}
-.role-option-clear{margin-top:2px;border-top:1px solid var(--hair);border-radius:0 0 6px 6px;color:var(--ink-3)}
-.role-menu-empty{margin:0;padding:10px;color:var(--muted);font-size:13px;text-align:center}
 .browser-account-list {
   display: grid;
   gap: 10px;
@@ -686,6 +648,10 @@ async function confirmRemoveAccount() {
   border: 1px solid var(--hair);
   border-radius: 10px;
   background: var(--panel);
+}
+.browser-account-card[data-rate-limited="true"] {
+  border-color: var(--danger-edge, #f0a0a0);
+  background: var(--danger-wash, rgba(220, 60, 60, 0.06));
 }
 .browser-account-info {
   display: grid;
@@ -727,6 +693,60 @@ async function confirmRemoveAccount() {
   color: var(--ink-3);
   border-color: var(--hair);
   background: var(--hair-2);
+}
+/* Spec 038 B091 FR-014：撞墙限流账号标红 + "限流"方框 */
+.browser-account-badge.rate-limited {
+  color: #c01818;
+  border-color: #e04040;
+  background: rgba(220, 60, 60, 0.1);
+}
+.rate-limited-name {
+  color: #c01818;
+}
+/* 账号池配置行：参与轮询开关 + R1/R2 配额输入 */
+.browser-account-pool {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+.pool-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ink-1);
+}
+.pool-toggle input[type="checkbox"] {
+  margin: 0;
+}
+.pool-toggle-label {
+  font-weight: 500;
+}
+.pool-quota {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.pool-quota-label {
+  color: var(--muted);
+}
+.pool-quota input[type="number"] {
+  width: 60px;
+  padding: 3px 6px;
+  border: 1px solid var(--hair);
+  border-radius: 5px;
+  background: var(--panel-2);
+  color: var(--ink-1);
+  font: inherit;
+  font-size: 12px;
+}
+.pool-quota input[type="number"]:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 .browser-account-platforms {
   display: flex;

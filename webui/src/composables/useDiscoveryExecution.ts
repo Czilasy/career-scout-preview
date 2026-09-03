@@ -377,6 +377,21 @@ async function startScrape(options: OneClickLaunch = {}) {
     deps.notify("请确认至少一个关键词", "warning");
     return;
   }
+  // Spec 038 B091 FR-019：开抓前校验至少 1 账号选中参与轮询
+  // 全取消所有账号勾选时阻止开抓（默认零配置：账号默认全选，本校验只在
+  // 用户主动取消所有账号后拦截；账号簿读取失败不阻断开抓，后端会兜底）。
+  try {
+    const accountsData = await apiRequest<{
+      accounts: Array<{ pool?: { selected: boolean } }>;
+    }>("/api/browser-accounts");
+    const anySelected = accountsData.accounts.some((a) => a.pool?.selected ?? true);
+    if (!anySelected) {
+      deps.notify("请至少勾选一个账号参与轮询后再开抓", "warning");
+      return;
+    }
+  } catch {
+    // best-effort：账号簿读取失败不阻断开抓
+  }
   const preview = await deps.refreshScopePreview();
   if (!preview) return;
   // 开始抓取后自动收拢两个配置面板（用户可随时手动展开查看）。

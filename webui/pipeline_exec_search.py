@@ -278,8 +278,20 @@ def run_search(params: dict, source, *, pages: int = 3,
                 message="检测到浏览器失联，正在自动重启并续抓…",
             ),
         )
+        # Spec 038 B091 R1 多账号轮询分摊：engagement 规则不满足时返回 None
+        # （legacy 单源行为），满足时（池内≥2 选中账号且 source 账号在选中池）
+        # 走跨账号轮询分摊。
+        try:
+            from webui.account_round_robin import make_list_robin
+            list_robin = make_list_robin(source)
+        except Exception:
+            _logger.debug("make_list_robin 初始化失败，回退 legacy 单源", exc_info=True)
+            list_robin = None
 
         def _fetch_list_once():
+            if list_robin is not None:
+                # Spec 038 B091 R1 轮询分摊：跨账号按配额拆子范围抓页
+                return list_robin.fetch_list(source, plan_item, on_page_completed=_page_completed)
             return source.fetch_list(plan_item, on_page_completed=_page_completed)
 
         _skipped_login_combo = [False]

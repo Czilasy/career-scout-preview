@@ -216,45 +216,52 @@ class BrowserAccountApiTests(unittest.TestCase):
         data = self.client.get("/api/browser-accounts").get_json()
         self.assertNotIn("b", [a["id"] for a in data["accounts"]])
 
-    def test_roles_assign_mutually_exclusive_and_clear(self):
-        data = self.client.get("/api/browser-accounts").get_json()
-        self.assertEqual([a["roles"] for a in data["accounts"]], [[], []])
+    def test_pool_partial_update_and_clamp(self):
+        """Spec 038 B091：账号池配置端点 PUT /api/browser-accounts/<id>/pool。
 
-        # 给 b 设 R1
-        resp = self.client.put("/api/browser-accounts/b/roles", json={"roles": ["R1"]})
+        FR-021：旧 /roles 端点已弃用，全删不兼容迁移。
+        新端点支持部分更新（未传字段保持原值）；配额越界 clamp 到 [min, max]。
+        """
+        data = self.client.get("/api/browser-accounts").get_json()
+        # 默认每账号都进池、默认全选、默认配额取中值
+        self.assertTrue(all(a["pool"]["selected"] for a in data["accounts"]))
+        self.assertTrue(all(a["pool"]["r1_quota"] == 25 for a in data["accounts"]))
+        self.assertTrue(all(a["rate_limited"] is False for a in data["accounts"]))
+        # 旧 roles 字段不再投影
+        self.assertTrue(all("roles" not in a for a in data["accounts"]))
+
+        # 取消 b 选中
+        resp = self.client.put("/api/browser-accounts/b/pool",
+                               json={"selected": False})
         self.assertEqual(resp.status_code, 200, resp.get_json())
-        self.assertEqual(resp.get_json()["roles"], ["R1"])
+        self.assertFalse(resp.get_json()["pool"]["selected"])
+        # r1_quota 未传 → 保留默认 25
+        self.assertEqual(resp.get_json()["pool"]["r1_quota"], 25)
         data = self.client.get("/api/browser-accounts").get_json()
         b = next(a for a in data["accounts"] if a["id"] == "b")
-        self.assertEqual(b["roles"], ["R1"])
+        self.assertFalse(b["pool"]["selected"])
 
-        # 同一账号可同时承担 R1 + R2
-        resp = self.client.put("/api/browser-accounts/b/roles", json={"roles": ["R1", "R2"]})
+        # 改 b 的 r1_quota=10
+        resp = self.client.put("/api/browser-accounts/b/pool",
+                               json={"r1_quota": 10})
         self.assertEqual(resp.status_code, 200, resp.get_json())
-        self.assertEqual(resp.get_json()["roles"], ["R1", "R2"])
+        self.assertEqual(resp.get_json()["pool"]["r1_quota"], 10)
+        # selected 未传 → 仍为 False（保留原值）
+        self.assertFalse(resp.get_json()["pool"]["selected"])
 
-        # 换选 a 为 R1 → b 的 R1 被清（互斥），R2 保留
-        resp = self.client.put("/api/browser-accounts/a/roles", json={"roles": ["R1"]})
+        # 越界 clamp：r1_quota=9999 → 50；r2_quota=-5 → 1
+        resp = self.client.put("/api/browser-accounts/b/pool",
+                               json={"r1_quota": 9999, "r2_quota": -5})
         self.assertEqual(resp.status_code, 200, resp.get_json())
-        self.assertEqual(resp.get_json()["roles"], ["R1"])
-        data = self.client.get("/api/browser-accounts").get_json()
-        a = next(x for x in data["accounts"] if x["id"] == "a")
-        b = next(x for x in data["accounts"] if x["id"] == "b")
-        self.assertEqual(a["roles"], ["R1"])
-        self.assertEqual(b["roles"], ["R2"])
+        self.assertEqual(resp.get_json()["pool"]["r1_quota"], 50)
+        self.assertEqual(resp.get_json()["pool"]["r2_quota"], 1)
 
-        # 清空（选回未指定）
-        resp = self.client.put("/api/browser-accounts/b/roles", json={"roles": []})
-        self.assertEqual(resp.status_code, 200, resp.get_json())
-        self.assertEqual(resp.get_json()["roles"], [])
-        data = self.client.get("/api/browser-accounts").get_json()
-        b = next(x for x in data["accounts"] if x["id"] == "b")
-        self.assertEqual(b["roles"], [])
-
-        # 校验：非法角色 → 422；不存在的账号 → 404
-        bad = self.client.put("/api/browser-accounts/b/roles", json={"roles": ["R3"]})
+        # 校验：非整数 → 422；不存在账号 → 404
+        bad = self.client.put("/api/browser-accounts/b/pool",
+                              json={"r1_quota": "not-int"})
         self.assertEqual(bad.status_code, 422)
-        missing = self.client.put("/api/browser-accounts/nope/roles", json={"roles": ["R1"]})
+        missing = self.client.put("/api/browser-accounts/nope/pool",
+                                  json={"selected": True})
         self.assertEqual(missing.status_code, 404)
 
     def _seed_paused_run(self, account="b", run_id="busy-account-run", platform="boss"):

@@ -16,6 +16,7 @@ from webui.error_registry import SYSTEMIC_BLOCK_CODES as _HARD_STOP_CODES
 from webui.error_registry import resolve_code
 from webui.task_pause_support import ImmediateOnlyCancelEvent
 from webui import recruiter_activity
+from webui.account_round_robin import is_wall_code as _robin_is_wall_code
 
 from webui.logging_setup import get_logger
 
@@ -228,6 +229,14 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     # 不置位（适配器 is_set() 为假），批照常跑完批边界停止，语义不变。
     if stop_event is not None and hasattr(source, "cancel_event"):
         source.cancel_event = ImmediateOnlyCancelEvent(stop_event)
+    # Spec 038 B091 R2 多账号轮询分摊：engagement 规则不满足时返回 None
+    # （legacy 单源行为），满足时走跨账号按配额推进 + 撞墙换号。
+    try:
+        from webui.account_round_robin import make_detail_robin
+        detail_robin = make_detail_robin(source)
+    except Exception:
+        _logger.debug("make_detail_robin 初始化失败，回退 legacy 单源", exc_info=True)
+        detail_robin = None
     for batch_start in range(0, len(indexed_jobs), BATCH_SIZE):
         if stop_event is not None and stop_event.is_set():
             stopped = True
@@ -271,6 +280,16 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             if stop_event is not None and stop_event.is_set():
                 stopped = True
                 break
+            # Spec 038 B091 R2：每轮 while 迭代重取当前队首账号的 source
+            # （engagement 时 robin 非空，闭包晚绑定整体切换账号源）；
+            # 全撞完（队空）→ 走既有 hard_stop 暂停路径。
+            if detail_robin is not None:
+                cur_src = detail_robin.current_source()
+                if cur_src is None:
+                    hard_stop = True
+                    hard_stop_code = "source_blocked"
+                    break
+                source = cur_src
             batch_exception_code: str | None = None
             _t0_batch = time.time()
 
@@ -493,6 +512,14 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             if guard is not None:
                 guard.complete_batch(batch_key)
                 guard.touch(batch_key)  # 批次结果返回也是产出
+            # Spec 038 B091 R2：撞墙（系统性阻断，非浏览器失联）→ 顺次换预选账号
+            # 重抓本批；全撞完则保留 hard_stop 走既有暂停路径（FR-013）。
+            if (detail_robin is not None and hard_stop
+                    and _robin_is_wall_code(hard_stop_code)
+                    and detail_robin.switch_next()):
+                hard_stop = False
+                hard_stop_code = None
+                continue
             if hard_stop:
                 break
             # 正常完成（未卡死、未硬停）：退出本批重抓循环

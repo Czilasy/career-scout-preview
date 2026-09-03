@@ -344,16 +344,14 @@ def register_exec_search_routes(app, ctx):
             script_params.pop("locations", None)
 
         # T402: 冻结完整 runtime — 平台登录空间、task_input_digest
-        # B073：BOSS 列表/广泛抓取阶段按 R1 角色解析账号（未指定/不可用降级当前账号）；
-        # 智联平台不受角色影响，保持当前账号。
-        if platform_raw == "boss":
-            from webui.pipeline_exec import account_for_role
-            browser_account = account_for_role(
-                "R1", app.config["BROWSER_ACCOUNTS_PATH"],
-                fallback=ctx.account_for_run(),
-            )
-        else:
-            browser_account = ctx.account_for_run()
+        # Spec 038 B091 FR-020：BOSS + 智联两平台都走账号池解析（FR-021：
+        # 旧 R1/R2 角色互斥 schema 已弃用，统一为 R1/R2 共用账号池；
+        # ``account_for_role`` 内部按 pool.selected 取第一个，role 参数忽略）。
+        from webui.pipeline_exec import account_for_role
+        browser_account = account_for_role(
+            "R1", app.config["BROWSER_ACCOUNTS_PATH"],
+            fallback=ctx.account_for_run(),
+        )
         profile_dir = resolve_browser_account(
             browser_account, app.config["BROWSER_ACCOUNTS_PATH"])
         login_space = resolve_login_space(

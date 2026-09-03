@@ -199,9 +199,16 @@ def register_settings_routes(app, ctx):
             active = "a"
         lock_kind, locked_account, lock_platform = ctx.browser_lock()
         from scripts.login_state_cache import all_login_states
+        # Spec 038 B091：投影补 pool/rate_limited 字段（FR-021 旧 roles 字段不投影）
+        projected = ctx.project_browser_accounts(accounts)
+        for p in projected:
+            raw = accounts.get(p["id"]) or {}
+            p["pool"] = dict(raw.get("pool") or {})
+            p["rate_limited"] = bool(raw.get("rate_limited", False))
+            p.pop("roles", None)
         return jsonify({
             "ok": True,
-            "accounts": ctx.project_browser_accounts(accounts),
+            "accounts": projected,
             "active_account": active,
             "login_states": all_login_states(),
             "busy": ctx.browser_busy(),
@@ -250,34 +257,43 @@ def register_settings_routes(app, ctx):
         ctx.save_legacy_advanced_settings(settings)
         return jsonify({"ok": True, "active_account": str(account_id)})
 
-    @app.route("/api/browser-accounts/<account_id>/roles", methods=["PUT"])
-    def set_browser_account_roles(account_id):
-        from webui.pipeline_exec import (
-            assign_account_role,
-            load_browser_accounts,
-            save_browser_accounts,
+    @app.route("/api/browser-accounts/<account_id>/pool", methods=["PUT"])
+    def set_browser_account_pool(account_id):
+        """Spec 038 B091：账号池配置（多选 + 配额 + 顺序）部分更新端点。
+
+        FR-021：旧 ``/roles`` 角色互斥 schema 已弃用，全删不兼容迁移。
+        body 字段全部可选：``{selected?, order?, r1_quota?, r2_quota?}``，
+        未传字段保持原值；``r1_quota``/``r2_quota`` 越界由
+        :func:`update_account_pool` clamp 处理（不抛错）。
+        """
+        from webui.pipeline_exec_accounts import (
+            load_browser_accounts, save_browser_accounts, update_account_pool,
         )
         body = request.get_json(silent=True) or {}
-        roles = body.get("roles")
-        if not isinstance(roles, list) or not all(
-                r in ("R1", "R2") for r in roles):
-            return jsonify({"ok": False, "error": "角色取值必须是 R1/R2"}), 422
+        kwargs: dict = {}
+        if "selected" in body:
+            kwargs["selected"] = bool(body["selected"])
+        for field in ("order", "r1_quota", "r2_quota"):
+            if field in body:
+                try:
+                    kwargs[field] = int(body[field])
+                except (TypeError, ValueError):
+                    return jsonify({
+                        "ok": False, "error": f"{field} 必须是整数",
+                    }), 422
         accounts = load_browser_accounts(app.config["BROWSER_ACCOUNTS_PATH"])
         if str(account_id) not in accounts:
             return jsonify({"ok": False, "error": _MSG_ACCOUNT_NOT_FOUND}), 404
-        # 完整替换语义：该账号先退出全部角色，再对 roles 中每个角色互斥打标
-        # （清全账号该角色 → 打标到该账号），保证角色→账号一对一；保序去重。
-        for aid, item in accounts.items():
-            if str(aid) == str(account_id):
-                item["roles"] = []
-        for role in dict.fromkeys(roles):
-            accounts = assign_account_role(accounts, role, str(account_id))
+        try:
+            accounts = update_account_pool(accounts, str(account_id), **kwargs)
+        except KeyError:
+            return jsonify({"ok": False, "error": _MSG_ACCOUNT_NOT_FOUND}), 404
         save_browser_accounts(accounts, app.config["BROWSER_ACCOUNTS_PATH"])
         updated = accounts.get(str(account_id)) or {}
         return jsonify({
             "ok": True,
             "account_id": str(account_id),
-            "roles": list(updated.get("roles") or []),
+            "pool": updated.get("pool") or {},
         })
 
     @app.route("/api/browser-accounts/<account_id>/open", methods=["POST"])

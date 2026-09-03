@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from webui.logging_setup import get_logger
 from webui.pipeline_exec_settings import _ADVANCED_SETTINGS_DIR
 
 import json
@@ -11,6 +12,8 @@ import threading
 import uuid
 from pathlib import Path
 
+
+_logger = get_logger(__name__)
 
 
 BROWSER_ACCOUNTS: dict[str, dict[str, str]] = {
@@ -56,26 +59,77 @@ def reset_browser_accounts_path() -> None:
 
 
 
-def _default_browser_accounts() -> dict[str, dict[str, str | bool]]:
+# Spec 038 B091：默认每轮配额取范围中值（FR-004/005）。
+DEFAULT_R1_QUOTA = 25
+DEFAULT_R2_QUOTA = 100
+R1_QUOTA_MIN, R1_QUOTA_MAX = 1, 50
+R2_QUOTA_MIN, R2_QUOTA_MAX = 1, 200
+
+
+def _clamp_quota(value: object, lo: int, hi: int, default: int) -> int:
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, v))
+
+
+def _normalize_pool(raw: object, default_order: int = 0) -> dict:
+    """把 pool 字段归一为 {selected, order, r1_quota, r2_quota}。
+
+    Spec 038 FR-015/016/017/018：缺字段一律补默认——默认全进池、默认全选、
+    默认配额取范围中值（R1 25 / R2 100）。``order`` 缺省时落
+    ``default_order``（账号簿入盘顺序，保证勾选顺序稳定）。
+    """
+    if not isinstance(raw, dict):
+        raw = {}
+    selected = raw.get("selected")
+    try:
+        order = int(raw.get("order") if raw.get("order") is not None else default_order)
+    except (TypeError, ValueError):
+        order = default_order
     return {
-        aid: {
-            "id": aid, "name": str(item["name"]), "profile_dir": str(item["profile_dir"]),
-            "builtin": aid == "a", "roles": [],
-        } for aid, item in BROWSER_ACCOUNTS.items()
+        "selected": bool(selected) if selected is not None else True,
+        "order": max(0, order),
+        "r1_quota": _clamp_quota(raw.get("r1_quota"), R1_QUOTA_MIN, R1_QUOTA_MAX, DEFAULT_R1_QUOTA),
+        "r2_quota": _clamp_quota(raw.get("r2_quota"), R2_QUOTA_MIN, R2_QUOTA_MAX, DEFAULT_R2_QUOTA),
     }
 
 
+def _normalize_rate_limited(raw: object) -> bool:
+    if raw is None:
+        return False
+    return bool(raw)
 
-def load_browser_accounts(path: str | os.PathLike[str] | None = None) -> dict[str, dict[str, str | bool]]:
-    """Load browser accounts; the accounts file, when present, is authoritative."""
+
+def _default_browser_accounts() -> dict[str, dict[str, object]]:
+    """内置默认账号簿——每账号默认进池、默认全选、默认配额取中值（FR-015）。"""
+    out: dict[str, dict[str, object]] = {}
+    for order, (aid, item) in enumerate(BROWSER_ACCOUNTS.items()):
+        out[str(aid)] = {
+            "id": str(aid), "name": str(item["name"]), "profile_dir": str(item["profile_dir"]),
+            "builtin": aid == "a",
+            "pool": _normalize_pool(None, order),
+            "rate_limited": False,
+        }
+    return out
+
+
+
+def load_browser_accounts(path: str | os.PathLike[str] | None = None) -> dict[str, dict[str, object]]:
+    """Load browser accounts; the accounts file, when present, is authoritative.
+
+    Spec 038 (FR-021)：旧 ``roles`` 字段全删不兼容；新 schema 含 ``pool`` 与
+    ``rate_limited``，缺字段补默认（FR-015：默认全进池、默认全选、默认配额）。
+    """
     accounts_path = Path(path) if path is not None else browser_accounts_path()
-    accounts = {}
+    accounts: dict[str, dict[str, object]] = {}
     try:
         if accounts_path.is_file():
             with open(accounts_path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             if isinstance(saved, dict):
-                for aid, item in saved.items():
+                for order, (aid, item) in enumerate(saved.items()):
                     if not isinstance(item, dict):
                         continue
                     name = str(item.get("name") or "").strip()
@@ -87,8 +141,9 @@ def load_browser_accounts(path: str | os.PathLike[str] | None = None) -> dict[st
                         "profile_dir": os.path.abspath(os.path.expanduser(profile_dir)),
                         # 只有默认账号不可删；历史文件里账号 b 的 builtin 标记不再沿用。
                         "builtin": str(aid) == "a",
-                        # B073：角色标记（R1/R2 可同时），旧文件无字段时兼容为空。
-                        "roles": _normalize_roles(item.get("roles")),
+                        # Spec 038 B091：账号池配置 + 限流标记（旧 roles 字段全删，FR-021）。
+                        "pool": _normalize_pool(item.get("pool"), order),
+                        "rate_limited": _normalize_rate_limited(item.get("rate_limited")),
                     }
             accounts.setdefault("a", _default_browser_accounts()["a"])
         else:
@@ -100,17 +155,19 @@ def load_browser_accounts(path: str | os.PathLike[str] | None = None) -> dict[st
 
 
 def save_browser_accounts(accounts: dict, path: str | os.PathLike[str] | None = None) -> None:
-    """Atomically persist browser accounts."""
+    """Atomically persist browser accounts (Spec 038: pool + rate_limited)."""
     accounts_path = Path(path) if path is not None else browser_accounts_path()
     accounts_path.parent.mkdir(parents=True, exist_ok=True)
     clean = {}
-    for aid, item in accounts.items():
+    for order, (aid, item) in enumerate(accounts.items()):
+        pool = _normalize_pool(item.get("pool"), order)
         clean[str(aid)] = {
             "id": str(aid),
             "name": str(item.get("name") or "").strip(),
             "profile_dir": os.path.abspath(os.path.expanduser(str(item.get("profile_dir") or ""))),
             "builtin": bool(item.get("builtin", False)),
-            "roles": _normalize_roles(item.get("roles")),
+            "pool": pool,
+            "rate_limited": _normalize_rate_limited(item.get("rate_limited")),
         }
     tmp = accounts_path.with_name(f".{accounts_path.name}.{uuid.uuid4().hex}.tmp")
     try:
@@ -152,7 +209,10 @@ def resolve_browser_account(
 
 def add_browser_account(
         name: str, profile_dir: str = "", path: str | os.PathLike[str] | None = None) -> dict:
-    """Add a user-defined browser account and return it."""
+    """Add a user-defined browser account and return it.
+
+    Spec 038 FR-018：新增账号自动加入 R1/R2 池、默认全选、默认配额取范围中值。
+    """
     with _BROWSER_ACCOUNTS_LOCK:
         accounts = load_browser_accounts(path)
         name = _normalize_account_name(name, accounts)
@@ -168,9 +228,12 @@ def add_browser_account(
         }
         if os.path.normcase(normalized_dir) in existing_dirs:
             raise ValueError("浏览器资料目录不能与其他账号重复")
+        # 新增账号默认进池、默认全选、配额取中值，order 排到现有账号末尾。
         account = {
             "id": account_id, "name": name,
             "profile_dir": normalized_dir, "builtin": False,
+            "pool": _normalize_pool(None, len(accounts)),
+            "rate_limited": False,
         }
         accounts[account_id] = account
         save_browser_accounts(accounts, path)
@@ -266,50 +329,41 @@ def _cdp_data_dir() -> str:
 
 
 
-_ROLE_VALUES = ("R1", "R2")
-
-
-def _normalize_roles(roles) -> list[str]:
-    """Normalize a raw roles value to a valid list of R1/R2 tags (dedup, order kept)."""
-    if not isinstance(roles, list):
-        return []
-    seen: list[str] = []
-    for raw in roles:
-        value = str(raw or "").strip()
-        if value in _ROLE_VALUES and value not in seen:
-            seen.append(value)
-    return seen
-
+_ROLE_VALUES = ("R1", "R2")  # 保留以兼容旧调用方校验（FR-021：角色 schema 已弃用）
 
 
 def resolve_account_for_role(accounts: dict, role: str) -> str | None:
-    """Return the first account id whose roles contain ``role``; None when unassigned."""
-    role = str(role or "").strip()
+    """Spec 038 (FR-021)：返回账号池中第一个 ``pool.selected=True`` 的账号 ID。
+
+    ``role`` 参数保留仅为兼容旧调用方（pipeline_jobs_api.py /
+    exec_search_api.py / ai_screen_api.py / resume_identity.py 仍按 R1/R2
+    传入），实际语义被忽略——R1/R2 共用同一账号池，不再做角色互斥。
+    没有选中账号时返回 None。
+    """
+    _ = str(role or "").strip()  # 接受但不再使用
     for aid, item in accounts.items():
-        if role in (item.get("roles") or []):
+        pool = item.get("pool")
+        if not isinstance(pool, dict):
+            pool = _normalize_pool(pool)
+        if pool.get("selected", True):
             return str(aid)
     return None
 
 
-
 def assign_account_role(
         accounts: dict, role: str, account_id_or_none: str | None) -> dict:
-    """Role→account one-to-one tag: clear ``role`` on every account, then tag the target.
+    """Spec 038 (FR-021)：角色→账号一对一 schema 已弃用，本函数为兼容 stub。
 
-    ``account_id_or_none`` of None clears the role entirely (back to 未指定).
-    Returns a new accounts dict for the caller to persist; does not mutate the input.
+    旧调用方（settings_api.py 的角色端点）传入后返回 accounts 的浅拷贝不变，
+    保留所有字段——pool 配置走专用端点（settings_api.py 的 pool 端点），
+    此处仅保证旧调用链不爆错。``role`` 与 ``account_id_or_none`` 校验保留
+    以维持 API 契约。
     """
     role = str(role or "").strip()
     if role not in _ROLE_VALUES:
         raise ValueError("角色必须是 R1 或 R2")
-    target = None if account_id_or_none is None else str(account_id_or_none)
-    updated = {}
-    for aid, item in accounts.items():
-        roles = [r for r in (item.get("roles") or []) if r != role]
-        if target is not None and str(aid) == target:
-            roles.append(role)
-        updated[str(aid)] = {**item, "roles": roles}
-    return updated
+    # 不修改任何字段；返回浅拷贝避免外部 mutate 影响入参。
+    return {str(aid): dict(item) for aid, item in accounts.items()}
 
 
 
@@ -323,9 +377,10 @@ def account_for_role(
     Priority:
     1. run 冻结值优先——续跑一律沿用任务创建时冻结的 browser_account，
        不重新按角色解析（冻结需求：运行中改角色不影响当前任务）；
-    2. 角色解析——账号簿中第一个带该角色标记的账号；
+    2. 池解析——账号簿中第一个 ``pool.selected=True`` 的账号（FR-021：R1/R2 共用池，
+       ``role`` 仅作兼容签名，不再有互斥语义）；
     3. 登录态检测——fresh 缓存为 not_logged_in/restricted 视为不可用，跳过；
-    4. 角色未指定或账号不可用 → fallback（调用方传当前账号），不报错不阻断。
+    4. 池未选账号或账号不可用 → fallback（调用方传当前账号），不报错不阻断。
     """
     accounts = load_browser_accounts(accounts_path)
     if isinstance(run, dict):
@@ -343,3 +398,68 @@ def account_for_role(
     if account_id is None:
         return fallback if fallback in accounts else "a"
     return account_id
+
+
+# ---------------------------------------------------------------------------
+# Spec 038 B091：账号池配置与限流持久化（账号簿权威域）
+# ---------------------------------------------------------------------------
+
+def update_account_pool(
+        accounts: dict, account_id: str, *,
+        selected: bool | None = None,
+        order: int | None = None,
+        r1_quota: int | None = None,
+        r2_quota: int | None = None) -> dict:
+    """部分更新某账号的 pool 配置；返回新 accounts dict 不修改入参。
+
+    - 目标账号不存在抛 ``KeyError``；
+    - 任何字段未传（None）保持原值；
+    - ``r1_quota``/``r2_quota`` 越界按 clamp 处理（落到 [min, max]，不抛错）；
+    - 全字段都没传时返回 accounts 浅拷贝（pool 不变）。
+    """
+    target = accounts.get(str(account_id))
+    if not isinstance(target, dict):
+        raise KeyError(account_id)
+    cur_pool = _normalize_pool(target.get("pool"), 0)
+    if selected is not None:
+        cur_pool["selected"] = bool(selected)
+    if order is not None:
+        try:
+            cur_pool["order"] = max(0, int(order))
+        except (TypeError, ValueError):
+            pass
+    if r1_quota is not None:
+        cur_pool["r1_quota"] = _clamp_quota(r1_quota, R1_QUOTA_MIN, R1_QUOTA_MAX, DEFAULT_R1_QUOTA)
+    if r2_quota is not None:
+        cur_pool["r2_quota"] = _clamp_quota(r2_quota, R2_QUOTA_MIN, R2_QUOTA_MAX, DEFAULT_R2_QUOTA)
+    updated = {str(aid): dict(item) for aid, item in accounts.items()}
+    updated[str(account_id)] = {**target, "pool": dict(cur_pool)}
+    return updated
+
+
+def set_account_rate_limited(
+        account_id: str, *, rate_limited: bool,
+        path: str | os.PathLike[str] | None = None) -> None:
+    """设置账号的撞墙限流标记（持久化，best-effort）。
+
+    Spec 038 FR-014：撞墙时写 True；成功使用后清零（自愈）。
+    账号不存在或写盘失败时仅记日志（不阻断运行流）。
+    """
+    aid = str(account_id or "").strip()
+    if not aid:
+        return
+    try:
+        accounts = load_browser_accounts(path)
+        item = accounts.get(aid)
+        if not isinstance(item, dict):
+            return
+        if bool(item.get("rate_limited")) == bool(rate_limited):
+            return  # 状态未变，避免无谓写盘
+        item["rate_limited"] = bool(rate_limited)
+        save_browser_accounts(accounts, path)
+    except Exception:
+        # best-effort：撞墙/自愈持久化失败不影响主流程
+        _logger.debug(
+            "set_account_rate_limited(%s, %s) 写盘失败（best-effort 忽略）",
+            aid, rate_limited, exc_info=True,
+        )

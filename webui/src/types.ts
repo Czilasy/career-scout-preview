@@ -187,8 +187,18 @@ export interface BrowserAccount {
   id: string;
   name: string;
   builtin?: boolean;
-  // B073：BOSS 任务角色标记（R1 列表/广泛抓取、R2 详情抓取），可同时存在。
-  roles?: string[];
+  // Spec 038 B091：账号池配置（FR-021 旧 roles 字段已弃用，全删不兼容）。
+  // R1/R2 共用账号池：selected 表示是否参与本轮询；r1_quota 是每轮 R1 抓取页数
+  // （1-50，默认 25）；r2_quota 是每轮 R2 抓取 JD 条数（1-200，默认 100）；
+  // order 是勾选顺序（默认按账号簿顺序）。
+  pool?: {
+    selected: boolean;
+    order: number;
+    r1_quota: number;
+    r2_quota: number;
+  };
+  // 撞墙限流标记（FR-014）：撞墙写 true，成功使用后清零（自愈）。
+  rate_limited?: boolean;
   // GET /api/browser-accounts 不返回 profile 路径或路径摘要（http-api.md L319）。
   platforms?: Partial<Record<Platform, BrowserAccountPlatformSpace>>;
 }

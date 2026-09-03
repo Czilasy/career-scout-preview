@@ -1260,7 +1260,12 @@ class FrozenConfigDigestTests(unittest.TestCase):
 
 
 class B073TaskAccountRoleTests(unittest.TestCase):
-    """B073：BOSS 任务按阶段冻结 R1/R2 账号，智联不受影响，未指定/不可用降级当前账号。"""
+    """Spec 038 B091：BOSS 任务按池解析冻结 browser_account。
+
+    FR-021：旧 R1/R2 角色互斥 schema 已弃用，新 schema 是 R1/R2 共用账号池。
+    任务创建时按 ``pool.selected`` 取第一个选中账号冻结（沿用 B073 续跑冻结语义）；
+    智联也走同一池解析（不再有 R1/R2 角色差异）；登录态不可用降级 fallback。
+    """
 
     def setUp(self):
         self.app, self.temp = _make_app()
@@ -1274,10 +1279,16 @@ class B073TaskAccountRoleTests(unittest.TestCase):
         from webui.pipeline_exec import reset_browser_accounts_path
         reset_browser_accounts_path()
 
-    def _set_role(self, account_id: str, roles: list[str]) -> None:
-        resp = self.client.put(
-            f"/api/browser-accounts/{account_id}/roles", json={"roles": roles})
-        self.assertEqual(resp.status_code, 200, resp.get_json())
+    def _set_only_selected(self, account_id: str) -> None:
+        """把目标账号设为唯一选中（其他账号取消选中），用新 pool schema。"""
+        from webui.pipeline_exec_accounts import (
+            load_browser_accounts, save_browser_accounts, update_account_pool,
+        )
+        accounts = load_browser_accounts()
+        for aid in list(accounts.keys()):
+            accounts = update_account_pool(
+                accounts, aid, selected=(str(aid) == str(account_id)))
+        save_browser_accounts(accounts)
 
     def _create_search_task(self, platform: str):
         from webui.execution_config import ExecutionConfigSnapshot
@@ -1304,19 +1315,22 @@ class B073TaskAccountRoleTests(unittest.TestCase):
         task_id = resp.get_json()["task_id"]
         return self.store.get_screening_run(task_id)
 
-    def test_boss_list_task_freezes_r1_account(self):
-        self._set_role("b", ["R1"])
+    def test_boss_list_task_freezes_pool_first_selected(self):
+        # b 设为唯一选中 → 任务冻结 browser_account == "b"
+        self._set_only_selected("b")
         persisted = self._create_search_task("boss")
         self.assertEqual(
             persisted["execution_params"]["browser_account"], "b")
 
-    def test_boss_list_task_falls_back_when_role_unassigned(self):
+    def test_boss_list_task_freezes_default_first_selected(self):
+        # 默认账号簿 a 是第一个 selected → 任务冻结 a
         persisted = self._create_search_task("boss")
         self.assertEqual(
             persisted["execution_params"]["browser_account"], "a")
 
-    def test_boss_list_task_downgrades_when_role_login_missing(self):
-        self._set_role("b", ["R1"])
+    def test_boss_list_task_downgrades_when_pool_account_login_missing(self):
+        # b 唯一 selected 但登录态 not_logged_in → fallback=a（兜底到内置账号）
+        self._set_only_selected("b")
         with mock.patch(
                 "scripts.login_state_cache.read_cached_state",
                 return_value="not_logged_in"):
@@ -1324,11 +1338,12 @@ class B073TaskAccountRoleTests(unittest.TestCase):
         self.assertEqual(
             persisted["execution_params"]["browser_account"], "a")
 
-    def test_zhilian_task_unaffected_by_roles(self):
-        self._set_role("b", ["R1"])
+    def test_zhilian_task_uses_pool_first_selected(self):
+        # 智联也走同一池解析（FR-020：两平台通吃；旧"智联不受 R1/R2 影响"已不适用）
+        self._set_only_selected("b")
         persisted = self._create_search_task("zhilian")
         self.assertEqual(
-            persisted["execution_params"]["browser_account"], "a")
+            persisted["execution_params"]["browser_account"], "b")
 
 
 class TuningLeaseOrdinaryTaskConflictTests(unittest.TestCase):
