@@ -178,26 +178,47 @@ describe("App", () => {
     } as never);
   }
 
+  // 038 P1-2：completed 通知 read:true（"完成"信号由 pill 彩色芯片展示，
+  // panel 行只是历史）；测试需要"未读 → 点击展开 panel"流程时改用 attention
+  // 过渡（paused/error 仍 read:false，是仅剩的 panel 未读来源）。
+  function emitAttentionTransition(
+    view: { vm: { $emit: (e: string, p: unknown) => void } },
+    message = "任务已暂停",
+  ) {
+    view.vm.$emit("round-status", {
+      platform: "boss", phase: "judged", judged: 0, scope: "all",
+      capsule: { state: "running", platform: "boss", progress: { phase: "scraping", done: 1, total: 10 } },
+    } as never);
+    view.vm.$emit("round-status", {
+      platform: "boss", phase: "judged", judged: 0, scope: "all",
+      capsule: { state: "attention", platform: "boss", attention: { kind: "paused", message } },
+    } as never);
+  }
+
   it("037: island catches notices first — pill click opens panel, not navigation", async () => {
     const wrapper = mount(App);
     await flushPromises();
     const view = wrapper.findComponent(DiscoveryView);
 
-    emitRoundTransition(view);
+    // 038 P1-2：completed 通知 read:true，改用 attention（paused）触发未读。
+    emitAttentionTransition(view);
     await flushPromises();
 
     // 未读红点出现；点击胶囊展开面板而非派发直达导航。
     expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
-    await wrapper.get('[data-testid="dynamic-island-completed"]').trigger("click");
+    await wrapper.get('[data-testid="dynamic-island-attention"]').trigger("click");
     expect(wrapper.find('[data-testid="island-notice-panel"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="island-notice-row-completed"]').text()).toContain("匹配 5");
+    expect(wrapper.get('[data-testid="island-notice-row-paused"]').text()).toContain("任务已暂停");
 
     // B2 语义：展开期间红点仍在、行以未读渲染（看过才算读 → 收起时 markAllRead）。
     expect(wrapper.find('[data-testid="island-unread"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="island-notice-row-completed"]').attributes("data-notice-read")).toBe("false");
+    expect(wrapper.get('[data-testid="island-notice-row-paused"]').attributes("data-notice-read")).toBe("false");
 
-    // 收起（点 backdrop）→ dismiss → 全部已读，红点消失。
-    await wrapper.get('[data-testid="island-backdrop"]').trigger("click");
+    // 收起（点 backdrop → dismiss → 快照内全部已读，红点消失）。backdrop 经
+    // Teleport 挂到 body，不在组件根内，从 document 查询并派发原生点击。
+    const backdrop = document.querySelector<HTMLElement>('[data-testid="island-backdrop"]');
+    expect(backdrop).toBeTruthy();
+    backdrop!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flushPromises();
     expect(wrapper.find('[data-testid="island-notice-panel"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="island-unread"]').exists()).toBe(false);
@@ -220,9 +241,10 @@ describe("App", () => {
     await flushPromises();
     const view = wrapper.findComponent(DiscoveryView);
 
-    emitRoundTransition(view);
+    // 038 P1-2：completed 通知 read:true，改用 attention 触发未读。
+    emitAttentionTransition(view, "首次暂停");
     await flushPromises();
-    await wrapper.get('[data-testid="dynamic-island-completed"]').trigger("click");
+    await wrapper.get('[data-testid="dynamic-island-attention"]').trigger("click");
     expect(wrapper.find('[data-testid="island-notice-panel"]').exists()).toBe(true);
 
     // 打开提醒抽屉 → 岛面板收起（collapse 触 dismiss，关闭瞬间的通知标已读）。
@@ -231,16 +253,24 @@ describe("App", () => {
     expect(wrapper.find('[data-testid="island-notice-panel"]').exists()).toBe(false);
 
     // 通知已全部消费：再点胶囊 = 直达导航（面板不开；抽屉不因导航而强关）。
-    await wrapper.get('[data-testid="dynamic-island-completed"]').trigger("click");
+    await wrapper.get('[data-testid="dynamic-island-attention"]').trigger("click");
     await flushPromises();
     expect(wrapper.find('[data-testid="island-notice-panel"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="reminder-drawer"]').exists()).toBe(true);
 
-    // 新通知到达（新一轮跑完）→ 未读出现 → 点胶囊开面板，并强制收起提醒抽屉。
-    emitRoundTransition(view);
+    // 新 attention 到达（不同 message 绕过 upsert 内容 dedup）→ 未读出现 →
+    // 点胶囊开面板，并强制收起提醒抽屉。
+    view.vm.$emit("round-status", {
+      platform: "boss", phase: "judged", judged: 0, scope: "all",
+      capsule: { state: "running", platform: "boss", progress: { phase: "scraping", done: 1, total: 10 } },
+    } as never);
+    view.vm.$emit("round-status", {
+      platform: "boss", phase: "judged", judged: 0, scope: "all",
+      capsule: { state: "attention", platform: "boss", attention: { kind: "paused", message: "再次暂停" } },
+    } as never);
     await flushPromises();
     expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
-    await wrapper.get('[data-testid="dynamic-island-completed"]').trigger("click");
+    await wrapper.get('[data-testid="dynamic-island-attention"]').trigger("click");
     expect(wrapper.find('[data-testid="island-notice-panel"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="reminder-drawer"]').exists()).toBe(false);
   });
@@ -250,12 +280,13 @@ describe("App", () => {
     await flushPromises();
     const view = wrapper.findComponent(DiscoveryView);
 
-    emitRoundTransition(view);
+    // 038 P1-2：completed 通知 read:true，改用 attention 触发未读。
+    emitAttentionTransition(view);
     await flushPromises();
     expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
 
     // 先展开面板，再切 profile：面板收起、通知池清空（reset + collapse，B3）。
-    await wrapper.get('[data-testid="dynamic-island-completed"]').trigger("click");
+    await wrapper.get('[data-testid="dynamic-island-attention"]').trigger("click");
     expect(wrapper.find('[data-testid="island-notice-panel"]').exists()).toBe(true);
 
     // 新建并切换 profile：收起岛面板并清空通知池。
@@ -288,9 +319,12 @@ describe("App", () => {
 
     expect(wrapper.find('[data-testid="reminder-badge"]').exists()).toBe(false);
     expect(wrapper.get('[data-testid="reminder-trigger"]').attributes("aria-label")).toBe("查看提醒");
-    // 胶囊本身照常显示本轮结果；岛通知也未受影响。
+    // 胶囊本身照常显示本轮结果。
     expect(wrapper.get('[data-testid="dynamic-island-completed"]').text()).toContain("匹配 5");
-    expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
+    // 038 P1-2：completed 通知 read:true（"完成"信号由 pill 彩色芯片实时展示，
+    // panel 行只是历史不计未读），pill 不显示未读角标——投递/待确认数字不会
+    // 反向漏进 island-unread。
+    expect(wrapper.find('[data-testid="island-unread"]').exists()).toBe(false);
   });
 
   it("opens the history drawer from the top bar", async () => {
@@ -620,10 +654,9 @@ describe("App", () => {
     await flushPromises();
     // 取消成功后卡片移除，抽屉保持打开；提示是成功态，不弹错误。
     expect(wrapper.find(".fav-card-remove").exists()).toBe(false);
-    const notice = wrapper.find(".notice-bar");
-    expect(notice.exists()).toBe(true);
-    expect(notice.text()).toContain("已取消收藏");
-    expect(notice.text()).not.toContain("失败");
+    // 038 复审：取消收藏成功提示进灵动岛打断队列，不再走 notice-bar 浮窗。
+    expect(wrapper.find(".notice-bar").exists()).toBe(false);
+    expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
   });
 
   it("closes the drawer on profile switch and drops stale count responses from the old profile", async () => {    const pendingCounts: Array<{ url: string; resolve: (value: Response) => void }> = [];
@@ -902,5 +935,224 @@ describe("App", () => {
     await wrapper.get(".favorites-trigger").trigger("click");
     await flushPromises();
     expect(wrapper.get(".fav-card-main").attributes("href")).toBe("#");
+  });
+
+  // ---------- 038：灵动岛 v3 接线（NoticeBar 分流 / 提醒打断 / carousel reset）----------
+
+  it("038: warning notice 折进 island 打断队列，NoticeBar 不渲染", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const view = wrapper.findComponent(DiscoveryView);
+
+    // 推一条 warning notice（经 DiscoveryView @notify → showNotice 分流）。
+    view.vm.$emit("notify", { message: "检查更新失败", tone: "warning" });
+    await flushPromises();
+
+    // NoticeBar 不渲染（warning 被 showNotice 分流到 carousel pushInterrupt）。
+    expect(wrapper.find(".notice-bar").exists()).toBe(false);
+    // carousel 收到打断：badgeCount=1，pill 角标 = notices 未读(0) + badge(1) = 1。
+    expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
+  });
+
+  it("038: error notice 折进 island 打断队列", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const view = wrapper.findComponent(DiscoveryView);
+
+    view.vm.$emit("notify", { message: "导出失败", tone: "error" });
+    await flushPromises();
+
+    expect(wrapper.find(".notice-bar").exists()).toBe(false);
+    expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
+  });
+
+  it("038 复审：info/success notice 也融入 island 打断队列（不再保留 NoticeBar 浮窗）", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const view = wrapper.findComponent(DiscoveryView);
+
+    view.vm.$emit("notify", { message: "已保存", tone: "success" });
+    await flushPromises();
+
+    // 038 复审：info/success 不再走 NoticeBar 浮窗，统一进灵动岛打断队列
+    // （用户要求「信息性浮窗全部进灵动岛，不要弹出小条幅」）。
+    expect(wrapper.find(".notice-bar").exists()).toBe(false);
+    expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
+  });
+
+  it("038: 投递提醒 0→N 推一条打断进 carousel", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/job-reminders/count")) {
+        return response({ ok: true, profile_id: "p1", threshold_hours: 720, total: 3 });
+      }
+      if (url.endsWith("/api/profiles")) return response({ profiles: [{ id: "p1", name: "画像A" }] });
+      return baseAppResponse(url) ?? response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(App);
+    await flushPromises();
+
+    // reminderTotal 0→3 触发 pushInterrupt：badgeCount=1，pill 角标=1。
+    expect(wrapper.get('[data-testid="reminder-badge"]').text()).toBe("3");
+    expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
+  });
+
+  it("038: 投递提醒 N→M（都 >0）不重复推打断", async () => {
+    let countTotal = 3;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/job-reminders/count")) {
+        return response({ ok: true, profile_id: "p1", threshold_hours: 720, total: countTotal });
+      }
+      if (url.endsWith("/api/profiles")) return response({ profiles: [{ id: "p1", name: "画像A" }] });
+      return baseAppResponse(url) ?? response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(App);
+    await flushPromises();
+    // 首次 0→3 推一条：badgeCount=1。
+    expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
+
+    // 手动刷新 count，total 3→5（都 >0）：不推新打断（badgeCount 不增长）。
+    countTotal = 5;
+    wrapper.findComponent(DiscoveryView).vm.$emit("job-feedback-changed", { profileId: "p1" });
+    await flushPromises();
+    // badgeCount 仍为 1（只 0→N 推一次）；角标仍是 1（notices 未读 0 + badge 1）。
+    expect(wrapper.get('[data-testid="reminder-badge"]').text()).toBe("5");
+    expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
+  });
+
+  it("038: profile 切换清空 carousel 打断队列", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const view = wrapper.findComponent(DiscoveryView);
+
+    // 推一条 warning 打断 → badgeCount=1。
+    view.vm.$emit("notify", { message: "测试警告", tone: "warning" });
+    await flushPromises();
+    expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
+
+    // 切换 profile → carousel.reset()：打断队列清空，角标消失。
+    view.vm.$emit("profile-created", { id: "profile-2", name: "画像B" });
+    await flushPromises();
+    expect(wrapper.find('[data-testid="island-unread"]').exists()).toBe(false);
+  });
+
+  it("038: TaskCompletedToast 删除——completed 态不弹独立 toast，由 pill 接管", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const view = wrapper.findComponent(DiscoveryView);
+
+    // 跑完一轮 → completed 态：原 toast 会在此弹"点此查看最新"。
+    emitRoundTransition(view);
+    await flushPromises();
+
+    // 组件已删：不渲染 task-completed-toast 元素；completed pill 是"完成→查看最新"主路径。
+    expect(wrapper.find('[data-testid="task-completed-toast"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="dynamic-island-completed"]').exists()).toBe(true);
+  });
+
+  // ---------- 038 复审 P2-1 / P2-5 / P2-8 ----------
+
+  it("038 P2-1: completed 通知 read:true，点 pill 直达结果页（不展开 panel）", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const view = wrapper.findComponent(DiscoveryView);
+
+    // 跑完一轮 → completed 通知 read:true（P1-2 裁决）。
+    emitRoundTransition(view);
+    await flushPromises();
+
+    // 无未读：pill 不显示角标；点击直达 results（不展开 panel）。
+    expect(wrapper.find('[data-testid="island-unread"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="dynamic-island-completed"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="island-notice-panel"]').exists()).toBe(false);
+    // 等价被删 TaskCompletedToast 的一键直达——胶囊导航不抛错、不改变挂载。
+    expect(wrapper.find('[data-testid="dynamic-island-completed"]').exists()).toBe(true);
+  });
+
+  it("038 P2-5: history 浏览期间 notify 暂停消费，回最新时 flush", async () => {
+    vi.useFakeTimers();
+    try {
+      const wrapper = mount(App);
+      await flushPromises();
+      const view = wrapper.findComponent(DiscoveryView);
+
+      // 进入 history scope（浏览历史轮）。
+      view.vm.$emit("round-status", {
+        platform: "boss", phase: "judged", judged: 0, scope: "history",
+        capsule: { state: "completed", platform: "boss", results: { matched: 3, pending: 0 } },
+      } as never);
+      await flushPromises();
+
+      // history 期间推一条 warning → pushInterruptOrDefer 缓冲，不打断 carousel。
+      view.vm.$emit("notify", { message: "导出失败", tone: "warning" });
+      await flushPromises();
+      expect(wrapper.find('[data-testid="island-unread"]').exists()).toBe(false);
+
+      // 回到最新（scope 离开 history）→ watch flush → pushInterrupt → 角标出现。
+      view.vm.$emit("round-status", {
+        platform: "boss", phase: "judged", judged: 0, scope: "all",
+        capsule: { state: "running", platform: "boss", progress: { phase: "scraping", done: 1, total: 10 } },
+      } as never);
+      await flushPromises();
+      expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
+
+      // 推进 timer → 打断沉入 panel（未读条出现，kind=interrupt，target=task）。
+      await vi.advanceTimersByTimeAsync(2200);
+      await flushPromises();
+      expect(wrapper.find('[data-testid="island-unread"]').exists()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("038 P2-8: 投递提醒打断沉入 panel 后行点击直达 reminders（开提醒抽屉）", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/job-reminders/count")) {
+        return response({ ok: true, profile_id: "p1", threshold_hours: 720, total: 3 });
+      }
+      if (url.includes("/api/job-reminders")) {
+        return response({ ok: true, profile_id: "p1", threshold_hours: 720, total: 3, items: [] });
+      }
+      if (url.endsWith("/api/profiles")) return response({ profiles: [{ id: "p1", name: "画像A" }] });
+      return baseAppResponse(url) ?? response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const wrapper = mount(App);
+      await flushPromises();
+
+      // reminder 0→3 触发 pushInterrupt（target="reminders"）：badgeCount=1。
+      expect(wrapper.get('[data-testid="reminder-badge"]').text()).toBe("3");
+      expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
+
+      // 推进 timer → 打断沉入 panel（target="reminders"，未读）。
+      await vi.advanceTimersByTimeAsync(2200);
+      await flushPromises();
+      // 沉入后 badgeCount=0；notices 多一条 interrupt 未读 → 总未读仍是 1。
+      expect(wrapper.get('[data-testid="island-unread"]').text()).toBe("1");
+
+      // 点 pill → 展开 panel；行点击 → handleIslandNavigate("reminders") → 开提醒抽屉。
+      await wrapper.get('[data-testid="island-unread"]').trigger("click");
+      await flushPromises();
+      const row = wrapper.find('[data-testid="island-notice-row-interrupt"]');
+      expect(row.exists()).toBe(true);
+      expect(row.text()).toContain("投递提醒");
+      await row.trigger("click");
+      await flushPromises();
+      expect(wrapper.find('[data-testid="reminder-drawer"]').exists()).toBe(true);
+      // panel 收起（row-click 触 requestClose）。
+      expect(wrapper.find('[data-testid="island-notice-panel"]').exists()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 });

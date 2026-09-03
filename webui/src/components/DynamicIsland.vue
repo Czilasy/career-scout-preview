@@ -1,63 +1,58 @@
 <script setup lang="ts">
 // ---------------------------------------------------------------------------
-// 037 顶栏灵动岛 v2：常驻活组件 + motion-v 驱动。
+// 038 灵动岛 v3：live 仪表盘 + 转盘轮播 + 彩色芯片 + 红光 live state。
 //
-// 数据：消费 App 上抛的 CapsuleStatusPayload（036 链路）与 useIslandNotices
-// 产生的通知池；不做数据抓取（036 FR-017 沿用）。
-//
-// 动画策略（037 复审后修订）：
-// - 入场用 Motion 组件 + :initial/:animate（弹簧 spring）；
-// - 通知到达弹跳改 Web Animations API（CSS attribute 递增不会重启动画，
-//   0→1 后 1→2、2→3 全部静默——复审 P1）；reduce-motion 下跳过；
-// - 新通知到达时 pill 短暂展示最新未读摘要（"一瞥"，2.2s 收回）；
-// - idle 常驻呼吸（scale 1↔1.006，4s）兑现 spec US-1 的生命感；
-// - 退场：手写两阶段（leaving 220ms 淡出再卸载），reduce-motion 下即时卸载，
-//   兼顾 jsdom 测试确定性（不动 AnimatePresence）；
-// - 系统"减少动态"时 useReducedMotion() 短路所有弹簧为 {duration:0}。
-//
-// 点击行为：
-// - 有未读 → 展开面板（emit expand；已读在收起 dismiss 时统一标记，
-//   dismiss 携带关闭瞬间的 id 快照——展开期间行以未读渲染，复审二 B2/N2）；
-// - 全部已读/无通知 → 按 live capsule 状态 emit navigate（复审三 §13：
-//   已读后回到直达语义，不永远弹历史列表）。
-//
-// 无障碍（复审 C2/§7）：
-// - pill 无未读时不设 aria-label，让运行进度/结果数字作为可访问名；
-// - 通知到达经 visually-hidden aria-live 播报；
-// - 面板 role=dialog，展开时移焦入面板、收起时焦点归还 pill，Tab 轻量圈闭。
-//
-// 暴露：collapse() via defineExpose（App 打开抽屉/profile 切换时调用）。
+// 038 核心变更（在 037 骨架上叠加，不回退 037 行为）：
+// - pill 内部改为 vertical spring carousel（lane 0=主流程 live state pinned，
+//   lane 1+=打断队列 FIFO）；translateY 用 motion-v spring 有 overshoot 才"弹"。
+// - running 态显示 live 进度（正在抓取/AI精筛 N/M），数字跳动有弹性：
+//   done 变化时旧值上滑淡出（labelStack 栈）+ 新值下滑淡入 + playPop 弹动。
+// - completed 态显示彩色芯片（匹配绿 / 待确认琥珀），phase=scraped 仍显示"待筛选 N"。
+// - attention 态叠加红光层（data-glow="error"|"paused"），任务恢复自动褪去。
+// - pill 宽度 spring 弹性伸缩（FR-007"弹弹的"）：测量展示位 lane 的自然宽，
+//   Motion 以 spring 过渡到目标宽（含角标占位）；上限 100vw-32px（窄屏边角）。
+// - 打断到达：carousel 垂直转一次展示打断、~2.2s 后转回主流程，打断沉入 panel。
+// - 037 的 peek 一瞥机制移除（live state 已是实时仪表盘，无需临时文本）；
+//   playPop + aria-live announce 保留（终态通知 + 打断都触发）。
+// - 037 的 panel/dismiss snapshot/互斥/tab trap/Teleport backdrop/navigate/aria 全保留。
+// - navigate 目标含 "reminders"（打断行点击开提醒抽屉，App 层分流——
+//   requestCapsuleNavigation 不认识它，useDiscoveryState 禁改）。
 // ---------------------------------------------------------------------------
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Motion, useReducedMotion } from "motion-v";
 import type { CapsuleStatusPayload, DynamicIslandState } from "../composables/useDiscoveryState";
 import type { IslandNotice } from "../composables/useIslandNotices";
+import type {
+  IslandCarouselApi,
+  IslandInterruptContent,
+  IslandLiveState,
+} from "../composables/useIslandCarousel";
 import IslandNoticePanel from "./IslandNoticePanel.vue";
 
-export type CapsuleTarget = "home" | "task" | "results" | "attention";
+export type CapsuleTarget = "home" | "task" | "results" | "attention" | "reminders";
 
 const props = defineProps<{
   status: CapsuleStatusPayload | null;
   notices: IslandNotice[];
+  carousel: IslandCarouselApi;
 }>();
 
 const emit = defineEmits<{
   navigate: [target: CapsuleTarget];
   expand: [];
-  // dismiss 携带关闭瞬间的通知 id 快照：App 只把快照内标记已读，
-  // 关闭窗口期（leaving 220ms）新到达的通知保持未读，不被误吞（复审二 N2）。
   dismiss: [ids: string[]];
 }>();
 
+const LANE_HEIGHT = 34;
+
 const open = ref(false);
 const leaving = ref(false);
-const peekText = ref("");
 const liveText = ref("");
 
 const pillRef = ref<HTMLElement | null>(null);
 const anchorEl = ref<HTMLElement | null>(null);
+const trackEl = ref<HTMLElement | null>(null);
 
-let peekTimer: number | undefined;
 let leaveTimer: number | undefined;
 let popAnim: Animation | null = null;
 
@@ -65,36 +60,42 @@ const capsule = computed<DynamicIslandState>(
   () => props.status?.capsule ?? { state: "idle", platform: "boss" },
 );
 
+const mainLaneState = props.carousel.mainLaneState;
+const activeLaneIndex = props.carousel.activeLaneIndex;
+const lanes = props.carousel.lanes;
+const badgeCount = props.carousel.badgeCount;
+
+const interruptLanes = computed(() => lanes.value.filter((l) => l.type === "interrupt"));
+
+const livePhase = computed(() => mainLaneState.value.phase);
+const liveDone = computed(() => mainLaneState.value.done);
+const liveTotal = computed(() => mainLaneState.value.total);
+const liveCounts = computed(() => mainLaneState.value.counts);
+const glow = computed(() => mainLaneState.value.glow ?? "none");
+
 const platformLabel = computed(() =>
   capsule.value.platform === "zhilian" ? "智联" : "BOSS",
 );
 
-const reduced = useReducedMotion();
-const animOn = computed(() => !reduced.value);
-const spring = computed(() =>
-  reduced.value ? { duration: 0 } : { type: "spring", stiffness: 380, damping: 30 },
-);
-const hoverSpring = computed(() =>
-  reduced.value ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 18 },
-);
+const isScrapedPhase = computed(() => props.status?.phase === "scraped");
 
 const runningLabel = computed(() => {
-  if (capsule.value.state !== "running") return "";
-  const { progress } = capsule.value;
-  const prefix = progress.phase === "scraping" ? "抓取" : "筛选";
-  return progress.total === undefined
-    ? `${prefix} ${progress.done}`
-    : `${prefix} ${progress.done}/${progress.total}`;
+  // 038 复审：三种阶段文案——列表抓取 / JD 抓取 / AI 精筛（旧版只有前两种，
+  // 抓 JD 阶段被显示成"AI精筛"，与真·AI 精筛撞车）。
+  if (!["scraping", "jd", "screening"].includes(livePhase.value)) return "";
+  const prefix =
+    livePhase.value === "scraping" ? "正在抓取"
+      : livePhase.value === "jd" ? "抓取 JD"
+        : "AI精筛";
+  const done = liveDone.value ?? 0;
+  return liveTotal.value === undefined
+    ? `${prefix} ${done}`
+    : `${prefix} ${done}/${liveTotal.value}`;
 });
 
-const completedLabel = computed(() => {
-  if (capsule.value.state !== "completed") return "";
-  const { results } = capsule.value;
-  if (props.status?.phase === "scraped") return `待筛选 ${results.matched}`;
-  return results.pending > 0
-    ? `匹配 ${results.matched} · 待确认 ${results.pending}`
-    : `匹配 ${results.matched}`;
-});
+const attentionMessage = computed(() =>
+  capsule.value.state === "attention" ? capsule.value.attention.message : "",
+);
 
 const stateTarget = computed<CapsuleTarget>(() => {
   switch (capsule.value.state) {
@@ -105,13 +106,88 @@ const stateTarget = computed<CapsuleTarget>(() => {
   }
 });
 
-const unread = computed(() => props.notices.filter((n) => !n.read).length);
+// 038：总未读 = panel 未读（终态通知 + 已沉入的打断） + carousel 队列（未沉入的打断）
+const unread = computed(() =>
+  props.notices.filter((n) => !n.read).length + badgeCount.value,
+);
 
-// ---- 通知到达反馈（复审二 N3）：按"新出现的未读 id"触发，而非未读计数 ----
-// upsert 把"同 kind 内容更新"定义为新通知（未读数不变），只看计数会漏掉
-// 未读→未读的更新（无 pop/peek/播报）。用 seenUnread 集合求差集识别新增。
-let seenUnread = new Set<string>();
-let boot = true;
+const reduced = useReducedMotion();
+const animOn = computed(() => !reduced.value);
+const carouselSpring = computed(() =>
+  reduced.value ? { duration: 0 } : { type: "spring" as const, stiffness: 300, damping: 26 },
+);
+const hoverSpring = computed(() =>
+  reduced.value ? { duration: 0 } : { type: "spring" as const, stiffness: 460, damping: 18 },
+);
+const valueSpring = computed(() =>
+  // 038 复审：stiffness 380 → 520（收敛更快）——数字跳动动画窗口越长，
+  // 文字停留在亚像素位移+半透明状态越久越"糊"（用户反馈）。
+  reduced.value ? { duration: 0 } : { type: "spring" as const, stiffness: 520, damping: 32 },
+);
+
+// ---- 038 FR-007：pill 宽度 spring 弹性伸缩（"弹弹的"） ----
+// 测量展示位 lane 的自然宽（inline-flex nowrap，offsetWidth 即内容宽），
+// Motion 以 spring 过渡到 目标宽 = lane 宽 + 左右 padding + 角标占位。
+// 上限 100vw - 32px（窄屏边角）；reduce-motion 瞬时（widthSpring duration 0）。
+const PILL_PAD_X = 36; // 左右 padding 18*2（与 .island-pill padding 同口径）
+const BADGE_W = 30; // 未读角标占位（含 margin）
+/* 038 复审：56 → 60——短文案（如 idle 的"BOSS"）时 pill 不过窄，
+   内容左右留出可见的呼吸空间，不再"截断一丢丢"。
+   约束：必须小于 PILL_PAD_X + BADGE_W（36+30=66）。否则 jsdom 下
+   （无布局、offsetWidth 恒为 0）目标宽全部被最小值夹住，"角标出现后
+   增宽"的 FR-007 断言失去差值——真实浏览器不受影响，但不掩盖测试语义。 */
+const PILL_MIN_W = 60;
+
+const pillWidth = ref<number | null>(null);
+const widthSpring = computed(() =>
+  reduced.value ? { duration: 0 } : { type: "spring" as const, stiffness: 380, damping: 26 },
+);
+const widthAnimate = computed(() =>
+  pillWidth.value !== null ? { width: pillWidth.value } : undefined,
+);
+
+function remeasureWidth() {
+  const track = trackEl.value;
+  if (!track) return;
+  // track 的 children 顺序 = [main lane, ...interrupt lanes]，与 activeLaneIndex 对齐。
+  const el = track.children[activeLaneIndex.value] as HTMLElement | undefined;
+  if (!el) return;
+  const extra = unread.value > 0 ? BADGE_W : 0;
+  const target = el.offsetWidth + PILL_PAD_X + extra;
+  pillWidth.value = Math.min(Math.max(target, PILL_MIN_W), window.innerWidth - 32);
+}
+
+// 内容变化触发重测：主流程文案/芯片计数/打断内容/角标出现。
+const contentKey = computed(() => {
+  const lane = lanes.value[activeLaneIndex.value];
+  if (lane && lane.type === "interrupt") {
+    const c = lane.content as IslandInterruptContent;
+    return `int:${c.title}:${c.detail ?? ""}`;
+  }
+  switch (livePhase.value) {
+    // 038 复审：加上 "jd"——漏掉它会落进 default（idle 口径），JD 抓取阶段
+    // 文案变化触发不了宽度重测，pill 不跟着撑宽，文字被裁。
+    case "scraping":
+    case "jd":
+    case "screening":
+      return `run:${runningLabel.value}`;
+    case "completed":
+      return `done:${isScrapedPhase.value ? "s" : "j"}:${liveCounts.value?.matched ?? 0}:${liveCounts.value?.pending ?? 0}`;
+    case "attention":
+      return `att:${attentionMessage.value}`;
+    default:
+      return `idle:${capsule.value.platform}`;
+  }
+});
+
+watch([contentKey, unread], async () => {
+  await nextTick();
+  remeasureWidth();
+}, { flush: "post" });
+
+onMounted(() => {
+  remeasureWidth();
+});
 
 function playPop() {
   const el = pillRef.value;
@@ -128,32 +204,18 @@ function playPop() {
   );
 }
 
-function showPeek(notice: IslandNotice) {
-  peekText.value = notice.detail ? `${notice.title} · ${notice.detail}` : notice.title;
-  if (peekTimer !== undefined) window.clearTimeout(peekTimer);
-  peekTimer = window.setTimeout(() => {
-    peekText.value = "";
-    peekTimer = undefined;
-  }, 2200);
+function announce(title: string, detail?: string) {
+  liveText.value = detail ? `${title}：${detail}` : title;
 }
 
-function announce(notice: IslandNotice) {
-  liveText.value = notice.detail ? `${notice.title}：${notice.detail}` : notice.title;
-}
-
-function clearPeek() {
-  if (peekTimer !== undefined) {
-    window.clearTimeout(peekTimer);
-    peekTimer = undefined;
-  }
-  peekText.value = "";
-}
+// ---- 037 终态通知反馈：watch notices 新未读 → playPop + announce ----
+let seenUnread = new Set<string>();
+let boot = true;
 
 watch(
   () => props.notices,
   (list) => {
     const current = new Set(list.filter((n) => !n.read).map((n) => n.id));
-    // 首次观察只建基线（mount 已有未读 = 用户尚未有机会看到，不补反馈）。
     if (boot) {
       seenUnread = current;
       boot = false;
@@ -166,16 +228,60 @@ watch(
       .filter((n) => fresh.includes(n.id))
       .sort((a, b) => b.at - a.at)[0];
     if (!newest) return;
-    announce(newest);
-    // 面板已展开或正在退场时直接看面板，不叠加弹跳/一瞥（红点照常出现）。
-    if (open.value || leaving.value) return;
-    playPop();
-    showPeek(newest);
+    announce(newest.title, newest.detail);
+    if (!open.value && !leaving.value) playPop();
   },
   { immediate: true },
 );
 
-// ---- 开合与焦点管理 ----
+// ---- 038 打断反馈：watch badgeCount 增长 → playPop + announce ----
+let badgeBoot = true;
+let seenBadge = 0;
+
+watch(badgeCount, (count) => {
+  if (badgeBoot) {
+    seenBadge = count;
+    badgeBoot = false;
+    return;
+  }
+  if (count <= seenBadge) {
+    seenBadge = count;
+    return;
+  }
+  seenBadge = count;
+  if (open.value || leaving.value) return;
+  const active = lanes.value[activeLaneIndex.value];
+  if (active && active.type === "interrupt") {
+    const content = active.content as IslandInterruptContent;
+    announce(content.title, content.detail);
+    playPop();
+  }
+});
+
+// ---- 038 数字跳动（SC-001）：done 变化 → playPop 弹动 + 旧值上滑淡出 ----
+// 新值下滑淡入由 runningLabel Motion 的 :key 重建承担（y:8→0 淡入）；
+// 旧值经 labelStack 短暂保留渲染（absolute + 上滑淡出 keyframes），
+// 400ms 后出栈（jsdom 不跑 CSS animation，用 setTimeout 保证测试可推进）。
+const labelStack = ref<string[]>([]);
+let labelOutTimer: number | undefined;
+
+watch(runningLabel, (next, prev) => {
+  if (!prev || prev === next) return;
+  labelStack.value = [prev];
+  if (labelOutTimer !== undefined) window.clearTimeout(labelOutTimer);
+  labelOutTimer = window.setTimeout(() => {
+    labelStack.value = [];
+    labelOutTimer = undefined;
+  }, 400);
+});
+
+watch(liveDone, (_next, prev) => {
+  if (prev === undefined || prev === _next) return;
+  // 数字推进时"啵"一下（reduce-motion 由 playPop 内部 animOn 守卫短路）。
+  if (!open.value && !leaving.value) playPop();
+});
+
+// ---- 开合与焦点管理（沿用 037） ----
 let closingIds: string[] = [];
 
 function openPanel() {
@@ -183,15 +289,11 @@ function openPanel() {
   leaving.value = false;
   open.value = true;
   emit("expand");
-  // 点开即"已看"：清掉 pill 上还挂着的一瞥文案（复审三 §8）。
-  clearPeek();
-  // B1：窄屏面板改 fixed 视口居中，top 取胶囊实测底缘（锚点偏左时会溢出）。
   const rect = pillRef.value?.getBoundingClientRect();
   if (anchorEl.value) {
     const top = rect ? Math.min(rect.bottom + 8, window.innerHeight - 48) : 76;
     anchorEl.value.style.setProperty("--panel-top", `${Math.max(top, 8)}px`);
   }
-  // 焦点移入面板（C2）：面板自身 role=dialog/tabindex=-1，首 Tab 从面板行开始。
   void nextTick(() => {
     anchorEl.value?.querySelector<HTMLElement>('[data-testid="island-notice-panel"]')?.focus({ preventScroll: true });
   });
@@ -205,13 +307,10 @@ function finishClose() {
   leaving.value = false;
   if (!open.value) return;
   open.value = false;
-  // 快照在 requestClose 时已定格；只有快照内通知被标已读。
   if (closingIds.length > 0) {
     emit("dismiss", closingIds);
     closingIds = [];
   }
-  // 焦点归还仅当焦点仍在岛内（面板/行/胶囊）时执行（复审三 N1）：
-  // App 主动收岛去开抽屉/菜单时，焦点已在别处，不能 220ms 后抢回。
   if (anchorEl.value?.contains(document.activeElement)) {
     pillRef.value?.focus({ preventScroll: true });
   }
@@ -219,11 +318,9 @@ function finishClose() {
 
 function requestClose() {
   if (!open.value || leaving.value) return;
-  closingIds = props.notices.map((n) => n.id); // 定格关闭瞬间的通知集合（N2）
+  closingIds = props.notices.map((n) => n.id);
   if (animOn.value) {
     leaving.value = true;
-    // 两阶段退场：spring 收敛 ~200ms，150ms 时只差最后透明度，留 70ms 余量
-    //（复审三 §10：220ms 内视觉基本跑完，reduce 态即时卸载）。
     leaveTimer = window.setTimeout(() => finishClose(), 220);
   } else {
     finishClose();
@@ -231,8 +328,6 @@ function requestClose() {
 }
 
 function onPillClick() {
-  // 有未读 → 面板（查看/直达）；全部已读 → 通知池已消费，回到直达语义
-  //（复审三 §13：iOS 岛轻点 = 打开对应内容，不永远弹历史列表）。
   if (unread.value > 0) {
     if (open.value) {
       requestClose();
@@ -259,8 +354,6 @@ function onKeydown(event: KeyboardEvent) {
     requestClose();
     return;
   }
-  // 轻量焦点圈闭（复审三 §7）：shift+Tab 从胶囊回末行、Tab 在末行回胶囊，
-  // 让 aria-modal=true 名副其实——键盘与鼠标同处面板封锁级。
   if (event.key === "Tab" && open.value && !leaving.value) {
     const anchor = anchorEl.value;
     if (!anchor) return;
@@ -292,119 +385,153 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
-  if (peekTimer !== undefined) window.clearTimeout(peekTimer);
   if (leaveTimer !== undefined) window.clearTimeout(leaveTimer);
+  if (labelOutTimer !== undefined) window.clearTimeout(labelOutTimer);
   popAnim?.cancel();
 });
+// Motion 组件实例 → 真实 DOM（$el）；普通元素直接用。pill/track 的 ref 均经此适配。
+function setPillRef(el: unknown): void {
+  const dom = (el as { $el?: unknown } | null)?.$el ?? el;
+  pillRef.value = dom instanceof HTMLElement ? dom : null;
+}
+function setTrackRef(el: unknown): void {
+  const dom = (el as { $el?: unknown } | null)?.$el ?? el;
+  trackEl.value = dom instanceof HTMLElement ? dom : null;
+}
+
 </script>
 
 <template>
   <div ref="anchorEl" class="island-anchor">
-    <button
-      ref="pillRef"
+    <Motion
+      :ref="setPillRef"
+      as="button"
       type="button"
       class="island-pill"
-      :class="[`is-${capsule.state}`, { 'has-unread': unread > 0, 'is-open': open }]"
+      :class="[`is-${capsule.state}`, { 'has-unread': unread > 0, 'is-open': open, 'has-glow': glow !== 'none' }]"
       :data-testid="`dynamic-island-${capsule.state}`"
+      :data-pill-width="pillWidth ?? null"
+      :data-glow="glow !== 'none' ? glow : undefined"
       :aria-expanded="open"
       :aria-label="unread > 0 ? `灵动岛，${unread} 条未读提醒` : undefined"
+      :animate="widthAnimate"
+      :transition="widthSpring"
+      :while-hover="animOn ? { scale: 1.03 } : undefined"
+      :while-press="animOn ? { scale: 0.96 } : undefined"
       @click="onPillClick"
     >
-      <Motion
-        as="span"
-        class="island-pill-inner"
-        :while-hover="animOn ? { scale: 1.03 } : undefined"
-        :while-press="animOn ? { scale: 0.96 } : undefined"
-        :transition="hoverSpring"
-      >
-        <!-- 通知到达一瞥：短暂展示最新未读摘要（B4），否则渲染胶囊态 -->
-        <template v-if="peekText">
-          <Motion
-            :key="`peek-${peekText}`"
-            :initial="animOn ? { y: 6, opacity: 0 } : false"
-            :animate="{ y: 0, opacity: 1 }"
-            :transition="spring"
-            as="span"
-            class="island-peek"
-            data-testid="island-peek"
-          >{{ peekText }}</Motion>
-        </template>
+      <!-- 038 红光层（attention live state，subtle glow） -->
+      <span
+        v-if="glow !== 'none'"
+        class="island-glow"
+        :data-glow="glow"
+        aria-hidden="true"
+      ></span>
 
-        <!-- idle：低调常驻 + 4s 呼吸 -->
-        <template v-else-if="capsule.state === 'idle'">
+      <!-- 038 转盘轮播：viewport（clip 窗口）与 track（被 translate 的轨道）分离。
+           038 复审根因修复：旧版把 overflow:hidden 直接放在被 translate 的 track 上，
+           CSS overflow clip 区随 transform 一起移动，translateY 只把整块内容推出
+           pill（被外层裁掉），永远只显示 lane0——打断 lane 从不进入可视区（用户实测
+           打断弹开但内容空白）。现固定 viewport 高 34 + overflow hidden 不移动，
+           内层 track 以 translateY=-activeLaneIndex*LANE_HEIGHT 精确轮播。 -->
+      <span class="island-carousel-viewport">
+        <Motion
+          :ref="setTrackRef"
+          as="span"
+          class="island-carousel-track"
+          :animate="{ y: -activeLaneIndex * LANE_HEIGHT }"
+          :transition="carouselSpring"
+        >
+        <!-- Lane 0: 主流程（live state，pinned） -->
+        <span class="island-lane island-lane-main">
+          <!-- idle：平台名 + 呼吸 -->
           <Motion
+            v-if="livePhase === 'idle'"
             :key="`idle-${capsule.platform}`"
             :initial="animOn ? { y: 6, opacity: 0, scale: 0.92 } : false"
             :animate="{ y: 0, opacity: 1, scale: 1 }"
-            :transition="spring"
+            :transition="valueSpring"
             as="span"
             class="island-idle-label"
             data-testid="island-idle"
           >{{ platformLabel }}</Motion>
-        </template>
 
-        <!-- running：实时进度 + 呼吸点 -->
-        <template v-else-if="capsule.state === 'running'">
-          <span class="island-live" aria-hidden="true"></span>
-          <Motion
-            :key="runningLabel"
-            :initial="animOn ? { y: 8, opacity: 0 } : false"
-            :animate="{ y: 0, opacity: 1 }"
-            :transition="spring"
-            as="span"
-            class="island-value"
-            data-testid="island-running-value"
-          >{{ runningLabel }}</Motion>
-        </template>
-
-        <!-- completed：结果数字；待确认 >0 标亮 -->
-        <template v-else-if="capsule.state === 'completed'">
-          <Motion
-            :key="completedLabel"
-            :initial="animOn ? { y: 8, opacity: 0, scale: 0.9 } : false"
-            :animate="{ y: 0, opacity: 1, scale: 1 }"
-            :transition="spring"
-            as="span"
-            class="island-value"
-            data-testid="island-completed-value"
-          >{{ completedLabel }}</Motion>
-          <span
-            v-if="capsule.results.pending > 0"
-            class="island-pending-dot"
-            aria-hidden="true"
-          ></span>
-        </template>
-
-        <!-- attention：提醒色 + 文案 -->
-        <template v-else>
-          <Motion
-            :key="`att-${capsule.attention.kind}-${capsule.attention.message}`"
-            :initial="animOn ? { y: 6, opacity: 0, scale: 0.92 } : false"
-            :animate="{ y: 0, opacity: 1, scale: 1 }"
-            :transition="spring"
-            as="span"
-            class="island-attention-row"
-          >
+          <!-- running：正在抓取 / 抓取 JD / AI精筛 + live dot；旧值上滑淡出（labelStack 栈） -->
+          <template v-else-if="['scraping', 'jd', 'screening'].includes(livePhase)">
+            <span class="island-live" :class="`phase-${livePhase}`" aria-hidden="true"></span>
             <span
-              class="island-attention-mark"
-              :class="`attention-${capsule.attention.kind}`"
+              v-for="old in labelStack"
+              :key="`out-${old}`"
+              class="island-value is-value-out"
               aria-hidden="true"
-            ></span>
-            <span class="island-value">{{ capsule.attention.message }}</span>
-          </Motion>
-        </template>
+            >{{ old }}</span>
+            <Motion
+              :key="runningLabel"
+              :initial="animOn ? { y: 5, opacity: 0 } : false"
+              :animate="{ y: 0, opacity: 1 }"
+              :transition="valueSpring"
+              as="span"
+              class="island-value"
+              data-testid="island-running-value"
+            >{{ runningLabel }}</Motion>
+          </template>
 
-        <!-- 未读红点 -->
+          <!-- completed：彩色芯片（匹配绿 / 待确认琥珀）；scraped 显示"待筛选 N" -->
+          <template v-else-if="livePhase === 'completed'">
+            <span v-if="isScrapedPhase" class="island-value" data-testid="island-completed-value">{{ `待筛选 ${liveCounts?.matched ?? 0}` }}</span>
+            <span v-else class="island-chips">
+              <span class="island-chip c-green" data-testid="island-completed-value">匹配 {{ liveCounts?.matched ?? 0 }}</span>
+              <span
+                v-if="(liveCounts?.pending ?? 0) > 0"
+                class="island-chip c-amber island-pending-dot"
+                data-testid="island-pending-chip"
+              >待确认 {{ liveCounts?.pending }}</span>
+            </span>
+          </template>
+
+          <!-- attention：提醒色 + 文案 -->
+          <template v-else-if="livePhase === 'attention'">
+            <Motion
+              :key="`att-${glow}-${attentionMessage}`"
+              :initial="animOn ? { y: 6, opacity: 0, scale: 0.92 } : false"
+              :animate="{ y: 0, opacity: 1, scale: 1 }"
+              :transition="valueSpring"
+              as="span"
+              class="island-attention-row"
+            >
+              <span class="island-attention-mark" :class="`attention-${glow}`" aria-hidden="true"></span>
+              <span class="island-value">{{ attentionMessage }}</span>
+            </Motion>
+          </template>
+        </span>
+
+        <!-- Lane 1+: 打断队列 -->
         <span
-          v-if="unread > 0"
-          class="island-unread"
-          data-testid="island-unread"
-          aria-hidden="true"
-        >{{ unread > 99 ? "99+" : unread }}</span>
+          v-for="lane in interruptLanes"
+          :key="lane.id"
+          class="island-lane island-lane-interrupt"
+          :data-tone="(lane.content as IslandInterruptContent).tone"
+        >
+          <span class="island-interrupt-mark" :class="`tone-${(lane.content as IslandInterruptContent).tone}`" aria-hidden="true"></span>
+          <span class="island-interrupt-title">{{ (lane.content as IslandInterruptContent).title }}</span>
+          <span
+            v-if="(lane.content as IslandInterruptContent).detail"
+            class="island-interrupt-detail"
+          >{{ (lane.content as IslandInterruptContent).detail }}</span>
+        </span>
       </Motion>
-    </button>
+      </span>
 
-    <!-- 读屏播报（视觉隐藏，C2）：通知到达 announce() 更新 -->
+      <!-- 未读角标（037 badge + 038 carousel queue） -->
+      <span
+        v-if="unread > 0"
+        class="island-unread"
+        data-testid="island-unread"
+        aria-hidden="true"
+      >{{ unread > 99 ? "99+" : unread }}</span>
+    </Motion>
+
+    <!-- 读屏播报（视觉隐藏）：通知/打断到达 announce() 更新 -->
     <span
       class="island-sr-live"
       role="status"
@@ -412,17 +539,19 @@ onBeforeUnmount(() => {
       data-testid="island-sr-live"
     >{{ liveText }}</span>
 
-    <Motion
-      v-if="open"
-      as="div"
-      class="island-backdrop"
-      :class="{ 'is-leaving': leaving }"
-      :initial="animOn ? { opacity: 0 } : false"
-      :animate="{ opacity: 1 }"
-      :transition="{ duration: animOn ? 0.18 : 0 }"
-      data-testid="island-backdrop"
-      @click="onBackdrop"
-    />
+    <Teleport to="body">
+      <Motion
+        v-if="open"
+        as="div"
+        class="island-backdrop"
+        :class="{ 'is-leaving': leaving }"
+        :initial="animOn ? { opacity: 0 } : false"
+        :animate="{ opacity: 1 }"
+        :transition="{ duration: animOn ? 0.18 : 0 }"
+        data-testid="island-backdrop"
+        @click="onBackdrop"
+      />
+    </Teleport>
     <IslandNoticePanel
       v-if="open"
       :notices="notices"
@@ -448,7 +577,10 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 9px;
   height: 34px;
-  padding: 0 16px;
+  /* 038 复审：0 16 → 0 18——用户反馈内容"左右截断一丢丢"（贴边框）。
+     注意 PILL_PAD_X 必须与此处左右 padding 之和同口径（18*2=36），
+     否则 remeasureWidth 测出的目标宽会偏窄、内容仍显贴边。 */
+  padding: 0 18px;
   font-size: 13px;
   font-weight: 600;
   color: var(--ink-2);
@@ -457,14 +589,16 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   white-space: nowrap;
   cursor: pointer;
+  overflow: hidden;
+  /* 038 窄屏边角：pill 宽度上限不超屏宽 -32px（宽度 spring 由 Motion 驱动，
+     目标宽 JS 侧同口径 clamp，此处兜底防溢出视口）。 */
+  max-width: calc(100vw - 32px);
   transition:
     background-color 0.18s ease,
     border-color 0.18s ease,
     color 0.18s ease,
     box-shadow 0.18s ease;
 }
-/* idle 常驻呼吸（US-1）：几乎不可察但打破静止；transform 由 CSS 动画独占，
- * 与 pill-inner 的 Motion 缩放（子元素）互不冲突，WAAPI 弹跳期间优先。 */
 .island-pill.is-idle {
   animation: island-idle-breathe 4s ease-in-out infinite;
 }
@@ -479,8 +613,6 @@ onBeforeUnmount(() => {
   outline-offset: 2px;
 }
 .island-pill.is-open {
-  /* 复审三 §5/§8：开态 pill 提到 backdrop(65) 之上——hover 高亮复活、
-     点胶囊原位可 toggle 收起（否则点击永远落在 backdrop 上）。 */
   z-index: 68;
   border-color: var(--brand);
   background: var(--brand-wash);
@@ -490,12 +622,67 @@ onBeforeUnmount(() => {
   border-color: var(--brand);
 }
 
-.island-pill-inner {
+/* 038 红光层：attention 时 pill 背景隐隐闪光泛红 */
+.island-glow {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  pointer-events: none;
+  z-index: 0;
+  animation: island-glow 2.4s ease-in-out infinite;
+}
+.island-glow[data-glow="error"] {
+  background: radial-gradient(ellipse at center, rgba(229, 72, 77, 0.18), transparent 70%);
+  box-shadow: inset 0 0 12px rgba(229, 72, 77, 0.15);
+}
+.island-glow[data-glow="paused"] {
+  background: radial-gradient(ellipse at center, rgba(229, 161, 58, 0.16), transparent 70%);
+  box-shadow: inset 0 0 12px rgba(229, 161, 58, 0.12);
+}
+@keyframes island-glow {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1; }
+}
+
+/* 038 转盘轮播：viewport 与 track 分离。
+   038 复审根因修复：viewport 固定单 lane 视口高 + overflow:hidden，clip 窗口
+   不随 transform 移动；内层 track 是纯 flex column 轨道（高=内容自然堆叠），
+   以 translateY=-activeLaneIndex*LANE_HEIGHT 轮播，打断 lane 才能进入视口。
+   旧版把 height:34 + overflow:hidden 直接放在被 translate 的 track 上：CSS
+   overflow clip 区随 transform 同步移动，translateY 只是让整块内容从 pill 顶部
+   滑出被外层裁掉，永远只显示 lane0——打断 lane 从不进入可视区（用户实测：
+   打断弹开但内容空白、只留红角标）。单 lane（idle）时 track 高=viewport 高，
+   viewport align-items:center 垂直居中不偏上。 */
+.island-carousel-viewport {
+  display: inline-flex;
+  /* track 顶部对齐 viewport：多 lane 时 track 高=34*N，居中会让 lane0 被裁；
+     flex-start 保证 track 的 y=0（lane0 顶）对准 clip 窗口顶，translateY
+     精确轮播。单 lane 时 track 高=viewport 高，无空隙不偏上。 */
+  align-items: flex-start;
+  height: 34px;
+  overflow: hidden;
+}
+
+.island-carousel-track {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  flex: none;
+  transform-origin: center center;
+  /* 038 复审：去掉 will-change: transform——它把 track 常驻提升为合成层，
+     文字走纹理渲染配合 spring 的亚像素位移（实测 -20.36/-34.13）会明显发虚
+     （用户反馈"灵动岛里的字是真的糊"）。小元素无需常驻提示。 */
+}
+
+.island-lane {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 9px;
-  transform-origin: center center;
-  will-change: transform;
+  height: 34px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .island-value {
@@ -505,17 +692,20 @@ onBeforeUnmount(() => {
   display: inline-block;
 }
 
-/* 一瞥摘要：到达瞬间 pill 内短暂展示最新通知 */
-.island-peek {
-  font-family: var(--font-display);
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--brand-ink);
-  display: inline-block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 230px;
+/* 038 SC-001 数字跳动：旧值上滑淡出（新值由 :key 重建的 Motion 下滑淡入）。
+   038 复审：0.32s → 0.18s、位移 -10px → -6px——抓取中数字频繁刷新，动画
+   窗口越长文字停留在亚像素位移+半透明状态越久，看上去"糊"（用户反馈）。
+   缩短并减幅后清晰，跳动感保留。 */
+.island-value.is-value-out {
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, 0);
+  pointer-events: none;
+  animation: island-value-out 0.18s ease forwards;
+}
+@keyframes island-value-out {
+  from { opacity: 0.9; transform: translate(-50%, 0); }
+  to   { opacity: 0;   transform: translate(-50%, -6px); }
 }
 
 .island-idle-label {
@@ -523,10 +713,13 @@ onBeforeUnmount(() => {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  color: var(--brand-ink);
-  background: var(--brand-wash);
-  padding: 2px 8px;
-  border-radius: 5px;
+  /* 038 复审：color 从 var(--brand-ink) 改 var(--ink-1)——dark boss 下
+     --brand-ink=#005e53 深青色与深色 pill 背景撞色看不见（用户反馈）。
+     --ink-1 在 dark/light 都与 pill --panel 对比够。 */
+  color: var(--ink-1);
+  /* 038 复审：去掉 idle label 自己的 wash 底色块（background/padding/
+     border-radius）——用户反馈"不要带方块"：pill 本身就是圆角胶囊框，
+     内部再嵌一个青色小药丸显得零碎；改为纯文字，视觉更干净。 */
   display: inline-block;
 }
 
@@ -534,17 +727,49 @@ onBeforeUnmount(() => {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--match);
-  box-shadow: 0 0 0 3px var(--match-wash);
-  animation: island-breathe 1.8s ease-in-out infinite;
+  flex: 0 0 auto;
+  /* 038 复审：圆点只做不透明度呼吸，不再 scale（island-breathe 的
+     scale 1→1.18 让用户觉得"弹弹嫩嫩"太跳）；未读角标保留原动画。 */
+  animation: island-live-breathe 1.8s ease-in-out infinite;
+}
+.island-live.phase-scraping {
+  background: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+/* 038 复审：JD 抓取阶段专用色（青色，介于抓取蓝与精筛紫之间，三阶段可辨）。 */
+.island-live.phase-jd {
+  background: #00d4bc;
+  box-shadow: 0 0 0 3px rgba(0, 212, 188, 0.22);
+}
+.island-live.phase-screening {
+  background: #8b5cf6;
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.2);
 }
 
-.island-pending-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #e5a13a;
-  animation: island-breathe 1.6s ease-in-out infinite;
+/* 038 completed 彩色芯片 */
+.island-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.island-chip {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  line-height: 1.4;
+}
+.island-chip.c-green {
+  color: #12905f;
+  background: rgba(18, 144, 95, 0.12);
+}
+.island-chip.c-amber {
+  color: #b45309;
+  background: rgba(229, 161, 58, 0.15);
 }
 
 .island-attention-row {
@@ -566,10 +791,43 @@ onBeforeUnmount(() => {
   background: #e5484d;
   box-shadow: 0 0 0 3px rgba(229, 72, 77, 0.25);
 }
-.island-attention-mark.attention-pending {
-  background: #e5a13a;
-  box-shadow: 0 0 0 3px rgba(229, 161, 58, 0.25);
+.island-attention-mark.attention-none {
+  background: var(--text-muted, #888);
 }
+
+/* 038 打断 lane */
+.island-interrupt-mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.island-interrupt-mark.tone-warning {
+  background: #e5a13a;
+  box-shadow: 0 0 0 3px rgba(229, 161, 58, 0.2);
+}
+.island-interrupt-mark.tone-error {
+  background: #e5484d;
+  box-shadow: 0 0 0 3px rgba(229, 72, 77, 0.2);
+}
+.island-interrupt-title {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-1);
+}
+/* 038 复审：打断 title 按 tone 染色——warning 琥珀 / error 红，比 --ink-1
+   更醒目且不与 pill 背景撞色（用户反馈打断弹开后字看不见，--ink-1 在某些
+   theme 下对比不足）。pill 内打断 lane 直接用 tone 色，沉入 panel 的
+   notice-title 同步染色（见 IslandNoticePanel）。 */
+.island-lane-interrupt[data-tone="warning"] .island-interrupt-title { color: #e5a13a; }
+.island-lane-interrupt[data-tone="error"] .island-interrupt-title { color: #e5484d; }
+.island-interrupt-detail {
+  font-size: 11px;
+  color: var(--text-soft, #9fb0c3);
+}
+.island-lane-interrupt[data-tone="warning"] .island-interrupt-detail { color: #e5a13a; opacity: 0.85; }
+.island-lane-interrupt[data-tone="error"] .island-interrupt-detail { color: #e5484d; opacity: 0.85; }
 
 .island-unread {
   font-family: var(--font-display);
@@ -590,16 +848,13 @@ onBeforeUnmount(() => {
 .island-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 65;
+  z-index: 60;
   background: transparent;
 }
-/* 复审三 N2：退场阶段 backdrop 只需遮罩语义、不再拦点击——220ms 窗口内
- * App 已可能打开抽屉/菜单（z 低于 backdrop），放行指针避免点击黑洞。 */
 .island-backdrop.is-leaving {
   pointer-events: none;
 }
 
-/* 读屏播报区：视觉隐藏但保留给 AT */
 .island-sr-live {
   position: absolute;
   width: 1px;
@@ -616,9 +871,19 @@ onBeforeUnmount(() => {
   0%, 100% { opacity: 1; transform: scale(1); }
   50%      { opacity: 0.6; transform: scale(1.18); }
 }
+/* 038 复审：idle 呼吸不再用 transform scale（scale 1→1.006 无限循环，让 pill
+   内容一直处于非整数倍缩放 → 文字渲染发虚，实测 computed transform 恒为
+   matrix(1.00224,...)）。改为只呼吸边框光晕：不动 transform，文字保持清晰，
+   呼吸感仍保留（用户反馈"灵动岛里的字是真的糊"）。 */
 @keyframes island-idle-breathe {
-  0%, 100% { transform: scale(1); }
-  50%      { transform: scale(1.006); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 212, 188, 0); }
+  50%      { box-shadow: 0 0 10px 0 rgba(0, 212, 188, 0.3); }
+}
+/* 038 复审：运行指示点只呼吸不透明度、不缩放（原 island-breathe 的
+   scale 1→1.18 即用户说的"弹弹嫩嫩"）；未读角标仍用 island-breathe。 */
+@keyframes island-live-breathe {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
 }
 
 :global([data-theme="kaleido"]) .island-pill {
@@ -636,20 +901,31 @@ onBeforeUnmount(() => {
 :global([data-theme="kaleido"]) .island-value {
   color: #fff;
 }
-/* C3：kaleido 下 idle 平台标签也走白玻璃，避免暗色 wash 叠出脏灰绿 */
 :global([data-theme="kaleido"]) .island-idle-label {
+  /* 038 复审：与主主题一致去掉 wash 底色块（"不要带方块"），只保留字色。 */
   color: rgba(255, 255, 255, 0.92);
-  background: rgba(255, 255, 255, 0.16);
 }
-:global([data-theme="kaleido"]) .island-peek {
+:global([data-theme="kaleido"]) .island-chip.c-green {
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.15);
+}
+:global([data-theme="kaleido"]) .island-chip.c-amber {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.15);
+}
+:global([data-theme="kaleido"]) .island-interrupt-title {
   color: #fff;
+}
+:global([data-theme="kaleido"]) .island-interrupt-detail {
+  color: rgba(255, 255, 255, 0.65);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .island-live,
-  .island-pending-dot,
   .island-unread,
-  .island-pill.is-idle {
+  .island-pill.is-idle,
+  .island-glow,
+  .island-value.is-value-out {
     animation: none;
   }
 }

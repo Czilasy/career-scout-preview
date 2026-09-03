@@ -785,15 +785,24 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
   }
 
   // ---- running：抓取 / 筛选 / 补抓进行中 ----
+  // 038 复审 bug 修复：scrapeLive 只看抓取任务（scrape+recrawl）的 snapshot，
+  // 不含 screenSnapshot——否则 fetch_jd 阶段 screenSnapshot.status=running 会让
+  // scrapeLive 误判 true，phase 卡在 scraping、取已完成的 scrapeSnapshot，
+  // 灵动岛数字不推进（用户实测「从脚本抓取到 JD 抓取灵动岛不变」）。
   const scrapeLive = scrapeBusy.value || recrawlBusy.value
-    || snapshots.some((s) => s && ["running", "queued"].includes(String(s.status)));
+    || [scrapeSnapshot.value, recrawlSnapshot.value].some((s) => s && ["running", "queued"].includes(String(s.status)));
   const screenLive = screenBusy.value
     || Boolean(screenSnapshot.value && ["running", "queued"].includes(String(screenSnapshot.value.status)));
   if (scrapeLive || screenLive) {
-    const phase = scrapeLive ? "scraping" as const : "screening" as const;
     const snapshot = scrapeLive
       ? (scrapeSnapshot.value || recrawlSnapshot.value)
       : screenSnapshot.value;
+    // 038 复审：phase 不再只看"哪个任务在跑"二选一——screen 任务内部还分
+    // 阶段（后端 emit 的 progress.stage：ensure_chrome/fetch_jd/screen_a/
+    // screen_b/done，补抓链路为 recrawl_fetch_jd/recrawl_ai）。旧版一律落
+    // "screening"，导致抓 JD（fetch_jd）也显示"AI精筛"（用户实测反馈）。
+    // 现按 stage 细分：抓 JD → "jd"，其余仍为 "screening"。
+    const phase = scrapeLive ? "scraping" as const : screenStagePhase(snapshot);
     const progress = taskProgressFromSnapshot(snapshot);
     return {
       platform, phase, judged: progress.done, scope: platform,
@@ -1213,7 +1222,7 @@ export type DynamicIslandState =
   | {
       state: "running";
       platform: Platform;
-      progress: { phase: "scraping" | "screening"; done: number; total?: number };
+      progress: { phase: "scraping" | "jd" | "screening"; done: number; total?: number };
     }
   | {
       state: "completed";
@@ -1238,6 +1247,18 @@ export interface CapsuleStatusPayload extends RoundStatusPayload {
 // total 未知（缺省/0）时省略分母（spec 边界 B088-进度数字缺失）。
 // 结果：matched = 明确匹配；pending = 待确认（verdict 非 match/not_match/mismatch）。
 // ---------------------------------------------------------------------------
+
+// 038 复审：从 screen 任务 snapshot 的 progress.stage 细分阶段（纯函数）。
+// 后端 AI 筛选链路 emit 的 stage：ensure_chrome（启动浏览器）/ fetch_jd（抓 JD）
+// / screen_a（AI 粗筛）/ screen_b（AI 精筛）/ done；补抓链路为
+// recrawl_fetch_jd / recrawl_ai。只有 JD 抓取细分出来（灵动岛显示"抓取 JD"），
+// 其余一律 screening——避免抓 JD 与真·AI 精筛撞车显示同一文案（用户实测反馈）。
+export function screenStagePhase(snapshot: TaskSnapshot | null): "jd" | "screening" {
+  const progress = (snapshot?.progress || {}) as Record<string, unknown>;
+  const stage = String(progress.stage ?? "");
+  if (stage === "fetch_jd" || stage === "recrawl_fetch_jd") return "jd";
+  return "screening";
+}
 
 export function taskProgressFromSnapshot(
   snapshot: TaskSnapshot | null,

@@ -146,6 +146,35 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
     }
   });
 
+  // 038 复审：screen 任务内部分阶段——旧版一律落 screening，抓 JD 与
+  // 真·AI 精筛显示同一文案（用户实测「抓 JD 时显示成 AI 精筛」）。
+  it("038 复审：抓 JD（stage=fetch_jd）→ phase 为 jd，不再误报 AI 精筛", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.screenBusy.value = true;
+    state.screenSnapshot.value = {
+      status: "running", progress: { stage: "fetch_jd", current: 7, total: 20 }, logs: [],
+    };
+    const capsule = state.roundStatusPayload.value?.capsule;
+    expect(capsule?.state).toBe("running");
+    if (capsule?.state === "running") {
+      expect(capsule.progress.phase).toBe("jd");
+      expect(capsule.progress.done).toBe(7);
+      expect(capsule.progress.total).toBe(20);
+    }
+  });
+
+  it("038 复审：AI 精筛（stage=screen_b）→ phase 仍为 screening", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.screenBusy.value = true;
+    state.screenSnapshot.value = {
+      status: "running", progress: { stage: "screen_b", current: 3, total: 20 }, logs: [],
+    };
+    const capsule = state.roundStatusPayload.value?.capsule;
+    if (capsule?.state === "running") {
+      expect(capsule.progress.phase).toBe("screening");
+    }
+  });
+
   it("筛选完成有结果 → completed + 结果数字", () => {
     const state = useDiscoveryState({ profileId: "test" }, () => {});
     state.resultLoaded.value = true;

@@ -4,14 +4,14 @@ import { Bell, History, LoaderCircle, Moon, Settings, Star, Sun, X } from "@luci
 import AiSettingsDialog from "./components/AiSettingsDialog.vue";
 import BrowserAccountsDialog from "./components/BrowserAccountsDialog.vue";
 import EnvCheckDialog from "./components/EnvCheckDialog.vue";
-import NoticeBar from "./components/NoticeBar.vue";
 import ReminderDrawer from "./components/ReminderDrawer.vue";
 import UpdateDialog from "./components/UpdateDialog.vue";
 import AppSettingsMenu from "./components/AppSettingsMenu.vue";
 import WindowTitleBar from "./components/WindowTitleBar.vue";
-import DynamicIsland from "./components/DynamicIsland.vue";
-import { requestCapsuleNavigation, type CapsuleStatusPayload, type CapsuleNavigationTarget } from "./composables/useDiscoveryState";
+import DynamicIsland, { type CapsuleTarget } from "./components/DynamicIsland.vue";
+import { requestCapsuleNavigation, type CapsuleStatusPayload } from "./composables/useDiscoveryState";
 import { createIslandNotices } from "./composables/useIslandNotices";
+import { useIslandCarousel, type IslandInterruptContent, type IslandLane } from "./composables/useIslandCarousel";
 import { useReminderBadge } from "./composables/useReminderBadge";
 import DiscoveryView from "./views/DiscoveryView.vue";
 import { apiRequest, currentRuntimeMode, errorMessage, GITHUB_REPO_URL, initializeSession, openExternalLink, updateApi, type UpdateCheckResult } from "./api";
@@ -40,7 +40,13 @@ function handleRoundStatus(payload: RoundStatusPayload | null) {
   roundStatus.value = payload as CapsuleStatusPayload | null;
 }
 
-function handleCapsuleNavigate(target: CapsuleNavigationTarget) {
+// 038 复审 P2-8：岛 navigate 分流——"reminders"（投递提醒打断行）开提醒抽屉；
+// requestCapsuleNavigation 不认识它（useDiscoveryState 禁改），分流在 App 层做。
+function handleIslandNavigate(target: CapsuleTarget) {
+  if (target === "reminders") {
+    if (!reminderDrawerOpen.value) toggleReminderDrawer();
+    return;
+  }
   requestCapsuleNavigation(target);
 }
 
@@ -69,8 +75,48 @@ const discoveryRef = ref<{
 // ---------------------------------------------------------------------------
 // 037 灵动岛 v2：通知池由胶囊状态跃迁派生（App 持有）；面板开闭由
 // DynamicIsland 内部 open 状态控制；面板与三抽屉互斥（开任一即 collapse）。
+// 038 灵动岛 v3：carousel 状态机接管打断轮转；onSinkInterrupt 把转完的打断
+// 沉入 islandNotices 作未读条目（kind:"interrupt" + tone 染色），角标由
+// DynamicIsland 组合 notices 未读 + badgeCount 显示。
 // ---------------------------------------------------------------------------
 const islandNotices = createIslandNotices(roundStatus);
+const islandCarousel = useIslandCarousel(roundStatus, {
+  onSinkInterrupt: (lane) => {
+    // interrupt lane 的 content 是 IslandInterruptContent；窄化为 notice 字段。
+    // target 按打断类型透传（缺省 task；投递提醒给 reminders 开提醒抽屉）。
+    const c = lane.content as IslandInterruptContent;
+    islandNotices.sinkInterrupt({
+      id: lane.id,
+      kind: "interrupt",
+      title: c.title,
+      detail: c.detail,
+      tone: c.tone,
+      target: c.target ?? "task",
+    });
+  },
+});
+
+// 038 边角（复审 P2-5）：scope=history（浏览历史轮）期间打断暂停消费——
+// 先攒入缓冲，回到最新（scope 离开 history）时逐条 flush：最后一条占据展示位
+// （"只转最新一条"），余数照常计时沉入 panel；不打断历史轮的浏览。
+const historyPendingInterrupts: Omit<IslandLane, "id" | "type">[] = [];
+
+function pushInterruptOrDefer(lane: Omit<IslandLane, "id" | "type">): void {
+  if (roundStatus.value?.scope === "history") {
+    historyPendingInterrupts.push(lane);
+    return;
+  }
+  islandCarousel.pushInterrupt(lane);
+}
+
+watch(
+  () => roundStatus.value?.scope,
+  (scope) => {
+    if (scope === "history" || historyPendingInterrupts.length === 0) return;
+    const queued = historyPendingInterrupts.splice(0);
+    for (const pending of queued) islandCarousel.pushInterrupt(pending);
+  },
+);
 const islandRef = ref<{ collapse: () => void } | null>(null);
 function collapseIsland() {
   islandRef.value?.collapse?.();
@@ -117,8 +163,6 @@ function manualUpdateFromMenu() {
 }
 const profiles = ref<CandidateProfile[]>([]);
 const currentProfileId = ref("");
-const notice = ref<Notice | null>(null);
-let noticeTimer: number | undefined;
 
 const favoritesOpen = ref(false);
 const favorites = ref<Record<string, unknown>[]>([]);
@@ -293,9 +337,6 @@ function ignoreThisVersion() {
 
 // 手动检查更新：始终实时请求 GitHub latest release，无更新时给出明确反馈。
 async function manualCheckUpdate() {
-  // 弹 UpdateDialog 前先清旧 notice，避免"已是最新"残留与新对话框自相矛盾
-  if (noticeTimer) { window.clearTimeout(noticeTimer); noticeTimer = undefined; }
-  notice.value = null;
   updateChecking.value = true;
   try {
     const result = await updateApi.check();
@@ -455,7 +496,9 @@ function openGitHub() {
 }
 
 onBeforeUnmount(() => {
-  if (noticeTimer) window.clearTimeout(noticeTimer);
+  // 038：清 carousel 打断队列的残留 timer，避免组件卸载后 fake/real timer
+  // 回调在死队列上 mutate（虽无观察者，但属卫生）。
+  islandCarousel.reset();
   document.removeEventListener("pointerdown", onDocPointerDown);
   cancelThemeCharge();
   document.removeEventListener("pointerdown", onThemePickerDocPointerDown);
@@ -467,21 +510,17 @@ function selectProfile(profileId: string) {
 }
 
 function showNotice(next: Notice) {
-  if (noticeTimer) window.clearTimeout(noticeTimer);
-  notice.value = next;
-  let delay = 3000;
-  if (next.tone === "error") delay = 8000;
-  else if (next.tone === "warning") delay = 5000;
-  noticeTimer = window.setTimeout(() => {
-    notice.value = null;
-    noticeTimer = undefined;
-  }, delay);
-}
-
-function dismissNotice() {
-  if (noticeTimer) window.clearTimeout(noticeTimer);
-  noticeTimer = undefined;
-  notice.value = null;
+  // 038 复审补齐：所有信息提示融入灵动岛，不再有独立 notice toast 浮窗
+  // （用户要求「信息性小条幅全部进灵动岛，不要弹出浮窗」，按钮自带即时
+  // 反馈不在此列）。warning/error 保留原 tone；info/success 映射 warning
+  // （琥珀提示色），打断展示 ~2.2s 后沉入 panel 未读；history 浏览期间
+  // 经 pushInterruptOrDefer 顺延到回到最新（复审 P2-5）。
+  const tone: "warning" | "error" =
+    next.tone === "error" ? "error" : "warning";
+  pushInterruptOrDefer({
+    content: { title: next.message, detail: "", tone, target: "task" },
+    duration: 2200,
+  });
 }
 
 function acceptCreatedProfile(profile: CandidateProfile) {
@@ -498,6 +537,22 @@ function acceptCreatedProfile(profile: CandidateProfile) {
 
 const reminderDrawerOpen = ref(false);
 const reminderBadge = useReminderBadge(currentProfileId);
+
+// 038：投递提醒 0→N 推一条打断进 carousel（只转一次展示，转完沉入 panel 未读）。
+// 仅在从 0 跳到 N 时推——避免每次 +1 都打扰；N→M（都 >0）不推。
+// target:"reminders"——沉入 panel 的行点击直达提醒抽屉（复审 P2-8）；
+// history 浏览期间经 pushInterruptOrDefer 顺延（复审 P2-5）。
+watch(
+  () => reminderBadge.reminderTotal.value,
+  (next, prev) => {
+    if (prev === 0 && next > 0) {
+      pushInterruptOrDefer({
+        content: { title: "投递提醒", detail: `${next}条逾期`, tone: "warning", target: "reminders" },
+        duration: 2200,
+      });
+    }
+  },
+);
 
 function toggleReminderDrawer() {
   if (reminderDrawerOpen.value) {
@@ -530,12 +585,15 @@ function handleIslandDismiss(ids: string[]) {
   islandNotices.markReadBatch(ids);
 }
 
-// profile 初始化/切换：收起岛面板、关提醒抽屉、清空岛通知池；badge 由
-// composable 内部 watch 自刷新（seq 自守卫），App 不再重复调用，避免双请求。
+// profile 初始化/切换：收起岛面板、关提醒抽屉、清空岛通知池 + carousel 打断
+// 队列 + history 期间积压的未消费打断（038）；badge 由 composable 内部 watch
+// 自刷新（seq 自守卫），App 不再重复调用，避免双请求。
 watch(currentProfileId, (profileId) => {
   collapseIsland();
   reminderDrawerOpen.value = false;
   islandNotices.reset();
+  islandCarousel.reset();
+  historyPendingInterrupts.length = 0;
 });
 
 // 详情动作（DiscoveryView）或抽屉快捷动作（ReminderDrawer）成功后刷新 count。
@@ -599,7 +657,8 @@ function handleIslandExpand() {
         ref="islandRef"
         :status="roundStatus"
         :notices="islandNotices.notices.value"
-        @navigate="handleCapsuleNavigate"
+        :carousel="islandCarousel"
+        @navigate="handleIslandNavigate"
         @expand="handleIslandExpand"
         @dismiss="handleIslandDismiss"
       />
@@ -756,7 +815,8 @@ function handleIslandExpand() {
       </div>
     </Transition>
 
-    <NoticeBar :notice="notice" @dismiss="dismissNotice" />
+    <!-- 038 复审：所有信息提示（含 info/success）都融入灵动岛，不再有独立
+         notice toast 浮窗（showNotice 统一走 pushInterruptOrDefer）。 -->
 
     <ReminderDrawer
       :open="reminderDrawerOpen"

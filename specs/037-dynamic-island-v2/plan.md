@@ -42,6 +42,12 @@
 - App.vue 当前 852 行（>900 预警线 75%）；本批次净减目标 ≥ 50 行（回退块删除 + 抽取）。
 - 新文件保持轻量：useIslandNotices ≤ 200、useReminderBadge ≤ 150、IslandNoticePanel ≤ 250、DynamicIsland ≤ 400（结构 + motion-v 动画 prop 较多）。
 
+#### 偏差记录（三轮独立复审后 2026-09-03）
+- 宪法 II 硬线全部守住（App.vue 844、DynamicIsland.vue 656、IslandNoticePanel 236、useIslandNotices 174、useReminderBadge 54）。
+- 自设门禁未达两项，成因：复审引入的体验修复（WAAPI 弹跳、一瞥、两阶段退场、焦点管理、窄屏适配、kaleido 覆盖、测试补洞等）属于原计划范围外增量；与 spec 行数目标冲突时以宪法硬线为准，未做功能砍减。记录在此作为显式豁免，后续若需瘦身另立 Spec。
+  - App.vue 实际净 -8（852→844），未达"净减 ≥50"（回退块删除的净减被 037 接线/互斥/文档同步部分抵消）。
+  - DynamicIsland.vue 656 行 > 目标 400：v2 版承担四态渲染 + 通知反馈 + 无障碍 + 动画 + 双主题样式，行数集中在 scoped style（~280 行）与事件处理；未触 1200 红线。
+
 ## 数据流
 
 ```

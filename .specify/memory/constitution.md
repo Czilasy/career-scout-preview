@@ -168,13 +168,14 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/composables/discoveryDeps.ts` — Discovery 跨域依赖契约：五域提供接口（Workflow/Search/Execution/Tasks/Results）与消费接口（*Needs）、容器建/接线函数（createDiscoveryDeps / wireDiscoveryDeps / attachRoundFlow）（031 B8）
 - `webui/src/composables/useModeWarnings.ts` — 档位/规模风险警示文案：极限档与总页数 >30 两条警示的合并计算（031 B8 自 DiscoveryView.vue 抽出）
 - `webui/src/composables/useNarrowSearchLayout.ts` — 窄屏布局断点判定：`max-width: 1050px` 媒体查询订阅，供两个配置抽屉的联动/独立切换（031 B8 自 DiscoveryView.vue 抽出）
-- `webui/src/components/TaskCompletedToast.vue` — 顶部冒泡提示组件：后台任务跑完时用户在看历史的完成提示，点击回最新（035）
+- `webui/src/components/TaskCompletedToast.vue` — ~~顶部冒泡提示组件~~（035 立；038 删除——"完成→查看最新"由灵动岛 completed pill + navigate 接管）
 - `packaging/window_controls.py` — 窗口控制 Win32 助手：无边框窗口控制原语与最大化避让任务栏适配（036）
 - `webui/src/components/WindowTitleBar.vue` — 自绘标题栏组件：桌面版窗口标题栏（文字+三按钮+拖拽区+主题配色，仅 EXE 渲染）（036）
-- `webui/src/components/DynamicIsland.vue` — 顶栏胶囊灵动岛组件：四态渲染/motion-v 弹簧动画/未读红点/通知面板开闭与 collapse 暴露（036 立；037 v2 重写为通知池消费方）
-- `webui/src/composables/useIslandNotices.ts` — 灵动岛通知池：roundStatus capsule 跃迁派生 completed/error/paused 通知（sync watch、同 kind 内容级替换、running/idle 清空、初始观察不产幽灵）（037）
+- `webui/src/components/DynamicIsland.vue` — 顶栏胶囊灵动岛组件：四态渲染/motion-v 弹簧动画/未读红点/通知面板开闭与 collapse 暴露（036 立；037 v2 重写为通知池消费方；038 v3 重写为 live 仪表盘 + 转盘轮播 + 四色芯片 + 红光层 + badge 角标）
+- `webui/src/composables/useIslandCarousel.ts` — 灵动岛转盘轮播状态机：mainLaneState 直接读 roundStatus（永不冻结，硬不变式 FR-011）/打断队列 FIFO/只转一次/定时沉入 panel/badgeCount（038 新增）
+- `webui/src/composables/useIslandNotices.ts` — 灵动岛通知池：roundStatus capsule 跃迁派生 completed/error/paused 通知（sync watch、同 kind 内容级替换、running 不清池 038 改/idle 清空、初始观察不产幽灵、sinkInterrupt 沉入 interrupt kind 038 增）（037 立；038 改 running 不 clearAll + 增 sinkInterrupt）
 - `webui/src/composables/useReminderBadge.ts` — 提醒角标单源：服务端 /api/job-reminders/count total 与 seq 守卫/99+ 截断/aria（037 自 App.vue 036 通用化块回退抽出）
-- `webui/src/components/IslandNoticePanel.vue` — 灵动岛通知面板：胶囊下方弹出、error→paused→completed 排序、未读高亮/已读淡化、行点击直达（037）
+- `webui/src/components/IslandNoticePanel.vue` — 灵动岛通知面板：胶囊下方弹出、error→paused→interrupt→completed 排序、未读高亮/已读淡化、行点击直达、interrupt 行 tone 染色、completed counts 时四色芯片（037 立；038 增 interrupt kind + 四色 chip 前向兼容）
 
 ## 文件布局约束
 

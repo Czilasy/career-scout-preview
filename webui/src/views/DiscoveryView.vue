@@ -12,7 +12,6 @@ import JobWorkspace from "../components/JobWorkspace.vue";
 import LocationPicker from "../components/LocationPicker.vue";
 import HistoryRoundProfile from "../components/HistoryRoundProfile.vue";
 import ResultHistoryDrawer from "../components/ResultHistoryDrawer.vue";
-import TaskCompletedToast from "../components/TaskCompletedToast.vue";
 import LogViewerDialog from "../components/LogViewerDialog.vue";
 import OneClickScreenDialog, {
   type OneClickFilterGroup,
@@ -189,7 +188,6 @@ const {
   platformBeforeHistory,
   historyMode,
   returningFromHistory,
-  taskCompletedToast,
   currentRoundStatus,
   isScrapedOnly,
   historyStatusText,
@@ -531,6 +529,19 @@ watch(roundStatusPayload, (payload) => {
   emit("round-status", payload);
 });
 
+// 038 复审补齐：restoredTaskHint（刷新接回任务的恢复提示）原为独立 restore-banner
+// 浮窗，用户要求"信息性提示全部融入灵动岛、不再有独立浮窗"。改走 emit notify →
+// App.vue showNotice 已把所有 tone（info/success/warning/error）折进 island 打断
+// 队列。tone 按文案推断：失败→error、被中断/暂停中→warning、其余 info。
+watch(restoredTaskHint, (value) => {
+  if (!value) return;
+  const tone: Notice["tone"] =
+    value.includes("失败") ? "error"
+    : (value.includes("被中断") || value.includes("暂停中")) ? "warning"
+    : "info";
+  emit("notify", { message: value, tone });
+});
+
 onMounted(() => {
   restoreWorkflowState();
   void loadAdvancedSettings();
@@ -552,11 +563,7 @@ onMounted(() => {
     :class="{ 'results-view': activeStep === 'results' }"
     data-testid="discovery-view"
   >
-    <div v-if="restoredTaskHint" class="restore-banner" role="status">
-      <LoaderCircle :size="16" class="spin" aria-hidden="true" />
-      <span>{{ restoredTaskHint }}</span>
-      <button type="button" class="restore-close" aria-label="关闭提示" @click="restoredTaskHint = ''">×</button>
-    </div>
+    <!-- 038 复审：restoredTaskHint 恢复提示已融入灵动岛（见 script watch），不再渲染独立 restore-banner 浮窗 -->
     <div
       class="platform-segment"
       role="tablist"
@@ -1113,12 +1120,6 @@ onMounted(() => {
       @cancel-delete="cancelHistoryDelete"
       @delete-round="deleteHistoryRound"
       @view-log="openHistoryLog"
-    />
-
-    <TaskCompletedToast
-      :visible="taskCompletedToast.visible"
-      @click="taskCompletedToast.visible = false; void returnToLatest()"
-      @close="taskCompletedToast.visible = false"
     />
 
     <LogViewerDialog

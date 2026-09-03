@@ -1,28 +1,49 @@
 // ---------------------------------------------------------------------------
-// 037 灵动岛通知池：从 App 层 roundStatus 派生四类通知（跑完/出错/暂停）。
+// 038 灵动岛 v3 通知池：037 骨架 + 三项增强。
 //
-// 设计要点：
-// - 状态跃迁驱动；同 kind 替换（任意时刻同类最多 1 条）。
-// - 进入 running/idle 整体清空（新一轮任务启动或重置）。
-// - scope="history"（浏览历史轮）只是展示，不派生通知（037 复审 A3）。
-// - 初始 prev=null：不产生通知（避免刷新复活已结束任务时弹幽灵通知）。
-// - 已读仅是会话级内存标记（与持久化无关）；新一轮启动 / 显式 reset() 清空。
-// - 不发请求；不动后端；不修改 036 的派生体（useDiscoveryState.roundStatusPayload）。
+// 038 变更：
+// - running 态不再 clearAll（037 L93 主动丢弃 running 数据 → 038 改为保留，
+//   running 期间的 live state 由 useIslandCarousel 直接读 roundStatus 派生，
+//   useIslandNotices 只负责终态历史 + interrupt 沉入）；idle 仍 clearAll。
+// - IslandNoticeKind 增加 "interrupt"（carousel 转完一条打断后沉入此处）。
+// - 暴露 sinkInterrupt(notice)：供 useIslandCarousel 的 onSinkInterrupt 回调。
+//   沉入走 append（打断有唯一 id，逐条事件流）——不走终态通知的
+//   "同 kind 只保留最新一条" upsert（复审 P1-1：多条打断连沉时
+//   upsert 会互相吞掉，panel 只剩 1 条，US-3"panel 有 3 条未读"落空）。
+// - completed 终态通知 read:true（复审 P2-1 裁决，FR-008 vs FR-013）：
+//   "完成"信号已由 pill completed live state（彩色芯片）实时展示，
+//   panel 的 completed 行只是历史记录、不算未读——完成后点 pill 不会
+//   被"自己刚发的未读通知"拦住，直达结果页（等价被删 toast 的一键直达）。
+//   error/paused/interrupt 保持未读（用户没看过的告警仍要角标提示）。
+//
+// 037 不变：
+// - 终态事件（completed/error/paused 跃迁）仍 upsert 进 notices（panel 历史）。
+// - 同 kind 替换（仅终态通知）；scope="history" 不派生；初始 prev=null
+//   不弹幽灵；已读会话级。
 // ---------------------------------------------------------------------------
 import { computed, ref, watch, type ComputedRef, type Ref } from "vue";
 import type { CapsuleStatusPayload, DynamicIslandState } from "./useDiscoveryState";
 
-export type IslandNoticeKind = "completed" | "error" | "paused";
+export type IslandNoticeKind = "completed" | "error" | "paused" | "interrupt";
 
 export interface IslandNotice {
   id: string;
   kind: IslandNoticeKind;
   title: string;
   detail?: string;
-  target: "task" | "results" | "attention";
+  /** 038：interrupt 行 tone 染色（warning 琥珀 / error 红）；终态 kind 不填。
+   *  sinkInterrupt 把 IslandInterruptContent.tone 透传过来，面板按此渲染行边框/背景。 */
+  tone?: "warning" | "error";
+  /** 038：打断行点击直达目标（"reminders"=提醒抽屉 / "task"=任务页）；
+   *  终态通知沿用 037 的 task/results/attention。 */
+  target: IslandNoticeTarget;
   at: number;
   read: boolean;
 }
+
+/** 通知行 navigate 目标：三个胶囊导航目标 + "reminders"（App 层拦截开提醒抽屉，
+ *  requestCapsuleNavigation 不认识它——useDiscoveryState 禁改，分流在 App 做）。 */
+export type IslandNoticeTarget = "task" | "results" | "attention" | "reminders";
 
 export interface IslandNoticesApi {
   notices: Ref<IslandNotice[]>;
@@ -30,6 +51,8 @@ export interface IslandNoticesApi {
   markAllRead(): void;
   markRead(id: string): void;
   markReadBatch(ids: readonly string[]): void;
+  /** 038：打断沉入——carousel 转完一条后把该打断加入 notices（未读，进 panel）。 */
+  sinkInterrupt(notice: Omit<IslandNotice, "at" | "read">): void;
   reset(): void;
 }
 
@@ -89,10 +112,17 @@ export function createIslandNotices(
     if (scope === "history") {
       return;
     }
-    // 跃迁到 running / idle：清空（旧通知全部清）。
-    if (next.state === "running" || next.state === "idle") {
+    // 038：running 态不再 clearAll（live state 由 useIslandCarousel 直接读
+    // roundStatus 派生，useIslandNotices 只管终态历史 + interrupt 沉入）。
+    // idle 态仍清空（无主流程，旧轮终态通知归零）。
+    if (next.state === "idle") {
       prev = next;
       clearAll();
+      return;
+    }
+    if (next.state === "running") {
+      prev = next;
+      // 不 clearAll：running 期间终态通知保留在 panel 历史（用户可能还没看）。
       return;
     }
     // 跃迁到 attention / completed：从初始观察（prev==null）跳过。
@@ -109,7 +139,9 @@ export function createIslandNotices(
         detail,
         target: "results",
         at: Date.now(),
-        read: false,
+        // read:true（P2-1 裁决）：完成信号已由 pill completed live state 展示，
+        // panel 行只是历史；不产生未读，完成后点 pill 直达结果页（FR-008）。
+        read: true,
       });
     } else if (next.state === "attention") {
       const meta = ATTENTION_KIND[next.attention.kind];
@@ -166,10 +198,18 @@ export function createIslandNotices(
     markReadBatch(notices.value.map((n) => n.id));
   }
 
+  /** 038：打断沉入——carousel 转完一条后调此方法，把打断加入 panel 未读。
+   *  append 而非 upsert：打断是逐条事件流（id 唯一，interrupt-N 递增），
+   *  不适用终态通知"同 kind 只保留最新一条"的去重语义（复审 P1-1：
+   *  多条打断连沉时 upsert 会互相吞掉，panel 只剩 1 条）。 */
+  function sinkInterrupt(notice: Omit<IslandNotice, "at" | "read">): void {
+    notices.value = [...notices.value, { ...notice, at: Date.now(), read: false }];
+  }
+
   function reset(): void {
     prev = null;
     clearAll();
   }
 
-  return { notices, unreadCount, markAllRead, markRead, markReadBatch, reset };
+  return { notices, unreadCount, markAllRead, markRead, markReadBatch, sinkInterrupt, reset };
 }

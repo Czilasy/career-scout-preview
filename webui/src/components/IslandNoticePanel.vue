@@ -1,15 +1,29 @@
 <script setup lang="ts">
 // ---------------------------------------------------------------------------
-// 037 灵动岛通知面板：弹出在胶囊下方（绝对定位），按 kind 排序（error→paused
-// →completed），未读左侧高亮，已读淡化。点击行直达目标（父处理导航）。
+// 038 灵动岛通知面板：037 骨架 + interrupt 行 + 四色 chip 前向兼容。
 //
-// 动画：Motion 驱动 scale + opacity 入场；退场由父两阶段驱动（leaving prop
-// 切换 :animate 目标，淡出后父再卸载，避免 AnimatePresence 在 jsdom 卡 DOM）。
-// 无障碍：role=dialog/tabindex 经 attrs 透传到渲染元素，父展开后移焦。
+// 038 变更：
+// - KIND_ORDER 增 "interrupt"（位 2，paused 与 completed 之间）——打断类（投递
+//   提醒/NoticeBar warning/error）属操作告警，比终态成功事件更需先看到。
+// - iconFor：interrupt → Bell（@lucide/vue）。
+// - row 挂 data-tone（warning/error）；icon + 行边框/底色按 tone 染色
+//   （warning 琥珀 / error 红）。
+// - 打断行点击直达 notice.target（interrupt 带 "reminders" 时开提醒抽屉，
+//   App 层分流；终态通知沿用 task/results/attention）。
+//   复审 P1-2 裁决：删除 counts 四色 chip 渲染——capsule 仅上抛 matched+pending
+//   两元（useDiscoveryState 禁改），全链路无生产数据源，属死代码；待后续
+//   capsule 扩展批次再随 spec 一起加回。
+//
+// 037 不变：
+// - 排序（KIND_ORDER）/未读高亮（is-unread）/已读淡化（opacity 0.65）/行点击
+//   emit row-click 直达目标/role=dialog 焦点管理。
+// - 动画：Motion 驱动 scale+opacity 入场；退场由父两阶段驱动（leaving prop 切
+//   :animate 目标，淡出后父再卸载，避免 AnimatePresence 在 jsdom 卡 DOM）。
+// - 无障碍：role=dialog/tabindex 经 attrs 透传到渲染元素，父展开后移焦。
 // ---------------------------------------------------------------------------
 import { computed } from "vue";
 import { Motion, useReducedMotion } from "motion-v";
-import { AlertTriangle, CheckCircle2, Pause } from "@lucide/vue";
+import { AlertTriangle, Bell, CheckCircle2, Pause } from "@lucide/vue";
 import type { DynamicIslandState } from "../composables/useDiscoveryState";
 import type { IslandNotice } from "../composables/useIslandNotices";
 
@@ -23,7 +37,9 @@ const emit = defineEmits<{
   "row-click": [notice: IslandNotice];
 }>();
 
-const KIND_ORDER: Record<string, number> = { error: 0, paused: 1, completed: 2 };
+// 038：interrupt 在 paused 与 completed 之间——打断类（投递提醒/NoticeBar
+// warning/error）属操作告警，比终态成功事件更需用户先看到，故排在 completed 前。
+const KIND_ORDER: Record<string, number> = { error: 0, paused: 1, interrupt: 2, completed: 3 };
 
 const reduced = useReducedMotion();
 const animOn = computed(() => !reduced.value);
@@ -42,6 +58,7 @@ const orderedNotices = computed(() =>
 function iconFor(kind: IslandNotice["kind"]) {
   if (kind === "error") return AlertTriangle;
   if (kind === "paused") return Pause;
+  if (kind === "interrupt") return Bell;
   return CheckCircle2;
 }
 
@@ -72,6 +89,7 @@ function onRowClick(notice: IslandNotice) {
       :data-testid="`island-notice-row-${notice.kind}`"
       :data-notice-id="notice.id"
       :data-notice-read="notice.read ? 'true' : 'false'"
+      :data-tone="notice.tone"
       :initial="animOn ? { opacity: 0, y: 4 } : false"
       :animate="{ opacity: notice.read ? 0.65 : 1, y: 0 }"
       :transition="spring"
@@ -83,7 +101,7 @@ function onRowClick(notice: IslandNotice) {
       @keydown.enter.prevent="onRowClick(notice)"
       @keydown.space.prevent="onRowClick(notice)"
     >
-      <span class="notice-icon" :class="`notice-${notice.kind}`" aria-hidden="true">
+      <span class="notice-icon" :class="`notice-${notice.kind}`" :data-tone="notice.tone" aria-hidden="true">
         <component :is="iconFor(notice.kind)" :size="14" />
       </span>
       <span class="notice-body">
@@ -167,6 +185,34 @@ function onRowClick(notice: IslandNotice) {
 .notice-icon.notice-completed {
   background: var(--match, #12905f);
 }
+/* 038：interrupt 图标按 tone 染色（warning 琥珀 / error 红）。无 tone 时退灰。 */
+.notice-icon.notice-interrupt {
+  background: #6b7280;
+}
+.notice-icon.notice-interrupt[data-tone="warning"] {
+  background: #e5a13a;
+}
+.notice-icon.notice-interrupt[data-tone="error"] {
+  background: var(--reject, #a85751);
+}
+
+/* 038：interrupt 行边框/底色按 tone 染色——比终态行更显眼，比 error 略柔。 */
+.notice-row.notice-interrupt[data-tone="warning"] {
+  border-color: #e5a13a;
+  background: rgba(229, 161, 58, 0.10);
+}
+.notice-row.notice-interrupt[data-tone="warning"].is-unread {
+  border-color: #e5a13a;
+  background: rgba(229, 161, 58, 0.18);
+}
+.notice-row.notice-interrupt[data-tone="error"] {
+  border-color: var(--reject, #a85751);
+  background: rgba(168, 87, 81, 0.10);
+}
+.notice-row.notice-interrupt[data-tone="error"].is-unread {
+  border-color: var(--reject, #a85751);
+  background: rgba(168, 87, 81, 0.18);
+}
 
 .notice-body {
   display: flex;
@@ -186,6 +232,10 @@ function onRowClick(notice: IslandNotice) {
   color: var(--text-soft, #9fb0c3);
   overflow-wrap: anywhere;
 }
+/* 038 复审：interrupt 行 title 按 tone 染色（与 pill 内打断 lane 一致）——
+   warning 琥珀 / error 红，醒目不撞 panel 背景。 */
+.notice-row.notice-interrupt[data-tone="warning"] .notice-title { color: #e5a13a; }
+.notice-row.notice-interrupt[data-tone="error"] .notice-title { color: #e5484d; }
 
 .notice-go {
   flex: 0 0 auto;
@@ -222,6 +272,23 @@ function onRowClick(notice: IslandNotice) {
 :global([data-theme="kaleido"]) .notice-row.is-unread {
   background: rgba(255, 255, 255, 0.16);
   border-color: rgba(255, 255, 255, 0.35);
+}
+/* 038：kaleido 下 interrupt tone 行在半透明毛玻璃上保持可见。 */
+:global([data-theme="kaleido"]) .notice-row.notice-interrupt[data-tone="warning"] {
+  background: rgba(229, 161, 58, 0.18);
+  border-color: rgba(229, 161, 58, 0.45);
+}
+:global([data-theme="kaleido"]) .notice-row.notice-interrupt[data-tone="warning"].is-unread {
+  background: rgba(229, 161, 58, 0.28);
+  border-color: rgba(229, 161, 58, 0.60);
+}
+:global([data-theme="kaleido"]) .notice-row.notice-interrupt[data-tone="error"] {
+  background: rgba(168, 87, 81, 0.18);
+  border-color: rgba(168, 87, 81, 0.45);
+}
+:global([data-theme="kaleido"]) .notice-row.notice-interrupt[data-tone="error"].is-unread {
+  background: rgba(168, 87, 81, 0.28);
+  border-color: rgba(168, 87, 81, 0.60);
 }
 
 @media (max-width: 760px) {
