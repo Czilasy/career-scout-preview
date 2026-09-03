@@ -106,7 +106,7 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/ai_screening.py` — AI 粗筛 screen_jobs 与 JD 精筛 match_jds（021 B7 T022）
 - `webui/ai_resume.py` — AI 简历解析、统一字段校验与偏好更新（021 B7 T022）
 - `webui/pipeline_exec.py` — pipeline 执行域门面：re-export 全部既有符号，CDP 活动目录经门面镜像同步（021 B7 T023）
-- `webui/resume_identity.py` — 续跑身份域：冻结身份解析/持久化、账号快照、双门槛自动换号判定、换号留痕、角色感知兜底、父身份继承、R1/R2 撞墙换号留痕 helper（030 / 038 B091 T008）
+- `webui/resume_identity.py` — 续跑身份域：冻结身份解析/持久化、账号快照、双门槛自动换号判定、换号留痕、角色感知兜底、父身份继承（030）；038 B091 in-flight 撞墙换号留痕由 account_round_robin 限流标记承担
 - `webui/pipeline_exec_settings.py` — 高级设置读写（021 B7 T023）
 - `webui/pipeline_exec_accounts.py` — 浏览器账号簿与 CDP 数据目录；Spec 038 B091 账号池配置 schema（pool 多选 + 配额 + 限流标记）+ 默认零配置 + 限流持久化 helper（021 B7 T023 / 038 B091 T003/T014）
 - `webui/account_round_robin.py` — Spec 038 B091 多账号轮询分摊调度域：纯调度（RotationQueue/plan_round_robin）、IO 编排（ListRobin/DetailRobin/clone_source/_switch_browser_account）、撞墙换号接力、engagement 规则保护既有替身、限流持久化 best-effort（038 B091 T001）
