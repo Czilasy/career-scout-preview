@@ -15,6 +15,7 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import webui.account_round_robin as robin_mod
@@ -103,6 +104,16 @@ class RotationQueueTests(unittest.TestCase):
         self.assertEqual(q.head_account, "b")
         self.assertIn("a", q.blocked_accounts)
 
+    def test_block_account_removes_reserved_account_not_current_head(self):
+        q = RotationQueue([PoolEntry("a", 25), PoolEntry("b", 25), PoolEntry("c", 25)])
+        reserved, taken = q.reserve(25)
+        self.assertEqual((reserved.account_id, taken), ("a", 25))
+        self.assertEqual(q.head_account, "b")
+        removed = q.block_account("a")
+        self.assertEqual(removed.account_id, "a")
+        self.assertEqual(q.head_account, "b")
+        self.assertIn("a", q.blocked_accounts)
+
     def test_block_until_empty_signals_all_walled(self):
         q = RotationQueue([PoolEntry("a", 25), PoolEntry("b", 25)])
         q.block_head()  # a 撞墙
@@ -140,6 +151,53 @@ class WallCodeTests(unittest.TestCase):
         self.assertFalse(is_wall_code(""))
         self.assertFalse(is_wall_code(None))
         self.assertFalse(is_wall_code("source_timeout"))
+
+
+class CloneSourceTests(unittest.TestCase):
+    def test_zhilian_clone_keeps_runners_and_uses_new_profile_key(self):
+        from webui.source import ZhilianCdpSource
+
+        preflight = mock.Mock()
+        list_runner = mock.Mock()
+        detail_runner = mock.Mock()
+        batch_runner = mock.Mock()
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=preflight, list_runner=list_runner,
+            detail_runner=detail_runner, batch_detail_runner=batch_runner,
+        )
+        clone = robin_mod.clone_source(source, "b", run_id="run-b")
+        self.assertEqual(clone.browser_account, "b")
+        self.assertEqual(clone.profile_key, "zhilian:b")
+        self.assertIs(clone.breaker, source.breaker)
+        self.assertIs(clone._preflight_runner, preflight)
+        self.assertIs(clone._list_runner, list_runner)
+        self.assertIs(clone._detail_runner, detail_runner)
+        self.assertIs(clone._batch_detail_runner, batch_runner)
+
+    def test_boss_clone_keeps_non_default_constructor_configuration(self):
+        from webui.source import BossCdpSource
+
+        runner = mock.Mock()
+        source = BossCdpSource(
+            browser_account="a", cdp_port=9222, run_id="run-a",
+            cwd="C:\\custom-cwd", scraper_path="C:\\custom-scraper.py",
+            env={"CUSTOM": "1"}, timeout_seconds=17, runner=runner,
+            artifact_root="C:\\artifacts", max_artifact_bytes=1234,
+            in_process=True,
+        )
+        clone = robin_mod.clone_source(source, "b", run_id="run-b")
+        self.assertEqual(clone.browser_account, "b")
+        self.assertEqual(clone.cdp_port, 9222)
+        self.assertEqual(clone.cwd, source.cwd)
+        self.assertEqual(clone.scraper_path, source.scraper_path)
+        self.assertEqual(clone.env["CUSTOM"], "1")
+        self.assertEqual(clone.env["CAREER_SCOUT_TASK_ID"], "run-b")
+        self.assertEqual(clone.timeout_seconds, 17)
+        self.assertIs(clone._runner, runner)
+        self.assertIs(clone._executor, source._executor)
+        self.assertEqual(clone.max_artifact_bytes, 1234)
+        self.assertTrue(clone.in_process)
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +375,85 @@ class ListRobinTests(unittest.TestCase):
         # b 接力同 start_page=1（剩余份额不丢）
         self.assertEqual(b_src.calls[0]["start_page"], 1)
 
+    def test_cached_source_rebinds_profile_when_account_is_reused(self):
+        book = _make_book(("a", "A"), ("b", "B"), r1=1)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+
+        src = self._source_in_pool("a", [
+            _FakeOutcome(True, jobs=[{"job_id": "a1"}]),
+            _FakeOutcome(True, jobs=[{"job_id": "a2"}]),
+        ])
+        entries = robin_mod._engaged_entries(src, "R1")
+        r = ListRobin(src, entries, run_id="r")
+        switches = []
+        with mock.patch.object(
+            robin_mod, "_switch_browser_account",
+            side_effect=lambda aid, _platform, _port: switches.append(aid) or True,
+        ), mock.patch.object(
+            robin_mod, "clone_source",
+            return_value=_FakeSource("b", [_FakeOutcome(True, jobs=[{"job_id": "b1"}])]),
+        ):
+            out = r.fetch_list(src, {
+                "keyword": "k", "city": "c", "combo_key": "k|c",
+                "start_page": 1, "target_pages": 3, "source_filters": {},
+                "input_hash": "H", "platform": "boss",
+            })
+        self.assertTrue(out.ok)
+        self.assertEqual(switches, ["b", "a"])
+
+    def test_wall_retry_starts_after_pages_already_checkpointed(self):
+        book = _make_book(("a", "A"), ("b", "B"), r1=3)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+
+        class _PartialSource(_FakeSource):
+            def fetch_list(self, plan_item, *, on_page_completed=None):
+                self.calls.append(dict(plan_item))
+                if self.browser_account == "a":
+                    on_page_completed({"page": 1, "resume_page": 2})
+                    return _FakeOutcome(False, failed_code="source_rate_limited")
+                return _FakeOutcome(True, jobs=[{"job_id": "j1"}])
+
+        source_a = _PartialSource("a", [])
+        source_b = _PartialSource("b", [])
+        r = ListRobin(source_a, robin_mod._engaged_entries(source_a, "R1"), run_id="r")
+        with mock.patch.object(robin_mod, "clone_source", return_value=source_b):
+            out = r.fetch_list(source_a, {
+                "keyword": "k", "city": "c", "combo_key": "k|c",
+                "start_page": 1, "target_pages": 3, "source_filters": {},
+                "input_hash": "H", "platform": "boss",
+            }, on_page_completed=lambda _event: None)
+        self.assertTrue(out.ok)
+        self.assertEqual(source_b.calls[0]["start_page"], 2)
+
+    def test_profile_switch_failure_is_not_marked_as_rate_limited(self):
+        book = _make_book(("a", "A"), ("b", "B"), r1=1)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+        source_a = self._source_in_pool("a", [
+            _FakeOutcome(True, jobs=[{"job_id": "j1"}]),
+        ])
+        r = ListRobin(source_a, robin_mod._engaged_entries(source_a, "R1"), run_id="r")
+        with mock.patch.object(robin_mod, "_switch_browser_account", return_value=False), \
+                mock.patch.object(robin_mod, "mark_account_rate_limited") as mark:
+            out = r.fetch_list(source_a, {
+                "keyword": "k", "city": "c", "combo_key": "k|c",
+                "start_page": 1, "target_pages": 2, "source_filters": {},
+                "input_hash": "H", "platform": "boss",
+            })
+        self.assertTrue(out.ok)
+        mark.assert_not_called()
+
     def test_all_walled_returns_failure_for_pause(self):
         # 全撞完 → 返回失败 outcome 交既有暂停路径（FR-013）
         book = _make_book(("a", "A"), ("b", "B"), r1=25)
@@ -354,12 +491,14 @@ class DetailRobinTests(unittest.TestCase):
     def setUp(self):
         self._sw = robin_mod._switch_browser_account
         self._cl = robin_mod.clone_source
+        self._clear = robin_mod.clear_account_rate_limited
         robin_mod._switch_browser_account = lambda aid, plat, port: True
         robin_mod.mark_account_rate_limited = lambda *a, **k: None
 
     def tearDown(self):
         robin_mod._switch_browser_account = self._sw
         robin_mod.clone_source = self._cl
+        robin_mod.clear_account_rate_limited = self._clear
 
     def test_current_source_uses_template_for_head(self):
         book = _make_book(("a", "A"), ("b", "B"), r2=100)
@@ -392,6 +531,41 @@ class DetailRobinTests(unittest.TestCase):
         # b 再撞墙 → 全撞完
         self.assertFalse(r.switch_next())
 
+    def test_switch_next_reports_event_through_callback(self):
+        book = _make_book(("a", "A"), ("b", "B"), r2=100)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+        src = _FakeSource("a", [], platform="boss", cdp_port=9222)
+        events = []
+        r = DetailRobin(
+            src, robin_mod._engaged_entries(src, "R2"), run_id="r",
+            on_account_switch=lambda from_id, to_id: events.append((from_id, to_id)),
+        )
+        self.assertTrue(r.switch_next())
+        self.assertEqual(events, [("a", "b")])
+
+    def test_factory_records_b057_switch_event(self):
+        book = _make_book(("a", "A"), ("b", "B"), r2=100)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+        src = _FakeSource("a", [], platform="boss", cdp_port=9222)
+        store = mock.Mock()
+        with mock.patch(
+            "webui.resume_identity.record_account_switch_event"
+        ) as record:
+            r = make_detail_robin(src, run_id="run-1", switch_event_store=store)
+            self.assertIsNotNone(r)
+            self.assertTrue(r.switch_next())
+        record.assert_called_once_with(
+            store, "run-1", from_account="a", to_account="b",
+        )
+
     def test_advance_rotates_on_quota_exhaustion(self):
         book = _make_book(("a", "A"), ("b", "B"), r2=2)
         self.addCleanup(book.cleanup)
@@ -421,6 +595,55 @@ class DetailRobinTests(unittest.TestCase):
         # b 还剩 1 配额（2-1），再 advance(1) 扣完轮转回 a
         r.advance(1)
         self.assertEqual(r._queue.head_account, "a")
+
+    def test_reserve_caps_batch_to_current_account_quota(self):
+        book = _make_book(("a", "A"), ("b", "B"), r2=2)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+        src = _FakeSource("a", [], platform="boss", cdp_port=9222)
+        r = DetailRobin(src, robin_mod._engaged_entries(src, "R2"), run_id="r")
+        entry, take = r.reserve(5)
+        self.assertEqual((entry.account_id, take), ("a", 2))
+        self.assertEqual(r._queue.head_account, "b")
+
+    def test_cached_source_rebinds_profile_when_account_is_reused(self):
+        book = _make_book(("a", "A"), ("b", "B"), r2=1)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+        src = _FakeSource("a", [], platform="boss", cdp_port=9222)
+        r = DetailRobin(src, robin_mod._engaged_entries(src, "R2"), run_id="r")
+        switches = []
+        with mock.patch.object(
+            robin_mod, "_switch_browser_account",
+            side_effect=lambda aid, _platform, _port: switches.append(aid) or True,
+        ), mock.patch.object(
+            robin_mod, "clone_source",
+            return_value=_FakeSource("b", [], platform="boss", cdp_port=9222),
+        ):
+            r.advance(1)
+            r.current_source()
+            r.advance(1)
+            r.current_source()
+        self.assertEqual(switches, ["b", "a"])
+
+    def test_mark_success_clears_the_account_used_for_the_batch(self):
+        book = _make_book(("a", "A"), ("b", "B"), r2=1)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+        src = _FakeSource("a", [], platform="boss", cdp_port=9222)
+        r = DetailRobin(src, robin_mod._engaged_entries(src, "R2"), run_id="r")
+        with mock.patch.object(robin_mod, "clear_account_rate_limited") as clear:
+            r.mark_success("a")
+        clear.assert_called_once_with("a")
 
 
 # ---------------------------------------------------------------------------
@@ -464,16 +687,16 @@ class EngagementTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    """R1/R2 接线契约：防 advance 调用被误删回归（Spec 038 收口）。"""
+    """R1/R2 接线契约：防轮询入口被误删回归（Spec 038 收口）。"""
 
-    def test_fetch_job_details_calls_advance(self):
-        """契约：R2 批次成功后必须调 detail_robin.advance 推进配额轮转。"""
+    def test_fetch_job_details_reserves_detail_quota(self):
+        """契约：R2 每次请求先按当前账号配额预留，避免整窗绕过限额。"""
         import inspect
         from webui import pipeline_exec_details
         src = inspect.getsource(pipeline_exec_details.fetch_job_details)
         self.assertIn(
-            "detail_robin.advance", src,
-            "R2 接线必须调 detail_robin.advance（Spec 038 FR-003/005）",
+            "detail_robin.allocate", src,
+            "R2 接线必须按当前账号配额领取请求（Spec 038 FR-003/005）",
         )
 
     def test_search_wiring_uses_list_robin(self):
@@ -482,6 +705,92 @@ class WiringTests(unittest.TestCase):
         from webui import pipeline_exec_search
         src = inspect.getsource(pipeline_exec_search)
         self.assertIn("make_list_robin", src, "R1 接线必须调 make_list_robin")
+
+    def test_search_wiring_initializes_list_robin_once_per_task(self):
+        import inspect
+        from webui import pipeline_exec_search
+        src = inspect.getsource(pipeline_exec_search.run_search)
+        self.assertLess(
+            src.index("list_robin = make_list_robin"),
+            src.index("for idx, combo in enumerate(combos)"),
+        )
+
+    def test_detail_wiring_uses_resume_identity_switch_events(self):
+        import inspect
+        from webui import account_round_robin
+        src = inspect.getsource(account_round_robin.make_detail_robin)
+        self.assertIn("resume_identity", src)
+        self.assertIn("record_account_switch_event", src)
+
+
+class DetailPipelineRoundRobinTests(unittest.TestCase):
+    """R2 quota allocation and mixed wall/success retry behavior."""
+
+    def test_detail_batch_is_split_by_quota_and_retries_only_wall_items(self):
+        from webui.source import SourceOutcome
+        from webui.pipeline_exec_details import fetch_job_details
+
+        jobs = [{"job_id": "j1"}, {"job_id": "j2"}, {"job_id": "j3"}]
+
+        class _DetailSource:
+            platform = "boss"
+            cdp_port = 9222
+
+            def __init__(self, account_id, behavior):
+                self.browser_account = account_id
+                self.behavior = behavior
+                self.calls = []
+
+            def fetch_details_batch(self, batch, **_kwargs):
+                ids = [job["job_id"] for job in batch]
+                self.calls.append(ids)
+                return self.behavior(ids)
+
+        def a_behavior(ids):
+            return {
+                jid: SourceOutcome.success(detail={"jd": f"JD-{jid}"})
+                for jid in ids
+            }
+
+        def b_behavior(ids):
+            return {
+                jid: SourceOutcome.failure(
+                    failed_code="source_rate_limited", safe_log="rate limited"
+                )
+                for jid in ids
+            }
+
+        source_a = _DetailSource("a", a_behavior)
+        source_b = _DetailSource("b", b_behavior)
+        robin = DetailRobin(
+            source_a, [PoolEntry("a", 1), PoolEntry("b", 1)], run_id="run-x"
+        )
+        config = SimpleNamespace(
+            detail_batch_size=3,
+            detail_interval=0,
+            detail_reset_every=0,
+            detail_batch_cooldown=0,
+            detail_tab_pool_size=1,
+        )
+
+        with tempfile.TemporaryDirectory() as artifact_dir, \
+                mock.patch.object(robin_mod, "make_detail_robin", return_value=robin), \
+                mock.patch.object(robin_mod, "clone_source", return_value=source_b), \
+                mock.patch.object(robin_mod, "_switch_browser_account", return_value=True), \
+                mock.patch("webui.pipeline_exec.load_advanced_settings", return_value={}), \
+                mock.patch("webui.pipeline_exec_details.time.sleep"):
+            result = fetch_job_details(
+                jobs, source_a, artifact_dir=artifact_dir,
+                execution_config=config,
+            )
+
+        self.assertFalse(result["hard_stop"], result)
+        self.assertEqual(result["fetched"], 3)
+        self.assertEqual(source_a.calls, [["j1"], ["j2"], ["j3"]])
+        self.assertEqual(source_b.calls, [["j2"]])
+        self.assertEqual({job["job_id"]: job["jd"] for job in result["jobs"]}, {
+            "j1": "JD-j1", "j2": "JD-j2", "j3": "JD-j3",
+        })
 
 
 if __name__ == "__main__":

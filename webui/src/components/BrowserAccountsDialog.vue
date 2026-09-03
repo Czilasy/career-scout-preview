@@ -137,9 +137,16 @@ async function togglePoolSelected(account: BrowserAccount) {
   const next = !currentSelected;
   poolBusy.value = true;
   try {
+    const order = next
+      ? Math.max(
+          -1,
+          ...accounts.value.map((item) => Number(item.pool?.order ?? -1))
+            .filter((value) => Number.isFinite(value)),
+        ) + 1
+      : undefined;
     await apiRequest(`/api/browser-accounts/${encodeURIComponent(account.id)}/pool`, {
       method: "PUT",
-      json: { selected: next },
+      json: { selected: next, ...(order === undefined ? {} : { order }) },
     });
     await loadAccounts();
   } catch (error) {

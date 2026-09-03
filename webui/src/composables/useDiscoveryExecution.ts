@@ -390,7 +390,8 @@ async function startScrape(options: OneClickLaunch = {}) {
       return;
     }
   } catch {
-    // best-effort：账号簿读取失败不阻断开抓
+    // 读取异常时继续提交，由任务创建端的 FR-019 硬门禁裁决；避免把短暂
+    // 的账号簿读取异常误报成用户不可开抓。
   }
   const preview = await deps.refreshScopePreview();
   if (!preview) return;

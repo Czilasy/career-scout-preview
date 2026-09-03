@@ -16,7 +16,6 @@ from webui.error_registry import SYSTEMIC_BLOCK_CODES as _HARD_STOP_CODES
 from webui.error_registry import resolve_code
 from webui.task_pause_support import ImmediateOnlyCancelEvent
 from webui import recruiter_activity
-from webui.account_round_robin import is_wall_code as _robin_is_wall_code
 
 from webui.logging_setup import get_logger
 
@@ -148,6 +147,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     stall_attempts = 0
     # 028 B081：详情成功时归一化的招聘者活跃事实（idx → fact 或 None）
     activity_by_idx: dict = {}
+    counted_done: set[int] = set()
+    counted_fetched: set[int] = set()
 
     def _apply_batch_outcomes(batch_entries, batch_outcomes, batch_exc_code,
                               *, count_done=True):
@@ -199,8 +200,9 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 )
                 jd_fail_evidence_by_idx[idx] = str(getattr(outcome, "safe_log", "") or "")
             jd_by_idx[idx] = jd
-            if jd:
+            if jd and idx not in counted_fetched:
                 fetched += 1
+                counted_fetched.add(idx)
                 # 成功覆盖失败标记（重抓场景：抢救失败 → 重抓成功）
                 jd_fail_by_idx.pop(idx, None)
                 jd_fail_reason_by_idx.pop(idx, None)
@@ -215,8 +217,9 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 except Exception:
                     _logger.debug("观测回调执行失败（不阻断详情抓取主流程）", exc_info=True)
 
-            if count_done:
+            if count_done and idx not in counted_done:
                 done += 1
+                counted_done.add(idx)
                 if progress is not None:
                     try:
                         progress(done, total)
@@ -231,12 +234,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         source.cancel_event = ImmediateOnlyCancelEvent(stop_event)
     # Spec 038 B091 R2 多账号轮询分摊：engagement 规则不满足时返回 None
     # （legacy 单源行为），满足时走跨账号按配额推进 + 撞墙换号。
-    try:
-        from webui.account_round_robin import make_detail_robin
-        detail_robin = make_detail_robin(source)
-    except Exception:
-        _logger.debug("make_detail_robin 初始化失败，回退 legacy 单源", exc_info=True)
-        detail_robin = None
+    from webui.account_round_robin import make_detail_robin
+    detail_robin = make_detail_robin(
+        source, run_id=str(task_id or ""), switch_event_store=store,
+    )
     for batch_start in range(0, len(indexed_jobs), BATCH_SIZE):
         if stop_event is not None and stop_event.is_set():
             stopped = True
@@ -263,7 +264,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 except Exception:
                     _logger.debug("观测回调执行失败（不阻断详情抓取主流程）", exc_info=True)
 
-        batch = indexed_jobs[batch_start:batch_start + BATCH_SIZE]
+        # 一个逻辑窗口仍遵守原 detail_batch_size；R2 轮询会把它拆成多个
+        # 账号实际请求，避免一次把整窗交给单个账号而绕过其配额。
+        pending_batch = indexed_jobs[batch_start:batch_start + BATCH_SIZE]
+        batch = list(pending_batch)
         batch_jobs = [job for _, _, job in batch]
         batch_path = os.path.join(
             artifact_dir, f"pipeline_batch_{batch_start}_{time.time_ns()}.json"
@@ -276,18 +280,29 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             batch_progress(
                 batch_start // BATCH_SIZE + 1,
                 (len(indexed_jobs) + BATCH_SIZE - 1) // BATCH_SIZE)
+        allocation = None
         while True:
             if stop_event is not None and stop_event.is_set():
                 stopped = True
                 break
-            # Spec 038 B091 R2：每轮 while 迭代重取当前队首账号的 source
-            # （engagement 时 robin 非空，闭包晚绑定整体切换账号源）；
-            # 全撞完（队空）→ 走既有 hard_stop 暂停路径。
             if detail_robin is not None:
-                cur_src = detail_robin.current_source()
+                if allocation is None:
+                    allocation = detail_robin.allocate(pending_batch)
+                    if allocation is None:
+                        hard_stop = True
+                        hard_stop_code = "source_blocked"
+                        break
+                    batch = allocation.entries
+                    batch_jobs = [job for _, _, job in batch]
+                cur_src = detail_robin.source_for(allocation.account_id)
                 if cur_src is None:
+                    retry_pending = detail_robin.retry_after_binding_failure(allocation)
+                    allocation = None
+                    if retry_pending is not None:
+                        pending_batch = retry_pending
+                        continue
                     hard_stop = True
-                    hard_stop_code = "source_blocked"
+                    hard_stop_code = "source_cdp_unavailable"
                     break
                 source = cur_src
             batch_exception_code: str | None = None
@@ -377,11 +392,19 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 # 025 B077：批返回后立即处理结果——抢救出的已抓并入 jd_by_idx，
                 # 不再被重抓分支丢弃；重抓剔除已抓成功岗位、只抓缺失，避免重复抓。
                 _apply_batch_outcomes(batch, outcomes, batch_exception_code)
+                if (detail_robin is not None and allocation is not None
+                        and any(outcome is not None and outcome.ok
+                                for outcome in outcomes.values())):
+                    detail_robin.mark_success(allocation.account_id)
                 remaining = [entry for entry in batch
                              if not jd_by_idx.get(entry[0], "")]
                 if not remaining:
                     # 卡死前该批已全部抓完（抢救全成功）：不重抓直接完成
                     guard.complete_batch(batch_key)
+                    if allocation is not None and allocation.tail:
+                        pending_batch = list(allocation.tail)
+                        allocation = None
+                        continue
                     break
                 # 卡死：等 3~5s 后重抓缺失岗位（接受重复抓取已抓部分以外的内容）
                 _delay = guard.next_retry_delay()
@@ -391,6 +414,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 attempt += 1
                 batch = remaining
                 batch_jobs = [job for _, _, job in remaining]
+                if detail_robin is not None and allocation is not None:
+                    allocation = detail_robin.keep_unfinished(allocation, remaining)
                 # 025 B077：重抓用新产物文件，不覆盖已抓产物
                 batch_path = os.path.join(
                     artifact_dir,
@@ -436,7 +461,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 and not recovery.is_browser_lost(batch_exception_code)
             ) or any(
                 outcome is not None
-                and outcome.failed_code in _jd_hard_stop_codes
+                and _jd_is_hard_stop(outcome.failed_code)
                 and not recovery.is_browser_lost(outcome.failed_code)
                 for outcome in outcomes.values()
             )
@@ -494,6 +519,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
 
             # 025 B077：批返回后立即处理结果（抢救的已抓并入；成功清除失败标记）
             _apply_batch_outcomes(batch, outcomes, batch_exception_code)
+            if (detail_robin is not None and allocation is not None
+                    and any(outcome is not None and outcome.ok
+                            for outcome in outcomes.values())):
+                detail_robin.mark_success(allocation.account_id)
             # T018: 记录 batch 事件
             if measurement_callback is not None:
                 try:
@@ -512,21 +541,23 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             if guard is not None:
                 guard.complete_batch(batch_key)
                 guard.touch(batch_key)  # 批次结果返回也是产出
-            # Spec 038 B091 R2：撞墙（系统性阻断，非浏览器失联）→ 顺次换预选账号
-            # 重抓本批；全撞完则保留 hard_stop 走既有暂停路径（FR-013）。
-            if (detail_robin is not None and hard_stop
-                    and _robin_is_wall_code(hard_stop_code)
-                    and detail_robin.switch_next()):
-                hard_stop = False
-                hard_stop_code = None
-                continue
+            if detail_robin is not None and allocation is not None and hard_stop:
+                handled, retry_pending = detail_robin.retry_after_wall(
+                    allocation, outcomes, batch_exception_code,
+                    outcome_key=lambda item: item[1],
+                )
+                if handled and retry_pending is not None:
+                    pending_batch = retry_pending
+                    allocation = None
+                    hard_stop = False
+                    hard_stop_code = None
+                    continue
             if hard_stop:
                 break
-            # Spec 038 B091 R2：批次成功推进配额，耗尽轮转下一账号（FR-003/005）
-            if detail_robin is not None:
-                _adv = sum(1 for _, jid, _ in batch if outcomes.get(jid) and outcomes[jid].ok)
-                if _adv:
-                    detail_robin.advance(_adv)
+            if detail_robin is not None and allocation is not None and allocation.tail:
+                pending_batch = list(allocation.tail)
+                allocation = None
+                continue
             break  # 正常完成（未卡死、未硬停）
         # 025：批内信号清除（批结束/停止/重抓循环退出，任何 break 都会落到这里）
         if batch_progress is not None:

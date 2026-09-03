@@ -226,6 +226,27 @@ describe("useDiscoveryExecution screen 侧清空（035 FR-010）", () => {
     expect(state.currentRoundStatus.value).toBe("");
   });
 
+  it("账号池读取失败时仍交给服务端 FR-019 门禁裁决", async () => {
+    const state = makeState();
+    state.selectedKeywords.value = ["Python"];
+    apiRequestMock.mockImplementation(async (url: string) => {
+      if (url === "/api/browser-accounts") throw new Error("network");
+      if (url === "/api/execute-search") return { task_id: "scrape-new-2" };
+      throw new Error(`unexpected request: ${url}`);
+    });
+    const deps = makeDeps({
+      refreshScopePreview: vi.fn(async () => (
+        { scope_digest: "digest-2" } as unknown as FrozenSearchScope
+      )),
+    });
+
+    await useDiscoveryExecution(state, deps).startScrape();
+
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/api/execute-search", expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("T005-②: restoreRunningTask 检测到活的抓取任务时清空 screen 侧残留（含 sessionStorage 整包恢复带入）", async () => {
     apiRequestMock.mockResolvedValue({
       ok: true, has_task: true, task_id: "scrape-live-1", kind: "scrape",

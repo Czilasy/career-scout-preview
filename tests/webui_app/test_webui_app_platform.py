@@ -154,6 +154,30 @@ class PlatformAwareSearchScopeTests(unittest.TestCase):
         data = resp.get_json()
         self.assertEqual(data["error_code"], "search_filters_not_supported")
 
+    def test_execute_search_rejects_an_empty_account_pool(self):
+        """FR-019：服务端也不能让旧 fallback 绕过全取消账号的前端校验。"""
+        from webui.pipeline_exec_accounts import (
+            load_browser_accounts,
+            save_browser_accounts,
+        )
+
+        accounts_path = self.app.config["BROWSER_ACCOUNTS_PATH"]
+        accounts = load_browser_accounts(accounts_path)
+        for account in accounts.values():
+            account["pool"]["selected"] = False
+        save_browser_accounts(accounts, accounts_path)
+
+        resp = self.client.post("/api/execute-search", json={
+            "platform": "boss",
+            "script_params": {
+                "keyword": "Python",
+                "city": ["上海"],
+                "pages": 1,
+            },
+        })
+        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.get_json()["error_code"], "account_pool_empty")
+
     def test_execute_search_rejects_screening_fields(self):
         """screening_fields 属于 AI 筛选，搜索请求携带时返回 422。"""
         preview = self.client.post("/api/search-scope/preview", json={

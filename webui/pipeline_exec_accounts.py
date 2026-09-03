@@ -102,6 +102,21 @@ def _normalize_rate_limited(raw: object) -> bool:
     return bool(raw)
 
 
+def parse_bool(value: object) -> bool | None:
+    """Parse API boolean values without treating the string ``"false"`` as true."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1"}:
+            return True
+        if normalized in {"false", "0"}:
+            return False
+    return None
+
+
 def _default_browser_accounts() -> dict[str, dict[str, object]]:
     """内置默认账号簿——每账号默认进池、默认全选、默认配额取中值（FR-015）。"""
     out: dict[str, dict[str, object]] = {}
@@ -341,13 +356,29 @@ def resolve_account_for_role(accounts: dict, role: str) -> str | None:
     没有选中账号时返回 None。
     """
     _ = str(role or "").strip()  # 接受但不再使用
-    for aid, item in accounts.items():
+    selected: list[tuple[int, str]] = []
+    for fallback_order, (aid, item) in enumerate(accounts.items()):
         pool = item.get("pool")
         if not isinstance(pool, dict):
-            pool = _normalize_pool(pool)
+            pool = _normalize_pool(pool, fallback_order)
         if pool.get("selected", True):
-            return str(aid)
-    return None
+            try:
+                order = int(pool.get("order", fallback_order))
+            except (TypeError, ValueError):
+                order = fallback_order
+            selected.append((max(0, order), str(aid)))
+    if not selected:
+        return None
+    selected.sort()
+    return selected[0][1]
+
+
+def has_selected_account(
+        accounts_path: str | os.PathLike[str] | None = None) -> bool:
+    """Return whether the account pool has at least one selected account."""
+    return resolve_account_for_role(
+        load_browser_accounts(accounts_path), ""
+    ) is not None
 
 
 def assign_account_role(
@@ -449,14 +480,17 @@ def set_account_rate_limited(
     if not aid:
         return
     try:
-        accounts = load_browser_accounts(path)
-        item = accounts.get(aid)
-        if not isinstance(item, dict):
-            return
-        if bool(item.get("rate_limited")) == bool(rate_limited):
-            return  # 状态未变，避免无谓写盘
-        item["rate_limited"] = bool(rate_limited)
-        save_browser_accounts(accounts, path)
+        # 与新增/删除/池设置共用同一把进程锁，避免撞墙标记的读改写
+        # 覆盖用户刚保存的勾选顺序或配额。
+        with _BROWSER_ACCOUNTS_LOCK:
+            accounts = load_browser_accounts(path)
+            item = accounts.get(aid)
+            if not isinstance(item, dict):
+                return
+            if bool(item.get("rate_limited")) == bool(rate_limited):
+                return  # 状态未变，避免无谓写盘
+            item["rate_limited"] = bool(rate_limited)
+            save_browser_accounts(accounts, path)
     except Exception:
         # best-effort：撞墙/自愈持久化失败不影响主流程
         _logger.debug(

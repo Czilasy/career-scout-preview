@@ -466,6 +466,9 @@ describe("BrowserAccountsDialog role assignment (B073)", () => {
           if (typeof body.selected === "boolean") {
             next.pool = { ...next.pool, selected: body.selected };
           }
+          if (typeof body.order === "number") {
+            next.pool = { ...next.pool, order: body.order };
+          }
           if (typeof body.r1_quota === "number") {
             next.pool = { ...next.pool, r1_quota: body.r1_quota };
           }
@@ -501,6 +504,19 @@ describe("BrowserAccountsDialog role assignment (B073)", () => {
       String(u).endsWith("/api/browser-accounts/b/pool") && i?.method === "PUT");
     expect(putCall).toBeTruthy();
     expect(JSON.parse(String(putCall![1]!.body))).toEqual({ selected: false });
+  });
+
+  it("puts a reselected account at the end of the checkbox order", async () => {
+    const fetchMock = poolFetchMock();
+    const wrapper = await mountOpen(fetchMock);
+    await wrapper.get('[data-testid="pool-selected-b"]').trigger("change");
+    await flushPromises();
+    await wrapper.get('[data-testid="pool-selected-b"]').trigger("change");
+    await flushPromises();
+    const putCalls = fetchMock.mock.calls.filter(([u, i]) =>
+      String(u).endsWith("/api/browser-accounts/b/pool") && i?.method === "PUT");
+    expect(putCalls).toHaveLength(2);
+    expect(JSON.parse(String(putCalls[1]![1]!.body))).toEqual({ selected: true, order: 2 });
   });
 
   it("updates r1 quota via PUT /pool", async () => {
