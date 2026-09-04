@@ -109,7 +109,8 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/resume_identity.py` — 续跑身份域：冻结身份解析/持久化、账号快照、双门槛自动换号判定、换号留痕、角色感知兜底、父身份继承（030）；038 B091 in-flight 撞墙换号留痕由 account_round_robin 限流标记承担
 - `webui/pipeline_exec_settings.py` — 高级设置读写（021 B7 T023）
 - `webui/pipeline_exec_accounts.py` — 浏览器账号簿与 CDP 数据目录；Spec 038 B091 账号池配置 schema（pool 多选 + 配额 + 限流标记）+ 默认零配置 + 限流持久化 helper（021 B7 T023 / 038 B091 T003/T014）
-- `webui/account_round_robin.py` — Spec 038 B091 多账号轮询分摊调度域：纯调度（RotationQueue/plan_round_robin）、IO 编排（ListRobin/DetailRobin/clone_source/_switch_browser_account）、撞墙换号接力、engagement 规则保护既有替身、限流持久化 best-effort（038 B091 T001）
+- `webui/account_round_robin.py` — Spec 038 B091 多账号轮询分摊调度域：纯调度（RotationQueue/plan_round_robin）、IO 编排（ListRobin/DetailRobin/clone_source/_switch_browser_account）、撞墙换号接力、engagement 规则保护既有替身、限流持久化 best-effort（038 B091 T001）+ 白箱 seam 接线（038 B091 V2）
+- `webui/account_round_robin_observability.py` — Spec 038 B091 V2 轮询白箱安全摘要适配器：账号池快照、分配段、正常/撞墙切换、失败不完整标记，复用 `task_logs`，不记录凭据或岗位正文
 - `webui/pipeline_exec_status.py` — 失败码口径、taxonomy 理由与抓取进度权重（021 B7 T023）
 - `webui/pipeline_exec_chrome.py` — 调试浏览器生命周期：就绪检查与关闭（021 B7 T023）
 - `webui/pipeline_exec_filters.py` — 搜索参数展开与本地岗位过滤匹配（021 B7 T023）

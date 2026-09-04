@@ -21,9 +21,9 @@ import inspect
 from typing import Any, Callable
 
 from webui.logging_setup import get_logger
+from webui.account_round_robin_observability import RoundRobinWhitebox
 
 _logger = get_logger(__name__)
-
 
 # 默认每轮配额取范围中值（FR-004/FR-005/A9）。
 DEFAULT_R1_QUOTA = 25
@@ -122,6 +122,11 @@ class RotationQueue:
         self._entries: list[PoolEntry] = list(entries)
         self._remaining: list[int] = [max(1, int(e.quota)) for e in entries]
         self._blocked: list[PoolEntry] = []
+        self._round = 1
+        self._round_seen: set[str] = set()
+        self._next_round_pending = False
+        self._last_round = 1
+        self._last_remaining = 0
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -143,14 +148,30 @@ class RotationQueue:
             return None, 0
         take = max(1, min(int(n) if n and n > 0 else 1, self._remaining[0]))
         entry = self._entries[0]
+        if self._next_round_pending and entry.account_id in self._round_seen:
+            self._round += 1
+            self._round_seen.clear()
+        self._next_round_pending = False
+        self._round_seen.add(entry.account_id)
+        self._last_round = self._round
         self._remaining[0] -= take
+        self._last_remaining = max(0, self._remaining[0])
         if self._remaining[0] <= 0:
             e = self._entries.pop(0)
             r = self._remaining.pop(0)
             self._entries.append(e)
             self._remaining.append(max(1, int(e.quota)))
+            self._next_round_pending = True
             _ = r
         return entry, take
+
+    @property
+    def last_round(self) -> int:
+        return self._last_round
+
+    @property
+    def last_remaining(self) -> int:
+        return self._last_remaining
 
     def block_head(self) -> PoolEntry | None:
         """队首撞墙：移出队列（不再轮转）。返回被移除账号，队空返回 None。"""
@@ -357,7 +378,6 @@ def clone_source(source: Any, account_id: str, *, run_id: str = "") -> Any:
             kwargs[name] = value
     return cls(**kwargs)
 
-
 # ---------------------------------------------------------------------------
 # R1：列表轮询分摊编排
 # ---------------------------------------------------------------------------
@@ -384,7 +404,6 @@ def _recompute_input_hash(plan_item: dict, subrange_target: int) -> str:
                       int(subrange_target),
                       plan_item.get("source_filters") or {})
 
-
 class ListRobin:
     """R1 列表轮询分摊编排：把一个 combo 按配额拆成子范围跨账号抓。
 
@@ -395,13 +414,19 @@ class ListRobin:
     - 成功使用账号时清 rate_limited（自愈）；撞墙时写 rate_limited（FR-014）。
     """
 
-    def __init__(self, source: Any, entries: list[PoolEntry], *, run_id: str = ""):
+    def __init__(self, source: Any, entries: list[PoolEntry], *, run_id: str = "",
+                 switch_event_store: Any = None):
         if not entries:
             raise ValueError("ListRobin 需至少一个预选账号")
         self._queue = RotationQueue(entries)
         self._run_id = str(run_id or getattr(source, "run_id", "") or "")
         self._platform = str(getattr(source, "platform", "boss") or "boss")
         self._cdp_port = getattr(source, "cdp_port", None)
+        self._whitebox = RoundRobinWhitebox(
+            switch_event_store, self._run_id, phase="R1",
+            platform=self._platform, entries=entries,
+        )
+        self._pending_switch_reason = None
         # 当前账号的 source 缓存：首个账号直接用传入 source（避免无谓克隆）。
         self._sources: dict[str, Any] = {}
         head = self._queue.head_account
@@ -414,9 +439,20 @@ class ListRobin:
         """取该账号的 source：每次跨账号使用前重新绑定 profile。"""
         src = self._sources.get(account_id)
         if self._active_account != account_id:
+            from_account = str(self._active_account or "")
+            reason = str(self._pending_switch_reason or "quota")
             if not _switch_browser_account(account_id, self._platform, self._cdp_port):
+                self._whitebox.switch(
+                    from_account=from_account, to_account=account_id,
+                    reason=reason, result="failed",
+                )
                 return None
             self._active_account = account_id
+            self._whitebox.switch(
+                from_account=from_account, to_account=account_id,
+                reason=reason, result="succeeded",
+            )
+            self._pending_switch_reason = None
         if src is not None:
             return src
         src = clone_source(template, account_id, run_id=self._run_id)
@@ -442,6 +478,11 @@ class ListRobin:
             if entry is None:
                 break  # 队空（全撞完）——交下面失败路径
             sub_end = start + take - 1
+            self._whitebox.allocation(
+                entry.account_id, round_no=self._queue.last_round, count=take,
+                remaining=self._queue.last_remaining,
+                start_page=start, end_page=sub_end,
+            )
             sub_plan = dict(plan_item)
             sub_plan["start_page"] = start
             sub_plan["target_pages"] = sub_end
@@ -453,6 +494,7 @@ class ListRobin:
             if src is None:
                 # profile/Chrome 绑定失败是环境问题，不得误标平台限流。
                 self._queue.block_account(entry.account_id)
+                self._pending_switch_reason = "binding_failure"
                 if not self._queue.head_account:
                     return _source_unavailable()
                 continue
@@ -486,6 +528,15 @@ class ListRobin:
             if is_wall_code(getattr(outcome, "failed_code", "")):
                 mark_account_rate_limited(entry.account_id)
                 self._queue.block_account(entry.account_id)
+                next_account = self._queue.head_account
+                self._whitebox.handoff(
+                    blocked_account=entry.account_id,
+                    blocked_reason=str(getattr(outcome, "failed_code", "") or "wall"),
+                    to_account=str(next_account or ""),
+                    remaining=max(0, target - start + 1),
+                    result="queued" if next_account else "paused",
+                )
+                self._pending_switch_reason = "wall"
                 if self._queue.head_account is None:
                     return outcome  # 全撞完
                 continue  # 同 start 重抓，剩余份额接力
@@ -495,16 +546,6 @@ class ListRobin:
         # 未抓任何东西（target<start 或首轮即空）→ 交回原 source 的等价空成功
         return _passthrough(source, plan_item, on_page_completed)
 
-
-def _failure(template: Any):
-    """全撞完兜底：构造一个系统性阻断失败 outcome 交既有暂停路径。"""
-    from webui.source_breaker import SourceOutcome
-    return SourceOutcome.failure(
-        failed_code="source_blocked",
-        safe_log="round_robin_all_accounts_walled",
-    )
-
-
 def _source_unavailable():
     """所有候选账号都无法绑定 profile 时交给既有环境暂停路径。"""
     from webui.source_breaker import SourceOutcome
@@ -512,7 +553,6 @@ def _source_unavailable():
         failed_code="source_cdp_unavailable",
         safe_log="round_robin_account_binding_failed",
     )
-
 
 def _passthrough(source: Any, plan_item: dict, on_page_completed):
     """轮询未实际推进（如 target<start）时的等价透传。"""
@@ -535,7 +575,8 @@ class DetailRobin:
     """
 
     def __init__(self, source: Any, entries: list[PoolEntry], *, run_id: str = "",
-                 on_account_switch: Callable[[str, str], None] | None = None):
+                 on_account_switch: Callable[[str, str], None] | None = None,
+                 switch_event_store: Any = None):
         if not entries:
             raise ValueError("DetailRobin 需至少一个预选账号")
         self._queue = RotationQueue(entries)
@@ -543,6 +584,11 @@ class DetailRobin:
         self._platform = str(getattr(source, "platform", "boss") or "boss")
         self._cdp_port = getattr(source, "cdp_port", None)
         self._on_account_switch = on_account_switch
+        self._whitebox = RoundRobinWhitebox(
+            switch_event_store, self._run_id, phase="R2",
+            platform=self._platform, entries=entries,
+        )
+        self._pending_switch_reason = None
         self._sources: dict[str, Any] = {}
         head = self._queue.head_account
         self._active_account = head
@@ -556,9 +602,20 @@ class DetailRobin:
             return None
         src = self._sources.get(account_id)
         if self._active_account != account_id:
+            from_account = str(self._active_account or "")
+            reason = str(self._pending_switch_reason or "quota")
             if not _switch_browser_account(account_id, self._platform, self._cdp_port):
+                self._whitebox.switch(
+                    from_account=from_account, to_account=account_id,
+                    reason=reason, result="failed",
+                )
                 return None
             self._active_account = account_id
+            self._whitebox.switch(
+                from_account=from_account, to_account=account_id,
+                reason=reason, result="succeeded",
+            )
+            self._pending_switch_reason = None
         if src is not None:
             return src
         # 取一个模板（任一已缓存 source）用于克隆同参数
@@ -580,6 +637,11 @@ class DetailRobin:
         entry, take = self.reserve(len(pending_entries))
         if entry is None or take <= 0:
             return None
+        self._whitebox.allocation(
+            entry.account_id, round_no=self._queue.last_round, count=take,
+            remaining=self._queue.last_remaining,
+            pending_remaining=max(0, len(pending_entries) - take),
+        )
         return DetailAllocation(
             account_id=entry.account_id,
             entries=list(pending_entries[:take]),
@@ -599,7 +661,8 @@ class DetailRobin:
             str(account_id or self._queue.head_account or "")
         )
 
-    def switch_next(self, account_id: str | None = None) -> bool:
+    def switch_next(self, account_id: str | None = None,
+                    *, handoff_count: int = 0) -> bool:
         """撞墙换号：当前队首移出并切下一个。全撞完返回 False。"""
         failed_account = str(account_id or self._queue.head_account or "")
         if not failed_account:
@@ -607,11 +670,18 @@ class DetailRobin:
         mark_account_rate_limited(failed_account)
         self._queue.block_account(failed_account)
         next_account = self._queue.head_account
+        self._pending_switch_reason = "wall"
         if next_account and self._on_account_switch is not None:
             try:
                 self._on_account_switch(failed_account, next_account)
             except Exception:
                 _logger.debug("账号轮询切换留痕失败（不阻断主流程）", exc_info=True)
+        self._whitebox.handoff(
+            blocked_account=failed_account,
+            to_account=str(next_account or ""),
+            remaining=max(0, int(handoff_count or 0)),
+            result="queued" if next_account else "paused", blocked_reason="wall",
+        )
         return next_account is not None
 
     def skip_account(self, account_id: str | None = None) -> bool:
@@ -660,7 +730,8 @@ class DetailRobin:
             wall_entries = list(allocation.entries)
         if not wall_entries:
             return False, None
-        if not self.switch_next(allocation.account_id):
+        if not self.switch_next(allocation.account_id,
+                                handoff_count=len(wall_entries) + len(allocation.tail)):
             return True, None
         return True, wall_entries + list(allocation.tail)
 
@@ -703,12 +774,14 @@ def _engaged_entries(source: Any, role: str) -> list[PoolEntry]:
     return entries
 
 
-def make_list_robin(source: Any, *, run_id: str = "") -> ListRobin | None:
+def make_list_robin(source: Any, *, run_id: str = "",
+                    switch_event_store: Any = None) -> ListRobin | None:
     """R1 接线入口：返回 ListRobin 或 None（legacy 透传）。"""
     entries = _engaged_entries(source, "R1")
     if not entries:
         return None
-    return ListRobin(source, entries, run_id=run_id)
+    return ListRobin(source, entries, run_id=run_id,
+                     switch_event_store=switch_event_store)
 
 
 def make_detail_robin(source: Any, *, run_id: str = "",
@@ -718,15 +791,8 @@ def make_detail_robin(source: Any, *, run_id: str = "",
     entries = _engaged_entries(source, "R2")
     if not entries:
         return None
-    if on_account_switch is None and switch_event_store is not None and run_id:
-        def on_account_switch(from_account: str, to_account: str) -> None:
-            # B057 的换号事件由 resume_identity 统一落盘，R2 撞墙不另起一套。
-            from webui.resume_identity import record_account_switch_event
-            record_account_switch_event(
-                switch_event_store, run_id,
-                from_account=from_account, to_account=to_account,
-            )
     return DetailRobin(
         source, entries, run_id=run_id,
         on_account_switch=on_account_switch,
+        switch_event_store=switch_event_store,
     )

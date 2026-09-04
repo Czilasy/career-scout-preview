@@ -49,7 +49,8 @@ def run_search(params: dict, source, *, pages: int = 3,
                on_issue=None,
                resume_pages: dict[str, int] | None = None,
                resume_jobs: dict[str, list[dict]] | None = None,
-               close_chrome_on_success: bool = True) -> dict:
+               close_chrome_on_success: bool = True,
+               task_id=None, task_event_store=None) -> dict:
     """Execute the multi-search pipeline and return merged, filtered jobs.
 
     ``source`` is a ``BossCdpSource`` (or compatible) providing ``preflight``
@@ -156,7 +157,10 @@ def run_search(params: dict, source, *, pages: int = 3,
     # 组合只是待处理工作项；不能每个 combo 重新从账号 1 号开始。
     try:
         from webui.account_round_robin import make_list_robin
-        list_robin = make_list_robin(source)
+        list_robin = make_list_robin(
+            source, run_id=str(task_id or getattr(source, "run_id", "") or ""),
+            switch_event_store=task_event_store,
+        )
     except Exception:
         _logger.debug("make_list_robin 初始化失败，回退 legacy 单源", exc_info=True)
         list_robin = None

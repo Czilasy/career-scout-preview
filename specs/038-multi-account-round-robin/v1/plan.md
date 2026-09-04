@@ -1,8 +1,8 @@
 # Implementation Plan: 多账号轮询分摊抓取（B091）
 
-**Branch**: `038-multi-account-round-robin` | **Date**: 2026-09-03 | **Spec**: [spec.md](./spec.md)
+**Branch**: `038-multi-account-round-robin` | **Date**: 2026-09-03 | **Spec Version**: `v1` | **Spec**: [spec.md](./spec.md)
 
-**Input**: Feature specification from `/specs/038-multi-account-round-robin/spec.md`
+**Input**: Feature specification from `/specs/038-multi-account-round-robin/v1/spec.md`
 
 ## Summary
 
@@ -87,7 +87,7 @@
 ### Documentation (this feature)
 
 ```text
-specs/038-multi-account-round-robin/
+specs/038-multi-account-round-robin/v1/
 ├── spec.md              # 需求规格（已完成）
 ├── plan.md              # 本文件
 └── tasks.md             # /speckit-tasks 输出

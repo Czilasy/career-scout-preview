@@ -411,7 +411,7 @@ class StoreRunsMixin:
         """追加一条流程事件到 task_logs（FR-038）。
 
         事件类型：stage_start / stage_complete / job_success / job_fail /
-        pause / resume / cancel / block_check。
+        pause / resume / cancel / block_check，以及 038 轮询白箱摘要事件。
         line 字段存 JSON：{"type":..., "payload":..., "at":...}。
 
         task_logs 有 FOREIGN KEY (task_id) REFERENCES tasks(id)，但 screening

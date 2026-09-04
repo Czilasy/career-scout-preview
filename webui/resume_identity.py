@@ -82,19 +82,40 @@ def decide_auto_account_switch(
 
 def record_account_switch_event(store: Any, run_id: str, *,
                                 from_account: str, to_account: str,
-                                accounts: dict[str, Any] | None = None) -> None:
-    """换号留痕：写 ``account_switch`` 任务事件（030 FR-005）。尽力而为，
-    不因事件失败回滚已发生的身份改写。"""
+                                accounts: dict[str, Any] | None = None,
+                                phase: str | None = None,
+                                reason: str | None = None,
+                                result: str | None = None) -> bool:
+    """换号留痕：写 ``account_switch`` 任务事件（030 FR-005）。
+
+    038 调用方可补充阶段、切换原因和结果；旧调用方不传时保持原摘要。
+    返回是否成功写入，失败不回滚已发生的身份改写。
+    """
     payload = {
         "from_account": str(from_account or ""),
         "to_account": str(to_account or ""),
         "from_name": account_display_name(from_account, accounts),
         "to_name": account_display_name(to_account, accounts),
     }
+    if phase:
+        payload["phase"] = str(phase)
+    if reason:
+        payload["reason"] = str(reason)
+    if result:
+        payload["result"] = str(result)
     try:
         store.append_task_event(run_id, "account_switch", payload)
+        return True
     except Exception:
-        _logger.debug("账号切换事件落库失败（不影响切换主流程）", exc_info=True)
+        _logger.warning("账号切换事件落库失败 task=%s（不影响切换主流程）", run_id)
+        if phase or reason:
+            try:
+                store.append_task_event(run_id, "whitebox_incomplete", {
+                    "event_type": "account_switch", "reason": "write_failed",
+                })
+            except Exception:
+                _logger.warning("白箱不完整标记写入失败 task=%s event=account_switch", run_id)
+        return False
 
 
 def append_account_switch_log_line(task: dict[str, Any] | None, *,

@@ -232,6 +232,16 @@ class _FakeSource:
         return self._outcomes.pop(0)
 
 
+class _EventStore:
+    """仅收集结构化任务事件，验证 038 白箱摘要，不落真实数据库。"""
+
+    def __init__(self):
+        self.events = []
+
+    def append_task_event(self, run_id, event_type, payload=None):
+        self.events.append((str(run_id), str(event_type), dict(payload or {})))
+
+
 class _TempBook:
     """临时账号簿：set_path 时写 pool/rate_limited schema，结束后清理。
     accounts 属性可先 mutate（如取消某账号选中）再 set_path。"""
@@ -405,6 +415,68 @@ class ListRobinTests(unittest.TestCase):
         self.assertTrue(out.ok)
         self.assertEqual(switches, ["b", "a"])
 
+    def test_whitebox_records_r1_segments_and_quota_switches(self):
+        book = _make_book(("a", "A"), ("b", "B"), r1=1)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+        store = _EventStore()
+        src = self._source_in_pool("a", [
+            _FakeOutcome(True, jobs=[{"job_id": "a1"}]),
+            _FakeOutcome(True, jobs=[{"job_id": "a3"}]),
+        ])
+        robin = ListRobin(
+            src, robin_mod._engaged_entries(src, "R1"), run_id="run-r1",
+            switch_event_store=store,
+        )
+        out = robin.fetch_list(src, {
+            "keyword": "k", "city": "c", "combo_key": "k|c",
+            "start_page": 1, "target_pages": 3, "source_filters": {},
+            "input_hash": "H", "platform": "boss",
+        })
+        self.assertTrue(out.ok)
+        whitebox = [event for event in store.events if event[1] != "whitebox_incomplete"]
+        self.assertEqual(whitebox[0][1], "account_pool_snapshot")
+        allocations = [event[2] for event in whitebox if event[1] == "account_allocation"]
+        self.assertEqual([(item["account_id"], item["count"], item["round"])
+                          for item in allocations],
+                         [("a", 1, 1), ("b", 1, 1), ("a", 1, 2)])
+        switches = [event[2] for event in whitebox if event[1] == "account_switch"]
+        self.assertEqual([(item["from_account"], item["to_account"], item["reason"], item["result"])
+                          for item in switches],
+                         [("a", "b", "quota", "succeeded"),
+                          ("b", "a", "quota", "succeeded")])
+        for _, _, payload in whitebox:
+            self.assertNotIn("Cookie", repr(payload))
+            self.assertNotIn("token", repr(payload).lower())
+
+    def test_whitebox_write_failure_is_explicit_but_does_not_break_r1(self):
+        class _BrokenStore:
+            def append_task_event(self, *_args, **_kwargs):
+                raise RuntimeError("disk full")
+
+        book = _make_book(("a", "A"), ("b", "B"), r1=1)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+        src = self._source_in_pool("a", [_FakeOutcome(True, jobs=[{"job_id": "a1"}])])
+        with self.assertLogs("career_scout.webui.account_round_robin", level="WARNING") as logs:
+            robin = ListRobin(
+                src, robin_mod._engaged_entries(src, "R1"), run_id="run-broken",
+                switch_event_store=_BrokenStore(),
+            )
+            out = robin.fetch_list(src, {
+                "keyword": "k", "city": "c", "combo_key": "k|c",
+                "start_page": 1, "target_pages": 1, "source_filters": {},
+                "input_hash": "H", "platform": "boss",
+            })
+        self.assertTrue(out.ok)
+        self.assertTrue(any("白箱" in line for line in logs.output))
+
     def test_wall_retry_starts_after_pages_already_checkpointed(self):
         book = _make_book(("a", "A"), ("b", "B"), r1=3)
         self.addCleanup(book.cleanup)
@@ -547,7 +619,7 @@ class DetailRobinTests(unittest.TestCase):
         self.assertTrue(r.switch_next())
         self.assertEqual(events, [("a", "b")])
 
-    def test_factory_records_b057_switch_event(self):
+    def test_factory_records_wall_switch_event_after_actual_binding(self):
         book = _make_book(("a", "A"), ("b", "B"), r2=100)
         self.addCleanup(book.cleanup)
         book.set_path()
@@ -562,9 +634,44 @@ class DetailRobinTests(unittest.TestCase):
             r = make_detail_robin(src, run_id="run-1", switch_event_store=store)
             self.assertIsNotNone(r)
             self.assertTrue(r.switch_next())
+            with mock.patch.object(robin_mod, "clone_source",
+                                   return_value=_FakeSource("b", [])):
+                self.assertIsNotNone(r.current_source())
         record.assert_called_once_with(
             store, "run-1", from_account="a", to_account="b",
+            phase="R2", reason="wall", result="succeeded",
         )
+
+    def test_whitebox_records_r2_segments_and_quota_switch(self):
+        book = _make_book(("a", "A"), ("b", "B"), r2=2)
+        self.addCleanup(book.cleanup)
+        book.set_path()
+        self.addCleanup(lambda: __import__(
+            "webui.pipeline_exec_accounts", fromlist=["reset_browser_accounts_path"]
+        ).reset_browser_accounts_path())
+        store = _EventStore()
+        src = _FakeSource("a", [], platform="boss", cdp_port=9222)
+        robin = DetailRobin(
+            src, robin_mod._engaged_entries(src, "R2"), run_id="run-r2",
+            switch_event_store=store,
+        )
+        first = robin.allocate(["j1", "j2", "j3"])
+        self.assertEqual(first.account_id, "a")
+        self.assertEqual(len(first.entries), 2)
+        second = robin.allocate(["j3", "j4"])
+        self.assertEqual(second.account_id, "b")
+        self.assertEqual(len(second.entries), 2)
+        with mock.patch.object(robin_mod, "clone_source",
+                               return_value=_FakeSource("b", [])):
+            robin.source_for(second.account_id)
+        allocations = [event[2] for event in store.events
+                       if event[1] == "account_allocation"]
+        self.assertEqual([(item["account_id"], item["count"], item["round"])
+                          for item in allocations],
+                         [("a", 2, 1), ("b", 2, 1)])
+        switches = [event[2] for event in store.events if event[1] == "account_switch"]
+        self.assertEqual([(item["from_account"], item["to_account"], item["reason"])
+                          for item in switches], [("a", "b", "quota")])
 
     def test_advance_rotates_on_quota_exhaustion(self):
         book = _make_book(("a", "A"), ("b", "B"), r2=2)
@@ -718,7 +825,7 @@ class WiringTests(unittest.TestCase):
     def test_detail_wiring_uses_resume_identity_switch_events(self):
         import inspect
         from webui import account_round_robin
-        src = inspect.getsource(account_round_robin.make_detail_robin)
+        src = inspect.getsource(account_round_robin.RoundRobinWhitebox.switch)
         self.assertIn("resume_identity", src)
         self.assertIn("record_account_switch_event", src)
 

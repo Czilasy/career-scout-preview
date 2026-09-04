@@ -88,7 +88,13 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary,
         event_stage = ctx.event_stage_names.get(stage)
         stage_events = []
         if stage == "done" and last_event_stage:
-            stage_events.append(("stage_complete", {"stage": last_event_stage}))
+            stage_events.append(("stage_complete", {
+                "stage": last_event_stage,
+                **{key: kw[key] for key in (
+                    "current", "total", "total_matched", "total_mismatch",
+                    "total_pending", "total_dropped",
+                ) if key in kw},
+            }))
             last_event_stage = None
         elif event_stage and event_stage != last_event_stage:
             if last_event_stage:
@@ -497,7 +503,9 @@ def run_ai_screen_task(ctx, task_id, screening_fields, profile_summary,
         )
         # 最终事件也是持久化契约的一部分；先写事件，再提交终态，避免
         # DB 已终态后事件写失败造成内存 failed / DB completed 分裂。
-        emit(stage="done", total_matched=match_count,
+        emit(stage="done", current=processed_count, total=len(raw_jobs),
+             total_matched=match_count, total_mismatch=mismatch_count,
+             total_pending=pending_count, total_dropped=len(dropped),
              message=terminal_message)
         # 018：终态校验先于写历史轮——校验失败抛错时库里没有任何
         # done 轮，杜绝"任务 failed 但历史多一条幽灵轮"的事故。

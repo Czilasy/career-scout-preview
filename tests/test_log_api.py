@@ -11,6 +11,8 @@ import tempfile
 import unittest
 
 from webui.app import create_app
+from webui.account_round_robin import PoolEntry
+from webui.account_round_robin_observability import RoundRobinWhitebox
 
 
 def _write_log(log_dir, lines):
@@ -130,6 +132,29 @@ class LogApiTests(unittest.TestCase):
         self.assertEqual(data["start"], 1)
         self.assertEqual(data["end"], 1)
         self.assertEqual(data["total"], 1)
+
+    def test_completed_task_view_exposes_round_robin_whitebox_events(self):
+        task_id = "round-robin-history-1"
+        store = self.app.config["TASK_STORE"]
+        whitebox = RoundRobinWhitebox(
+            store, task_id, phase="R1", platform="boss",
+            entries=[PoolEntry("a", 1), PoolEntry("b", 1)],
+        )
+        whitebox.allocation("a", round_no=1, count=1, remaining=0,
+                            start_page=1, end_page=1)
+        store.append_task_event(task_id, "stage_complete", {
+            "stage": "scrape", "total_scraped": 1,
+        })
+
+        data = self.client.get(
+            f"/api/logs?tail=20&task_id={task_id}"
+        ).get_json()
+        self.assertTrue(data["ok"])
+        self.assertIn('"type": "account_pool_snapshot"', "\n".join(data["lines"]))
+        self.assertIn('"type": "account_allocation"', "\n".join(data["lines"]))
+        self.assertIn('"type": "stage_complete"', "\n".join(data["lines"]))
+        self.assertNotIn("profile_dir", "\n".join(data["lines"]))
+        self.assertNotIn("Cookie", "\n".join(data["lines"]))
 
     def test_task_id_with_since_uses_filtered_set(self):
         _write_log(self.log_dir, [

@@ -235,6 +235,8 @@ def run_pipeline_task(ctx,
             on_issue=_record_combo_issue,
             resume_pages=resume_pages,
             resume_jobs=resume_jobs,
+            task_id=task_id,
+            task_event_store=ctx.store,
         )
         # 断点续抓：合并旧结果（按 job_id 去重）
         merged_total = None
@@ -270,7 +272,11 @@ def run_pipeline_task(ctx,
                     source_count=int(result.get("combinations") or len(completed)),
                     total_scraped=int(result.get("total_scraped") or 0),
                 )
-                ctx.store.append_task_event(task_id, "stage_complete", {"stage": "scrape"})
+                ctx.store.append_task_event(task_id, "stage_complete", {
+                    "stage": "scrape",
+                    "combinations": int(result.get("combinations") or len(completed)),
+                    "total_scraped": int(result.get("total_scraped") or 0),
+                })
                 _terminal_status = "done"
             else:
                 # 切片4：列表抓取失败时区分"系统性阻断暂停" vs "真失败"

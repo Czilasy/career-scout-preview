@@ -1,6 +1,10 @@
-# Tasks: 多账号轮询分摊抓取（B091）
+# Tasks: 多账号轮询分摊抓取（B091 V2）
 
-**Input**: Design documents from `/specs/038-multi-account-round-robin/`
+**Spec Version**: `v2`
+
+**Supersedes**: `v1`
+
+**Input**: Design documents from `/specs/038-multi-account-round-robin/v2/`
 
 **Prerequisites**: plan.md（必需）、spec.md（必需）
 
@@ -11,16 +15,16 @@
 ## Format: `[ID] [P?] [Story] Description`
 
 - **[P]**: 可并行（不同文件、无依赖）
-- **[Story]**: US1 = 轮询分摊核心；US2 = 撞墙换号兜底；US3 = 全撞完即停 + 限流标识；US4 = 默认零配置
+- **[Story]**: US1 = 轮询分摊核心；US2 = 撞墙换号兜底；US3 = 全撞完即停 + 限流标识；US4 = 默认零配置；US5 = 038 白箱可追溯
 - 含确切文件路径
 
 ## File Boundaries
 
 解析自 plan.md，每个任务只碰允许文件：
 
-- **Allowed files**: `webui/account_round_robin.py`（新）、`webui/pipeline_exec_search.py`、`webui/pipeline_exec_details.py`、`webui/pipeline_exec_accounts.py`、`webui/resume_identity.py`、`webui/settings_api.py`、`webui/src/components/BrowserAccountsDialog.vue`、`webui/src/components/AccountPoolSelector.vue`（条件新）、`webui/src/composables/useDiscoveryExecution.ts`、`webui/src/api.ts`、`tests/test_account_round_robin.py`（新）、`tests/test_pipeline_exec_accounts*.py`、`webui/src/components/__tests__/BrowserAccountsDialog.spec.ts`、`.specify/memory/constitution.md`
+- **Allowed files**: `webui/account_round_robin.py`、`webui/pipeline_exec_search.py`、`webui/pipeline_exec_details.py`、`webui/pipeline_exec_accounts.py`、`webui/resume_identity.py`、`webui/settings_api.py`、`webui/store_runs.py`（如需）、`webui/log_api.py`（如需）、`webui/src/components/BrowserAccountsDialog.vue`、`webui/src/components/AccountPoolSelector.vue`（条件新）、`webui/src/composables/useDiscoveryExecution.ts`、`webui/src/api.ts`、`webui/src/components/LogViewerDialog.vue`（如需）、`tests/test_account_round_robin.py`、`tests/test_pipeline_exec_accounts*.py`、`tests/test_logging_whitebox.py`、`tests/test_log_api.py`、`webui/src/components/__tests__/BrowserAccountsDialog.spec.ts`、`webui/src/components/__tests__/LogViewerDialog.spec.ts`、`.specify/memory/constitution.md`
 - **Forbidden files**: `webui/pipeline_exec.py`（门面）、`webui/app.py`、`webui/store.py`、`webui/source.py`、`scripts/boss_cdp_raw.py`、`scripts/zhilian_cdp_raw.py`、`webui/task_runners.py`、`webui/historical_recovery.py`、`webui/src/views/DiscoveryView.vue`（1249 超限）、数据库迁移文件（旧配置不兼容全删，不走迁移）、`roadmap/`、`.codebuddy/`
-- **New files**: `webui/account_round_robin.py`（轮询分摊调度域，~250 行）、`tests/test_account_round_robin.py`（聚焦测试，~150 行）、`webui/src/components/AccountPoolSelector.vue`（条件新，仅当 `BrowserAccountsDialog.vue` 净增超 900 预警时抽，~150 行）
+- **New files**: V2 不新增白箱生产模块或数据库表；如测试边界需要，可新增白箱事件聚焦测试文件。`AccountPoolSelector.vue` 仍仅在 `BrowserAccountsDialog.vue` 超过预警时新建。
 - **Reference direction**: 后端 `pipeline_exec_search.py`/`pipeline_exec_details.py` → `account_round_robin.py` → `resume_identity.py`（单向）；`settings_api.py` → `pipeline_exec_accounts.py`；前端 `view → component → composable → api client`；调度域不 import 前端
 - **Line gate**: `pipeline_exec_search.py` 净增后 ≤580；`pipeline_exec_details.py` 净增后 ≤570；`settings_api.py` 净增后 ≤590；`BrowserAccountsDialog.vue` 净增后 ≤950（超 900 预警则抽 `AccountPoolSelector.vue`）
 
@@ -121,6 +125,24 @@
 
 ---
 
+## Phase 7: User Story 5 - 038 白箱可追溯（P1）
+
+**Goal**: 在不另建白箱产品的前提下，复用现有任务事件和按任务日志能力，记录并核对账号池、配额分配、正常轮换、撞墙接管和任务终态。
+
+**Independent Test**: 白箱事件聚焦测试 + 现有按任务日志读取测试 + 小规模真实 E2E；R1 用每账号 1 页验证页面切换，R2 用每账号 10 条验证岗位分配切换。
+
+### Implementation for User Story 5
+
+- [x] T022 [P] [US5] `webui/account_round_robin.py` + `webui/account_round_robin_observability.py`：在实际账号分配与切换 seam 接入结构化任务事件，记录任务/平台/阶段、账号池快照、分配段、轮次、数量、剩余量，以及正常配额轮换、账号绑定失败和撞墙接管；不得记录凭据或完整正文。
+- [x] T023 [US5] `webui/resume_identity.py`：扩展既有 `account_switch` 事件的安全摘要，使正常配额轮换与撞墙接管可区分；保持既有调用方兼容和失败不回滚主流程的口径。
+- [x] T024 [US5] `webui/store_runs.py`：确认白箱事件复用现有 `task_logs` 结构和有序序号；如现有事件写入不足以承载 V2 摘要，仅做兼容扩展，不新增表或迁移。
+- [x] T025 [US5] `webui/log_api.py`、`webui/src/components/LogViewerDialog.vue`：确认已结束 038 任务可以按任务查看白箱事件；仅在现有读取路径无法展示时补齐最小接线，不新增独立白箱控制台。
+- [x] T026 [P] [US5] `tests/test_account_round_robin.py`、`tests/test_log_api.py` 及既有白箱日志测试：覆盖账号池快照、R1/R2 分配、正常轮换、撞墙接管、历史任务查看、敏感信息排除和白箱写入失败可识别。
+- [x] T027 [US5] 真实 E2E：使用正式 WebUI 的 BOSS 真实入口执行 1 个关键词 × 1 个城市、列表 2 页；R1 以每账号 1 页、R2 以每账号 10 个 JD 验证账号轮换，并通过按任务日志核对事件顺序、账号和配额；结果页 51 个 JD 完成，31 匹配、20 不匹配、0 待确认、6 粗筛淘汰，未出现 `whitebox_incomplete`。
+- [ ] T028 [US5] 更新 `.specify/memory/constitution.md` 模块地图/可观测性说明（仅在实际新增职责或接口后登记），完成后重新执行 V2 全量门禁。架构登记已完成；全量行为测试通过，但仓库卫生项因本次新增文件尚未提交而失败，待用户授权提交后复核。
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies
@@ -130,7 +152,8 @@
 - **Phase 3（US2 撞墙换号）**: 依赖 Phase 1（调度域）+ US1（轮询分摊先有，撞墙才接得上）
 - **Phase 4（US3 全撞完 + 限流标识）**: 依赖 Phase 1 + US2（撞墙换号先有，全撞完才走暂停）
 - **Phase 5（US4 默认零配置）**: 依赖 Phase 1（账号簿 schema）；可与 US2/US3 并行
-- **Phase 6（Polish）**: 依赖所有 US 完成
+- **Phase 6（Polish）**: 依赖 v1 的 US1–US4 完成
+- **Phase 7（US5 白箱）**: 依赖 v1 的轮询实现与既有任务事件链；T022/T023/T024/T025 完成后执行 T026/T027，最后执行 T028
 
 ### User Story Dependencies
 
@@ -180,7 +203,8 @@ Task: "T003 pipeline_exec_accounts.py 账号池配置 schema"
 3. US2 撞墙换号兜底 → 测试 → 真机走查
 4. US3 全撞完 + 限流标识 → 测试 → 真机走查
 5. US4 默认零配置 → 测试 → 真机走查
-6. Phase 6 门禁全绿 → 交付
+6. Phase 6 门禁全绿 → 交付 v1
+7. Phase 7 白箱接入 → 白箱聚焦测试 → 小规模真实 E2E → V2 全量门禁
 
 ---
 
@@ -192,3 +216,4 @@ Task: "T003 pipeline_exec_accounts.py 账号池配置 schema"
 - 撞墙换号复用 B057 现有逻辑（`resume_identity.py`），只改取号范围，不重写换号机制
 - 旧账号配置不兼容，全删，新 schema 直接上，不走数据迁移
 - 真机端到端验证项最终由用户执行，自动化门禁覆盖单元/组件层
+- V2 不另建白箱 Spec：白箱只作为 038 主体的架构与验收补充；若未来成为多个主体共用的独立能力，再单独抽取系统级 Spec。
