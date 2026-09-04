@@ -35,6 +35,7 @@ function makeDeps() {
     recrawlTaskId: ref("recrawl-1"),
     recrawlSnapshot: ref<any>(null),
     finishedPartial: ref(false),
+    resultsPageSeen: ref(false),
     restoredTaskHint: ref(""),
     activeStep: ref("screen"),
     resultLoaded: ref(false),
@@ -324,6 +325,18 @@ describe("useScreenRoundFlow", () => {
     const { refs, api } = makeDeps();
     const flow = useScreenRoundFlow({ refs, api });
     await flow.confirmNewRound();
+    expect(api.resetWorkflow).toHaveBeenCalled();
+  });
+
+  it("starts a new round from the results page despite a stale resumable context", async () => {
+    const { refs, api } = makeDeps();
+    refs.activeStep.value = "results";
+    refs.resultsPageSeen.value = true;
+    const flow = useScreenRoundFlow({ refs, api });
+    flow.restoreRoundContext(roundContext({ status: "partial", resumable: true }));
+
+    await flow.confirmNewRound();
+
     expect(api.resetWorkflow).toHaveBeenCalled();
   });
 

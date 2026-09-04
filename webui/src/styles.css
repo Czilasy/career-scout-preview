@@ -2353,7 +2353,7 @@ button:disabled {
   border-radius: var(--radius-lg);
   background: var(--panel);
   box-shadow: var(--shadow);
-}.dialog-lg { width: min(100%, 920px); max-width: 920px; max-height: min(860px, calc(100vh - 32px)); }.dialog-header {
+}.dialog-lg { width: min(100%, 920px); max-width: 920px; max-height: min(860px, calc(100vh - 32px)); }.dialog-account { width: min(100%, 720px); max-width: 720px; max-height: min(860px, calc(100vh - 32px)); }.dialog-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;

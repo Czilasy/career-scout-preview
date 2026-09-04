@@ -6,7 +6,7 @@ const props = defineProps<{
   open: boolean;
   title: string;
   description?: string;
-  size?: "sm" | "md" | "lg";
+  size?: "sm" | "md" | "lg" | "account";
   /** 打开时初始聚焦元素的 CSS 选择器；缺省聚焦面板内第一个可聚焦元素。 */
   initialFocus?: string;
 }>();

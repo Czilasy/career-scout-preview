@@ -149,6 +149,7 @@ const completedExitValues = completedValueTransition.exiting;
 // 上限 100vw - 32px（窄屏边角）；reduce-motion 瞬时（widthSpring duration 0）。
 const PILL_PAD_X = 36; // 左右 padding 18*2（与 .island-pill padding 同口径）
 const PILL_BORDER_W = 2; // 左右边框 1*2（.island-pill 使用 border-box）
+const ISLAND_EFFECT_BLEED = 4; // 圆点 3px 光晕 + 1px 抗锯齿余量
 const BADGE_W = 30; // 未读角标占位（含 margin）
 /* 037 复审：56 → 60——短文案（如 idle 的"BOSS"）时 pill 不过窄，
    内容左右留出可见的呼吸空间，不再"截断一丢丢"。
@@ -174,7 +175,8 @@ function remeasureWidth() {
   const extra = unread.value > 0 ? BADGE_W : 0;
   const cssWidth = Number.parseFloat(window.getComputedStyle(el).width);
   const naturalWidth = Number.isFinite(cssWidth) && cssWidth > 0 ? cssWidth : el.offsetWidth;
-  const target = naturalWidth + PILL_PAD_X + PILL_BORDER_W + extra;
+  const target =
+    naturalWidth + ISLAND_EFFECT_BLEED * 2 + PILL_PAD_X + PILL_BORDER_W + extra;
   pillWidth.value = Math.min(Math.max(target, PILL_MIN_W), window.innerWidth - 32);
 }
 
@@ -452,16 +454,17 @@ function setTrackRef(el: unknown): void {
            037 复审根因修复：旧版把 overflow:hidden 直接放在被 translate 的 track 上，
            CSS overflow clip 区随 transform 一起移动，translateY 只把整块内容推出
            pill（被外层裁掉），永远只显示 lane0——打断 lane 从不进入可视区（用户实测
-           打断弹开但内容空白）。现固定 viewport 高 34 + overflow hidden 不移动，
+           打断弹开但内容空白）。现固定 viewport 高 34 + 单独的垂直 clip 不移动，
            内层 track 以 translateY=-activeLaneIndex*LANE_HEIGHT 精确轮播。 -->
-      <span class="island-carousel-viewport">
-        <Motion
-          :ref="setTrackRef"
-          as="span"
-          class="island-carousel-track"
-          :animate="{ y: -activeLaneIndex * LANE_HEIGHT }"
-          :transition="carouselSpring"
-        >
+      <span class="island-content-frame">
+        <span class="island-carousel-viewport">
+          <Motion
+            :ref="setTrackRef"
+            as="span"
+            class="island-carousel-track"
+            :animate="{ y: -activeLaneIndex * LANE_HEIGHT }"
+            :transition="carouselSpring"
+          >
         <!-- Lane 0: 主流程（live state，pinned） -->
         <span class="island-lane island-lane-main">
           <!-- idle：平台名 + 呼吸 -->
@@ -556,16 +559,17 @@ function setTrackRef(el: unknown): void {
             class="island-interrupt-detail"
           >{{ (lane.content as IslandInterruptContent).detail }}</span>
         </span>
-      </Motion>
-      </span>
+          </Motion>
+        </span>
 
-      <!-- 未读角标（037 badge + 037 carousel queue） -->
-      <span
-        v-if="unread > 0"
-        class="island-unread"
-        data-testid="island-unread"
-        aria-hidden="true"
-      >{{ unread > 99 ? "99+" : unread }}</span>
+        <!-- 未读角标（037 badge + 037 carousel queue） -->
+        <span
+          v-if="unread > 0"
+          class="island-unread"
+          data-testid="island-unread"
+          aria-hidden="true"
+        >{{ unread > 99 ? "99+" : unread }}</span>
+      </span>
     </Motion>
 
     <!-- 读屏播报（视觉隐藏）：通知/打断到达 announce() 更新 -->
@@ -612,7 +616,7 @@ function setTrackRef(el: unknown): void {
   z-index: 2;
   display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: 0;
   height: 34px;
   /* 037 复审：0 16 → 0 18——用户反馈内容"左右截断一丢丢"（贴边框）。
      注意 PILL_PAD_X 必须与此处左右 padding 之和同口径（18*2=36），
@@ -681,8 +685,17 @@ function setTrackRef(el: unknown): void {
   50%      { opacity: 1; }
 }
 
+/* 037 裁边修复：内容边界集中到一个安全框，给圆点光晕预留水平余量。 */
+.island-content-frame {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  flex: 0 0 auto;
+  padding-inline: 4px;
+}
+
 /* 037 转盘轮播：viewport 与 track 分离。
-   037 复审根因修复：viewport 固定单 lane 视口高 + overflow:hidden，clip 窗口
+   037 复审根因修复：viewport 固定单 lane 视口高 + 独立 clip 窗口
    不随 transform 移动；内层 track 是纯 flex column 轨道（高=内容自然堆叠），
    以 translateY=-activeLaneIndex*LANE_HEIGHT 轮播，打断 lane 才能进入视口。
    旧版把 height:34 + overflow:hidden 直接放在被 translate 的 track 上：CSS
@@ -697,7 +710,9 @@ function setTrackRef(el: unknown): void {
      精确轮播。单 lane 时 track 高=viewport 高，无空隙不偏上。 */
   align-items: flex-start;
   height: 34px;
-  overflow: hidden;
+  /* 只裁上下轮播，水平向外放出 4px，避免圆点 box-shadow 被切半。 */
+  overflow: visible;
+  clip-path: inset(0 -4px);
 }
 
 .island-carousel-track {

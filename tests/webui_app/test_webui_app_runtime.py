@@ -264,6 +264,27 @@ class BrowserAccountApiTests(unittest.TestCase):
                                   json={"selected": True})
         self.assertEqual(missing.status_code, 404)
 
+    def test_clear_rate_limited_marker_persists_without_changing_pool(self):
+        from webui.pipeline_exec import load_browser_accounts, save_browser_accounts
+
+        path = self.app.config["BROWSER_ACCOUNTS_PATH"]
+        accounts = load_browser_accounts(path)
+        accounts["b"]["rate_limited"] = True
+        original_pool = dict(accounts["b"]["pool"])
+        save_browser_accounts(accounts, path)
+
+        cleared = self.client.delete("/api/browser-accounts/b/rate-limited")
+        self.assertEqual(cleared.status_code, 200, cleared.get_json())
+        self.assertEqual(cleared.get_json(), {
+            "ok": True, "account_id": "b", "rate_limited": False,
+        })
+
+        updated = load_browser_accounts(path)["b"]
+        self.assertFalse(updated["rate_limited"])
+        self.assertEqual(updated["pool"], original_pool)
+        self.assertEqual(self.client.delete(
+            "/api/browser-accounts/not-found/rate-limited").status_code, 404)
+
     def _seed_paused_run(self, account="b", run_id="busy-account-run", platform="boss"):
         self.store.create_screening_run(
             run_id, source_count=1,

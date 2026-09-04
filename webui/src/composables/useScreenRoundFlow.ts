@@ -37,6 +37,7 @@ export interface ScreenRoundFlowDeps {
     recrawlTaskId: Ref<string>;
     recrawlSnapshot: Ref<TaskSnapshot | null>;
     finishedPartial: Ref<boolean>;
+    resultsPageSeen: Ref<boolean>;
     activeStep: Ref<string>;
     currentRoundStatus: Ref<string>;
     resultPlatformFilter: Ref<"all" | Platform>;
@@ -497,6 +498,9 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       return false;
     }
     const snapshotStatus = String(deps.refs.screenSnapshot.value?.status || "");
+    const roundFinished = Boolean(
+      deps.refs.resultsPageSeen.value || deps.refs.finishedPartial.value,
+    );
     const resumable = Boolean(
       deps.refs.pausedRunId.value
       || deps.refs.interruptedRunId.value
@@ -506,19 +510,21 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
       || anyResumableTarget.value
       || Boolean(roundContext.value?.resumable),
     );
-    if (!resumable) {
-      busyAction.value = "new-round";
-      try {
-        await deps.api.resetWorkflow();
-      } finally {
-        busyAction.value = "";
-      }
-      return true;
+    // 结果页已确认本轮结束时，resumable 只代表旧上下文仍可恢复，
+    // 不能覆盖用户明确点击「开始新一轮」的意图。
+    if (!roundFinished && resumable) {
+      // 035：未结束任务存在时，一律跳回未完成的任务视图，不弹确认、不开始新一轮、不取消任务。
+      deps.refs.activeStep.value = "screen";
+      deps.api.notify("当前还有任务在跑，已回到任务进度", "info");
+      return false;
     }
-    // 035：未结束任务存在时，一律跳回未完成的任务视图，不弹确认、不开始新一轮、不取消任务。
-    deps.refs.activeStep.value = "screen";
-    deps.api.notify("当前还有任务在跑，已回到任务进度", "info");
-    return false;
+    busyAction.value = "new-round";
+    try {
+      await deps.api.resetWorkflow();
+    } finally {
+      busyAction.value = "";
+    }
+    return true;
   }
 
   return {

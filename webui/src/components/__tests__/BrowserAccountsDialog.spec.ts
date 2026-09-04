@@ -81,8 +81,10 @@ describe("BrowserAccountsDialog", () => {
     expect(wrapper.get('[data-testid="account-state-a-zhilian"]').text()).toBe("未登录");
 
     // 每个平台独立「打开」入口，不再有单按钮一次开全部
-    expect(wrapper.get('[data-testid="open-boss-a"]').text()).toContain("打开");
-    expect(wrapper.get('[data-testid="open-zhilian-a"]').text()).toContain("打开");
+    expect(wrapper.get('[data-testid="open-boss-a"]').text()).toBe("");
+    expect(wrapper.get('[data-testid="open-boss-a"]').find("svg").exists()).toBe(true);
+    expect(wrapper.get('[data-testid="open-zhilian-a"]').text()).toBe("");
+    expect(wrapper.get('[data-testid="open-zhilian-a"]').find("svg").exists()).toBe(true);
     expect(wrapper.find('[data-testid="open-browser-a"]').exists()).toBe(false);
   });
 
@@ -107,7 +109,9 @@ describe("BrowserAccountsDialog", () => {
     // 只有默认账号没有删除按钮；账号 B 与自定义账号保留删除入口
     const accountCards = wrapper.findAll(".browser-account-card");
     expect(accountCards[0].find('[data-testid="delete-a"]').exists()).toBe(false);
-    expect(accountCards[1].text()).toContain("非当前账号");
+    expect(accountCards[0].find(".account-sheet-icon").exists()).toBe(false);
+    expect(accountCards[0].text()).not.toContain("当前账号");
+    expect(accountCards[1].text()).not.toContain("非当前账号");
     expect(accountCards[1].find('[data-testid="delete-b"]').exists()).toBe(true);
   });
 
@@ -444,11 +448,11 @@ describe("BrowserAccountsDialog role assignment (B073)", () => {
   const accB = { id: "b", name: "账号 B", platforms: { boss: { cdp_port: 9222 } } };
 
   // Spec 038 B091：模拟后端 pool 配置端点（PUT /api/browser-accounts/<id>/pool）。
-  // 默认每账号都进池、默认全选、默认配额取中值（R1 25 / R2 100）。
+  // 默认每账号都进池、默认全选、默认配额取中值（R1 25 / R2 150）。
   function poolFetchMock(initial: Array<{ id: string; name: string }> = [accA, accB]) {
     let accounts = initial.map((a, i) => ({
       ...a,
-      pool: { selected: true, order: i, r1_quota: 25, r2_quota: 100 },
+      pool: { selected: true, order: i, r1_quota: 25, r2_quota: 150 },
       rate_limited: false,
     }));
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -490,9 +494,9 @@ describe("BrowserAccountsDialog role assignment (B073)", () => {
     const cbB = wrapper.get('[data-testid="pool-selected-b"]');
     expect((cbA.element as HTMLInputElement).checked).toBe(true);
     expect((cbB.element as HTMLInputElement).checked).toBe(true);
-    // 默认配额 25/100
+    // 默认配额 25/150
     expect((wrapper.get('[data-testid="pool-r1-quota-a"]').element as HTMLInputElement).value).toBe("25");
-    expect((wrapper.get('[data-testid="pool-r2-quota-a"]').element as HTMLInputElement).value).toBe("100");
+    expect((wrapper.get('[data-testid="pool-r2-quota-a"]').element as HTMLInputElement).value).toBe("150");
   });
 
   it("toggles pool selected via PUT /pool", async () => {
@@ -539,8 +543,8 @@ describe("BrowserAccountsDialog role assignment (B073)", () => {
       if (String(input) === "/api/browser-accounts") {
         return response({
           accounts: [
-            { ...accA, pool: { selected: true, order: 0, r1_quota: 25, r2_quota: 100 }, rate_limited: false },
-            { ...accB, pool: { selected: true, order: 1, r1_quota: 25, r2_quota: 100 }, rate_limited: true },
+            { ...accA, pool: { selected: true, order: 0, r1_quota: 25, r2_quota: 150 }, rate_limited: false },
+            { ...accB, pool: { selected: true, order: 1, r1_quota: 25, r2_quota: 150 }, rate_limited: true },
           ],
           active_account: "a",
         });
@@ -630,5 +634,142 @@ describe("BrowserAccountsDialog kernel chip（抓取浏览器合并）", () => {
       else expect(chip.attributes("disabled")).toBeUndefined();
       await wrapper.unmount();
     }
+  });
+});
+
+describe("BrowserAccountsDialog compact account sheet (B091 V3)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the existing dialog context inside the compact account sheet", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/browser-accounts") {
+        return response({ accounts: [dualAccount], active_account: "a" });
+      }
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+
+    expect(wrapper.text()).toContain("每个账号使用独立的浏览器环境");
+    expect(wrapper.find('[data-testid="browser-kernel-chip"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="account-sheet-header"]').text()).toContain("账号池");
+    expect(wrapper.find('[data-testid="pool-selected-a"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="account-platforms-a"]').text()).toContain("BOSS");
+    expect(findButton(wrapper, "添加账号").exists()).toBe(true);
+  });
+
+  it("uses a wider panel and keeps account-pool column labels aligned", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/browser-accounts") {
+        return response({ accounts: [dualAccount], active_account: "a" });
+      }
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+    const panel = wrapper.get(".dialog-panel");
+    const header = wrapper.get('[data-testid="account-sheet-header"]');
+
+    expect(panel.classes()).toContain("dialog-account");
+    expect(header.find('[data-testid="account-sheet-column-account"]').text()).toBe("账号");
+    expect(header.find('[data-testid="account-sheet-column-pool"]').text()).toBe("轮询与配额");
+    expect(header.find('[data-testid="account-sheet-column-platform"]').text()).toBe("平台");
+    expect(header.find('[data-testid="account-sheet-column-actions"]').text()).toBe("操作");
+    expect(header.find(".account-sheet-columns").classes()).toContain("account-sheet-columns");
+    expect(header.find(".account-sheet-header").classes()).toContain("account-sheet-sticky-header");
+  });
+
+  it("stacks R1 and R2 quotas like the platform rows", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/browser-accounts") {
+        return response({ accounts: [dualAccount], active_account: "a" });
+      }
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+    const quotas = wrapper.get('[data-testid="pool-config-a"]');
+    const rows = quotas.findAll(".account-sheet-quota-row");
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0].text()).toContain("R1");
+    expect(rows[1].text()).toContain("R2");
+    expect(rows[0].find("input").classes()).toContain("account-sheet-quota-input");
+  });
+
+  it("uses an R2 default of 150 and accepts values through 300", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/browser-accounts") {
+        return response({ accounts: [dualAccount], active_account: "a" });
+      }
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+    const input = wrapper.get('[data-testid="pool-r2-quota-a"]');
+
+    expect((input.element as HTMLInputElement).value).toBe("150");
+    expect(input.attributes("min")).toBe("1");
+    expect(input.attributes("max")).toBe("300");
+    expect(input.attributes("placeholder")).toBe("1-300");
+  });
+
+  it("lets R1 and R2 inputs fill the available quota column", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/api/browser-accounts") {
+        return response({ accounts: [dualAccount], active_account: "a" });
+      }
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+    const inputs = wrapper.get('[data-testid="pool-config-a"]').findAll("input");
+
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0].classes()).toContain("account-sheet-quota-input-fill");
+    expect(inputs[1].classes()).toContain("account-sheet-quota-input-fill");
+  });
+
+  it("clears only the rate-limit marker and reloads the account", async () => {
+    let accounts = [
+      {
+        id: "b",
+        name: "账号 B",
+        platforms: { boss: { cdp_port: 9222 }, zhilian: { cdp_port: 9223 } },
+        pool: { selected: true, order: 0, r1_quota: 25, r2_quota: 150 },
+        rate_limited: true,
+      },
+    ];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/browser-accounts") {
+        return response({ accounts, active_account: "a" });
+      }
+      if (url === "/api/browser-accounts/b/rate-limited" && init?.method === "DELETE") {
+        accounts = accounts.map((account) => ({ ...account, rate_limited: false }));
+        return response({ ok: true, account_id: "b", rate_limited: false });
+      }
+      return response({});
+    });
+
+    const wrapper = await mountOpen(fetchMock);
+    const clear = wrapper.get('[data-testid="clear-rate-limited-b"]');
+    expect(clear.attributes("aria-label")).toBe("清除限流标记");
+    expect(clear.attributes("title")).toBe("清除限流标记");
+    expect(clear.classes()).toContain("rate-limited-clear-compact");
+    expect(clear.classes()).toContain("rate-limited-clear-always-visible");
+
+    await clear.trigger("click");
+    await flushPromises();
+
+    const deleteCall = fetchMock.mock.calls.find(([url, init]) =>
+      String(url) === "/api/browser-accounts/b/rate-limited" && init?.method === "DELETE");
+    expect(deleteCall).toBeTruthy();
+    expect(wrapper.find('[data-testid="rate-limited-b"]').exists()).toBe(false);
+    expect((wrapper.get('[data-testid="pool-r1-quota-b"]').element as HTMLInputElement).value).toBe("25");
+    expect((wrapper.get('[data-testid="pool-r2-quota-b"]').element as HTMLInputElement).value).toBe("150");
   });
 });

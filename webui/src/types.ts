@@ -189,7 +189,7 @@ export interface BrowserAccount {
   builtin?: boolean;
   // Spec 038 B091：账号池配置（FR-021 旧 roles 字段已弃用，全删不兼容）。
   // R1/R2 共用账号池：selected 表示是否参与本轮询；r1_quota 是每轮 R1 抓取页数
-  // （1-50，默认 25）；r2_quota 是每轮 R2 抓取 JD 条数（1-200，默认 100）；
+  // （1-50，默认 25）；r2_quota 是每轮 R2 抓取 JD 条数（1-300，默认 150）；
   // order 是勾选顺序（默认按账号簿顺序）。
   pool?: {
     selected: boolean;

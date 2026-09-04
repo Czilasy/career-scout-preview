@@ -27,9 +27,9 @@ _logger = get_logger(__name__)
 
 # 默认每轮配额取范围中值（FR-004/FR-005/A9）。
 DEFAULT_R1_QUOTA = 25
-DEFAULT_R2_QUOTA = 100
+DEFAULT_R2_QUOTA = 150
 R1_QUOTA_MIN, R1_QUOTA_MAX = 1, 50
-R2_QUOTA_MIN, R2_QUOTA_MAX = 1, 200
+R2_QUOTA_MIN, R2_QUOTA_MAX = 1, 300
 
 
 # ---------------------------------------------------------------------------

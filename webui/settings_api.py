@@ -13,8 +13,10 @@ from flask import jsonify, request
 
 from webui.constants import _MSG_ACCOUNT_NOT_FOUND, _MSG_UNSUPPORTED_PLATFORM
 from webui.task_runners import _mask_key
+from webui.browser_account_rate_limit_api import register_browser_account_rate_limit_routes
 
 def register_settings_routes(app, ctx):
+    register_browser_account_rate_limit_routes(app)
     def _resolve_credentials_from_request():
         """从请求 body 读取 endpoint_url/api_key/model，缺的用已保存设置兜底。
 

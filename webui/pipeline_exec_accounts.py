@@ -61,9 +61,9 @@ def reset_browser_accounts_path() -> None:
 
 # Spec 038 B091：默认每轮配额取范围中值（FR-004/005）。
 DEFAULT_R1_QUOTA = 25
-DEFAULT_R2_QUOTA = 100
+DEFAULT_R2_QUOTA = 150
 R1_QUOTA_MIN, R1_QUOTA_MAX = 1, 50
-R2_QUOTA_MIN, R2_QUOTA_MAX = 1, 200
+R2_QUOTA_MIN, R2_QUOTA_MAX = 1, 300
 
 
 def _clamp_quota(value: object, lo: int, hi: int, default: int) -> int:
@@ -78,7 +78,7 @@ def _normalize_pool(raw: object, default_order: int = 0) -> dict:
     """把 pool 字段归一为 {selected, order, r1_quota, r2_quota}。
 
     Spec 038 FR-015/016/017/018：缺字段一律补默认——默认全进池、默认全选、
-    默认配额取范围中值（R1 25 / R2 100）。``order`` 缺省时落
+    默认配额取范围中值（R1 25 / R2 150）。``order`` 缺省时落
     ``default_order``（账号簿入盘顺序，保证勾选顺序稳定）。
     """
     if not isinstance(raw, dict):

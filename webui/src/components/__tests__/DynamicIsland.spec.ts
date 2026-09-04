@@ -844,7 +844,7 @@ describe("DynamicIsland 037 组件级 carousel + 宽度 spring + 数字弹动", 
     try {
       const wrapper = mountIsland(makeStatus({ state: "idle", platform: "boss" }));
       await nextTick();
-      expect(Number(wrapper.get(".island-pill").attributes("data-pill-width"))).toBe(68);
+      expect(Number(wrapper.get(".island-pill").attributes("data-pill-width"))).toBe(76);
 
       laneWidth = 32;
       resolveFonts();
@@ -875,7 +875,7 @@ describe("DynamicIsland 037 组件级 carousel + 宽度 spring + 数字弹动", 
       const wrapper = mountIsland(makeStatus({ state: "idle", platform: "boss" }));
       await nextTick();
       const pill = wrapper.get(".island-pill");
-      expect(Number(pill.attributes("data-pill-width"))).toBe(68);
+      expect(Number(pill.attributes("data-pill-width"))).toBe(76);
 
       laneWidth = 48;
       window.dispatchEvent(new Event("resize"));
@@ -911,6 +911,47 @@ describe("DynamicIsland 037 组件级 carousel + 宽度 spring + 数字弹动", 
 
       // 32.75px 内容 + 36px 内边距 + 2px 边框，左右边界都必须完整保留。
       expect(Number(wrapper.get(".island-pill").attributes("data-pill-width"))).toBeGreaterThanOrEqual(70.75);
+      wrapper.unmount();
+    } finally {
+      computedStyle.mockRestore();
+      offsetWidth.mockRestore();
+    }
+  });
+
+  it("037 修订：内容框为圆点发光预留安全边距，轮播只裁垂直方向", () => {
+    const source = readFileSync(resolve(process.cwd(), "src/components/DynamicIsland.vue"), "utf8");
+    const viewportRule = source.match(/\.island-carousel-viewport \{[\s\S]*?\n\}/)?.[0] ?? "";
+
+    expect(source).toContain('class="island-content-frame"');
+    expect(source).toContain("const ISLAND_EFFECT_BLEED = 4;");
+    expect(viewportRule).toContain("overflow: visible;");
+    expect(viewportRule).toContain("clip-path: inset(0 -4px);");
+    expect(viewportRule).not.toContain("overflow: hidden;");
+  });
+
+  it("037 修订：胶囊宽度包含圆点发光的水平安全边距", async () => {
+    const naturalWidth = 32.75;
+    const offsetWidth = vi
+      .spyOn(HTMLElement.prototype, "offsetWidth", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.classList.contains("island-lane-main") ? Math.floor(naturalWidth) : 0;
+      });
+    const originalGetComputedStyle = window.getComputedStyle.bind(window);
+    const computedStyle = vi
+      .spyOn(window, "getComputedStyle")
+      .mockImplementation((element, pseudoElement) => {
+        const style = originalGetComputedStyle(element, pseudoElement);
+        if (element instanceof HTMLElement && element.classList.contains("island-lane-main")) {
+          Object.defineProperty(style, "width", { configurable: true, value: `${naturalWidth}px` });
+        }
+        return style;
+      });
+    try {
+      const wrapper = mountIsland(makeStatus({ state: "idle", platform: "boss" }));
+      await nextTick();
+
+      // 32.75px 内容 + 8px 特效安全边距 + 36px 内边距 + 2px 边框。
+      expect(Number(wrapper.get(".island-pill").attributes("data-pill-width"))).toBeGreaterThanOrEqual(78.75);
       wrapper.unmount();
     } finally {
       computedStyle.mockRestore();

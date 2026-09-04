@@ -413,6 +413,7 @@ const roundFlow = reactive(useScreenRoundFlow({
     recrawlTaskId,
     recrawlSnapshot: recrawlSnapshot as unknown as Ref<ApiTaskSnapshot | null>,
     finishedPartial,
+    resultsPageSeen,
     activeStep, historyRound,
     currentRoundStatus,
     resultPlatformFilter,

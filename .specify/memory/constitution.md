@@ -151,6 +151,7 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `packaging/window_state.py` — 窗口状态域：desktop_window.json schema 3 读写/旧版升级/工作区钳制、WindowStateTracker 普通矩形追踪、工作区枚举与窗口事件接线适配（029，b082 分支）
 - `scripts/boss/browser_registry.py` — 浏览器注册表域：8 家 Chromium 浏览器配置/探测/选择持久化（browser_selection.json）/手动路径校验/CDP 内核判定（029，b082 分支）
 - `webui/browser_registry_api.py` — 浏览器注册表路由域：探测清单/保存选择/路径校验端点（029，b082 分支）
+- `webui/browser_account_rate_limit_api.py` — 浏览器账号限流标记路由：用户手动清除 `rate_limited` 视觉标记，不修改账号池、浏览器资料或登录状态（038 B091 V3）
 - `webui/src/components/BrowserSettingsDialog.vue` — 浏览器选择对话框：注册表清单/手动路径即时校验/当前生效路径展示（029，b082 分支）
 - `webui/src/themes/registry.ts` — 主题注册口：light/dark/kaleido 三态登记与值校验（032）
 - `webui/src/themes/ThemePickerOptions.vue` — 长按弹层选项列表：三主题标本与当前态标识（032）

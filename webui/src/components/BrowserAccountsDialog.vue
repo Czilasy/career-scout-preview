@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Check, ChevronDown, ExternalLink, Globe, LoaderCircle, Plus, Trash2, UserRound } from "@lucide/vue";
+import { ChevronDown, Globe, LoaderCircle, Plus, RefreshCw } from "@lucide/vue";
+import AccountPoolSheet from "./AccountPoolSheet.vue";
 import BaseDialog from "./BaseDialog.vue";
 import BrowserKernelPicker from "./BrowserKernelPicker.vue";
 import { ApiError, apiRequest, browserRegistryApi, errorMessage } from "../api";
@@ -58,8 +59,9 @@ const pendingDelete = ref<BrowserAccount | null>(null);
 // Spec 038 B091：账号池配置（多选 + 每账号配额）+ 撞墙限流视觉标识。
 // 旧 R1/R2 角色互斥 schema 已弃用（FR-021），统一为 R1/R2 共用账号池。
 const poolBusy = ref(false);
+const rateLimitClearAccount = ref("");
 const POOL_R1_RANGE = { min: 1, max: 50, default: 25 } as const;
-const POOL_R2_RANGE = { min: 1, max: 200, default: 100 } as const;
+const POOL_R2_RANGE = { min: 1, max: 300, default: 150 } as const;
 
 // 抓取浏览器（原独立「浏览器」设置合并至此）：清单/选择/生效路径随弹窗打开加载，
 // chip 常显当前选择，展开后由 BrowserKernelPicker 选即存。
@@ -172,6 +174,27 @@ async function updateQuota(account: BrowserAccount, field: "r1_quota" | "r2_quot
   }
 }
 
+async function clearRateLimited(account: BrowserAccount) {
+  if (rateLimitClearAccount.value) return;
+  rateLimitClearAccount.value = account.id;
+  try {
+    await apiRequest(`/api/browser-accounts/${encodeURIComponent(account.id)}/rate-limited`, {
+      method: "DELETE",
+    });
+    await loadAccounts();
+    setLocalNotice({ message: "已清除限流标记", tone: "success" });
+  } catch (error) {
+    setLocalNotice({ message: errorMessage(error, "限流标记清除失败"), tone: "error" });
+  } finally {
+    rateLimitClearAccount.value = "";
+  }
+}
+
+async function refreshKernel() {
+  if (kernelLocked.value) return;
+  await loadKernel();
+}
+
 watch(() => props.open, (open) => {
   if (open) {
     localNotice.value = null;
@@ -181,12 +204,14 @@ watch(() => props.open, (open) => {
     busyKind.value = "";
     lockedAccount.value = "";
     lockedPlatform.value = "";
+    rateLimitClearAccount.value = "";
     kernelOpen.value = false;
     void loadAccounts();
     void loadKernel();
   } else {
     localNotice.value = null;
     busyAccount.value = "";
+    rateLimitClearAccount.value = "";
     kernelOpen.value = false;
   }
 });
@@ -414,10 +439,11 @@ async function confirmRemoveAccount() {
     :open="open"
     title="账号"
     description="每个账号使用独立的浏览器环境，BOSS 与智联窗口可分别打开；登录一次后长期有效，任务会使用「当前账号」的登录态抓取。多账号勾选进 R1/R2 共用账号池后，开抓会按勾选顺序轮询分摊（每轮每账号抓固定配额就换下一个，总量不够自动多轮覆盖），撞墙顺次切下一个预选账号继续。"
-    size="md"
+    size="account"
     @close="$emit('close')"
   >
     <div class="config-row" data-testid="config-row">
+      <div class="kernel-control-row">
       <button
         ref="kernelChipEl"
         type="button"
@@ -434,6 +460,19 @@ async function confirmRemoveAccount() {
         <span class="kernel-chip-value">{{ kernelChipLabel }}</span>
         <ChevronDown :size="14" class="kernel-chip-caret" aria-hidden="true" />
       </button>
+      <button
+        type="button"
+        class="kernel-refresh"
+        data-testid="browser-kernel-refresh"
+        title="重新探测浏览器"
+        aria-label="重新探测浏览器"
+        :disabled="kernelLocked"
+        @click="refreshKernel"
+      >
+        <RefreshCw :size="14" aria-hidden="true" />
+        <span>重新探测</span>
+      </button>
+      </div>
       <div
         v-if="kernelOpen"
         ref="kernelPopEl"
@@ -450,130 +489,32 @@ async function confirmRemoveAccount() {
       </div>
     </div>
 
-    <div class="browser-account-list">
-      <div
-        v-if="lockNotice"
-        class="browser-account-notice"
-        data-tone="warning"
-        role="status"
-      >
-        {{ lockNotice }}
-      </div>
-      <article
-        v-for="account in accounts"
-        :key="account.id"
-        class="browser-account-card"
-        :data-active="account.id === activeAccount || undefined"
-        :data-rate-limited="account.rate_limited ? 'true' : undefined"
-      >
-        <div class="browser-account-info">
-          <div class="browser-account-head">
-            <span class="browser-account-icon" aria-hidden="true"><UserRound :size="17" /></span>
-            <strong :class="{ 'rate-limited-name': account.rate_limited }">{{ displayName(account) }}</strong>
-            <span v-if="account.rate_limited" class="browser-account-badge rate-limited" :data-testid="`rate-limited-${account.id}`">限流</span>
-            <span v-else-if="account.id === activeAccount" class="browser-account-badge">当前账号</span>
-            <span v-else class="browser-account-badge muted">非当前账号</span>
-          </div>
-          <div class="browser-account-pool" :data-testid="`pool-config-${account.id}`">
-            <label class="pool-toggle">
-              <input
-                type="checkbox"
-                :checked="account.pool?.selected ?? true"
-                :disabled="poolBusy"
-                :data-testid="`pool-selected-${account.id}`"
-                @change="togglePoolSelected(account)"
-              >
-              <span class="pool-toggle-label">参与轮询</span>
-            </label>
-            <label class="pool-quota">
-              <span class="pool-quota-label">R1 配额</span>
-              <input
-                type="number"
-                :min="POOL_R1_RANGE.min"
-                :max="POOL_R1_RANGE.max"
-                :value="account.pool?.r1_quota ?? POOL_R1_RANGE.default"
-                :placeholder="`${POOL_R1_RANGE.min}-${POOL_R1_RANGE.max}`"
-                :disabled="poolBusy"
-                :data-testid="`pool-r1-quota-${account.id}`"
-                @change="updateQuota(account, 'r1_quota', Number(($event.target as HTMLInputElement).value))"
-              >
-            </label>
-            <label class="pool-quota">
-              <span class="pool-quota-label">R2 配额</span>
-              <input
-                type="number"
-                :min="POOL_R2_RANGE.min"
-                :max="POOL_R2_RANGE.max"
-                :value="account.pool?.r2_quota ?? POOL_R2_RANGE.default"
-                :placeholder="`${POOL_R2_RANGE.min}-${POOL_R2_RANGE.max}`"
-                :disabled="poolBusy"
-                :data-testid="`pool-r2-quota-${account.id}`"
-                @change="updateQuota(account, 'r2_quota', Number(($event.target as HTMLInputElement).value))"
-              >
-            </label>
-          </div>
-          <ul class="browser-account-platforms" :data-testid="`account-platforms-${account.id}`">
-            <li
-              v-for="platform in platformsOf(account)"
-              :key="platform"
-              :data-platform="platform"
-            >
-              <span class="browser-account-platform-label">{{ PLATFORM_LABELS[platform] }}</span>
-              <span
-                class="browser-account-state"
-                :data-tone="platformBadge(account, platform).tone"
-                :data-testid="`account-state-${account.id}-${platform}`"
-              >
-                {{ platformBadge(account, platform).text }}
-              </span>
-              <button
-                type="button"
-                class="browser-account-open"
-                :data-testid="`open-${platform}-${account.id}`"
-                :aria-label="`打开${PLATFORM_LABELS[platform]}浏览器`"
-                :title="`打开${PLATFORM_LABELS[platform]}浏览器`"
-                :disabled="!canOpenPlatform(account.id, platform)"
-                @click="openPlatform(account, platform)"
-              >
-                <LoaderCircle v-if="busyAccount === account.id" class="spin" :size="13" aria-hidden="true" />
-                <ExternalLink v-else :size="13" aria-hidden="true" />
-                {{ busyAccount === account.id ? "打开中…" : "打开" }}
-              </button>
-            </li>
-          </ul>
-        </div>
-        <div class="browser-account-actions">
-          <div class="browser-account-icon-actions">
-            <button
-              v-if="account.id !== activeAccount"
-              type="button"
-              class="icon-button activate-toggle"
-              :data-testid="`activate-${account.id}`"
-              aria-label="设为当前账号"
-              title="设为当前账号"
-              :disabled="!canManage(account.id)"
-              @click="activateAccount(account.id)"
-            >
-              <LoaderCircle v-if="busyAccount === account.id" class="spin" :size="17" aria-hidden="true" />
-              <Check v-else :size="17" aria-hidden="true" />
-            </button>
-            <button
-              v-if="!account.builtin"
-              type="button"
-              class="icon-button danger-icon"
-              :data-testid="`delete-${account.id}`"
-              aria-label="删除账号"
-              title="删除账号"
-              :disabled="!canManage(account.id)"
-              @click="removeAccount(account.id)"
-            >
-              <Trash2 :size="17" aria-hidden="true" />
-            </button>
-          </div>
-        </div>
-      </article>
-      <p v-if="!accounts.length && !busy" class="browser-account-empty">暂无账号，先添加一个账号。</p>
-    </div>
+    <div
+      v-if="lockNotice"
+      class="browser-account-notice"
+      data-tone="warning"
+      role="status"
+    >{{ lockNotice }}</div>
+    <AccountPoolSheet
+      :accounts="accounts"
+      :busy="busy"
+      :active-account="activeAccount"
+      :pool-busy="poolBusy"
+      :busy-account="busyAccount"
+      :rate-limit-clear-account="rateLimitClearAccount"
+      :platform-labels="PLATFORM_LABELS"
+      :display-name="displayName"
+      :platforms-of="platformsOf"
+      :platform-badge="platformBadge"
+      :can-open-platform="canOpenPlatform"
+      :can-manage="canManage"
+      @toggle-pool="togglePoolSelected"
+      @update-quota="updateQuota"
+      @open-platform="openPlatform"
+      @activate="activateAccount"
+      @remove="removeAccount"
+      @clear-rate-limited="clearRateLimited"
+    />
 
     <form class="browser-account-add" @submit.prevent="addAccount">
       <label class="field-label">
@@ -633,13 +574,15 @@ async function confirmRemoveAccount() {
 </template>
 
 <style scoped>
-.config-row{position:relative;display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px}
-.kernel-chip{display:inline-flex;align-items:center;gap:6px;margin-left:auto;min-height:30px;padding:4px 10px;border:1px solid var(--hair);border-radius:7px;background:var(--panel-2);color:var(--ink-1);font:inherit;font-size:12px;font-weight:600;line-height:1.2;cursor:pointer;transition:border-color 160ms ease,background 160ms ease}
+.config-row{position:relative;margin-bottom:12px}
+.kernel-control-row{display:flex;align-items:center;gap:8px}
+.kernel-chip{display:inline-flex;align-items:center;gap:6px;flex:1;min-width:0;min-height:36px;padding:6px 10px;border:1px solid var(--hair);border-radius:8px;background:var(--panel-2);color:var(--ink-1);font:inherit;font-size:12px;font-weight:600;line-height:1.2;cursor:pointer;transition:border-color 160ms ease,background 160ms ease}
 .kernel-chip:hover:not(:disabled),.kernel-chip[aria-expanded="true"]{border-color:var(--brand-edge);background:var(--brand-wash)}
 .kernel-chip:disabled{cursor:not-allowed;opacity:.65}
 .kernel-chip-label{color:var(--muted);font-weight:500}
-.kernel-chip-value{color:var(--brand-strong);max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kernel-chip-value{color:var(--brand-strong);margin-left:auto;max-width:146px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kernel-popover{position:absolute;z-index:60;top:calc(100% + 6px);right:0;width:min(340px,calc(100% - 4px));max-height:min(460px,60vh);overflow-y:auto;padding:10px;border:1px solid var(--hair);border-radius:9px;background:var(--panel);box-shadow:0 14px 40px rgba(0,0,0,.18),0 2px 8px rgba(0,0,0,.08)}
+.kernel-refresh{display:inline-flex;align-items:center;gap:5px;min-height:36px;padding:6px 9px;border:1px solid var(--brand-edge);border-radius:8px;background:var(--brand-wash);color:var(--brand-strong);font:inherit;font-size:12px;font-weight:700;cursor:pointer}.kernel-refresh:hover:not(:disabled){color:var(--brand-ink);background:var(--panel)}.kernel-refresh:disabled{opacity:.6;cursor:not-allowed}
 .browser-account-list {
   display: grid;
   gap: 10px;

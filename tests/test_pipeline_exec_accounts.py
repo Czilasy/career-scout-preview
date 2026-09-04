@@ -112,6 +112,13 @@ class BrowserAccountPoolDataTests(unittest.TestCase):
         # 非 dict 入参归一默认
         self.assertEqual(_normalize_pool("garbage", 2)["order"], 2)
 
+    def test_r2_default_and_upper_bound(self):
+        self.assertEqual(DEFAULT_R2_QUOTA, 150)
+        self.assertEqual(R2_QUOTA_MIN, 1)
+        self.assertEqual(R2_QUOTA_MAX, 300)
+        self.assertEqual(_normalize_pool(None)["r2_quota"], 150)
+        self.assertEqual(_normalize_pool({"r2_quota": 9999})["r2_quota"], 300)
+
     def test_normalize_rate_limited(self):
         self.assertIs(_normalize_rate_limited(None), False)
         self.assertIs(_normalize_rate_limited(True), True)
