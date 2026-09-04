@@ -87,4 +87,6 @@ git status --short
 - 后端全量回归（最新源码）：`Ran 2908 tests in 936.242s`，`OK (skipped=4)`；证据：`$env:TEMP\career-scout-v4-backend-full-final-2.txt`。
 - 前端测试：`Test Files 50 passed (50)`、`Tests 765 passed (765)`；证据：`$env:TEMP\career-scout-v4-frontend-test-final-2.txt`。
 - 前端构建：`✓ built in 1.01s`；证据：`$env:TEMP\career-scout-v4-frontend-build-final.txt`。
+- 真实浏览器用户烟测：使用项目正式入口和隔离 `test` 状态库，按“跳过简历 → Python × 上海 → 账号池两个 R2 配额均设为 2 → 单独抓取”操作，页面从运行中推进到 100%，显示抓取 90 条且去重 90 条；隔离库 `db_meta.env=test`，运行状态为 `scraped_only`。
+- AI 筛选入口烟测：点击“开始 AI 筛选”后，页面按真实前置条件阻断并显示“求职画像至少 10 个字”，未发起 AI 或详情请求。
 - 本轮未执行真实账号端到端，交付状态：`自动化验证完成，真实账号端到端待验收`。
