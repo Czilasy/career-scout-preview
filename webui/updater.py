@@ -43,6 +43,9 @@ logger = get_logger(__name__)
 
 GITHUB_REPO = "Czilasy/career-scout-preview"
 GITHUB_LATEST_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_RELEASE_TAG_URL = (
+    f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/{{tag}}"
+)
 # 国内自建更新镜像。HTTP 明文是该源的已知取舍：安装包传输完整性由强制
 # SHA256 校验兜底（manifest 与安装包同源），写权限锁在服务器 SSH 密钥上，
 # 公开可读是设计预期。镜像地址不写入公开仓库（FR-005），来源按序：
@@ -190,7 +193,7 @@ def _check_mirror(
 
     manifest 形状（服务器部署账号 home 下 update_manifest.py 生成）::
 
-        {"latest": "1.8.1", "released": "...",
+        {"latest": "1.8.1", "released": "...", "release_notes": "...",
          "files": {"win": {"name", "sha256", "size"}, "mac": {...}}}
     """
     if not MIRROR_HOST:
@@ -217,6 +220,20 @@ def _check_mirror(
         # 让 check_for_update 回退 GitHub 复核。防止镜像 manifest 滞后
         # （同步漏跑）时锁死所有走镜像的老版本，拿不到真正的新版提示。
         return None
+    info.release_notes = str(payload.get("release_notes") or "").strip()[:4000]
+    if not info.release_notes:
+        # 兼容尚未带说明字段的旧镜像清单；说明获取失败不影响安装包更新。
+        try:
+            response = requests.get(
+                GITHUB_RELEASE_TAG_URL.format(tag=f"v{info.latest}"),
+                timeout=DOWNLOAD_TIMEOUT,
+                headers={"Accept": "application/vnd.github+json"},
+            )
+            release = response.json()
+            if isinstance(release, dict):
+                info.release_notes = str(release.get("body") or "")[:4000]
+        except Exception as exc:
+            logger.debug("获取 GitHub 版本说明失败：%s", type(exc).__name__)
     entry = files.get(_MIRROR_PLATFORM_KEYS.get(update_platform, "")) \
         if isinstance(files, dict) else None
     if not isinstance(entry, dict) or not str(entry.get("name") or "").strip():

@@ -458,7 +458,7 @@ class _MirrorManifestResponse:
         return self._payload
 
 
-def _mirror_manifest(latest="1.8.1", files=None):
+def _mirror_manifest(latest="1.8.1", files=None, release_notes="镜像更新说明"):
     if files is None:
         files = {
             "win": {"name": "CareerScout-v1.8.1.exe", "size": 29931838,
@@ -466,7 +466,10 @@ def _mirror_manifest(latest="1.8.1", files=None):
             "mac": {"name": "CareerScout-v1.8.1.dmg", "size": 23465579,
                     "sha256": "b" * 64},
         }
-    return {"latest": latest, "released": "2026-08-29", "files": files}
+    payload = {"latest": latest, "released": "2026-08-29", "files": files}
+    if release_notes is not None:
+        payload["release_notes"] = release_notes
+    return payload
 
 
 _GITHUB_PAYLOAD = {
@@ -513,7 +516,24 @@ class MirrorFirstTests(unittest.TestCase):
         self.assertEqual(info.sha256_url,
                          f"http://{_TEST_MIRROR_HOST}/CareerScout-v1.8.1.exe.sha256")
         self.assertTrue(info.release_url.endswith("/releases/tag/v1.8.1"))
+        self.assertEqual(info.release_notes, "镜像更新说明")
         get.assert_called_once_with(updater.MIRROR_MANIFEST_URL, timeout=10)
+
+    def test_mirror_update_fills_notes_from_github_when_manifest_omits_them(self):
+        mirror = _MirrorManifestResponse(_mirror_manifest(release_notes=None))
+        github = _MirrorManifestResponse({
+            **_GITHUB_PAYLOAD,
+            "body": "修复：更新弹窗显示版本介绍",
+        })
+        with patch.object(updater.requests, "get", side_effect=[mirror, github]) as get:
+            info = updater.check_for_update("1.7.10")
+
+        self.assertEqual(info.release_notes, "修复：更新弹窗显示版本介绍")
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(
+            get.call_args_list[1].args[0],
+            f"https://api.github.com/repos/{updater.GITHUB_REPO}/releases/tags/v1.8.1",
+        )
 
     def test_mirror_up_to_date_no_update_falls_back_to_github(self):
         # 镜像 latest == 当前版本：不据此判"已最新"，回退 GitHub 复核。
