@@ -250,7 +250,7 @@ export interface LogsQuery {
   offset?: number;
   since?: number;
   identity?: string;
-  /** 035：按任务过滤（运行日志），仅返回包含该 task_id 的日志行。 */
+  /** 035：按任务查看运行日志，优先读取持久化任务日志并兼容旧版文件日志。 */
   task_id?: string;
 }
 

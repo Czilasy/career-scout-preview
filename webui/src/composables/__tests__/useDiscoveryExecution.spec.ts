@@ -3,6 +3,7 @@
 //   interrupted run 也不恢复 02/03 页、不弹"服务重启被中断"提示（FR-002/FR-003）。
 // - 未进 04 页 → 走既有 interrupted 恢复续跑（FR-004，B068 行为不变）。
 import { ref } from "vue";
+import { flushPromises } from "@vue/test-utils";
 import { apiRequest } from "../../api";
 import type { FrozenSearchScope } from "../../types";
 import { useDiscoveryExecution } from "../useDiscoveryExecution";
@@ -304,5 +305,43 @@ describe("useDiscoveryExecution screen 侧清空（035 FR-010）", () => {
 
     expect(state.screenSnapshot.value?.status).toBe("running");
     expect(state.screenTaskId.value).toBe("screen-live-1");
+  });
+});
+
+describe("单独抓取入口的画像边界", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset();
+  });
+
+  it("空画像时单独抓取仍可创建抓取任务", async () => {
+    const state = makeState();
+    state.selectedKeywords.value = ["Python"];
+    state.cityText.value = "上海";
+    const validateProfile = vi.fn(() => false);
+    const requireProfileConfirmed = vi.fn(() => false);
+    apiRequestMock.mockImplementation(async (url: string) => {
+      if (url === "/api/browser-accounts") {
+        return { accounts: [{ pool: { selected: true } }] };
+      }
+      if (url === "/api/execute-search") return { task_id: "scrape-empty-profile" };
+      throw new Error(`unexpected request: ${url}`);
+    });
+    const deps = makeDeps({
+      refreshScopePreview: vi.fn(async () => ({
+        scope_digest: "digest-empty-profile",
+      } as unknown as FrozenSearchScope)),
+      requireProfileConfirmed,
+      validateProfileForScreen: validateProfile,
+    });
+    const execution = useDiscoveryExecution(state, deps);
+
+    execution.handleStartScrapeClick();
+    await flushPromises();
+
+    expect(validateProfile).not.toHaveBeenCalled();
+    expect(requireProfileConfirmed).not.toHaveBeenCalled();
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/api/execute-search", expect.objectContaining({ method: "POST" }),
+    );
   });
 });

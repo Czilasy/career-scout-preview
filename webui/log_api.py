@@ -3,7 +3,7 @@
 GET /api/logs：读 career-scout.log 尾部 / 更早分页 / 轮询增量；受本地
 会话令牌保护（before_request 全局敏感 GET 清单覆盖）。每次请求重开文件
 并携带文件身份（size:mtime）检测轮转，轮转后从新文件读取，保证实时
-更新不失效（FR-009）。只读文件系统与 logging_setup，不触碰 store。
+更新不失效（FR-009）。运行日志优先读取任务持久化日志，兼容旧版文件日志。
 """
 
 from __future__ import annotations
@@ -59,9 +59,24 @@ def register_log_routes(app, ctx):
         # 035：按任务过滤（运行日志）——仅保留包含该 task_id 的日志行。
         task_id = str(request.args.get("task_id") or "").strip()
 
-        lines, identity = _read_file()
         if task_id:
-            lines = [line for line in lines if task_id in line]
+            # 任务输出由 task_logs 持久化，历史轮次对应的 pipeline run id
+            # 不会出现在 career-scout.log 的每一行中。优先返回持久化日志；
+            # 不存在该任务时保留旧版文件日志按文本过滤的兼容行为。
+            try:
+                task_rows = ctx.store.get_logs(task_id)
+            except KeyError:
+                task_rows = None
+            except ctx.operational_errors:
+                task_rows = None
+            if task_rows is not None:
+                lines = [str(row["line"]) for row in task_rows]
+                identity = f"task:{task_id}"
+            else:
+                lines, identity = _read_file()
+                lines = [line for line in lines if task_id in line]
+        else:
+            lines, identity = _read_file()
         total = len(lines)
         rotated = bool(client_identity and identity and identity != client_identity)
         if not lines:

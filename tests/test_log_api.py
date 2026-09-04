@@ -116,6 +116,21 @@ class LogApiTests(unittest.TestCase):
         ])
         self.assertEqual(data["total"], 2)
 
+    def test_task_id_reads_persisted_task_logs_when_file_has_no_task_line(self):
+        task_id = "history-task-1"
+        store = self.app.config["TASK_STORE"]
+        store.append_task_event(task_id, "stage_start", {"stage": "scrape"})
+
+        resp = self.client.get(f"/api/logs?tail=10&task_id={task_id}")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(len(data["lines"]), 1)
+        self.assertIn('"type": "stage_start"', data["lines"][0])
+        self.assertEqual(data["start"], 1)
+        self.assertEqual(data["end"], 1)
+        self.assertEqual(data["total"], 1)
+
     def test_task_id_with_since_uses_filtered_set(self):
         _write_log(self.log_dir, [
             "line-a-task-9",

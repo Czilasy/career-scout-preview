@@ -755,11 +755,6 @@ function handleStartScrapeClick() {
     void cancelScrape();
     return;
   }
-  if (!deps.validateProfileForScreen()) {
-    deps.notify("求职画像至少 10 个字（不含首尾空格）", "warning");
-    return;
-  }
-  if (!deps.requireProfileConfirmed()) return;
   if (shouldConfirmNationalScope(selectedKeywords.value, cityList.value)) {
     nationalScopeConfirm.value = "scrape";
     return;

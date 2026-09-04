@@ -3533,7 +3533,7 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
-  it("B032: short or unconfirmed profile blocks task entries and edits require re-confirmation", async () => {
+  it("B032: short or unconfirmed profile only blocks AI entries; edits require re-confirmation", async () => {
     const fetchMock = oneClickBase({
       "/api/execute-search": () => response({ ok: true, task_id: "scrape-short" }),
       "/api/task-state/scrape-short": () => response({ status: "completed", progress: {}, logs: [] }),
@@ -3548,12 +3548,12 @@ describe("DiscoveryView", () => {
     await wrapper.get('.profile-summary-input').setValue("短画像");
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
-    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/execute-search"))).toBe(false);
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/execute-search")).length).toBe(1);
 
     await wrapper.get('.profile-summary-input').setValue("3年Python后端候选人");
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
     await flushPromises();
-    expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith("/api/execute-search"))).toBe(false);
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/api/execute-search")).length).toBe(2);
 
     await wrapper.get('[data-testid="profile-confirm"]').trigger("click");
     await wrapper.get('[data-testid="start-scrape"]').trigger("click");
