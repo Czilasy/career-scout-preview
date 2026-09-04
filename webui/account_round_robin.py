@@ -31,7 +31,6 @@ DEFAULT_R2_QUOTA = 150
 R1_QUOTA_MIN, R1_QUOTA_MAX = 1, 50
 R2_QUOTA_MIN, R2_QUOTA_MAX = 1, 300
 
-
 # ---------------------------------------------------------------------------
 # 纯调度：旋转队列与段规划（无 IO，可单测）
 # ---------------------------------------------------------------------------
@@ -48,14 +47,12 @@ class PoolEntry:
         # 不在此校验 quota 范围（构造时宽松，clamp 在读配额处统一）；
         # quota<=0 会在 RotationQueue.reserve 时被当 1 处理。
 
-
 @dataclass(frozen=True)
 class Segment:
     """一段轮询份额：[start, start+count) 由 account_id 抓。"""
     account_id: str
     start: int
     count: int
-
 
 @dataclass(frozen=True)
 class DetailAllocation:
@@ -313,7 +310,6 @@ def _switch_browser_account(account_id: str, platform: str, cdp_port: object) ->
     ok, _err = _facade.ensure_chrome_ready(port, minimize_after_launch=True)
     return bool(ok)
 
-
 def clone_source(source: Any, account_id: str, *, run_id: str = "") -> Any:
     """克隆 source 用于另一个账号（同平台/同端口，新 browser_account）。
 
@@ -329,7 +325,7 @@ def clone_source(source: Any, account_id: str, *, run_id: str = "") -> Any:
             browser_account=str(account_id),
             cdp_port=int(getattr(source, "cdp_port", 9223) or 9223),
             profile_key=f"zhilian:{account_id}",
-            breaker=getattr(source, "breaker", None),
+            breaker=None,
             preflight_runner=getattr(source, "_preflight_runner", None),
             list_runner=getattr(source, "_list_runner", None),
             detail_runner=getattr(source, "_detail_runner", None),
@@ -346,9 +342,6 @@ def clone_source(source: Any, account_id: str, *, run_id: str = "") -> Any:
     cdp_port = getattr(source, "cdp_port", None)
     if cdp_port is not None:
         kwargs["cdp_port"] = int(cdp_port)
-    # 复制构造器接受且会影响抓取行为的配置，尤其是测试/生产注入的
-    # runner、breaker、cwd 与 artifact 限制；不把仅存在于实例上的字段盲传给
-    # 兼容 source，避免替身和旧 adapter 构造失败。
     try:
         parameters = inspect.signature(cls).parameters
     except (TypeError, ValueError):
@@ -368,6 +361,14 @@ def clone_source(source: Any, account_id: str, *, run_id: str = "") -> Any:
         if name == "runner" and getattr(source, "_use_default_runner", False):
             continue
         value = getattr(source, attr)
+        if name == "breaker":
+            value = None
+        if name == "executor" and value is not None:
+            from webui.process_executor import ScraperExecutor
+            value = ScraperExecutor(
+                max_output_bytes=getattr(value, "max_output_bytes", 1_000_000),
+                poll_seconds=getattr(value, "poll_seconds", 0.05),
+            )
         if name == "env" and isinstance(value, dict) and run_id:
             value = {
                 **value,
@@ -681,6 +682,7 @@ class DetailRobin:
             to_account=str(next_account or ""),
             remaining=max(0, int(handoff_count or 0)),
             result="queued" if next_account else "paused", blocked_reason="wall",
+            source_attempt_id=getattr(self, "_pending_attempt_id", None),
         )
         return next_account is not None
 

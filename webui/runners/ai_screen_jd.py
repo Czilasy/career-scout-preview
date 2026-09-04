@@ -7,6 +7,11 @@ detail_batch_size 分批抓取与 JD 断点文件落盘、源级硬信号暂停�
 
 from __future__ import annotations
 
+from webui.logging_setup import get_logger
+
+
+_logger = get_logger(__name__)
+
 
 def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                  frozen_platform, frozen_cdp_port, frozen_profile_key,
@@ -24,6 +29,79 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
     jd_failures: dict[str, dict[str, str]] = {}
     # 022：卡死防护（app_support 创建并挂 ctx；无 guard 时行为与旧版一致）
     guard = getattr(ctx, "pipeline_guard", None)
+
+    def _pause_for_rotation_snapshot(reason: str):
+        """Pause instead of silently restarting a damaged R2 checkpoint."""
+        checkpoint_error = ""
+        if jd_map:
+            try:
+                save_jd_checkpoint(jd_path, jd_map)
+            except Exception as exc:
+                checkpoint_error = f"；JD 断点写入失败（{type(exc).__name__}）"
+                _logger.warning(
+                    "R2 异常暂停时 JD 断点写入失败 task=%s",
+                    task_id, exc_info=True,
+                )
+        reason = f"{reason}{checkpoint_error}"
+        ctx.write_run(
+            task_id, status="paused", error_code="r2_rotation_checkpoint_invalid",
+            current_stage="jd_detail", processed_count=len(jd_map),
+            error_reason=reason,
+        )
+        ctx.store.save_checkpoint(task_id, "jd_detail", sorted(jd_map))
+        ctx.store.append_task_event(task_id, "r2_rotation_checkpoint_invalid", {
+            "stage": "jd_detail", "platform": frozen_platform,
+            "reason": str(reason), "recoverable": True,
+        })
+        ctx.store.append_task_event(task_id, "pause", {
+            "stage": "jd_detail", "code": "r2_rotation_checkpoint_invalid",
+            "processed": len(jd_map), "total": len(survivors),
+        })
+        ctx.record_pause_failure(
+            task_id, "jd_detail", "r2_rotation_checkpoint_invalid", reason,
+            processed=len(jd_map), total=len(survivors),
+        )
+        with ctx.lock:
+            t = ctx.tasks.get(task_id)
+            if t is not None:
+                t["status"] = "paused"
+                t["error"] = reason
+        ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
+        return None
+
+    def _clear_resolved_jd_pending(job_id: str) -> None:
+        """Remove only pending rows written by the JD failure stage."""
+        if not job_id or not hasattr(ctx.store, "delete_pending_result"):
+            return
+        try:
+            if hasattr(ctx.store, "list_pending_results"):
+                rows = ctx.store.list_pending_results(task_id) or []
+                for row in rows:
+                    if str(row.get("job_id") or "") != job_id:
+                        continue
+                    stage = str(row.get("failure_stage") or "")
+                    if stage == "jd_detail" or stage.startswith("jd_"):
+                        ctx.store.delete_pending_result(task_id, job_id)
+            elif hasattr(ctx.store, "get_pending_result"):
+                row = ctx.store.get_pending_result(task_id, job_id) or {}
+                stage = str(row.get("failure_stage") or "")
+                if stage == "jd_detail" or stage.startswith("jd_"):
+                    ctx.store.delete_pending_result(task_id, job_id)
+            else:
+                _logger.warning(
+                    "已取得有效 JD 但无法确认待处理阶段，跳过清理 task=%s job=%s",
+                    task_id, job_id,
+                )
+        except Exception:
+            _logger.warning(
+                "已取得有效 JD 但待处理清理失败 task=%s job=%s",
+                task_id, job_id, exc_info=True,
+            )
+
+    for job_id, jd in jd_map.items():
+        if str(jd or "").strip():
+            _clear_resolved_jd_pending(str(job_id))
+
     if survivors:
         emit(stage="ensure_chrome", message="启动调试浏览器，准备抓取 JD…")
         # 030：抓 JD 前把浏览器身份重绑到任务冻结账号——粗筛阶段耗时较长，
@@ -92,6 +170,141 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
             ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
             return
 
+        from webui.account_round_robin import PoolEntry, make_detail_robin
+        from webui.detail_attempts import DetailAttemptTracker
+        from webui.r2_rotation_session import (
+            R2RotationSession,
+            R2RotationSnapshotError,
+        )
+        initial_robin = make_detail_robin(
+            source, run_id=str(task_id), switch_event_store=ctx.store,
+        )
+        r2_session = None
+
+        def _completed_job_ids() -> list[str]:
+            return [
+                str(job_id) for job_id, jd in jd_map.items()
+                if str(jd or "").strip()
+            ]
+
+        def _save_rotation_checkpoint() -> bool:
+            if r2_session is None:
+                return True
+            try:
+                completed_ids = _completed_job_ids()
+                r2_session.set_completed_count(len(completed_ids))
+                r2_session.save_checkpoint(
+                    ctx.store, completed_count=len(completed_ids),
+                    completed_ids=completed_ids,
+                )
+            except R2RotationSnapshotError as exc:
+                _pause_for_rotation_snapshot(f"R2 轮询断点写入失败：{exc}")
+                return False
+            return True
+
+        attempt_tracker = DetailAttemptTracker(
+            str(task_id), ctx.app.config["RESULT_DIR"]
+        )
+        task_events = None
+        if hasattr(ctx.store, "list_task_events"):
+            try:
+                task_events = ctx.store.list_task_events(task_id) or []
+            except Exception:
+                task_events = None
+        if task_events is not None:
+            attempt_tracker = DetailAttemptTracker.from_task_events(
+                str(task_id), ctx.app.config["RESULT_DIR"], task_events
+            )
+        try:
+            checkpoint = R2RotationSession.latest_checkpoint(ctx.store, task_id)
+        except R2RotationSnapshotError as exc:
+            return _pause_for_rotation_snapshot(f"R2 轮询断点读取失败：{exc}")
+        prior_r2 = any(
+            isinstance(event, dict)
+            and event.get("type") == "account_pool_snapshot"
+            and isinstance(event.get("payload"), dict)
+            and event["payload"].get("phase") == "R2"
+            for event in (task_events or [])
+        )
+        prior_pause = any(
+            isinstance(event, dict)
+            and event.get("type") == "pause"
+            and isinstance(event.get("payload"), dict)
+            and event["payload"].get("stage") == "jd_detail"
+            for event in (task_events or [])
+        )
+        if initial_robin is not None:
+            r2_session = R2RotationSession.from_robin(
+                source, initial_robin, task_id=str(task_id),
+                platform=frozen_platform,
+            )
+            if checkpoint is not None:
+                try:
+                    checkpoint_order = checkpoint["account_order"]
+                    checkpoint_quotas = checkpoint["quotas"]
+                    if (not isinstance(checkpoint_order, list)
+                            or not isinstance(checkpoint_quotas, dict)):
+                        raise R2RotationSnapshotError(
+                            "R2 快照缺少冻结账号池"
+                        )
+                    live_entries = list(initial_robin._queue._entries) + list(
+                        initial_robin._queue._blocked
+                    )
+                    live_quotas = {
+                        str(entry.account_id): max(1, int(entry.quota))
+                        for entry in live_entries
+                    }
+                    snapshot_quotas = {
+                        str(account_id): max(1, int(checkpoint_quotas[account_id]))
+                        for account_id in checkpoint_order
+                    }
+                    if live_quotas != snapshot_quotas:
+                        raise R2RotationSnapshotError(
+                            "R2 快照账号池与当前冻结池不一致"
+                        )
+                    if list(r2_session.account_order) != checkpoint_order:
+                        r2_session = R2RotationSession(
+                            source,
+                            [PoolEntry(str(account_id), snapshot_quotas[str(account_id)])
+                             for account_id in checkpoint_order],
+                            task_id=str(task_id), platform=frozen_platform,
+                            robin=initial_robin,
+                        )
+                    r2_session.restore_snapshot(checkpoint)
+                    completed_ids = _completed_job_ids()
+                    expected_digest = R2RotationSession.completed_digest(
+                        completed_ids
+                    )
+                    if (int(checkpoint["completed_count"]) != len(completed_ids)
+                            or checkpoint["completed_digest"] != expected_digest):
+                        raise R2RotationSnapshotError(
+                            "R2 轮询断点与 JD 断点不一致"
+                        )
+                    initial_account = str(
+                        (checkpoint.get("account_order") or [frozen_browser_account])[0]
+                    )
+                    # continue API persists an explicitly selected account in
+                    # the frozen identity; the unchanged initial account means
+                    # ordinary checkpoint recovery and must not override it.
+                    if (frozen_browser_account
+                            and str(frozen_browser_account) != initial_account):
+                        r2_session.override_active_account(frozen_browser_account)
+                except (KeyError, TypeError, ValueError, R2RotationSnapshotError) as exc:
+                    return _pause_for_rotation_snapshot(
+                        f"R2 轮询断点无法安全恢复：{exc}"
+                    )
+            elif prior_r2 and prior_pause:
+                return _pause_for_rotation_snapshot(
+                    "R2 轮询断点缺失，无法安全确定接续位置"
+                )
+            else:
+                if not _save_rotation_checkpoint():
+                    return
+        elif checkpoint is not None or (prior_r2 and prior_pause):
+            return _pause_for_rotation_snapshot(
+                "R2 账号池或轮询断点与任务不一致，无法安全恢复"
+            )
+
         todo_jd = [j for j in survivors
                    if str(j.get("job_id", "")) not in jd_map]
         emit(stage="fetch_jd", current=len(jd_map), total=len(survivors),
@@ -99,6 +312,10 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
         DETAIL_CHUNK = max(1, int(execution_config.detail_batch_size))
         for chunk_start in range(0, len(todo_jd), DETAIL_CHUNK):
             if stop_requested():
+                if r2_session is not None:
+                    r2_session.emit_account_summary(
+                        attempt_tracker, total_success=len(jd_map)
+                    )
                 close_debug_chrome(frozen_cdp_port)
                 handle_user_stop()
                 return
@@ -162,6 +379,8 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                 simulation_mode=_simulation_mode,
                 batch_progress=_jd_batch_progress,
                 store=ctx.store,
+                r2_session=r2_session,
+                attempt_tracker=attempt_tracker,
             )
             # 022：卡死 3 次失败分流收场（环境级暂停 / 偶发跳过进待确认）
             _stall_divert = detail_result.get("stall_divert")
@@ -179,6 +398,14 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                     task_id, detail_result.get("jobs") or [],
                     stage="jd_detail", platform=frozen_platform,
                 )
+                if r2_session is not None:
+                    if jd_map:
+                        save_jd_checkpoint(jd_path, jd_map)
+                    if not _save_rotation_checkpoint():
+                        return
+                    r2_session.emit_account_summary(
+                        attempt_tracker, total_success=len(jd_map)
+                    )
                 ctx.write_run(
                     task_id, status="paused", error_code=_hs_code,
                     current_stage="jd_detail",
@@ -214,6 +441,7 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                 if jid and jd:
                     jd_map[jid] = jd
                     jd_failures.pop(jid, None)
+                    _clear_resolved_jd_pending(jid)
                 elif jid and j.get("jd_failed_code"):
                     jd_failures[jid] = {
                         "code": str(j.get("jd_failed_code")),
@@ -223,6 +451,8 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
             # 025 B077：暂停返回时绝不把空结果写进断点（无已抓则跳过落盘）
             if jd_map:
                 save_jd_checkpoint(jd_path, jd_map)
+            if not _save_rotation_checkpoint():
+                return
             ctx.write_run(
                 task_id, source_cursor=len(jd_map),
                 processed_count=len(jd_map), current_stage="jd_detail",
@@ -246,6 +476,10 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                     stage="jd_detail",
                     platform=frozen_platform,
                 )
+                if r2_session is not None:
+                    r2_session.emit_account_summary(
+                        attempt_tracker, total_success=len(jd_map)
+                    )
                 ctx.write_run(
                     task_id, status="paused", error_code=_hs_code,
                     current_stage="jd_detail",
@@ -267,10 +501,18 @@ def run_jd_stage(ctx, task_id, enriched, survivors, resume_jd, jd_path,
                 ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
                 return
             if detail_result.get("stopped"):
+                if r2_session is not None:
+                    r2_session.emit_account_summary(
+                        attempt_tracker, total_success=len(jd_map)
+                    )
                 close_debug_chrome(frozen_cdp_port)
                 handle_user_stop()
                 return
         close_debug_chrome(frozen_cdp_port)
+        if r2_session is not None:
+            r2_session.emit_account_summary(
+                attempt_tracker, total_success=len(jd_map)
+            )
     for job in enriched:
         jid = str(job.get("job_id", ""))
         job["jd"] = jd_map.get(jid, "")

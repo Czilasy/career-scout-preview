@@ -20,6 +20,18 @@
 
 不得只写测试后直接实施；必须保存修复前失败证据。
 
+本轮红灯命令：
+
+```powershell
+uv run python -m unittest tests.test_r2_rotation_v4 tests.test_detail_attempts_v4 tests.source.test_source_account_isolation_v4
+```
+
+结果：`Ran 6 tests ... FAILED (failures=6)`。失败证据：`$env:TEMP\career-scout-v4-red.txt`。
+
+失败断言包括：跨 chunk 首账号收到 220 条而不是 200 条；浏览器恢复与跨账号接力沿用相同 artifact；成功 JD 未删除 `(pending-run, j1)`；BOSS 克隆共享 breaker 与 executor；Zhilian 克隆共享 breaker。
+
+Phase 2 契约红灯命令同样已执行；结果：`Ran 6 tests ... FAILED (failures=2, errors=4)`。失败证据：`$env:TEMP\career-scout-v4-contract-red.txt`。其中快照模块尚不存在、请求事件接口尚不存在，且两处旧克隆断言在隔离契约下失败。
+
 ## 3. 聚焦验证
 
 实现完成后运行 V4 新增测试文件，并至少证明：
@@ -67,3 +79,12 @@ git status --short
 5. 如安全地遇到自然平台阻断，核对只隔离实际撞墙账号；不得主动制造或绕过平台风控。
 
 未执行真实账号验收时，交付状态必须写为“自动化验证完成，真实账号端到端待验收”。
+
+## 6. 本轮自动化验证记录
+
+- V4 聚焦回归：`Ran 25 tests in 0.254s`，`OK`；证据：`$env:TEMP\career-scout-v4-focused-final-4.txt`。
+- R1/R2 轮询与 BOSS、智联源回归：`Ran 214 tests in 20.825s`，`OK`；证据：`$env:TEMP\career-scout-v4-existing-source-final-2.txt`。
+- 后端全量回归（最新源码）：`Ran 2908 tests in 936.242s`，`OK (skipped=4)`；证据：`$env:TEMP\career-scout-v4-backend-full-final-2.txt`。
+- 前端测试：`Test Files 50 passed (50)`、`Tests 765 passed (765)`；证据：`$env:TEMP\career-scout-v4-frontend-test-final-2.txt`。
+- 前端构建：`✓ built in 1.01s`；证据：`$env:TEMP\career-scout-v4-frontend-build-final.txt`。
+- 本轮未执行真实账号端到端，交付状态：`自动化验证完成，真实账号端到端待验收`。

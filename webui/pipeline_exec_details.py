@@ -1,7 +1,5 @@
 """fetch_job_details：批量详情抓取（021 B7 自 pipeline_exec.py 搬运）。"""
-
 from __future__ import annotations
-
 import random
 import time
 
@@ -18,12 +16,7 @@ from webui.task_pause_support import ImmediateOnlyCancelEvent
 from webui import recruiter_activity
 
 from webui.logging_setup import get_logger
-
 _logger = get_logger(__name__)
-
-
-
-
 
 def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                       stop_event=None, completed_job_ids=None,
@@ -34,7 +27,9 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                       task_id=None,
                       simulation_mode=None,
                       batch_progress=None,
-                      store=None):
+                      store=None,
+                      r2_session=None,
+                      attempt_tracker=None):
     """对一批岗位批量抓 JD（调用方需先确保 Chrome 就绪）。
 
     Spec 007 ⑧：改用 fetch_details_batch（≤5 一批）走 --enable-parallel 常驻 tab 池，
@@ -72,10 +67,13 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     - stall_code / stall_attempts：环境级分流时的失败码与实际尝试次数。
     """
     from webui import pipeline_exec as _facade
+    from webui.detail_attempts import DetailAttemptTracker
     import os
     if artifact_dir is None:
         artifact_dir = os.path.join(os.path.expanduser("~"), ".career-scout", "job-result")
     os.makedirs(artifact_dir, exist_ok=True)
+    if attempt_tracker is None:
+        attempt_tracker = DetailAttemptTracker(str(task_id or ""), artifact_dir)
     total = len(jobs)
     if total == 0:
         return {"jobs": [], "hard_stop": False, "hard_stop_code": None,
@@ -119,7 +117,6 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     # 016：与组合层共用注册表派生的 SYSTEMIC_BLOCK_CODES，不再维护第二份清单
     # （JD 抓取阶段不调 AI，ai_* 码实际不会出现）。
     _jd_hard_stop_codes = _HARD_STOP_CODES
-
     def _jd_is_hard_stop(code: object) -> bool:
         """硬停判定先归一别名码（历史码/测试夹具可能仍带旧码）。"""
         code = str(code or "")
@@ -141,7 +138,6 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 return False, _code, "环境检查未通过"
             return True, "", ""
         return _probe
-
     stall_divert: str | None = None
     stall_code = ""
     stall_attempts = 0
@@ -149,7 +145,6 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
     activity_by_idx: dict = {}
     counted_done: set[int] = set()
     counted_fetched: set[int] = set()
-
     def _apply_batch_outcomes(batch_entries, batch_outcomes, batch_exc_code,
                               *, count_done=True):
         """处理一批 outcomes 并入 jd_by_idx / jd_fail（025 B077：批返回后立即处理，
@@ -226,7 +221,6 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                     except Exception:
                         _logger.debug("进度回调执行失败（不阻断详情抓取主流程）", exc_info=True)
 
-
     # 025 修复：把「仅立即停止」的取消信号接到抓取源。in-process（EXE）模式
     # 没有子进程可杀，scrape_details 的逐条检查点是批内唯一中断手段；graceful
     # 不置位（适配器 is_set() 为假），批照常跑完批边界停止，语义不变。
@@ -234,10 +228,24 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         source.cancel_event = ImmediateOnlyCancelEvent(stop_event)
     # Spec 038 B091 R2 多账号轮询分摊：engagement 规则不满足时返回 None
     # （legacy 单源行为），满足时走跨账号按配额推进 + 撞墙换号。
-    from webui.account_round_robin import make_detail_robin
-    detail_robin = make_detail_robin(
-        source, run_id=str(task_id or ""), switch_event_store=store,
-    )
+    if r2_session is not None:
+        detail_robin = r2_session
+    else:
+        from webui.account_round_robin import make_detail_robin
+        detail_robin = make_detail_robin(
+            source, run_id=str(task_id or ""), switch_event_store=store,
+        )
+    if detail_robin is not None:
+        account_order = getattr(detail_robin, "account_order", None)
+        if account_order is None:
+            queue = getattr(detail_robin, "_queue", None)
+            account_order = [
+                entry.account_id for entry in (getattr(queue, "_entries", [])
+                                               + getattr(queue, "_blocked", []))
+            ] if queue is not None else []
+        attempt_tracker.register_accounts(account_order)
+    _robin_impl = getattr(detail_robin, "robin", detail_robin)
+    _whitebox = getattr(_robin_impl, "_whitebox", None)
     for batch_start in range(0, len(indexed_jobs), BATCH_SIZE):
         if stop_event is not None and stop_event.is_set():
             stopped = True
@@ -263,15 +271,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                                          counts={"batch_index": batch_start // BATCH_SIZE})
                 except Exception:
                     _logger.debug("观测回调执行失败（不阻断详情抓取主流程）", exc_info=True)
-
         # 一个逻辑窗口仍遵守原 detail_batch_size；R2 轮询会把它拆成多个
         # 账号实际请求，避免一次把整窗交给单个账号而绕过其配额。
         pending_batch = indexed_jobs[batch_start:batch_start + BATCH_SIZE]
         batch = list(pending_batch)
-        batch_jobs = [job for _, _, job in batch]
-        batch_path = os.path.join(
-            artifact_dir, f"pipeline_batch_{batch_start}_{time.time_ns()}.json"
-        )
         # 022：批次键跨 chunk 唯一（run_jd_stage 传 task_id+chunk_start 前缀）。
         batch_key = f"{batch_key_prefix or 'jd'}:{batch_start}"
         attempt = 1
@@ -281,6 +284,7 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 batch_start // BATCH_SIZE + 1,
                 (len(indexed_jobs) + BATCH_SIZE - 1) // BATCH_SIZE)
         allocation = None
+        segment_id = None
         while True:
             if stop_event is not None and stop_event.is_set():
                 stopped = True
@@ -293,10 +297,60 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                         hard_stop_code = "source_blocked"
                         break
                     batch = allocation.entries
-                    batch_jobs = [job for _, _, job in batch]
+                    segment_id = attempt_tracker.reserve(
+                        allocation.account_id,
+                        len(batch),
+                        round_no=getattr(detail_robin, "last_round", 0),
+                    )
                 cur_src = detail_robin.source_for(allocation.account_id)
                 if cur_src is None:
+                    from webui.source import SourceOutcome
+                    binding_attempt = attempt_tracker.new_attempt(
+                        segment_id or "legacy-segment", allocation.account_id,
+                        len(allocation.entries), started=False,
+                    )
+                    binding_outcomes = {
+                        entry[1]: SourceOutcome.failure(
+                            failed_code="source_cdp_unavailable",
+                            safe_log="account_binding_failed",
+                        ) for entry in allocation.entries
+                    }
+                    binding_terminal = attempt_tracker.complete_attempt(
+                        binding_attempt, allocation.entries, binding_outcomes, None,
+                        local_short_circuit=True,
+                        is_success=lambda outcome: False,
+                        is_unresolved=lambda _code: False,
+                    )
                     retry_pending = detail_robin.retry_after_binding_failure(allocation)
+                    queue = getattr(getattr(detail_robin, "robin", detail_robin), "_queue", None)
+                    next_account = getattr(queue, "head_account", None)
+                    if retry_pending is not None:
+                        attempt_tracker.record_handoff(
+                            allocation.account_id, str(next_account), len(retry_pending)
+                        )
+                    if _whitebox is not None:
+                        _whitebox.request_terminal(
+                            account_id=allocation.account_id,
+                            segment=segment_id or "legacy-segment",
+                            attempt_id=binding_attempt.attempt_id,
+                            attempt_no=binding_attempt.attempt_no,
+                            input_count=binding_attempt.input_count,
+                            failure_code="source_cdp_unavailable",
+                            handed_off=retry_pending is not None,
+                            success_count=binding_terminal["success_count"],
+                            failure_count=binding_terminal["failure_count"],
+                            short_circuit_count=binding_terminal["short_circuit_count"],
+                            unresolved_count=binding_terminal["unresolved_count"],
+                            success_keys=binding_terminal["success_keys"],
+                        )
+                        _whitebox.handoff(
+                            blocked_account=allocation.account_id,
+                            to_account=str(next_account or ""),
+                            remaining=len(retry_pending or []),
+                            result="queued" if retry_pending is not None else "paused",
+                            blocked_reason="binding_failure",
+                            source_attempt_id=binding_attempt.attempt_id,
+                        )
                     allocation = None
                     if retry_pending is not None:
                         pending_batch = retry_pending
@@ -305,9 +359,13 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                     hard_stop_code = "source_cdp_unavailable"
                     break
                 source = cur_src
+            elif segment_id is None:
+                segment_id = attempt_tracker.reserve(
+                    str(getattr(source, "browser_account", "") or "unknown"),
+                    len(batch),
+                )
             batch_exception_code: str | None = None
             _t0_batch = time.time()
-
             # 批内条级进度：智联串行逐条抓取时由 source 逐条回调（on_item_done），
             # 否则一批 15 条要十几分钟，前端进度条一直停在 0。BOSS 子进程模式
             # 在批返回时一次性回调（幂等），不改变原有批量语义。
@@ -330,13 +388,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                     progress(min(_base + n, _total), _total)
                 except Exception:
                     _logger.debug("进度回调执行失败（不阻断详情抓取主流程）", exc_info=True)
-
-
             recovery = BrowserRecovery(
                 cdp_port=getattr(source, "cdp_port", None),
                 platform=getattr(source, "platform", ""),
             )
-
             def _fetch_batch(job_list, output_path, *, with_progress=True):
                 try:
                     results = source.fetch_details_batch(
@@ -355,6 +410,110 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                     # 批调用本身抛错时没有逐岗位 outcome 可供后续分类；这属于源/编排
                     # 级故障，不能伪装成一批空结果继续推进。
                     return {}, _classify_detail_batch_exception(exc)
+            def _local_short_circuit(src):
+                breaker = getattr(src, "breaker", None)
+                if breaker is None or not callable(getattr(breaker, "is_open", None)):
+                    return False
+                try:
+                    if not breaker.is_open():
+                        return False
+                    recover = getattr(src, "_try_breaker_recovery", None)
+                    if callable(recover) and recover():
+                        return False
+                    return bool(breaker.is_open())
+                except Exception:
+                    _logger.warning("检查账号本地熔断状态失败，按本地短路处理", exc_info=True)
+                    return True
+
+            def _detail_success(outcome):
+                return bool(
+                    getattr(outcome, "ok", False)
+                    and isinstance(getattr(outcome, "detail", None), dict)
+                    and str(getattr(outcome, "detail", {}).get("jd", "")).strip()
+                )
+
+            def _run_attempt(attempt_entries, *, with_progress=True):
+                from webui.source import SourceOutcome
+                from webui.account_round_robin import is_wall_code
+
+                account_id = str(
+                    allocation.account_id if allocation is not None
+                    else getattr(source, "browser_account", "") or "unknown"
+                )
+                local_short_circuit = _local_short_circuit(source)
+                attempt_record = attempt_tracker.new_attempt(
+                    segment_id or "legacy-segment",
+                    account_id,
+                    len(attempt_entries),
+                    started=not local_short_circuit,
+                )
+                if local_short_circuit:
+                    code = "source_blocked"
+                    breaker = getattr(source, "breaker", None)
+                    if breaker is not None:
+                        code = str(getattr(breaker, "open_failure_code", lambda: code)() or code)
+                    outcomes = {
+                        entry[1]: SourceOutcome.failure(
+                            failed_code=code, safe_log="local_breaker_open"
+                        ) for entry in attempt_entries
+                    }
+                    batch_exception = None
+                else:
+                    if _whitebox is not None:
+                        _whitebox.request_start(
+                            account_id=account_id,
+                            segment=segment_id or "legacy-segment",
+                            attempt_id=attempt_record.attempt_id,
+                            attempt_no=attempt_record.attempt_no,
+                            input_count=attempt_record.input_count,
+                            artifact_id=attempt_record.artifact_id,
+                        )
+                    outcomes, batch_exception = _fetch_batch(
+                        [entry[2] for entry in attempt_entries],
+                        attempt_record.artifact_path,
+                        with_progress=with_progress,
+                    )
+                terminal = attempt_tracker.complete_attempt(
+                    attempt_record,
+                    attempt_entries,
+                    outcomes,
+                    batch_exception,
+                    local_short_circuit=local_short_circuit,
+                    is_success=_detail_success,
+                    is_unresolved=lambda code: (
+                        is_wall_code(code) or recovery.is_browser_lost(code)
+                    ),
+                )
+                wall_candidate = bool(
+                    is_wall_code(batch_exception)
+                    or any(
+                        outcome is not None
+                        and is_wall_code(outcome.failed_code)
+                        for outcome in outcomes.values()
+                    )
+                )
+                queue = getattr(_robin_impl, "_queue", None)
+                terminal["handed_off"] = bool(
+                    wall_candidate and queue is not None and len(queue) > 1
+                )
+                if _whitebox is not None:
+                    _whitebox.request_terminal(
+                        account_id=account_id,
+                        segment=segment_id or "legacy-segment",
+                        attempt_id=attempt_record.attempt_id,
+                        attempt_no=attempt_record.attempt_no,
+                        input_count=attempt_record.input_count,
+                        failure_code=terminal["failure_code"],
+                        handed_off=terminal["handed_off"],
+                        success_count=terminal["success_count"],
+                        failure_count=terminal["failure_count"],
+                        short_circuit_count=terminal["short_circuit_count"],
+                        unresolved_count=terminal["unresolved_count"],
+                        success_keys=terminal["success_keys"],
+                    )
+                if _robin_impl is not None:
+                    _robin_impl._pending_attempt_id = attempt_record.attempt_id
+                return outcomes, batch_exception, local_short_circuit, attempt_record
 
             # 022：批次登记 + 挂 spawn 钩子（登记子进程供卡死 kill）+ 心跳透传。
             # task_id 必须是真正的 run_id（不是带 jd- 前缀的 batch_key_prefix），
@@ -375,14 +534,13 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                         )
                     except Exception:
                         _executor = None
-            outcomes, batch_exception_code = _fetch_batch(batch_jobs, batch_path)
+            outcomes, batch_exception_code, local_short_circuit, _attempt_record = _run_attempt(batch)
             if _executor is not None:
                 try:
                     _executor.on_spawn = None
                     _executor.on_output_probe = None
                 except Exception:
                     _logger.debug("执行器探针注销失败（忽略）", exc_info=True)
-
             # 025 B076：立即停止 → 当前批一律作废（结果不处理、不保全；FR-012）
             if (stop_event is not None and stop_event.is_set()
                     and getattr(stop_event, "immediate", False)):
@@ -413,13 +571,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 time.sleep(_delay)
                 attempt += 1
                 batch = remaining
-                batch_jobs = [job for _, _, job in remaining]
                 if detail_robin is not None and allocation is not None:
                     allocation = detail_robin.keep_unfinished(allocation, remaining)
-                # 025 B077：重抓用新产物文件，不覆盖已抓产物
-                batch_path = os.path.join(
-                    artifact_dir,
-                    f"pipeline_batch_{batch_start}_{time.time_ns()}.json")
                 continue
             if guard is not None and guard.should_giveup(batch_key):
                 # 第 3 次仍卡死：分流收场（环境级由调用方暂停 / 偶发跳过进待确认）
@@ -478,10 +631,10 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                 if retry_entries:
                     restart_ok, restart_err = recovery.try_restart()
                     if restart_ok:
-                        retry_jobs = [entry[2] for entry in retry_entries]
-                        retry_outcomes, retry_exception = _fetch_batch(
-                            retry_jobs, batch_path, with_progress=False,
+                        retry_outcomes, retry_exception, retry_local, _retry_record = _run_attempt(
+                            retry_entries, with_progress=False,
                         )
+                        local_short_circuit = retry_local
                         outcomes.update(retry_outcomes)
                         if retry_exception is None:
                             batch_exception_code = None
@@ -533,7 +686,6 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
                                                  "batch_index": batch_start // BATCH_SIZE})
                 except Exception:
                     _logger.debug("观测回调执行失败（不阻断详情抓取主流程）", exc_info=True)
-
             # 025 B076/B077：批返回窗口普通停止 → 已并入的已抓保全
             if stop_event is not None and stop_event.is_set():
                 stopped = True
@@ -541,14 +693,54 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             if guard is not None:
                 guard.complete_batch(batch_key)
                 guard.touch(batch_key)  # 批次结果返回也是产出
+            if local_short_circuit and detail_robin is not None and allocation is not None:
+                old_account = allocation.account_id
+                retry_pending = [
+                    entry for entry in batch
+                    if not _detail_success(outcomes.get(entry[1]))
+                ] + list(allocation.tail)
+                has_next = detail_robin.skip_account(old_account)
+                queue = getattr(getattr(detail_robin, "robin", detail_robin), "_queue", None)
+                next_account = getattr(queue, "head_account", None)
+                if has_next:
+                    attempt_tracker.record_handoff(
+                        old_account, str(next_account), len(retry_pending)
+                    )
+                if _whitebox is not None:
+                    _whitebox.handoff(
+                        blocked_account=old_account,
+                        to_account=str(next_account or ""),
+                        remaining=len(retry_pending),
+                        result="queued" if next_account else "paused",
+                        blocked_reason="local_short_circuit",
+                        source_attempt_id=_attempt_record.attempt_id,
+                    )
+                if has_next:
+                    pending_batch = retry_pending
+                    allocation = None
+                    segment_id = None
+                    hard_stop = False
+                    hard_stop_code = None
+                    continue
+                hard_stop = True
+                hard_stop_code = "source_blocked"
             if detail_robin is not None and allocation is not None and hard_stop:
                 handled, retry_pending = detail_robin.retry_after_wall(
                     allocation, outcomes, batch_exception_code,
                     outcome_key=lambda item: item[1],
                 )
                 if handled and retry_pending is not None:
+                    queue = getattr(getattr(detail_robin, "robin", detail_robin), "_queue", None)
+                    next_account = getattr(queue, "head_account", None)
+                    if next_account:
+                        attempt_tracker.record_handoff(
+                            allocation.account_id,
+                            str(next_account),
+                            len(retry_pending),
+                        )
                     pending_batch = retry_pending
                     allocation = None
+                    segment_id = None
                     hard_stop = False
                     hard_stop_code = None
                     continue
@@ -569,6 +761,14 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
         if stall_divert == "environment":
             # 环境级卡死：停止后续批次，交调用方走暂停收场
             break
+    if detail_robin is not None and _whitebox is not None and r2_session is None:
+        summary = attempt_tracker.summary()
+        _whitebox.account_summary(
+            summaries=summary["accounts"],
+            total_success=summary["total_success"],
+            reconciled=summary["reconciled"],
+            whitebox_incomplete=summary["whitebox_incomplete"],
+        )
     enriched = []
     for idx, job in enumerate(jobs):
         e = dict(job) if isinstance(job, dict) else {}

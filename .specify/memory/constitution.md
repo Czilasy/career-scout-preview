@@ -110,12 +110,14 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/pipeline_exec_settings.py` — 高级设置读写（021 B7 T023）
 - `webui/pipeline_exec_accounts.py` — 浏览器账号簿与 CDP 数据目录；Spec 038 B091 账号池配置 schema（pool 多选 + 配额 + 限流标记）+ 默认零配置 + 限流持久化 helper（021 B7 T023 / 038 B091 T003/T014）
 - `webui/account_round_robin.py` — Spec 038 B091 多账号轮询分摊调度域：纯调度（RotationQueue/plan_round_robin）、IO 编排（ListRobin/DetailRobin/clone_source/_switch_browser_account）、撞墙换号接力、engagement 规则保护既有替身、限流持久化 best-effort（038 B091 T001）+ 白箱 seam 接线（038 B091 V2）
+- `webui/r2_rotation_session.py` — Spec 038 B091 V4 R2 任务级轮询会话：冻结账号池、连续配额位置、版本化断点导出/恢复与身份校验；由 runner 创建并向详情执行域下发
+- `webui/detail_attempts.py` — Spec 038 B091 V4 详情尝试事实：分配段、唯一尝试/产物身份、终态数量守恒、按账号唯一成功聚合；由详情执行域调用，不反向依赖 runner 或存储
 - `webui/account_round_robin_observability.py` — Spec 038 B091 V2 轮询白箱安全摘要适配器：账号池快照、分配段、正常/撞墙切换、失败不完整标记，复用 `task_logs`，不记录凭据或岗位正文
 - `webui/pipeline_exec_status.py` — 失败码口径、taxonomy 理由与抓取进度权重（021 B7 T023）
 - `webui/pipeline_exec_chrome.py` — 调试浏览器生命周期：就绪检查与关闭（021 B7 T023）
 - `webui/pipeline_exec_filters.py` — 搜索参数展开与本地岗位过滤匹配（021 B7 T023）
 - `webui/pipeline_exec_search.py` — run_search：关键词×城市组合抓取主流程（021 B7 T023）
-- `webui/pipeline_exec_details.py` — fetch_job_details：批量详情抓取（021 B7 T023）
+- `webui/pipeline_exec_details.py` — fetch_job_details：批量详情抓取与 R2 会话/尝试事实接线（021 B7 T023 / 038 B091 V4）
 - `webui/pipeline_exec_artifacts.py` — 组合产物检查点与冻结清单（021 B7 T023）
 - `webui/pipeline_exec_tuning.py` — 调优轮次执行器 TuningRoundRunner（021 B7 T023）
 - `webui/platforms.py` — 平台注册域门面：re-export 全部既有符号，_REGISTRY 经 _facade 动态取用（021 B7 T023）

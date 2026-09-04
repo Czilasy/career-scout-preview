@@ -169,7 +169,7 @@ class CloneSourceTests(unittest.TestCase):
         clone = robin_mod.clone_source(source, "b", run_id="run-b")
         self.assertEqual(clone.browser_account, "b")
         self.assertEqual(clone.profile_key, "zhilian:b")
-        self.assertIs(clone.breaker, source.breaker)
+        self.assertIsNot(clone.breaker, source.breaker)
         self.assertIs(clone._preflight_runner, preflight)
         self.assertIs(clone._list_runner, list_runner)
         self.assertIs(clone._detail_runner, detail_runner)
@@ -195,7 +195,7 @@ class CloneSourceTests(unittest.TestCase):
         self.assertEqual(clone.env["CAREER_SCOUT_TASK_ID"], "run-b")
         self.assertEqual(clone.timeout_seconds, 17)
         self.assertIs(clone._runner, runner)
-        self.assertIs(clone._executor, source._executor)
+        self.assertIsNot(clone._executor, source._executor)
         self.assertEqual(clone.max_artifact_bytes, 1234)
         self.assertTrue(clone.in_process)
 
