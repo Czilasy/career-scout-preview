@@ -16,6 +16,108 @@ from webui.store import (
 from tests.healthy_pipeline.harness import _make_app, _authed_test_client, _wait_for_pipeline_task, _pause_run
 
 
+def _record_mock_scrape_completion(call_kwargs, combo_key, jobs, *, finalize=False):
+    """Make a run_search replacement produce the same whitebox facts as the real path."""
+    store = call_kwargs.get("task_event_store")
+    task_id = call_kwargs.get("task_id")
+    if store is None or not task_id:
+        return None
+    from webui.store_helpers import _now
+    from webui.whitebox import WhiteboxService
+
+    whitebox = WhiteboxService(store)
+    run = store.get_whitebox_run("scrape", str(task_id))
+    if not run:
+        return None
+    units = [
+        unit for unit in store.list_whitebox_units(run["id"])
+        if str(unit.get("unit_key") or "") == str(combo_key)
+    ]
+    actual_key = str(combo_key)
+    if not units:
+        planned = [
+            unit for unit in store.list_whitebox_units(run["id"])
+            if str(unit.get("status") or "planned") not in {"succeeded", "empty"}
+        ]
+        if planned:
+            actual_key = str(planned[0].get("unit_key") or combo_key)
+            units = [planned[0]]
+        elif finalize:
+            return whitebox.finalize(run["id"], lifecycle_end="succeeded")
+        else:
+            return None
+    if units and str(units[-1].get("status") or "") in {"succeeded", "empty"}:
+        if finalize:
+            return whitebox.finalize(run["id"], lifecycle_end="succeeded")
+        return None
+    latest_unit = units[-1] if units else None
+    attempt = int((latest_unit or {}).get("attempt_no") or 1)
+    if latest_unit and str(latest_unit.get("status") or "") in {
+        "failed", "incomplete", "skipped",
+    }:
+        attempt += 1
+    pages = max(1, int(call_kwargs.get("pages") or 1))
+    job_count = len(jobs)
+    for page in range(1, pages + 1):
+        whitebox.record_for_owner("scrape", str(task_id), {
+            "idempotency_key": f"mock-page:{task_id}:{combo_key}:{attempt}:{page}",
+            "event_type": "page_completed",
+            "occurred_at": _now(),
+            "stage": "scrape_list",
+            "unit_kind": "keyword_city",
+            "unit_key": actual_key,
+            "attempt_no": attempt,
+            "required_evidence": True,
+            "payload": {
+                "page": page,
+                "planned_pages": pages,
+                "returned_count": job_count if page == 1 else 0,
+                "new_unique_count": job_count if page == 1 else 0,
+                "has_more": False,
+                "resume_page": page + 1,
+                "scope_complete": True,
+                "source_exhausted": True,
+                "stop_reason": "explicit_empty" if job_count == 0 else "target_reached",
+            },
+        })
+    whitebox.record_for_owner("scrape", str(task_id), {
+        "idempotency_key": f"mock-scope:{task_id}:{combo_key}:{attempt}",
+        "event_type": "scope_completed",
+        "occurred_at": _now(),
+        "stage": "scrape_list",
+        "unit_kind": "keyword_city",
+        "unit_key": actual_key,
+        "attempt_no": attempt,
+        "required_evidence": True,
+        "payload": {
+            "scope_complete": True,
+            "source_exhausted": True,
+            "stop_reason": "explicit_empty" if job_count == 0 else "target_reached",
+            "returned_total_count": job_count,
+            "unit_unique_count": job_count,
+        },
+    })
+    if job_count == 0:
+        whitebox.record_for_owner("scrape", str(task_id), {
+            "idempotency_key": f"mock-empty:{task_id}:{combo_key}:{attempt}",
+            "event_type": "explicit_empty",
+            "occurred_at": _now(),
+            "stage": "scrape_list",
+            "unit_kind": "keyword_city",
+            "unit_key": actual_key,
+            "attempt_no": attempt,
+            "required_evidence": True,
+            "payload": {"empty_evidence": {
+                "kind": "explicit_empty_state",
+                "fixture_version": "test",
+                "marker": "mock_no_jobs",
+            }},
+        })
+    if finalize:
+        return whitebox.finalize(run["id"], lifecycle_end="succeeded")
+    return None
+
+
 class Slice7And9ApiTests(unittest.TestCase):
     """切片 7+9：统一状态接口 + 版本接口（FR-037/FR-039）。"""
 
@@ -242,7 +344,8 @@ class Slice7And9ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.get_json())
         data = response.get_json()
-        self.assertEqual(data["status"], "completed")
+        self.assertEqual(data["status"], "completed_with_pending")
+        self.assertEqual(data["integrity"]["conclusion"], "unverifiable")
         self.assertEqual(data["progress"]["stage"], "done")
         self.assertEqual(data["logs"], ["第一条", "第二条"])
         self.assertEqual(data["result"]["updates"]["job-1"]["verdict"], "match")
@@ -472,6 +575,7 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
                 on_combo_done = _kwargs.get("on_combo_done")
                 if on_combo_done is not None:
                     on_combo_done("kw|city1", [_job1], ["kw|city1"])
+                _record_mock_scrape_completion(_kwargs, "kw|city1", [_job1])
                 return {
                     "ok": False, "jobs": [], "total_scraped": 0, "total_matched": 0,
                     "combinations": 2, "completed_combos": ["kw|city1"],
@@ -492,10 +596,12 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
                 on_combo_done = _kwargs.get("on_combo_done")
                 if on_combo_done is not None:
                     on_combo_done("kw|city2", [_job2], ["kw|city1", "kw|city2"])
+                _integrity = _record_mock_scrape_completion(
+                    _kwargs, "kw|city2", [_job2], finalize=True)
                 return {
                     "ok": True, "jobs": [_job2], "total_scraped": 1, "total_matched": 1,
                     "combinations": 2, "completed_combos": ["kw|city1", "kw|city2"],
-                    "error": "",
+                    "error": "", "integrity": _integrity,
                 }
 
             _dispatch_calls = 0
@@ -774,7 +880,8 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
                     return SourceOutcome.failure(
                         failed_code="source_cdp_unavailable", safe_log="lost")
                 return SourceOutcome.success(
-                    jobs=[{"job_id": "j2", "title": "新岗位"}])
+                    jobs=[{"job_id": "j2", "title": "新岗位"}],
+                    scope_complete=True)
 
         source = RecoverableListSource()
         resume_pages = {}
@@ -881,7 +988,10 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
                 resume_jobs={"前端|上海": [{"job_id": "old-1", "title": "旧岗位"}]},
             )
 
-        self.assertTrue(result["ok"], result)
+        # checkpoint 越过目标页但没有 scope_completed 事实时，不能把
+        # “看起来抓满”升级为成功；这正是 033 V2 的白箱门槛。
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["integrity"]["conclusion"], "unverifiable")
         self.assertEqual(result["completed_combos"], ["前端|上海"])
 
     def test_list_cdp_lost_after_last_page_retries_with_valid_start_page(self):
@@ -915,7 +1025,8 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
                     return SourceOutcome.failure(
                         failed_code="source_cdp_unavailable", safe_log="lost")
                 return SourceOutcome.success(
-                    jobs=[{"job_id": "j1", "title": "旧岗位"}])
+                    jobs=[{"job_id": "j1", "title": "旧岗位"}],
+                    scope_complete=True)
 
         source = LastPageLostSource()
         with mock.patch(
@@ -936,15 +1047,23 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
         app, temp = _make_app()
         try:
             client = _authed_test_client(app)
-            with mock.patch("webui.pipeline_exec.run_search", return_value={
-                "ok": True,
-                "jobs": [{"job_id": "j1", "title": "前端"}],
-                "total_scraped": 1,
-                "total_matched": 1,
-                "combinations": 2,
-                "completed_combos": ["前端|上海", "后端|上海"],
-                "error": "",
-            }):
+            def completed_search(*_args, **kwargs):
+                _integrity = _record_mock_scrape_completion(
+                    kwargs, "前端|上海", [{"job_id": "j1", "title": "前端"}])
+                _integrity = _record_mock_scrape_completion(
+                    kwargs, "后端|上海", [], finalize=True)
+                return {
+                    "ok": True,
+                    "jobs": [{"job_id": "j1", "title": "前端"}],
+                    "total_scraped": 1,
+                    "total_matched": 1,
+                    "combinations": 2,
+                    "completed_combos": ["前端|上海", "后端|上海"],
+                    "error": "", "integrity": _integrity,
+                }
+
+            with mock.patch("webui.pipeline_exec.run_search",
+                            side_effect=completed_search):
                 response = client.post(
                     "/api/execute-search",
                     json={"script_params": {
@@ -1055,6 +1174,8 @@ class Slice9ResumeAfterRestartConservationTests(unittest.TestCase):
                 callback = kwargs.get("on_combo_done")
                 if callback is not None:
                     callback("前端|上海", old_jobs, ["前端|上海"])
+                _record_mock_scrape_completion(
+                    kwargs, "前端|上海", old_jobs)
                 return {
                     "ok": False, "jobs": old_jobs, "total_scraped": 1,
                     "total_matched": 1, "combinations": 2,
@@ -1080,6 +1201,12 @@ class Slice9ResumeAfterRestartConservationTests(unittest.TestCase):
 
             def resumed_search(*_args, **kwargs):
                 captured_resume["skip_combos"] = set(kwargs.get("skip_combos") or set())
+                _integrity = _record_mock_scrape_completion(
+                    kwargs, "后端|上海", [{
+                        "job_id": "new-1", "title": "后端工程师",
+                        "salary": "20-30K", "company": "公司B",
+                        "source_url": "https://example.com/new-1",
+                    }], finalize=True)
                 return {
                     "ok": True,
                     "jobs": [{
@@ -1088,7 +1215,8 @@ class Slice9ResumeAfterRestartConservationTests(unittest.TestCase):
                         "source_url": "https://example.com/new-1",
                     }],
                     "total_scraped": 1, "total_matched": 1, "combinations": 2,
-                    "completed_combos": ["前端|上海", "后端|上海"], "error": "",
+                    "completed_combos": ["前端|上海", "后端|上海"],
+                    "error": "", "integrity": _integrity,
                 }
 
             with mock.patch("webui.pipeline_exec.run_search", side_effect=resumed_search), \
@@ -1145,10 +1273,27 @@ class Slice10AiResumeAfterRefreshTests(unittest.TestCase):
         返回 scrapeTaskId、scrapeCompleted、source_run_id、checkpoint_stage。
         """
         run_id = "paused-ai-run"
+        scrape_task_id = "scrape-task-123"
+        self.store.create_screening_run(scrape_task_id, source_count=1)
+        self.store.update_screening_run(scrape_task_id, status="running")
+        self.store.update_screening_run(scrape_task_id, status="succeeded")
+        from webui.whitebox import WhiteboxService
+        WhiteboxService(self.store).begin("scrape", scrape_task_id, {
+            "stages": ["scrape_list"],
+            "units": [{
+                "unit_key": "前端|上海", "unit_kind": "keyword_city",
+                "stage": "scrape_list", "planned_pages": 1, "required": True,
+            }],
+        })
+        _record_mock_scrape_completion({
+            "task_event_store": self.store,
+            "task_id": scrape_task_id,
+            "pages": 1,
+        }, "前端|上海", [{"job_id": "source-job"}], finalize=True)
         self.store.create_screening_run(
             run_id, source_count=50,
             execution_params={
-                "scrape_task_id": "scrape-task-123",
+                "scrape_task_id": scrape_task_id,
                 "scrape_completed": True,
                 "source_run_id": "source-run-456",
             },
@@ -1450,7 +1595,7 @@ class Slice13ComboDoneHardStopTests(unittest.TestCase):
                 return SourceOutcome.success(jobs=[{
                     "job_id": "j1", "title": "工程师", "company": "公司A",
                     "salary": "15-25K", "source_url": "https://example.com/j1",
-                }])
+                }], scope_complete=True)
 
         delivered = []
         try:

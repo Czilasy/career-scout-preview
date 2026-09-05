@@ -26,6 +26,7 @@ import type {
   PlatformCityCatalog,
   PlatformFilterSchema,
   RoundContext,
+  IntegritySnapshot,
   TaskSnapshot as ApiTaskSnapshot,
 } from "../types";
 import JobWorkspace from "../components/JobWorkspace.vue";
@@ -399,7 +400,7 @@ const {
 } = historyStore;
 
 
-const historyRound = ref<{ runId: string; platform: Platform; status: string; jobCount: number } | null>(null);
+const historyRound = ref<{ runId: string; platform: Platform; status: string; jobCount: number; integrity?: IntegritySnapshot | null } | null>(null);
 // 035：从历史「回到最新」的过渡标记：过渡期间切到 04 页不得触发「已结束」置位。
 const returningFromHistory = ref(false);
 // 035：后台任务跑完时用户在看历史的顶部冒泡提示状态。
@@ -770,6 +771,7 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
         state: "attention", platform,
         attention: { kind: "error", message: failed.error || "任务执行出错" },
       },
+      integrity: failed.integrity,
     };
   }
   const hasPaused = pausedRunId.value || interruptedRunId.value
@@ -781,6 +783,7 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
         state: "attention", platform,
         attention: { kind: "paused", message: "任务已暂停，请处理后继续" },
       },
+      integrity: snapshots.find((s) => s && s.integrity)?.integrity,
     };
   }
 
@@ -810,6 +813,28 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
     return {
       platform, phase, judged: progress.done, scope: platform,
       capsule: { state: "running", platform, progress: { phase, ...progress } },
+      integrity: snapshot?.integrity,
+    };
+  }
+
+  const resolvedIntegrity = historyRound.value?.integrity
+    || screenSnapshot.value?.integrity
+    || recrawlSnapshot.value?.integrity
+    || scrapeSnapshot.value?.integrity
+    || pipelineResult.value?.integrity;
+  if (resolvedIntegrity && ["failed", "unverifiable", "interrupted"].includes(resolvedIntegrity.conclusion)) {
+    const interrupted = resolvedIntegrity.conclusion === "interrupted";
+    return {
+      platform, phase: "scraping" as const, judged: 0, scope: platform,
+      capsule: {
+        state: "attention", platform,
+        attention: {
+          kind: interrupted ? "paused" : "error",
+          message: resolvedIntegrity.primary_reason
+            || (interrupted ? "任务已中断" : resolvedIntegrity.label),
+        },
+      },
+      integrity: resolvedIntegrity,
     };
   }
 
@@ -823,6 +848,7 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
           state: "completed", platform: historyRound.value.platform,
           results: { matched: total, pending: 0 },
         },
+        integrity: historyRound.value.integrity || pipelineResult.value?.integrity,
       };
     }
     const counts = resultCountsFromPipeline(pipelineResult.value);
@@ -834,6 +860,7 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
         state: "completed", platform: historyRound.value.platform,
         results: counts,
       },
+      integrity: historyRound.value.integrity || pipelineResult.value?.integrity,
     };
   }
   if (resultLoaded.value && pipelineResult.value) {
@@ -846,6 +873,7 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
           state: "completed", platform,
           results: { matched: total, pending: 0 },
         },
+        integrity: pipelineResult.value?.integrity,
       };
     }
     const counts = resultCountsFromPipeline(pipelineResult.value);
@@ -854,6 +882,7 @@ const roundStatusPayload = computed<CapsuleStatusPayload | null>(() => {
     return {
       platform, phase: "judged" as const, judged, scope,
       capsule: { state: "completed", platform, results: counts },
+      integrity: pipelineResult.value?.integrity,
     };
   }
 
@@ -1178,6 +1207,7 @@ export interface TaskSnapshot {
   platform?: Platform;
   /** 一键链路标记：抓取任务完成后前端自动接续 AI 筛选。 */
   auto_screen?: boolean;
+  integrity?: IntegritySnapshot | null;
 }
 
 export interface OneClickLaunch {
@@ -1208,6 +1238,7 @@ interface MergedLatestResult {
       result?: PipelineResult | null;
       scrape_task_id?: string;
       round_context?: Partial<RoundContext> | null;
+      integrity?: IntegritySnapshot | null;
     };
   };
   /** 025 B078：各平台最新轮状态（供完成态判定；无该平台轮则缺省）。 */
@@ -1241,6 +1272,7 @@ export type DynamicIslandState =
 /** round-status 上抛 payload：既有展示字段 + 胶囊状态（App 供 DynamicIsland 消费）。 */
 export interface CapsuleStatusPayload extends RoundStatusPayload {
   capsule: DynamicIslandState;
+  integrity?: IntegritySnapshot | null;
 }
 
 // ---------------------------------------------------------------------------

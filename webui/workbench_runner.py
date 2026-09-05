@@ -67,9 +67,59 @@ class WorkbenchRunner(TaskRunner):
             self.store.create_run_query(
                 run_id, ordinal, frozen_query, list_path, detail_path, int(budget),
             )
+        self._begin_workbench_whitebox(run_id, keywords, profile_snapshot)
         if self.executor:
-            self.executor.submit(self._execute_search_run, run_id)
+            try:
+                self.executor.submit(self._execute_search_run, run_id)
+            except RuntimeError as exc:
+                reason = "工作台后台任务提交失败"
+                self.store.update_search_run(run_id, status="failed", error_code="submit_failed")
+                self._record_workbench(run_id, "submission_failed", "workbench", {
+                    "error_code": "submit_failed", "error_reason": reason,
+                }, severity="error")
+                if self.whitebox is not None:
+                    wb_run = self.whitebox.store.get_whitebox_run("workbench", str(run_id))
+                    units = self.whitebox.store.list_whitebox_units(wb_run["id"]) if wb_run else []
+                    for unit in units:
+                        unit_key = str(unit.get("unit_key") or "")
+                        if unit_key:
+                            self._record_workbench(run_id, "unit_failed", unit_key, {
+                                "error_code": "submit_failed", "error_reason": reason,
+                            }, severity="error")
+                self._finalize_workbench(run_id, lifecycle_end="failed")
         return self.store.get_search_run(run_id)
+
+    def _begin_workbench_whitebox(self, run_id, keywords, profile):
+        if self.whitebox is None:
+            return
+        self.whitebox.begin("workbench", str(run_id), {
+            "stages": ["workbench_search"],
+            "units": [
+                {"unit_key": f"query:{index}:{keyword}", "unit_kind": "query",
+                 "stage": "workbench_search", "required": True}
+                for index, keyword in enumerate(keywords)
+            ],
+            "profile": {key: value for key, value in profile.items() if key != "resume_text"},
+        })
+
+    def _record_workbench(self, run_id, event_type, unit_key, payload, *, severity="info"):
+        if self.whitebox is None:
+            return False
+        from webui.store_helpers import _now
+        return self.whitebox.record_for_owner("workbench", str(run_id), {
+            "idempotency_key": f"{event_type}:{run_id}:{unit_key}", "event_type": event_type,
+            "occurred_at": _now(), "stage": "workbench_search",
+            "unit_kind": "query" if unit_key and unit_key != "workbench" else None,
+            "unit_key": unit_key if unit_key and unit_key != "workbench" else None,
+            "attempt_no": 1, "required_evidence": event_type in {"scope_completed", "explicit_empty", "unit_failed", "submission_failed"},
+            "severity": severity, "payload": payload or {},
+        })
+
+    def _finalize_workbench(self, run_id, *, lifecycle_end=None):
+        if self.whitebox is None:
+            return None
+        row = self.whitebox.store.get_whitebox_run("workbench", str(run_id))
+        return self.whitebox.finalize(row["id"], lifecycle_end=lifecycle_end) if row else None
 
     def _query_command(self, query):
         """Build one bounded invocation of the existing CDP scraper."""
@@ -154,7 +204,11 @@ class WorkbenchRunner(TaskRunner):
                         self.store.link_profile_job(run["profile_id"], job_id, run["id"], run["id"], ai_rank=rank)
                 except (ai_service.AISecurityError, ValueError):
                     # Ranking is optional: valid complete JDs still stream when AI fails.
-                    pass
+                    self._record_workbench(
+                        run["id"], "ai_keep_all_fallback",
+                        f"query:{query.get('ordinal', 0)}:{query['frozen_query'].get('keyword', '')}",
+                        {"action": "keep_results", "normal_screening_completed": False,
+                         "reason": "AI 排序失败"}, severity="warning")
         return count
 
     def _stream_new_details(self, run_id, query, seen_detail_ids):
@@ -178,10 +232,15 @@ class WorkbenchRunner(TaskRunner):
         if run["status"] != "queued":
             return
         self.store.update_search_run(run_id, status="running")
+        self._record_workbench(run_id, "task_started", "workbench", {"run_id": run_id})
         for query in self.store.list_run_queries(run_id):
             if self.store.get_search_run(run_id)["status"] == "interrupted":
                 return
             self.store.update_run_query(query["id"], status="running")
+            query_key = f"query:{query.get('ordinal', 0)}:{query.get('frozen_query', {}).get('keyword', '')}"
+            self._record_workbench(run_id, "unit_started", query_key, {
+                "planned_pages": query.get("frozen_query", {}).get("pages"),
+            })
             try:
                 cancel_event = threading.Event()
                 with self._process_lock:
@@ -223,8 +282,18 @@ class WorkbenchRunner(TaskRunner):
                     discovered_count=current["discovered_count"] + len(jobs),
                     completed_jd_count=current["completed_jd_count"] + persisted,
                 )
-            except (OSError, ValueError):
+                self._record_workbench(run_id, "scope_completed", query_key, {
+                    "scope_complete": True, "source_exhausted": None,
+                    "stop_reason": "target_reached", "returned_total_count": len(jobs),
+                    "unit_unique_count": len({str(job.get("job_id") or job.get("platform_job_id") or "") for job in jobs if isinstance(job, dict)} - {""}),
+                })
+                if not jobs:
+                    self._record_workbench(run_id, "explicit_empty", query_key, {"empty_evidence": True})
+            except (OSError, ValueError) as exc:
                 self.store.update_run_query(query["id"], status="failed", error_code="scrape_failed")
+                self._record_workbench(run_id, "unit_failed", query_key, {
+                    "error_code": "scrape_failed", "error_reason": str(exc)[:200],
+                }, severity="error")
             finally:
                 with self._process_lock:
                     self._processes.pop(run_id, None)
@@ -298,17 +367,18 @@ class WorkbenchRunner(TaskRunner):
         queries = self.store.list_run_queries(run_id)
         if not queries:
             self.store.update_search_run(run_id, status="failed", error_code="no_queries")
+            units = self.whitebox.store.list_whitebox_units(self.whitebox.store.get_whitebox_run("workbench", str(run_id))["id"]) if self.whitebox is not None and self.whitebox.store.get_whitebox_run("workbench", str(run_id)) else []
+            for unit in units:
+                self._record_workbench(run_id, "unit_failed", str(unit.get("unit_key") or "workbench"), {"error_code": "no_queries", "error_reason": "没有可执行的子查询"}, severity="error")
+            self._finalize_workbench(run_id, lifecycle_end="failed")
             return self.store.get_search_run(run_id)
 
-        states = [q["status"] for q in queries]
-        succeeded = sum(1 for s in states if s == "succeeded")
-        failed = sum(1 for s in states if s == "failed")
-        if succeeded == len(queries):
-            new_status = "succeeded"
-        elif failed == len(queries):
-            new_status = "failed"
-        else:
-            new_status = "partial"
+        integrity = self._finalize_workbench(run_id)
+        conclusion = str((integrity or {}).get("conclusion") or "unverifiable")
+        new_status = {
+            "succeeded": "succeeded", "empty": "succeeded", "partial": "partial",
+            "failed": "failed", "unverifiable": "partial", "interrupted": "interrupted",
+        }.get(conclusion, "partial")
         return self.store.update_search_run(run_id, status=new_status)
 
     def cancel_search_run(self, run_id):
@@ -323,4 +393,8 @@ class WorkbenchRunner(TaskRunner):
             cancel_event.set()
         if process is not None:
             process.terminate()
+        self._record_workbench(run_id, "task_interrupted", "workbench", {
+            "stop_reason": "cancelled",
+        }, severity="warning")
+        self._finalize_workbench(run_id, lifecycle_end="cancelled")
         return self.store.update_search_run(run_id, status="interrupted")

@@ -22,6 +22,27 @@ export type TaskApiStatus =
   | "cancelled"
   | "interrupted";
 
+/** 033 V2：任务完成证据的唯一最终结论。 */
+export type IntegrityConclusion =
+  | "succeeded"
+  | "empty"
+  | "partial"
+  | "failed"
+  | "unverifiable"
+  | "interrupted";
+
+/** 033 V2：任务状态、结果、历史和开发者报告共用的完整性投影。 */
+export interface IntegritySnapshot {
+  conclusion: IntegrityConclusion;
+  label: string;
+  degraded?: boolean;
+  evidence_complete?: boolean;
+  primary_code?: string | null;
+  primary_reason?: string | null;
+  recommendation?: string | null;
+  revision?: number;
+}
+
 /** 平台注册表 / API 错误响应中的稳定错误码。 */
 export type PlatformErrorCode =
   | "platform_validation_failed"
@@ -246,6 +267,8 @@ export interface TaskSnapshot {
   combo_issues?: ComboIssue[] | null;
   /** 一键链路标记：抓取任务完成后前端自动接续 AI 筛选。 */
   auto_screen?: boolean;
+  /** 033 V2：不得由 status、岗位数或旧 ok 重新推断。 */
+  integrity?: IntegritySnapshot | null;
 }
 
 /** 016：单个组合的软失败记录（combo_issue 事件投影）。 */

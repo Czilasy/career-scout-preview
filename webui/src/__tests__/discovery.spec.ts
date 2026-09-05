@@ -11,6 +11,8 @@ import {
   projectResumeSuggestionToSchema,
   recoverSelectionSettings,
   historyStatusLabel,
+  integrityLabel,
+  normalizeIntegrity,
   roundScopeLabel,
   shouldConfirmNationalScope,
   type PipelineResult,
@@ -515,6 +517,23 @@ describe("historyStatusLabel (B038)", () => {
     expect(historyStatusLabel("partial", 3)).toBe("部分结果");
     // 017-US3: 标签只有三种；未知状态不渲染（失败/取消轮已不再产生）
     expect(historyStatusLabel("failed", 3)).toBe("");
+  });
+});
+
+describe("integrity parsing (033 V2)", () => {
+  it("normalizes all six backend conclusions and rejects unknown values", () => {
+    const expected = new Map([
+      ["succeeded", "完整成功"], ["empty", "已完成，没有找到岗位"],
+      ["partial", "部分完成，部分结果可能缺失"], ["failed", "执行失败"],
+      ["unverifiable", "无法确认是否完成"], ["interrupted", "任务已中断"],
+    ]);
+    for (const [conclusion, label] of expected) {
+      const normalized = normalizeIntegrity({ conclusion, primary_reason: "reason", revision: 7 });
+      expect(normalized?.conclusion).toBe(conclusion);
+      expect(normalized?.label).toBe(label);
+      expect(integrityLabel({ conclusion })).toBe(label);
+    }
+    expect(normalizeIntegrity({ conclusion: "unknown" })).toBeNull();
   });
 });
 

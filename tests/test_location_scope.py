@@ -182,9 +182,9 @@ class RunSearchComboKeyTests(unittest.TestCase):
         source.cdp_port = 9222
         source.preflight.return_value = SourceOutcome.success(safe_log="ready")
         source.fetch_list.side_effect = [
-            SourceOutcome.success(jobs=[{"job_id": "j1", "source_url": "u1"}], safe_log="ok", input_hash="h1"),
-            SourceOutcome.success(jobs=[{"job_id": "j2", "source_url": "u2"}], safe_log="ok", input_hash="h2"),
-            SourceOutcome.success(jobs=[{"job_id": "j3", "source_url": "u3"}], safe_log="ok", input_hash="h3"),
+            SourceOutcome.success(jobs=[{"job_id": "j1", "source_url": "u1"}], safe_log="ok", input_hash="h1", scope_complete=True),
+            SourceOutcome.success(jobs=[{"job_id": "j2", "source_url": "u2"}], safe_log="ok", input_hash="h2", scope_complete=True),
+            SourceOutcome.success(jobs=[{"job_id": "j3", "source_url": "u3"}], safe_log="ok", input_hash="h3", scope_complete=True),
         ]
         with mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, "")), \
                 mock.patch("webui.pipeline_exec.close_debug_chrome"), \

@@ -679,6 +679,29 @@ describe("DynamicIsland 037 组件级 carousel + 宽度 spring + 数字弹动", 
     }
   });
 
+  it.each([
+    ["partial", "部分完成"],
+    ["unverifiable", "无法确认"],
+  ])("033 V2：%s 不使用完整成功绿色芯片", (conclusion, label) => {
+    const wrapper = mountIsland(makeStatus(
+      { state: "completed", platform: "boss", results: { matched: 3, pending: 1 } },
+      {
+        integrity: {
+          conclusion: conclusion as "partial" | "unverifiable",
+          label,
+          evidence_complete: false,
+          primary_reason: "证据不足",
+          revision: 1,
+        },
+      },
+    ));
+    const el = wrapper.get('[data-testid="dynamic-island-completed"]');
+    expect(el.text()).toContain(label);
+    expect(el.find(".island-chip.c-green").exists()).toBe(false);
+    expect(el.attributes("data-integrity")).toBe(conclusion);
+    wrapper.unmount();
+  });
+
   it("通知面板焦点从首条通知开始，Shift+Tab 不会逃回胶囊", async () => {
     const wrapper = mountIsland(
       makeStatus({ state: "idle", platform: "boss" }),

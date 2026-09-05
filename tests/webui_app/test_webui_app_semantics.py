@@ -499,7 +499,9 @@ class PauseElapsedAndResumeConfigTests(unittest.TestCase):
         self._insert_event(run_id, "pause", self._iso(60))
         self._insert_event(run_id, "resume", self._iso(180))
         data = self.client.get(f"/api/task-state/{run_id}").get_json()
-        self.assertEqual(data["status"], "completed")
+        # 只有 screening_runs.status 没有白箱完成证据，不能显示完整成功。
+        self.assertEqual(data["status"], "completed_with_pending")
+        self.assertEqual(data["integrity"]["conclusion"], "unverifiable")
         self.assertEqual(data["active_elapsed_ms"], 120_000)
 
     def test_task_state_active_elapsed_frozen_while_paused(self):
@@ -808,6 +810,59 @@ class AutoScreenChainTests(unittest.TestCase):
         self.store.save_scrape_combo_result(run_id, "kw|city", jobs, ["kw|city"])
         self.store.update_screening_run(run_id, status="running", current_stage="scrape")
         self.store.update_screening_run(run_id, status="succeeded", current_stage="scrape")
+        # 033 V2：这个夹具代表真实的已完成抓取，因此补齐页级和范围完成证据。
+        from webui.store_helpers import _now
+        from webui.whitebox import WhiteboxService
+        whitebox = WhiteboxService(self.store)
+        ref = whitebox.begin("scrape", run_id, {
+            "stages": ["scrape_list"],
+            "units": [{
+                "unit_key": "kw|city",
+                "unit_kind": "keyword_city",
+                "stage": "scrape_list",
+                "planned_pages": 1,
+                "required": True,
+            }],
+        })
+        whitebox.record(ref, {
+            "idempotency_key": f"page:{run_id}",
+            "event_type": "page_completed",
+            "occurred_at": _now(),
+            "stage": "scrape_list",
+            "unit_kind": "keyword_city",
+            "unit_key": "kw|city",
+            "attempt_no": 1,
+            "required_evidence": True,
+            "payload": {
+                "page": 1,
+                "planned_pages": 1,
+                "returned_count": len(jobs),
+                "new_unique_count": len(jobs),
+                "has_more": False,
+                "resume_page": 2,
+                "scope_complete": True,
+                "source_exhausted": True,
+                "stop_reason": "target_reached",
+            },
+        })
+        whitebox.record(ref, {
+            "idempotency_key": f"scope-completed:{run_id}",
+            "event_type": "scope_completed",
+            "occurred_at": _now(),
+            "stage": "scrape_list",
+            "unit_kind": "keyword_city",
+            "unit_key": "kw|city",
+            "attempt_no": 1,
+            "required_evidence": True,
+            "payload": {
+                "scope_complete": True,
+                "source_exhausted": True,
+                "stop_reason": "target_reached",
+                "returned_total_count": len(jobs),
+                "unit_unique_count": len(jobs),
+            },
+        })
+        whitebox.finalize(ref, lifecycle_end="succeeded")
         return jobs
 
     def test_execute_search_persists_auto_screen_flag(self):

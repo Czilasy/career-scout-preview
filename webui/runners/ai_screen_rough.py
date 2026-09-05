@@ -87,6 +87,72 @@ def run_rough_stage(ctx, task_id, raw_jobs, criteria, endpoint, api_key,
                                     on_batch_done=_rough_batch_done,
                                     execution_config=execution_config,
                                     correlation_id=task_id)
+        from webui.store_helpers import _now
+        from webui.whitebox import WhiteboxService
+        _wb = WhiteboxService(ctx.store)
+        if screen_result.get("degraded"):
+            reasons = [str(reason or "ai_request_failed")
+                       for reason in (screen_result.get("fallback_reasons") or [])]
+            if not reasons:
+                reasons = ["ai_request_failed"]
+            for index, reason in enumerate(dict.fromkeys(reasons)):
+                _wb.record_for_owner("screening", task_id, {
+                    "idempotency_key": f"ai-rough-request-failed:{task_id}:{index}:{reason}",
+                    "event_type": "ai_request_failed", "occurred_at": _now(),
+                    "stage": "ai_rough", "unit_kind": "ai_stage", "unit_key": "ai_rough",
+                    "attempt_no": 1, "required_evidence": True, "severity": "warning",
+                    "payload": {"reason_code": reason, "action": "keep_all",
+                                "normal_screening_completed": False},
+                })
+            _wb.record_for_owner("screening", task_id, {
+                "idempotency_key": f"ai-rough-fallback:{task_id}",
+                "event_type": "ai_keep_all_fallback", "occurred_at": _now(),
+                "stage": "ai_rough", "unit_kind": "ai_stage", "unit_key": "ai_rough",
+                "attempt_no": 1, "required_evidence": True, "severity": "warning",
+                "payload": {"normal_screening_completed": False,
+                            "reasons": reasons, "action": "keep_all"},
+            })
+            _wb.record_for_owner("screening", task_id, {
+                "idempotency_key": f"ai-rough-incomplete:{task_id}",
+                "event_type": "unit_incomplete", "occurred_at": _now(),
+                "stage": "ai_rough", "unit_kind": "ai_stage", "unit_key": "ai_rough",
+                "attempt_no": 1, "required_evidence": True, "severity": "error",
+                "payload": {"stop_reason": "ai_keep_all_fallback"},
+            })
+        else:
+            _wb.record_for_owner("screening", task_id, {
+                "idempotency_key": f"ai-rough-complete:{task_id}",
+                "event_type": "scope_completed", "occurred_at": _now(),
+                "stage": "ai_rough", "unit_kind": "ai_stage", "unit_key": "ai_rough",
+                "attempt_no": 1, "required_evidence": True,
+                "payload": {
+                    "scope_complete": True,
+                    "returned_total_count": len(_rough_todo) + len(_rough_kept_from_resume),
+                    "unit_unique_count": len(
+                        set(screen_result.get("kept") or [])
+                        | {str(job.get("job_id") or "") for job in _rough_kept_from_resume}
+                    ),
+                    "stop_reason": (
+                        "explicit_empty"
+                        if not (_rough_todo or _rough_kept_from_resume)
+                        else "target_reached"
+                    ),
+                },
+            })
+            if not (_rough_todo or _rough_kept_from_resume):
+                _wb.record_for_owner("screening", task_id, {
+                    "idempotency_key": f"ai-rough-empty:{task_id}",
+                    "event_type": "explicit_empty", "occurred_at": _now(),
+                    "stage": "ai_rough", "unit_kind": "ai_stage",
+                    "unit_key": "ai_rough", "attempt_no": 1,
+                    "required_evidence": True, "severity": "info",
+                    "payload": {"empty_evidence": {
+                        "kind": "stage_input_empty",
+                        "reason": "all_input_removed_before_ai_rough",
+                        "input_count": len(raw_jobs),
+                        "dropped_count": len(_dup_ids),
+                    }},
+                })
         ctx.store.save_screening_verdicts(
             task_id, screen_result.get("verdicts") or {})
     except (ai_service.AISecurityError, ai_service.AICheckpointError) as _ai_exc:

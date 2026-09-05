@@ -424,6 +424,27 @@ class SearchRunTests(WorkbenchAPITestBase):
         self.assertIn("城市", body["user_message"])
         self.assertNotIn("error", body)
 
+    def test_search_run_submit_failure_is_terminal_and_reported(self):
+        """033 V2 T053：工作台提交失败立即终止，不遗留 queued/running。"""
+        pid = self._make_profile()
+        runner = self.app.config["WORKBENCH_RUNNER"]
+        fake_executor = mock.Mock()
+        fake_executor.submit.side_effect = RuntimeError("executor unavailable")
+        with mock.patch.object(runner, "executor", fake_executor):
+            resp = self.client.post("/api/search-runs", json={
+                "profile_id": pid, "manual_keywords": ["Python 后端"],
+            })
+        self.assertEqual(resp.status_code, 202)
+        run = resp.get_json()
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["error_code"], "submit_failed")
+        store = self.app.config["TASK_STORE"]
+        report = __import__("webui.whitebox", fromlist=["WhiteboxService"]).WhiteboxService(
+            store
+        ).report("workbench", run["id"], include_events=True)
+        self.assertEqual(report["integrity"]["conclusion"], "failed")
+        self.assertTrue(any(event["event_type"] == "submission_failed" for event in report["events"]))
+
     def test_search_uses_validated_resume_ai_keywords_when_manual_is_empty(self):
         pid = self._make_profile()
         with mock.patch("webui.ai.store_api_key", return_value="ref"):

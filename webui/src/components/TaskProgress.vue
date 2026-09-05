@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { CircleCheck, CircleX, LoaderCircle, Octagon, PauseCircle } from "@lucide/vue";
-import type { Platform } from "../types";
+import type { IntegritySnapshot, Platform } from "../types";
 
 interface PauseInfo {
   error_code?: string;
@@ -39,6 +39,7 @@ interface TaskSnapshot {
   // 后端从 task_logs 的 pause/resume 事件推导的累计实际运行时长（排除暂停），
   // 单位毫秒；运行中包含当前段，暂停/终态为定格累计。
   active_elapsed_ms?: number;
+  integrity?: IntegritySnapshot | null;
 }
 
 const props = defineProps<{
@@ -68,6 +69,7 @@ const BLOCK_CODES = new Set([
 ]);
 
 const blocked = computed(() => {
+  if (["failed", "unverifiable"].includes(integrityConclusion.value)) return true;
   const status = props.snapshot?.status;
   if (status === "failed") return true;
   if (status !== "paused") return false;
@@ -82,6 +84,30 @@ function isCompletedStatus(status?: string) {
 function isTerminalStatus(status?: string) {
   return Boolean(status && TERMINAL_STATUSES.has(status));
 }
+
+const integrity = computed(() => props.snapshot?.integrity ?? null);
+const integrityConclusion = computed(() => integrity.value?.conclusion || "");
+const integrityStatus = computed(() => {
+  switch (integrityConclusion.value) {
+    case "succeeded":
+    case "empty": return "completed";
+    case "partial": return "completed_with_pending";
+    case "unverifiable": return "unverifiable";
+    case "failed": return "failed";
+    case "interrupted": return "interrupted";
+    default: return props.snapshot?.status || "running";
+  }
+});
+const integrityStyle = computed(() => {
+  if (integrityConclusion.value === "partial") return { color: "var(--unsure)" };
+  if (["failed", "unverifiable", "interrupted"].includes(integrityConclusion.value)) {
+    return { color: "var(--danger)" };
+  }
+  return undefined;
+});
+const integritySuccess = computed(() => integrityConclusion.value
+  ? ["succeeded", "empty"].includes(integrityConclusion.value)
+  : isCompletedStatus(props.snapshot?.status));
 
 // ---- 用时计时 ----
 // snapshot 从 null→非 null 时记开始时间；status 进入终态（done/failed/cancelled）时定格。
@@ -269,7 +295,23 @@ onBeforeUnmount(() => {
 const percentage = computed(() => Math.round(displayPercent.value));
 
 const message = computed(() => String(progress.value.message || "正在准备任务…"));
+const integrityMessage = computed(() => {
+  const conclusion = integrityConclusion.value;
+  if (!conclusion) return "";
+  if (conclusion === "empty") return "已完成，没有找到岗位";
+  return String(integrity.value?.primary_reason || integrity.value?.recommendation || "");
+});
 const statusLabel = computed(() => {
+  if (integrityConclusion.value) {
+    return {
+      succeeded: "完整成功",
+      empty: "已完成，没有找到岗位",
+      partial: "部分完成，部分结果可能缺失",
+      failed: "执行失败",
+      unverifiable: "无法确认是否完成",
+      interrupted: "任务已中断",
+    }[integrityConclusion.value] || "运行中";
+  }
   if (["completed_with_pending", "partial"].includes(String(props.snapshot?.status || ""))) return "完成，但有待确认";
   if (isCompletedStatus(props.snapshot?.status)) return "已完成";
   if (props.snapshot?.status === "failed") return "执行失败";
@@ -337,7 +379,8 @@ const stageLabel = computed(() => {
 
 const failureVisible = computed(() => {
   const status = props.snapshot?.status;
-  return status === "failed" || status === "paused";
+  return status === "failed" || status === "paused"
+    || ["failed", "unverifiable", "interrupted"].includes(integrityConclusion.value);
 });
 
 // 016：软失败组合留痕摘要（不阻塞任务，但让用户看见哪些组合失败、为什么）。
@@ -353,6 +396,16 @@ const failureLine = computed(() => {
     return {
       reason: pi?.error_reason || props.snapshot?.error || "任务已暂停，请处理后点继续",
       code: pi?.error_code || "",
+    };
+  }
+  if (["failed", "unverifiable", "interrupted"].includes(integrityConclusion.value)) {
+    const reason = integrity.value?.primary_reason || integrityMessage.value || "无法确认是否完成";
+    const recommendation = integrityConclusion.value === "unverifiable"
+      ? integrity.value?.recommendation
+      : "";
+    return {
+      reason: recommendation ? `${reason}；${recommendation}` : reason,
+      code: integrity.value?.primary_code || "",
     };
   }
   if (status === "failed") {
@@ -436,13 +489,13 @@ const timeLabel = computed(() => {
 </script>
 
 <template>
-  <section v-if="snapshot" class="task-progress" :data-blocked="blocked || undefined">
+  <section v-if="snapshot" class="task-progress" :data-blocked="blocked || undefined" :data-integrity="integrityConclusion || undefined">
     <p class="sr-only" aria-live="polite" data-testid="task-progress-announcement">{{ announcementText }}</p>
     <header>
-      <span class="task-status" :data-status="snapshot.status || 'running'">
-        <CircleCheck v-if="isCompletedStatus(snapshot.status)" :size="17" aria-hidden="true" />
-        <CircleX v-else-if="snapshot.status === 'failed'" :size="17" aria-hidden="true" />
-        <PauseCircle v-else-if="snapshot.status === 'paused'" :size="17" aria-hidden="true" />
+      <span class="task-status" :data-status="integrityStatus" :style="integrityStyle">
+        <CircleCheck v-if="integritySuccess" :size="17" aria-hidden="true" />
+        <CircleX v-else-if="['failed', 'unverifiable'].includes(integrityConclusion || snapshot.status || '')" :size="17" aria-hidden="true" />
+        <PauseCircle v-else-if="snapshot.status === 'paused' || integrityConclusion === 'interrupted'" :size="17" aria-hidden="true" />
         <Octagon v-else-if="snapshot.status === 'cancelled'" :size="17" aria-hidden="true" />
         <LoaderCircle v-else class="spin" :size="17" aria-hidden="true" />
         {{ statusLabel }}
@@ -465,7 +518,7 @@ const timeLabel = computed(() => {
       <PauseCircle v-if="snapshot.status === 'paused'" :size="14" aria-hidden="true" />
       {{ failureLine.reason }}<span v-if="failureLine.code" class="error-field" data-testid="error-field"> · {{ failureLine.code }}</span>
     </p>
-    <p v-else class="task-message">{{ snapshot.error || message }}</p>
+    <p v-else class="task-message">{{ snapshot.error || integrityMessage || message }}</p>
     <ul v-if="comboIssues.length" class="task-combo-issues" data-testid="combo-issues">
       <li
         v-for="issue in comboIssues"

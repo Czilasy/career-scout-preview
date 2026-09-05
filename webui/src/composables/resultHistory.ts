@@ -1,7 +1,7 @@
 import { reactive, toRefs } from "vue";
 import { apiRequest } from "../api";
 import type { PipelineResult } from "../discovery";
-import type { Platform } from "../types";
+import type { IntegritySnapshot, Platform } from "../types";
 
 export interface HistoryRoundItem {
   run_id: string;
@@ -22,6 +22,7 @@ export interface HistoryRoundItem {
   profile_summary_preview: string;
   archived_at?: string | null;
   is_latest: boolean;
+  integrity?: IntegritySnapshot | null;
 }
 
 export interface HistoryRoundDetail {
@@ -39,6 +40,7 @@ export interface HistoryRoundDetail {
   execution_config?: Record<string, unknown>;
   source_summary?: Record<string, unknown>;
   source_outcomes?: Array<Record<string, unknown>>;
+  integrity?: IntegritySnapshot | null;
   result: PipelineResult;
 }
 

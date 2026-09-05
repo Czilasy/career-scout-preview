@@ -111,7 +111,7 @@ def register_ai_screen_routes(app, ctx):
         if (
             source_snapshot.get("status") != "done"
             or not isinstance(source_result, dict)
-            or not source_result.get("ok")
+            or (not source_result.get("ok") and not source_result.get("jobs"))
         ):
             return jsonify({"ok": False, "error": "抓取任务尚未成功完成"}), 409
 
@@ -309,20 +309,93 @@ def register_ai_screen_routes(app, ctx):
                     "error": "ai_screen_persist_failed",
                     "detail": type(exc).__name__,
                 }), 503
+        _ai_units = [("ai_rough", "ai_rough"), ("jd_detail", "jd_detail"), ("ai_fine", "ai_fine")]
+        try:
+            from webui.whitebox import WhiteboxService
+            WhiteboxService(ctx.store).begin("screening", task_id, {
+                "stages": ["ai_rough", "jd_detail", "ai_fine"],
+                "units": [{"unit_key": key, "unit_kind": "ai_stage", "stage": stage, "required": True}
+                          for key, stage in _ai_units],
+            }, parent_owner_id=scrape_task_id)
+        except Exception as exc:
+            reason = "任务证据白箱初始化失败"
+            _logger.warning("AI whitebox initialization failed", exc_info=True)
+            try:
+                ctx.store.update_screening_run(task_id, status="failed",
+                                               error_code="whitebox_incomplete",
+                                               error_reason=reason)
+                ctx.store.append_task_event(task_id, "whitebox_incomplete", {
+                    "error_code": "whitebox_incomplete", "error_reason": reason,
+                })
+            except Exception as marker_exc:
+                _logger.warning("AI whitebox initialization state write failed: %s",
+                                type(marker_exc).__name__)
+            ctx.release_pipeline_claim(task_id, claimed_task, previous_task)
+            if claimed_old_resume:
+                ctx.release_resume_claim(resume_from_run_id)
+            with ctx.lock:
+                claimed_task["status"] = "failed"
+                claimed_task["error"] = reason
+            return jsonify({"ok": False, "error": "whitebox_incomplete",
+                            "error_reason": reason,
+                            "detail": type(exc).__name__}), 503
         try:
             ctx.executor.submit(
                 ctx.run_ai_screen_task, task_id, screening_fields,
                 profile_summary, scrape_task_id, resume_from_run_id,
                 profile_facts, cross_platform_dedupe=cross_platform_dedupe,
             )
-        except RuntimeError:
+        except RuntimeError as exc:
             ctx.release_pipeline_claim(task_id, claimed_task, previous_task)
             if (resume_from_run_id and prev is not None
                     and prev["status"] == "paused"):
                 ctx.store.update_screening_run(resume_from_run_id, status="paused")
             if claimed_old_resume:
                 ctx.release_resume_claim(resume_from_run_id)
-            raise
+            reason = "AI 筛选后台任务提交失败"
+            try:
+                ctx.store.update_screening_run(task_id, status="failed",
+                                               error_code="submit_failed", error_reason=reason)
+                ctx.store.append_task_event(task_id, "submission_failed", {
+                    "error_code": "submit_failed", "error_reason": reason,
+                })
+                from webui.store_helpers import _now
+                from webui.whitebox import WhiteboxService
+                _wb = WhiteboxService(ctx.store)
+                _row = ctx.store.get_whitebox_run("screening", task_id)
+                if _row is None:
+                    _wb.begin("screening", task_id, {
+                        "stages": ["ai_rough", "jd_detail", "ai_fine"],
+                        "units": [{"unit_key": key, "unit_kind": "ai_stage", "stage": stage, "required": True}
+                                  for key, stage in _ai_units],
+                    }, parent_owner_id=scrape_task_id)
+                    _row = ctx.store.get_whitebox_run("screening", task_id)
+                for _unit in (ctx.store.list_whitebox_units(_row["id"]) if _row else []):
+                    _key = str(_unit.get("unit_key") or "")
+                    if _key:
+                        _attempt = int(_unit.get("attempt_no") or 1)
+                        if str(_unit.get("status") or "planned") != "planned":
+                            _attempt += 1
+                        _wb.record(_row["id"], {
+                            "idempotency_key": f"submission-failed:{task_id}:{_key}:{_attempt}",
+                            "event_type": "submission_failed", "occurred_at": _now(),
+                            "stage": "submit", "unit_kind": _unit.get("unit_kind"),
+                            "unit_key": _key, "attempt_no": _attempt,
+                            "required_evidence": True, "severity": "error",
+                            "payload": {"error_code": "submit_failed", "error_reason": reason},
+                        })
+                if _row:
+                    _wb.finalize(_row["id"], lifecycle_end="failed")
+            except Exception as marker_exc:
+                _logger.warning(
+                    "AI submission failure whitebox marker failed: %s",
+                    type(marker_exc).__name__,
+                )
+            with ctx.lock:
+                claimed_task["status"] = "failed"
+                claimed_task["error"] = reason
+            return jsonify({"ok": False, "error": "submit_failed", "error_reason": reason,
+                            "detail": type(exc).__name__}), 503
         if claimed_old_resume:
             try:
                 ctx.store.update_screening_run(

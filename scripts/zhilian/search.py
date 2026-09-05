@@ -279,15 +279,20 @@ def fetch_list(plan_item: dict, *, on_page_completed=None) -> tuple[str | None, 
             if isinstance(job, dict) and job.get("platform_job_id"):
                 merged[job["platform_job_id"]] = job
         api_city = _api_city_code(city_code)
+        scope_stop_reason = None
         for page_index in range(start_page, max(1, target_pages) + 1):
             value = _evaluate(ws, _search_fetch_expression(keyword, api_city, page_index))
             if not isinstance(value, dict) or value.get("error"):
                 return "invalid_output", [], None
             jobs = [_normalize_job(item) for item in value.get("jobs") or []]
+            before = set(merged)
             for job in jobs:
                 jid = job.get("platform_job_id")
                 if jid:
                     merged[jid] = job
+            page_done = bool(value.get("isEndPage") or not jobs or page_index >= target_pages)
+            if page_done:
+                scope_stop_reason = "source_exhausted" if value.get("isEndPage") or not jobs else "target_reached"
             if on_page_completed is not None:
                 on_page_completed({
                     "kind": "page_completed",
@@ -297,10 +302,16 @@ def fetch_list(plan_item: dict, *, on_page_completed=None) -> tuple[str | None, 
                     "page": page_index,
                     "target_pages": target_pages,
                     "jobs_delta": len(jobs),
+                    "returned_count": len(jobs),
+                    "new_unique_count": len(set(merged) - before),
+                    "unit_unique_count": len(merged),
                     "jobs_count": len(merged),
-                    "has_more": bool(value.get("jobs")) and not bool(value.get("isEndPage")),
+                    "has_more": (None if "isEndPage" not in value else not bool(value.get("isEndPage"))),
                     "resume_page": page_index + 1,
                     "last_completed_page": page_index,
+                    "scope_complete": page_done,
+                    "source_exhausted": (True if value.get("isEndPage") else None),
+                    "stop_reason": scope_stop_reason,
                     "jobs_snapshot": list(merged.values()),
                 })
             if value.get("isEndPage") or not value.get("jobs"):

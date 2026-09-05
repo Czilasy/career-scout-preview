@@ -1361,6 +1361,45 @@ class ZhilianCdpSourceOutcomeContractTests(_LoginCacheIsolated):
         self.assertIsNone(outcome.failed_code)
         self.assertIsNotNone(outcome.input_hash)
 
+    def test_page_evidence_preserves_three_value_has_more_and_stop_reason(self):
+        events = []
+        def runner(item):
+            item["on_page_completed"]({"kind": "page_completed", "page": 1,
+                "target_pages": 1, "returned_count": 20, "new_unique_count": 3,
+                "has_more": None, "resume_page": 2, "last_completed_page": 1,
+                "scope_complete": True, "stop_reason": "target_reached"})
+            return _fake_list(signal="ok", jobs=[{"platform": "zhilian", "platform_job_id": "x"}])
+        source = ZhilianCdpSource(browser_account="a", cdp_port=9223, list_runner=runner)
+        item = {"platform": "zhilian", "keyword": "Python",
+                "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+                "target_pages": 1,
+                "input_hash": _zhilian_input_hash({"platform": "zhilian", "keyword": "Python",
+                    "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+                    "target_pages": 1})}
+        outcome = source.fetch_list(item, on_page_completed=events.append)
+        self.assertTrue(outcome.ok)
+        self.assertIsNone(outcome.page_evidence[0]["has_more"])
+        self.assertEqual(outcome.page_evidence[0]["new_unique_count"], 3)
+
+    def test_ok_empty_list_without_empty_evidence_is_rejected(self):
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            list_runner=lambda item: _fake_list(signal="ok", jobs=[]),
+        )
+        item = {
+            "platform": "zhilian", "keyword": "Python",
+            "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+            "target_pages": 1,
+            "input_hash": _zhilian_input_hash({
+                "platform": "zhilian", "keyword": "Python",
+                "city": {"name": "全国", "platform_code": "jl0", "mapping_version": 1},
+                "target_pages": 1,
+            }),
+        }
+        outcome = source.fetch_list(item)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
     def test_failed_outcome_carries_safe_code_and_reason(self):
         source = ZhilianCdpSource(
             browser_account="a", cdp_port=9223,
@@ -1399,6 +1438,7 @@ class ZhilianCdpSourceOutcomeContractTests(_LoginCacheIsolated):
         outcome = SourceOutcome.empty_success(
             empty_evidence=evidence,
             safe_log="platform=zhilian stage=list empty_result=1",
+            scope_complete=True,
         )
         self.assertTrue(outcome.ok)
         self.assertEqual(outcome.jobs, [])

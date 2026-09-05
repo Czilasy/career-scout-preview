@@ -37,6 +37,26 @@ def _public_task_status(status: str, interruption_kind: str | None = None) -> st
     return mapping.get(status, status or "failed")
 
 
+def _public_status_for_integrity(
+    integrity: dict | None, fallback: str = "", interruption_kind: str | None = None,
+) -> str:
+    """Map the canonical whitebox conclusion without re-evaluating evidence."""
+    lifecycle = str(fallback or "")
+    if lifecycle in {"failed", "cancelled", "interrupted"}:
+        # A completeness projection must not replace a more authoritative
+        # lifecycle terminal state with a pending/unverifiable label.
+        return _public_task_status(lifecycle, interruption_kind)
+    conclusion = str((integrity or {}).get("conclusion") or "")
+    if conclusion == "interrupted":
+        if interruption_kind in {"user_finished", "user_cancelled"}:
+            return "cancelled"
+        return "interrupted"
+    return {
+        "succeeded": "completed", "empty": "completed", "partial": "completed_with_pending",
+        "failed": "failed", "unverifiable": "completed_with_pending",
+    }.get(conclusion, _public_task_status(fallback))
+
+
 def _pipeline_kind_for_stage(stage: str) -> str:
     """把 screening run 阶段映射为对外 pipeline kind。"""
     if str(stage).startswith("recrawl_"):

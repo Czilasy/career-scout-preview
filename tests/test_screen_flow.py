@@ -2,6 +2,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 from webui.screen_flow import (
     build_round_context_payload,
@@ -74,6 +75,41 @@ class ScreenFlowTests(unittest.TestCase):
         run = self._find()
         self.assertIsNotNone(run)
         self.assertEqual(run["id"], "paused-run")
+
+    def test_ai_keep_all_fallback_is_degraded_and_not_complete(self):
+        """033 V2 T034：AI 请求失败全部保留也不得生成完整成功。"""
+        from webui.ai import AISecurityError, ERROR_NETWORK, screen_jobs
+        from webui.whitebox import WhiteboxService
+
+        jobs = [{"job_id": "j1", "title": "岗位", "salary": "", "location": ""}]
+        with mock.patch("webui.ai.call_ai", side_effect=AISecurityError(ERROR_NETWORK)):
+            result = screen_jobs(
+                jobs, {"profile_summary": "画像"}, "https://ai.invalid", "key",
+                batch_size=1, raise_on_systemic=False,
+            )
+        self.assertTrue(result["degraded"])
+        self.assertFalse(result["normal_screening_completed"])
+        self.assertEqual(result["kept"], ["j1"])
+
+        service = WhiteboxService(self.store)
+        ref = service.begin("screening", "screen-ai", {
+            "stages": ["ai_rough"], "units": [{"unit_key": "ai_rough"}],
+        })
+        for event_type, key, payload in (
+            ("ai_request_failed", "request", {"reason_code": ERROR_NETWORK,
+                                                 "action": "keep_all",
+                                                 "normal_screening_completed": False}),
+            ("unit_incomplete", "incomplete", {"stop_reason": "ai_keep_all_fallback"}),
+        ):
+            service.record(ref, {
+                "idempotency_key": f"{key}:screen-ai", "event_type": event_type,
+                "occurred_at": "2026-09-05T00:00:00+08:00", "stage": "ai_rough",
+                "unit_key": "ai_rough", "required_evidence": True,
+                "payload": payload,
+            })
+        integrity = service.finalize(ref)
+        self.assertEqual(integrity["conclusion"], "unverifiable")
+        self.assertTrue(integrity["degraded"])
 
     def test_find_resumable_failed(self):
         _make_ai_run(self.store, "failed-run", status="failed")

@@ -182,6 +182,13 @@ Python 业务文件不超过 800 行，Vue 单文件组件不超过 1200 行。�
 - `webui/src/composables/useReminderBadge.ts` — 提醒角标单源：服务端 /api/job-reminders/count total 与 seq 守卫/99+ 截断/aria（统一 Spec 037）
 - `webui/src/composables/useIslandValueTransition.ts` — 灵动岛展示值切换：保留旧值短暂退场并在减少动态时直接替换（统一 Spec 037 修订）
 - `webui/src/components/IslandNoticePanel.vue` — 灵动岛通知面板：胶囊下方弹出、error→paused→interrupt→completed 排序、未读高亮/已读淡化、行点击直达、interrupt 行 tone 染色、kaleido blur 6px（统一 Spec 037）
+- `webui/whitebox.py` — 033 V2 任务证据白箱公共服务：计划、事实、最终结论与报告的唯一业务入口
+- `webui/whitebox_rules.py` — 033 V2 任务证据纯规则：按计划单元与完成证据收敛完整成功、空结果、部分完成、失败、无法确认和中断
+- `webui/store_whitebox.py` — 033 V2 白箱数据访问域：任务运行、计划单元、分页事实、摘要与应急追加持久化
+- `webui/store_migrations_v5.py` — 033 V2 白箱数据库迁移：白箱运行、单元与事实表及索引
+- `webui/whitebox_evidence.py` — 033 V2 抓取分页事实适配器：把抓取循环事实投影到公共白箱服务
+- `webui/task_finish_whitebox.py` — 033 V2 手动结束与恢复提交失败的白箱收口辅助
+- `webui/exec_search_whitebox.py` — 033 V2 搜索执行入口的白箱计划与提交失败辅助
 
 ## 文件布局约束
 

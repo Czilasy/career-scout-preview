@@ -226,6 +226,36 @@ describe("useDiscoveryTasks.pollTask（035 后台跑完历史冒泡）", () => {
   });
 });
 
+describe("useDiscoveryTasks.pollRecrawl（033 V2 完整性优先）", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset();
+  });
+
+  it("终态 status=completed 但 integrity=unverifiable → 不自动进入结果页", async () => {
+    const state = makeState({
+      recrawlBusy: ref(true),
+      activeStep: ref("screen"),
+    });
+    const deps = makeDeps();
+    const tasks = useDiscoveryTasks(state, deps);
+    apiRequestMock.mockResolvedValue({
+      status: "completed",
+      progress: {},
+      logs: [],
+      integrity: {
+        conclusion: "unverifiable", label: "无法确认", evidence_complete: false,
+        primary_code: "unit_evidence_missing", primary_reason: "证据不足",
+      },
+    });
+
+    await tasks.pollRecrawl("recrawl-1");
+
+    expect(state.recrawlBusy.value).toBe(false);
+    expect(state.activeStep.value).toBe("screen");
+    expect(deps.notify).toHaveBeenCalledWith("证据不足", "warning");
+  });
+});
+
 // 035 US2（真机问题②，FR-011）：入口 5（启动/刷新自动开新一轮）的
 // scrape-only running 守卫——抓取运行中恢复现场，不 reset、不取消、不查历史轮。
 describe("useDiscoveryTasks.maybeAutoStartNewRound（035 scrape-only 守卫）", () => {

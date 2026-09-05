@@ -70,6 +70,15 @@ class _FakeProcess:
         return self._poll
 
 
+class _FakeWhitebox:
+    def __init__(self):
+        self.facts = []
+
+    def record_for_owner(self, owner_kind, owner_id, fact):
+        self.facts.append((owner_kind, owner_id, fact))
+        return True
+
+
 def _make_guard(ctx, **overrides):
     kwargs = dict(
         write_run=ctx.write_run,
@@ -232,6 +241,24 @@ class PipelineGuardCoreTests(unittest.TestCase):
             self.assertIn("retry", content)
             self.assertIn("batch=b1", content)
             self.assertIn("attempt", content)
+
+    def test_whitebox_guard_events_keep_task_unit_and_attempt_context(self):
+        """033 V2 T035：卡住/重试事件必须可定位到任务、阶段、单元和尝试。"""
+        whitebox = _FakeWhitebox()
+        guard = _make_guard(self.ctx, whitebox=whitebox)
+        try:
+            guard.begin_batch("detail-batch", task_id="task-1", attempt=1)
+            time.sleep(STALL + 0.05)
+            guard.scan_once()
+            guard.begin_batch("detail-batch", task_id="task-1", attempt=2)
+            for _owner, owner_id, fact in whitebox.facts:
+                self.assertEqual(owner_id, "task-1")
+                self.assertEqual(fact["stage"], "jd_detail")
+                self.assertEqual(fact["unit_key"], "detail-batch")
+                self.assertGreaterEqual(fact["attempt_no"], 1)
+                self.assertEqual(fact["payload"]["task_id"], "task-1")
+        finally:
+            guard.close()
 
 
 class FetchJobDetailsGuardTests(unittest.TestCase):

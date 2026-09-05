@@ -101,6 +101,20 @@ def run_pipeline_task(ctx,
         if source is None:
             completed = sorted(skip_combos or [])
             reason = "连不上调试浏览器，请启动 Chrome 调试端口后继续"
+            try:
+                from webui.whitebox import ScrapeEvidence
+                _pages = frozen_scope.pages_per_combination if frozen_scope is not None else int(script_params.get("pages") or 3)
+                _evidence = ScrapeEvidence(ctx.store, task_id, expand_combinations(script_params), _pages)
+                if _evidence.startup_error is None:
+                    for _key in _evidence.units:
+                        _evidence.incomplete(_key, reason, "source_cdp_unavailable")
+                    _evidence.finish({"ok": False, "jobs": [], "total_scraped": 0,
+                                      "total_matched": 0, "combinations": len(_evidence.units),
+                                      "error": reason})
+            except Exception as _whitebox_exc:
+                logger = getattr(ctx, "logger", None)
+                if logger is not None:
+                    logger.warning("source-unavailable whitebox marker failed: %s", type(_whitebox_exc).__name__)
             ctx.write_run(
                 task_id,
                 status="paused",
@@ -257,6 +271,10 @@ def run_pipeline_task(ctx,
         # 永远停在 running（数据已齐却没收尾）。
         with ctx.lock:
             task = ctx.tasks.get(task_id)
+            raw_integrity = result.get("integrity")
+            integrity = raw_integrity if isinstance(raw_integrity, dict) else {}
+            has_integrity = isinstance(raw_integrity, dict)
+            conclusion = str(integrity.get("conclusion") or "unverifiable")
             if stop_event is not None and stop_event.is_set():
                 ctx.write_run(
                     task_id, status="cancelled", current_stage="scrape",
@@ -264,7 +282,7 @@ def run_pipeline_task(ctx,
                     error_reason=ctx.msg_user_stopped_scrape,
                 )
                 _terminal_status = "cancelled"
-            elif result.get("ok"):
+            elif conclusion in {"succeeded", "empty"}:
                 completed = list(result.get("completed_combos") or [])
                 ctx.write_run(
                     task_id, status="succeeded", current_stage="scrape",
@@ -278,6 +296,22 @@ def run_pipeline_task(ctx,
                     "total_scraped": int(result.get("total_scraped") or 0),
                 })
                 _terminal_status = "done"
+            elif conclusion == "partial":
+                completed = list(result.get("completed_combos") or [])
+                ctx.write_run(
+                    task_id, status="partial", current_stage="scrape",
+                    processed_count=len(completed),
+                    source_count=int(result.get("combinations") or len(completed)),
+                    error_code=integrity.get("primary_code"),
+                    error_reason=integrity.get("primary_reason") or result.get("error", ""),
+                    total_scraped=int(result.get("total_scraped") or 0),
+                )
+                ctx.store.append_task_event(task_id, "stage_partial", {
+                    "stage": "scrape", "conclusion": conclusion,
+                    "combinations": int(result.get("combinations") or len(completed)),
+                    "total_scraped": int(result.get("total_scraped") or 0),
+                })
+                _terminal_status = "partial"
             else:
                 # 切片4：列表抓取失败时区分"系统性阻断暂停" vs "真失败"
                 # 部分组合已完成 + 错误含阻断关键字 → paused + checkpoint
@@ -307,6 +341,20 @@ def run_pipeline_task(ctx,
                         total=int(result.get("combinations") or 0),
                     )
                     _terminal_status = "paused"
+                elif conclusion == "unverifiable" and has_integrity and not result.get("hard_stop"):
+                    ctx.store.append_task_event(task_id, "job_fail", {
+                        "stage": "scrape", "error": integrity.get("primary_reason") or err_msg,
+                        "failed_code": integrity.get("primary_code") or "evidence_missing",
+                    })
+                    ctx.write_run(
+                        task_id, status="partial", current_stage="scrape",
+                        processed_count=len(completed),
+                        source_count=int(result.get("combinations") or 0),
+                        error_code=integrity.get("primary_code") or "evidence_missing",
+                        error_reason=integrity.get("primary_reason") or err_msg,
+                        total_scraped=int(result.get("total_scraped") or 0),
+                    )
+                    _terminal_status = "partial"
                 else:
                     ctx.store.append_task_event(task_id, "job_fail", {
                         "stage": "scrape", "error": err_msg,
@@ -338,6 +386,9 @@ def run_pipeline_task(ctx,
                     task["error"] = ctx.msg_user_stopped_scrape
                 elif _terminal_status == "done":
                     task["status"] = "done"
+                elif _terminal_status == "partial":
+                    task["status"] = "partial"
+                    task["error"] = integrity.get("primary_reason") or result.get("error", "")
                 elif _terminal_status == "paused":
                     task["status"] = "paused"
                     task["error"] = (
@@ -347,7 +398,7 @@ def run_pipeline_task(ctx,
                     )
                 else:
                     task["status"] = "failed"
-        if _terminal_status in ("cancelled", "failed"):
+        if _terminal_status in ("cancelled", "failed", "partial"):
             ctx.clear_auto_screen(task_id)
         ctx.schedule_pipeline_task_cleanup(task_id)
         ctx.release_worker_resume_claims(ctx.tasks.get(task_id))

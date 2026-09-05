@@ -28,6 +28,7 @@ def record_failure(
     diagnostics: dict[str, Any] | None = None,
     exception: BaseException | None = None,
     include_traceback: bool = False,
+    whitebox_unit: str | None = None,
 ) -> dict[str, Any] | None:
     """Log and persist one structured failure event.
 
@@ -65,12 +66,33 @@ def record_failure(
         "correlation_id": correlation_id or "",
         "diagnostics": safe_diagnostics,
     }
+    def _whitebox_failure() -> bool:
+        if not hasattr(store, "get_whitebox_run"):
+            return False
+        try:
+            from webui.store_helpers import _now
+            from webui.whitebox import WhiteboxService
+            service = WhiteboxService(store)
+            unit_key = str(whitebox_unit or stage)
+            fact = {"idempotency_key": f"diagnostic:{task_id}:{stage}:{error_code}",
+                    "event_type": "unit_failed", "occurred_at": _now(), "stage": stage,
+                    "unit_kind": "diagnostic", "unit_key": unit_key, "attempt_no": 1,
+                    "required_evidence": True, "severity": "error", "payload": payload}
+            for kind in ("scrape", "screening", "recrawl", "workbench", "tuning"):
+                if service.record_for_owner(kind, task_id, fact):
+                    return True
+        except Exception as exc:
+            _log.warning("whitebox diagnostic persist failed: %s", type(exc).__name__)
+        return False
     try:
         store.append_task_event(task_id, "failure", payload)
+        if not _whitebox_failure():
+            payload["whitebox_incomplete"] = True
     except Exception as exc:  # diagnostics must never break the task flow
         if is_configured():
             with bind_task_context(task_id, correlation_id):
                 _log.warning("failure event persist failed: %s", type(exc).__name__)
+        payload["whitebox_incomplete"] = not _whitebox_failure()
         return None
     return payload
 

@@ -1,17 +1,12 @@
 """任务续跑 / 暂停 / 取消 / 结束 API 路由（021 B6 T019 外迁自 webui/app.py）。
-
 paused/中断 run 的续跑分发（抓取/筛选/重抓三向）、用户暂停与取消、
 结束任务的部分快照定稿。路由体纯搬运：HTTP 契约零改动。
 """
-
 from __future__ import annotations
 import threading
-
 import sqlite3
 import time
-
 from flask import jsonify, request
-
 from webui.constants import (
     _MSG_TASK_ALREADY_RUNNING,
     _MSG_TASK_NOT_FOUND,
@@ -28,7 +23,6 @@ from webui.resume_identity import (
 from webui.store import DiscoveryStoreConflictError
 from webui.task_pause_support import cancel_task_cleanup, pause_with_mode
 from webui.task_runners import _iso_epoch_ms
-
 def register_task_continue_routes(app, ctx):
     def _build_partial_pipeline_result(
             source_jobs, verdicts, pending_rows, jd_map, profile_summary,
@@ -132,17 +126,13 @@ def register_task_continue_routes(app, ctx):
             "profile_facts": profile_facts,
             "error": "",
         }
-
     @app.route("/api/task/continue/<run_id>", methods=["POST"])
     def api_task_continue(run_id: str):
         """FR-020/FR-022：统一继续接口。
-
         允许 paused 状态调用；running 状态拒绝（防止重复继续）。
         继续前检查阻断条件是否解除（由各阶段 handler 自行实现）。
-
         SPEC011 T015: 实验租约持有时拒绝继续（FR-035）。
         """
-        # SPEC011 T015/FR-035: 实验租约门禁
         ok, err_resp = ctx.check_tuning_lease_conflict()
         if not ok:
             return err_resp
@@ -156,10 +146,6 @@ def register_task_continue_routes(app, ctx):
                 "status": _public_task_status(run["status"], run.get("interruption_kind")),
                 "message": "只有 paused 状态的任务才能继续",
             }), 409
-        # B057：限流后可指定另一个已登录账号继续同一断点（显式指定，行为不变）。
-        # 030：未显式指定时收紧为双门槛自动换号——仅当用户暂停期间主动换过
-        # 全局账号（当前 ≠ 创建时快照）且暂停码非 AI 类；快照缺失（存量任务）
-        # 一律沿用冻结身份。决策/留痕在续跑身份域，此处只接线。
         _continue_body = request.get_json(silent=True) or {}
         target_account = str(_continue_body.get("target_account") or "").strip()
         auto_switch: tuple[bool, str, str] | None = None
@@ -172,7 +158,6 @@ def register_task_continue_routes(app, ctx):
             if auto_switch[0]:
                 target_account = auto_switch[2]
         if target_account:
-            # 030：目标账号校验/登录空间/阻断检查/持久化/留痕整段收口到续跑身份域
             applied = apply_continue_account_switch(
                 ctx.store, run, run_id=run_id, target_account=target_account,
                 auto_switch=auto_switch,
@@ -181,7 +166,6 @@ def register_task_continue_routes(app, ctx):
             if applied["status"] != "ok":
                 return jsonify(applied["body"]), applied["http_status"]
             run = applied["run"]
-        # FR-022：检查内存中是否已有该 run 的工作
         ctx.activate_run_browser(run)
         with ctx.lock:
             existing = ctx.tasks.get(run_id)
@@ -191,7 +175,6 @@ def register_task_continue_routes(app, ctx):
                     "error": "already_running",
                     "message": "该任务正在运行，请勿重复点击继续",
                 }), 409
-        # 版本校验（FR-039）
         run_version = run.get("backend_version")
         if run_version and run_version != ctx.backend_version:
             return jsonify({
@@ -208,8 +191,6 @@ def register_task_continue_routes(app, ctx):
             resolve_frozen_identity,
         )
         identity = resolve_frozen_identity(ctx.store, run)
-        # 030：存量 run 缺冻结账号时按角色感知兜底（BOSS=R2，智联=当前账号），
-        # 与筛选提交续跑同口径并写回；不再借父抓取 run 的 R1 账号或静默全局回退。
         if not str((run.get("execution_params") or {}).get("browser_account") or ""):
             effective_account = ensure_frozen_browser_account(
                 ctx.store, run_id, run,
@@ -238,18 +219,13 @@ def register_task_continue_routes(app, ctx):
         run["execution_params"] = dict(run.get("execution_params") or {})
         run["execution_params"].update(
             {k: v for k, v in identity.items() if v not in (None, "")})
-        # 高级设置续跑生效：block 检查通过后才按当前 active 配置刷新该 run 的
-        # execution_config 并写回 DB（三条续跑路径统一从刷新后的配置读取）。
-        # pages/frozen_scope 保持冻结不变；block 未解除时不提前改写 DB 快照。
         stage = str(run.get("current_stage") or "")
         refreshed_config = None
-
         def _refresh_run_config():
             nonlocal refreshed_config
             refreshed_config = _refresh_paused_run_execution_config(run, ctx.store)
             if refreshed_config is not None:
                 run["execution_params"]["execution_config"] = refreshed_config.to_dict()
-
         if stage.startswith("recrawl_"):
             passed, code, reason = ctx.check_resume_block(run)
             if not passed:
@@ -278,7 +254,6 @@ def register_task_continue_routes(app, ctx):
                 account_switch_note=(
                     (auto_switch[1], auto_switch[2])
                     if auto_switch is not None and auto_switch[0] else None))
-
         passed, code, reason = ctx.check_resume_block(run)
         if not passed:
             return jsonify({
@@ -286,7 +261,6 @@ def register_task_continue_routes(app, ctx):
                 "error_code": code, "error_reason": reason,
                 "status": "paused",
             }), 409
-
         params = run.get("execution_params") or {}
         scrape_task_id = str(params.get("scrape_task_id") or "")
         profile_summary = str(params.get("profile_summary") or "")
@@ -300,29 +274,29 @@ def register_task_continue_routes(app, ctx):
                 "error": "missing_scrape_snapshot",
                 "message": "抓取岗位快照缺失，无法安全继续 AI 筛选",
             }), 409
+        from webui.task_finish_whitebox import source_integrity_for_resume
+        source_integrity = source_integrity_for_resume(ctx.store, scrape_task_id)
+        source_ok = bool(source_integrity.get("evidence_complete") and source_integrity.get("conclusion") in {"succeeded", "empty"})
         _refresh_run_config()
-
         if not ctx.claim_resume(run_id):
             return jsonify({
                 "ok": False,
                 "error": "already_running",
                 "message": _MSG_TASK_ALREADY_RUNNING,
             }), 409
-
-        # 服务重启后内存来源丢失：从逐组合持久化结果重建只读来源快照。
         with ctx.lock:
             ctx.tasks[scrape_task_id] = {
                 "kind": "scrape", "status": "done", "progress": {}, "logs": [],
                 "result": {
-                    "ok": True, "jobs": source_jobs,
+                    "ok": source_ok, "jobs": source_jobs,
                     "total_scraped": len(source_jobs), "total_matched": len(source_jobs),
                     "completed_combos": sorted(ctx.store.load_checkpoint(scrape_task_id, "scrape")),
-                    "error": "",
+                    "error": "" if source_ok else source_integrity.get("primary_reason", "无法确认是否完成"),
+                    "integrity": source_integrity,
                 },
                 "error": "", "started_at": None, "finished_at": None,
                 "stop_event": threading.Event(),
             }
-
         task_id = run_id
         claimed_task, previous_task = ctx.claim_pipeline_task_id(
             task_id, "ai_screen",
@@ -347,13 +321,11 @@ def register_task_continue_routes(app, ctx):
                 resume_params[key] = identity.get(key)
         ctx.store.update_screening_execution_params(run_id, resume_params)
         if auto_switch is not None and auto_switch[0]:
-            # 030 FR-005：自动换号在续跑启动日志留一行中文说明
             append_account_switch_log_line(
                 claimed_task,
                 from_account=auto_switch[1], to_account=auto_switch[2])
         start_gate = threading.Event()
         abort_start = threading.Event()
-
         def run_after_claim_commits(
                 task_id, frozen_filters, frozen_profile, source_task_id,
                 resume_from_run_id, frozen_facts, execution_config):
@@ -368,7 +340,6 @@ def register_task_continue_routes(app, ctx):
                     frozen_facts,
                     execution_config=execution_config,
                 )
-
         try:
             future = ctx.executor.submit(
                 run_after_claim_commits,
@@ -378,7 +349,6 @@ def register_task_continue_routes(app, ctx):
                 scrape_task_id,
                 run_id,
                 profile_facts,
-                # 高级设置续跑生效：优先使用本轮刷新后的配置，而非父抓取 run 的旧冻结值
                 refreshed_config,
             )
             ctx.store.append_task_event(run_id, "resume", {
@@ -397,10 +367,26 @@ def register_task_continue_routes(app, ctx):
                 future.cancel()
             ctx.release_pipeline_claim(task_id, claimed_task, previous_task)
             ctx.release_resume_claim(run_id)
+            reason = "继续任务提交失败，原任务已结束"
+            try:
+                ctx.store.update_screening_run(run_id, status="failed",
+                                               error_code="submit_failed", error_reason=reason)
+                ctx.store.append_task_event(run_id, "submission_failed", {
+                    "error_code": "submit_failed", "error_reason": reason,
+                })
+                from webui.task_finish_whitebox import mark_resume_submission_failed
+                mark_resume_submission_failed(
+                    ctx.store, run_id, reason, parent_owner_id=scrape_task_id)
+            except Exception as marker_exc:
+                from webui.logging_setup import get_logger
+                get_logger(__name__).warning(
+                    "resume submission whitebox marker failed: %s",
+                    type(marker_exc).__name__,
+                )
             return jsonify({
                 "ok": False,
                 "error": "resume_submit_failed",
-                "message": f"继续任务提交失败：{type(exc).__name__}",
+                "message": reason,
             }), 500
         start_gate.set()
         return jsonify({
@@ -410,27 +396,21 @@ def register_task_continue_routes(app, ctx):
             "resumed_from": run_id,
             "status": "running",
             "message": "AI 筛选已从断点继续",
-            # T412 契约 http-api.md L216：成功响应增加 platform 和
-            # task_input_digest。平台不由客户端选择，从原 run 读取。
             "platform": run.get("platform"),
             "task_input_digest": run.get("task_input_digest"),
         })
-
     @app.route("/api/task/pause/<run_id>", methods=["POST"])
     def api_task_pause(run_id: str):
         """013：安全暂停 AI 筛选任务（025：支持 mode=immediate 批中立即停止）。
-
         body 可选 ``{"mode": "immediate" | "graceful"}``，缺省 graceful。
         编排逻辑在 task_pause_support（本文件超行数预警线，api 层只做组装）。
         """
         body = request.get_json(silent=True) or {}
         return pause_with_mode(
             ctx, run_id, str(body.get("mode") or "graceful"))
-
     @app.route("/api/task/cancel/<run_id>", methods=["POST"])
     def api_task_cancel(run_id: str):
         """FR-024：取消任务，保留已有结果，不自动恢复。"""
-        # 任务注册先于后台线程创建 DB run，因此取消必须同时支持纯内存窗口。
         with ctx.lock:
             task = ctx.tasks.get(run_id)
             if task is not None and task.get("status") in {
@@ -442,15 +422,11 @@ def register_task_continue_routes(app, ctx):
         run = ctx.store.get_screening_run(run_id)
         if run is None and task is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
-
         if run is not None and run.get("status") == "interrupted" and run.get("error_code") == "user_finished":
             return jsonify({
                 "ok": False, "error": "already_finished",
                 "message": "任务已结束保存，无需取消",
             }), 409
-
-        # 有 DB 身份时先提交 durable cancel，再发布内存状态。写入失败时
-        # 保持内存原状态，避免页面显示 cancelled 而数据库仍在 running。
         if run is not None:
             try:
                 if run["status"] not in (
@@ -490,7 +466,6 @@ def register_task_continue_routes(app, ctx):
                     "detail": type(exc).__name__,
                 }), 503
             run = ctx.store.get_screening_run(run_id)
-
         with ctx.lock:
             current = ctx.tasks.get(run_id)
             if current is not None:
@@ -511,7 +486,6 @@ def register_task_continue_routes(app, ctx):
                 close_debug_chrome()
             except (OSError, RuntimeError):
                 pass  # best-effort 关闭浏览器；取消状态已经可靠提交。
-        # 025：取消也清理 guard 批次登记（避免「继续」后被误判卡死重抓）
         cancel_task_cleanup(ctx, run_id)
         return jsonify({
             "ok": True,
@@ -523,18 +497,15 @@ def register_task_continue_routes(app, ctx):
             "processed_count": int((run or {}).get("processed_count") or 0),
             "message": "任务已取消，已有结果保留",
         })
-
     @app.route("/api/task/finish/<run_id>", methods=["POST"])
     def api_task_finish(run_id: str):
         """T416: 结束可恢复任务并生成可展示的部分结果快照。
-
         允许 queued/running/paused/failed 以及 interrupted(process_restart/
         operator_stop)；user_cancelled 是终态，不能通过 finish 改写。
         """
         run = ctx.store.get_screening_run(run_id)
         if run is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
-        # T416: 检查 interruption_kind
         interruption_kind = run.get("interruption_kind") or ""
         if run["status"] == "interrupted" and run.get("error_code") == "user_finished":
             return jsonify({
@@ -579,13 +550,10 @@ def register_task_continue_routes(app, ctx):
         source_payload = None
         source_dropped = []
         source_total_scraped = None
-        # 先落“用户正在收尾”标记：worker 即使抢先写 cancelled，也保留 operator_stop，
-        # 不会变成 finish 无法收尾的空 kind 中断。
         try:
             ctx.store.save_interruption_kind(run_id, "operator_stop")
         except ctx.operational_errors:
             pass
-        # 先发停止信号并等待当前页原子落库稳定，再从页级快照生成部分结果。
         flush_run_id = scrape_task_id or (
             run_id if str(run.get("current_stage") or "") == "scrape" else ""
         )
@@ -671,13 +639,10 @@ def register_task_continue_routes(app, ctx):
                 source_facts = ((source_payload or {}).get("result") or {}).get("profile_facts")
                 if isinstance(source_facts, dict) and source_facts:
                     profile_facts = source_facts
-        # 快照可构建性校验完成后，才停止后台工作并原子标记 user_finished；
-        # 无快照时保持原状态，避免把任务永久写成无法恢复的终态（B027）。
         with ctx.lock:
             task = ctx.tasks.get(run_id)
             if task is not None and task.get("stop_event") is not None:
                 task["stop_event"].set()
-            # B027：陈旧续跑接管标记不阻断结束保存；先兜底释放，再收尾。
             ctx.resume_claims.discard(run_id)
         try:
             from webui.pipeline_exec import close_debug_chrome
@@ -708,8 +673,14 @@ def register_task_continue_routes(app, ctx):
             started_at=run.get("started_at"),
             finished_at=int(time.time() * 1000),
         )
-        # 快照先落库，再原子标记 user_finished：保存失败时任务仍可重试，
-        # 不会留下“已结束但无结果”的死状态；worker 已收到停止信号。
+        from webui.task_finish_whitebox import finalize_manual_partial_whitebox_or_none
+        whitebox_integrity = finalize_manual_partial_whitebox_or_none(
+            ctx.store, run, parent_owner_id=parent_scrape_task_id)
+        if whitebox_integrity is None:
+            return jsonify({
+                "ok": False, "error": "whitebox_incomplete",
+                "message": "部分结果已生成，但任务证据未能可靠终结，请重试结束保存",
+            }), 503
         try:
             ctx.store.finish_screening_run(run_id)
         except DiscoveryStoreConflictError as exc:
@@ -749,6 +720,7 @@ def register_task_continue_routes(app, ctx):
             "ok": True, "run_id": run_id, "snapshot_run_id": snapshot_run_id,
             "platform": platform,
             "status": "completed_with_pending", "result": result,
+            "integrity": whitebox_integrity,
             "scrape_task_id": parent_scrape_task_id,
             "message": "任务已结束，已完成结果已保存",
         })

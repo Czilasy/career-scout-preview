@@ -1,19 +1,14 @@
 """搜索执行 API 路由（021 B6 T019 外迁自 webui/app.py）。
-
 搜索范围预览、组合抓取提交/续跑/取消。路由体纯搬运：HTTP 契约零改动；
 任务声明 / 断言 / runner 包装经 ctx 取用。
 """
-
 from __future__ import annotations
 import threading
 import uuid
-
 import hashlib
 import json
 import sqlite3
-
 from flask import jsonify, request
-
 from webui.constants import (
     _MSG_TASK_ALREADY_RUNNING,
     _MSG_TASK_NOT_FOUND,
@@ -26,17 +21,13 @@ from webui.resume_identity import (
     ensure_frozen_browser_account,
 )
 from webui.task_runners import _iso_epoch_ms
-
 from webui.logging_setup import get_logger
-
+from webui.exec_search_whitebox import begin_scrape_whitebox, mark_scrape_submission_failed
 _logger = get_logger(__name__)
-
-
 def register_exec_search_routes(app, ctx):
     @app.route("/api/search-scope/preview", methods=["POST"])
     def search_scope_preview():
         """SPEC011 T004 / tasks005 T402: 后端权威范围预览与校验（平台感知）。
-
         不改变任务工作量字段；仅返回规范化后的 scope 和去重信息。
         对应 HTTP API POST /api/search-scope/preview。
         """
@@ -47,11 +38,8 @@ def register_exec_search_routes(app, ctx):
             get_platform_or_none,
             validate_platform_key,
         )
-
         body = request.get_json(silent=True) or {}
         platform_raw = body.get("platform") or "boss"
-
-        # 平台键校验
         try:
             validate_platform_key(platform_raw)
         except UnknownPlatformError:
@@ -73,13 +61,11 @@ def register_exec_search_routes(app, ctx):
                 "error_code": "platform_disabled",
                 "user_message": reg.availability_reason or "平台暂不可用",
             }), 503
-
         keywords = body.get("keywords")
         scope_kind = body.get("scope_kind", "cities")
         cities = body.get("cities", [])
         pages_per_combination = body.get("pages_per_combination", 1)
         locations = body.get("locations") or []
-
         if not isinstance(keywords, list):
             return jsonify({"ok": False, "error": "keywords 必须是数组"}), 400
         if scope_kind not in ("cities", "nationwide"):
@@ -88,13 +74,11 @@ def register_exec_search_routes(app, ctx):
             return jsonify({"ok": False, "error": "cities 必须是数组"}), 400
         if not isinstance(locations, list):
             return jsonify({"ok": False, "error": "locations 必须是数组"}), 400
-
         if isinstance(pages_per_combination, bool) or not isinstance(
             pages_per_combination, int
         ):
             return jsonify({"ok": False, "error": "pages_per_combination 必须是整数"}), 400
         pages_int = pages_per_combination
-
         try:
             result = preview_scope(
                 keywords=keywords,
@@ -121,14 +105,11 @@ def register_exec_search_routes(app, ctx):
                 "error_code": "scope_validation_failed",
                 "error": str(e),
             }), 422
-
     @app.route("/api/execute-search", methods=["POST"])
     def execute_search():
         """Stage 3 / tasks005 T402: 平台感知搜索 run 创建。
-
         Accepts JSON ``{"script_params": {...}}`` (or the params directly).
         Launches a background task and returns a ``task_id`` for polling.
-
         SPEC011 T006: 后端从权威 scope 和当前配置选择创建不可变快照；
         客户端不能提供或覆盖任务规模与执行配置。
         SPEC011 T015: 实验租约持有时拒绝启动（FR-035）。
@@ -150,7 +131,6 @@ def register_exec_search_routes(app, ctx):
             resolve_login_space,
             validate_platform_key,
         )
-
         body = request.get_json(silent=True) or {}
         script_params = body.get("script_params") or body
         if not isinstance(script_params, dict):
@@ -160,9 +140,6 @@ def register_exec_search_routes(app, ctx):
         locations = script_params.get("locations") or []
         if not isinstance(locations, list):
             return jsonify({"ok": False, "error": "locations 必须是数组"}), 400
-
-        # B031: 一键链路标记；auto_screen_fields/profile 只作为刷新恢复快照，
-        # 不进 script_params，不触碰搜索请求的 AI filters 校验。
         auto_screen = bool(body.get("auto_screen"))
         auto_screen_fields = body.get("auto_screen_fields") if auto_screen else {}
         if auto_screen and not isinstance(auto_screen_fields, dict):
@@ -173,16 +150,12 @@ def register_exec_search_routes(app, ctx):
             if auto_screen and isinstance(body.get("auto_screen_facts"), dict)
             else None
         )
-
-        # B033/B038：普通抓取也冻结画像，刷新后单独查看结果可恢复三通道输入。
         profile_summary = str(body.get("profile_summary") or "")
         raw_profile_facts = body.get("profile_facts")
         profile_facts = (
             raw_profile_facts
             if isinstance(raw_profile_facts, dict) else None
         )
-
-        # T402: 平台键校验（先于任何副作用）
         platform_raw = body.get("platform") or "boss"
         try:
             validate_platform_key(platform_raw)
@@ -199,9 +172,6 @@ def register_exec_search_routes(app, ctx):
                 "error_code": "platform_validation_failed",
                 "user_message": "平台未注册",
             }), 400
-
-        # Spec 038 FR-019：账号池为空时在任务创建入口硬阻断，不能依赖
-        # account_for_role 的旧 fallback 启动到未勾选账号。
         if not has_selected_account(app.config["BROWSER_ACCOUNTS_PATH"]):
             return jsonify({
                 "ok": False,
@@ -209,8 +179,6 @@ def register_exec_search_routes(app, ctx):
                 "error": "请至少勾选一个账号参与轮询后再开抓",
                 "user_message": "请至少勾选一个账号参与轮询后再开抓",
             }), 422
-
-        # T402: 非空 AI filters 拒绝（零副作用，先于租约和 scope 检查）
         offending = [
             k for k in _AI_FILTER_KEYS
             if k in script_params and _is_non_empty_filter_value(script_params[k])
@@ -221,19 +189,14 @@ def register_exec_search_routes(app, ctx):
                 "error_code": "search_filters_not_supported",
                 "user_message": "搜索请求不允许携带非空 AI filters: " + ", ".join(sorted(offending)),
             }), 422
-
-        # SPEC011 T015/FR-035: 实验租约门禁
         ok, err_resp = ctx.check_tuning_lease_conflict()
         if not ok:
             return err_resp
-
-        # 逻辑隔离：同一时间只允许一个 pipeline 任务占用浏览器（B031 回归）。
         if ctx.browser_busy():
             return jsonify({
                 "ok": False, "error": "browser_busy",
                 "message": "当前已有任务在运行或暂停，请先等待、继续或结束任务后再开始新任务",
             }), 409
-
         requested_digest = str(body.get("scope_digest") or "")
         scope_payload = ctx.scope_previews.get(requested_digest) if requested_digest else None
         if requested_digest and scope_payload is None:
@@ -285,24 +248,18 @@ def register_exec_search_routes(app, ctx):
                 "ok": False, "error_code": "config_resolution_failed",
                 "error": str(exc),
             }), 422
-
-        # T402: 平台一致性校验
         if frozen_scope.platform != platform_raw:
             return jsonify({
                 "ok": False,
                 "error_code": "scope_platform_mismatch",
                 "user_message": "请求平台与搜索范围平台不一致",
             }), 409
-
-        # T402: 平台禁用检查（在 scope 平台不匹配之后）
         if not reg.enabled_for_new_tasks:
             return jsonify({
                 "ok": False,
                 "error_code": "platform_disabled",
                 "user_message": reg.availability_reason or "平台暂不可用",
             }), 503
-
-        # T402: script_params 与 scope 一致性校验
         sp_keywords = script_params.get("keyword")
         if isinstance(sp_keywords, str):
             sp_keyword_list = [k.strip() for k in sp_keywords.replace("，", ",").split(",") if k.strip()]
@@ -327,7 +284,6 @@ def register_exec_search_routes(app, ctx):
                 "error_code": "location_validation_failed",
                 "error": str(exc),
             }), 422
-        # pages 未显式提供时不校验（后端用 scope 冻结值覆盖）
         pages_mismatch = False
         if "pages" in script_params:
             try:
@@ -344,7 +300,6 @@ def register_exec_search_routes(app, ctx):
                 "error_code": "scope_request_mismatch",
                 "user_message": "搜索参数与搜索范围不一致",
             }), 409
-
         script_params = dict(script_params)
         script_params["keyword"] = ",".join(frozen_scope.keywords)
         script_params["city"] = scope_cities
@@ -353,11 +308,6 @@ def register_exec_search_routes(app, ctx):
             script_params["locations"] = list(frozen_scope.locations)
         else:
             script_params.pop("locations", None)
-
-        # T402: 冻结完整 runtime — 平台登录空间、task_input_digest
-        # Spec 038 B091 FR-020：BOSS + 智联两平台都走账号池解析（FR-021：
-        # 旧 R1/R2 角色互斥 schema 已弃用，统一为 R1/R2 共用账号池；
-        # ``account_for_role`` 内部按 pool.selected 取第一个，role 参数忽略）。
         from webui.pipeline_exec import account_for_role
         browser_account = account_for_role(
             "R1", app.config["BROWSER_ACCOUNTS_PATH"],
@@ -388,10 +338,8 @@ def register_exec_search_routes(app, ctx):
             "cdp_port": login_space.cdp_port,
             "profile_key": login_space.profile_key,
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-
         task_id = uuid.uuid4().hex
         task = ctx.register_pipeline_task(task_id, "scrape")
-        # 把冻结配置摘要存入任务记录，供进度查询返回
         with ctx.lock:
             task["config_digest"] = execution_config.config_digest
             task["scope_digest"] = frozen_scope.scope_digest
@@ -401,7 +349,6 @@ def register_exec_search_routes(app, ctx):
             task["profile_key"] = login_space.profile_key
             task["task_input_digest"] = task_input_digest
             task["auto_screen"] = auto_screen
-        # T402: 搜索 run 的 frozen_filters 为空，筛选快照为空
         ctx.store.create_screening_run(
             task_id,
             frozen_filters={},
@@ -423,12 +370,10 @@ def register_exec_search_routes(app, ctx):
                 "auto_screen_facts": auto_screen_facts,
                 "profile_summary": profile_summary,
                 "profile_facts": profile_facts,
-                # 030：创建时全局当前账号快照，续跑判定"用户是否主动换号"用
                 "active_account_at_freeze": ctx.account_for_run(),
             },
             backend_version=ctx.backend_version,
         )
-        # T402: 持久化平台、空筛选快照和 task_input_digest
         ctx.store.save_filter_snapshot(
             task_id,
             platform=platform_raw,
@@ -436,18 +381,51 @@ def register_exec_search_routes(app, ctx):
             filter_snapshot={},
             task_input_digest=task_input_digest,
         )
+        try:
+            begin_scrape_whitebox(ctx.store, task_id, script_params, frozen_scope.pages_per_combination)
+        except Exception as exc:
+            reason = "任务证据白箱初始化失败"
+            _logger.warning("搜索白箱计划初始化失败", exc_info=True)
+            try:
+                ctx.store.update_screening_run(
+                    task_id, status="failed", error_code="whitebox_incomplete",
+                    error_reason=reason,
+                )
+                ctx.store.append_task_event(task_id, "whitebox_incomplete", {
+                    "error_code": "whitebox_incomplete", "error_reason": reason,
+                })
+            except Exception:
+                _logger.warning("搜索白箱初始化失败状态写入失败", exc_info=True)
+            with ctx.lock:
+                task["status"] = "failed"
+                task["error"] = reason
+            return jsonify({"ok": False, "error": "whitebox_incomplete",
+                            "error_reason": reason,
+                            "detail": type(exc).__name__}), 503
         ctx.activate_run_browser()
         try:
             ctx.executor.submit(
                 ctx.run_pipeline_task, task_id, script_params,
                 execution_config, frozen_scope,
             )
-        except RuntimeError:
+        except RuntimeError as exc:
+            reason = "任务执行器未接受任务"
             ctx.store.update_screening_run(
                 task_id, status="failed", error_code="submit_failed",
-                error_reason="任务执行器未接受任务",
+                error_reason=reason,
             )
-            raise
+            try:
+                ctx.store.append_task_event(task_id, "submission_failed", {
+                    "error_code": "submit_failed", "error_reason": reason,
+                })
+                mark_scrape_submission_failed(ctx.store, task_id, script_params, reason, stage="submit", pages=frozen_scope.pages_per_combination)
+            except Exception:
+                _logger.warning("搜索提交失败白箱记录失败", exc_info=True)
+            with ctx.lock:
+                task["status"] = "failed"
+                task["error"] = reason
+            return jsonify({"ok": False, "error": "submit_failed", "error_reason": reason,
+                            "detail": type(exc).__name__}), 503
         return jsonify({
             "ok": True,
             "task_id": task_id,
@@ -458,27 +436,21 @@ def register_exec_search_routes(app, ctx):
             "task_size": frozen_scope.task_size,
             "browser_account": browser_account,
         })
-
     @app.route("/api/execute-search/continue/<old_task_id>", methods=["POST"])
     def continue_execute_search(old_task_id, _block_checked=False,
                                 account_switch_note=None):
         """断点续抓：从上次失败的组合接着跑，跳过已完成的组合。
-
         切片4：支持 paused 状态继续（FR-020）。优先从 DB checkpoint 恢复
         completed_combos（服务重启后内存丢失也能恢复），回退到内存 task.result。
         同时检查阻断是否解除（如登录已恢复、验证码已过）。
-
         SPEC011 T015: 实验租约持有时拒绝继续（FR-035）。
         """
-        # SPEC011 T015/FR-035: 实验租约门禁
         ok, err_resp = ctx.check_tuning_lease_conflict()
         if not ok:
             return err_resp
-        # 1) 优先从内存读 old_task
         with ctx.lock:
             old_task = ctx.tasks.get(old_task_id)
             old_snapshot = dict(old_task) if old_task else None
-        # 2) 内存没有则从 DB 读（服务重启恢复场景）
         db_run = None
         try:
             db_run = ctx.store.get_screening_run(old_task_id)
@@ -486,7 +458,6 @@ def register_exec_search_routes(app, ctx):
             db_run = None
         if old_snapshot is None and db_run is None:
             return jsonify({"ok": False, "error": "原任务不存在或已过期"}), 404
-        # DB 是服务重启后仍存在的状态权威；取消/失败均为终态，不得复活。
         mem_status = old_snapshot.get("status") if old_snapshot else None
         db_status = db_run.get("status") if db_run else None
         effective_status = db_status or mem_status
@@ -506,12 +477,10 @@ def register_exec_search_routes(app, ctx):
                     "status": "paused",
                 }), 409
         if db_run is not None:
-            # 030：缺冻结账号时回退填充收口到续跑身份域（口径不变：沿用当前全局账号）
             ensure_frozen_browser_account(
                 ctx.store, old_task_id, db_run,
                 platform=str((db_run.get("execution_params") or {}).get("platform") or "boss"),
                 fallback_account=ctx.account_for_run(db_run))
-        # 3) 收集 script_params（内存优先，DB 兜底）
         script_params = (old_snapshot or {}).get("script_params")
         if not script_params and db_run:
             try:
@@ -521,7 +490,6 @@ def register_exec_search_routes(app, ctx):
                 script_params = None
         if not script_params:
             return jsonify({"ok": False, "error": "原任务参数丢失，无法继续"}), 400
-        # 4) 收集 completed_combos：DB checkpoint 优先（持久），内存 result 兜底
         completed: set[str] = set()
         try:
             completed = ctx.store.load_checkpoint(old_task_id, "scrape")
@@ -554,17 +522,11 @@ def register_exec_search_routes(app, ctx):
                 "message": _MSG_TASK_ALREADY_RUNNING,
             }), 409
         if account_switch_note:
-            # 030 FR-005：自动换号在续跑启动日志留一行中文说明
             append_account_switch_log_line(
                 claimed_task,
                 from_account=account_switch_note[0],
                 to_account=account_switch_note[1])
-        # 把续抓信息存进 task，ctx.run_pipeline_task 会读取
-        # T403: 从 DB 恢复冻结 runtime（platform/cdp_port/profile_key/
-        # task_input_digest），不读当前 UI 或活动账号
         db_ep = (db_run or {}).get("execution_params") or {}
-        # 高级设置续跑生效：从 DB 读取刷新后的 execution_config/frozen_scope，
-        # 传给 ctx.run_pipeline_task（frozen_scope 保持冻结，只 pages 不变）。
         from webui.execution_config import (
             ExecutionConfigSnapshot,
             FrozenTaskScope,
@@ -594,16 +556,12 @@ def register_exec_search_routes(app, ctx):
             task["auto_screen"] = bool(db_ep.get("auto_screen"))
         start_gate = threading.Event()
         abort_start = threading.Event()
-
         def run_after_claim_commits():
             start_gate.wait()
             if not abort_start.is_set():
                 ctx.run_pipeline_task(task_id, script_params, resume_config, resume_scope)
-
         try:
             future = ctx.executor.submit(run_after_claim_commits)
-            # 事件与 DB claim 都在 worker 放行前完成；继续沿用同一 task_id，
-            # 避免把内部 handoff 暴露成非 canonical 的 resumed 状态。
             if db_run is not None:
                 ctx.store.append_task_event(old_task_id, "resume", {"task_id": task_id})
                 if not ctx.store.claim_paused_screening_run(old_task_id):
@@ -618,6 +576,13 @@ def register_exec_search_routes(app, ctx):
                 future.cancel()
             ctx.release_pipeline_claim(task_id, claimed_task, previous_task)
             ctx.release_resume_claim(old_task_id)
+            reason = "继续任务提交失败，任务已结束"
+            try:
+                ctx.store.update_screening_run(
+                    task_id, status="failed", error_code="submit_failed", error_reason=reason)
+                mark_scrape_submission_failed(ctx.store, task_id, script_params, reason, stage="resume_submit", pages=int(resume_scope.pages_per_combination) if resume_scope else 0)
+            except Exception as _marker_exc:
+                _logger.warning("继续任务提交失败白箱记录失败: %s", type(_marker_exc).__name__)
             return jsonify({
                 "ok": False, "error": "resume_submit_failed",
                 "message": f"继续任务提交失败：{type(exc).__name__}",
@@ -626,11 +591,9 @@ def register_exec_search_routes(app, ctx):
         return jsonify({"ok": True, "task_id": task_id,
                         "skipped": len(completed), "old_jobs": len(old_jobs),
                         "resumed_from": old_task_id})
-
     @app.route("/api/execute-search/<task_id>/cancel", methods=["POST"])
     def cancel_execute_search(task_id):
         """停止正在运行的抓取任务。
-
         做法：set stop_event → 立刻关调试 Chrome（不等当前组合抓完）→
         task 标 cancelled。run_search 会因浏览器被关而退出，ctx.run_pipeline_task
         看到 stop_event.is_set() 后标 cancelled 而非 failed/done。
@@ -644,21 +607,16 @@ def register_exec_search_routes(app, ctx):
             stop_event = task.get("stop_event")
             if stop_event is not None:
                 stop_event.set()
-            # 立刻标记 cancelled，让前端轮询马上看到状态变化
             task["status"] = "cancelled"
             task["error"] = _MSG_USER_STOPPED_SCRAPE
             task["logs"].append("用户取消任务")
             cancel_platform = task.get("platform")
-        # 关浏览器放到锁外，避免持锁时间过长。best-effort，失败不阻塞取消。
         try:
             from webui.pipeline_exec import close_debug_chrome
             close_debug_chrome()
         except Exception:
             _logger.warning("调试 Chrome 关闭失败（不影响本次响应）", exc_info=True)
-
         ctx.clear_auto_screen(task_id)
-        # T412 契约 http-api.md L223-229：DB run 存在时以 DB platform 为权威；
-        # 仅 DB 创建前内存窗口用注册 task 的不可变平台快照。
         if not cancel_platform:
             try:
                 _db_run = ctx.store.get_screening_run(task_id)
@@ -669,6 +627,4 @@ def register_exec_search_routes(app, ctx):
             "ok": True, "run_id": task_id, "task_id": task_id,
             "platform": cancel_platform, "status": "cancelled",
         })
-
-    # 021 B6：路由函数回传 ctx，供 app.py 内续跑分发调用
     ctx.continue_execute_search = continue_execute_search

@@ -16,9 +16,39 @@ from flask import jsonify, request
 
 from webui.constants import LOG_TAIL_LINES, _MSG_TASK_NOT_FOUND
 from webui.result_rounds import save_scraped_only_round
-from webui.task_status import _public_task_status
+from webui.task_status import _public_status_for_integrity, _public_task_status
 from webui.task_runners import _iso_epoch_ms
 from webui.workbench import normalize_job_link
+from webui.whitebox import WhiteboxService
+
+def _integrity_for_run(store, run_id: str, scrape_task_id: str = "") -> dict:
+    run = store.get_screening_run(run_id) if run_id else None
+    if run is not None and run.get("record_kind") == "result_snapshot":
+        try:
+            return WhiteboxService(store).integrity_for_result(
+                str(run_id), str(scrape_task_id or ""))
+        except Exception as exc:
+            # A malformed/legacy snapshot falls through to the conservative
+            # report path below; retain a trace instead of swallowing it.
+            from webui.logging_setup import get_logger
+            get_logger(__name__).debug(
+                "result snapshot integrity lookup deferred: %s",
+                type(exc).__name__,
+            )
+    stage = str((run or {}).get("current_stage") or "")
+    owner = (
+        "scrape"
+        if str(run_id) == str(scrape_task_id or "") or stage == "scrape"
+        else "recrawl"
+        if stage.startswith("recrawl_") or str(run_id).startswith("recrawl-")
+        else "screening"
+    )
+    try:
+        return WhiteboxService(store).report(owner, str(run_id or scrape_task_id))["integrity"]
+    except Exception:
+        return {"conclusion": "unverifiable", "label": "无法确认", "evidence_complete": False,
+                "primary_code": "legacy_evidence_missing", "primary_reason": "历史证据不足，无法确认",
+                "recommendation": "建议重新执行", "revision": 0}
 
 def register_results_routes(app, ctx):
     def _build_source_summary_and_outcomes(run_id):
@@ -224,11 +254,16 @@ def register_results_routes(app, ctx):
                 task["finished_at"] = int(time.time() * 1000)
             # T405: 按 combo 最新 attempt 汇总 source outcomes
             source_summary, source_outcomes = _build_source_summary_and_outcomes(task_id)
+            integrity = _integrity_for_run(ctx.store, task_id)
+            raw_status = str(task.get("status") or "")
+            public_status = (_public_status_for_integrity(
+                integrity, raw_status, (db_run or {}).get("interruption_kind"),
+            ) if raw_status in {"done", "succeeded", "partial", "failed", "cancelled", "interrupted"}
+                else _public_task_status(raw_status, (db_run or {}).get("interruption_kind")))
             snapshot = {
                 "ok": True,
                 "kind": task.get("kind", ""),
-                "status": _public_task_status(
-                    task["status"], (db_run or {}).get("interruption_kind")),
+                "status": public_status,
                 "progress": task["progress"],
                 "logs": list(task["logs"][-LOG_TAIL_LINES:]),
                 "error": task["error"],
@@ -241,6 +276,7 @@ def register_results_routes(app, ctx):
                 "task_input_digest": task.get("task_input_digest") or (db_run or {}).get("task_input_digest"),
                 "source_summary": source_summary,
                 "source_outcomes": source_outcomes,
+                "integrity": integrity,
             }
             if task["status"] in ("done", "failed") and task["result"] is not None:
                 # 原样返回整个 result：抓取任务含 jobs/计数；
@@ -298,6 +334,8 @@ def register_results_routes(app, ctx):
         result = payload["result"]
         jobs = result.get("jobs", [])
         run_id = payload.get("run_id", "")
+        integrity = _integrity_for_run(
+            ctx.store, str(run_id), str(payload.get("scrape_task_id") or ""))
         round_context = _round_context_for_run(
             ctx.store.get_screening_run(run_id) if run_id else None)
         # T409: 汇总 source outcomes
@@ -382,6 +420,7 @@ def register_results_routes(app, ctx):
             "source_summary": source_summary,
             "source_outcomes": source_outcomes,
             "source_evidence_available": True,
+            "integrity": integrity,
             "result": {
                 "total_scraped": result.get("total_scraped", 0),
                 "total_matched": result.get("total_matched", 0),

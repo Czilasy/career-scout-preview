@@ -1,20 +1,15 @@
 """AI 粗筛（screen_jobs）与 JD 精筛（match_jds）（021 B7 自 ai.py 搬运）。
-
 call_ai 经 webui.ai 门面在调用时动态取用，保持 patch 面不变。
 """
-
 from __future__ import annotations
-
 import json
 import time
-
 from webui.ai_retry import FINE_SINGLE_INVALID_RESPONSE_DELAY_SECONDS
 from webui.error_registry import ERROR_INVALID, ERROR_SERVER, ERROR_TRUNCATED, SYSTEMIC_AI_ERROR_CODES
 from webui.flag_features import build_features_prompt_text, clean_flags, decide_flags
 from webui.screening_jd_gate import has_usable_jd, missing_jd_verdict
 from webui.profile_facts import build_profile_facts_description
 from webui.ai_prompts import build_match_system_prompt
-
 from webui.ai_client import FINE_BATCH_TIMEOUT, _AI_CHECKPOINT_FAILED
 from webui.ai_errors import (
     AICheckpointError,
@@ -37,14 +32,12 @@ from webui.ai_filters import (
     job_hard_mismatch,
 )
 from webui import recruiter_activity
-
 from webui.logging_setup import get_logger
-
 _logger = get_logger(__name__)
-
-
-
-
+def _ai_integrity_meta(state):
+    used = bool(state.get("used"))
+    return {"degraded": used, "normal_screening_completed": not used,
+            "fallback_reasons": list(state.get("reasons") or [])}
 def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 batch_size=None, progress=None,
                 concurrency=None, raise_on_systemic=False,
@@ -54,27 +47,21 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 measurement_input_count=None, retry_limits=None,
                 correlation_id: str = ""):
     """Stage A 粗筛：AI 逐条核对岗位列表字段，移除"明显"不符合的。
-
     ``jobs``: 脚本抓回的岗位列表（仅列表字段，无 JD）。
     ``criteria``: {"profile_summary": str, "city": [...], "degree": [...], ...}。
     ``concurrency``: 并发批次数，默认 1（串行）。spec 007 ⑥⑦：免费端点实测并发=1；
         换不限流端点可调大。>1 时用线程池并发提交批次，结果按批次顺序合并。
-
     ``execution_config``: SPEC011 T006 — 可选的不可变 ExecutionConfigSnapshot。
     提供时使用冻结的 ``screen_batch_size``/``screen_concurrency``，不读 JSON。
-
     学历向下兼容、实习/全职不符、城市不符、薪资严重偏低视为明显不符；
     拿不准的一律保留（宁可多留不可错杀）。AI 调用失败的批次全部保留。
-
     输入格式（spec 007 ⑥）：一行一个紧凑格式 ``i. 标题 | 薪资 | 城市 | 学历 | 规模``，
     省 JSON 包装省 token。输出格式：只列剔除名单
     ``{"dropped":[{"i":3,"reason":...}]}``，未列出的默认保留——防错杀、省输出 token、
     避免 50 条输出截断。
-
     切片6（FR-020/SC-006）：``raise_on_systemic=True`` 时，AI 命中限流/额度/密钥/
     网络等 systemic 错误立即抛 ``AISecurityError``，调用方应捕获并暂停整任务，
     而不是默认全部保留并继续。默认 False 保持向后兼容。
-
     返回 {"kept": [job_id...], "dropped": [{"job_id","title","reason"}...],
     "verdicts": {job_id: {"verdict","reason"}}}。
     """
@@ -90,6 +77,7 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         else:
             concurrency = int(_adv_setting("screen_concurrency", SCREEN_CONCURRENCY))
     kept, dropped, verdicts = [], [], {}
+    fallback_state = {"used": False, "reasons": []}
     measurement_indices = {id(job): index for index, job in enumerate(jobs)}
     terminal_input_count = (
         int(measurement_input_count)
@@ -142,8 +130,7 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
             if str(job.get("job_id", "")) not in _hard_ids
         ]
     if not jobs:
-        return {"kept": kept, "dropped": dropped, "verdicts": verdicts}
-
+        return {"kept": kept, "dropped": dropped, "verdicts": verdicts, **_ai_integrity_meta(fallback_state)}
     criteria_desc = _build_criteria_description(criteria)
     system_prompt = (
         "你是求职初筛助手。只按候选人已确认的筛选字段，剔除【明显】不符的岗位。\n"
@@ -172,20 +159,15 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
         "禁止使用「经验过高」「不符合」「不匹配」等笼统词汇。\n"
         "reason 限25字内。若无任何剔除，输出 {\"dropped\":[]}。"
     )
-
-    # 切批
     batches = []
     for start in range(0, len(jobs_to_process), batch_size):
         batches.append(jobs_to_process[start:start + batch_size])
-
     def _process_batch(batch):
         """处理单个批次，返回 (batch_dropped, batch_verdicts)。
-
         batch_dropped: [{"job_id","title","reason"}...]
         batch_verdicts: {job_id: {"verdict","reason"}}
         默认全保留；AI 返回的 dropped 名单扣掉。
         """
-        # 紧凑文本输入：i. 标题 | 薪资 | 城市 | 学历 | 规模
         lines = []
         for idx, job in enumerate(batch):
             parts = [
@@ -215,12 +197,10 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
             dropped_list = raw_dropped if isinstance(raw_dropped, list) else []
             by_i = {r.get("i"): r for r in dropped_list if isinstance(r, dict)}
         except AISecurityError as exc:
-            # 切片6：systemic 错误（限流/额度/密钥/网络）立即抛，让调用方暂停
             if raise_on_systemic and exc.error_code in SYSTEMIC_AI_ERROR_CODES:
                 _req_error_code = exc.error_code
                 raise
             if exc.error_code == ERROR_TRUNCATED and len(batch) > 1:
-                # 返回被截断：拆半重跑这批，还截断就继续拆（到单条为止）
                 _req_error_code = exc.error_code
                 _emit_retry_event(
                     measurement_callback, "rough", 0,
@@ -232,8 +212,9 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 v1.update(v2)
                 return d1 + d2, v1
             _req_error_code = exc.error_code
+            fallback_state["used"] = True
+            fallback_state["reasons"].append(str(exc.error_code))
             by_i = {}  # 调用失败：该批全部保留，防错杀
-
         b_dropped, b_verdicts = [], {}
         for idx, job in enumerate(batch):
             jid = str(job.get("job_id", ""))
@@ -257,15 +238,12 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                     status="dropped" if r else "kept",
                     input_count=terminal_input_count,
                 )
-        # 批次事件：记录输入/输出数量
         _emit_batch_event(measurement_callback, "rough",
                           input_count=len(batch),
                           output_count=len(b_dropped),
                           error_code=_req_error_code)
         return b_dropped, b_verdicts
-
     if concurrency <= 1:
-        # 串行（默认，免费端点并发=1）
         processed = 0
         for batch in batches:
             b_dropped, b_verdicts = _process_batch(batch)
@@ -283,14 +261,11 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                     progress(min(processed, len(jobs)), len(jobs))
                 except Exception:
                     _logger.debug("进度回调执行失败（不阻断筛选主流程）", exc_info=True)
-
     else:
-        # 并发（换不限流端点时启用）
         import threading
         from concurrent.futures import ThreadPoolExecutor, as_completed
         lock = threading.Lock()
         processed_counter = [0]
-
         def _safe_progress(n_done):
             if progress is None:
                 return
@@ -301,8 +276,6 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                 progress(cur, len(jobs))
             except Exception:
                 _logger.debug("进度回调执行失败（不阻断筛选主流程）", exc_info=True)
-
-
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = {pool.submit(_process_batch, batch): batch for batch in batches}
             for fut in as_completed(futures):
@@ -318,14 +291,9 @@ def screen_jobs(jobs, criteria, endpoint_url, api_key, model="",
                     except Exception as exc:
                         raise AICheckpointError(_AI_CHECKPOINT_FAILED) from exc
                 _safe_progress(len(futures[fut]))
-
     kept = [str(j.get("job_id", "")) for j in jobs
             if str(j.get("job_id", "")) not in {d["job_id"] for d in dropped}]
-    return {"kept": kept, "dropped": dropped, "verdicts": verdicts}
-
-
-
-
+    return {"kept": kept, "dropped": dropped, "verdicts": verdicts, **_ai_integrity_meta(fallback_state)}
 def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
               criteria=None, profile_facts=None,
               batch_size=None, progress=None, completed_verdicts=None,
@@ -336,7 +304,6 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
               missing_result_retry_budget=0, retry_limits=None,
               correlation_id: str = ""):
     """Stage B 精筛：AI 逐条对比岗位 JD 与候选人画像，判 match/not_match。
-
     ``jobs_with_jd``: [{"job_id","title","salary","location","jd"}...]。
     ``profile_summary``: 求职画像（用户可编辑，优先级低于已选六类字段，只能放宽未选择维度）。
     ``criteria``: 可选，筛选条件 dict（学历/经验/薪资/城市等，作硬性基线）。
@@ -348,23 +315,17 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     不能把未完成的判定伪装成已匹配。
     传输层失败的批次不额外整批重试，失败项直接按 uncertain 落库，
     用户可在结果页对 uncertain 岗位补抓/重判。
-
     ``completed_verdicts``: 可选，已完成的判定 {job_id: verdict}（断点续筛）。
     这些岗位跳过不重复调用 AI，原样并入返回；默认 None 时行为与之前一致。
-
     ``concurrency``: 并发批次数，默认 1（串行）。spec 007 ⑥⑦：免费端点实测并发=1；
         换不限流端点可调大。>1 时用线程池并发提交批次，结果按完成顺序合并。
-
     ``execution_config``: SPEC011 T006 — 可选的不可变 ExecutionConfigSnapshot。
     提供时使用冻结的 ``match_batch_size``/``match_concurrency``，不读 JSON。
-
     ``on_batch_done``: 可选回调 (batch_verdicts, completed_job_ids)，每批判定落库后
     调用；回调抛异常会转成 AICheckpointError，防止内存进度领先于可恢复进度。
-
     切片6（FR-020/SC-008）：``raise_on_systemic=True`` 时，AI 命中限流/额度/密钥/
     网络等 systemic 错误立即抛 ``AISecurityError``，调用方应捕获并暂停整任务，
     而不是批量变 uncertain 后完成。默认 False 保持向后兼容。
-
     熔断：``raise_on_systemic=True`` 时，连续 AI_CONSECUTIVE_FAILURE_LIMIT 个批次
     全部无有效判定（空响应/截断/无效 JSON 等非 systemic 失败）也会抛
     ``AISecurityError(server_error, failure_phase=circuit_open)`` 触发暂停，
@@ -382,13 +343,13 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         else:
             concurrency = int(_adv_setting("match_concurrency", MATCH_CONCURRENCY))
     verdicts = {}
+    fallback_state = {"used": False, "reasons": []}
     measurement_indices = {
         id(job): index for index, job in enumerate(jobs_with_jd)
     }
     import threading
     terminal_lock = threading.Lock()
     emitted_terminal_indices: set[int] = set()
-
     def _emit_final_terminal(job: dict, fallback: int, status: str) -> None:
         item_index = _measurement_item_index(job, fallback, measurement_indices)
         with terminal_lock:
@@ -405,14 +366,9 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         jobs_with_jd = [j for j in jobs_with_jd
                         if str(j.get("job_id", "")) not in done_ids]
     if not jobs_with_jd:
-        return {"verdicts": verdicts}
-    # 熔断：连续整批 AI 无有效判定（空响应/截断/无效 JSON 等非 systemic 失败）
-    # 达到 AI_CONSECUTIVE_FAILURE_LIMIT 即判定端点系统性故障，抛 server_error
-    # 让调用方暂停整任务，避免故障时拆半递归放大请求、长期空转。
-    # 仅 raise_on_systemic=True 时生效；False 保持原“标 uncertain 继续”行为。
+        return {"verdicts": verdicts, **_ai_integrity_meta(fallback_state)}
     _circuit_state = {"consecutive": 0}
     _circuit_lock = threading.Lock()
-
     def _circuit_after_batch(batch_verdicts: dict) -> None:
         """整批全部 uncertain（AI 未给出任何有效判定）→ 连续失败计数，否则清零。"""
         all_uncertain = bool(batch_verdicts) and all(
@@ -451,10 +407,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
         _emit_final_terminal(_job, _idx, "uncertain")
     jobs_with_jd = eligible_jobs
     if not jobs_with_jd:
-        return {"verdicts": verdicts}
-    # 已选筛选字段是硬约束：结构化标签/JD 明确值与筛选条件冲突时直接 not_match，
-    # 不交给 AI 各批自判；字段未知或未标明的岗位保留给 AI 判断。
-    # 028：精筛同时启用第 7 类招聘者活跃判定（详情抓取后已有事实，见 job_hard_mismatch）。
+        return {"verdicts": verdicts, **_ai_integrity_meta(fallback_state)}
     _hard_kept = []
     for _idx, _job in enumerate(jobs_with_jd):
         _field, _reason = job_hard_mismatch(_job, criteria, include_recruiter=True)
@@ -467,7 +420,7 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             _hard_kept.append(_job)
     jobs_with_jd = _hard_kept
     if not jobs_with_jd:
-        return {"verdicts": verdicts}
+        return {"verdicts": verdicts, **_ai_integrity_meta(fallback_state)}
     missing_retry_budget = [max(0, int(missing_result_retry_budget))]
     summary = (profile_summary or "").strip() or "（无候选人画像）"
     criteria_desc = ""
@@ -485,10 +438,8 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
     )
     def _match_one_batch(batch, _invalid_retried=False):
         """单批精筛，返回 {jid: verdict}。
-
         返回被截断（ERROR_TRUNCATED）时拆半重跑，还截断就继续拆到单条；
         单条仍失败才标 uncertain（不伪装成已匹配）。
-
         整批因网络/超时/限流失败时，本批每项直接标 uncertain 并发终态，
         不再末尾补一轮；用户可在结果页对 uncertain 岗位重抓。
         """
@@ -523,7 +474,6 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             results = raw_results if isinstance(raw_results, list) else []
             by_i = {r.get("i"): r for r in results if isinstance(r, dict)}
         except AISecurityError as exc:
-            # 切片6：systemic 错误立即抛，让调用方暂停（不批量变 uncertain 后完成）
             if raise_on_systemic and exc.error_code in SYSTEMIC_AI_ERROR_CODES:
                 _req_error_code = exc.error_code
                 for fallback, pending_job in enumerate(jobs_with_jd):
@@ -549,12 +499,16 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 )
                 return _match_one_batch(batch, _invalid_retried=True)
             _req_error_code = exc.error_code
+            fallback_state["used"] = True
+            fallback_state["reasons"].append(str(exc.error_code))
             by_i = None
             fail_reason = user_facing_error(exc.error_code)
         batch_verdicts = {}
         for idx, job in enumerate(batch):
             jid = str(job.get("job_id", ""))
             if by_i is None:
+                fallback_state["used"] = True
+                fallback_state["reasons"].append("missing_result")
                 batch_verdicts[jid] = {
                     "verdict": "uncertain",
                     "reason": f"{fail_reason}，待人工确认" if fail_reason else "AI 精筛失败，待人工确认",
@@ -579,13 +533,10 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
             reason = str(r.get("reason", "")).strip()
             caveats = [str(c).strip() for c in r.get("caveats") or []
                        if isinstance(c, str) and c.strip()]
-            # flags 结构化解析：清洗（code/level/reason 校验）+ 分级判定
-            # （高危≥1 或 中危≥2 → 输出 flags；中危仅 1 条 → 降级 caveats）
             decided = decide_flags(clean_flags(r.get("flags")))
             flags = decided["flags"]
             caveats.extend(decided["caveats"])
             verdict = "match" if match else "not_match"
-            # 高危命中强制 not_match，reason 以"疑似骗局："开头
             if any(f.get("level") == "high" for f in flags):
                 verdict = "not_match"
                 reason = reason or "命中高危可疑特征"
@@ -603,13 +554,10 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                           output_count=len(batch_verdicts),
                           error_code=_req_error_code)
         return batch_verdicts
-
     batches = []
     for start in range(0, len(jobs_with_jd), batch_size):
         batches.append(jobs_with_jd[start:start + batch_size])
-
     if concurrency <= 1 or len(batches) <= 1:
-        # 串行（默认，免费端点并发=1）
         processed = 0
         for batch in batches:
             batch_verdicts = _match_one_batch(batch)
@@ -626,14 +574,11 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                     progress(min(processed, len(jobs_with_jd)), len(jobs_with_jd))
                 except Exception:
                     _logger.debug("进度回调执行失败（不阻断筛选主流程）", exc_info=True)
-
     else:
-        # 并发（换不限流端点时启用）
         import threading
         from concurrent.futures import ThreadPoolExecutor, as_completed
         lock = threading.Lock()
         processed_counter = [0]
-
         def _safe_progress(n_done):
             if progress is None:
                 return
@@ -644,8 +589,6 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                 progress(cur, len(jobs_with_jd))
             except Exception:
                 _logger.debug("进度回调执行失败（不阻断筛选主流程）", exc_info=True)
-
-
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = {pool.submit(_match_one_batch, batch): batch for batch in batches}
             for fut in as_completed(futures):
@@ -660,9 +603,6 @@ def match_jds(jobs_with_jd, profile_summary, endpoint_url, api_key, model="",
                     except Exception as exc:
                         raise AICheckpointError(_AI_CHECKPOINT_FAILED) from exc
                 _safe_progress(len(futures[fut]))
-
-
-    # 028 US2：选中第 7 类但拿不到活跃事实的岗位附未知 caveat（不拦截，无噪音）
     for _jid in recruiter_activity.unknown_job_ids(jobs_with_jd, criteria):
         recruiter_activity.merge_unknown_caveat(verdicts.get(_jid))
-    return {"verdicts": verdicts}
+    return {"verdicts": verdicts, **_ai_integrity_meta(fallback_state)}

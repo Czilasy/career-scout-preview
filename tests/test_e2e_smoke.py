@@ -93,10 +93,56 @@ class _E2EBase(unittest.TestCase):
         )
         self.store.save_scrape_combo_result(
             run_id, "kw|city", jobs, ["kw|city"])
+        from webui.store_helpers import _now
+        from webui.whitebox import WhiteboxService
+        whitebox = WhiteboxService(self.store)
+        whitebox_ref = whitebox.begin("scrape", run_id, {
+            "stages": ["scrape_list"],
+            "units": [{
+                "unit_key": "kw|city", "unit_kind": "keyword_city",
+                "stage": "scrape_list", "planned_pages": 1,
+                "required": True,
+            }],
+        })
+        whitebox.record(whitebox_ref, {
+            "idempotency_key": f"fixture-start:{run_id}",
+            "event_type": "unit_started", "occurred_at": _now(),
+            "stage": "scrape_list", "unit_kind": "keyword_city",
+            "unit_key": "kw|city", "attempt_no": 1,
+            "required_evidence": False, "payload": {
+                "planned_pages": 1, "start_page": 1,
+            },
+        })
+        whitebox.record(whitebox_ref, {
+            "idempotency_key": f"fixture-page:{run_id}",
+            "event_type": "page_completed", "occurred_at": _now(),
+            "stage": "scrape_list", "unit_kind": "keyword_city",
+            "unit_key": "kw|city", "attempt_no": 1,
+            "required_evidence": True, "payload": {
+                "page": 1, "planned_pages": 1,
+                "returned_count": len(jobs),
+                "new_unique_count": len(jobs), "has_more": False,
+                "resume_page": 2,
+            },
+        })
+        whitebox.record(whitebox_ref, {
+            "idempotency_key": f"fixture-scope:{run_id}",
+            "event_type": "scope_completed", "occurred_at": _now(),
+            "stage": "scrape_list", "unit_kind": "keyword_city",
+            "unit_key": "kw|city", "attempt_no": 1,
+            "required_evidence": True, "payload": {
+                "scope_complete": True, "source_exhausted": True,
+                "stop_reason": "target_reached",
+                "returned_total_count": len(jobs),
+                "unit_unique_count": len(jobs),
+            },
+        })
+        scrape_integrity = whitebox.finalize(whitebox_ref)
         self.app.config["PIPELINE_TASKS"][run_id] = {
             "kind": "scrape", "status": "done", "progress": {}, "logs": [],
             "result": {"ok": True, "jobs": jobs, "total_scraped": len(jobs),
-                       "total_matched": 0, "completed_combos": ["kw|city"]},
+                       "total_matched": 0, "completed_combos": ["kw|city"],
+                       "integrity": scrape_integrity},
             "error": "", "started_at": None, "finished_at": None,
             "stop_event": threading.Event(), "platform": "boss",
         }

@@ -83,6 +83,76 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
         )
         self.store.update_screening_run(scrape_task_id, status="running")
         self.store.update_screening_run(scrape_task_id, status="succeeded")
+        # 033 V2：父抓取的 succeeded 夹具必须带有可复核的页级和范围级
+        # 完成事实，否则 AI 子任务只能诚实地显示为无法确认。
+        from webui.store_helpers import _now
+        from webui.whitebox import WhiteboxService
+        whitebox = WhiteboxService(self.store)
+        ref = whitebox.begin("scrape", scrape_task_id, {
+            "stages": ["scrape_list"],
+            "units": [{
+                "unit_key": "后端|上海",
+                "unit_kind": "keyword_city",
+                "stage": "scrape_list",
+                "planned_pages": 1,
+                "required": True,
+            }],
+        })
+        whitebox.record(ref, {
+            "idempotency_key": f"page:{scrape_task_id}",
+            "event_type": "page_completed",
+            "occurred_at": _now(),
+            "stage": "scrape_list",
+            "unit_kind": "keyword_city",
+            "unit_key": "后端|上海",
+            "attempt_no": 1,
+            "required_evidence": True,
+            "payload": {
+                "page": 1,
+                "planned_pages": 1,
+                "returned_count": len(jobs),
+                "new_unique_count": len(jobs),
+                "has_more": False,
+                "resume_page": 2,
+                "scope_complete": True,
+                "source_exhausted": True,
+                "stop_reason": "target_reached" if jobs else "explicit_empty",
+            },
+        })
+        whitebox.record(ref, {
+            "idempotency_key": f"scope-completed:{scrape_task_id}",
+            "event_type": "scope_completed",
+            "occurred_at": _now(),
+            "stage": "scrape_list",
+            "unit_kind": "keyword_city",
+            "unit_key": "后端|上海",
+            "attempt_no": 1,
+            "required_evidence": True,
+            "payload": {
+                "scope_complete": True,
+                "source_exhausted": True,
+                "returned_total_count": len(jobs),
+                "unit_unique_count": len(jobs),
+                "stop_reason": "target_reached" if jobs else "explicit_empty",
+            },
+        })
+        if not jobs:
+            whitebox.record(ref, {
+                "idempotency_key": f"explicit-empty:{scrape_task_id}",
+                "event_type": "explicit_empty",
+                "occurred_at": _now(),
+                "stage": "scrape_list",
+                "unit_kind": "keyword_city",
+                "unit_key": "后端|上海",
+                "attempt_no": 1,
+                "required_evidence": True,
+                "payload": {"empty_evidence": {
+                    "kind": "explicit_empty_state",
+                    "fixture_version": "test",
+                    "marker": "no_jobs",
+                }},
+            })
+        whitebox.finalize(ref, lifecycle_end="succeeded")
         self.store.save_ai_settings(
             "http://example.invalid", "test-ref", status="ready"
         )
@@ -534,7 +604,8 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200, response.get_json())
             finished = _wait_for_pipeline_task(self.client, run_id)
-        self.assertEqual(finished["status"], "completed", finished)
+        self.assertEqual(finished["status"], "completed_with_pending", finished)
+        self.assertEqual(finished["integrity"]["conclusion"], "partial", finished)
         self.assertEqual(match_jds.call_count, 1)
         self.assertEqual(match_jds.call_args.args[0], [])
         run = self.store.get_screening_run(run_id)
@@ -680,7 +751,8 @@ class ConvergencePendingPersistenceTests(unittest.TestCase):
             task_id = response.get_json()["task_id"]
             finished = _wait_for_pipeline_task(self.client, task_id)
 
-        self.assertEqual(finished["status"], "completed", finished)
+        self.assertEqual(finished["status"], "completed_with_pending", finished)
+        self.assertEqual(finished["integrity"]["conclusion"], "partial", finished)
         self.assertEqual(seen.get("pending"), 1)
 
     def test_main_ai_screen_splits_by_frozen_batch_settings(self):

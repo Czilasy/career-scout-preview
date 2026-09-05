@@ -764,7 +764,10 @@ class LoginRecheckTests(unittest.TestCase):
             [
                 SourceOutcome.failure(
                     failed_code="source_login_required", safe_log="reason=疑似"),
-                SourceOutcome.success(jobs=[{"job_id": "j1", "source_url": "u1"}]),
+                SourceOutcome.success(
+                    jobs=[{"job_id": "j1", "source_url": "u1"}],
+                    scope_complete=True,
+                ),
             ],
             SourceOutcome.success(),
             params={"keyword": "A", "city": ["上海"]},  # 单组合：1 次失败 + 1 次重试
@@ -781,11 +784,15 @@ class LoginRecheckTests(unittest.TestCase):
             [
                 SourceOutcome.failure(
                     failed_code="source_login_required", safe_log="reason=确认"),
-                SourceOutcome.success(jobs=[{"job_id": "j2", "source_url": "u2"}]),
+                SourceOutcome.success(
+                    jobs=[{"job_id": "j2", "source_url": "u2"}],
+                    scope_complete=True,
+                ),
             ],
             SourceOutcome.failure(failed_code="source_login_required"),
         )
-        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["integrity"]["conclusion"], "partial")
         self.assertNotIn("hard_stop", result)
         self.assertEqual(source.fetch_calls, 2)
         self.assertEqual(result["total_scraped"], 1)

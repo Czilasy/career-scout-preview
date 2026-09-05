@@ -13,23 +13,46 @@ import sqlite3
 from flask import jsonify
 
 from webui.constants import LOG_TAIL_LINES
-from webui.task_status import _pipeline_kind_for_stage
+from webui.task_status import _pipeline_kind_for_stage, _public_status_for_integrity
 from webui.task_runners import _iso_epoch_ms
+from webui.whitebox import WhiteboxService
 
 
 def register_running_task_routes(app, ctx):
+    def _integrity_for(owner_kind: str, owner_id: str, *, active: bool = False):
+        """Read the canonical report without promoting legacy rows to success."""
+        try:
+            return WhiteboxService(ctx.store).report(owner_kind, str(owner_id))["integrity"]
+        except ctx.operational_errors:
+            return None if active else {
+                "conclusion": "unverifiable", "label": "无法确认",
+                "evidence_complete": False, "primary_code": "query_failed",
+                "primary_reason": "任务证据查询失败", "recommendation": "建议重新执行",
+                "revision": 0,
+            }
+        except Exception:
+            return None if active else {
+                "conclusion": "unverifiable", "label": "无法确认",
+                "evidence_complete": False, "primary_code": "legacy_evidence_missing",
+                "primary_reason": "历史证据不足，无法确认", "recommendation": "建议重新执行",
+                "revision": 0,
+            }
+
     def _scrape_completed_for_run(execution_params: dict) -> bool:
         """Infer whether the source scrape run finished after a service restart."""
-        if bool(execution_params.get("scrape_completed")):
-            return True
         scrape_task_id = str(execution_params.get("scrape_task_id") or "")
         if not scrape_task_id:
             return False
         try:
-            source_run = ctx.store.get_screening_run(scrape_task_id)
+            integrity = WhiteboxService(ctx.store).report("scrape", scrape_task_id)["integrity"]
         except ctx.operational_errors:
             return False
-        return bool(source_run and source_run.get("status") == "succeeded")
+        except Exception:
+            return False
+        return bool(integrity.get("evidence_complete") and integrity.get("conclusion") in {"succeeded", "empty"})
+
+    def _status_for_integrity(integrity: dict | None, fallback: str) -> str:
+        return _public_status_for_integrity(integrity, fallback)
     @app.route("/api/latest-running-task")
     def latest_running_task():
         """返回最近一个仍在运行（running/queued）的 pipeline 任务。
@@ -92,6 +115,12 @@ def register_running_task_routes(app, ctx):
                             or _mem_db_ep.get("auto_screen_facts")
                         ),
                         "round_context": ctx.round_context_for_run(_mem_run),
+                        "integrity": _integrity_for(
+                            "scrape" if task.get("kind") == "scrape" else (
+                                "recrawl" if task.get("kind") == "recrawl" else "screening"
+                            ),
+                            task_id, active=True,
+                        ),
                     })
         # 2. DB 中最近 paused（服务重启后恢复暂停态，FR-028）
         try:
@@ -169,6 +198,10 @@ def register_running_task_routes(app, ctx):
                 "scraped_count": paused_scraped_count,
                 "source_total": int(prow["source_count"] or 0),
                 "round_context": ctx.round_context_for_run(paused_run),
+                "integrity": _integrity_for(
+                    paused_kind if paused_kind in {"scrape", "recrawl"} else "screening",
+                    prow["id"],
+                ),
             })
         # 3. DB 中被进程重启打断的筛选。重启后工作线程已死，
         # 不能假装还在跑——如实告诉前端有个可续跑的中断任务。
@@ -222,6 +255,10 @@ def register_running_task_routes(app, ctx):
                 "scraped_count": interrupted_scraped_count,
                 "source_total": int(run.get("source_count") or 0),
                 "round_context": ctx.round_context_for_run(run),
+                "integrity": _integrity_for(
+                    interrupted_kind if interrupted_kind in {"scrape", "recrawl"} else "screening",
+                    run["id"],
+                ),
             })
         # 3.4 孤儿收尾：DB 里 running+scrape、内存已无 worker、但 checkpoint
         # 已满且已抓岗位>0 —— 说明抓取确实完成而终态漏写。这里补写
@@ -260,7 +297,23 @@ def register_running_task_routes(app, ctx):
                 continue
             if ctx.store.count_scrape_run_jobs(_rid) <= 0:
                 continue
-            # 数据可证明已抓完且 worker 已不在：补写完成终态（幂等）。
+            # 仅白箱完整结论可补写完成；岗位/检查点数量本身不是完成证据。
+            try:
+                _integrity = WhiteboxService(ctx.store).report("scrape", _rid)["integrity"]
+            except Exception:
+                _integrity = {"conclusion": "unverifiable", "label": "无法确认",
+                              "evidence_complete": False, "primary_code": "legacy_evidence_missing",
+                              "primary_reason": "历史证据不足，无法确认", "revision": 0}
+            if _integrity.get("conclusion") not in {"succeeded", "empty"} or not _integrity.get("evidence_complete"):
+                return jsonify({
+                    "ok": True, "has_task": True, "task_id": _rid, "kind": "scrape",
+                    "status": "running", "stage": "scrape", "progress": {"message": "正在核对任务完成证据"},
+                    "logs": [], "error": _integrity.get("primary_reason") or "无法确认是否完成",
+                    "resumable": True, "source": "database", "integrity": _integrity,
+                    "platform": _running_run.get("platform"), "scrape_task_id": _rid,
+                    "scrape_completed": False, "scraped_count": ctx.store.count_scrape_run_jobs(_rid),
+                    "source_total": _source_total,
+                })
             ctx.write_run(
                 _rid, status="succeeded", current_stage="scrape",
                 processed_count=max(int(_running_run.get("processed_count") or 0), _checkpoint_done),
@@ -291,12 +344,13 @@ def register_running_task_routes(app, ctx):
             auto_scraped_count = ctx.store.count_scrape_run_jobs(auto_row["id"])
             if auto_scraped_count <= 0:
                 continue
+            auto_integrity = _integrity_for("scrape", auto_row["id"])
             return jsonify({
                 "ok": True,
                 "has_task": True,
                 "task_id": auto_row["id"],
                 "kind": "scrape",
-                "status": "completed",
+                "status": _status_for_integrity(auto_integrity, "completed"),
                 "stage": "scrape",
                 "progress": {"message": "抓取已完成，等待 AI 筛选"},
                 "logs": [],
@@ -305,7 +359,7 @@ def register_running_task_routes(app, ctx):
                 "source": "database",
                 "auto_screen": True,
                 "scrape_task_id": auto_row["id"],
-                "scrape_completed": True,
+                "scrape_completed": _scrape_completed_for_run({"scrape_task_id": auto_row["id"]}),
                 "frozen_filters": auto_params.get("auto_screen_fields") or {},
                 "profile_summary": str(auto_params.get("auto_screen_profile") or ""),
                 "profile_facts": auto_params.get("auto_screen_facts"),
@@ -313,6 +367,7 @@ def register_running_task_routes(app, ctx):
                 "task_input_digest": auto_params.get("task_input_digest"),
                 "scraped_count": auto_scraped_count,
                 "source_total": int(auto_row["source_count"] or 0),
+                "integrity": auto_integrity,
             })
         # 3.6 已完成普通抓取：快照未落库时刷新仍可恢复并触发保存。
         for completed_row in auto_rows:
@@ -332,12 +387,13 @@ def register_running_task_routes(app, ctx):
             if completed_scraped_count <= 0:
                 continue
             completed_run = ctx.store.get_screening_run(completed_row["id"]) or {}
+            completed_integrity = _integrity_for("scrape", completed_row["id"])
             return jsonify({
                 "ok": True,
                 "has_task": True,
                 "task_id": completed_row["id"],
                 "kind": "scrape",
-                "status": "completed",
+                "status": _status_for_integrity(completed_integrity, "completed"),
                 "stage": "scrape",
                 "progress": {"message": "抓取已完成，正在恢复结果"},
                 "logs": [],
@@ -346,7 +402,7 @@ def register_running_task_routes(app, ctx):
                 "source": "database",
                 "auto_screen": False,
                 "scrape_task_id": completed_row["id"],
-                "scrape_completed": True,
+                "scrape_completed": _scrape_completed_for_run({"scrape_task_id": completed_row["id"]}),
                 "frozen_filters": (
                     completed_run.get("frozen_filters")
                     or completed_params.get("auto_screen_fields") or {}
@@ -364,6 +420,7 @@ def register_running_task_routes(app, ctx):
                 "scraped_count": completed_scraped_count,
                 "source_total": int(completed_row["source_count"] or 0),
                 "round_context": ctx.round_context_for_run(completed_run),
+                "integrity": completed_integrity,
             })
         # 4. failed 抓取兜底：有已持久化岗位的任务刷新后可恢复显示真实数量。
         try:
@@ -392,12 +449,13 @@ def register_running_task_routes(app, ctx):
                 or failed_run.get("error_code")
                 or "抓取失败"
             )
+            failed_integrity = _integrity_for("scrape", failed_run["id"])
             return jsonify({
                 "ok": True,
                 "has_task": True,
                 "task_id": failed_run["id"],
                 "kind": "scrape",
-                "status": "failed",
+                "status": _status_for_integrity(failed_integrity, "failed"),
                 "stage": "scrape",
                 "progress": {
                     "message": failed_error_reason,
@@ -417,5 +475,6 @@ def register_running_task_routes(app, ctx):
                 "scraped_count": failed_scraped_count,
                 "source_total": int(failed_run.get("source_count") or 0),
                 "execution_params": failed_params,
+                "integrity": failed_integrity,
             })
         return jsonify({"ok": True, "has_task": False})

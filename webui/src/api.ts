@@ -5,6 +5,7 @@ import type {
   ModeSelectionResponse,
   ScopePreviewRequest,
   ScopePreviewResponse,
+  IntegritySnapshot,
 } from "./types";
 import { ERROR_MESSAGES } from "./errorCodes";
 
@@ -160,6 +161,35 @@ export function userFacingMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError && typeof error.payload.user_message === "string" && error.payload.user_message
     ? error.payload.user_message
     : fallback;
+}
+
+export interface WhiteboxReport {
+  ok: boolean;
+  owner_kind: string;
+  owner_id: string;
+  lifecycle_status?: string;
+  integrity: IntegritySnapshot;
+  plan?: Record<string, unknown>;
+  summary?: Record<string, unknown>;
+  units?: Array<Record<string, unknown>>;
+  events?: Array<Record<string, unknown>>;
+  events_truncated?: boolean;
+  next_sequence?: number;
+}
+
+/** 开发者白箱查询；普通任务轮询不拉取逐事件技术明细。 */
+export function fetchWhiteboxReport(
+  ownerKind: string,
+  ownerId: string,
+  options: { includeEvents?: boolean; eventLimit?: number } = {},
+): Promise<WhiteboxReport> {
+  const query = new URLSearchParams();
+  if (options.includeEvents) query.set("include_events", "1");
+  if (options.eventLimit !== undefined) query.set("event_limit", String(options.eventLimit));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiRequest<WhiteboxReport>(
+    `/api/task-state/${encodeURIComponent(ownerKind)}/${encodeURIComponent(ownerId)}/whitebox${suffix}`,
+  );
 }
 
 export const settingsApi = {

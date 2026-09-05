@@ -175,10 +175,6 @@ class StoreScrapeRunsMixin:
                     str(run_id),
                 ),
             )
-            conn.execute(
-                "DELETE FROM scrape_page_progress WHERE run_id = ? AND combo_key = ?",
-                (str(run_id), str(combo_key)),
-            )
 
     def save_scrape_page_progress(self, run_id, combo_key, progress_event):
         """Atomically persist one completed page and its jobs snapshot.

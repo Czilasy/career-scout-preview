@@ -13,6 +13,7 @@ from datetime import datetime
 from flask import jsonify, request
 
 from webui.constants import _MSG_EXPERIMENT_NOT_FOUND, _MSG_MANIFEST_NOT_FOUND
+from webui.store_helpers import _now
 
 def register_tuning_routes(app, ctx):
     @app.route("/api/tuning/experiments", methods=["POST"])
@@ -340,12 +341,58 @@ def register_tuning_routes(app, ctx):
             }), 409
         round_id = started["round_id"]
         child_task_id = record["manifest"].get("task_id") or round_id
+        from webui.whitebox import WhiteboxService, build_tuning_plan
+        whitebox = WhiteboxService(ctx.store) if hasattr(ctx.store, "create_whitebox_run") else None
+        whitebox_ref = None
+        round_kind = str(record["manifest"].get("round_kind") or "unknown")
+        if whitebox is not None:
+            try:
+                whitebox_ref = whitebox.begin(
+                    "tuning", round_id, build_tuning_plan(round_kind),
+                    parent_owner_id=manifest_id,
+                )
+            except Exception:
+                try:
+                    ctx.store.update_tuning_round_status(
+                        round_id, status="blocked", failure_code="whitebox_incomplete",
+                    )
+                except Exception as marker_exc:
+                    from webui.logging_setup import get_logger
+                    get_logger(__name__).warning(
+                        "tuning whitebox initialization rollback failed: %s",
+                        type(marker_exc).__name__,
+                    )
+                return jsonify({
+                    "ok": False, "error_code": "whitebox_incomplete",
+                    "error": "任务证据白箱初始化失败",
+                }), 503
         if app.config.get("START_TASKS"):
             try:
                 ctx.executor.submit(ctx.run_tuning_manifest_child, manifest_id)
             except RuntimeError as exc:
+                reason = "调参后台任务提交失败"
+                try:
+                    ctx.store.update_tuning_round_status(
+                        round_id, status="blocked", failure_code="submit_failed",
+                    )
+                    if whitebox_ref is not None:
+                        whitebox.record(whitebox_ref, {
+                            "idempotency_key": f"submission-failed:{round_id}",
+                            "event_type": "submission_failed", "occurred_at": _now(),
+                            "stage": round_kind, "unit_kind": "tuning_round",
+                            "unit_key": f"round:{round_kind}", "attempt_no": 1,
+                            "required_evidence": True, "severity": "error",
+                            "payload": {"error_code": "submit_failed", "error_reason": reason},
+                        })
+                        whitebox.finalize(whitebox_ref, lifecycle_end="failed")
+                except Exception as marker_exc:
+                    from webui.logging_setup import get_logger
+                    get_logger(__name__).warning(
+                        "tuning submission whitebox finalization failed: %s",
+                        type(marker_exc).__name__,
+                    )
                 return jsonify({
-                    "ok": False, "error_code": "submit_failed", "error": str(exc),
+                    "ok": False, "error_code": "submit_failed", "error": reason,
                 }), 503
         return jsonify({
             "ok": True,
@@ -368,6 +415,16 @@ def register_tuning_routes(app, ctx):
                 "ok": False, "error_code": "round_not_found",
                 "error": "轮次不存在",
             }), 404
+        integrity = None
+        try:
+            from webui.whitebox import WhiteboxService
+            integrity = WhiteboxService(ctx.store).report("tuning", round_id)["integrity"]
+        except Exception:
+            integrity = {
+                "conclusion": "unverifiable", "label": "无法确认",
+                "evidence_complete": False, "primary_code": "legacy_evidence_missing",
+                "primary_reason": "历史证据不足，无法确认",
+            }
         return jsonify({
             "ok": True,
             "round": {
@@ -382,6 +439,7 @@ def register_tuning_routes(app, ctx):
                 "finished_at": round_rec.get("finished_at"),
                 "confirmed_at": round_rec.get("confirmed_at"),
                 "failure_code": round_rec.get("failure_code"),
+                "integrity": integrity,
             },
         }), 200
 

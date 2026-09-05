@@ -10,6 +10,8 @@ import type {
   LocationCondition,
   ScopePreviewResponse,
   TaskSize,
+  IntegrityConclusion,
+  IntegritySnapshot,
 } from "./types";
 import { buildLocationPayload } from "./location";
 
@@ -23,6 +25,39 @@ export interface PipelineResult {
   total_dropped?: number;
   profile_summary?: string;
   error?: string;
+  integrity?: IntegritySnapshot | null;
+}
+
+export const INTEGRITY_LABELS: Record<IntegrityConclusion, string> = {
+  succeeded: "完整成功",
+  empty: "已完成，没有找到岗位",
+  partial: "部分完成，部分结果可能缺失",
+  failed: "执行失败",
+  unverifiable: "无法确认是否完成",
+  interrupted: "任务已中断",
+};
+
+/** 只做 API 投影归一化；最终结论仍由后端白箱返回。 */
+export function normalizeIntegrity(value: unknown): IntegritySnapshot | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const conclusion = String(raw.conclusion || "") as IntegrityConclusion;
+  if (!(conclusion in INTEGRITY_LABELS)) return null;
+  return {
+    conclusion,
+    label: INTEGRITY_LABELS[conclusion],
+    degraded: Boolean(raw.degraded),
+    evidence_complete: Boolean(raw.evidence_complete),
+    primary_code: typeof raw.primary_code === "string" ? raw.primary_code : null,
+    primary_reason: typeof raw.primary_reason === "string" ? raw.primary_reason : null,
+    recommendation: typeof raw.recommendation === "string" ? raw.recommendation : null,
+    revision: Number.isFinite(Number(raw.revision)) ? Number(raw.revision) : 0,
+  };
+}
+
+export function integrityLabel(value: unknown): string {
+  const normalized = normalizeIntegrity(value);
+  return normalized ? normalized.label : "";
 }
 
 export interface PipelineGroups {

@@ -15,6 +15,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from webui.pipeline_exec_accounts import (
@@ -38,6 +39,43 @@ from webui.pipeline_exec_accounts import (
     set_account_rate_limited,
     update_account_pool,
 )
+
+
+class AccountWhiteboxTests(unittest.TestCase):
+    def test_pool_allocation_switch_and_handoff_are_bound_to_run(self):
+        """033 V2 T036：账号池事件带任务/阶段/单元/尝试上下文。"""
+        from webui.account_round_robin_observability import RoundRobinWhitebox
+        from webui.store import TaskStore
+        from webui.whitebox import WhiteboxService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(Path(tmp) / "state" / "webui.db")
+            service = WhiteboxService(store)
+            store.create_screening_run("account-run", source_count=0)
+            service.begin("scrape", "account-run", {
+                "stages": ["scrape_list"], "units": [{
+                    "unit_key": "scrape_list", "unit_kind": "account_pool",
+                }],
+            })
+            observer = RoundRobinWhitebox(
+                store, "account-run", phase="scrape_list", platform="boss",
+                entries=[SimpleNamespace(account_id="a", quota=3),
+                         SimpleNamespace(account_id="b", quota=2)],
+            )
+            observer.allocation("a", round_no=1, count=3, remaining=2, start_page=1, end_page=1)
+            observer.switch(from_account="a", to_account="b", reason="quota", result="succeeded")
+            observer.handoff(blocked_account="b", to_account="a", remaining=1, result="accepted",
+                             blocked_reason="rate_limited")
+            report = service.report("scrape", "account-run", include_events=True)
+            events = report["events"]
+            self.assertTrue(any(event["event_type"] == "account_allocation" for event in events))
+            self.assertTrue(any(event["event_type"] == "account_switch" for event in events))
+            self.assertTrue(any(event["event_type"] == "account_handoff" for event in events))
+            for event in events:
+                if event["event_type"].startswith("account_"):
+                    self.assertEqual(event["stage"], "scrape_list")
+                    self.assertEqual(event["unit_key"], "scrape_list")
+                    self.assertEqual(event["attempt_no"], 1)
 
 
 def _accounts():

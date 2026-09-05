@@ -79,6 +79,7 @@ from webui.store_job_catalog import StoreJobCatalogMixin
 from webui.store_tuning_experiments import StoreTuningExperimentsMixin
 from webui.store_tuning_rounds import StoreTuningRoundsMixin
 from webui.store_tuning_reports import StoreTuningReportsMixin
+from webui.store_whitebox import StoreWhiteboxMixin
 
 from webui.logging_setup import get_logger
 
@@ -115,6 +116,7 @@ class TaskStore(
     StoreTuningExperimentsMixin,
     StoreTuningRoundsMixin,
     StoreTuningReportsMixin,
+    StoreWhiteboxMixin,
     ResultHistoryStoreMixin,
     ScrapeOnlyStoreMixin,
     StoreMigrationsMixin,

@@ -82,6 +82,7 @@ class PipelineGuard:
         lock: Any = None,
         record_pause_failure: Callable | None = None,
         release_worker_resume_claims: Callable | None = None,
+        whitebox: Any = None,
         logger: Any = None,
     ):
         self._stall_seconds = max(0.05, float(stall_seconds))
@@ -100,6 +101,10 @@ class PipelineGuard:
         self._lock = lock
         self._record_pause_failure = record_pause_failure
         self._release_worker_resume_claims = release_worker_resume_claims
+        self._whitebox = whitebox
+        if self._whitebox is None and store is not None and hasattr(store, "create_whitebox_run"):
+            from webui.whitebox import WhiteboxService
+            self._whitebox = WhiteboxService(store)
         self._logger = logger or get_logger("pipeline_guard")
         self._batches: dict[str, _BatchState] = {}
         self._mutex = threading.RLock()
@@ -393,8 +398,27 @@ class PipelineGuard:
                     f"{k}={v}" for k, v in extra.items() if v not in (None, "")
                 )
             self._logger.info(line)
+            self._record_whitebox(event, st, result=result, extra=extra)
         except Exception:
             _logger.debug("日志行组装失败（忽略）", exc_info=True)
+
+    def _record_whitebox(self, event: str, st: dict, *, result: str, extra: dict | None) -> None:
+        if self._whitebox is None or not st.get("task_id"):
+            return
+        from webui.store_helpers import _now
+        from webui.whitebox import WhiteboxService
+        kind = {"stall": "stall_detected", "retry": "retry_started",
+                "giveup": "retry_abandoned", "fallback": "whitebox_incomplete"}.get(event, event)
+        fact = {"idempotency_key": f"guard:{event}:{st['batch_key']}:{st['attempt']}",
+                "event_type": kind, "occurred_at": _now(), "stage": "jd_detail",
+                "unit_kind": "detail_batch", "unit_key": st["batch_key"],
+                "attempt_no": max(1, int(st.get("attempt") or 1)), "required_evidence": True,
+                "severity": "error" if event in {"giveup", "fallback"} else "warning",
+                "payload": {"task_id": st["task_id"], "attempt": st["attempt"],
+                            "result": result, **(extra or {})}}
+        service = self._whitebox if isinstance(self._whitebox, WhiteboxService) else WhiteboxService(self._store)
+        if not service.record_for_owner("scrape", str(st["task_id"]), fact):
+            service.record_for_owner("screening", str(st["task_id"]), fact)
 
 
     # ------------------------------------------------------------------

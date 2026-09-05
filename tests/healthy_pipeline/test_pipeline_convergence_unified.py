@@ -786,6 +786,11 @@ class ConvergenceTaskEventSequenceTests(unittest.TestCase):
                 "jobs": [{"job_id": "job-1", "title": "前端"}],
                 "total_scraped": 1, "total_matched": 1,
                 "combinations": 1, "completed_combos": ["前端|上海"],
+                "integrity": {
+                    "conclusion": "succeeded", "evidence_complete": True,
+                    "degraded": False, "primary_code": None,
+                    "primary_reason": "全部计划单元均已完成",
+                },
                 "error": "",
             }
 

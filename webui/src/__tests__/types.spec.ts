@@ -5,6 +5,8 @@ import type {
   FilterOption,
   FilterSnapshot,
   FilterSnapshotField,
+  IntegrityConclusion,
+  IntegritySnapshot,
   JobItem,
   Platform,
   PlatformCityCatalog,
@@ -91,6 +93,16 @@ describe("platform types baseline (T501)", () => {
     const status: TaskApiStatus = "completed_with_pending";
     expectTypeOf<TaskApiStatus>().toExtend<TaskApiStatus>();
     void status;
+  });
+
+  it("keeps all six integrity conclusions in the frontend contract", () => {
+    expectTypeOf<IntegrityConclusion>().toEqualTypeOf<
+      "succeeded" | "empty" | "partial" | "failed" | "unverifiable" | "interrupted"
+    >();
+    const snapshots: IntegritySnapshot[] = [
+      "succeeded", "empty", "partial", "failed", "unverifiable", "interrupted",
+    ].map((conclusion) => ({ conclusion: conclusion as IntegrityConclusion, label: "" }));
+    expectTypeOf(snapshots).toMatchTypeOf<IntegritySnapshot[]>();
   });
 
   it("adds dual job id fields and structured extras to JobItem", () => {

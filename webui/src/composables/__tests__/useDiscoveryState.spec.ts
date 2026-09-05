@@ -231,4 +231,38 @@ describe("roundStatusPayload 胶囊四态派生（036 FR-013 优先级）", () =
       expect(capsule.attention.message).toBe("boom");
     }
   });
+
+  it("033 V2：结果完整性失败/无法确认 → attention，不按岗位数显示完成", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.resultLoaded.value = true;
+    state.pipelineResult.value = {
+      ok: true,
+      jobs: [{ verdict: "match" }],
+      integrity: {
+        conclusion: "unverifiable", label: "无法确认", degraded: false,
+        evidence_complete: false, primary_code: "unit_evidence_missing",
+        primary_reason: "证据不足", recommendation: "建议重新执行", revision: 2,
+      },
+    } as never;
+    const payload = state.roundStatusPayload.value;
+    expect(payload?.capsule.state).toBe("attention");
+    expect(payload?.integrity?.conclusion).toBe("unverifiable");
+  });
+
+  it("033 V2：部分完成保留结果胶囊但携带同一完整性结论", () => {
+    const state = useDiscoveryState({ profileId: "test" }, () => {});
+    state.resultLoaded.value = true;
+    state.pipelineResult.value = {
+      ok: false,
+      jobs: [{ verdict: "match" }],
+      integrity: {
+        conclusion: "partial", label: "部分完成", degraded: false,
+        evidence_complete: true, primary_code: "unit_failed",
+        primary_reason: "一组失败", recommendation: "查看已有结果或重试缺失部分", revision: 3,
+      },
+    } as never;
+    const payload = state.roundStatusPayload.value;
+    expect(payload?.capsule.state).toBe("completed");
+    expect(payload?.integrity?.conclusion).toBe("partial");
+  });
 });

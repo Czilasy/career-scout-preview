@@ -89,6 +89,52 @@ describe("TaskProgress diagnostics", () => {
   });
 });
 
+describe("TaskProgress 033 V2 integrity", () => {
+  const integrity = (conclusion: string, reason = "证据不足") => ({
+    conclusion, label: conclusion, evidence_complete: conclusion === "succeeded",
+    primary_reason: reason, recommendation: "建议重新执行", revision: 2,
+  });
+
+  it.each([
+    ["succeeded", "完整成功"],
+    ["empty", "已完成，没有找到岗位"],
+    ["partial", "部分完成，部分结果可能缺失"],
+    ["failed", "执行失败"],
+    ["unverifiable", "无法确认是否完成"],
+    ["interrupted", "任务已中断"],
+  ])("uses the whitebox label for %s", (conclusion, label) => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "completed",
+          integrity: integrity(conclusion, "主要原因"),
+        }) as never,
+        kind: "screen",
+      },
+    });
+    expect(wrapper.get(".task-status").text()).toContain(label);
+    expect(wrapper.get(".task-progress").attributes("data-integrity")).toBe(conclusion);
+    if (["partial", "unverifiable"].includes(conclusion)) {
+      expect(wrapper.get(".task-status").attributes("data-status")).not.toBe("completed");
+    }
+    wrapper.unmount();
+  });
+
+  it("无法确认时同时显示重新执行建议", () => {
+    const wrapper = mount(TaskProgress, {
+      props: {
+        snapshot: snapshot({
+          status: "completed",
+          integrity: integrity("unverifiable", "缺少完成证据"),
+        }) as never,
+        kind: "screen",
+      },
+    });
+    expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("建议重新执行");
+    wrapper.unmount();
+  });
+});
+
 describe("TaskProgress elapsed time: hours and pause-excluded duration", () => {
   afterEach(() => vi.useRealTimers());
 

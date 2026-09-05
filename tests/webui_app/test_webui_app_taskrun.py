@@ -246,6 +246,15 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
 
     def test_finish_paused_task_saves_partial_snapshot_and_latest(self):
         run_id = self._seed_paused_ai_screen()
+        from webui.whitebox import WhiteboxService
+        WhiteboxService(self.store).begin("screening", run_id, {
+            "stages": ["ai_rough", "jd_detail", "ai_fine"],
+            "units": [
+                {"unit_key": "ai_rough", "unit_kind": "ai_stage", "stage": "ai_rough"},
+                {"unit_key": "jd_detail", "unit_kind": "ai_stage", "stage": "jd_detail"},
+                {"unit_key": "ai_fine", "unit_kind": "ai_stage", "stage": "ai_fine"},
+            ],
+        })
         resp = self.client.post(f"/api/task/finish/{run_id}")
         self.assertEqual(resp.status_code, 200, resp.get_json())
         data = resp.get_json()
@@ -271,6 +280,10 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         finished = self.store.get_screening_run(run_id)
         self.assertEqual(finished["status"], "interrupted")
         self.assertEqual(finished["error_code"], "user_finished")
+        report = WhiteboxService(self.store).report("screening", run_id, include_events=True)
+        self.assertEqual(report["lifecycle_status"], "terminal")
+        self.assertEqual(report["integrity"]["conclusion"], "interrupted")
+        self.assertTrue(any(event["event_type"] == "task_interrupted" for event in report["events"]))
         latest_running = self.client.get("/api/latest-running-task").get_json()
         self.assertFalse(latest_running["has_task"])
 
@@ -416,6 +429,7 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertTrue(data["has_task"])
         self.assertEqual(data["kind"], "scrape")
         self.assertEqual(data["status"], "failed")
+        self.assertEqual(data["integrity"]["conclusion"], "unverifiable")
         self.assertEqual(data["scraped_count"], 1280)
         self.assertEqual(data["source_total"], 1280)
         self.assertEqual(data["platform"], "boss")
@@ -441,10 +455,11 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.store.update_screening_run(run_id, status="succeeded", current_stage="scrape")
         data = self.client.get("/api/latest-running-task").get_json()
         self.assertTrue(data["has_task"])
-        self.assertEqual(data["status"], "completed")
+        self.assertEqual(data["status"], "completed_with_pending")
+        self.assertEqual(data["integrity"]["conclusion"], "unverifiable")
         self.assertEqual(data["kind"], "scrape")
         self.assertEqual(data["scrape_task_id"], run_id)
-        self.assertTrue(data["scrape_completed"])
+        self.assertFalse(data["scrape_completed"])
         self.assertEqual(data["profile_summary"], "3年Python后端")
         self.assertEqual(data["profile_facts"], {"years": 3})
         self.assertEqual(data["round_context"]["keywords"], ["Python"])
@@ -498,8 +513,8 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         data = self.client.get("/api/latest-running-task").get_json()
         self.assertFalse(data["has_task"])
 
-    def test_latest_running_task_reconciles_orphaned_running_scrape(self):
-        """数据已抓完但终态漏写的 running 抓取，刷新时自动补写完成。"""
+    def test_latest_running_task_does_not_upgrade_orphan_without_whitebox_evidence(self):
+        """仅有岗位和 checkpoint 不能把孤儿 running 任务升级为完成。"""
         run_id = "orphan-running-complete"
         jobs = [
             {"job_id": "j1", "platform_job_id": "j1", "title": "岗位1",
@@ -521,20 +536,18 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
 
         data = self.client.get("/api/latest-running-task").get_json()
         self.assertTrue(data["has_task"])
-        self.assertEqual(data["status"], "completed")
+        self.assertNotEqual(data["status"], "completed")
         self.assertEqual(data["kind"], "scrape")
         run = self.store.get_screening_run(run_id)
-        self.assertEqual(run["status"], "succeeded")
+        self.assertEqual(run["status"], "running")
         self.assertEqual(run["current_stage"], "scrape")
         events = self.store.list_task_events(run_id)
-        self.assertEqual(
-            sum(1 for e in events if e["type"] == "stage_complete"), 1)
-        # 幂等：再次恢复不再重复补写完成事件。
+        self.assertEqual(sum(1 for e in events if e["type"] == "stage_complete"), 0)
+        # 幂等：再次刷新不因岗位数量改变结论。
         again = self.client.get("/api/latest-running-task").get_json()
         self.assertTrue(again["has_task"])
         events = self.store.list_task_events(run_id)
-        self.assertEqual(
-            sum(1 for e in events if e["type"] == "stage_complete"), 1)
+        self.assertEqual(sum(1 for e in events if e["type"] == "stage_complete"), 0)
 
     def test_finish_failed_scrape_run_saves_partial_snapshot(self):
         self._seed_scrape_run(
@@ -1471,7 +1484,10 @@ class ScreenContinueFlowTests(unittest.TestCase):
         run = self.store.get_screening_run(task_id)
         self.assertEqual(run["total_kept"], kept_n)
         self.assertEqual(run["total_dropped"], dropped_n)
-        self.assertEqual(run["status"], "succeeded")
+        # 033 V2：旧抓取 run 没有白箱完成证据，不能凭岗位与旧 ok=True
+        # 把恢复后的筛选升级为完整成功。
+        self.assertEqual(run["status"], "partial")
+        self.assertFalse((self.store.get_whitebox_run("screening", task_id) or {}).get("evidence_complete"))
         # 链首 277 断点齐全：粗筛零重筛（旧代码会重筛或塌缩幸存者）
         self.assertEqual(screen_calls, [[]])
         # 40 条精筛判定被继承，只精筛剩余 125 条
@@ -1761,7 +1777,8 @@ class ResultRoundRescueTests(unittest.TestCase):
         # 零结果轮
         self.assertEqual(self.store.list_history_rounds(), [])
 
-        # 续跑：AI 零重筛、直达收尾、结果轮重建、终态 succeeded
+        # 续跑：AI 零重筛、直达收尾、结果轮重建；旧抓取 run 仍无
+        # V2 完成证据，因此只能是 partial，不能凭已有岗位升级成功。
         screen_calls2, match_calls2 = [], []
         captured2 = self._start_screen(scrape_id)
         self._run_with_mocks(captured2, screen_calls2, match_calls2)
@@ -1769,7 +1786,8 @@ class ResultRoundRescueTests(unittest.TestCase):
         resumed_id = resumed_ids.pop() if resumed_ids else task_id
 
         run2 = self.store.get_screening_run(resumed_id)
-        self.assertEqual(run2["status"], "succeeded", run2)
+        self.assertEqual(run2["status"], "partial", run2)
+        self.assertFalse((self.store.get_whitebox_run("screening", resumed_id) or {}).get("evidence_complete"))
         # AI 零调用：粗筛/精筛收到的都是空清单
         self.assertTrue(screen_calls2 and all(c == [] for c in screen_calls2),
                         screen_calls2)

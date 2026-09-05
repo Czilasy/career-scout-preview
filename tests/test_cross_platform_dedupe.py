@@ -355,6 +355,76 @@ class CrossPlatformDedupeIntegrationTests(unittest.TestCase):
         # 重启恢复路径依赖 DB 抓取快照重建输入（T012）。
         self.store.save_scrape_combo_result(
             scrape_task_id, "后端|北京", jobs, ["后端|北京"])
+        # 033 V2：父抓取 run 的“成功”夹具必须同时写入页级、范围完成
+        # 和空结果事实，AI 子任务才能合法继承该来源。
+        from webui.whitebox import WhiteboxService
+        from webui.store_helpers import _now
+        whitebox = WhiteboxService(self.store)
+        ref = whitebox.begin("scrape", scrape_task_id, {
+            "stages": ["scrape_list"],
+            "units": [{
+                "unit_key": "后端|北京",
+                "unit_kind": "keyword_city",
+                "stage": "scrape_list",
+                "planned_pages": 1,
+                "required": True,
+            }],
+        })
+        whitebox.record(ref, {
+            "idempotency_key": f"page:{scrape_task_id}",
+            "event_type": "page_completed",
+            "occurred_at": _now(),
+            "stage": "scrape_list",
+            "unit_kind": "keyword_city",
+            "unit_key": "后端|北京",
+            "attempt_no": 1,
+            "required_evidence": True,
+            "payload": {
+                "page": 1,
+                "planned_pages": 1,
+                "returned_count": len(jobs),
+                "new_unique_count": len(jobs),
+                "has_more": False,
+                "resume_page": 2,
+                "scope_complete": True,
+                "source_exhausted": True,
+                "stop_reason": "explicit_empty" if not jobs else "target_reached",
+            },
+        })
+        whitebox.record(ref, {
+            "idempotency_key": f"scope-completed:{scrape_task_id}",
+            "event_type": "scope_completed",
+            "occurred_at": _now(),
+            "stage": "scrape_list",
+            "unit_kind": "keyword_city",
+            "unit_key": "后端|北京",
+            "attempt_no": 1,
+            "required_evidence": True,
+            "payload": {
+                "scope_complete": True,
+                "source_exhausted": True,
+                "stop_reason": "explicit_empty" if not jobs else "target_reached",
+                "returned_total_count": len(jobs),
+                "unit_unique_count": len(jobs),
+            },
+        })
+        if not jobs:
+            whitebox.record(ref, {
+                "idempotency_key": f"explicit-empty:{scrape_task_id}",
+                "event_type": "explicit_empty",
+                "occurred_at": _now(),
+                "stage": "scrape_list",
+                "unit_kind": "keyword_city",
+                "unit_key": "后端|北京",
+                "attempt_no": 1,
+                "required_evidence": True,
+                "payload": {"empty_evidence": {
+                    "kind": "explicit_empty_state",
+                    "fixture_version": "test",
+                    "marker": "no_jobs",
+                }},
+            })
+        whitebox.finalize(ref, lifecycle_end="succeeded")
         self.store.save_ai_settings(
             "http://example.invalid", "test-ref", status="ready")
 

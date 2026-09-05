@@ -6,6 +6,21 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from webui.whitebox import WhiteboxService
+
+def _integrity_for_run(store, run_id: str, scrape_task_id: str = "") -> dict:
+    try:
+        row = store.get_screening_run(run_id) if run_id else None
+        if row is not None and row.get("record_kind") == "result_snapshot":
+            return WhiteboxService(store).integrity_for_result(
+                str(run_id), str(scrape_task_id or ""))
+        owner = "scrape" if str(run_id) == str(scrape_task_id or "") or str((row or {}).get("current_stage") or "") == "scrape" else "screening"
+        return WhiteboxService(store).report(owner, str(run_id or scrape_task_id))["integrity"]
+    except Exception:
+        return {"conclusion": "unverifiable", "label": "无法确认", "evidence_complete": False,
+                "primary_code": "legacy_evidence_missing", "primary_reason": "历史证据不足，无法确认",
+                "recommendation": "建议重新执行", "revision": 0}
+
 _CST = timezone(timedelta(hours=8))
 _PREVIEW_LENGTH = 120
 
@@ -111,6 +126,8 @@ class ResultHistoryService:
             platform_key = str(row.get("platform") or "")
             # 035：暴露该轮的抓取任务 id，供「查看该轮运行日志」按任务过滤。
             params = _decode_json(row.get("execution_params_json"), {})
+            source_id = str(params.get("scrape_task_id") or row.get("id") or "")
+            integrity = _integrity_for_run(self.store, str(row.get("id") or source_id), source_id)
             items.append({
                 "run_id": str(row["id"]),
                 "platform": row.get("platform"),
@@ -129,6 +146,7 @@ class ResultHistoryService:
                 "archived_at": row.get("archived_at"),
                 "is_latest": bool(latest_ids.get(platform_key) == str(row["id"])),
                 "scrape_task_id": str(params.get("scrape_task_id") or ""),
+                "integrity": integrity,
             })
         return items
 
@@ -145,6 +163,8 @@ class ResultHistoryService:
         raw_status = str(run.get("status") or "done")
         source_summary, source_outcomes = _build_source_summary_and_outcomes(
             self.store, run)
+        source_id = str(payload.get("scrape_task_id") or run_id)
+        integrity = _integrity_for_run(self.store, str(run_id), source_id)
         return {
             "ok": True,
             "has_result": True,
@@ -159,6 +179,7 @@ class ResultHistoryService:
             "scrape_task_id": str(payload.get("scrape_task_id") or ""),
             "source_summary": source_summary,
             "source_outcomes": source_outcomes,
+            "integrity": integrity,
             "result": result,
         }
 

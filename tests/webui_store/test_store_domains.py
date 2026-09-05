@@ -154,7 +154,18 @@ class ScrapePageProgressTests(unittest.TestCase):
         self.assertEqual(rows[0]["completed_pages"], 3)
         self.assertEqual(rows[0]["resume_page"], 4)
 
-    def test_combo_done_clears_page_checkpoint_but_keeps_jobs(self):
+    def test_combo_done_clears_recovery_checkpoint_but_keeps_whitebox_page_history(self):
+        whitebox_run = self.store.create_whitebox_run(
+            "scrape", "page-run", {"stages": ["scrape_list"],
+                                    "units": [{"unit_key": "Python|北京"}]},
+        )
+        self.store.append_whitebox_event(whitebox_run["id"], {
+            "idempotency_key": "page-history-1", "event_type": "page_completed",
+            "occurred_at": "2026-09-05T00:00:00+08:00", "stage": "scrape_list",
+            "unit_key": "Python|北京", "required_evidence": True,
+            "payload": {"page": 10, "returned_count": 1, "new_unique_count": 1,
+                        "has_more": False, "resume_page": 11},
+        })
         self.store.save_scrape_page_progress(
             "page-run", "Python|北京",
             {"combo_key": "Python|北京", "page": 10, "target_pages": 10,
@@ -167,8 +178,9 @@ class ScrapePageProgressTests(unittest.TestCase):
             ["Python|北京"],
         )
 
-        self.assertEqual(self.store.load_scrape_page_progress("page-run"), [])
+        self.assertEqual(self.store.load_scrape_page_progress("page-run")[0]["completed_pages"], 10)
         self.assertEqual(self.store.count_scrape_run_jobs("page-run"), 1)
+        self.assertEqual(len(self.store.list_whitebox_events(whitebox_run["id"])), 1)
 
     def test_load_scrape_run_jobs_can_filter_by_combo(self):
         self.store.save_scrape_page_progress(

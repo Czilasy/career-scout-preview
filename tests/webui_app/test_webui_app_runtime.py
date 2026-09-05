@@ -518,7 +518,7 @@ class RunSearchAllFailTests(unittest.TestCase):
         # 构造一个 source，fetch_list 永远失败
         class _FailSource:
             def preflight(self):
-                return SourceOutcome.success(jobs=[], safe_log="ok", input_hash="")
+                return SourceOutcome.success(safe_log="ok", input_hash="")
             def fetch_list(self, plan_item, *, on_page_completed=None):
                 return SourceOutcome.failure(
                     failed_code="source_verification_required",
@@ -537,7 +537,7 @@ class RunSearchAllFailTests(unittest.TestCase):
         self.assertIn("验证码", result["error"])
 
     @mock.patch("webui.pipeline_exec.ensure_chrome_ready", return_value=(True, ""))
-    def test_partial_fail_still_returns_ok_true(self, _mock_chrome):
+    def test_partial_fail_returns_partial_not_ok(self, _mock_chrome):
         from webui.pipeline_exec import run_search
         from webui.source import SourceOutcome
 
@@ -545,7 +545,7 @@ class RunSearchAllFailTests(unittest.TestCase):
 
         class _MixedSource:
             def preflight(self):
-                return SourceOutcome.success(jobs=[], safe_log="ok", input_hash="")
+                return SourceOutcome.success(safe_log="ok", input_hash="")
             def fetch_list(self, plan_item, *, on_page_completed=None):
                 call_count[0] += 1
                 if call_count[0] == 1:
@@ -553,7 +553,9 @@ class RunSearchAllFailTests(unittest.TestCase):
                         failed_code="source_timeout", safe_log="reason=单组合超时")
                 return SourceOutcome.success(
                     jobs=[{"job_id": "j1", "source_url": "u1"}],
-                    safe_log="ok", input_hash=plan_item.get("input_hash", ""))
+                    safe_log="ok", input_hash=plan_item.get("input_hash", ""),
+                    scope_complete=True, source_exhausted=True,
+                    stop_reason="target_reached")
 
         result = run_search(
             {"keyword": "A,B", "city": ["X"]},
@@ -561,7 +563,8 @@ class RunSearchAllFailTests(unittest.TestCase):
             pages=1,
             artifact_dir=self._tmp_dir(),
         )
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("integrity", {}).get("conclusion"), "partial")
         self.assertEqual(result["total_scraped"], 1)
 
     @staticmethod

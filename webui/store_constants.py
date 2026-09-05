@@ -87,3 +87,26 @@ PROFILE_JOB_STATUSES = {"new", "interested", "read", "applied", "stale", "delete
 AI_STATUS_VALUES = {"unconfigured", "testing", "ready", "failed"}
 RESUME_FORMATS = {"txt", "pdf", "docx"}
 MAX_DETAIL_BUDGET = 60
+
+# 033 V2 whitebox value domains.  Keep these in the store domain so API,
+# services and projections share one vocabulary without importing storage
+# implementation modules.
+WHITEBOX_CONCLUSIONS = frozenset({
+    "succeeded", "empty", "partial", "failed", "unverifiable", "interrupted",
+})
+WHITEBOX_UNIT_STATUSES = frozenset({
+    "planned", "running", "succeeded", "empty", "failed", "incomplete",
+    "skipped", "unverifiable", "interrupted",
+})
+WHITEBOX_STOP_REASONS = frozenset({
+    "target_reached", "source_exhausted", "explicit_empty", "cancelled", "paused",
+    "hard_block", "soft_failure", "browser_lost", "persistence_failed", "unknown",
+})
+WHITEBOX_CONCLUSION_LABELS = {
+    "succeeded": "完整成功",
+    "empty": "空结果",
+    "partial": "部分完成",
+    "failed": "执行失败",
+    "unverifiable": "无法确认",
+    "interrupted": "任务已中断",
+}

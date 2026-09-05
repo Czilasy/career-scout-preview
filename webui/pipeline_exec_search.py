@@ -22,6 +22,8 @@ from webui.source import PageEventPersistenceError
 from webui.browser_recovery import BrowserRecovery
 from webui.error_registry import SYSTEMIC_BLOCK_CODES as _HARD_STOP_CODES
 from webui.error_registry import resolve_code
+from webui.whitebox import ScrapeEvidence, WhiteboxWriteError
+from webui.whitebox_rules import reduce_conclusion
 
 from webui.logging_setup import get_logger
 
@@ -92,6 +94,20 @@ def run_search(params: dict, source, *, pages: int = 3,
 
     combos = expand_combinations(params)
 
+    if not combos:
+        return {"ok": False, "jobs": [], "total_scraped": 0,
+                "total_matched": 0, "combinations": 0,
+                "integrity": reduce_conclusion(None, []),
+                "error": "没有可执行的搜索组合（关键词或城市为空）"}
+
+    evidence = ScrapeEvidence(task_event_store, task_id, combos, pages)
+    if evidence.startup_error is not None:
+        return evidence.finish({"ok": False, "jobs": [], "total_scraped": 0,
+                                "total_matched": 0, "combinations": len(combos),
+                                "hard_stop": True, "hard_stop_code": "internal_error",
+                                "error": f"任务证据白箱初始化失败（{type(evidence.startup_error).__name__}）"})
+    _finish = evidence.finish
+
     def emit(**kw):
         stage = str(kw.get("stage", ""))
         current = int(kw.get("current") or 0)
@@ -114,11 +130,6 @@ def run_search(params: dict, source, *, pages: int = 3,
                 _logger.debug("进度回调执行失败（不阻断搜索主流程）", exc_info=True)
 
 
-    if not combos:
-        return {"ok": False, "jobs": [], "total_scraped": 0,
-                "total_matched": 0, "combinations": 0,
-                "error": "没有可执行的搜索组合（关键词或城市为空）"}
-
     # Auto-launch the debug Chrome if it isn't running, so the user is shown
     # the browser instead of a raw infrastructure error.
     emit(stage="ensure_chrome", message="检查并启动调试浏览器…")
@@ -128,10 +139,10 @@ def run_search(params: dict, source, *, pages: int = 3,
         cdp_port, minimize_after_launch=True,
     )
     if not chrome_ok:
-        return {"ok": False, "jobs": [], "total_scraped": 0,
+        return _finish({"ok": False, "jobs": [], "total_scraped": 0,
                 "total_matched": 0, "combinations": len(combos),
                 "error": f"调试浏览器未就绪：{chrome_err}。"
-                         "若始终无法启动，请手动运行 scripts/boss_cdp_raw.py --setup-chrome 后重试。"}
+                         "若始终无法启动，请手动运行 scripts/boss_cdp_raw.py --setup-chrome 后重试。"})
 
     # Preflight: CDP connection + BOSS login.
     emit(stage="preflight", message=f"检查 {('BOSS直聘' if platform == 'boss' else '智联招聘')} 登录状态…")
@@ -142,9 +153,9 @@ def run_search(params: dict, source, *, pages: int = 3,
                    else "浏览器已打开，但还未登录智联招聘。请在浏览器中登录 zhaopin.com，登录后重新继续。")
         else:
             msg = f"预检失败：{pre.failed_code}"
-        return {"ok": False, "jobs": [], "total_scraped": 0,
+        return _finish({"ok": False, "jobs": [], "total_scraped": 0,
                 "total_matched": 0, "combinations": len(combos),
-                "error": msg}
+                "error": msg})
 
     merged: dict[str, dict] = {}
     total_scraped = 0
@@ -180,12 +191,15 @@ def run_search(params: dict, source, *, pages: int = 3,
 
         # 断点续抓：跳过已完成的组合
         if combo_key in _skip:
+            evidence.skip(combo_key)
             completed_combos.append(combo_key)
             continue
 
         resume_page = max(1, int((resume_pages or {}).get(combo_key, 1)))
         if resume_page > pages:
             # 页级 checkpoint 已越过目标页数：该组合已抓满，不再用非法 start_page 续抓。
+            evidence.units[combo_key].update(status="unverifiable", evidence_complete=False,
+                                             error_code="page_evidence_missing")
             completed_combos.append(combo_key)
             continue
 
@@ -236,6 +250,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                 "list_output_path": _combo_output_path(artifact_dir, combo_key),
                 "start_page": resume_page,
             }
+        evidence.unit_started(combo_key, pages, resume_page)
         last_page_ratio = 0.0
         page_progress_seen = False
 
@@ -257,6 +272,13 @@ def run_search(params: dict, source, *, pages: int = 3,
                 snapshot = event.get("jobs_snapshot")
                 if isinstance(snapshot, list):
                     resume_jobs[combo_key] = list(snapshot)
+            try:
+                evidence.page(combo_key, event, target)
+            except WhiteboxWriteError as exc:
+                emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
+                     keyword=kw, city=display_city, failed_code="internal_error",
+                     message="白箱页级证据写入失败，任务暂停")
+                raise PageEventPersistenceError(str(exc)) from exc
             if on_page_completed is not None:
                 try:
                     on_page_completed(event)
@@ -285,6 +307,8 @@ def run_search(params: dict, source, *, pages: int = 3,
         recovery = BrowserRecovery(
             cdp_port=cdp_port,
             platform=platform,
+            task_id=str(task_id or ""), unit_key=combo_key,
+            store=task_event_store,
             on_restart=lambda: emit(
                 stage="ensure_chrome", current=len(completed_combos), total=len(combos),
                 keyword=kw, city=display_city,
@@ -354,26 +378,28 @@ def run_search(params: dict, source, *, pages: int = 3,
             if not outcome.ok and outcome.failed_code == "source_login_required":
                 outcome = _recheck_login_combo(outcome)
         except PageEventPersistenceError as exc:
-            return {
+            evidence.incomplete(combo_key, "页级快照持久化失败")
+            return _finish({
                 "ok": False, "jobs": list(merged.values()),
                 "total_scraped": total_scraped, "total_matched": len(merged),
                 "combinations": len(combos), "completed_combos": completed_combos,
                 "hard_stop": True, "hard_stop_code": "internal_error",
                 "error": f"页级快照持久化失败（{type(exc.__cause__).__name__}），任务已暂停",
-            }
+            })
         except _PIPELINE_OPERATION_ERRORS as exc:
             emit(
                 stage="hard_stop", current=len(completed_combos), total=len(combos),
                 keyword=kw, city=display_city, failed_code="internal_error",
                 message="抓取执行失败，任务暂停",
             )
-            return {
+            evidence.incomplete(combo_key, "抓取执行失败", "internal_error")
+            return _finish({
                 "ok": False, "jobs": list(merged.values()),
                 "total_scraped": total_scraped, "total_matched": len(merged),
                 "combinations": len(combos), "completed_combos": completed_combos,
                 "hard_stop": True, "hard_stop_code": "internal_error",
                 "error": f"抓取执行失败（{type(exc).__name__}），任务已暂停",
-            }
+            })
         if not outcome.ok and recovery.is_browser_lost(outcome.failed_code):
             restart_ok, restart_err = recovery.try_restart()
             if restart_ok:
@@ -384,26 +410,28 @@ def run_search(params: dict, source, *, pages: int = 3,
                 try:
                     outcome = _fetch_list_once()
                 except PageEventPersistenceError as exc:
-                    return {
+                    evidence.incomplete(combo_key, "页级快照持久化失败")
+                    return _finish({
                         "ok": False, "jobs": list(merged.values()),
                         "total_scraped": total_scraped, "total_matched": len(merged),
                         "combinations": len(combos), "completed_combos": completed_combos,
                         "hard_stop": True, "hard_stop_code": "internal_error",
                         "error": f"页级快照持久化失败（{type(exc.__cause__).__name__}），任务已暂停",
-                    }
+                    })
                 except _PIPELINE_OPERATION_ERRORS as exc:
                     emit(
                         stage="hard_stop", current=len(completed_combos), total=len(combos),
                         keyword=kw, city=display_city, failed_code="internal_error",
                         message="抓取执行失败，任务暂停",
                     )
-                    return {
+                    evidence.incomplete(combo_key, "抓取执行失败", "internal_error")
+                    return _finish({
                         "ok": False, "jobs": list(merged.values()),
                         "total_scraped": total_scraped, "total_matched": len(merged),
                         "combinations": len(combos), "completed_combos": completed_combos,
                         "hard_stop": True, "hard_stop_code": "internal_error",
                         "error": f"抓取执行失败（{type(exc).__name__}），任务已暂停",
-                    }
+                    })
                 if outcome.ok:
                     recovery.mark_progress()
                 elif recovery.is_browser_lost(outcome.failed_code):
@@ -411,22 +439,28 @@ def run_search(params: dict, source, *, pages: int = 3,
                     emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
                          keyword=kw, city=display_city, failed_code=outcome.failed_code,
                          message=f"自动重启后仍失联：{label}，任务暂停")
-                    return {"ok": False, "jobs": list(merged.values()),
+                    evidence.incomplete(combo_key, "自动重启后仍失联", "browser_lost")
+                    return _finish({"ok": False, "jobs": list(merged.values()),
                             "total_scraped": total_scraped, "total_matched": len(merged),
                             "combinations": len(combos), "completed_combos": completed_combos,
                             "hard_stop": True, "hard_stop_code": outcome.failed_code,
-                            "error": f"自动重启后仍失联：{label}，任务暂停"}
+                            "error": f"自动重启后仍失联：{label}，任务暂停"})
             else:
                 label = failed_code_label("source_cdp_unavailable", platform)
                 emit(stage="hard_stop", current=len(completed_combos), total=len(combos),
                      keyword=kw, city=display_city, failed_code="source_cdp_unavailable",
                      message=f"调试浏览器自动重启失败：{restart_err}")
-                return {"ok": False, "jobs": list(merged.values()),
+                evidence.incomplete(combo_key, "调试浏览器自动重启失败", "source_cdp_unavailable")
+                return _finish({"ok": False, "jobs": list(merged.values()),
                         "total_scraped": total_scraped, "total_matched": len(merged),
                         "combinations": len(combos), "completed_combos": completed_combos,
                         "hard_stop": True, "hard_stop_code": "source_cdp_unavailable",
-                        "error": f"调试浏览器自动重启失败：{restart_err}，任务暂停"}
+                        "error": f"调试浏览器自动重启失败：{restart_err}，任务暂停"})
         if not outcome.ok:
+            _failure_reason = outcome.failed_reason or (
+                outcome.safe_log.split("reason=", 1)[1] if outcome.safe_log and "reason=" in outcome.safe_log else ""
+            ) or failed_code_label(outcome.failed_code, platform)
+            evidence.failed(combo_key, outcome, skipped=_skipped_login_combo[0], reason=_failure_reason)
             # 二次复核确认登录失效：跳过本组合并记录原因，不整场暂停
             if _skipped_login_combo[0]:
                 label = failed_code_label(outcome.failed_code, platform)
@@ -444,11 +478,11 @@ def run_search(params: dict, source, *, pages: int = 3,
                      keyword=kw, city=display_city, failed_code=outcome.failed_code,
                      combo_key=combo_key,
                      message=f"系统性阻断：{label}，任务暂停")
-                return {"ok": False, "jobs": list(merged.values()),
+                return _finish({"ok": False, "jobs": list(merged.values()),
                         "total_scraped": total_scraped, "total_matched": len(merged),
                         "combinations": len(combos), "completed_combos": completed_combos,
                         "hard_stop": True, "hard_stop_code": outcome.failed_code,
-                        "error": f"系统性阻断：{label}"}
+                        "error": f"系统性阻断：{label}"})
             else:
                 failed_combos += 1
                 # 从 safe_log 提取 reason= 后的可读原因
@@ -471,6 +505,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                      message=f"组合失败：{label}{detail}")
         else:
             total_scraped += len(outcome.jobs)
+            evidence.completed(combo_key, outcome)
             completed_combos.append(combo_key)
             for job in outcome.jobs:
                 jid = (job.get("platform_job_id") or job.get("job_id") or job.get("source_url") or "")
@@ -485,7 +520,8 @@ def run_search(params: dict, source, *, pages: int = 3,
                         keyword=kw, city=display_city, failed_code="internal_error",
                         message="组合结果持久化失败，任务暂停",
                     )
-                    return {
+                    evidence.incomplete(combo_key, "组合结果持久化失败")
+                    return _finish({
                         "ok": False,
                         "jobs": list(merged.values()),
                         "total_scraped": total_scraped,
@@ -495,7 +531,7 @@ def run_search(params: dict, source, *, pages: int = 3,
                         "hard_stop": True,
                         "hard_stop_code": "internal_error",
                         "error": f"组合结果持久化失败（{type(exc).__name__}），任务已暂停",
-                    }
+                    })
             emit(stage="combo_done", current=len(completed_combos), total=len(combos),
                  keyword=kw, city=display_city, scraped=len(outcome.jobs),
                  **({"page_progress": 0} if page_progress_seen else {}),
@@ -544,11 +580,11 @@ def run_search(params: dict, source, *, pages: int = 3,
             if login_skipped else "所有组合均失败，请检查浏览器登录、网络或平台提示后重试。")
         emit(stage="risk_warning", current=len(completed_combos), total=len(combos),
              message=warning_message)
-        return {"ok": False, "jobs": [], "total_scraped": 0,
+        return _finish({"ok": False, "jobs": [], "total_scraped": 0,
                 "total_matched": 0, "combinations": len(combos),
                 "completed_combos": completed_combos,
                 "error": (f"因登录失效跳过了全部 {login_skipped} 个组合，请确认登录态后重试" if login_skipped
-                          else "所有搜索组合均失败，请检查浏览器登录、网络或平台提示后重试")}
+                          else "所有搜索组合均失败，请检查浏览器登录、网络或平台提示后重试")})
 
     # 有数据才关浏览器（任务完成）；全失败则保留窗口供用户排查/重试。
     if total_scraped > 0 and close_chrome_on_success:
@@ -558,7 +594,7 @@ def run_search(params: dict, source, *, pages: int = 3,
     emit(stage="done", total_scraped=total_scraped, total_matched=len(all_jobs),
          message=f"完成：抓取 {total_scraped} 条，去重 {len(all_jobs)} 条")
 
-    return {"ok": True, "jobs": all_jobs, "total_scraped": total_scraped,
+    return _finish({"ok": True, "jobs": all_jobs, "total_scraped": total_scraped,
             "total_matched": len(all_jobs), "combinations": len(combos),
             "completed_combos": completed_combos,
-            "error": ""}
+            "error": ""}, lifecycle_end=("cancelled" if stop_event is not None and stop_event.is_set() else None))

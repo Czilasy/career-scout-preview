@@ -94,6 +94,16 @@ class StoreMigrationsV1Mixin:
             self._migration_031()
         if current < 32:
             self._migration_032()
+        if current < 33:
+            # Test fixtures and recovery tooling may intentionally freeze the
+            # pre-033 schema by stubbing one or more prior migrations.  Only
+            # create the whitebox tables after the database has durably reached
+            # v32; a real v27 database reaches that point through the calls
+            # above, while a frozen fixture remains at its requested version.
+            with self._connection() as conn:
+                latest = conn.execute("SELECT MAX(version) AS v FROM schema_migrations").fetchone()
+            if int(latest["v"] if latest is not None else 0) >= 32:
+                self._migration_033()
         # Always reconcile: copy old default profile if not yet in candidate_profiles
         self._copy_legacy_default_profile()
 

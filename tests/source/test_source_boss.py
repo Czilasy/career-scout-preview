@@ -70,17 +70,20 @@ class SourceOutcomeSuccessTests(unittest.TestCase):
         self.assertIsNone(outcome.empty_evidence)
         self.assertIsNone(outcome.failed_code)
 
-    def test_success_empty_jobs_without_empty_flag_is_not_empty_result(self):
-        """ok=True + jobs=[] 但 empty_result=False 是合同允许的普通成功（零岗位）。
-
-        合同只要求 ok=True + jobs=[] + empty_result=True 时必须带 evidence；
-        普通 success(jobs=[]) 不自动变成 empty_result。
-        """
+    def test_success_empty_jobs_without_empty_flag_is_rejected(self):
+        """调用方不能用显式空列表伪造成功。"""
         outcome = SourceOutcome.success(jobs=[])
-        self.assertTrue(outcome.ok)
+        self.assertFalse(outcome.ok)
         self.assertEqual(outcome.jobs, [])
-        self.assertFalse(outcome.empty_result)
-        self.assertIsNone(outcome.empty_evidence)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+    def test_success_empty_jobs_requires_scope_completion(self):
+        outcome = SourceOutcome.success(
+            jobs=[], empty_result=True,
+            empty_evidence={"kind": "explicit_empty_state"},
+        )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
 
 
 class SourceOutcomeEmptySuccessTests(unittest.TestCase):
@@ -91,7 +94,7 @@ class SourceOutcomeEmptySuccessTests(unittest.TestCase):
             "fixture_version": "zhilian-list-v1",
             "marker": "normalized-empty-state",
         }
-        outcome = SourceOutcome.empty_success(empty_evidence=evidence, safe_log="empty")
+        outcome = SourceOutcome.empty_success(empty_evidence=evidence, safe_log="empty", scope_complete=True)
         self.assertTrue(outcome.ok)
         self.assertEqual(outcome.jobs, [])
         self.assertTrue(outcome.empty_result)
@@ -101,6 +104,13 @@ class SourceOutcomeEmptySuccessTests(unittest.TestCase):
     def test_empty_success_rejects_none_evidence(self):
         with self.assertRaises(ValueError):
             SourceOutcome.empty_success(empty_evidence=None)
+
+    def test_empty_success_rejects_missing_scope_evidence(self):
+        outcome = SourceOutcome.empty_success(empty_evidence={
+            "kind": "explicit_empty_state", "fixture_version": "v1", "marker": "m",
+        })
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
 
     def test_empty_success_rejects_empty_evidence(self):
         with self.assertRaises(ValueError):
@@ -517,6 +527,29 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         self.assertEqual(events[0]["page"], 1)
         self.assertEqual(events[0]["jobs_count"], 1)
 
+    def test_list_page_evidence_preserves_counts_and_scope_stop(self):
+        source = self._make_source()
+        list_path = str(self.artifact_root / "list_page_evidence.json")
+        plan_item = {
+            "keyword": "AI", "city": "上海", "source_filters": {}, "target_pages": 1,
+            "input_hash": _boss_input_hash({"keyword": "AI", "city": "上海",
+                                              "source_filters": {}, "target_pages": 1}),
+            "list_output_path": list_path,
+        }
+        def fake_run(**kwargs):
+            self._write_json(kwargs["output_path"], {"jobs": [{"encrypt_job_id": "j1", "job_link": "https://zhipin.example/1"}]})
+            kwargs["on_page_completed"]({"kind": "page_completed", "page": 1, "target_pages": 1,
+                "returned_count": 30, "new_unique_count": 2, "jobs_count": 1,
+                "has_more": None, "resume_page": 2, "last_completed_page": 1,
+                "scope_complete": True, "stop_reason": "target_reached"})
+            return {"list_data": {"jobs": []}, "details": None}
+        with mock.patch.object(_boss_for_inprocess, "run_search_programmatic", side_effect=fake_run):
+            outcome = source.fetch_list(plan_item)
+        self.assertTrue(outcome.ok)
+        self.assertTrue(outcome.scope_complete)
+        self.assertEqual(outcome.page_evidence[0]["returned_count"], 30)
+        self.assertIsNone(outcome.page_evidence[0]["has_more"])
+
     # ---- detail-only 翻译 -------------------------------------------
 
     def test_detail_only_translates_to_scrape_details(self):
@@ -676,8 +709,8 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
         self.assertIn("empty_batch_no_events_cdp_lost", outcome.safe_log)
         m_signal.assert_called_once_with("source_cdp_unavailable")
 
-    def test_list_empty_with_page_event_remains_success(self):
-        """有页级事件佐证的真实空结果不被误判为浏览器失联。"""
+    def test_list_empty_with_page_event_without_empty_evidence_is_unverifiable(self):
+        """只有页事件不能证明空结果；必须另有明确空结果事实。"""
         source = self._make_source()
         list_path = str(self.artifact_root / "list_empty_ok.json")
         plan_item = {
@@ -707,7 +740,8 @@ class BossCdpSourceInProcessTests(unittest.TestCase):
                                side_effect=fake_run):
             outcome = source.fetch_list(plan_item)
 
-        self.assertTrue(outcome.ok)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_invalid_output")
         self.assertEqual(outcome.jobs, [])
 
     def test_detail_batch_empty_without_events_not_mapped_to_cdp_lost(self):

@@ -188,6 +188,19 @@ def save_scraped_only_round(
         profile_summary=profile_summary,
         profile_facts=profile_facts,
     )
+    try:
+        from webui.whitebox import WhiteboxService
+        result["integrity"] = WhiteboxService(store).report(
+            "scrape", str(scrape_task_id)
+        )["integrity"]
+    except Exception:
+        result["integrity"] = {
+            "conclusion": "unverifiable", "label": "无法确认",
+            "evidence_complete": False, "degraded": False,
+            "primary_code": "legacy_evidence_missing",
+            "primary_reason": "历史证据不足，无法确认",
+            "recommendation": "建议重新执行", "revision": 0,
+        }
     existing = _existing_scraped_only_for_flow(store, scrape_task_id, platform)
     if existing is not None:
         # 幂等命中：轮已存在，结果可用（saved=True，前端展示 result）

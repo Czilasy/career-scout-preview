@@ -391,6 +391,8 @@ def fetch_job_details(jobs, source, *, artifact_dir=None, progress=None,
             recovery = BrowserRecovery(
                 cdp_port=getattr(source, "cdp_port", None),
                 platform=getattr(source, "platform", ""),
+                task_id=str(task_id or ""), unit_key=batch_key,
+                attempt=attempt, store=store,
             )
             def _fetch_batch(job_list, output_path, *, with_progress=True):
                 try:

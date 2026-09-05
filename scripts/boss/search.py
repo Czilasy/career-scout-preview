@@ -292,7 +292,13 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             print(f"⚠️ 无法写入列表事件文件 ({list_events_output}): {exc}")
             events_handle = None
 
-    def _emit_page(page, delta, has_more, resume_page, *, snapshot=None):
+    scope_stop_reason = None
+    scope_source_exhausted = None
+    scope_explicit_empty = False
+    returned_total_count = 0
+
+    def _emit_page(page, delta, has_more, resume_page, *, snapshot=None,
+                   returned_count=None, scope_complete=None, stop_reason=None):
         """每完成一页发出结构化事件，供 WebUI 页级持久化/进度使用。"""
         event = {
             "kind": "page_completed",
@@ -302,10 +308,15 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             "page": int(page),
             "target_pages": int(max_pages),
             "jobs_delta": int(delta),
+            "returned_count": int(delta if returned_count is None else returned_count),
+            "new_unique_count": int(delta),
+            "unit_unique_count": len(all_jobs),
             "jobs_count": len(all_jobs),
-            "has_more": bool(has_more),
+            "has_more": has_more if has_more in (True, False, None) else None,
             "resume_page": int(resume_page),
             "last_completed_page": int(last_completed_page),
+            "scope_complete": scope_complete,
+            "stop_reason": stop_reason,
         }
         if on_page_completed is not None:
             cb_event = dict(event)
@@ -397,7 +408,8 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                         "last_completed_page": last_completed_page,
                     }, all_jobs)
                 _emit_page(
-                    last_completed_page, 0, True, pg, snapshot=all_jobs)
+                    last_completed_page, 0, True, pg, snapshot=all_jobs,
+                    returned_count=0)
                 raise RiskControlError(
                     verdict_hint, code=verdict_code,
                     page=pg, scraped_count=len(all_jobs),
@@ -421,6 +433,8 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
             elif not jobs:
                 log.warning("⚠️ API 未返回职位数据，已跳过 DOM fallback；如需强制降级可加 --allow-dom-fallback")
 
+            returned_total_count += len(jobs or [])
+
             if not jobs:
                 consecutive_empty += 1
                 # API 以合法结构应答但无职位（diagnosis=None）→ 正常空页。
@@ -440,13 +454,15 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                         "scraped_at": datetime.now().isoformat(),
                         "last_completed_page": last_completed_page,
                     }, all_jobs)
-                _emit_page(pg, 0, bool(prev_has_more) if prev_has_more is not None else True,
-                            pg + 1, snapshot=all_jobs)
+                page_has_more = api_meta.get("hasMore") if isinstance(api_meta, dict) else prev_has_more
+                _emit_page(pg, 0, page_has_more, pg + 1, snapshot=all_jobs,
+                           returned_count=0)
 
                 # --- 哨兵第二层：用 hasMore 精确判断空页原因 ---
                 # 上一页 API 说"没有更多了" → 空页是正常的"翻完了"
                 if prev_has_more is False:
                     print(f"  ℹ️ 上一页 hasMore=false，搜索结果已翻完，停止（已抓 {len(all_jobs)} 条）")
+                    scope_stop_reason, scope_source_exhausted = "source_exhausted", True
                     break
                 # 当页 API 正常应答且明确无更多数据 → 该组合确实没有职位，与风控无关。
                 # 不提前 break 会在连续空页后被误判成风控，把没被封的账号报成 IP 限流。
@@ -454,10 +470,14 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                         and (api_meta.get("totalCount") == 0
                              or api_meta.get("hasMore") is False)):
                     print(f"  ℹ️ API 正常返回但该搜索组合无职位（totalCount/hasMore 明确），停止（已抓 {len(all_jobs)} 条）")
+                    scope_stop_reason = "explicit_empty" if not all_jobs else "source_exhausted"
+                    scope_source_exhausted = True
+                    scope_explicit_empty = not all_jobs
                     break
                 # 有数据 + 连续空页达阈值 → 大概率翻完了（兜底，防 hasMore 不准）
                 if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES and len(all_jobs) > 0:
                     print(f"  ℹ️ 连续 {consecutive_empty} 页无数据，搜索结果已翻完，停止翻页（已抓 {len(all_jobs)} 条）")
+                    scope_stop_reason, scope_source_exhausted = "source_exhausted", True
                     break
                 # 从头就空 + 连续达阈值：全部空页都是 API 正常应答 → 真实空结果；
                 # 伴随结构异常/拦截的空页已按分档处置，这里只做"停止翻页"刹车，
@@ -465,6 +485,8 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                 if consecutive_empty >= MAX_CONSECUTIVE_EMPTY_PAGES and len(all_jobs) == 0:
                     if legit_empty_streak >= consecutive_empty:
                         print(f"  ℹ️ 连续 {consecutive_empty} 页 API 正常应答但无职位，判定该搜索条件没有职位（非风控）")
+                        scope_stop_reason, scope_source_exhausted = "explicit_empty", True
+                        scope_explicit_empty = True
                         break
                     print(f"  ⚠️ 连续 {consecutive_empty} 页无法获取职位数据，原因无法确认，停止本组合")
                     raise RiskControlError(
@@ -504,13 +526,36 @@ def scrape_list(keyword, city_input, max_pages, filters, output_path,
                     "scraped_at": datetime.now().isoformat(),
                     "last_completed_page": last_completed_page,
                 }, all_jobs)
-            _emit_page(pg, new, bool(prev_has_more) if prev_has_more is not None else True,
-                        pg + 1, snapshot=all_jobs)
+            page_has_more = api_meta.get("hasMore") if isinstance(api_meta, dict) else None
+            _emit_page(pg, new, page_has_more, pg + 1, snapshot=all_jobs,
+                       returned_count=len(jobs))
 
             if pg < max_pages:
                 d = random.uniform(12, 22)
                 print(f"  翻页等待 {d:.0f}s...\n")
                 time.sleep(d)
+
+        # Emit the terminal scope fact before the handle is closed below.
+        if scope_stop_reason is None and last_completed_page >= max_pages:
+            scope_stop_reason = "target_reached"
+        if scope_stop_reason and events_handle is not None:
+            events_handle.write(json.dumps({
+                "kind": "scope_completed", "event_type": "scope_completed",
+                "combo_key": combo_key or f"{keyword}|{city_name}", "keyword": keyword,
+                "city": city_name, "scope_complete": True,
+                "source_exhausted": scope_source_exhausted, "stop_reason": scope_stop_reason,
+                "returned_total_count": returned_total_count, "unit_unique_count": len(all_jobs),
+                "explicit_empty": bool(scope_explicit_empty),
+            }, ensure_ascii=False) + "\n")
+            if scope_explicit_empty:
+                events_handle.write(json.dumps({
+                    "kind": "explicit_empty", "event_type": "explicit_empty",
+                    "combo_key": combo_key or f"{keyword}|{city_name}", "keyword": keyword,
+                    "city": city_name, "scope_complete": True,
+                    "source_exhausted": scope_source_exhausted, "stop_reason": "explicit_empty",
+                    "explicit_empty": True, "fixture_version": "boss-list-v2", "marker": "explicit-empty",
+                }, ensure_ascii=False) + "\n")
+            events_handle.flush()
 
     except KeyboardInterrupt:
         print("\n中断")

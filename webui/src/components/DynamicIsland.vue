@@ -27,6 +27,7 @@ import type {
   IslandInterruptContent,
   IslandLiveState,
 } from "../composables/useIslandCarousel";
+import type { IntegrityConclusion } from "../types";
 import { useIslandValueTransition } from "../composables/useIslandValueTransition";
 import IslandNoticePanel from "./IslandNoticePanel.vue";
 
@@ -60,6 +61,17 @@ let popAnim: Animation | null = null;
 const capsule = computed<DynamicIslandState>(
   () => props.status?.capsule ?? { state: "idle", platform: "boss" },
 );
+const integrityConclusion = computed<IntegrityConclusion | "">(
+  () => props.status?.integrity?.conclusion || "",
+);
+const integrityLabel = computed(() => {
+  if (integrityConclusion.value === "partial") return "部分完成";
+  if (integrityConclusion.value === "unverifiable") return "无法确认";
+  if (integrityConclusion.value === "failed") return "执行失败";
+  if (integrityConclusion.value === "interrupted") return "任务已中断";
+  if (integrityConclusion.value === "empty") return "没有找到岗位";
+  return "";
+});
 
 const mainLaneState = props.carousel.mainLaneState;
 const activeLaneIndex = props.carousel.activeLaneIndex;
@@ -96,6 +108,9 @@ const runningLabel = computed(() => {
 
 const completedSummary = computed(() => {
   if (livePhase.value !== "completed") return "";
+  if (integrityLabel.value && integrityConclusion.value !== "succeeded") {
+    return integrityLabel.value;
+  }
   if (isScrapedPhase.value) return `待筛选 ${liveCounts.value?.matched ?? 0}`;
   const matched = liveCounts.value?.matched ?? 0;
   const pending = liveCounts.value?.pending ?? 0;
@@ -433,6 +448,7 @@ function setTrackRef(el: unknown): void {
       :class="[`is-${capsule.state}`, { 'has-unread': unread > 0, 'is-open': open, 'has-glow': glow !== 'none' }]"
       :data-testid="`dynamic-island-${capsule.state}`"
       :data-pill-width="pillWidth ?? null"
+      :data-integrity="integrityConclusion || undefined"
       :data-glow="glow !== 'none' ? glow : undefined"
       :aria-expanded="open"
       :aria-label="unread > 0 ? `灵动岛，${unread} 条未读提醒` : undefined"
@@ -519,9 +535,13 @@ function setTrackRef(el: unknown): void {
             >
               <span v-if="isScrapedPhase" class="island-value" data-testid="island-completed-value">{{ `待筛选 ${liveCounts?.matched ?? 0}` }}</span>
               <span v-else class="island-chips">
-                <span class="island-chip c-green" data-testid="island-completed-value">匹配 {{ liveCounts?.matched ?? 0 }}</span>
                 <span
-                  v-if="(liveCounts?.pending ?? 0) > 0"
+                  class="island-chip"
+                  :class="integrityConclusion && integrityConclusion !== 'succeeded' ? 'c-amber' : 'c-green'"
+                  data-testid="island-completed-value"
+                >{{ completedSummary || `匹配 ${liveCounts?.matched ?? 0}` }}</span>
+                <span
+                  v-if="!integrityConclusion && (liveCounts?.pending ?? 0) > 0"
                   class="island-chip c-amber island-pending-dot"
                   data-testid="island-pending-chip"
                 >待确认 {{ liveCounts?.pending }}</span>

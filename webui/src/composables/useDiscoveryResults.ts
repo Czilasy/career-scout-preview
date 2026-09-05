@@ -136,11 +136,13 @@ async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean }) {
     status: snapshotStatus, stage: "done", progress: { message: "上次抓取已完成" }, logs: [],
     started_at: newer.data.started_at,
     finished_at: newer.data.finished_at,
+    integrity: newer.data.integrity || merged.integrity || null,
   };
   screenSnapshot.value = {
     status: snapshotStatus, stage: "done", progress: { message: "上次 AI 筛选已完成" }, logs: [],
     started_at: newer.data.started_at,
     finished_at: newer.data.finished_at,
+    integrity: newer.data.integrity || merged.integrity || null,
   };
   const execConfig = newer.data.execution_config || {};
   scrapeSnapshot.value.execution_config = execConfig;
@@ -178,6 +180,7 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
       execution_config?: Record<string, unknown> | null;
       scrape_task_id?: string;
       round_context?: Partial<RoundContext> | null;
+      integrity?: PipelineResult["integrity"];
     }>(`/api/latest-pipeline-result?platform=${platform}${base}`).catch(() => null);
     const [bossData, zhilianData] = await Promise.all([fetchOne("boss"), fetchOne("zhilian")]);
     if (interruptedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return null;
@@ -227,6 +230,7 @@ async function fetchMergedLatestResult(): Promise<MergedLatestResult | null> {
       total_matched: sum("total_matched"),
       total_kept: sum("total_kept"),
       total_dropped: sum("total_dropped"),
+      integrity: newer.data.integrity || (newer.data.result as PipelineResult | undefined)?.integrity || null,
     };
     // 019：跨平台重复簇——剔除行 extra.cross_platform_dup_of 反查合并 jobs 中
     // 的对端保留条目，命中者挂运行时簇数据（复用 _result_run_id 惯例）；
@@ -302,8 +306,12 @@ function enterHistoryRound(detail: HistoryRoundDetail) {
     platform: detail.platform,
     status: detail.status,
     jobCount: Number(detail.result?.total_kept || (detail.result?.jobs || []).length || 0),
+    integrity: detail.integrity || detail.result?.integrity || null,
   };
-  pipelineResult.value = detail.result || {};
+  pipelineResult.value = {
+    ...(detail.result || {}),
+    integrity: detail.integrity || detail.result?.integrity || null,
+  };
   resultEpoch.value += 1;
   const historyGroups = partitionPipelineResult(detail.result || {});
   activeCategory.value = historyGroups.matched.length ? "matched"

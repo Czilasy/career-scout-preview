@@ -128,6 +128,26 @@ class WorkbenchRunnerTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def _record_query_evidence(self, run_id, query, *, failed=False):
+        key = f"query:{query['ordinal']}:{query['frozen_query']['keyword']}"
+        if failed:
+            self.runner._record_workbench(
+                run_id, "unit_failed", key,
+                {"error_code": "scrape_error", "error_reason": "抓取失败"},
+                severity="error",
+            )
+            return
+        self.runner._record_workbench(
+            run_id, "scope_completed", key,
+            {
+                "scope_complete": True,
+                "source_exhausted": None,
+                "stop_reason": "target_reached",
+                "returned_total_count": 1,
+                "unit_unique_count": 1,
+            },
+        )
+
     def test_create_search_run_with_keywords_creates_parent_and_queries(self):
         run = self.runner.create_search_run(
             self.profile["id"],
@@ -173,6 +193,7 @@ class WorkbenchRunnerTests(unittest.TestCase):
         queries = self.store.list_run_queries(run["id"])
         for q in queries:
             self.store.update_run_query(q["id"], status="succeeded")
+            self._record_query_evidence(run["id"], q)
         self.runner._finalize_run(run["id"])
         self.assertEqual(self.store.get_search_run(run["id"])["status"], "succeeded")
 
@@ -184,7 +205,9 @@ class WorkbenchRunnerTests(unittest.TestCase):
         )
         queries = self.store.list_run_queries(run["id"])
         self.store.update_run_query(queries[0]["id"], status="succeeded")
+        self._record_query_evidence(run["id"], queries[0])
         self.store.update_run_query(queries[1]["id"], status="failed", error_code="scrape_error")
+        self._record_query_evidence(run["id"], queries[1], failed=True)
         self.runner._finalize_run(run["id"])
         self.assertEqual(self.store.get_search_run(run["id"])["status"], "partial")
 
@@ -197,6 +220,7 @@ class WorkbenchRunnerTests(unittest.TestCase):
         queries = self.store.list_run_queries(run["id"])
         for q in queries:
             self.store.update_run_query(q["id"], status="failed", error_code="scrape_error")
+            self._record_query_evidence(run["id"], q, failed=True)
         self.runner._finalize_run(run["id"])
         self.assertEqual(self.store.get_search_run(run["id"])["status"], "failed")
 

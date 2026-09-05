@@ -774,6 +774,77 @@ class AiScreenPlatformInheritanceTests(unittest.TestCase):
         self.store.update_screening_run(run_id, status="succeeded",
                                           current_stage="done",
                                           processed_count=5, match_count=3)
+        # 033 V2：测试中的“已完成”父抓取必须同时拥有可复核的白箱证据，
+        # 不能只靠 screening_runs.status 推断 AI 入口可以继续。
+        from webui.whitebox import WhiteboxService
+        from webui.store_helpers import _now
+        whitebox = WhiteboxService(self.store)
+        ref = whitebox.begin("scrape", run_id, {
+            "stages": ["scrape_list"],
+            "units": [{
+                "unit_key": "Python|上海",
+                "unit_kind": "keyword_city",
+                "stage": "scrape_list",
+                "planned_pages": 1,
+                "required": True,
+            }],
+        })
+        whitebox.record(ref, {
+            "idempotency_key": f"page:{run_id}",
+            "event_type": "page_completed",
+            "occurred_at": _now(),
+            "stage": "scrape_list",
+            "unit_kind": "keyword_city",
+            "unit_key": "Python|上海",
+            "attempt_no": 1,
+            "required_evidence": True,
+            "payload": {
+                "page": 1,
+                "planned_pages": 1,
+                "returned_count": 0,
+                "new_unique_count": 0,
+                "has_more": False,
+                "resume_page": 2,
+                "scope_complete": True,
+                "source_exhausted": True,
+                "stop_reason": "explicit_empty",
+            },
+        })
+        whitebox.record(ref, {
+            "idempotency_key": f"scope-completed:{run_id}",
+            "event_type": "scope_completed",
+            "occurred_at": _now(),
+            "stage": "scrape_list",
+            "unit_kind": "keyword_city",
+            "unit_key": "Python|上海",
+            "attempt_no": 1,
+            "required_evidence": True,
+            "payload": {
+                "scope_complete": True,
+                "source_exhausted": True,
+                "stop_reason": "explicit_empty",
+                "returned_total_count": 0,
+                "unit_unique_count": 0,
+            },
+        })
+        whitebox.record(ref, {
+            "idempotency_key": f"explicit-empty:{run_id}",
+            "event_type": "explicit_empty",
+            "occurred_at": _now(),
+            "stage": "scrape_list",
+            "unit_kind": "keyword_city",
+            "unit_key": "Python|上海",
+            "attempt_no": 1,
+            "required_evidence": True,
+            "payload": {
+                "empty_evidence": {
+                    "kind": "explicit_empty_state",
+                    "fixture_version": "test",
+                    "marker": "no_jobs",
+                },
+            },
+        })
+        whitebox.finalize(ref, lifecycle_end="succeeded")
         # 在内存中注册为已完成任务
         self.app.config["PIPELINE_TASKS"][run_id] = {
             "kind": "scrape", "status": "done", "progress": {}, "logs": [],

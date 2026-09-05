@@ -62,6 +62,11 @@ class TaskRunner:
         self._process_lock = threading.Lock()
         self.process_executor = ScraperExecutor()
         self.result_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            from webui.whitebox import WhiteboxService
+            self.whitebox = WhiteboxService(store) if hasattr(store, "create_whitebox_run") else None
+        except Exception:
+            self.whitebox = None
         self.executor = (
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="boss-task")
             if self.start_tasks else None
@@ -78,18 +83,95 @@ class TaskRunner:
             output_path=str(output_path),
             detail_output_path=str(detail_path),
         )
+        if not self._ensure_whitebox(task):
+            return self.store.get_task(task_id)
         self._submit(task_id)
         return task
 
     def create_setup_chrome(self):
         task_id = f"setup-{uuid.uuid4().hex[:8]}"
         task = self.store.create_task(task_id, "setup_chrome", {})
+        if not self._ensure_whitebox(task):
+            return self.store.get_task(task_id)
         self._submit(task_id)
         return task
 
     def _submit(self, task_id):
         if self.executor:
-            self.executor.submit(self._execute, task_id)
+            try:
+                self.executor.submit(self._execute, task_id)
+            except RuntimeError as exc:
+                reason = "后台任务提交失败，任务已结束"
+                try:
+                    self.store.append_log(task_id, reason)
+                    self.store.update_task(task_id, "failed", returncode=-1, error=reason)
+                    failed_task = self.store.get_task(task_id)
+                    failed_unit = str((failed_task or {}).get("kind") or "task")
+                    self._record_whitebox(task_id, "submission_failed", failed_unit, {
+                        "error_code": "submit_failed", "error_reason": reason,
+                    }, severity="error")
+                    self._finalize_whitebox(task_id, lifecycle_end="failed", returncode=-1)
+                except Exception:
+                    _logger.exception("旧任务提交失败状态保存异常 task=%s", task_id)
+                return False
+        return True
+
+    def _ensure_whitebox(self, task):
+        if self.whitebox is None:
+            return True
+        kind = str(task.get("kind") or "task")
+        search = (task.get("params") or {}).get("search") or {}
+        unit = {"unit_key": kind, "unit_kind": "legacy_task", "stage": kind, "required": True}
+        if kind == "scrape":
+            unit["planned_pages"] = max(1, int(search.get("pages") or 1))
+        try:
+            self.whitebox.begin("legacy_task", str(task["id"]), {
+                "stages": [kind], "units": [unit],
+            })
+            return True
+        except Exception as exc:
+            reason = "任务证据白箱初始化失败"
+            try:
+                self.store.update_task(task["id"], "failed", returncode=-1, error=reason)
+            except Exception:
+                _logger.exception("旧任务白箱初始化失败且状态保存失败 task=%s", task.get("id"))
+            _logger.error("旧任务白箱初始化失败 task=%s error=%s", task.get("id"), type(exc).__name__)
+            return False
+
+    def _record_whitebox(self, task_id, event_type, stage, payload, *, severity="info"):
+        if self.whitebox is None:
+            return False
+        from webui.store_helpers import _now
+        return self.whitebox.record_for_owner("legacy_task", str(task_id), {
+            "idempotency_key": f"{event_type}:{task_id}:{stage}", "event_type": event_type,
+            "occurred_at": _now(), "stage": stage, "unit_kind": "legacy_task",
+            "unit_key": stage, "attempt_no": 1, "required_evidence": event_type in {
+                "scope_completed", "explicit_empty", "unit_failed", "unit_incomplete",
+                "submission_failed", "task_interrupted",
+            }, "severity": severity, "payload": payload or {},
+        })
+
+    def _finalize_whitebox(self, task_id, *, lifecycle_end=None, returncode=None):
+        if self.whitebox is None:
+            return None
+        return self.whitebox.finalize(
+            self.whitebox.store.get_whitebox_run("legacy_task", str(task_id))["id"],
+            lifecycle_end=lifecycle_end, task_returncode=returncode,
+        )
+
+    def _scrape_artifact_counts(self, task):
+        if task.get("kind") != "scrape":
+            return 1, 1
+        try:
+            payload = _read_json(Path(task.get("output_path") or ""), {})
+            jobs = payload.get("jobs") if isinstance(payload, dict) else []
+            jobs = jobs if isinstance(jobs, list) else []
+            ids = {str((job or {}).get("job_id") or (job or {}).get("platform_job_id") or "")
+                   for job in jobs if isinstance(job, dict)}
+            ids.discard("")
+            return len(jobs), len(ids) or len(jobs)
+        except (OSError, ValueError, TypeError):
+            return 0, 0
 
     def cancel(self, task_id):
         task = self.store.get_task(task_id)
@@ -103,6 +185,12 @@ class TaskRunner:
         if process is not None:
             process.terminate()
         self.store.append_log(task_id, _MSG_USER_CANCELLED_TASK)
+        try:
+            self._record_whitebox(task_id, "task_interrupted", str(task.get("kind") or "task"),
+                                  {"stop_reason": "cancelled"}, severity="warning")
+            self._finalize_whitebox(task_id, lifecycle_end="cancelled", returncode=-1)
+        except Exception:
+            _logger.exception("旧任务取消白箱记录失败 task=%s", task_id)
         try:
             return self.store.update_task(task_id, "interrupted", error=_MSG_USER_CANCELLED_TASK)
         except ValueError:
@@ -174,9 +262,24 @@ class TaskRunner:
         try:
             if self.store.get_task(task_id)["status"] != "queued":
                 return
+            # Tests and a few legacy callers create the task row directly and
+            # invoke ``_execute`` without going through ``create_scrape`` /
+            # ``create_setup_chrome``.  Ensure their required whitebox plan is
+            # present before recording the first event; otherwise finalization
+            # would dereference a missing run and mask the real outcome.
+            if self.whitebox is not None and self.store.get_whitebox_run(
+                    "legacy_task", str(task_id)) is None:
+                task = self.store.get_task(task_id)
+                if not self._ensure_whitebox(task):
+                    return
             self.store.update_task(task_id, "running")
             task = self.store.get_task(task_id)
             self.store.append_log(task_id, "任务开始")
+            self._record_whitebox(task_id, "task_started", str(task.get("kind") or "task"),
+                                  {"kind": task.get("kind")}, severity="info")
+            self._record_whitebox(task_id, "unit_started", str(task.get("kind") or "task"),
+                                  {"planned_pages": ((task.get("params") or {}).get("search") or {}).get("pages")},
+                                  severity="info")
             cancel_event = threading.Event()
             with self._process_lock:
                 self._cancel_events[task_id] = cancel_event
@@ -207,6 +310,9 @@ class TaskRunner:
                 )
             # SearchCancelled → interrupted（cancel() 可能已改状态，也可能尚未）
             if outcome[0] == "interrupted":
+                self._record_whitebox(task_id, "task_interrupted", str(task.get("kind") or "task"),
+                                      {"stop_reason": "cancelled"}, severity="warning")
+                self._finalize_whitebox(task_id, lifecycle_end="cancelled", returncode=-1)
                 try:
                     if self.store.get_task(task_id)["status"] in {"queued", "running"}:
                         self.store.update_task(task_id, "interrupted", error=_MSG_USER_CANCELLED_TASK)
@@ -217,8 +323,34 @@ class TaskRunner:
                 return
             if outcome[0] == "succeeded":
                 self.validate_artifacts(task)
+                returned_count, unique_count = self._scrape_artifact_counts(task)
+                self._record_whitebox(
+                    task_id, "scope_completed", str(task.get("kind") or "task"),
+                    {"scope_complete": True, "source_exhausted": None,
+                     "stop_reason": "target_reached", "returned_total_count": returned_count,
+                     "unit_unique_count": unique_count},
+                )
+                if returned_count == 0 and task.get("kind") == "scrape":
+                    self._record_whitebox(task_id, "explicit_empty", str(task.get("kind") or "task"),
+                                          {"empty_evidence": True})
+                integrity = self._finalize_whitebox(task_id, returncode=0)
                 self.store.append_log(task_id, "任务完成")
-                self.store.update_task(task_id, "succeeded", returncode=0)
+                # The whitebox conclusion is the only source of the terminal
+                # task state.  In particular, missing evidence is ``partial``
+                # (publicly rendered as completed-with-pending), never a
+                # green success and never an unrelated failure downgrade.
+                conclusion = str((integrity or {}).get("conclusion") or "unverifiable")
+                target_status = {
+                    "succeeded": "succeeded", "empty": "succeeded",
+                    "partial": "partial", "unverifiable": "partial",
+                    "failed": "failed", "interrupted": "interrupted",
+                }.get(conclusion, "partial")
+                if self.store.get_task(task_id)["status"] in {"queued", "running"}:
+                    self.store.update_task(
+                        task_id, target_status, returncode=0,
+                        error=(integrity or {}).get("primary_reason")
+                        if target_status != "succeeded" else None,
+                    )
             else:
                 message = f"抓取执行失败: {outcome[2] or 'process_failed'}"
                 record_runtime_event(
@@ -229,14 +361,26 @@ class TaskRunner:
                     extra={"returncode": outcome[1]},
                 )
                 self.store.append_log(task_id, message)
-                self.store.update_task(
-                    task_id, "failed", returncode=outcome[1], error=message,
-                )
+                self._record_whitebox(task_id, "unit_failed", str(task.get("kind") or "task"), {
+                    "error_code": outcome[2] or "process_failed", "error_reason": message,
+                }, severity="error")
+                self._finalize_whitebox(task_id, lifecycle_end="failed", returncode=outcome[1])
+                if self.store.get_task(task_id)["status"] in {"queued", "running"}:
+                    self.store.update_task(task_id, "failed", returncode=outcome[1], error=message)
         except Exception as exc:
             _logger.exception("任务执行兜底异常 task=%s type=%s", task_id, type(exc).__name__)
             try:
+                try:
+                    self._record_whitebox(task_id, "unit_failed",
+                                          str(task.get("kind") or "task"), {
+                        "error_code": "internal_error", "error_reason": str(exc),
+                    }, severity="error")
+                    self._finalize_whitebox(task_id, lifecycle_end="failed", returncode=-1)
+                except Exception:
+                    _logger.exception("旧任务白箱失败事实保存异常 task=%s", task_id)
                 self.store.append_log(task_id, f"任务失败：{exc}")
-                self.store.update_task(task_id, "failed", returncode=-1, error=str(exc))
+                if self.store.get_task(task_id)["status"] in {"queued", "running"}:
+                    self.store.update_task(task_id, "failed", returncode=-1, error=str(exc))
             except (KeyError, ValueError) as persist_exc:
                 try:
                     current = self.store.get_task(task_id)

@@ -17,6 +17,21 @@ from typing import Protocol, runtime_checkable
 # Typed source outcomes
 # ---------------------------------------------------------------------------
 
+_UNSET_JOBS = object()
+
+
+def _valid_empty_evidence(value: object) -> bool:
+    """Return whether a source supplied the frozen empty-state marker.
+
+    ``empty_result`` is a claim about the searched scope, not merely an empty
+    Python list.  Keep the marker check in one place so both the constructor
+    and the convenience factories enforce the same contract.
+    """
+    return isinstance(value, dict) and all(
+        bool(str(value.get(key) or "").strip())
+        for key in ("kind", "fixture_version", "marker")
+    )
+
 class PageEventPersistenceError(RuntimeError):
     """编排层页级快照持久化失败时抛出，source 不得吞掉。"""
 
@@ -50,6 +65,12 @@ class SourceOutcome:
         "input_hash",
         "jobs",
         "ok",
+        "scope_complete",
+        "source_exhausted",
+        "stop_reason",
+        "page_evidence",
+        "degraded",
+        "quality_counts",
         "safe_log",
     )
 
@@ -57,7 +78,7 @@ class SourceOutcome:
         self,
         *,
         ok: bool,
-        jobs: list[dict] | None = None,
+        jobs: list[dict] | None | object = _UNSET_JOBS,
         detail: dict | None = None,
         empty_result: bool = False,
         empty_evidence: dict | None = None,
@@ -65,9 +86,27 @@ class SourceOutcome:
         safe_log: str = "",
         input_hash: str | None = None,
         failed_reason: str = "",
+        scope_complete: bool | None = None,
+        source_exhausted: bool | None = None,
+        stop_reason: str | None = None,
+        page_evidence: list[dict] | None = None,
+        degraded: bool = False,
+        quality_counts: dict | None = None,
     ):
         self.ok = bool(ok)
-        self.jobs = jobs or []
+        explicit_jobs = jobs is not _UNSET_JOBS
+        if self.ok and (bool(empty_result)
+                        or (explicit_jobs and isinstance(jobs, list) and not jobs)):
+            has_empty_evidence = bool(
+                explicit_jobs and isinstance(jobs, list) and not jobs
+                and empty_result and _valid_empty_evidence(empty_evidence)
+                and scope_complete is True
+            )
+            if not has_empty_evidence:
+                self.ok = False
+                failed_code = failed_code or "source_invalid_output"
+                failed_reason = failed_reason or "空结果证据缺失，不得返回成功"
+        self.jobs = [] if jobs is _UNSET_JOBS or jobs is None else list(jobs)
         self.detail = detail or {}
         self.empty_result = bool(empty_result)
         self.empty_evidence = empty_evidence
@@ -75,14 +114,33 @@ class SourceOutcome:
         self.safe_log = safe_log
         self.input_hash = input_hash
         self.failed_reason = failed_reason
+        self.scope_complete = scope_complete
+        self.source_exhausted = source_exhausted
+        self.stop_reason = stop_reason
+        self.page_evidence = list(page_evidence or [])
+        self.degraded = bool(degraded)
+        self.quality_counts = dict(quality_counts or {})
 
     @classmethod
-    def success(cls, *, jobs: list[dict] | None = None, detail: dict | None = None, safe_log: str = "", input_hash: str | None = None) -> SourceOutcome:
-        return cls(ok=True, jobs=jobs, detail=detail, safe_log=safe_log, input_hash=input_hash)
+    def success(cls, *, jobs: list[dict] | None | object = _UNSET_JOBS, detail: dict | None = None,
+                safe_log: str = "", input_hash: str | None = None, **evidence) -> SourceOutcome:
+        # An explicitly supplied empty list must be an explicit empty result;
+        # omitted jobs remains valid for preflight/detail outcomes.
+        if jobs is not _UNSET_JOBS and not jobs:
+            empty = (evidence.get("empty_result")
+                     and _valid_empty_evidence(evidence.get("empty_evidence"))
+                     and evidence.get("scope_complete") is True)
+            if not empty:
+                return cls.failure(failed_code="source_invalid_output",
+                                   safe_log="empty_evidence_missing",
+                                   failed_reason="空结果证据缺失，不得返回成功")
+        return cls(ok=True, jobs=jobs, detail=detail, safe_log=safe_log,
+                   input_hash=input_hash, **evidence)
 
     @classmethod
-    def empty_success(cls, *, empty_evidence: dict, safe_log: str = "", input_hash: str | None = None) -> SourceOutcome:
-        """真实空结果：ok=True, jobs=[], empty_result=True, empty_evidence 必填。
+    def empty_success(cls, *, empty_evidence: dict, safe_log: str = "", input_hash: str | None = None,
+                       **evidence) -> SourceOutcome:
+        """真实空结果：须有空状态、范围完成证据与 jobs=[] 才能 ok=True。
 
         empty_evidence 必须包含 ``kind``、``fixture_version`` 和 ``marker``；
         只含脱敏标记，不含页面正文、Cookie、JD 或本地路径。
@@ -92,9 +150,15 @@ class SourceOutcome:
         for key in ("kind", "fixture_version", "marker"):
             if not empty_evidence.get(key):
                 raise ValueError(f"empty_evidence 缺少必填字段: {key}")
+        if evidence.get("scope_complete") is not True:
+            return cls.failure(
+                failed_code="source_invalid_output",
+                safe_log="empty_scope_evidence_missing",
+                failed_reason="空结果缺少范围完成证据，不得返回成功",
+            )
         return cls(
             ok=True, jobs=[], empty_result=True, empty_evidence=empty_evidence,
-            safe_log=safe_log, input_hash=input_hash,
+            safe_log=safe_log, input_hash=input_hash, **evidence,
         )
 
     @classmethod
@@ -112,6 +176,12 @@ class SourceOutcome:
             "failed_code": self.failed_code,
             "safe_log": self.safe_log,
             "failed_reason": self.failed_reason,
+            "scope_complete": self.scope_complete,
+            "source_exhausted": self.source_exhausted,
+            "stop_reason": self.stop_reason,
+            "page_evidence": list(self.page_evidence),
+            "degraded": self.degraded,
+            "quality_counts": dict(self.quality_counts),
         }
 
 

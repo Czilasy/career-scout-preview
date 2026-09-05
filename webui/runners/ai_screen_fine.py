@@ -18,6 +18,9 @@ def run_fine_stage(ctx, task_id, enriched, profile_summary, criteria,
     from webui.pipeline_exec import failed_code_label
 
     jobs_with_jd = [j for j in enriched if str(j.get("jd", "")).strip()]
+    from webui.store_helpers import _now
+    from webui.whitebox import WhiteboxService
+    _wb = WhiteboxService(ctx.store)
 
     if not profile_summary.strip():
         # 无画像时跳过精筛，全部标记待人工确认
@@ -29,6 +32,12 @@ def run_fine_stage(ctx, task_id, enriched, profile_summary, criteria,
         # 会造成 30/30 + 100% 假进度，且 task-state 的 max() 会钉死它）
         emit(stage="screen_b", current=0, total=len(jobs_with_jd),
              message="未填写求职画像，已跳过 AI 精筛")
+        _wb.record_for_owner("screening", task_id, {
+            "idempotency_key": f"ai-fine-skipped:{task_id}", "event_type": "unit_skipped",
+            "occurred_at": _now(), "stage": "ai_fine", "unit_kind": "ai_stage",
+            "unit_key": "ai_fine", "attempt_no": 1, "required_evidence": True,
+            "severity": "warning", "payload": {"stop_reason": "profile_missing"},
+        })
     else:
         if stop_requested():
             handle_user_stop()
@@ -98,6 +107,37 @@ def run_fine_stage(ctx, task_id, enriched, profile_summary, criteria,
                 on_batch_done=_fine_batch_done,
                 execution_config=execution_config,
                 correlation_id=task_id)
+            if match_result.get("degraded"):
+                reasons = [str(reason or "ai_request_failed")
+                           for reason in (match_result.get("fallback_reasons") or [])]
+                if not reasons:
+                    reasons = ["ai_request_failed"]
+                for index, reason in enumerate(dict.fromkeys(reasons)):
+                    _wb.record_for_owner("screening", task_id, {
+                        "idempotency_key": f"ai-fine-request-failed:{task_id}:{index}:{reason}",
+                        "event_type": "ai_request_failed", "occurred_at": _now(),
+                        "stage": "ai_fine", "unit_kind": "ai_stage", "unit_key": "ai_fine",
+                        "attempt_no": 1, "required_evidence": True, "severity": "warning",
+                        "payload": {"reason_code": reason,
+                                    "action": "keep_all_or_uncertain",
+                                    "normal_screening_completed": False},
+                    })
+                _wb.record_for_owner("screening", task_id, {
+                    "idempotency_key": f"ai-fine-fallback:{task_id}",
+                    "event_type": "ai_keep_all_fallback", "occurred_at": _now(),
+                    "stage": "ai_fine", "unit_kind": "ai_stage", "unit_key": "ai_fine",
+                    "attempt_no": 1, "required_evidence": True, "severity": "warning",
+                    "payload": {"normal_screening_completed": False,
+                                "reasons": reasons,
+                                "action": "keep_all_or_uncertain"},
+                })
+                _wb.record_for_owner("screening", task_id, {
+                    "idempotency_key": f"ai-fine-incomplete:{task_id}",
+                    "event_type": "unit_incomplete", "occurred_at": _now(),
+                    "stage": "ai_fine", "unit_kind": "ai_stage", "unit_key": "ai_fine",
+                    "attempt_no": 1, "required_evidence": True, "severity": "error",
+                    "payload": {"stop_reason": "ai_keep_all_fallback"},
+                })
         except ai_service.AISecurityError as _ai_exc:
             # 切片6：systemic 错误暂停整任务（不批量变 uncertain 后完成）
             from webui.ai import AISecurityError, map_ai_error_to_block_code
@@ -172,4 +212,36 @@ def run_fine_stage(ctx, task_id, enriched, profile_summary, criteria,
                 }
 
         match_count = sum(1 for j in enriched if j.get("verdict") == "match")
+        if not match_result.get("degraded"):
+            uncertain = sum(1 for j in enriched if j.get("verdict") == "uncertain")
+            if uncertain:
+                _wb.record_for_owner("screening", task_id, {
+                    "idempotency_key": f"ai-fine-incomplete:{task_id}",
+                    "event_type": "unit_incomplete", "occurred_at": _now(),
+                    "stage": "ai_fine", "unit_kind": "ai_stage", "unit_key": "ai_fine",
+                    "attempt_no": 1, "required_evidence": True, "severity": "warning",
+                    "payload": {"stop_reason": "uncertain_verdict", "uncertain_count": uncertain},
+                })
+            else:
+                _wb.record_for_owner("screening", task_id, {
+                    "idempotency_key": f"ai-fine-complete:{task_id}",
+                    "event_type": "scope_completed", "occurred_at": _now(),
+                    "stage": "ai_fine", "unit_kind": "ai_stage", "unit_key": "ai_fine",
+                    "attempt_no": 1, "required_evidence": True,
+                    "payload": {"scope_complete": True, "returned_total_count": len(enriched),
+                                "unit_unique_count": len(enriched),
+                                "stop_reason": "explicit_empty" if not enriched else "target_reached"},
+                })
+                if not enriched:
+                    _wb.record_for_owner("screening", task_id, {
+                        "idempotency_key": f"ai-fine-empty:{task_id}",
+                        "event_type": "explicit_empty", "occurred_at": _now(),
+                        "stage": "ai_fine", "unit_kind": "ai_stage",
+                        "unit_key": "ai_fine", "attempt_no": 1,
+                        "required_evidence": True, "severity": "info",
+                        "payload": {"empty_evidence": {
+                            "kind": "stage_input_empty",
+                            "reason": "no_survivors_after_jd_detail",
+                        }},
+                    })
     return match_count

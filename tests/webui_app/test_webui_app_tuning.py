@@ -397,6 +397,27 @@ class TuningManifestRouteTests(unittest.TestCase):
         self.assertEqual(data["child_task_id"], manifest["task_id"])
         self.assertIn("status_url", data)
 
+    def test_execute_manifest_submit_failure_closes_round_and_whitebox(self):
+        """033 V2 T055: 后台提交失败不得遗留 running 轮次。"""
+        manifest = self._make_manifest()
+        issued = self.controller.issue_manifest(manifest)
+        self.app.config["START_TASKS"] = True
+        with mock.patch.object(
+            self.app.config["PIPELINE_EXECUTOR"], "submit",
+            side_effect=RuntimeError("executor unavailable"),
+        ):
+            resp = self.client.post(
+                f"/api/tuning/manifests/{issued['manifest_id']}/execute"
+            )
+        self.assertEqual(resp.status_code, 503)
+        round_rec = self.store.get_tuning_round(self.round["id"])
+        self.assertEqual(round_rec["status"], "blocked")
+        self.assertEqual(round_rec["failure_code"], "submit_failed")
+        from webui.whitebox import WhiteboxService
+        report = WhiteboxService(self.store).report("tuning", self.round["id"], include_events=True)
+        self.assertEqual(report["integrity"]["conclusion"], "failed")
+        self.assertTrue(any(event["event_type"] == "submission_failed" for event in report["events"]))
+
     def test_execute_manifest_route_wrong_digest_returns_409(self):
         """POST /execute 在 manifest 被篡改后返回 409。"""
         manifest = self._make_manifest()

@@ -15,6 +15,7 @@ from webui.store_migrations_v1 import (
     _SQL_SCREENING_RUN_COLUMNS,
 )
 from webui.store_migrations_v4 import StoreMigrationsV4Mixin
+from webui.store_migrations_v5 import StoreMigrationsV5Mixin
 from webui.store_migrations_v3 import StoreMigrationsV3Mixin
 from webui.store_migrations_v2 import StoreMigrationsV2Mixin
 from webui.store_migrations_v1 import StoreMigrationsV1Mixin
@@ -29,9 +30,10 @@ class MigrationBackupError(RuntimeError):
 
 
 class StoreMigrationsMixin(
+    StoreMigrationsV5Mixin,
     StoreMigrationsV4Mixin,
     StoreMigrationsV3Mixin,
     StoreMigrationsV2Mixin,
     StoreMigrationsV1Mixin,
 ):
-    """迁移 mixin 组装（021 B7 T024）：调度在 v1，版本段 001-032 物理归组。"""
+    """迁移 mixin 组装；版本段 001-032/033 物理归组。"""

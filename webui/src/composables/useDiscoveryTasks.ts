@@ -17,6 +17,7 @@ import type {
   PlatformCityCatalog,
   PlatformFilterSchema,
   RoundContext,
+  IntegritySnapshot,
   TaskSnapshot as ApiTaskSnapshot,
 } from "../types";
 import JobLifecycleActions from "../components/JobLifecycleActions.vue";
@@ -81,6 +82,26 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
     if (kind === "scrape") scrapeSnapshot.value = applyProgressFloor(data, scrapeSnapshot.value);
     else screenSnapshot.value = applyProgressFloor(data, screenSnapshot.value);
 
+    const integrityConclusion = data.integrity?.conclusion || "";
+    // The public status keeps completed_with_pending for compatibility, but
+    // an unverifiable/failed/interrupted whitebox conclusion is authoritative.
+    if (["unverifiable", "failed", "interrupted"].includes(integrityConclusion)) {
+      if (kind === "scrape") {
+        scrapeBusy.value = false;
+        scrapeSnapshot.value = data;
+      } else {
+        screenBusy.value = false;
+        pausingScreen.value = false;
+        screenSnapshot.value = data;
+      }
+      deps.notify(
+        data.integrity?.primary_reason
+          || (integrityConclusion === "failed" ? "执行失败"
+            : integrityConclusion === "interrupted" ? "任务已中断" : "无法确认是否完成"),
+        integrityConclusion === "failed" ? "error" : "warning",
+      );
+      return;
+    }
     if (isCompletedTaskStatus(data.status)) {
       pollRetryCount.value = 0;
       restoredTaskHint.value = "";
@@ -91,7 +112,9 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
         scrapeBusy.value = false;
         scrapeCompleted.value = true;
         let noticeMessage: string;
-        if (shouldAutoScreen) {
+        if (integrityConclusion === "empty") {
+          noticeMessage = "已完成，没有找到岗位，可调整条件后重试";
+        } else if (shouldAutoScreen) {
           noticeMessage = data.status === "completed_with_pending"
             ? "抓取完成，正在自动开始 AI 筛选，部分岗位待确认"
             : "抓取完成，正在自动开始 AI 筛选";
@@ -144,7 +167,7 @@ async function pollTask(taskId: string, kind: "scrape" | "screen") {
         }
         deps.notify(
           data.status === "completed_with_pending"
-            ? "AI 筛选完成，但有岗位待确认"
+            ? "部分完成，部分结果可能缺失"
             : "AI 筛选完成",
           data.status === "completed_with_pending" ? "warning" : "success",
         );
@@ -275,6 +298,7 @@ async function saveScrapedOnlySnapshot(markViewed = false): Promise<"saved" | "z
     ok: true, jobs: [], dropped: [],
     total_scraped: 0, total_kept: 0, total_matched: 0, total_dropped: 0,
     profile_summary: profileSummary.value, error: "",
+    integrity: scrapeSnapshot.value?.integrity || null,
   });
   const snap = scrapeSnapshot.value;
   const scrapedCount = Number(
@@ -402,6 +426,7 @@ async function enrichPausedSnapshot(
       scraped_count?: number;
       pause_info?: { error_code?: string; error_reason?: string } | null;
       execution_config?: Record<string, unknown> | null;
+      integrity?: IntegritySnapshot | null;
       result?: { updates?: Record<string, unknown> } | null;
     }>(`/api/task-state/${encodeURIComponent(runId)}`);
     snapshot.success_count = data.success_count;
@@ -439,6 +464,7 @@ async function enrichPausedSnapshot(
     }
     if (data.pause_info) snapshot.pause_info = data.pause_info;
     if (data.execution_config) snapshot.execution_config = data.execution_config;
+    if (data.integrity) snapshot.integrity = data.integrity;
     if (data.result?.updates) mergeRecrawlUpdates(data.result.updates);
   } catch { /* 退化到 progress 字段 */ }
   if (kind === "scrape") {
@@ -570,6 +596,23 @@ async function pollRecrawl(taskId: string) {
     recrawlSnapshot.value = data;
     const liveUpdates = (data.result as unknown as { updates?: Record<string, unknown> } | undefined)?.updates;
     if (liveUpdates) mergeRecrawlUpdates(liveUpdates as Record<string, unknown>);
+    const integrityConclusion = data.integrity?.conclusion || "";
+    if (["unverifiable", "failed", "interrupted"].includes(integrityConclusion)) {
+      recrawlRetryCount.value = 0;
+      recrawlBusy.value = false;
+      if (integrityConclusion === "interrupted") {
+        interruptedRunId.value = taskId;
+        recrawlTaskId.value = taskId;
+        restoredTaskHint.value = "上次补抓因服务重启被中断；可结束保存已有结果";
+      }
+      deps.notify(
+        data.integrity?.primary_reason
+          || (integrityConclusion === "failed" ? "重抓失败"
+            : integrityConclusion === "interrupted" ? "重抓已中断" : "无法确认重抓是否完成"),
+        integrityConclusion === "failed" ? "error" : "warning",
+      );
+      return;
+    }
     if (isCompletedTaskStatus(data.status)) {
       recrawlRetryCount.value = 0;
       recrawlBusy.value = false;

@@ -558,6 +558,33 @@ class ManifestReportValidationTests(unittest.TestCase):
         )
         return manifest
 
+    def test_result_object_without_measurements_is_not_inferred_success(self):
+        """033 V2 T054: jobs/verdicts 不能替代调参逐项测量证据。"""
+        from unittest import mock
+        from webui.runners.tuning_manifest import run_tuning_manifest_child
+
+        manifest = self._make_manifest()
+        issued = self.controller.issue_manifest(manifest)
+        self.controller.execute_manifest(issued["manifest_id"])
+        ctx = type("Ctx", (), {})()
+        ctx.store = self.store
+        ctx.tuning_round_runner = mock.Mock(
+            execute=mock.Mock(return_value={"jobs": [{"job_id": "j1"}]})
+        )
+
+        run_tuning_manifest_child(ctx, issued["manifest_id"])
+
+        evidence_path = pathlib.Path(self.temp.name) / manifest["monitoring"]["final_artifact_path"]
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        self.assertEqual(evidence["input_count"], 0)
+        self.assertEqual(evidence["terminal_count"], 0)
+        self.assertEqual(evidence["success_count"], 0)
+        report = __import__("webui.whitebox", fromlist=["WhiteboxService"]).WhiteboxService(
+            self.store
+        ).report("tuning", self.round["id"])
+        self.assertEqual(report["integrity"]["conclusion"], "unverifiable")
+        self.assertEqual(report["integrity"]["primary_code"], "measurement_missing")
+
     def _make_canonical_artifact_manifest(self) -> tuple[dict, pathlib.Path, str]:
         manifest = self._make_manifest()
         program_artifact = manifest["required_artifacts"][0]

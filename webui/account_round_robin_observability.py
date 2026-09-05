@@ -1,6 +1,6 @@
 """038 多账号轮询的安全白箱事件适配器。
 
-只负责把调度 seam 的摘要写入既有 task_logs，不参与账号选择或抓取控制。
+只负责把调度 seam 的摘要写入既有 task_logs 和可选白箱，不参与账号选择或抓取控制。
 """
 
 from __future__ import annotations
@@ -23,6 +23,10 @@ class RoundRobinWhitebox:
         self._platform = str(platform or "boss")
         self._segment = 0
         self._incomplete = False
+        self._whitebox = None
+        if store is not None and hasattr(store, "get_whitebox_run"):
+            from webui.whitebox import WhiteboxService
+            self._whitebox = WhiteboxService(store)
         self._emit("account_pool_snapshot", {
             "phase": self._phase,
             "platform": self._platform,
@@ -38,6 +42,14 @@ class RoundRobinWhitebox:
             return True
         try:
             self._store.append_task_event(self._run_id, event_type, dict(payload))
+            if self._whitebox is not None:
+                from webui.store_helpers import _now
+                self._whitebox.record_for_owner("scrape", self._run_id, {
+                    "idempotency_key": f"account:{self._run_id}:{self._phase}:{event_type}:{self._segment}",
+                    "event_type": event_type, "occurred_at": _now(), "stage": self._phase,
+                    "unit_kind": "account_pool", "unit_key": self._phase,
+                    "attempt_no": 1, "required_evidence": False, "payload": payload,
+                })
             return True
         except Exception:
             self._incomplete = True
@@ -127,11 +139,21 @@ class RoundRobinWhitebox:
         if self._store is None or not self._run_id:
             return True
         from webui.resume_identity import record_account_switch_event
-        return bool(record_account_switch_event(
+        ok = bool(record_account_switch_event(
             self._store, self._run_id,
             from_account=str(from_account), to_account=str(to_account),
             phase=self._phase, reason=str(reason), result=str(result),
         ))
+        if ok and self._whitebox is not None:
+            from webui.store_helpers import _now
+            self._whitebox.record_for_owner("scrape", self._run_id, {
+                "idempotency_key": f"account:{self._run_id}:{self._phase}:switch:{from_account}:{to_account}",
+                "event_type": "account_switch", "occurred_at": _now(), "stage": self._phase,
+                "unit_kind": "account_pool", "unit_key": self._phase, "attempt_no": 1,
+                "required_evidence": False, "payload": {"from": str(from_account), "to": str(to_account),
+                                                          "reason": str(reason), "result": str(result)},
+            })
+        return ok
 
     def handoff(self, *, blocked_account: str, to_account: str,
                 remaining: int, result: str, blocked_reason: str | None = None,

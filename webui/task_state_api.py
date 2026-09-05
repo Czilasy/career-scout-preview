@@ -10,6 +10,7 @@ run 诊断摘要、task-state 聚合快照（011 healthy-pipeline 统一接口�
 from __future__ import annotations
 
 import time
+from flask import request
 
 from flask import jsonify
 
@@ -21,6 +22,7 @@ from webui.task_status import (
     _active_elapsed_ms,
     _pipeline_kind_for_stage,
     _public_task_status,
+    _public_status_for_integrity,
     _recrawl_overall_percent,
     _screen_overall_percent,
 )
@@ -28,6 +30,11 @@ from webui.diagnostics import build_diagnostic_payload
 from webui.error_registry import resolve_code
 from webui.store import SYSTEMIC_BLOCK_CODES
 from webui.task_runners import _iso_epoch_ms
+from webui.whitebox import WhiteboxService
+from webui.whitebox import WhiteboxNotFoundError
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
 
 def register_task_state_routes(app, ctx):
     @app.route("/api/runs/<run_id>/diagnostics")
@@ -101,6 +108,32 @@ def register_task_state_routes(app, ctx):
         run = ctx.store.get_screening_run(run_id)
         if run is None and live is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
+        integrity = None
+        _stage_name = str((run or {}).get("current_stage") or "")
+        owner_kind = ("scrape" if (live or {}).get("kind") == "scrape" or _stage_name == "scrape"
+                      else "recrawl" if _stage_name.startswith("recrawl_") or str(run_id).startswith("recrawl-")
+                      else "screening")
+        try:
+            if (run or {}).get("record_kind") == "result_snapshot":
+                params = (run or {}).get("execution_params") or {}
+                integrity = WhiteboxService(ctx.store).integrity_for_result(
+                    run_id, str(params.get("scrape_task_id") or params.get("source_run_id") or ""))
+            else:
+                integrity = WhiteboxService(ctx.store).report(owner_kind, run_id)["integrity"]
+        except WhiteboxNotFoundError:
+            # A live-only task can exist in memory before its durable run or
+            # without a whitebox row (for example a legacy recrawl).  Keep
+            # the status endpoint usable, but make the missing evidence
+            # explicit so it cannot be displayed as a successful completion.
+            integrity = WhiteboxService.legacy_report(owner_kind, run_id)["integrity"]
+        except ctx.operational_errors as exc:
+            _logger.warning("task integrity query failed: %s", type(exc).__name__)
+            return jsonify({"ok": False, "error_code": "query_failed",
+                            "user_message": "任务证据查询失败"}), 500
+        except Exception as exc:
+            _logger.warning("task integrity query failed: %s", type(exc).__name__)
+            return jsonify({"ok": False, "error_code": "query_failed",
+                            "user_message": "任务证据查询失败"}), 500
         # T405: 按 combo 最新 attempt 汇总 source outcomes
         source_summary, source_outcomes = ctx.build_source_summary_and_outcomes(run_id)
         live_progress = (live or {}).get("progress") or {}
@@ -198,7 +231,7 @@ def register_task_state_routes(app, ctx):
             progress.setdefault("page", latest_page["completed_pages"])
             progress.setdefault("target_pages", latest_page["target_pages"])
             progress.setdefault("resume_page", latest_page["resume_page"])
-            progress.setdefault("has_more", bool(latest_page["has_more"]))
+            progress.setdefault("has_more", latest_page["has_more"])
             progress.setdefault("scraped", latest_page["jobs_count"])
             if "overall_percent" not in progress:
                 page_ratio = min(
@@ -230,10 +263,11 @@ def register_task_state_routes(app, ctx):
         ):
             progress.setdefault("message", f"重抓完成，但仍有 {pending} 个岗位待确认")
         pause_info = None
-        effective_status = _public_task_status(
-            str(live.get("status")) if live is not None else str(run["status"]),
-            (run or {}).get("interruption_kind"),
-        )
+        raw_status = str(live.get("status")) if live is not None else str(run["status"])
+        effective_status = (_public_status_for_integrity(
+                                integrity, raw_status, (run or {}).get("interruption_kind"))
+                            if raw_status in {"done", "succeeded", "partial", "failed", "cancelled", "interrupted"}
+                            else _public_task_status(raw_status, (run or {}).get("interruption_kind")))
         _resolved_error_code = (
             resolve_code(error_code) if error_code else "")
         if effective_status == "paused" or (
@@ -325,6 +359,7 @@ def register_task_state_routes(app, ctx):
             "source_summary": source_summary,
             "source_outcomes": source_outcomes,
             "combo_issues": combo_issues,
+            "integrity": integrity,
             **(
                 {"result": live["result"]}
                 if live is not None and live.get("result") is not None else {}
@@ -334,3 +369,45 @@ def register_task_state_routes(app, ctx):
     # 031 B7：/api/recovery/{preview,prepare,execute}/<run_id> 三条路由已撤除。
     # 事故恢复能力迁为手动运维工具 scripts/maintenance/historical_recovery.py
     # （preview/prepare/execute 三子命令 + --confirm 安全栏），不再驻留生产 API 面。
+
+    @app.route("/api/task-state/<owner_kind>/<owner_id>/whitebox", methods=["GET"])
+    def api_task_whitebox_report(owner_kind: str, owner_id: str):
+        if owner_kind not in {"scrape", "screening", "recrawl", "workbench", "legacy_task", "tuning"}:
+            return jsonify({"ok": False, "error_code": "invalid_owner_kind",
+                            "user_message": "owner_kind 参数非法"}), 400
+        raw_events = request.args.get("include_events", "0").strip().lower()
+        if raw_events not in {"0", "1", "true", "false"}:
+            return jsonify({"ok": False, "error_code": "invalid_include_events",
+                            "user_message": "include_events 参数非法"}), 400
+        try:
+            event_limit = int(request.args.get("event_limit", "100"))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error_code": "invalid_event_limit",
+                            "user_message": "event_limit 参数非法"}), 400
+        if event_limit < 1 or event_limit > 1000:
+            return jsonify({"ok": False, "error_code": "invalid_event_limit",
+                            "user_message": "event_limit 参数超出范围"}), 400
+        try:
+            after_sequence = int(request.args.get("after_sequence", "0"))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error_code": "invalid_after_sequence",
+                            "user_message": "after_sequence 参数非法"}), 400
+        if after_sequence < 0:
+            return jsonify({"ok": False, "error_code": "invalid_after_sequence",
+                            "user_message": "after_sequence 参数不能小于 0"}), 400
+        try:
+            report = WhiteboxService(ctx.store).report(
+                owner_kind, owner_id, include_events=raw_events in {"1", "true"},
+                after_sequence=after_sequence, event_limit=event_limit,
+            )
+        except WhiteboxNotFoundError:
+            return jsonify({"ok": False, "error_code": "task_not_found",
+                            "user_message": _MSG_TASK_NOT_FOUND}), 404
+        except ctx.operational_errors:
+            return jsonify({"ok": False, "error_code": "query_failed",
+                            "user_message": "任务证据查询失败"}), 500
+        except Exception as exc:
+            _logger.warning("whitebox report query failed: %s", type(exc).__name__)
+            return jsonify({"ok": False, "error_code": "query_failed",
+                            "user_message": "任务证据查询失败"}), 500
+        return jsonify({"ok": True, **report})
