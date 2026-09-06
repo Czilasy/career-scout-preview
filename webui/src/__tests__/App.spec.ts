@@ -833,6 +833,7 @@ describe("App", () => {
       has_update: true,
       release_url: "https://github.com/Czilasy/career-scout-preview/releases/tag/v2.6.0",
       release_notes: "## 更新内容",
+      release_items: ["优化：更新提示只展示重点内容"],
       asset_name: "CareerScout-v2.6.0.exe",
       asset_url: "https://github.com/x/x.exe",
       asset_size: 1000,

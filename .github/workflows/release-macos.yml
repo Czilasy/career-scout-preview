@@ -178,6 +178,8 @@ jobs:
           if [ "$REMOTE_SHA" != "$SHA" ]; then
             echo "远程 DMG 哈希不一致（$REMOTE_SHA != $SHA），中止同步"; exit 1
           fi
+          SUMMARY_JSON="$(python3 scripts/release_summary.py --version "$VERSION")"
+          SUMMARY_B64="$(printf '%s' "$SUMMARY_JSON" | base64 | tr -d '\n')"
           ssh $SSH_OPTS "$MIRROR_USER@$MIRROR_HOST" \
-            "python3 ~/update_manifest.py '$VERSION' mac '$FILE' '$SHA' $SIZE"
+            "python3 ~/update_manifest.py '$VERSION' mac '$FILE' '$SHA' $SIZE '$SUMMARY_B64'"
           echo "镜像已同步 mac 条目：v$VERSION"

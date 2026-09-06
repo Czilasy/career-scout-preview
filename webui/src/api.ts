@@ -223,6 +223,7 @@ export interface UpdateCheckResult {
   has_update: boolean;
   release_url: string;
   release_notes: string;
+  release_items: string[];
   asset_name: string;
   asset_url: string;
   asset_size: number;

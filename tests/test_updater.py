@@ -190,6 +190,66 @@ class CheckUpdateTests(unittest.TestCase):
         self.assertEqual(info.reason, "no_sha256")
 
 
+class ReleaseSummaryTests(unittest.TestCase):
+    def test_summarize_release_notes_keeps_user_items_and_filters_release_details(self):
+        notes = """增加：
+- 任务完成状态现在区分完整成功、空结果、部分完成、失败、无法确认和中断。
+
+优化：
+- 任务进度、历史结果和开发者报告统一显示同一完成结论。
+
+修复：
+- 空结果、后台提交失败和完成证据缺失不再被误报为成功。
+
+Windows 安装包：`CareerScout-v1.8.2.exe`
+macOS 安装包：`CareerScout-v1.8.2.dmg`
+校验值（SHA256）：`CareerScout-v1.8.2.exe.sha256`
+前置条件：Windows 用户直接运行安装包。
+已知限制：macOS 安装包由 GitHub Actions 构建并上传。
+"""
+
+        self.assertEqual(
+            updater._summarize_release_notes(notes, "1.8.2"),
+            [
+                "增加：任务完成状态现在区分完整成功、空结果、部分完成、失败、无法确认和中断。",
+                "优化：任务进度、历史结果和开发者报告统一显示同一完成结论。",
+                "修复：空结果、后台提交失败和完成证据缺失不再被误报为成功。",
+            ],
+        )
+
+    def test_summarize_flattened_notes_splits_categories(self):
+        notes = (
+            "增加： - 多账号抓取更稳定 优化： - 更新提示更清晰 "
+            "修复： - 某些任务状态显示不准"
+        )
+
+        self.assertEqual(
+            updater._summarize_release_notes(notes, "1.8.2"),
+            [
+                "增加：多账号抓取更稳定",
+                "优化：更新提示更清晰",
+                "修复：某些任务状态显示不准",
+            ],
+        )
+
+    def test_summarize_release_notes_caps_at_eight_items(self):
+        notes = "增加：\n" + "\n".join(f"- 功能 {i}" for i in range(1, 11))
+
+        self.assertEqual(len(updater._summarize_release_notes(notes, "1.8.2")), 8)
+
+    def test_update_info_serializes_safe_legacy_notes_from_items(self):
+        info = updater.UpdateInfo(
+            release_notes="Windows 安装包：CareerScout-v1.8.1.exe",
+            release_items=["修复：更新提示只展示重点内容"],
+        )
+
+        payload = info.to_dict()
+
+        self.assertEqual(payload["release_items"], ["修复：更新提示只展示重点内容"])
+        self.assertEqual(payload["release_notes"], "• 修复：更新提示只展示重点内容")
+        self.assertNotIn("CareerScout-v1.8.1.exe", payload["release_notes"])
+
+
 class Sha256Tests(unittest.TestCase):
     def test_fetch_expected_sha256_parses_sha256sum_format(self):
         digest = "a" * 64
@@ -518,6 +578,76 @@ class MirrorFirstTests(unittest.TestCase):
         self.assertTrue(info.release_url.endswith("/releases/tag/v1.8.1"))
         self.assertEqual(info.release_notes, "镜像更新说明")
         get.assert_called_once_with(updater.MIRROR_MANIFEST_URL, timeout=10)
+
+    def test_stale_mirror_notes_fall_back_to_target_release_notes(self):
+        mirror = _mirror_manifest(
+            latest="1.8.2",
+            files={
+                "win": {"name": "CareerScout-v1.8.2.exe", "size": 200,
+                        "sha256": "a" * 64},
+            },
+            release_notes=(
+                "增加：\n- 旧版本功能\n\n"
+                "Windows 安装包：`CareerScout-v1.8.1.exe`\n"
+                "校验值（SHA256）：`CareerScout-v1.8.1.exe.sha256`"
+            ),
+        )
+        github = _MirrorManifestResponse({
+            "tag_name": "v1.8.2",
+            "html_url": "https://github.com/x/y/releases/tag/v1.8.2",
+            "body": "增加：\n- 新版本功能\n\n修复：\n- 新版本问题",
+            "assets": [
+                {"name": "CareerScout-v1.8.2.exe",
+                 "browser_download_url": "https://github.com/x/y/releases/download/v1.8.2/a.exe",
+                 "size": 200},
+                {"name": "CareerScout-v1.8.2.exe.sha256",
+                 "browser_download_url": "https://github.com/x/y/releases/download/v1.8.2/a.exe.sha256",
+                 "size": 1},
+            ],
+        })
+
+        with patch.object(updater.requests, "get",
+                          side_effect=[_MirrorManifestResponse(mirror), github]) as get:
+            info = updater.check_for_update("1.8.1")
+
+        self.assertEqual(info.latest, "1.8.2")
+        self.assertEqual(info.release_items, ["增加：新版本功能", "修复：新版本问题"])
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(
+            get.call_args_list[1].args[0],
+            f"https://api.github.com/repos/{updater.GITHUB_REPO}/releases/tags/v1.8.2",
+        )
+
+    def test_mirror_asset_version_mismatch_falls_back_to_github(self):
+        mirror = _MirrorManifestResponse(_mirror_manifest(
+            latest="1.8.2",
+            files={
+                "win": {"name": "CareerScout-v1.8.1.exe", "size": 100,
+                        "sha256": "a" * 64},
+            },
+            release_notes="修复：旧镜像文件",
+        ))
+        github = _MirrorManifestResponse({
+            **_GITHUB_PAYLOAD,
+            "tag_name": "v1.8.2",
+            "html_url": "https://github.com/x/y/releases/tag/v1.8.2",
+            "body": "修复：\n- 正确的 1.8.2 更新",
+            "assets": [
+                {"name": "CareerScout-v1.8.2.exe",
+                 "browser_download_url": "https://github.com/x/y/releases/download/v1.8.2/a.exe",
+                 "size": 200},
+                {"name": "CareerScout-v1.8.2.exe.sha256",
+                 "browser_download_url": "https://github.com/x/y/releases/download/v1.8.2/a.exe.sha256",
+                 "size": 1},
+            ],
+        })
+
+        with patch.object(updater.requests, "get", side_effect=[mirror, github]) as get:
+            info = updater.check_for_update("1.8.1")
+
+        self.assertEqual(info.asset_name, "CareerScout-v1.8.2.exe")
+        self.assertEqual(info.release_items, ["修复：正确的 1.8.2 更新"])
+        self.assertEqual(get.call_count, 2)
 
     def test_mirror_update_fills_notes_from_github_when_manifest_omits_them(self):
         mirror = _MirrorManifestResponse(_mirror_manifest(release_notes=None))

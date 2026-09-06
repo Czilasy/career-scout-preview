@@ -1,8 +1,14 @@
 # Career Scout Release 说明模板
 
-- Windows 安装包：`CareerScout-vX.Y.Z.exe`
-- macOS 安装包：`CareerScout-vX.Y.Z.dmg`
-- 校验值（SHA256）：`CareerScout-vX.Y.Z.exe.sha256`、`CareerScout-vX.Y.Z.dmg.sha256`
-- 前置条件：Windows 10/11 或 macOS 11+；已安装 Chrome 或 Edge；Windows 建议安装 WebView2 运行时；macOS 首次打开按 Gatekeeper 指引处理
-- 已知限制：Windows 单文件首次启动需要解压，等待时间较长；未签名 macOS 应用首次打开会提示；杀毒软件可能误报单文件产物
-- 常见问题与排错：界面空白请检查 WebView2 并查看 `~/.career-scout/desktop.log`；登录失效请在浏览器账号中重新登录；数据目录为 `~/.career-scout`；更多指引见项目 README
+增加：
+- <用户可直接使用的新功能>
+
+优化：
+- <用户能感受到的体验改进>
+
+修复：
+- <用户能感受到的问题修复>
+
+整份说明总数按本次更新实际内容控制在 3～8 条，不要填写安装包名称、校验值、前置条件、构建平台或内部实现细节。
+
+发布后台检查项（不要复制到更新正文）：Windows 安装包、macOS 安装包、SHA256、前置条件、已知限制、常见问题。

@@ -109,6 +109,137 @@ def is_newer(remote: str, current: str) -> bool:
     return parse_version(remote) > parse_version(current)
 
 
+_MAX_RELEASE_ITEMS = 8
+_RELEASE_CATEGORY_ALIASES = {
+    "增加": "增加",
+    "新增": "增加",
+    "优化": "优化",
+    "改进": "优化",
+    "修复": "修复",
+}
+_RELEASE_CATEGORY_RE = re.compile(
+    r"^(增加|新增|优化|改进|修复)\s*[：:]\s*(.*)$"
+)
+_RELEASE_ASSET_VERSION_RE = re.compile(
+    r"CareerScout-v?(\d+\.\d+\.\d+)\.(?:exe|dmg)(?:\.sha256)?",
+    re.IGNORECASE,
+)
+_RELEASE_DETAIL_RE = re.compile(
+    r"(?:windows\s*安装包|macos?\s*安装包|校验值|sha256|前置条件|"
+    r"已知限制|github\s*actions)",
+    re.IGNORECASE,
+)
+
+
+def _summarize_release_notes(
+    raw_notes: str, target_version: str = "",
+) -> list[str] | None:
+    """把 Release 正文清洗成最多 8 条用户可感知的更新摘要。
+
+    返回 ``None`` 表示正文明确引用了不同版本的安装包，不能信任；
+    返回空列表表示正文没有可展示的用户条目。
+    """
+    text = str(raw_notes or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        return []
+
+    # 镜像服务器的旧版本可能把所有换行压成空格；先恢复类别和项目边界。
+    text = re.sub(
+        r"(?<!\n)\s+(?=(?:增加|新增|优化|改进|修复)\s*[：:])",
+        "\n",
+        text,
+    )
+    text = re.sub(r"(?<!\n)\s+-\s+", "\n", text)
+
+    if target_version:
+        expected = parse_version(target_version)
+        referenced = {
+            parse_version(match.group(1))
+            for match in _RELEASE_ASSET_VERSION_RE.finditer(text)
+        }
+        if any(version != expected for version in referenced):
+            return None
+
+    items: list[str] = []
+    seen: set[str] = set()
+    category = ""
+    for raw_line in text.splitlines():
+        line = re.sub(r"^\s*#+\s*", "", raw_line).strip()
+        line = re.sub(r"^\s*[-*•]\s*", "", line).strip()
+        if not line or line in {"更新内容", "更新说明", "本次更新"}:
+            continue
+
+        match = _RELEASE_CATEGORY_RE.match(line)
+        if match:
+            category = _RELEASE_CATEGORY_ALIASES[match.group(1)]
+            line = match.group(2).strip()
+            if not line:
+                continue
+
+        if _RELEASE_DETAIL_RE.search(line):
+            continue
+        line = line.replace("`", "").strip()
+        if not line:
+            continue
+        item = f"{category}：{line}" if category else line
+        if item not in seen:
+            seen.add(item)
+            items.append(item)
+        if len(items) >= _MAX_RELEASE_ITEMS:
+            break
+    return items
+
+
+def _format_legacy_release_notes(items: list[str]) -> str:
+    """给旧客户端保留安全的换行文本，不再序列化原始 Release 正文。"""
+    return "\n".join(f"• {item}" for item in items)
+
+
+def _asset_version_matches(name: str, target_version: str) -> bool:
+    match = re.fullmatch(
+        r"CareerScout-v?(\d+\.\d+\.\d+)\.(?:exe|dmg)",
+        str(name or "").strip(),
+        re.IGNORECASE,
+    )
+    return bool(match and parse_version(match.group(1)) == parse_version(target_version))
+
+
+def _mirror_release_items(payload: dict, target_version: str) -> list[str] | None:
+    """读取带版本绑定的镜像摘要；旧正文不可信时返回 ``None``。"""
+    declared_version = str(payload.get("release_notes_version") or "").strip()
+    if declared_version and (
+        not re.fullmatch(r"v?\d+(?:\.\d+){1,2}", declared_version)
+        or parse_version(declared_version) != parse_version(target_version)
+    ):
+        return None
+
+    structured = payload.get("release_items")
+    if structured is not None:
+        if not isinstance(structured, list):
+            return None
+        raw_notes = "\n".join(str(item) for item in structured)
+    else:
+        raw_notes = str(payload.get("release_notes") or "")
+    return _summarize_release_notes(raw_notes, target_version)
+
+
+def _fetch_release_summary(version: str) -> tuple[str, list[str]]:
+    """按目标版本读取 GitHub 正文并返回原文与安全摘要。"""
+    try:
+        response = requests.get(
+            GITHUB_RELEASE_TAG_URL.format(tag=f"v{version}"),
+            timeout=DOWNLOAD_TIMEOUT,
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        release = response.json()
+        if isinstance(release, dict):
+            raw_notes = str(release.get("body") or "")[:4000]
+            return raw_notes, _summarize_release_notes(raw_notes, version) or []
+    except Exception as exc:
+        logger.debug("获取 GitHub 版本说明失败：%s", type(exc).__name__)
+    return "", []
+
+
 # ---------------------------------------------------------------------------
 # 资产选择
 # ---------------------------------------------------------------------------
@@ -139,6 +270,7 @@ class UpdateInfo:
     has_update: bool = False
     release_url: str = ""
     release_notes: str = ""
+    release_items: list[str] = field(default_factory=list)
     asset_name: str = ""
     asset_url: str = ""
     asset_size: int = 0
@@ -153,7 +285,8 @@ class UpdateInfo:
             "latest": self.latest,
             "has_update": self.has_update,
             "release_url": self.release_url,
-            "release_notes": self.release_notes,
+            "release_notes": _format_legacy_release_notes(self.release_items),
+            "release_items": list(self.release_items),
             "asset_name": self.asset_name,
             "asset_url": self.asset_url,
             "asset_size": self.asset_size,
@@ -193,7 +326,8 @@ def _check_mirror(
 
     manifest 形状（服务器部署账号 home 下 update_manifest.py 生成）::
 
-        {"latest": "1.8.1", "released": "...", "release_notes": "...",
+        {"latest": "1.8.1", "released": "...", "release_notes_version": "1.8.1",
+         "release_items": ["增加：..."],
          "files": {"win": {"name", "sha256", "size"}, "mac": {...}}}
     """
     if not MIRROR_HOST:
@@ -221,25 +355,20 @@ def _check_mirror(
         # （同步漏跑）时锁死所有走镜像的老版本，拿不到真正的新版提示。
         return None
     info.release_notes = str(payload.get("release_notes") or "").strip()[:4000]
-    if not info.release_notes:
-        # 兼容尚未带说明字段的旧镜像清单；说明获取失败不影响安装包更新。
-        try:
-            response = requests.get(
-                GITHUB_RELEASE_TAG_URL.format(tag=f"v{info.latest}"),
-                timeout=DOWNLOAD_TIMEOUT,
-                headers={"Accept": "application/vnd.github+json"},
-            )
-            release = response.json()
-            if isinstance(release, dict):
-                info.release_notes = str(release.get("body") or "")[:4000]
-        except Exception as exc:
-            logger.debug("获取 GitHub 版本说明失败：%s", type(exc).__name__)
+    items = _mirror_release_items(payload, info.latest)
+    if not items:
+        # 兼容旧清单，也防止镜像继续返回上一版本的完整正文；按目标版本复核。
+        info.release_notes, items = _fetch_release_summary(info.latest)
+    info.release_items = items
     entry = files.get(_MIRROR_PLATFORM_KEYS.get(update_platform, "")) \
         if isinstance(files, dict) else None
     if not isinstance(entry, dict) or not str(entry.get("name") or "").strip():
         info.reason = "no_asset"
         return info
     name = str(entry["name"])
+    if not _asset_version_matches(name, info.latest):
+        # 不能让 manifest 的 latest 与实际下载文件脱钩，回退 GitHub 复核。
+        return None
     info.asset_name = name
     info.asset_url = f"{MIRROR_BASE_URL}/{name}"
     info.asset_size = int(entry.get("size") or 0)
@@ -300,6 +429,9 @@ def _build_info(
         release_notes=str(api.get("body") or "")[:4000],
         checked_at=checked_at,
     )
+    info.release_items = _summarize_release_notes(
+        info.release_notes, info.latest,
+    ) or []
     info.has_update = bool(tag) and is_newer(tag, current_version)
     if not info.has_update:
         return info

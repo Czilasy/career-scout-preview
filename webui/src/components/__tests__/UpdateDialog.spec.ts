@@ -15,7 +15,8 @@ const updateInfo = {
   latest: "2.8.5",
   has_update: true,
   release_url: "https://github.com/Czilasy/career-scout-preview/releases",
-  release_notes: "修复：应用内更新提示优化",
+  release_notes: "Windows 安装包：CareerScout-v2.8.5.exe\n校验值（SHA256）：...",
+  release_items: ["修复：应用内更新提示只展示重点内容"],
   asset_name: "CareerScout-v2.8.5.exe",
   asset_url: "https://github.com/Czilasy/career-scout-preview/releases/download/v2.8.5/CareerScout-v2.8.5.exe",
   asset_size: 1024,
@@ -44,6 +45,16 @@ afterEach(() => {
 });
 
 describe("UpdateDialog failure messages", () => {
+  it("renders only structured release items as compact bullets", async () => {
+    const wrapper = await mountOpen(async () => response({}));
+
+    const notes = wrapper.get('[data-testid="update-notes"]');
+    expect(notes.findAll("li")).toHaveLength(1);
+    expect(notes.text()).toContain("修复：应用内更新提示只展示重点内容");
+    expect(wrapper.text()).not.toContain("CareerScout-v2.8.5.exe");
+    expect(wrapper.text()).not.toContain("SHA256");
+  });
+
   it.each([
     ["download_failed", "下载失败，请检查网络或磁盘空间后重试"],
     ["sha256_unavailable", "无法获取校验文件"],

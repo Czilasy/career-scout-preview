@@ -47,6 +47,15 @@ const sizeText = computed(() => {
   const size = props.info?.asset_size || 0;
   return size > 0 ? `${(size / 1024 / 1024).toFixed(1)} MB` : "";
 });
+const releaseItems = computed(() => {
+  const items = props.info?.release_items;
+  if (!Array.isArray(items)) return ["本次更新包含功能优化和问题修复。"];
+  const visible = items
+    .map((item) => String(item).trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  return visible.length ? visible : ["本次更新包含功能优化和问题修复。"];
+});
 
 function stopPolling() {
   if (pollTimer) {
@@ -158,7 +167,9 @@ onBeforeUnmount(stopPolling);
       <p v-if="checkedAtText" class="update-checked-at" data-testid="update-checked-at">
         上次检查：{{ checkedAtText }}
       </p>
-      <pre v-if="info?.release_notes" class="update-notes">{{ info.release_notes }}</pre>
+      <ul class="update-notes" data-testid="update-notes">
+        <li v-for="item in releaseItems" :key="item">{{ item }}</li>
+      </ul>
 
       <div v-if="error" class="update-error" role="alert" data-testid="update-error">{{ error }}</div>
       <p v-if="notice" class="update-notice" data-testid="update-notice">{{ notice }}</p>
@@ -241,14 +252,29 @@ onBeforeUnmount(stopPolling);
   margin: 0;
   max-height: 220px;
   overflow: auto;
-  padding: 12px;
+  padding: 12px 16px 12px 30px;
   border-radius: 8px;
   background: var(--surface-2, rgba(127, 127, 127, 0.08));
-  font-family: inherit;
-  white-space: pre-wrap;
+  list-style: none;
   word-break: break-word;
   font-size: 13px;
   line-height: 1.6;
+}
+.update-notes li {
+  position: relative;
+}
+.update-notes li + li {
+  margin-top: 4px;
+}
+.update-notes li::before {
+  position: absolute;
+  top: 0.72em;
+  left: -14px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent, #4f8cff);
+  content: "";
 }
 .update-error {
   padding: 10px 12px;
