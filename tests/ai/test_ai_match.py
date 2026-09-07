@@ -1575,9 +1575,19 @@ class ProfileFactsTests(unittest.TestCase):
             analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
 
         prompt = call.call_args.args[2][0]["content"]
-        self.assertIn("最终总共5-10句", prompt)
-        self.assertIn("随机挑1-3个自然补充", prompt)
-        self.assertIn("不一次全塞", prompt)
+        self.assertIn("必须固定输出以下五个段落", prompt)
+        for section in (
+            "1. 求职方向：",
+            "2. 核心能力：",
+            "3. 工作与项目经历：",
+            "4. 学历与基本条件：",
+            "5. 岗位偏好与排除项：",
+        ):
+            self.assertIn(section, prompt)
+        self.assertIn("冒号后只能写无", prompt)
+        self.assertNotIn("最终总共5-10句", prompt)
+        self.assertNotIn("随机挑1-3个自然补充", prompt)
+        self.assertNotIn("不一次全塞", prompt)
         # 旧硬默认偏好已随第四层移除，改为字段填写说明书驱动：
         self.assertNotIn("只找全职，兼职/外包/按单结算不考虑", prompt)
         self.assertNotIn("不接受996", prompt)
@@ -1586,9 +1596,9 @@ class ProfileFactsTests(unittest.TestCase):
         self.assertIn("week_off：", prompt)
         self.assertIn("overtime：", prompt)
         self.assertIn("默认\"统招\"", prompt)
-        self.assertIn("画像里已有该偏好就不重复", prompt)
+        self.assertIn("不得因为技能、经历或职业方向自行推断偏好和排除项", prompt)
         self.assertIn("degree", prompt)
-        self.assertIn("项目经历只写项目方向、个人角色和所用技术栈", prompt)
+        self.assertIn("工作/项目方向、个人角色和所用技术栈", prompt)
         self.assertIn("summary 只写简历明确给出的职责或成果一句话", prompt)
 
 

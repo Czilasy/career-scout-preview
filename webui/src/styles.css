@@ -1044,10 +1044,11 @@ button:disabled {
   font-size: 13px;
   font-family: var(--font-display);
 }
-/* 求职画像输入框：多行展示（默认 4 行高），去掉右下角拖拽手柄。 */
+/* 求职画像输入框：至少显示五段，内容变化时由视图按内容自动增高。 */
 .profile-summary-input {
   resize: none;
   min-height: 96px;
+  overflow-y: hidden;
   line-height: 1.5;
 }
 .profile-summary-input.profile-invalid {

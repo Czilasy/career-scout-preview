@@ -35,11 +35,13 @@ import {
 } from "../discovery";
 import { setThemePlatform } from "../composables/useTheme";
 import { liveTaskStep } from "./useDiscoveryState";
+import { useAutoGrowTextarea } from "./useAutoGrowTextarea";
 import type { AnalyzeResponse } from "./useDiscoveryState";
 
 export function useDiscoverySearch(state: DiscoveryState, deps: SearchNeeds) {
   const { LOGIN_ERROR_CODES, SPEED_FIELDS, activeCategory, activeStep, advancedBusy, advancedRanges, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, cityCatalogBusy, cityCatalogRef, cityList, cityLoader, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, dragActive, executionSelection, fieldLabels, filterGroups, filterValues, finishedPartial, historyBackToLatest, historyRound, interruptedRunId, keywords, locationDraft, loginGuide, nationalScopeConfirm, oneClickOpen, pagesValue, pausedRunId, pendingPlatformSwitch, pipelineResult, pipelineResultRunId, platformState, profileConfirmed, profileError, profileFacts, profileInputEl, profileSummary, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resumeAnalysis, resumeError, schemaBusy, schemaLoader, schemaRef, scopePreview, scopePreviewBusy, scopePreviewReqId, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uploadBusy } = state;
   const { cancelActiveTasksForNewRound, clearLatestResult, enterSearchStep, notify, openOneClickDialog, restoreRunningTask, startScrape } = deps;
+  const { scheduleResize: scheduleProfileSummaryResize } = useAutoGrowTextarea(profileInputEl, profileSummary);
 
 
 async function showLoginGuide(platform: Platform) {
@@ -405,6 +407,7 @@ function confirmProfile() {
 
 function handleProfileInput() {
  if (profileError.value && profileSummary.value.trim().length >= 10) profileError.value = "";
+ scheduleProfileSummaryResize();
 }
 
 
