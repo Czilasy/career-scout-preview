@@ -4,7 +4,7 @@
 
 **Plan**: [plan.md](./plan.md)
 
-**Status**: 自动化验证完成，真实账号端到端待验收
+**Status**: 已实施，自动化验证完成，真实账号端到端验收已由用户确认完成十次；本次未重复执行或补造逐次运行明细。
 
 ## Phase 1: Setup and red baseline
 
@@ -73,7 +73,7 @@
 - [x] T029 Run `npm test` and `npm run build` from `webui/`, recording exact results in `specs/038-multi-account-round-robin/v4/quickstart.md`
 - [x] T030 Run `uv run python -m unittest tests.test_repo_hygiene`, `git diff --check`, and `git status --short`; verify no root-level test artifacts and no changes under `specs/033-log-whitebox/`
 - [x] T031 Request an independent read-only review against `specs/038-multi-account-round-robin/v4/spec.md` and resolve only confirmed V4 blockers
-- [x] T032 After explicit user authorization, execute the minimal formal-account E2E in `specs/038-multi-account-round-robin/v4/quickstart.md`; otherwise record “自动化验证完成，真实账号端到端待验收” without claiming full completion
+- [x] T032 After explicit user authorization, execute the minimal formal-account E2E in `specs/038-multi-account-round-robin/v4/quickstart.md`; 用户已确认真实账号端到端验收完成十次，本轮以该确认更新状态，未自行重跑或补造逐次账号/平台/请求分布明细
 - [x] T033 Update task checkboxes, verification evidence, and final implementation status in `specs/038-multi-account-round-robin/v4/tasks.md` without changing frozen requirements
 
 ## Dependencies
