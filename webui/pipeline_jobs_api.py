@@ -36,6 +36,48 @@ def register_pipeline_jobs_routes(app, ctx):
     def _pipeline_identity_error_response(exc: JobIdentityError):
         return (jsonify({'ok': False, 'error_code': exc.code, 'user_message': str(exc), 'details': exc.details}), exc.http_status)
 
+    def _resolve_recrawl_parent_run(source_run_id):
+        """Resolve a result snapshot to the run that froze its browser identity.
+
+        Result snapshots are the public result source used by the UI, but the
+        snapshot itself intentionally does not own a browser session.  The
+        original screening run does.  Keep the snapshot id for result/pending
+        writes and use this resolved run only for identity and activation.
+        """
+        try:
+            run = ctx.store.get_screening_run(source_run_id)
+        except ctx.operational_errors:
+            return None
+        if run is None or run.get('record_kind') != 'result_snapshot':
+            return run
+        try:
+            from webui.screen_flow import resolve_snapshot_source_run
+            return resolve_snapshot_source_run(ctx.store, run) or run
+        except ctx.operational_errors:
+            return run
+
+    def _recrawl_activation_error_response(exc, platform):
+        """Return the recoverable, user-visible response for a bad CDP binding."""
+        raw_code = str(
+            getattr(exc, 'error_code', '')
+            or getattr(exc, 'failed_code', '')
+            or 'source_cdp_unavailable'
+        )
+        code = resolve_code(raw_code, default='source_cdp_unavailable')
+        if not code.startswith('source_'):
+            code = 'source_cdp_unavailable'
+        reason = str(exc).strip() or user_visible_failure_reason(
+            code, '', str(platform or ''),
+        )
+        return (jsonify({
+            'ok': False,
+            'error': code,
+            'error_code': code,
+            'message': reason,
+            'user_message': reason,
+            'error_reason': reason,
+        }), 503)
+
     def _recrawl_whitebox_begin(task_id, job_ids, *, parent_id=None):
         from webui.whitebox import WhiteboxService
         service = WhiteboxService(ctx.store)
@@ -307,10 +349,11 @@ def register_pipeline_jobs_routes(app, ctx):
                         return (jsonify({'ok': False, 'error': 'already_running', 'existing_task_id': existing_id}), 409)
             task_id = f'recrawl-{uuid.uuid4().hex[:12]}'
             parent_identity = None
-            parent_run = None
+            parent_run = _resolve_recrawl_parent_run(source_run_id)
             try:
-                parent_identity = ctx.store.get_run_checkpoint_identity(source_run_id)
-                parent_run = ctx.store.get_screening_run(source_run_id)
+                parent_identity = ctx.store.get_run_checkpoint_identity(
+                    str((parent_run or {}).get('id') or source_run_id)
+                )
             except ctx.operational_errors:
                 pass
             parent_platform = (parent_identity or {}).get('platform') or 'boss'
@@ -357,7 +400,26 @@ def register_pipeline_jobs_routes(app, ctx):
                         task['status'] = 'failed'
                         task['error'] = '重抓任务证据白箱初始化失败'
                 return (jsonify({'ok': False, 'error': 'whitebox_incomplete'}), 503)
-            ctx.activate_run_browser(parent_run)
+            try:
+                ctx.activate_run_browser(parent_run)
+            except (OSError, RuntimeError, ValueError, KeyError) as exc:
+                ctx.store.update_screening_run(
+                    task_id,
+                    status='failed',
+                    error_code=resolve_code(
+                        str(getattr(exc, 'error_code', '')
+                            or getattr(exc, 'failed_code', '')
+                            or 'source_cdp_unavailable'),
+                        default='source_cdp_unavailable',
+                    ),
+                    error_reason=str(exc),
+                )
+                with ctx.lock:
+                    task = ctx.tasks.get(task_id)
+                    if task is not None:
+                        task['status'] = 'failed'
+                        task['error'] = str(exc)
+                return _recrawl_activation_error_response(exc, parent_platform)
             try:
                 ctx.executor.submit(_run_recrawl_with_whitebox, task_id, [str(job_id)], profile_summary, source_run_id, None, profile_facts)
             except RuntimeError as exc:
@@ -428,10 +490,11 @@ def register_pipeline_jobs_routes(app, ctx):
             return (jsonify({'ok': False, 'error': 'no_recrawlable_targets', 'message': '0 个可重抓岗位', 'job_ids': sorted(requested_ids)}), 400)
         job_ids = sorted(requested_ids)
         parent_identity = None
-        parent_run = None
+        parent_run = _resolve_recrawl_parent_run(source_run_id)
         try:
-            parent_identity = ctx.store.get_run_checkpoint_identity(source_run_id)
-            parent_run = ctx.store.get_screening_run(source_run_id)
+            parent_identity = ctx.store.get_run_checkpoint_identity(
+                str((parent_run or {}).get('id') or source_run_id)
+            )
         except ctx.operational_errors:
             pass
         parent_platform = (parent_identity or {}).get('platform') or 'boss'
@@ -464,7 +527,11 @@ def register_pipeline_jobs_routes(app, ctx):
         claimed_task['cdp_port'] = parent_cdp_port
         claimed_task['profile_key'] = parent_profile_key
         claimed_task['task_input_digest'] = parent_task_input_digest
-        ctx.activate_run_browser(parent_run)
+        try:
+            ctx.activate_run_browser(parent_run)
+        except (OSError, RuntimeError, ValueError, KeyError) as exc:
+            ctx.release_pipeline_claim(task_id, claimed_task)
+            return _recrawl_activation_error_response(exc, parent_platform)
         try:
             ctx.store.create_screening_run(task_id, source_count=len(job_ids), execution_params={'source_run_id': source_run_id, 'job_ids': [str(x) for x in job_ids], 'profile_summary': profile_summary, 'profile_facts': profile_facts, 'browser_account': claimed_task['browser_account'], 'active_account_at_freeze': ctx.account_for_run(), 'platform': parent_platform, 'cdp_port': parent_cdp_port, 'profile_key': parent_profile_key, 'task_input_digest': parent_task_input_digest}, backend_version=ctx.backend_version)
             ctx.store.save_filter_snapshot(task_id, platform=parent_platform, task_input_digest=parent_task_input_digest)

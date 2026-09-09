@@ -1468,6 +1468,95 @@ class ProfileFactsTests(unittest.TestCase):
         self.assertEqual(result["profile_facts"]["core_skills"], ["Python", "Django"])
         self.assertEqual(result["profile_facts"]["job_type"], "全职")
 
+    def test_analyze_resume_calculates_experience_and_shows_judgments(self):
+        from webui.ai import analyze_resume_to_fields
+
+        payload = {
+            "keyword": [{"word": "Python", "recommended": True}],
+            "profile_summary": (
+                "1. 求职方向：后端开发\n"
+                "2. 核心能力：Python\n"
+                "3. 工作与项目经历：后端工程师\n"
+                "4. 学历与基本条件：本科\n"
+                "5. 岗位偏好与排除项：无"
+            ),
+            "profile_facts": {
+                "employment_history": [{
+                    "company": "甲科技",
+                    "role": "后端工程师",
+                    "start_date": "2022-01",
+                    "end_date": "2023-12",
+                }],
+                "education_history": [{
+                    "school": "甲大学",
+                    "degree": "本科",
+                    "graduation_date": "2021-06",
+                }],
+                "work_pattern": "不接受996",
+            },
+        }
+        with patch("webui.ai.call_ai", return_value=payload), \
+                patch("webui.ai._resume_bytes_to_text", return_value="简历"):
+            result = analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
+
+        self.assertEqual(result["profile_facts"]["experience_years"], 2.0)
+        self.assertIn("甲科技", result["profile_summary"])
+        self.assertIn("2022-01至2023-12", result["profile_summary"])
+        self.assertIn("累计工作经验：2.0年", result["profile_summary"])
+        self.assertIn("毕业时间：2021-06", result["profile_summary"])
+
+    def test_profile_summary_remains_authoritative_when_facts_disagree(self):
+        from webui.ai import analyze_resume_to_fields
+
+        payload = {
+            "keyword": [{"word": "Python", "recommended": True}],
+            "profile_summary": (
+                "1. 求职方向：运营岗位也可以\n"
+                "2. 核心能力：Python\n"
+                "3. 工作与项目经历：后端工程师\n"
+                "4. 学历与基本条件：本科\n"
+                "5. 岗位偏好与排除项：接受996"
+            ),
+            "profile_facts": {
+                "employment_history": [{
+                    "company": "甲科技", "role": "后端", "start_date": "2022-01", "end_date": "2023-12",
+                }],
+                "work_pattern": "不接受996",
+            },
+        }
+        with patch("webui.ai.call_ai", return_value=payload), \
+                patch("webui.ai._resume_bytes_to_text", return_value="简历"):
+            result = analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
+
+        # 用户意愿保留；隐藏事实只用于精筛证据，不反向改写画像。
+        self.assertIn("接受996", result["profile_summary"])
+
+    def test_analyze_resume_completes_missing_profile_summary_section(self):
+        """画像摘要即使漏返第五段，也必须保持固定五段格式。"""
+        from webui.ai import analyze_resume_to_fields
+
+        payload = {
+            "keyword": [{"word": "Python", "recommended": True}],
+            "profile_summary": (
+                "1. 求职方向：AI 应用开发\n"
+                "2. 核心能力：Python、FastAPI\n"
+                "3. 工作与项目经历：负责后端项目\n"
+                "4. 学历与基本条件：本科"
+            ),
+        }
+        with patch("webui.ai.call_ai", return_value=payload), \
+                patch("webui.ai._resume_bytes_to_text", return_value="简历"):
+            result = analyze_resume_to_fields(b"resume", "txt", "https://x", "key")
+
+        self.assertEqual(
+            result["profile_summary"],
+            "1. 求职方向：AI 应用开发\n"
+            "2. 核心能力：Python、FastAPI\n"
+            "3. 工作与项目经历：负责后端项目\n"
+            "4. 学历与基本条件：本科\n"
+            "5. 岗位偏好与排除项：无",
+        )
+
     def test_analyze_resume_missing_profile_facts(self):
         """老端点不返回 profile_facts：返回空 dict，不报错。"""
         from webui.ai import analyze_resume_to_fields

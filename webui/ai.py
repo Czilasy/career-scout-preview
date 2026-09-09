@@ -54,6 +54,8 @@ from webui.flag_features import (
 from webui.screening_jd_gate import has_usable_jd, missing_jd_verdict
 from webui.profile_facts import (
     build_profile_facts_description,
+    calculate_experience_years,
+    derive_profile_facts,
     validate_profile_facts,
 )
 from webui.ai_prompts import (
@@ -144,6 +146,8 @@ from webui.ai_resume import (
     _build_field_options_prompt,
     _fallback_keywords_from_facts,
     _normalize_ai_payload_keys,
+    normalize_profile_summary,
+    enrich_profile_summary,
     _require,
     _require_str_list,
     _resume_bytes_to_text,

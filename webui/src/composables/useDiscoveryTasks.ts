@@ -578,10 +578,6 @@ async function enrichPausedSnapshot(
 // 待确认项「全部重抓」：缺 JD 的补 CDP 抓取，有 JD 的用画像重跑 AI 精筛。
 // 复用现有轮询机制显示进度（已完成 X / 共 N），结果原地合并进当前结果，保留当前 tab。
 async function recrawlUncertain(platformOverride?: "boss" | "zhilian") {
-  if (historyMode.value) {
-    deps.notify("历史轮次不可改写，请先回到最新", "warning");
-    return;
-  }
   let filter = platformOverride || resultPlatformFilter.value;
   // “全部”视图不发起混合重抓：仅当两个平台都有待确认岗位时才引导选择；
   // 只有一个平台有待确认岗位时直接用该平台，无需用户再选一次。
@@ -622,18 +618,23 @@ async function recrawlUncertain(platformOverride?: "boss" | "zhilian") {
         // 单平台视图按岗位自身来源 run 重抓，不跨平台混合。
         source_run_id: resultRunIds.value[filter] || pipelineResultRunId.value,
         job_ids: ids,
-        profile_summary: profileSummary.value,
-        profile_facts: profileFacts.value,
+        // 历史轮次必须使用该轮落盘画像，不能把当前工作流画像带入旧轮次；
+        // runner 收到空画像后会按 source_run_id 从原轮次恢复。
+        profile_summary: historyMode.value ? "" : profileSummary.value,
+        profile_facts: historyMode.value ? null : profileFacts.value,
       },
     });
     recrawlTaskId.value = data.task_id;
     await pollRecrawl(data.task_id);
   } catch (error) {
+    const message = errorMessage(error, "重抓启动失败");
     recrawlBusy.value = false;
-    recrawlSnapshot.value = {
-      status: "failed", progress: {}, logs: [], error: errorMessage(error, "重抓启动失败"),
-    };
-    deps.notify(errorMessage(error, "重抓启动失败"), "error");
+    // 启动请求未返回 task_id，后端不会有可继续/停止的任务。清掉临时
+    // 03 页状态并回到结果页，避免渲染出点击后无动作的恢复按钮。
+    recrawlTaskId.value = "";
+    recrawlSnapshot.value = null;
+    activeStep.value = "results";
+    deps.notify(message, "error");
   }
 }
 

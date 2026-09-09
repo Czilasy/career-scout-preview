@@ -188,6 +188,65 @@ describe("DiscoveryView paused recrawl recovery", () => {
     });
   });
 
+  it("returns to results without dead recrawl controls when startup is rejected", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/latest-running-task") {
+        return response({ ok: true, has_task: false });
+      }
+      if (url.startsWith("/api/latest-pipeline-result")) {
+        if (url.includes("platform=boss")) {
+          return response({ ok: true, has_result: false });
+        }
+        return response({
+          ok: true,
+          has_result: true,
+          source_run_id: "zhilian-result-run",
+          result: {
+            jobs: [{
+              job_id: "pending-zhilian",
+              platform: "zhilian",
+              title: "前端",
+              verdict: "uncertain",
+              verdict_reason: "详情超时",
+            }],
+          },
+        });
+      }
+      if (url === "/api/pipeline/recrawl") {
+        return response({
+          ok: false,
+          error: "source_cdp_unavailable",
+          error_code: "source_cdp_unavailable",
+          message: "冻结登录空间身份不完整",
+          user_message: "冻结登录空间身份不完整",
+        }, 503);
+      }
+      if (url === "/api/version") {
+        return response({
+          backend_version: "010", build_hash: expectedBackendBuildHash, build_time: "now",
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
+    await flushPromises();
+    const resultsStep = wrapper.findAll("button").find((button) => button.text().includes("查看结果"));
+    await resultsStep?.trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="pending-recrawl"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find(".results-stage").exists()).toBe(true);
+    expect(wrapper.find('[data-testid="screen-recrawl-progress"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="continue-recrawl"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="finish-save-results"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="cancel-recrawl"]').exists()).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/pipeline/recrawl")).toBe(true);
+  });
+
   it("starts a single JD retry as a resumable task with source identity", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);

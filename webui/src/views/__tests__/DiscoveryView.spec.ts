@@ -107,6 +107,69 @@ describe("DiscoveryView", () => {
     vi.unstubAllGlobals();
   });
 
+  it("auto-grows an AI-filled five-section profile after the textarea mounts", async () => {
+    const settings = {
+      pages: 3, inter_combo_delay: 10, detail_batch_size: 15, detail_interval: 2,
+      detail_reset_every: 4, detail_batch_cooldown: 5, detail_tab_pool_size: 5,
+      screen_batch_size: 50, screen_concurrency: 5, match_batch_size: 4, match_concurrency: 10,
+    };
+    const summary = [
+      "1. 求职方向：AI 应用开发、后端开发",
+      "2. 核心能力：Python、FastAPI、Vue 3、TypeScript",
+      "3. 工作与项目经历：负责多个后端与自动化项目",
+      "4. 学历与基本条件：本科，计算机相关专业",
+      "5. 岗位偏好与排除项：期望双休，排除 996",
+    ].join("\n");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+      if (url.endsWith("/api/filter-labels")) return response({ labels: {} });
+      if (url.endsWith("/api/latest-running-task")) return response({ task: null });
+      if (url.endsWith("/api/advanced-settings")) {
+        return response({ ok: true, selection: "balanced", settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+      }
+      if (url.endsWith("/api/analyze-resume")) {
+        return response({
+          ok: true,
+          fields: {
+            keyword: [{ word: "Python 后端", recommended: true }],
+            city: [],
+            profile_summary: summary,
+          },
+          labels: {},
+        });
+      }
+      return response({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const scrollHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "scrollHeight");
+    Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
+      configurable: true,
+      get: () => 180,
+    });
+
+    const wrapper = mount(DiscoveryView, { props: { profileId: "profile-ai-grow" } });
+    await flushPromises();
+    const file = new File(["resume"], "resume.txt", { type: "text/plain" });
+    Object.defineProperty(wrapper.get('[data-testid="resume-input"]').element, "files", { value: [file], configurable: true });
+    await wrapper.get('[data-testid="resume-input"]').trigger("change");
+    await wrapper.get('[data-testid="resume-consent"]').setValue(true);
+    await wrapper.get('[data-testid="analyze-resume"]').trigger("click");
+    await flushPromises();
+
+    const input = wrapper.get(".profile-summary-input").element as HTMLTextAreaElement;
+    expect(input.value).toContain("5. 岗位偏好与排除项：期望双休，排除 996");
+    expect(input.style.height).toBe("180px");
+
+    if (scrollHeightDescriptor) {
+      Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", scrollHeightDescriptor);
+    } else {
+      delete (HTMLTextAreaElement.prototype as unknown as { scrollHeight?: number }).scrollHeight;
+    }
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
   it("keeps scope editable when only a completed historical result is restored", async () => {
     const settings = {
       inter_combo_delay: 10,

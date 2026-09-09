@@ -13,6 +13,8 @@ from webui.profile_facts import (
     DEFAULT_OVERTIME,
     DEFAULT_WEEK_OFF,
     build_profile_facts_description,
+    calculate_experience_years,
+    derive_profile_facts,
     flex_degree_type,
     flex_job_type,
     flex_overtime,
@@ -65,6 +67,14 @@ class ValidateProfileFactsTests(unittest.TestCase):
         self.assertNotIn("week_off", validate_profile_facts({}))
         self.assertNotIn("overtime", validate_profile_facts({}))
 
+    def test_unrepresented_preference_sentinels_are_treated_as_missing(self):
+        facts = validate_profile_facts({
+            "week_off": "未体现",
+            "overtime": "未知",
+        })
+        self.assertNotIn("week_off", facts)
+        self.assertNotIn("overtime", facts)
+
     def test_degree_type_defaults_to_tongzhao(self):
         """FR-006：degree_type 默认「统招」，仅明确非统招标志才填「非统招」。"""
         self.assertEqual(normalize_degree_type(None), "统招")
@@ -79,6 +89,50 @@ class ValidateProfileFactsTests(unittest.TestCase):
     def test_non_tongzhao_preserved_in_facts(self):
         facts = validate_profile_facts({"degree_type": "自考"})
         self.assertEqual(facts["degree_type"], "非统招")
+
+    def test_keeps_structured_employment_and_education_facts(self):
+        facts = validate_profile_facts({
+            "employment_history": [{
+                "company": "甲科技",
+                "role": "后端工程师",
+                "start_date": "2022年07月",
+                "end_date": "2024-06",
+                "evidence": "任职经历：甲科技",
+                "confidence": 0.93,
+            }],
+            "education_history": [{
+                "school": "甲大学",
+                "degree": "本科",
+                "major": "计算机科学与技术",
+                "graduation_date": "2022.06",
+            }],
+            "work_pattern": "996",
+            "experience_years": 2,
+        })
+
+        self.assertEqual(facts["employment_history"][0]["start_date"], "2022-07")
+        self.assertEqual(facts["employment_history"][0]["end_date"], "2024-06")
+        self.assertEqual(facts["education_history"][0]["graduation_date"], "2022-06")
+        self.assertEqual(facts["work_pattern"], "996")
+        self.assertEqual(facts["experience_years"], 2.0)
+
+    def test_drops_invalid_structured_fact_items(self):
+        facts = validate_profile_facts({
+            "employment_history": [
+                {"company": "", "start_date": "not-a-date"},
+                {"company": "有效公司", "start_date": "2022-01"},
+                "invalid",
+            ],
+            "education_history": [{"school": 123, "graduation_date": "2022"}],
+            "experience_years": "很多年",
+            "work_pattern": 996,
+        })
+
+        self.assertEqual(len(facts["employment_history"]), 1)
+        self.assertEqual(facts["employment_history"][0]["company"], "有效公司")
+        self.assertNotIn("education_history", facts)
+        self.assertNotIn("experience_years", facts)
+        self.assertNotIn("work_pattern", facts)
 
 
 class FlexDefaultsTests(unittest.TestCase):
@@ -125,6 +179,7 @@ class BuildDescriptionTests(unittest.TestCase):
         self.assertIn("核心技能：Python", desc)
         self.assertIn("学历层次：本科", desc)
         self.assertIn("学历类型：非统招", desc)
+        self.assertNotIn("学历类型：非统招（默认）", desc)
         self.assertIn("作息：双休", desc)
 
     def test_subject_default_marked_as_default(self):
@@ -134,6 +189,54 @@ class BuildDescriptionTests(unittest.TestCase):
         desc2 = build_profile_facts_description({})
         # 空 facts 走兜底文案，不出现默认标注（无事实可描述时按未体现）。
         self.assertNotIn("（默认）", desc2)
+
+    def test_legacy_preference_sentinels_render_as_defaults(self):
+        desc = build_profile_facts_description({
+            "degree": "本科",
+            "week_off": "未体现",
+            "overtime": "未体现",
+        })
+        self.assertIn("作息：单休（默认）", desc)
+        self.assertIn("加班态度：能够加班（默认）", desc)
+
+    def test_structured_facts_description_contains_judgments(self):
+        facts = derive_profile_facts(validate_profile_facts({
+            "employment_history": [
+                {"company": "甲科技", "role": "后端", "start_date": "2022-01", "end_date": "2023-12"},
+                {"company": "乙网络", "role": "工程师", "start_date": "2024-01", "end_date": "至今"},
+            ],
+            "education_history": [{
+                "school": "甲大学", "degree": "本科", "graduation_date": "2021-06",
+            }],
+            "work_pattern": "996",
+        }), as_of="2024-12")
+
+        desc = build_profile_facts_description(facts)
+        self.assertIn("任职经历：甲科技（后端，2022-01 至 2023-12）；乙网络（工程师，2024-01 至今）", desc)
+        self.assertIn("累计工作经验：3.0年", desc)
+        self.assertIn("毕业时间：2021-06", desc)
+        self.assertIn("工作制度：996", desc)
+
+
+class ExperienceCalculationTests(unittest.TestCase):
+    def test_merges_overlapping_employment_intervals(self):
+        years = calculate_experience_years([
+            {"start_date": "2020-01", "end_date": "2021-12"},
+            {"start_date": "2021-06", "end_date": "2022-06"},
+        ], as_of="2024-01")
+        self.assertEqual(years, 2.5)
+
+    def test_current_flag_uses_reference_month_when_end_date_is_missing(self):
+        years = calculate_experience_years([
+            {"start_date": "2024-01", "current": True},
+        ], as_of="2024-12")
+        self.assertEqual(years, 1.0)
+
+    def test_year_only_dates_use_full_calendar_years(self):
+        years = calculate_experience_years([
+            {"start_date": "2022", "end_date": "2024"},
+        ])
+        self.assertEqual(years, 3.0)
 
 
 if __name__ == "__main__":

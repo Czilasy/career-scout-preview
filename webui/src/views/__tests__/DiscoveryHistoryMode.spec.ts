@@ -129,7 +129,11 @@ describe("DiscoveryView history mode", () => {
 
     await wrapper.get('[data-testid="back-to-latest"]').trigger("click");
     await flushPromises();
-    expect(wrapper.find('[data-testid="latest-result-empty"]').exists()).toBe(true);
+    // 当前没有最新结果时，回到最新应回到干净的 01，而不是短暂/长期停在空 04。
+    expect(wrapper.find('[data-testid="latest-result-empty"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
+
+    wrapper.unmount();
 
     vi.unstubAllGlobals();
   });
@@ -212,6 +216,7 @@ describe("DiscoveryView history mode", () => {
     expect(wrapper.find('[data-testid="platform-current-zhilian"]').exists()).toBe(true);
     expect(wrapper.get('[data-testid="platform-segment-zhilian"]').attributes("aria-selected")).toBe("true");
 
+    wrapper.unmount();
     vi.unstubAllGlobals();
   });
 
@@ -277,6 +282,7 @@ describe("DiscoveryView history mode", () => {
     // 回到最新过渡到 04：同样不得写入「已结束」事实
     expect(localStorage.getItem("career-scout-workflow:profile-1:finished")).toBeNull();
 
+    wrapper.unmount();
     vi.unstubAllGlobals();
   });
 

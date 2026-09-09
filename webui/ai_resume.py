@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 
 from webui.error_registry import ERROR_INVALID
-from webui.profile_facts import validate_profile_facts
+from webui.profile_facts import derive_profile_facts, validate_profile_facts
+from webui.profile_summary import enrich_profile_summary, normalize_profile_summary
 from webui.ai_prompts import build_resume_analysis_prompt
 
 from webui.ai_client import DEFAULT_TIMEOUT, RANK_BATCH_SIZE
@@ -125,8 +126,6 @@ def _normalize_ai_payload_keys(data):
     return normalized
 
 
-
-
 def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
                              api_key: str, model: str = "",
                              platform: str = "boss", timeout: int = DEFAULT_TIMEOUT) -> dict:
@@ -161,12 +160,15 @@ def analyze_resume_to_fields(file_bytes: bytes, fmt: str, endpoint_url: str,
 
     # 城市不由 AI 管理：用户未选择时由执行层按全国兜底。
     result["city"] = []
-    # profile_summary 是自由文本，不参与枚举校验，验证后附加返回
+    # profile_summary 是用户可编辑的自然语言，但展示前统一为固定五段格式。
     summary = data.get("profile_summary", "") if isinstance(data, dict) else ""
-    result["profile_summary"] = str(summary).strip()
+    result["profile_summary"] = normalize_profile_summary(summary)
     # profile_facts 隐藏画像事实：宽松验证，无效项丢弃不阻塞整体
-    result["profile_facts"] = validate_profile_facts(
+    result["profile_facts"] = derive_profile_facts(validate_profile_facts(
         data.get("profile_facts") if isinstance(data, dict) else None
+    ))
+    result["profile_summary"] = enrich_profile_summary(
+        result["profile_summary"], result["profile_facts"]
     )
     # AI 可能漏返 keyword（模型没按提示词输出）：此时不得静默空着进
     # 确认页，先用简历自身技能兜底出可选项；完全无可用词才报错重试。

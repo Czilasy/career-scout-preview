@@ -86,6 +86,117 @@ class Slice8RecrawlTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202, response.get_json())
         return response.get_json()["task_id"]
 
+    def _save_zhilian_snapshot_with_source_run(self, *, job_id="j1"):
+        """Build the persisted snapshot/source shape produced by a real round."""
+        scrape_task_id = f"zhilian-scrape-{job_id}"
+        screen_run_id = f"zhilian-screen-{job_id}"
+        frozen_identity = {
+            "platform": "zhilian",
+            "browser_account": "a",
+            "cdp_port": 9223,
+            "profile_key": "zhilian:a",
+        }
+        self.store.create_screening_run(
+            scrape_task_id,
+            source_count=1,
+            execution_params=dict(frozen_identity),
+        )
+        self.store.update_screening_run(
+            scrape_task_id, status="running", current_stage="scrape"
+        )
+        self.store.update_screening_run(
+            scrape_task_id, status="succeeded", current_stage="done"
+        )
+        self.store.create_screening_run(
+            screen_run_id,
+            source_count=1,
+            execution_params={
+                **frozen_identity,
+                "scrape_task_id": scrape_task_id,
+            },
+        )
+        self.store.update_screening_run(
+            screen_run_id, status="running", current_stage="screen_a"
+        )
+        self.store.update_screening_run(
+            screen_run_id,
+            status="partial",
+            current_stage="done",
+            pending_count=1,
+        )
+        snapshot_id = self.store.save_pipeline_result(
+            {
+                "jobs": [{
+                    "job_id": job_id,
+                    "platform": "zhilian",
+                    "platform_job_id": job_id,
+                    "title": "前端工程师",
+                    "verdict": "uncertain",
+                    "jd": "",
+                    "jd_failed_code": "detail_timeout",
+                    "source_url": f"https://www.zhaopin.com/jobdetail/{job_id}.htm",
+                }],
+                "dropped": [],
+                "total_scraped": 1,
+                "total_kept": 1,
+                "total_matched": 0,
+                "total_dropped": 0,
+                "profile_summary": "前端工程师",
+            },
+            {"platform": "zhilian"},
+            execution_params={
+                "platform": "zhilian",
+                "scrape_task_id": scrape_task_id,
+            },
+        )
+        return snapshot_id, screen_run_id
+
+    def test_recrawl_snapshot_uses_original_screen_run_identity(self):
+        """A result snapshot must activate the frozen identity of its source AI run."""
+        source_run_id, screen_run_id = self._save_zhilian_snapshot_with_source_run()
+        ctx = self.app.config["PIPELINE_CONTEXT"]
+        activated = []
+
+        with mock.patch.object(
+            ctx, "activate_run_browser", side_effect=lambda run: activated.append(run)
+        ), mock.patch.object(ctx.executor, "submit"):
+            task_id = self._post_recrawl(source_run_id)
+
+        self.assertEqual([run["id"] for run in activated], [screen_run_id])
+        run = self.store.get_screening_run(task_id)
+        self.assertEqual(run["execution_params"]["source_run_id"], source_run_id)
+        self.assertEqual(run["execution_params"]["browser_account"], "a")
+        self.assertEqual(run["execution_params"]["profile_key"], "zhilian:a")
+
+    def test_recrawl_activation_failure_releases_in_memory_claim(self):
+        """A failed start must not leave a queued task that all controls cannot operate."""
+        source_run_id = self._save_pending_source()
+        ctx = self.app.config["PIPELINE_CONTEXT"]
+        before = set(ctx.tasks)
+        from webui.frozen_browser_identity import FrozenBrowserBindingError
+
+        with mock.patch.object(
+            ctx,
+            "activate_run_browser",
+            side_effect=FrozenBrowserBindingError(
+                "冻结登录空间身份不完整 (platform=boss, browser_account=<missing>, profile_key=<missing>)"
+            ),
+        ):
+            response = self.client.post(
+                "/api/pipeline/recrawl",
+                json={
+                    "source_run_id": source_run_id,
+                    "job_ids": ["j1"],
+                    "profile_summary": "前端工程师",
+                },
+                headers=self._auth(),
+            )
+
+        self.assertEqual(response.status_code, 503, response.get_json())
+        self.assertEqual(response.get_json()["error_code"], "source_cdp_unavailable")
+        self.assertIn("冻结登录空间身份不完整", response.get_json()["message"])
+        self.assertEqual(set(ctx.tasks), before)
+
     def test_recrawl_chrome_not_ready_pauses_with_persisted_reason(self):
         """Chrome preflight failure is systemic and must never finish recrawl."""
         source_run_id = self._save_pending_source()

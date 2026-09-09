@@ -109,9 +109,18 @@ async function loadLatestResult(opts?: { skipTerminalSnapshot?: boolean }) {
   if (interruptedRunId.value || pausedRunId.value || scrapeBusy.value || screenBusy.value || recrawlBusy.value) return;
   const fetched = await fetchMergedLatestResult();
   if (!fetched) return;
-  const { merged, newer } = fetched;
+  const { newer } = fetched;
   if (hasLiveTaskState() && newer.data.scrape_task_id && scrapeTaskId.value && newer.data.scrape_task_id !== scrapeTaskId.value) return;
-  const live = hasLiveTaskState();
+  applyFetchedLatestResult(fetched, opts, hasLiveTaskState());
+}
+
+
+function applyFetchedLatestResult(
+  fetched: MergedLatestResult,
+  opts?: { skipTerminalSnapshot?: boolean },
+  live = hasLiveTaskState(),
+) {
+  const { merged, newer } = fetched;
   pipelineResultRunId.value = newer.data.source_run_id || "";
   setPipelineResult(merged);
   // B038：最新轮可能是"已抓取，未筛选"，原样透传驱动展示模式。
@@ -298,9 +307,9 @@ function closeHistoryDrawer() {
 function enterHistoryRound(detail: HistoryRoundDetail) {
   // 首次进入历史时记住进入前的草稿平台，返回最新时还原。
   if (!historyRound.value) platformBeforeHistory.value = platformState.draft;
-  // 035（真机问题③，FR-012）：历史浏览只读——先挂历史轮标记（同一时刻只有一个
-  // 历史轮激活），展示数据直接装载，不经 setPipelineResult 的当前轮置位路径：
-  // scrapeCompleted/resultLoaded/analysisReady 不因历史轮被置位。
+  // 035（真机问题③，FR-012）：历史浏览默认只读——先挂历史轮标记（同一时刻只有一个
+  // 历史轮激活），展示数据直接装载，不经 setPipelineResult 的当前轮置位路径；
+  // 待确认重抓是唯一复用原轮次 source_run_id 的写回入口。
   historyRound.value = {
     runId: detail.source_run_id || "",
     platform: detail.platform,
@@ -333,36 +342,48 @@ function enterHistoryRound(detail: HistoryRoundDetail) {
 
 
 async function returnToLatest() {
+  if (returningFromHistory.value) return;
   const restorePlatform = platformBeforeHistory.value;
-  platformBeforeHistory.value = null;
-  historyRound.value = null;
-  historyBackToLatest();
-  resultPlatformFilter.value = "all";
-  pipelineResult.value = null;
-  pipelineResultRunId.value = "";
-  resultLoaded.value = false;
-  resultRunIds.value = { boss: "", zhilian: "" };
-  resultEpoch.value += 1;
-  currentRoundStatus.value = "";
-  if (restorePlatform) {
-    platformState.setDraftPlatform(restorePlatform);
-    draftPlatform.value = restorePlatform;
-    setThemePlatform(restorePlatform);
-  }
-  // 035：未结束任务存在时回最新＝回到该任务的真实进度页（抓取→02、筛选/重抓→03），
-  // 不得落到空结果页、不得触发「已结束」；并按任务真实状态重算 scrapeCompleted
-  //（防御层，FR-012：抓取活 = 未完成；筛选/重抓活 = 抓取已完成）。
-  const liveStep = liveTaskStep(state);
-  if (liveStep) {
-    scrapeCompleted.value = liveStep === "screen";
-    activeStep.value = liveStep;
-    return;
-  }
-  // 任务已结束：回结果页展示本轮成果；过渡期间防御性拦截重复置位。
   returningFromHistory.value = true;
-  activeStep.value = "results";
   try {
-    await loadLatestResult();
+    // 先拿到最新结果，再清理历史展示。请求期间继续保留历史轮次，避免
+    // pipelineResult 被置空后渲染出一个数字全为 0 的临时 04 页面。
+    // 035：未结束任务存在时不请求结果，直接回到任务真实进度页。
+    const liveStep = liveTaskStep(state);
+    const fetched = liveStep ? null : await fetchMergedLatestResult();
+
+    platformBeforeHistory.value = null;
+    historyRound.value = null;
+    historyBackToLatest();
+    resultPlatformFilter.value = "all";
+    pipelineResult.value = null;
+    pipelineResultRunId.value = "";
+    resultLoaded.value = false;
+    resultRunIds.value = { boss: "", zhilian: "" };
+    resultEpoch.value += 1;
+    currentRoundStatus.value = "";
+    if (restorePlatform) {
+      platformState.setDraftPlatform(restorePlatform);
+      draftPlatform.value = restorePlatform;
+      setThemePlatform(restorePlatform);
+    }
+
+    if (liveStep) {
+      scrapeCompleted.value = liveStep === "screen";
+      activeStep.value = liveStep;
+      return;
+    }
+    if (fetched) {
+      applyFetchedLatestResult(fetched);
+      activeStep.value = "results";
+      return;
+    }
+
+    // 没有进行中的任务，也没有可恢复的最新结果：回到干净的 01，
+    // 不把一个空的 04 当成“最新结果”。
+    analysisReady.value = false;
+    scrapeCompleted.value = false;
+    activeStep.value = "upload";
   } finally {
     returningFromHistory.value = false;
   }

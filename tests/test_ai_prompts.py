@@ -66,6 +66,25 @@ class BuildMatchSystemPromptTests(unittest.TestCase):
         self.assertIn("（默认）", prompt)
         self.assertIn("不得判不匹配", prompt)
         self.assertIn("实习/兼职与全职冲突", prompt)
+        self.assertIn("工作制度", prompt)
+        self.assertIn("双休/单休/大小周/996", prompt)
+
+    def test_profile_summary_overrides_hidden_facts_for_intent(self):
+        prompt = self._prompt()
+        self.assertIn("求职画像优先于隐藏画像字段", prompt)
+        self.assertIn("隐藏画像字段不得覆盖求职画像", prompt)
+        self.assertIn("冲突时按求职画像执行", prompt)
+        self.assertIn("结构化筛选条件 > 求职画像 > 隐藏画像字段", prompt)
+        self.assertIn("简历事实", prompt)
+        self.assertIn("系统计算", prompt)
+
+    def test_prompt_lists_structured_resume_judgment_fields(self):
+        prompt = build_resume_analysis_prompt("x")
+        for field in (
+            "employment_history", "education_history", "start_date",
+            "end_date", "graduation_date", "experience_years", "work_pattern",
+        ):
+            self.assertIn(field, prompt)
 
     def test_hard_rules_keep(self):
         """六类硬条件与高危 flag 照常硬约束。"""

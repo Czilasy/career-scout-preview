@@ -1016,6 +1016,20 @@ onMounted(() => {
           :result-epoch="resultEpoch"
           @update:platform-filter="onResultPlatformFilterChange"
         >
+          <template #heading-actions>
+            <button
+              type="button"
+              v-if="activeCategory === 'uncertain' && groups.uncertain.length > 0 && !isScrapedOnly && (historyMode || resultLoaded)"
+              class="button secondary small pending-recrawl-heading-action"
+              data-testid="pending-recrawl-heading"
+              :disabled="Boolean(roundFlow.busyAction) || recrawlBusy || Boolean(recrawlSnapshot && (recrawlSnapshot.status === 'running' || recrawlSnapshot.status === 'queued'))"
+              @click="roundFlow.startRecrawl(resultPlatformFilter === 'all' ? undefined : resultPlatformFilter)"
+            >
+              <LoaderCircle v-if="Boolean(roundFlow.busyAction) || recrawlBusy" class="spin" :size="15" aria-hidden="true" />
+              <RotateCcw v-else :size="15" aria-hidden="true" />
+              全部重抓（{{ groups.uncertain.length }}）
+            </button>
+          </template>
           <template #actions="{ job }">
             <template v-if="activeCategory !== 'dropped'">
               <button class="button primary" type="button" :disabled="feedbackBusyIds.has(jobId(job))" @click="toggleInterest(job)">

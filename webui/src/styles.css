@@ -1240,6 +1240,17 @@ button:disabled {
   font-size: 13px;
   gap: 6px;
 }
+/* 详情重抓进度操作：与结果列表标题的重抓入口保持同一紧凑尺寸，并留出间距。 */
+.screen-recrawl-progress .screen-round-actions {
+  gap: 10px;
+}
+.screen-recrawl-progress .screen-round-actions .button {
+  min-height: 32px;
+  height: 32px;
+  padding: 0 10px;
+  gap: 5px;
+  font-size: 12px;
+}
 .filter-groups {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1542,6 +1553,16 @@ button:disabled {
   flex-wrap: wrap;
   justify-content: flex-end;
   min-width: 0;
+}
+/* 列表标题里的待确认重抓：比页面操作按钮紧凑，和筛选/排序工具同一层级。 */
+.job-list-heading .pending-recrawl-heading-action {
+  min-height: 32px;
+  height: 32px;
+  padding: 0 10px;
+  gap: 5px;
+  border-radius: 7px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 /* 结果页平台筛选滑块：居中嵌入列表头部（左右两侧 space-between 不受影响）。 */
 /* 结果页平台筛选滑块：随头部流式布局，避免绝对定位压住右侧重抓按钮（B030）。 */

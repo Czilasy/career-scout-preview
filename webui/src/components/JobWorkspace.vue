@@ -377,6 +377,7 @@ function clearFilters() {
           >{{ option.label }}</button>
         </div>
         <div class="job-list-heading-right">
+          <slot name="heading-actions" />
           <JobListToolbar
             v-if="jobs.length"
             :filter-state="filterState"
@@ -385,7 +386,6 @@ function clearFilters() {
             @reset-filter="clearFilters"
             @select-sort="(key) => { sortKey = key; }"
           />
-          <slot name="heading-actions" />
         </div>
       </div>
       <div v-if="workspaceJobs.length" ref="listEl" class="job-list" role="list">

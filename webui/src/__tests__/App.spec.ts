@@ -668,6 +668,7 @@ describe("App", () => {
     await flushPromises();
     await wrapper.get(".favorites-trigger").trigger("click");
     await flushPromises();
+    expect(wrapper.get(".favorites-trigger").find(".fav-badge").exists()).toBe(false);
     expect(wrapper.find(".fav-card-remove").exists()).toBe(true);
 
     await wrapper.get(".fav-card-remove").trigger("click");

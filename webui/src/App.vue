@@ -692,7 +692,6 @@ function handleIslandExpand() {
           @click="handleDrawerTrigger(toggleFavorites, $event)"
         >
           <Star :size="18" aria-hidden="true" /><span>收藏</span>
-          <em v-if="favorites.length" class="fav-badge">{{ favorites.length }}</em>
         </button>
         <button
           class="button secondary history-trigger"
