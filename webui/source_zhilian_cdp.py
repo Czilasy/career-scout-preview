@@ -248,6 +248,15 @@ class ZhilianCdpSource:
             cached = read_cached_state(self.browser_account, "zhilian")
         if cached in ("logged_in", "not_logged_in"):
             return self._outcome_for_signal(_STATE_TO_SIGNAL[cached])
+        signal = self._fresh_preflight_signal()
+        return self._outcome_for_signal(signal)
+
+    def recheck_login(self) -> SourceOutcome:
+        """绕过登录缓存，重新检查冻结 CDP 和智联真实登录态。"""
+        return self._outcome_for_signal(self._fresh_preflight_signal())
+
+    def _fresh_preflight_signal(self) -> str:
+        """Run the platform probe and persist only its fresh login result."""
         try:
             signal = self._preflight_runner(self.cdp_port)
         except Exception:
@@ -257,11 +266,11 @@ class ZhilianCdpSource:
         if self.browser_account and state is not None:
             from scripts.login_state_cache import write_login_state
             write_login_state(self.browser_account, "zhilian", state)
-        return self._outcome_for_signal(signal)
+        return signal
 
     def preflight_after_profile_switch(self) -> SourceOutcome:
         """公开给账号轮询层的切号后预检能力。"""
-        return run_zhilian_preflight_after_profile_switch(self.preflight)
+        return run_zhilian_preflight_after_profile_switch(self.recheck_login)
 
     def _outcome_for_signal(self, signal: str) -> SourceOutcome:
         """把智联 preflight signal 映射为统一 SourceOutcome。"""

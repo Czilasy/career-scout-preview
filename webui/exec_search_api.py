@@ -15,12 +15,20 @@ from webui.constants import (
     _MSG_UNSUPPORTED_PLATFORM,
     _MSG_USER_STOPPED_SCRAPE,
 )
-from webui.task_status import _public_task_status
-from webui.error_registry import ALIAS_TO_CODE, resolve_code
+from webui.task_status import _public_task_status, is_resume_eligible_run
+from webui.error_registry import (
+    ALIAS_TO_CODE,
+    ERROR_TAXONOMY,
+    is_recoverable_systemic_block,
+    resolve_code,
+)
 from webui.pipeline_exec_status import user_visible_failure_reason
 from webui.resume_identity import (
+    activate_frozen_identity_candidate,
     append_account_switch_log_line,
-    ensure_frozen_browser_account,
+    commit_continue_identity,
+    invalidate_login_cache_for_resume,
+    prepare_continue_identity,
 )
 from webui.task_runners import _iso_epoch_ms
 from webui.logging_setup import get_logger
@@ -28,10 +36,24 @@ from webui.exec_search_whitebox import begin_scrape_whitebox, mark_scrape_submis
 from webui.task_pause_support import (
     STOP_MODE_CANCEL,
     ScrapeCheckpointReadError,
+    normalize_recoverable_failed_run,
     request_stop,
     scrape_checkpoint,
 )
 _logger = get_logger(__name__)
+
+
+def _is_recoverable_resume_failure(code: object) -> bool:
+    """Resume-time source failures stay paused, including non-systemic retries."""
+    canonical = resolve_code(code, default="")
+    taxonomy = ERROR_TAXONOMY.get(canonical) or {}
+    return bool(
+        is_recoverable_systemic_block(canonical)
+        or (
+            taxonomy.get("category") == "source"
+            and taxonomy.get("retryable")
+        )
+    )
 
 
 def _public_failure_details(
@@ -429,6 +451,11 @@ def register_exec_search_routes(app, ctx):
             return jsonify({"ok": False, "error": "whitebox_incomplete",
                             "error_reason": reason,
                             "detail": type(exc).__name__}), 503
+        # Browser activation is part of the running scrape lifecycle.  Mark
+        # the queued row running before the activation boundary so a
+        # recoverable CDP failure can legally converge to paused and remain
+        # resumable in durable storage.
+        ctx.write_run(task_id, status="running", current_stage="scrape")
         try:
             ctx.activate_run_browser()
         except (OSError, RuntimeError, ValueError, KeyError) as exc:
@@ -440,10 +467,12 @@ def register_exec_search_routes(app, ctx):
             error_code, reason = _public_failure_details(
                 raw_error_code, "", str(platform_raw),
             )
+            recoverable = is_recoverable_systemic_block(error_code)
+            resume_status = "paused" if recoverable else "failed"
             try:
                 ctx.write_run(
                     task_id,
-                    status="failed",
+                    status=resume_status,
                     current_stage="scrape",
                     error_code=error_code,
                     error_reason=reason,
@@ -455,16 +484,17 @@ def register_exec_search_routes(app, ctx):
             except Exception:
                 _logger.warning("搜索任务激活失败状态写入失败", exc_info=True)
             with ctx.lock:
-                task["status"] = "failed"
+                task["status"] = resume_status
                 task["error"] = reason
-            ctx.clear_auto_screen(task_id)
+            if not recoverable:
+                ctx.clear_auto_screen(task_id)
             ctx.schedule_pipeline_task_cleanup(task_id)
             ctx.release_worker_resume_claims(task)
             return jsonify({
                 "ok": False,
                 "error": error_code,
                 "error_code": error_code,
-                "status": "failed",
+                "status": resume_status,
                 "error_reason": reason,
                 "detail": type(exc).__name__,
             }), 503
@@ -526,7 +556,7 @@ def register_exec_search_routes(app, ctx):
         mem_status = old_snapshot.get("status") if old_snapshot else None
         db_status = db_run.get("status") if db_run else None
         effective_status = db_status or mem_status
-        if effective_status != "paused":
+        if not is_resume_eligible_run(db_run or old_snapshot):
             return jsonify({
                 "ok": False,
                 "error": "not_paused",
@@ -536,15 +566,16 @@ def register_exec_search_routes(app, ctx):
 
         def _finish_resume_failure(
                 error_code, reason, exception=None, *, platform=""):
-            """Converge a resume-time source/preflight error to failed."""
+            """Keep recoverable resume blocks paused; fail only terminal errors."""
             code, message = _public_failure_details(
                 error_code or "internal_error", reason, platform,
             )
             message = message or code
+            recoverable = _is_recoverable_resume_failure(code)
             try:
                 ctx.write_run(
                     old_task_id,
-                    status="failed",
+                    status="paused" if recoverable else "failed",
                     current_stage="scrape",
                     error_code=code,
                     error_reason=message,
@@ -566,23 +597,113 @@ def register_exec_search_routes(app, ctx):
             with ctx.lock:
                 current = ctx.tasks.get(old_task_id)
                 if current is not None:
-                    current["status"] = "failed"
+                    current["status"] = "paused" if recoverable else "failed"
                     current["error"] = message
-            ctx.clear_auto_screen(old_task_id)
+            if not recoverable:
+                ctx.clear_auto_screen(old_task_id)
             ctx.schedule_pipeline_task_cleanup(old_task_id)
             ctx.release_worker_resume_claims(ctx.tasks.get(old_task_id))
-            return code, message
+            return code, message, "paused" if recoverable else "failed"
 
         resume_snapshot = old_snapshot.get("result") if old_snapshot else {}
         resume_completed = (
             resume_snapshot.get("completed_combos")
             if isinstance(resume_snapshot, dict) else None
         )
+        if db_run is not None and db_run.get("status") == "failed":
+            db_run = normalize_recoverable_failed_run(ctx, db_run)
+        resume_identity = None
+        resume_auto_switch = None
+        resume_run = db_run or old_snapshot
+        if db_run is not None and not _block_checked:
+            continue_body = request.get_json(silent=True) or {}
+            target_account = (
+                str(continue_body.get("target_account") or "").strip()
+                if isinstance(continue_body, dict) else ""
+            )
+            plan = prepare_continue_identity(
+                ctx.store,
+                db_run,
+                target_account=target_account,
+                current_account=ctx.load_legacy_advanced_settings,
+                fallback_account=lambda: ctx.account_for_run(db_run),
+                accounts_path=app.config["BROWSER_ACCOUNTS_PATH"],
+            )
+            if plan["status"] != "ok":
+                return jsonify(plan["body"]), plan["http_status"]
+            resume_identity = plan["identity"]
+            resume_auto_switch = plan.get("auto_switch")
+            activation = activate_frozen_identity_candidate(
+                ctx.activate_run_browser, db_run, resume_identity,
+            )
+            if not activation["ok"]:
+                code, reason, resume_status = _finish_resume_failure(
+                    activation.get("error_code") or activation.get("error")
+                    or "source_cdp_unavailable",
+                    "", exception=None,
+                    platform=str(resume_identity.get("platform") or ""),
+                )
+                return jsonify({
+                    "ok": False,
+                    "error": code,
+                    "error_code": code,
+                    "status": resume_status,
+                    "message": reason,
+                    "error_reason": reason,
+                    "detail": activation.get("detail") or "",
+                }), 409
+            resume_run = activation["run"]
+        if resume_run is not None and not _block_checked:
+            try:
+                if resume_identity is None:
+                    ctx.activate_run_browser(resume_run)
+            except (OSError, RuntimeError, ValueError, KeyError) as exc:
+                platform = str(
+                    resume_run.get("platform")
+                    or (resume_run.get("execution_params") or {}).get("platform")
+                    or ""
+                )
+                code, reason, resume_status = _finish_resume_failure(
+                    getattr(exc, "error_code", "")
+                    or getattr(exc, "failed_code", "")
+                    or "source_cdp_unavailable",
+                    "", exception=exc, platform=platform,
+                )
+                return jsonify({
+                    "ok": False,
+                    "error": code,
+                    "error_code": code,
+                    "status": resume_status,
+                    "message": reason,
+                    "error_reason": reason,
+                    "detail": type(exc).__name__,
+                }), 409
+            resume_params = resume_run.get("execution_params") or {}
+            invalidate_login_cache_for_resume(
+                str(resume_params.get("browser_account") or ""),
+                str(resume_run.get("platform") or resume_params.get("platform") or ""),
+            )
+            passed, code, reason = ctx.check_resume_block(resume_run)
+            if not passed:
+                platform = str(
+                    resume_run.get("platform")
+                    or (resume_run.get("execution_params") or {}).get("platform")
+                    or ""
+                )
+                code, reason, resume_status = _finish_resume_failure(
+                    code, reason, platform=platform,
+                )
+                return jsonify({
+                    "ok": False, "error": "block_not_resolved",
+                    "error_code": code, "error_reason": reason,
+                    "status": resume_status,
+                }), 409
         try:
-            # Use the same strict reader as pause persistence.  A corrupt
-            # payload is not equivalent to an empty checkpoint: reject before
-            # browser activation, claims, or worker submission so resume can
-            # never restart from zero or overwrite the raw bytes.
+            # The fresh browser/login checks above must pass before the strict
+            # checkpoint read.  A corrupt payload is not equivalent to an
+            # empty checkpoint: reject before identity commit, claims, or
+            # worker submission so resume can never restart from zero or
+            # overwrite the raw bytes.
             completed = set(scrape_checkpoint(
                 ctx, old_task_id, completed_combos=resume_completed,
             ))
@@ -595,72 +716,34 @@ def register_exec_search_routes(app, ctx):
                 "message": exc.public_reason,
                 "status": "failed",
             }), 409
-        if db_run is not None and not _block_checked:
+        if resume_identity is not None:
             try:
-                ctx.activate_run_browser(db_run)
-            except (OSError, RuntimeError, ValueError, KeyError) as exc:
-                platform = str(
-                    db_run.get("platform")
-                    or (db_run.get("execution_params") or {}).get("platform")
-                    or ""
+                commit_continue_identity(
+                    ctx.store, old_task_id, resume_identity, resume_auto_switch,
                 )
-                code, reason = _finish_resume_failure(
-                    getattr(exc, "error_code", "")
-                    or getattr(exc, "failed_code", "")
-                    or "source_cdp_unavailable",
-                    "", exception=exc, platform=platform,
-                )
+                db_run = ctx.store.get_screening_run(old_task_id) or resume_run
+                resume_run = db_run
+            except ctx.operational_errors as exc:
                 return jsonify({
                     "ok": False,
-                    "error": code,
-                    "error_code": code,
-                    "status": "failed",
-                    "message": reason,
-                    "error_reason": reason,
+                    "error": "resume_identity_persist_failed",
+                    "message": "继续任务身份未能保存，任务保持暂停，请重试",
+                    "status": "paused",
                     "detail": type(exc).__name__,
-                }), 409
-            passed, code, reason = ctx.check_resume_block(db_run)
-            if not passed:
-                platform = str(
-                    db_run.get("platform")
-                    or (db_run.get("execution_params") or {}).get("platform")
-                    or ""
-                )
-                code, reason = _finish_resume_failure(
-                    code, reason, platform=platform,
-                )
-                return jsonify({
-                    "ok": False, "error": "block_not_resolved",
-                    "error_code": code, "error_reason": reason,
-                    "status": "failed",
-                }), 409
-        if db_run is not None:
-            try:
-                ensure_frozen_browser_account(
-                    ctx.store, old_task_id, db_run,
-                    platform=str((db_run.get("execution_params") or {}).get("platform") or "boss"),
-                    fallback_account=ctx.account_for_run(db_run))
-            except (OSError, RuntimeError, ValueError, KeyError) as exc:
-                platform = str(
-                    db_run.get("platform")
-                    or (db_run.get("execution_params") or {}).get("platform")
-                    or ""
-                )
-                code, reason = _finish_resume_failure(
-                    getattr(exc, "error_code", "")
-                    or getattr(exc, "failed_code", "")
-                    or "source_cdp_unavailable",
-                    "", exception=exc, platform=platform,
-                )
+                }), 503
+            except (KeyError, ValueError) as exc:
                 return jsonify({
                     "ok": False,
-                    "error": code,
-                    "error_code": code,
-                    "status": "failed",
-                    "message": reason,
-                    "error_reason": reason,
+                    "error": "resume_identity_persist_failed",
+                    "message": "继续任务身份未能保存，任务保持暂停，请重试",
+                    "status": "paused",
                     "detail": type(exc).__name__,
-                }), 409
+                }), 503
+        if account_switch_note is None and resume_auto_switch is not None \
+                and resume_auto_switch[0]:
+            account_switch_note = (
+                resume_auto_switch[1], resume_auto_switch[2],
+            )
         script_params = (old_snapshot or {}).get("script_params")
         if not script_params and db_run:
             try:

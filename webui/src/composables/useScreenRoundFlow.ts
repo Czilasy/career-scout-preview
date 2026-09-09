@@ -36,6 +36,7 @@ export interface ScreenRoundFlowDeps {
     recrawlBusy: Ref<boolean>;
     recrawlTaskId: Ref<string>;
     recrawlSnapshot: Ref<TaskSnapshot | null>;
+    pollTimer?: Ref<number | undefined>;
     finishedPartial: Ref<boolean>;
     resultsPageSeen: Ref<boolean>;
     activeStep: Ref<string>;
@@ -63,6 +64,20 @@ export interface ScreenRoundFlowDeps {
 const TERMINAL_POLL_STATUSES = new Set([
   "paused", "failed", "cancelled", "interrupted", "completed", "completed_with_pending",
 ]);
+
+type CleanupActionResponse = {
+  error?: string;
+  cleanup_error?: string;
+  cleanup?: { ok?: boolean } | null;
+};
+
+function cleanupFailureMessage(data: CleanupActionResponse): string {
+  return data.error === "browser_cleanup_failed"
+    || data.cleanup_error === "browser_cleanup_failed"
+    || data.cleanup?.ok === false
+    ? "详情补抓已停止，但浏览器清理失败"
+    : "";
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -543,6 +558,70 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     }
   }
 
+  async function cancelRecrawl(): Promise<void> {
+    const runId = deps.refs.recrawlTaskId.value;
+    if (!runId || busyAction.value) return;
+    busyAction.value = "cancel-recrawl";
+    if (deps.refs.pollTimer?.value) {
+      window.clearTimeout(deps.refs.pollTimer.value);
+      deps.refs.pollTimer.value = undefined;
+    }
+    const applyCancelled = (cleanupError = ""): void => {
+      const previous = deps.refs.recrawlSnapshot.value;
+      deps.refs.recrawlBusy.value = false;
+      if (deps.refs.pausedRunId.value === runId) deps.refs.pausedRunId.value = "";
+      deps.refs.recrawlSnapshot.value = {
+        ...(previous || {}),
+        status: "cancelled",
+        progress: {
+          ...((previous || {}).progress || {}),
+          message: cleanupError || "详情补抓已停止，当前结果已保留",
+        },
+        logs: previous?.logs || [],
+        error: cleanupError,
+      };
+      deps.refs.activeStep.value = "results";
+      deps.api.notify(
+        cleanupError || "已停止详情补抓，当前结果已保留",
+        cleanupError ? "error" : "info",
+      );
+    };
+    try {
+      const data = await apiRequest<CleanupActionResponse>(
+        `/api/task/cancel/${encodeURIComponent(runId)}`,
+        { method: "POST" },
+      );
+      applyCancelled(cleanupFailureMessage(data));
+    } catch (error) {
+      const latest = await readTaskState(runId);
+      const latestStatus = String(latest?.status || "");
+      if (latest && TERMINAL_POLL_STATUSES.has(latestStatus)) {
+        deps.refs.recrawlSnapshot.value = latest;
+        deps.refs.recrawlBusy.value = false;
+        if (latestStatus === "cancelled") {
+          applyCancelled("");
+        } else if (latestStatus === "paused") {
+          deps.refs.pausedRunId.value = runId;
+          deps.api.notify(latest.error || "详情补抓仍已暂停，可继续或再次停止", "warning");
+        } else {
+          deps.api.notify(
+            latest.error || errorMessage(error, "停止详情补抓失败，请重试"),
+            latestStatus === "failed" ? "error" : "warning",
+          );
+        }
+      } else {
+        deps.refs.recrawlBusy.value = true;
+        deps.refs.recrawlSnapshot.value = snapshotWithProgress(
+          deps.refs.recrawlSnapshot.value,
+          "停止状态未知，请刷新后确认…",
+        );
+        deps.api.notify(errorMessage(error, "停止详情补抓失败，请重试"), "error");
+      }
+    } finally {
+      busyAction.value = "";
+    }
+  }
+
   async function finishRecrawl(): Promise<void> {
     const runId = deps.refs.recrawlTaskId.value || deps.refs.pausedRunId.value;
     if (!runId || busyAction.value) return;
@@ -632,6 +711,7 @@ export function useScreenRoundFlow(deps: ScreenRoundFlowDeps) {
     startRecrawl,
     pauseRecrawl,
     continueRecrawl,
+    cancelRecrawl,
     finishRecrawl,
     confirmNewRound,
   };

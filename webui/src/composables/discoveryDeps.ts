@@ -99,6 +99,7 @@ export interface ExecutionDeps {
 }
 
 export interface TasksDeps {
+  abandonRound: () => Promise<void>;
   cancelActiveTasksForNewRound: () => Promise<boolean>;
   mergeRecrawlUpdates: (updates: Record<string, unknown>) => void;
   pollRecrawl: (taskId: string) => Promise<void>;

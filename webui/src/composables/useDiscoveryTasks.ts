@@ -43,9 +43,22 @@ import {
 import { hasLiveTaskState, MODE_DEFAULT_PAGES } from "./useDiscoveryState";
 import type { MergedLatestResult, TaskSnapshot } from "./useDiscoveryState";
 
+type CleanupActionResponse = {
+  error?: string;
+  cleanup_error?: string;
+  cleanup?: { ok?: boolean } | null;
+};
+
+function hasCleanupFailure(data: CleanupActionResponse): boolean {
+  return data.error === "browser_cleanup_failed"
+    || data.cleanup_error === "browser_cleanup_failed"
+    || data.cleanup?.ok === false;
+}
+
 export function useDiscoveryTasks(state: DiscoveryState, deps: TasksNeeds) {
-  const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, activeTaskRestored, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, historyStore, interruptedRunId, isScrapedOnly, taskCompletedToast, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysis, schemaLoader, scopePreview, scopePreviewBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform, unfinishedWorkflowRestored } = state;
+  const { COMPLETED_TASK_STATUSES, POLL_BASE_DELAY, POLL_MAX_DELAY, POLL_MAX_RETRIES, activeCategory, activeStep, activeTaskRestored, advancedSettings, aiConsent, analysisReady, appliedResumePlatforms, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityText, currentRoundStatus, customCity, customKeyword, draftPlatform, executionSelection, filterValues, finishedPartial, groups, historyBackToLatest, historyMode, historyRound, historyStore, interruptedRunId, isScrapedOnly, taskCompletedToast, keywords, locationDraft, oneClickOpen, pausedRunId, pausingScreen, pipelineResult, pipelineResultRunId, pollRetryCount, pollTimer, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlRetryCount, recrawlSnapshot, recrawlTaskId, rejectedIds, restoredTaskHint, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, resumeAnalysis, schemaLoader, scopePreview, scopePreviewBusy, scrapeActionBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, selectedFile, selectedKeywords, uncertainByPlatform, unfinishedWorkflowRestored } = state;
   const { cancelScrape, clearLatestResult, clearWorkflowState, continueAiScreen, enterScreenStep, fetchMergedLatestResult, finishPausedTask, isLoginErrorCode, jobId, loadLatestResult, notify, restoreRunningTask, setPipelineResult, showLoginGuide, startAiScreen } = deps;
+  let lastCancellationCleanupFailed = false;
 
   function clearScrapeRecoveryMarkers(): void {
     pausedRunId.value = "";
@@ -378,7 +391,8 @@ async function viewScrapedOnly() {
 // 后 2 次保持 64s，总等待约 4 分钟。达上限后主动放弃并提示用户。
 
 
-async function cancelActiveTasksForNewRound(): Promise<boolean> {
+async function cancelActiveTasksForNewRound(silent = false): Promise<boolean> {
+  lastCancellationCleanupFailed = false;
   const ids = new Set<string>();
   for (const id of [
     scrapeTaskId.value, screenTaskId.value, recrawlTaskId.value,
@@ -395,10 +409,23 @@ async function cancelActiveTasksForNewRound(): Promise<boolean> {
   let cancelled = false;
   for (const id of ids) {
     try {
-      await apiRequest(`/api/task/cancel/${encodeURIComponent(id)}`, { method: "POST" });
+      const data = await apiRequest<CleanupActionResponse>(
+        `/api/task/cancel/${encodeURIComponent(id)}`,
+        { method: "POST" },
+      );
+      if (hasCleanupFailure(data)) lastCancellationCleanupFailed = true;
       cancelled = true;
     } catch (error) {
-      const payload = (error as ApiError).payload as { error?: string } | undefined;
+      const payload = (error as ApiError).payload as {
+        error?: string;
+        cleanup_error?: string;
+      } | undefined;
+      if (payload?.error === "browser_cleanup_failed"
+          || payload?.cleanup_error === "browser_cleanup_failed") {
+        lastCancellationCleanupFailed = true;
+        cancelled = true;
+        continue;
+      }
       if (payload?.error && [
         "already_finished", "run_not_found", "task_not_active", "not_paused",
       ].includes(payload.error)) {
@@ -408,7 +435,40 @@ async function cancelActiveTasksForNewRound(): Promise<boolean> {
       return false;
     }
   }
-  if (cancelled) deps.notify("已结束旧任务，开始新一轮", "info");
+  // 取消接口确认后，先把本地任务槽收口为非活动终态，再清理最新结果。
+  // 否则 clearLatestResult 会继续看到旧的 paused/running 快照，拒绝归档，
+  // “放弃本轮”就会出现按钮点了但现场仍留在原步骤的假成功。
+  const markCancelled = (
+    snapshot: TaskSnapshot | null,
+    message: string,
+  ): TaskSnapshot => ({
+    ...(snapshot || {}),
+    status: "cancelled",
+    progress: { ...((snapshot || {}).progress || {}), message },
+    logs: snapshot?.logs || [],
+  });
+  if (scrapeTaskId.value && ids.has(scrapeTaskId.value)) {
+    scrapeBusy.value = false;
+    scrapeActionBusy.value = "";
+    scrapeSnapshot.value = markCancelled(scrapeSnapshot.value, "本轮已放弃");
+  }
+  if (screenTaskId.value && ids.has(screenTaskId.value)) {
+    screenBusy.value = false;
+    pausingScreen.value = false;
+    screenSnapshot.value = markCancelled(screenSnapshot.value, "本轮已放弃");
+  }
+  if (recrawlTaskId.value && ids.has(recrawlTaskId.value)) {
+    recrawlBusy.value = false;
+    recrawlSnapshot.value = markCancelled(recrawlSnapshot.value, "本轮已放弃");
+  }
+  if (pausedRunId.value && ids.has(pausedRunId.value)) pausedRunId.value = "";
+  if (interruptedRunId.value && ids.has(interruptedRunId.value)) interruptedRunId.value = "";
+  if (cancelled && !silent) {
+    deps.notify(
+      lastCancellationCleanupFailed ? "任务已停止，但浏览器清理失败" : "已结束旧任务，开始新一轮",
+      lastCancellationCleanupFailed ? "error" : "info",
+    );
+  }
   return true;
 }
 
@@ -810,14 +870,18 @@ async function maybeAutoStartNewRound(): Promise<void> {
 }
 
 
-async function resetWorkflow() {
-  if (!(await cancelActiveTasksForNewRound())) return;
-  if (!(await deps.clearLatestResult())) return;
+async function resetWorkflowInternal(silent = false): Promise<boolean> {
+  // 先停掉旧轮询，避免取消/归档等待期间旧任务回调把已清空的现场写回来。
+  if (pollTimer.value) {
+    window.clearTimeout(pollTimer.value);
+    pollTimer.value = undefined;
+  }
+  if (!(await cancelActiveTasksForNewRound(silent))) return false;
+  if (!(await deps.clearLatestResult())) return false;
   deps.clearWorkflowState();
   // 026 B078：开始新一轮即清除持久化的已结束事实。
   deps.clearFinishedState?.();
   resultsPageSeen.value = false;
-  if (pollTimer.value) window.clearTimeout(pollTimer.value);
   activeStep.value = "upload";
   analysisReady.value = false;
   scrapeCompleted.value = false;
@@ -873,9 +937,37 @@ async function resetWorkflow() {
   if (executionSelection.value in MODE_DEFAULT_PAGES) {
     advancedSettings.value.pages = MODE_DEFAULT_PAGES[executionSelection.value];
   }
+  return true;
+}
+
+async function resetWorkflow() {
+  await resetWorkflowInternal();
+}
+
+/**
+ * 结束当前业务轮次：取消仍占用的任务、归档当前最新结果并清空现场，
+ * 让用户明确回到第一步。与“结束并保存结果”不同，这里不把本轮停在结果页。
+ */
+async function abandonRound(): Promise<void> {
+  if (cancelBusy.value || deps.roundFlow.busyAction) return;
+  cancelBusy.value = true;
+  try {
+    const cleared = await resetWorkflowInternal(true);
+    if (cleared) {
+      deps.notify(
+        lastCancellationCleanupFailed
+          ? "已放弃本轮，但浏览器清理失败"
+          : "已放弃本轮，已回到第一步",
+        lastCancellationCleanupFailed ? "error" : "info",
+      );
+    }
+  } finally {
+    cancelBusy.value = false;
+  }
 }
 
 return {
+  abandonRound,
   pollTask,
   saveScrapedOnlySnapshot,
   viewScrapedOnly,

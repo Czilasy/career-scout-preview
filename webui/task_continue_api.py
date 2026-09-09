@@ -13,6 +13,7 @@ from webui.constants import (
 )
 from webui.task_status import (
     _public_task_status,
+    is_resume_eligible_run,
     _refresh_paused_run_execution_config,
 )
 from webui.resume_identity import (
@@ -33,6 +34,7 @@ from webui.task_pause_support import (
     pause_with_mode,
     request_stop,
     continue_task_kind,
+    normalize_recoverable_failed_run,
     scrape_checkpoint,
 )
 from webui.task_runners import _iso_epoch_ms
@@ -147,7 +149,8 @@ def register_task_continue_routes(app, ctx):
     @app.route("/api/task/continue/<run_id>", methods=["POST"])
     def api_task_continue(run_id: str):
         """FR-020/FR-022：统一继续接口。
-        允许 paused 状态调用；running 状态拒绝（防止重复继续）。
+        允许 paused 及修复前遗留的可恢复 failed 状态调用；running 状态拒绝
+        （防止重复继续）。
         继续前检查阻断条件是否解除（由各阶段 handler 自行实现）。
         SPEC011 T015: 实验租约持有时拒绝继续（FR-035）。
         """
@@ -157,39 +160,19 @@ def register_task_continue_routes(app, ctx):
         run = ctx.store.get_screening_run(run_id)
         if run is None:
             return jsonify({"ok": False, "error": "run_not_found"}), 404
-        if run["status"] != "paused":
+        if not is_resume_eligible_run(run):
             return jsonify({
                 "ok": False,
                 "error": "not_paused",
                 "status": _public_task_status(run["status"], run.get("interruption_kind")),
                 "message": "只有 paused 状态的任务才能继续",
             }), 409
-        # Scrape continuation must validate the same strict checkpoint before
-        # touching browser identity/cache state.  A corrupt payload is not an
-        # empty checkpoint: finish the run as failed and leave all activation
-        # and identity persistence side effects untouched.
+        # Resolve legacy rows before building the candidate identity.  The
+        # continuation order is deliberately identity -> fresh CDP/login
+        # check -> strict checkpoint read -> durable commit -> dispatch.
         continue_kind = continue_task_kind(ctx, run_id, run)
-        if continue_kind == "scrape":
-            with ctx.lock:
-                current_task = ctx.tasks.get(run_id)
-                current_result = (current_task or {}).get("result") or {}
-            completed_combos = (
-                current_result.get("completed_combos")
-                if isinstance(current_result, dict) else None
-            )
-            try:
-                scrape_checkpoint(
-                    ctx, run_id, completed_combos=completed_combos,
-                )
-            except ScrapeCheckpointReadError as exc:
-                return jsonify({
-                    "ok": False,
-                    "error": exc.error_code,
-                    "error_code": exc.error_code,
-                    "error_reason": exc.public_reason,
-                    "message": exc.public_reason,
-                    "status": "failed",
-                }), 409
+        if run.get("status") == "failed":
+            run = normalize_recoverable_failed_run(ctx, run)
         # Reject stale/repeated requests before binding or persisting a new
         # identity.  These checks are intentionally side-effect free so a
         # failed retry keeps the durable run paused and unmodified.
@@ -224,22 +207,6 @@ def register_task_continue_routes(app, ctx):
             return jsonify(plan["body"]), plan["http_status"]
         identity = plan["identity"]
         auto_switch = plan.get("auto_switch")
-        invalidate_login_cache_for_resume(
-            identity["browser_account"], identity["platform"])
-        passed, code, reason = ctx.check_resume_block(
-            plan["run"], persist=False, probe_only=True,
-        )
-        if not passed:
-            default_probe_deferred = (
-                code == "source_cdp_unavailable"
-                and not callable(ctx.app.config.get("RESUME_BLOCK_CHECKER"))
-            )
-            if not default_probe_deferred:
-                return jsonify({
-                    "ok": False, "error": "block_not_resolved",
-                    "error_code": code, "error_reason": reason,
-                    "status": "paused",
-                }), 409
         activation = activate_frozen_identity_candidate(
             ctx.activate_run_browser, run, identity)
         if not activation["ok"]:
@@ -250,6 +217,27 @@ def register_task_continue_routes(app, ctx):
             error_reason = user_visible_failure_reason(
                 error_code, "", str(identity.get("platform") or ""),
             )
+            try:
+                ctx.write_run(
+                    run_id, status="paused",
+                    current_stage=str(run.get("current_stage") or "scrape"),
+                    error_code=error_code,
+                    error_reason=error_reason,
+                )
+                append_task_event_best_effort(
+                    ctx.store, run_id, "resume_activation_failed", {
+                        "stage": str(run.get("current_stage") or "scrape"),
+                        "error_code": error_code,
+                        "error_reason": error_reason,
+                    },
+                    logger=_logger,
+                    context="resume activation failure audit write failed",
+                )
+            except ctx.operational_errors as exc:
+                _logger.warning(
+                    "继续激活失败状态写入失败 error_type=%s",
+                    type(exc).__name__,
+                )
             return jsonify({
                 "ok": False,
                 "error": error_code,
@@ -259,8 +247,10 @@ def register_task_continue_routes(app, ctx):
                 "status": activation["status"],
             }), 409
         run = activation["run"]
-        # The candidate is already bound; this check is deliberately pure and
-        # must run before any identity commit or pipeline claim.
+        invalidate_login_cache_for_resume(
+            identity["browser_account"], identity["platform"])
+        # The candidate is already bound; this is the single fresh CDP/login
+        # check before any identity commit or pipeline claim.
         passed, code, reason = ctx.check_resume_block(run)
         if not passed:
             return jsonify({
@@ -268,6 +258,27 @@ def register_task_continue_routes(app, ctx):
                 "error_code": code, "error_reason": reason,
                 "status": "paused",
             }), 409
+        if continue_kind == "scrape":
+            with ctx.lock:
+                current_task = ctx.tasks.get(run_id)
+                current_result = (current_task or {}).get("result") or {}
+            completed_combos = (
+                current_result.get("completed_combos")
+                if isinstance(current_result, dict) else None
+            )
+            try:
+                scrape_checkpoint(
+                    ctx, run_id, completed_combos=completed_combos,
+                )
+            except ScrapeCheckpointReadError as exc:
+                return jsonify({
+                    "ok": False,
+                    "error": exc.error_code,
+                    "error_code": exc.error_code,
+                    "error_reason": exc.public_reason,
+                    "message": exc.public_reason,
+                    "status": "failed",
+                }), 409
         try:
             commit_continue_identity(ctx.store, run_id, identity, auto_switch)
         except ctx.operational_errors as exc:

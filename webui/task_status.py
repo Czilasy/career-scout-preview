@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from flask import jsonify
 
 from webui.constants import _FEEDBACK_ERROR_STATUS, _OPERATIONAL_ERRORS
+from webui.error_registry import is_recoverable_systemic_block
 
 def _public_task_status(status: str, interruption_kind: str | None = None) -> str:
     """Canonical DB/内存状态 → 公共 API 状态（http-api.md 公共状态映射）。"""
@@ -35,6 +36,24 @@ def _public_task_status(status: str, interruption_kind: str | None = None) -> st
     if status == "interrupted" and interruption_kind == "user_finished":
         return "completed_with_pending"
     return mapping.get(status, status or "failed")
+
+
+def is_resume_eligible_run(run: dict | None) -> bool:
+    """Return whether a run may enter the shared continuation flow.
+
+    New workers persist every recoverable source block as ``paused``.  The
+    ``failed`` compatibility branch is intentionally narrow so rows produced
+    by the old hard-stop bug can be migrated once, while genuinely terminal
+    failures remain terminal.
+    """
+    if not isinstance(run, dict):
+        return False
+    status = str(run.get("status") or "")
+    if status == "paused":
+        return True
+    return status == "failed" and is_recoverable_systemic_block(
+        run.get("error_code")
+    )
 
 
 def _public_status_for_integrity(

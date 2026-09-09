@@ -12,12 +12,17 @@ defineProps<{
   busyAction?: string;
   busyLabel?: string;
   showFinishSave?: boolean;
+  showCancel?: boolean;
+  cancelBusy?: boolean;
+  cancelLabel?: string;
+  cancelTestId?: string;
 }>();
 
 const emit = defineEmits<{
   "pause-recrawl": [];
   "continue-recrawl": [];
   "finish-save": [];
+  cancel: [];
 }>();
 </script>
 
@@ -31,9 +36,14 @@ const emit = defineEmits<{
       :busy-label="busyLabel"
       :finish-busy="busyAction === 'finish'"
       :show-finish-save="showFinishSave"
+      :show-cancel="showCancel"
+      :cancel-busy="cancelBusy"
+      :cancel-label="cancelLabel"
+      :cancel-test-id="cancelTestId"
       @pause-recrawl="emit('pause-recrawl')"
       @continue-recrawl="emit('continue-recrawl')"
       @finish-save="emit('finish-save')"
+      @cancel="emit('cancel')"
     />
   </div>
 </template>

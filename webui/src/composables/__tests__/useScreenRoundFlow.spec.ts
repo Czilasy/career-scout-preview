@@ -359,6 +359,30 @@ describe("useScreenRoundFlow", () => {
     expect(flow.busyAction.value).toBe("");
   });
 
+  it("cancelRecrawl stops only the detail recrawl and returns to the preserved results", async () => {
+    const { refs, api } = makeDeps();
+    refs.activeStep.value = "screen";
+    refs.recrawlBusy.value = true;
+    refs.recrawlSnapshot.value = {
+      status: "running",
+      progress: { current: 2, total: 5 },
+      logs: [],
+    };
+    apiRequestMock.mockResolvedValue({ ok: true, status: "cancelled" });
+    const flow = useScreenRoundFlow({ refs, api });
+
+    await flow.cancelRecrawl();
+
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/api/task/cancel/recrawl-1", { method: "POST" },
+    );
+    expect(refs.recrawlBusy.value).toBe(false);
+    expect(refs.recrawlSnapshot.value?.status).toBe("cancelled");
+    expect(refs.activeStep.value).toBe("results");
+    expect(api.resetWorkflow).not.toHaveBeenCalled();
+    expect(api.notify).toHaveBeenCalledWith("已停止详情补抓，当前结果已保留", "info");
+  });
+
   it("confirmNewRound resets immediately when nothing is resumable", async () => {
     const { refs, api } = makeDeps();
     const flow = useScreenRoundFlow({ refs, api });

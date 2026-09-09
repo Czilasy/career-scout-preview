@@ -1081,7 +1081,7 @@ class AutoScreenChainTests(unittest.TestCase):
         )
         data = self.client.get("/api/latest-running-task").get_json()
         self.assertTrue(data["has_task"])
-        self.assertEqual(data["status"], "failed")
+        self.assertEqual(data["status"], "paused")
         self.assertEqual(data["profile_summary"], "3年Python后端")
         self.assertEqual(
             data["profile_facts"],
@@ -1145,7 +1145,7 @@ class AutoScreenChainTests(unittest.TestCase):
         )
         data = self.client.get("/api/latest-running-task").get_json()
         self.assertTrue(data["has_task"])
-        self.assertEqual(data["status"], "failed")
+        self.assertEqual(data["status"], "paused")
         self.assertTrue(data["auto_screen"])
 
     def test_task_state_returns_auto_screen_with_memory_priority(self):

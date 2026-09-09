@@ -19,7 +19,9 @@ import threading
 from flask import jsonify
 
 from webui.constants import _MSG_TASK_NOT_FOUND
+from webui.error_registry import ERROR_USER_MESSAGES, resolve_code
 from webui.logging_setup import get_logger
+from webui.task_event_audit import append_task_event_best_effort
 
 _logger = get_logger("task_pause_support")
 
@@ -357,8 +359,9 @@ def scrape_checkpoint(ctx, run_id: str, *, completed_combos=None,
 
 def mark_scrape_paused(ctx, run_id: str, *, completed_combos=None,
                        skip_combos=None, source_count=0, total_scraped=0,
-                       reason="用户已暂停，结果已保留") -> list[str]:
-    """Persist a user-requested scrape pause and its public event."""
+                       reason="用户已暂停，结果已保留",
+                       error_code="user_paused") -> list[str]:
+    """Persist a scrape pause/block and its public event."""
     completed = scrape_checkpoint(
         ctx, run_id, completed_combos=completed_combos,
         skip_combos=skip_combos,
@@ -373,7 +376,7 @@ def mark_scrape_paused(ctx, run_id: str, *, completed_combos=None,
     existing_run = existing_run or {}
     ctx.write_run(
         run_id, status="paused", current_stage="scrape",
-        error_code="user_paused", error_reason=reason,
+        error_code=error_code, error_reason=reason,
         processed_count=max(
             len(completed), int(existing_run.get("processed_count") or 0),
         ),
@@ -397,16 +400,67 @@ def mark_scrape_paused(ctx, run_id: str, *, completed_combos=None,
             reason=ScrapeCheckpointWriteError.public_reason,
         )
         raise ScrapeCheckpointWriteError(pause_persisted=persisted) from None
-    ctx.store.append_task_event(run_id, "pause", {
-        "stage": "scrape", "code": "user_paused",
-        "completed_combos": len(completed),
-    })
+    append_task_event_best_effort(
+        ctx.store, run_id, "pause", {
+            "stage": "scrape", "code": error_code,
+            "completed_combos": len(completed),
+            "reason": reason,
+        },
+        logger=_logger,
+        context="scrape pause audit event write failed",
+    )
     with ctx.lock:
         task = ctx.tasks.get(run_id)
         if task is not None:
             task["status"] = "paused"
             task["error"] = reason
     return completed
+
+
+def normalize_recoverable_failed_run(ctx, run: dict | None) -> dict | None:
+    """Migrate a legacy recoverable ``failed`` row into ``paused`` once.
+
+    This is only a compatibility bridge for rows written before the shared
+    hard-stop fix.  It changes status and canonical error metadata only;
+    checkpoints, counters, platform and execution identity remain untouched.
+    """
+    if not isinstance(run, dict) or run.get("status") != "failed":
+        return run
+    from webui.error_registry import is_recoverable_systemic_block
+
+    raw_code = str(run.get("error_code") or "").strip()
+    if not is_recoverable_systemic_block(raw_code):
+        return run
+    code = resolve_code(raw_code, default=raw_code)
+    params = run.get("execution_params") or {}
+    platform = str(run.get("platform") or params.get("platform") or "")
+    reason = str(run.get("error_reason") or "").strip()
+    if not reason:
+        reason = ERROR_USER_MESSAGES.get(code, code)
+    ctx.store.update_screening_run(
+        run["id"], status="paused",
+        current_stage=str(run.get("current_stage") or "scrape"),
+        error_code=code, error_reason=reason,
+    )
+    append_task_event_best_effort(
+        ctx.store, run["id"], "pause", {
+            "stage": str(run.get("current_stage") or "scrape"),
+            "code": code,
+            "reason": reason,
+            "legacy_recovery": True,
+            "platform": platform,
+        },
+        logger=_logger,
+        context="legacy failed recovery audit event write failed",
+    )
+    with ctx.lock:
+        task = ctx.tasks.get(run["id"])
+        if task is not None:
+            task["status"] = "paused"
+            task["error"] = reason
+    refreshed = ctx.store.get_screening_run(run["id"])
+    return refreshed or {**run, "status": "paused", "error_code": code,
+                         "error_reason": reason}
 
 
 

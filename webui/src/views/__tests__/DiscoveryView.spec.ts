@@ -4510,10 +4510,10 @@ describe("DiscoveryView", () => {
   );
 
   it.each(["boss", "zhilian"] as const)(
-    "paused scrape %s shows shared cancel cleanup failure feedback",
+    "paused scrape %s can abandon the round while surfacing cleanup failure",
     async (platform) => {
       const runId = `paused-scrape-cleanup-${platform}`;
-      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
         const url = String(input);
         if (url.endsWith("/api/latest-running-task")) {
           return response({
@@ -4536,6 +4536,22 @@ describe("DiscoveryView", () => {
             status: "cancelled",
           });
         }
+        if (url === "/api/scrape-result-save") {
+          return response({
+            saved: true,
+            run_id: `snapshot-${platform}`,
+            result: {
+              platform,
+              source_run_id: runId,
+              jobs: [{ job_id: `${platform}-saved-job`, platform, title: "当前轮岗位" }],
+              dropped: [],
+              total_scraped: 1,
+              total_kept: 1,
+              total_matched: 1,
+              total_dropped: 0,
+            },
+          });
+        }
         if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
         if (url.includes("/api/filter-labels")) {
           return response(platform === "boss" ? bossSchema() : {
@@ -4551,11 +4567,16 @@ describe("DiscoveryView", () => {
       const wrapper = mount(DiscoveryView, { props: { profileId: "profile-1" } });
       await flushPromises();
 
+      expect(wrapper.get('[data-testid="cancel-paused-scrape"]').text()).toContain("放弃本轮");
       await wrapper.get('[data-testid="cancel-paused-scrape"]').trigger("click");
       await flushPromises();
 
-      expect(wrapper.text()).toContain("任务已停止，但浏览器清理失败");
-      expect(wrapper.text()).not.toContain("已取消任务，已有结果保留");
+      expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/scrape-result-save")).toBe(false);
+      expect(wrapper.find('[data-testid="discovery-view"]').classes()).not.toContain("results-view");
+      expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
+      expect(wrapper.emitted("notify")?.flat()).toContainEqual(
+        expect.objectContaining({ message: "已放弃本轮，但浏览器清理失败" }),
+      );
       expect(fetchMock.mock.calls.some(([url]) => String(url) === `/api/task/cancel/${runId}`)).toBe(true);
 
       wrapper.unmount();
@@ -4615,6 +4636,59 @@ describe("DiscoveryView", () => {
       expect(wrapper.find('[data-testid="view-screen-results"]').exists()).toBe(false);
       vi.unstubAllGlobals();
     });
+
+    it.each(["boss", "zhilian"] as const)(
+      "步骤 3 的 %s 详情筛选可以放弃本轮并回到上传页",
+      async (platform) => {
+        const runId = `screen-abandon-${platform}`;
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.endsWith("/api/latest-running-task")) {
+            return response({
+              ok: true, has_task: true, task_id: runId, kind: "ai_screen", status: "running",
+              platform, scrape_task_id: `scrape-${platform}`, scrape_completed: true,
+              progress: { message: "抓取岗位详情中" }, logs: [],
+            });
+          }
+          if (url.includes(`/api/task-state/${runId}`)) {
+            return response({ status: "running", progress: { message: "抓取岗位详情中" }, logs: [] });
+          }
+          if (url === `/api/task/cancel/${runId}`) return response({ ok: true, status: "cancelled" });
+          if (url.endsWith("/api/result-history/archive-latest")) return response({ ok: true, archived_run_ids: [] });
+          if (url.includes("/api/latest-pipeline-result")) return response({ ok: true, has_result: false });
+          if (url.includes("/api/filter-labels")) {
+            return response(platform === "boss" ? bossSchema() : {
+              ok: true, platform, schema_version: 1, enabled_for_new_tasks: true,
+              fields: [{ key: "company_nature", label: "公司性质", multiple: false, options: [{ value: "1", label: "国企" }] }],
+            });
+          }
+          if (url.includes("/api/options")) return response({ ok: true, platform, city_mapping_version: 1, cities: [] });
+          if (url.endsWith("/api/advanced-settings")) return response({ ok: true, selection: "balanced", settings: t513Settings, last_custom: null, mode_version: null, manual_ranges: {}, config_schema_version: 1 });
+          return response({});
+        });
+        vi.stubGlobal("fetch", fetchMock);
+
+        const wrapper = mount(DiscoveryView, { props: { profileId: `screen-abandon-${platform}` } });
+        await flushPromises();
+
+        const abandon = wrapper.get('[data-testid="abandon-screen-round"]');
+        expect(abandon.text()).toContain("放弃本轮");
+        await abandon.trigger("click");
+        await flushPromises();
+
+        expect(fetchMock.mock.calls.some(([url]) => String(url) === `/api/task/cancel/${runId}`)).toBe(true);
+        expect(wrapper.find('[data-testid="resume-input"]').exists()).toBe(true);
+        expect(wrapper.find('[data-testid="discovery-view"]').classes()).not.toContain("results-view");
+        expect(wrapper.emitted("notify")?.flat()).toContainEqual(
+          expect.objectContaining({ message: "已放弃本轮，已回到第一步" }),
+        );
+
+        wrapper.unmount();
+        sessionStorage.clear();
+        localStorage.clear();
+        vi.unstubAllGlobals();
+      },
+    );
 
     it("结束保存后刷新（B078）：完成态自动新一轮，干净 01 页、无上一轮胶囊糊脸", async () => {
       const fetchMock = vi.fn(async (input: RequestInfo | URL) => {

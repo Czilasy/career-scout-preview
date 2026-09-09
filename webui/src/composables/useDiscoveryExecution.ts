@@ -68,9 +68,22 @@ function cleanupFailureMessage(
     : "任务已停止，但浏览器清理失败";
 }
 
+async function saveCancelledScrapeResult(
+  saveScrapedOnlySnapshot: (markViewed?: boolean) => Promise<"saved" | "zero" | "failed">,
+  activeCategory: Ref<string>,
+  activeStep: Ref<string>,
+): Promise<"saved" | "zero" | "failed"> {
+  const outcome = await saveScrapedOnlySnapshot(true);
+  if (outcome !== "failed") {
+    activeCategory.value = "matched";
+    activeStep.value = "results";
+  }
+  return outcome;
+}
+
 export function useDiscoveryExecution(state: DiscoveryState, deps: ExecutionNeeds) {
   const { activeCategory, activeStep, activeTaskRestored, advancedPanelsOpen, analysisReady, autoScreenArmed, autoScreenFields, autoScreenProfile, cancelBusy, cityList, currentRoundStatus, draftPlatform, effectiveSearchCities, filterValues, finishSaveBusy, finishedPartial, historyDetail, historyMode, historyRound, historyScreenBusy, interruptedRunId, locationDraft, nationalScopeConfirm, oneClickOpen, pausedRunId, pipelineBusy, pipelineResult, pipelineResultRunId, platformBeforeHistory, platformState, pollRetryCount, pollTimer, profileConfirmed, profileError, profileFacts, profileSummary, recrawlBusy, recrawlPlatformGuide, recrawlSnapshot, recrawlTaskId, restoredTaskHint, resultEpoch, resultLoaded, resultPlatformFilter, resultRunIds, resultsPageSeen, schemaRef, scrapeActionBusy, scrapeBusy, scrapeCompleted, scrapeSnapshot, scrapeTaskId, screenBusy, screenPanelOpen, screenSnapshot, screenTaskId, searchPanelsOpen, selectedKeywords } = state;
-  const { clearWorkflowState, enrichPausedSnapshot, enterScreenStep, enterSearchStep, isCompletedTaskStatus, isLoginErrorCode, loadCityCatalog, loadFilterLabels, loadLatestResult, notify, pollRecrawl, pollTask, refreshScopePreview, requireProfileConfirmed, restoreLocationsFromContext, returnToLatest, saveScrapedOnlySnapshot, setDraftPlatform, setPipelineResult, showLoginGuide, validateProfileForScreen } = deps;
+  const { clearWorkflowState, enrichPausedSnapshot, enterScreenStep, enterSearchStep, isCompletedTaskStatus, isLoginErrorCode, loadCityCatalog, loadFilterLabels, loadLatestResult, notify, pollRecrawl, pollTask, refreshScopePreview, requireProfileConfirmed, restoreLocationsFromContext, returnToLatest, setDraftPlatform, setPipelineResult, showLoginGuide, validateProfileForScreen } = deps;
 
   const scrapeAction = computed<ScrapePrimaryAction>(() => {
     const status = String(scrapeSnapshot.value?.status || "");
@@ -335,6 +348,10 @@ async function restoreRunningTask() {
       pausedRunId.value = data.task_id;
       analysisReady.value = true;
       if (kind === "scrape") {
+        // 恢复后的暂停抓取仍要挂载同一个父任务 ID；继续和取消都必须
+        // 指向这次断点，不能只保留 pausedRunId 导致按钮进入“无任务”分支。
+        scrapeTaskId.value = data.task_id;
+        scrapeCompleted.value = Boolean(data.scrape_completed);
         activeStep.value = "search";
         autoScreenArmed.value = Boolean(data.auto_screen);
         if (data.auto_screen_fields) {
@@ -390,6 +407,17 @@ async function restoreRunningTask() {
       }
       // 拉 /api/task-state 拿完整计数画面（success/fail/unstarted/total）
       await deps.enrichPausedSnapshot(data.task_id, snapshot, kind);
+      if (kind === "scrape") {
+        scrapeSnapshot.value = {
+          ...snapshot,
+          scraped_count: data.scraped_count,
+          source_total: data.source_total,
+        };
+      } else if (kind === "screen") {
+        screenSnapshot.value = snapshot;
+      } else {
+        recrawlSnapshot.value = snapshot;
+      }
       const reason = data.pause_info?.error_reason || "任务已暂停";
       restoredTaskHint.value = `检测到暂停中的任务（${reason}），处理后点继续`;
       return;
@@ -556,18 +584,33 @@ async function cancelScrape() {
       },
     );
     const cleanupError = cleanupFailureMessage(data, "cancel");
+    const previousSnapshot = scrapeSnapshot.value;
+    const resultOutcome = await saveCancelledScrapeResult(
+      deps.saveScrapedOnlySnapshot,
+      activeCategory,
+      activeStep,
+    );
     // 后端会立刻关浏览器并标 cancelled；这里直接复位，不等下一次轮询
     scrapeBusy.value = false;
     autoScreenArmed.value = false;
     restoredTaskHint.value = "";
     scrapeSnapshot.value = {
+      ...(previousSnapshot || {}),
       status: "cancelled",
-      progress: { message: cleanupError || "已停止抓取" },
-      logs: [],
-      error: cleanupError,
+      progress: {
+        ...((previousSnapshot || {}).progress || {}),
+        message: resultOutcome === "failed"
+          ? "任务已停止，但结果保存失败"
+          : cleanupError || "已停止抓取，结果已保存",
+      },
+      logs: previousSnapshot?.logs || [],
+      error: cleanupError || (resultOutcome === "failed" ? "结果保存失败" : ""),
     };
     interruptedRunId.value = "";
-    deps.notify(cleanupError || "已停止抓取", cleanupError ? "error" : "warning");
+    deps.notify(
+      cleanupError || (resultOutcome === "failed" ? "任务已停止，但结果保存失败" : "已停止抓取，结果已保存"),
+      cleanupError || resultOutcome === "failed" ? "error" : "success",
+    );
   } catch (error) {
     // 取消接口失败时不要卡死：恢复轮询让前端看真实状态
     deps.notify(errorMessage(error, "停止失败，请重试"), "error");
@@ -998,6 +1041,11 @@ async function cancelPausedTask(runId: string) {
       },
     );
     const cleanupError = cleanupFailureMessage(data, "cancel");
+    const isScrapeRun = runId === scrapeTaskId.value;
+    const previousScrapeSnapshot = scrapeSnapshot.value;
+    const resultOutcome = isScrapeRun
+      ? await saveCancelledScrapeResult(deps.saveScrapedOnlySnapshot, activeCategory, activeStep)
+      : "failed" as const;
     scrapeBusy.value = false;
     screenBusy.value = false;
     restoredTaskHint.value = "";
@@ -1006,10 +1054,16 @@ async function cancelPausedTask(runId: string) {
     autoScreenArmed.value = false;
     if (scrapeSnapshot.value) {
       scrapeSnapshot.value = {
+        ...(previousScrapeSnapshot || {}),
         status: "cancelled",
-        progress: { message: cleanupError || "已取消任务" },
-        logs: [],
-        error: cleanupError,
+        progress: {
+          ...((previousScrapeSnapshot || {}).progress || {}),
+          message: isScrapeRun && resultOutcome === "failed"
+            ? "任务已取消，但结果保存失败"
+            : cleanupError || (isScrapeRun ? "已取消任务，结果已保存" : "已取消任务"),
+        },
+        logs: previousScrapeSnapshot?.logs || [],
+        error: cleanupError || (isScrapeRun && resultOutcome === "failed" ? "结果保存失败" : ""),
       };
     }
     if (screenSnapshot.value) {
@@ -1021,8 +1075,9 @@ async function cancelPausedTask(runId: string) {
       };
     }
     deps.notify(
-      cleanupError || "已取消任务，已有结果保留",
-      cleanupError ? "error" : "warning",
+      cleanupError
+        || (isScrapeRun && resultOutcome === "failed" ? "任务已取消，但结果保存失败" : "已取消任务，已有结果保留"),
+      cleanupError || (isScrapeRun && resultOutcome === "failed") ? "error" : "warning",
     );
   } catch (error) {
     deps.notify(errorMessage(error, "取消失败，请重试"), "error");

@@ -507,6 +507,31 @@ describe("抓取任务恢复边界", () => {
       expect(state.pipelineBusy.value).toBe(false);
     },
   );
+
+  it("恢复暂停抓取时保留抓取任务 ID，继续和取消都指向同一轮", async () => {
+    apiRequestMock.mockResolvedValue({
+      has_task: true,
+      task_id: "paused-scrape-current",
+      kind: "scrape",
+      status: "paused",
+      platform: "zhilian",
+      progress: { overall_percent: 42 },
+      logs: [],
+      error: "需要登录",
+      scraped_count: 8,
+      source_total: 8,
+      pause_info: { error_code: "source_login_required", error_reason: "需要登录" },
+    });
+    const state = makeState();
+    const deps = makeDeps();
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.restoreRunningTask();
+
+    expect(state.scrapeTaskId.value).toBe("paused-scrape-current");
+    expect(state.pausedRunId.value).toBe("paused-scrape-current");
+    expect(state.scrapeSnapshot.value?.status).toBe("paused");
+  });
 });
 
 describe("浏览器清理失败的公共动作反馈", () => {
@@ -593,4 +618,35 @@ describe("浏览器清理失败的公共动作反馈", () => {
       expect(deps.notify).not.toHaveBeenCalledWith("已取消任务，已有结果保留", "warning");
     },
   );
+});
+
+describe("抓取终止后的结果收口", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset();
+  });
+
+  it("终止抓取后保存当前任务快照并立即进入结果页", async () => {
+    apiRequestMock.mockResolvedValue({ ok: true });
+    const state = makeState({
+      activeStep: ref("search"),
+      scrapeTaskId: ref("scrape-current-round"),
+      scrapeBusy: ref(true),
+      scrapeSnapshot: ref({
+        status: "running",
+        scraped_count: 12,
+        source_total: 12,
+        progress: { overall_percent: 48 },
+        logs: ["抓取中"],
+      }),
+    });
+    const saveScrapedOnlySnapshot = vi.fn(async () => "saved" as const);
+    const deps = makeDeps({ saveScrapedOnlySnapshot });
+    const execution = useDiscoveryExecution(state, deps);
+
+    await execution.cancelScrape();
+
+    expect(saveScrapedOnlySnapshot).toHaveBeenCalledWith(true);
+    expect(state.scrapeSnapshot.value?.status).toBe("cancelled");
+    expect(state.activeStep.value).toBe("results");
+  });
 });

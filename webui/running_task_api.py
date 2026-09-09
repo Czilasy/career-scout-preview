@@ -13,7 +13,12 @@ import sqlite3
 from flask import jsonify
 
 from webui.constants import LOG_TAIL_LINES
-from webui.task_status import _pipeline_kind_for_stage, _public_status_for_integrity
+from webui.error_registry import RECOVERABLE_SYSTEMIC_BLOCK_CODES
+from webui.task_status import (
+    _pipeline_kind_for_stage,
+    _public_status_for_integrity,
+    is_resume_eligible_run,
+)
 from webui.task_runners import _iso_epoch_ms
 from webui.task_pause_support import is_user_paused_run
 from webui.pipeline_exec_status import user_visible_failure_reason
@@ -123,16 +128,37 @@ def register_running_task_routes(app, ctx):
                             task_id, active=True,
                         ),
                     })
-        # 2. DB 中最近 paused（服务重启后恢复暂停态，FR-028）
+        # 2. DB 中最近可继续的 paused，或修复前误写成 failed 的旧阻断。
+        # 刷新恢复和 POST /api/task/continue 必须看到同一套候选状态；
+        # 不能让 legacy failed 只在已知 run_id 的接口里才可继续。
         try:
             with ctx.store._connection() as conn:
-                prow = conn.execute(
+                _failed_resume_codes = tuple(
+                    sorted(RECOVERABLE_SYSTEMIC_BLOCK_CODES)
+                )
+                _failed_resume_placeholders = ",".join(
+                    "?" for _ in _failed_resume_codes
+                )
+                _resume_row = conn.execute(
                     "SELECT id, status, current_stage, error_code, error_reason, "
                     "processed_count, source_count, pending_count, match_count, "
                     "mismatch_count, total_dropped, backend_version, updated_at "
-                    "FROM screening_runs WHERE status = 'paused' "
-                    "ORDER BY updated_at DESC LIMIT 1"
-                ).fetchone()
+                    "FROM screening_runs "
+                    "WHERE status = 'paused' "
+                    f"OR (status = 'failed' AND error_code IN ({_failed_resume_placeholders})) "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    _failed_resume_codes,
+                )
+                _resume_row = _resume_row.fetchone()
+                prow = (
+                    _resume_row
+                    if _resume_row is not None
+                    and is_resume_eligible_run({
+                        "status": _resume_row["status"],
+                        "error_code": _resume_row["error_code"],
+                    })
+                    else None
+                )
         except (sqlite3.Error, RuntimeError):
             prow = None
         if prow is not None and ctx.has_newer_saved_result_than(prow["updated_at"]):
@@ -156,10 +182,10 @@ def register_running_task_routes(app, ctx):
                 "has_task": True,
                 "task_id": prow["id"],
                 "kind": paused_kind,
-                # Older workers persisted source/AI failures as ``paused``.
-                # Only an explicit user pause may keep the global recovery
-                # slot occupied after a refresh.
-                "status": "paused" if user_paused else "failed",
+                # Every row selected above is resume-eligible.  Systemic
+                # source/AI blocks must remain visibly resumable after a
+                # refresh, including rows written as failed by old workers.
+                "status": "paused",
                 "stage": prow["current_stage"],
                 "progress": {
                     "processed": prow["processed_count"],
@@ -439,8 +465,9 @@ def register_running_task_routes(app, ctx):
                 continue
             if ctx.has_newer_saved_result_than(failed_run.get("updated_at")):
                 continue
+            failed_resumable = is_resume_eligible_run(failed_run)
             failed_scraped_count = ctx.store.count_scrape_run_jobs(failed_run["id"])
-            if failed_scraped_count <= 0:
+            if failed_scraped_count <= 0 and not failed_resumable:
                 continue
             failed_params = failed_run.get("execution_params") or {}
             failed_error_reason = user_visible_failure_reason(
@@ -454,7 +481,7 @@ def register_running_task_routes(app, ctx):
                 "has_task": True,
                 "task_id": failed_run["id"],
                 "kind": "scrape",
-                "status": _status_for_integrity(failed_integrity, "failed"),
+                "status": "paused" if failed_resumable else _status_for_integrity(failed_integrity, "failed"),
                 "stage": "scrape",
                 "progress": {
                     "message": failed_error_reason,
@@ -465,7 +492,7 @@ def register_running_task_routes(app, ctx):
                     "error_code": failed_run.get("error_code"),
                     "error_reason": failed_error_reason,
                 },
-                "resumable": True,
+                "resumable": failed_resumable,
                 "source": "database",
                 "scrape_task_id": failed_run["id"],
                 "auto_screen": bool(failed_params.get("auto_screen")),

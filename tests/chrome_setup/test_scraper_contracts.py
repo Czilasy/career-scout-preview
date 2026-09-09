@@ -140,6 +140,25 @@ class TempfileProfileLifecycleTests(unittest.TestCase):
 
 
 class DedicatedChromeShutdownTests(unittest.TestCase):
+    def test_already_stopped_dedicated_browser_is_an_idempotent_success(self):
+        module = load_module()
+        session_factory = mock.Mock()
+        process_stopper = mock.Mock()
+
+        closed = module.close_cdp_chrome(
+            cdp_port=9333,
+            cdp_data_dir="C:/isolated/boss-profile",
+            profile_checker=lambda _port, _path: False,
+            session_factory=session_factory,
+            process_stopper=process_stopper,
+            ready_checker=lambda _port: False,
+            sleeper=lambda _seconds: None,
+        )
+
+        self.assertTrue(closed)
+        session_factory.assert_not_called()
+        process_stopper.assert_not_called()
+
     def test_graceful_close_refuses_non_dedicated_cdp_profile(self):
         module = load_module()
         session_factory = mock.Mock()
@@ -163,6 +182,7 @@ class DedicatedChromeShutdownTests(unittest.TestCase):
         module = load_module()
         session = mock.Mock()
         process_stopper = mock.Mock()
+        readiness = iter([True, False])
 
         closed = module.close_cdp_chrome(
             cdp_port=9333,
@@ -170,7 +190,7 @@ class DedicatedChromeShutdownTests(unittest.TestCase):
             profile_checker=lambda _port, _path: True,
             session_factory=lambda _port: session,
             process_stopper=process_stopper,
-            ready_checker=lambda _port: False,
+            ready_checker=lambda _port: next(readiness),
             sleeper=lambda _seconds: None,
         )
 
@@ -184,7 +204,7 @@ class DedicatedChromeShutdownTests(unittest.TestCase):
         session = mock.Mock()
         session.send.side_effect = ConnectionError("browser closed socket")
         process_stopper = mock.Mock(return_value=1)
-        readiness = iter([True] * 10 + [False])
+        readiness = iter([True] * 11 + [False])
 
         closed = module.close_cdp_chrome(
             cdp_port=9333,

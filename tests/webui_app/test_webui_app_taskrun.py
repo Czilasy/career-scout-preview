@@ -466,6 +466,54 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
         self.assertEqual(data["platform"], "boss")
         self.assertEqual(data["scrape_task_id"], "recover-failed")
 
+    def test_latest_running_task_restores_legacy_recoverable_failed_as_paused(self):
+        """旧版本误写成 failed 的可恢复阻断刷新后仍必须进入继续态。"""
+        self._seed_scrape_run(
+            "recover-legacy-block", 1, "failed", platform="zhilian",
+            error_code="source_login_required", error_reason="旧版本误写失败",
+        )
+        data = self.client.get("/api/latest-running-task").get_json()
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["task_id"], "recover-legacy-block")
+        self.assertEqual(data["status"], "paused")
+        self.assertTrue(data["resumable"])
+        self.assertEqual(data["pause_info"]["error_code"], "source_login_required")
+
+    def test_latest_running_task_does_not_hide_legacy_block_behind_terminal_failures(self):
+        """大量普通失败历史不能遮住仍可继续的旧阻断任务。"""
+        target_id = "recover-legacy-block-old"
+        self.store.create_screening_run(
+            target_id, source_count=1,
+            execution_params={"platform": "zhilian"},
+        )
+        self.store.update_screening_run(
+            target_id, status="running", current_stage="scrape",
+        )
+        self.store.update_screening_run(
+            target_id, status="failed", current_stage="scrape",
+            error_code="source_login_required", error_reason="旧版本误写失败",
+        )
+        for index in range(101):
+            run_id = f"terminal-failure-{index:03d}"
+            self.store.create_screening_run(
+                run_id, source_count=1,
+                execution_params={"platform": "boss"},
+            )
+            self.store.update_screening_run(
+                run_id, status="running", current_stage="scrape",
+            )
+            self.store.update_screening_run(
+                run_id, status="failed", current_stage="scrape",
+                error_code="scrape_failed", error_reason="不可恢复失败",
+            )
+
+        data = self.client.get("/api/latest-running-task").get_json()
+
+        self.assertTrue(data["has_task"])
+        self.assertEqual(data["task_id"], target_id)
+        self.assertEqual(data["status"], "paused")
+        self.assertTrue(data["resumable"])
+
     def test_latest_running_task_restores_completed_plain_scrape(self):
         run_id = "recover-plain-completed"
         jobs = [{
@@ -513,7 +561,7 @@ class TaskFinishAndCountRegressionTests(unittest.TestCase):
             error_code="source_login_required", error_reason="",
         )
         data = self.client.get("/api/latest-running-task").get_json()
-        self.assertEqual(data["status"], "failed")
+        self.assertEqual(data["status"], "paused")
         self.assertEqual(data["error"], "登录已失效，需重新登录")
         self.assertNotIn("BOSS", data["progress"]["message"])
 
@@ -1308,7 +1356,8 @@ class ScreenContinueFlowTests(unittest.TestCase):
         self.assertEqual(params.get("browser_account"), "b")
         self.assertEqual(params.get("profile_key"), "boss:b")
         self.assertEqual(params.get("cdp_port"), 9222)
-        self.assertEqual(checked, ["b", "b"])
+        # A single fresh check runs after the candidate identity is activated.
+        self.assertEqual(checked, ["b"])
         submit.assert_called_once()
 
     def test_b057_continue_switch_missing_account_rejected(self):
@@ -1420,7 +1469,8 @@ class ScreenContinueFlowTests(unittest.TestCase):
         self.assertEqual(params.get("browser_account"), "b")
         self.assertEqual(params.get("profile_key"), "boss:b")
         self.assertEqual(params.get("cdp_port"), 9222)
-        self.assertEqual(checked, ["b", "b"])
+        # A single fresh check runs after the candidate identity is activated.
+        self.assertEqual(checked, ["b"])
         submit.assert_called_once()
 
     def test_worker_pause_writes_paused_without_history_round(self):

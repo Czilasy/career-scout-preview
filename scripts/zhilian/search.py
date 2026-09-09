@@ -154,6 +154,17 @@ def _api_city_code(platform_code: str) -> str:
     return platform_code
 
 
+def _api_error_signal(value: dict[str, Any]) -> str | None:
+    """Map an API error payload to a stable source signal when identifiable."""
+    code = str(value.get("error") or "").strip().lower()
+    message = str(value.get("msg") or value.get("message") or "").strip().lower()
+    if code in {"401", "unauthorized"} or any(
+        marker in message for marker in ("login required", "not logged", "登录")
+    ):
+        return "login_required"
+    return None
+
+
 def check_login_state_tri(cdp_port: int = DEFAULT_CDP_PORT) -> str:
     """智联登录态 DOM marker 探测，零 API 请求。
 
@@ -295,8 +306,10 @@ def fetch_list(plan_item: dict, *, on_page_completed=None) -> tuple[str | None, 
         scope_stop_reason = None
         for page_index in range(start_page, max(1, target_pages) + 1):
             value = _evaluate(ws, _search_fetch_expression(keyword, api_city, page_index))
-            if not isinstance(value, dict) or value.get("error"):
+            if not isinstance(value, dict):
                 return "invalid_output", [], None
+            if value.get("error"):
+                return _api_error_signal(value) or "invalid_output", [], None
             jobs = [_normalize_job(item) for item in value.get("jobs") or []]
             before = set(merged)
             for job in jobs:

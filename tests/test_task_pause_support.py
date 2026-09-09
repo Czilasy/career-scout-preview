@@ -267,6 +267,46 @@ class ScrapeCheckpointPauseSafetyTests(unittest.TestCase):
                 failures[-1]["payload"]["error_code"], "checkpoint_write_failed",
             )
 
+    def test_pause_audit_write_failure_does_not_undo_durable_pause(self):
+        """暂停主状态和断点成功后，审计事件失败不能把任务改回 failed。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "pause-audit-write-failure"
+            store.create_screening_run(run_id, source_count=1)
+            store.update_screening_run(
+                run_id, status="running", current_stage="scrape",
+            )
+            original_append = store.append_task_event
+
+            def append_event(current_id, event_type, payload):
+                if event_type == "pause":
+                    raise RuntimeError("audit event unavailable")
+                return original_append(current_id, event_type, payload)
+
+            ctx = SimpleNamespace(
+                store=store,
+                operational_errors=_OPERATIONAL_ERRORS,
+                write_run=lambda current_id, **kwargs: store.update_screening_run(
+                    current_id, **kwargs,
+                ),
+                lock=threading.RLock(),
+                tasks={},
+            )
+            with mock.patch.object(
+                    store, "append_task_event", side_effect=append_event):
+                completed = mark_scrape_paused(
+                    ctx, run_id, completed_combos=["kw|city"],
+                    error_code="source_cdp_unavailable", reason="浏览器未连接",
+                )
+
+            self.assertEqual(completed, ["kw|city"])
+            run = store.get_screening_run(run_id)
+            self.assertEqual(run["status"], "paused")
+            self.assertEqual(run["error_code"], "source_cdp_unavailable")
+            self.assertEqual(
+                store.load_checkpoint(run_id, "scrape"), {"kw|city"},
+            )
+
 
 class StopModePriorityTests(unittest.TestCase):
     def test_pause_cannot_overwrite_terminal_mode_in_either_order(self):
@@ -424,11 +464,14 @@ class ScrapeFailureLifecycleTests(unittest.TestCase):
             ctx.schedule_pipeline_task_cleanup.assert_called_once_with(run_id)
             ctx.release_worker_resume_claims.assert_called_once()
 
-    def test_hard_stop_finishes_failed_and_does_not_hold_browser(self):
+    def test_recoverable_hard_stop_pauses_and_does_not_hold_browser(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = TaskStore(f"{tmp}/test/webui.db")
-            run_id = "hard-stop-failed"
-            store.create_screening_run(run_id, source_count=1)
+            run_id = "hard-stop-paused"
+            store.create_screening_run(
+                run_id, source_count=1,
+                execution_params={"platform": "boss"},
+            )
             ctx = self._context_for_run(store, run_id)
             ctx.make_cdp_source = mock.Mock(return_value=object())
 
@@ -445,12 +488,70 @@ class ScrapeFailureLifecycleTests(unittest.TestCase):
                     {"keyword": "kw", "city": ["city"], "pages": 1},
                 )
 
-            self.assertEqual(store.get_screening_run(run_id)["status"], "failed")
-            self.assertEqual(ctx.tasks[run_id]["status"], "failed")
+            run = store.get_screening_run(run_id)
+            self.assertEqual(run["status"], "paused")
+            self.assertEqual(run["error_code"], "source_cdp_unavailable")
+            self.assertEqual(run["error_reason"], result["error"])
+            self.assertEqual(store.load_checkpoint(run_id, "scrape"), set())
+            self.assertEqual(ctx.tasks[run_id]["status"], "paused")
             support = build_browser_support(
                 store, ctx.tasks, ctx.lock, lambda _run: "a", mock.Mock(),
             )
             self.assertFalse(support[1]())
+
+    def test_checkpoint_failure_does_not_leave_recoverable_pause_in_memory(self):
+        """断点持久化失败后，内存状态必须与 durable failed 状态一致。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "recoverable-pause-checkpoint-failure"
+            store.create_screening_run(
+                run_id, source_count=1,
+                execution_params={"platform": "boss"},
+            )
+            ctx = self._context_for_run(store, run_id)
+            ctx.make_cdp_source = mock.Mock(return_value=object())
+
+            class RecoverableSourceError(RuntimeError):
+                error_code = "source_cdp_unavailable"
+
+            with mock.patch(
+                    "webui.pipeline_exec.run_search",
+                    side_effect=RecoverableSourceError("source disconnected")), \
+                    mock.patch.object(
+                        store, "save_checkpoint",
+                        side_effect=RuntimeError("checkpoint unavailable")), \
+                    self.assertLogs(
+                        "career_scout.task_pause_support", level="ERROR"):
+                run_pipeline_task(
+                    ctx, run_id,
+                    {"keyword": "kw", "city": ["city"], "pages": 1},
+                )
+
+            self.assertEqual(store.get_screening_run(run_id)["status"], "failed")
+            self.assertEqual(ctx.tasks[run_id]["status"], "failed")
+
+    def test_unrecoverable_hard_stop_still_finishes_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TaskStore(f"{tmp}/test/webui.db")
+            run_id = "hard-stop-internal-error"
+            store.create_screening_run(run_id, source_count=1)
+            ctx = self._context_for_run(store, run_id)
+
+            result = {
+                "ok": False, "jobs": [], "total_scraped": 0,
+                "total_matched": 0, "combinations": 1,
+                "completed_combos": [], "hard_stop": True,
+                "hard_stop_code": "internal_error",
+                "error": "checkpoint persistence failed",
+            }
+            with mock.patch("webui.pipeline_exec.run_search", return_value=result):
+                run_pipeline_task(
+                    ctx, run_id,
+                    {"keyword": "kw", "city": ["city"], "pages": 1},
+                )
+
+            self.assertEqual(store.get_screening_run(run_id)["status"], "failed")
+            self.assertEqual(ctx.tasks[run_id]["status"], "failed")
 
 
 if __name__ == "__main__":

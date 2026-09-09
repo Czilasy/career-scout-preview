@@ -253,11 +253,17 @@ def close_cdp_chrome(cdp_port=DEFAULT_CDP_PORT, cdp_data_dir=DEFAULT_CDP_DATA_DI
                      profile_checker=None, session_factory=CDPSession,
                      process_stopper=None, ready_checker=None, sleeper=None):
     """Close only a Chrome CDP instance using the expected dedicated profile."""
+    is_ready = ready_checker or is_cdp_ready
     checker = profile_checker or cdp_port_uses_profile
-    if not checker(cdp_port, cdp_data_dir):
+    dedicated = checker(cdp_port, cdp_data_dir)
+    # 关闭动作必须幂等：任务已经把 CDP 浏览器关掉时，不能再把“已关闭”
+    # 误报成清理失败，更不能为了确认而创建一个无效 CDP 会话；但若专属
+    # Chrome 进程仍在启动、端口尚未开放，仍要按专属 profile 做兜底清理。
+    if not is_ready(cdp_port) and not dedicated:
+        return True
+    if not dedicated:
         return False
 
-    is_ready = ready_checker or is_cdp_ready
     stop_processes = process_stopper or stop_cdp_chrome
     pause = sleeper or time.sleep
     session = None

@@ -353,6 +353,7 @@ const {
   pollTask,
   saveScrapedOnlySnapshot,
   viewScrapedOnly,
+  abandonRound,
   cancelActiveTasksForNewRound,
   finishScreenSave,
   isCompletedTaskStatus,
@@ -413,6 +414,7 @@ const roundFlow = reactive(useScreenRoundFlow({
     recrawlBusy,
     recrawlTaskId,
     recrawlSnapshot: recrawlSnapshot as unknown as Ref<ApiTaskSnapshot | null>,
+    pollTimer,
     finishedPartial,
     resultsPageSeen,
     activeStep, historyRound,
@@ -878,11 +880,12 @@ onMounted(() => {
             :finish-busy="finishSaveBusy"
             :show-finish-save="scrapeCanFinish || scrapeAction.kind !== 'none'"
             :show-cancel="scrapeAction.kind !== 'none'"
+            cancel-label="放弃本轮"
             :cancel-busy="cancelBusy"
             @pause-scrape="pauseScrape()"
             @continue-scrape="continueScrape()"
             @finish-save="finishPausedTask(pausedRunId || scrapeTaskId)"
-            @cancel="cancelActiveScrape()"
+            @cancel="abandonRound()"
           />
           <button v-if="scrapeCompleted" class="button secondary" type="button" data-testid="continue-to-screen" @click="enterScreenStep()">
             进行确认AI筛选条件
@@ -915,10 +918,15 @@ onMounted(() => {
                 :finish-busy="roundFlow.busyAction === 'finish' || finishSaveBusy"
                 :disabled="roundFlow.screenAction.kind === 'start' && (draftPlatformDisabled || !scrapeCompleted)"
                 :show-finish-save="roundFlow.screenAction.kind === 'pause' || roundFlow.screenAction.kind === 'continue'"
+                :show-cancel="roundFlow.screenAction.kind === 'pause' || roundFlow.screenAction.kind === 'continue'"
+                cancel-label="放弃本轮"
+                cancel-test-id="abandon-screen-round"
+                :cancel-busy="cancelBusy"
                 @pause="roundFlow.pauseScreen()"
                 @continue="roundFlow.continueScreen()"
                 @start="roundFlow.startScreen()"
                 @finish-save="finishScreenSave()"
+                @cancel="abandonRound()"
               />
             </div>
           </template>
@@ -953,7 +961,7 @@ onMounted(() => {
         <ContinuePlatformGuide v-if="!historyMode && roundFlow.continueGuide" :guide="roundFlow.continueGuide" @choose="roundFlow.chooseContinuePlatform" @cancel="roundFlow.cancelContinueGuide" />
 
         <TaskProgress :snapshot="screenSnapshot" kind="screen" :task-id="screenTaskId" />
-        <ScreenRecrawlProgress v-if="recrawlSnapshot || recrawlBusy" :snapshot="recrawlSnapshot" :task-id="recrawlTaskId" :action="roundFlow.recrawlAction" :busy="Boolean(roundFlow.busyAction)" :busy-action="roundFlow.busyAction" :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''" :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || roundFlow.recrawlAction.kind === 'continue-recrawl'" @pause-recrawl="roundFlow.pauseRecrawl()" @continue-recrawl="roundFlow.continueRecrawl()" @finish-save="roundFlow.finishRecrawl()" />
+        <ScreenRecrawlProgress v-if="recrawlSnapshot || recrawlBusy" :snapshot="recrawlSnapshot" :task-id="recrawlTaskId" :action="roundFlow.recrawlAction" :busy="Boolean(roundFlow.busyAction)" :busy-action="roundFlow.busyAction" :busy-label="roundFlow.busyAction === 'pause-recrawl' ? '正在暂停重抓…' : ''" :show-finish-save="roundFlow.recrawlAction.kind === 'pause-recrawl' || roundFlow.recrawlAction.kind === 'continue-recrawl'" :show-cancel="roundFlow.recrawlAction.kind === 'pause-recrawl' || roundFlow.recrawlAction.kind === 'continue-recrawl'" :cancel-busy="roundFlow.busyAction === 'cancel-recrawl'" cancel-label="停止详情补抓" cancel-test-id="cancel-recrawl" @pause-recrawl="roundFlow.pauseRecrawl()" @continue-recrawl="roundFlow.continueRecrawl()" @finish-save="roundFlow.finishRecrawl()" @cancel="roundFlow.cancelRecrawl()" />
       </section>
 
       <section

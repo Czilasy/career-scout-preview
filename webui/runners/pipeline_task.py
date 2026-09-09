@@ -12,6 +12,11 @@ import threading
 import time
 
 from webui.diagnostics import record_failure
+from webui.error_registry import (
+    ERROR_TAXONOMY,
+    is_recoverable_systemic_block,
+    resolve_code,
+)
 from webui.pipeline_exec_status import user_visible_failure_reason
 from webui.task_runners import _classify_scrape_block
 from webui.task_pause_support import (
@@ -130,30 +135,24 @@ def run_pipeline_task(ctx,
                 logger = getattr(ctx, "logger", None)
                 if logger is not None:
                     logger.warning("source-unavailable whitebox marker failed: %s", type(_whitebox_exc).__name__)
-            ctx.write_run(
-                task_id,
-                status="failed",
-                current_stage="scrape",
+            completed = mark_scrape_paused(
+                ctx, task_id,
+                completed_combos=completed,
+                source_count=len(expand_combinations(script_params)),
+                reason=reason,
                 error_code="source_cdp_unavailable",
-                error_reason=reason,
-                processed_count=len(completed),
             )
-            ctx.store.save_checkpoint(task_id, "scrape", completed)
-            ctx.store.append_task_event(task_id, "failure", {
-                "stage": "scrape",
-                "code": "source_cdp_unavailable",
-                "completed_combos": len(completed),
-            })
             ctx.record_pause_failure(
                 task_id, "scrape", "source_cdp_unavailable", reason,
-                processed=len(completed), total=len(completed),
+                processed=len(completed),
+                total=len(expand_combinations(script_params)),
+                extra={"platform": str(frozen_platform or "")},
             )
             with ctx.lock:
                 task = ctx.tasks.get(task_id)
                 if task is not None:
-                    task["status"] = "failed"
+                    task["status"] = "paused"
                     task["error"] = reason
-            ctx.clear_auto_screen(task_id)
             ctx.schedule_pipeline_task_cleanup(task_id)
             ctx.release_worker_resume_claims(ctx.tasks.get(task_id))
             return
@@ -345,8 +344,8 @@ def run_pipeline_task(ctx,
                 })
                 _terminal_status = "partial"
             else:
-                # 系统性阻断是错误结束，不是用户暂停。已完成组合仍写入
-                # checkpoint，供诊断/结果保留，但不会继续占用浏览器。
+                # 系统性 source 阻断是可恢复暂停，不是不可恢复失败。只有
+                # registry 明确标为不可恢复的 hard-stop 才能进入 failed。
                 completed = list(result.get("completed_combos") or [])
                 err_msg = str(result.get("error", "") or "")
                 _pause_code = (
@@ -354,24 +353,55 @@ def run_pipeline_task(ctx,
                     or _classify_scrape_block(err_msg)
                 )
                 if result.get("hard_stop") and _pause_code:
-                    ctx.write_run(
-                        task_id, status="failed", error_code=_pause_code,
-                        current_stage="scrape",
-                        processed_count=len(completed),
-                        source_count=int(result.get("combinations") or 0),
-                        error_reason=err_msg,
-                        total_scraped=int(result.get("total_scraped") or 0))
-                    ctx.store.save_checkpoint(task_id, "scrape", completed)
-                    ctx.store.append_task_event(
-                        task_id, "failure",
-                        {"stage": "scrape", "code": _pause_code,
-                         "completed_combos": len(completed)})
-                    ctx.record_pause_failure(
-                        task_id, "scrape", _pause_code, err_msg,
-                        processed=len(completed),
-                        total=int(result.get("combinations") or 0),
-                    )
-                    _terminal_status = "failed"
+                    if is_recoverable_systemic_block(_pause_code):
+                        _pause_code = resolve_code(
+                            _pause_code, default=_pause_code,
+                        )
+                        _pause_reason = err_msg or user_visible_failure_reason(
+                            _pause_code, "", str(
+                                (ctx.store.get_screening_run(task_id) or {}).get(
+                                    "platform", "",
+                                )
+                            ),
+                        )
+                        completed = mark_scrape_paused(
+                            ctx, task_id,
+                            completed_combos=completed,
+                            source_count=int(result.get("combinations") or 0),
+                            total_scraped=int(result.get("total_scraped") or 0),
+                            reason=_pause_reason,
+                            error_code=_pause_code,
+                        )
+                        ctx.record_pause_failure(
+                            task_id, "scrape", _pause_code, _pause_reason,
+                            processed=len(completed),
+                            total=int(result.get("combinations") or 0),
+                            extra={"platform": str(
+                                (ctx.store.get_screening_run(task_id) or {}).get(
+                                    "platform", "",
+                                )
+                            )},
+                        )
+                        _terminal_status = "paused"
+                    else:
+                        ctx.write_run(
+                            task_id, status="failed", error_code=_pause_code,
+                            current_stage="scrape",
+                            processed_count=len(completed),
+                            source_count=int(result.get("combinations") or 0),
+                            error_reason=err_msg,
+                            total_scraped=int(result.get("total_scraped") or 0))
+                        ctx.store.save_checkpoint(task_id, "scrape", completed)
+                        ctx.store.append_task_event(
+                            task_id, "failure",
+                            {"stage": "scrape", "code": _pause_code,
+                             "completed_combos": len(completed)})
+                        ctx.record_pause_failure(
+                            task_id, "scrape", _pause_code, err_msg,
+                            processed=len(completed),
+                            total=int(result.get("combinations") or 0),
+                        )
+                        _terminal_status = "failed"
                 elif conclusion == "unverifiable" and has_integrity and not result.get("hard_stop"):
                     ctx.store.append_task_event(task_id, "job_fail", {
                         "stage": "scrape", "error": integrity.get("primary_reason") or err_msg,
@@ -449,21 +479,43 @@ def run_pipeline_task(ctx,
         cancelled = stop_mode == "cancel"
         finishing = stop_mode in (STOP_MODE_FINISH, STOP_MODE_TERMINATE)
         terminal_stop = cancelled or finishing
-        # A checkpoint exception normally owns the recoverable paused state,
-        # but an already-published terminal stop must win the race.  Do not
-        # turn an explicit cancel/finish/terminate into a pause merely because
-        # the worker happened to fail while unwinding its checkpoint.
-        paused = not terminal_stop and (
-            stop_mode == STOP_MODE_PAUSE and not checkpoint_failure
-        )
         failure_code = str(
             getattr(exc, "error_code", "")
             or getattr(exc, "failed_code", "")
             or "internal_error"
         )
+        resolved_failure_code = resolve_code(
+            failure_code, default=failure_code,
+        )
+        task_platform = str((task or {}).get("platform") or "")
+        failure_taxonomy = ERROR_TAXONOMY.get(resolved_failure_code) or {}
+        recoverable_failure = bool(
+            not terminal_stop
+            and not checkpoint_failure
+            and stop_mode != STOP_MODE_PAUSE
+            and failure_taxonomy.get("category") == "source"
+            and failure_taxonomy.get("retryable")
+        )
+        # A checkpoint exception normally owns the recoverable paused state,
+        # but an already-published terminal stop must win the race.  Do not
+        # turn an explicit cancel/finish/terminate into a pause merely because
+        # the worker happened to fail while unwinding its checkpoint.
+        paused = (
+            not terminal_stop
+            and (
+                (stop_mode == STOP_MODE_PAUSE and not checkpoint_failure)
+                or recoverable_failure
+            )
+        )
+        pause_code = (
+            resolved_failure_code if recoverable_failure else "user_paused"
+        )
         error_message = (
             ctx.msg_user_stopped_scrape if cancelled
             else str(exc) if checkpoint_failure
+            else user_visible_failure_reason(
+                pause_code, "", task_platform,
+            ) if recoverable_failure
             else "用户已暂停，结果已保留" if paused
             else f"执行异常：{type(exc).__name__}"
         )
@@ -478,6 +530,7 @@ def run_pipeline_task(ctx,
                     source_count=current_result.get("combinations"),
                     total_scraped=current_result.get("total_scraped"),
                     reason=error_message,
+                    error_code=pause_code,
                 )
                 pause_persisted = True
             except (ScrapeCheckpointReadError, ScrapeCheckpointWriteError) as pause_exc:
@@ -485,6 +538,13 @@ def run_pipeline_task(ctx,
                 # structured failure event without touching corrupt
                 # checkpoint bytes.  Do not retry the read in the outer
                 # persistence block or leave memory/DB states divergent.
+                checkpoint_failure = True
+                paused = False
+                recoverable_failure = False
+                failure_code = pause_exc.error_code
+                resolved_failure_code = pause_exc.error_code
+                error_message = pause_exc.public_reason
+                pause_code = pause_exc.error_code
                 pause_persisted = bool(getattr(pause_exc, "pause_persisted", False))
             except ctx.operational_errors:
                 pass
@@ -510,6 +570,7 @@ def run_pipeline_task(ctx,
                         total_scraped=((task or {}).get("result") or {}).get(
                             "total_scraped"),
                         reason=error_message,
+                        error_code=pause_code,
                     )
                 elif not paused:
                     write_kwargs = {
@@ -522,6 +583,24 @@ def run_pipeline_task(ctx,
                     ctx.write_run(task_id, **write_kwargs)
         except ctx.operational_errors as persist_exc:
             persistence_error = type(persist_exc).__name__
+        if recoverable_failure and pause_persisted:
+            try:
+                current_result = (task or {}).get("result") or {}
+                ctx.record_pause_failure(
+                    task_id, "scrape", pause_code, error_message,
+                    processed=len(current_result.get("completed_combos") or []),
+                    total=int(current_result.get("combinations") or 0),
+                    extra={"platform": task_platform},
+                )
+            except Exception as audit_exc:
+                # Durable run/checkpoint state is already preserved; audit
+                # failure must not turn a recoverable pause into failed.
+                logger = getattr(ctx, "logger", None)
+                if logger is not None:
+                    logger.warning(
+                        "pause-failure audit record failed: %s",
+                        type(audit_exc).__name__,
+                    )
         with ctx.lock:
             task = ctx.tasks.get(task_id)
             if task is not None:

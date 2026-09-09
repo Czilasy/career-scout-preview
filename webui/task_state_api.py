@@ -23,6 +23,7 @@ from webui.task_status import (
     _pipeline_kind_for_stage,
     _public_task_status,
     _public_status_for_integrity,
+    is_resume_eligible_run,
     _recrawl_overall_percent,
     _screen_overall_percent,
 )
@@ -326,6 +327,16 @@ def register_task_state_routes(app, ctx):
             progress.setdefault("message", f"重抓完成，但仍有 {pending} 个岗位待确认")
         pause_info = None
         raw_status = str(live.get("status")) if live is not None else str(run["status"])
+        # Rows written by the old hard-stop path may still say ``failed``
+        # until the first continuation request migrates them.  Expose their
+        # public state as paused so refreshes preserve the continue action;
+        # ordinary failed rows remain terminal.
+        if (
+            raw_status == "failed"
+            and run is not None
+            and is_resume_eligible_run(run)
+        ):
+            raw_status = "paused"
         effective_status = (_public_status_for_integrity(
                                 integrity, raw_status, (run or {}).get("interruption_kind"))
                             if raw_status in {"done", "succeeded", "partial", "failed", "cancelled", "interrupted"}

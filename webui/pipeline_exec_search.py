@@ -393,12 +393,26 @@ def run_search(params: dict, source, *, pages: int = 3,
             recheck = getattr(source, "recheck_login", None)
             if callable(recheck):
                 return recheck()
+            # Keep injected/legacy sources safe too: a fallback preflight must
+            # not silently reuse the 15-minute login cache during recovery.
+            account = str(getattr(source, "browser_account", "") or "")
+            platform = str(getattr(source, "platform", "") or "")
+            if account and platform:
+                try:
+                    from scripts.login_state_cache import invalidate_login_state
+                    invalidate_login_state(account, platform)
+                except Exception:
+                    _logger.debug(
+                        "登录态缓存失效失败，继续使用兼容预检",
+                        exc_info=True,
+                    )
             return source.preflight()
 
         def _probe_passed(probe) -> bool:
-            return probe.ok or probe.failed_code not in (
-                "source_login_required", "source_blocked", "source_cdp_unavailable",
-            )
+            # A recovery probe is evidence, not a best-effort hint.  Unknown,
+            # timeout, restricted and other failed probes must not be treated
+            # as proof that the login wall disappeared.
+            return bool(probe is not None and probe.ok)
 
         def _recheck_login_combo(outcome):
             """疑似登录失效：独立复核一次，通过则重试本组合，否则跳过。"""

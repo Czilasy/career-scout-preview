@@ -52,6 +52,9 @@ RUN_TRANSITIONS = {
     "paused": {"running", "failed", "interrupted"},
     "succeeded": set(),
     "partial": set(),
+    # ``failed`` remains terminal in the normal state graph.  The store
+    # update guard contains a narrow compatibility bridge for old recoverable
+    # hard-stop rows; ordinary failed runs remain terminal everywhere.
     "failed": set(),
     "interrupted": set(),
 }

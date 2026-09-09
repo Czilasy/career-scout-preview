@@ -568,6 +568,74 @@ class Slice11RecrawlResumeTests(unittest.TestCase):
         self.assertEqual(submitted[4], "source-run-2")
         self.assertEqual(set(submitted[5]), {"j1"})
 
+    def test_unified_recrawl_continue_does_not_reactivate_after_shared_preflight(self):
+        """统一继续已完成身份/预检后，重抓 handler 不得再次激活浏览器。"""
+        run_id = "unified-recrawl-continue-order"
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={
+                "platform": "boss",
+                "source_run_id": "source-run-unified",
+                "job_ids": ["j1"],
+                "profile_summary": "前端工程师",
+                "browser_account": "a",
+                "cdp_port": 9222,
+                "profile_key": "boss:a",
+            },
+        )
+        _pause_run(
+            self.store, run_id,
+            error_code="source_login_required",
+            current_stage="recrawl_jd",
+        )
+        context = self.app.config["PIPELINE_CONTEXT"]
+        executor = self.app.config["PIPELINE_EXECUTOR"]
+        with mock.patch.object(context, "activate_run_browser") as activate, \
+                mock.patch.object(
+                    context, "check_resume_block", return_value=(True, "", "")
+                ) as check, mock.patch.object(executor, "submit") as submit:
+            response = self.client.post(f"/api/task/continue/{run_id}")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        activate.assert_called_once()
+        check.assert_called_once()
+        submit.assert_called_once()
+        resumed = self.store.get_screening_run(run_id)
+        self.assertEqual(resumed["status"], "running")
+        self.assertIsNone(resumed["error_code"])
+
+    def test_recrawl_continue_accepts_legacy_recoverable_failed_run(self):
+        """旧版本把可恢复重抓阻断写成 failed 时仍可从原断点继续。"""
+        run_id = "legacy-failed-recrawl-continue"
+        self.store.create_screening_run(
+            run_id, source_count=1,
+            execution_params={
+                "platform": "boss",
+                "source_run_id": "source-run-legacy",
+                "job_ids": ["j1"],
+                "profile_summary": "前端工程师",
+                "browser_account": "a",
+                "cdp_port": 9222,
+                "profile_key": "boss:a",
+            },
+        )
+        self.store.update_screening_run(
+            run_id, status="running", current_stage="recrawl_jd",
+        )
+        self.store.update_screening_run(
+            run_id, status="failed", current_stage="recrawl_jd",
+            error_code="source_login_required", error_reason="旧版本错误落库",
+        )
+        context = self.app.config["PIPELINE_CONTEXT"]
+        with mock.patch.object(context, "activate_run_browser"), \
+                mock.patch.object(self.app.config["PIPELINE_EXECUTOR"], "submit") as submit:
+            response = self.client.post(f"/api/recrawl/continue/{run_id}")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.store.get_screening_run(run_id)["status"], "running")
+        self.assertIsNone(self.store.get_screening_run(run_id)["error_code"])
+        submit.assert_called_once()
+
     def test_recrawl_hard_stop_persists_partial_jd_before_pause(self):
         """同批部分成功后验证码：先落 JD 和 checkpoint，再进入 paused。"""
         source_run_id = self.store.save_pipeline_result({
@@ -609,6 +677,8 @@ class Slice11RecrawlResumeTests(unittest.TestCase):
         self.assertEqual(self.store.load_checkpoint(task_id, "recrawl_jd"), {"j1"})
 
     def test_recrawl_hard_stop_persists_job_failure_on_task_and_source(self):
+        from webui.error_registry import ERROR_USER_MESSAGES
+
         source_run_id = self.store.save_pipeline_result({
             "jobs": [{
                 "job_id": "j1", "title": "前端", "verdict": "uncertain",
@@ -644,12 +714,13 @@ class Slice11RecrawlResumeTests(unittest.TestCase):
             paused = _wait_for_pipeline_task(self.client, task_id)
 
         self.assertEqual(paused["status"], "paused", paused)
+        expected_reason = ERROR_USER_MESSAGES["source_cdp_unavailable"]
         for run_id in (task_id, source_run_id):
             pending = self.store.get_pending_result(run_id, "j1")
             self.assertIsNotNone(pending, run_id)
             self.assertEqual(pending["failed_code"], "cdp_unavailable")
             self.assertEqual(
-                pending["ai_payload"]["reason"], "CDP websocket disconnected"
+                pending["ai_payload"]["reason"], expected_reason
             )
         failures = [
             event for event in self.store.list_task_events(task_id)
@@ -813,6 +884,18 @@ class LoginRecheckTests(unittest.TestCase):
         self.assertEqual(source.fetch_calls, 2)
         self.assertEqual(result["total_scraped"], 1)
         self.assertEqual(result["completed_combos"], ["B|上海"])
+        self.assertEqual(issues[0][1]["event"], "login_required_confirmed_skip")
+
+    def test_unknown_login_recheck_does_not_count_as_passed(self):
+        """未确认登录态不能触发把原组合当作已恢复的重试。"""
+        from webui.source import SourceOutcome
+        source, result, issues = self._run(
+            [SourceOutcome.failure(failed_code="source_login_required")],
+            SourceOutcome.failure(failed_code="source_unknown_error"),
+            params={"keyword": "A", "city": ["上海"]},
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(source.fetch_calls, 1)
         self.assertEqual(issues[0][1]["event"], "login_required_confirmed_skip")
 
     def test_all_combos_confirmed_login_skip_no_hard_stop(self):

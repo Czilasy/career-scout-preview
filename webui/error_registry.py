@@ -383,6 +383,30 @@ def _derived_systemic_block_codes() -> frozenset[str]:
 SYSTEMIC_BLOCK_CODES = _derived_systemic_block_codes()
 
 
+def _derived_recoverable_systemic_block_codes() -> frozenset[str]:
+    """Return the exact systemic block codes eligible for continuation.
+
+    SYSTEMIC_BLOCK_CODES also contains terminal systemic errors such as
+    invalid credentials or internal failures.  Lifecycle queries need the
+    narrower retryable subset so an arbitrary history limit cannot hide an
+    older, recoverable run behind ordinary terminal failures.
+    """
+    canonical = frozenset({
+        code for code, entry in REGISTRY.items()
+        if entry["blocking"]
+        and entry["retryable"]
+        and entry["impact"] == "systemic"
+    })
+    aliases = frozenset({
+        alias for alias, target in ALIAS_TO_CODE.items()
+        if target in canonical
+    })
+    return canonical | aliases
+
+
+RECOVERABLE_SYSTEMIC_BLOCK_CODES = _derived_recoverable_systemic_block_codes()
+
+
 def validate_code(code: str) -> str:
     """Return the canonical code or raise for unknown codes."""
     if not isinstance(code, str) or not code:
@@ -416,6 +440,26 @@ def resolve_code(code: object, *, default: str = "internal_error") -> str:
         }},
     )
     return default
+
+
+def is_recoverable_systemic_block(code: object) -> bool:
+    """Return whether a code represents a resumable systemic block.
+
+    The lifecycle layer uses the registry as the single source of truth: a
+    block must be explicitly marked both ``blocking`` and ``retryable`` and
+    must affect the whole source/system before it can become a paused run.
+    Aliases are accepted for rows written by older workers.
+    """
+    if not isinstance(code, str) or not code.strip():
+        return False
+    resolved = resolve_code(code, default="")
+    entry = REGISTRY.get(resolved)
+    return bool(
+        entry
+        and entry.get("blocking")
+        and entry.get("retryable")
+        and entry.get("impact") == "systemic"
+    )
 
 
 def to_json() -> dict[str, dict[str, Any]]:

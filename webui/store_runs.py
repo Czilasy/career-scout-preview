@@ -14,7 +14,10 @@ from webui.store_helpers import (
     _now,
     _uuid,
 )
-from webui.error_registry import SYSTEMIC_BLOCK_CODES
+from webui.error_registry import (
+    SYSTEMIC_BLOCK_CODES,
+    is_recoverable_systemic_block,
+)
 from webui.store_constants import (
     DiscoveryStoreConflictError,
     MAX_DETAIL_BUDGET,
@@ -243,10 +246,19 @@ class StoreRunsMixin:
                     and status not in (None, "interrupted")
                 ):
                     raise DiscoveryStoreConflictError("user_finished")
+                allowed_transition = status in RUN_TRANSITIONS.get(
+                    cur_status, set(),
+                )
+                legacy_recovery = (
+                    cur_status == "failed"
+                    and status == "paused"
+                    and is_recoverable_systemic_block(current["error_code"])
+                )
                 if (
                     status is not None
                     and status != cur_status
-                    and status not in RUN_TRANSITIONS.get(cur_status, set())
+                    and not allowed_transition
+                    and not legacy_recovery
                 ):
                     raise ValueError(f"运行不能从 {cur_status} 转换到 {status}")
             conn.execute(

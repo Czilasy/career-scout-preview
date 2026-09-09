@@ -320,16 +320,32 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
             passed, code, reason = checker(run)
         else:
             _raw_code = str(run.get('error_code') or '')
-            code = resolve_code(_raw_code) if _raw_code else ''
+            # Control codes such as user_paused are not registry failures.
+            # Preserve them while the source-stage branch performs its fresh
+            # probe; a failed probe will replace them with a source code.
+            code = resolve_code(_raw_code, default=_raw_code) if _raw_code else ''
             reason = ''
             passed = True
             _ai_resume_codes = {'ai_rate_limited', 'ai_quota_exhausted', 'ai_key_invalid', 'ai_network_error'}
+            _source_resume_check = False
             try:
-                if code in SYSTEMIC_BLOCK_CODES and code not in _ai_resume_codes:
+                _resume_params = run.get('execution_params') or {}
+                _resume_platform = run.get('platform') or _resume_params.get('platform') or 'boss'
+                _resume_stage = str(run.get('current_stage') or '').strip().lower()
+                _source_resume_stage = (
+                    _resume_stage == 'scrape'
+                    or _resume_stage.startswith('recrawl_')
+                )
+                _source_resume_check = (
+                    _source_resume_stage
+                    and str(_resume_platform).strip().lower() in {'boss', 'zhilian'}
+                )
+                if (
+                    (code in SYSTEMIC_BLOCK_CODES or _source_resume_check)
+                    and code not in _ai_resume_codes
+                ):
                     from webui.pipeline_exec import probe_chrome_ready, taxonomy_reason
                     from webui.pipeline_exec_status import user_visible_failure_reason
-                    _resume_params = run.get('execution_params') or {}
-                    _resume_platform = run.get('platform') or _resume_params.get('platform') or 'boss'
                     chrome_ok, chrome_err = probe_chrome_ready(_resume_params.get('cdp_port'))
                     if not chrome_ok:
                         passed = False
@@ -337,13 +353,39 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
                         reason = user_visible_failure_reason(
                             code, chrome_err, _resume_platform,
                         )
-                    elif not probe_only:
+                    elif probe_only:
+                        # ``probe_only`` intentionally stops after the cheap
+                        # CDP readiness check.  Do not fall through to the
+                        # outcome branch below: no platform login probe has
+                        # been run in this mode.
+                        pass
+                    else:
                         source = _make_cdp_source(platform=_resume_platform, browser_account=_resume_params.get('browser_account'), cdp_port=_resume_params.get('cdp_port'), profile_key=_resume_params.get('profile_key'), run_id=str(run.get('id') or ''))
-                        outcome = source.preflight() if source is not None else None
+                        if source is None:
+                            outcome = None
+                        else:
+                            _invalidate_login_cache(
+                                str(_resume_params.get('browser_account') or ''),
+                                str(_resume_platform or ''),
+                            )
+                            recheck = getattr(source, 'recheck_login', None)
+                            outcome = (
+                                recheck() if callable(recheck)
+                                else source.preflight()
+                            )
                         if outcome is None or not outcome.ok:
                             passed = False
-                            source_code = getattr(outcome, 'failed_code', '')
-                            code = resolve_code(source_code) if source_code else code or 'source_blocked'
+                            if outcome is None:
+                                code = 'source_cdp_unavailable'
+                            else:
+                                source_code = getattr(outcome, 'failed_code', '')
+                                if source_code:
+                                    code = resolve_code(
+                                        source_code,
+                                        default='source_status_unclear',
+                                    )
+                                elif not str(code).startswith('source_'):
+                                    code = 'source_status_unclear'
                             reason = taxonomy_reason(code, _resume_platform, fallback='阻断条件尚未解除')
                 elif code in {'ai_key_invalid', 'ai_quota_exhausted', 'ai_rate_limited', 'ai_network_error'}:
                     from webui.pipeline_exec import taxonomy_reason
@@ -363,8 +405,15 @@ def build_app_support(app, store, runner, workbench_runner, job_feedback_service
                     reason = '内部错误尚未解除，请先检查日志或重启服务'
             except (OSError, RuntimeError, ValueError) as exc:
                 passed = False
-                code = code or 'internal_error'
-                reason = f'阻断复核失败：{type(exc).__name__}'
+                if _source_resume_check:
+                    code = 'source_cdp_unavailable'
+                    from webui.pipeline_exec_status import user_visible_failure_reason
+                    reason = user_visible_failure_reason(
+                        code, '', str(_resume_platform),
+                    )
+                else:
+                    code = code or 'internal_error'
+                    reason = f'阻断复核失败：{type(exc).__name__}'
         raw_code = str(code or '').strip()
         if raw_code.startswith('source_') or raw_code in ALIAS_TO_CODE:
             from webui.pipeline_exec_status import user_visible_failure_reason

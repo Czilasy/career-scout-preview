@@ -9,11 +9,17 @@ import sqlite3
 from pathlib import Path
 from flask import jsonify, request
 from webui.constants import _MSG_PROFILE_ID_REQUIRED, _MSG_PROFILE_NOT_FOUND, _ZHILIAN_HOST_TOKEN
-from webui.task_status import _pipeline_identity_payload
+from webui.error_registry import resolve_code
+from webui.pipeline_exec_status import user_visible_failure_reason
+from webui.task_status import _pipeline_identity_payload, is_resume_eligible_run
 from webui.pipeline_job_identity import JobIdentityError, parse_identity_payload, resolve_job_identity
 from webui.resume_identity import append_account_switch_log_line, ensure_frozen_browser_account, inherit_parent_frozen_identity
+from webui.task_pause_support import normalize_recoverable_failed_run
 from webui.task_runners import _iso_epoch_ms
 from webui.workbench import normalize_job_link_for_platform
+from webui.logging_setup import get_logger
+
+_logger = get_logger(__name__)
 
 def register_pipeline_jobs_routes(app, ctx):
 
@@ -499,10 +505,43 @@ def register_pipeline_jobs_routes(app, ctx):
         if run is None:
             return (jsonify({'ok': False, 'error': 'run_not_found'}), 404)
         stage = str(run.get('current_stage') or '')
-        if run.get('status') != 'paused' or not stage.startswith('recrawl_'):
+        if not is_resume_eligible_run(run) or not stage.startswith('recrawl_'):
             return (jsonify({'ok': False, 'error': 'not_paused_recrawl', 'status': run.get('status'), 'stage': stage}), 409)
-        ctx.activate_run_browser(run)
+        if run.get('status') == 'failed':
+            run = normalize_recoverable_failed_run(ctx, run)
         if not _block_checked:
+            try:
+                ctx.activate_run_browser(run)
+            except (OSError, RuntimeError, ValueError, KeyError) as exc:
+                raw_code = str(
+                    getattr(exc, 'error_code', '')
+                    or getattr(exc, 'failed_code', '')
+                    or 'source_cdp_unavailable'
+                )
+                code = resolve_code(raw_code, default='source_cdp_unavailable')
+                if not code.startswith('source_'):
+                    code = 'source_cdp_unavailable'
+                reason = user_visible_failure_reason(
+                    code, '', str(run.get('platform') or ''),
+                )
+                try:
+                    ctx.write_run(
+                        task_id, status='paused', current_stage=stage,
+                        error_code=code, error_reason=reason,
+                    )
+                except ctx.operational_errors as persist_exc:
+                    _logger.warning(
+                        '重抓继续激活失败状态写入失败 error_type=%s',
+                        type(persist_exc).__name__,
+                    )
+                return (jsonify({
+                    'ok': False,
+                    'error': code,
+                    'error_code': code,
+                    'error_reason': reason,
+                    'message': reason,
+                    'status': 'paused',
+                }), 409)
             passed, code, reason = ctx.check_resume_block(run)
             if not passed:
                 return (jsonify({'ok': False, 'error': 'block_not_resolved', 'error_code': code, 'error_reason': reason, 'status': 'paused'}), 409)
@@ -539,7 +578,7 @@ def register_pipeline_jobs_routes(app, ctx):
         claimed_task['profile_key'] = resume_params.get('profile_key')
         claimed_task['task_input_digest'] = resume_params.get('task_input_digest')
         try:
-            if not ctx.write_run(task_id, status='running'):
+            if not ctx.store.claim_paused_screening_run(task_id):
                 ctx.release_pipeline_claim(task_id, claimed_task, previous_task)
                 return (jsonify({'ok': False, 'error': 'user_finished', 'message': '任务已结束保存，不能继续', 'status': 'completed_with_pending'}), 409)
             ctx.store.append_task_event(task_id, 'resume', {'stage': stage, 'completed': len(completed_job_ids)})

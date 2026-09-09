@@ -292,6 +292,29 @@ class ZhilianCdpSourcePreflightTests(_LoginCacheIsolated):
         self.assertTrue(outcome.ok)
         self.assertIsNone(outcome.failed_code)
 
+    def test_recheck_login_bypasses_cached_logged_in_state(self):
+        """继续前的登录复检必须调用新鲜 runner，不能信任 15 分钟缓存。"""
+        from scripts import login_state_cache as cache
+
+        cache.write_login_state("a", "zhilian", "logged_in")
+        calls = []
+
+        def runner(port):
+            calls.append(port)
+            return _fake_preflight(signal="login_required")
+
+        source = ZhilianCdpSource(
+            browser_account="a", cdp_port=9223,
+            preflight_runner=runner,
+        )
+
+        outcome = source.recheck_login()
+
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_login_required")
+        self.assertEqual(calls, [9223])
+        self.assertEqual(cache.read_cached_state("a", "zhilian"), "not_logged_in")
+
     def test_preflight_does_not_fallback_to_boss_port(self):
         """preflight 只检查智联冻结端口 9223，不触碰 BOSS 9222。"""
         captured_ports = []
@@ -442,6 +465,29 @@ class ZhilianCdpSourceFetchListInputTests(unittest.TestCase):
         outcome = source.fetch_list(item)
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.failed_code, "source_invalid_output")
+
+
+class ZhilianSearchErrorMappingTests(unittest.TestCase):
+    def test_fetch_list_maps_401_login_required_to_login_signal(self):
+        """列表 API 的 401/login required 不能再落到 invalid_output。"""
+        plan_item = {
+            "keyword": "Python",
+            "city": {"name": "全国", "platform_code": "jl0"},
+            "target_pages": 1,
+            "cdp_port": 9223,
+        }
+        ws = mock.Mock()
+        with mock.patch.object(zhilian_search, "_connect", return_value=ws), \
+                mock.patch.object(
+                    zhilian_search,
+                    "_evaluate",
+                    return_value={"error": "401", "msg": "login required"},
+                ):
+            signal, jobs, evidence = zhilian_search.fetch_list(plan_item)
+
+        self.assertEqual(signal, "login_required")
+        self.assertEqual(jobs, [])
+        self.assertIsNone(evidence)
 
 
 class ZhilianCdpSourceInputHashTests(unittest.TestCase):

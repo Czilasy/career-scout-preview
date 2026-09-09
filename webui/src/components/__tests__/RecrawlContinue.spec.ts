@@ -98,6 +98,7 @@ describe("DiscoveryView paused recrawl recovery", () => {
     expect(wrapper.get(".task-stage").text()).toContain("重抓 JD 详情");
     expect(wrapper.get(".task-stage").text()).not.toContain("recrawl_fetch_jd");
     expect(wrapper.find('[data-testid="continue-recrawl"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="cancel-recrawl"]').text()).toContain("停止详情补抓");
     expect(wrapper.get('[data-testid="finish-save-results"]').text()).toContain("结束并保存结果");
     expect(wrapper.get('[data-testid="pause-reason"]').text()).toContain("触发验证码");
 

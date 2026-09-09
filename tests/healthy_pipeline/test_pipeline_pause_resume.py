@@ -321,6 +321,23 @@ class Slice7And9ApiTests(unittest.TestCase):
         self.assertEqual(data["status"], "failed")
         self.assertEqual(data["pause_info"]["error_code"], "source_invalid_output")
 
+    def test_task_state_exposes_legacy_recoverable_failure_as_paused(self):
+        """修复前遗留的可恢复 failed 在状态接口中仍显示为可继续暂停。"""
+        self.store.update_screening_run(self.run_id, status="running")
+        self.store.update_screening_run(
+            self.run_id, status="failed",
+            error_code="source_cdp_unavailable",
+            error_reason="旧版本把浏览器阻断落成失败",
+        )
+
+        data = self.client.get(f"/api/task-state/{self.run_id}").get_json()
+
+        self.assertEqual(data["status"], "paused")
+        self.assertEqual(data["db_status"], "failed")
+        self.assertEqual(
+            data["pause_info"]["error_code"], "source_cdp_unavailable",
+        )
+
     def test_fetch_job_details_source_error_uses_registry_message_over_diagnostic(self):
         from webui.error_registry import ERROR_USER_MESSAGES
         from webui.pipeline_exec_details import fetch_job_details
@@ -541,8 +558,8 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
         finally:
             temp.cleanup()
 
-    def test_initial_scrape_missing_cdp_source_finishes_failed(self):
-        """列表任务构造 CDP source 失败时必须错误结束且释放占用。"""
+    def test_initial_scrape_missing_cdp_source_pauses_and_releases_occupancy(self):
+        """列表任务构造 CDP source 失败时暂停并释放占用，允许继续。"""
         app, temp = _make_app()
         try:
             client = _authed_test_client(app)
@@ -556,9 +573,9 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
                 task_id = response.get_json()["task_id"]
                 paused = _wait_for_pipeline_task(client, task_id)
 
-            self.assertEqual(paused["status"], "failed", paused)
+            self.assertEqual(paused["status"], "paused", paused)
             run = app.config["TASK_STORE"].get_screening_run(task_id)
-            self.assertEqual(run["status"], "failed")
+            self.assertEqual(run["status"], "paused")
             self.assertEqual(run["error_code"], "source_cdp_unavailable")
             self.assertEqual(run["current_stage"], "scrape")
         finally:
@@ -668,7 +685,9 @@ class Slice4ScrapePauseContinueTests(unittest.TestCase):
                         "WHERE run_id = ? AND stage = 'scrape'", (run_id,),
                     ).fetchone()
                 self.assertEqual(row["completed_keys_json"], raw_checkpoint)
-                activate.assert_not_called()
+                # 继续链路必须先完成身份/CDP/登录态复检，之后才读取断点。
+                # 断点损坏只应阻止 worker 启动，不能绕过恢复前置检查。
+                activate.assert_called_once()
                 submit.assert_not_called()
             finally:
                 executor = app.config.get("PIPELINE_EXECUTOR")
@@ -883,12 +902,8 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
     def _auth(self):
         return {"X-Boss-Token": self.token}
 
-    def test_first_combo_captcha_finishes_failed(self):
-        """首组合即触发 captcha：completed_combos=[] 也必须错误结束。
-
-        hard-stop 信号即使发生在首组合，也必须走失败收敛路径，不能因
-        completed 为空而误判为可恢复暂停。
-        """
+    def test_first_combo_captcha_pauses_even_without_completed_combos(self):
+        """首组合即触发 captcha：即使没有完成组合也必须保存为可恢复暂停。"""
         # mock run_search 返回首组合 captcha hard_stop，completed=[]
         def fake_run_search(*args, **kwargs):
             return {
@@ -913,20 +928,20 @@ class Slice7HardStopFirstComboTests(unittest.TestCase):
             task_id = resp.get_json()["task_id"]
             snapshot = _wait_for_pipeline_task(self.client, task_id)
 
-        self.assertEqual(snapshot["status"], "failed", snapshot)
+        self.assertEqual(snapshot["status"], "paused", snapshot)
         self.assertIn("验证码", snapshot.get("error", ""))
 
-        # 查 DB 中是否有 failed run
+        # 查 DB 中是否有 paused run
         with self.store._connection() as conn:
             rows = conn.execute(
                 "SELECT id, status, error_code FROM screening_runs "
                 "WHERE id = ?", (task_id,)).fetchall()
             runs = [dict(r) for r in rows]
 
-        failed_runs = [r for r in runs if r.get("status") == "failed"
-                       and r.get("error_code") == "captcha_required"]
-        self.assertTrue(failed_runs,
-                        f"首组合 captcha completed=[] 时必须 failed，实际 runs={runs}")
+        paused_runs = [r for r in runs if r.get("status") == "paused"
+                       and r.get("error_code") == "source_verification_required"]
+        self.assertTrue(paused_runs,
+                        f"首组合 captcha completed=[] 时必须 paused，实际 runs={runs}")
 
     def test_first_combo_captcha_no_other_combos_run(self):
         """首组合 captcha 后，后续组合不得继续抓取。"""
@@ -1991,6 +2006,54 @@ class ScrapePauseResumeContractTests(unittest.TestCase):
                         executor.shutdown(wait=True, cancel_futures=True)
                     temp.cleanup()
 
+    def test_recoverable_runner_exception_persists_paused_not_failed(self):
+        """执行器抛出可恢复 source 阻断时，DB 和内存都保持可继续。"""
+        from types import SimpleNamespace
+        from webui.runners.pipeline_task import run_pipeline_task
+
+        app, temp = _make_app()
+        try:
+            store = app.config["TASK_STORE"]
+            ctx = app.config["PIPELINE_CONTEXT"]
+            run_id = "runner-recoverable-exception"
+            script_params = {"keyword": "前端", "city": ["上海"], "pages": 1}
+            store.create_screening_run(
+                run_id, source_count=1,
+                execution_params={
+                    "platform": "boss", "script_params": script_params,
+                    "browser_account": "a", "cdp_port": 9222,
+                    "profile_key": "boss:a",
+                },
+            )
+            store.update_screening_run(
+                run_id, status="running", current_stage="scrape",
+            )
+            app.config["PIPELINE_TASKS"][run_id] = self._task(
+                run_id, "boss", stop_event=threading.Event(),
+            )
+            failure = RuntimeError("browser lost")
+            failure.error_code = "source_cdp_unavailable"
+            source = SimpleNamespace(platform="boss", cdp_port=9222)
+            with mock.patch.object(ctx, "activate_task_browser"), \
+                    mock.patch.object(ctx, "make_cdp_source", return_value=source), \
+                    mock.patch.object(ctx, "schedule_pipeline_task_cleanup"), \
+                    mock.patch("webui.pipeline_exec.run_search", side_effect=failure):
+                run_pipeline_task(ctx, run_id, script_params)
+
+            self.assertEqual(store.get_screening_run(run_id)["status"], "paused")
+            self.assertEqual(
+                store.get_screening_run(run_id)["error_code"],
+                "source_cdp_unavailable",
+            )
+            self.assertEqual(
+                app.config["PIPELINE_TASKS"][run_id]["status"], "paused",
+            )
+        finally:
+            executor = app.config.get("PIPELINE_EXECUTOR")
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+            temp.cleanup()
+
     def test_real_pipeline_runner_and_search_persist_pause_checkpoint(self):
         """真实 runner/search 在两个平台暂停后保留可恢复断点。"""
         from types import SimpleNamespace
@@ -2345,6 +2408,59 @@ class ResumeSourceFailureMessageTests(unittest.TestCase):
                     self.assertNotIn(raw_diagnostic, payload["error_reason"])
                     self.assertEqual(store.get_screening_run(run_id)["status"], "paused")
                     submit.assert_not_called()
+        finally:
+            executor = app.config.get("PIPELINE_EXECUTOR")
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
+            temp.cleanup()
+
+    def test_direct_recrawl_activation_failure_keeps_paused(self):
+        """直接重抓继续的浏览器绑定失败也必须保持可恢复暂停。"""
+        from webui.error_registry import ERROR_USER_MESSAGES
+        from webui.frozen_browser_identity import FrozenBrowserBindingError
+
+        app, temp = _make_app()
+        try:
+            client = _authed_test_client(app)
+            store = app.config["TASK_STORE"]
+            ctx = app.config["PIPELINE_CONTEXT"]
+            run_id = "direct-recrawl-activation-failure"
+            store.create_screening_run(
+                run_id,
+                source_count=1,
+                execution_params={
+                    "platform": "zhilian",
+                    "source_run_id": "direct-recrawl-source",
+                    "job_ids": ["job-1"],
+                    "browser_account": "a",
+                    "cdp_port": 9223,
+                    "profile_key": "zhilian:a",
+                },
+            )
+            _pause_run(
+                store, run_id, current_stage="recrawl_jd",
+                error_code="source_cdp_unavailable",
+            )
+            with mock.patch.object(
+                    ctx, "activate_run_browser",
+                    side_effect=FrozenBrowserBindingError("raw bind diagnostic"),
+                ), mock.patch.object(ctx.executor, "submit") as submit:
+                response = client.post(f"/api/recrawl/continue/{run_id}")
+
+            self.assertEqual(response.status_code, 409, response.get_json())
+            payload = response.get_json()
+            self.assertEqual(payload["error"], "source_cdp_unavailable")
+            self.assertEqual(payload["error_code"], "source_cdp_unavailable")
+            self.assertEqual(
+                payload["error_reason"],
+                ERROR_USER_MESSAGES["source_cdp_unavailable"],
+            )
+            self.assertEqual(payload["status"], "paused")
+            self.assertEqual(
+                store.get_screening_run(run_id)["status"], "paused",
+            )
+            self.assertNotIn("raw bind diagnostic", str(payload))
+            submit.assert_not_called()
         finally:
             executor = app.config.get("PIPELINE_EXECUTOR")
             if executor is not None:

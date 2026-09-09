@@ -285,6 +285,57 @@ describe("useDiscoveryTasks.pollTask 错误态不阻塞新任务", () => {
   );
 });
 
+describe("useDiscoveryTasks.abandonRound", () => {
+  beforeEach(() => {
+    apiRequestMock.mockReset();
+  });
+
+  it("cancels the current task, clears the round, and returns to upload", async () => {
+    const state = makeState({
+      activeStep: ref("screen"),
+      scrapeTaskId: ref("scrape-abandon-1"),
+      scrapeSnapshot: ref({ status: "paused", progress: { current: 3 }, logs: [] }),
+      pausedRunId: ref("scrape-abandon-1"),
+      selectedKeywords: ref(["Python"]),
+    });
+    const deps = makeDeps();
+    apiRequestMock.mockResolvedValue({ ok: true, status: "cancelled" });
+    const tasks = useDiscoveryTasks(state, deps);
+
+    await tasks.abandonRound();
+
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/api/task/cancel/scrape-abandon-1", { method: "POST" },
+    );
+    expect(deps.clearLatestResult).toHaveBeenCalled();
+    expect(state.activeStep.value).toBe("upload");
+    expect(state.scrapeTaskId.value).toBe("");
+    expect(state.scrapeSnapshot.value).toBeNull();
+    expect(state.selectedKeywords.value).toEqual([]);
+    expect(state.cancelBusy.value).toBe(false);
+    expect(deps.notify).toHaveBeenCalledWith("已放弃本轮，已回到第一步", "info");
+  });
+
+  it("keeps the current round when cancellation cannot be confirmed", async () => {
+    const state = makeState({
+      activeStep: ref("search"),
+      scrapeTaskId: ref("scrape-abandon-2"),
+      scrapeSnapshot: ref({ status: "running", progress: {}, logs: [] }),
+    });
+    const deps = makeDeps();
+    apiRequestMock.mockRejectedValue(new Error("cancel unavailable"));
+    const tasks = useDiscoveryTasks(state, deps);
+
+    await tasks.abandonRound();
+
+    expect(state.activeStep.value).toBe("search");
+    expect(state.scrapeTaskId.value).toBe("scrape-abandon-2");
+    expect(deps.clearLatestResult).not.toHaveBeenCalled();
+    expect(deps.notify).not.toHaveBeenCalledWith("已放弃本轮，已回到第一步", "info");
+    expect(state.cancelBusy.value).toBe(false);
+  });
+});
+
 describe("useDiscoveryTasks.pollRecrawl（033 V2 完整性优先）", () => {
   beforeEach(() => {
     apiRequestMock.mockReset();

@@ -152,6 +152,26 @@ class Slice1StateAndFinalizeTests(unittest.TestCase):
         run = self.store.get_screening_run(self.run_id)
         self.assertEqual(run["status"], "running")
 
+    def test_failed_to_paused_requires_recoverable_error_code(self):
+        """failed → paused 只允许迁移修复前遗留的可恢复阻断。"""
+        self.store.update_screening_run(self.run_id, status="running")
+        self.store.update_screening_run(
+            self.run_id, status="failed", error_code="internal_error",
+        )
+        with self.assertRaises(ValueError):
+            self.store.update_screening_run(self.run_id, status="paused")
+
+        legacy_id = "test-run-recoverable-failed"
+        self.store.create_screening_run(legacy_id, source_count=1)
+        self.store.update_screening_run(legacy_id, status="running")
+        self.store.update_screening_run(
+            legacy_id, status="failed", error_code="source_cdp_unavailable",
+        )
+        self.store.update_screening_run(legacy_id, status="paused")
+        self.assertEqual(
+            self.store.get_screening_run(legacy_id)["status"], "paused",
+        )
+
 
 class Slice1ConservationTests(unittest.TestCase):
     """切片 1：统计总和守恒（SC-018）。"""

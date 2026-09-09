@@ -1173,7 +1173,7 @@ class RiskSignalClassificationTests(unittest.TestCase):
 
 
 class BossCdpSourcePreflightTests(_LoginCacheIsolated):
-    """BOSS preflight：不信任 not_logged_in 缓存，unknown 重试一次后放行。"""
+    """BOSS preflight/recheck：未确认的 CDP 登录态不得按成功放行。"""
 
     def _source(self):
         return BossCdpSource(browser_account="a", cdp_port=9222)
@@ -1212,15 +1212,26 @@ class BossCdpSourcePreflightTests(_LoginCacheIsolated):
         self.assertEqual(outcome.failed_code, "source_account_restricted")
         self.assertNotEqual(cache.read_cached_state("a", "boss"), "restricted")
 
-    def test_unknown_probe_retries_once_then_proceeds(self):
+    def test_unknown_probe_retries_once_then_blocks(self):
         from scripts import boss_cdp_raw as boss
         source = self._source()
         with self._mock_cdp_ok(), \
                 mock.patch.object(boss, "check_login_state_tri", return_value="unknown") as m:
             outcome = source.preflight()
-        self.assertTrue(outcome.ok)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_cdp_unavailable")
         self.assertEqual(m.call_count, 2)
         self.assertIn("probe_unknown", outcome.safe_log)
+
+    def test_recheck_unknown_blocks_instead_of_proceeding(self):
+        from scripts import boss_cdp_raw as boss
+        source = self._source()
+        with mock.patch.object(
+                boss, "check_login_state_tri", return_value="unknown") as m:
+            outcome = source.recheck_login()
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.failed_code, "source_cdp_unavailable")
+        self.assertEqual(m.call_count, 2)
 
     def test_unknown_then_logged_in_succeeds(self):
         from scripts import boss_cdp_raw as boss

@@ -124,7 +124,10 @@ class BossCdpSource(_BossCdpDetailMixin):
             return SourceOutcome.failure(failed_code='source_account_restricted', safe_log=f'boss_login_restricted{cache_note}{retry_note}')
         if state == 'not_logged_in':
             return SourceOutcome.failure(failed_code='source_login_required', safe_log=f'boss_login_required{cache_note}{retry_note}')
-        return SourceOutcome.success(safe_log=f"boss_login_probe_unknown{retry_note or ' retry=1'} proceed=1")
+        return SourceOutcome.failure(
+            failed_code='source_cdp_unavailable',
+            safe_log=f"boss_login_probe_unknown{retry_note or ' retry=1'}",
+        )
 
     def recheck_login(self) -> SourceOutcome:
         """运行中疑似登录失效时的独立复核探测（绕过登录态缓存）。
@@ -141,13 +144,19 @@ class BossCdpSource(_BossCdpDetailMixin):
             state = boss.check_login_state_tri(self.cdp_port)
             if state == 'unknown':
                 state = boss.check_login_state_tri(self.cdp_port)
+        if self.browser_account and state in ('logged_in', 'not_logged_in', 'unknown'):
+            from scripts.login_state_cache import write_login_state
+            write_login_state(self.browser_account, 'boss', state)
         if state == 'logged_in':
             return SourceOutcome.success(safe_log=f'recheck_logged_in{retry_note}')
         if state == 'restricted':
             return SourceOutcome.failure(failed_code='source_account_restricted', safe_log=f'recheck_restricted{retry_note}')
         if state == 'not_logged_in':
             return SourceOutcome.failure(failed_code='source_login_required', safe_log='recheck_not_logged_in')
-        return SourceOutcome.success(safe_log=f'recheck_unknown{retry_note} proceed=1')
+        return SourceOutcome.failure(
+            failed_code='source_cdp_unavailable',
+            safe_log=f'recheck_unknown{retry_note or " retry=1"}',
+        )
 
     def fetch_list(self, plan_item: dict, *, on_page_completed: Callable[[dict], None] | None=None) -> SourceOutcome:
         """Fetch a job list for one search plan item.
